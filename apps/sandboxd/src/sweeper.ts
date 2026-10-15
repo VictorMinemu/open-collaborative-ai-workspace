@@ -6,6 +6,10 @@ import type { Clock, Sandboxes } from "./sandboxes";
  * sandbox's workspace (the soft quota stops one that is over), stops a sandbox idle past its organization's
  * `idleStopMs` with reason `idle` (its volume stays), reports CPU and disk as `usage`, and reaps `files` helpers idle
  * for 60 s. One bot's failure never stops the pass for the others; nothing here logs a path or content.
+ *
+ * Without a pushed policy for the organization (sandboxd restarted and the API has not pushed yet) a running sandbox is
+ * measured and sampled but never stopped: there is no default idle time or quota to judge it by, and nothing new can run
+ * in it meanwhile (exec answers `policy_missing`).
  */
 
 export const SWEEP_INTERVAL_MS = 60_000;
@@ -60,8 +64,12 @@ export function createSweeper(deps: SweeperDeps): Sweeper {
         // The soft quota first: over it, the sandbox stops with reason disk_full (and one usage sample).
         await quota.measure(target);
         if (sandboxes.isDiskFull(target)) continue;
-        const { idleStopMs } = sandboxes.limitsFor(target.orgId);
-        if (sandboxes.idleMs(target, clock.now()) >= idleStopMs && !sandboxes.hasRunningProcess(target)) {
+        const idleStopMs = sandboxes.limitsFor(target.orgId)?.idleStopMs;
+        if (
+          idleStopMs !== undefined &&
+          sandboxes.idleMs(target, clock.now()) >= idleStopMs &&
+          !sandboxes.hasRunningProcess(target)
+        ) {
           await sandboxes.stopWith(target, "idle");
           continue;
         }

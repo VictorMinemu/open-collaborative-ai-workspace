@@ -34,6 +34,7 @@ const policy = (over: { diskQuotaBytes?: number; idleStopMs?: number; killed?: b
     idleStopMs: 300_000,
   },
   killed: over.killed ?? false,
+  version: 1,
 });
 
 /** A workspace whose `du` answers `disk` bytes; `rm` frees what the test says. */
@@ -61,6 +62,7 @@ function setup(opts: { disk?: number } = {}) {
     clock,
     onEvent: (e) => events.push(e),
   });
+  sandboxes.setPolicy(policy());
   const quota = createQuota({ sandboxes });
   const files = createFiles({ sandboxes, quota });
   const sweeper = createSweeper({ sandboxes, quota, clock, intervalMs: 60_000 });

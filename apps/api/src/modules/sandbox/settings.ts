@@ -257,7 +257,14 @@ export async function buildPolicy(tx: Tx): Promise<SandboxdOrgPolicy> {
     limits: limitsOf(CONTAINER_LIMITS.sbx),
     browserLimits: limitsOf(CONTAINER_LIMITS.brw),
     killed: settings.killed !== null,
+    // sandboxd keeps the newest version it was sent, so a stale push never undoes a kill (every kill/resume bumps it).
+    version: settings.version,
   };
+}
+
+/** The organization's current policy for sandboxd, read in its own tenant transaction (the client's re-push). */
+export function loadOrgPolicy(deps: Pick<Core, "db">, organizationId: string): Promise<SandboxdOrgPolicy> {
+  return deps.db.withTenant({ organizationId }, (tx) => buildPolicy(tx));
 }
 
 /**
@@ -272,7 +279,7 @@ export async function pushPolicy(
 ): Promise<boolean> {
   if (!client) return false;
   try {
-    const policy = await deps.db.withTenant({ organizationId }, (tx) => buildPolicy(tx));
+    const policy = await loadOrgPolicy(deps, organizationId);
     await client.call("policy", policy, { timeoutMs: POLICY_TIMEOUT_MS });
     return true;
   } catch (err) {

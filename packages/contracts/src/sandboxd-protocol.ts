@@ -71,7 +71,13 @@ export const SandboxdLimits = z.strictObject({
 });
 export type SandboxdLimits = z.infer<typeof SandboxdLimits>;
 
-/** `POST /v1/policy`: everything sandboxd and the egress proxy enforce for one organization. */
+/**
+ * `POST /v1/policy`: everything sandboxd and the egress proxy enforce for one organization. sandboxd holds it in memory
+ * only and has no default: until the API pushes it (after every settings change, kill and resume, on a new sandboxd
+ * boot, and on a `policy_missing` refusal) an op that would start or run a container answers 409 `policy_missing`.
+ * `version` is the organization's settings version (`sandbox_policies.version`, 0 before the first save; every kill and
+ * resume bumps it): sandboxd keeps the newest push, so a late, stale push can never undo a kill.
+ */
 export const SandboxdOrgPolicy = z.strictObject({
   orgId: Id,
   sandboxEgress: SandboxEgressMode,
@@ -82,6 +88,7 @@ export const SandboxdOrgPolicy = z.strictObject({
   limits: SandboxdLimits,
   browserLimits: SandboxdLimits,
   killed: z.boolean(),
+  version: z.number().int().nonnegative(),
 });
 export type SandboxdOrgPolicy = z.infer<typeof SandboxdOrgPolicy>;
 
@@ -310,7 +317,11 @@ export type SandboxdEventsResponse = z.infer<typeof SandboxdEventsResponse>;
 
 // ---------------------------------------------------------------- errors
 
-/** Codes of sandboxd's non-2xx bodies; the API maps them to a `SandboxRefusal` or `BrowserRefusal`. */
+/**
+ * Codes of sandboxd's non-2xx bodies; the API maps them to a `SandboxRefusal` or `BrowserRefusal`. `policy_missing`
+ * (409): sandboxd holds no policy for the organization (it restarted); the API's client pushes the current one and
+ * retries the call once.
+ */
 export const SandboxdErrorCode = z.enum([
   "unauthorized",
   "invalid_request",
@@ -322,6 +333,7 @@ export const SandboxdErrorCode = z.enum([
   "disk_full",
   "busy",
   "killed",
+  "policy_missing",
   "timeout",
   "docker_unavailable",
   "limit_reached",

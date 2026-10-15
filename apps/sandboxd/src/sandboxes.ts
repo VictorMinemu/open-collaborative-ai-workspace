@@ -22,7 +22,6 @@ import {
 import { type Docker, DockerUnavailableError, demux } from "./docker";
 import {
   type ContainerLimits,
-  DEFAULT_SBX_LIMITS,
   type DockerRuntime,
   filesSpec,
   nameFor,
@@ -99,11 +98,11 @@ export type SandboxdEventInput = SandboxdEvent extends infer E
     : never
   : never;
 
-/** The research defaults until the API pushes the organization's policy: 2 GiB soft quota, 15 minutes idle. */
-export const DEFAULT_DISK_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
-export const DEFAULT_IDLE_STOP_MS = SANDBOX_LIMITS.idleStopMinutes * 60_000;
-
-/** What sandboxd enforces for one organization's `sbx` (from its pushed policy, else the defaults). */
+/**
+ * What sandboxd enforces for one organization's `sbx`, from the policy the API pushed in this boot. There is no
+ * default (07.8 policy fix): an organization without a pushed policy has no limits here, so nothing may start or run
+ * for it (`policy_missing`) until the API pushes its current policy, kill state included.
+ */
 export interface EffectiveLimits {
   container: ContainerLimits;
   diskQuotaBytes: number;
@@ -117,7 +116,6 @@ export interface SandboxesOptions {
   runtime: RuntimeSetting;
   image: string;
   clock?: Clock;
-  limits?: ContainerLimits;
   /** Every lifecycle change and usage sample (the event feed, 07.8-09 Task 3). */
   onEvent?: (event: SandboxdEventInput) => void;
 }
@@ -167,9 +165,18 @@ export interface Sandboxes {
 
   // ------------------------------------------------------------ policy, quota, idle and usage (07.8-09 Task 2)
 
-  /** The organization's limits and kill state as pushed by the API (`policy`); egress fields are the proxy's (13). */
+  /**
+   * The organization's limits and kill state as pushed by the API (`policy`); egress fields are the proxy's (13). A
+   * push older than the stored one (lower `version`) is ignored, so a late re-push never undoes a kill.
+   */
   setPolicy(policy: SandboxdOrgPolicy): void;
-  limitsFor(orgId: string): EffectiveLimits;
+  /** The organization's pushed limits, or null when this boot has none (no default). */
+  limitsFor(orgId: string): EffectiveLimits | null;
+  /**
+   * The pushed limits, else 409 `policy_missing`; with `runnable`, a killed organization is also refused (409
+   * `killed`). Called before anything that would create, start or run a container, and before a write (the quota).
+   */
+  requirePolicy(orgId: string, opts?: { runnable?: boolean }): EffectiveLimits;
   /** Per bot: state, cumulative CPU since the container started, and the last measured disk. */
   usage(orgId: string): Promise<SandboxdUsage>;
   recordDisk(target: SandboxdTarget, bytes: number): void;
@@ -366,10 +373,12 @@ function runtimeOf(c: ContainerInspect | null): SandboxRuntime | null {
 export function createSandboxes(options: SandboxesOptions): Sandboxes {
   const { docker, ns, image } = options;
   const clock: Clock = options.clock ?? { now: () => Date.now() };
-  const defaultLimits = options.limits ?? DEFAULT_SBX_LIMITS;
   const emit = options.onEvent ?? (() => {});
   const processes = new Map<string, ProcessRecord>();
-  /** Per organization: the pushed policy (in memory; the API pushes again after a new boot id). */
+  /**
+   * Per organization: the pushed policy, in memory only. A restart (new boot id) forgets every one; the API pushes
+   * them again (its events consumer on the new boot id, its client on `policy_missing`).
+   */
   const policies = new Map<string, SandboxdOrgPolicy>();
   /** Per bot (`org:agent`): last measured disk, disk_full flag, why it last stopped, last CPU sample. */
   const diskBytes = new Map<string, number>();
@@ -519,22 +528,23 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     return spec.Name;
   }
 
-  function limitsFor(orgId: string): EffectiveLimits {
+  function limitsFor(orgId: string): EffectiveLimits | null {
     const p = policies.get(orgId);
-    if (!p) {
-      return {
-        container: defaultLimits,
-        diskQuotaBytes: DEFAULT_DISK_QUOTA_BYTES,
-        idleStopMs: DEFAULT_IDLE_STOP_MS,
-        killed: false,
-      };
-    }
+    if (!p) return null;
     return {
       container: { nanoCpus: p.limits.nanoCpus, memoryBytes: p.limits.memoryBytes, pids: p.limits.pids },
       diskQuotaBytes: p.limits.diskQuotaBytes,
       idleStopMs: p.limits.idleStopMs,
       killed: p.killed,
     };
+  }
+
+  function requirePolicy(orgId: string, opts: { runnable?: boolean } = {}): EffectiveLimits {
+    const lim = limitsFor(orgId);
+    if (!lim) throw failure("policy_missing", 409, "sandboxd holds no policy for this organization");
+    if (opts.runnable && lim.killed)
+      throw failure("killed", 409, "this organization's sandboxes are stopped");
+    return lim;
   }
 
   /** The broker's view of a stopped sandbox: disk_full and killed outlive the container's own "exited". */
@@ -859,8 +869,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     },
 
     async ensure(target) {
-      const lim = limitsFor(target.orgId);
-      if (lim.killed) throw failure("killed", 409, "this organization's sandboxes are stopped");
+      const lim = requirePolicy(target.orgId, { runnable: true });
       if (diskFull.has(targetKey(target))) {
         throw failure("disk_full", 409, "the workspace is over its quota");
       }
@@ -903,6 +912,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     },
 
     async exec(input) {
+      requirePolicy(input.target.orgId, { runnable: true });
       sweep();
       const c = await ownedRunningShell(input.target);
       let running = 0;
@@ -988,10 +998,9 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
 
     async restart(target) {
       return locked(targetKey(target), async () => {
+        requirePolicy(target.orgId, { runnable: true });
         const c = await ownedShell(target);
         if (!c) throw failure("not_found", 404, "this bot has no sandbox");
-        const lim = limitsFor(target.orgId);
-        if (lim.killed) throw failure("killed", 409, "this organization's sandboxes are stopped");
         if (diskFull.has(targetKey(target)))
           throw failure("disk_full", 409, "the workspace is over its quota");
         expectStop(c.Id);
@@ -1128,10 +1137,13 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     },
 
     setPolicy(policy) {
+      const held = policies.get(policy.orgId);
+      if (held && held.version > policy.version) return;
       policies.set(policy.orgId, policy);
     },
 
     limitsFor,
+    requirePolicy,
 
     async usage(orgId) {
       const listed = await listContainers(

@@ -29,6 +29,7 @@ import {
   SANDBOXD_LABELS,
   SANDBOXD_ROUTES,
   SandboxdError,
+  SandboxdErrorCode,
   SandboxdEventsResponse,
   SandboxdExec,
   SandboxdExecResult,
@@ -423,8 +424,12 @@ describe("sandboxd policy, events, errors and frame framing", () => {
       limits,
       browserLimits: limits,
       killed: false,
+      version: 3,
     };
     expect(SandboxdOrgPolicy.parse(policy)).toEqual(policy);
+    // The settings version orders pushes: sandboxd keeps the newest (a stale re-push never undoes a kill).
+    expect(SandboxdOrgPolicy.safeParse({ ...policy, version: undefined }).success).toBe(false);
+    expect(SandboxdOrgPolicy.safeParse({ ...policy, version: -1 }).success).toBe(false);
     expect(SandboxdOrgPolicy.safeParse({ ...policy, binds: ["/:/host"] }).success).toBe(false);
     expect(SandboxdOrgPolicy.safeParse({ ...policy, limits: { ...limits, privileged: true } }).success).toBe(
       false,
@@ -458,6 +463,30 @@ describe("sandboxd policy, events, errors and frame framing", () => {
     expect(
       SandboxdEventsResponse.safeParse({ ...res, events: [{ ...res.events[1], cpuMs: -1 }] }).success,
     ).toBe(false);
+  });
+
+  it("error codes are exactly these; policy_missing is sandboxd holding no policy for the organization", () => {
+    expect(SandboxdErrorCode.options).toEqual([
+      "unauthorized",
+      "invalid_request",
+      "label_mismatch",
+      "not_found",
+      "exists",
+      "invalid_path",
+      "too_large",
+      "disk_full",
+      "busy",
+      "killed",
+      "policy_missing",
+      "timeout",
+      "docker_unavailable",
+      "limit_reached",
+      "no_context",
+      "element_gone",
+      "navigation_refused",
+      "digest_mismatch",
+      "tree_changed",
+    ]);
   });
 
   it("errors carry a code and a message", () => {
