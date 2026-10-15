@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 135
+open_count: 134
 waived_count: 4
-fixed_count: 86
-total_count: 225
-last_updated: 2026-10-15T06:39:02.837Z
+fixed_count: 88
+total_count: 226
+last_updated: 2026-10-15T07:14:53.155Z
 ---
 
 # Broken Windows Ledger
@@ -230,16 +230,17 @@ last_updated: 2026-10-15T06:39:02.837Z
 | 213 | 07.5 | deviation | apps/api/src/testing.ts |  | Test Redis containers leak (208 redis:8 found running, 1-2 h old): TestStack.stop() awaits built.close() before stopping containers, so a throwing close skips redis.stop(); make it try/finally and check why Ryuk did not reap them (fix in the 07.5 gate) | open |  | 2026-10-14T17:47:21.500Z |  |
 | 214 | 07.5 | unrun-verify | apps/openclaw-channel/src/work-zone-tools.ts |  | Work Zone proposal tools unproven in a real cell (alsoAllow, model use, taint refusal) and only tested against the fake; 07.5-15 must run SMOKE_ONLY=work_zone and an API parity test after 07.5-08; import cycle tool-guard <-> work-zone-tools (harmless, commented) | open |  | 2026-10-14T17:49:14.525Z |  |
 | 215 | 07.5 | deviation | apps/api/src/modules/work-session |  | When a Work Zone proposal Start fails the bot hears 'approved' without the error code (add resultCode to CardAction); each Work Zone card read recomputes its live state with several queries | fixed |  | 2026-10-14T18:19:32.619Z | 2026-10-15T05:03:39.267Z |
-| 216 | 07.5 | deviation | apps/web/components/ui/avatar.tsx |  | Shared avatar initials are 4.25-4.48:1 at 12 px (below AA, axe flaky by random id); move text from *-700 to *-800 | open |  | 2026-10-14T18:27:17.175Z |  |
+| 216 | 07.5 | deviation | apps/web/components/ui/avatar.tsx |  | Shared avatar initials are 4.25-4.48:1 at 12 px (below AA, axe flaky by random id); move text from *-700 to *-800 | fixed |  | 2026-10-14T18:27:17.175Z | 2026-10-15T07:14:53.085Z |
 | 217 | 07.5 | deviation | apps/web/components/settings |  | Approval history shows a raw m…__* pattern for a rule on a deleted server; the policies page does not warn when /access or the catalog are truncated | open |  | 2026-10-14T18:27:17.253Z |  |
 | 218 | 07.5 | deviation | apps/web/components/approvals |  | Mobile shows 'Approvals' twice (top bar and back link, per UI-SPEC); 'To review' sorts client-side over loaded pages; the e2e fake cell answers approval_* without the plugin's fixed sentences | open |  | 2026-10-14T19:14:27.881Z |  |
 | 219 | 07.5 | unrun-verify | apps/api/src/modules/agent-channel |  | Approval card posted inside the claim transaction (<2 s measured) needs a concurrent-channel contention test (07.5-16); connector grant names the logical tool while the bot calls ocw_connector_call, unproven in a real cell (07.5-15 smoke); fake MCP has no 5xx after a consumed grant | open |  | 2026-10-15T05:03:39.342Z |  |
 | 220 | 07.5 | deviation | apps/api/src/modules/agent-channel |  | An ocw_http_request URL normalised differently counts as a different action and opens a new approval; plugin failure texts duplicate the UI-SPEC copy | open |  | 2026-10-15T05:03:39.415Z |  |
-| 221 | 07.5 | deviation | apps/api/src/modules/tool-approval/kind.ts |  | The tool.call 'target' field carries the internal MCP server name (e.g. mc4866abe); hide it in the API view and the 07.5-14 card | open |  | 2026-10-15T06:05:38.732Z |  |
+| 221 | 07.5 | deviation | apps/api/src/modules/tool-approval/kind.ts |  | The tool.call 'target' field carries the internal MCP server name (e.g. mc4866abe); hide it in the API view and the 07.5-14 card | fixed |  | 2026-10-15T06:05:38.732Z | 2026-10-15T07:14:53.016Z |
 | 222 | 07.5 | deviation | apps/api/src/modules/realtime |  | A diagnostic run hit 'deadlock detected' writing to a user: stream, failing a bot reply with 500 (investigate in 07.5-16) | fixed |  | 2026-10-15T06:05:38.809Z | 2026-10-15T06:39:02.837Z |
 | 223 | 07.5 | deviation | e2e/tests |  | Decided approvals stay in the run's DB; specs must filter by their own ids; the phone top bar lacks the Approvals count the UI-SPEC asks for | open |  | 2026-10-15T06:05:38.884Z |  |
 | 224 | 07.5 | deviation | apps/api/src/modules/approval/service.ts |  | Remaining lock-order risks (not reproduced): a server_apply approval (e.g. memory) still notifies user: streams before the conversation; notifications notify in recipient order, not ascending; no retry on 40P01 | open |  | 2026-10-15T06:38:56.276Z |  |
 | 225 | 07.5 | deviation | apps/api/src/testing.ts |  | ConnectorsStack.stop(): a throwing stop leaves the fake server open and a half-built stack leaves containers alive (same family as the Redis leak); grants bind to the action not the bot run, so Sam's next normal turn may use it once (state in ADR-0026) | open |  | 2026-10-15T06:38:56.352Z |  |
+| 226 | 07.5 | deviation | apps/web/components/chat/agent-card.tsx |  | A live linked card grows when its approval link arrives and the list does not stay pinned to the bottom (on mobile the card end hides under the composer); requester name and runtime are parsed from server text (add requesterName/runtime to AgentCardApprovalLink); warnings are classified by exact copy match | open |  | 2026-10-15T07:14:53.155Z |  |
 
 ````json
 [
@@ -2830,10 +2831,10 @@ last_updated: 2026-10-15T06:39:02.837Z
     "file": "apps/web/components/ui/avatar.tsx",
     "line": null,
     "description": "Shared avatar initials are 4.25-4.48:1 at 12 px (below AA, axe flaky by random id); move text from *-700 to *-800",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T18:27:17.175Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T07:14:53.085Z"
   },
   {
     "id": 217,
@@ -2890,10 +2891,10 @@ last_updated: 2026-10-15T06:39:02.837Z
     "file": "apps/api/src/modules/tool-approval/kind.ts",
     "line": null,
     "description": "The tool.call 'target' field carries the internal MCP server name (e.g. mc4866abe); hide it in the API view and the 07.5-14 card",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-15T06:05:38.732Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T07:14:53.016Z"
   },
   {
     "id": 222,
@@ -2941,6 +2942,18 @@ last_updated: 2026-10-15T06:39:02.837Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T06:38:56.352Z",
+    "resolved_at": null
+  },
+  {
+    "id": 226,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/web/components/chat/agent-card.tsx",
+    "line": null,
+    "description": "A live linked card grows when its approval link arrives and the list does not stay pinned to the bottom (on mobile the card end hides under the composer); requester name and runtime are parsed from server text (add requesterName/runtime to AgentCardApprovalLink); warnings are classified by exact copy match",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T07:14:53.155Z",
     "resolved_at": null
   }
 ]
