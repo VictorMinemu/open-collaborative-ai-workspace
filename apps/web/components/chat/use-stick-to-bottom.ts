@@ -19,11 +19,31 @@ export function useStickToBottom(contentKey: unknown, resetKey: string, detached
   detachedRef.current = detached;
   const restore = useRef<{ height: number; top: number } | null>(null);
   const observed = useRef<{ el: HTMLDivElement; disconnect: () => void } | null>(null);
+  /** Where the list was last seen (a scroll event, or where this hook put it). */
+  const lastTop = useRef(0);
+  /**
+   * Whether to keep following the bottom now. Someone may have scrolled it up (a permalink centring a message, the
+   * reader) whose scroll event is not in yet: a list higher than where it was last seen, and not merely clamped at the
+   * bottom by shrinking content, has left the bottom.
+   */
+  const following = (el: HTMLDivElement) => {
+    if (!atBottom.current || detachedRef.current || restore.current) return false;
+    if (el.scrollTop < lastTop.current - 1 && el.scrollHeight - el.scrollTop - el.clientHeight > 1) {
+      atBottom.current = false;
+      return false;
+    }
+    return true;
+  };
+  const pinToBottom = (el: HTMLDivElement) => {
+    el.scrollTop = el.scrollHeight;
+    lastTop.current = el.scrollTop;
+  };
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset when switching conversations
   useLayoutEffect(() => {
     atBottom.current = true;
     restore.current = null;
+    lastTop.current = 0;
   }, [resetKey]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-run whenever the content changes
@@ -32,10 +52,11 @@ export function useStickToBottom(contentKey: unknown, resetKey: string, detached
     if (!el) return;
     if (restore.current) {
       el.scrollTop = el.scrollHeight - restore.current.height + restore.current.top;
+      lastTop.current = el.scrollTop;
       restore.current = null;
       return;
     }
-    if (atBottom.current && !detachedRef.current) el.scrollTop = el.scrollHeight;
+    if (following(el)) pinToBottom(el);
   }, [contentKey]);
 
   // Size changes that come with no new message: (re)attached whenever the list element itself changes.
@@ -46,7 +67,7 @@ export function useStickToBottom(contentKey: unknown, resetKey: string, detached
     observed.current = null;
     if (!el || typeof ResizeObserver === "undefined") return;
     const follow = () => {
-      if (atBottom.current && !detachedRef.current && !restore.current) el.scrollTop = el.scrollHeight;
+      if (following(el)) pinToBottom(el);
     };
     const resize = new ResizeObserver(follow);
     const watchChildren = () => {
@@ -76,7 +97,6 @@ export function useStickToBottom(contentKey: unknown, resetKey: string, detached
 
   // Only a scroll UP leaves the bottom. A scroll event can arrive after the content already grew under it (our own
   // scroll to the bottom, dispatched a frame later), and must not read as the reader moving away (WINDOWS #226).
-  const lastTop = useRef(0);
   const onScroll = useCallback(() => {
     const el = ref.current;
     if (!el) return;
@@ -93,7 +113,9 @@ export function useStickToBottom(contentKey: unknown, resetKey: string, detached
   const scrollToBottom = useCallback((smooth = false) => {
     atBottom.current = true;
     const el = ref.current;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+    if (!smooth) lastTop.current = el.scrollTop;
   }, []);
 
   return { ref, onScroll, preserve, scrollToBottom, atBottom };
