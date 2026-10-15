@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 133
+open_count: 134
 waived_count: 4
 fixed_count: 101
-total_count: 238
-last_updated: 2026-10-15T16:43:10.294Z
+total_count: 239
+last_updated: 2026-10-15T16:49:17.151Z
 ---
 
 # Broken Windows Ledger
@@ -253,6 +253,7 @@ last_updated: 2026-10-15T16:43:10.294Z
 | 236 | 07.8 | deviation | infra/sandbox |  | sbx apt versions approved but not pinned in the Dockerfile (later builds pick newer security versions); gVisor path proven by unit tests only until the 07.8-24 CI job; CODEOWNERS lacks apps/sandboxd (07.8-29) | open |  | 2026-10-15T16:42:21.880Z |  |
 | 237 | 07.8 | deviation | infra/sandbox/brw |  | brw: iframes are outside the snapshot (screenshot masks them whole after human input); a page that rebuilds an input after typing loses the human-typed marker (password type fields stay redacted); live frames to other viewers are unmasked, F-5/U-2 must hold in the API (07.8-16) | open |  | 2026-10-15T16:43:10.209Z |  |
 | 238 | 07.8 | deviation | infra/sandbox/brw |  | sandboxd (07.8-13) must strip the context-id tag from type-0 frames and map the new brw codes (paused, internal, maskRects, resize mode); brw proven on arm64 Docker Desktop only, amd64 runc and the gVisor CI job remain (07.8-24); apt not pinned to a snapshot | open |  | 2026-10-15T16:43:10.294Z |  |
+| 239 | 07.8 | deviation | apps/openclaw-channel/src |  | API does not send CellProvider.imageModels or turn.maxSandboxCalls yet (07.8-05/14): screenshot reaches no model and the gate uses default 40; sign-in skipped/expired sentences unwired (07.8-21); OpenClaw image rescaling (imageMaxDimensionPx) untested (8x8 fake JPEG, 07.8-13/28) | open |  | 2026-10-15T16:49:17.151Z |  |
 
 ````json
 [
@@ -3110,6 +3111,18 @@ last_updated: 2026-10-15T16:43:10.294Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T16:43:10.294Z",
+    "resolved_at": null
+  },
+  {
+    "id": 239,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/openclaw-channel/src",
+    "line": null,
+    "description": "API does not send CellProvider.imageModels or turn.maxSandboxCalls yet (07.8-05/14): screenshot reaches no model and the gate uses default 40; sign-in skipped/expired sentences unwired (07.8-21); OpenClaw image rescaling (imageMaxDimensionPx) untested (8x8 fake JPEG, 07.8-13/28)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T16:49:17.151Z",
     "resolved_at": null
   }
 ]
