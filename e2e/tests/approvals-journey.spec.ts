@@ -2,12 +2,12 @@ import { type APIRequestContext, type BrowserContext, expect, type Page, test } 
 import { expectNoSeriousA11y } from "../support/a11y";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
 import {
-  ACME_CRM,
   clearApprovalPolicies,
   clearPendingApprovals,
   ensureUnitRole,
   LUIS,
   MARTA,
+  NORTHWIND_CRM,
   openApprovals,
   seedApprovalMcp,
   seedApprovalPeople,
@@ -114,8 +114,8 @@ test.beforeAll(async () => {
   const servers = (await (await admin.get("/api/v1/mcp-servers")).json()) as {
     servers: Array<{ id: string; name: string }>;
   };
-  const crm = servers.servers.find((s) => s.name === ACME_CRM);
-  expect(crm, "Acme CRM is registered").toBeTruthy();
+  const crm = servers.servers.find((s) => s.name === NORTHWIND_CRM);
+  expect(crm, "Northwind CRM is registered").toBeTruthy();
   const granted = await admin.patch(`/api/v1/agents/${botId}/capabilities`, {
     data: {
       tools: ["write_note", "echo"].map((t) => ({
@@ -125,7 +125,9 @@ test.beforeAll(async () => {
       })),
     },
   });
-  expect(granted.ok(), `grant Acme CRM to ${BOT}: ${granted.status()} ${await granted.text()}`).toBe(true);
+  expect(granted.ok(), `grant Northwind CRM to ${BOT}: ${granted.status()} ${await granted.text()}`).toBe(
+    true,
+  );
   const dm = await samApi.post(`/api/v1/agents/${botId}/dm`);
   expect(dm.ok(), `Sam's DM with ${BOT}`).toBe(true);
   dmId = ((await dm.json()) as { dmId: string }).dmId;
@@ -183,7 +185,7 @@ test("journey 1: Sam asks in the DM, approves in the card, and the bot runs it o
     });
     const card = sam.page
       .locator('[data-testid="agent-card"][data-kind="approval"]')
-      .filter({ hasText: "Run write_note on Acme CRM" })
+      .filter({ hasText: "Run write_note on Northwind CRM" })
       .last();
     await expect(card.getByTestId("agent-card-status")).toHaveText("Pending", { timeout: 15_000 });
     await expect(card.getByTestId("agent-card-value-field-text")).toContainText(text);

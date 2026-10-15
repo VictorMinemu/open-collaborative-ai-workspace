@@ -9,11 +9,11 @@ import {
 import { expectNoSeriousA11y } from "../support/a11y";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
 import {
-  ACME_CRM,
   clearApprovalPolicies,
   clearPendingApprovals,
   ensureUnitRole,
   MARTA,
+  NORTHWIND_CRM,
   openApprovals,
   proposeWorkZoneFromDm,
   seedApprovalMcp,
@@ -35,7 +35,7 @@ import { ADMIN, API_URL } from "./env";
 
 /**
  * 07.5-13 (APPROVE-02, D-02, D-04, UI-SPEC Surface 2, R7, R11, C-03): the action review in `/approvals`, end to end with
- * the fake cell (no model, no provider). An "Always ask" rule on Acme CRM's `write_note` stops the bot; Sam opens the
+ * the fake cell (no model, no provider). An "Always ask" rule on Northwind CRM's `write_note` stops the bot; Sam opens the
  * review from the inbox, sees exactly what will be sent (fact strip, ACTION, WHAT LEDGER WILL SEND, the canonical JSON),
  * approves, and the bot runs it exactly once and replies. Then four-eyes (a Sales lead approves a member's channel
  * request while the member sees the waiting footer), deny with a note the bot hears, a second decider who comes too late
@@ -192,13 +192,13 @@ test.beforeAll(async () => {
   // Sam works in Sales (a member, not a lead): a Sales rule reaches his requests.
   await ensureUnitRole(admin, salesId, samId, "member");
 
-  // Ledger, a team bot with Acme CRM's two tools, and Sam's DM with it.
+  // Ledger, a team bot with Northwind CRM's two tools, and Sam's DM with it.
   botId = await freshTeamBot(admin, BOT);
   const servers = (await (await admin.get("/api/v1/mcp-servers")).json()) as {
     servers: Array<{ id: string; name: string }>;
   };
-  const crm = servers.servers.find((s) => s.name === ACME_CRM);
-  expect(crm, "Acme CRM is registered").toBeTruthy();
+  const crm = servers.servers.find((s) => s.name === NORTHWIND_CRM);
+  expect(crm, "Northwind CRM is registered").toBeTruthy();
   const granted = await admin.patch(`/api/v1/agents/${botId}/capabilities`, {
     data: {
       tools: ["write_note", "echo"].map((t) => ({
@@ -208,7 +208,9 @@ test.beforeAll(async () => {
       })),
     },
   });
-  expect(granted.ok(), `grant Acme CRM to ${BOT}: ${granted.status()} ${await granted.text()}`).toBe(true);
+  expect(granted.ok(), `grant Northwind CRM to ${BOT}: ${granted.status()} ${await granted.text()}`).toBe(
+    true,
+  );
   const dm = await samApi.post(`/api/v1/agents/${botId}/dm`);
   expect(dm.ok(), `Sam's DM with ${BOT}`).toBe(true);
   dmId = ((await dm.json()) as { dmId: string }).dmId;
@@ -299,10 +301,10 @@ test("Sam approves his bot's note from the review and the bot runs it once", asy
     const row = sam.page.getByTestId(`approval-row-${id}`);
     await expect(row).toBeVisible({ timeout: 15_000 });
     await expect(sam.page.getByTestId(`approval-row-${wzId}`)).toBeVisible();
-    await expect(row).toContainText("Run write_note on Acme CRM");
+    await expect(row).toContainText("Run write_note on Northwind CRM");
     await expect(row).toContainText(`${BOT} for you`);
     await expect(row).toContainText("DM");
-    await expect(row).toContainText(ACME_CRM);
+    await expect(row).toContainText(NORTHWIND_CRM);
     await expect(sam.page.getByTestId("approvals-review-count")).toHaveText("2");
     if (mobile) {
       // WINDOWS #223: the phone top bar carries the section's count, as the UI-SPEC's "☰ Approvals ②" (the visual
@@ -321,7 +323,7 @@ test("Sam approves his bot's note from the review and the bot runs it once", asy
 
     // ---- the review: who approves, who sees it, the action, what will be sent, all arguments
     const view = await openReview(sam.page, id);
-    await expect(view.getByTestId("approval-title")).toHaveText("Run write_note on Acme CRM");
+    await expect(view.getByTestId("approval-title")).toHaveText("Run write_note on Northwind CRM");
     await expect(view.getByTestId("approval-status").first()).toHaveText("Pending");
     await expect(view.getByTestId("approval-meta")).toContainText(`${BOT} for you`);
     await expect(view.getByTestId("approval-fact-approvers")).toContainText("You");
@@ -331,7 +333,7 @@ test("Sam approves his bot's note from the review and the bot runs it once", asy
     await expect(view.getByTestId("approval-fact-taint")).toHaveCount(0);
     await expect(view.getByTestId("tool-call-tool")).toContainText("write_note");
     await expect(view.getByTestId("tool-call-tool")).not.toContainText("__");
-    await expect(view.getByTestId("tool-call-source")).toContainText(`${ACME_CRM} · MCP server`);
+    await expect(view.getByTestId("tool-call-source")).toContainText(`${NORTHWIND_CRM} · MCP server`);
     await expect(view.getByTestId("tool-call-asked-in")).toContainText(
       `your DM with ${BOT} · only you see this card`,
     );

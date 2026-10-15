@@ -15,10 +15,10 @@ import { FakeCellPlugin } from "./fake-cell-plugin";
 /**
  * Helpers for the approval policy specs (07.5-09; reused by the 07.5 journeys). API calls only, on the isolated stack
  * (scripts/e2e-isolated.sh): never the demo. The fake MCP server (`echo` read-only, `write_note` destructive) is
- * registered as "Acme CRM" and probed by a simulated cell, so the policy catalog lists its two tools.
+ * registered as "Northwind CRM" and probed by a simulated cell, so the policy catalog lists its two tools.
  */
 
-export const ACME_CRM = "Acme CRM";
+export const NORTHWIND_CRM = "Northwind CRM";
 
 /** A Sales lead (org role lead, unit lead of Sales) and a standard member: both named as specific approvers. */
 export const MARTA: Actor = {
@@ -90,7 +90,7 @@ function newCell(token: string) {
 }
 
 /**
- * "Acme CRM" (the fake MCP: `echo`, `write_note`) registered and probed, plus the notes plugin approved, so the policy
+ * "Northwind CRM" (the fake MCP: `echo`, `write_note`) registered and probed, plus the notes plugin approved, so the policy
  * catalog has an MCP group, a Plugins group and Web requests. Idempotent across projects and runs.
  */
 export async function seedApprovalMcp(
@@ -111,24 +111,24 @@ export async function seedApprovalMcp(
   const cell = newCell(token);
   await cell.start();
   try {
-    let server = (await list()).find((s) => s.name === ACME_CRM);
+    let server = (await list()).find((s) => s.name === NORTHWIND_CRM);
     if (!server) {
       const res = await admin.post("/api/v1/mcp-servers", {
         data: {
-          name: ACME_CRM,
+          name: NORTHWIND_CRM,
           transport: "streamable-http",
           url: `http://${FAKE_MCP_HOST}/mcp`,
           headers: [{ name: "Authorization", value: `Bearer ${FAKE_MCP_TOKEN}` }],
         },
       });
-      expect(res.ok(), `register ${ACME_CRM}: ${await res.text()}`).toBe(true);
+      expect(res.ok(), `register ${NORTHWIND_CRM}: ${await res.text()}`).toBe(true);
     } else if (server.tools.length < 2) {
       expect((await admin.post(`/api/v1/mcp-servers/${server.id}/probe`)).ok(), "re-probe").toBe(true);
     }
     await expect
       .poll(
         async () => {
-          server = (await list()).find((s) => s.name === ACME_CRM);
+          server = (await list()).find((s) => s.name === NORTHWIND_CRM);
           return server?.status === "ready" ? server.tools.length : 0;
         },
         { timeout: 30_000 },
@@ -138,7 +138,7 @@ export async function seedApprovalMcp(
   } finally {
     await cell.stop();
   }
-  const s = (await list()).find((x) => x.name === ACME_CRM) as ServerJson;
+  const s = (await list()).find((x) => x.name === NORTHWIND_CRM) as ServerJson;
   return { serverId: s.id, safeName: s.safeName };
 }
 
