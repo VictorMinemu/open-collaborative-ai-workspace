@@ -208,9 +208,9 @@ test("1. two bots, both switches on; Scout writes and reads its own file in its 
   state.samId = await ensureMember(ana, SAM, "developer");
   const sam = await apiAs(SAM);
 
-  // One cell change at a time: the plugin coalesces a `cell.config.changed` that arrives while a refresh is in flight
-  // into that refresh (whose GET /cell already ran), so a second change within ~50 ms can be lost until the next one
-  // (seen in this proof; reported for apps/openclaw-channel). Each step waits for the cell before the next change.
+  // One cell change at a time, each awaited in the cell: the steps stay deterministic. (This proof found that the plugin
+  // folded a `cell.config.changed` arriving during an in-flight refresh into it, so a bot created then stayed
+  // `provisioning`; bridge.ts `refreshCell` now runs one more refresh after the flight.)
   const scout = await freshPersonalBot(ana, state.anaId, "Scout");
   await waitReady(ana, scout.id);
   const echo = await freshPersonalBot(sam, state.samId, "Echo");
