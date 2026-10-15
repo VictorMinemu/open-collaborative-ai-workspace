@@ -29,6 +29,7 @@ import {
   Laptop,
   LayoutGrid,
   Lock,
+  LogIn,
   type LucideIcon,
   Package,
   Play,
@@ -100,6 +101,8 @@ const KIND: Record<AgentCardKind, { label: string; icon: ComponentType<{ classNa
   deployment: { label: "Deployment", icon: Rocket },
   pr: { label: "Pull request", icon: GitPullRequest },
   generic: { label: "Card", icon: LayoutGrid },
+  // Phase 07.8 (UI-SPEC R1): the platform-owned sign-in card; its body is plan 07.8-26's.
+  browser: { label: "Sign-in", icon: LogIn },
 };
 
 /** Status pill colours: text at AA contrast on its tint in light and dark. */

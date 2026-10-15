@@ -3,6 +3,7 @@ import {
   AGENT_CARD_KINDS,
   AGENT_CARD_ROUTE_PREFIXES,
   AGENT_CARD_STATUSES,
+  AgentCardInput,
   type AgentChannelPatchCard,
   type AgentChannelPostCard,
   type AgentChannelPostCardResponse,
@@ -394,6 +395,18 @@ describe("Agent Card mirror parity (plugin ↔ packages/contracts/src/agent-card
     };
     expect([...AGENT_CARD_ROUTE_PREFIXES]).toEqual([...c.AGENT_CARD_ROUTE_PREFIXES]);
     expect([...AGENT_CARD_KINDS]).toEqual(c.AgentCardKind.options);
+    // Phase 07.8: the sign-in card kind is mirrored but platform-owned; the model can never post it.
+    expect(AGENT_CARD_KINDS).toContain("browser");
+    expect(
+      AgentCardInput.safeParse({
+        kind: "browser",
+        title: "Sign in to panel.autofy.app",
+        fields: [],
+        status: "pending",
+        actions: [],
+        summary: "Sign in",
+      }).success,
+    ).toBe(false);
     expect([...AGENT_CARD_STATUSES]).toEqual(c.AgentCardStatus.options);
     for (const v of [
       "/work-zone",

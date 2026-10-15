@@ -7,11 +7,11 @@ import { z } from "zod";
 import {
   AGENT_CARD_ACTIONS_MAX,
   AGENT_CARD_FIELDS_MAX,
-  AGENT_CARD_KINDS,
   AGENT_CARD_ROUTE_PREFIXES,
   AGENT_CARD_STATUSES,
   AGENT_CARD_SUMMARY_MAX,
   AGENT_CARD_TITLE_MAX,
+  AGENT_POSTABLE_CARD_KINDS,
   AgentCardFields,
   AgentCardInput,
   AgentCardStatus,
@@ -76,7 +76,7 @@ const PARAMETERS = {
       additionalProperties: false,
       description: 'The card (action "create").',
       properties: {
-        kind: { type: "string", enum: [...AGENT_CARD_KINDS] },
+        kind: { type: "string", enum: [...AGENT_POSTABLE_CARD_KINDS] },
         title: str(1, AGENT_CARD_TITLE_MAX),
         fields: FIELDS_SCHEMA,
         status: { type: "string", enum: [...AGENT_CARD_STATUSES] },
