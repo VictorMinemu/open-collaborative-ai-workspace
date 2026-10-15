@@ -706,3 +706,120 @@ describe("approval cards posted inside the claim transaction under concurrent ch
     }
   });
 });
+
+// ---------------------------------------------------------------- `user:` stream lock order (07.5-13 deadlock report)
+
+describe("fan-out to the same `user:` streams from concurrent transactions never deadlocks", () => {
+  let martaDm = "";
+  const ROUNDS = 6;
+  /** Each round delivers many turns: the bot's daily limit (D-11) is reset so every message reaches it. */
+  const nextRound = async () => {
+    await expirePending();
+    await s.su.query("delete from app.agent_usage_daily where agent_id = $1", [keeperId]);
+  };
+
+  beforeAll(async () => {
+    await clearRules();
+    await expirePending();
+    // Sam and Marta both decide: Sam's request is announced to [Sam, Marta], Marta's to [Marta, Sam].
+    await s.su.query(
+      `insert into app.tool_approval_policies
+         (organization_id, scope_unit_id, tool_pattern, mode, approver_kind, approver_user_ids, created_by, updated_by)
+       values ($1, null, $2, 'always', 'users', $3::uuid[], $4, $4)`,
+      [s.orgA, WRITE, [s.samId, martaId], s.victorId],
+    );
+    martaDm = (
+      await ok(marta.request("POST", "/api/v1/dms", { participants: [{ kind: "agent", id: keeperId }] }))
+    ).id as string;
+  });
+
+  it("Sam's and Marta's bots ask at the same moment (each request announced to both): every call answers", async () => {
+    for (let round = 0; round < ROUNDS; round++) {
+      await nextRound();
+      const sams: Json[] = [];
+      const martas: Json[] = [];
+      for (let i = 0; i < 4; i++) {
+        sams.push(await turnOf(s.sam, samDm));
+        martas.push(await turnOf(marta, martaDm));
+      }
+      const results = await Promise.all(
+        sams.flatMap((ev, i) => [
+          ask(ev, { text: `crossed ${round}.${i} sam` }),
+          ask(martas[i] as Json, { text: `crossed ${round}.${i} marta` }),
+        ]),
+      );
+      for (const r of results) expect(r.status, `round ${round}: ${JSON.stringify(r.body)}`).toBe(200);
+      expect(results.every((r) => r.body?.reason === "approval_required")).toBe(true);
+    }
+  });
+
+  it("Marta decides Sam's requests while Sam decides Marta's, at the same moment: every decision answers", async () => {
+    for (let round = 0; round < ROUNDS; round++) {
+      await nextRound();
+      const pairs: Array<[string, string]> = [];
+      for (let i = 0; i < 4; i++) {
+        const a = await ask(await turnOf(s.sam, samDm), { text: `decide ${round}.${i} sam` });
+        const b = await ask(await turnOf(marta, martaDm), { text: `decide ${round}.${i} marta` });
+        pairs.push([a.body?.approval.id as string, b.body?.approval.id as string]);
+      }
+      const decideRaw = async (who: TestClient, id: string) => {
+        const row = await approvalRow(id);
+        return who.request("POST", `/api/v1/approvals/${id}/decision`, {
+          outcome: "approved",
+          actionHash: row.action_hash,
+        });
+      };
+      const results = await Promise.all(
+        pairs.flatMap(([samsRequest, martasRequest]) => [
+          decideRaw(marta, samsRequest),
+          decideRaw(s.sam, martasRequest),
+        ]),
+      );
+      for (const r of results) expect(r.status, `round ${round}: ${JSON.stringify(r.body)}`).toBe(200);
+    }
+  });
+
+  it("a request announced to Sam and Marta while messages in the same channel notify them: every request answers", async () => {
+    // Víctor joins #ops and mentions Marta and Sam there while Sam's bot asks there.
+    await ok(s.victor.request("POST", `/api/v1/channels/${ops}/members`, { kind: "user", id: s.victorId }));
+    for (let round = 0; round < ROUNDS; round++) {
+      await nextRound();
+      const turns: Json[] = [];
+      for (let i = 0; i < 4; i++) turns.push(await turnOf(s.sam, ops, { mention: true }));
+      const results = await Promise.all([
+        ...turns.map((ev, i) => ask(ev, { text: `channel ${round}.${i}` })),
+        ...Array.from({ length: 8 }, (_, i) =>
+          s.victor.request("POST", `/api/v1/conversations/${ops}/messages`, {
+            body: i % 2 ? `@marta @sam look ${round}.${i}` : `@sam @marta look ${round}.${i}`,
+            mentions: (i % 2 ? [martaId, s.samId] : [s.samId, martaId]).map((id) => ({ kind: "user", id })),
+          }),
+        ),
+      ]);
+      for (const r of results) expect(r.status, `round ${round}: ${JSON.stringify(r.body)}`).toBe(200);
+    }
+  });
+
+  it("mentions of the same two people in two channels at the same moment (opposite order): every post answers", async () => {
+    const channel = async (name: string) => {
+      const id = (await ok(s.victor.request("POST", "/api/v1/channels", { name, visibility: "private" }))).id;
+      for (const uid of [s.samId, martaId]) {
+        await ok(s.victor.request("POST", `/api/v1/channels/${id}/members`, { kind: "user", id: uid }));
+      }
+      return id as string;
+    };
+    const [one, two] = [await channel("north"), await channel("south")];
+    for (let round = 0; round < ROUNDS; round++) {
+      await nextRound();
+      const results = await Promise.all(
+        Array.from({ length: 12 }, (_, i) => {
+          const order = i % 2 ? [martaId, s.samId] : [s.samId, martaId];
+          return s.victor.request("POST", `/api/v1/conversations/${i % 2 ? one : two}/messages`, {
+            body: `ping ${round}.${i}`,
+            mentions: order.map((id) => ({ kind: "user", id })),
+          });
+        }),
+      );
+      for (const r of results) expect(r.status, `round ${round}: ${JSON.stringify(r.body)}`).toBe(200);
+    }
+  });
+});
