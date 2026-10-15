@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 134
+open_count: 133
 waived_count: 4
-fixed_count: 88
+fixed_count: 89
 total_count: 226
-last_updated: 2026-10-15T07:14:53.155Z
+last_updated: 2026-10-15T07:15:02.121Z
 ---
 
 # Broken Windows Ledger
@@ -216,7 +216,7 @@ last_updated: 2026-10-15T07:14:53.155Z
 | 199 | 07.4 | deviation | apps/web/components/markdown |  | In-app links in chat Markdown open a new tab (all chat links do); ReadersPreview still lacks the unit name; the cell smoke needs the plugin built first in a fresh worktree | open |  | 2026-10-14T08:44:37.532Z |  |
 | 200 | 07.5 | deviation | packages/db/drizzle |  | The column list in SET NULL (col) is not in the drizzle snapshot; a future migration recreating those FKs would emit a plain SET NULL and deletes would fail on organization_id NOT NULL | open |  | 2026-10-14T13:26:02.622Z |  |
 | 201 | 07.5 | deviation | packages/db/sql/post-migrate.sql |  | Immutability triggers on the stored tool action and Work Zone proposal do not cover TRUNCATE; add REVOKE TRUNCATE in post-migrate.sql | open |  | 2026-10-14T13:26:02.702Z |  |
-| 202 | 07.5 | deviation | packages/db/src/schema/app.ts |  | conversation_id, event_id and requested_for_user_id on 07.5 tables have no FK; 07.5-07/08 must resolve them inside withTenant | open |  | 2026-10-14T13:26:02.781Z |  |
+| 202 | 07.5 | deviation | packages/db/src/schema/app.ts |  | conversation_id, event_id and requested_for_user_id on 07.5 tables have no FK; 07.5-07/08 must resolve them inside withTenant | fixed |  | 2026-10-14T13:26:02.781Z | 2026-10-15T07:15:02.121Z |
 | 203 | 07.5 | deviation | packages/contracts/src/agent-card-route.ts |  | Stubs until later plans: toPrompt proposedBy is always null (07.5-08 wires it); the memory inbox shows 07.5 approvals title-only (07.5-12 filters by kind); the '/approvals' route prefix grep now targets agent-card-route.ts | fixed |  | 2026-10-14T14:00:24.659Z | 2026-10-14T19:14:34.707Z |
 | 204 | 07.5 | deviation | apps/api/src/modules/approval |  | A server_apply decision via /approvals by someone who cannot read the conversation still starts (and meters) a bot turn for that decider (bot reply is refused); an unused grant keeps a running card forever; the pending total stops at 1000 scanned rows | open |  | 2026-10-14T15:04:59.297Z |  |
 | 205 | 07.5 | deviation | apps/api/src/modules/work-session/routes.ts |  | The HTTP route's 'lower to the default mode' is dead code: Zod defaults permissionMode to 'default', so a member limited to plan who starts a session without picking a mode gets 403 device_grant instead of a plan session (only proposals lower) | open |  | 2026-10-14T15:32:46.937Z |  |
@@ -2663,10 +2663,10 @@ last_updated: 2026-10-15T07:14:53.155Z
     "file": "packages/db/src/schema/app.ts",
     "line": null,
     "description": "conversation_id, event_id and requested_for_user_id on 07.5 tables have no FK; 07.5-07/08 must resolve them inside withTenant",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T13:26:02.781Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T07:15:02.121Z"
   },
   {
     "id": 203,
