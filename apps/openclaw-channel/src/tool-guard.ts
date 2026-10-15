@@ -101,6 +101,8 @@ const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
   "ocw_http_request",
   "ocw_work_zone_projects",
   "ocw_start_work_zone",
+  // 07.8: the confined tools (`/sandbox/*`): the API decides, counts and audits every call.
+  "ocw_sandbox_exec",
 ]);
 /**
  * Always side-effecting, whatever flags a turn carries: writing memory or changing shared board work after untrusted

@@ -17,7 +17,8 @@
       "ocw_connector_call",
       "ocw_http_request",
       "ocw_work_zone_projects",
-      "ocw_start_work_zone"
+      "ocw_start_work_zone",
+      "ocw_sandbox_exec"
     ]
   },
   "activation": {

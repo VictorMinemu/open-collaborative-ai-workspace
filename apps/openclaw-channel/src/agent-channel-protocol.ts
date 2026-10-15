@@ -396,6 +396,11 @@ export const TurnContext = z.object({
    * older API sends none (the legacy `memory` notes apply); an invalid list is dropped, the turn is kept.
    */
   memoryFiles: z.array(TurnMemoryFile).max(2).optional().catch(undefined),
+  /**
+   * 07.8 (D-11 F-7): sandbox and browser calls this turn may make, counted apart from `maxToolCalls`. Absent (an older
+   * API) or invalid → `SANDBOX_LIMITS.callsPerTurn`; the API counts and refuses `budget_exhausted` either way.
+   */
+  maxSandboxCalls: z.number().int().nonnegative().optional().catch(undefined),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -1273,3 +1278,196 @@ export const AgentChannelWorkZoneProposeResponse = z.union([
   z.object({ approvalId: Id, created: z.boolean() }),
 ]);
 export type AgentChannelWorkZoneProposeResponse = z.infer<typeof AgentChannelWorkZoneProposeResponse>;
+
+// ---------------------------------------------------------------- confined sandbox tools (07.8, mirror of contracts
+// sandbox.ts and bot-capabilities.ts; parity test in sandbox-tools.test.ts)
+
+/**
+ * The bounds of contracts `SANDBOX_LIMITS` the cell checks before posting (the API re-validates everything with the
+ * strict contract schemas) and `MAX_SANDBOX_CALLS_PER_TURN` (`callsPerTurn`).
+ */
+export const SANDBOX_LIMITS = {
+  execTimeoutMaxSeconds: 600,
+  argvMax: 64,
+  argMaxChars: 8192,
+  pathMaxChars: 1024,
+  readMaxBytes: 262_144,
+  writeMaxBytes: 1_048_576,
+  /** Sandbox and browser calls per turn, separate from the cap of 8 (D-11 F-7). */
+  callsPerTurn: 40,
+} as const;
+
+/** The eight `ocw_sandbox_*` tools (contracts `SANDBOX_TOOL_NAMES`). */
+export const SANDBOX_TOOL_NAMES = [
+  "ocw_sandbox_exec",
+  "ocw_sandbox_process",
+  "ocw_sandbox_read",
+  "ocw_sandbox_write",
+  "ocw_sandbox_list",
+  "ocw_sandbox_delete",
+  "ocw_sandbox_share",
+  "ocw_sandbox_import",
+] as const;
+export type SandboxToolName = (typeof SANDBOX_TOOL_NAMES)[number];
+
+/** Each sandbox tool's own Agent Channel route (self-validated: never `/tool-calls`). */
+export const SANDBOX_TOOL_ROUTES: Readonly<Record<SandboxToolName, string>> = {
+  ocw_sandbox_exec: "/sandbox/exec",
+  ocw_sandbox_process: "/sandbox/process",
+  ocw_sandbox_read: "/sandbox/read",
+  ocw_sandbox_write: "/sandbox/write",
+  ocw_sandbox_list: "/sandbox/list",
+  ocw_sandbox_delete: "/sandbox/delete",
+  ocw_sandbox_share: "/sandbox/share",
+  ocw_sandbox_import: "/sandbox/import",
+};
+
+/** Why the API refused a sandbox call (contracts `SandboxRefusal`); the model reads one fixed sentence per code. */
+export const SANDBOX_REFUSALS = [
+  "no_trigger",
+  "sandbox_off",
+  "module_off",
+  "bot_off",
+  "not_allowed",
+  "killed",
+  "cap_reached",
+  "cpu_budget",
+  "disk_full",
+  "budget_exhausted",
+  "tainted",
+  "member_data",
+  "audience_narrower",
+  "approval_required",
+  "approval_pending",
+  "approval_denied",
+  "approval_used",
+  "too_many_pending",
+  "policy_changed",
+  "service_unavailable",
+  "timeout",
+  "not_found",
+  "too_large",
+  "invalid_path",
+  "busy",
+] as const;
+export const SandboxRefusal = z.enum(SANDBOX_REFUSALS);
+export type SandboxRefusal = z.infer<typeof SandboxRefusal>;
+
+/**
+ * Same rule as contracts `SandboxRelativePath`: relative and normalised (no leading `/`, no `.`/`..`/empty segment, no
+ * `\`, no NUL), at most 1024 characters; `""` is the workspace root, allowed only where the contract allows it.
+ */
+export function isSandboxPath(p: string, allowRoot: boolean): boolean {
+  if (p.length > SANDBOX_LIMITS.pathMaxChars) return false;
+  if (p === "") return allowRoot;
+  if (p.includes("\u0000") || p.includes("\\")) return false;
+  return p.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+}
+
+type TurnRef = { eventId: string; agentId: string };
+
+/** `POST /sandbox/exec`: an argv array (never a shell string; `sh -c` is just an argv). */
+export type AgentChannelSandboxExec = TurnRef & {
+  argv: string[];
+  cwd?: string;
+  timeoutSeconds?: number;
+  background?: boolean;
+};
+/** `POST /sandbox/process`: poll or kill a process an exec yielded. */
+export type AgentChannelSandboxProcess = TurnRef & { processId: string; action: "poll" | "kill" };
+export type AgentChannelSandboxRead = TurnRef & { path: string; offset?: number; limit?: number };
+export type AgentChannelSandboxWrite = TurnRef & {
+  path: string;
+  content: string;
+  mode: "create" | "overwrite" | "append";
+};
+export type AgentChannelSandboxList = TurnRef & { path: string };
+export type AgentChannelSandboxDelete = TurnRef & { path: string; recursive?: boolean };
+export type AgentChannelSandboxShare = TurnRef & { path: string };
+export type AgentChannelSandboxImport = TurnRef & { attachmentId: string; path?: string };
+
+const ExecCommon = {
+  stdout: z.string(),
+  stderr: z.string(),
+  truncated: z.boolean(),
+  durationMs: z.number().int().nonnegative(),
+};
+/** Finished, or still running under a process id (unknown fields dropped). */
+export const AgentChannelSandboxExecResponse = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("exited"), exitCode: z.number().int(), ...ExecCommon }),
+  z.object({ status: z.literal("running"), processId: z.string().min(1).max(64), ...ExecCommon }),
+]);
+export type AgentChannelSandboxExecResponse = z.infer<typeof AgentChannelSandboxExecResponse>;
+
+export const AgentChannelSandboxReadResponse = z.object({
+  path: z.string(),
+  content: z.string(),
+  encoding: z.enum(["utf8", "base64"]),
+  size: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+});
+export type AgentChannelSandboxReadResponse = z.infer<typeof AgentChannelSandboxReadResponse>;
+
+export const AgentChannelSandboxWriteResponse = z.object({
+  path: z.string(),
+  size: z.number().int().nonnegative(),
+});
+export type AgentChannelSandboxWriteResponse = z.infer<typeof AgentChannelSandboxWriteResponse>;
+
+export const SandboxFileEntry = z.object({
+  path: z.string(),
+  name: z.string(),
+  kind: z.enum(["file", "dir"]),
+  size: z.number().int().nonnegative().nullable(),
+  modifiedAt: z.string(),
+  hidden: z.boolean(),
+});
+export type SandboxFileEntry = z.infer<typeof SandboxFileEntry>;
+
+export const AgentChannelSandboxListResponse = z.object({
+  path: z.string(),
+  entries: z.array(SandboxFileEntry),
+  more: z.number().int().nonnegative(),
+});
+export type AgentChannelSandboxListResponse = z.infer<typeof AgentChannelSandboxListResponse>;
+
+export const AgentChannelSandboxDeleteResponse = z.object({
+  path: z.string(),
+  deleted: z.number().int().nonnegative(),
+});
+export type AgentChannelSandboxDeleteResponse = z.infer<typeof AgentChannelSandboxDeleteResponse>;
+
+export const AgentChannelSandboxShareResponse = z.object({
+  attachmentId: Id,
+  name: z.string(),
+  size: z.number().int().nonnegative(),
+});
+export type AgentChannelSandboxShareResponse = z.infer<typeof AgentChannelSandboxShareResponse>;
+
+export const AgentChannelSandboxImportResponse = AgentChannelSandboxWriteResponse;
+export type AgentChannelSandboxImportResponse = z.infer<typeof AgentChannelSandboxImportResponse>;
+
+/** Per tool: the body it posts and the answer it parses. */
+export type SandboxToolBodies = {
+  ocw_sandbox_exec: AgentChannelSandboxExec;
+  ocw_sandbox_process: AgentChannelSandboxProcess;
+  ocw_sandbox_read: AgentChannelSandboxRead;
+  ocw_sandbox_write: AgentChannelSandboxWrite;
+  ocw_sandbox_list: AgentChannelSandboxList;
+  ocw_sandbox_delete: AgentChannelSandboxDelete;
+  ocw_sandbox_share: AgentChannelSandboxShare;
+  ocw_sandbox_import: AgentChannelSandboxImport;
+};
+export const SANDBOX_TOOL_RESPONSES = {
+  ocw_sandbox_exec: AgentChannelSandboxExecResponse,
+  ocw_sandbox_process: AgentChannelSandboxExecResponse,
+  ocw_sandbox_read: AgentChannelSandboxReadResponse,
+  ocw_sandbox_write: AgentChannelSandboxWriteResponse,
+  ocw_sandbox_list: AgentChannelSandboxListResponse,
+  ocw_sandbox_delete: AgentChannelSandboxDeleteResponse,
+  ocw_sandbox_share: AgentChannelSandboxShareResponse,
+  ocw_sandbox_import: AgentChannelSandboxImportResponse,
+} as const satisfies Record<SandboxToolName, z.ZodType>;
+export type SandboxToolResponses = {
+  [K in SandboxToolName]: z.infer<(typeof SANDBOX_TOOL_RESPONSES)[K]>;
+};

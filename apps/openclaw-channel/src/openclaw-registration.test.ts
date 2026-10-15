@@ -78,7 +78,7 @@ describe("OpenClaw 2026.9.7 registration of the real entry", () => {
     expect(ocwHooks("discovery", "gateway")).toEqual([]);
   });
 
-  it("the memory, memory file, card, board, connector and Work Zone tools are registered where OpenClaw resolves plugin tools (boot registry and tool discovery)", () => {
+  it("the memory, memory file, card, board, connector, Work Zone and confined tools are registered where OpenClaw resolves plugin tools (boot registry and tool discovery)", () => {
     const tools = (mode: RegistrationMode) =>
       loadRegistry(entry, manifest, { mode }).tools.flatMap((t) => t.names);
     const owned = [
@@ -94,6 +94,7 @@ describe("OpenClaw 2026.9.7 registration of the real entry", () => {
       "ocw_http_request",
       "ocw_work_zone_projects",
       "ocw_start_work_zone",
+      "ocw_sandbox_exec",
     ];
     expect(tools("full")).toEqual(owned);
     expect(tools("tool-discovery")).toEqual(owned);

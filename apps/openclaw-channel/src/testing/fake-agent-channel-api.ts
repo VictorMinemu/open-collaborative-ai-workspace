@@ -64,6 +64,14 @@
  *                                          when that is the refusal, like the real API. Both: 400 for any key beyond the
  *                                          contract's (a mode, a model, a user id). POST /__test/work-zone
  *                                          {refused?, projects?} sets the knobs ({} resets them)
+ *   POST /agent-channel/v1/sandbox/{exec,process,read,write,list,delete,share,import}  (07.8) records every body
+ *                                          (`sandbox.calls`, refused ones included) and answers a canned result per
+ *                                          route (exec `exited 0` with stdout `hi`); 400 for any key beyond the contract's
+ *                                          (never a user id, a command string or a token). POST /__test/sandbox
+ *                                          {exec?, results?, refusal?} replaces the knobs ({} resets them): `exec` the
+ *                                          exec answer, `results` per route, `refusal` a `SandboxRefusal` code every
+ *                                          sandbox route answers with its contract status (the body carries
+ *                                          FAKE_ERROR_CANARY, which must never reach the model)
  *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
  *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
  *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
@@ -192,6 +200,101 @@ const WORK_ZONE_BODY_KEYS = {
   projects: ["eventId", "agentId"],
   proposals: ["eventId", "agentId", "projectId", "deviceId", "prompt", "runtime"],
 } as const;
+/** 07.8: the sandbox routes' records and knobs (`POST /__test/sandbox` replaces the knobs). */
+export type FakeSandbox = {
+  /** Every POST /sandbox/* body, in order (refused ones included). */
+  calls: Array<{ route: string; body: Record<string, unknown> }>;
+  /** What POST /sandbox/exec answers (default: exited 0, stdout `hi`). */
+  exec?: Record<string, unknown>;
+  /** Per route (`exec`, `read`, …): what it answers instead of the default. */
+  results: Record<string, unknown>;
+  /** When set, every sandbox route refuses with this code and its contract status. */
+  refusal?: string;
+};
+/** The keys each sandbox body may carry (contracts `AgentChannelSandbox*`, strict objects). */
+const SANDBOX_BODY_KEYS: Record<string, readonly string[]> = {
+  exec: ["eventId", "agentId", "argv", "cwd", "timeoutSeconds", "background"],
+  process: ["eventId", "agentId", "processId", "action"],
+  read: ["eventId", "agentId", "path", "offset", "limit"],
+  write: ["eventId", "agentId", "path", "content", "mode"],
+  list: ["eventId", "agentId", "path"],
+  delete: ["eventId", "agentId", "path", "recursive"],
+  share: ["eventId", "agentId", "path"],
+  import: ["eventId", "agentId", "attachmentId", "path"],
+};
+/** Contracts `SANDBOX_REFUSAL_STATUS` / `BROWSER_REFUSAL_STATUS` (403 for every other code). */
+function confinedRefusalStatus(code: string): number {
+  if (code === "not_found" || code === "no_context" || code === "screenshot_unavailable") return 404;
+  if (code === "too_large") return 413;
+  if (code === "invalid_path") return 422;
+  if (code === "service_unavailable" || code === "timeout") return 503;
+  if (
+    code.startsWith("approval_") ||
+    [
+      "too_many_pending",
+      "policy_changed",
+      "disk_full",
+      "busy",
+      "paused",
+      "signin_pending",
+      "element_gone",
+    ].includes(code)
+  ) {
+    return 409;
+  }
+  return 403;
+}
+const FAKE_FILE_TIME = "2026-10-15T09:00:00.000Z";
+/** The default answer of each sandbox route for a valid body. */
+function fakeSandboxResult(route: string, body: Record<string, unknown>): unknown {
+  const path = typeof body.path === "string" ? body.path : "";
+  switch (route) {
+    case "exec":
+      return { status: "exited", exitCode: 0, stdout: "hi\n", stderr: "", truncated: false, durationMs: 4 };
+    case "process":
+      return {
+        status: "exited",
+        exitCode: 0,
+        stdout: "done\n",
+        stderr: "",
+        truncated: false,
+        durationMs: 30_000,
+      };
+    case "read":
+      return { path, content: "hello from the sandbox\n", encoding: "utf8", size: 23, truncated: false };
+    case "write":
+      return { path, size: new TextEncoder().encode(String(body.content ?? "")).length };
+    case "list":
+      return {
+        path,
+        entries: [
+          {
+            path: path ? `${path}/notes.txt` : "notes.txt",
+            name: "notes.txt",
+            kind: "file",
+            size: 23,
+            modifiedAt: FAKE_FILE_TIME,
+            hidden: false,
+          },
+          {
+            path: path ? `${path}/app` : "app",
+            name: "app",
+            kind: "dir",
+            size: null,
+            modifiedAt: FAKE_FILE_TIME,
+            hidden: false,
+          },
+        ],
+        more: 0,
+      };
+    case "delete":
+      return { path, deleted: 1 };
+    case "share":
+      return { attachmentId: randomUUID(), name: path.split("/").at(-1) ?? path, size: 23 };
+    default:
+      return { path: path || "downloads/report.pdf", size: 1024 };
+  }
+}
 /** In every refusal body of the connector routes: a plugin must never relay it to the model. */
 export const FAKE_ERROR_CANARY = "fake-api-error-body-canary";
 export type VerifyCall = {
@@ -263,6 +366,8 @@ export type FakeAgentChannelApi = {
   connectorControl: ConnectorControl;
   /** The Work Zone proposal routes' records and knobs (07.5-10). */
   workZone: FakeWorkZone;
+  /** The sandbox routes' records and knobs (07.8). */
+  sandbox: FakeSandbox;
   /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
   mcpServers: CellMcpServer[];
   /** Every POST /mcp/probe-results, in order. */
@@ -491,6 +596,7 @@ export async function startFakeAgentChannelApi(
     httpRequests: [] as Array<Record<string, unknown>>,
     connectorControl: {} as ConnectorControl,
     workZone: { projectLists: [], proposals: [], projects: fakeWorkZoneProjects() } as FakeWorkZone,
+    sandbox: { calls: [], results: {} } as FakeSandbox,
     // Never serialized: not in /cell, not in an answer, not in the state dump.
     connectorToken: opts.connectorToken ?? "fake-connector-token",
     mcpServers: opts.mcpServers ?? ([] as CellMcpServer[]),
@@ -573,6 +679,17 @@ export async function startFakeAgentChannelApi(
           else delete state.workZone.refused;
           return json(res, 200, { ok: true });
         }
+        if (req.method === "POST" && url.pathname === "/__test/sandbox") {
+          // Replace the sandbox knobs ({} resets them; the records stay).
+          const body = ((await readJson(req)) ?? {}) as Partial<FakeSandbox>;
+          const sb = state.sandbox;
+          if (body.exec && typeof body.exec === "object") sb.exec = body.exec;
+          else delete sb.exec;
+          sb.results = body.results && typeof body.results === "object" ? body.results : {};
+          if (typeof body.refusal === "string") sb.refusal = body.refusal;
+          else delete sb.refusal;
+          return json(res, 200, { ok: true });
+        }
         if (req.method === "POST" && url.pathname === "/__test/tool-approval") {
           // One tool's approval reply; no reply clears it.
           const body = ((await readJson(req)) ?? {}) as Partial<ToolApprovalControl> & { tool?: string };
@@ -621,6 +738,7 @@ export async function startFakeAgentChannelApi(
             connectorLists: state.connectorLists,
             httpRequests: state.httpRequests,
             workZone: state.workZone,
+            sandbox: state.sandbox,
             mcpProbes: state.mcpProbes,
             cellReads: state.cellReads,
             plugins: state.plugins,
@@ -876,6 +994,29 @@ export async function startFakeAgentChannelApi(
           truncated: false,
           redirectHost: null,
         });
+      }
+      const sandboxRoute = /^\/sandbox\/(exec|process|read|write|list|delete|share|import)$/u.exec(
+        route,
+      )?.[1];
+      if (req.method === "POST" && sandboxRoute) {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        const sb = state.sandbox;
+        sb.calls.push({ route: sandboxRoute, body: { ...body } });
+        const allowed = SANDBOX_BODY_KEYS[sandboxRoute] ?? [];
+        if (
+          typeof body.eventId !== "string" ||
+          typeof body.agentId !== "string" ||
+          Object.keys(body).some((k) => !allowed.includes(k))
+        ) {
+          return json(res, 400, { error: { code: "bad_request", message: `bad body ${FAKE_ERROR_CANARY}` } });
+        }
+        if (sb.refusal) {
+          return json(res, confinedRefusalStatus(sb.refusal), {
+            error: { code: sb.refusal, message: `refused by test ${FAKE_ERROR_CANARY}` },
+          });
+        }
+        const canned = sandboxRoute === "exec" && sb.exec ? sb.exec : sb.results[sandboxRoute];
+        return json(res, 200, canned ?? fakeSandboxResult(sandboxRoute, body));
       }
       const workZoneRoute =
         route === "/work-zone/projects"
@@ -1329,6 +1470,9 @@ export async function startFakeAgentChannelApi(
     },
     get workZone() {
       return state.workZone;
+    },
+    get sandbox() {
+      return state.sandbox;
     },
     get mcpServers() {
       return state.mcpServers;

@@ -1209,6 +1209,7 @@ const PLUGIN_TOOLS = [
   "ocw_http_request",
   "ocw_work_zone_projects",
   "ocw_start_work_zone",
+  "ocw_sandbox_exec",
 ];
 
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
