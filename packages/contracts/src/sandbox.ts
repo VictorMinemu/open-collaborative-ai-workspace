@@ -176,7 +176,7 @@ export type SandboxRefusal = z.infer<typeof SandboxRefusal>;
  * sandboxd does not answer.
  */
 export const SANDBOX_REFUSAL_STATUS: Record<SandboxRefusal, 403 | 404 | 409 | 413 | 422 | 503> = {
-  no_trigger: 404,
+  no_trigger: 403,
   sandbox_off: 403,
   module_off: 403,
   bot_off: 403,

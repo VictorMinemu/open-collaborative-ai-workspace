@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AgentCardRoute } from "./agent-card-route";
 import { Id, IsoDateTime, RelativePath } from "./common";
+import { BrowserSandboxMode } from "./sandbox";
 
 /**
  * Bot browsers and the live view (Phase 07.8, D-05…D-08, D-11…D-14, BRW-01…04). One bounded schema per payload the API,
@@ -366,14 +367,6 @@ export type BrowserEndReason = z.infer<typeof BrowserEndReason>;
 /** Why frames go to one person only: their takeover lease, or their sealed session is loaded (D-12 U-2). */
 export const BrowserPrivateReason = z.enum(["takeover", "member_session"]);
 export type BrowserPrivateReason = z.infer<typeof BrowserPrivateReason>;
-
-/**
- * D-14: how Chromium is confined. `chromium+gvisor`: its own sandbox on under runsc; `chromium`: its own sandbox on a
- * hardened runc; `container-only`: `--no-sandbox` on a host that restricts unprivileged user namespaces (stated in
- * Settings and ADR-0029, never a silent fallback under runsc).
- */
-export const BrowserSandboxMode = z.enum(["chromium+gvisor", "chromium", "container-only"]);
-export type BrowserSandboxMode = z.infer<typeof BrowserSandboxMode>;
 
 /** Server → client control frame `state` (JSON text; frames themselves are binary JPEG). */
 export const LiveStateFrame = z

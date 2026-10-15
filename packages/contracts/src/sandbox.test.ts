@@ -147,7 +147,7 @@ describe("Agent Channel sandbox exec (D-02, T-07.8-01-01)", () => {
       expect([403, 404, 409, 413, 422, 503]).toContain(SANDBOX_REFUSAL_STATUS[code]);
     }
     expect(Object.keys(SANDBOX_REFUSAL_STATUS).sort()).toEqual([...SandboxRefusal.options].sort());
-    expect(SANDBOX_REFUSAL_STATUS.no_trigger).toBe(404);
+    expect(SANDBOX_REFUSAL_STATUS.no_trigger).toBe(403);
     expect(SANDBOX_REFUSAL_STATUS.not_found).toBe(404);
     expect(SANDBOX_REFUSAL_STATUS.killed).toBe(403);
     expect(SANDBOX_REFUSAL_STATUS.member_data).toBe(403);

@@ -24,7 +24,6 @@ import {
   BrowserEndReason,
   BrowserPrivateReason,
   BrowserRefusal,
-  BrowserSandboxMode,
   BrowserSessionItem,
   BrowserSessionList,
   BrowserSignInStatus,
@@ -35,6 +34,7 @@ import {
 } from "./browser";
 // Published through `agent-cards.ts` (07.8-30): `index.ts` stays 07.8-01's alone during the parallel wave.
 import * as index from "./index";
+import { BrowserSandboxMode } from "./sandbox";
 
 const ID = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 const ID2 = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c";
