@@ -437,6 +437,10 @@ test("a personal key used by handle: the provider gets it, the bot and the page 
     expect(JSON.stringify(plugin.events)).not.toContain(KC_TOKEN);
     expect(JSON.stringify(plugin.connectorRequests)).not.toContain(KC_TOKEN);
 
+    // The chat page's bodies are read while that page is still loaded: a body still arriving when `goto` tears the
+    // document down never finishes, and its read would wait forever (07.5-15 full gate: a 180 s timeout here).
+    expect((await Promise.all(bodies.splice(0))).join("\n")).not.toContain(KC_TOKEN);
+
     // ---- Settings › Keychain: the row shows the use, never the value
     await page.goto(`${BASE_URL}/settings/keychain`);
     const row = page.getByTestId(`vault-row-${key.id}`);
