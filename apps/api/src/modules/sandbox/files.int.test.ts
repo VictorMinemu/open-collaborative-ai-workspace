@@ -213,3 +213,291 @@ describe("bad paths and a missing service", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------- Task 2: upload, delete, preview, status, stop, restart
+
+const enc = encodeURIComponent;
+const MiB = 1024 * 1024;
+const upload = (who: TestClient, agentId: string, folder: string, name: string, body: Buffer, extra = "") =>
+  raw(
+    who,
+    "POST",
+    `/api/v1/agents/${agentId}/sandbox/files/upload?path=${enc(folder)}&name=${enc(name)}${extra}`,
+    body,
+  );
+const preview = (who: TestClient, agentId: string, path: string) =>
+  who.request("GET", `/api/v1/agents/${agentId}/sandbox/files/content?path=${enc(path)}`) as Promise<Res>;
+const remove = (who: TestClient, agentId: string, path: string, recursive = false) =>
+  who.request(
+    "DELETE",
+    `/api/v1/agents/${agentId}/sandbox/files?path=${enc(path)}${recursive ? "&recursive=1" : ""}`,
+  ) as Promise<Res>;
+const status = (who: TestClient, agentId: string) =>
+  who.request("GET", `/api/v1/agents/${agentId}/sandbox`) as Promise<Res>;
+const lifecycle = (who: TestClient, agentId: string, op: "stop" | "restart") =>
+  who.request("POST", `/api/v1/agents/${agentId}/sandbox/${op}`) as Promise<Res>;
+const fakeCalls = (op: string) => s.sandboxd.stats().calls[op] ?? 0;
+
+describe("upload and delete for configurers (D-01, F-9)", () => {
+  it("uploads 1 MB into a folder; audited with count and total size, never the name", async () => {
+    const body = Buffer.alloc(MiB, "x");
+    const r = await upload(s.sam, mine, "reports", "new.csv", body);
+    expect(r.status, JSON.stringify(r.json)).toBe(200);
+    expect(r.json).toEqual({ path: "reports/new.csv", size: MiB });
+    const list = await ok(files(s.sam, mine, "reports"));
+    expect(list.entries.map((e: Json) => e.name)).toEqual(["new.csv", "q3.csv"]);
+    const row = (await audits("sandbox.files_uploaded")).at(-1);
+    expect(row).toMatchObject({ user_id: s.samId, agent_id: mine, metadata: { count: 1, totalBytes: MiB } });
+    expect(JSON.stringify(row?.metadata)).not.toContain("new");
+  });
+
+  it("the same name again → 409 upload_exists unless replace=1", async () => {
+    const body = Buffer.from("replaced\n");
+    const again = await upload(s.sam, mine, "reports", "new.csv", body);
+    expect(again.status).toBe(409);
+    expect(again.json?.error?.code).toBe("upload_exists");
+    const replaced = await upload(s.sam, mine, "reports", "new.csv", body, "&replace=1");
+    expect(replaced.status).toBe(200);
+    expect(replaced.json).toEqual({ path: "reports/new.csv", size: body.length });
+  });
+
+  it("51 MB → 413 too_large before sandboxd is called, with or without a declared length", async () => {
+    const before = fakeCalls("filesUpload");
+    const big = Buffer.alloc(51 * MiB, "y");
+    const r = await upload(s.sam, mine, "", "big.bin", big);
+    expect(r.status).toBe(413);
+    expect(r.json?.error?.code).toBe("too_large");
+    // Chunked: no Content-Length, the body grows past the route's limit.
+    const chunk = Buffer.alloc(MiB, "z");
+    let sent = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent >= 51) return controller.close();
+        sent += 1;
+        controller.enqueue(chunk);
+      },
+    });
+    const res = await fetch(
+      `${s.stack.baseUrl}/api/v1/agents/${mine}/sandbox/files/upload?path=&name=big.bin`,
+      {
+        method: "POST",
+        headers: {
+          origin: WEB_ORIGIN,
+          cookie: s.sam.cookieHeader,
+          "content-type": "application/octet-stream",
+        },
+        body: stream,
+        duplex: "half",
+      } as RequestInit,
+    );
+    expect(res.status).toBe(413);
+    expect(((await res.json()) as Json).error.code).toBe("too_large");
+    expect(fakeCalls("filesUpload")).toBe(before);
+  });
+
+  it("the bot's quota has no room → 409 disk_full before writing", async () => {
+    await s.setPolicy({});
+    await s.su.query("update app.sandbox_policies set disk_per_bot_mb = 64 where organization_id = $1", [
+      s.orgA,
+    ]);
+    await s.su.query(
+      `insert into app.bot_sandboxes (organization_id, agent_id, kind, state, disk_bytes)
+       values ($1, $2, 'sbx', 'stopped', $3)
+       on conflict (organization_id, agent_id, kind) do update set disk_bytes = excluded.disk_bytes`,
+      [s.orgA, mine, 63.5 * MiB],
+    );
+    const before = fakeCalls("filesUpload");
+    try {
+      const r = await upload(s.sam, mine, "reports", "more.csv", Buffer.alloc(MiB, "q"));
+      expect(r.status).toBe(409);
+      expect(r.json?.error?.code).toBe("disk_full");
+      expect(fakeCalls("filesUpload")).toBe(before);
+      // A small one still fits.
+      expect((await upload(s.sam, mine, "reports", "tiny.csv", Buffer.from("a\n"))).status).toBe(200);
+    } finally {
+      await s.su.query("update app.sandbox_policies set disk_per_bot_mb = 2048 where organization_id = $1", [
+        s.orgA,
+      ]);
+      await s.su.query("update app.bot_sandboxes set disk_bytes = 0 where agent_id = $1", [mine]);
+    }
+  });
+
+  it("a name with / or starting with .., or a folder outside the workspace → 422 invalid_path", async () => {
+    for (const [folder, name] of [
+      ["reports", "a/b.csv"],
+      ["reports", "..secret"],
+      ["reports", ".."],
+      ["../etc", "x.csv"],
+      ["", ""],
+    ] as const) {
+      const r = await upload(s.sam, mine, folder, name, Buffer.from("x"));
+      expect(r.status, `${folder}/${name}`).toBe(422);
+      expect(r.json?.error?.code).toBe("invalid_path");
+    }
+  });
+
+  it("deletes a file, then a folder with recursive=1; audited with the count; never the root", async () => {
+    await seed(mine, "old/a.txt", "a");
+    await seed(mine, "old/deep/b.txt", "b");
+    expect(await ok(remove(s.sam, mine, "reports/tiny.csv"))).toEqual({
+      path: "reports/tiny.csv",
+      deleted: 1,
+    });
+    expect((await audits("sandbox.file_deleted")).at(-1)).toMatchObject({
+      agent_id: mine,
+      metadata: { count: 1 },
+    });
+    const notEmpty = await remove(s.sam, mine, "old");
+    expect(notEmpty.status).toBe(409);
+    expect(codeOf(notEmpty)).toBe("busy");
+    const folder = await ok(remove(s.sam, mine, "old", true));
+    expect(folder.deleted).toBe(4);
+    expect((await audits("sandbox.file_deleted")).at(-1)?.metadata).toEqual({ count: 4 });
+    const root = await remove(s.sam, mine, "");
+    expect(root.status).toBe(422);
+    expect(codeOf(root)).toBe("invalid_path");
+  });
+
+  it("a non-configurer cannot upload, preview or delete (404) and sandboxd is never asked", async () => {
+    const before = s.sandboxd.stats().calls;
+    expect((await upload(s.alex, mine, "reports", "x.csv", Buffer.from("x"))).status).toBe(404);
+    expect((await preview(s.alex, mine, "reports/q3.csv")).status).toBe(404);
+    expect((await remove(s.alex, mine, "reports/q3.csv")).status).toBe(404);
+    expect((await upload(s.eve, mine, "reports", "x.csv", Buffer.from("x"))).status).toBe(404);
+    expect(s.sandboxd.stats().calls).toEqual(before);
+  });
+});
+
+describe("preview: text as JSON text, raster images by magic bytes, nothing rendered (T-07.8-11-02)", () => {
+  it("UTF-8 text up to 256 KB → text", async () => {
+    const p = await ok(preview(s.sam, mine, "reports/q3.csv"));
+    expect(p).toEqual({ kind: "text", text: Q3, size: Q3_SIZE, modifiedAt: expect.any(String) });
+  });
+
+  it("300 KB of text → too_large", async () => {
+    await seed(mine, "big.txt", "a".repeat(300 * 1024));
+    expect(await ok(preview(s.sam, mine, "big.txt"))).toMatchObject({ kind: "too_large", size: 300 * 1024 });
+  });
+
+  it("a GIF and a WebP → image with the sniffed type (bytes come from the download route)", async () => {
+    // ASCII-safe magic bytes: the in-memory sandboxd keeps files as UTF-8 text (PNG and JPEG: files.test.ts).
+    await seed(mine, "chart.gif", "GIF89a\u0001\u0002rest-of-image");
+    await seed(mine, "chart.webp", "RIFF\u0010\u0010\u0010\u0010WEBPVP8 data");
+    expect(await ok(preview(s.sam, mine, "chart.gif"))).toMatchObject({
+      kind: "image",
+      mimeType: "image/gif",
+    });
+    expect(await ok(preview(s.sam, mine, "chart.webp"))).toMatchObject({
+      kind: "image",
+      mimeType: "image/webp",
+    });
+  });
+
+  it("SVG, HTML (by name or by markup) and binary → binary; their markup never reaches the response", async () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+    await seed(mine, "pic.svg", svg);
+    await seed(mine, "page.html", "<p>hi</p><script>alert(2)</script>");
+    await seed(mine, "page.txt", "<!DOCTYPE html><html><script>alert(3)</script></html>");
+    await seed(mine, "blob.bin", "abc\u0000def");
+    for (const path of ["pic.svg", "page.html", "page.txt", "blob.bin"]) {
+      const r = await preview(s.sam, mine, path);
+      expect(r.status, path).toBe(200);
+      expect(r.body, path).toMatchObject({ kind: "binary" });
+      expect(JSON.stringify(r.body)).not.toContain("script");
+    }
+  });
+
+  it("a folder or a path outside the workspace → 422 invalid_path; a missing file → 404", async () => {
+    expect(codeOf(await preview(s.sam, mine, "reports"))).toBe("invalid_path");
+    expect(codeOf(await preview(s.sam, mine, "../x"))).toBe("invalid_path");
+    expect(codeOf(await preview(s.sam, mine, "nope.txt"))).toBe("not_found");
+  });
+});
+
+describe("status, stop and restart (R4, UI-SPEC §3.1, §3.5)", () => {
+  let bot: { id: string; dm: string };
+
+  beforeAll(async () => {
+    await s.setPolicy({ enabled: true });
+    bot = await s.newBot("Status Bot");
+  });
+
+  it("a bot with no sandbox yet: absent, the quota, the organization's CPU and cap, the fixed limits", async () => {
+    const v = await ok(status(s.victor, bot.id));
+    expect(v).toEqual({
+      agentId: bot.id,
+      state: "absent",
+      runtime: null,
+      lastActiveAt: null,
+      diskBytes: 0,
+      diskQuotaBytes: 2048 * MiB,
+      cpuMsToday: 0,
+      org: { cpuMinutesToday: expect.any(Number), cpuMinutesPerDay: 600 },
+      limits: { cpus: 1, memoryBytes: 1024 * MiB, pids: 256, idleStopMinutes: 15 },
+      packages: 0,
+      teamBot: true,
+      stopReason: null,
+      viewerCan: { files: true, control: true },
+    });
+    expect((await ok(status(s.sam, mine))).teamBot).toBe(false);
+  });
+
+  it("running after an exec, with today's CPU of the bot and of the organization", async () => {
+    const ev = await s.turnOf(s.sam, bot.dm, bot.id);
+    expect(
+      (await s.cell("/sandbox/exec", { eventId: ev.eventId, agentId: bot.id, argv: ["true"] })).status,
+    ).toBe(200);
+    const today = new Date().toISOString().slice(0, 10);
+    await s.su.query(
+      `insert into app.sandbox_usage_daily (organization_id, agent_id, day, cpu_ms) values ($1, $2, $3, 120000)
+       on conflict (organization_id, agent_id, day) do update set cpu_ms = 120000`,
+      [s.orgA, bot.id, today],
+    );
+    const v = await ok(status(s.victor, bot.id));
+    expect(v).toMatchObject({ state: "running", runtime: "gvisor", cpuMsToday: 120000, stopReason: null });
+    expect(v.lastActiveAt).toEqual(expect.any(String));
+    expect(v.org.cpuMinutesToday).toBeGreaterThanOrEqual(2);
+    await s.su.query("delete from app.sandbox_usage_daily where agent_id = $1", [bot.id]);
+  });
+
+  it("stop → stopped by the user, audited; restart → running again, audited", async () => {
+    const stopped = await ok(lifecycle(s.victor, bot.id, "stop"));
+    expect(stopped).toMatchObject({ state: "stopped", stopReason: "user" });
+    expect(s.sandboxd.fake.stateOf({ orgId: s.orgA, agentId: bot.id })).toBe("stopped");
+    expect((await audits("sandbox.stopped")).at(-1)).toMatchObject({
+      user_id: s.victorId,
+      agent_id: bot.id,
+      metadata: { kind: "sbx", reason: "user" },
+    });
+    const restarted = await ok(lifecycle(s.victor, bot.id, "restart"));
+    expect(restarted).toMatchObject({ state: "running", stopReason: null });
+    expect(s.sandboxd.fake.stateOf({ orgId: s.orgA, agentId: bot.id })).toBe("running");
+    expect((await audits("sandbox.restarted")).at(-1)).toMatchObject({
+      agent_id: bot.id,
+      metadata: { kind: "sbx" },
+    });
+  });
+
+  it("restart while an admin stopped everything → 403 killed; sandboxd is not asked", async () => {
+    await s.setPolicy({ killed: true });
+    const before = fakeCalls("restart");
+    try {
+      const r = await lifecycle(s.victor, bot.id, "restart");
+      expect(r.status).toBe(403);
+      expect(codeOf(r)).toBe("killed");
+      expect(fakeCalls("restart")).toBe(before);
+      expect((await ok(status(s.victor, bot.id))).state).toBe("killed");
+    } finally {
+      await s.setPolicy({ killed: false });
+    }
+  });
+
+  it("a non-configurer and organization B get 404 on status, stop and restart", async () => {
+    for (const who of [s.sam, s.alex, s.eve]) {
+      expect((await status(who, bot.id)).status).toBe(404);
+      expect((await lifecycle(who, bot.id, "stop")).status).toBe(404);
+      expect((await lifecycle(who, bot.id, "restart")).status).toBe(404);
+    }
+    expect(s.sandboxd.fake.stateOf({ orgId: s.orgA, agentId: bot.id })).toBe("running");
+  });
+});

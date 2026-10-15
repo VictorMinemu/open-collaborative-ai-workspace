@@ -1,12 +1,22 @@
 import {
   BotCapabilities,
   DEFAULT_SANDBOX_SETTINGS,
+  SANDBOX_LIMITS,
   type SandboxRuntime,
   type SandboxSettings,
   type SandboxState,
   type SandboxStopReason,
 } from "@ocw/contracts";
-import { agents, botSandboxes, orgMembers, orgUnits, sandboxPolicies, type Tx, tenantOf } from "@ocw/db";
+import {
+  agents,
+  botSandboxes,
+  orgMembers,
+  orgUnits,
+  sandboxPolicies,
+  sandboxUsageDaily,
+  type Tx,
+  tenantOf,
+} from "@ocw/db";
 import { and, eq, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import type { AuditService } from "../audit";
 import { agentResource, type PermissionService } from "../organization";
@@ -302,4 +312,68 @@ export async function resumeSandboxes(
     metadata: {},
   });
   return { changed: true };
+}
+
+// ---------------------------------------------------------------- limits and usage (07.8-11; D-01, D-09)
+
+const MIB = 1024 * 1024;
+
+/**
+ * The fixed per-container limits (UI-SPEC §3.1 and §4: "Each sandbox: 1 CPU · 1 GB memory · 256 processes · stops after
+ * 15 min without use. Each browser: 1 CPU · 2 GB memory · stops after 5"); sandboxd clamps them again to its own hard
+ * bounds. The disk quota is the organization's `disk_per_bot_mb`.
+ */
+export const CONTAINER_LIMITS = {
+  sbx: { cpus: 1, memoryBytes: 1024 * MIB, pids: 256, idleStopMinutes: SANDBOX_LIMITS.idleStopMinutes },
+  brw: { cpus: 1, memoryBytes: 2048 * MIB, pids: 512, idleStopMinutes: 5 },
+} as const;
+
+/** Today's UTC day (`sandbox_usage_daily.day`). */
+export const utcDay = (at: Date = new Date()): string => at.toISOString().slice(0, 10);
+
+/** CPU used today (UTC) by the organization's sandboxes, or by one bot's. */
+export async function cpuMsToday(tx: Tx, agentId?: string): Promise<number> {
+  const [row] = await tx
+    .select({ ms: sql<string | null>`sum(${sandboxUsageDaily.cpuMs})` })
+    .from(sandboxUsageDaily)
+    .where(
+      and(eq(sandboxUsageDaily.day, utcDay()), ...(agentId ? [eq(sandboxUsageDaily.agentId, agentId)] : [])),
+    );
+  return Number(row?.ms ?? 0);
+}
+
+/** The organization's workspaces as last measured (the `sbx` mirror). */
+export async function diskBytesTotal(tx: Tx): Promise<number> {
+  const [row] = await tx
+    .select({ bytes: sql<string | null>`sum(${botSandboxes.diskBytes})` })
+    .from(botSandboxes)
+    .where(eq(botSandboxes.kind, "sbx"));
+  return Number(row?.bytes ?? 0);
+}
+
+/** Bytes still free in one bot's workspace under the organization's per-bot quota (last measurement). */
+export async function diskRoom(tx: Tx, agentId: string): Promise<number> {
+  const policy = await policyRow(tx);
+  const quota = (policy?.diskPerBotMb ?? DEFAULT_SANDBOX_SETTINGS.limits.diskPerBotMb) * MIB;
+  const [row] = await tx
+    .select({ disk: botSandboxes.diskBytes })
+    .from(botSandboxes)
+    .where(and(eq(botSandboxes.agentId, agentId), eq(botSandboxes.kind, "sbx")))
+    .limit(1);
+  return Math.max(0, quota - (row?.disk ?? 0));
+}
+
+/**
+ * Whether a person may start one bot's sandbox now (restart): the organization switch, the kill switch and the bot's own
+ * switch. Settings, not access: who may ask at all is the resolver's `sandbox.files` (files.ts).
+ */
+export async function lifecycleRefusal(
+  tx: Tx,
+  agentId: string,
+): Promise<"sandbox_off" | "killed" | "bot_off" | null> {
+  const policy = await policyRow(tx);
+  if (!policy?.enabled) return "sandbox_off";
+  if (policy.killedAt) return "killed";
+  const bot = await loadSandboxBot(tx, agentId);
+  return bot?.switches.sandbox ? null : "bot_off";
 }
