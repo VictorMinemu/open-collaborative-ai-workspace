@@ -212,6 +212,11 @@ export function renderConfig(env, opts = {}) {
         // OpenClaw always prints the current date; pin its zone (the asker's local time comes per turn).
         userTimezone: "UTC",
         compaction: { memoryFlush: { enabled: false } },
+        // ADR-0029 / 07.8 RESEARCH F-1 (D-11): OpenClaw's own sandbox stays off, pinned rather than left to the default.
+        // Its Docker backend needs the host Docker socket in the gateway, which the cell never gets. Bots reach a sandbox
+        // or a browser only through the ocw_sandbox_* / ocw_browser_* tools, which the Agent Channel API decides, audits
+        // and runs in `sandboxd`; exec, read, write, process and browser stay in DANGEROUS_TOOLS.
+        sandbox: { mode: "off" },
       },
     },
     tools: {
