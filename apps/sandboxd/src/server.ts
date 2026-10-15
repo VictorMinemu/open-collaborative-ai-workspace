@@ -1,7 +1,8 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import http from "node:http";
-import { SANDBOXD_ROUTES, type SandboxdErrorCode, type SandboxdOp } from "@ocw/contracts";
+import { SANDBOX_LIMITS, SANDBOXD_ROUTES, type SandboxdErrorCode, type SandboxdOp } from "@ocw/contracts";
 import type { z } from "zod";
+import type { Files } from "./files";
 import { SandboxdFailure, type Sandboxes } from "./sandboxes";
 
 /**
@@ -11,7 +12,7 @@ import { SandboxdFailure, type Sandboxes } from "./sandboxes";
  * (never argv, output, paths or tokens). Listens on the internal `sandbox-control` network only; no published port.
  */
 
-/** The ops this server implements so far; any other path is 404 (later plans add files, events, browser, packages). */
+/** The ops this server implements so far; any other path is 404 (later plans add browser and package ops). */
 export const IMPLEMENTED_OPS = [
   "info",
   "ensure",
@@ -22,11 +23,37 @@ export const IMPLEMENTED_OPS = [
   "kill",
   "killOrg",
   "purge",
+  "filesList",
+  "filesStat",
+  "filesRead",
+  "filesWrite",
+  "filesDelete",
+  "filesUpload",
+  "filesDownload",
+  "filesImport",
 ] as const satisfies readonly SandboxdOp[];
 type ImplementedOp = (typeof IMPLEMENTED_OPS)[number];
 
 /** Request bodies above this are refused before parsing (exec argv is at most 64 × 8 KiB). */
 const MAX_BODY_BYTES = 1024 * 1024;
+
+/** JSON overhead allowed over a base64 payload. */
+const ENVELOPE_BYTES = 64 * 1024;
+const base64Size = (bytes: number) => Math.ceil(bytes / 3) * 4;
+
+/**
+ * The file transfer ops carry base64 in JSON (the contract's shape): an upload or import of 50 MiB is about 67 MiB on
+ * the wire, a write of 1 MiB about 1.4 MiB. Only these routes get a larger body limit; everything else keeps 1 MiB.
+ */
+export const BODY_LIMITS: Partial<Record<ImplementedOp, number>> = {
+  filesUpload: base64Size(SANDBOX_LIMITS.uploadMaxBytes) + ENVELOPE_BYTES,
+  filesImport: base64Size(SANDBOX_LIMITS.uploadMaxBytes) + ENVELOPE_BYTES,
+  filesWrite: base64Size(SANDBOX_LIMITS.writeMaxBytes) + ENVELOPE_BYTES,
+};
+
+/** Large transfers held in memory at once (each up to ~67 MiB of JSON plus 50 MiB decoded); more answer 409 busy. */
+export const MAX_CONCURRENT_TRANSFERS = 2;
+const TRANSFER_OPS: ReadonlySet<ImplementedOp> = new Set(["filesUpload", "filesImport", "filesDownload"]);
 
 export interface LogLine {
   level: "info" | "warn" | "error";
@@ -37,6 +64,7 @@ export interface LogLine {
 export interface ServerOptions {
   token: string;
   sandboxes: Sandboxes;
+  files: Files;
   log?: (line: LogLine) => void;
 }
 
@@ -66,13 +94,19 @@ function sendError(res: http.ServerResponse, status: number, code: SandboxdError
 
 class BodyTooLarge extends Error {}
 
-function readBody(req: http.IncomingMessage): Promise<string> {
+function readBody(req: http.IncomingMessage, max: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    const declared = Number(req.headers["content-length"] ?? "0");
+    if (Number.isFinite(declared) && declared > max) {
+      reject(new BodyTooLarge());
+      req.resume();
+      return;
+    }
     req.on("data", (c: Buffer) => {
       size += c.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > max) {
         reject(new BodyTooLarge());
         req.destroy();
         return;
@@ -102,8 +136,9 @@ function idsOf(input: unknown): Record<string, string> {
 }
 
 export function createServer(options: ServerOptions): http.Server {
-  const { token, sandboxes } = options;
+  const { token, sandboxes, files } = options;
   const log = options.log ?? (() => {});
+  let transfers = 0;
 
   const handlers: {
     [Op in ImplementedOp]: (input: z.output<(typeof SANDBOXD_ROUTES)[Op]["input"]>) => unknown;
@@ -117,6 +152,14 @@ export function createServer(options: ServerOptions): http.Server {
     kill: (input) => sandboxes.kill(input.target),
     killOrg: (input) => sandboxes.killOrg(input.orgId),
     purge: (input) => sandboxes.purge(input.target),
+    filesList: (input) => files.list(input),
+    filesStat: (input) => files.stat(input),
+    filesRead: (input) => files.read(input),
+    filesWrite: (input) => files.write(input),
+    filesDelete: (input) => files.remove(input),
+    filesUpload: (input) => files.upload(input),
+    filesDownload: (input) => files.download(input),
+    filesImport: (input) => files.upload(input),
   };
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -147,7 +190,7 @@ export function createServer(options: ServerOptions): http.Server {
         raw = Object.fromEntries(url.searchParams.entries());
         req.resume();
       } else {
-        const text = await readBody(req);
+        const text = await readBody(req, BODY_LIMITS[op] ?? MAX_BODY_BYTES);
         raw = text.length === 0 ? {} : JSON.parse(text);
       }
     } catch (err) {
@@ -165,6 +208,13 @@ export function createServer(options: ServerOptions): http.Server {
     }
     const ids = idsOf(parsed.data);
 
+    const transfer = TRANSFER_OPS.has(op);
+    if (transfer && transfers >= MAX_CONCURRENT_TRANSFERS) {
+      sendError(res, 409, "busy", "too many file transfers at once");
+      log({ level: "info", msg: "request", op, ...ids, status: 409, code: "busy", ms: Date.now() - started });
+      return;
+    }
+    if (transfer) transfers += 1;
     try {
       const handler = handlers[op] as (input: unknown) => unknown;
       const result = await handler(parsed.data);
@@ -200,6 +250,8 @@ export function createServer(options: ServerOptions): http.Server {
         error: err instanceof Error ? err.name : "unknown",
         ms: Date.now() - started,
       });
+    } finally {
+      if (transfer) transfers -= 1;
     }
   }
 

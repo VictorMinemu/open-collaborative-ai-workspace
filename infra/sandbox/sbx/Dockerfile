@@ -24,8 +24,10 @@ RUN groupadd --gid 10001 ocw \
  && find / -xdev -type f -perm /6000 -exec chmod a-s {} + \
  && test -z "$(find / -xdev -type f -perm /6000 -print -quit)"
 
-# Root-owned and read-only for the bot: the only way sandboxd runs an argv (process group record + timeout).
+# Root-owned and read-only for the bot: the only way sandboxd runs an argv (process group record + timeout), and the
+# only way it touches workspace files (realpath-confined to /workspace, run as 10001; never the archive API).
 COPY --chmod=0755 ocw-run /usr/local/bin/ocw-run
+COPY --chmod=0755 ocw-files /usr/local/bin/ocw-files
 
 ENV HOME=/workspace
 WORKDIR /workspace

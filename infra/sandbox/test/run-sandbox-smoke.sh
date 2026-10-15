@@ -4,12 +4,42 @@
 # proves through its HTTP API that a bot's argv runs as uid 10001 in /workspace of its own hardened container. The
 # smoke also `docker exec`s into that same labelled container on its own to check the file and its owner.
 #
-# Usage (repo root):  bash infra/sandbox/test/run-sandbox-smoke.sh
+# 07.8-09 adds the files section: people's and bots' file operations through sandboxd (as 10001, realpath-confined,
+# through the network-none `files` helper when the sandbox is stopped or killed).
+#
+# Usage (repo root):  bash infra/sandbox/test/run-sandbox-smoke.sh [--only core,files]
+#   --only <list>          run only these sections (comma separated): core, files; default all
 #   DOCKER_SOCKET=<path>   the daemon socket (default: the current docker context's unix socket)
 #
 # Every Docker object it creates carries `ocw.namespace=ocw-smoke-<pid>` and is removed by that label before the run
 # and on exit; the image tag is `ocw-sandbox-sbx:smoke-<sha>` and is removed on exit. It never prunes.
 set -euo pipefail
+
+ONLY=all
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --only)
+      ONLY="${2:-}"
+      shift 2
+      ;;
+    --only=*)
+      ONLY="${1#--only=}"
+      shift
+      ;;
+    *)
+      printf 'unknown argument: %s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+done
+SECTIONS="core files"
+for s in ${ONLY//,/ }; do
+  if [ "$s" != all ] && [[ " $SECTIONS " != *" $s "* ]]; then
+    printf 'unknown section: %s (known: %s)\n' "$s" "$SECTIONS" >&2
+    exit 2
+  fi
+done
+want() { [ "$ONLY" = all ] || [[ ",$ONLY," == *",$1,"* ]]; }
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
@@ -94,6 +124,16 @@ exec_json() {
 
 uuid() { node -e 'process.stdout.write(require("crypto").randomUUID())'; }
 
+# run_in <org> <agent> <argv json> [timeoutMs] → status; body in $WORK/body.json
+run_in() { api POST /v1/sandboxes/exec "$(exec_json "$1" "$2" "$3" "${4:-30000}" 25000)"; }
+exited_with() { # exited_with <expected: 0|nonzero>
+  [ "$(jfield "$WORK/body.json" status)" = exited ] || return 1
+  local code
+  code="$(jfield "$WORK/body.json" exitCode)"
+  if [ "$1" = 0 ]; then [ "$code" = 0 ]; else [ -n "$code" ] && [ "$code" != 0 ]; fi
+}
+running_of() { docker inspect --format '{{.State.Running}}' "$1" 2>/dev/null || echo gone; }
+
 # ---------------------------------------------------------------- preflight
 
 if [ -z "${DOCKER_SOCKET:-}" ]; then
@@ -125,33 +165,35 @@ log "building ${IMAGE} from infra/sandbox/sbx/Dockerfile"
 docker build -q --label "ocw.namespace=${NS}" -t "$IMAGE" -f infra/sandbox/sbx/Dockerfile infra/sandbox/sbx >/dev/null
 
 # ---------------------------------------------------------------- D-14: a required runsc that is missing refuses to start
+if want core; then
 
-if docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'; then
-  log "skip runsc-required refusal (this daemon has runsc)"
-else
-  set +e
-  OCW_SANDBOX_TOKEN="$TOKEN" OCW_SANDBOX_NAMESPACE="$NS" OCW_SANDBOXD_HOST=127.0.0.1 OCW_SANDBOXD_PORT=0 \
-    OCW_SANDBOX_RUNTIME=runsc OCW_SANDBOX_SBX_IMAGE="$IMAGE" \
-    node --import tsx apps/sandboxd/src/main.ts >"$WORK/refusal.log" 2>&1 &
-  refusal_pid=$!
-  for _ in $(seq 1 100); do
-    kill -0 "$refusal_pid" 2>/dev/null || break
-    sleep 0.2
-  done
-  if kill -0 "$refusal_pid" 2>/dev/null; then
-    kill "$refusal_pid" 2>/dev/null
-    refusal_code=running
+  if docker info --format '{{json .Runtimes}}' | grep -q '"runsc"'; then
+    log "skip runsc-required refusal (this daemon has runsc)"
   else
-    wait "$refusal_pid"
-    refusal_code=$?
-  fi
-  set -e
-  if [ "$refusal_code" = 1 ] && grep -q '"refusing to start"' "$WORK/refusal.log" &&
-    ! grep -q '"listening"' "$WORK/refusal.log" &&
-    [ -z "$(docker ps -aq --filter "label=ocw.namespace=${NS}" --filter "label=ocw.sandbox=1")" ]; then
-    ok "OCW_SANDBOX_RUNTIME=runsc without runsc → sandboxd refuses to start (exit 1), nothing created"
-  else
-    fail "runsc-required start → ${refusal_code}: $(tail -n 3 "$WORK/refusal.log")"
+    set +e
+    OCW_SANDBOX_TOKEN="$TOKEN" OCW_SANDBOX_NAMESPACE="$NS" OCW_SANDBOXD_HOST=127.0.0.1 OCW_SANDBOXD_PORT=0 \
+      OCW_SANDBOX_RUNTIME=runsc OCW_SANDBOX_SBX_IMAGE="$IMAGE" \
+      node --import tsx apps/sandboxd/src/main.ts >"$WORK/refusal.log" 2>&1 &
+    refusal_pid=$!
+    for _ in $(seq 1 100); do
+      kill -0 "$refusal_pid" 2>/dev/null || break
+      sleep 0.2
+    done
+    if kill -0 "$refusal_pid" 2>/dev/null; then
+      kill "$refusal_pid" 2>/dev/null
+      refusal_code=running
+    else
+      wait "$refusal_pid"
+      refusal_code=$?
+    fi
+    set -e
+    if [ "$refusal_code" = 1 ] && grep -q '"refusing to start"' "$WORK/refusal.log" &&
+      ! grep -q '"listening"' "$WORK/refusal.log" &&
+      [ -z "$(docker ps -aq --filter "label=ocw.namespace=${NS}" --filter "label=ocw.sandbox=1")" ]; then
+      ok "OCW_SANDBOX_RUNTIME=runsc without runsc → sandboxd refuses to start (exit 1), nothing created"
+    else
+      fail "runsc-required start → ${refusal_code}: $(tail -n 3 "$WORK/refusal.log")"
+    fi
   fi
 fi
 
@@ -194,234 +236,376 @@ fi
 status="$(api GET /v1/info "" "")"
 [ "$status" = 401 ] && ok "GET /v1/info without the token → 401" || fail "no token → ${status}"
 
-# ---------------------------------------------------------------- ensure bot A
+# ================================================================ section: core (07.8-04)
 
-status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$ORG" "$A")}")"
-if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" state)" = running ]; then
-  ok "ensure A → running"
-else
-  fail "ensure A → ${status} $(cat "$WORK/body.json")"
-fi
+section_core() {
+  # ---------------------------------------------------------------- ensure bot A
 
-running="$(docker ps -q --filter "label=ocw.sandbox=1" --filter "label=ocw.namespace=${NS}" --filter "label=ocw.agent=${A}")"
-count="$(printf '%s\n' "$running" | grep -c . || true)"
-CID_A="$(printf '%s\n' "$running" | head -n 1)"
-if [ "$count" = 1 ] && [ "$(docker inspect --format '{{.Config.Image}}' "$CID_A")" = "$IMAGE" ]; then
-  ok "exactly one running container for A, from ${IMAGE}"
-else
-  fail "containers for A: ${count}"
-fi
+  status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$ORG" "$A")}")"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" state)" = running ]; then
+    ok "ensure A → running"
+  else
+    fail "ensure A → ${status} $(cat "$WORK/body.json")"
+  fi
 
-# ---------------------------------------------------------------- exec as 10001 in /workspace
+  running="$(docker ps -q --filter "label=ocw.sandbox=1" --filter "label=ocw.namespace=${NS}" --filter "label=ocw.agent=${A}")"
+  count="$(printf '%s\n' "$running" | grep -c . || true)"
+  CID_A="$(printf '%s\n' "$running" | head -n 1)"
+  if [ "$count" = 1 ] && [ "$(docker inspect --format '{{.Config.Image}}' "$CID_A")" = "$IMAGE" ]; then
+    ok "exactly one running container for A, from ${IMAGE}"
+  else
+    fail "containers for A: ${count}"
+  fi
 
-status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sh","-c","echo hi > note.txt && cat note.txt && id -u"]')")"
-if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" status)" = exited ] &&
-  [ "$(jfield "$WORK/body.json" exitCode)" = 0 ] && [ "$(jfield "$WORK/body.json" stdout)" = "$(printf 'hi\n10001\n')" ]; then
-  ok "exec writes note.txt and runs as 10001"
-else
-  fail "exec → ${status} $(cat "$WORK/body.json")"
-fi
+  # ---------------------------------------------------------------- exec as 10001 in /workspace
 
-# The smoke's own look into the same labelled container, not through sandboxd.
-stat_line="$(docker exec "$CID_A" stat -c '%u %n' /workspace/note.txt 2>&1 || true)"
-[ "$stat_line" = "10001 /workspace/note.txt" ] && ok "docker exec stat: ${stat_line}" || fail "docker exec stat: ${stat_line}"
+  status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sh","-c","echo hi > note.txt && cat note.txt && id -u"]')")"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" status)" = exited ] &&
+    [ "$(jfield "$WORK/body.json" exitCode)" = 0 ] && [ "$(jfield "$WORK/body.json" stdout)" = "$(printf 'hi\n10001\n')" ]; then
+    ok "exec writes note.txt and runs as 10001"
+  else
+    fail "exec → ${status} $(cat "$WORK/body.json")"
+  fi
 
-# ---------------------------------------------------------------- yield, poll, kill, timeout, tails
+  # The smoke's own look into the same labelled container, not through sandboxd.
+  stat_line="$(docker exec "$CID_A" stat -c '%u %n' /workspace/note.txt 2>&1 || true)"
+  [ "$stat_line" = "10001 /workspace/note.txt" ] && ok "docker exec stat: ${stat_line}" || fail "docker exec stat: ${stat_line}"
 
-t0=$(date +%s)
-status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sleep","40"]' 60000 25000)")"
-PID_SLEEP="$(jfield "$WORK/body.json" processId)"
-if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" status)" = running ] && [ -n "$PID_SLEEP" ]; then
-  ok "sleep 40 yields after the default 25 s with a process id"
-else
-  fail "sleep 40 → ${status} $(cat "$WORK/body.json")"
-fi
+  # ---------------------------------------------------------------- yield, poll, kill, timeout, tails
 
-status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sleep","300"]' 600000 500)")"
-PID_KILL="$(jfield "$WORK/body.json" processId)"
-status="$(api POST /v1/sandboxes/process "$(printf '{"target":%s,"processId":"%s","action":"kill"}' "$(target "$ORG" "$A")" "$PID_KILL")")"
-code="$(jfield "$WORK/body.json" exitCode)"
-if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" status)" = exited ] && [ -n "$code" ] && [ "$code" != 0 ]; then
-  ok "process kill → exited ${code}"
-else
-  fail "process kill → ${status} $(cat "$WORK/body.json")"
-fi
+  t0=$(date +%s)
+  status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sleep","40"]' 60000 25000)")"
+  PID_SLEEP="$(jfield "$WORK/body.json" processId)"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" status)" = running ] && [ -n "$PID_SLEEP" ]; then
+    ok "sleep 40 yields after the default 25 s with a process id"
+  else
+    fail "sleep 40 → ${status} $(cat "$WORK/body.json")"
+  fi
 
-s0=$(node -e 'process.stdout.write(String(Date.now()))')
-status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sleep","10"]' 2000 25000)")"
-s1=$(node -e 'process.stdout.write(String(Date.now()))')
-code="$(jfield "$WORK/body.json" exitCode)"
-if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" status)" = exited ] && [ "$code" != 0 ] && [ $((s1 - s0)) -lt 3000 ]; then
-  ok "timeoutMs 2000 on sleep 10 → exited ${code} in $((s1 - s0)) ms"
-else
-  fail "timeout → ${status} in $((s1 - s0)) ms $(cat "$WORK/body.json")"
-fi
-
-status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sh","-c","yes a | head -c 40000; echo END"]')")"
-tail_ok="$(node -e '
-  const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-  process.stdout.write(String(Buffer.byteLength(j.stdout ?? "") === 16384 && /a\nEND\n$/.test(j.stdout ?? "")));
-' "$WORK/body.json")"
-if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" truncated)" = true ] && [ "$tail_ok" = true ]; then
-  ok "output over 16 KiB keeps the last 16384 bytes, truncated"
-else
-  fail "tail → ${status} $(head -c 300 "$WORK/body.json")"
-fi
-
-# ---------------------------------------------------------------- hardening seen from inside A (D-01, D-11)
-
-# run_a <argv json> [timeoutMs] → status; body in $WORK/body.json
-run_in() { api POST /v1/sandboxes/exec "$(exec_json "$1" "$2" "$3" "${4:-30000}" 25000)"; }
-exited_with() { # exited_with <expected: 0|nonzero>
-  [ "$(jfield "$WORK/body.json" status)" = exited ] || return 1
-  local code
+  status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sleep","300"]' 600000 500)")"
+  PID_KILL="$(jfield "$WORK/body.json" processId)"
+  status="$(api POST /v1/sandboxes/process "$(printf '{"target":%s,"processId":"%s","action":"kill"}' "$(target "$ORG" "$A")" "$PID_KILL")")"
   code="$(jfield "$WORK/body.json" exitCode)"
-  if [ "$1" = 0 ]; then [ "$code" = 0 ]; else [ -n "$code" ] && [ "$code" != 0 ]; fi
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" status)" = exited ] && [ -n "$code" ] && [ "$code" != 0 ]; then
+    ok "process kill → exited ${code}"
+  else
+    fail "process kill → ${status} $(cat "$WORK/body.json")"
+  fi
+
+  s0=$(node -e 'process.stdout.write(String(Date.now()))')
+  status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sleep","10"]' 2000 25000)")"
+  s1=$(node -e 'process.stdout.write(String(Date.now()))')
+  code="$(jfield "$WORK/body.json" exitCode)"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" status)" = exited ] && [ "$code" != 0 ] && [ $((s1 - s0)) -lt 3000 ]; then
+    ok "timeoutMs 2000 on sleep 10 → exited ${code} in $((s1 - s0)) ms"
+  else
+    fail "timeout → ${status} in $((s1 - s0)) ms $(cat "$WORK/body.json")"
+  fi
+
+  status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sh","-c","yes a | head -c 40000; echo END"]')")"
+  tail_ok="$(node -e '
+    const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    process.stdout.write(String(Buffer.byteLength(j.stdout ?? "") === 16384 && /a\nEND\n$/.test(j.stdout ?? "")));
+  ' "$WORK/body.json")"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" truncated)" = true ] && [ "$tail_ok" = true ]; then
+    ok "output over 16 KiB keeps the last 16384 bytes, truncated"
+  else
+    fail "tail → ${status} $(head -c 300 "$WORK/body.json")"
+  fi
+
+  # ---------------------------------------------------------------- hardening seen from inside A (D-01, D-11)
+
+
+  run_in "$ORG" "$A" '["sh","-c","grep -E \"^(CapEff|NoNewPrivs):\" /proc/self/status"]' >/dev/null
+  caps="$(jfield "$WORK/body.json" stdout | tr -s '\t ' ' ')"
+  if printf '%s' "$caps" | grep -q '^CapEff: 0000000000000000$' && printf '%s' "$caps" | grep -q '^NoNewPrivs: 1$'; then
+    ok "A: CapEff 0000000000000000, NoNewPrivs 1"
+  else
+    fail "A capabilities: ${caps}"
+  fi
+
+  for path in /etc/x /usr/x; do
+    run_in "$ORG" "$A" "[\"sh\",\"-c\",\"echo x > ${path}\"]" >/dev/null
+    exited_with nonzero && ok "A: writing ${path} fails (read-only root)" || fail "A: write ${path} $(cat "$WORK/body.json")"
+  done
+
+  run_in "$ORG" "$A" '["sh","-c","printf \"#!/bin/sh\\necho ran\\n\" > /tmp/x.sh && chmod +x /tmp/x.sh && /tmp/x.sh"]' >/dev/null
+  if exited_with nonzero && ! jfield "$WORK/body.json" stdout | grep -q ran; then
+    ok "A: a script copied to /tmp does not execute (noexec)"
+  else
+    fail "A: /tmp exec $(cat "$WORK/body.json")"
+  fi
+
+  run_in "$ORG" "$A" '["env"]' >/dev/null
+  envs="$(jfield "$WORK/body.json" stdout)"
+  if exited_with 0 && ! printf '%s' "$envs" | grep -q 'OCW_' && ! printf '%s' "$envs" | grep -qF "$TOKEN"; then
+    ok "A: env has no OCW_ variable and no token value"
+  else
+    fail "A: env leaks ($(printf '%s' "$envs" | grep -c 'OCW_' || true) OCW_ lines)"
+  fi
+
+  run_in "$ORG" "$A" '["python3","-c","import subprocess\nps=[];fail=0\nfor i in range(300):\n  try: ps.append(subprocess.Popen([\"sleep\",\"30\"]))\n  except OSError: fail+=1\nprint(len(ps), fail)\nfor p in ps: p.kill()\nfor p in ps: p.wait()"]' 60000 >/dev/null
+  pids_line="$(jfield "$WORK/body.json" stdout | tr -d '\n')"
+  pids_failed="${pids_line##* }"
+  if exited_with 0 && [ -n "$pids_failed" ] && [ "$pids_failed" -gt 0 ]; then
+    ok "A: 300 background sleeps hit the pids limit (started/refused: ${pids_line})"
+  else
+    fail "A: pids limit not hit: ${pids_line} $(head -c 300 "$WORK/body.json")"
+  fi
+
+  run_in "$ORG" "$A" '["getent","hosts","example.com"]' >/dev/null
+  exited_with nonzero && ok "A: getent hosts example.com fails (no DNS out)" || fail "A: DNS resolved $(cat "$WORK/body.json")"
+
+  run_in "$ORG" "$A" '["bash","-c","exec 3<>/dev/tcp/1.1.1.1/443"]' 8000 >/dev/null
+  exited_with nonzero && ok "A: connect to 1.1.1.1:443 fails (no route out)" || fail "A: route out $(cat "$WORK/body.json")"
+
+  # ---------------------------------------------------------------- bot B is isolated from A (E3, E4)
+
+  B="$(uuid)"
+  status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$ORG" "$B")}")"
+  [ "$status" = 200 ] && ok "ensure B → running" || fail "ensure B → ${status} $(cat "$WORK/body.json")"
+  CID_B="$(docker ps -q --filter "label=ocw.sandbox=1" --filter "label=ocw.namespace=${NS}" --filter "label=ocw.agent=${B}" | head -n 1)"
+
+  run_in "$ORG" "$B" '["test","-e","/workspace/note.txt"]' >/dev/null
+  exited_with nonzero && ok "B: /workspace/note.txt of A does not exist" || fail "B sees A's file $(cat "$WORK/body.json")"
+
+  A_IP="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CID_A")"
+  api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["python3","-m","http.server","8080","--bind","0.0.0.0"]' 300000 1500)" >/dev/null
+  PID_LISTEN="$(jfield "$WORK/body.json" processId)"
+  sleep 1
+  run_in "$ORG" "$A" "[\"bash\",\"-c\",\"exec 3<>/dev/tcp/${A_IP}/8080\"]" 8000 >/dev/null
+  exited_with 0 && ok "control: A reaches its own listener at ${A_IP}:8080" || fail "control: A to itself $(cat "$WORK/body.json")"
+  run_in "$ORG" "$B" "[\"bash\",\"-c\",\"exec 3<>/dev/tcp/${A_IP}/8080\"]" 8000 >/dev/null
+  exited_with nonzero && ok "B: connect to A's container IP fails" || fail "B reached A $(cat "$WORK/body.json")"
+  api POST /v1/sandboxes/process "$(printf '{"target":%s,"processId":"%s","action":"kill"}' "$(target "$ORG" "$A")" "$PID_LISTEN")" >/dev/null
+
+  # ---------------------------------------------------------------- objects sandboxd did not create are refused
+
+  C="$(uuid)"
+  C_NAME="$(node -e 'process.stdout.write("ocw-sbx-" + process.argv[1] + "-" + require("crypto").createHash("sha256").update(process.argv[2]).digest("hex").slice(0, 12))' "$NS" "$C")"
+  docker create -q --name "$C_NAME" --label "ocw.namespace=${NS}" "$IMAGE" sleep 60 >/dev/null
+  docker start "$C_NAME" >/dev/null
+  for path in /v1/sandboxes/ensure /v1/sandboxes/exec; do
+    if [ "$path" = /v1/sandboxes/ensure ]; then body="{\"target\":$(target "$ORG" "$C")}"; else body="$(exec_json "$ORG" "$C" '["id"]')"; fi
+    status="$(api POST "$path" "$body")"
+    if [ "$status" = 409 ] && [ "$(jfield "$WORK/body.json" error.code)" = label_mismatch ]; then
+      ok "unlabelled container named ${C_NAME%-*}-… refused by ${path##*/} (409 label_mismatch)"
+    else
+      fail "unlabelled container via ${path##*/} → ${status} $(cat "$WORK/body.json")"
+    fi
+  done
+
+  D="$(uuid)"
+  D_NAME="$(node -e 'process.stdout.write("ocw-sbx-" + process.argv[1] + "-" + require("crypto").createHash("sha256").update(process.argv[2]).digest("hex").slice(0, 12))' "$NS" "$D")"
+  docker create -q --name "$D_NAME" --label "ocw.namespace=${NS}" --label ocw.sandbox=1 --label "ocw.org=$(uuid)" \
+    --label "ocw.agent=${D}" --label ocw.kind=sbx "$IMAGE" sleep 60 >/dev/null
+  docker start "$D_NAME" >/dev/null
+  status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$D" '["id"]')")"
+  [ "$status" = 409 ] && ok "a container labelled for another org is refused for exec (409)" || fail "other-org container → ${status}"
+
+  # ---------------------------------------------------------------- exec latency (recorded in the SUMMARY)
+
+  lat="$(node -e '
+    const [port, token, body] = process.argv.slice(1);
+    (async () => {
+      const ms = [];
+      for (let i = 0; i < 5; i++) {
+        const t = performance.now();
+        const r = await fetch(`http://127.0.0.1:${port}/v1/sandboxes/exec`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body });
+        await r.text();
+        ms.push(Math.round(performance.now() - t));
+      }
+      ms.sort((a, b) => a - b);
+      process.stdout.write(`median ${ms[2]} ms (min ${ms[0]}, max ${ms[4]})`);
+    })();
+  ' "$PORT" "$TOKEN" "$(exec_json "$ORG" "$A" '["true"]')")"
+  ok "exec latency of [\"true\"] through sandboxd: ${lat}"
+
+  # ---------------------------------------------------------------- the yielded sleep finishes
+
+  now=$(date +%s)
+  wait_s=$((t0 + 42 - now))
+  if [ "$wait_s" -gt 0 ]; then sleep "$wait_s"; fi
+  status="$(api POST /v1/sandboxes/process "$(printf '{"target":%s,"processId":"%s","action":"poll"}' "$(target "$ORG" "$A")" "$PID_SLEEP")")"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" status)" = exited ] && [ "$(jfield "$WORK/body.json" exitCode)" = 0 ]; then
+    ok "process poll after 42 s → exited 0"
+  else
+    fail "process poll → ${status} $(cat "$WORK/body.json")"
+  fi
+
+  # ---------------------------------------------------------------- kill, killOrg, purge act by label (D-02)
+
+
+  status="$(api POST /v1/sandboxes/kill "{\"target\":$(target "$ORG" "$A")}")"
+  if [ "$status" = 200 ] && [ "$(running_of "$CID_A")" = false ] && [ "$(running_of "$CID_B")" = true ]; then
+    ok "kill A → A stopped while B runs"
+  else
+    fail "kill A → ${status} A=$(running_of "$CID_A") B=$(running_of "$CID_B")"
+  fi
+
+  status="$(api POST /v1/orgs/kill "{\"orgId\":\"${ORG}\"}")"
+  if [ "$status" = 200 ] && [ "$(running_of "$CID_A")" = false ] && [ "$(running_of "$CID_B")" = false ] &&
+    [ "$(running_of "$D_NAME")" = true ]; then
+    ok "killOrg → both bots stopped (another org's container untouched)"
+  else
+    fail "killOrg → ${status} A=$(running_of "$CID_A") B=$(running_of "$CID_B") other=$(running_of "$D_NAME")"
+  fi
+
+  status="$(api POST /v1/sandboxes/purge "{\"target\":$(target "$ORG" "$B")}")"
+  left_b=$(($(docker ps -aq --filter "label=ocw.agent=${B}" | wc -l) + $(docker volume ls -q --filter "label=ocw.agent=${B}" | wc -l) + $(docker network ls -q --filter "label=ocw.agent=${B}" | wc -l)))
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" removed)" = 3 ] && [ "$left_b" = 0 ] && [ "$(running_of "$CID_A")" = false ]; then
+    ok "purge B removes its container, volume and network (A's objects stay)"
+  else
+    fail "purge B → ${status} $(cat "$WORK/body.json"), ${left_b} object(s) left"
+  fi
 }
 
-run_in "$ORG" "$A" '["sh","-c","grep -E \"^(CapEff|NoNewPrivs):\" /proc/self/status"]' >/dev/null
-caps="$(jfield "$WORK/body.json" stdout | tr -s '\t ' ' ')"
-if printf '%s' "$caps" | grep -q '^CapEff: 0000000000000000$' && printf '%s' "$caps" | grep -q '^NoNewPrivs: 1$'; then
-  ok "A: CapEff 0000000000000000, NoNewPrivs 1"
-else
-  fail "A capabilities: ${caps}"
-fi
+# ================================================================ section: files (07.8-09 Task 1; D-01, D-04, D-09)
 
-for path in /etc/x /usr/x; do
-  run_in "$ORG" "$A" "[\"sh\",\"-c\",\"echo x > ${path}\"]" >/dev/null
-  exited_with nonzero && ok "A: writing ${path} fails (read-only root)" || fail "A: write ${path} $(cat "$WORK/body.json")"
-done
+# api_file <method> <path> <json file> → the HTTP status; a large body (an upload) goes from a file, not argv.
+api_file() {
+  curl -sS -o "$WORK/body.json" -w '%{http_code}' -X "$1" --max-time 180 -H "authorization: Bearer ${TOKEN}" \
+    -H 'content-type: application/json' --data-binary "@$3" "http://127.0.0.1:${PORT}$2"
+}
 
-run_in "$ORG" "$A" '["sh","-c","printf \"#!/bin/sh\\necho ran\\n\" > /tmp/x.sh && chmod +x /tmp/x.sh && /tmp/x.sh"]' >/dev/null
-if exited_with nonzero && ! jfield "$WORK/body.json" stdout | grep -q ran; then
-  ok "A: a script copied to /tmp does not execute (noexec)"
-else
-  fail "A: /tmp exec $(cat "$WORK/body.json")"
-fi
+# upload_json <org> <agent> <path> <bytes file> <overwrite> > json: the base64 upload body.
+upload_json() {
+  node -e '
+    const [org, agent, path, file, overwrite] = process.argv.slice(1);
+    const data = require("fs").readFileSync(file).toString("base64");
+    process.stdout.write(JSON.stringify({ target: { orgId: org, agentId: agent }, path, data, overwrite: overwrite === "true" }));
+  ' "$1" "$2" "$3" "$4" "$5"
+}
 
-run_in "$ORG" "$A" '["env"]' >/dev/null
-envs="$(jfield "$WORK/body.json" stdout)"
-if exited_with 0 && ! printf '%s' "$envs" | grep -q 'OCW_' && ! printf '%s' "$envs" | grep -qF "$TOKEN"; then
-  ok "A: env has no OCW_ variable and no token value"
-else
-  fail "A: env leaks ($(printf '%s' "$envs" | grep -c 'OCW_' || true) OCW_ lines)"
-fi
+# path_json <org> <agent> <path> [extra json fields]
+path_json() { printf '{"target":%s,"path":"%s"%s}' "$(target "$1" "$2")" "$3" "${4:+,$4}"; }
 
-run_in "$ORG" "$A" '["python3","-c","import subprocess\nps=[];fail=0\nfor i in range(300):\n  try: ps.append(subprocess.Popen([\"sleep\",\"30\"]))\n  except OSError: fail+=1\nprint(len(ps), fail)\nfor p in ps: p.kill()\nfor p in ps: p.wait()"]' 60000 >/dev/null
-pids_line="$(jfield "$WORK/body.json" stdout | tr -d '\n')"
-pids_failed="${pids_line##* }"
-if exited_with 0 && [ -n "$pids_failed" ] && [ "$pids_failed" -gt 0 ]; then
-  ok "A: 300 background sleeps hit the pids limit (started/refused: ${pids_line})"
-else
-  fail "A: pids limit not hit: ${pids_line} $(head -c 300 "$WORK/body.json")"
-fi
+sha_of() { node -e 'process.stdout.write(require("crypto").createHash("sha256").update(require("fs").readFileSync(process.argv[1])).digest("hex"))' "$1"; }
 
-run_in "$ORG" "$A" '["getent","hosts","example.com"]' >/dev/null
-exited_with nonzero && ok "A: getent hosts example.com fails (no DNS out)" || fail "A: DNS resolved $(cat "$WORK/body.json")"
+section_files() {
+  FO="$(uuid)"
+  FA="$(uuid)"
+  status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$FO" "$FA")}")"
+  [ "$status" = 200 ] && ok "files: ensure F → running" || fail "files: ensure F → ${status} $(cat "$WORK/body.json")"
+  CID_F="$(docker ps -q --filter "label=ocw.namespace=${NS}" --filter "label=ocw.agent=${FA}" --filter "label=ocw.kind=sbx")"
 
-run_in "$ORG" "$A" '["bash","-c","exec 3<>/dev/tcp/1.1.1.1/443"]' 8000 >/dev/null
-exited_with nonzero && ok "A: connect to 1.1.1.1:443 fails (no route out)" || fail "A: route out $(cat "$WORK/body.json")"
-
-# ---------------------------------------------------------------- bot B is isolated from A (E3, E4)
-
-B="$(uuid)"
-status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$ORG" "$B")}")"
-[ "$status" = 200 ] && ok "ensure B → running" || fail "ensure B → ${status} $(cat "$WORK/body.json")"
-CID_B="$(docker ps -q --filter "label=ocw.sandbox=1" --filter "label=ocw.namespace=${NS}" --filter "label=ocw.agent=${B}" | head -n 1)"
-
-run_in "$ORG" "$B" '["test","-e","/workspace/note.txt"]' >/dev/null
-exited_with nonzero && ok "B: /workspace/note.txt of A does not exist" || fail "B sees A's file $(cat "$WORK/body.json")"
-
-A_IP="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CID_A")"
-api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["python3","-m","http.server","8080","--bind","0.0.0.0"]' 300000 1500)" >/dev/null
-PID_LISTEN="$(jfield "$WORK/body.json" processId)"
-sleep 1
-run_in "$ORG" "$A" "[\"bash\",\"-c\",\"exec 3<>/dev/tcp/${A_IP}/8080\"]" 8000 >/dev/null
-exited_with 0 && ok "control: A reaches its own listener at ${A_IP}:8080" || fail "control: A to itself $(cat "$WORK/body.json")"
-run_in "$ORG" "$B" "[\"bash\",\"-c\",\"exec 3<>/dev/tcp/${A_IP}/8080\"]" 8000 >/dev/null
-exited_with nonzero && ok "B: connect to A's container IP fails" || fail "B reached A $(cat "$WORK/body.json")"
-api POST /v1/sandboxes/process "$(printf '{"target":%s,"processId":"%s","action":"kill"}' "$(target "$ORG" "$A")" "$PID_LISTEN")" >/dev/null
-
-# ---------------------------------------------------------------- objects sandboxd did not create are refused
-
-C="$(uuid)"
-C_NAME="$(node -e 'process.stdout.write("ocw-sbx-" + process.argv[1] + "-" + require("crypto").createHash("sha256").update(process.argv[2]).digest("hex").slice(0, 12))' "$NS" "$C")"
-docker create -q --name "$C_NAME" --label "ocw.namespace=${NS}" "$IMAGE" sleep 60 >/dev/null
-docker start "$C_NAME" >/dev/null
-for path in /v1/sandboxes/ensure /v1/sandboxes/exec; do
-  if [ "$path" = /v1/sandboxes/ensure ]; then body="{\"target\":$(target "$ORG" "$C")}"; else body="$(exec_json "$ORG" "$C" '["id"]')"; fi
-  status="$(api POST "$path" "$body")"
-  if [ "$status" = 409 ] && [ "$(jfield "$WORK/body.json" error.code)" = label_mismatch ]; then
-    ok "unlabelled container named ${C_NAME%-*}-… refused by ${path##*/} (409 label_mismatch)"
+  # A 2 MB upload (base64 JSON over 1 MiB) streams into the helper's stdin as 10001.
+  head -c 2097152 /dev/urandom >"$WORK/q3.csv"
+  upload_json "$FO" "$FA" reports/q3.csv "$WORK/q3.csv" false >"$WORK/upload.json"
+  status="$(api_file POST /v1/files/upload "$WORK/upload.json")"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" size)" = 2097152 ]; then
+    ok "files: upload 2 MB to reports/q3.csv → 200, size 2097152"
   else
-    fail "unlabelled container via ${path##*/} → ${status} $(cat "$WORK/body.json")"
+    fail "files: upload → ${status} $(head -c 300 "$WORK/body.json")"
   fi
-done
 
-D="$(uuid)"
-D_NAME="$(node -e 'process.stdout.write("ocw-sbx-" + process.argv[1] + "-" + require("crypto").createHash("sha256").update(process.argv[2]).digest("hex").slice(0, 12))' "$NS" "$D")"
-docker create -q --name "$D_NAME" --label "ocw.namespace=${NS}" --label ocw.sandbox=1 --label "ocw.org=$(uuid)" \
-  --label "ocw.agent=${D}" --label ocw.kind=sbx "$IMAGE" sleep 60 >/dev/null
-docker start "$D_NAME" >/dev/null
-status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$D" '["id"]')")"
-[ "$status" = 409 ] && ok "a container labelled for another org is refused for exec (409)" || fail "other-org container → ${status}"
+  status="$(api POST /v1/files/list "$(path_json "$FO" "$FA" reports)")"
+  listed="$(node -e '
+    const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    process.stdout.write((j.entries ?? []).map((e) => `${e.path}:${e.kind}:${e.size}`).join(","));
+  ' "$WORK/body.json")"
+  [ "$status" = 200 ] && [ "$listed" = "reports/q3.csv:file:2097152" ] &&
+    ok "files: list reports → q3.csv with its size" || fail "files: list → ${status} ${listed}"
 
-# ---------------------------------------------------------------- exec latency (recorded in the SUMMARY)
+  status="$(api POST /v1/files/stat "$(path_json "$FO" "$FA" reports/q3.csv)")"
+  [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" kind)" = file ] && ok "files: stat q3.csv → file" ||
+    fail "files: stat → ${status} $(cat "$WORK/body.json")"
+  owner="$(docker exec "$CID_F" stat -c '%u:%g' /workspace/reports/q3.csv /workspace/reports 2>&1 | tr '\n' ' ')"
+  [ "$owner" = "10001:10001 10001:10001 " ] && ok "files: docker exec stat → q3.csv and reports/ owned by 10001" ||
+    fail "files: owner ${owner}"
 
-lat="$(node -e '
-  const [port, token, body] = process.argv.slice(1);
-  (async () => {
-    const ms = [];
-    for (let i = 0; i < 5; i++) {
-      const t = performance.now();
-      const r = await fetch(`http://127.0.0.1:${port}/v1/sandboxes/exec`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body });
-      await r.text();
-      ms.push(Math.round(performance.now() - t));
-    }
-    ms.sort((a, b) => a - b);
-    process.stdout.write(`median ${ms[2]} ms (min ${ms[0]}, max ${ms[4]})`);
-  })();
-' "$PORT" "$TOKEN" "$(exec_json "$ORG" "$A" '["true"]')")"
-ok "exec latency of [\"true\"] through sandboxd: ${lat}"
+  status="$(api POST /v1/files/download "$(path_json "$FO" "$FA" reports/q3.csv)")"
+  node -e '
+    const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    require("fs").writeFileSync(process.argv[2], Buffer.from(j.data ?? "", "base64"));
+  ' "$WORK/body.json" "$WORK/q3.down"
+  if [ "$status" = 200 ] && [ "$(sha_of "$WORK/q3.down")" = "$(sha_of "$WORK/q3.csv")" ] &&
+    [ "$(jfield "$WORK/body.json" name)" = q3.csv ]; then
+    ok "files: download → the same bytes (sha256 equal)"
+  else
+    fail "files: download → ${status}"
+  fi
 
-# ---------------------------------------------------------------- the yielded sleep finishes
+  status="$(api POST /v1/files/write "$(path_json "$FO" "$FA" notes/today.txt '"content":"héllo\n","encoding":"utf8","mode":"create"')")"
+  [ "$status" = 200 ] || fail "files: write → ${status} $(cat "$WORK/body.json")"
+  status="$(api POST /v1/files/read "$(path_json "$FO" "$FA" notes/today.txt)")"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" encoding)" = utf8 ] &&
+    [ "$(jfield "$WORK/body.json" content)" = "$(printf 'héllo\n')" ]; then
+    ok "files: write then read a text file → utf8"
+  else
+    fail "files: read → ${status} $(cat "$WORK/body.json")"
+  fi
+  status="$(api POST /v1/files/write "$(path_json "$FO" "$FA" notes/today.txt '"content":"x","encoding":"utf8","mode":"create"')")"
+  [ "$status" = 409 ] && [ "$(jfield "$WORK/body.json" error.code)" = exists ] &&
+    ok "files: write create on an existing file → 409 exists" || fail "files: create twice → ${status}"
 
-now=$(date +%s)
-wait_s=$((t0 + 42 - now))
-if [ "$wait_s" -gt 0 ]; then sleep "$wait_s"; fi
-status="$(api POST /v1/sandboxes/process "$(printf '{"target":%s,"processId":"%s","action":"poll"}' "$(target "$ORG" "$A")" "$PID_SLEEP")")"
-if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" status)" = exited ] && [ "$(jfield "$WORK/body.json" exitCode)" = 0 ]; then
-  ok "process poll after 42 s → exited 0"
-else
-  fail "process poll → ${status} $(cat "$WORK/body.json")"
-fi
+  # The bot plants symlinks out of the workspace; every file op refuses them (realpath, T-07.8-09-01).
+  run_in "$FO" "$FA" '["sh","-c","ln -s /etc/passwd leak && ln -s /etc etcdir && mkdir -p deep && ln -s ../../etc deep/up && test -r /etc/passwd"]' >/dev/null
+  exited_with 0 || fail "files: planting symlinks $(cat "$WORK/body.json")"
+  refused=0
+  for req in "read leak" "download leak" "list etcdir" "read etcdir/passwd" "read deep/up/passwd" "stat leak"; do
+    op="${req%% *}"
+    p="${req#* }"
+    status="$(api POST "/v1/files/${op}" "$(path_json "$FO" "$FA" "$p")")"
+    if [ "$status" = 422 ] && [ "$(jfield "$WORK/body.json" error.code)" = invalid_path ] &&
+      ! grep -q 'root:' "$WORK/body.json"; then
+      refused=$((refused + 1))
+    else
+      fail "files: ${op} ${p} → ${status} $(head -c 200 "$WORK/body.json")"
+    fi
+  done
+  [ "$refused" = 6 ] && ok "files: a symlink to /etc/passwd (and /etc, ../../etc) → 422 invalid_path for read, download, list, stat"
+  status="$(api POST /v1/files/write "$(path_json "$FO" "$FA" etcdir/evil '"content":"x","encoding":"utf8","mode":"overwrite"')")"
+  [ "$status" = 422 ] && ok "files: write through a symlinked folder → 422" || fail "files: write via etcdir → ${status}"
+  status="$(api POST /v1/files/delete "$(path_json "$FO" "$FA" leak)")"
+  if [ "$status" = 200 ] && docker exec "$CID_F" test -r /etc/passwd; then
+    ok "files: delete of the symlink removes the link, never its target"
+  else
+    fail "files: delete leak → ${status}"
+  fi
 
-# ---------------------------------------------------------------- kill, killOrg, purge act by label (D-02)
+  status="$(api POST /v1/files/delete "$(path_json "$FO" "$FA" reports)")"
+  [ "$status" = 409 ] && [ "$(jfield "$WORK/body.json" error.code)" = busy ] &&
+    ok "files: delete a non-empty folder without recursive → 409 busy" || fail "files: delete reports → ${status}"
+  status="$(api POST /v1/files/delete "$(path_json "$FO" "$FA" reports '"recursive":true')")"
+  deleted="$(jfield "$WORK/body.json" deleted)"
+  api POST /v1/files/list "$(path_json "$FO" "$FA" "")" >/dev/null
+  if [ "$status" = 200 ] && [ "$deleted" = 2 ] && ! grep -q '"reports"' "$WORK/body.json"; then
+    ok "files: delete reports recursive → 2 entries removed, gone from the root listing"
+  else
+    fail "files: delete recursive → ${status} deleted=${deleted}"
+  fi
 
-running_of() { docker inspect --format '{{.State.Running}}' "$1" 2>/dev/null || echo gone; }
+  # Stopped: people keep their files through the network-none helper; the bot's sbx stays stopped (D-01, D-04).
+  status="$(api POST /v1/sandboxes/stop "{\"target\":$(target "$FO" "$FA"),\"reason\":\"user\"}")"
+  [ "$status" = 200 ] || fail "files: stop F → ${status}"
+  status="$(api POST /v1/files/list "$(path_json "$FO" "$FA" notes)")"
+  HELPER="$(docker ps -q --filter "label=ocw.namespace=${NS}" --filter "label=ocw.agent=${FA}" --filter "label=ocw.kind=files")"
+  netmode="$(docker inspect --format '{{.HostConfig.NetworkMode}} {{len .NetworkSettings.Networks}} {{.Config.User}}' "$HELPER" 2>/dev/null || echo none)"
+  if [ "$status" = 200 ] && grep -q 'notes/today.txt' "$WORK/body.json" && [ "$(running_of "$CID_F")" = false ] &&
+    [ -n "$HELPER" ] && [ "$netmode" = "none 1 10001:10001" ]; then
+    ok "files: after stop, list works through the files helper (network none, user 10001); sbx stays stopped"
+  else
+    fail "files: stopped list → ${status} sbx=$(running_of "$CID_F") helper=${HELPER:-none} (${netmode})"
+  fi
+  helper_net="$(docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' "$HELPER" 2>/dev/null)"
+  [ "$helper_net" = none ] && ok "files: the helper is attached to no network (only 'none')" || fail "files: helper networks ${helper_net}"
 
-status="$(api POST /v1/sandboxes/kill "{\"target\":$(target "$ORG" "$A")}")"
-if [ "$status" = 200 ] && [ "$(running_of "$CID_A")" = false ] && [ "$(running_of "$CID_B")" = true ]; then
-  ok "kill A → A stopped while B runs"
-else
-  fail "kill A → ${status} A=$(running_of "$CID_A") B=$(running_of "$CID_B")"
-fi
+  status="$(api POST /v1/orgs/kill "{\"orgId\":\"${FO}\"}")"
+  [ "$status" = 200 ] || fail "files: killOrg → ${status}"
+  status="$(api POST /v1/files/read "$(path_json "$FO" "$FA" notes/today.txt)")"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" content)" = "$(printf 'héllo\n')" ] &&
+    [ "$(running_of "$CID_F")" = false ]; then
+    ok "files: after killOrg, people's files still read through the helper; sbx stays stopped"
+  else
+    fail "files: killed read → ${status} sbx=$(running_of "$CID_F")"
+  fi
+}
 
-status="$(api POST /v1/orgs/kill "{\"orgId\":\"${ORG}\"}")"
-if [ "$status" = 200 ] && [ "$(running_of "$CID_A")" = false ] && [ "$(running_of "$CID_B")" = false ] &&
-  [ "$(running_of "$D_NAME")" = true ]; then
-  ok "killOrg → both bots stopped (another org's container untouched)"
-else
-  fail "killOrg → ${status} A=$(running_of "$CID_A") B=$(running_of "$CID_B") other=$(running_of "$D_NAME")"
-fi
+# ================================================================ run the chosen sections
 
-status="$(api POST /v1/sandboxes/purge "{\"target\":$(target "$ORG" "$B")}")"
-left_b=$(($(docker ps -aq --filter "label=ocw.agent=${B}" | wc -l) + $(docker volume ls -q --filter "label=ocw.agent=${B}" | wc -l) + $(docker network ls -q --filter "label=ocw.agent=${B}" | wc -l)))
-if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" removed)" = 3 ] && [ "$left_b" = 0 ] && [ "$(running_of "$CID_A")" = false ]; then
-  ok "purge B removes its container, volume and network (A's objects stay)"
-else
-  fail "purge B → ${status} $(cat "$WORK/body.json"), ${left_b} object(s) left"
-fi
+if want core; then section_core; fi
+if want files; then section_files; fi
 
 if [ "$FAILURES" != 0 ]; then
   log "${FAILURES} check(s) failed"

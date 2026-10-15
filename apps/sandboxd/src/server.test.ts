@@ -2,6 +2,7 @@ import type { AddressInfo } from "node:net";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Docker, DockerMethod, DockerRequestOptions, DockerResponse } from "./docker";
+import { createFiles } from "./files";
 import { createSandboxes, type RuntimeSetting, startupRefusal } from "./sandboxes";
 import { createServer, tokenMatches } from "./server";
 import { nameFor } from "./spec";
@@ -155,7 +156,11 @@ afterEach(() => {
 
 async function start(docker: FakeDocker, runtime: RuntimeSetting = "auto") {
   const sandboxes = createSandboxes({ docker, ns: NS, runtime, image: "ocw-sandbox-sbx:test" });
-  const server = createServer({ token: TOKEN, sandboxes });
+  const files = createFiles({
+    sandboxes,
+    quota: { assertRoom: async () => {}, afterChange: async () => {} },
+  });
+  const server = createServer({ token: TOKEN, sandboxes, files });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   servers.push(server);
   const { port } = server.address() as AddressInfo;

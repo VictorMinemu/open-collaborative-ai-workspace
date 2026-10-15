@@ -19,6 +19,7 @@ import {
   type ContainerLimits,
   DEFAULT_SBX_LIMITS,
   type DockerRuntime,
+  filesSpec,
   nameFor,
   networkSpec,
   OCW_RUN,
@@ -44,6 +45,9 @@ const FINISHED_RETENTION_MS = 10 * 60_000;
 /** Extra time over the exec timeout before sandboxd kills the process group itself (ocw-run normally has). */
 const TIMEOUT_GRACE_MS = 5_000;
 const EXEC_POLL_MS = 250;
+const RUN_MAX_STDOUT = 1024 * 1024;
+const RUN_TIMEOUT_MS = 60_000;
+const STDIN_CHUNK = 64 * 1024;
 
 /** A refusal with its sandboxd error code and HTTP status. The message is fixed text, never request content. */
 export class SandboxdFailure extends Error {
@@ -87,6 +91,28 @@ export interface SandboxesOptions {
   limits?: ContainerLimits;
 }
 
+/** Where a file operation runs: the bot's running `sbx`, or its network-none `files` helper on the same volume. */
+export interface WorkspaceHandle {
+  containerId: string;
+  kind: "sbx" | "files";
+}
+
+export interface RunOptions {
+  /** Bytes for the helper's stdin (file content); the stream is half-closed after the last byte. */
+  stdin?: Buffer;
+  /** stdout beyond this is dropped and `overflow` is set (default 1 MiB). */
+  maxStdout?: number;
+  /** Backstop for a helper that never ends (default 60 s). */
+  timeoutMs?: number;
+}
+
+export interface RunResult {
+  /** The helper's exit code; -1 when it could not be read. */
+  exitCode: number;
+  stdout: Buffer;
+  overflow: boolean;
+}
+
 export interface Sandboxes {
   info(): Promise<SandboxdInfo>;
   ensure(target: SandboxdTarget): Promise<SandboxdSandboxStatus>;
@@ -98,6 +124,13 @@ export interface Sandboxes {
   killOrg(orgId: string): Promise<{ removed: number }>;
   purge(target: SandboxdTarget): Promise<{ removed: number }>;
   reconcile(): Promise<{ containers: number; networks: number; volumes: number }>;
+  /**
+   * The container a file operation runs in: the running `sbx`, else the bot's `files` helper (created or started on
+   * the same volume, no network). A stopped or killed `sbx` stays stopped. 404 when the bot has no workspace.
+   */
+  workspace(target: SandboxdTarget): Promise<WorkspaceHandle>;
+  /** Runs one helper argv as 10001 in /workspace of that container; stderr is discarded, never logged. */
+  run(handle: WorkspaceHandle, cmd: string[], options?: RunOptions): Promise<RunResult>;
 }
 
 // ---------------------------------------------------------------- output tails
@@ -173,6 +206,30 @@ interface ProcessRecord {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** Waits until the stream can take more, or is gone. */
+function drained(stream: Duplex): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      stream.off("drain", done);
+      stream.off("close", done);
+      stream.off("error", done);
+      resolve();
+    };
+    stream.on("drain", done);
+    stream.on("close", done);
+    stream.on("error", done);
+  });
+}
+
+/** Writes `data` in chunks with backpressure, then half-closes so the helper sees EOF on stdin. */
+async function writeStdin(stream: Duplex, data: Buffer): Promise<void> {
+  for (let offset = 0; offset < data.length; offset += STDIN_CHUNK) {
+    if (stream.destroyed || stream.writableEnded) return;
+    if (!stream.write(data.subarray(offset, offset + STDIN_CHUNK))) await drained(stream);
+  }
+  if (!stream.destroyed && !stream.writableEnded) stream.end();
+}
+
 function failure(code: SandboxdErrorCode, status: number, message: string): SandboxdFailure {
   return new SandboxdFailure(code, status, message);
 }
@@ -215,6 +272,9 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
   const processes = new Map<string, ProcessRecord>();
   const lastActive = new Map<string, number>();
   const locks = new Map<string, Promise<unknown>>();
+  /** `files` helper container id → last use, and file operations still running in it (the sweeper reaps idle ones). */
+  const filesUsed = new Map<string, number>();
+  const filesBusy = new Map<string, number>();
 
   const targetKey = (t: SandboxdTarget) => `${t.orgId}:${t.agentId}`;
 
@@ -409,18 +469,24 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     };
   }
 
-  /** Runs a short helper command as the bot's user and waits for it (used for `ocw-run --kill`). */
-  async function runHelper(containerId: string, cmd: string[]): Promise<number | null> {
+  /**
+   * Runs one helper argv as the bot's user in /workspace and waits for it: `ocw-run --kill` and every `ocw-files`
+   * operation. Content travels on stdin and stdout only (never argv); stderr is read and dropped.
+   */
+  async function runIn(containerId: string, cmd: string[], opts: RunOptions = {}): Promise<RunResult> {
+    const withStdin = opts.stdin !== undefined;
     const created = await call("POST", `/containers/${encodeURIComponent(containerId)}/exec`, {
       User: SANDBOX_USER,
       Cmd: cmd,
       WorkingDir: WORKSPACE,
-      AttachStdin: false,
+      AttachStdin: withStdin,
       AttachStdout: true,
       AttachStderr: true,
       Tty: false,
     });
     const execId = String(asRecord(created.body).Id ?? "");
+    if (created.status === 404) throw failure("not_found", 404, "this bot's sandbox is gone");
+    if (created.status === 409) throw failure("not_found", 404, "this bot's sandbox is not running");
     if (created.status !== 201 || !execId) throw dockerDown();
     let stream: Duplex;
     try {
@@ -431,13 +497,41 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     } catch {
       throw dockerDown();
     }
-    await demux(stream, () => {});
-    for (let i = 0; i < 20; i++) {
+    const max = opts.maxStdout ?? RUN_MAX_STDOUT;
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let overflow = false;
+    const ended = demux(stream, (frame) => {
+      if (frame.stream !== 1 || overflow) return;
+      if (size + frame.data.length > max) {
+        chunks.push(frame.data.subarray(0, max - size));
+        size = max;
+        overflow = true;
+        stream.destroy();
+        return;
+      }
+      chunks.push(frame.data);
+      size += frame.data.length;
+    });
+    // A helper that never ends (a FIFO, a hung filesystem) is cut off; the process dies with its container.
+    const timer = setTimeout(() => stream.destroy(), opts.timeoutMs ?? RUN_TIMEOUT_MS);
+    timer.unref();
+    try {
+      if (withStdin) await writeStdin(stream, opts.stdin as Buffer);
+      await ended;
+    } finally {
+      clearTimeout(timer);
+    }
+    let exitCode = -1;
+    for (let i = 0; i < 40; i++) {
       const state = await execInspect(execId);
-      if (!state.running) return state.exitCode;
+      if (!state.running) {
+        exitCode = state.exitCode ?? -1;
+        break;
+      }
       await sleep(EXEC_POLL_MS);
     }
-    return null;
+    return { exitCode, stdout: Buffer.concat(chunks, size), overflow };
   }
 
   async function finish(rec: ProcessRecord): Promise<void> {
@@ -497,7 +591,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
   async function killRecord(rec: ProcessRecord): Promise<void> {
     if (rec.ended) return;
     const c = await inspectContainer(nameFor("sbx", ns, rec.agentId));
-    if (c?.State?.Running) await runHelper(c.Id, [OCW_RUN, "--kill", rec.id]);
+    if (c?.State?.Running) await runIn(c.Id, [OCW_RUN, "--kill", rec.id], { timeoutMs: 10_000 });
   }
 
   return {
@@ -705,6 +799,67 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         lastActive.delete(targetKey(target));
         return { removed };
       });
+    },
+
+    async workspace(target) {
+      const c = await ownedShell(target);
+      if (c?.State?.Running) {
+        lastActive.set(targetKey(target), clock.now());
+        return { containerId: c.Id, kind: "sbx" };
+      }
+      return locked(`files:${targetKey(target)}`, async () => {
+        const volume = nameFor("ws", ns, target.agentId);
+        const vol = await call("GET", `/volumes/${encodeURIComponent(volume)}`);
+        if (vol.status === 404) throw failure("not_found", 404, "this bot has no workspace");
+        if (vol.status !== 200) throw dockerDown();
+        if (!labelsMatch(asRecord(vol.body).Labels as Record<string, string>, target, "sbx"))
+          throw mismatch();
+
+        const name = nameFor("files", ns, target.agentId);
+        let h = await inspectContainer(name);
+        if (h && !labelsMatch(h.Config?.Labels, target, "files")) throw mismatch();
+        if (!h) {
+          const p = await probe();
+          if (!p.versionOk) throw failure("docker_unavailable", 503, DOCKER_TOO_OLD);
+          if (p.dockerRuntime === null) throw failure("docker_unavailable", 503, RUNSC_UNAVAILABLE);
+          const spec = filesSpec({
+            ns,
+            orgId: target.orgId,
+            agentId: target.agentId,
+            image,
+            runtime: p.dockerRuntime,
+            volume,
+          });
+          const created = await call("POST", `/containers/create?name=${encodeURIComponent(name)}`, spec);
+          if (created.status !== 201 && created.status !== 409) throw dockerDown();
+          h = await inspectContainer(name);
+          if (!h) throw dockerDown();
+          if (!labelsMatch(h.Config?.Labels, target, "files")) throw mismatch();
+        }
+        if (!h.State?.Running) {
+          const started = await call("POST", `/containers/${encodeURIComponent(h.Id)}/start`);
+          if (started.status !== 204 && started.status !== 304) throw dockerDown();
+        }
+        filesUsed.set(h.Id, clock.now());
+        return { containerId: h.Id, kind: "files" };
+      });
+    },
+
+    async run(handle, cmd, opts) {
+      if (handle.kind === "files") {
+        filesUsed.set(handle.containerId, clock.now());
+        filesBusy.set(handle.containerId, (filesBusy.get(handle.containerId) ?? 0) + 1);
+      }
+      try {
+        return await runIn(handle.containerId, cmd, opts);
+      } finally {
+        if (handle.kind === "files") {
+          filesUsed.set(handle.containerId, clock.now());
+          const n = (filesBusy.get(handle.containerId) ?? 1) - 1;
+          if (n <= 0) filesBusy.delete(handle.containerId);
+          else filesBusy.set(handle.containerId, n);
+        }
+      }
     },
 
     async reconcile() {

@@ -1,0 +1,190 @@
+#!/bin/sh
+# ocw-files: every file operation sandboxd runs on a bot's workspace (07.8-09, D-04, Pitfalls 4-5). POSIX sh with
+# coreutils and findutils only; root-owned and read-only in the `sbx` image; always run by sandboxd as 10001, in the
+# bot's `sbx` or in its network-none `files` helper. Never the Docker archive API.
+#
+#   ocw-files realpath <rel>                         print the resolved workspace-relative path
+#   ocw-files list <rel> <hidden 0|1> <max>          NUL-terminated: the total, then <max> `name/d|f/size/mtime`
+#                                                    records, folders first, each group by name (C locale)
+#   ocw-files stat <rel>                             `d|f/size/mtime`
+#   ocw-files read <rel> <offset> <limit>            the file size and a newline, then at most <limit> bytes
+#   ocw-files cat <rel>                              the whole file
+#   ocw-files write <rel> <create|overwrite|append>  content on stdin; prints the new size
+#   ocw-files rm <rel> <recursive 0|1>               prints the number of entries removed
+#   ocw-files du                                     the workspace's apparent size in bytes
+#
+# <rel> is workspace-relative (sandboxd already refused `/`, `.`, `..`, NUL and `\`). Every path is resolved with
+# `realpath -m` under /workspace and refused when it lands outside, including through a symlink: exit 3. A file
+# operation follows a symlink only when its target is inside the workspace; `rm` removes the link itself.
+#
+# Exit codes: 0 ok, 2 usage, 3 outside the workspace, 4 not found, 5 exists, 6 wrong kind (a folder where a file is
+# needed, a file in the way, not a regular file), 7 folder not empty, 8 failed (e.g. no space left).
+set -eu
+
+W=/workspace
+LC_ALL=C
+export LC_ALL
+umask 022
+
+num() {
+  case "$1" in
+    "" | *[!0-9]*) exit 2 ;;
+  esac
+}
+
+# resolve <rel>: sets R to the resolved absolute path, or exits 3 when it is outside /workspace. The trailing `x`
+# keeps a name that ends in a newline intact through the command substitution.
+resolve() {
+  R="$(realpath -m -- "$W/$1" && printf x)" || exit 3
+  R="${R%x}"
+  R="${R%?}"
+  case "$R" in
+    "$W" | "$W"/*) ;;
+    *) exit 3 ;;
+  esac
+}
+
+# entries <dir> <hidden> <find predicates…>: the direct children of <dir>, dot entries only when <hidden> is 1.
+entries() {
+  d="$1"
+  h="$2"
+  shift 2
+  if [ "$h" = 1 ]; then
+    find "$d" -mindepth 1 -maxdepth 1 "$@" 2>/dev/null
+  else
+    find "$d" -mindepth 1 -maxdepth 1 ! -name '.*' "$@" 2>/dev/null
+  fi
+}
+
+cmd="${1:-}"
+[ "$#" -ge 1 ] && shift
+
+case "$cmd" in
+  realpath)
+    [ "$#" -eq 1 ] || exit 2
+    resolve "$1"
+    rel="${R#"$W"}"
+    printf '%s' "${rel#/}"
+    ;;
+
+  list)
+    [ "$#" -eq 3 ] || exit 2
+    num "$3"
+    resolve "$1"
+    [ -e "$R" ] || exit 4
+    [ -d "$R" ] || exit 6
+    total="$(entries "$R" "$2" -printf . | wc -c)"
+    printf '%s\0' "$total"
+    {
+      entries "$R" "$2" -type d -printf '%f/d/0/%T@\0' | sort -z -t / -k1,1
+      entries "$R" "$2" ! -type d -printf '%f/f/%s/%T@\0' | sort -z -t / -k1,1
+    } | head -z -n "$3"
+    ;;
+
+  stat)
+    [ "$#" -eq 1 ] || exit 2
+    resolve "$1"
+    [ -e "$R" ] || exit 4
+    if [ -d "$R" ]; then
+      find "$R" -maxdepth 0 -printf 'd/0/%T@'
+    else
+      find "$R" -maxdepth 0 -printf 'f/%s/%T@'
+    fi
+    ;;
+
+  read)
+    [ "$#" -eq 3 ] || exit 2
+    num "$2"
+    num "$3"
+    resolve "$1"
+    [ -e "$R" ] || exit 4
+    # Regular files only: a FIFO or a device would block or read the container, never the workspace.
+    [ -f "$R" ] || exit 6
+    stat -c '%s' -- "$R"
+    tail -c "+$(($2 + 1))" -- "$R" | head -c "$3"
+    ;;
+
+  cat)
+    [ "$#" -eq 1 ] || exit 2
+    resolve "$1"
+    [ -e "$R" ] || exit 4
+    [ -f "$R" ] || exit 6
+    cat -- "$R"
+    ;;
+
+  write)
+    [ "$#" -eq 2 ] || exit 2
+    resolve "$1"
+    [ "$R" != "$W" ] || exit 6
+    if [ -d "$R" ]; then exit 6; fi
+    dir="${R%/*}"
+    if [ -e "$dir" ] && [ ! -d "$dir" ]; then exit 6; fi
+    mkdir -p -- "$dir" 2>/dev/null || exit 6
+    case "$2" in
+      append)
+        if [ -e "$R" ] && [ ! -f "$R" ]; then exit 6; fi
+        cat >>"$R" || exit 8
+        ;;
+      create | overwrite)
+        if [ "$2" = create ] && { [ -e "$R" ] || [ -L "$R" ]; }; then exit 5; fi
+        # Written beside the target under a fresh name (noclobber: O_EXCL, never through a planted symlink), then
+        # renamed, so a failed or refused write never leaves a partial file under the real name.
+        tmp="$dir/.ocw-write-$$"
+        if ! (set -C && cat >"$tmp") 2>/dev/null; then
+          rm -f -- "$tmp"
+          exit 8
+        fi
+        if [ "$2" = create ]; then
+          # ln refuses an existing name atomically; -T never writes into a folder of that name.
+          if ! ln -T -- "$tmp" "$R" 2>/dev/null; then
+            rm -f -- "$tmp"
+            exit 5
+          fi
+          rm -f -- "$tmp"
+        elif ! mv -f -T -- "$tmp" "$R" 2>/dev/null; then
+          rm -f -- "$tmp"
+          exit 6
+        fi
+        ;;
+      *) exit 2 ;;
+    esac
+    stat -c '%s' -- "$R"
+    ;;
+
+  rm)
+    [ "$#" -eq 2 ] || exit 2
+    # The parent is resolved; the last name is not, so a symlink is removed itself and never its target.
+    case "$1" in
+      */*)
+        resolve "${1%/*}"
+        base="${1##*/}"
+        ;;
+      *)
+        R="$W"
+        base="$1"
+        ;;
+    esac
+    [ -d "$R" ] || exit 4
+    p="$R/$base"
+    if [ ! -e "$p" ] && [ ! -L "$p" ]; then exit 4; fi
+    if [ -d "$p" ] && [ ! -L "$p" ]; then
+      if [ "$2" != 1 ] && [ -n "$(find "$p" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then exit 7; fi
+      n="$(find "$p" -printf . 2>/dev/null | wc -c)"
+      rm -rf -- "$p" || exit 8
+    else
+      n=1
+      rm -f -- "$p" || exit 8
+    fi
+    printf '%s' "$n"
+    ;;
+
+  du)
+    [ "$#" -eq 0 ] || exit 2
+    # A folder the bot made unreadable to itself would hide its content from the soft quota: give the owner (the
+    # bot's own uid) read and search back on its folders before measuring.
+    find "$W" -xdev -type d ! -perm -u=rx -exec chmod u+rx {} + 2>/dev/null || true
+    du -sb -- "$W" 2>/dev/null | cut -f1
+    ;;
+
+  *) exit 2 ;;
+esac

@@ -14,6 +14,8 @@ export const SANDBOX_USER = `${SANDBOX_UID}:${SANDBOX_UID}`;
 export const WORKSPACE = "/workspace";
 /** The helper every exec goes through (infra/sandbox/sbx/ocw-run). */
 export const OCW_RUN = "/usr/local/bin/ocw-run";
+/** The helper every file operation goes through (infra/sandbox/sbx/ocw-files), workspace-confined with realpath. */
+export const OCW_FILES = "/usr/local/bin/ocw-files";
 
 export interface ContainerLimits {
   nanoCpus: number;
@@ -59,8 +61,11 @@ export function clampLimits(limits: ContainerLimits): ContainerLimits {
 /** Docker's runtime names for the two boundaries (D-01): gVisor where the daemon has it, else hardened runc. */
 export type DockerRuntime = "runsc" | "runc";
 
-/** Object name kinds: containers (`sbx`, `brw`), volumes (`ws`, `pkg`) and the bot's network (`net`). */
-export type NameKind = "sbx" | "brw" | "ws" | "pkg" | "net";
+/**
+ * Object name kinds: containers (`sbx`, `brw`, the `files` helper), volumes (`ws`, `pkg`) and the bot's network
+ * (`net`).
+ */
+export type NameKind = "sbx" | "brw" | "files" | "ws" | "pkg" | "net";
 
 /** A namespace is part of every object name: lower-case letters, digits and dashes. */
 export const NAMESPACE_RE = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
@@ -133,6 +138,16 @@ export function volumeSpec(p: ObjectSpecInput) {
   };
 }
 
+/** The `files` helper's limits: enough for coreutils over one workspace, never the bot's own share. */
+export const FILES_HELPER_LIMITS: ContainerLimits = {
+  nanoCpus: 500_000_000,
+  memoryBytes: 256 * 1024 * 1024,
+  pids: 64,
+};
+
+/** How long a `files` helper lives on its own before it exits (the sweeper reaps idle ones sooner). */
+export const FILES_HELPER_SECONDS = 300;
+
 export interface ShellSpecInput extends ObjectSpecInput {
   /** The configured `sbx` image (OCW_SANDBOX_SBX_IMAGE), never a caller's. */
   image: string;
@@ -180,5 +195,27 @@ export function shellSpec(p: ShellSpecInput) {
       IpcMode: "private",
       LogConfig: { Type: "none", Config: {} },
     },
+  };
+}
+
+export interface FilesSpecInput extends ObjectSpecInput {
+  image: string;
+  runtime: DockerRuntime;
+  volume: string;
+}
+
+/**
+ * The `files` helper (D-01, D-04, D-09, Pitfall 5): people's file operations on a stopped or killed sandbox run here,
+ * so the bot's `sbx` stays stopped. It is `shellSpec` with no network at all (`NetworkMode: "none"`), kind `files`,
+ * small limits and a command that ends on its own; every file operation still arrives through exec as 10001 via
+ * `ocw-files`.
+ */
+export function filesSpec(p: FilesSpecInput) {
+  const spec = shellSpec({ ...p, network: "none", limits: FILES_HELPER_LIMITS });
+  return {
+    ...spec,
+    Cmd: ["sleep", String(FILES_HELPER_SECONDS)],
+    Labels: labelsFor({ ns: p.ns, orgId: p.orgId, agentId: p.agentId, kind: "files" }),
+    HostConfig: { ...spec.HostConfig, NetworkMode: "none" },
   };
 }

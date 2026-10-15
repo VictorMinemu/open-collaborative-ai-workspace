@@ -1,6 +1,7 @@
 import type { SandboxdInfo } from "@ocw/contracts";
 import { z } from "zod";
 import { createDocker } from "./docker";
+import { createFiles } from "./files";
 import { createSandboxes, startupRefusal } from "./sandboxes";
 import { createServer, type LogLine } from "./server";
 import { NAMESPACE_RE } from "./spec";
@@ -82,7 +83,12 @@ async function main() {
     }
   }
 
-  const server = createServer({ token: env.OCW_SANDBOX_TOKEN, sandboxes, log: writeLog });
+  // The soft quota arrives with 07.8-09 Task 2; until then file writes are not measured.
+  const files = createFiles({
+    sandboxes,
+    quota: { assertRoom: async () => {}, afterChange: async () => {} },
+  });
+  const server = createServer({ token: env.OCW_SANDBOX_TOKEN, sandboxes, files, log: writeLog });
   server.listen(env.OCW_SANDBOXD_PORT, env.OCW_SANDBOXD_HOST, () => {
     const address = server.address();
     const port = typeof address === "object" && address ? address.port : env.OCW_SANDBOXD_PORT;
