@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { shownTarget } from "./kind";
 import {
   approverText,
   argumentsDisplay,
@@ -190,5 +191,14 @@ describe("titles and approver labels (UI-SPEC Copywriting › Action card)", () 
       "Waiting for a lead of Sales",
     );
     expect(approverText({ ...base, approverKind: "admins" })).toBe("Waiting for an admin");
+  });
+});
+
+describe("the target a person reads (WINDOWS #221)", () => {
+  it("hides the internal server name an MCP or connector tool carries as its prefix; keeps a real host", () => {
+    expect(shownTarget({ target: "mc4866abe", tool: "mc4866abe__write_note" })).toBeNull();
+    expect(shownTarget({ target: "acme", tool: "acme__create_record" })).toBeNull();
+    expect(shownTarget({ target: "api.acme.example", tool: "ocw_http_request" })).toBe("api.acme.example");
+    expect(shownTarget({ target: null, tool: "notes_save" })).toBeNull();
   });
 });

@@ -30,6 +30,7 @@ import type { LiveSession } from "@/lib/use-live-session";
 import { cn } from "@/lib/utils";
 import { Markdown } from "./markdown";
 import { RUNTIMES, RuntimeLogo } from "./meta";
+import { ProposedByLine } from "./proposed-by-line";
 import { groupTurns, type Turn, TurnSummary } from "./turn-summary";
 
 /** One rendered stream entry. `at` is the event time (absent for live text and prompts not started yet). */
@@ -385,6 +386,7 @@ function PromptBubble({ item, session }: { item: Extract<Item, { kind: "prompt" 
         ) : null}
         {p ? <span className="tabular-nums">{hhmm(p.createdAt)}</span> : null}
         <span className="font-medium text-foreground">{name}</span>
+        {p?.proposedBy ? <ProposedByLine agent={p.proposedBy} /> : null}
         <UserAvatar name={name} seed={p?.authorUserId} className="size-5 text-[9px]" />
       </p>
       {attachments.length > 0 ? (
