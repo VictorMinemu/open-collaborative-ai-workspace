@@ -6,10 +6,11 @@
 #
 # 07.8-09 adds the files section: people's and bots' file operations through sandboxd (as 10001, realpath-confined,
 # through the network-none `files` helper when the sandbox is stopped or killed), the soft quota (`quota`) and the idle
-# stop (`idle`). sandboxd runs with a 3 s sweep here (OCW_SANDBOXD_SWEEP_MS) so measurements come quickly.
+# stop (`idle`) and the event feed the API long-polls (`events`: boot id, long poll, crash detection, and no path,
+# argv or content in any event). sandboxd runs with a 3 s sweep here (OCW_SANDBOXD_SWEEP_MS).
 #
-# Usage (repo root):  bash infra/sandbox/test/run-sandbox-smoke.sh [--only core,files,quota,idle]
-#   --only <list>          run only these sections (comma separated): core, files, quota, idle; default all
+# Usage (repo root):  bash infra/sandbox/test/run-sandbox-smoke.sh [--only core,files,quota,idle,events]
+#   --only <list>          run only these sections (comma separated): core, files, quota, idle, events; default all
 #   DOCKER_SOCKET=<path>   the daemon socket (default: the current docker context's unix socket)
 #
 # Every Docker object it creates carries `ocw.namespace=ocw-smoke-<pid>` and is removed by that label before the run
@@ -33,7 +34,7 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-SECTIONS="core files quota idle"
+SECTIONS="core files quota idle events"
 for s in ${ONLY//,/ }; do
   if [ "$s" != all ] && [[ " $SECTIONS " != *" $s "* ]]; then
     printf 'unknown section: %s (known: %s)\n' "$s" "$SECTIONS" >&2
@@ -728,12 +729,148 @@ section_idle() {
     ok "idle: after the next ensure the sandbox runs and its file is still there" || fail "idle: read after → ${status}"
 }
 
+# ================================================================ section: events (07.8-09 Task 3; D-09, P-04, T-07.8-09-04)
+
+# events_get <after> <waitMs> → status; body in $WORK/events.json
+events_get() {
+  curl -sS -o "$WORK/events.json" -w '%{http_code}' --max-time 40 -H "authorization: Bearer ${TOKEN}" \
+    "http://127.0.0.1:${PORT}/v1/events?after=$1&waitMs=$2"
+}
+
+# all_events > file: every retained event, paging 500 at a time from seq 0.
+all_events() {
+  node -e '
+    const [port, token] = process.argv.slice(1);
+    (async () => {
+      const all = [];
+      let after = 0;
+      for (;;) {
+        const r = await fetch(`http://127.0.0.1:${port}/v1/events?after=${after}&waitMs=0`, { headers: { authorization: `Bearer ${token}` } });
+        const j = await r.json();
+        all.push(...j.events);
+        if (j.events.length === 0 || j.nextSeq === after) break;
+        after = j.nextSeq;
+      }
+      process.stdout.write(JSON.stringify(all));
+    })();
+  ' "$PORT" "$TOKEN"
+}
+
+section_events() {
+  EO="$(uuid)"
+  EA="$(uuid)"
+  status="$(events_get 0 0)"
+  BOOT="$(jfield "$WORK/events.json" bootId)"
+  if [ "$status" = 200 ] && printf '%s' "$BOOT" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'; then
+    ok "events: GET /v1/events → 200 with a uuid bootId"
+  else
+    fail "events: GET → ${status} $(head -c 200 "$WORK/events.json")"
+  fi
+  status="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${PORT}/v1/events?after=0&waitMs=0")"
+  [ "$status" = 401 ] && ok "events: without the token → 401" || fail "events: no token → ${status}"
+  status="$(events_get 0 30001)"
+  [ "$status" = 400 ] && ok "events: waitMs over the contract → 400" || fail "events: waitMs 30001 → ${status}"
+
+  # A long poll from the newest cursor resolves on the next event (the ensure of a new bot).
+  status="$(events_get 0 0)"
+  CURSOR="$(node -e '
+    const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    process.stdout.write(String(j.nextSeq));
+  ' "$WORK/events.json")"
+  while :; do
+    events_get "$CURSOR" 0 >/dev/null
+    next="$(jfield "$WORK/events.json" nextSeq)"
+    [ "$next" = "$CURSOR" ] && break
+    CURSOR="$next"
+  done
+  p0=$(node -e 'process.stdout.write(String(Date.now()))')
+  (sleep 1 && api POST /v1/sandboxes/ensure "{\"target\":$(target "$EO" "$EA")}" >/dev/null) &
+  ensure_pid=$!
+  found=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    status="$(events_get "$CURSOR" 20000)"
+    found="$(node -e '
+      const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      const hit = j.events.find((e) => e.type === "state" && e.target.agentId === process.argv[2] && e.state === "running");
+      process.stdout.write(hit ? "yes" : "");
+    ' "$WORK/events.json" "$EA")"
+    [ -n "$found" ] && break
+    CURSOR="$(jfield "$WORK/events.json" nextSeq)"
+  done
+  p1=$(node -e 'process.stdout.write(String(Date.now()))')
+  wait "$ensure_pid" || true
+  [ -n "$found" ] && [ $((p1 - p0)) -lt 15000 ] &&
+    ok "events: a long poll resolves on the next state event (ensure → running) in $((p1 - p0)) ms" ||
+    fail "events: long poll → ${status}, found='${found}' in $((p1 - p0)) ms"
+
+  # Content the bot and people handle must never reach the feed.
+  run_in "$EO" "$EA" '["sh","-c","echo SENTINEL-argv-3d1c > SENTINEL-file-6b2e.txt"]' >/dev/null
+  api POST /v1/files/write "$(path_json "$EO" "$EA" SENTINEL-path-8f4a.txt '"content":"SENTINEL-content-2c7d","encoding":"utf8","mode":"create"')" >/dev/null
+
+  # The sweep samples the running bot: a usage event with its CPU and its measured disk.
+  usage=""
+  for _ in $(seq 1 20); do
+    all_events >"$WORK/all.json"
+    usage="$(node -e '
+      const all = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      const hit = all.find((e) => e.type === "usage" && e.target.agentId === process.argv[2] && e.diskBytes > 0);
+      process.stdout.write(hit ? `cpuMs ${hit.cpuMs}, diskBytes ${hit.diskBytes}` : "");
+    ' "$WORK/all.json" "$EA")"
+    [ -n "$usage" ] && break
+    sleep 0.5
+  done
+  [ -n "$usage" ] && ok "events: a usage sample for the running bot (${usage})" || fail "events: no usage event for E"
+
+  # A container that dies without the broker is reported (crashed: stopped with reason null).
+  CID_E="$(docker ps -q --filter "label=ocw.namespace=${NS}" --filter "label=ocw.agent=${EA}" --filter "label=ocw.kind=sbx")"
+  docker stop -t 1 "$CID_E" >/dev/null
+  crashed=""
+  for _ in $(seq 1 20); do
+    all_events >"$WORK/all.json"
+    crashed="$(node -e '
+      const all = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      const hit = all.find((e) => e.type === "state" && e.target.agentId === process.argv[2] && e.state === "stopped" && e.reason === null);
+      process.stdout.write(hit ? "yes" : "");
+    ' "$WORK/all.json" "$EA")"
+    [ -n "$crashed" ] && break
+    sleep 0.5
+  done
+  [ -n "$crashed" ] && ok "events: a container stopped outside sandboxd → state stopped, reason null" ||
+    fail "events: no crash event for E"
+
+  all_events >"$WORK/all.json"
+  summary="$(node -e '
+    const all = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    const seen = new Set();
+    for (const e of all) seen.add(e.type === "state" ? `state:${e.state}:${e.reason}` : e.type);
+    process.stdout.write([...seen].sort().join(" "));
+  ' "$WORK/all.json")"
+  log "     events seen: ${summary}"
+  leaks=""
+  for s in SENTINEL-argv-3d1c SENTINEL-file-6b2e SENTINEL-path-8f4a SENTINEL-content-2c7d q3.csv today.txt fifty.bin \
+    keep.txt big.bin /etc/passwd héllo "still here" "\"path\"" "\"argv\"" "\"content\""; do
+    if grep -qF -- "$s" "$WORK/all.json"; then leaks="${leaks} ${s}"; fi
+  done
+  [ -z "$leaks" ] && ok "events: $(node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).length))' "$WORK/all.json") events carry no path, argv or content" ||
+    fail "events: leaked${leaks}"
+  if want quota; then
+    printf '%s' "$summary" | grep -q 'state:disk_full:disk_full' && ok "events: disk_full state event seen" || fail "events: no disk_full event"
+  fi
+  if want idle; then
+    printf '%s' "$summary" | grep -q 'state:stopped:idle' && ok "events: idle stop event seen" || fail "events: no idle event"
+  fi
+  if want core; then
+    printf '%s' "$summary" | grep -q 'state:killed:kill_switch' && ok "events: killed event seen" || fail "events: no killed event"
+  fi
+}
+
 # ================================================================ run the chosen sections
 
 if want core; then section_core; fi
 if want files; then section_files; fi
 if want quota; then section_quota; fi
 if want idle; then section_idle; fi
+if want events; then section_events; fi
 
 if [ "$FAILURES" != 0 ]; then
   log "${FAILURES} check(s) failed"

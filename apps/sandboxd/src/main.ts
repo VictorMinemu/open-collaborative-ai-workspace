@@ -1,6 +1,7 @@
 import type { SandboxdInfo } from "@ocw/contracts";
 import { z } from "zod";
 import { createDocker } from "./docker";
+import { createEvents } from "./events";
 import { createFiles } from "./files";
 import { createQuota } from "./quota";
 import { createSandboxes, startupRefusal } from "./sandboxes";
@@ -51,11 +52,14 @@ async function main() {
   const env = parsed.data;
 
   const docker = createDocker({ socketPath: env.DOCKER_SOCKET });
+  // Lifecycle and usage events for the API's long poll (ids, kinds, states and sizes only).
+  const events = createEvents();
   const sandboxes = createSandboxes({
     docker,
     ns: env.OCW_SANDBOX_NAMESPACE,
     runtime: env.OCW_SANDBOX_RUNTIME,
     image: env.OCW_SANDBOX_SBX_IMAGE,
+    onEvent: (event) => events.emit(event),
   });
 
   let info: SandboxdInfo | null = null;
@@ -103,16 +107,20 @@ async function main() {
         error: err instanceof Error ? err.name : "unknown",
       }),
   });
-  const server = createServer({ token: env.OCW_SANDBOX_TOKEN, sandboxes, files, log: writeLog });
+  const server = createServer({ token: env.OCW_SANDBOX_TOKEN, sandboxes, files, events, log: writeLog });
+  let stopWatching = () => {};
   server.listen(env.OCW_SANDBOXD_PORT, env.OCW_SANDBOXD_HOST, () => {
     const address = server.address();
     const port = typeof address === "object" && address ? address.port : env.OCW_SANDBOXD_PORT;
-    writeLog({ level: "info", msg: "listening", host: env.OCW_SANDBOXD_HOST, port });
+    writeLog({ level: "info", msg: "listening", host: env.OCW_SANDBOXD_HOST, port, bootId: events.bootId });
     sweeper.start();
+    stopWatching = sandboxes.watch();
   });
 
   const shutdown = () => {
     sweeper.stop();
+    stopWatching();
+    events.close();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 5_000).unref();
   };

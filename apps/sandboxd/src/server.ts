@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import { SANDBOX_LIMITS, SANDBOXD_ROUTES, type SandboxdErrorCode, type SandboxdOp } from "@ocw/contracts";
 import type { z } from "zod";
+import { createEvents, EVENTS_MAX_WAIT_MS, type Events } from "./events";
 import type { Files } from "./files";
 import { SandboxdFailure, type Sandboxes } from "./sandboxes";
 
@@ -25,6 +26,7 @@ export const IMPLEMENTED_OPS = [
   "purge",
   "usage",
   "policy",
+  "events",
   "filesList",
   "filesStat",
   "filesRead",
@@ -67,6 +69,8 @@ export interface ServerOptions {
   token: string;
   sandboxes: Sandboxes;
   files: Files;
+  /** The event feed the sandboxes emit into (a fresh, empty one when omitted). */
+  events?: Events;
   log?: (line: LogLine) => void;
 }
 
@@ -139,6 +143,7 @@ function idsOf(input: unknown): Record<string, string> {
 
 export function createServer(options: ServerOptions): http.Server {
   const { token, sandboxes, files } = options;
+  const events = options.events ?? createEvents();
   const log = options.log ?? (() => {});
   let transfers = 0;
 
@@ -155,6 +160,8 @@ export function createServer(options: ServerOptions): http.Server {
     killOrg: (input) => sandboxes.killOrg(input.orgId),
     purge: (input) => sandboxes.purge(input.target),
     usage: (input) => sandboxes.usage(input.orgId),
+    // The API's long poll (P-04): sandboxd never calls the API. Capped at 25 s whatever the contract allows.
+    events: (input) => events.since(input.after, Math.min(input.waitMs, EVENTS_MAX_WAIT_MS)),
     policy: (input) => {
       sandboxes.setPolicy(input);
       return { ok: true };

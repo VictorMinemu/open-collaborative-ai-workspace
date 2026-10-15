@@ -140,6 +140,10 @@ class FakeDocker implements Docker {
     return s;
   }
 
+  async stream(): Promise<PassThrough> {
+    return new PassThrough();
+  }
+
   get execCreates() {
     return this.calls.filter((c) => c.method === "POST" && /\/exec$/.test(c.path));
   }

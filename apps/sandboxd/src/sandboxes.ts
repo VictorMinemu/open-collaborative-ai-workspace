@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { Duplex } from "node:stream";
+import type { Duplex, Readable } from "node:stream";
 import {
   Id,
   SANDBOX_LIMITS,
@@ -53,6 +53,11 @@ const EXEC_POLL_MS = 250;
 const RUN_MAX_STDOUT = 1024 * 1024;
 const RUN_TIMEOUT_MS = 60_000;
 const STDIN_CHUNK = 64 * 1024;
+/** A broker-caused stop is matched to its `die` event within this window. */
+const EXPECTED_STOP_MS = 60_000;
+const WATCH_RETRY_MS = 2_000;
+/** A Docker event line longer than this is dropped (they are a few hundred bytes). */
+const MAX_EVENT_LINE = 64 * 1024;
 
 /** A refusal with its sandboxd error code and HTTP status. The message is fixed text, never request content. */
 export class SandboxdFailure extends Error {
@@ -184,6 +189,11 @@ export interface Sandboxes {
   sampleUsage(target: SandboxdTarget): Promise<void>;
   /** Removes `files` helpers unused for `idleMs` (never their volume); returns how many. */
   reapFilesHelpers(now: number, idleMs: number): Promise<number>;
+  /**
+   * Follows Docker's `die` events for this namespace's `sbx` containers: one the broker did not stop, kill, restart
+   * or remove is a crash, reported as state `stopped` with reason null. Reconnects after an error; returns `stop`.
+   */
+  watch(): () => void;
 }
 
 // ---------------------------------------------------------------- output tails
@@ -269,6 +279,26 @@ function drained(stream: Duplex): Promise<void> {
       resolve();
     };
     stream.on("drain", done);
+    stream.on("close", done);
+    stream.on("error", done);
+  });
+}
+
+/** Calls `onLine` for each newline-terminated line of the stream; resolves when it ends or closes. */
+function readLines(stream: Readable, onLine: (line: string) => void): Promise<void> {
+  return new Promise((resolve) => {
+    let buf = "";
+    stream.on("data", (chunk: Buffer | string) => {
+      buf += chunk.toString();
+      for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        if (line.trim()) onLine(line);
+      }
+      if (buf.length > MAX_EVENT_LINE) buf = "";
+    });
+    const done = () => resolve();
+    stream.on("end", done);
     stream.on("close", done);
     stream.on("error", done);
   });
@@ -581,7 +611,42 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
   }
 
   function expectStop(containerId: string) {
-    expectedStops.set(containerId, clock.now());
+    const now = clock.now();
+    for (const [id, at] of expectedStops) if (now - at > EXPECTED_STOP_MS) expectedStops.delete(id);
+    expectedStops.set(containerId, now);
+  }
+
+  /** One Docker event line: a `die` of this namespace's `sbx` the broker did not cause is a crash. */
+  function onDockerEvent(line: string) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return;
+    }
+    const ev = asRecord(parsed);
+    if ((ev.Action ?? ev.status) !== "die") return;
+    const actor = asRecord(ev.Actor);
+    const id = String(actor.ID ?? ev.id ?? "");
+    const attrs = asRecord(actor.Attributes) as Record<string, string>;
+    if (
+      attrs[SANDBOXD_LABELS.sandbox] !== "1" ||
+      attrs[SANDBOXD_LABELS.namespace] !== ns ||
+      attrs[SANDBOXD_LABELS.kind] !== "sbx"
+    ) {
+      return;
+    }
+    const t = targetOfLabels(attrs);
+    if (!t) return;
+    const at = expectedStops.get(id);
+    if (at !== undefined) {
+      expectedStops.delete(id);
+      if (clock.now() - at <= EXPECTED_STOP_MS) return;
+    }
+    const key = targetKey(t);
+    cpuLast.delete(key);
+    stopReasons.delete(key);
+    emit({ type: "state", target: t, kind: "sbx", state: "stopped", reason: null });
   }
 
   /** Stops the bot's `sbx` (the caller holds the bot's lock): usage sample, stop, state event with the reason. */
@@ -1186,6 +1251,45 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         }
       }
       return reaped;
+    },
+
+    watch() {
+      let stopped = false;
+      let current: Readable | null = null;
+      const filters = encodeURIComponent(
+        JSON.stringify({
+          type: ["container"],
+          event: ["die"],
+          label: [
+            `${SANDBOXD_LABELS.sandbox}=1`,
+            `${SANDBOXD_LABELS.namespace}=${ns}`,
+            `${SANDBOXD_LABELS.kind}=sbx`,
+          ],
+        }),
+      );
+      const loop = async () => {
+        while (!stopped) {
+          try {
+            current = await docker.stream(`/events?filters=${filters}`);
+            if (stopped) current.destroy();
+            else await readLines(current, onDockerEvent);
+          } catch {
+            // Docker unavailable: try again shortly (a die in the gap is not reported).
+          }
+          current = null;
+          if (!stopped) {
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, WATCH_RETRY_MS);
+              timer.unref();
+            });
+          }
+        }
+      };
+      void loop();
+      return () => {
+        stopped = true;
+        current?.destroy();
+      };
     },
 
     async reconcile() {

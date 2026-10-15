@@ -1,5 +1,5 @@
 import http from "node:http";
-import type { Duplex } from "node:stream";
+import type { Duplex, Readable } from "node:stream";
 
 /**
  * A minimal Docker Engine API client over the daemon's Unix socket (07.8-04, spike iii). Node built-ins only: JSON
@@ -34,6 +34,8 @@ export interface Docker {
   ): Promise<DockerResponse>;
   /** A hijacked connection (`Connection: Upgrade`, `Upgrade: tcp`): exec start and attach. */
   hijack(path: string, body: unknown): Promise<Duplex>;
+  /** A streaming GET with no timeout (the Engine's `/events` feed): the body as it arrives. */
+  stream(path: string): Promise<Readable>;
 }
 
 /** The daemon could not be reached or answered something unusable. Never carries a request body. */
@@ -119,7 +121,25 @@ export function createDocker(options: { socketPath: string }): Docker {
     });
   }
 
-  return { request, hijack };
+  function stream(path: string): Promise<Readable> {
+    return new Promise((resolve, reject) => {
+      const req = http.request(
+        { socketPath, method: "GET", path: fullPath(path), headers: { Host: "docker" } },
+        (res) => {
+          if (res.statusCode !== 200) {
+            res.resume();
+            reject(new DockerUnavailableError(`stream refused with ${res.statusCode ?? 0}`));
+            return;
+          }
+          resolve(res);
+        },
+      );
+      req.on("error", (err) => reject(new DockerUnavailableError(err.message)));
+      req.end();
+    });
+  }
+
+  return { request, hijack, stream };
 }
 
 export interface DemuxedFrame {
