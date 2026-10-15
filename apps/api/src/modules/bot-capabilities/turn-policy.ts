@@ -1,8 +1,11 @@
 import {
   type BotCapabilityView,
   BUILTIN_TOOLS,
+  CONFINED_TOOL_FLAGS,
+  MAX_SANDBOX_CALLS_PER_TURN,
   MAX_TOOL_CALLS_PER_TURN,
   MAX_WEB_CALLS_PER_TURN,
+  SANDBOX_TOOL_NAMES,
   type TurnContext,
   type TurnMemoryFile,
   type TurnNow,
@@ -25,6 +28,7 @@ import type { Core } from "../../core";
 import { type EffectiveVaultItem, effectiveVaultItems, unitAudienceAllows } from "../keychain";
 import type { MemoryAudience, MemoryService } from "../memory";
 import { agentResource, orgResource, type PermissionService, type PrincipalRef } from "../organization";
+import { sandboxAvailable } from "../sandbox";
 import { approvalModesFor } from "../tool-approval";
 import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
 import { loadAllGrants, loadCatalog, loadGrants } from "./catalog";
@@ -119,6 +123,13 @@ const WORK_ZONE_PROJECTS_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEf
  * content can never propose a session (the proposal route claims it as side-effecting whatever the turn says).
  */
 const START_WORK_ZONE_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
+
+/**
+ * The sandbox tools a turn is offered (07.8-05, D-12, P-05, P-06): every `ocw_sandbox_*` tool except
+ * `ocw_sandbox_import`, which 07.8-25 offers with its audience check. Their static flags come from
+ * `CONFINED_TOOL_FLAGS` (the D-13 member-data rule stays server-side). Browser tools are offered from 07.8-14.
+ */
+const OFFERED_SANDBOX_TOOLS = SANDBOX_TOOL_NAMES.filter((name) => name !== BUILTIN_TOOLS.sandboxImport);
 
 /**
  * Whether a catalog source acts with the asking member's own account (07.4 D-01): a per-member MCP connector. Its tools
@@ -245,6 +256,8 @@ interface ComputedTurn extends TurnTools {
   dailyLimit: number;
   /** With an audience only: the tools this turn does not offer, and why (06-10). */
   withheld: Withheld;
+  /** The sandbox tools are offered (07.8-05): the turn carries `maxSandboxCalls`. */
+  sandboxOffered: boolean;
 }
 
 /**
@@ -263,6 +276,12 @@ async function computeTurn(
     /** The turn's conversation: needed for the member-account rule (07.4-11); without it that rule fails closed. */
     conversationId?: string | null;
     board?: boolean;
+    /**
+     * Offer the sandbox tools when `sandboxAvailable` allows them (07.8-05): delivery only, and only while sandboxd is
+     * configured. The call-time re-decisions of the other routes never compute them; the sandbox routes decide each
+     * call themselves.
+     */
+    sandbox?: boolean;
   },
   env: SearchEnv,
   audience?: TurnAudience | null,
@@ -421,6 +440,27 @@ async function computeTurn(
     usable.length > 0,
     workZone,
   );
+  // Bot sandboxes (07.8-05, D-09, D-12, P-05): offered only when the resolver grants `sandbox.use` to the bot acting for
+  // this human (07.3 module denies included), the organization switch is on, the organization is not killed and the
+  // bot's own switch is on: the one decision `sandboxAvailable` makes, asked again at every call.
+  let sandboxOffered = false;
+  if (p.sandbox) {
+    const available = await sandboxAvailable(
+      tx,
+      perms,
+      { agentId: row.id, userId: p.humanUserId },
+      "sandbox",
+    );
+    if (available.ok) {
+      for (const name of OFFERED_SANDBOX_TOOLS) {
+        if (assembled.toolFlags[name] || assembled.tools.length >= MAX_TURN_TOOLS) continue;
+        const { untrustedOutput, sideEffecting } = CONFINED_TOOL_FLAGS[name];
+        assembled.tools.push(name);
+        assembled.toolFlags[name] = { untrustedOutput, sideEffecting };
+      }
+      sandboxOffered = assembled.tools.includes(BUILTIN_TOOLS.sandboxExec);
+    }
+  }
   // Per-tool approvals (07.5-11, D-01, D-04, APPROVE-01): every offered tool with an effective `always` or
   // `when_tainted` rule for (bot, human) is flagged, so the gate sends exactly those calls' arguments. One policy load
   // per turn computation; delivery and the call-time re-decision share it. The cell-wide view never calls this.
@@ -435,6 +475,7 @@ async function computeTurn(
     dailyLimit: effectiveDailyLimit(row.scope, caps, policy),
     withheld,
     keys: { usable, memberAccount, unitAudience },
+    sandboxOffered,
     ...assembled,
   };
 }
@@ -682,7 +723,8 @@ export async function turnPolicy(
   const computed = await computeTurn(
     tx,
     perms,
-    { ...p, conversationKind: scopeKind, board },
+    // Sandbox tools only while sandboxd is configured (07.8-05): without it nothing could run them.
+    { ...p, conversationKind: scopeKind, board, sandbox: core.env.OCW_SANDBOX_URL !== null },
     core.env,
     opts.audience,
   );
@@ -723,6 +765,8 @@ export async function turnPolicy(
     now: computed.effective.dateTime.effective ? turnNow(p.clientTimeZone) : null,
     maxToolCalls: MAX_TOOL_CALLS_PER_TURN,
     maxWebCalls: MAX_WEB_CALLS_PER_TURN,
+    // The separate budget of the sandbox calls (P-06), counted by the sandbox routes in `agent_turns.sandbox_calls`.
+    ...(computed.sandboxOffered ? { maxSandboxCalls: MAX_SANDBOX_CALLS_PER_TURN } : {}),
     // The persona can tell people what it could not use here and why (06-10); never a reason to enable anything.
     // Member-account entries (07.4-11, R7) travel on every delivery, so the persona can offer the share link.
     ...(opts.audience || computed.withheld.length > 0 ? { withheld: computed.withheld } : {}),
