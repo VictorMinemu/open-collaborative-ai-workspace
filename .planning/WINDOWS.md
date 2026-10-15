@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 131
+open_count: 133
 waived_count: 4
 fixed_count: 101
-total_count: 236
-last_updated: 2026-10-15T16:42:21.880Z
+total_count: 238
+last_updated: 2026-10-15T16:43:10.294Z
 ---
 
 # Broken Windows Ledger
@@ -251,6 +251,8 @@ last_updated: 2026-10-15T16:42:21.880Z
 | 234 | 07.8 | deviation | packages/db/src/schema/app.ts |  | MUST (07.8-21): app.message_cards kind check and Drizzle enum accept only the 8 old kinds; a sign-in ('browser') card cannot be stored until a new migration (chained after 07.8-02) adds it. ApprovalToolSourceKind lacks a sandbox/browser source (07.8-14; update SOURCE_ICON) | open |  | 2026-10-15T15:23:46.137Z |  |
 | 235 | 07.8 | deviation | apps/sandboxd/src |  | sandboxd: running processes tracked in memory only (unpollable after a restart, still end at timeout); /tmp/ocw-proc group files not removed; runtime_unavailable and docker_too_old share docker_unavailable; diskBytes 0 until 07.8-09 | open |  | 2026-10-15T16:42:21.790Z |  |
 | 236 | 07.8 | deviation | infra/sandbox |  | sbx apt versions approved but not pinned in the Dockerfile (later builds pick newer security versions); gVisor path proven by unit tests only until the 07.8-24 CI job; CODEOWNERS lacks apps/sandboxd (07.8-29) | open |  | 2026-10-15T16:42:21.880Z |  |
+| 237 | 07.8 | deviation | infra/sandbox/brw |  | brw: iframes are outside the snapshot (screenshot masks them whole after human input); a page that rebuilds an input after typing loses the human-typed marker (password type fields stay redacted); live frames to other viewers are unmasked, F-5/U-2 must hold in the API (07.8-16) | open |  | 2026-10-15T16:43:10.209Z |  |
+| 238 | 07.8 | deviation | infra/sandbox/brw |  | sandboxd (07.8-13) must strip the context-id tag from type-0 frames and map the new brw codes (paused, internal, maskRects, resize mode); brw proven on arm64 Docker Desktop only, amd64 runc and the gVisor CI job remain (07.8-24); apt not pinned to a snapshot | open |  | 2026-10-15T16:43:10.294Z |  |
 
 ````json
 [
@@ -3084,6 +3086,30 @@ last_updated: 2026-10-15T16:42:21.880Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T16:42:21.880Z",
+    "resolved_at": null
+  },
+  {
+    "id": 237,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/sandbox/brw",
+    "line": null,
+    "description": "brw: iframes are outside the snapshot (screenshot masks them whole after human input); a page that rebuilds an input after typing loses the human-typed marker (password type fields stay redacted); live frames to other viewers are unmasked, F-5/U-2 must hold in the API (07.8-16)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T16:43:10.209Z",
+    "resolved_at": null
+  },
+  {
+    "id": 238,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/sandbox/brw",
+    "line": null,
+    "description": "sandboxd (07.8-13) must strip the context-id tag from type-0 frames and map the new brw codes (paused, internal, maskRects, resize mode); brw proven on arm64 Docker Desktop only, amd64 runc and the gVisor CI job remain (07.8-24); apt not pinned to a snapshot",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T16:43:10.294Z",
     "resolved_at": null
   }
 ]
