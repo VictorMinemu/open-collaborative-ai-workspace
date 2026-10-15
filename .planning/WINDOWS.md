@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 129
+open_count: 131
 waived_count: 4
 fixed_count: 101
-total_count: 234
-last_updated: 2026-10-15T15:23:46.137Z
+total_count: 236
+last_updated: 2026-10-15T16:42:21.880Z
 ---
 
 # Broken Windows Ledger
@@ -249,6 +249,8 @@ last_updated: 2026-10-15T15:23:46.137Z
 | 232 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | Wiring left for later plans: turn.activity not registered in realtime EventTypes (07.8-10); SandboxdContextInput.events is loose until tightened to LiveInputFrame (07.8-16); PATCH /agents/:id/capabilities ignores sandbox/browser until 07.8-15 | open |  | 2026-10-15T15:10:12.850Z |  |
 | 233 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | File upload/download/import travel as base64 JSON up to 50 MiB (~67 MiB on the wire): check the body limit or stream (07.8-09/11); cap_reached/tainted answer 403 here vs 409 on 07.4 connector routes, unify in 05/10/14; npm lockfiles with sha1-only integrity fail PackageTreeEntry, refuse with a reason in 17/18 | open |  | 2026-10-15T15:10:12.922Z |  |
 | 234 | 07.8 | deviation | packages/db/src/schema/app.ts |  | MUST (07.8-21): app.message_cards kind check and Drizzle enum accept only the 8 old kinds; a sign-in ('browser') card cannot be stored until a new migration (chained after 07.8-02) adds it. ApprovalToolSourceKind lacks a sandbox/browser source (07.8-14; update SOURCE_ICON) | open |  | 2026-10-15T15:23:46.137Z |  |
+| 235 | 07.8 | deviation | apps/sandboxd/src |  | sandboxd: running processes tracked in memory only (unpollable after a restart, still end at timeout); /tmp/ocw-proc group files not removed; runtime_unavailable and docker_too_old share docker_unavailable; diskBytes 0 until 07.8-09 | open |  | 2026-10-15T16:42:21.790Z |  |
+| 236 | 07.8 | deviation | infra/sandbox |  | sbx apt versions approved but not pinned in the Dockerfile (later builds pick newer security versions); gVisor path proven by unit tests only until the 07.8-24 CI job; CODEOWNERS lacks apps/sandboxd (07.8-29) | open |  | 2026-10-15T16:42:21.880Z |  |
 
 ````json
 [
@@ -3058,6 +3060,30 @@ last_updated: 2026-10-15T15:23:46.137Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T15:23:46.137Z",
+    "resolved_at": null
+  },
+  {
+    "id": 235,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src",
+    "line": null,
+    "description": "sandboxd: running processes tracked in memory only (unpollable after a restart, still end at timeout); /tmp/ocw-proc group files not removed; runtime_unavailable and docker_too_old share docker_unavailable; diskBytes 0 until 07.8-09",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T16:42:21.790Z",
+    "resolved_at": null
+  },
+  {
+    "id": 236,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/sandbox",
+    "line": null,
+    "description": "sbx apt versions approved but not pinned in the Dockerfile (later builds pick newer security versions); gVisor path proven by unit tests only until the 07.8-24 CI job; CODEOWNERS lacks apps/sandboxd (07.8-29)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T16:42:21.880Z",
     "resolved_at": null
   }
 ]
