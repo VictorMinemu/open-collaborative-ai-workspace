@@ -1,0 +1,17 @@
+{
+  "name": "@ocw/egress-policy",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "description": "The pure egress classification shared by the API's egress guard and the sandbox-egress proxy (07.4, D-11): address classes, platform names, allow-list matching and one decision per resolved address. Node built-ins only.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@ocw/config": "workspace:*"
+  }
+}
