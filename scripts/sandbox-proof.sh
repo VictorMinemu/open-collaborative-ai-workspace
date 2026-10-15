@@ -165,7 +165,7 @@ done
 # ---------------------------------------------------------------- the proof (Playwright, API only)
 status=0
 started="$(date +%s)"
-OCW_PROOF_STATE="$OUT/state.json" OCW_PROOF_CAPTURE_DIR="$CAPTURE" \
+OCW_PROOF_STATE="$OUT/state.json" OCW_PROOF_CAPTURE_DIR="$CAPTURE" OCW_PROOF_CELL="$CELL" \
   pnpm exec playwright test -c e2e/playwright.proof.config.ts --project sandbox-proof --no-deps || status=$?
 echo "== proof run: exit $status in $(($(date +%s) - started)) s"
 
@@ -175,7 +175,7 @@ step() {
   if passed "$1"; then echo "$2"; else echo "FAIL ${2#PASS }"; status=1; fi
 }
 echo "== steps"
-step 1 "PASS 1. two bots (Scout for Ana, Echo for Sam), both switches on; Scout wrote proof-<nonce> to note.txt and read it back"
+step 1 "PASS 1. two bots (Scout for Ana, Echo for Sam), switches on, the cell's alsoAllow carries ocw_sandbox_*/ocw_browser_*; Scout wrote proof-<nonce> to note.txt and read it back"
 step 2 "PASS 2. Echo's cat note.txt: No such file; the two sbx containers are on different ocw-net-* networks and ocw-ws-* volumes"
 step 3 "PASS 3. kill switch: no running container of the organization within 5 s; the next exec answered the killed sentence"
 step 4 "PASS 4. sandbox.exec rows for both bots and one sandbox.killed row by Ana, ids, codes and durations only"

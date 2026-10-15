@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type APIRequestContext, expect, test } from "@playwright/test";
+import { BROWSER_TOOL_NAMES, SANDBOX_TOOL_NAMES } from "../../packages/contracts/src/bot-capabilities";
 import { apiAs, ensureMember, SAM } from "../support/actors";
 import { enableBotSandbox, enableSandboxOrg, killSwitch, organizationOf, resume } from "../support/sandbox";
 import { asSuperuser } from "../support/superuser";
@@ -14,7 +15,9 @@ import { ADMIN } from "../tests/env";
  * `sbx` containers (`scripts/e2e-isolated.sh --sandbox`). The model is the deterministic fake (`[[call …]]`
  * directives); everything else is real. API only, no browser page: the chat is driven like the web does it.
  *
- *   1. Scout (Ana's bot) writes `proof-<nonce>` to note.txt in its own sandbox and reads it back;
+ *   1. Scout (Ana's bot) writes `proof-<nonce>` to note.txt in its own sandbox and reads it back; the real cell's
+ *      agent entries allow the confined tools of each bot's switches (`alsoAllow`, from `GET /cell`) while the turn
+ *      offers only what the API decides (no browser tool before 07.8-14);
  *   2. Echo (Sam's bot) cannot see that file; the two `sbx` containers sit on different networks and volumes;
  *   3. a running command is stopped by the admin's kill switch within 5 s; a turn delivered before the kill whose
  *      exec reaches the API after it answers the killed sentence; a turn after the kill is offered no sandbox tool;
@@ -91,6 +94,20 @@ function sbxOf(agentId: string): Inspect {
   expect(ids, `one sbx container for ${agentId}`).toHaveLength(1);
   return (JSON.parse(docker("inspect", ids[0] ?? "")) as Inspect[])[0] as Inspect;
 }
+
+/** The real cell's live OpenClaw config: the `alsoAllow` of one bot's agent entry (`ocw-<agent id>`). */
+function cellAlsoAllow(agentId: string): string[] {
+  const cell = process.env.OCW_PROOF_CELL ?? "";
+  expect(cell, "OCW_PROOF_CELL names the cell container (scripts/sandbox-proof.sh)").not.toBe("");
+  const config = JSON.parse(docker("exec", cell, "cat", "/home/node/.openclaw/openclaw.json")) as {
+    agents?: { entries?: Record<string, { tools?: { alsoAllow?: string[] } }> };
+  };
+  const id = `ocw-${agentId}`.toLowerCase().replace(/[^a-z0-9_-]/gu, "-"); // openClawAgentIdFor
+  return config.agents?.entries?.[id]?.tools?.alsoAllow ?? [];
+}
+
+const confinedOf = (tools: string[]) =>
+  tools.filter((t) => t.startsWith("ocw_sandbox_") || t.startsWith("ocw_browser_")).sort();
 
 const runningOfOrg = () =>
   docker("ps", "-q", "--filter", `label=ocw.org=${state.org}`).split("\n").filter(Boolean);
@@ -191,16 +208,32 @@ test("1. two bots, both switches on; Scout writes and reads its own file in its 
   state.samId = await ensureMember(ana, SAM, "developer");
   const sam = await apiAs(SAM);
 
+  // One cell change at a time: the plugin coalesces a `cell.config.changed` that arrives while a refresh is in flight
+  // into that refresh (whose GET /cell already ran), so a second change within ~50 ms can be lost until the next one
+  // (seen in this proof; reported for apps/openclaw-channel). Each step waits for the cell before the next change.
   const scout = await freshPersonalBot(ana, state.anaId, "Scout");
-  const echo = await freshPersonalBot(sam, state.samId, "Echo");
-  Object.assign(state, { scoutId: scout.id, scoutDm: scout.dm, echoId: echo.id, echoDm: echo.dm });
   await waitReady(ana, scout.id);
+  const echo = await freshPersonalBot(sam, state.samId, "Echo");
   await waitReady(sam, echo.id);
+  Object.assign(state, { scoutId: scout.id, scoutDm: scout.dm, echoId: echo.id, echoDm: echo.dm });
 
   await enableSandboxOrg(ana);
-  expect(await enableBotSandbox(ana, scout.id)).toEqual({ sandbox: true, browser: false });
+  expect(await enableBotSandbox(ana, scout.id, { sandbox: true, browser: true })).toEqual({
+    sandbox: true,
+    browser: true,
+  });
+  // WINDOWS #240: the real cell's agent entries allow the confined tools (OpenClaw runs only what `alsoAllow` lists).
+  await expect
+    .poll(() => confinedOf(cellAlsoAllow(scout.id)), { timeout: 60_000 })
+    .toEqual([...SANDBOX_TOOL_NAMES, ...BROWSER_TOOL_NAMES].sort());
   expect(await enableBotSandbox(sam, echo.id)).toEqual({ sandbox: true, browser: false });
+  await expect
+    .poll(() => confinedOf(cellAlsoAllow(echo.id)), { timeout: 60_000 })
+    .toEqual([...SANDBOX_TOOL_NAMES].sort());
   record();
+  console.log(
+    `[proof] cell alsoAllow: Scout ${confinedOf(cellAlsoAllow(scout.id)).length} confined tools, Echo ${confinedOf(cellAlsoAllow(echo.id)).length}`,
+  );
 
   const { reply, ms, attempts } = await ask(
     ana,
@@ -209,6 +242,8 @@ test("1. two bots, both switches on; Scout writes and reads its own file in its 
   );
   expect(reply).toContain("Tool ocw_sandbox_exec said: exit 0");
   expect(reply).toContain(MARK);
+  // The turn narrows the agent entry: the API offers no browser tool yet (07.8-14), whatever alsoAllow lists.
+  expect(reply).not.toContain("ocw_browser_");
   state.coldStartMs = ms;
   state.firstExecAttempts = attempts;
   await ana.dispose();
