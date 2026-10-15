@@ -441,3 +441,101 @@ describe("deleting a bot purges its sandbox after the commit (D-01, R11)", () =>
     await c.stop();
   });
 });
+
+describe("a sandboxd restart forgets every policy: the API fails closed and pushes them again (07.8 policy fix)", () => {
+  const policyCalls = (orgId: string) => s.sandboxd.stats().orgs[orgId]?.policy ?? 0;
+  const calls = (op: string, orgId: string) => s.sandboxd.stats().orgs[orgId]?.[op] ?? 0;
+
+  it("a killed organization's exec is still refused after the restart, and nothing starts, even through the client", async () => {
+    const bot = await s.newBot("Killed Restart Bot");
+    expect((await execOf(bot)).status).toBe(200);
+    await ok(s.victor.request("POST", "/api/v1/sandbox/kill") as Promise<Res>);
+    try {
+      expect(s.sandboxd.fake.policyOf(s.orgA)).toEqual({ killed: true });
+      s.sandboxd.fake.reboot();
+      expect(s.sandboxd.fake.policyOf(s.orgA)).toBeNull();
+      const stopped = s.sandboxd.fake.stateOf(target(bot.id));
+      expect(stopped).toBe("killed");
+
+      // The bot's own call: the API refuses before sandboxd (the kill switch in the database).
+      const ensures = calls("ensure", s.orgA);
+      const execs = calls("exec", s.orgA);
+      const r = await execOf(bot);
+      expect(r.status).toBe(403);
+      expect(codeOf(r)).toBe("killed");
+      expect([calls("ensure", s.orgA), calls("exec", s.orgA)]).toEqual([ensures, execs]);
+
+      // Any call that does reach sandboxd: policy_missing → the client pushes the current policy (killed) and retries
+      // once → still killed; the bot's sandbox never runs.
+      const client = s.stack.built.sandbox.client as SandboxdClient;
+      const err = await client.call("ensure", { target: target(bot.id) }).catch((e: unknown) => e);
+      expect(err).toMatchObject({ name: "SandboxdRefusedError", code: "killed" });
+      expect(s.sandboxd.fake.policyOf(s.orgA)).toEqual({ killed: true });
+      expect(s.sandboxd.fake.stateOf(target(bot.id))).toBe("killed");
+      expect(calls("ensure", s.orgA)).toBe(ensures + 2);
+    } finally {
+      await ok(s.victor.request("POST", "/api/v1/sandbox/resume") as Promise<Res>);
+    }
+  });
+
+  it("a live organization's exec succeeds after one transparent re-push", async () => {
+    const bot = await s.newBot("Live Restart Bot");
+    expect((await execOf(bot)).status).toBe(200);
+    s.sandboxd.fake.reboot();
+    expect(s.sandboxd.fake.policyOf(s.orgA)).toBeNull();
+    const pushes = policyCalls(s.orgA);
+    const r = await execOf(bot);
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ status: "exited", exitCode: 0 });
+    expect(policyCalls(s.orgA)).toBe(pushes + 1);
+    expect(s.sandboxd.fake.policyOf(s.orgA)).toEqual({ killed: false });
+    expect(s.sandboxd.fake.stateOf(target(bot.id))).toBe("running");
+  });
+
+  it("the consumer pushes every organization with sandboxes on a new boot id, even one with no event since", async () => {
+    // Organization B has a sandbox row (it ran before) and sends no event after the restart.
+    const bee = (
+      await ok(
+        s.eve.request("POST", "/api/v1/agents", {
+          name: "Quiet Bee",
+          username: "quietbee",
+          instructions: "You are Quiet Bee.",
+          modelProvider: "mock",
+          modelId: "mock-1",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    await s.su.query(
+      "insert into app.bot_sandboxes (organization_id, agent_id, kind, state) values ($1, $2, 'sbx', 'stopped')",
+      [s.orgB, bee],
+    );
+    const c = consumer();
+    await c.runOnce();
+    s.sandboxd.fake.reboot();
+    expect([s.sandboxd.fake.policyOf(s.orgA), s.sandboxd.fake.policyOf(s.orgB)]).toEqual([null, null]);
+    const r = await c.runOnce();
+    expect(r.applied).toBe(0);
+    expect(s.sandboxd.fake.policyOf(s.orgB)).toEqual({ killed: false });
+    expect(s.sandboxd.fake.policyOf(s.orgA)).toEqual({ killed: false });
+    // The same boot again pushes nothing more.
+    const pushes = policyCalls(s.orgB);
+    await c.runOnce();
+    expect(policyCalls(s.orgB)).toBe(pushes);
+    await c.stop();
+  });
+
+  it("app.sandbox_organizations returns organization ids only, is not executable by PUBLIC and is by ocw_app", async () => {
+    const res = await s.su.query("select * from app.sandbox_organizations(null, 10)");
+    expect(res.fields.map((f) => f.name)).toEqual(["organization_id"]);
+    expect(res.rows.map((r) => r.organization_id)).toEqual(expect.arrayContaining([s.orgA, s.orgB]));
+    const priv = (
+      await s.su.query(
+        `select has_function_privilege('public', 'app.sandbox_organizations(uuid, integer)', 'execute') as pub,
+                has_function_privilege('ocw_app', 'app.sandbox_organizations(uuid, integer)', 'execute') as app,
+                p.prosecdef as definer
+           from pg_proc p where p.oid = 'app.sandbox_organizations(uuid, integer)'::regprocedure`,
+      )
+    ).rows[0];
+    expect(priv).toEqual({ pub: false, app: true, definer: true });
+  });
+});

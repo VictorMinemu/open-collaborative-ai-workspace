@@ -4,6 +4,7 @@ import { createFiles, OCW_FILES } from "./files";
 import { createSandboxes, type RunOptions, type RunResult, type WorkspaceHandle } from "./sandboxes";
 import { nameFor } from "./spec";
 import { type ExecCall, FakeDocker } from "./testing/fake-docker";
+import { testPolicy } from "./testing/policy";
 
 const ORG = "0199f0a0-0000-7000-8000-00000000000a";
 const AGENT = "0199f0a0-1111-7000-8000-00000000000b";
@@ -377,6 +378,7 @@ describe("files through sandboxd's containers (D-01, D-04, D-09, T-07.8-09-02)",
   it("runs ocw-files as 10001 in the running sbx, with bytes on stdin and no archive API call", async () => {
     const { docker, seen } = helperDocker();
     const sandboxes = createSandboxes({ docker, ns: NS, runtime: "auto", image: "sbx:test" });
+    sandboxes.setPolicy(testPolicy(ORG));
     await sandboxes.ensure(target);
     const files = createFiles({
       sandboxes,
@@ -402,6 +404,7 @@ describe("files through sandboxd's containers (D-01, D-04, D-09, T-07.8-09-02)",
   it("on a stopped sandbox, uses a files helper on the same volume with no network, and leaves the sbx stopped", async () => {
     const { docker, seen } = helperDocker();
     const sandboxes = createSandboxes({ docker, ns: NS, runtime: "auto", image: "sbx:test" });
+    sandboxes.setPolicy(testPolicy(ORG));
     await sandboxes.ensure(target);
     await sandboxes.stop({ target, reason: "user" });
     const files = createFiles({
@@ -444,6 +447,7 @@ describe("files through sandboxd's containers (D-01, D-04, D-09, T-07.8-09-02)",
   it("a bot with no workspace volume → 404 not_found and no helper is created", async () => {
     const { docker } = helperDocker();
     const sandboxes = createSandboxes({ docker, ns: NS, runtime: "auto", image: "sbx:test" });
+    sandboxes.setPolicy(testPolicy(ORG));
     const files = createFiles({
       sandboxes,
       quota: { assertRoom: async () => 0, afterWrite: () => {}, afterChange: async () => {} },
@@ -458,6 +462,7 @@ describe("files through sandboxd's containers (D-01, D-04, D-09, T-07.8-09-02)",
   it("refuses a files helper whose labels name another bot (409 label_mismatch, no exec)", async () => {
     const { docker, seen } = helperDocker();
     const sandboxes = createSandboxes({ docker, ns: NS, runtime: "auto", image: "sbx:test" });
+    sandboxes.setPolicy(testPolicy(ORG));
     await sandboxes.ensure(target);
     await sandboxes.stop({ target, reason: "user" });
     docker.containers.set(nameFor("files", NS, AGENT), {
@@ -505,6 +510,7 @@ describe("files routes on the sandboxd server", () => {
       return { exitCode: 0 };
     };
     const sandboxes = createSandboxes({ docker, ns: NS, runtime: "auto", image: "sbx:test" });
+    sandboxes.setPolicy(testPolicy(ORG));
     await sandboxes.ensure(target);
     const files = createFiles({
       sandboxes,
@@ -607,6 +613,7 @@ describe("transfer body limits (07.8-11: the API sends up to 50 MiB as base64 JS
       return { exitCode: 0 };
     };
     const sandboxes = createSandboxes({ docker, ns: NS, runtime: "auto", image: "sbx:test" });
+    sandboxes.setPolicy(testPolicy(ORG));
     await sandboxes.ensure(target);
     const files = createFiles({
       sandboxes,

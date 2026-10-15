@@ -38,6 +38,58 @@ export const IMPLEMENTED_OPS = [
 ] as const satisfies readonly SandboxdOp[];
 type ImplementedOp = (typeof IMPLEMENTED_OPS)[number];
 
+/**
+ * What each op needs from the organization's pushed policy (07.8 policy fix; D-09, the kill switch). sandboxd keeps
+ * policies in memory only and has no default, so after a restart it knows none until the API pushes them again:
+ * - `run`: the op creates, starts or runs a container (the bot's shell, its browser, an installer). It needs a policy
+ *   (else 409 `policy_missing`) and refuses a killed organization (409 `killed`).
+ * - `policy`: the op writes into the workspace and needs the quota (else 409 `policy_missing`); people keep these on a
+ *   killed organization, as before.
+ * - `none`: reads, deletes, stops, kills, purges, usage, the feed and the policy op itself, which start nothing (a
+ *   person's file op on a stopped sandbox uses the network-none files helper).
+ * Every contract op is classified here (a `Record`), so a later plan that implements an op inherits its gate.
+ */
+export const POLICY_GATE: Record<SandboxdOp, "run" | "policy" | "none"> = {
+  info: "none",
+  ensure: "run",
+  exec: "run",
+  process: "none",
+  stop: "none",
+  restart: "run",
+  kill: "none",
+  killOrg: "none",
+  purge: "none",
+  usage: "none",
+  policy: "none",
+  filesList: "none",
+  filesStat: "none",
+  filesRead: "none",
+  filesWrite: "policy",
+  filesDelete: "none",
+  filesUpload: "policy",
+  filesDownload: "none",
+  filesImport: "policy",
+  events: "none",
+  browserEnsure: "run",
+  contextOpen: "run",
+  contextNavigate: "run",
+  contextSnapshot: "run",
+  contextAct: "run",
+  contextScreenshot: "run",
+  contextWait: "run",
+  contextExportState: "none",
+  contextClose: "none",
+  contextHold: "run",
+  contextTakeover: "run",
+  contextResize: "run",
+  contextFrames: "none",
+  contextInput: "run",
+  contextDownload: "none",
+  packageReview: "run",
+  packageInstall: "run",
+  packageRemove: "run",
+};
+
 /** Request bodies above this are refused before parsing (exec argv is at most 64 × 8 KiB). */
 export const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -235,6 +287,12 @@ export function createServer(options: ServerOptions): http.Server {
     }
     if (transfer) transfers += 1;
     try {
+      const gate = POLICY_GATE[op];
+      if (gate !== "none") {
+        // An op that names no organization cannot be checked: refused as if it had no policy (fail closed).
+        if (!ids.orgId) throw new SandboxdFailure("policy_missing", 409, "no organization to check");
+        sandboxes.requirePolicy(ids.orgId, { runnable: gate === "run" });
+      }
       const handler = handlers[op] as (input: unknown) => unknown;
       const result = await handler(parsed.data);
       const out = route.output.safeParse(result);

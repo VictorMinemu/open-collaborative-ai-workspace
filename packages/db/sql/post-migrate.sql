@@ -349,3 +349,18 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
 $fn$;
 REVOKE ALL ON FUNCTION app.pending_ai_queues(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.pending_ai_queues(integer) TO ocw_app;
+
+-- Sandbox policy re-push (07.8 policy fix; D-09, the kill switch): sandboxd keeps every organization's policy in memory
+-- only and refuses to start anything without one, so after it restarts the API's events consumer pushes the policy of
+-- every organization that has a sandbox row. Organization ids only, keyset-paged by id; the consumer then reads each
+-- policy inside that organization's own withTenant() transaction.
+CREATE OR REPLACE FUNCTION app.sandbox_organizations(p_after uuid, p_limit integer)
+RETURNS TABLE (organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT DISTINCT b.organization_id FROM app.bot_sandboxes b
+  WHERE p_after IS NULL OR b.organization_id > p_after
+  ORDER BY b.organization_id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.sandbox_organizations(uuid, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.sandbox_organizations(uuid, integer) TO ocw_app;

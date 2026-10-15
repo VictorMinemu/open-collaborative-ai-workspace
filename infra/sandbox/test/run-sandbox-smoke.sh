@@ -9,8 +9,14 @@
 # stop (`idle`) and the event feed the API long-polls (`events`: boot id, long poll, crash detection, and no path,
 # argv or content in any event). sandboxd runs with a 3 s sweep here (OCW_SANDBOXD_SWEEP_MS).
 #
-# Usage (repo root):  bash infra/sandbox/test/run-sandbox-smoke.sh [--only core,files,quota,idle,events]
-#   --only <list>          run only these sections (comma separated): core, files, quota, idle, events; default all
+# The 07.8 policy fix adds the restart section: sandboxd has no default policy, so every section pushes its
+# organization's policy first (as the API does); then sandboxd is restarted mid-run (a new boot id, every policy
+# forgotten) and a killed organization stays killed: `policy_missing` until the policy is pushed again, `killed` after,
+# its container never started, while a live organization runs again after one push.
+#
+# Usage (repo root):  bash infra/sandbox/test/run-sandbox-smoke.sh [--only core,files,quota,idle,events,restart]
+#   --only <list>          run only these sections (comma separated): core, files, quota, idle, events, restart;
+#                          default all
 #   DOCKER_SOCKET=<path>   the daemon socket (default: the current docker context's unix socket)
 #
 # Every Docker object it creates carries `ocw.namespace=ocw-smoke-<pid>` and is removed by that label before the run
@@ -34,7 +40,7 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-SECTIONS="core files quota idle events"
+SECTIONS="core files quota idle events restart"
 for s in ${ONLY//,/ }; do
   if [ "$s" != all ] && [[ " $SECTIONS " != *" $s "* ]]; then
     printf 'unknown section: %s (known: %s)\n' "$s" "$SECTIONS" >&2
@@ -201,29 +207,55 @@ fi
 
 # ---------------------------------------------------------------- sandboxd as a host process
 
-OCW_SANDBOX_TOKEN="$TOKEN" OCW_SANDBOX_NAMESPACE="$NS" OCW_SANDBOXD_HOST=127.0.0.1 OCW_SANDBOXD_PORT=0 \
-  OCW_SANDBOX_RUNTIME=auto OCW_SANDBOX_SBX_IMAGE="$IMAGE" OCW_SANDBOXD_SWEEP_MS=3000 \
-  node --import tsx apps/sandboxd/src/main.ts >"$WORK/sandboxd.log" 2>&1 &
-SANDBOXD_PID=$!
-
-PORT=""
-for _ in $(seq 1 100); do
-  PORT="$(node -e '
-    const lines = require("fs").readFileSync(process.argv[1], "utf8").split("\n");
-    for (const l of lines) { try { const j = JSON.parse(l); if (j.msg === "listening") { process.stdout.write(String(j.port)); break; } } catch {} }
-  ' "$WORK/sandboxd.log" 2>/dev/null || true)"
-  [ -n "$PORT" ] && break
-  if ! kill -0 "$SANDBOXD_PID" 2>/dev/null; then
-    log "FAIL sandboxd exited"
+# start_sandboxd: one sandboxd process (its log appended to $WORK/sandboxd.log); sets SANDBOXD_PID and PORT.
+start_sandboxd() {
+  local from
+  from="$(wc -l <"$WORK/sandboxd.log" 2>/dev/null | tr -d ' ' || echo 0)"
+  OCW_SANDBOX_TOKEN="$TOKEN" OCW_SANDBOX_NAMESPACE="$NS" OCW_SANDBOXD_HOST=127.0.0.1 OCW_SANDBOXD_PORT=0 \
+    OCW_SANDBOX_RUNTIME=auto OCW_SANDBOX_SBX_IMAGE="$IMAGE" OCW_SANDBOXD_SWEEP_MS=3000 \
+    node --import tsx apps/sandboxd/src/main.ts >>"$WORK/sandboxd.log" 2>&1 &
+  SANDBOXD_PID=$!
+  PORT=""
+  for _ in $(seq 1 100); do
+    PORT="$(node -e '
+      const lines = require("fs").readFileSync(process.argv[1], "utf8").split("\n").slice(Number(process.argv[2]));
+      for (const l of lines) { try { const j = JSON.parse(l); if (j.msg === "listening") { process.stdout.write(String(j.port)); break; } } catch {} }
+    ' "$WORK/sandboxd.log" "${from:-0}" 2>/dev/null || true)"
+    [ -n "$PORT" ] && break
+    if ! kill -0 "$SANDBOXD_PID" 2>/dev/null; then
+      log "FAIL sandboxd exited"
+      exit 1
+    fi
+    sleep 0.2
+  done
+  [ -n "$PORT" ] || {
+    log "FAIL sandboxd did not listen"
     exit 1
-  fi
-  sleep 0.2
-done
-[ -n "$PORT" ] || {
-  log "FAIL sandboxd did not listen"
-  exit 1
+  }
 }
+
+# stop_sandboxd: ends the sandboxd process (its containers, volumes and networks stay, as on a real restart).
+stop_sandboxd() {
+  kill "$SANDBOXD_PID" 2>/dev/null || true
+  wait "$SANDBOXD_PID" 2>/dev/null || true
+  SANDBOXD_PID=""
+}
+
+: >"$WORK/sandboxd.log"
+start_sandboxd
 ok "sandboxd listening on 127.0.0.1:${PORT}"
+
+MIB=1048576
+
+# policy_json <org> <diskQuotaBytes> <idleStopMs> [killed] [version]: the organization's policy as the API pushes it
+# (11). sandboxd has no default: nothing starts for an organization until its policy is pushed.
+policy_json() {
+  printf '{"orgId":"%s","sandboxEgress":"off","browserEgress":"off","allowHosts":[],"privateHosts":[],"limits":{"nanoCpus":1000000000,"memoryBytes":1073741824,"pids":256,"diskQuotaBytes":%s,"idleStopMs":%s},"browserLimits":{"nanoCpus":1000000000,"memoryBytes":2147483648,"pids":512,"diskQuotaBytes":%s,"idleStopMs":300000},"killed":%s,"version":%s}' \
+    "$1" "$2" "$3" "$2" "${4:-false}" "${5:-1}"
+}
+
+# push_policy <org> [killed] [version]: a 2 GiB quota and 15 minutes idle → the HTTP status.
+push_policy() { api POST /v1/policy "$(policy_json "$1" $((2048 * MIB)) 900000 "${2:-false}" "${3:-1}")"; }
 
 # ---------------------------------------------------------------- info and the token
 
@@ -242,6 +274,9 @@ status="$(api GET /v1/info "" "")"
 
 section_core() {
   # ---------------------------------------------------------------- ensure bot A
+
+  status="$(push_policy "$ORG")"
+  [ "$status" = 200 ] && ok "policy for the core org → 200" || fail "core: policy → ${status} $(cat "$WORK/body.json")"
 
   status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$ORG" "$A")}")"
   if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" state)" = running ]; then
@@ -487,6 +522,8 @@ sha_of() { node -e 'process.stdout.write(require("crypto").createHash("sha256").
 section_files() {
   FO="$(uuid)"
   FA="$(uuid)"
+  status="$(push_policy "$FO")"
+  [ "$status" = 200 ] || fail "files: policy → ${status} $(cat "$WORK/body.json")"
   status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$FO" "$FA")}")"
   [ "$status" = 200 ] && ok "files: ensure F → running" || fail "files: ensure F → ${status} $(cat "$WORK/body.json")"
   CID_F="$(docker ps -q --filter "label=ocw.namespace=${NS}" --filter "label=ocw.agent=${FA}" --filter "label=ocw.kind=sbx")"
@@ -606,12 +643,6 @@ section_files() {
 
 # ================================================================ sections: quota and idle (07.8-09 Task 2; D-01, D-09, F-9)
 
-# policy_json <org> <diskQuotaBytes> <idleStopMs>: the organization's policy as the API pushes it (11).
-policy_json() {
-  printf '{"orgId":"%s","sandboxEgress":"off","browserEgress":"off","allowHosts":[],"privateHosts":[],"limits":{"nanoCpus":1000000000,"memoryBytes":1073741824,"pids":256,"diskQuotaBytes":%s,"idleStopMs":%s},"browserLimits":{"nanoCpus":1000000000,"memoryBytes":2147483648,"pids":512,"diskQuotaBytes":%s,"idleStopMs":300000},"killed":false}' \
-    "$1" "$2" "$3" "$2"
-}
-
 # usage_of <org> <agent> <field>: one bot's field from the usage op.
 usage_of() {
   api POST /v1/usage "{\"orgId\":\"$1\"}" >/dev/null
@@ -630,8 +661,6 @@ wait_stopped() {
   done
   return 1
 }
-
-MIB=1048576
 
 section_quota() {
   QO="$(uuid)"
@@ -759,6 +788,8 @@ all_events() {
 section_events() {
   EO="$(uuid)"
   EA="$(uuid)"
+  status="$(push_policy "$EO")"
+  [ "$status" = 200 ] || fail "events: policy → ${status} $(cat "$WORK/body.json")"
   status="$(events_get 0 0)"
   BOOT="$(jfield "$WORK/events.json" bootId)"
   if [ "$status" = 200 ] && printf '%s' "$BOOT" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'; then
@@ -864,6 +895,114 @@ section_events() {
   fi
 }
 
+# ================================================================ section: restart (07.8 policy fix; D-09, the kill switch)
+
+# shell_of <agent>: the bot's sbx container id (running or not).
+shell_of() { docker ps -aq --filter "label=ocw.namespace=${NS}" --filter "label=ocw.agent=$1" --filter "label=ocw.kind=sbx"; }
+
+section_restart() {
+  KO="$(uuid)"
+  KA="$(uuid)"
+  LO="$(uuid)"
+  LA="$(uuid)"
+  # A fresh sandboxd has no policy and no default: nothing starts for an organization it was not told about.
+  status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$KO" "$KA")}")"
+  if [ "$status" = 409 ] && [ "$(jfield "$WORK/body.json" error.code)" = policy_missing ] && [ -z "$(shell_of "$KA")" ]; then
+    ok "restart: ensure before any policy → 409 policy_missing, no container created"
+  else
+    fail "restart: ensure without policy → ${status} $(cat "$WORK/body.json") containers=$(shell_of "$KA")"
+  fi
+
+  for o in "$KO" "$LO"; do
+    status="$(push_policy "$o")"
+    [ "$status" = 200 ] || fail "restart: policy → ${status}"
+  done
+  api POST /v1/sandboxes/ensure "{\"target\":$(target "$KO" "$KA")}" >/dev/null
+  api POST /v1/sandboxes/ensure "{\"target\":$(target "$LO" "$LA")}" >/dev/null
+  run_in "$KO" "$KA" '["sh","-c","echo kept > kept.txt"]' >/dev/null
+  CID_K="$(shell_of "$KA")"
+  CID_L="$(shell_of "$LA")"
+  # The admin kills organization K: the API stops its containers and pushes killed (a new settings version).
+  status="$(api POST /v1/orgs/kill "{\"orgId\":\"${KO}\"}")"
+  [ "$status" = 200 ] || fail "restart: killOrg → ${status}"
+  status="$(push_policy "$KO" true 2)"
+  [ "$status" = 200 ] || fail "restart: killed policy → ${status}"
+  if [ -n "$CID_K" ] && [ "$(running_of "$CID_K")" = false ] && [ "$(running_of "$CID_L")" = true ]; then
+    ok "restart: org K killed (its sbx stopped), org L running"
+  else
+    fail "restart: before the restart K=$(running_of "$CID_K") L=$(running_of "$CID_L")"
+  fi
+
+  # sandboxd restarts mid-run: a new process, a new boot id, every policy forgotten; Docker's objects stay.
+  status="$(events_get 0 0)"
+  BOOT_BEFORE="$(jfield "$WORK/events.json" bootId)"
+  stop_sandboxd
+  start_sandboxd
+  status="$(events_get 0 0)"
+  BOOT_AFTER="$(jfield "$WORK/events.json" bootId)"
+  if [ "$status" = 200 ] && [ -n "$BOOT_AFTER" ] && [ "$BOOT_AFTER" != "$BOOT_BEFORE" ]; then
+    ok "restart: sandboxd restarted on port ${PORT} with a new boot id"
+  else
+    fail "restart: boot id ${BOOT_BEFORE} → ${BOOT_AFTER} (${status})"
+  fi
+
+  # The killed organization, before the API pushes again: nothing may start or run.
+  refused=0
+  for req in "ensure" "restart" "exec"; do
+    if [ "$req" = exec ]; then body="$(exec_json "$KO" "$KA" '["true"]')"; else body="{\"target\":$(target "$KO" "$KA")}"; fi
+    status="$(api POST "/v1/sandboxes/${req}" "$body")"
+    if [ "$status" = 409 ] && [ "$(jfield "$WORK/body.json" error.code)" = policy_missing ]; then
+      refused=$((refused + 1))
+    else
+      fail "restart: ${req} for killed K without a policy → ${status} $(cat "$WORK/body.json")"
+    fi
+  done
+  status="$(api POST /v1/files/write "$(path_json "$KO" "$KA" new.txt '"content":"x","encoding":"utf8","mode":"create"')")"
+  [ "$status" = 409 ] && [ "$(jfield "$WORK/body.json" error.code)" = policy_missing ] && refused=$((refused + 1)) ||
+    fail "restart: write for K without a policy → ${status}"
+  if [ "$refused" = 4 ] && [ "$(running_of "$CID_K")" = false ] && [ "$(shell_of "$KA")" = "$CID_K" ]; then
+    ok "restart: org K without a policy → ensure, restart, exec and write 409 policy_missing; its sbx stays stopped, no new container"
+  fi
+  status="$(api POST /v1/files/read "$(path_json "$KO" "$KA" kept.txt)")"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" content)" = "$(printf 'kept\n')" ] && [ "$(running_of "$CID_K")" = false ]; then
+    ok "restart: people still read org K's files through the helper; its sbx stays stopped"
+  else
+    fail "restart: read for K → ${status} sbx=$(running_of "$CID_K")"
+  fi
+
+  # The API pushes K's current policy: still killed. A stale push (an older version) cannot undo it.
+  status="$(push_policy "$KO" true 2)"
+  [ "$status" = 200 ] || fail "restart: re-push K → ${status}"
+  status="$(push_policy "$KO" false 1)"
+  [ "$status" = 200 ] || fail "restart: stale push K → ${status}"
+  killed=0
+  for req in "ensure" "restart" "exec"; do
+    if [ "$req" = exec ]; then body="$(exec_json "$KO" "$KA" '["true"]')"; else body="{\"target\":$(target "$KO" "$KA")}"; fi
+    status="$(api POST "/v1/sandboxes/${req}" "$body")"
+    if [ "$status" = 409 ] && [ "$(jfield "$WORK/body.json" error.code)" = killed ]; then
+      killed=$((killed + 1))
+    else
+      fail "restart: ${req} for K after the re-push → ${status} $(cat "$WORK/body.json")"
+    fi
+  done
+  if [ "$killed" = 3 ] && [ "$(running_of "$CID_K")" = false ]; then
+    ok "restart: org K after the re-push (and a stale killed=false push) → ensure, restart, exec 409 killed; its sbx never started"
+  fi
+
+  # The live organization: its container survived the restart, but nothing runs in it until the policy is back.
+  status="$(run_in "$LO" "$LA" '["true"]')"
+  [ "$status" = 409 ] && [ "$(jfield "$WORK/body.json" error.code)" = policy_missing ] &&
+    ok "restart: org L exec before the re-push → 409 policy_missing" || fail "restart: L exec without a policy → ${status}"
+  status="$(push_policy "$LO")"
+  [ "$status" = 200 ] || fail "restart: re-push L → ${status}"
+  status="$(run_in "$LO" "$LA" '["sh","-c","echo back"]')"
+  if [ "$status" = 200 ] && exited_with 0 && [ "$(jfield "$WORK/body.json" stdout)" = "$(printf 'back\n')" ]; then
+    ok "restart: org L after one re-push → exec runs again"
+  else
+    fail "restart: L exec after the re-push → ${status} $(cat "$WORK/body.json")"
+  fi
+}
+
 # ================================================================ run the chosen sections
 
 if want core; then section_core; fi
@@ -871,6 +1010,7 @@ if want files; then section_files; fi
 if want quota; then section_quota; fi
 if want idle; then section_idle; fi
 if want events; then section_events; fi
+if want restart; then section_restart; fi
 
 if [ "$FAILURES" != 0 ]; then
   log "${FAILURES} check(s) failed"

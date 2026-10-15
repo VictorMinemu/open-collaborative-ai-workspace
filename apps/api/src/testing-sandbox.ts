@@ -8,6 +8,7 @@ import {
   type FakeSandboxd,
   type FakeSandboxdStats,
 } from "../../../infra/fake-model/fake-sandboxd.mjs";
+import { pushPolicy } from "./modules/sandbox";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "./testing";
 
 /**
@@ -268,6 +269,10 @@ async function prepare(
       );
     }
   };
+
+  // sandboxd holds no default policy. In production the events consumer pushes every organization's policy on its first
+  // poll; the app starts none under NODE_ENV=test, so the fixture does that push once here.
+  for (const orgId of [orgA, orgB]) await pushPolicy(stack.built.core, stack.built.sandbox.client, orgId);
 
   return {
     stack,

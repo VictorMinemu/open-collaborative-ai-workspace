@@ -210,6 +210,7 @@ describe("PUT /api/v1/sandbox/settings: versioned, validated, audited, pushed", 
         idleStopMs: 5 * 60_000,
       },
       killed: false,
+      version: 1,
     });
     expect(s.sandboxd.fake.policyOf(s.orgA)).toEqual({ killed: false });
   });
