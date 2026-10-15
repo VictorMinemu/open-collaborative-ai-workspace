@@ -2,6 +2,7 @@ import type { AddressInfo } from "node:net";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Docker, DockerMethod, DockerRequestOptions, DockerResponse } from "./docker";
+import { createFiles } from "./files";
 import { createSandboxes, type RuntimeSetting, startupRefusal } from "./sandboxes";
 import { createServer, tokenMatches } from "./server";
 import { nameFor } from "./spec";
@@ -139,6 +140,10 @@ class FakeDocker implements Docker {
     return s;
   }
 
+  async stream(): Promise<PassThrough> {
+    return new PassThrough();
+  }
+
   get execCreates() {
     return this.calls.filter((c) => c.method === "POST" && /\/exec$/.test(c.path));
   }
@@ -155,7 +160,11 @@ afterEach(() => {
 
 async function start(docker: FakeDocker, runtime: RuntimeSetting = "auto") {
   const sandboxes = createSandboxes({ docker, ns: NS, runtime, image: "ocw-sandbox-sbx:test" });
-  const server = createServer({ token: TOKEN, sandboxes });
+  const files = createFiles({
+    sandboxes,
+    quota: { assertRoom: async () => 0, afterWrite: () => {}, afterChange: async () => {} },
+  });
+  const server = createServer({ token: TOKEN, sandboxes, files });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   servers.push(server);
   const { port } = server.address() as AddressInfo;

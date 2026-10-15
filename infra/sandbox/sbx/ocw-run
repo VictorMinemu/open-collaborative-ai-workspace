@@ -40,6 +40,19 @@ if [ "${1:-}" = "--" ]; then shift; fi
 
 umask 077
 mkdir -p "$DIR"
+# Forget the records of process groups that are gone, so /tmp/ocw-proc does not grow with every exec. A group is gone
+# when no process is left in it (`kill -0 -<pgid>`); sandboxd only ever sends --kill for a live record.
+for f in "$DIR"/*; do
+  [ -f "$f" ] || continue
+  pg="$(cat "$f" 2>/dev/null)" || continue
+  case "$pg" in
+    "" | *[!0-9]*)
+      rm -f -- "$f"
+      continue
+      ;;
+  esac
+  kill -0 -- "-$pg" 2>/dev/null || rm -f -- "$f"
+done
 # `exec` keeps this pid; GNU timeout calls setpgid(0, 0), so the group id is this pid and covers argv's children.
 echo "$$" >"$DIR/$id"
 exec timeout -s KILL "$seconds" "$@"

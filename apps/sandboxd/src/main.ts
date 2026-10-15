@@ -1,9 +1,13 @@
 import type { SandboxdInfo } from "@ocw/contracts";
 import { z } from "zod";
 import { createDocker } from "./docker";
+import { createEvents } from "./events";
+import { createFiles } from "./files";
+import { createQuota } from "./quota";
 import { createSandboxes, startupRefusal } from "./sandboxes";
 import { createServer, type LogLine } from "./server";
 import { NAMESPACE_RE } from "./spec";
+import { createSweeper, SWEEP_INTERVAL_MS } from "./sweeper";
 
 /**
  * The sandbox broker (07.8-04, D-11 option b). The only process with the Docker socket: it never calls the API and
@@ -17,6 +21,8 @@ import { NAMESPACE_RE } from "./spec";
  *   OCW_SANDBOX_RUNTIME     auto | runsc | runc (default auto: runsc when the daemon has it)
  *   OCW_SANDBOX_SBX_IMAGE   the `sbx` image reference (digest or tag)
  *   DOCKER_SOCKET           the daemon socket (default /var/run/docker.sock)
+ *   OCW_SANDBOXD_SWEEP_MS   the sweep interval: quota, idle stop, usage, files helpers (default 60000; smokes
+ *                           use a few seconds)
  */
 const Env = z.object({
   OCW_SANDBOX_TOKEN: z.string().min(32, "OCW_SANDBOX_TOKEN must be at least 32 characters"),
@@ -28,6 +34,7 @@ const Env = z.object({
   OCW_SANDBOX_RUNTIME: z.enum(["auto", "runsc", "runc"]).default("auto"),
   OCW_SANDBOX_SBX_IMAGE: z.string().min(1).max(300).default("ocw-sandbox-sbx:local"),
   DOCKER_SOCKET: z.string().min(1).default("/var/run/docker.sock"),
+  OCW_SANDBOXD_SWEEP_MS: z.coerce.number().int().min(1000).max(3_600_000).default(SWEEP_INTERVAL_MS),
 });
 
 function writeLog(line: LogLine) {
@@ -45,11 +52,14 @@ async function main() {
   const env = parsed.data;
 
   const docker = createDocker({ socketPath: env.DOCKER_SOCKET });
+  // Lifecycle and usage events for the API's long poll (ids, kinds, states and sizes only).
+  const events = createEvents();
   const sandboxes = createSandboxes({
     docker,
     ns: env.OCW_SANDBOX_NAMESPACE,
     runtime: env.OCW_SANDBOX_RUNTIME,
     image: env.OCW_SANDBOX_SBX_IMAGE,
+    onEvent: (event) => events.emit(event),
   });
 
   let info: SandboxdInfo | null = null;
@@ -82,14 +92,35 @@ async function main() {
     }
   }
 
-  const server = createServer({ token: env.OCW_SANDBOX_TOKEN, sandboxes, log: writeLog });
+  const quota = createQuota({ sandboxes });
+  const files = createFiles({ sandboxes, quota });
+  const sweeper = createSweeper({
+    sandboxes,
+    quota,
+    intervalMs: env.OCW_SANDBOXD_SWEEP_MS,
+    // The step and the error's name only: never a path, an argv or content.
+    onError: (step, err) =>
+      writeLog({
+        level: "warn",
+        msg: "sweep failed",
+        step,
+        error: err instanceof Error ? err.name : "unknown",
+      }),
+  });
+  const server = createServer({ token: env.OCW_SANDBOX_TOKEN, sandboxes, files, events, log: writeLog });
+  let stopWatching = () => {};
   server.listen(env.OCW_SANDBOXD_PORT, env.OCW_SANDBOXD_HOST, () => {
     const address = server.address();
     const port = typeof address === "object" && address ? address.port : env.OCW_SANDBOXD_PORT;
-    writeLog({ level: "info", msg: "listening", host: env.OCW_SANDBOXD_HOST, port });
+    writeLog({ level: "info", msg: "listening", host: env.OCW_SANDBOXD_HOST, port, bootId: events.bootId });
+    sweeper.start();
+    stopWatching = sandboxes.watch();
   });
 
   const shutdown = () => {
+    sweeper.stop();
+    stopWatching();
+    events.close();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 5_000).unref();
   };

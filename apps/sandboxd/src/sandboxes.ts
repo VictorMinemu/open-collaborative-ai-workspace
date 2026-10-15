@@ -1,24 +1,30 @@
 import { randomBytes } from "node:crypto";
-import type { Duplex } from "node:stream";
+import type { Duplex, Readable } from "node:stream";
 import {
+  Id,
   SANDBOX_LIMITS,
   SANDBOXD_LABELS,
   type SandboxdErrorCode,
+  type SandboxdEvent,
   type SandboxdExec,
   type SandboxdExecResult,
   type SandboxdInfo,
+  type SandboxdOrgPolicy,
   type SandboxdProcess,
   type SandboxdSandboxStatus,
   type SandboxdStop,
   type SandboxdTarget,
+  type SandboxdUsage,
   type SandboxRuntime,
   type SandboxState,
+  type SandboxStopReason,
 } from "@ocw/contracts";
 import { type Docker, DockerUnavailableError, demux } from "./docker";
 import {
   type ContainerLimits,
   DEFAULT_SBX_LIMITS,
   type DockerRuntime,
+  filesSpec,
   nameFor,
   networkSpec,
   OCW_RUN,
@@ -44,6 +50,14 @@ const FINISHED_RETENTION_MS = 10 * 60_000;
 /** Extra time over the exec timeout before sandboxd kills the process group itself (ocw-run normally has). */
 const TIMEOUT_GRACE_MS = 5_000;
 const EXEC_POLL_MS = 250;
+const RUN_MAX_STDOUT = 1024 * 1024;
+const RUN_TIMEOUT_MS = 60_000;
+const STDIN_CHUNK = 64 * 1024;
+/** A broker-caused stop is matched to its `die` event within this window. */
+const EXPECTED_STOP_MS = 60_000;
+const WATCH_RETRY_MS = 2_000;
+/** A Docker event line longer than this is dropped (they are a few hundred bytes). */
+const MAX_EVENT_LINE = 64 * 1024;
 
 /** A refusal with its sandboxd error code and HTTP status. The message is fixed text, never request content. */
 export class SandboxdFailure extends Error {
@@ -78,6 +92,25 @@ export interface Clock {
   now(): number;
 }
 
+/** One event as the broker emits it; the feed (events.ts) adds `seq` and `at`. Ids, kinds, states and sizes only. */
+export type SandboxdEventInput = SandboxdEvent extends infer E
+  ? E extends SandboxdEvent
+    ? Omit<E, "seq" | "at">
+    : never
+  : never;
+
+/** The research defaults until the API pushes the organization's policy: 2 GiB soft quota, 15 minutes idle. */
+export const DEFAULT_DISK_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
+export const DEFAULT_IDLE_STOP_MS = SANDBOX_LIMITS.idleStopMinutes * 60_000;
+
+/** What sandboxd enforces for one organization's `sbx` (from its pushed policy, else the defaults). */
+export interface EffectiveLimits {
+  container: ContainerLimits;
+  diskQuotaBytes: number;
+  idleStopMs: number;
+  killed: boolean;
+}
+
 export interface SandboxesOptions {
   docker: Docker;
   ns: string;
@@ -85,6 +118,30 @@ export interface SandboxesOptions {
   image: string;
   clock?: Clock;
   limits?: ContainerLimits;
+  /** Every lifecycle change and usage sample (the event feed, 07.8-09 Task 3). */
+  onEvent?: (event: SandboxdEventInput) => void;
+}
+
+/** Where a file operation runs: the bot's running `sbx`, or its network-none `files` helper on the same volume. */
+export interface WorkspaceHandle {
+  containerId: string;
+  kind: "sbx" | "files";
+}
+
+export interface RunOptions {
+  /** Bytes for the helper's stdin (file content); the stream is half-closed after the last byte. */
+  stdin?: Buffer;
+  /** stdout beyond this is dropped and `overflow` is set (default 1 MiB). */
+  maxStdout?: number;
+  /** Backstop for a helper that never ends (default 60 s). */
+  timeoutMs?: number;
+}
+
+export interface RunResult {
+  /** The helper's exit code; -1 when it could not be read. */
+  exitCode: number;
+  stdout: Buffer;
+  overflow: boolean;
 }
 
 export interface Sandboxes {
@@ -98,6 +155,45 @@ export interface Sandboxes {
   killOrg(orgId: string): Promise<{ removed: number }>;
   purge(target: SandboxdTarget): Promise<{ removed: number }>;
   reconcile(): Promise<{ containers: number; networks: number; volumes: number }>;
+  /**
+   * The container a file operation runs in: the running `sbx`, else the bot's `files` helper (created or started on
+   * the same volume, no network). A stopped or killed `sbx` stays stopped. 404 when the bot has no workspace.
+   */
+  workspace(target: SandboxdTarget, options?: { touch?: boolean }): Promise<WorkspaceHandle>;
+  /** Runs one helper argv as 10001 in /workspace of that container; stderr is discarded, never logged. */
+  run(handle: WorkspaceHandle, cmd: string[], options?: RunOptions): Promise<RunResult>;
+  /** The bot's sandbox as sandboxd sees it now (inspect plus the broker's disk and stop state). */
+  status(target: SandboxdTarget): Promise<SandboxdSandboxStatus>;
+
+  // ------------------------------------------------------------ policy, quota, idle and usage (07.8-09 Task 2)
+
+  /** The organization's limits and kill state as pushed by the API (`policy`); egress fields are the proxy's (13). */
+  setPolicy(policy: SandboxdOrgPolicy): void;
+  limitsFor(orgId: string): EffectiveLimits;
+  /** Per bot: state, cumulative CPU since the container started, and the last measured disk. */
+  usage(orgId: string): Promise<SandboxdUsage>;
+  recordDisk(target: SandboxdTarget, bytes: number): void;
+  isDiskFull(target: SandboxdTarget): boolean;
+  /** Over quota: `ensure` refuses `disk_full`; a running `sbx` stops with that reason (one usage, one state event). */
+  markDiskFull(target: SandboxdTarget): Promise<void>;
+  /** Back under quota: `ensure` works again (one state event, reason null). */
+  clearDiskFull(target: SandboxdTarget): Promise<void>;
+  /** The namespace's running `sbx` containers. */
+  listRunning(): Promise<Array<{ target: SandboxdTarget; containerId: string }>>;
+  /** Milliseconds since the bot's last op (first sight counts as an op). */
+  idleMs(target: SandboxdTarget, now: number): number;
+  hasRunningProcess(target: SandboxdTarget): boolean;
+  /** Stops the `sbx` with a reason: one usage sample, then one state event (idle, disk_full, kill_switch, …). */
+  stopWith(target: SandboxdTarget, reason: SandboxStopReason): Promise<SandboxdSandboxStatus>;
+  /** One usage event for a running `sbx`: the CPU since the previous sample and the last measured disk. */
+  sampleUsage(target: SandboxdTarget): Promise<void>;
+  /** Removes `files` helpers unused for `idleMs` (never their volume); returns how many. */
+  reapFilesHelpers(now: number, idleMs: number): Promise<number>;
+  /**
+   * Follows Docker's `die` events for this namespace's `sbx` containers: one the broker did not stop, kill, restart
+   * or remove is a crash, reported as state `stopped` with reason null. Reconnects after an error; returns `stop`.
+   */
+  watch(): () => void;
 }
 
 // ---------------------------------------------------------------- output tails
@@ -173,6 +269,50 @@ interface ProcessRecord {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** Waits until the stream can take more, or is gone. */
+function drained(stream: Duplex): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => {
+      stream.off("drain", done);
+      stream.off("close", done);
+      stream.off("error", done);
+      resolve();
+    };
+    stream.on("drain", done);
+    stream.on("close", done);
+    stream.on("error", done);
+  });
+}
+
+/** Calls `onLine` for each newline-terminated line of the stream; resolves when it ends or closes. */
+function readLines(stream: Readable, onLine: (line: string) => void): Promise<void> {
+  return new Promise((resolve) => {
+    let buf = "";
+    stream.on("data", (chunk: Buffer | string) => {
+      buf += chunk.toString();
+      for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        if (line.trim()) onLine(line);
+      }
+      if (buf.length > MAX_EVENT_LINE) buf = "";
+    });
+    const done = () => resolve();
+    stream.on("end", done);
+    stream.on("close", done);
+    stream.on("error", done);
+  });
+}
+
+/** Writes `data` in chunks with backpressure, then half-closes so the helper sees EOF on stdin. */
+async function writeStdin(stream: Duplex, data: Buffer): Promise<void> {
+  for (let offset = 0; offset < data.length; offset += STDIN_CHUNK) {
+    if (stream.destroyed || stream.writableEnded) return;
+    if (!stream.write(data.subarray(offset, offset + STDIN_CHUNK))) await drained(stream);
+  }
+  if (!stream.destroyed && !stream.writableEnded) stream.end();
+}
+
 function failure(code: SandboxdErrorCode, status: number, message: string): SandboxdFailure {
   return new SandboxdFailure(code, status, message);
 }
@@ -203,6 +343,21 @@ function stateOf(c: ContainerInspect | null): SandboxState {
   }
 }
 
+/** The state a stop leaves, by its reason. */
+function stoppedState(reason: SandboxStopReason | undefined): SandboxState {
+  if (reason === "disk_full") return "disk_full";
+  if (reason === "kill_switch") return "killed";
+  return "stopped";
+}
+
+/** The target named by an object's labels, or null when they are not two ids. */
+function targetOfLabels(labels: Record<string, string> | null | undefined): SandboxdTarget | null {
+  const orgId = labels?.[SANDBOXD_LABELS.org];
+  const agentId = labels?.[SANDBOXD_LABELS.agent];
+  if (!Id.safeParse(orgId).success || !Id.safeParse(agentId).success) return null;
+  return { orgId: orgId as string, agentId: agentId as string };
+}
+
 function runtimeOf(c: ContainerInspect | null): SandboxRuntime | null {
   if (!c) return null;
   return c.HostConfig?.Runtime === "runsc" ? "gvisor" : "hardened-runc";
@@ -211,10 +366,23 @@ function runtimeOf(c: ContainerInspect | null): SandboxRuntime | null {
 export function createSandboxes(options: SandboxesOptions): Sandboxes {
   const { docker, ns, image } = options;
   const clock: Clock = options.clock ?? { now: () => Date.now() };
-  const limits = options.limits ?? DEFAULT_SBX_LIMITS;
+  const defaultLimits = options.limits ?? DEFAULT_SBX_LIMITS;
+  const emit = options.onEvent ?? (() => {});
   const processes = new Map<string, ProcessRecord>();
+  /** Per organization: the pushed policy (in memory; the API pushes again after a new boot id). */
+  const policies = new Map<string, SandboxdOrgPolicy>();
+  /** Per bot (`org:agent`): last measured disk, disk_full flag, why it last stopped, last CPU sample. */
+  const diskBytes = new Map<string, number>();
+  const diskFull = new Set<string>();
+  const stopReasons = new Map<string, SandboxStopReason>();
+  const cpuLast = new Map<string, number>();
+  /** Containers the broker itself is stopping, killing or restarting: their `die` is not a crash. */
+  const expectedStops = new Map<string, number>();
   const lastActive = new Map<string, number>();
   const locks = new Map<string, Promise<unknown>>();
+  /** `files` helper container id → last use, and file operations still running in it (the sweeper reaps idle ones). */
+  const filesUsed = new Map<string, number>();
+  const filesBusy = new Map<string, number>();
 
   const targetKey = (t: SandboxdTarget) => `${t.orgId}:${t.agentId}`;
 
@@ -351,13 +519,40 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     return spec.Name;
   }
 
+  function limitsFor(orgId: string): EffectiveLimits {
+    const p = policies.get(orgId);
+    if (!p) {
+      return {
+        container: defaultLimits,
+        diskQuotaBytes: DEFAULT_DISK_QUOTA_BYTES,
+        idleStopMs: DEFAULT_IDLE_STOP_MS,
+        killed: false,
+      };
+    }
+    return {
+      container: { nanoCpus: p.limits.nanoCpus, memoryBytes: p.limits.memoryBytes, pids: p.limits.pids },
+      diskQuotaBytes: p.limits.diskQuotaBytes,
+      idleStopMs: p.limits.idleStopMs,
+      killed: p.killed,
+    };
+  }
+
+  /** The broker's view of a stopped sandbox: disk_full and killed outlive the container's own "exited". */
+  function stateFor(target: SandboxdTarget, c: ContainerInspect | null): SandboxState {
+    const state = stateOf(c);
+    if (state !== "stopped") return state;
+    const key = targetKey(target);
+    if (diskFull.has(key)) return "disk_full";
+    return stoppedState(stopReasons.get(key));
+  }
+
   function statusOf(target: SandboxdTarget, c: ContainerInspect | null): SandboxdSandboxStatus {
     const active = lastActive.get(targetKey(target));
     return {
       target,
-      state: stateOf(c),
+      state: stateFor(target, c),
       runtime: runtimeOf(c),
-      diskBytes: 0,
+      diskBytes: diskBytes.get(targetKey(target)) ?? 0,
       startedAt: c?.State?.Running ? isoOrNull(c.State.StartedAt) : null,
       lastActiveAt: active === undefined ? null : new Date(active).toISOString(),
     };
@@ -389,6 +584,121 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     return (Array.isArray(vols) ? vols : []) as Array<{ Name: string }>;
   }
 
+  // ------------------------------------------------------------ usage and stops
+
+  /** Cumulative CPU of a running container in ms (cgroup `cpu.stat` via one-shot stats), or null. */
+  async function cpuOf(containerId: string): Promise<number | null> {
+    const res = await call(
+      "GET",
+      `/containers/${encodeURIComponent(containerId)}/stats?stream=false&one-shot=true`,
+    );
+    if (res.status !== 200) return null;
+    const ns = (asRecord(asRecord(asRecord(res.body).cpu_stats).cpu_usage).total_usage ?? null) as unknown;
+    return typeof ns === "number" && Number.isFinite(ns) && ns >= 0 ? Math.floor(ns / 1_000_000) : null;
+  }
+
+  /** One `usage` event: the CPU since this bot's previous sample (a restarted container starts again from 0). */
+  async function sampleUsageOf(target: SandboxdTarget, containerId: string): Promise<void> {
+    const key = targetKey(target);
+    const cumulative = await cpuOf(containerId);
+    let delta = 0;
+    if (cumulative !== null) {
+      const last = cpuLast.get(key) ?? 0;
+      delta = cumulative >= last ? cumulative - last : cumulative;
+      cpuLast.set(key, cumulative);
+    }
+    emit({ type: "usage", target, cpuMs: delta, diskBytes: diskBytes.get(key) ?? 0 });
+  }
+
+  function expectStop(containerId: string) {
+    const now = clock.now();
+    for (const [id, at] of expectedStops) if (now - at > EXPECTED_STOP_MS) expectedStops.delete(id);
+    expectedStops.set(containerId, now);
+  }
+
+  /** One Docker event line: a `die` of this namespace's `sbx` the broker did not cause is a crash. */
+  function onDockerEvent(line: string) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return;
+    }
+    const ev = asRecord(parsed);
+    if ((ev.Action ?? ev.status) !== "die") return;
+    const actor = asRecord(ev.Actor);
+    const id = String(actor.ID ?? ev.id ?? "");
+    const attrs = asRecord(actor.Attributes) as Record<string, string>;
+    if (
+      attrs[SANDBOXD_LABELS.sandbox] !== "1" ||
+      attrs[SANDBOXD_LABELS.namespace] !== ns ||
+      attrs[SANDBOXD_LABELS.kind] !== "sbx"
+    ) {
+      return;
+    }
+    const t = targetOfLabels(attrs);
+    if (!t) return;
+    const at = expectedStops.get(id);
+    if (at !== undefined) {
+      expectedStops.delete(id);
+      if (clock.now() - at <= EXPECTED_STOP_MS) return;
+    }
+    const key = targetKey(t);
+    cpuLast.delete(key);
+    stopReasons.delete(key);
+    emit({ type: "state", target: t, kind: "sbx", state: "stopped", reason: null });
+  }
+
+  /** Stops the bot's `sbx` (the caller holds the bot's lock): usage sample, stop, state event with the reason. */
+  async function stopLocked(
+    target: SandboxdTarget,
+    reason: SandboxStopReason,
+  ): Promise<SandboxdSandboxStatus> {
+    const key = targetKey(target);
+    const c = await ownedShell(target);
+    if (!c) return statusOf(target, null);
+    if (c.State?.Running) {
+      await sampleUsageOf(target, c.Id).catch(() => undefined);
+      expectStop(c.Id);
+      const res = await call("POST", `/containers/${encodeURIComponent(c.Id)}/stop?t=5`);
+      if (res.status !== 204 && res.status !== 304) throw dockerDown();
+      cpuLast.delete(key);
+      stopReasons.set(key, reason);
+      emit({
+        type: "state",
+        target,
+        kind: "sbx",
+        state: diskFull.has(key) ? "disk_full" : stoppedState(reason),
+        reason,
+      });
+    }
+    return statusOf(target, await ownedShell(target));
+  }
+
+  /** Kills running containers listed by label (kill switch): usage for each `sbx`, then `killed` state events. */
+  async function killListed(
+    listed: Array<{ Id: string; Labels?: Record<string, string> }>,
+  ): Promise<{ removed: number }> {
+    let removed = 0;
+    for (const c of listed) {
+      const t = targetOfLabels(c.Labels);
+      const kind = c.Labels?.[SANDBOXD_LABELS.kind];
+      if (t && kind === "sbx") await sampleUsageOf(t, c.Id).catch(() => undefined);
+      expectStop(c.Id);
+      const res = await call("POST", `/containers/${encodeURIComponent(c.Id)}/kill`);
+      if (res.status !== 204) continue;
+      removed++;
+      if (t && (kind === "sbx" || kind === "brw")) {
+        if (kind === "sbx") {
+          stopReasons.set(targetKey(t), "kill_switch");
+          cpuLast.delete(targetKey(t));
+        }
+        emit({ type: "state", target: t, kind, state: "killed", reason: "kill_switch" });
+      }
+    }
+    return { removed };
+  }
+
   // ------------------------------------------------------------ exec
 
   function sweep() {
@@ -409,18 +719,24 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     };
   }
 
-  /** Runs a short helper command as the bot's user and waits for it (used for `ocw-run --kill`). */
-  async function runHelper(containerId: string, cmd: string[]): Promise<number | null> {
+  /**
+   * Runs one helper argv as the bot's user in /workspace and waits for it: `ocw-run --kill` and every `ocw-files`
+   * operation. Content travels on stdin and stdout only (never argv); stderr is read and dropped.
+   */
+  async function runIn(containerId: string, cmd: string[], opts: RunOptions = {}): Promise<RunResult> {
+    const withStdin = opts.stdin !== undefined;
     const created = await call("POST", `/containers/${encodeURIComponent(containerId)}/exec`, {
       User: SANDBOX_USER,
       Cmd: cmd,
       WorkingDir: WORKSPACE,
-      AttachStdin: false,
+      AttachStdin: withStdin,
       AttachStdout: true,
       AttachStderr: true,
       Tty: false,
     });
     const execId = String(asRecord(created.body).Id ?? "");
+    if (created.status === 404) throw failure("not_found", 404, "this bot's sandbox is gone");
+    if (created.status === 409) throw failure("not_found", 404, "this bot's sandbox is not running");
     if (created.status !== 201 || !execId) throw dockerDown();
     let stream: Duplex;
     try {
@@ -431,13 +747,41 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     } catch {
       throw dockerDown();
     }
-    await demux(stream, () => {});
-    for (let i = 0; i < 20; i++) {
+    const max = opts.maxStdout ?? RUN_MAX_STDOUT;
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let overflow = false;
+    const ended = demux(stream, (frame) => {
+      if (frame.stream !== 1 || overflow) return;
+      if (size + frame.data.length > max) {
+        chunks.push(frame.data.subarray(0, max - size));
+        size = max;
+        overflow = true;
+        stream.destroy();
+        return;
+      }
+      chunks.push(frame.data);
+      size += frame.data.length;
+    });
+    // A helper that never ends (a FIFO, a hung filesystem) is cut off; the process dies with its container.
+    const timer = setTimeout(() => stream.destroy(), opts.timeoutMs ?? RUN_TIMEOUT_MS);
+    timer.unref();
+    try {
+      if (withStdin) await writeStdin(stream, opts.stdin as Buffer);
+      await ended;
+    } finally {
+      clearTimeout(timer);
+    }
+    let exitCode = -1;
+    for (let i = 0; i < 40; i++) {
       const state = await execInspect(execId);
-      if (!state.running) return state.exitCode;
+      if (!state.running) {
+        exitCode = state.exitCode ?? -1;
+        break;
+      }
       await sleep(EXEC_POLL_MS);
     }
-    return null;
+    return { exitCode, stdout: Buffer.concat(chunks, size), overflow };
   }
 
   async function finish(rec: ProcessRecord): Promise<void> {
@@ -497,7 +841,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
   async function killRecord(rec: ProcessRecord): Promise<void> {
     if (rec.ended) return;
     const c = await inspectContainer(nameFor("sbx", ns, rec.agentId));
-    if (c?.State?.Running) await runHelper(c.Id, [OCW_RUN, "--kill", rec.id]);
+    if (c?.State?.Running) await runIn(c.Id, [OCW_RUN, "--kill", rec.id], { timeoutMs: 10_000 });
   }
 
   return {
@@ -515,6 +859,11 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     },
 
     async ensure(target) {
+      const lim = limitsFor(target.orgId);
+      if (lim.killed) throw failure("killed", 409, "this organization's sandboxes are stopped");
+      if (diskFull.has(targetKey(target))) {
+        throw failure("disk_full", 409, "the workspace is over its quota");
+      }
       const p = await probe();
       if (!p.versionOk) throw failure("docker_unavailable", 503, DOCKER_TOO_OLD);
       const dockerRuntime = p.dockerRuntime;
@@ -532,7 +881,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
             runtime: dockerRuntime,
             network,
             volume,
-            limits,
+            limits: lim.container,
           });
           const name = nameFor("sbx", ns, target.agentId);
           const created = await call("POST", `/containers/create?name=${encodeURIComponent(name)}`, spec);
@@ -544,6 +893,9 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
           const started = await call("POST", `/containers/${encodeURIComponent(c.Id)}/start`);
           if (started.status !== 204 && started.status !== 304) throw dockerDown();
           c = await ownedShell(target);
+          stopReasons.delete(targetKey(target));
+          cpuLast.delete(targetKey(target));
+          emit({ type: "state", target, kind: "sbx", state: "running", reason: null });
         }
         lastActive.set(targetKey(target), clock.now());
         return statusOf(target, c);
@@ -631,22 +983,24 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     },
 
     async stop(input) {
-      return locked(targetKey(input.target), async () => {
-        const c = await ownedShell(input.target);
-        if (!c) return statusOf(input.target, null);
-        const res = await call("POST", `/containers/${encodeURIComponent(c.Id)}/stop?t=5`);
-        if (res.status !== 204 && res.status !== 304) throw dockerDown();
-        return statusOf(input.target, await ownedShell(input.target));
-      });
+      return locked(targetKey(input.target), () => stopLocked(input.target, input.reason));
     },
 
     async restart(target) {
       return locked(targetKey(target), async () => {
         const c = await ownedShell(target);
         if (!c) throw failure("not_found", 404, "this bot has no sandbox");
+        const lim = limitsFor(target.orgId);
+        if (lim.killed) throw failure("killed", 409, "this organization's sandboxes are stopped");
+        if (diskFull.has(targetKey(target)))
+          throw failure("disk_full", 409, "the workspace is over its quota");
+        expectStop(c.Id);
         const res = await call("POST", `/containers/${encodeURIComponent(c.Id)}/restart?t=5`);
         if (res.status !== 204) throw dockerDown();
         lastActive.set(targetKey(target), clock.now());
+        stopReasons.delete(targetKey(target));
+        cpuLast.delete(targetKey(target));
+        emit({ type: "state", target, kind: "sbx", state: "running", reason: null });
         return statusOf(target, await ownedShell(target));
       });
     },
@@ -657,12 +1011,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         ownerLabels({ ns, orgId: target.orgId, agentId: target.agentId }),
         false,
       );
-      let removed = 0;
-      for (const c of running) {
-        const res = await call("POST", `/containers/${encodeURIComponent(c.Id)}/kill`);
-        if (res.status === 204) removed++;
-      }
-      return { removed };
+      return killListed(running);
     },
 
     async killOrg(orgId) {
@@ -670,12 +1019,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         { [SANDBOXD_LABELS.sandbox]: "1", [SANDBOXD_LABELS.namespace]: ns, [SANDBOXD_LABELS.org]: orgId },
         false,
       );
-      let removed = 0;
-      for (const c of running) {
-        const res = await call("POST", `/containers/${encodeURIComponent(c.Id)}/kill`);
-        if (res.status === 204) removed++;
-      }
-      return { removed };
+      return killListed(running);
     },
 
     async purge(target) {
@@ -683,9 +1027,13 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         await ownedShell(target);
         const labels = ownerLabels({ ns, orgId: target.orgId, agentId: target.agentId });
         let removed = 0;
+        let hadShell = false;
         for (const c of await listContainers(labels, true)) {
+          expectStop(c.Id);
           const res = await call("DELETE", `/containers/${encodeURIComponent(c.Id)}?force=1`);
           if (res.status === 204) removed++;
+          if (c.Labels?.[SANDBOXD_LABELS.kind] === "sbx") hadShell = true;
+          filesUsed.delete(c.Id);
         }
         for (const v of await listVolumes(labels)) {
           const res = await call("DELETE", `/volumes/${encodeURIComponent(v.Name)}`);
@@ -702,9 +1050,246 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
             processes.delete(id);
           }
         }
-        lastActive.delete(targetKey(target));
+        const key = targetKey(target);
+        lastActive.delete(key);
+        diskBytes.delete(key);
+        diskFull.delete(key);
+        stopReasons.delete(key);
+        cpuLast.delete(key);
+        if (hadShell) emit({ type: "state", target, kind: "sbx", state: "absent", reason: null });
         return { removed };
       });
+    },
+
+    async workspace(target, opts = {}) {
+      const c = await ownedShell(target);
+      if (c?.State?.Running) {
+        // A person's or the bot's file op is activity; the broker's own measurement is not.
+        if (opts.touch !== false) lastActive.set(targetKey(target), clock.now());
+        return { containerId: c.Id, kind: "sbx" };
+      }
+      return locked(`files:${targetKey(target)}`, async () => {
+        const volume = nameFor("ws", ns, target.agentId);
+        const vol = await call("GET", `/volumes/${encodeURIComponent(volume)}`);
+        if (vol.status === 404) throw failure("not_found", 404, "this bot has no workspace");
+        if (vol.status !== 200) throw dockerDown();
+        if (!labelsMatch(asRecord(vol.body).Labels as Record<string, string>, target, "sbx"))
+          throw mismatch();
+
+        const name = nameFor("files", ns, target.agentId);
+        let h = await inspectContainer(name);
+        if (h && !labelsMatch(h.Config?.Labels, target, "files")) throw mismatch();
+        if (!h) {
+          const p = await probe();
+          if (!p.versionOk) throw failure("docker_unavailable", 503, DOCKER_TOO_OLD);
+          if (p.dockerRuntime === null) throw failure("docker_unavailable", 503, RUNSC_UNAVAILABLE);
+          const spec = filesSpec({
+            ns,
+            orgId: target.orgId,
+            agentId: target.agentId,
+            image,
+            runtime: p.dockerRuntime,
+            volume,
+          });
+          const created = await call("POST", `/containers/create?name=${encodeURIComponent(name)}`, spec);
+          if (created.status !== 201 && created.status !== 409) throw dockerDown();
+          h = await inspectContainer(name);
+          if (!h) throw dockerDown();
+          if (!labelsMatch(h.Config?.Labels, target, "files")) throw mismatch();
+        }
+        if (!h.State?.Running) {
+          const started = await call("POST", `/containers/${encodeURIComponent(h.Id)}/start`);
+          if (started.status !== 204 && started.status !== 304) throw dockerDown();
+        }
+        filesUsed.set(h.Id, clock.now());
+        return { containerId: h.Id, kind: "files" };
+      });
+    },
+
+    async run(handle, cmd, opts) {
+      if (handle.kind === "files") {
+        filesUsed.set(handle.containerId, clock.now());
+        filesBusy.set(handle.containerId, (filesBusy.get(handle.containerId) ?? 0) + 1);
+      }
+      try {
+        return await runIn(handle.containerId, cmd, opts);
+      } finally {
+        if (handle.kind === "files") {
+          filesUsed.set(handle.containerId, clock.now());
+          const n = (filesBusy.get(handle.containerId) ?? 1) - 1;
+          if (n <= 0) filesBusy.delete(handle.containerId);
+          else filesBusy.set(handle.containerId, n);
+        }
+      }
+    },
+
+    async status(target) {
+      return statusOf(target, await ownedShell(target));
+    },
+
+    setPolicy(policy) {
+      policies.set(policy.orgId, policy);
+    },
+
+    limitsFor,
+
+    async usage(orgId) {
+      const listed = await listContainers(
+        { [SANDBOXD_LABELS.sandbox]: "1", [SANDBOXD_LABELS.namespace]: ns, [SANDBOXD_LABELS.org]: orgId },
+        true,
+      );
+      const items: SandboxdUsage["items"] = [];
+      const running = { sandboxes: 0, browsers: 0 };
+      for (const c of listed) {
+        const kind = c.Labels?.[SANDBOXD_LABELS.kind];
+        const t = targetOfLabels(c.Labels);
+        if (!t || t.orgId !== orgId || (kind !== "sbx" && kind !== "brw")) continue;
+        const isRunning = c.State === "running";
+        if (isRunning) running[kind === "sbx" ? "sandboxes" : "browsers"] += 1;
+        const key = targetKey(t);
+        let state: SandboxState = isRunning ? "running" : "stopped";
+        if (!isRunning && kind === "sbx") {
+          state = diskFull.has(key) ? "disk_full" : stoppedState(stopReasons.get(key));
+        }
+        items.push({
+          agentId: t.agentId,
+          kind,
+          state,
+          diskBytes: kind === "sbx" ? (diskBytes.get(key) ?? 0) : 0,
+          cpuMs: isRunning ? ((await cpuOf(c.Id)) ?? 0) : 0,
+        });
+        if (items.length >= 1000) break;
+      }
+      return { orgId, running, items };
+    },
+
+    recordDisk(target, bytes) {
+      diskBytes.set(targetKey(target), bytes);
+    },
+
+    isDiskFull(target) {
+      return diskFull.has(targetKey(target));
+    },
+
+    async markDiskFull(target) {
+      const key = targetKey(target);
+      diskFull.add(key);
+      await locked(key, async () => {
+        const c = await ownedShell(target);
+        if (c?.State?.Running) await stopLocked(target, "disk_full");
+        else emit({ type: "state", target, kind: "sbx", state: "disk_full", reason: "disk_full" });
+      });
+    },
+
+    async clearDiskFull(target) {
+      const key = targetKey(target);
+      if (!diskFull.delete(key)) return;
+      if (stopReasons.get(key) === "disk_full") stopReasons.delete(key);
+      const c = await ownedShell(target);
+      emit({ type: "state", target, kind: "sbx", state: stateFor(target, c), reason: null });
+    },
+
+    async listRunning() {
+      const listed = await listContainers(
+        { [SANDBOXD_LABELS.sandbox]: "1", [SANDBOXD_LABELS.namespace]: ns, [SANDBOXD_LABELS.kind]: "sbx" },
+        false,
+      );
+      const out: Array<{ target: SandboxdTarget; containerId: string }> = [];
+      for (const c of listed) {
+        const t = targetOfLabels(c.Labels);
+        if (t) out.push({ target: t, containerId: c.Id });
+      }
+      return out;
+    },
+
+    idleMs(target, now) {
+      const key = targetKey(target);
+      const last = lastActive.get(key);
+      if (last === undefined) {
+        // First sight (a sandbox this process did not start): its idle time counts from now.
+        lastActive.set(key, now);
+        return 0;
+      }
+      return Math.max(0, now - last);
+    },
+
+    hasRunningProcess(target) {
+      for (const rec of processes.values()) {
+        if (!rec.ended && rec.orgId === target.orgId && rec.agentId === target.agentId) return true;
+      }
+      return false;
+    },
+
+    async stopWith(target, reason) {
+      return locked(targetKey(target), () => stopLocked(target, reason));
+    },
+
+    async sampleUsage(target) {
+      const c = await ownedShell(target);
+      if (c?.State?.Running) await sampleUsageOf(target, c.Id);
+    },
+
+    async reapFilesHelpers(now, idleMs) {
+      const listed = await listContainers(
+        { [SANDBOXD_LABELS.sandbox]: "1", [SANDBOXD_LABELS.namespace]: ns, [SANDBOXD_LABELS.kind]: "files" },
+        true,
+      );
+      let reaped = 0;
+      for (const c of listed) {
+        if ((filesBusy.get(c.Id) ?? 0) > 0) continue;
+        const last = filesUsed.get(c.Id);
+        if (last === undefined) {
+          filesUsed.set(c.Id, now);
+          continue;
+        }
+        if (now - last < idleMs) continue;
+        // force=1 without v=1: the helper goes, the bot's named volume stays.
+        const res = await call("DELETE", `/containers/${encodeURIComponent(c.Id)}?force=1`);
+        if (res.status === 204 || res.status === 404) {
+          filesUsed.delete(c.Id);
+          reaped++;
+        }
+      }
+      return reaped;
+    },
+
+    watch() {
+      let stopped = false;
+      let current: Readable | null = null;
+      const filters = encodeURIComponent(
+        JSON.stringify({
+          type: ["container"],
+          event: ["die"],
+          label: [
+            `${SANDBOXD_LABELS.sandbox}=1`,
+            `${SANDBOXD_LABELS.namespace}=${ns}`,
+            `${SANDBOXD_LABELS.kind}=sbx`,
+          ],
+        }),
+      );
+      const loop = async () => {
+        while (!stopped) {
+          try {
+            current = await docker.stream(`/events?filters=${filters}`);
+            if (stopped) current.destroy();
+            else await readLines(current, onDockerEvent);
+          } catch {
+            // Docker unavailable: try again shortly (a die in the gap is not reported).
+          }
+          current = null;
+          if (!stopped) {
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, WATCH_RETRY_MS);
+              timer.unref();
+            });
+          }
+        }
+      };
+      void loop();
+      return () => {
+        stopped = true;
+        current?.destroy();
+      };
     },
 
     async reconcile() {
