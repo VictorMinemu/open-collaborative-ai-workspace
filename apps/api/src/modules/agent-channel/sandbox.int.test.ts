@@ -1,6 +1,10 @@
+import { randomUUID } from "node:crypto";
+import { CONFINED_TOOL_FLAGS } from "@ocw/contracts";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { sha256Hex } from "../../lib/crypto";
 import type { TestClient } from "../../testing";
-import { codeOf, type Json, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
+import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
+import { reserveSandbox } from "../sandbox";
 
 /**
  * 07.8-05 (SBX-02, SBX-04; D-02 (b), D-03, D-09, D-11 F-7, D-12; P-04, P-06, P-07): `POST /agent-channel/v1/sandbox/exec`.
@@ -243,5 +247,338 @@ describe("07.5 approvals apply to the sandbox (D-03, SBX-04)", () => {
       ])
     ).rows[0].n;
     expect(after).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: offering and refusals
+
+const SANDBOX_TOOLS_OFFERED = [
+  "ocw_sandbox_exec",
+  "ocw_sandbox_process",
+  "ocw_sandbox_read",
+  "ocw_sandbox_write",
+  "ocw_sandbox_list",
+  "ocw_sandbox_delete",
+  "ocw_sandbox_share",
+];
+
+const confinedOf = (ev: Json): string[] =>
+  (ev.turn.tools as string[]).filter((t) => t.startsWith("ocw_sandbox_") || t.startsWith("ocw_browser_"));
+
+const setModule = (scopeUnitId: string | null, subject: Json, enabled: boolean) =>
+  ok(
+    s.victor.request("PUT", "/api/v1/module-access", {
+      module: "sandbox",
+      scopeUnitId,
+      subject,
+      enabled,
+    }) as Promise<Res>,
+  );
+
+/** A superuser-inserted permission rule; returns its removal. */
+async function denyRule(subjectKind: "user" | "agent", subjectId: string, permission: string) {
+  const { rows } = await s.su.query(
+    `insert into app.permission_rules (organization_id, subject_kind, subject_id, permission, effect)
+     values ($1, $2, $3, $4, 'deny') returning id`,
+    [s.orgA, subjectKind, subjectId, permission],
+  );
+  return () => s.su.query("delete from app.permission_rules where id = $1", [rows[0].id]);
+}
+
+describe("the sandbox tools are offered only when every layer allows it (D-12, P-05)", () => {
+  it("all on: the seven tools (never import), their confined flags, the budget of 40, no browser tool", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    expect(confinedOf(ev)).toEqual(SANDBOX_TOOLS_OFFERED);
+    for (const name of SANDBOX_TOOLS_OFFERED) {
+      const { untrustedOutput, sideEffecting } =
+        CONFINED_TOOL_FLAGS[name as keyof typeof CONFINED_TOOL_FLAGS];
+      expect(ev.turn.toolFlags[name], name).toEqual({ untrustedOutput, sideEffecting });
+    }
+    expect(ev.turn.maxSandboxCalls).toBe(40);
+  });
+
+  it("the organization switch off: no sandbox tool and no sandbox budget", async () => {
+    await s.setPolicy({ enabled: false });
+    try {
+      const ev = await s.turnOf(s.sam, s.samDm);
+      expect(confinedOf(ev)).toEqual([]);
+      expect(ev.turn.maxSandboxCalls).toBeUndefined();
+    } finally {
+      await s.setPolicy({ enabled: true });
+    }
+  });
+
+  it("the bot's own switch off: none", async () => {
+    await s.setBotSandbox(s.scoutId, false);
+    try {
+      expect(confinedOf(await s.turnOf(s.sam, s.samDm))).toEqual([]);
+    } finally {
+      await s.setBotSandbox(s.scoutId, true);
+    }
+  });
+
+  it("the Sandbox module off for Sam, for the organization or at Sam's unit: none for Sam; Alex keeps them", async () => {
+    const alexDm = (
+      await ok(
+        s.alex.request("POST", "/api/v1/dms", {
+          participants: [{ kind: "agent", id: s.scoutId }],
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    const sales = (
+      await ok(
+        s.victor.request("POST", "/api/v1/units", {
+          kind: "department",
+          name: "Sales",
+          parentId: null,
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    await ok(s.victor.request("POST", `/api/v1/units/${sales}/members`, { userId: s.samId }) as Promise<Res>);
+
+    const cases: Array<[string | null, Json]> = [
+      [null, { kind: "user", userId: s.samId }],
+      [null, { kind: "everyone" }],
+      [sales, { kind: "everyone" }],
+    ];
+    for (const [scope, subject] of cases) {
+      await setModule(scope, subject, false);
+      try {
+        expect(confinedOf(await s.turnOf(s.sam, s.samDm)), JSON.stringify(subject)).toEqual([]);
+        const alexTurn = await s.turnOf(s.alex, alexDm);
+        expect(confinedOf(alexTurn)).toEqual(
+          subject.kind === "everyone" && scope === null ? [] : SANDBOX_TOOLS_OFFERED,
+        );
+      } finally {
+        await setModule(scope, subject, true);
+      }
+    }
+    expect(confinedOf(await s.turnOf(s.sam, s.samDm))).toEqual(SANDBOX_TOOLS_OFFERED);
+  });
+
+  it("the bot without `sandbox.use` (a deny rule for the agent): none", async () => {
+    const remove = await denyRule("agent", s.scoutId, "sandbox.use");
+    try {
+      expect(confinedOf(await s.turnOf(s.sam, s.samDm))).toEqual([]);
+    } finally {
+      await remove();
+    }
+  });
+});
+
+describe("every call is re-decided: a change after delivery refuses the next exec before sandboxd", () => {
+  it("switch off → 403 sandbox_off; module off for Sam → 403 not_allowed; bot off → 403 bot_off; no fake exec", async () => {
+    const execBefore = calls("exec");
+    const steps: Array<[string, () => Promise<unknown>, () => Promise<unknown>]> = [
+      ["sandbox_off", () => s.setPolicy({ enabled: false }), () => s.setPolicy({ enabled: true })],
+      [
+        "not_allowed",
+        () => setModule(null, { kind: "user", userId: s.samId }, false),
+        () => setModule(null, { kind: "user", userId: s.samId }, true),
+      ],
+      ["bot_off", () => s.setBotSandbox(s.scoutId, false), () => s.setBotSandbox(s.scoutId, true)],
+    ];
+    for (const [code, off, on] of steps) {
+      const ev = await s.turnOf(s.sam, s.samDm);
+      expect(ev.turn.tools).toContain(EXEC);
+      await off();
+      try {
+        const r = await exec(ev, ["echo", "hi"]);
+        expect(r.status, code).toBe(403);
+        expect(codeOf(r)).toBe(code);
+        expect(await callsOf(ev.eventId)).toEqual([
+          expect.objectContaining({ tool: EXEC, decision: "denied", reason: code, status: null }),
+        ]);
+        expect((await turnRow(ev.eventId)).sandbox_calls).toBe(0);
+      } finally {
+        await on();
+      }
+    }
+    expect(calls("exec")).toBe(execBefore);
+  });
+
+  it("a turn delivered without the tool cannot use it after the switch comes on → 409 policy_changed", async () => {
+    await s.setPolicy({ enabled: false });
+    const ev = await s.turnOf(s.sam, s.samDm);
+    await s.setPolicy({ enabled: true });
+    const r = await exec(ev, ["echo", "hi"]);
+    expect(r.status).toBe(409);
+    expect(codeOf(r)).toBe("policy_changed");
+  });
+});
+
+describe("the per-turn budget is its own (P-06)", () => {
+  it("40 calls in one turn, the 41st → 403 budget_exhausted; the 8-call tool cap is untouched", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    for (let i = 0; i < 10; i += 1) expect((await exec(ev, ["true"])).status).toBe(200);
+    // Ten sandbox calls later, the turn's other tools still have their whole 8-call cap.
+    const card = await s.cell("/tool-calls", {
+      eventId: ev.eventId,
+      agentId: s.scoutId,
+      tool: "ocw_agent_card",
+    });
+    expect(card.status, JSON.stringify(card.body)).toBe(200);
+    expect(card.body?.allowed).toBe(true);
+    for (let i = 10; i < 40; i += 1) expect((await exec(ev, ["true"])).status, String(i)).toBe(200);
+    const execBefore = calls("exec");
+    const r = await exec(ev, ["true"]);
+    expect(r.status).toBe(403);
+    expect(codeOf(r)).toBe("budget_exhausted");
+    expect(calls("exec")).toBe(execBefore);
+    expect(await turnRow(ev.eventId)).toEqual({ tainted: true, tool_calls: 1, sandbox_calls: 40 });
+  }, 120_000);
+});
+
+describe("the organization cap (D-09)", () => {
+  it("cap 1 with Scout running: another bot's first exec → 403 cap_reached and no ensure", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    expect((await exec(ev, ["true"])).status).toBe(200);
+    await s.setPolicy({ maxSandboxes: 1 });
+    try {
+      const rover = await s.newBot("Rover");
+      const ensureBefore = calls("ensure");
+      const turn = await s.turnOf(s.sam, rover.dm, rover.id);
+      const r = await exec(turn, ["true"], {}, rover.id);
+      expect(r.status).toBe(403);
+      expect(codeOf(r)).toBe("cap_reached");
+      expect(calls("ensure")).toBe(ensureBefore);
+      // Scout, already running, needs no slot.
+      expect((await exec(await s.turnOf(s.sam, s.samDm), ["true"])).status).toBe(200);
+    } finally {
+      await s.setPolicy({ maxSandboxes: 10 });
+    }
+  });
+
+  it("cap 1, four bots' first execs at once: exactly one runs, one ensure (advisory lock)", async () => {
+    await s.su.query("delete from app.bot_sandboxes where organization_id = $1", [s.orgA]);
+    await s.setPolicy({ maxSandboxes: 1 });
+    try {
+      const bots = [await s.newBot("Ada"), await s.newBot("Bo"), await s.newBot("Cy"), await s.newBot("Di")];
+      const turns: Json[] = [];
+      for (const b of bots) turns.push(await s.turnOf(s.sam, b.dm, b.id));
+      const ensureBefore = calls("ensure");
+      const results = await Promise.all(bots.map((b, i) => exec(turns[i] as Json, ["true"], {}, b.id)));
+      expect(results.map((r) => r.status).sort()).toEqual([200, 403, 403, 403]);
+      expect(results.map((r) => codeOf(r) ?? "ok").sort()).toEqual([
+        "cap_reached",
+        "cap_reached",
+        "cap_reached",
+        "ok",
+      ]);
+      expect(calls("ensure")).toBe(ensureBefore + 1);
+      const running = (
+        await s.su.query(
+          "select count(*)::int as n from app.bot_sandboxes where organization_id = $1 and state in ('starting','running')",
+          [s.orgA],
+        )
+      ).rows[0].n;
+      expect(running).toBe(1);
+    } finally {
+      await s.setPolicy({ maxSandboxes: 10 });
+    }
+  });
+});
+
+describe("the cap's lock (D-09)", () => {
+  it("a second reservation waits for the first to commit, then sees its slot taken", async () => {
+    await s.su.query("delete from app.bot_sandboxes where organization_id = $1", [s.orgA]);
+    await s.setPolicy({ maxSandboxes: 1 });
+    try {
+      const [x, y] = [await s.newBot("Xa"), await s.newBot("Yo")];
+      const db = s.stack.built.core.db;
+      const ctx = { organizationId: s.orgA, userId: s.samId };
+      let release: () => void = () => {};
+      const hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let reserved: () => void = () => {};
+      const firstReserved = new Promise<void>((resolve) => {
+        reserved = resolve;
+      });
+      const first = db.withTenant(ctx, async (tx) => {
+        const r = await reserveSandbox(tx, { agentId: x.id }, "sbx");
+        reserved();
+        await hold;
+        return r;
+      });
+      await firstReserved;
+      let secondDone = false;
+      const second = db
+        .withTenant(ctx, (tx) => reserveSandbox(tx, { agentId: y.id }, "sbx"))
+        .finally(() => {
+          secondDone = true;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Without the per-organization lock the second would already have read an empty count.
+      expect(secondDone).toBe(false);
+      release();
+      expect(await first).toEqual({ ok: true, ensure: true });
+      expect(await second).toEqual({ ok: false, reason: "cap_reached" });
+    } finally {
+      await s.setPolicy({ maxSandboxes: 10 });
+    }
+  });
+});
+
+describe("sandboxd unavailable", () => {
+  it("down → 503 service_unavailable; the claim row completes with error; the audit says error; up again → runs", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    s.sandboxd.fake.setDown(true);
+    let r: Res;
+    try {
+      r = await exec(ev, ["echo", "hi"]);
+    } finally {
+      s.sandboxd.fake.setDown(false);
+    }
+    expect(r.status).toBe(503);
+    expect(codeOf(r)).toBe("service_unavailable");
+    expect(await callsOf(ev.eventId)).toEqual([
+      expect.objectContaining({ tool: EXEC, decision: "allowed", status: "error" }),
+    ]);
+    const [audit] = await auditOf("sandbox.exec", ev.eventId);
+    expect(audit?.result).toBe("error");
+    expect(audit?.metadata).toMatchObject({ status: "error", exitCode: null, reason: "service_unavailable" });
+    const state = (
+      await s.su.query(
+        "select state, stop_reason from app.bot_sandboxes where agent_id = $1 and kind = 'sbx'",
+        [s.scoutId],
+      )
+    ).rows[0];
+    expect(state).toEqual({ state: "unavailable", stop_reason: "service_down" });
+    const ensureBefore = calls("ensure");
+    expect((await exec(ev, ["echo", "back"])).body?.stdout).toBe("back\n");
+    expect(calls("ensure")).toBe(ensureBefore + 1);
+  });
+});
+
+describe("no live turn → 403 no_trigger (as every Agent Channel route)", () => {
+  it("an unknown event, another bot's turn, another organization's cell token: refused, nothing run, audited", async () => {
+    const execBefore = calls("exec");
+    const ev = await s.turnOf(s.sam, s.samDm);
+    const other = await s.newBot("Other");
+    const tokenB = `ocw_cell_${randomUUID()}${randomUUID()}`;
+    await s.su.query(
+      "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
+      [s.orgB, sha256Hex(tokenB)],
+    );
+    const cases: Res[] = [
+      await exec({ eventId: randomUUID() }, ["echo", "hi"]),
+      await exec(ev, ["echo", "hi"], {}, other.id),
+      await exec(ev, ["echo", "hi"], {}, s.scoutId, tokenB),
+    ];
+    for (const r of cases) {
+      expect(r.status).toBe(403);
+      expect(codeOf(r)).toBe("no_trigger");
+    }
+    expect(calls("exec")).toBe(execBefore);
+    expect(await callsOf(ev.eventId)).toEqual([]);
+    const audited = (
+      await s.su.query(
+        "select organization_id from app.audit_events where action = 'bot.tool_call' and metadata->>'reason' = 'no_trigger' and metadata->>'tool' = $1",
+        [EXEC],
+      )
+    ).rows.map((r) => r.organization_id);
+    expect(audited.filter((o) => o === s.orgA).length).toBeGreaterThanOrEqual(2);
+    expect(audited).toContain(s.orgB);
   });
 });
