@@ -97,6 +97,12 @@ export interface PostAgentMessageInput {
    * PATCH it (403 `card_platform_owned`).
    */
   cardPlatformOwned?: boolean;
+  /**
+   * Phase 07.8 (07.8-10): runs in the post's transaction right after the message row is inserted and before its
+   * `message.created` is appended (the Agent Channel attaches the turn's activity and links the files the bot shared in
+   * that turn to this reply). Not called on an idempotent retry.
+   */
+  onInserted?: (tx: Tx, messageId: string) => Promise<void>;
 }
 
 /** A reader's single decision on an Agent Card (06-13): delivered to the card's agent as `agent.card_action.v1`. */

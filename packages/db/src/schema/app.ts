@@ -546,6 +546,12 @@ export const attachments = appSchema.table(
     hasRenditions: boolean("has_renditions").notNull().default(false),
     /** Byte size of the stored `large.webp` rendition, recorded by `complete` (06.1: the prompt budget, no storage call). */
     largeBytes: integer("large_bytes"),
+    /**
+     * Phase 07.8 (07.8-10, SBX-02): the bot turn (`agent_turns.event_id`) whose `ocw_sandbox_share` stored this file.
+     * The row stays `pending` (uploader = the bot) until that turn's reply links it, and is swept like any abandoned
+     * upload when no reply comes. Null for every upload made by a person.
+     */
+    eventId: uuid("event_id"),
     createdAt: createdAt(),
     completedAt: ts("completed_at"),
     deletedAt: ts("deleted_at"),
@@ -555,6 +561,7 @@ export const attachments = appSchema.table(
     index("attachments_org_conv_idx").on(t.organizationId, t.conversationId),
     index("attachments_org_message_idx").on(t.organizationId, t.messageId),
     index("attachments_org_work_prompt_idx").on(t.organizationId, t.workPromptId),
+    index("attachments_org_event_idx").on(t.organizationId, t.eventId).where(sql`event_id is not null`),
     index("attachments_sweep_idx")
       .on(t.status, t.createdAt)
       .where(sql`purged_at is null and status in ('pending','rejected','deleted')`),

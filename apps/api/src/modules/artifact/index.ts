@@ -1,18 +1,21 @@
+import { createHash } from "node:crypto";
 import type { Readable } from "node:stream";
 import {
   type Attachment,
   INLINE_IMAGE_TYPES,
   MAX_ATTACHMENTS_PER_MESSAGE,
+  sanitizeFilename,
   WORK_PROMPT_MAX_IMAGES,
 } from "@ocw/contracts";
-import { attachments, type Tx } from "@ocw/db";
-import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { attachments, type Tx, tenantOf } from "@ocw/db";
+import { and, asc, count, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { ApiModule, App, Core } from "../../core";
 import { conflict } from "../../lib/errors";
 // Type-only: the chat module imports this module's helpers (Plan 04-12), so a runtime import would be a cycle.
 import type { ConversationAccess } from "../chat/access";
 import { type AttachmentScopes, presignPart, registerAttachmentRoutes } from "./attachments";
 import { type AttachmentRow, toAttachment } from "./model";
+import { SNIFF_BYTES, sniff } from "./sniff";
 import { type AttachmentPart, attachmentKey, createObjectStorage, type ObjectStorage } from "./storage";
 import { createAttachmentSweeper } from "./sweeper";
 
@@ -333,4 +336,87 @@ export async function attachmentRowsByIds(tx: Tx, ids: string[]): Promise<Attach
   const unique = [...new Set(ids)];
   if (unique.length === 0) return [];
   return tx.select().from(attachments).where(inArray(attachments.id, unique));
+}
+
+/**
+ * A file the server itself puts into a conversation for a bot turn (07.8-10: `ocw_sandbox_share`; 07.8-25: browser
+ * downloads under a member session). The bytes are written with the storage's server credentials and the row is
+ * inserted in the caller's tenant transaction: `pending`, uploaded by the bot, tagged with the turn's `eventId`, its type
+ * sniffed from the bytes (nothing declared is trusted, T-04-04-02) and never rendered inline (no renditions). Nobody can
+ * read it until the reply posted for that turn links it (`linkTurnAttachments`); a share whose reply never comes stays
+ * `pending` and the attachment sweeper removes it after 24 h. A storage failure throws, so the caller's transaction
+ * rolls the row back.
+ */
+export async function storeServerAttachment(
+  tx: Tx,
+  storage: ObjectStorage,
+  input: {
+    conversationId: string;
+    uploaderAgentId: string;
+    eventId: string;
+    name: string;
+    bytes: Uint8Array;
+  },
+): Promise<AttachmentRow> {
+  const sniffed = await sniff(input.bytes.subarray(0, SNIFF_BYTES), "application/octet-stream");
+  const contentType = sniffed.ok ? sniffed.contentType : "application/octet-stream";
+  const [row] = await tx
+    .insert(attachments)
+    .values({
+      organizationId: tenantOf(tx).organizationId,
+      conversationId: input.conversationId,
+      uploaderId: input.uploaderAgentId,
+      filename: sanitizeFilename(input.name),
+      declaredType: contentType,
+      contentType,
+      sizeBytes: input.bytes.length,
+      sha256: createHash("sha256").update(input.bytes).digest("hex"),
+      eventId: input.eventId,
+    })
+    .returning();
+  if (!row) throw new Error("attachment insert returned no row");
+  await storage.put(
+    attachmentKey(row.organizationId, row.conversationId, row.id, "original"),
+    input.bytes,
+    contentType,
+  );
+  return row;
+}
+
+/** How many files a turn has shared that no reply has linked yet (at most `MAX_ATTACHMENTS_PER_MESSAGE`). */
+export async function pendingTurnAttachmentCount(tx: Tx, eventId: string): Promise<number> {
+  const [row] = await tx
+    .select({ n: count() })
+    .from(attachments)
+    .where(
+      and(eq(attachments.eventId, eventId), eq(attachments.status, "pending"), isNull(attachments.messageId)),
+    );
+  return Number(row?.n ?? 0);
+}
+
+/**
+ * Links the files a bot shared in one turn to the reply posted for it, in the reply's transaction before its
+ * `message.created` is appended: only the turn's own `pending` rows of this conversation uploaded by this bot become
+ * `ready` attachments of the reply. Returns how many were linked.
+ */
+export async function linkTurnAttachments(
+  tx: Tx,
+  input: { eventId: string; conversationId: string; uploaderAgentId: string; messageId: string },
+): Promise<number> {
+  const linked = await tx
+    .update(attachments)
+    .set({ messageId: input.messageId, status: "ready", completedAt: new Date().toISOString() })
+    .where(
+      and(
+        eq(attachments.eventId, input.eventId),
+        eq(attachments.conversationId, input.conversationId),
+        eq(attachments.uploaderId, input.uploaderAgentId),
+        eq(attachments.status, "pending"),
+        isNull(attachments.messageId),
+        isNull(attachments.workPromptId),
+        isNull(attachments.purgedAt),
+      ),
+    )
+    .returning({ id: attachments.id });
+  return linked.length;
 }

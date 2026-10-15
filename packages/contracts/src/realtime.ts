@@ -216,4 +216,10 @@ export const EphemeralTypes = {
    * coalesced every AI_DELTA_COALESCE_MS. The durable `message.updated` at the end carries the final body.
    */
   aiDelta: "ai.delta",
+  /**
+   * On `conv:<id>` (07.8-10, R2): a bot turn's sandbox and browser activity while it runs (`TurnActivityEvent`),
+   * composed and masked by the API from the calls it decided. Ephemeral (the reply's `message.created` and every
+   * message list carry the final `activity`), so it reaches only the topic's authorized subscribers.
+   */
+  turnActivity: "turn.activity",
 } as const;
