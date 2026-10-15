@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 140
+open_count: 141
 waived_count: 4
 fixed_count: 103
-total_count: 247
-last_updated: 2026-10-15T22:14:34.840Z
+total_count: 248
+last_updated: 2026-10-15T22:38:49.256Z
 ---
 
 # Broken Windows Ledger
@@ -262,6 +262,7 @@ last_updated: 2026-10-15T22:14:34.840Z
 | 245 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | Sandbox activity steps never carry approvalMessageRoute (07.8-14/20); bot_turn_activity.running stays true for a turn that never replies, web live label needs a timeout (07.8-20); a write body over Fastify's 2 MiB limit returns Fastify's 413 not too_large; shared images show as downloads, no preview (07.8-25); fake sandboxd codes (404 read folder, 409 busy delete) to check against the real one (07.8-08/09) | open |  | 2026-10-15T22:12:53.836Z |  |
 | 246 | 07.8 | deviation | apps/sandboxd/src |  | MUST FIX (fail-open): sandboxd keeps policy, kill state and disk_full in memory; after a sandboxd restart the defaults apply (2 GiB, 15 min idle, NOT killed) until the API re-pushes, and the API only re-pushes for orgs with events. Fix: sandboxd refuses ensure/restart for an org with no policy (409 policy_missing) and the API pushes policy then retries; plus a boot event | open |  | 2026-10-15T22:14:34.757Z |  |
 | 247 | 07.8 | deviation | apps/sandboxd/src |  | Soft quota counts apparent size (sparse files in full) and may overshoot up to one 60 s sweep (document XFS hard quota at the gate); transfers hold ~67 MiB JSON + 50 MiB decoded in memory, two at once; after a sandboxd restart a running background process no longer prevents idling; a container death during the watcher's 2 s reconnect is not reported; OCW_SANDBOXD_SWEEP_MS needs compose and env parity (07.8-24) | open |  | 2026-10-15T22:14:34.840Z |  |
+| 248 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | When the org is killed or switched off the bot is not offered the sandbox tool and cannot say why (add a withheld reason killed/sandbox_off, 07.8-10/14/19); a message 1-2 s after a member turns Sandbox on can still get 'not offered' (UI should show applying, 07.8-15); cell-proof.sh PROOF_BUILD=1 still builds the demo's :local tags; e2e-reset.sh label cleanup untested locally | open |  | 2026-10-15T22:38:49.256Z |  |
 
 ````json
 [
@@ -3227,6 +3228,18 @@ last_updated: 2026-10-15T22:14:34.840Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T22:14:34.840Z",
+    "resolved_at": null
+  },
+  {
+    "id": 248,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/agent-channel",
+    "line": null,
+    "description": "When the org is killed or switched off the bot is not offered the sandbox tool and cannot say why (add a withheld reason killed/sandbox_off, 07.8-10/14/19); a message 1-2 s after a member turns Sandbox on can still get 'not offered' (UI should show applying, 07.8-15); cell-proof.sh PROOF_BUILD=1 still builds the demo's :local tags; e2e-reset.sh label cleanup untested locally",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T22:38:49.256Z",
     "resolved_at": null
   }
 ]
