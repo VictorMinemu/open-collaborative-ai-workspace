@@ -153,6 +153,15 @@ describe("tracer: a bot's exec is decided, counted, run through sandboxd and aud
     expect(calls("ensure")).toBe(ensureBefore);
     expect(calls("exec")).toBe(execBefore + 1);
 
+    // A refused call carries no argv into the ledger or the audit either.
+    await s.setBotSandbox(s.scoutId, false);
+    try {
+      const refused = await exec(ev, ["sh", "-c", "echo OCW-SENTINEL-ARGV-7731 > leak.txt"]);
+      expect(codeOf(refused)).toBe("bot_off");
+    } finally {
+      await s.setBotSandbox(s.scoutId, true);
+    }
+
     const swept = await s.su.query(
       `select
          (select count(*)::int from app.audit_events where metadata::text like $1) as audit,
