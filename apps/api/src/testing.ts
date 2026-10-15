@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { startTestDatabase, type TestDatabase } from "@ocw/db/testing";
+import { startAllOrNone, startTestDatabase, type TestDatabase } from "@ocw/db/testing";
 import { RedisContainer, type StartedRedisContainer } from "@testcontainers/redis";
 import { type BuiltApp, buildApp } from "./app";
 import { type Env, loadEnv } from "./config/env";
@@ -17,18 +17,34 @@ export interface TestStack {
   stop(): Promise<void>;
 }
 
+export interface TestStackOptions {
+  /** Extra/overridden env vars (e.g. OCW_CELL_TOKEN, OCW_MODEL_PROVIDER). */
+  env?: Record<string, string>;
+  /** Capture API log lines (enables the logger at LOG_LEVEL, default silent). */
+  logStream?: { write(msg: string): void };
+  /** A lower Device Link frame limit for this stack (06.1-02 frame guard tests). */
+  deviceFrameMaxBytes?: number;
+}
+
 /** Real PostgreSQL 18 + Redis 8 (testcontainers) and the full API listening on a random port. */
-export async function startTestStack(
-  opts: {
-    /** Extra/overridden env vars (e.g. OCW_CELL_TOKEN, OCW_MODEL_PROVIDER). */
-    env?: Record<string, string>;
-    /** Capture API log lines (enables the logger at LOG_LEVEL, default silent). */
-    logStream?: { write(msg: string): void };
-    /** A lower Device Link frame limit for this stack (06.1-02 frame guard tests). */
-    deviceFrameMaxBytes?: number;
-  } = {},
+export async function startTestStack(opts: TestStackOptions = {}): Promise<TestStack> {
+  // Both containers or neither (WINDOWS #213): a failed start stops the one that came up.
+  const [db, redis] = await startAllOrNone([startTestDatabase(), new RedisContainer("redis:8").start()]);
+  const stopContainers = () => Promise.allSettled([db.stop(), redis.stop()]);
+  try {
+    return await buildStack(db, redis, opts, stopContainers);
+  } catch (err) {
+    await stopContainers();
+    throw err;
+  }
+}
+
+async function buildStack(
+  db: TestDatabase,
+  redis: StartedRedisContainer,
+  opts: TestStackOptions,
+  stopContainers: () => Promise<unknown>,
 ): Promise<TestStack> {
-  const [db, redis] = await Promise.all([startTestDatabase(), new RedisContainer("redis:8").start()]);
   const source = {
     NODE_ENV: "test",
     LOG_LEVEL: "silent",
@@ -50,7 +66,12 @@ export async function startTestStack(
     secretStore,
     ...(opts.deviceFrameMaxBytes ? { deviceFrameMaxBytes: opts.deviceFrameMaxBytes } : {}),
   });
-  await built.app.listen({ host: "127.0.0.1", port: 0 });
+  try {
+    await built.app.listen({ host: "127.0.0.1", port: 0 });
+  } catch (err) {
+    await built.close().catch(() => {});
+    throw err;
+  }
   const addr = built.app.server.address();
   const port = typeof addr === "object" && addr ? addr.port : 0;
   return {
@@ -60,8 +81,12 @@ export async function startTestStack(
     built,
     baseUrl: `http://127.0.0.1:${port}`,
     async stop() {
-      await built.close();
-      await Promise.allSettled([db.stop(), redis.stop()]);
+      // The containers stop whatever the app's close does (WINDOWS #213); its failure is still reported.
+      try {
+        await built.close();
+      } finally {
+        await stopContainers();
+      }
     },
   };
 }

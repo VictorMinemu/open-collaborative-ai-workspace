@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkSchema, createTenantDb, localMigrations } from "@ocw/db";
 import { bootstrapRoles, runMigrations } from "@ocw/db/migrate";
+import { startAllOrNone } from "@ocw/db/testing";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { RedisContainer, type StartedRedisContainer } from "@testcontainers/redis";
 import pg from "pg";
@@ -163,7 +164,7 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
   }
 
   beforeAll(async () => {
-    [pgc, redis] = await Promise.all([
+    [pgc, redis] = await startAllOrNone([
       new PostgreSqlContainer("postgres:18")
         .withDatabase("ocw")
         .withUsername("postgres")
