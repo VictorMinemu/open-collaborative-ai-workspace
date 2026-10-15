@@ -234,7 +234,8 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
 
   /**
    * A card's approval link (no viewer field): the 07.2 fields, and for a kind with a `link` hook (07.5, UI-SPEC R6, R7,
-   * R9) its kind, expiry and use time plus the kind's fields, parsed (an invalid result adds nothing of the kind's).
+   * R9) its kind, expiry and use time plus the kind's fields, parsed. An invalid result adds nothing of the kind's and
+   * reads as `review_only` (I-1, fail closed): the card then never approves and never shows a decision note.
    */
   async function linkOf(tx: Tx, row: Locked): Promise<LinkedCardInfo> {
     const base: LinkedCardInfo = {
@@ -253,7 +254,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
       kind: row.kind,
       expiresAt: iso(row.expiresAt),
       usedAt: row.consumedAt ? iso(row.consumedAt) : null,
-      ...(extras.success ? extras.data : {}),
+      ...(extras.success ? extras.data : { display: "review_only" as const }),
     };
   }
 

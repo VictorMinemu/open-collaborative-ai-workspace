@@ -563,8 +563,10 @@ export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
     }
     // 07.5-11 (WINDOWS #211, P-07): a card that does not show the exact action (a `summary` in a shared conversation, or
     // `review_only` when a value was cut for the card) is approved only on the review, where the decider sees all of
-    // it. Deny stays possible here. Kinds without a display (07.2 memory) are unchanged.
-    if (outcome === "approved" && link.display !== undefined && link.display !== "exact") {
+    // it. Deny stays possible here. Kinds without a link hook (07.2 memory: no `kind`, no `display`) are unchanged; a
+    // linked kind without a display (its link failed validation) is never exact (I-1, fail closed).
+    const exact = link.display === "exact" || (link.display === undefined && link.kind === undefined);
+    if (outcome === "approved" && !exact) {
       throw conflict("Review the full action before approving it", "review_required");
     }
     await linked.decide(tx, { messageId: message.id, deciderUserId: userId, outcome, actionHash, note });
