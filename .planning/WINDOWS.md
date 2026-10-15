@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 124
+open_count: 126
 waived_count: 4
 fixed_count: 101
-total_count: 229
-last_updated: 2026-10-15T12:01:49.197Z
+total_count: 231
+last_updated: 2026-10-15T15:08:27.379Z
 ---
 
 # Broken Windows Ledger
@@ -244,6 +244,8 @@ last_updated: 2026-10-15T12:01:49.197Z
 | 227 | 07.5 | deviation | apps/web/components/chat/composer.tsx |  | Composer hint text is under AA contrast; e2e specs share one DB so fixture names collide across phases; e2e specs reading response bodies across a navigation can hang | open |  | 2026-10-15T12:01:49.057Z |  |
 | 228 | 07.5 | deviation | apps/openclaw-channel/src/tool-guard.ts |  | Pin limits (ADR-0026): a plugin registered below -10000 or one answering OpenClaw's own approval first can still beat TOOL_PIN_PRIORITY | open |  | 2026-10-15T12:01:49.128Z |  |
 | 229 | 07.5 | deviation | apps/api/src/modules/approval |  | After #204 the bot does not hear decisions made from /approvals by someone outside the conversation; Work Zone Start has no applyTopics; cards still parse requester and runtime from server text | open |  | 2026-10-15T12:01:49.197Z |  |
+| 230 | 07.8 | deviation | packages/db/src/schema/app.ts |  | Hard-deleting a bot removes its browser_sessions rows but leaves their browser_session secrets; revoke/purge/sweeper in 07.8-21/27 must delete them; nothing cleans browser_sessions when a member leaves the org | open |  | 2026-10-15T15:08:27.289Z |  |
+| 231 | 07.8 | deviation | packages/db/src/schema/app.ts |  | DECIDE in 07.8-18: the app role can change an approved sandbox package's pinned fields (sha256, tree_sha256, lockfile, dependency_count, review_token); add an immutability trigger after approval. Every new secret kind now needs a migration (secrets_kind_check), note in ADR-0029 | open |  | 2026-10-15T15:08:27.379Z |  |
 
 ````json
 [
@@ -2993,6 +2995,30 @@ last_updated: 2026-10-15T12:01:49.197Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T12:01:49.197Z",
+    "resolved_at": null
+  },
+  {
+    "id": 230,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/db/src/schema/app.ts",
+    "line": null,
+    "description": "Hard-deleting a bot removes its browser_sessions rows but leaves their browser_session secrets; revoke/purge/sweeper in 07.8-21/27 must delete them; nothing cleans browser_sessions when a member leaves the org",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T15:08:27.289Z",
+    "resolved_at": null
+  },
+  {
+    "id": 231,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/db/src/schema/app.ts",
+    "line": null,
+    "description": "DECIDE in 07.8-18: the app role can change an approved sandbox package's pinned fields (sha256, tree_sha256, lockfile, dependency_count, review_token); add an immutability trigger after approval. Every new secret kind now needs a migration (secrets_kind_check), note in ADR-0029",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T15:08:27.379Z",
     "resolved_at": null
   }
 ]
