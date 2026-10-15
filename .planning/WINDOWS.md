@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 138
+open_count: 140
 waived_count: 4
 fixed_count: 103
-total_count: 245
-last_updated: 2026-10-15T22:12:53.836Z
+total_count: 247
+last_updated: 2026-10-15T22:14:34.840Z
 ---
 
 # Broken Windows Ledger
@@ -260,6 +260,8 @@ last_updated: 2026-10-15T22:12:53.836Z
 | 243 | 07.8 | deviation | apps/sandboxd/src/egress/proxy.ts |  | Egress proxy: public mode proven by unit tests only (real egress in 07.8-13/24); no per-network tunnel limit; platform names refused by name (not resolved) | open |  | 2026-10-15T18:33:30.267Z |  |
 | 244 | 07.8 | deviation | apps/api/src/modules/sandbox |  | Pending purges and policy re-push after a sandboxd restart reach only orgs with events or a failed purge in this process (needs a SECURITY DEFINER org list or a sandboxd boot event); no 'crashed' stop reason in contract/DB; egress audit hourly dedupe queries audit_events metadata without an index; the event consumer holds a pool connection; fake sandboxd stores files as UTF-8 text (breaks binaries) | open |  | 2026-10-15T21:29:49.204Z |  |
 | 245 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | Sandbox activity steps never carry approvalMessageRoute (07.8-14/20); bot_turn_activity.running stays true for a turn that never replies, web live label needs a timeout (07.8-20); a write body over Fastify's 2 MiB limit returns Fastify's 413 not too_large; shared images show as downloads, no preview (07.8-25); fake sandboxd codes (404 read folder, 409 busy delete) to check against the real one (07.8-08/09) | open |  | 2026-10-15T22:12:53.836Z |  |
+| 246 | 07.8 | deviation | apps/sandboxd/src |  | MUST FIX (fail-open): sandboxd keeps policy, kill state and disk_full in memory; after a sandboxd restart the defaults apply (2 GiB, 15 min idle, NOT killed) until the API re-pushes, and the API only re-pushes for orgs with events. Fix: sandboxd refuses ensure/restart for an org with no policy (409 policy_missing) and the API pushes policy then retries; plus a boot event | open |  | 2026-10-15T22:14:34.757Z |  |
+| 247 | 07.8 | deviation | apps/sandboxd/src |  | Soft quota counts apparent size (sparse files in full) and may overshoot up to one 60 s sweep (document XFS hard quota at the gate); transfers hold ~67 MiB JSON + 50 MiB decoded in memory, two at once; after a sandboxd restart a running background process no longer prevents idling; a container death during the watcher's 2 s reconnect is not reported; OCW_SANDBOXD_SWEEP_MS needs compose and env parity (07.8-24) | open |  | 2026-10-15T22:14:34.840Z |  |
 
 ````json
 [
@@ -3201,6 +3203,30 @@ last_updated: 2026-10-15T22:12:53.836Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T22:12:53.836Z",
+    "resolved_at": null
+  },
+  {
+    "id": 246,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src",
+    "line": null,
+    "description": "MUST FIX (fail-open): sandboxd keeps policy, kill state and disk_full in memory; after a sandboxd restart the defaults apply (2 GiB, 15 min idle, NOT killed) until the API re-pushes, and the API only re-pushes for orgs with events. Fix: sandboxd refuses ensure/restart for an org with no policy (409 policy_missing) and the API pushes policy then retries; plus a boot event",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T22:14:34.757Z",
+    "resolved_at": null
+  },
+  {
+    "id": 247,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src",
+    "line": null,
+    "description": "Soft quota counts apparent size (sparse files in full) and may overshoot up to one 60 s sweep (document XFS hard quota at the gate); transfers hold ~67 MiB JSON + 50 MiB decoded in memory, two at once; after a sandboxd restart a running background process no longer prevents idling; a container death during the watcher's 2 s reconnect is not reported; OCW_SANDBOXD_SWEEP_MS needs compose and env parity (07.8-24)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T22:14:34.840Z",
     "resolved_at": null
   }
 ]
