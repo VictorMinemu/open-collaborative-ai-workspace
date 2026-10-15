@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 131
+open_count: 134
 waived_count: 4
 fixed_count: 85
-total_count: 220
-last_updated: 2026-10-15T05:03:39.415Z
+total_count: 223
+last_updated: 2026-10-15T06:05:38.884Z
 ---
 
 # Broken Windows Ledger
@@ -235,6 +235,9 @@ last_updated: 2026-10-15T05:03:39.415Z
 | 218 | 07.5 | deviation | apps/web/components/approvals |  | Mobile shows 'Approvals' twice (top bar and back link, per UI-SPEC); 'To review' sorts client-side over loaded pages; the e2e fake cell answers approval_* without the plugin's fixed sentences | open |  | 2026-10-14T19:14:27.881Z |  |
 | 219 | 07.5 | unrun-verify | apps/api/src/modules/agent-channel |  | Approval card posted inside the claim transaction (<2 s measured) needs a concurrent-channel contention test (07.5-16); connector grant names the logical tool while the bot calls ocw_connector_call, unproven in a real cell (07.5-15 smoke); fake MCP has no 5xx after a consumed grant | open |  | 2026-10-15T05:03:39.342Z |  |
 | 220 | 07.5 | deviation | apps/api/src/modules/agent-channel |  | An ocw_http_request URL normalised differently counts as a different action and opens a new approval; plugin failure texts duplicate the UI-SPEC copy | open |  | 2026-10-15T05:03:39.415Z |  |
+| 221 | 07.5 | deviation | apps/api/src/modules/tool-approval/kind.ts |  | The tool.call 'target' field carries the internal MCP server name (e.g. mc4866abe); hide it in the API view and the 07.5-14 card | open |  | 2026-10-15T06:05:38.732Z |  |
+| 222 | 07.5 | deviation | apps/api/src/modules/realtime |  | A diagnostic run hit 'deadlock detected' writing to a user: stream, failing a bot reply with 500 (investigate in 07.5-16) | open |  | 2026-10-15T06:05:38.809Z |  |
+| 223 | 07.5 | deviation | e2e/tests |  | Decided approvals stay in the run's DB; specs must filter by their own ids; the phone top bar lacks the Approvals count the UI-SPEC asks for | open |  | 2026-10-15T06:05:38.884Z |  |
 
 ````json
 [
@@ -2876,6 +2879,42 @@ last_updated: 2026-10-15T05:03:39.415Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T05:03:39.415Z",
+    "resolved_at": null
+  },
+  {
+    "id": 221,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/api/src/modules/tool-approval/kind.ts",
+    "line": null,
+    "description": "The tool.call 'target' field carries the internal MCP server name (e.g. mc4866abe); hide it in the API view and the 07.5-14 card",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T06:05:38.732Z",
+    "resolved_at": null
+  },
+  {
+    "id": 222,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/api/src/modules/realtime",
+    "line": null,
+    "description": "A diagnostic run hit 'deadlock detected' writing to a user: stream, failing a bot reply with 500 (investigate in 07.5-16)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T06:05:38.809Z",
+    "resolved_at": null
+  },
+  {
+    "id": 223,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "e2e/tests",
+    "line": null,
+    "description": "Decided approvals stay in the run's DB; specs must filter by their own ids; the phone top bar lacks the Approvals count the UI-SPEC asks for",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T06:05:38.884Z",
     "resolved_at": null
   }
 ]
