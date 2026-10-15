@@ -10,7 +10,7 @@ import {
   type ApprovalSummary,
   EventTypes,
 } from "@ocw/contracts";
-import { approvalRequests, type Tx, tenantOf, withSavepoint } from "@ocw/db";
+import { approvalRequests, messages, type Tx, tenantOf, withSavepoint } from "@ocw/db";
 import { and, desc, eq, inArray, isNull, lt, type SQL, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { CardAction, LinkedCardInfo, LinkedCards } from "../../lib/chat-agent-bridge";
@@ -273,6 +273,27 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
     }
   }
 
+  /**
+   * Locks, in the order a message post takes them, the streams a `server_apply` decision appends to before its `apply`
+   * runs: the card's conversation, then the `user:` streams of the kind's `applyTopics` and of `announce`, ascending.
+   * Other topics `apply` names (e.g. `org:`) are left to the append itself.
+   */
+  async function lockDecisionStreams(tx: Tx, kind: ApprovalKind, row: ApprovalRow, deciderUserId: string) {
+    const users = new Set((await announcedTo(tx, kind, row, [deciderUserId])).map((id) => `user:${id}`));
+    for (const topic of (await kind.applyTopics?.(tx, row)) ?? [])
+      if (topic.startsWith("user:")) users.add(topic);
+    const conv = row.cardMessageId
+      ? (
+          await tx
+            .select({ conversationId: messages.conversationId })
+            .from(messages)
+            .where(eq(messages.id, row.cardMessageId))
+            .limit(1)
+        )[0]?.conversationId
+      : undefined;
+    await core.realtime.lockStreams(tx, [...(conv ? [convTopic(conv)] : []), ...[...users].sort()]);
+  }
+
   /** Who `announce` tells, in ascending id order (the stream lock order). */
   async function announcedTo(tx: Tx, kind: ApprovalKind, row: ApprovalRow, extra: Array<string | null>) {
     const to = new Set<string>(await kind.audience(tx, row));
@@ -486,6 +507,9 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
 
       let final: ApprovalRow = decided;
       if (input.outcome === "approved" && kind.mode === "server_apply") {
+        // Stream lock order (#224): the card's conversation, then every `user:` stream this decision appends to
+        // (what `apply` announces and who `announce` tells), ascending, before `apply` writes its own events.
+        await lockDecisionStreams(tx, kind, decided, input.deciderUserId);
         final = await applyApproved(tx, kind, decided, recomputed, input.deciderUserId);
       }
       // Stream lock order (`announce`): the card's conversation, then the `user:` streams, then the bot's card action.

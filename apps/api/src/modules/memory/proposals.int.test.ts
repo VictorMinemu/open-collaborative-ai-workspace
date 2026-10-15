@@ -1358,3 +1358,70 @@ describe("a deleted, turned-off or forgotten requester never gets a write (WINDO
     expect(await fileAt(scopeOf[A] as string, "late.md")).toBeUndefined();
   });
 });
+
+describe("WINDOWS #224: a memory approval and the bot's replies in the same DM never deadlock", () => {
+  const ROUNDS = 6;
+  // Its own personal bot and DM: earlier cases of this file delete or turn off Scout and archive its DM.
+  let botId = "";
+  let botDm = "";
+  beforeAll(async () => {
+    const bot = await ok(sam.request("POST", "/api/v1/agents/personal", {}));
+    botId = bot.agent.id as string;
+    botDm = bot.dmId as string;
+    await ok(sam.request("PATCH", `/api/v1/agents/${botId}/capabilities`, { dailyLimit: 100 }));
+  });
+  /** The bot answers a turn of Sam's DM through the Agent Channel API: the post notifies Sam (`user:` stream). */
+  const reply = (t: { eventId: string; messageId: string }, text: string, key: string) =>
+    fetch(`${stack.baseUrl}/agent-channel/v1/messages`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${CELL_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        agentId: botId,
+        conversationId: botDm,
+        threadRootMessageId: null,
+        inReplyToMessageId: t.messageId,
+        eventId: t.eventId,
+        text,
+        idempotencyKey: key,
+      }),
+    }).then(async (r) => ({ status: r.status, body: (await r.json()) as Json }));
+
+  it("Lena applies team-memory proposals (memory.changed to its readers) while the bot replies in the card's DM: every request answers", async () => {
+    const deadlocks = async () =>
+      (await su.query("select deadlocks::int as n from pg_stat_database where datname = current_database()"))
+        .rows[0].n as number;
+    for (let round = 0; round < ROUNDS; round++) {
+      // Every round delivers many turns: the bot's daily limit (D-11) is reset so each message reaches it.
+      await su.query("delete from app.agent_usage_daily where agent_id = $1", [botId]);
+      const ids: string[] = [];
+      const turns: Array<{ eventId: string; messageId: string }> = [];
+      for (let i = 0; i < 3; i++) {
+        const asked = await turnIn(sam, botDm, botId, `keep lock note ${round}.${i}`);
+        const r = await proposed({
+          eventId: asked.eventId,
+          agentId: botId,
+          scope: scopeOf[A] as string,
+          path: `locks/${round}-${i}.md`,
+          op: "create",
+          content: `lock ${round}.${i}\n`,
+        });
+        ids.push(r.approvalId);
+        turns.push(await turnIn(sam, botDm, botId, `and reply ${round}.${i}`));
+      }
+      const hashes = await Promise.all(ids.map((id) => hashOf(lena, id)));
+      // The approval locks the readers' `user:` streams (Lena, Sam, Ana) and the DM's stream; each reply locks the DM's
+      // stream and then Sam's. One order for both (conversation, then `user:` ascending) or PostgreSQL aborts one.
+      const results = await Promise.all([
+        ...ids.map((id, i) => decide(lena, id, { outcome: "approved", actionHash: hashes[i] })),
+        ...turns.map((t, i) => reply(t, `Noted ${round}.${i}`, `locks-${round}-${i}`)),
+      ]);
+      for (const r of results) {
+        expect(
+          [200, 201],
+          `round ${round}: ${JSON.stringify(r.body)}, deadlocks so far ${await deadlocks()}`,
+        ).toContain(r.status);
+      }
+      for (const id of ids) expect((await approvalRow(id)).status).toBe("applied");
+    }
+  });
+});

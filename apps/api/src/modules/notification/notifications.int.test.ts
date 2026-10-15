@@ -582,3 +582,23 @@ describe("edits and lost access (Pitfalls 8 and 9, P-05)", () => {
     expect(JSON.stringify(list)).not.toContain("temporary note");
   });
 });
+
+describe("stream lock order (07.5-16, WINDOWS #224)", () => {
+  it("one message's notifications are appended to the recipients' user: streams in ascending id order", async () => {
+    const realtime = stack.built.core.realtime;
+    const append = realtime.appendEvent;
+    const order: string[] = [];
+    realtime.appendEvent = async (tx, topic, type, payload, opts) => {
+      if (type === "notification.created") order.push(topic);
+      return append.call(realtime, tx, topic, type, payload, opts);
+    };
+    try {
+      // Mentioned in an order that is not the id order: the appends must not follow the mention order.
+      await post(ada, generalId, "lock order @bob @alex @sam");
+    } finally {
+      realtime.appendEvent = append;
+    }
+    const expected = [samId, alexId, bobId].map((id) => `user:${id}`).sort();
+    expect(order).toEqual(expected);
+  });
+});

@@ -54,6 +54,12 @@ export interface ApprovalKind {
   /** `server_apply` only: applies the approved action inside the decision transaction (in a savepoint). */
   apply?(tx: Tx, row: ApprovalRow, ctx: { deciderUserId: string }): Promise<ApplyResult>;
   /**
+   * `server_apply` only, optional: the realtime topics `apply` will append to. The decision locks the card's
+   * conversation and every `user:` stream it will touch (these and the announced people) up front, in one order
+   * (conversation, then `user:` ascending), before `apply` runs: the order a message post follows (07.5-16, #224).
+   */
+  applyTopics?(tx: Tx, row: ApprovalRow): Promise<readonly string[]>;
+  /**
    * Whether the stored action can never be applied again, by anyone (its target went with a cascade, the agent that
    * asked was deleted): a result code (e.g. `scope_gone`) lets `closeGone` close a pending request as `failed` with
    * it; null keeps it pending. Asked only by `closeGone`, which the owners of those lifecycles call (07.2, WINDOWS 144).
