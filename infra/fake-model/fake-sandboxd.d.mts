@@ -1,0 +1,45 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+
+/**
+ * Types for the TypeScript tests that run the in-memory sandboxd in-process (implementation: fake-sandboxd.mjs,
+ * 07.8-05). Every answer has the shape of `SANDBOXD_ROUTES` in `@ocw/contracts`.
+ */
+
+export interface FakeSandboxdOptions {
+  /** The bearer token every op requires (≥ 32 chars, like `OCW_SANDBOX_TOKEN`). */
+  token?: string;
+  /** The namespace `info` reports. */
+  namespace?: string;
+}
+
+export interface FakeSandboxdStats {
+  /** Calls per op name (`ensure`, `exec`, `killOrg`, …), counted after the token check; never bodies. */
+  calls: Partial<Record<string, number>>;
+  /** The same counts per organization id. */
+  orgs: Record<string, Partial<Record<string, number>>>;
+  down: boolean;
+}
+
+export interface FakeSandboxdTarget {
+  orgId: string;
+  agentId: string;
+}
+
+export interface FakeSandboxd {
+  /** The node:http handler: answers every request (404 for an op it does not serve). */
+  handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
+  token: string;
+  stats(): FakeSandboxdStats;
+  /** While true every op answers 503 `docker_unavailable` (the service is down). */
+  setDown(value: boolean): void;
+  /** Forgets every sandbox, process, event and counter. */
+  reset(): void;
+  /** Queues one sandboxd event (seq and time added); returns its seq. */
+  emit(event: Record<string, unknown>): number;
+  /** A bot's sandbox state ("absent" when never ensured). */
+  stateOf(target: FakeSandboxdTarget): string;
+  /** The organization policy last pushed with `policy` (only `killed` is kept), or null. */
+  policyOf(orgId: string): { killed: boolean } | null;
+}
+
+export function createFakeSandboxd(opts?: FakeSandboxdOptions): FakeSandboxd;

@@ -30,6 +30,7 @@ import { cellMcpServers } from "../mcp";
 import type { MemoryService } from "../memory";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
 import { cellApprovedPlugins } from "../plugins";
+import type { SandboxdClient } from "../sandbox";
 import type { WorkZoneProposalService } from "../work-session";
 import { cellOf, createCellAuth } from "./auth";
 import { registerBoardAgentRoutes } from "./board";
@@ -44,6 +45,7 @@ import { registerMentionHandler } from "./mentions";
 import { registerPluginCellRoutes } from "./plugins";
 import { createCellPresence } from "./presence";
 import { createProviderAuth } from "./provider-auth";
+import { registerSandboxRoutes } from "./sandbox";
 import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerWorkZoneRoutes } from "./work-zone";
 
@@ -119,6 +121,11 @@ export function createAgentChannelModule(
      * (`/tool-calls`, `/connectors/call`, `/http-requests`) inside its claim transaction.
      */
     toolApproval: ToolApprovalGate;
+    /**
+     * Bot sandboxes (07.8-05, D-02 (b)): the sandboxd client of the sandbox module, null when `OCW_SANDBOX_URL` is not
+     * configured (every sandbox call then answers `service_unavailable` after its decision).
+     */
+    sandbox?: { client: SandboxdClient | null } | null;
   },
 ): ApiModule {
   const auth = createCellAuth(core);
@@ -480,6 +487,13 @@ export function createAgentChannelModule(
           registerMemoryFileRoutes(scope, { core, perms, memory: opts.memory });
           // Work Zone proposals (07.5-08, D-03): the projects a turn's human may use, and a session proposed as a card.
           if (opts.workZone) registerWorkZoneRoutes(scope, core, opts.workZone);
+          // Bot sandboxes (07.8-05, D-02 (b), D-09): every `ocw_sandbox_*` call decided, approved, counted, capped and
+          // audited by the API before sandboxd runs it.
+          registerSandboxRoutes(scope, core, {
+            perms,
+            toolApproval: opts.toolApproval,
+            client: opts.sandbox?.client ?? null,
+          });
           // The cell's MCP tool discovery (D-13): probe reports → the tool catalog.
           registerMcpCellRoutes(scope, core);
           // The cell's marketplace executor and install gate (D-14).

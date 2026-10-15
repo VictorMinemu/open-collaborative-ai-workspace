@@ -142,6 +142,21 @@ export const EnvSchema = z
      * Admins can also mint a token in Settings › Bots runtime (stored as SHA-256 only).
      */
     OCW_CELL_TOKEN: z.string().min(32, "must be at least 32 characters").optional(),
+    /**
+     * Phase 07.8 (D-11, P-03): the sandbox broker as seen from the API (e.g. http://sandboxd:8090 on the internal
+     * `sandbox-control` network). Empty = not configured: no bot is offered sandbox tools and every sandbox call answers
+     * `service_unavailable`. The API never holds the Docker socket; it only calls this URL.
+     */
+    OCW_SANDBOX_URL: optionalUrl,
+    /** Bearer token of every sandboxd call (shared with sandboxd; `NAME` or `NAME_FILE`). Required with the URL. */
+    OCW_SANDBOX_TOKEN: z.preprocess(
+      (v) => (v === "" ? undefined : v),
+      z
+        .string()
+        .min(32, "must be at least 32 characters")
+        .optional()
+        .transform((v) => v ?? null),
+    ),
     /** `mock` offers the deterministic fake model (`fake/mock-1`) for E2E/CI; never metered. */
     OCW_MODEL_PROVIDER: z
       .enum(["", "mock"])
@@ -298,6 +313,21 @@ export const EnvSchema = z
     ),
   })
   .superRefine((v, ctx) => {
+    // The sandbox broker is configured with both its URL and its token, or not at all (07.8-05).
+    if (v.OCW_SANDBOX_URL && !v.OCW_SANDBOX_TOKEN) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["OCW_SANDBOX_TOKEN"],
+        message: "is required when OCW_SANDBOX_URL is set",
+      });
+    }
+    if (v.OCW_SANDBOX_TOKEN && !v.OCW_SANDBOX_URL) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["OCW_SANDBOX_URL"],
+        message: "is required when OCW_SANDBOX_TOKEN is set",
+      });
+    }
     if (v.OCW_SMTP_URL === "memory:" && v.NODE_ENV !== "test") {
       ctx.addIssue({
         code: "custom",
@@ -343,6 +373,7 @@ const SECRET_VARS = [
   "OCW_ENCRYPTION_KEY",
   "OCW_CELL_TOKEN",
   "OCW_SMTP_URL",
+  "OCW_SANDBOX_TOKEN",
 ] as const;
 
 export function decodeKey(v: string): Buffer | null {

@@ -43,6 +43,7 @@ import { createNotificationModule } from "./modules/notification";
 import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
 import { createPluginsModule } from "./modules/plugins";
 import { createOnlineSet, createRealtimeModule, createRealtimeService } from "./modules/realtime";
+import { createSandboxModule, type SandboxModule } from "./modules/sandbox";
 import { createSearchModule } from "./modules/search";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createToolApprovalModule, type ToolApprovalService } from "./modules/tool-approval";
@@ -67,6 +68,8 @@ export interface BuiltApp {
   memory: MemoryService;
   /** Per-tool approval policies (07.5-03): the gate (07.5-07) and turn assembly (07.5-11) resolve through it. */
   toolApprovals: ToolApprovalService;
+  /** Bot sandboxes (07.8-05): the domain service and the sandboxd client (null when not configured). */
+  sandbox: SandboxModule;
   close(): Promise<void>;
 }
 
@@ -291,6 +294,9 @@ export async function buildApp(
     storage: artifactModule.storage,
     approvals: approvals.service,
   });
+  // Phase 07.8: bot sandboxes (D-02 (b), D-09, D-11); built before the Agent Channel, which serves the bots' sandbox
+  // routes with its sandboxd client.
+  const sandbox = createSandboxModule(core);
   const modules: ApiModule[] = [
     createIdentityModule({
       identity,
@@ -321,12 +327,14 @@ export async function buildApp(
       memory,
       workZone: workSession.proposals, // 07.5-08: Work Zone proposals (D-03)
       toolApproval: toolApproval.service, // 07.5-11: the approval decision of every agent action (D-04)
+      sandbox, // 07.8-05: the sandboxd client of the bots' sandbox routes
     }),
     deviceModule, // B3
     workSession, // B3 (built above)
     approvals.module, // Phase 07.2: approvals inbox and decisions (MEM-06)
     createMemoryModule(core, memory), // Phase 07.2: memory scopes, files and history (MEM-01, MEM-02, MEM-07)
     toolApproval.module, // Phase 07.5: approval policies per tool (APPROVE-01)
+    sandbox.module, // Phase 07.8: the kill switch (D-09); settings, files and packages from 11 and 18
   ];
   for (const m of modules) {
     await app.register(async (scope) => m.register(scope as unknown as App), {
@@ -343,6 +351,7 @@ export async function buildApp(
     approvals: approvals.service,
     memory,
     toolApprovals: toolApproval.service,
+    sandbox,
     async close() {
       await app.close();
       for (const m of modules) await m.close?.();

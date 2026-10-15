@@ -213,6 +213,60 @@ describe("Presidio variables (MEM-05, D-06)", () => {
   });
 });
 
+describe("sandboxd variables (07.8-05, D-11)", () => {
+  const base = {
+    DATABASE_URL: "postgres://app:x@localhost:5432/ocw",
+    AUTH_DATABASE_URL: "postgres://auth:x@localhost:5432/ocw",
+    REDIS_URL: "redis://localhost:6379",
+    BETTER_AUTH_SECRET: "b".repeat(32),
+    OCW_SETUP_TOKEN: "s".repeat(16),
+    OCW_ENCRYPTION_KEY: "a".repeat(64),
+  };
+  const token = "t".repeat(32);
+
+  it("unset or compose-empty: the service is not configured", () => {
+    for (const env of [loadEnv(base), loadEnv({ ...base, OCW_SANDBOX_URL: "", OCW_SANDBOX_TOKEN: "" })]) {
+      expect(env.OCW_SANDBOX_URL).toBeNull();
+      expect(env.OCW_SANDBOX_TOKEN).toBeNull();
+    }
+  });
+
+  it("both set: the URL and the token (also from a _FILE)", () => {
+    const env = loadEnv({ ...base, OCW_SANDBOX_URL: "http://sandboxd:8090", OCW_SANDBOX_TOKEN: token });
+    expect(env.OCW_SANDBOX_URL).toBe("http://sandboxd:8090");
+    expect(env.OCW_SANDBOX_TOKEN).toBe(token);
+    const dir = mkdtempSync(join(tmpdir(), "ocw-sbx-"));
+    try {
+      writeFileSync(join(dir, "token"), `${token}\n`);
+      const fromFile = loadEnv({
+        ...base,
+        OCW_SANDBOX_URL: "http://sandboxd:8090",
+        OCW_SANDBOX_TOKEN_FILE: join(dir, "token"),
+      });
+      expect(fromFile.OCW_SANDBOX_TOKEN).toBe(token);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("both or neither, a token of at least 32 characters, never the value in the message", () => {
+    expect(() => loadEnv({ ...base, OCW_SANDBOX_URL: "http://sandboxd:8090" })).toThrow(/OCW_SANDBOX_TOKEN/);
+    expect(() => loadEnv({ ...base, OCW_SANDBOX_TOKEN: token })).toThrow(/OCW_SANDBOX_URL/);
+    const short = "short-sandbox-token";
+    let message = "";
+    try {
+      loadEnv({ ...base, OCW_SANDBOX_URL: "http://sandboxd:8090", OCW_SANDBOX_TOKEN: short });
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/OCW_SANDBOX_TOKEN/);
+    expect(message).not.toContain(short);
+    expect(() => loadEnv({ ...base, OCW_SANDBOX_URL: "not a url", OCW_SANDBOX_TOKEN: token })).toThrow(
+      /OCW_SANDBOX_URL/,
+    );
+  });
+});
+
 describe("OCW_TRUST_PROXY (SELF-05, D-18)", () => {
   const base = {
     DATABASE_URL: "postgres://app:x@localhost:5432/ocw",
