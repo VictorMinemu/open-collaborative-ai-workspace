@@ -104,7 +104,8 @@ rules:
     message: >-
       Outbound calls go through lib/egress.ts (ADR-0025): the connectors and keychain modules and the Agent Channel
       proxy routes call admin-, authorization-server- and model-chosen URLs, so a raw fetch, undici, http(s), tls or
-      socket call would skip the public-only, IP-pinned egress guard (D-07, CONN-05). Use egressFor(env).
+      socket call would skip the public-only, IP-pinned egress guard (D-07, CONN-05). Use egressFor(env). In the
+      sandbox egress entrypoint (07.8 D-11) only proxy.ts opens sockets, after deciding with @ocw/egress-policy.
     pattern-either:
       - pattern: fetch(...)
       - pattern: globalThis.fetch(...)
@@ -123,5 +124,9 @@ rules:
         - /apps/api/src/modules/keychain/
         - /apps/api/src/modules/agent-channel/connectors.ts
         - /apps/api/src/modules/agent-channel/http-requests.ts
+        - /apps/sandboxd/src/egress/
       exclude:
         - "*.test.ts"
+        # ADR-0029 (07.8-12): the sandbox-egress proxy is the one place that connects for a bot, to the address it
+        # pinned after deciding every answer with the shared 07.4 rules.
+        - /apps/sandboxd/src/egress/proxy.ts

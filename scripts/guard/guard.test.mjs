@@ -176,6 +176,29 @@ describe("guard: ocw.raw-egress", () => {
   });
 });
 
+describe("guard: ocw.raw-egress in the sandbox egress entrypoint (07.8-12)", () => {
+  it("a raw socket or http client in apps/sandboxd/src/egress outside proxy.ts fails", () => {
+    put("apps/sandboxd/src/egress/main.ts", `import net from "node:net";\nnet.connect(80, "x");\n`);
+    put("apps/sandboxd/src/egress/extra.ts", `import http from "node:http";\nhttp.request("http://x");\n`);
+    const res = semgrep();
+    assert.notEqual(res.status, 0, res.out);
+    assert.match(res.out, /ocw\.raw-egress apps\/sandboxd\/src\/egress\/main\.ts/);
+    assert.match(res.out, /ocw\.raw-egress apps\/sandboxd\/src\/egress\/extra\.ts/);
+  });
+
+  it("proxy.ts, the one allowed file, passes; the allowance is that exact file", () => {
+    put(
+      "apps/sandboxd/src/egress/proxy.ts",
+      `import http from "node:http";\nimport net from "node:net";\nnet.connect(443, "93.184.216.34");\n`,
+    );
+    assert.equal(semgrep().status, 0);
+    put("apps/sandboxd/src/egress/sub/proxy.ts", `import net from "node:net";\nnet.connect(1, "x");\n`);
+    const res = semgrep();
+    assert.notEqual(res.status, 0, res.out);
+    assert.match(res.out, /ocw\.raw-egress apps\/sandboxd\/src\/egress\/sub\/proxy\.ts/);
+  });
+});
+
 describe("guard: rule fixtures", () => {
   it("--rule-tests passes over .semgrep/tests", () => {
     const res = guard(["--rule-tests"]);
