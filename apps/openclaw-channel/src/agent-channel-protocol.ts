@@ -763,7 +763,8 @@ export const AGENT_CARD_FIELDS_MAX = 12;
 export const AGENT_CARD_ACTIONS_MAX = 4;
 export const AGENT_CARD_SUMMARY_MAX = 2_000;
 const AGENT_CARD_ROUTE_MAX = 512;
-export const AGENT_CARD_KINDS = [
+/** The kinds an agent may post with `ocw_agent_card`. */
+export const AGENT_POSTABLE_CARD_KINDS = [
   "work_zone",
   "approval",
   "report",
@@ -773,6 +774,8 @@ export const AGENT_CARD_KINDS = [
   "pr",
   "generic",
 ] as const;
+/** Every kind (contracts parity); `browser` (Phase 07.8 sign-in card) is platform-owned, never posted by an agent. */
+export const AGENT_CARD_KINDS = [...AGENT_POSTABLE_CARD_KINDS, "browser"] as const;
 export const AGENT_CARD_STATUSES = [
   "info",
   "pending",
@@ -844,7 +847,7 @@ export const AgentCardSummary = z.string().trim().min(1).max(AGENT_CARD_SUMMARY_
 
 /** What an agent posts; `summary` becomes the plain-text message body. */
 export const AgentCardInput = z.object({
-  kind: AgentCardKind,
+  kind: z.enum(AGENT_POSTABLE_CARD_KINDS),
   title: AgentCardTitle,
   fields: AgentCardFields,
   status: AgentCardStatus,

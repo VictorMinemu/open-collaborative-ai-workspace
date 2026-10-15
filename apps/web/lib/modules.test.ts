@@ -89,7 +89,8 @@ describe("withoutBotDms", () => {
 
 describe("moduleNames (Settings › Modules copy, 07.2 WINDOWS 155)", () => {
   it("names every module of the catalog, Memory included, in catalog order", () => {
-    expect(moduleNames()).toBe("Work Zone, AI chats, Bots and Memory");
+    // 07.8-30: Sandbox and Browser joined the catalog (exact string updated to the new correct value).
+    expect(moduleNames()).toBe("Work Zone, AI chats, Bots, Memory, Sandbox and Browser");
     for (const id of ModuleId.options) expect(moduleNames()).toContain(MODULE_CATALOG[id].label);
   });
 });

@@ -211,7 +211,10 @@ describe("tool-call approval wire contracts (tracer)", () => {
       deniedSuppressMs: 24 * 60 * 60 * 1000,
       approverUsersMax: 20,
       historyPage: 30,
+      // Phase 07.8 (D-12, R8): a browser-action approval expires with the held page.
+      browserPendingTtlMs: 15 * 60 * 1000,
     });
+    expect(TOOL_APPROVAL_LIMITS.browserPendingTtlMs).toBe(900_000);
   });
 
   it("a request may carry the model's arguments (≤ 32 KB); old requests still parse", () => {
@@ -320,6 +323,49 @@ describe("tool-call approval wire contracts (tracer)", () => {
     useBy: null,
     usedAt: null,
   };
+
+  it("Phase 07.8: a tool_call view can carry a browser action (R8) and D-13's cross-site open", () => {
+    const click = {
+      action: "click",
+      element: { role: "button", name: "Place order" },
+      host: "shop.example.com",
+      secure: true,
+      signedIn: true,
+      sessionSite: "shop.example.com",
+      value: null,
+      option: null,
+    };
+    expect(ToolCallApprovalView.parse({ ...view, tool: "ocw_browser_act", browser: click }).browser).toEqual(
+      click,
+    );
+    const open = {
+      action: "open",
+      element: null,
+      host: "evil.example",
+      secure: true,
+      signedIn: false,
+      sessionSite: "panel.fake.test",
+      value: null,
+      option: null,
+    };
+    expect(
+      ToolCallApprovalView.parse({ ...view, tool: "ocw_browser_open", browser: open }).browser?.action,
+    ).toBe("open");
+    expect(ToolCallApprovalView.parse(view).browser).toBeUndefined();
+    expect(ToolCallApprovalView.parse({ ...view, browser: null }).browser).toBeNull();
+    for (const bad of [
+      { ...click, action: "evaluate" },
+      { ...click, host: "https://shop.example.com/" },
+      { ...click, value: "x".repeat(TOOL_APPROVAL_LIMITS.previewValueChars + 1) },
+      { ...click, element: { role: "button", name: "x".repeat(201) } },
+      { ...click, cookies: [] },
+    ]) {
+      expect(
+        ToolCallApprovalView.safeParse({ ...view, browser: bad }).success,
+        JSON.stringify(bad).slice(0, 80),
+      ).toBe(false);
+    }
+  });
 
   it("the tool_call view is an approval view bounded at 12 preview fields", () => {
     expect(ToolCallApprovalView.parse(view).preview).toHaveLength(12);
@@ -465,6 +511,34 @@ describe("approvable tools and patterns (D-01, P-04)", () => {
       "",
       "a b",
       "x".repeat(129),
+    ]) {
+      expect(isApprovableTool(t), t).toBe(false);
+    }
+  });
+
+  it("Phase 07.8: every confined sandbox and browser tool is approvable except sign-in and close (SBX-04, D-12)", () => {
+    for (const t of [
+      "ocw_sandbox_exec",
+      "ocw_sandbox_write",
+      "ocw_sandbox_delete",
+      "ocw_sandbox_import",
+      "ocw_browser_act",
+      "ocw_browser_open",
+      "ocw_browser_snapshot",
+    ]) {
+      expect(isApprovableTool(t), t).toBe(true);
+      expect(ToolPattern.safeParse(t).success, t).toBe(true);
+    }
+    for (const t of [
+      "ocw_browser_signin",
+      "ocw_browser_close",
+      "ocw_memory_save",
+      "web_fetch",
+      // Exact lower case only: a look-alike never slips in.
+      "OCW_SANDBOX_EXEC",
+      "ocw_Browser_act",
+      "ocw_sandbox_",
+      "ocw_sandboxexec",
     ]) {
       expect(isApprovableTool(t), t).toBe(false);
     }

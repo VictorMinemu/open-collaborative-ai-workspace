@@ -29,7 +29,7 @@ export function grainStatus(perms: Decision, failed: boolean, permission: Permis
   return failed ? "on" : "loading";
 }
 
-/** "Work Zone, AI chats, Bots and Memory": every module's label in catalog order, for copy that lists them all. */
+/** "Work Zone, AI chats, Bots, Memory, Sandbox and Browser": every module's label in catalog order, for copy that lists them all. */
 export function moduleNames(): string {
   const labels = ModuleId.options.map((id) => MODULE_CATALOG[id].label);
   return labels.length > 1 ? `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}` : (labels[0] ?? "");

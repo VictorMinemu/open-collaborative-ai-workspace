@@ -69,15 +69,20 @@ describe("ModuleAccessPanel", () => {
           { module: "ai_chats", state: "custom", inherited: null },
           on("bots"),
           on("memory"),
+          on("sandbox"),
+          on("browser"),
         ],
         unitBotCount: 2,
       }),
     );
+    // 07.8-30: Sandbox and Browser follow Memory (exact list updated to the new correct value).
     expect([...html.matchAll(/data-testid="module-switch-([a-z_]+)"/g)].map((m) => m[1])).toEqual([
       "work_zone",
       "ai_chats",
       "bots",
       "memory",
+      "sandbox",
+      "browser",
     ]);
     expect(tagOf(html, "module-switch-work_zone")).toContain('aria-checked="true"');
     expect(tagOf(html, "module-switch-work_zone")).toContain(

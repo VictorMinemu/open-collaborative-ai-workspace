@@ -56,7 +56,8 @@ describe("module catalog (Phase 07.3, ADR-0024)", () => {
   });
 
   it("is exactly the agreed catalog (P-03)", () => {
-    expect(ModuleId.options).toEqual(["work_zone", "ai_chats", "bots", "memory"]);
+    // Phase 07.8 (07.8-30, D-09): Sandbox and Browser appended after Memory.
+    expect(ModuleId.options).toEqual(["work_zone", "ai_chats", "bots", "memory", "sandbox", "browser"]);
     expect(MODULE_CATALOG.work_zone).toMatchObject({
       entry: "work_session.read",
       patterns: ["work_session.*", "device.pair", "device.use", "device.full_access"],
@@ -108,12 +109,75 @@ describe("module catalog (Phase 07.3, ADR-0024)", () => {
     expect(modulePatternOf("device.pair")).toBe("work_zone");
     expect(modulePatternOf("bot.tool.use")).toBe("bots");
     expect(modulePatternOf("memory.*")).toBe("memory");
+    expect(modulePatternOf("sandbox.*")).toBe("sandbox");
+    expect(modulePatternOf("browser.*")).toBe("browser");
+    expect(modulePatternOf("browser.watch")).toBeNull();
     expect(modulePatternOf("memory.read")).toBeNull();
     expect(modulePatternOf("device.revoke")).toBeNull();
     // Exact pattern, not a match: a hand-written grain under a catalog prefix is not a catalog row.
     expect(modulePatternOf("ai_chat.use")).toBeNull();
     expect(modulePatternOf("bot.*")).toBeNull();
     expect(modulePatternOf("nope")).toBeNull();
+  });
+});
+
+describe("Sandbox and Browser modules (Phase 07.8, D-09, D-12, P-05)", () => {
+  it("are ordinary catalog modules with the UI-SPEC copy, one pattern each and no exclusion", () => {
+    expect(MODULE_CATALOG.sandbox).toEqual({
+      label: "Sandbox",
+      description: "Bots get their own workspace to keep files and run commands",
+      entry: "sandbox.use",
+      patterns: ["sandbox.*"],
+    });
+    expect(MODULE_CATALOG.browser).toEqual({
+      label: "Browser",
+      description: "Bots open web pages in a real browser that people can watch and sign in to",
+      entry: "browser.use",
+      patterns: ["browser.*"],
+    });
+    for (const perm of MODULE_EXCLUDED) {
+      expect(perm.startsWith("sandbox.") || perm.startsWith("browser."), perm).toBe(false);
+    }
+  });
+
+  it("every sandbox. and browser. grain belongs to exactly its module", () => {
+    const sandbox = Permission.options.filter((p) => p.startsWith("sandbox."));
+    const browserGrains = Permission.options.filter((p) => p.startsWith("browser."));
+    expect(sandbox).toEqual(["sandbox.use", "sandbox.files"]);
+    expect(browserGrains).toEqual(["browser.use", "browser.watch", "browser.control"]);
+    for (const p of sandbox) expect(modulesMatching(p), p).toEqual(["sandbox"]);
+    for (const p of browserGrains) expect(modulesMatching(p), p).toEqual(["browser"]);
+  });
+
+  it("C-05 does not apply: no grain is added to an existing module", () => {
+    expect(MODULE_CATALOG.work_zone.patterns).toEqual([
+      "work_session.*",
+      "device.pair",
+      "device.use",
+      "device.full_access",
+    ]);
+    expect(MODULE_CATALOG.ai_chats.patterns).toEqual(["ai_chat.*"]);
+    expect(MODULE_CATALOG.bots.patterns).toEqual([
+      "bot.read",
+      "bot.create_personal",
+      "bot.configure",
+      "bot.internet",
+      "bot.tool.use",
+      "connector.connect",
+      "vault.use",
+    ]);
+    expect(MODULE_CATALOG.memory.patterns).toEqual(["memory.*"]);
+    for (const m of ["work_zone", "ai_chats", "bots", "memory"] as const) {
+      for (const p of [
+        "sandbox.use",
+        "sandbox.files",
+        "browser.use",
+        "browser.watch",
+        "browser.control",
+      ] as const) {
+        expect(modulesMatching(p), `${m}: ${p}`).not.toContain(m);
+      }
+    }
   });
 });
 
