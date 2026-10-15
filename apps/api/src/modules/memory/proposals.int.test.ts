@@ -417,7 +417,9 @@ describe("tracer: Scout's proposal into team memory becomes a pending card; Lena
       decision: { outcome: "approved", by: { id: lenaId } },
       approval: { status: "applied" },
     });
-    expect(await cardActionsOf(cardMessageId)).toHaveLength(1);
+    // Lena does not read Sam's DM with Scout, so no turn is delivered for her there (WINDOWS #204: her bot reply would
+    // be refused and the turn metered for nothing). The card shows the decision to Sam live.
+    expect(await cardActionsOf(cardMessageId)).toHaveLength(0);
     // History names the approver (07.2-13, WINDOWS 156).
     const history = await ok(sam.request("GET", `/api/v1/memory/files/${file?.id}/revisions`));
     expect(history.revisions[0]).toMatchObject({
@@ -836,7 +838,7 @@ describe("integrity: the exact change, once, on the file it was proposed for (Ta
     expect(await fileAt(scopeOf[A] as string, "race.md")).toMatchObject({ content: "once\n", version: 1 });
   });
 
-  it("deny: the card is cancelled, the file unchanged, the bot hears it was denied", async () => {
+  it("deny: the card is cancelled, the file unchanged; the bot hears it only where the decider reads", async () => {
     const r = await fresh({ scope: scopeOf[A] as string, path: "denied.md", op: "create", content: "no\n" });
     const res = await decide(lena, r.approvalId, {
       outcome: "denied",
@@ -846,9 +848,8 @@ describe("integrity: the exact change, once, on the file it was proposed for (Ta
     expect(await fileAt(scopeOf[A] as string, "denied.md")).toBeUndefined();
     const row = await approvalRow(r.approvalId);
     expect((await cardFor(sam, row.card_message_id)).status).toBe("cancelled");
-    const heard = await cardActionsOf(row.card_message_id);
-    expect(heard).toHaveLength(1);
-    expect(heard[0]?.cardAction).toMatchObject({ outcome: "denied" });
+    // Lena decided from /approvals and does not read Sam's DM: no turn for her there (WINDOWS #204).
+    expect(await cardActionsOf(row.card_message_id)).toHaveLength(0);
   });
 
   it("an expired request cannot be decided (409 approval_expired), nothing written", async () => {
