@@ -1,5 +1,7 @@
 import {
+  type BotCapabilities,
   type BotCapabilityView,
+  BROWSER_TOOL_NAMES,
   BUILTIN_TOOLS,
   CONFINED_TOOL_FLAGS,
   MAX_SANDBOX_CALLS_PER_TURN,
@@ -23,6 +25,7 @@ import {
   tenantOf,
 } from "@ocw/db";
 import { and, eq, isNull, ne, sql } from "drizzle-orm";
+import type { Env } from "../../config/env";
 import type { Core } from "../../core";
 // Types only: the memory service is injected by the caller (a value import would be a module cycle).
 import { type EffectiveVaultItem, effectiveVaultItems, unitAudienceAllows } from "../keychain";
@@ -130,6 +133,22 @@ const START_WORK_ZONE_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffec
  * `CONFINED_TOOL_FLAGS` (the D-13 member-data rule stays server-side). Browser tools are offered from 07.8-14.
  */
 const OFFERED_SANDBOX_TOOLS = SANDBOX_TOOL_NAMES.filter((name) => name !== BUILTIN_TOOLS.sandboxImport);
+
+/**
+ * The confined tools a bot's cell entry allows (`alsoAllow`, 07.8-08; WINDOWS #240): every `ocw_sandbox_*` tool while
+ * the bot's Sandbox switch is on and every `ocw_browser_*` tool while its Browser switch is on, only while sandboxd is
+ * configured. OpenClaw runs a plugin tool only when the agent entry allows it, and the cell-wide snapshot is computed
+ * for no human, so the bot's own switch is the only fact it can use here. The organization switch, the kill state,
+ * the resolver (modules, agent ∩ human) and the delivered tool list stay per-turn decisions (`turnPolicy`, every
+ * confined route), so this list never widens what a turn may do: each turn narrows it (`toolsAllow`).
+ */
+export function confinedCellTools(
+  caps: Pick<BotCapabilities, "sandbox" | "browser">,
+  sandboxdConfigured: boolean,
+): string[] {
+  if (!sandboxdConfigured) return [];
+  return [...(caps.sandbox ? SANDBOX_TOOL_NAMES : []), ...(caps.browser ? BROWSER_TOOL_NAMES : [])];
+}
 
 /**
  * Whether a catalog source acts with the asking member's own account (07.4 D-01): a per-member MCP connector. Its tools
@@ -828,7 +847,7 @@ export async function recordLimitReached(
  */
 export async function cellAgentCapabilities(
   tx: Tx,
-  env: SearchEnv,
+  env: SearchEnv & Pick<Env, "OCW_SANDBOX_URL">,
 ): Promise<Map<string, { tools: string[] }>> {
   const rows = await tx.select().from(agents).where(isNull(agents.deletedAt));
   const policy = await loadPolicy(tx);
@@ -865,7 +884,10 @@ export async function cellAgentCapabilities(
       tools:
         row.status === "disabled"
           ? []
-          : assemble(effective, null, catalog, names, false, keyHolders.has(row.id)).tools,
+          : [
+              ...assemble(effective, null, catalog, names, false, keyHolders.has(row.id)).tools,
+              ...confinedCellTools(caps, env.OCW_SANDBOX_URL !== null),
+            ],
     });
   }
   return out;

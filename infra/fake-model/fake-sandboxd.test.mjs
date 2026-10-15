@@ -210,3 +210,286 @@ describe("fake sandboxd", () => {
     assert.equal(r.body.nextSeq, 1);
   });
 });
+
+// ---------------------------------------------------------------- browser ops (07.8-08, P-10, P-13, D-13)
+
+const SENTINEL = "OCW-SENTINEL-PW-5521";
+const VIEWPORT = { width: 960, height: 600 };
+const control = async (path, body) => {
+  const res = await fetch(`${base}/__control/browser/${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  return { status: res.status, body: await res.json() };
+};
+const events = async () => (await op("/v1/events?after=0&waitMs=0", undefined, TOKEN, "GET")).body.events;
+
+/** Required keys of each browser op's response (the contract's `SANDBOXD_ROUTES` outputs). */
+const REQUIRED = {
+  browserEnsure: ["target", "state", "runtime", "browserSandbox"],
+  contextOpen: ["contextId"],
+  contextNavigate: ["host", "secure", "title", "blockedNavigation"],
+  contextSnapshot: ["host", "title", "nodes", "text", "truncated"],
+  contextAct: ["navigated", "blockedNavigation", "download"],
+  contextScreenshot: ["mimeType", "data", "width", "height", "masked"],
+  contextWait: ["ok", "host"],
+  contextExportState: ["storageState"],
+  contextClose: ["closed"],
+  contextHold: ["held"],
+  contextTakeover: ["active"],
+  contextResize: ["ok"],
+  contextInput: ["accepted"],
+  contextDownload: ["name", "size", "mimeType", "data"],
+};
+const NODE_KEYS = ["ref", "role", "name", "value", "redacted", "depth"];
+function shaped(opName, body) {
+  for (const key of REQUIRED[opName]) assert.ok(key in body, `${opName} answers ${key}`);
+  if (opName === "contextSnapshot") {
+    for (const n of body.nodes) for (const key of NODE_KEYS) assert.ok(key in n, `node ${n.ref} has ${key}`);
+  }
+  return body;
+}
+
+async function browser(target, contextId = randomUUID(), extra = {}) {
+  shaped("browserEnsure", (await op("/v1/browsers/ensure", { target })).body);
+  const opened = await op("/v1/browsers/contexts/open", { target, contextId, viewport: VIEWPORT, ...extra });
+  assert.equal(opened.status, 200, JSON.stringify(opened.body));
+  shaped("contextOpen", opened.body);
+  return contextId;
+}
+const ctxOp = (name, target, contextId, body = {}) =>
+  op(`/v1/browsers/contexts/${name}`, { target, contextId, ...body });
+
+/** Reads `ms` of a frame stream: [{ type, payload }] in the contract's framing (4-byte BE length, 1-byte type). */
+async function readFrames(target, contextId, ms) {
+  const q = new URLSearchParams({ orgId: target.orgId, agentId: target.agentId, contextId });
+  const ac = new AbortController();
+  const res = await fetch(`${base}/v1/browsers/contexts/frames?${q}`, {
+    headers: { authorization: `Bearer ${TOKEN}` },
+    signal: ac.signal,
+  });
+  assert.equal(res.status, 200);
+  const chunks = [];
+  const timer = setTimeout(() => ac.abort(), ms);
+  try {
+    for await (const chunk of res.body) chunks.push(Buffer.from(chunk));
+  } catch {
+    /* aborted after `ms` */
+  } finally {
+    clearTimeout(timer);
+  }
+  const all = Buffer.concat(chunks);
+  const frames = [];
+  let at = 0;
+  while (at + 5 <= all.length) {
+    const length = all.readUInt32BE(at);
+    if (at + 5 + length > all.length) break;
+    frames.push({ type: all[at + 4], payload: all.subarray(at + 5, at + 5 + length) });
+    at += 5 + length;
+  }
+  return frames;
+}
+
+describe("fake sandboxd: browser ops", () => {
+  it("ensure + open + navigate panel.fake.test/app: a navigated event with the host, every answer shaped", async () => {
+    const ctx = await browser(A);
+    const nav = await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app" });
+    assert.equal(nav.status, 200);
+    shaped("contextNavigate", nav.body);
+    assert.deepEqual(
+      { host: nav.body.host, secure: nav.body.secure, blocked: nav.body.blockedNavigation },
+      { host: "panel.fake.test", secure: true, blocked: null },
+    );
+    const navigated = (await events()).filter((e) => e.type === "browser" && e.event === "navigated");
+    assert.deepEqual(
+      navigated.map((e) => [e.contextId, e.host, e.target.agentId]),
+      [[ctx, "panel.fake.test", A.agentId]],
+    );
+  });
+
+  it("the snapshot redacts the password field; the leak control puts the sentinel on a redacted node once", async () => {
+    const ctx = await browser(A);
+    await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app" });
+    const snap = shaped("contextSnapshot", (await ctxOp("snapshot", A, ctx)).body);
+    const pw = snap.nodes.find((n) => n.name === "Password");
+    assert.deepEqual({ value: pw.value, redacted: pw.redacted }, { value: "[redacted]", redacted: true });
+    assert.ok(!JSON.stringify(snap).includes(SENTINEL));
+    assert.equal((await control("leak")).status, 200);
+    const leaked = (await ctxOp("snapshot", A, ctx)).body;
+    const bad = leaked.nodes.filter((n) => n.redacted && n.value !== "[redacted]");
+    assert.deepEqual(
+      bad.map((n) => n.value),
+      [SENTINEL],
+    );
+    const again = (await ctxOp("snapshot", A, ctx)).body;
+    assert.ok(!JSON.stringify(again).includes(SENTINEL), "the leak control is one-shot");
+  });
+
+  it("frames: the fixture JPEGs at ≤ 8 fps per subscriber, a size control first, contract framing", async () => {
+    const ctx = await browser(A);
+    await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app" });
+    const frames = await readFrames(A, ctx, 1100);
+    assert.equal(frames[0]?.type, 1);
+    assert.deepEqual(JSON.parse(frames[0].payload.toString("utf8")), { kind: "size", ...VIEWPORT });
+    const jpegs = frames.filter((f) => f.type === 0);
+    assert.ok(jpegs.length >= 2, `some frames (${jpegs.length})`);
+    assert.ok(jpegs.length <= 9, `at most 8 fps (${jpegs.length} in 1.1 s)`);
+    for (const f of jpegs) assert.deepEqual([...f.payload.subarray(0, 3)], [0xff, 0xd8, 0xff]);
+  });
+
+  it("input counts frames by type, never payloads; it needs a takeover; acts answer paused meanwhile", async () => {
+    const ctx = await browser(A);
+    await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app" });
+    const before = await ctxOp("input", A, ctx, { events: [{ type: "text", text: "nope" }] });
+    assert.equal(before.status, 400);
+    shaped("contextTakeover", (await ctxOp("takeover", A, ctx, { active: true })).body);
+    const paused = await ctxOp("act", A, ctx, { action: "click", ref: "r4" });
+    assert.equal(paused.status, 409);
+    assert.equal(paused.body.error.code, "paused");
+    assert.equal((await ctxOp("snapshot", A, ctx)).body.error.code, "paused");
+    const input = await ctxOp("input", A, ctx, {
+      events: [
+        { type: "text", text: SENTINEL },
+        { type: "key", key: "Enter" },
+        { type: "text", text: "again" },
+      ],
+    });
+    assert.equal(input.status, 200);
+    shaped("contextInput", input.body);
+    assert.equal(input.body.accepted, 3);
+    const s = await stats();
+    const counted = s.browser.contexts.find((c) => c.contextId === ctx);
+    assert.deepEqual(counted.inputs, { text: 2, key: 1 });
+    assert.ok(!JSON.stringify(s).includes(SENTINEL), "stats never hold a payload");
+    await ctxOp("takeover", A, ctx, { active: false });
+    assert.equal((await ctxOp("act", A, ctx, { action: "click", ref: "r4" })).status, 200);
+  });
+
+  it("storage state: exported after the signed-in control, a context opened with it is signed in", async () => {
+    const ctx = await browser(A);
+    await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app" });
+    const outBefore = (await ctxOp("export-state", A, ctx)).body;
+    assert.deepEqual(JSON.parse(outBefore.storageState).cookies, []);
+    assert.equal((await control("signed-in", { contextId: ctx })).status, 200);
+    const exported = shaped("contextExportState", (await ctxOp("export-state", A, ctx)).body);
+    const again = (await ctxOp("export-state", A, ctx)).body;
+    assert.equal(exported.storageState, again.storageState, "deterministic");
+    const blob = JSON.parse(exported.storageState);
+    assert.deepEqual(
+      blob.cookies.map((c) => c.domain),
+      ["panel.fake.test"],
+    );
+    const fresh = await browser(A, randomUUID(), {
+      storageState: exported.storageState,
+      siteLock: "panel.fake.test",
+      memberId: randomUUID(),
+    });
+    await ctxOp("navigate", A, fresh, { url: "https://panel.fake.test/app" });
+    assert.equal((await stats()).browser.contexts.find((c) => c.contextId === fresh).signedIn, true);
+    assert.match((await ctxOp("snapshot", A, fresh)).body.title, /signed in/i);
+  });
+
+  it("downloads: a download control emits the event; the token returns fixed bytes once", async () => {
+    const ctx = await browser(A);
+    await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app" });
+    const r = await control("event", { target: A, contextId: ctx, event: "download" });
+    assert.equal(r.status, 200);
+    const ev = (await events()).find((e) => e.type === "browser" && e.event === "download");
+    assert.equal(ev.download.name, "report.csv");
+    const got = shaped(
+      "contextDownload",
+      (await ctxOp("download", A, ctx, { token: ev.download.token })).body,
+    );
+    assert.equal(Buffer.from(got.data, "base64").toString("utf8"), "id,amount\n1,1250\n");
+    assert.equal(got.size, ev.download.size);
+    const unknown = await ctxOp("download", A, ctx, { token: "x".repeat(32) });
+    assert.equal(unknown.status, 404);
+  });
+
+  it("controls emit crashed, closed and focus_sensitive events for the context", async () => {
+    const ctx = await browser(A);
+    for (const event of ["crashed", "focus_sensitive", "closed"]) {
+      assert.equal((await control("event", { target: A, contextId: ctx, event })).status, 200);
+    }
+    const got = (await events())
+      .filter((e) => e.type === "browser" && e.contextId === ctx)
+      .map((e) => e.event);
+    assert.deepEqual(got, ["crashed", "focus_sensitive", "closed"]);
+    assert.equal((await ctxOp("snapshot", A, ctx)).body.error.code, "no_context", "closed ends the context");
+  });
+
+  it("an act on ref `gone` answers element_gone; an unknown context answers no_context", async () => {
+    const ctx = await browser(A);
+    await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app" });
+    const gone = await ctxOp("act", A, ctx, { action: "click", ref: "gone" });
+    assert.equal(gone.status, 409);
+    assert.equal(gone.body.error.code, "element_gone");
+    const none = await ctxOp("snapshot", A, randomUUID());
+    assert.equal(none.status, 404);
+    assert.equal(none.body.error.code, "no_context");
+    // Another bot never reaches this bot's context.
+    assert.equal((await ctxOp("snapshot", B, ctx)).body.error.code, "no_context");
+  });
+
+  it("site lock (D-13): the export link to evil.fake.test is blocked and reported; allowCrossSite passes once", async () => {
+    const ctx = await browser(A, randomUUID(), { siteLock: "panel.fake.test" });
+    await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app" });
+    const blocked = shaped(
+      "contextAct",
+      (await ctxOp("act", A, ctx, { action: "click", ref: "export-link" })).body,
+    );
+    assert.deepEqual(blocked, {
+      navigated: false,
+      blockedNavigation: { host: "evil.fake.test" },
+      download: null,
+    });
+    assert.equal((await ctxOp("snapshot", A, ctx)).body.host, "panel.fake.test", "did not navigate");
+    const nav = (await ctxOp("navigate", A, ctx, { url: "https://evil.fake.test/collect" })).body;
+    assert.deepEqual(nav.blockedNavigation, { host: "evil.fake.test" });
+    assert.equal(nav.host, "panel.fake.test");
+    const allowed = (
+      await ctxOp("navigate", A, ctx, { url: "https://evil.fake.test/collect", allowCrossSite: true })
+    ).body;
+    assert.deepEqual(
+      { host: allowed.host, blocked: allowed.blockedNavigation },
+      { host: "evil.fake.test", blocked: null },
+    );
+    // Once: back on the site, the next cross-site navigation is blocked again.
+    await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app", allowCrossSite: true });
+    const again = (await ctxOp("navigate", A, ctx, { url: "https://evil.fake.test/collect" })).body;
+    assert.deepEqual(again.blockedNavigation, { host: "evil.fake.test" });
+    // Without a site lock the same link navigates.
+    const free = await browser(A);
+    await ctxOp("navigate", A, free, { url: "https://panel.fake.test/app" });
+    const went = (await ctxOp("act", A, free, { action: "click", ref: "export-link" })).body;
+    assert.deepEqual(went, { navigated: true, blockedNavigation: null, download: null });
+  });
+
+  it("screenshot, wait, hold, resize and close answer their contract shapes", async () => {
+    const ctx = await browser(A);
+    await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app" });
+    const shot = shaped("contextScreenshot", (await ctxOp("screenshot", A, ctx)).body);
+    assert.equal(shot.mimeType, "image/jpeg");
+    assert.ok(shot.masked >= 1, "the password box is masked");
+    assert.deepEqual([...Buffer.from(shot.data, "base64").subarray(0, 3)], [0xff, 0xd8, 0xff]);
+    assert.equal(
+      shaped("contextWait", (await ctxOp("wait", A, ctx, { for: "text", text: "Sign in" })).body).ok,
+      true,
+    );
+    assert.equal((await ctxOp("wait", A, ctx, { for: "text", text: "[redacted]x" })).body.ok, false);
+    assert.equal(
+      shaped("contextHold", (await ctxOp("hold", A, ctx, { hold: true, reason: "signin" })).body).held,
+      true,
+    );
+    shaped("contextResize", (await ctxOp("resize", A, ctx, { width: 390, height: 844 })).body);
+    shaped("contextClose", (await ctxOp("close", A, ctx)).body);
+    assert.equal((await ctxOp("snapshot", A, ctx)).body.error.code, "no_context");
+  });
+
+  it("killOrg closes the organization's browsers too", async () => {
+    const ctx = await browser(A);
+    await op("/v1/orgs/kill", { orgId: ORG });
+    assert.equal((await ctxOp("snapshot", A, ctx)).body.error.code, "no_context");
+  });
+});

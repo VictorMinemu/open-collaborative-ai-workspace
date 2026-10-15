@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 /**
  * Types for the TypeScript tests that run the in-memory sandboxd in-process (implementation: fake-sandboxd.mjs,
- * 07.8-05). Every answer has the shape of `SANDBOXD_ROUTES` in `@ocw/contracts`.
+ * 07.8-05; browser ops 07.8-08). Every answer has the shape of `SANDBOXD_ROUTES` in `@ocw/contracts`.
  */
 
 export interface FakeSandboxdOptions {
@@ -12,12 +12,28 @@ export interface FakeSandboxdOptions {
   namespace?: string;
 }
 
+/** One browser context as the fake holds it: ids, host and flags only; input counted by event type, never kept. */
+export interface FakeBrowserContextStats {
+  contextId: string;
+  agentId: string;
+  host: string | null;
+  signedIn: boolean;
+  siteLock: string | null;
+  takeover: boolean;
+  held: boolean;
+  /** Open frame streams (`contextFrames` subscribers). */
+  viewers: number;
+  /** Takeover input events per `type`; payloads are dropped on arrival. */
+  inputs: Partial<Record<string, number>>;
+}
+
 export interface FakeSandboxdStats {
-  /** Calls per op name (`ensure`, `exec`, `killOrg`, …), counted after the token check; never bodies. */
+  /** Calls per op name (`ensure`, `exec`, `killOrg`, `contextAct`, …), counted after the token check; never bodies. */
   calls: Partial<Record<string, number>>;
   /** The same counts per organization id. */
   orgs: Record<string, Partial<Record<string, number>>>;
   down: boolean;
+  browser: { contexts: FakeBrowserContextStats[] };
 }
 
 export interface FakeSandboxdTarget {

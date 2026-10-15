@@ -8,6 +8,7 @@ import {
   SandboxdContextInput,
   SandboxdContextNavigate,
   SandboxdContextOpen,
+  SandboxdError,
   SandboxdExportStateResult,
   SandboxdPackageInstall,
   SandboxdPackageInstallResult,
@@ -57,6 +58,12 @@ function reachable() {
 }
 
 describe("broker browser primitives (D-07, D-13, P-10, P-18, T-07.8-01-03)", () => {
+  it("a bot op during a person's takeover is refused with the code `paused` (07.8-08; the brw agent's code)", () => {
+    expect(
+      SandboxdError.parse({ error: { code: "paused", message: "a person is in control" } }).error.code,
+    ).toBe("paused");
+  });
+
   it("a redacted snapshot node can only carry [redacted]", () => {
     const node = {
       ref: "e12",

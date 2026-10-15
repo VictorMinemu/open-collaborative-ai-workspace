@@ -54,7 +54,12 @@ export interface ConfinedSource {
 
 const tags = ["bot-capabilities"];
 const VIEWER_CANDIDATES: Permission[] = ["bot.read", "bot.configure", "bot.manage"];
-const TOGGLES = ["internet", "memory", "dateTime", "replyMode", "dailyLimit"] as const;
+/**
+ * The capability keys PATCH may change. `sandbox` and `browser` are the per-bot switches of the confined tools (07.8
+ * D-12, P-05): off by default and effective only with the organization switch, no kill, the module allowed for the
+ * human and agent ∩ human, all decided per turn and per call (`sandboxAvailable`).
+ */
+const TOGGLES = ["internet", "memory", "dateTime", "replyMode", "dailyLimit", "sandbox", "browser"] as const;
 
 // ---------------------------------------------------------------- data helpers (exported through index.ts)
 
