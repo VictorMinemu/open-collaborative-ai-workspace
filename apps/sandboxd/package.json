@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@ocw/contracts": "workspace:*",
+    "@ocw/egress-policy": "workspace:*",
     "zod": "4.6.5"
   },
   "devDependencies": {

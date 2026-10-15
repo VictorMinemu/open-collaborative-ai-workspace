@@ -1,6 +1,16 @@
 import type { LookupAddress } from "node:dns";
 import { lookup as dnsLookup } from "node:dns/promises";
-import { BlockList, isIP, type LookupFunction } from "node:net";
+import { isIP, type LookupFunction } from "node:net";
+import {
+  classifyAddress,
+  DEFAULT_PORTS,
+  formatHostPort,
+  isRefusedName,
+  normalizeHost,
+  PLATFORM_SERVICE_NAMES,
+  parseHostPort,
+  hostPortOf as sharedHostPortOf,
+} from "@ocw/egress-policy";
 import { Agent, type RequestInit as UndiciRequestInit, fetch as undiciFetch } from "undici";
 import type { Env } from "../config/env";
 
@@ -88,138 +98,16 @@ const PLATFORM_TTL_MS = 30_000;
 /** Bound on resolving one platform name (compose names may be unknown outside compose). */
 const PLATFORM_LOOKUP_MS = 2_000;
 
-// --- address classification ---------------------------------------------------------------------------------
-// Separate lists per family: a BlockList matches IPv4 addresses against IPv4-mapped IPv6 subnets too.
-// Values extend modules/mcp/url-policy.ts (REFUSED_V4/V6, PRIVATE_V4) to the full special-purpose registries.
+// --- address classification and host:port ----------------------------------------------------------------------
+// The pure rules live in @ocw/egress-policy, shared with the sandbox egress proxy (07.8 D-11) so the two never drift.
 
-const REFUSED_V4 = new BlockList();
-for (const [net, prefix] of [
-  ["0.0.0.0", 8], // "this network", incl. 0.0.0.0
-  ["127.0.0.0", 8], // loopback
-  ["169.254.0.0", 16], // link-local, incl. 169.254.169.254 (metadata)
-  ["192.0.0.0", 24], // IETF protocol assignments
-  ["192.0.2.0", 24], // TEST-NET-1
-  ["198.18.0.0", 15], // benchmarking
-  ["198.51.100.0", 24], // TEST-NET-2
-  ["203.0.113.0", 24], // TEST-NET-3
-  ["224.0.0.0", 4], // multicast
-  ["240.0.0.0", 4], // reserved, incl. 255.255.255.255
-] as const) {
-  REFUSED_V4.addSubnet(net, prefix, "ipv4");
-}
-REFUSED_V4.addAddress("100.100.100.200", "ipv4"); // Alibaba Cloud metadata (inside CGNAT: checked first)
-
-const PRIVATE_V4 = new BlockList();
-for (const [net, prefix] of [
-  ["10.0.0.0", 8],
-  ["172.16.0.0", 12],
-  ["192.168.0.0", 16],
-  ["100.64.0.0", 10], // CGNAT
-] as const) {
-  PRIVATE_V4.addSubnet(net, prefix, "ipv4");
-}
-
-const REFUSED_V6 = new BlockList();
-for (const [net, prefix] of [
-  ["::", 96], // unspecified, loopback, IPv4-compatible
-  ["::ffff:0:0", 96], // IPv4-mapped: would bypass the IPv4 rules
-  ["64:ff9b::", 96], // NAT64 well-known prefix
-  ["64:ff9b:1::", 48], // NAT64 local-use
-  ["100::", 64], // discard
-  ["2001::", 23], // IETF protocol assignments (Teredo, ORCHID…)
-  ["2001:db8::", 32], // documentation
-  ["2002::", 16], // 6to4: embeds any IPv4 address
-  ["fe80::", 10], // link-local
-  ["fec0::", 10], // site-local (deprecated)
-  ["ff00::", 8], // multicast
-] as const) {
-  REFUSED_V6.addSubnet(net, prefix, "ipv6");
-}
-REFUSED_V6.addAddress("fd00:ec2::254", "ipv6"); // AWS IMDS over IPv6 (inside ULA: checked first)
-
-const PRIVATE_V6 = new BlockList();
-PRIVATE_V6.addSubnet("fc00::", 7, "ipv6"); // ULA
-
-const REFUSED_NAMES = new Set([
-  "localhost",
-  "metadata",
-  "metadata.google.internal",
-  "instance-data",
-  "instance-data.ec2.internal",
-]);
-
-/** The compose services every deployment runs next to the API (compose.yaml). */
-export const PLATFORM_SERVICE_NAMES = [
-  "postgres",
-  "redis",
-  "garage",
-  "openbao",
-  "openclaw",
-  "api",
-  "web",
-  "caddy",
-  "otel-collector",
-] as const;
-
-export type AddressClass = "public" | "private" | "refused";
-
-/** Lowercase, no brackets, no zone id, no trailing dot. */
-function normalizeHost(host: string): string {
-  let h = host.trim().toLowerCase();
-  if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1);
-  const zone = h.indexOf("%");
-  if (zone >= 0 && isIP(h.slice(0, zone)) === 6) h = h.slice(0, zone);
-  return h.replace(/\.$/, "");
-}
-
-export function classifyAddress(raw: string): AddressClass {
-  const address = normalizeHost(raw);
-  const family = isIP(address);
-  if (family === 4) {
-    if (REFUSED_V4.check(address, "ipv4")) return "refused";
-    return PRIVATE_V4.check(address, "ipv4") ? "private" : "public";
-  }
-  if (family === 6) {
-    if (REFUSED_V6.check(address, "ipv6")) return "refused";
-    return PRIVATE_V6.check(address, "ipv6") ? "private" : "public";
-  }
-  return "refused";
-}
-
-const isRefusedName = (host: string) => REFUSED_NAMES.has(host) || host.endsWith(".localhost");
-
-// --- host:port ------------------------------------------------------------------------------------------------
-
-const DEFAULT_PORTS: Record<string, string> = {
-  "http:": "80",
-  "https:": "443",
-  "postgres:": "5432",
-  "postgresql:": "5432",
-  "redis:": "6379",
-  "rediss:": "6379",
-};
-
-const formatHostPort = (host: string, port: string) => `${isIP(host) === 6 ? `[${host}]` : host}:${port}`;
+export { type AddressClass, classifyAddress, PLATFORM_SERVICE_NAMES } from "@ocw/egress-policy";
 
 /** "host:port" with the scheme's default port; IPv6 hosts in brackets. */
 export function hostPortOf(url: string | URL): string {
-  let u: URL;
-  try {
-    u = typeof url === "string" ? new URL(url) : url;
-  } catch {
-    throw new EgressRefusedError("bad_url", null);
-  }
-  const host = normalizeHost(u.hostname);
-  if (!host) throw new EgressRefusedError("bad_url", null);
-  return formatHostPort(host, u.port || DEFAULT_PORTS[u.protocol] || "");
-}
-
-/** Normalises a "host:port" entry; null when it has no port. */
-function parseHostPort(entry: string): { host: string; port: string } | null {
-  const e = entry.trim().toLowerCase();
-  const m = /^\[([^\]]+)\]:(\d{1,5})$/.exec(e) ?? /^([^:[\]]+):(\d{1,5})$/.exec(e);
-  if (!m?.[1] || !m[2]) return null;
-  return { host: normalizeHost(m[1]), port: String(Number(m[2])) };
+  const hostPort = sharedHostPortOf(url);
+  if (hostPort === null) throw new EgressRefusedError("bad_url", null);
+  return hostPort;
 }
 
 // --- platform hosts -------------------------------------------------------------------------------------------
