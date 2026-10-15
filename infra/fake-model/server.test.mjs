@@ -825,3 +825,120 @@ describe("fake MCP onToolCall", () => {
     }
   });
 });
+
+describe("[[pause:N]] (07.8-08: a model that thinks before its first tool call)", () => {
+  const offered = ["ocw_sandbox_exec"];
+  const ask = '[[pause:8]] [[call ocw_sandbox_exec {"argv":["true"]}]]';
+
+  it("the first tool call of the turn waits N seconds; the reply step does not", () => {
+    const first = planToolStep([{ role: "user", content: ask }], offered);
+    assert.equal(first?.call?.name, "ocw_sandbox_exec");
+    assert.equal(first?.pauseMs, 8000);
+    const done = planToolStep(
+      [
+        { role: "user", content: ask },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            { id: "c1", type: "function", function: { name: "ocw_sandbox_exec", arguments: "{}" } },
+          ],
+        },
+        { role: "tool", tool_call_id: "c1", content: "exit 0" },
+      ],
+      offered,
+    );
+    assert.ok(done?.reply);
+    assert.equal(done?.pauseMs, undefined);
+  });
+
+  it("is capped at 30 s and absent without the directive", () => {
+    const capped = planToolStep(
+      [{ role: "user", content: '[[pause:99]] [[call ocw_sandbox_exec {"argv":["true"]}]]' }],
+      offered,
+    );
+    assert.equal(capped?.pauseMs, 30_000);
+    const plain = planToolStep(
+      [{ role: "user", content: '[[call ocw_sandbox_exec {"argv":["true"]}]]' }],
+      offered,
+    );
+    assert.equal(plain?.pauseMs, undefined);
+  });
+
+  it("an OpenAI request with the directive answers its tool call only after the pause", async () => {
+    const server = createFakeModelServer();
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const started = Date.now();
+      const res = await fetch(`${base}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "mock-1",
+          messages: [{ role: "user", content: '[[pause:1]] [[call ocw_sandbox_exec {"argv":["true"]}]]' }],
+          tools: [{ type: "function", function: { name: "ocw_sandbox_exec", parameters: {} } }],
+        }),
+      });
+      const body = await res.json();
+      assert.ok(Date.now() - started >= 1000, "answered after the pause");
+      assert.equal(body.choices[0].message.tool_calls[0].function.name, "ocw_sandbox_exec");
+    } finally {
+      await new Promise((r) => server.close(r));
+    }
+  });
+});
+
+describe("/__sandboxd (07.8-08: the e2e harness's fake sandboxd)", () => {
+  const TOKEN = "e2e-sandbox-token-test-0123456789abcdef";
+
+  async function withServer(opts, fn) {
+    const server = createFakeModelServer(opts);
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      await fn(`http://127.0.0.1:${server.address().port}`);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((r) => server.close(r));
+    }
+  }
+
+  it("serves the fake sandboxd behind its token: info 200, no token 401, an exec round trip", async () => {
+    await withServer({ sandboxToken: TOKEN }, async (base) => {
+      const auth = { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" };
+      const info = await fetch(`${base}/__sandboxd/v1/info`, { headers: auth });
+      assert.equal(info.status, 200);
+      assert.equal((await info.json()).dockerOk, true);
+      assert.equal((await fetch(`${base}/__sandboxd/v1/info`)).status, 401);
+      const target = {
+        orgId: "00000000-0000-4000-8000-000000000001",
+        agentId: "00000000-0000-4000-8000-000000000002",
+      };
+      assert.equal(
+        (
+          await fetch(`${base}/__sandboxd/v1/sandboxes/ensure`, {
+            method: "POST",
+            headers: auth,
+            body: JSON.stringify({ target }),
+          })
+        ).status,
+        200,
+      );
+      const exec = await fetch(`${base}/__sandboxd/v1/sandboxes/exec`, {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({ target, argv: ["echo", "hi"], cwd: "", timeoutMs: 5000, yieldMs: 5000 }),
+      });
+      assert.equal((await exec.json()).stdout, "hi\n");
+      // The test controls live under the same prefix (no token, as in fake-sandboxd.mjs).
+      const stats = await (await fetch(`${base}/__sandboxd/__control/stats`)).json();
+      assert.equal(stats.calls.exec, 1);
+    });
+  });
+
+  it("is not mounted without a token", async () => {
+    await withServer({ sandboxToken: "" }, async (base) => {
+      assert.equal((await fetch(`${base}/__sandboxd/v1/info`)).status, 404);
+    });
+  });
+});

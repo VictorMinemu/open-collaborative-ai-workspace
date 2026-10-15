@@ -29,6 +29,13 @@
 // carrying a `<participants>` roster, with a `<turn_context>` in the last user message, answers
 // `Hi <names>! (participants: <humans>) Echo: <last message body>` (+ the attachment suffix, no tools suffix).
 //
+// `[[pause:N]]` (07.8-08) in the same message delays the turn's FIRST tool call by N seconds (at most 30): a model
+// that thinks before acting, so a full-stack proof can change state between a turn's delivery and its call.
+//
+// Fake sandboxd (fake-sandboxd.mjs, 07.8-08): with FAKE_SANDBOX_TOKEN set, every sandboxd route under `/__sandboxd`
+// (`/__sandboxd/v1/...` behind the bearer, `/__sandboxd/__control/...` without), so the e2e API's OCW_SANDBOX_URL can
+// point here (scripts/e2e-isolated.sh default mode).
+//
 // Fake SearXNG: `GET /search?q=<query>&format=json` returns one deterministic result.
 //
 // Fake OpenAI Responses API (fake-responses.mjs, Phase 5): `POST /v1/responses` (SSE) and, for `fake-plan-…`
@@ -52,6 +59,7 @@
 // Env: PORT (default 18999), FAKE_MODEL_HOST (default 0.0.0.0), FAKE_MODEL_CAPTURE_DIR (optional: write each request body as JSON),
 // FAKE_MCP_TOKEN (optional: the fake MCP routes then require `Authorization: Bearer <token>`),
 // FAKE_CLAWHUB_ARTIFACT_DIR (optional: npm-pack tarballs the fake ClawHub serves, digests computed from them).
+// FAKE_SANDBOX_TOKEN (optional: mounts the fake sandboxd at `/__sandboxd` behind this bearer, at least 32 characters),
 // FAKE_MCP_OAUTH_REDIRECTS (optional, comma list: the `ocw-e2e` client's redirect URIs; default
 // http://127.0.0.1:4290/api/v1/connectors/oauth/callback), FAKE_KC_TOKEN (optional: the bearer `/kc/whoami` accepts).
 // FAKE_MODEL_DEBUG=1 (optional, off by default: log a short preview of each tool-offering request's messages,
@@ -93,6 +101,14 @@ try {
 } catch (error) {
   if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
   console.warn("fake-model: fake-mcp-oauth.mjs not found, /mcp-oauth and /kc routes disabled");
+}
+// And the fake sandboxd (07.8-05), mounted at `/__sandboxd` when FAKE_SANDBOX_TOKEN is set (07.8-08).
+let createFakeSandboxd = null;
+try {
+  ({ createFakeSandboxd } = await import("./fake-sandboxd.mjs"));
+} catch (error) {
+  if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
+  console.warn("fake-model: fake-sandboxd.mjs not found, /__sandboxd disabled");
 }
 // And the fake Responses API (Phase 5).
 let fakeResponses = null;
@@ -288,6 +304,8 @@ function offeredToolNames(body) {
  * Next step of a directive-driven turn: `{ call: {name, args} }` when a tool must be called now, `{ reply }`
  * when every directive has an outcome, or null when the last user message has no directive.
  */
+const PAUSE_RE = /\[\[pause:(\d{1,3})\]\]/u;
+
 export function planToolStep(messages, offered) {
   const lastUserIdx = messages.findLastIndex((m) => m.role === "user");
   if (lastUserIdx === -1) return null;
@@ -316,6 +334,8 @@ export function planToolStep(messages, offered) {
     );
   }
   if (directives.length === 0) return null;
+  const pause = PAUSE_RE.exec(userBody(contentText(messages[bodyIdx].content)));
+  const pauseMs = pause ? Math.min(30, Number(pause[1])) * 1000 : 0;
   const after = messages.slice(bodyIdx + 1).filter((m) => !isContextOnly(m));
   const calls = after.flatMap((m) =>
     m.role === "assistant" && Array.isArray(m.tool_calls) ? m.tool_calls : [],
@@ -332,7 +352,7 @@ export function planToolStep(messages, offered) {
       continue;
     }
     const done = calls[k];
-    if (!done) return { call: { name, args: d.args } };
+    if (!done) return { call: { name, args: d.args }, ...(k === 0 && pauseMs > 0 ? { pauseMs } : {}) };
     k++;
     lines.push(`Tool ${d.tool} said: ${summarizeResult(results.get(done.id) ?? "")}`);
   }
@@ -475,7 +495,10 @@ async function openAIChat(res, body) {
   const toolCount = Array.isArray(body.tools) ? body.tools.length : 0;
   const messages = Array.isArray(body.messages) ? body.messages : [];
   const step = planToolStep(messages, offered);
-  if (step?.call) return openAIToolCall(res, body, step.call);
+  if (step?.call) {
+    if (step.pauseMs) await new Promise((resolve) => setTimeout(resolve, step.pauseMs));
+    return openAIToolCall(res, body, step.call);
+  }
   const flags = turnFlags(messages);
   const instructionTexts = messages
     .filter((m) => m.role === "system" || m.role === "developer")
@@ -631,7 +654,10 @@ async function anthropicMessages(res, body) {
   res.end();
 }
 
+const SANDBOXD_PREFIX = "/__sandboxd";
+
 /**
+ * `opts.sandboxToken` overrides `FAKE_SANDBOX_TOKEN` (empty = no `/__sandboxd`);
  * `opts.mcpToken` overrides `FAKE_MCP_TOKEN` (empty = no token); `opts.clawhubArtifactDir` overrides
  * `FAKE_CLAWHUB_ARTIFACT_DIR`; `opts.onRequest({kind, path, headers, body})` sees every model request.
  */
@@ -663,9 +689,19 @@ export function createFakeModelServer(opts = {}) {
       preRegistered: [{ client_id: "ocw-e2e", redirect_uris: redirects }],
       ...(process.env.FAKE_KC_TOKEN ? { kcToken: process.env.FAKE_KC_TOKEN } : {}),
     }) ?? null;
+  const sandboxToken = opts.sandboxToken ?? process.env.FAKE_SANDBOX_TOKEN ?? "";
+  const sandboxd =
+    sandboxToken && createFakeSandboxd
+      ? createFakeSandboxd({ token: sandboxToken, namespace: "ocw-e2e-fake" })
+      : null;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     try {
+      if (sandboxd && (url.pathname === SANDBOXD_PREFIX || url.pathname.startsWith(`${SANDBOXD_PREFIX}/`))) {
+        // The fake sees its own paths (`/v1/...`, `/__control/...`) with the query string kept.
+        req.url = `${url.pathname.slice(SANDBOXD_PREFIX.length) || "/"}${url.search}`;
+        return void (await sandboxd.handle(req, res));
+      }
       if (mcpOAuth?.handle(req, res, url)) return;
       if (mcp?.(req, res, url)) return;
       if (clawhub?.(req, res, url)) return;

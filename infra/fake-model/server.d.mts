@@ -12,6 +12,8 @@ export interface FakeModelRequest {
 }
 
 export function createFakeModelServer(opts?: {
+  /** Mounts the fake sandboxd at `/__sandboxd` behind this bearer (default FAKE_SANDBOX_TOKEN; "" = not mounted). */
+  sandboxToken?: string;
   mcpToken?: string;
   clawhubArtifactDir?: string;
   onRequest?: (request: FakeModelRequest) => void;
