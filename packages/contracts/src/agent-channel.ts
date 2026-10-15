@@ -7,6 +7,7 @@ import {
   SubscriptionProviderKind,
 } from "./agent";
 import { AgentCardInput, AgentCardKind, AgentCardPatch } from "./agent-cards";
+import { APPROVAL_NOTE_MAX, ApprovalNote } from "./approvals";
 import {
   BOARD_CARD_DESCRIPTION_MAX,
   BOARD_MAX_COLUMNS,
@@ -169,6 +170,16 @@ export const AgentCardActionEvent = AgentMentionEvent.omit({ type: true }).exten
         useBy: IsoDateTime,
       })
       .optional(),
+    /**
+     * Phase 07.5 (07.5-11): the decider's own note (UI-SPEC R4) as a field, so the bot never parses it out of the
+     * sentence (which still quotes it). Absent without a note.
+     */
+    note: ApprovalNote.optional(),
+    /**
+     * Phase 07.5 (07.5-11): an approved `server_apply` request that failed to apply carries the kind's result code (a
+     * Work Zone Start: `device_offline`, `runtime_unavailable`, …), so the bot can tell its person what went wrong.
+     */
+    resultCode: z.string().max(64).optional(),
   }),
 });
 export type AgentCardActionEvent = z.infer<typeof AgentCardActionEvent>;
@@ -641,6 +652,16 @@ export const AgentChannelToolCallApproval = z.object({
 });
 export type AgentChannelToolCallApproval = z.infer<typeof AgentChannelToolCallApproval>;
 
+/**
+ * Who said no to exactly this action in the last 24 h (Phase 07.5, `approval_denied`): the decider's display name
+ * ("An approver" once they left) and their own note, so the bot can tell its person. Never an id, an email or arguments.
+ */
+export const AgentChannelApprovalDenial = z.object({
+  deciderName: z.string().max(200),
+  note: z.string().max(APPROVAL_NOTE_MAX).nullable(),
+});
+export type AgentChannelApprovalDenial = z.infer<typeof AgentChannelApprovalDenial>;
+
 export const AgentChannelToolCallDecision = z.object({
   callId: Id,
   allowed: z.boolean(),
@@ -648,6 +669,8 @@ export const AgentChannelToolCallDecision = z.object({
   reason: z.string().max(200).nullable(),
   /** Phase 07.5: set with `approval_required` / `approval_pending`; absent from older APIs. */
   approval: AgentChannelToolCallApproval.nullable().optional(),
+  /** Phase 07.5: set with `approval_denied` (who decided and their note); absent otherwise and from older APIs. */
+  denial: AgentChannelApprovalDenial.nullable().optional(),
 });
 export type AgentChannelToolCallDecision = z.infer<typeof AgentChannelToolCallDecision>;
 
@@ -884,8 +907,14 @@ export const AgentChannelToolRefusal = z.enum([
 ]);
 export type AgentChannelToolRefusal = z.infer<typeof AgentChannelToolRefusal>;
 
-/** Phase 07.5: the `details` of a 409 `approval_required` / `approval_pending` from `/connectors/call` and `/http-requests`. */
-export const AgentChannelApprovalRefusalDetails = z.object({ approval: AgentChannelToolCallApproval });
+/**
+ * Phase 07.5: the `details` of a 409 approval refusal from `/connectors/call` and `/http-requests`: the approval waited
+ * on (`approval_required` / `approval_pending`) or who denied exactly this action (`approval_denied`, 07.5-11).
+ */
+export const AgentChannelApprovalRefusalDetails = z.object({
+  approval: AgentChannelToolCallApproval.optional(),
+  denial: AgentChannelApprovalDenial.optional(),
+});
 export type AgentChannelApprovalRefusalDetails = z.infer<typeof AgentChannelApprovalRefusalDetails>;
 
 /** An MCP server's immutable OpenClaw name: `m` + 8 hex characters (`apps/api/src/modules/mcp/names.ts`). */

@@ -655,6 +655,30 @@ describe("approval-aware connector tools (07.5-04, D-04)", () => {
     },
   );
 
+  it("07.5-11: a 409 approval_denied with details names the decider and their note, never the body", async () => {
+    const { run } = approvalSetup({
+      flagged: true,
+      fail: () => {
+        throw new AgentChannelHttpError(
+          409,
+          "/connectors/call",
+          `409 ${CANARY}`,
+          "approval_denied",
+          undefined,
+          {
+            deciderName: "Marta Gil",
+            note: "Duplicate invoice",
+          },
+        );
+      },
+    });
+    const r = await run("ocw_connector_call", CREATE);
+    expect(r).toEqual({
+      text: "Marta Gil denied this exact action. Their note: “Duplicate invoice”. Don't retry it. Tell Ana Pérez it was denied and ask what to change.",
+    });
+    expect(JSON.stringify(r)).not.toContain(CANARY);
+  });
+
   it("the approval sentences are the UI contract's", () => {
     const p = { tool: INVOICE, waitingFor: "a lead of Sales", requesterName: "Ana Pérez" };
     expect(APPROVAL_SENTENCES.approval_pending(p)).toBe(

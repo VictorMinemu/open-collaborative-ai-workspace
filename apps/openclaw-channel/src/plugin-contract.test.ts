@@ -14,6 +14,7 @@ import { createFakeMcp } from "../../../infra/fake-model/fake-mcp.mjs";
 import {
   AGENT_CHANNEL_TOOL_REFUSALS,
   AgentCardActionEvent,
+  AgentChannelApprovalRefusalDetails,
   AgentChannelToolCallDecision,
   AgentChannelWorkZoneProjectsResponse,
   AgentChannelWorkZoneProposeResponse,
@@ -1115,6 +1116,28 @@ describe("approval mirror parity (07.5-04: plugin ↔ packages/contracts tool-ap
     };
     expect(channel.AgentCardActionEvent?.safeParse(cardEvent).success).toBe(true);
     expect(AgentCardActionEvent.parse(cardEvent).cardAction).toEqual(cardEvent.cardAction);
+    // 07.5-11: the denial (gate decision and 409 details), the card action's note and a failed apply's result code.
+    const denial = { deciderName: "Marta Gil", note: "Duplicate invoice" };
+    const denied = { callId: decision.callId, allowed: false, reason: "approval_denied", denial };
+    expect(channel.AgentChannelToolCallDecision?.safeParse(denied).success).toBe(true);
+    expect(AgentChannelToolCallDecision.parse(denied)).toEqual(denied);
+    for (const details of [
+      { denial },
+      { approval: decision.approval },
+      { denial: { ...denial, note: null } },
+    ]) {
+      expect(channel.AgentChannelApprovalRefusalDetails?.safeParse(details).success).toBe(true);
+      expect(AgentChannelApprovalRefusalDetails.parse(details)).toEqual(details);
+    }
+    for (const extra of [
+      { outcome: "denied", note: "Duplicate invoice" },
+      { outcome: "approved", resultCode: "device_offline" },
+    ]) {
+      const ev = { ...cardEvent, cardAction: { ...cardEvent.cardAction, grant: undefined, ...extra } };
+      delete (ev.cardAction as Record<string, unknown>).grant;
+      expect(channel.AgentCardActionEvent?.safeParse(ev).success).toBe(true);
+      expect(AgentCardActionEvent.parse(ev).cardAction).toEqual(ev.cardAction);
+    }
     // A value the contract does not know reads as absent in the mirror (never voids the turn or the decision).
     expect(TurnToolFlags.parse({ untrustedOutput: true, sideEffecting: true, approval: "later" })).toEqual({
       untrustedOutput: true,

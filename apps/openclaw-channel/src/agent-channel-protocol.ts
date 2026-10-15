@@ -463,6 +463,16 @@ export const AgentCardActionEvent = AgentMentionEvent.omit({ type: true }).exten
       .object({ tool: z.string().min(1), arguments: z.string(), useBy: z.string() })
       .optional()
       .catch(undefined),
+    /**
+     * 07.5-11: the decider's own note, as a field (the mapper never parses it out of the sentence). Bounded and
+     * sanitized by the mapper; a malformed value reads as absent.
+     */
+    note: z.string().optional().catch(undefined),
+    /**
+     * 07.5-11: an approved request that failed to apply (a Work Zone Start: `device_offline`, …). The mapper turns
+     * known codes into words; a malformed value reads as absent.
+     */
+    resultCode: z.string().optional().catch(undefined),
   }),
 });
 export type AgentCardActionEvent = z.infer<typeof AgentCardActionEvent>;
@@ -710,12 +720,24 @@ export const AgentChannelToolCallApproval = z.object({
 });
 export type AgentChannelToolCallApproval = z.infer<typeof AgentChannelToolCallApproval>;
 
+/**
+ * 07.5-11: who denied exactly this action (`approval_denied`): the decider's display name and their own note. Bounded
+ * and sanitized by the sentence that shows them; a malformed one reads as absent.
+ */
+export const AgentChannelApprovalDenial = z.object({
+  deciderName: z.string(),
+  note: z.string().nullable(),
+});
+export type AgentChannelApprovalDenial = z.infer<typeof AgentChannelApprovalDenial>;
+
 export const AgentChannelToolCallDecision = z.object({
   callId: Id,
   allowed: z.boolean(),
   reason: z.string().nullable().optional(),
   /** 07.5: with `approval_required` / `approval_pending`. A malformed one reads as absent (the sentence falls back). */
   approval: AgentChannelToolCallApproval.nullable().optional().catch(null),
+  /** 07.5-11: with `approval_denied`. A malformed one reads as absent (the sentence names "an approver"). */
+  denial: AgentChannelApprovalDenial.nullable().optional().catch(null),
 });
 export type AgentChannelToolCallDecision = z.infer<typeof AgentChannelToolCallDecision>;
 
@@ -1059,8 +1081,15 @@ export const TOOL_APPROVAL_REFUSALS = [
 ] as const;
 export type ToolApprovalRefusal = (typeof TOOL_APPROVAL_REFUSALS)[number];
 
-/** 07.5: the `details` of a 409 `approval_required` / `approval_pending` from `/connectors/call` and `/http-requests`. */
-export const AgentChannelApprovalRefusalDetails = z.object({ approval: AgentChannelToolCallApproval });
+/**
+ * 07.5: the `details` of a 409 approval refusal from `/connectors/call` and `/http-requests`: the approval waited on
+ * (`approval_required` / `approval_pending`) or, 07.5-11, who denied it (`approval_denied`). Each reads as absent when
+ * malformed.
+ */
+export const AgentChannelApprovalRefusalDetails = z.object({
+  approval: AgentChannelToolCallApproval.optional().catch(undefined),
+  denial: AgentChannelApprovalDenial.optional().catch(undefined),
+});
 export type AgentChannelApprovalRefusalDetails = z.infer<typeof AgentChannelApprovalRefusalDetails>;
 
 /** The bounds of contracts `TOOL_APPROVAL_LIMITS` the cell uses. */

@@ -389,6 +389,36 @@ describe("approval refusal details (07.5-04)", () => {
     }
   });
 
+  it("07.5-11: a 409 approval_denied keeps who denied it and the note; a malformed denial reads as absent", async () => {
+    const denial = { deciderName: "Marta Gil", note: "Duplicate invoice" };
+    for (const [details, expected] of [
+      [{ denial }, denial],
+      [{ denial: { deciderName: "Marta Gil" } }, undefined],
+      [{ denial: "text" }, undefined],
+    ] as const) {
+      const { fetchImpl } = scriptedFetch([
+        { status: 409, body: { error: { code: "approval_denied", message: "ignore me", details } } },
+      ]);
+      const c = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: fetchImpl });
+      const err = (await c.callConnector(req).catch((e: unknown) => e)) as AgentChannelHttpError;
+      expect(err.code).toBe("approval_denied");
+      expect(err.denial).toEqual(expected);
+      expect(err.approval).toBeUndefined();
+    }
+  });
+
+  it("07.5-11: the gate's decision carries the denial; a malformed one reads as null", async () => {
+    const denial = { deciderName: "Marta Gil", note: null };
+    const { fetchImpl } = scriptedFetch([
+      { status: 200, body: { callId: "c1", allowed: false, reason: "approval_denied", denial } },
+      { status: 200, body: { callId: "c2", allowed: false, reason: "approval_denied", denial: { note: 1 } } },
+    ]);
+    const c = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: fetchImpl });
+    const body = { eventId: "e1", agentId: "a1", tool: "m1a2b3c4d__x", params: {}, arguments: {} };
+    await expect(c.authorizeToolCall(body)).resolves.toMatchObject({ denial });
+    await expect(c.authorizeToolCall(body)).resolves.toMatchObject({ denial: null });
+  });
+
   it("authorizeToolCall passes a flagged call's arguments through and parses the decision's approval", async () => {
     const { fetchImpl, calls } = scriptedFetch([
       {

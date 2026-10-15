@@ -265,7 +265,12 @@ export type ApprovalSentenceInput = {
   waitingFor?: string | null | undefined;
   /** The requester's display name (the decision's, else the turn's). */
   requesterName?: string | null | undefined;
+  /** 07.5-11: who denied exactly this action and their own note (`approval_denied`), from the API's decision. */
+  denial?: { deciderName?: string | null; note?: string | null } | null | undefined;
 };
+
+/** The longest decider note the model is shown (contracts `APPROVAL_NOTE_MAX`). */
+const NOTE_MAX = 280;
 export type ApprovalSentenceKey = ToolApprovalRefusal | "too_large_local" | "no_call_id";
 
 /**
@@ -282,9 +287,16 @@ export const APPROVAL_SENTENCES: Record<ApprovalSentenceKey, (p: ApprovalSentenc
   approval_pending: (p) =>
     "This exact action is already waiting for approval in a card. Don't ask again; tell " +
     `${approvalLabel(p.requesterName) ?? ASKER} it is still waiting.`,
-  approval_denied: (p) =>
-    `${capitalized(approvalLabel(p.waitingFor, 200) ?? "an approver")} denied this exact action. Don't retry it. ` +
-    `Tell ${approvalLabel(p.requesterName) ?? ASKER} it was denied and ask what to change.`,
+  approval_denied: (p) => {
+    // 07.5-11: the decider by name when the API says who it was, and their note quoted (one line, bounded).
+    const decider =
+      approvalLabel(p.denial?.deciderName, 200) ?? approvalLabel(p.waitingFor, 200) ?? "an approver";
+    const note = approvalLabel(p.denial?.note, NOTE_MAX);
+    return (
+      `${capitalized(decider)} denied this exact action.${note ? ` Their note: “${note}”.` : ""} Don't retry it. ` +
+      `Tell ${approvalLabel(p.requesterName) ?? ASKER} it was denied and ask what to change.`
+    );
+  },
   approval_used: (p) =>
     `That approval was already used once. Ask ${approvalLabel(p.requesterName) ?? ASKER} if they want to run it again.`,
   arguments_too_large: (p) =>
@@ -532,6 +544,7 @@ export function createToolGuard(
                 tool,
                 waitingFor: decision.approval?.waitingFor,
                 requesterName: approvalLabel(decision.approval?.requesterName) ?? t.requesterName,
+                denial: decision.denial,
               }),
             );
           }

@@ -320,6 +320,7 @@ export async function buildApp(
       modelLabel: (ref) => modelGateway.labelOf(ref),
       memory,
       workZone: workSession.proposals, // 07.5-08: Work Zone proposals (D-03)
+      toolApproval: toolApproval.service, // 07.5-11: the approval decision of every agent action (D-04)
     }),
     deviceModule, // B3
     workSession, // B3 (built above)

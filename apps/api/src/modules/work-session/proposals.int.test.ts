@@ -331,6 +331,7 @@ describe("tracer: a bot proposes, the person who asked starts it (APPROVE-03)", 
       outcome: "approved",
       decidedBy: { id: samId },
     });
+    expect(actions[0]!.cardAction).not.toHaveProperty("resultCode");
     expect(actions[0]!.message.author).toMatchObject({ kind: "user", id: samId });
 
     // Nothing ever logged the prompt.
@@ -608,6 +609,10 @@ describe("failures at Start leave the proposal failed, with no session (Pitfall 
     const card = await cardFor(sam, p.cardMessageId);
     expect(card.status).toBe("failed");
     expect(card.approval).toMatchObject({ status: "failed", resultCode: code, resultRoute: null });
+    // 07.5-11: the bot hears what went wrong, not only "approved" (WINDOWS #215).
+    const [action, ...rest] = await cardActionsOf(p.cardMessageId);
+    expect(rest).toEqual([]);
+    expect(action?.cardAction).toMatchObject({ outcome: "approved", resultCode: code });
   };
 
   it("the device went offline", async () => {

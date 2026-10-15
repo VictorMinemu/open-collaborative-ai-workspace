@@ -349,7 +349,7 @@ export async function mirrorCardDecision(
     /** `running`: an approved grant not used yet (WINDOWS 135); `mirrorCardUsed` turns it `succeeded` on use. */
     status: "running" | "succeeded" | "failed" | "cancelled";
     note?: string | null | undefined;
-  } & Pick<CardAction, "turnUserId" | "decidedBy" | "grant" | "tainted">,
+  } & Pick<CardAction, "turnUserId" | "decidedBy" | "grant" | "tainted" | "resultCode">,
 ): Promise<void> {
   const [after] = await tx
     .update(messageCards)
@@ -389,6 +389,7 @@ export async function mirrorCardDecision(
       ...(a.decidedBy ? { decidedBy: a.decidedBy } : {}),
       ...(a.grant ? { grant: a.grant } : {}),
       ...(a.tainted ? { tainted: true } : {}),
+      ...(a.resultCode ? { resultCode: a.resultCode } : {}),
     },
     tenantOf(tx).afterCommit,
   );
@@ -549,6 +550,12 @@ export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
     const { actionHash, outcome, note } = req.body;
     if (!actionHash) {
       throw badRequest("Deciding this card needs the action hash you were shown", "action_hash_required");
+    }
+    // 07.5-11 (WINDOWS #211, P-07): a card that does not show the exact action (a `summary` in a shared conversation, or
+    // `review_only` when a value was cut for the card) is approved only on the review, where the decider sees all of
+    // it. Deny stays possible here. Kinds without a display (07.2 memory) are unchanged.
+    if (outcome === "approved" && link.display !== undefined && link.display !== "exact") {
+      throw conflict("Review the full action before approving it", "review_required");
     }
     await linked.decide(tx, { messageId: message.id, deciderUserId: userId, outcome, actionHash, note });
     markDecided(req);
