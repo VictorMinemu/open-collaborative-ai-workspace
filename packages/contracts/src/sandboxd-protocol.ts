@@ -328,6 +328,8 @@ export const SandboxdErrorCode = z.enum([
   "no_context",
   "element_gone",
   "navigation_refused",
+  /** A person holds the takeover lease: the bot's page ops wait (the brw agent's code; additive, 07.8-08). */
+  "paused",
   "digest_mismatch",
   "tree_changed",
 ]);
