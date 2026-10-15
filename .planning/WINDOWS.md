@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 136
+open_count: 138
 waived_count: 4
 fixed_count: 101
-total_count: 241
-last_updated: 2026-10-15T17:21:21.854Z
+total_count: 243
+last_updated: 2026-10-15T18:33:30.267Z
 ---
 
 # Broken Windows Ledger
@@ -256,6 +256,8 @@ last_updated: 2026-10-15T17:21:21.854Z
 | 239 | 07.8 | deviation | apps/openclaw-channel/src |  | API does not send CellProvider.imageModels or turn.maxSandboxCalls yet (07.8-05/14): screenshot reaches no model and the gate uses default 40; sign-in skipped/expired sentences unwired (07.8-21); OpenClaw image rescaling (imageMaxDimensionPx) untested (8x8 fake JPEG, 07.8-13/28) | open |  | 2026-10-15T16:49:17.151Z |  |
 | 240 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | 6 offered sandbox tools have no API route until 07.8-10 (404); confirm GET /cell alsoAllow carries ocw_sandbox_*/ocw_browser_* (plugin withTurnScopedTools); 403 (sandbox/board) vs 409 (07.4 connectors) refusal split: align or record in ADR-0029 | open |  | 2026-10-15T17:21:21.782Z |  |
 | 241 | 07.8 | deviation | apps/api/src/modules/sandbox |  | Orphan 'starting' reservation rows (API dies between reserve and ensure) hold a cap slot until cleaned (07.8-11); kill does not push policy {killed:true} to sandboxd nor bump settings version (07.8-11); sandbox approval cards read 'Web request' (07.8-14); OCW_SANDBOX_URL/TOKEN missing in e2e-isolated.sh, .woodpecker, compose, .env.example (07.8-08/24) | open |  | 2026-10-15T17:21:21.854Z |  |
+| 242 | 07.8 | deviation | scripts/guard/guard.test.mjs |  | guard.test.mjs (Semgrep rule tests) runs neither in CI nor pnpm verify; ocw.raw-egress covers only apps/sandboxd/src/egress; CODEOWNERS lacks packages/egress-policy and apps/sandboxd/src/egress | open |  | 2026-10-15T18:33:30.173Z |  |
+| 243 | 07.8 | deviation | apps/sandboxd/src/egress/proxy.ts |  | Egress proxy: public mode proven by unit tests only (real egress in 07.8-13/24); no per-network tunnel limit; platform names refused by name (not resolved) | open |  | 2026-10-15T18:33:30.267Z |  |
 
 ````json
 [
@@ -3149,6 +3151,30 @@ last_updated: 2026-10-15T17:21:21.854Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T17:21:21.854Z",
+    "resolved_at": null
+  },
+  {
+    "id": 242,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "scripts/guard/guard.test.mjs",
+    "line": null,
+    "description": "guard.test.mjs (Semgrep rule tests) runs neither in CI nor pnpm verify; ocw.raw-egress covers only apps/sandboxd/src/egress; CODEOWNERS lacks packages/egress-policy and apps/sandboxd/src/egress",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T18:33:30.173Z",
+    "resolved_at": null
+  },
+  {
+    "id": 243,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/egress/proxy.ts",
+    "line": null,
+    "description": "Egress proxy: public mode proven by unit tests only (real egress in 07.8-13/24); no per-network tunnel limit; platform names refused by name (not resolved)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T18:33:30.267Z",
     "resolved_at": null
   }
 ]
