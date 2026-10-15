@@ -27,6 +27,8 @@ const allOn: BotCapabilities = {
   dateTime: true,
   replyMode: "all",
   dailyLimit: 30,
+  sandbox: false,
+  browser: false,
 };
 
 const view = (
