@@ -1,8 +1,10 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import http from "node:http";
-import net from "node:net";
+import net, { BlockList } from "node:net";
+import { networkInterfaces } from "node:os";
 import type { Duplex } from "node:stream";
 import {
+  compileCidrs,
   decideAddress,
   decideHost,
   type EgressHostPolicy,
@@ -20,6 +22,10 @@ import {
  * - Each request is decided with the API's own 07.4 rules (`@ocw/egress-policy`): mode, allow-list, ports 80/443,
  *   platform names, then the host is resolved ONCE, every answer is decided and the request is refused if any answer
  *   is refused; the socket then connects to the first validated address only (pinning: no DNS rebinding window).
+ * - The single shared hop (D-01): before any allow-list, an answer is refused if it is one of the proxy's own
+ *   addresses (the policy's and every interface's), inside a bot network, or inside any network the proxy is attached
+ *   to, unless the arrival network allows that exact fixture `host:port`. Without bot networks and own addresses
+ *   there is no policy at all: every request is refused.
  * - One decision line per new (network, host, port, decision): `{ network, host, port, allowed, reason }`.
  */
 
@@ -38,6 +44,30 @@ export interface EgressNetworkPolicy {
 export interface EgressPolicySnapshot {
   /** Proxy address on a network → that network's policy. */
   networks: ReadonlyMap<string, EgressNetworkPolicy>;
+  /** Every bot network's subnet: refused for every network, before the private-host allowlist. */
+  botNetworks: BlockList;
+  /** The proxy's address on every network: refused first. */
+  ownAddresses: readonly string[];
+}
+
+/** The proxy's interfaces now (networks get attached at runtime): addresses and their subnets as CIDRs. */
+export interface LocalNetworks {
+  addresses: readonly string[];
+  subnets: readonly string[];
+}
+
+/** Non-loopback interfaces of this container (loopback is refused by classification anyway). */
+export function interfaceNetworks(): LocalNetworks {
+  const addresses: string[] = [];
+  const subnets: string[] = [];
+  for (const list of Object.values(networkInterfaces())) {
+    for (const i of list ?? []) {
+      if (i.internal || !i.cidr) continue;
+      addresses.push(normalizeHost(i.address));
+      subnets.push(i.cidr);
+    }
+  }
+  return { addresses, subnets };
 }
 
 /** Bound on every host list of one network (mirrors SANDBOX_LIMITS.allowHostsMax in @ocw/contracts). */
@@ -80,7 +110,7 @@ function idString(v: unknown, what: string): string {
  */
 export function parseEgressPolicy(value: unknown): EgressPolicySnapshot {
   if (!isRecord(value)) throw new PolicyError("not an object");
-  onlyKeys(value, ["networks"], "policy");
+  onlyKeys(value, ["networks", "botNetworks", "ownAddresses"], "policy");
   if (!Array.isArray(value.networks) || value.networks.length > MAX_NETWORKS)
     throw new PolicyError("networks");
   const networks = new Map<string, EgressNetworkPolicy>();
@@ -105,11 +135,27 @@ export function parseEgressPolicy(value: unknown): EgressPolicySnapshot {
       privateHosts: stringList(raw.privateHosts, "privateHosts"),
     });
   }
-  return { networks };
+  // Fail closed: a policy that names no bot network or no own address cannot keep bots apart.
+  const cidrs = stringList(value.botNetworks, "botNetworks", MAX_NETWORKS);
+  if (cidrs.length === 0) throw new PolicyError("botNetworks is empty");
+  let botNetworks: BlockList;
+  try {
+    botNetworks = compileCidrs(cidrs);
+  } catch {
+    throw new PolicyError("botNetworks");
+  }
+  const ownAddresses = stringList(value.ownAddresses, "ownAddresses", MAX_NETWORKS).map(normalizeHost);
+  if (ownAddresses.length === 0) throw new PolicyError("ownAddresses is empty");
+  if (!ownAddresses.every((a) => net.isIP(a))) throw new PolicyError("ownAddresses");
+  return { networks, botNetworks, ownAddresses };
 }
 
 /** No policy loaded: every connection is refused as `unknown_network`. */
-export const EMPTY_POLICY: EgressPolicySnapshot = { networks: new Map() };
+export const EMPTY_POLICY: EgressPolicySnapshot = {
+  networks: new Map(),
+  botNetworks: new BlockList(),
+  ownAddresses: [],
+};
 
 export type DecisionReason = EgressRefusalReason | "allowed" | "unknown_network" | "dns_failed";
 
@@ -124,6 +170,8 @@ export interface DecisionLine {
 export interface CreateEgressProxyOptions {
   /** The current policy; read per request, so a reload applies to new requests only. */
   policies: () => EgressPolicySnapshot;
+  /** The proxy's interfaces (default: os.networkInterfaces(), read per request). */
+  localNetworks?: () => LocalNetworks;
   lookup?: ProxyLookup;
   /** The outbound connect to a validated address (tests route it to a local server). */
   connect?: (address: string, port: number) => net.Socket;
@@ -197,6 +245,7 @@ function headersOut(raw: string[]): Array<[string, string]> {
 
 export function createEgressProxy(options: CreateEgressProxyOptions): http.Server {
   const lookup = options.lookup ?? defaultLookup;
+  const localNetworks = options.localNetworks ?? interfaceNetworks;
   const connect =
     options.connect ?? ((address: string, port: number) => net.connect({ host: address, port }));
   const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
@@ -231,19 +280,36 @@ export function createEgressProxy(options: CreateEgressProxyOptions): http.Serve
       });
       return outcome;
     };
-    const entry = options.policies().networks.get(network);
-    if (!entry) return finish({ allowed: false, reason: "unknown_network", status: 403 });
+    let snapshot: EgressPolicySnapshot;
+    let local: LocalNetworks;
+    let attachedNetworks: BlockList;
+    try {
+      snapshot = options.policies();
+      local = localNetworks();
+      attachedNetworks = compileCidrs(local.subnets);
+    } catch {
+      return finish({ allowed: false, reason: "unknown_network", status: 403 });
+    }
+    const entry = snapshot.networks.get(network);
+    // Fail closed: without bot networks and own addresses the shared hop cannot keep bots apart.
+    if (!entry || snapshot.ownAddresses.length === 0) {
+      return finish({ allowed: false, reason: "unknown_network", status: 403 });
+    }
     const policy: EgressHostPolicy = {
       mode: entry.mode,
       allowHosts: entry.allowHosts,
       privateHosts: entry.privateHosts,
+      botNetworks: snapshot.botNetworks,
+      ownAddresses: [...snapshot.ownAddresses, ...local.addresses],
+      attachedNetworks,
     };
-    const byHost = decideHost({ ...policy, host, port });
-    if (!byHost.allowed) return finish({ allowed: false, reason: byHost.reason, status: 403 });
 
     let answers: Array<{ address: string }>;
     if (net.isIP(host)) answers = [{ address: host }];
     else {
+      // Name rules first: a refused name is never resolved.
+      const byHost = decideHost({ ...policy, host, port });
+      if (!byHost.allowed) return finish({ allowed: false, reason: byHost.reason, status: 403 });
       try {
         answers = await lookup(host);
       } catch {
@@ -257,6 +323,14 @@ export function createEgressProxy(options: CreateEgressProxyOptions): http.Serve
     }
     return finish({ allowed: true, address: normalizeHost((answers[0] as { address: string }).address) });
   }
+
+  /** Never rejects: anything unexpected is a refusal, never a hanging client. */
+  const decideSafely = (network: string, host: string, port: number): Promise<Outcome> =>
+    decide(network, host, port).catch(() => ({
+      allowed: false as const,
+      reason: "unknown_network" as const,
+      status: 403 as const,
+    }));
 
   /** Opens the pinned upstream; resolves once connected, rejects on error or timeout. */
   function openUpstream(address: string, port: number): Promise<net.Socket> {
@@ -294,7 +368,7 @@ export function createEgressProxy(options: CreateEgressProxyOptions): http.Serve
     const target = parseAuthority(req.url ?? "");
     if (!target) return rawRefusal(client, 400, "bad_request");
     const network = arrivalAddress(req.socket);
-    void decide(network, target.host, target.port).then(async (outcome) => {
+    void decideSafely(network, target.host, target.port).then(async (outcome) => {
       if (!outcome.allowed) return rawRefusal(client, outcome.status, outcome.reason);
       let upstream: net.Socket;
       try {
@@ -331,7 +405,7 @@ export function createEgressProxy(options: CreateEgressProxyOptions): http.Serve
     const target = validTarget(url.hostname, Number(url.port || 80));
     if (!target) return refuse(400, "bad_request");
     const network = arrivalAddress(req.socket);
-    void decide(network, target.host, target.port).then((outcome) => {
+    void decideSafely(network, target.host, target.port).then((outcome) => {
       if (!outcome.allowed) return refuse(outcome.status, outcome.reason);
       const headers = headersOut(req.rawHeaders).filter(([name]) => name.toLowerCase() !== "host");
       headers.push(["Host", url.host]);

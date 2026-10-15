@@ -273,6 +273,53 @@ describe("decideAddress (every resolved answer)", () => {
       });
     });
 
+    it("both are refused first: whatever the port, the mode or the allow-lists say", () => {
+      const strict = { ...shared, privateHosts: [] };
+      expect(decideAddress({ ...strict, host: "10.89.4.2", port: 3128, address: "10.89.4.2" })).toEqual({
+        allowed: false,
+        reason: "proxy_self",
+      });
+      expect(decideAddress({ ...strict, host: "10.89.3.9", port: 22, address: "10.89.3.9" })).toEqual({
+        allowed: false,
+        reason: "bot_network",
+      });
+      expect(
+        decideAddress({
+          ...strict,
+          mode: "allowlist",
+          allowHosts: ["10.89.3.9"],
+          host: "10.89.3.9",
+          port: 443,
+          address: "10.89.3.9",
+        }),
+      ).toEqual({ allowed: false, reason: "bot_network" });
+    });
+
+    it("an attached network (not a bot network) is refused unless the exact fixture host:port is allowed", () => {
+      const attached = {
+        ...shared,
+        privateHosts: ["fixture.test:8080"],
+        attachedNetworks: compileCidrs(["10.77.0.0/24"]),
+      };
+      expect(decideAddress({ ...attached, host: "fixture.test", port: 8080, address: "10.77.0.5" })).toEqual({
+        allowed: true,
+      });
+      expect(decideAddress({ ...attached, host: "other.test", port: 443, address: "10.77.0.6" })).toEqual({
+        allowed: false,
+        reason: "attached_network",
+      });
+      // A bot network has no such exception, even when it is also attached and listed.
+      const both = {
+        ...attached,
+        privateHosts: ["10.89.3.9:443"],
+        attachedNetworks: compileCidrs(["10.89.3.0/24"]),
+      };
+      expect(decideAddress({ ...both, host: "10.89.3.9", port: 443, address: "10.89.3.9" })).toEqual({
+        allowed: false,
+        reason: "bot_network",
+      });
+    });
+
     it("compileCidrs refuses an invalid entry instead of dropping it", () => {
       expect(() => compileCidrs(["10.89.3.0/24", "nope"])).toThrow();
       expect(() => compileCidrs(["10.89.3.0/33"])).toThrow();

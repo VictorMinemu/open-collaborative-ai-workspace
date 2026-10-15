@@ -77,6 +77,12 @@ import { connect } from "node:net";
 const tls = require("node:tls");
 // ruleid: ocw.raw-egress
 const lazy = await import("undici");
+// ruleid: ocw.raw-egress
+import { createConnection } from "node:net";
+// ruleid: ocw.raw-egress
+import http from "node:http";
+// ok: ocw.raw-egress
+import { createEgressProxy } from "./proxy.ts";
 // ok: ocw.raw-egress
 const r3 = await egressFor(env).fetch("https://example.com");
 // ok: ocw.raw-egress

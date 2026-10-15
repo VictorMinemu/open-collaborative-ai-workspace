@@ -11,7 +11,8 @@ import { BlockList, isIP } from "node:net";
  * - Platform hosts (the compose services, incl. `sandboxd` and `sandbox-egress`): refused by name, by `host:port` and
  *   by address, even when allowed.
  * - Proxy only (D-01, D-11, the single shared hop): the proxy's own addresses and every bot network's subnet are
- *   refused first, before and regardless of the private-host allowlist, so one bot never reaches another.
+ *   refused first, before and regardless of the private-host allowlist, so one bot never reaches another; any other
+ *   network the proxy is attached to is refused unless the exact `host:port` is an allowed private host.
  *
  * Resolution and pinning stay with the callers: each resolves a host once, decides every answer and connects to the
  * validated address only.
@@ -29,6 +30,7 @@ export type EgressRefusalReason =
   | "platform_host"
   | "refused_address"
   | "bot_network"
+  | "attached_network"
   | "proxy_self";
 
 export type EgressDecision = { allowed: true } | { allowed: false; reason: EgressRefusalReason };
@@ -221,6 +223,12 @@ export interface EgressHostPolicy {
   botNetworks?: BlockList;
   /** The proxy's own addresses (proxy only): refused first. */
   ownAddresses?: readonly string[];
+  /**
+   * Every subnet the proxy is attached to (proxy only): refused as `attached_network`, except an answer for a target
+   * whose exact `host:port` the arrival network allows as a private host (a fixture or internal service). Bot
+   * networks never get that exception.
+   */
+  attachedNetworks?: BlockList;
 }
 
 export interface EgressTarget {
@@ -270,14 +278,19 @@ export function decideHost(input: EgressHostPolicy & EgressTarget): EgressDecisi
  * refused, then connect to a validated address only.
  */
 export function decideAddress(input: EgressHostPolicy & EgressTarget & { address: string }): EgressDecision {
-  const byHost = decideHost(input);
-  if (!byHost.allowed) return byHost;
   const host = normalizeHost(input.host);
   const address = normalizeHost(input.address);
   const family = isIP(address);
   if (!family) return refuse("refused_address");
+  const type = family === 4 ? "ipv4" : "ipv6";
+  // The shared hop (D-01, D-11): the proxy itself and every bot network come first, whatever the allow-lists say.
   if ((input.ownAddresses ?? []).some((own) => normalizeHost(own) === address)) return refuse("proxy_self");
-  if (input.botNetworks?.check(address, family === 4 ? "ipv4" : "ipv6")) return refuse("bot_network");
+  if (input.botNetworks?.check(address, type)) return refuse("bot_network");
+  if (input.attachedNetworks?.check(address, type) && !privateAllowed(input, host, input.port)) {
+    return refuse("attached_network");
+  }
+  const byHost = decideHost(input);
+  if (!byHost.allowed) return byHost;
   if (inPlatform(input, address, input.port)) return refuse("platform_host");
   const cls = classifyAddress(address);
   if (cls === "refused") return refuse("refused_address");

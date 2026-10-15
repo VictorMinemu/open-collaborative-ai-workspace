@@ -5,7 +5,9 @@ import { createEgressProxy, type DecisionLine, EMPTY_POLICY, parseEgressPolicy }
  * `sandbox-egress` entrypoint (07.8-12, D-11): the second entrypoint of @ocw/sandboxd, run by plain Node (native type
  * stripping) in its own image with no npm package. It is attached only to per-bot internal networks, never to the
  * control network, and receives its policy as a file the broker writes into its tmpfs with `docker exec` as root;
- * SIGHUP reloads it. A missing or invalid file means no policy: every connection is refused (fail closed).
+ * SIGHUP reloads it. The file carries one entry per bot network (keyed by the proxy's address there), `botNetworks`
+ * (every bot network's subnet) and `ownAddresses` (the proxy's address on each network); both must be non-empty. A
+ * missing or invalid file means no policy: every connection is refused (fail closed).
  *
  *   OCW_EGRESS_POLICY   policy file (default /run/ocw-egress/policy.json)
  *   OCW_EGRESS_HOST     listen address (default 0.0.0.0: every attached network)
