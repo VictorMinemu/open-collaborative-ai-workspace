@@ -602,6 +602,70 @@ describe("a connector write cannot bypass the rule, and a lead's approval acts w
   });
 });
 
+describe("a card that does not show the exact action cannot be approved from the card (WINDOWS #211)", () => {
+  const cardDecision = async (who: TestClient, approvalId: string, outcome: "approved" | "denied") => {
+    const row = await approvalRow(approvalId);
+    return who.request("POST", `/api/v1/cards/${row.card_message_id}/decision`, {
+      outcome,
+      actionHash: row.action_hash,
+    });
+  };
+  const displayOf = async (who: TestClient, approvalId: string) =>
+    (await ok(who.request("GET", `/api/v1/cards/${(await approvalRow(approvalId)).card_message_id}`)))
+      .approval?.display as string;
+
+  it("review_only (a value cut for the card): the card route refuses Approve (409 review_required), Deny works", async () => {
+    await clearRules();
+    await rule({ pattern: WRITE, mode: "always" });
+    const ev = await turnOf(s.sam, samDm);
+    const long = await ask(ev, WRITE, { arguments: { text: "x".repeat(600) } });
+    const id = long.body?.approval.id as string;
+    expect(await displayOf(s.sam, id)).toBe("review_only");
+    const refused = await cardDecision(s.sam, id, "approved");
+    expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+    expect(codeOf(refused)).toBe("review_required");
+    expect((await approvalRow(id)).status).toBe("pending");
+    // The review route still decides it (the decider saw the whole action there).
+    expect((await decide(s.sam, id, "approved")).status).toBe(200);
+
+    const other = await ask(ev, WRITE, { arguments: { text: "y".repeat(600) } });
+    const otherId = other.body?.approval.id as string;
+    expect((await cardDecision(s.sam, otherId, "denied")).status).toBe(200);
+    expect((await approvalRow(otherId)).status).toBe("denied");
+  });
+
+  it("summary (a channel): the card route refuses Approve even for a decider; the review route decides", async () => {
+    await clearRules();
+    await rule({ pattern: `${crmSafe}__*`, mode: "always", scopeUnitId: sales, approverKind: "unit_leads" });
+    const ev = await turnOf(s.sam, ops, true);
+    const asked = await cell("/connectors/call", {
+      eventId: ev.eventId,
+      agentId: keeperId,
+      connector: crmSafe,
+      tool: "whoami",
+      arguments: { detail: "summary-card" },
+    });
+    const id = asked.body?.error.details.approval.id as string;
+    expect(await displayOf(marta, id)).toBe("summary");
+    const refused = await cardDecision(marta, id, "approved");
+    expect(refused.status).toBe(409);
+    expect(codeOf(refused)).toBe("review_required");
+    expect((await approvalRow(id)).status).toBe("pending");
+    expect((await decide(marta, id, "approved")).status).toBe(200);
+  });
+
+  it("exact (Sam's own DM, values as they are): the card route still approves", async () => {
+    await clearRules();
+    await rule({ pattern: WRITE, mode: "always" });
+    const ev = await turnOf(s.sam, samDm);
+    const asked = await ask(ev, WRITE, { arguments: { text: "short" } });
+    const id = asked.body?.approval.id as string;
+    expect(await displayOf(s.sam, id)).toBe("exact");
+    expect((await cardDecision(s.sam, id, "approved")).status).toBe(200);
+    expect((await approvalRow(id)).status).toBe("approved");
+  });
+});
+
 describe("a keychain request cannot bypass the rule", () => {
   let key: Json;
   let kcHost = "";
