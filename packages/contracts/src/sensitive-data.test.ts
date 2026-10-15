@@ -286,29 +286,35 @@ const ADVERSARIAL_SHAPES = [
 ];
 
 describe("linear time on adversarial runs", () => {
-  /** Best of five, after a warm-up: a busy shared CI runner can stall a pass, a super-linear rule is slow on every pass. */
-  const bestOf = (run: () => unknown): number => {
-    run();
-    let best = Number.POSITIVE_INFINITY;
-    for (let i = 0; i < 5; i++) {
-      const t0 = performance.now();
-      run();
-      best = Math.min(best, performance.now() - t0);
-    }
-    return best;
-  };
   const sized = (shape: string, size: number) => shape.repeat(Math.ceil(size / shape.length)).slice(0, size);
+  /**
+   * Best of seven interleaved passes per size, after a warm-up. Interleaving makes a busy shared CI runner slow both
+   * sizes alike, so the ratio stays stable; a super-linear rule is slow on every pass.
+   */
+  const bestPair = (fn: (text: string) => unknown, small: string, large: string): [number, number] => {
+    fn(small);
+    fn(large);
+    let a = Number.POSITIVE_INFINITY;
+    let b = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < 7; i++) {
+      let t0 = performance.now();
+      fn(small);
+      a = Math.min(a, performance.now() - t0);
+      t0 = performance.now();
+      fn(large);
+      b = Math.min(b, performance.now() - t0);
+    }
+    return [a, b];
+  };
   for (const shape of ADVERSARIAL_SHAPES) {
     it(`detectSensitive and redactSecrets scale linearly on ${JSON.stringify(shape)} repeated`, () => {
       for (const fn of [detectSensitive, redactSecrets]) {
-        // 256 KiB → 1 MiB keeps both timings in whole milliseconds, where scheduler noise cannot swing the ratio.
-        const small = bestOf(() => fn(sized(shape, 256 * 1024)));
-        const large = bestOf(() => fn(sized(shape, 1024 * 1024)));
-        // 4x the input: about 4x the time when linear, 16x when quadratic (the ReDoS took 17 s at 256 KiB). The
-        // 2 ms floor stops a sub-millisecond baseline from inflating the ratio; the absolute cap still catches a
-        // catastrophic rule.
-        expect(large / Math.max(small, 2)).toBeLessThan(10);
-        expect(large).toBeLessThan(2000);
+        // 1 MiB → 4 MiB keeps both timings at several milliseconds, where scheduler noise cannot swing the ratio.
+        const [small, large] = bestPair(fn, sized(shape, 1024 * 1024), sized(shape, 4 * 1024 * 1024));
+        // 4x the input: about 4x the time when linear, 16x when quadratic (the ReDoS took 17 s at 256 KiB). The 2 ms
+        // floor stops a tiny baseline from inflating the ratio; the absolute cap still catches a catastrophic rule.
+        expect(large / Math.max(small, 2)).toBeLessThan(12);
+        expect(large).toBeLessThan(4000);
       }
     });
   }
