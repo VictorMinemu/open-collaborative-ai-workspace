@@ -198,6 +198,10 @@ function usePendingCount(kinds: string, enabled: boolean): number {
     enabled,
     retry: noRetryOn4xx,
     staleTime: 30_000,
+    // Live updates arrive only while a count is mounted: on a phone the nav drawer (the badge) unmounts when it closes,
+    // so a request created meanwhile would leave a cached count behind. Every surface that shows a count reads it
+    // fresh when it appears (07.5-13: the phone inbox said "To review 1" beside two rows).
+    refetchOnMount: "always",
   });
   return q.data ?? 0;
 }

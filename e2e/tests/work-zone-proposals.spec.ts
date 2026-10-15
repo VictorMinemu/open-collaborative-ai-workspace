@@ -350,7 +350,18 @@ test("tabs and the kind filter are URL state; the started proposal is Decided an
     await sam.page.getByTestId("approvals-kind-action").click();
     await expect(sam.page).toHaveURL(/\/approvals\?box=decided&kind=action$/);
     await expect(row).toHaveCount(0);
-    await expect(sam.page.getByTestId("approvals-inbox")).toContainText("No actions here.");
+    // Only actions under Actions: the empty state, or (when an earlier spec of the same run left Sam decided tool
+    // calls, e.g. tool-approvals) tool.call rows only.
+    const inbox = sam.page.getByTestId("approvals-inbox");
+    await expect
+      .poll(async () => {
+        const kinds = await inbox
+          .locator("[data-approval-row]")
+          .evaluateAll((els) => els.map((e) => e.getAttribute("data-kind")));
+        if (kinds.length > 0) return kinds.every((k) => k === "tool.call");
+        return (await inbox.getByText("No actions here.").count()) > 0;
+      })
+      .toBe(true);
 
     await sam.page.getByTestId("approvals-kind-work_zone").click();
     await expect(sam.page).toHaveURL(/kind=work_zone$/);
