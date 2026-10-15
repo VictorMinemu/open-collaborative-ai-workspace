@@ -255,6 +255,8 @@ export const conversations = appSchema.table(
     uniqueIndex("conversations_thread_root_uq")
       .on(t.organizationId, t.rootMessageId)
       .where(sql`root_message_id is not null`),
+    /** Phase 07.8: target of composite foreign keys that carry the organization (FKs bypass RLS). */
+    unique("conversations_org_id_uq").on(t.organizationId, t.id),
   ],
 );
 
@@ -673,8 +675,22 @@ export const agentTurns = appSchema.table(
     webCalls: integer("web_calls").notNull().default(0),
     tainted: boolean("tainted").notNull().default(false),
     createdAt: createdAt(),
+    /**
+     * Phase 07.8 (P-06): confined sandbox and browser tool calls of this turn, counted against their own per-turn
+     * budget (`SANDBOX_LIMITS.callsPerTurn`), separately from `tool_calls`.
+     */
+    sandboxCalls: integer("sandbox_calls").notNull().default(0),
+    /**
+     * Phase 07.8 (P-11, P-18, D-13): a member's sealed browser session was loaded in this turn. From then on the turn's
+     * cross-site opens and navigations and its egress-capable execs need the requester's approval, and a team bot's
+     * workspace writes are refused.
+     */
+    memberData: boolean("member_data").notNull().default(false),
   },
-  (t) => [index("agent_turns_org_agent_time_idx").on(t.organizationId, t.agentId, t.createdAt)],
+  (t) => [
+    index("agent_turns_org_agent_time_idx").on(t.organizationId, t.agentId, t.createdAt),
+    check("agent_turns_sandbox_calls_check", sql`${t.sandboxCalls} >= 0`),
+  ],
 );
 
 /** Every gated tool call the cell asked about (D-08): decision + outcome, never arguments or results. */
@@ -949,6 +965,16 @@ export const agentCredentials = appSchema.table(
   (t) => [index("agent_credentials_org_idx").on(t.organizationId)],
 );
 
+/** What a sealed `app.secrets` row holds (the `secrets_kind_check` list). */
+const SECRET_KINDS = [
+  "provider_api_key",
+  "mcp_credential",
+  "user_model_credential",
+  "connector_credential",
+  "vault_item",
+  "browser_session",
+] as const;
+
 /** Encrypted (AES-256-GCM, OCW_ENCRYPTION_KEY) secrets. Never selected into API responses. */
 export const secrets = appSchema.table(
   "secrets",
@@ -963,16 +989,10 @@ export const secrets = appSchema.table(
      * `<orgId>:<userId>:connector:<serverId>` and referenced by `connector_connections.secret_id`.
      * `vault_item` (Phase 07.4, D-04): a keychain item's value, sealed with AAD `<orgId>:vault:<itemId>` and referenced
      * by `vault_items.secret_ref`.
+     * `browser_session` (Phase 07.8, D-08, P-09): a member's browser storage state for one site and bot, sealed with AAD
+     * `<orgId>:<userId>:browser:<agentId>:<siteKey>` and referenced by `browser_sessions.secret_id` (owner-only).
      */
-    kind: text("kind", {
-      enum: [
-        "provider_api_key",
-        "mcp_credential",
-        "user_model_credential",
-        "connector_credential",
-        "vault_item",
-      ],
-    }).notNull(),
+    kind: text("kind", { enum: SECRET_KINDS }).notNull(),
     provider: text("provider"),
     ciphertext: text("ciphertext").notNull(),
     iv: text("iv").notNull(),
@@ -980,7 +1000,13 @@ export const secrets = appSchema.table(
     createdBy: uuid("created_by"),
     createdAt: createdAt(),
   },
-  (t) => [index("secrets_org_idx").on(t.organizationId)],
+  (t) => [
+    index("secrets_org_idx").on(t.organizationId),
+    /** Phase 07.8: the kinds are a database check too (until then only this enum held them). */
+    check("secrets_kind_check", sql`${t.kind} in (${sql.raw(SECRET_KINDS.map((k) => `'${k}'`).join(","))})`),
+    /** Phase 07.8: target of composite foreign keys that carry the organization (FKs bypass RLS). */
+    unique("secrets_org_id_uq").on(t.organizationId, t.id),
+  ],
 );
 
 export const modelProviders = appSchema.table(
@@ -2616,5 +2642,493 @@ export const workZoneProposals = appSchema.table(
       sql`char_length(${t.prompt}) between 1 and ${sql.raw(String(PROPOSAL_PROMPT_MAX_CHARS))}`,
     ),
     check("work_zone_proposals_prompt_sha256_check", sql`${t.promptSha256} ~ ${SHA256_HEX}`),
+  ],
+);
+
+// ---------------------------------------------------------------- bot sandboxes, packages, live browser (07.8)
+
+/** Shell and browser egress modes (`SandboxEgressMode`). */
+const SANDBOX_EGRESS_MODES = sql.raw(`('off','allowlist','public')`);
+/** Hosts an organization's allow list may name (`SANDBOX_LIMITS.allowHostsMax`). */
+const SANDBOX_ALLOW_HOSTS_MAX = 64;
+/** Steps one turn's activity keeps (`SANDBOX_LIMITS.activityStepsMax`); older ones are counted in `more`. */
+const ACTIVITY_STEPS_MAX = 50;
+/** Entries of a pinned package's dependency tree (`SANDBOX_LIMITS.packageTreeMaxEntries`). */
+const PACKAGE_TREE_MAX_ENTRIES = 5_000;
+/** A pinned package's lockfile or requirement set (`SANDBOX_LIMITS.packageLockfileMaxBytes`), in UTF-8 bytes. */
+const PACKAGE_LOCKFILE_MAX_BYTES = 2_097_152;
+/** Why a browser context ended (`BrowserEndReason`). */
+const BROWSER_END_REASONS = sql.raw(
+  `('closed_by_bot','idle','kill_switch','module_off','crashed','access_lost')`,
+);
+/**
+ * A host as the API stores it (a browser context's, a sign-in request's or a session's site key): the URL's lower-case
+ * host with `:port` when not the default, never a scheme, a path or credentials. 253 characters of name + a port.
+ */
+const browserHostCheck = (name: string, column: AnyPgColumn) =>
+  check(
+    name,
+    sql`${column} = lower(${column}) and char_length(${column}) between 1 and 260
+      and position('/' in ${column}) = 0 and position('@' in ${column}) = 0`,
+  );
+
+/**
+ * The organization's Sandbox & Browser settings (D-01, D-09, D-12, SBX-01): one row per organization; an absent row
+ * means these defaults. Off until an admin turns it on (`enabled`); `killed_at` is the kill switch, which stops every
+ * sandbox and browser of the organization until resumed. Shell (`sandbox_egress_mode`) and browser
+ * (`browser_egress_mode`) egress are `off`, `allowlist` (only `egress_allow_hosts`) or `public` (no private or platform
+ * address, ever). Limits: running sandboxes and browsers, CPU minutes per day for the organization, disk per bot and in
+ * total (MB), and the longest a sealed browser session is kept (days). `version` is the optimistic-concurrency counter of
+ * the settings route.
+ */
+export const sandboxPolicies = appSchema.table(
+  "sandbox_policies",
+  {
+    organizationId: orgId().primaryKey(),
+    enabled: boolean("enabled").notNull().default(false),
+    sandboxEgressMode: text("sandbox_egress_mode", { enum: ["off", "allowlist", "public"] })
+      .notNull()
+      .default("allowlist"),
+    browserEgressMode: text("browser_egress_mode", { enum: ["off", "allowlist", "public"] })
+      .notNull()
+      .default("public"),
+    egressAllowHosts: text("egress_allow_hosts").array().notNull().default(sql`'{}'::text[]`),
+    maxSandboxes: integer("max_sandboxes").notNull().default(10),
+    maxBrowsers: integer("max_browsers").notNull().default(3),
+    cpuMinutesPerDay: integer("cpu_minutes_per_day").notNull().default(600),
+    diskPerBotMb: integer("disk_per_bot_mb").notNull().default(2048),
+    diskTotalMb: integer("disk_total_mb").notNull().default(51_200),
+    browserSessionMaxDays: integer("browser_session_max_days").notNull().default(30),
+    killedAt: ts("killed_at"),
+    killedBy: uuid("killed_by"),
+    version: integer("version").notNull().default(1),
+    updatedBy: uuid("updated_by"),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "sandbox_policies_egress_mode_check",
+      sql`${t.sandboxEgressMode} in ${SANDBOX_EGRESS_MODES} and ${t.browserEgressMode} in ${SANDBOX_EGRESS_MODES}`,
+    ),
+    check(
+      "sandbox_policies_allow_hosts_check",
+      sql`cardinality(${t.egressAllowHosts}) <= ${sql.raw(String(SANDBOX_ALLOW_HOSTS_MAX))}
+        and array_position(${t.egressAllowHosts}, null) is null`,
+    ),
+    check(
+      "sandbox_policies_limits_check",
+      sql`${t.maxSandboxes} between 0 and 100 and ${t.maxBrowsers} between 0 and 50
+        and ${t.cpuMinutesPerDay} between 1 and 100000 and ${t.diskPerBotMb} between 64 and 102400
+        and ${t.diskTotalMb} between 64 and 1048576`,
+    ),
+    check("sandbox_policies_session_days_check", sql`${t.browserSessionMaxDays} between 1 and 90`),
+    check("sandbox_policies_version_check", sql`${t.version} >= 1`),
+  ],
+);
+
+/**
+ * A bot's sandbox containers (D-01, D-11, SBX-01/02): at most one shell (`sbx`) and one browser (`brw`) per bot, as
+ * `sandboxd` last reported them. `state` is a `SandboxState`; `runtime` the isolation it runs under; `disk_bytes` the
+ * last measured workspace size (soft quota, F-9); `stop_reason` why it last stopped. The workspace itself lives in the
+ * bot's Docker volume, never here.
+ */
+export const botSandboxes = appSchema.table(
+  "bot_sandboxes",
+  {
+    id: id(),
+    organizationId: orgId(),
+    agentId: uuid("agent_id").notNull(),
+    kind: text("kind", { enum: ["sbx", "brw"] }).notNull(),
+    state: text("state", {
+      enum: ["absent", "starting", "running", "stopping", "stopped", "disk_full", "killed", "unavailable"],
+    }).notNull(),
+    runtime: text("runtime", { enum: ["gvisor", "hardened-runc"] }),
+    diskBytes: bigint("disk_bytes", { mode: "number" }).notNull().default(0),
+    lastActiveAt: ts("last_active_at"),
+    stopReason: text("stop_reason", { enum: ["kill_switch", "disk_full", "idle", "user", "service_down"] }),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    // Composite with the organization (FKs bypass RLS); deleting the bot removes its sandbox rows.
+    foreignKey({
+      name: "bot_sandboxes_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    unique("bot_sandboxes_agent_kind_uq").on(t.organizationId, t.agentId, t.kind),
+    check("bot_sandboxes_kind_check", sql`${t.kind} in ('sbx','brw')`),
+    check(
+      "bot_sandboxes_state_check",
+      sql`${t.state} in ('absent','starting','running','stopping','stopped','disk_full','killed','unavailable')`,
+    ),
+    check(
+      "bot_sandboxes_runtime_check",
+      sql`${t.runtime} is null or ${t.runtime} in ('gvisor','hardened-runc')`,
+    ),
+    check(
+      "bot_sandboxes_stop_reason_check",
+      sql`${t.stopReason} is null or ${t.stopReason} in ('kill_switch','disk_full','idle','user','service_down')`,
+    ),
+    check("bot_sandboxes_disk_check", sql`${t.diskBytes} >= 0`),
+  ],
+);
+
+/** CPU used by a bot's sandbox containers per UTC day (SBX-01), summed against the organization's daily minutes. */
+export const sandboxUsageDaily = appSchema.table(
+  "sandbox_usage_daily",
+  {
+    organizationId: orgId(),
+    agentId: uuid("agent_id").notNull(),
+    day: date("day", { mode: "string" }).notNull(),
+    cpuMs: bigint("cpu_ms", { mode: "number" }).notNull().default(0),
+  },
+  (t) => [
+    primaryKey({ columns: [t.organizationId, t.agentId, t.day] }),
+    foreignKey({
+      name: "sandbox_usage_daily_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    check("sandbox_usage_daily_cpu_check", sql`${t.cpuMs} >= 0`),
+  ],
+);
+
+/**
+ * The durable position of the API's `sandboxd` event consumer, per organization (11): an event `(boot_id, seq)` is
+ * applied to the organization only if `boot_id` differs from the stored one or `seq` is greater than the stored `seq`,
+ * in the same transaction that applies it, so a replay after an API restart never double-counts usage.
+ */
+export const sandboxEventCursor = appSchema.table(
+  "sandbox_event_cursor",
+  {
+    organizationId: orgId().primaryKey(),
+    bootId: uuid("boot_id").notNull(),
+    seq: bigint("seq", { mode: "number" }).notNull().default(0),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [check("sandbox_event_cursor_seq_check", sql`${t.seq} >= 0`)],
+);
+
+/**
+ * A member's sealed browser sign-in for one site with one bot (D-08, F-10, P-09, BRW-04): one per (member, bot, site
+ * key). The storage state itself is never here: it is the sealed `secret_id` row (kind `browser_session`), deleted with
+ * it. `site_key` is the exact lower-case host of the sign-in card (`:port` when not the default). The row is its
+ * owner's ALONE: a RESTRICTIVE `personal_owner_only` policy in post-migrate.sql hides it from every session whose
+ * `app.user_id` is not `user_id` (another member, an admin, a cell route without a user). `expires_at` = the earliest
+ * of the kept cookies' expiries and the organization's `browser_session_max_days`.
+ */
+export const browserSessions = appSchema.table(
+  "browser_sessions",
+  {
+    id: id(),
+    organizationId: orgId(),
+    userId: uuid("user_id").notNull(),
+    agentId: uuid("agent_id").notNull(),
+    siteKey: text("site_key").notNull(),
+    secretId: uuid("secret_id").notNull(),
+    createdAt: createdAt(),
+    lastUsedAt: ts("last_used_at"),
+    expiresAt: ts("expires_at").notNull(),
+  },
+  (t) => [
+    foreignKey({
+      name: "browser_sessions_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "browser_sessions_secret_fk",
+      columns: [t.organizationId, t.secretId],
+      foreignColumns: [secrets.organizationId, secrets.id],
+    }).onDelete("cascade"),
+    unique("browser_sessions_owner_site_uq").on(t.organizationId, t.userId, t.agentId, t.siteKey),
+    /** Target of the contexts' and sign-in requests' `session_id` foreign keys. */
+    unique("browser_sessions_org_id_uq").on(t.organizationId, t.id),
+    index("browser_sessions_secret_idx").on(t.organizationId, t.secretId),
+    index("browser_sessions_agent_idx").on(t.organizationId, t.agentId),
+    browserHostCheck("browser_sessions_site_key_check", t.siteKey),
+  ],
+);
+
+/**
+ * A bot's live browser context in one conversation (D-06, D-07, BRW-01/02): opened by a turn (`event_id`) for the person
+ * the bot acts for (`requested_for_user_id`). `host` is the current page's host (never a path or query). `state` is
+ * the server-side `BrowserContextState` (`live`, `idle`, `paused`, `ended`); `paused_for` says why a page is held
+ * (`held_until`). `controller_user_id` + `lease_expires_at` are a person's takeover lease (both or neither).
+ * `session_id` = the member session loaded into it, if any (a revoked session only unlinks).
+ */
+export const browserContexts = appSchema.table(
+  "browser_contexts",
+  {
+    id: id(),
+    organizationId: orgId(),
+    agentId: uuid("agent_id").notNull(),
+    conversationId: uuid("conversation_id").notNull(),
+    threadRootMessageId: uuid("thread_root_message_id"),
+    requestedForUserId: uuid("requested_for_user_id").notNull(),
+    /** The opening turn (`agent_turns.event_id`). */
+    eventId: uuid("event_id").notNull(),
+    host: text("host").notNull(),
+    secure: boolean("secure").notNull(),
+    state: text("state", { enum: ["live", "idle", "paused", "ended"] }).notNull(),
+    sessionId: uuid("session_id"),
+    controllerUserId: uuid("controller_user_id"),
+    leaseExpiresAt: ts("lease_expires_at"),
+    pausedFor: text("paused_for", { enum: ["approval", "signin"] }),
+    heldUntil: ts("held_until"),
+    openedAt: ts("opened_at").notNull().defaultNow(),
+    closedAt: ts("closed_at"),
+    endReason: text("end_reason", {
+      enum: ["closed_by_bot", "idle", "kill_switch", "module_off", "crashed", "access_lost"],
+    }),
+  },
+  (t) => [
+    // Composite with the organization (FKs bypass RLS). The migration narrows the session action to
+    // `SET NULL ("session_id")` (PostgreSQL 15+; no drizzle builder), so a revoked session never nulls `organization_id`.
+    foreignKey({
+      name: "browser_contexts_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "browser_contexts_conversation_fk",
+      columns: [t.organizationId, t.conversationId],
+      foreignColumns: [conversations.organizationId, conversations.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "browser_contexts_session_fk",
+      columns: [t.organizationId, t.sessionId],
+      foreignColumns: [browserSessions.organizationId, browserSessions.id],
+    }).onDelete("set null"),
+    /** Target of `browser_signin_requests_context_fk`. */
+    unique("browser_contexts_org_id_uq").on(t.organizationId, t.id),
+    index("browser_contexts_open_idx").on(t.organizationId, t.conversationId).where(sql`closed_at is null`),
+    index("browser_contexts_agent_idx").on(t.organizationId, t.agentId, t.openedAt),
+    index("browser_contexts_session_idx")
+      .on(t.organizationId, t.sessionId)
+      .where(sql`session_id is not null`),
+    browserHostCheck("browser_contexts_host_check", t.host),
+    check("browser_contexts_state_check", sql`${t.state} in ('live','idle','paused','ended')`),
+    check(
+      "browser_contexts_paused_for_check",
+      sql`${t.pausedFor} is null or ${t.pausedFor} in ('approval','signin')`,
+    ),
+    check(
+      "browser_contexts_end_reason_check",
+      sql`${t.endReason} is null or ${t.endReason} in ${BROWSER_END_REASONS}`,
+    ),
+    check(
+      "browser_contexts_lease_check",
+      sql`(${t.controllerUserId} is null) = (${t.leaseExpiresAt} is null)`,
+    ),
+  ],
+);
+
+/**
+ * A bot's request that the person it acts for sign in to a site in its browser (D-08, BRW-03): the sign-in card
+ * (`card_message_id`) for one context and turn. `reason` is the bot's short, shown-as-is reason. `status` is a
+ * `BrowserSignInStatus`; `stop_reason` a `BrowserEndReason` when the context ended first; `session_id` the session it
+ * sealed (a revoked session only unlinks).
+ */
+export const browserSigninRequests = appSchema.table(
+  "browser_signin_requests",
+  {
+    id: id(),
+    organizationId: orgId(),
+    agentId: uuid("agent_id").notNull(),
+    contextId: uuid("context_id").notNull(),
+    requesterUserId: uuid("requester_user_id").notNull(),
+    conversationId: uuid("conversation_id").notNull(),
+    /** The asking turn (`agent_turns.event_id`). */
+    eventId: uuid("event_id").notNull(),
+    cardMessageId: uuid("card_message_id"),
+    host: text("host").notNull(),
+    reason: text("reason").notNull(),
+    status: text("status", {
+      enum: ["waiting", "signing_in", "signed_in", "skipped", "expired", "stopped"],
+    })
+      .notNull()
+      .default("waiting"),
+    stopReason: text("stop_reason", {
+      enum: ["closed_by_bot", "idle", "kill_switch", "module_off", "crashed", "access_lost"],
+    }),
+    sessionId: uuid("session_id"),
+    expiresAt: ts("expires_at").notNull(),
+    decidedAt: ts("decided_at"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    // Composite with the organization (FKs bypass RLS); the session action is narrowed to `SET NULL ("session_id")`
+    // in the migration, as on browser_contexts.
+    foreignKey({
+      name: "browser_signin_requests_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "browser_signin_requests_context_fk",
+      columns: [t.organizationId, t.contextId],
+      foreignColumns: [browserContexts.organizationId, browserContexts.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "browser_signin_requests_session_fk",
+      columns: [t.organizationId, t.sessionId],
+      foreignColumns: [browserSessions.organizationId, browserSessions.id],
+    }).onDelete("set null"),
+    unique("browser_signin_requests_event_uq").on(t.organizationId, t.eventId, t.contextId),
+    index("browser_signin_requests_context_idx").on(t.organizationId, t.contextId),
+    index("browser_signin_requests_session_idx")
+      .on(t.organizationId, t.sessionId)
+      .where(sql`session_id is not null`),
+    browserHostCheck("browser_signin_requests_host_check", t.host),
+    check("browser_signin_requests_reason_check", sql`char_length(${t.reason}) between 1 and 200`),
+    check(
+      "browser_signin_requests_status_check",
+      sql`${t.status} in ('waiting','signing_in','signed_in','skipped','expired','stopped')`,
+    ),
+    check(
+      "browser_signin_requests_stop_reason_check",
+      sql`${t.stopReason} is null or ${t.stopReason} in ${BROWSER_END_REASONS}`,
+    ),
+  ],
+);
+
+/**
+ * What a bot did in one turn (SBX-02, `BotTurnActivity`), composed by the server and shown under its reply to the
+ * conversation's readers. `steps` holds at most 50 masked `ActivityStep`s (never argv in clear, output, page text or
+ * typed input; WINDOWS #168); older ones are only counted in `more`. `running` until the turn ends.
+ */
+export const botTurnActivity = appSchema.table(
+  "bot_turn_activity",
+  {
+    /** The turn (`agent_turns.event_id`). */
+    eventId: uuid("event_id").primaryKey(),
+    organizationId: orgId(),
+    agentId: uuid("agent_id").notNull(),
+    conversationId: uuid("conversation_id").notNull(),
+    threadRootMessageId: uuid("thread_root_message_id"),
+    replyMessageId: uuid("reply_message_id"),
+    steps: jsonb("steps").$type<unknown[]>().notNull().default([]),
+    more: integer("more").notNull().default(0),
+    running: boolean("running").notNull().default(true),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      name: "bot_turn_activity_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    check(
+      "bot_turn_activity_steps_check",
+      sql`jsonb_typeof(${t.steps}) = 'array' and jsonb_array_length(${t.steps}) <= ${sql.raw(String(ACTIVITY_STEPS_MAX))}
+        and ${t.more} >= 0`,
+    ),
+    index("bot_turn_activity_reply_idx")
+      .on(t.organizationId, t.replyMessageId)
+      .where(sql`reply_message_id is not null`),
+    index("bot_turn_activity_agent_idx").on(t.organizationId, t.agentId),
+  ],
+);
+
+/**
+ * A package an admin approved for the organization's sandboxes (D-03 as refined by D-11, P-12, SBX-05): ADR-0011's
+ * pinned approval, mirrored from `cell_plugins`, with the WHOLE dependency tree pinned. `sha256` is the top-level
+ * artifact; `lockfile` is the exact set every install uses (npm `package-lock.json`, the PyPI requirement set with
+ * hashes, the Debian closure or the single ClawHub entry), `dependency_count` its entries and `tree_sha256` the hash of
+ * their canonical form, bound by `review_token`. `changed_upstream` = a later resolution no longer matches. One live
+ * (not `removed`) package per (source, name).
+ */
+export const sandboxPackages = appSchema.table(
+  "sandbox_packages",
+  {
+    id: id(),
+    organizationId: orgId(),
+    source: text("source", { enum: ["npm", "pypi", "debian", "clawhub"] }).notNull(),
+    name: text("name").notNull(),
+    version: text("version").notNull(),
+    sha256: text("sha256").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    license: text("license"),
+    publisher: text("publisher"),
+    hasInstallScript: boolean("has_install_script").notNull(),
+    risk: text("risk", { enum: ["low", "medium", "high", "refuse"] }).notNull(),
+    riskReasons: jsonb("risk_reasons").$type<string[]>().notNull().default([]),
+    reviewToken: text("review_token").notNull(),
+    treeSha256: text("tree_sha256").notNull(),
+    dependencyCount: integer("dependency_count").notNull(),
+    lockfile: text("lockfile").notNull(),
+    changedUpstream: boolean("changed_upstream").notNull().default(false),
+    status: text("status", { enum: ["approved", "removed"] }).notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    personalAllowed: boolean("personal_allowed").notNull().default(false),
+    approvedBy: uuid("approved_by"),
+    approvedAt: ts("approved_at"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("sandbox_packages_org_source_name_uq")
+      .on(t.organizationId, t.source, t.name)
+      .where(sql`status <> 'removed'`),
+    /** Target of `sandbox_package_installs_package_fk`. */
+    unique("sandbox_packages_org_id_uq").on(t.organizationId, t.id),
+    check("sandbox_packages_source_check", sql`${t.source} in ('npm','pypi','debian','clawhub')`),
+    check("sandbox_packages_name_check", sql`char_length(${t.name}) between 1 and 214`),
+    check("sandbox_packages_version_check", sql`char_length(${t.version}) between 1 and 128`),
+    check("sandbox_packages_sha256_check", sql`${t.sha256} ~ ${SHA256_HEX}`),
+    check("sandbox_packages_size_check", sql`${t.sizeBytes} >= 0`),
+    check("sandbox_packages_risk_check", sql`${t.risk} in ('low','medium','high','refuse')`),
+    check(
+      "sandbox_packages_risk_reasons_check",
+      sql`jsonb_typeof(${t.riskReasons}) = 'array' and jsonb_array_length(${t.riskReasons}) <= 10`,
+    ),
+    check(
+      "sandbox_packages_tree_check",
+      sql`${t.treeSha256} ~ ${SHA256_HEX}
+        and ${t.dependencyCount} between 0 and ${sql.raw(String(PACKAGE_TREE_MAX_ENTRIES))}`,
+    ),
+    check(
+      "sandbox_packages_lockfile_check",
+      sql`octet_length(${t.lockfile}) <= ${sql.raw(String(PACKAGE_LOCKFILE_MAX_BYTES))}`,
+    ),
+    check("sandbox_packages_status_check", sql`${t.status} in ('approved','removed')`),
+  ],
+);
+
+/** Where an approved package is installed (SBX-05): one row per (bot, package), as `sandboxd` last reported it. */
+export const sandboxPackageInstalls = appSchema.table(
+  "sandbox_package_installs",
+  {
+    organizationId: orgId(),
+    agentId: uuid("agent_id").notNull(),
+    packageId: uuid("package_id").notNull(),
+    status: text("status", { enum: ["pending", "installing", "installed", "failed", "removing"] }).notNull(),
+    /** A short error code or summary, never installer output. */
+    detail: text("detail"),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.organizationId, t.agentId, t.packageId] }),
+    foreignKey({
+      name: "sandbox_package_installs_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "sandbox_package_installs_package_fk",
+      columns: [t.organizationId, t.packageId],
+      foreignColumns: [sandboxPackages.organizationId, sandboxPackages.id],
+    }).onDelete("cascade"),
+    index("sandbox_package_installs_package_idx").on(t.organizationId, t.packageId),
+    check(
+      "sandbox_package_installs_status_check",
+      sql`${t.status} in ('pending','installing','installed','failed','removing')`,
+    ),
+    check(
+      "sandbox_package_installs_detail_check",
+      sql`${t.detail} is null or char_length(${t.detail}) <= 200`,
+    ),
   ],
 );
