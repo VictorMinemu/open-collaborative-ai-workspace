@@ -1,6 +1,12 @@
 import {
+  AgentChannelSandboxDelete,
+  AgentChannelSandboxDeleteResponse,
   AgentChannelSandboxExec,
   AgentChannelSandboxExecResponse,
+  AgentChannelSandboxList,
+  AgentChannelSandboxProcess,
+  AgentChannelSandboxRead,
+  AgentChannelSandboxReadResponse,
   AgentChannelSandboxWrite,
   AgentChannelSandboxWriteResponse,
   BUILTIN_TOOLS,
@@ -11,6 +17,8 @@ import {
   SANDBOX_REFUSAL_STATUS,
   type SandboxdErrorCode,
   type SandboxdTarget,
+  type SandboxFileEntry,
+  SandboxFileList,
   SandboxFilePath,
   type SandboxRefusal,
   SandboxRelativePath,
@@ -661,6 +669,25 @@ function guardBody(opts: { rootAllowed?: boolean; content?: boolean }) {
   };
 }
 
+/** The bot's view of a folder: folders first, then files, each by name (sandboxd's own order otherwise). */
+function foldersFirst(list: SandboxFileList): SandboxFileList {
+  const entries = [...list.entries].sort((a, b) =>
+    a.kind === b.kind ? (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) : a.kind === "dir" ? -1 : 1,
+  );
+  return { ...list, entries };
+}
+
+/** A path that must name a file: sandboxd's stat says what is there (a folder is `invalid_path`). */
+async function assertFile(
+  client: SandboxdClient,
+  target: SandboxdTarget,
+  path: string,
+): Promise<SandboxFileEntry> {
+  const entry = await client.call("filesStat", { target, path });
+  if (entry.kind !== "file") throw new LocalRefusal("invalid_path");
+  return entry;
+}
+
 export function registerSandboxRoutes(
   scope: App,
   core: Core,
@@ -717,6 +744,67 @@ export function registerSandboxRoutes(
   );
 
   scope.post(
+    "/sandbox/process",
+    route(AgentChannelSandboxProcess, AgentChannelSandboxExecResponse),
+    async (req) => {
+      const body = req.body;
+      return runSandboxCall(core, deps, cellOf(req), {
+        tool: BUILTIN_TOOLS.sandboxProcess,
+        body,
+        args: { processId: body.processId, action: body.action },
+        stepInput: { processId: body.processId, action: body.action },
+        // Stopping a command changes the sandbox; a poll is in the ledger only.
+        auditAction: body.action === "kill" ? "sandbox.process_stopped" : null,
+        // sandboxd scopes process ids to the bot's own sandbox (the target is the turn's bot): another bot's id is
+        // `not_found`.
+        call: (client, target) =>
+          client.call(
+            "process",
+            { target, processId: body.processId, action: body.action },
+            { timeoutMs: SANDBOX_LIMITS.execYieldMs + EXEC_ANSWER_MARGIN_MS },
+          ),
+        finish: async (_tx, result) => ({
+          response: result,
+          stepResult: {
+            status: result.status,
+            exitCode: result.status === "exited" ? result.exitCode : null,
+          },
+          audit: { status: result.status, exitCode: result.status === "exited" ? result.exitCode : null },
+        }),
+      });
+    },
+  );
+
+  scope.post(
+    "/sandbox/read",
+    { ...route(AgentChannelSandboxRead, AgentChannelSandboxReadResponse), preValidation: guardBody({}) },
+    async (req) => {
+      const body = req.body;
+      return runSandboxCall(core, deps, cellOf(req), {
+        tool: BUILTIN_TOOLS.sandboxRead,
+        body,
+        args: {
+          path: body.path,
+          ...(body.offset !== undefined ? { offset: body.offset } : {}),
+          ...(body.limit !== undefined ? { limit: body.limit } : {}),
+        },
+        stepInput: { path: body.path },
+        auditAction: null,
+        call: async (client, target) => {
+          await assertFile(client, target, body.path);
+          return client.call("filesRead", {
+            target,
+            path: body.path,
+            offset: body.offset ?? 0,
+            limit: body.limit ?? SANDBOX_LIMITS.readMaxBytes,
+          });
+        },
+        finish: async (_tx, result) => ({ response: result, stepResult: null, audit: {} }),
+      });
+    },
+  );
+
+  scope.post(
     "/sandbox/write",
     {
       ...route(AgentChannelSandboxWrite, AgentChannelSandboxWriteResponse),
@@ -743,6 +831,57 @@ export function registerSandboxRoutes(
           response: result,
           stepResult: { size: result.size },
           audit: { size: result.size, mode: body.mode, ...pathAudit(body.path) },
+        }),
+      });
+    },
+  );
+
+  scope.post(
+    "/sandbox/list",
+    {
+      ...route(AgentChannelSandboxList, SandboxFileList),
+      preValidation: guardBody({ rootAllowed: true }),
+    },
+    async (req) => {
+      const body = req.body;
+      return runSandboxCall(core, deps, cellOf(req), {
+        tool: BUILTIN_TOOLS.sandboxList,
+        body,
+        args: { path: body.path },
+        stepInput: { path: body.path },
+        auditAction: null,
+        call: async (client, target) =>
+          foldersFirst(await client.call("filesList", { target, path: body.path, hidden: true })),
+        finish: async (_tx, result) => ({ response: result, stepResult: null, audit: {} }),
+      });
+    },
+  );
+
+  scope.post(
+    "/sandbox/delete",
+    {
+      ...route(AgentChannelSandboxDelete, AgentChannelSandboxDeleteResponse),
+      preValidation: guardBody({}),
+    },
+    async (req) => {
+      const body = req.body;
+      const recursive = body.recursive === true;
+      return runSandboxCall(core, deps, cellOf(req), {
+        tool: BUILTIN_TOOLS.sandboxDelete,
+        body,
+        args: { path: body.path, ...(body.recursive !== undefined ? { recursive: body.recursive } : {}) },
+        stepInput: { path: body.path },
+        auditAction: "sandbox.file_deleted",
+        failureAudit: (reason) => ({ reason, recursive, ...pathAudit(body.path) }),
+        call: async (client, target) => {
+          // A folder goes only with `recursive`: without it, the path must be a file.
+          if (!recursive) await assertFile(client, target, body.path);
+          return client.call("filesDelete", { target, path: body.path, recursive });
+        },
+        finish: async (_tx, result) => ({
+          response: result,
+          stepResult: null,
+          audit: { deleted: result.deleted, recursive, ...pathAudit(body.path) },
         }),
       });
     },
