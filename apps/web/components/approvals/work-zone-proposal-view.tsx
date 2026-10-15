@@ -5,6 +5,7 @@ import { FolderGit2, FolderX, Info, Laptop, type LucideIcon, Sparkles } from "lu
 import type { ReactNode } from "react";
 import { permissionModeMeta } from "@/components/work-zone/meta";
 import { cn } from "@/lib/utils";
+import { UntrustedText } from "./untrusted-text";
 
 /**
  * The body of a Work Zone proposal review (Phase 07.5, D-03, APPROVE-03, UI-SPEC Surface 2 "Work Zone proposal
@@ -183,7 +184,8 @@ const SECTION_TITLE = "font-semibold text-muted-foreground text-xs uppercase tra
 
 /**
  * The fact strip, the prompt and the notes. `device` is the live state (see `deviceStateOf`). The prompt is the bot's
- * text (untrusted model output): one text node with its whitespace kept, never Markdown, HTML or links (T-07.5-12-01).
+ * text (untrusted model output): `UntrustedText`, so text nodes with its whitespace kept, revealed invisible characters
+ * as chips, never Markdown, HTML or links (T-07.5-12-01, T-07.5-13-01).
  */
 export function WorkZoneProposalView({ view, device }: { view: WorkZoneProposal; device: DeviceStateKind }) {
   const bot = view.agent.displayName;
@@ -251,7 +253,7 @@ export function WorkZoneProposalView({ view, device }: { view: WorkZoneProposal;
           data-testid="work-zone-prompt"
           className="max-h-[480px] overflow-auto whitespace-pre-wrap break-words rounded-lg border bg-muted/50 px-4 py-3 text-sm leading-5 outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40 dark:bg-white/[0.03]"
         >
-          {view.prompt}
+          <UntrustedText text={view.prompt} />
         </div>
         <p data-testid="work-zone-written-by" className="text-muted-foreground text-xs">
           Written by {bot}. Read it before starting: it runs on your device, as you.

@@ -102,6 +102,8 @@ export interface CardActionPayload extends MentionPayload {
     outcome: "approved" | "denied";
     decidedBy?: { id: string; displayName: string };
     grant?: { tool: string; arguments: string; useBy: string };
+    /** The decider's note (07.5-11), absent without one. */
+    note?: string;
   };
 }
 
@@ -150,6 +152,12 @@ export interface FakeCellOptions {
    * directives (07.4-14: a member asks in plain words, the persona calls `ocw_connector_call`).
    */
   toolCallsFor?: (m: MentionPayload) => Array<{ tool: string; args: Record<string, unknown> }>;
+  /**
+   * Answer a denied card action (07.5-13) the way the plugin's mapper words it for the model: one line
+   * `Card <title>: denied by <decider> (“<note>”)` (the note from `cardAction.note` only, never parsed from the
+   * sentence). Off by default, so specs that count a bot's replies are unchanged.
+   */
+  replyOnDenied?: boolean;
 }
 
 /**
@@ -463,6 +471,10 @@ export class FakeCellPlugin {
           const lines = await this.simulateToolCalls(a, [{ tool: grant.tool, args }]);
           this.grantReruns.push({ eventId: a.eventId, tool: grant.tool, lines });
           await this.reply(a, lines.join("\n") + turnToolsSuffix(a) + turnContextSuffix(a));
+        } else if (a.cardAction?.outcome === "denied" && this.opts.replyOnDenied) {
+          const by = a.cardAction.decidedBy?.displayName ?? "an approver";
+          const note = a.cardAction.note ? ` (“${a.cardAction.note}”)` : "";
+          await this.reply(a, `Card ${a.cardAction.title}: denied by ${by}${note}`);
         }
       }
       if (this.opts.pluginTools && (type === "plugin.install.v1" || type === "plugin.uninstall.v1")) {
