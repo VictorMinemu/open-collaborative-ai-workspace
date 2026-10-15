@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   type AgentChannelSandboxExecResponse,
   SANDBOX_REFUSALS,
+  SANDBOX_TOOL_NAMES,
   type SandboxToolBodies,
   type SandboxToolName,
   type TurnContext,
@@ -13,7 +14,9 @@ import {
   NO_TURN,
   registerSandboxTools,
   renderExecResult,
+  renderFileList,
   SANDBOX_REFUSAL_SENTENCE,
+  SANDBOX_TOOL_ROUTES,
   UNREACHABLE,
 } from "./sandbox-tools.js";
 import { type FakeAgentChannelApi, startFakeAgentChannelApi } from "./testing/fake-agent-channel-api.js";
@@ -351,5 +354,210 @@ describe("ocw_sandbox_exec over HTTP: the real client → the fake Agent Channel
     const refused = await exec.execute("tc-2", { argv: ["id"] });
     expect(text(refused)).toBe(SANDBOX_REFUSAL_SENTENCE.killed);
     expect(JSON.stringify(refused)).not.toContain("fake-api-error-body-canary");
+  });
+});
+
+const ALL_SANDBOX_TURN = (): TurnContext =>
+  turn({ tools: [...SANDBOX_TOOL_NAMES], toolFlags: {}, maxSandboxCalls: 40 });
+const ATTACHMENT = "0199a6f0-0000-7000-8000-0000000000aa";
+
+describe("the other seven sandbox tools (07.8 P-07): each posts only its contract body and renders its answer", () => {
+  const CASES: Array<{
+    tool: SandboxToolName;
+    params: Record<string, unknown>;
+    body: Record<string, unknown>;
+    result: unknown;
+    rendered: string;
+    tainted: boolean;
+  }> = [
+    {
+      tool: "ocw_sandbox_process",
+      params: { processId: "p_7Kq2", action: "poll", pid: 1 },
+      body: { processId: "p_7Kq2", action: "poll" },
+      result: {
+        status: "exited",
+        exitCode: 1,
+        stdout: "",
+        stderr: "fail",
+        truncated: false,
+        durationMs: 30_000,
+      },
+      rendered: "exit 1 in 30.0 s\nstdout:\n(empty)\nstderr:\nfail",
+      tainted: true,
+    },
+    {
+      tool: "ocw_sandbox_read",
+      params: { path: "notes/todo.md", offset: 0, limit: 100 },
+      body: { path: "notes/todo.md", offset: 0, limit: 100 },
+      result: { path: "notes/todo.md", content: "- ship it", encoding: "utf8", size: 9, truncated: false },
+      rendered: "- ship it",
+      tainted: true,
+    },
+    {
+      tool: "ocw_sandbox_write",
+      params: { path: "notes/todo.md", content: "- ship it", mode: "append" },
+      body: { path: "notes/todo.md", content: "- ship it", mode: "append" },
+      result: { path: "notes/todo.md", size: 9 },
+      rendered: "Wrote notes/todo.md (9 bytes now).",
+      tainted: false,
+    },
+    {
+      tool: "ocw_sandbox_list",
+      params: {},
+      body: { path: "" },
+      result: {
+        path: "",
+        entries: [
+          {
+            path: "app",
+            name: "app",
+            kind: "dir",
+            size: null,
+            modifiedAt: "2026-10-15T09:00:00.000Z",
+            hidden: false,
+          },
+          {
+            path: "notes.txt",
+            name: "notes.txt",
+            kind: "file",
+            size: 23,
+            modifiedAt: "2026-10-15T09:00:00.000Z",
+            hidden: false,
+          },
+        ],
+        more: 0,
+      },
+      rendered: "/workspace:\n- app/\n- notes.txt (23 bytes)",
+      tainted: true,
+    },
+    {
+      tool: "ocw_sandbox_delete",
+      params: { path: "build", recursive: true },
+      body: { path: "build", recursive: true },
+      result: { path: "build", deleted: 14 },
+      rendered: "Deleted build (14 items).",
+      tainted: false,
+    },
+    {
+      tool: "ocw_sandbox_share",
+      params: { path: "out/report.pdf" },
+      body: { path: "out/report.pdf" },
+      result: { attachmentId: ATTACHMENT, name: "report.pdf", size: 2048 },
+      rendered: "Shared report.pdf (2048 bytes) as an attachment in this conversation.",
+      tainted: false,
+    },
+    {
+      tool: "ocw_sandbox_import",
+      params: { attachmentId: ATTACHMENT },
+      body: { attachmentId: ATTACHMENT },
+      result: { path: "downloads/data.csv", size: 512 },
+      rendered: "Imported the attachment to /workspace/downloads/data.csv (512 bytes).",
+      tainted: false,
+    },
+  ];
+
+  it.each(CASES)("$tool", async (c) => {
+    const { calls, tool, begin, guard } = setup(async () => c.result);
+    begin(ALL_SANDBOX_TURN());
+    const r = await tool(c.tool).execute("tc-1", c.params);
+    expect(calls).toEqual([{ tool: c.tool, body: { eventId: "evt-1", agentId: BOT, ...c.body } }]);
+    expect(text(r)).toBe(c.rendered);
+    expect(guard.activeTurn(SESSION)?.tainted).toBe(c.tainted);
+  });
+
+  it("every sandbox tool has its own route and a closed parameter schema", () => {
+    const { tool } = setup();
+    for (const name of SANDBOX_TOOL_NAMES) {
+      expect(SANDBOX_TOOL_ROUTES[name]).toBe(`/sandbox/${name.slice("ocw_sandbox_".length)}`);
+      expect(tool(name).parameters).toMatchObject({ type: "object", additionalProperties: false });
+    }
+  });
+
+  it("invalid params are refused locally with a fixed sentence, before any request", async () => {
+    const { calls, tool, begin } = setup();
+    begin(ALL_SANDBOX_TURN());
+    for (const [name, params] of [
+      ["ocw_sandbox_process", { processId: "../1", action: "poll" }],
+      ["ocw_sandbox_process", { processId: "p1", action: "signal" }],
+      ["ocw_sandbox_read", { path: "/etc/passwd" }],
+      ["ocw_sandbox_read", { path: "" }],
+      ["ocw_sandbox_read", { path: "a/../../b" }],
+      ["ocw_sandbox_read", { path: "a", limit: 262_145 }],
+      ["ocw_sandbox_write", { path: "a", content: 3 }],
+      ["ocw_sandbox_write", { path: "a", content: "x".repeat(1_048_577) }],
+      ["ocw_sandbox_write", { path: "a", content: "x", mode: "truncate" }],
+      ["ocw_sandbox_list", { path: "/" }],
+      ["ocw_sandbox_delete", { path: "" }],
+      ["ocw_sandbox_share", { path: "a\\b" }],
+      ["ocw_sandbox_import", { attachmentId: "not-an-id" }],
+      ["ocw_sandbox_import", { attachmentId: ATTACHMENT, path: "/tmp/x" }],
+    ] as const) {
+      const r = await tool(name).execute("tc-1", params);
+      expect(r.details, `${name} ${JSON.stringify(params).slice(0, 80)}`).toEqual({
+        ok: false,
+        code: "bad_params",
+      });
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("write defaults to overwrite; a base64 read says it is binary", async () => {
+    const { calls, tool, begin } = setup(async (c) =>
+      c.tool === "ocw_sandbox_read"
+        ? { path: "logo.png", content: "iVBORw0K", encoding: "base64", size: 6, truncated: false }
+        : { path: "a.txt", size: 1 },
+    );
+    begin(ALL_SANDBOX_TURN());
+    await tool("ocw_sandbox_write").execute("tc-1", { path: "a.txt", content: "x" });
+    expect(calls[0]?.body.mode).toBe("overwrite");
+    expect(text(await tool("ocw_sandbox_read").execute("tc-2", { path: "logo.png" }))).toBe(
+      "logo.png is a binary file (6 bytes). Its content as base64:\niVBORw0K",
+    );
+  });
+
+  it("renders a cut listing and a cut read", async () => {
+    expect(renderFileList({ path: "app", entries: [], more: 0 })).toBe("/workspace/app: (empty folder)");
+    expect(
+      renderFileList({
+        path: "",
+        entries: [
+          {
+            path: "a\nb",
+            name: "a\nb",
+            kind: "file",
+            size: 1,
+            modifiedAt: "2026-10-15T09:00:00.000Z",
+            hidden: false,
+          },
+        ],
+        more: 501,
+      }),
+    ).toBe("/workspace:\n- a b (1 bytes)\n… and 501 more");
+    const { tool, begin } = setup(async () => ({
+      path: "big.log",
+      content: "tail",
+      encoding: "utf8",
+      size: 300_000,
+      truncated: true,
+    }));
+    begin(ALL_SANDBOX_TURN());
+    expect(text(await tool("ocw_sandbox_read").execute("tc-1", { path: "big.log" }))).toBe(
+      "tail\n[showing 4 of 300000 bytes; read more with offset]",
+    );
+  });
+
+  it("a member_data refusal on a team bot's write is its sentence (P-11), audience_narrower on import too", async () => {
+    for (const [name, params, code] of [
+      ["ocw_sandbox_write", { path: "a", content: "x" }, "member_data"],
+      ["ocw_sandbox_import", { attachmentId: ATTACHMENT }, "audience_narrower"],
+    ] as const) {
+      const { tool, begin } = setup(async () => {
+        throw new AgentChannelHttpError(403, "/sandbox/x", CANARY, code);
+      });
+      begin(ALL_SANDBOX_TURN());
+      const r = await tool(name).execute("tc-1", params);
+      expect(text(r)).toBe(SANDBOX_REFUSAL_SENTENCE[code].replaceAll("{requester}", "Ana Pérez"));
+      expect(JSON.stringify(r)).not.toContain(CANARY);
+    }
   });
 });

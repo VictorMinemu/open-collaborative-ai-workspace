@@ -95,6 +95,20 @@ describe("OpenClaw 2026.9.7 registration of the real entry", () => {
       "ocw_work_zone_projects",
       "ocw_start_work_zone",
       "ocw_sandbox_exec",
+      "ocw_sandbox_process",
+      "ocw_sandbox_read",
+      "ocw_sandbox_write",
+      "ocw_sandbox_list",
+      "ocw_sandbox_delete",
+      "ocw_sandbox_share",
+      "ocw_sandbox_import",
+      "ocw_browser_open",
+      "ocw_browser_snapshot",
+      "ocw_browser_act",
+      "ocw_browser_screenshot",
+      "ocw_browser_wait",
+      "ocw_browser_signin",
+      "ocw_browser_close",
     ];
     expect(tools("full")).toEqual(owned);
     expect(tools("tool-discovery")).toEqual(owned);

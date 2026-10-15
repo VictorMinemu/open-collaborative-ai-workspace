@@ -43,6 +43,11 @@ import {
   AgentChannelWorkZoneProjectsResponse,
   type AgentChannelWorkZonePropose,
   AgentChannelWorkZoneProposeResponse,
+  BROWSER_TOOL_RESPONSES,
+  BROWSER_TOOL_ROUTES,
+  type BrowserToolBodies,
+  type BrowserToolName,
+  type BrowserToolResponses,
   CellSnapshot,
   SANDBOX_TOOL_RESPONSES,
   SANDBOX_TOOL_ROUTES,
@@ -472,6 +477,19 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
     ): Promise<SandboxToolResponses[T]> {
       const raw = await request("POST", SANDBOX_TOOL_ROUTES[tool], body, signal, 1, confinedTimeoutMs(tool));
       return SANDBOX_TOOL_RESPONSES[tool].parse(raw) as SandboxToolResponses[T];
+    },
+    /**
+     * `ocw_browser_*` (07.8, D-05): one call to the tool's own route with the turn's ids and the tool's contract body
+     * only. One attempt, 35 s (wait) or 20 s budget. A refusal throws AgentChannelHttpError with its `BrowserRefusal`
+     * code. Never logs URLs, page text, typed text or images.
+     */
+    async browserCall<T extends BrowserToolName>(
+      tool: T,
+      body: BrowserToolBodies[T],
+      signal?: AbortSignal,
+    ): Promise<BrowserToolResponses[T]> {
+      const raw = await request("POST", BROWSER_TOOL_ROUTES[tool], body, signal, 1, confinedTimeoutMs(tool));
+      return BROWSER_TOOL_RESPONSES[tool].parse(raw) as BrowserToolResponses[T];
     },
     /**
      * A marketplace install / uninstall outcome (D-14). Three attempts at most: the API applies a report only to the

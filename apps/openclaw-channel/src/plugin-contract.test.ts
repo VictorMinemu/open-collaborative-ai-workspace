@@ -1210,12 +1210,26 @@ const PLUGIN_TOOLS = [
   "ocw_work_zone_projects",
   "ocw_start_work_zone",
   "ocw_sandbox_exec",
+  "ocw_sandbox_process",
+  "ocw_sandbox_read",
+  "ocw_sandbox_write",
+  "ocw_sandbox_list",
+  "ocw_sandbox_delete",
+  "ocw_sandbox_share",
+  "ocw_sandbox_import",
+  "ocw_browser_open",
+  "ocw_browser_snapshot",
+  "ocw_browser_act",
+  "ocw_browser_screenshot",
+  "ocw_browser_wait",
+  "ocw_browser_signin",
+  "ocw_browser_close",
 ];
 
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
   const MEMORY = { untrustedOutput: false, sideEffecting: true };
 
-  it("the manifest declares ocw_memory_save, the four memory file tools, ocw_agent_card, ocw_board_card, the connector tools and the two Work Zone tools in contracts.tools (OpenClaw discovers tool ownership there)", () => {
+  it("the manifest declares ocw_memory_save, the four memory file tools, ocw_agent_card, ocw_board_card, the connector tools, the two Work Zone tools and the fifteen confined tools in contracts.tools (OpenClaw discovers tool ownership there; 07.8: ocw_browser_screenshot is declared, spike ii reached the model)", () => {
     const manifest = JSON.parse(
       readFileSync(path.join(import.meta.dirname, "..", "openclaw.plugin.json"), "utf8"),
     ) as { contracts?: { tools?: string[] } };

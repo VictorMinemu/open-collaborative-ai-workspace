@@ -583,6 +583,12 @@ export const CellProvider = z.object({
   /** SECRET. Never log; written to OpenClaw only as an env reference. */
   apiKey: z.string().nullable(),
   models: z.array(z.string()),
+  /**
+   * 07.8 (D-14, spike ii): the ids of `models` that accept image input. The reconciler declares them
+   * `input: ["text", "image"]`, so a tool's image (`ocw_browser_screenshot`) reaches the model; absent or invalid = text
+   * only (OpenClaw then drops tool images).
+   */
+  imageModels: z.array(z.string()).optional().catch(undefined),
 });
 export type CellProvider = z.infer<typeof CellProvider>;
 
@@ -802,7 +808,8 @@ export const AGENT_CARD_ROUTE_PREFIXES = [
   "/approvals",
 ] as const;
 
-function hasControlCharacter(v: string): boolean {
+/** A C0/C1 control character or DEL. */
+export function hasControlCharacter(v: string): boolean {
   for (let i = 0; i < v.length; i++) {
     const c = v.charCodeAt(i);
     if (c <= 0x1f || (c >= 0x7f && c <= 0x9f)) return true;
@@ -1471,3 +1478,227 @@ export const SANDBOX_TOOL_RESPONSES = {
 export type SandboxToolResponses = {
   [K in SandboxToolName]: z.infer<(typeof SANDBOX_TOOL_RESPONSES)[K]>;
 };
+
+// ---------------------------------------------------------------- confined browser tools (07.8, mirror of contracts
+// browser.ts; parity test in browser-tools.test.ts)
+
+/** The bounds of contracts `BROWSER_LIMITS` the cell checks before posting. */
+export const BROWSER_LIMITS = {
+  urlMaxChars: 2000,
+  typeMaxChars: 2000,
+  reasonMaxChars: 200,
+} as const;
+
+/** The seven `ocw_browser_*` tools (contracts `BROWSER_TOOL_NAMES`). */
+export const BROWSER_TOOL_NAMES = [
+  "ocw_browser_open",
+  "ocw_browser_snapshot",
+  "ocw_browser_act",
+  "ocw_browser_screenshot",
+  "ocw_browser_wait",
+  "ocw_browser_signin",
+  "ocw_browser_close",
+] as const;
+export type BrowserToolName = (typeof BROWSER_TOOL_NAMES)[number];
+
+/** Each browser tool's own Agent Channel route (self-validated: never `/tool-calls`). */
+export const BROWSER_TOOL_ROUTES: Readonly<Record<BrowserToolName, string>> = {
+  ocw_browser_open: "/browser/open",
+  ocw_browser_snapshot: "/browser/snapshot",
+  ocw_browser_act: "/browser/act",
+  ocw_browser_screenshot: "/browser/screenshot",
+  ocw_browser_wait: "/browser/wait",
+  ocw_browser_signin: "/browser/signin",
+  ocw_browser_close: "/browser/close",
+};
+
+/** Why the API refused a browser call (contracts `BrowserRefusal`); the model reads one fixed sentence per code. */
+export const BROWSER_REFUSALS = [
+  "no_trigger",
+  "sandbox_off",
+  "module_off",
+  "bot_off",
+  "not_allowed",
+  "killed",
+  "cap_reached",
+  "cpu_budget",
+  "budget_exhausted",
+  "tainted",
+  "approval_required",
+  "approval_pending",
+  "approval_denied",
+  "approval_used",
+  "too_many_pending",
+  "policy_changed",
+  "service_unavailable",
+  "timeout",
+  "not_found",
+  "too_large",
+  "busy",
+  "paused",
+  "no_context",
+  "signin_not_allowed",
+  "signin_pending",
+  "element_gone",
+  "navigation_refused",
+  "screenshot_unavailable",
+] as const;
+export const BrowserRefusal = z.enum(BROWSER_REFUSALS);
+export type BrowserRefusal = z.infer<typeof BrowserRefusal>;
+
+export const BROWSER_ACT_ACTIONS = ["click", "type", "select", "press", "scroll"] as const;
+export const BROWSER_SCROLL_DIRECTIONS = ["up", "down", "left", "right"] as const;
+
+/** Same rule as contracts `BrowserUrl`: http(s), WHATWG-parsable, no user info, no control characters, ≤ 2000. */
+export function isBrowserUrl(v: string): boolean {
+  if (v.length < 1 || v.length > BROWSER_LIMITS.urlMaxChars || hasControlCharacter(v)) return false;
+  let u: URL;
+  try {
+    u = new URL(v);
+  } catch {
+    return false;
+  }
+  return (u.protocol === "http:" || u.protocol === "https:") && u.username === "" && u.password === "";
+}
+
+/** Same rule as contracts `BrowserRef`: an opaque snapshot ref, never a CSS, XPath or text selector. */
+export function isBrowserRef(v: string): boolean {
+  return /^[A-Za-z0-9_-]{1,64}$/u.test(v);
+}
+
+export type AgentChannelBrowserOpen = TurnRef & { url: string };
+export type AgentChannelBrowserAct = TurnRef & {
+  action: (typeof BROWSER_ACT_ACTIONS)[number];
+  ref?: string;
+  text?: string;
+  key?: string;
+  option?: string;
+  direction?: (typeof BROWSER_SCROLL_DIRECTIONS)[number];
+};
+export type AgentChannelBrowserWait = TurnRef & { for: "load" | "text" | "time"; text?: string; ms?: number };
+export type AgentChannelBrowserSignIn = TurnRef & { reason: string };
+
+export const AgentChannelBrowserOpenResponse = z.object({
+  contextId: Id,
+  host: z.string().min(1),
+  secure: z.boolean(),
+  title: z.string(),
+  signedIn: z.boolean(),
+});
+export type AgentChannelBrowserOpenResponse = z.infer<typeof AgentChannelBrowserOpenResponse>;
+
+/** Unknown fields are dropped: the plugin renders only the redacted text the contract defines (P-10). */
+export const AgentChannelBrowserSnapshotResponse = z.object({
+  contextId: Id,
+  host: z.string().min(1),
+  title: z.string(),
+  text: z.string(),
+  truncated: z.boolean(),
+  signedIn: z.boolean(),
+});
+export type AgentChannelBrowserSnapshotResponse = z.infer<typeof AgentChannelBrowserSnapshotResponse>;
+
+export const BrowserDownload = z.object({
+  name: z.string().min(1),
+  size: z.number().int().nonnegative(),
+  stored: z.enum(["workspace", "conversation"]),
+  path: z.string().optional(),
+  attachmentId: Id.optional(),
+});
+
+export const AgentChannelBrowserActResponse = z.object({
+  contextId: Id,
+  host: z.string().min(1),
+  signedIn: z.boolean(),
+  navigated: z.boolean(),
+  download: BrowserDownload.nullable(),
+});
+export type AgentChannelBrowserActResponse = z.infer<typeof AgentChannelBrowserActResponse>;
+
+export const AgentChannelBrowserScreenshotResponse = z.object({
+  contextId: Id,
+  host: z.string().min(1),
+  image: z.object({
+    mimeType: z.literal("image/jpeg"),
+    data: z.string().regex(/^[A-Za-z0-9+/]*={0,2}$/u),
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+    masked: z.number().int().nonnegative(),
+  }),
+});
+export type AgentChannelBrowserScreenshotResponse = z.infer<typeof AgentChannelBrowserScreenshotResponse>;
+
+export const AgentChannelBrowserWaitResponse = z.object({
+  contextId: Id,
+  host: z.string().min(1),
+  ok: z.boolean(),
+});
+export type AgentChannelBrowserWaitResponse = z.infer<typeof AgentChannelBrowserWaitResponse>;
+
+export const AgentChannelBrowserSignInResponse = z.object({
+  posted: z.literal(true),
+  host: z.string().min(1),
+});
+export type AgentChannelBrowserSignInResponse = z.infer<typeof AgentChannelBrowserSignInResponse>;
+
+export const AgentChannelBrowserCloseResponse = z.object({ closed: z.literal(true) });
+export type AgentChannelBrowserCloseResponse = z.infer<typeof AgentChannelBrowserCloseResponse>;
+
+/** Per tool: the body it posts and the answer it parses. */
+export type BrowserToolBodies = {
+  ocw_browser_open: AgentChannelBrowserOpen;
+  ocw_browser_snapshot: TurnRef;
+  ocw_browser_act: AgentChannelBrowserAct;
+  ocw_browser_screenshot: TurnRef;
+  ocw_browser_wait: AgentChannelBrowserWait;
+  ocw_browser_signin: AgentChannelBrowserSignIn;
+  ocw_browser_close: TurnRef;
+};
+export const BROWSER_TOOL_RESPONSES = {
+  ocw_browser_open: AgentChannelBrowserOpenResponse,
+  ocw_browser_snapshot: AgentChannelBrowserSnapshotResponse,
+  ocw_browser_act: AgentChannelBrowserActResponse,
+  ocw_browser_screenshot: AgentChannelBrowserScreenshotResponse,
+  ocw_browser_wait: AgentChannelBrowserWaitResponse,
+  ocw_browser_signin: AgentChannelBrowserSignInResponse,
+  ocw_browser_close: AgentChannelBrowserCloseResponse,
+} as const satisfies Record<BrowserToolName, z.ZodType>;
+export type BrowserToolResponses = {
+  [K in BrowserToolName]: z.infer<(typeof BROWSER_TOOL_RESPONSES)[K]>;
+};
+
+// ---------------------------------------------------------------- confined tool flags (07.8, mirror of contracts
+// CONFINED_TOOL_FLAGS; parity test in tool-guard.test.ts)
+
+export const CONFINED_TOOL_NAMES = [...SANDBOX_TOOL_NAMES, ...BROWSER_TOOL_NAMES] as const;
+export type ConfinedToolName = (typeof CONFINED_TOOL_NAMES)[number];
+
+/**
+ * The confined tools' static taint flags (D-11 F-7): command output, file content, listings and page text are untrusted;
+ * only `ocw_sandbox_share` changes something outside the sandbox (a conversation attachment). `ocw_browser_act` is
+ * side-effecting only while a member's session is loaded, which the API decides per call (07.8-14).
+ */
+export const CONFINED_TOOL_FLAGS: Readonly<
+  Record<ConfinedToolName, { untrustedOutput: boolean; sideEffecting: boolean }>
+> = {
+  ocw_sandbox_exec: { untrustedOutput: true, sideEffecting: false },
+  ocw_sandbox_process: { untrustedOutput: true, sideEffecting: false },
+  ocw_sandbox_read: { untrustedOutput: true, sideEffecting: false },
+  ocw_sandbox_write: { untrustedOutput: false, sideEffecting: false },
+  ocw_sandbox_list: { untrustedOutput: true, sideEffecting: false },
+  ocw_sandbox_delete: { untrustedOutput: false, sideEffecting: false },
+  ocw_sandbox_share: { untrustedOutput: false, sideEffecting: true },
+  ocw_sandbox_import: { untrustedOutput: false, sideEffecting: false },
+  ocw_browser_open: { untrustedOutput: true, sideEffecting: false },
+  ocw_browser_snapshot: { untrustedOutput: true, sideEffecting: false },
+  ocw_browser_act: { untrustedOutput: true, sideEffecting: false },
+  ocw_browser_screenshot: { untrustedOutput: true, sideEffecting: false },
+  ocw_browser_wait: { untrustedOutput: true, sideEffecting: false },
+  ocw_browser_signin: { untrustedOutput: false, sideEffecting: false },
+  ocw_browser_close: { untrustedOutput: false, sideEffecting: false },
+};
+
+const CONFINED_SET: ReadonlySet<string> = new Set(CONFINED_TOOL_NAMES);
+export function isConfinedTool(name: string): name is ConfinedToolName {
+  return CONFINED_SET.has(name);
+}

@@ -72,6 +72,13 @@
  *                                          exec answer, `results` per route, `refusal` a `SandboxRefusal` code every
  *                                          sandbox route answers with its contract status (the body carries
  *                                          FAKE_ERROR_CANARY, which must never reach the model)
+ *   POST /agent-channel/v1/browser/{open,snapshot,act,screenshot,wait,signin,close}  (07.8) records every body
+ *                                          (`browser.calls`) and answers a canned result per route: open/snapshot on
+ *                                          panel.example.test, whose snapshot reads the password `[redacted]` and also
+ *                                          carries FAKE_PASSWORD_SENTINEL in `unredactedValue`, a field outside the
+ *                                          contract the plugin must never render; screenshot a masked 8×8 JPEG. 400 for
+ *                                          any key beyond the contract's (a selector, a script, a cookie). POST
+ *                                          /__test/browser {results?, refusal?} replaces the knobs ({} resets them)
  *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
  *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
  *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
@@ -295,6 +302,76 @@ function fakeSandboxResult(route: string, body: Record<string, unknown>): unknow
       return { path: path || "downloads/report.pdf", size: 1024 };
   }
 }
+/** 07.8: the browser routes' records and knobs (`POST /__test/browser` replaces the knobs). */
+export type FakeBrowser = {
+  /** Every POST /browser/* body, in order (refused ones included). */
+  calls: Array<{ route: string; body: Record<string, unknown> }>;
+  /** Per route (`open`, `snapshot`, …): what it answers instead of the default. */
+  results: Record<string, unknown>;
+  /** When set, every browser route refuses with this code and its contract status. */
+  refusal?: string;
+};
+/** A password the fake browser "saw": only in a field outside the contract, so it must never reach the model (P-10). */
+export const FAKE_PASSWORD_SENTINEL = "OCW-SENTINEL-PW-5521";
+/** An 8×8 grey JPEG: what the fake browser's masked screenshot answers. */
+export const FAKE_SCREENSHOT_JPEG =
+  "/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAACKADAAQAAAABAAAACAAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgACAAIAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMABgYGBgYGCgYGCg4KCgoOEg4ODg4SFxISEhISFxwXFxcXFxccHBwcHBwcHCIiIiIiIicnJycnLCwsLCwsLCwsLP/bAEMBBwcHCwoLEwoKEy4fGh8uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLv/dAAQAAf/aAAwDAQACEQMRAD8AKKKKAP/Z";
+const FAKE_BROWSER_CONTEXT = "0199a6f0-0000-7000-8000-0000000b5001";
+const FAKE_BROWSER_HOST = "panel.example.test";
+/** The keys each browser body may carry (contracts `AgentChannelBrowser*`, strict objects). */
+const BROWSER_BODY_KEYS: Record<string, readonly string[]> = {
+  open: ["eventId", "agentId", "url"],
+  snapshot: ["eventId", "agentId"],
+  act: ["eventId", "agentId", "action", "ref", "text", "key", "option", "direction"],
+  screenshot: ["eventId", "agentId"],
+  wait: ["eventId", "agentId", "for", "text", "ms"],
+  signin: ["eventId", "agentId", "reason"],
+  close: ["eventId", "agentId"],
+};
+/** The default answer of each browser route for a valid body. */
+function fakeBrowserResult(route: string, body: Record<string, unknown>): unknown {
+  const context = { contextId: FAKE_BROWSER_CONTEXT, host: FAKE_BROWSER_HOST };
+  switch (route) {
+    case "open": {
+      let url: URL | undefined;
+      try {
+        url = new URL(String(body.url));
+      } catch {
+        /* the plugin checks URLs before posting */
+      }
+      return {
+        ...context,
+        host: url?.host ?? FAKE_BROWSER_HOST,
+        secure: url?.protocol === "https:",
+        title: "Panel Autofy — Sign in",
+        signedIn: false,
+      };
+    }
+    case "snapshot":
+      return {
+        ...context,
+        title: "Panel Autofy — Sign in",
+        text: '[r1] textbox "Email" value=""\n[r2] textbox "Password" value="[redacted]"\n[r3] button "Sign in"',
+        truncated: false,
+        signedIn: false,
+        // Outside the contract: a careless renderer would leak it.
+        unredactedValue: FAKE_PASSWORD_SENTINEL,
+      };
+    case "act":
+      return { ...context, signedIn: false, navigated: body.action === "click", download: null };
+    case "screenshot":
+      return {
+        ...context,
+        image: { mimeType: "image/jpeg", data: FAKE_SCREENSHOT_JPEG, width: 8, height: 8, masked: 1 },
+      };
+    case "wait":
+      return { ...context, ok: true };
+    case "signin":
+      return { posted: true, host: FAKE_BROWSER_HOST };
+    default:
+      return { closed: true };
+  }
+}
 /** In every refusal body of the connector routes: a plugin must never relay it to the model. */
 export const FAKE_ERROR_CANARY = "fake-api-error-body-canary";
 export type VerifyCall = {
@@ -368,6 +445,8 @@ export type FakeAgentChannelApi = {
   workZone: FakeWorkZone;
   /** The sandbox routes' records and knobs (07.8). */
   sandbox: FakeSandbox;
+  /** The browser routes' records and knobs (07.8). */
+  browser: FakeBrowser;
   /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
   mcpServers: CellMcpServer[];
   /** Every POST /mcp/probe-results, in order. */
@@ -597,6 +676,7 @@ export async function startFakeAgentChannelApi(
     connectorControl: {} as ConnectorControl,
     workZone: { projectLists: [], proposals: [], projects: fakeWorkZoneProjects() } as FakeWorkZone,
     sandbox: { calls: [], results: {} } as FakeSandbox,
+    browser: { calls: [], results: {} } as FakeBrowser,
     // Never serialized: not in /cell, not in an answer, not in the state dump.
     connectorToken: opts.connectorToken ?? "fake-connector-token",
     mcpServers: opts.mcpServers ?? ([] as CellMcpServer[]),
@@ -690,6 +770,15 @@ export async function startFakeAgentChannelApi(
           else delete sb.refusal;
           return json(res, 200, { ok: true });
         }
+        if (req.method === "POST" && url.pathname === "/__test/browser") {
+          // Replace the browser knobs ({} resets them; the records stay).
+          const body = ((await readJson(req)) ?? {}) as Partial<FakeBrowser>;
+          const br = state.browser;
+          br.results = body.results && typeof body.results === "object" ? body.results : {};
+          if (typeof body.refusal === "string") br.refusal = body.refusal;
+          else delete br.refusal;
+          return json(res, 200, { ok: true });
+        }
         if (req.method === "POST" && url.pathname === "/__test/tool-approval") {
           // One tool's approval reply; no reply clears it.
           const body = ((await readJson(req)) ?? {}) as Partial<ToolApprovalControl> & { tool?: string };
@@ -739,6 +828,7 @@ export async function startFakeAgentChannelApi(
             httpRequests: state.httpRequests,
             workZone: state.workZone,
             sandbox: state.sandbox,
+            browser: state.browser,
             mcpProbes: state.mcpProbes,
             cellReads: state.cellReads,
             plugins: state.plugins,
@@ -1017,6 +1107,26 @@ export async function startFakeAgentChannelApi(
         }
         const canned = sandboxRoute === "exec" && sb.exec ? sb.exec : sb.results[sandboxRoute];
         return json(res, 200, canned ?? fakeSandboxResult(sandboxRoute, body));
+      }
+      const browserRoute = /^\/browser\/(open|snapshot|act|screenshot|wait|signin|close)$/u.exec(route)?.[1];
+      if (req.method === "POST" && browserRoute) {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        const br = state.browser;
+        br.calls.push({ route: browserRoute, body: { ...body } });
+        const allowed = BROWSER_BODY_KEYS[browserRoute] ?? [];
+        if (
+          typeof body.eventId !== "string" ||
+          typeof body.agentId !== "string" ||
+          Object.keys(body).some((k) => !allowed.includes(k))
+        ) {
+          return json(res, 400, { error: { code: "bad_request", message: `bad body ${FAKE_ERROR_CANARY}` } });
+        }
+        if (br.refusal) {
+          return json(res, confinedRefusalStatus(br.refusal), {
+            error: { code: br.refusal, message: `refused by test ${FAKE_ERROR_CANARY}` },
+          });
+        }
+        return json(res, 200, br.results[browserRoute] ?? fakeBrowserResult(browserRoute, body));
       }
       const workZoneRoute =
         route === "/work-zone/projects"
@@ -1473,6 +1583,9 @@ export async function startFakeAgentChannelApi(
     },
     get sandbox() {
       return state.sandbox;
+    },
+    get browser() {
+      return state.browser;
     },
     get mcpServers() {
       return state.mcpServers;
