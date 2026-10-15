@@ -32,6 +32,15 @@ const policyOf = async (orgId: string) =>
     ])
   ).rows[0] as Json | undefined;
 
+/** 07.8-11: the settings row as stored (organization-B cases of the settings routes). */
+const settingsRowOf = async (orgId: string) =>
+  (
+    await s.su.query(
+      "select enabled, egress_allow_hosts, version, killed_at from app.sandbox_policies where organization_id = $1",
+      [orgId],
+    )
+  ).rows[0] as Json | undefined;
+
 const audits = async (orgId: string, action: string) =>
   (
     await s.su.query(
@@ -225,6 +234,22 @@ describe("cross-tenant guards derived from the authz registry (P-17, 07.4 #169)"
       "POST /api/v1/agents/:id/sandbox/restart": async () => {
         const r = (await s.eve.request("POST", `/api/v1/agents/${s.scoutId}/sandbox/restart`)) as Res;
         expect(r.status).toBe(404);
+      },
+      "GET /api/v1/sandbox/settings": async () => {
+        const b = (await ok(s.eve.request("GET", "/api/v1/sandbox/settings") as Promise<Res>)) as Json;
+        expect(b.settings.enabled).toBe(false);
+        expect((await settingsRowOf(s.orgA))?.enabled).toBe(true);
+      },
+      "PUT /api/v1/sandbox/settings": async () => {
+        const before = await settingsRowOf(s.orgA);
+        const b = (await ok(s.eve.request("GET", "/api/v1/sandbox/settings") as Promise<Res>)) as Json;
+        await ok(
+          s.eve.request("PUT", "/api/v1/sandbox/settings", {
+            expectedVersion: b.settings.version,
+            allowHosts: ["evil.example.com"],
+          }) as Promise<Res>,
+        );
+        expect(await settingsRowOf(s.orgA)).toEqual(before);
       },
       "POST /agent-channel/v1/sandbox/exec": async () => {
         const r = await exec(ev, ["echo", "hi"], tokenB);

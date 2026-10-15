@@ -45,6 +45,8 @@ export {
  */
 
 export interface SandboxService {
+  /** sandboxd is configured (`OCW_SANDBOX_URL` and its token); without it nothing runs (`service_down`). */
+  configured: boolean;
   /** The organization's settings (switch, egress, caps, kill state). */
   loadPolicy: typeof loadSandboxPolicy;
   /** The one combined availability decision (resolver, switch, kill, per-bot switch). */
@@ -80,6 +82,7 @@ export function createSandboxModule(
         ? createSandboxdClient({ url: core.env.OCW_SANDBOX_URL, token: core.env.OCW_SANDBOX_TOKEN })
         : null;
   const service: SandboxService = {
+    configured: client !== null,
     loadPolicy: loadSandboxPolicy,
     sandboxAvailable: (tx, p, kind) => sandboxAvailable(tx, perms, p, kind),
     reserveSandbox,

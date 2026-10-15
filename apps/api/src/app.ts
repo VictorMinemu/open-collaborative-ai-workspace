@@ -316,7 +316,8 @@ export async function buildApp(
     createModelGatewayModule(core, modelGateway), // Phase 5: AI chat models and ChatGPT plan status
     createAiChatModule(core, { gateway: modelGateway, storage: artifactModule.storage }), // Phase 5: direct AI chat (AICHAT-02/03/07/08)
     createAgentModule(core, { approvals: approvals.service }), // B2; 07.2: a bot deletion closes its pending approvals
-    createBotCapabilitiesModule(core, { memory }), // Phase 3.1: capabilities, bot policy, governance; 07.2-11: notes on files
+    // Phase 3.1: capabilities, bot policy, governance; 07.2-11: notes on files; 07.8-11: the Sandbox and Browser rows
+    createBotCapabilitiesModule(core, { memory, sandbox: sandbox.service }),
     createMcpModule(core), // Phase 3.1: MCP server registry (D-13)
     createConnectorsModule(core), // Phase 07.4: members' own connector accounts (D-01 … D-03, CONN-01 … CONN-03)
     createKeychainModule(core), // Phase 07.4: keys bots use by handle (D-04, CONN-05)

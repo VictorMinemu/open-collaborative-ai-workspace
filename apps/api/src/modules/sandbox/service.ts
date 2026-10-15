@@ -264,7 +264,8 @@ export async function killSandboxes(
     .values({ organizationId, killedAt: now, killedBy: actor.userId })
     .onConflictDoUpdate({
       target: sandboxPolicies.organizationId,
-      set: { killedAt: now, killedBy: actor.userId },
+      // 07.8-11: the kill state is part of the versioned settings (a stale settings form cannot undo it).
+      set: { killedAt: now, killedBy: actor.userId, version: sql`${sandboxPolicies.version} + 1` },
       setWhere: isNull(sandboxPolicies.killedAt),
     })
     .returning({ organizationId: sandboxPolicies.organizationId });
@@ -298,7 +299,7 @@ export async function resumeSandboxes(
   const { organizationId } = tenantOf(tx);
   const updated = await tx
     .update(sandboxPolicies)
-    .set({ killedAt: null, killedBy: null })
+    .set({ killedAt: null, killedBy: null, version: sql`${sandboxPolicies.version} + 1` })
     .where(isNotNull(sandboxPolicies.killedAt))
     .returning({ organizationId: sandboxPolicies.organizationId });
   if (updated.length === 0) return { changed: false };

@@ -7,7 +7,13 @@ import {
   type ToolGrant,
 } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
-import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
+import {
+  type CatalogSource,
+  confinedCapabilities,
+  effectiveCapabilities,
+  effectiveTools,
+  readCapabilities,
+} from "./capabilities";
 
 /**
  * D-06 truth table: effective = toggle ∧ org-wide policy ∧ (personal ? personal policy : true) ∧ configured ∧
@@ -332,5 +338,35 @@ describe("effectiveTools", () => {
   it("a grant pointing at a tool the catalog no longer lists is dropped", () => {
     const list = tools("team", [mcp()], [grant("mcp", MCP_ID, "m3f9a12c4__gone")]);
     expect(list.some((t) => t.tool === "m3f9a12c4__gone")).toBe(false);
+  });
+});
+
+describe("confinedCapabilities: the Sandbox and Browser rows (07.8-11, D-12, R11)", () => {
+  const all = {
+    caps: { sandbox: true, browser: false },
+    configured: true,
+    settings: { enabled: true, killed: false },
+    moduleAllowed: { sandbox: true, browser: true },
+  };
+
+  it("everything on: available, enabled is the bot's own switch", () => {
+    expect(confinedCapabilities(all)).toEqual({
+      sandbox: { enabled: true, available: true, reason: null },
+      browser: { enabled: false, available: true, reason: null },
+    });
+  });
+
+  it("reason precedence: service_down, org_off, killed, module_off", () => {
+    const off = { enabled: false, killed: true };
+    expect(confinedCapabilities({ ...all, configured: false, settings: off }).sandbox.reason).toBe(
+      "service_down",
+    );
+    expect(confinedCapabilities({ ...all, settings: off }).sandbox.reason).toBe("org_off");
+    expect(confinedCapabilities({ ...all, settings: { enabled: true, killed: true } }).sandbox.reason).toBe(
+      "killed",
+    );
+    const noSandbox = confinedCapabilities({ ...all, moduleAllowed: { sandbox: false, browser: true } });
+    expect(noSandbox.sandbox).toEqual({ enabled: true, available: false, reason: "module_off" });
+    expect(noSandbox.browser).toEqual({ enabled: false, available: true, reason: null });
   });
 });
