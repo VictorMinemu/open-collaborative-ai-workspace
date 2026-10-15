@@ -579,3 +579,61 @@ describe("files routes on the sandboxd server", () => {
     }
   });
 });
+
+describe("transfer body limits (07.8-11: the API sends up to 50 MiB as base64 JSON, ~67 MiB)", () => {
+  const MiB = 1024 * 1024;
+
+  it("upload, download and import accept bodies of at least 70 MiB; write stays ~1.4 MiB; the rest keep 1 MiB", async () => {
+    const { BODY_LIMITS, MAX_BODY_BYTES } = await import("./server");
+    for (const op of ["filesUpload", "filesDownload", "filesImport"] as const) {
+      expect(BODY_LIMITS[op], op).toBeGreaterThanOrEqual(70 * MiB);
+    }
+    expect(BODY_LIMITS.filesWrite).toBeLessThan(2 * MiB);
+    expect(MAX_BODY_BYTES).toBe(MiB);
+    for (const op of ["exec", "ensure", "filesList", "filesRead", "policy"] as const) {
+      expect(BODY_LIMITS[op as keyof typeof BODY_LIMITS], op).toBeUndefined();
+    }
+  });
+
+  it("a 50 MiB upload (the API's largest, about 67 MiB of JSON) is accepted end to end", async () => {
+    const { createServer } = await import("./server");
+    const docker = new FakeDocker();
+    let received = 0;
+    docker.onExec = (call) => {
+      if (call.cmd[1] === "write") {
+        received = call.stdin.length;
+        return { exitCode: 0, stdout: String(call.stdin.length) };
+      }
+      return { exitCode: 0 };
+    };
+    const sandboxes = createSandboxes({ docker, ns: NS, runtime: "auto", image: "sbx:test" });
+    await sandboxes.ensure(target);
+    const files = createFiles({
+      sandboxes,
+      quota: { assertRoom: async () => 0, afterWrite: () => {}, afterChange: async () => {} },
+    });
+    const TOKEN = "t".repeat(40);
+    const server = createServer({ token: TOKEN, sandboxes, files });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as import("node:net").AddressInfo;
+    try {
+      const body = JSON.stringify({
+        target,
+        path: "big.bin",
+        data: Buffer.alloc(SANDBOX_LIMITS.uploadMaxBytes, 3).toString("base64"),
+        overwrite: false,
+      });
+      expect(Buffer.byteLength(body)).toBeGreaterThan(66 * MiB);
+      const res = await fetch(`http://127.0.0.1:${port}/v1/files/upload`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+        body,
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ path: "big.bin", size: SANDBOX_LIMITS.uploadMaxBytes });
+      expect(received).toBe(SANDBOX_LIMITS.uploadMaxBytes);
+    } finally {
+      server.close();
+    }
+  }, 60_000);
+});

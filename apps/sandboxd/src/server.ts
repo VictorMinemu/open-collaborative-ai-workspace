@@ -39,19 +39,24 @@ export const IMPLEMENTED_OPS = [
 type ImplementedOp = (typeof IMPLEMENTED_OPS)[number];
 
 /** Request bodies above this are refused before parsing (exec argv is at most 64 × 8 KiB). */
-const MAX_BODY_BYTES = 1024 * 1024;
+export const MAX_BODY_BYTES = 1024 * 1024;
 
 /** JSON overhead allowed over a base64 payload. */
 const ENVELOPE_BYTES = 64 * 1024;
 const base64Size = (bytes: number) => Math.ceil(bytes / 3) * 4;
 
 /**
- * The file transfer ops carry base64 in JSON (the contract's shape): an upload or import of 50 MiB is about 67 MiB on
- * the wire, a write of 1 MiB about 1.4 MiB. Only these routes get a larger body limit; everything else keeps 1 MiB.
+ * The file transfer routes take 72 MiB. The API (07.8-11) accepts a raw upload of up to 50 MiB and forwards it as
+ * base64 JSON, about 67 MiB on the wire; the contract's own schema still refuses decoded content over 50 MiB.
+ * Download and import get the same limit as upload; a write (at most 1 MiB, about 1.4 MiB as base64) gets its own.
+ * Every other route keeps 1 MiB.
  */
+export const TRANSFER_BODY_BYTES = 72 * 1024 * 1024;
+
 export const BODY_LIMITS: Partial<Record<ImplementedOp, number>> = {
-  filesUpload: base64Size(SANDBOX_LIMITS.uploadMaxBytes) + ENVELOPE_BYTES,
-  filesImport: base64Size(SANDBOX_LIMITS.uploadMaxBytes) + ENVELOPE_BYTES,
+  filesUpload: TRANSFER_BODY_BYTES,
+  filesImport: TRANSFER_BODY_BYTES,
+  filesDownload: TRANSFER_BODY_BYTES,
   filesWrite: base64Size(SANDBOX_LIMITS.writeMaxBytes) + ENVELOPE_BYTES,
 };
 
