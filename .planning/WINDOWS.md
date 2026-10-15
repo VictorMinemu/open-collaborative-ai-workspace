@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 133
+open_count: 124
 waived_count: 4
-fixed_count: 89
-total_count: 226
-last_updated: 2026-10-15T07:15:02.121Z
+fixed_count: 101
+total_count: 229
+last_updated: 2026-10-15T12:01:49.197Z
 ---
 
 # Broken Windows Ledger
@@ -215,20 +215,20 @@ last_updated: 2026-10-15T07:15:02.121Z
 | 198 | 07.4 | deviation | apps/openclaw-channel/src/connector-tools.ts |  | For needs_reconnect the plugin says 'You haven't connected…' (should say reconnect); a unit key held back by the audience rule gives the bot no explanation; each connector call opens a new MCP session | fixed |  | 2026-10-14T04:20:46.057Z | 2026-10-14T08:44:37.322Z |
 | 199 | 07.4 | deviation | apps/web/components/markdown |  | In-app links in chat Markdown open a new tab (all chat links do); ReadersPreview still lacks the unit name; the cell smoke needs the plugin built first in a fresh worktree | open |  | 2026-10-14T08:44:37.532Z |  |
 | 200 | 07.5 | deviation | packages/db/drizzle |  | The column list in SET NULL (col) is not in the drizzle snapshot; a future migration recreating those FKs would emit a plain SET NULL and deletes would fail on organization_id NOT NULL | open |  | 2026-10-14T13:26:02.622Z |  |
-| 201 | 07.5 | deviation | packages/db/sql/post-migrate.sql |  | Immutability triggers on the stored tool action and Work Zone proposal do not cover TRUNCATE; add REVOKE TRUNCATE in post-migrate.sql | open |  | 2026-10-14T13:26:02.702Z |  |
+| 201 | 07.5 | deviation | packages/db/sql/post-migrate.sql |  | Immutability triggers on the stored tool action and Work Zone proposal do not cover TRUNCATE; add REVOKE TRUNCATE in post-migrate.sql | fixed |  | 2026-10-14T13:26:02.702Z | 2026-10-15T12:01:48.221Z |
 | 202 | 07.5 | deviation | packages/db/src/schema/app.ts |  | conversation_id, event_id and requested_for_user_id on 07.5 tables have no FK; 07.5-07/08 must resolve them inside withTenant | fixed |  | 2026-10-14T13:26:02.781Z | 2026-10-15T07:15:02.121Z |
 | 203 | 07.5 | deviation | packages/contracts/src/agent-card-route.ts |  | Stubs until later plans: toPrompt proposedBy is always null (07.5-08 wires it); the memory inbox shows 07.5 approvals title-only (07.5-12 filters by kind); the '/approvals' route prefix grep now targets agent-card-route.ts | fixed |  | 2026-10-14T14:00:24.659Z | 2026-10-14T19:14:34.707Z |
-| 204 | 07.5 | deviation | apps/api/src/modules/approval |  | A server_apply decision via /approvals by someone who cannot read the conversation still starts (and meters) a bot turn for that decider (bot reply is refused); an unused grant keeps a running card forever; the pending total stops at 1000 scanned rows | open |  | 2026-10-14T15:04:59.297Z |  |
-| 205 | 07.5 | deviation | apps/api/src/modules/work-session/routes.ts |  | The HTTP route's 'lower to the default mode' is dead code: Zod defaults permissionMode to 'default', so a member limited to plan who starts a session without picking a mode gets 403 device_grant instead of a plan session (only proposals lower) | open |  | 2026-10-14T15:32:46.937Z |  |
-| 206 | 07.5 | deviation | packages/contracts/src/sensitive-data.test.ts |  | The linear-time ratio test (<8x) failed once at 10.42x with load average 18 (parallel executors); consider a looser ratio or more samples | open |  | 2026-10-14T15:32:47.075Z |  |
-| 207 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | DECIDED (fix in gate): deleting a unit cascades its tool approval policies with no tool_approval_policy.deleted audit (principle 12); answer 409 unit_has_policies as for keys and templates | open |  | 2026-10-14T15:40:25.353Z |  |
+| 204 | 07.5 | deviation | apps/api/src/modules/approval |  | A server_apply decision via /approvals by someone who cannot read the conversation still starts (and meters) a bot turn for that decider (bot reply is refused); an unused grant keeps a running card forever; the pending total stops at 1000 scanned rows | fixed |  | 2026-10-14T15:04:59.297Z | 2026-10-15T12:01:48.298Z |
+| 205 | 07.5 | deviation | apps/api/src/modules/work-session/routes.ts |  | The HTTP route's 'lower to the default mode' is dead code: Zod defaults permissionMode to 'default', so a member limited to plan who starts a session without picking a mode gets 403 device_grant instead of a plan session (only proposals lower) | fixed |  | 2026-10-14T15:32:46.937Z | 2026-10-15T12:01:48.375Z |
+| 206 | 07.5 | deviation | packages/contracts/src/sensitive-data.test.ts |  | The linear-time ratio test (<8x) failed once at 10.42x with load average 18 (parallel executors); consider a looser ratio or more samples | fixed |  | 2026-10-14T15:32:47.075Z | 2026-10-15T12:01:48.982Z |
+| 207 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | DECIDED (fix in gate): deleting a unit cascades its tool approval policies with no tool_approval_policy.deleted audit (principle 12); answer 409 unit_has_policies as for keys and templates | fixed |  | 2026-10-14T15:40:25.353Z | 2026-10-15T12:01:48.144Z |
 | 208 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | History query has no audit_events index on (action, scopeUnitId); silent caps: /access 500 units, catalog 200 tools/group and 100 groups; a 'users' rule whose people are gone must count as no approver in 07.5-07 canDecide | open |  | 2026-10-14T15:40:25.495Z |  |
-| 209 | 07.5 | unrun-verify | apps/openclaw-channel/src/tool-guard.ts |  | The TOOL_PIN_PRIORITY pin relies on OpenClaw 2026.9.7 'last returned params win' (assumption A2), unverified; a plugin registered below -10000 could rewrite after the pin; the 07.5-15 real-cell smoke must record it | open |  | 2026-10-14T15:58:17.312Z |  |
+| 209 | 07.5 | unrun-verify | apps/openclaw-channel/src/tool-guard.ts |  | The TOOL_PIN_PRIORITY pin relies on OpenClaw 2026.9.7 'last returned params win' (assumption A2), unverified; a plugin registered below -10000 could rewrite after the pin; the 07.5-15 real-cell smoke must record it | fixed |  | 2026-10-14T15:58:17.312Z | 2026-10-15T12:01:48.826Z |
 | 210 | 07.5 | deviation | apps/openclaw-channel/src/connector-tools.ts |  | Denial note parsed from the end of the server sentence (no cardAction.note in contracts); approval_denied does not say who decided; flagged connector tools still use the old 32 KB message; fake /tool-calls never answers no_trigger | fixed |  | 2026-10-14T15:58:17.419Z | 2026-10-15T05:03:39.191Z |
 | 211 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | MUST FIX (07.5-11/gate): a review_only tool.call card still carries Approve and the server accepts an approval from the card route; only the web hides it. Refuse server-side | fixed |  | 2026-10-14T17:45:03.509Z | 2026-10-15T05:03:39.033Z |
 | 212 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | 07.5-11 must map denial {deciderName, note} onto the 409 and add an explicit cardAction note to contracts + plugin mirror (replace sentence parsing); 'You can't approve your own request' copy must follow viewerCan; real use window is min(15 min, request expiry); review view counts readers with one check per member | fixed |  | 2026-10-14T17:45:03.593Z | 2026-10-15T05:03:39.115Z |
-| 213 | 07.5 | deviation | apps/api/src/testing.ts |  | Test Redis containers leak (208 redis:8 found running, 1-2 h old): TestStack.stop() awaits built.close() before stopping containers, so a throwing close skips redis.stop(); make it try/finally and check why Ryuk did not reap them (fix in the 07.5 gate) | open |  | 2026-10-14T17:47:21.500Z |  |
-| 214 | 07.5 | unrun-verify | apps/openclaw-channel/src/work-zone-tools.ts |  | Work Zone proposal tools unproven in a real cell (alsoAllow, model use, taint refusal) and only tested against the fake; 07.5-15 must run SMOKE_ONLY=work_zone and an API parity test after 07.5-08; import cycle tool-guard <-> work-zone-tools (harmless, commented) | open |  | 2026-10-14T17:49:14.525Z |  |
+| 213 | 07.5 | deviation | apps/api/src/testing.ts |  | Test Redis containers leak (208 redis:8 found running, 1-2 h old): TestStack.stop() awaits built.close() before stopping containers, so a throwing close skips redis.stop(); make it try/finally and check why Ryuk did not reap them (fix in the 07.5 gate) | fixed |  | 2026-10-14T17:47:21.500Z | 2026-10-15T12:01:48.525Z |
+| 214 | 07.5 | unrun-verify | apps/openclaw-channel/src/work-zone-tools.ts |  | Work Zone proposal tools unproven in a real cell (alsoAllow, model use, taint refusal) and only tested against the fake; 07.5-15 must run SMOKE_ONLY=work_zone and an API parity test after 07.5-08; import cycle tool-guard <-> work-zone-tools (harmless, commented) | fixed |  | 2026-10-14T17:49:14.525Z | 2026-10-15T12:01:48.903Z |
 | 215 | 07.5 | deviation | apps/api/src/modules/work-session |  | When a Work Zone proposal Start fails the bot hears 'approved' without the error code (add resultCode to CardAction); each Work Zone card read recomputes its live state with several queries | fixed |  | 2026-10-14T18:19:32.619Z | 2026-10-15T05:03:39.267Z |
 | 216 | 07.5 | deviation | apps/web/components/ui/avatar.tsx |  | Shared avatar initials are 4.25-4.48:1 at 12 px (below AA, axe flaky by random id); move text from *-700 to *-800 | fixed |  | 2026-10-14T18:27:17.175Z | 2026-10-15T07:14:53.085Z |
 | 217 | 07.5 | deviation | apps/web/components/settings |  | Approval history shows a raw m…__* pattern for a rule on a deleted server; the policies page does not warn when /access or the catalog are truncated | open |  | 2026-10-14T18:27:17.253Z |  |
@@ -237,10 +237,13 @@ last_updated: 2026-10-15T07:15:02.121Z
 | 220 | 07.5 | deviation | apps/api/src/modules/agent-channel |  | An ocw_http_request URL normalised differently counts as a different action and opens a new approval; plugin failure texts duplicate the UI-SPEC copy | open |  | 2026-10-15T05:03:39.415Z |  |
 | 221 | 07.5 | deviation | apps/api/src/modules/tool-approval/kind.ts |  | The tool.call 'target' field carries the internal MCP server name (e.g. mc4866abe); hide it in the API view and the 07.5-14 card | fixed |  | 2026-10-15T06:05:38.732Z | 2026-10-15T07:14:53.016Z |
 | 222 | 07.5 | deviation | apps/api/src/modules/realtime |  | A diagnostic run hit 'deadlock detected' writing to a user: stream, failing a bot reply with 500 (investigate in 07.5-16) | fixed |  | 2026-10-15T06:05:38.809Z | 2026-10-15T06:39:02.837Z |
-| 223 | 07.5 | deviation | e2e/tests |  | Decided approvals stay in the run's DB; specs must filter by their own ids; the phone top bar lacks the Approvals count the UI-SPEC asks for | open |  | 2026-10-15T06:05:38.884Z |  |
-| 224 | 07.5 | deviation | apps/api/src/modules/approval/service.ts |  | Remaining lock-order risks (not reproduced): a server_apply approval (e.g. memory) still notifies user: streams before the conversation; notifications notify in recipient order, not ascending; no retry on 40P01 | open |  | 2026-10-15T06:38:56.276Z |  |
-| 225 | 07.5 | deviation | apps/api/src/testing.ts |  | ConnectorsStack.stop(): a throwing stop leaves the fake server open and a half-built stack leaves containers alive (same family as the Redis leak); grants bind to the action not the bot run, so Sam's next normal turn may use it once (state in ADR-0026) | open |  | 2026-10-15T06:38:56.352Z |  |
-| 226 | 07.5 | deviation | apps/web/components/chat/agent-card.tsx |  | A live linked card grows when its approval link arrives and the list does not stay pinned to the bottom (on mobile the card end hides under the composer); requester name and runtime are parsed from server text (add requesterName/runtime to AgentCardApprovalLink); warnings are classified by exact copy match | open |  | 2026-10-15T07:14:53.155Z |  |
+| 223 | 07.5 | deviation | e2e/tests |  | Decided approvals stay in the run's DB; specs must filter by their own ids; the phone top bar lacks the Approvals count the UI-SPEC asks for | fixed |  | 2026-10-15T06:05:38.884Z | 2026-10-15T12:01:48.747Z |
+| 224 | 07.5 | deviation | apps/api/src/modules/approval/service.ts |  | Remaining lock-order risks (not reproduced): a server_apply approval (e.g. memory) still notifies user: streams before the conversation; notifications notify in recipient order, not ascending; no retry on 40P01 | fixed |  | 2026-10-15T06:38:56.276Z | 2026-10-15T12:01:48.451Z |
+| 225 | 07.5 | deviation | apps/api/src/testing.ts |  | ConnectorsStack.stop(): a throwing stop leaves the fake server open and a half-built stack leaves containers alive (same family as the Redis leak); grants bind to the action not the bot run, so Sam's next normal turn may use it once (state in ADR-0026) | fixed |  | 2026-10-15T06:38:56.352Z | 2026-10-15T12:01:48.599Z |
+| 226 | 07.5 | deviation | apps/web/components/chat/agent-card.tsx |  | A live linked card grows when its approval link arrives and the list does not stay pinned to the bottom (on mobile the card end hides under the composer); requester name and runtime are parsed from server text (add requesterName/runtime to AgentCardApprovalLink); warnings are classified by exact copy match | fixed |  | 2026-10-15T07:14:53.155Z | 2026-10-15T12:01:48.673Z |
+| 227 | 07.5 | deviation | apps/web/components/chat/composer.tsx |  | Composer hint text is under AA contrast; e2e specs share one DB so fixture names collide across phases; e2e specs reading response bodies across a navigation can hang | open |  | 2026-10-15T12:01:49.057Z |  |
+| 228 | 07.5 | deviation | apps/openclaw-channel/src/tool-guard.ts |  | Pin limits (ADR-0026): a plugin registered below -10000 or one answering OpenClaw's own approval first can still beat TOOL_PIN_PRIORITY | open |  | 2026-10-15T12:01:49.128Z |  |
+| 229 | 07.5 | deviation | apps/api/src/modules/approval |  | After #204 the bot does not hear decisions made from /approvals by someone outside the conversation; Work Zone Start has no applyTopics; cards still parse requester and runtime from server text | open |  | 2026-10-15T12:01:49.197Z |  |
 
 ````json
 [
@@ -2651,10 +2654,10 @@ last_updated: 2026-10-15T07:15:02.121Z
     "file": "packages/db/sql/post-migrate.sql",
     "line": null,
     "description": "Immutability triggers on the stored tool action and Work Zone proposal do not cover TRUNCATE; add REVOKE TRUNCATE in post-migrate.sql",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T13:26:02.702Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T12:01:48.221Z"
   },
   {
     "id": 202,
@@ -2687,10 +2690,10 @@ last_updated: 2026-10-15T07:15:02.121Z
     "file": "apps/api/src/modules/approval",
     "line": null,
     "description": "A server_apply decision via /approvals by someone who cannot read the conversation still starts (and meters) a bot turn for that decider (bot reply is refused); an unused grant keeps a running card forever; the pending total stops at 1000 scanned rows",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T15:04:59.297Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T12:01:48.298Z"
   },
   {
     "id": 205,
@@ -2699,10 +2702,10 @@ last_updated: 2026-10-15T07:15:02.121Z
     "file": "apps/api/src/modules/work-session/routes.ts",
     "line": null,
     "description": "The HTTP route's 'lower to the default mode' is dead code: Zod defaults permissionMode to 'default', so a member limited to plan who starts a session without picking a mode gets 403 device_grant instead of a plan session (only proposals lower)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T15:32:46.937Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T12:01:48.375Z"
   },
   {
     "id": 206,
@@ -2711,10 +2714,10 @@ last_updated: 2026-10-15T07:15:02.121Z
     "file": "packages/contracts/src/sensitive-data.test.ts",
     "line": null,
     "description": "The linear-time ratio test (<8x) failed once at 10.42x with load average 18 (parallel executors); consider a looser ratio or more samples",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T15:32:47.075Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T12:01:48.982Z"
   },
   {
     "id": 207,
@@ -2723,10 +2726,10 @@ last_updated: 2026-10-15T07:15:02.121Z
     "file": "apps/api/src/modules/tool-approval",
     "line": null,
     "description": "DECIDED (fix in gate): deleting a unit cascades its tool approval policies with no tool_approval_policy.deleted audit (principle 12); answer 409 unit_has_policies as for keys and templates",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T15:40:25.353Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T12:01:48.144Z"
   },
   {
     "id": 208,
@@ -2747,10 +2750,10 @@ last_updated: 2026-10-15T07:15:02.121Z
     "file": "apps/openclaw-channel/src/tool-guard.ts",
     "line": null,
     "description": "The TOOL_PIN_PRIORITY pin relies on OpenClaw 2026.9.7 'last returned params win' (assumption A2), unverified; a plugin registered below -10000 could rewrite after the pin; the 07.5-15 real-cell smoke must record it",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T15:58:17.312Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T12:01:48.826Z"
   },
   {
     "id": 210,
@@ -2795,10 +2798,10 @@ last_updated: 2026-10-15T07:15:02.121Z
     "file": "apps/api/src/testing.ts",
     "line": null,
     "description": "Test Redis containers leak (208 redis:8 found running, 1-2 h old): TestStack.stop() awaits built.close() before stopping containers, so a throwing close skips redis.stop(); make it try/finally and check why Ryuk did not reap them (fix in the 07.5 gate)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T17:47:21.500Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T12:01:48.525Z"
   },
   {
     "id": 214,
@@ -2807,10 +2810,10 @@ last_updated: 2026-10-15T07:15:02.121Z
     "file": "apps/openclaw-channel/src/work-zone-tools.ts",
     "line": null,
     "description": "Work Zone proposal tools unproven in a real cell (alsoAllow, model use, taint refusal) and only tested against the fake; 07.5-15 must run SMOKE_ONLY=work_zone and an API parity test after 07.5-08; import cycle tool-guard <-> work-zone-tools (harmless, commented)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T17:49:14.525Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T12:01:48.903Z"
   },
   {
     "id": 215,
@@ -2915,10 +2918,10 @@ last_updated: 2026-10-15T07:15:02.121Z
     "file": "e2e/tests",
     "line": null,
     "description": "Decided approvals stay in the run's DB; specs must filter by their own ids; the phone top bar lacks the Approvals count the UI-SPEC asks for",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-15T06:05:38.884Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T12:01:48.747Z"
   },
   {
     "id": 224,
@@ -2927,10 +2930,10 @@ last_updated: 2026-10-15T07:15:02.121Z
     "file": "apps/api/src/modules/approval/service.ts",
     "line": null,
     "description": "Remaining lock-order risks (not reproduced): a server_apply approval (e.g. memory) still notifies user: streams before the conversation; notifications notify in recipient order, not ascending; no retry on 40P01",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-15T06:38:56.276Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T12:01:48.451Z"
   },
   {
     "id": 225,
@@ -2939,10 +2942,10 @@ last_updated: 2026-10-15T07:15:02.121Z
     "file": "apps/api/src/testing.ts",
     "line": null,
     "description": "ConnectorsStack.stop(): a throwing stop leaves the fake server open and a half-built stack leaves containers alive (same family as the Redis leak); grants bind to the action not the bot run, so Sam's next normal turn may use it once (state in ADR-0026)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-15T06:38:56.352Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T12:01:48.599Z"
   },
   {
     "id": 226,
@@ -2951,9 +2954,45 @@ last_updated: 2026-10-15T07:15:02.121Z
     "file": "apps/web/components/chat/agent-card.tsx",
     "line": null,
     "description": "A live linked card grows when its approval link arrives and the list does not stay pinned to the bottom (on mobile the card end hides under the composer); requester name and runtime are parsed from server text (add requesterName/runtime to AgentCardApprovalLink); warnings are classified by exact copy match",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-15T07:14:53.155Z",
+    "resolved_at": "2026-10-15T12:01:48.673Z"
+  },
+  {
+    "id": 227,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/web/components/chat/composer.tsx",
+    "line": null,
+    "description": "Composer hint text is under AA contrast; e2e specs share one DB so fixture names collide across phases; e2e specs reading response bodies across a navigation can hang",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T12:01:49.057Z",
+    "resolved_at": null
+  },
+  {
+    "id": 228,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/openclaw-channel/src/tool-guard.ts",
+    "line": null,
+    "description": "Pin limits (ADR-0026): a plugin registered below -10000 or one answering OpenClaw's own approval first can still beat TOOL_PIN_PRIORITY",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T12:01:49.128Z",
+    "resolved_at": null
+  },
+  {
+    "id": 229,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/api/src/modules/approval",
+    "line": null,
+    "description": "After #204 the bot does not hear decisions made from /approvals by someone outside the conversation; Work Zone Start has no applyTopics; cards still parse requester and runtime from server text",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T12:01:49.197Z",
     "resolved_at": null
   }
 ]
