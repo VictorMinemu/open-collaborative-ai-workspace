@@ -696,6 +696,26 @@ describe("AgentCardView: tool.call pills and state lines (07.5-14, UI-SPEC State
     expect(buttons(html)).toEqual([]);
   });
 
+  it("a summary or review-only card never shows a decision note, even one a server sent (W-1)", () => {
+    const summary = renderTool(
+      summaryCard(
+        { status: "cancelled", decision: decided("denied", "NOTE-SENTINEL-web-summary") },
+        { status: "denied" },
+      ),
+    );
+    expect(summary).toMatch(/Denied by Sam Lee/);
+    expect(summary).not.toContain("agent-card-note");
+    expect(summary).not.toContain("NOTE-SENTINEL-web-summary");
+    const reviewOnly = renderTool(
+      toolCard(
+        { status: "cancelled", decision: decided("denied", "NOTE-SENTINEL-web-review") },
+        { status: "denied", display: "review_only" },
+      ),
+    );
+    expect(reviewOnly).toMatch(/Denied by Sam Lee/);
+    expect(reviewOnly).not.toContain("NOTE-SENTINEL-web-review");
+  });
+
   it("expired: Expired and nothing was run", () => {
     const html = renderTool(toolCard({ status: "cancelled" }, { status: "expired" }));
     expect(html).toContain('aria-label="Status: Expired"');
