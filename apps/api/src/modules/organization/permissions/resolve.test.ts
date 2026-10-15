@@ -138,6 +138,11 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "vault.manage": false,
     "agent_template.manage": false,
     "tool_approval.manage": false,
+    "sandbox.use": true,
+    "sandbox.files": true,
+    "browser.use": true,
+    "browser.watch": true,
+    "browser.control": true,
   },
   developer: {
     "org.read": true,
@@ -205,6 +210,11 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "vault.manage": false,
     "agent_template.manage": false,
     "tool_approval.manage": false,
+    "sandbox.use": true,
+    "sandbox.files": true,
+    "browser.use": true,
+    "browser.watch": true,
+    "browser.control": true,
   },
   lead: {
     "org.read": true,
@@ -272,6 +282,11 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "vault.manage": false,
     "agent_template.manage": false,
     "tool_approval.manage": false,
+    "sandbox.use": true,
+    "sandbox.files": true,
+    "browser.use": true,
+    "browser.watch": true,
+    "browser.control": true,
   },
   admin: {
     "org.read": true,
@@ -339,6 +354,11 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "vault.manage": true,
     "agent_template.manage": true,
     "tool_approval.manage": true,
+    "sandbox.use": true,
+    "sandbox.files": true,
+    "browser.use": true,
+    "browser.watch": true,
+    "browser.control": true,
   },
 };
 

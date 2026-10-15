@@ -24,15 +24,60 @@ const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const now = 1_790_000_000;
 
 describe("permission vocabulary", () => {
-  it("has exactly the 65 agreed permissions", () => {
-    // 64 through 07.4; 07.5-01 appended `tool_approval.manage`.
-    expect(Permission.options).toHaveLength(65);
-    expect(new Set(Permission.options).size).toBe(65);
+  it("has exactly the 70 agreed permissions", () => {
+    // 64 through 07.4; 07.5-01 appended `tool_approval.manage`; 07.8-30 appended the five sandbox and browser grains.
+    expect(Permission.options).toHaveLength(70);
+    expect(new Set(Permission.options).size).toBe(70);
+  });
+
+  it("Phase 07.8 sandbox and browser grains exist exactly as 07.8-30 defines them (D-09, D-12, P-05)", () => {
+    const grains = [
+      "sandbox.use",
+      "sandbox.files",
+      "browser.use",
+      "browser.watch",
+      "browser.control",
+    ] as const;
+    // Appended at the end, never renamed.
+    expect(Permission.options.slice(65)).toEqual([...grains]);
+    for (const p of grains) {
+      expect(PERMISSION_SURFACE[p], p).toBe("bots");
+      // Every role that lets bots use tools holds them; module deny rules take them away (delegable).
+      for (const role of OrgRole.options) {
+        expect(ROLE_PERMISSIONS[role].includes("bot.tool.use"), role).toBe(true);
+        expect(ROLE_PERMISSIONS[role], `${role}: ${p}`).toContain(p);
+      }
+      expect(NON_DELEGABLE_PERMISSIONS, p).not.toContain(p);
+      expect(LEAD_PERMISSIONS, p).not.toContain(p);
+      expect(PermissionPattern.safeParse(p).success, p).toBe(true);
+    }
+    // Bots use their sandbox and browser for the human; they never watch, take control or manage files (T-07.8-30-03).
+    expect(AGENT_PERMISSIONS).toEqual(expect.arrayContaining(["sandbox.use", "browser.use"]));
+    for (const p of ["sandbox.files", "browser.watch", "browser.control"] as const) {
+      expect(AGENT_PERMISSIONS, p).not.toContain(p);
+    }
+    expect(PermissionPattern.safeParse("sandbox.*").success).toBe(true);
+    expect(PermissionPattern.safeParse("browser.*").success).toBe(true);
+    expect(PERMISSION_DESCRIPTIONS["sandbox.use"]).toBe(
+      "Let bots run commands and keep files in their sandbox when they work for you",
+    );
+    expect(PERMISSION_DESCRIPTIONS["sandbox.files"]).toBe(
+      "Browse, upload and delete files in the sandboxes of bots you configure",
+    );
+    expect(PERMISSION_DESCRIPTIONS["browser.use"]).toBe(
+      "Let bots open web pages in their browser when they work for you",
+    );
+    expect(PERMISSION_DESCRIPTIONS["browser.watch"]).toBe(
+      "Watch a bot's browser in conversations you can read",
+    );
+    expect(PERMISSION_DESCRIPTIONS["browser.control"]).toBe(
+      "Take control of a bot's browser to sign in yourself",
+    );
   });
 
   it("Phase 07.5 approval-policy grain exists exactly as 07.5-01 defines it (D-04, P-03)", () => {
-    // Appended at the end, never renamed.
-    expect(Permission.options.at(-1)).toBe("tool_approval.manage");
+    // Appended at the end, never renamed (position 64; 07.8-30 appended five grains after it).
+    expect(Permission.options[64]).toBe("tool_approval.manage");
     // `team` like `unit.modules.manage`: delegable to leads, outside the 07.3 module catalog's classified surfaces.
     expect(PERMISSION_SURFACE["tool_approval.manage"]).toBe("team");
     for (const role of OrgRole.options) {

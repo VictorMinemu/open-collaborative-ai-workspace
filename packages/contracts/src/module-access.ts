@@ -8,7 +8,7 @@ import type { Permission } from "./permissions";
  * role, unit rules reach the unit's subtree). The web hides what the API already refuses.
  */
 
-export const ModuleId = z.enum(["work_zone", "ai_chats", "bots", "memory"]);
+export const ModuleId = z.enum(["work_zone", "ai_chats", "bots", "memory", "sandbox", "browser"]);
 export type ModuleId = z.infer<typeof ModuleId>;
 
 export interface ModuleDefinition {
@@ -60,6 +60,20 @@ export const MODULE_CATALOG: Record<ModuleId, ModuleDefinition> = {
     description: "Memory files that bots and people keep in folders",
     entry: "memory.read",
     patterns: ["memory.*"],
+  },
+  // Phase 07.8 (07.8-30, D-09, D-12, P-05): on unless a deny row exists, like every module; the organization switch in
+  // Settings › Sandbox & Browser (off by default) and the per-bot switches gate them too. New grains keep the prefixes.
+  sandbox: {
+    label: "Sandbox",
+    description: "Bots get their own workspace to keep files and run commands",
+    entry: "sandbox.use",
+    patterns: ["sandbox.*"],
+  },
+  browser: {
+    label: "Browser",
+    description: "Bots open web pages in a real browser that people can watch and sign in to",
+    entry: "browser.use",
+    patterns: ["browser.*"],
   },
 };
 

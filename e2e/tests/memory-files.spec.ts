@@ -562,7 +562,7 @@ test("Settings › Modules lists Memory next to Work Zone, AI chats and Bots", a
   await expect(page.getByText("Memory", { exact: true }).first()).toBeVisible();
   // The card's own sentence names every module, Memory included (WINDOWS 155).
   await expect(page.getByTestId("module-access").first()).toContainText(
-    "Turn Work Zone, AI chats, Bots and Memory on or off for the whole organization",
+    "Turn Work Zone, AI chats, Bots, Memory, Sandbox and Browser on or off for the whole organization",
   );
   for (const theme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: theme });

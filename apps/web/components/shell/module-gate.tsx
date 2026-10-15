@@ -1,7 +1,15 @@
 "use client";
 
 import { MODULE_CATALOG, type ModuleId, type Permission } from "@ocw/contracts";
-import { Bot, type LucideIcon, NotebookText, Sparkles, SquareTerminal } from "lucide-react";
+import {
+  Bot,
+  Container,
+  type LucideIcon,
+  MonitorPlay,
+  NotebookText,
+  Sparkles,
+  SquareTerminal,
+} from "lucide-react";
 import Link from "next/link";
 import { type ReactNode, useRef } from "react";
 import { EmptyState } from "@/components/common/empty-state";
@@ -41,6 +49,13 @@ const OFF_COPY: Record<ModuleId, { icon: LucideIcon; verb: "is" | "are"; extra: 
     verb: "is",
     extra: " Memory files are kept and come back when it is turned on again.",
   },
+  // Phase 07.8 (UI-SPEC §4.1).
+  sandbox: {
+    icon: Container,
+    verb: "is",
+    extra: " Files are kept and come back when it is turned on again.",
+  },
+  browser: { icon: MonitorPlay, verb: "is", extra: " Saved sign-ins stay in Settings › Keychain." },
 };
 
 /** The in-place explanation shown instead of a denied module's page (never a redirect). */

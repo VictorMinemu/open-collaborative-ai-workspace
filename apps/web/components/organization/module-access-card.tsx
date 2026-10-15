@@ -12,7 +12,9 @@ import {
   Blocks,
   Bot,
   ChevronRight,
+  Container,
   type LucideIcon,
+  MonitorPlay,
   NotebookText,
   Search,
   Sparkles,
@@ -60,6 +62,9 @@ const MODULE_ICONS: Record<ModuleId, LucideIcon> = {
   ai_chats: Sparkles,
   bots: Bot,
   memory: NotebookText,
+  // Phase 07.8 (UI-SPEC §4.1): the D-12 row hint and the settings page are plan 07.8-19's.
+  sandbox: Container,
+  browser: MonitorPlay,
 };
 
 const ADMIN_ONLY = "Only an organization admin can change modules for an admin.";
