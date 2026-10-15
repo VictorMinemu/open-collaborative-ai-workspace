@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  ActivityStep,
+  ActivityVerb,
   AgentChannelSandboxDelete,
   AgentChannelSandboxExec,
   AgentChannelSandboxExecResponse,
@@ -10,12 +12,18 @@ import {
   AgentChannelSandboxShare,
   AgentChannelSandboxWrite,
   AllowHost,
+  ApproveSandboxPackageRequest,
+  BotTurnActivity,
   DEFAULT_SANDBOX_SETTINGS,
   decodeFrameHeader,
   encodeFrame,
   FRAME_HEADER_BYTES,
   FRAME_MAX_PAYLOAD_BYTES,
   FRAME_TYPES,
+  Message,
+  PackageTreeEntry,
+  packageTreeCanonical,
+  ReviewSandboxPackageRequest,
   SANDBOX_LIMITS,
   SANDBOX_REFUSAL_STATUS,
   SANDBOXD_LABELS,
@@ -29,11 +37,16 @@ import {
   SandboxFilePath,
   SandboxFilePreview,
   SandboxIsolationInfo,
+  SandboxPackage,
+  SandboxPackageList,
+  SandboxPackageReview,
   SandboxRefusal,
   SandboxRelativePath,
   SandboxSettings,
   SandboxSettingsView,
   SandboxStatusView,
+  TurnActivityEvent,
+  UpdateSandboxPackageRequest,
   UpdateSandboxSettingsRequest,
 } from "./index";
 
@@ -468,5 +481,193 @@ describe("sandboxd policy, events, errors and frame framing", () => {
     expect(() => encodeFrame(FRAME_TYPES.jpeg, new Uint8Array(FRAME_MAX_PAYLOAD_BYTES + 1))).toThrow(
       RangeError,
     );
+  });
+});
+
+describe("sandbox packages: the whole dependency tree is pinned (P-12, T-07.8-01-06)", () => {
+  const SHA256 = "b".repeat(64);
+  const a = { name: "a", version: "1.0.0", integrity: `sha512-${"A".repeat(86)}==` };
+  const b = { name: "b", version: "2.0.0", integrity: `sha256:${SHA256}` };
+  const b1 = { name: "b", version: "1.0.0", integrity: `sha256:${"c".repeat(64)}` };
+
+  it("the canonical tree ignores order and changes with any version or integrity", () => {
+    const base = packageTreeCanonical([a, b, b1]);
+    expect(packageTreeCanonical([b1, b, a])).toBe(base);
+    expect(packageTreeCanonical([b, a, b1])).toBe(base);
+    expect(packageTreeCanonical([a, { ...b, version: "2.0.1" }, b1])).not.toBe(base);
+    expect(packageTreeCanonical([a, { ...b, integrity: `sha256:${"d".repeat(64)}` }, b1])).not.toBe(base);
+    expect(JSON.parse(base)).toEqual([a, b1, b]);
+    expect(packageTreeCanonical([])).toBe("[]");
+  });
+
+  it("tree entries take sha512 (npm) or sha256 integrity only", () => {
+    expect(PackageTreeEntry.safeParse(a).success).toBe(true);
+    expect(PackageTreeEntry.safeParse(b).success).toBe(true);
+    expect(PackageTreeEntry.safeParse({ ...a, integrity: "sha1-abc=" }).success).toBe(false);
+    expect(PackageTreeEntry.safeParse({ ...a, integrity: `sha256:${"B".repeat(64)}` }).success).toBe(false);
+    expect(PackageTreeEntry.safeParse({ ...a, name: "x".repeat(215) }).success).toBe(false);
+  });
+
+  it("a review requires the dependency count and the tree hash, and binds them in its token", () => {
+    const review = {
+      source: "npm",
+      name: "@scope/tool",
+      version: "1.2.3",
+      sha256: SHA256,
+      sizeBytes: 10,
+      license: null,
+      publisher: null,
+      hasInstallScript: true,
+      dependencyCount: 12,
+      treeSha256: SHA256,
+      risk: "medium",
+      riskReasons: ["Runs an install script"],
+      reviewToken: "tok",
+    };
+    expect(SandboxPackageReview.parse(review).dependencyCount).toBe(12);
+    const { dependencyCount: _d, ...noCount } = review;
+    expect(SandboxPackageReview.safeParse(noCount).success).toBe(false);
+    const { treeSha256: _t, ...noTree } = review;
+    expect(SandboxPackageReview.safeParse(noTree).success).toBe(false);
+    expect(SandboxPackageReview.safeParse({ ...review, treeSha256: "abc" }).success).toBe(false);
+    expect(SandboxPackageReview.safeParse({ ...review, dependencyCount: 5001 }).success).toBe(false);
+    expect(SandboxPackageReview.safeParse({ ...review, riskReasons: Array(11).fill("x") }).success).toBe(
+      false,
+    );
+  });
+
+  it("requests are strict and names are exact package names", () => {
+    expect(
+      ReviewSandboxPackageRequest.safeParse({ source: "pypi", name: "requests", version: "2.32.3" }).success,
+    ).toBe(true);
+    expect(
+      ReviewSandboxPackageRequest.safeParse({
+        source: "debian",
+        name: "libxml2-utils",
+        version: "2.9.14+dfsg-1.3~deb12u1",
+      }).success,
+    ).toBe(true);
+    for (const name of ["", "a b", "a;rm -rf /", "../x", "-flag", "@scope/../x"]) {
+      expect(
+        ReviewSandboxPackageRequest.safeParse({ source: "npm", name, version: "1.0.0" }).success,
+        name,
+      ).toBe(false);
+    }
+    for (const version of ["", "^1.0.0", ">=1", "1.0.0 || 2", "*"]) {
+      expect(
+        ReviewSandboxPackageRequest.safeParse({ source: "npm", name: "a", version }).success,
+        version,
+      ).toBe(false);
+    }
+    expect(ReviewSandboxPackageRequest.safeParse({ source: "brew", name: "a", version: "1" }).success).toBe(
+      false,
+    );
+    expect(
+      ReviewSandboxPackageRequest.safeParse({ source: "npm", name: "a", version: "1", registry: "x" })
+        .success,
+    ).toBe(false);
+    expect(
+      ApproveSandboxPackageRequest.safeParse({ reviewToken: "t", acknowledge: "install anyway" }).success,
+    ).toBe(true);
+    expect(ApproveSandboxPackageRequest.safeParse({ reviewToken: "t", acknowledge: "yes" }).success).toBe(
+      false,
+    );
+    expect(UpdateSandboxPackageRequest.safeParse({}).success).toBe(false);
+    expect(UpdateSandboxPackageRequest.safeParse({ enabled: false }).success).toBe(true);
+  });
+
+  it("a package row says whether its tree moved upstream; the list is bounded", () => {
+    const pkg = {
+      id: ID,
+      source: "npm",
+      name: "left-pad",
+      version: "1.3.0",
+      sha256: SHA256,
+      dependencyCount: 0,
+      treeSha256: SHA256,
+      risk: "low",
+      enabled: true,
+      personalAllowed: false,
+      installedIn: 2,
+      installing: 0,
+      failed: 1,
+      changedUpstream: true,
+      newerVersion: "1.3.1",
+      approvedBy: { id: ID2, displayName: "Ada" },
+      approvedAt: NOW,
+    };
+    expect(SandboxPackage.parse(pkg).changedUpstream).toBe(true);
+    expect(
+      SandboxPackageList.safeParse({ items: Array(201).fill(pkg), viewerCan: { manage: true } }).success,
+    ).toBe(false);
+  });
+});
+
+describe("turn activity on replies (R2, UI-SPEC Surface 5)", () => {
+  const step = {
+    id: "s1",
+    tool: "ocw_sandbox_exec",
+    verb: "ran",
+    target: "python report.py",
+    outcome: { kind: "ok", code: null, exitCode: 0, durationMs: 1200 },
+    signedIn: false,
+    contextId: null,
+    approvalMessageRoute: null,
+    details: { command: "python report.py", cwd: "reports", exitCode: 0, outputTail: "done\n" },
+  };
+  const activity = (n: number) => ({
+    eventId: ID,
+    steps: Array(n).fill(step),
+    more: 0,
+    running: false,
+    current: null,
+  });
+  const message = {
+    id: ID,
+    organizationId: ID,
+    conversationId: ID,
+    seq: 1,
+    authorKind: "agent",
+    authorId: ID2,
+    body: "Done",
+    mentions: [],
+    status: "sent",
+    threadId: null,
+    replyCount: 0,
+    lastReplyAt: null,
+    clientKind: "agent",
+    createdAt: NOW,
+    editedAt: null,
+  };
+
+  it("a reply carries at most 50 steps; older messages without activity parse", () => {
+    expect(Message.parse(message).activity).toBeUndefined();
+    expect(Message.parse({ ...message, activity: activity(50) }).activity?.steps).toHaveLength(50);
+    expect(Message.safeParse({ ...message, activity: activity(51) }).success).toBe(false);
+  });
+
+  it("steps are bounded: target, output tail and verbs", () => {
+    expect(
+      ActivityStep.safeParse({ ...step, details: { ...step.details, outputTail: "x".repeat(4097) } }).success,
+    ).toBe(false);
+    expect(
+      ActivityStep.safeParse({ ...step, details: { ...step.details, outputTail: "x".repeat(4096) } }).success,
+    ).toBe(true);
+    expect(ActivityStep.safeParse({ ...step, target: "x".repeat(201) }).success).toBe(false);
+    expect(ActivityStep.safeParse({ ...step, verb: "evaluated" }).success).toBe(false);
+    expect(ActivityVerb.options).toContain("blocked_egress");
+    expect(BotTurnActivity.safeParse({ ...activity(1), current: "x".repeat(81) }).success).toBe(false);
+  });
+
+  it("the live event names the conversation, thread and agent", () => {
+    const ev = {
+      type: "turn.activity",
+      conversationId: ID,
+      threadRootMessageId: null,
+      agentId: ID2,
+      activity: { ...activity(1), running: true, current: "Running python report.py" },
+    };
+    expect(TurnActivityEvent.parse(ev).activity.running).toBe(true);
+    expect(TurnActivityEvent.safeParse({ ...ev, type: "turn.updated" }).success).toBe(false);
   });
 });

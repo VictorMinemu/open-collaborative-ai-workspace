@@ -504,3 +504,211 @@ export const SandboxStatusView = z.object({
   viewerCan: z.object({ files: z.boolean(), control: z.boolean() }),
 });
 export type SandboxStatusView = z.infer<typeof SandboxStatusView>;
+
+// ---------------------------------------------------------------- turn activity (R2, UI-SPEC Surface 5)
+
+/** What a step did, as the chat shows it ("Ran …", "Opened …", "Blocked …"). */
+export const ActivityVerb = z.enum([
+  "ran",
+  "checked_process",
+  "stopped_process",
+  "read",
+  "listed",
+  "wrote",
+  "deleted",
+  "shared",
+  "imported",
+  "opened",
+  "read_page",
+  "screenshot",
+  "clicked",
+  "typed",
+  "chose",
+  "pressed",
+  "scrolled",
+  "waited",
+  "asked_signin",
+  "closed",
+  "blocked_egress",
+  "blocked",
+  "paused",
+]);
+export type ActivityVerb = z.infer<typeof ActivityVerb>;
+
+/**
+ * One confined call of a turn, composed by the API from the call it decided. Every string is masked server-side
+ * (07.5 `maskForDisplay`), paths are relative to `/workspace`, sites are hosts only; typed text is never shown.
+ */
+export const ActivityStep = z.object({
+  id: z.string().min(1).max(64),
+  tool: z.string().min(1).max(64),
+  verb: ActivityVerb,
+  /** Masked: a relative path, a host, a short command or an element name. */
+  target: z.string().max(200),
+  outcome: z.object({
+    kind: z.enum(["ok", "error", "running", "approval", "blocked"]),
+    /** A `SandboxRefusal` / `BrowserRefusal` or approval code, when there is one. */
+    code: z.string().max(64).nullable(),
+    exitCode: z.number().int().nullable(),
+    durationMs: z.number().int().nonnegative().nullable(),
+  }),
+  /** The step ran with a member's sealed browser session loaded. */
+  signedIn: z.boolean(),
+  contextId: Id.nullable(),
+  /** The approval card's message route while the step waits for one. */
+  approvalMessageRoute: z.string().max(500).nullable(),
+  /** Exec only: the masked command, its folder, exit code and the last lines of output (≤ 4 KB). */
+  details: z
+    .object({
+      command: z.string().max(2000).optional(),
+      cwd: z.string().max(SANDBOX_LIMITS.pathMaxChars).optional(),
+      exitCode: z.number().int().optional(),
+      outputTail: boundedText(SANDBOX_LIMITS.activityOutputBytes, "output tail").optional(),
+    })
+    .nullable(),
+});
+export type ActivityStep = z.infer<typeof ActivityStep>;
+
+/** A turn's activity: at most 50 steps (`more` counts the rest), whether it still runs and what it does now. */
+export const BotTurnActivity = z.object({
+  eventId: Id,
+  steps: z.array(ActivityStep).max(SANDBOX_LIMITS.activityStepsMax),
+  more: z.number().int().nonnegative(),
+  running: z.boolean(),
+  current: z.string().max(80).nullable(),
+});
+export type BotTurnActivity = z.infer<typeof BotTurnActivity>;
+
+/** Streamed to the conversation's readers while the turn runs; the reply message then carries `activity`. */
+export const TurnActivityEvent = z.object({
+  type: z.literal("turn.activity"),
+  conversationId: Id,
+  threadRootMessageId: Id.nullable(),
+  agentId: Id,
+  activity: BotTurnActivity,
+});
+export type TurnActivityEvent = z.infer<typeof TurnActivityEvent>;
+
+// ---------------------------------------------------------------- sandbox packages (P-12; ADR-0011's model)
+
+export const SandboxPackageSource = z.enum(["npm", "pypi", "debian", "clawhub"]);
+export type SandboxPackageSource = z.infer<typeof SandboxPackageSource>;
+
+/** Lower-case hex sha256. */
+export const Sha256Hex = z.string().regex(/^[0-9a-f]{64}$/, "a lower-case sha256");
+export type Sha256Hex = z.infer<typeof Sha256Hex>;
+
+/**
+ * An exact package name of any source: an optional npm scope, then letters, digits and `._+-`, starting with a letter or
+ * digit (no spaces, paths, flags or shell syntax).
+ */
+export const SandboxPackageName = z
+  .string()
+  .min(1)
+  .max(214)
+  .regex(/^(@[a-z0-9][a-z0-9._-]*\/)?[A-Za-z0-9][A-Za-z0-9._+-]*$/, "a package name");
+export type SandboxPackageName = z.infer<typeof SandboxPackageName>;
+
+/** An exact version (npm, PEP 440 and Debian shapes), never a range or a wildcard. */
+export const SandboxPackageVersion = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9.+:~_-]*$/, "an exact version");
+export type SandboxPackageVersion = z.infer<typeof SandboxPackageVersion>;
+
+/** One resolved dependency with its integrity: npm `sha512-<base64>` or `sha256:<hex>` (PyPI, Debian, ClawHub). */
+export const PackageTreeEntry = z.object({
+  name: SandboxPackageName,
+  version: SandboxPackageVersion,
+  integrity: z
+    .string()
+    .regex(/^(sha512-[A-Za-z0-9+/]{86}==|sha256:[0-9a-f]{64})$/, "sha512 or sha256 integrity"),
+});
+export type PackageTreeEntry = z.infer<typeof PackageTreeEntry>;
+
+const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * The canonical text of a dependency tree: entries sorted by (name, version, integrity) by code unit, serialised as
+ * `[{name, version, integrity}, …]`. The API and sandboxd hash it with `node:crypto` sha256 into `treeSha256`;
+ * contracts take no crypto dependency.
+ */
+export function packageTreeCanonical(entries: readonly PackageTreeEntry[]): string {
+  const sorted = [...entries].sort(
+    (x, y) => cmp(x.name, y.name) || cmp(x.version, y.version) || cmp(x.integrity, y.integrity),
+  );
+  return JSON.stringify(sorted.map((e) => ({ name: e.name, version: e.version, integrity: e.integrity })));
+}
+
+export const SandboxPackageRisk = z.enum(["low", "medium", "high", "refuse"]);
+export type SandboxPackageRisk = z.infer<typeof SandboxPackageRisk>;
+
+/** `POST /api/v1/sandbox/packages/review`. */
+export const ReviewSandboxPackageRequest = z.strictObject({
+  source: SandboxPackageSource,
+  name: SandboxPackageName,
+  version: SandboxPackageVersion,
+});
+export type ReviewSandboxPackageRequest = z.infer<typeof ReviewSandboxPackageRequest>;
+
+/** The review sheet; `reviewToken` binds (source, name, version, sha256, treeSha256). */
+export const SandboxPackageReview = z.object({
+  source: SandboxPackageSource,
+  name: SandboxPackageName,
+  version: SandboxPackageVersion,
+  sha256: Sha256Hex,
+  sizeBytes: z.number().int().nonnegative(),
+  license: z.string().max(100).nullable(),
+  publisher: z.string().max(200).nullable(),
+  hasInstallScript: z.boolean(),
+  dependencyCount: z.number().int().min(0).max(SANDBOX_LIMITS.packageTreeMaxEntries),
+  treeSha256: Sha256Hex,
+  risk: SandboxPackageRisk,
+  riskReasons: z.array(z.string().max(200)).max(10),
+  reviewToken: z.string().min(1).max(2048),
+});
+export type SandboxPackageReview = z.infer<typeof SandboxPackageReview>;
+
+/** `POST /api/v1/sandbox/packages`: approve a review; a high risk needs the typed acknowledgement. */
+export const ApproveSandboxPackageRequest = z.strictObject({
+  reviewToken: z.string().min(1).max(2048),
+  acknowledge: z.literal("install anyway").optional(),
+});
+export type ApproveSandboxPackageRequest = z.infer<typeof ApproveSandboxPackageRequest>;
+
+/** `PATCH /api/v1/sandbox/packages/:id`: at least one change. */
+export const UpdateSandboxPackageRequest = z
+  .strictObject({ enabled: z.boolean().optional(), personalAllowed: z.boolean().optional() })
+  .refine((v) => v.enabled !== undefined || v.personalAllowed !== undefined, {
+    message: "Change at least one setting",
+  });
+export type UpdateSandboxPackageRequest = z.infer<typeof UpdateSandboxPackageRequest>;
+
+/** One approved package. `changedUpstream`: a re-resolution or an install found a different tree (refused). */
+export const SandboxPackage = z.object({
+  id: Id,
+  source: SandboxPackageSource,
+  name: SandboxPackageName,
+  version: SandboxPackageVersion,
+  sha256: Sha256Hex,
+  dependencyCount: z.number().int().min(0).max(SANDBOX_LIMITS.packageTreeMaxEntries),
+  treeSha256: Sha256Hex,
+  risk: SandboxPackageRisk,
+  enabled: z.boolean(),
+  personalAllowed: z.boolean(),
+  installedIn: z.number().int().nonnegative(),
+  installing: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  changedUpstream: z.boolean(),
+  newerVersion: z.string().max(128).nullable(),
+  approvedBy: PersonRef.nullable(),
+  approvedAt: IsoDateTime,
+});
+export type SandboxPackage = z.infer<typeof SandboxPackage>;
+
+export const SandboxPackageList = z.object({
+  items: z.array(SandboxPackage).max(200),
+  viewerCan: z.object({ manage: z.boolean() }),
+});
+export type SandboxPackageList = z.infer<typeof SandboxPackageList>;
