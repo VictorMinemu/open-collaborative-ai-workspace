@@ -5,11 +5,13 @@ import {
   type ApprovalDetail,
   type ApprovalOrigin,
   type ApprovalRequestStatus,
+  type ToolCallApprovalView,
   type WorkZoneProposalView as WorkZoneProposal,
 } from "@ocw/contracts";
 import {
   ArrowLeft,
   ArrowRight,
+  Check,
   CircleCheck,
   CircleSlash,
   CircleX,
@@ -53,6 +55,7 @@ import {
 import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { useDevices } from "@/lib/workzone-queries";
+import { shortToolName, ToolCallView, waitingFor } from "./tool-call-view";
 import {
   deviceStateOf,
   failedStartText,
@@ -61,11 +64,13 @@ import {
   WorkZoneProposalView,
 } from "./work-zone-proposal-view";
 
+export { approvalWho } from "./tool-call-view";
+
 /**
  * One request's review in `/approvals` (Phase 07.5, D-03, D-04, APPROVE-02, APPROVE-03, UI-SPEC Surface 2): the header
  * (title, status pill, "{bot} for {person}", origin, age, expiry), the kind's body, and a sticky footer with the
- * decision, the waiting line or the decision line. Dispatches on `view.type`: `work_zone_proposal` here, `tool_call`
- * added by 07.5-13. Every decision asks first and sends the hash of the view on screen (T-07.5-12-02); buttons follow
+ * decision, the waiting line or the decision line. Dispatches on `view.type`: `work_zone_proposal` (07.5-12) and
+ * `tool_call` (07.5-13, `ToolCallView`). Every decision asks first and sends the hash of the view on screen (T-07.5-12-02); buttons follow
  * the API's `viewerCan` and `startBlocked`, and the API decides again (T-07.5-12-03). A request the viewer may not
  * open is the shared not-found state (T-07.5-12-04).
  */
@@ -354,7 +359,20 @@ export function ApprovalReview({ id, stacked, onBack, inboxHref, announce }: App
       />
     );
   }
-  // `tool_call` (07.5-13) and any other kind: the title and the generic fields until its view exists.
+  if (detail.view.type === "tool_call") {
+    return (
+      <ToolCallReview
+        key={detail.id}
+        detail={detail}
+        view={detail.view}
+        stacked={stacked}
+        back={back}
+        refetch={refetch}
+        announce={announce}
+      />
+    );
+  }
+  // Any other kind: the title and the generic fields.
   return (
     <ReviewFrame
       detail={detail}
@@ -515,9 +533,9 @@ function FooterBar({ stacked, state, children }: { stacked: boolean; state: stri
   );
 }
 
-type Notice = { kind: "changed" } | { kind: "error"; text: string };
+export type Notice = { kind: "changed" } | { kind: "error"; text: string };
 
-function NoticeBox({ notice, onReload }: { notice: Notice; onReload: () => void }) {
+export function NoticeBox({ notice, onReload }: { notice: Notice; onReload: () => void }) {
   return (
     <div
       role="alert"
@@ -551,6 +569,17 @@ export function decisionError(err: unknown): string {
     }
   }
   return "Couldn't save the decision. Try again.";
+}
+
+/**
+ * The notice a failed decision leaves on the review (UI-SPEC "Decision errors"): a changed request asks for Reload and
+ * never decides by itself (07.2 R4); a request decided elsewhere, expired or no longer the viewer's says so; anything
+ * else is a toast (null).
+ */
+export function decisionNoticeOf(err: unknown): Notice | null {
+  if (isApiError(err, 409) && err.code === "approval_action_changed") return { kind: "changed" };
+  if (isApiError(err, 409) || isApiError(err, 403)) return { kind: "error", text: decisionError(err) };
+  return null;
 }
 
 // ---------------------------------------------------------------- Work Zone proposal
@@ -882,11 +911,14 @@ function DecisionText({
   text,
   at,
   tone,
+  after,
 }: {
   icon: LucideIcon;
   text: string;
   at: string | null;
   tone?: "done";
+  /** More of the same line ("Used at 10:33"), after the date. */
+  after?: string | null;
 }) {
   return (
     <p
@@ -910,6 +942,14 @@ function DecisionText({
           <time dateTime={at} className="text-muted-foreground">
             {decisionDate(at)}
           </time>
+        </>
+      ) : null}
+      {after ? (
+        <>
+          <span aria-hidden className="text-muted-foreground">
+            ·
+          </span>
+          <span className="text-muted-foreground">{after}</span>
         </>
       ) : null}
     </p>
@@ -997,6 +1037,365 @@ function ConfirmWorkZone({
           >
             {busy ? <Spinner /> : starting ? <Play /> : <X />}
             {starting ? "Start session" : "Dismiss"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------- action (tool call)
+
+const timeFmt = new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit" });
+/** "10:33 AM". */
+const timeOf = (iso: string) => timeFmt.format(new Date(iso));
+
+/** "It runs with your account." and its variants: whose credential the call uses (UI-SPEC Decision dialogs). */
+export function runsWithText(view: ToolCallApprovalView, meId: string | null): string {
+  const mine = meId !== null && view.requestedFor.id === meId;
+  const requester = view.requestedFor.displayName;
+  switch (view.source.account) {
+    case "requester":
+      return mine ? "It runs with your account." : `It runs with ${requester}'s account.`;
+    case "org":
+      return "It runs with the organization's account.";
+    default:
+      return mine ? "It runs for you." : `It runs for ${requester}.`;
+  }
+}
+
+function ToolCallReview({
+  detail,
+  view,
+  stacked,
+  back,
+  refetch,
+  announce,
+}: {
+  detail: ApprovalDetail;
+  view: ToolCallApprovalView;
+  stacked: boolean;
+  back: ReactNode;
+  refetch: () => Promise<unknown>;
+  announce: (text: string) => void;
+}) {
+  const me = useMe({ enabled: false }).data?.user.id ?? null;
+  const decide = useDecideApproval();
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const [asking, setAsking] = useState<"approved" | "denied" | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const decidedHere = useRef(false);
+  const status = detail.status;
+  const bot = view.agent.displayName;
+  const canDecide = detail.viewerCan.includes("decide");
+
+  // A decision made elsewhere (the card, another tab, another approver) arrives live: say so politely.
+  const lastStatus = useRef(status);
+  useEffect(() => {
+    if (lastStatus.current === status) return;
+    const was = lastStatus.current;
+    lastStatus.current = status;
+    if (decidedHere.current || was !== "pending") return;
+    const by = detail.decidedBy?.displayName ?? null;
+    if (status === "approved" || status === "applied") announce(by ? `Approved by ${by}.` : "Approved.");
+    else if (status === "denied") announce(by ? `Denied by ${by}.` : "Denied.");
+    else if (status === "expired") announce("No one decided within 24 hours. Nothing was run.");
+  }, [status, detail.decidedBy, announce]);
+
+  // Pending turns Expired and Approved turns Not used by the clock, not by an event.
+  const deadline = status === "pending" ? detail.expiresAt : status === "approved" ? view.useBy : null;
+  useEffect(() => {
+    if (!deadline) return;
+    const left = new Date(deadline).getTime() - Date.now();
+    if (left > DAY) return;
+    const t = window.setTimeout(() => void refetch(), Math.max(0, left) + 1000);
+    return () => window.clearTimeout(t);
+  }, [deadline, refetch]);
+
+  const confirm = async (outcome: "approved" | "denied", note: string) => {
+    decidedHere.current = true;
+    try {
+      const result = await decide.mutateAsync({
+        id: detail.id,
+        outcome,
+        actionHash: detail.actionHash,
+        ...(note.trim() ? { note: note.trim() } : {}),
+      });
+      setAsking(null);
+      setNotice(null);
+      const said =
+        result.status === "denied" ? `Denied. ${bot} won't run it.` : `Approved. ${bot} runs it once.`;
+      if (result.status === "denied") toast(said);
+      else toast.success(said);
+      announce(said);
+      await refetch();
+      window.setTimeout(() => headingRef.current?.focus(), 0);
+    } catch (err) {
+      setAsking(null);
+      decidedHere.current = false;
+      const n = decisionNoticeOf(err);
+      if (n) {
+        setNotice(n);
+        // Decided elsewhere, expired or no longer the viewer's: show the current state. A changed request waits
+        // for Reload, so the person reads the new values before deciding again.
+        if (n.kind === "error") void refetch();
+      } else {
+        toast.error(decisionError(err));
+      }
+    }
+  };
+
+  return (
+    <>
+      <ReviewFrame
+        detail={detail}
+        title={view.title}
+        back={back}
+        testId="tool-call-view"
+        headingRef={headingRef}
+        meta={
+          <MetaLine
+            detail={detail}
+            origin={view.audience.origin}
+            bot={bot}
+            originLong={view.audience.origin.kind === "dm" ? `DM with ${bot}` : null}
+          />
+        }
+        notice={
+          notice ? (
+            <NoticeBox
+              notice={notice}
+              onReload={() => {
+                setNotice(null);
+                void refetch();
+              }}
+            />
+          ) : null
+        }
+        footer={
+          <ToolCallFooter
+            detail={detail}
+            view={view}
+            stacked={stacked}
+            canDecide={canDecide}
+            meId={me}
+            onAsk={setAsking}
+          />
+        }
+      >
+        <ToolCallView view={view} meId={me} />
+      </ReviewFrame>
+      <ConfirmAction
+        outcome={asking}
+        view={view}
+        meId={me}
+        busy={decide.isPending}
+        onCancel={() => setAsking(null)}
+        onConfirm={(o, note) => void confirm(o, note)}
+      />
+    </>
+  );
+}
+
+function ToolCallFooter({
+  detail,
+  view,
+  stacked,
+  canDecide,
+  meId,
+  onAsk,
+}: {
+  detail: ApprovalDetail;
+  view: ToolCallApprovalView;
+  stacked: boolean;
+  canDecide: boolean;
+  meId: string | null;
+  onAsk: (o: "approved" | "denied") => void;
+}) {
+  const status = detail.status;
+  const bot = view.agent.displayName;
+  if (status === "pending" && canDecide) {
+    return (
+      <FooterBar stacked={stacked} state="decide">
+        <div className={cn("flex items-center gap-2", stacked ? "min-h-11" : "h-16 justify-end")}>
+          <Button
+            variant="outline"
+            data-testid="approval-deny"
+            className={cn("max-lg:h-11", stacked && "flex-1")}
+            onClick={() => onAsk("denied")}
+          >
+            <X /> Deny…
+          </Button>
+          <Button
+            data-testid="approval-approve"
+            className={cn("max-lg:h-11", stacked && "flex-1")}
+            onClick={() => onAsk("approved")}
+          >
+            <Check /> Approve…
+          </Button>
+        </div>
+      </FooterBar>
+    );
+  }
+
+  const by = detail.decidedBy?.displayName ?? "an approver";
+  const note = detail.decisionNote ? (
+    <p data-testid="approval-decision-note" className="break-words text-muted-foreground text-xs">
+      “{detail.decisionNote}”
+    </p>
+  ) : null;
+  let body: ReactNode;
+  if (status === "pending") {
+    const who = waitingFor(view);
+    body = (
+      <p data-testid="approval-waiting" className="flex items-start gap-1.5 text-muted-foreground text-sm">
+        <Hourglass aria-hidden className="mt-0.5 size-4 shrink-0" />
+        <span className="min-w-0">{who ? waitingLine(detail, meId, who) : `${view.approverLabel}.`}</span>
+      </p>
+    );
+  } else if (status === "approved") {
+    const useBy = view.useBy ?? detail.headline?.useBy ?? null;
+    const late = useBy !== null && new Date(useBy).getTime() < Date.now();
+    body = (
+      <div className="grid min-w-0 gap-1">
+        <DecisionText icon={CircleCheck} text={`Approved by ${by}`} at={detail.decidedAt} />
+        {useBy ? (
+          <p data-testid="approval-use-by" className="text-muted-foreground text-xs">
+            {late
+              ? `Approved, but ${bot} didn't run it before ${timeOf(useBy)}. Ask again if you still need it.`
+              : `${bot} runs it once, before ${timeOf(useBy)}.`}
+          </p>
+        ) : null}
+        {note}
+      </div>
+    );
+  } else if (status === "applied") {
+    body = (
+      <div className="grid min-w-0 gap-1">
+        <DecisionText
+          icon={CircleCheck}
+          tone="done"
+          text={`Approved by ${by}`}
+          at={detail.decidedAt}
+          after={view.usedAt ? `Used at ${timeOf(view.usedAt)}` : "Used"}
+        />
+        {note}
+      </div>
+    );
+  } else if (status === "denied") {
+    body = (
+      <div className="grid min-w-0 gap-1">
+        <DecisionText icon={CircleX} text={`Denied by ${by}`} at={detail.decidedAt} />
+        {note}
+      </div>
+    );
+  } else if (status === "failed") {
+    body = (
+      <p data-testid="approval-decision-line" data-status="failed" className="text-muted-foreground text-sm">
+        Approved, but it couldn't run. Ask {bot} again if you still need it.
+      </p>
+    );
+  } else {
+    body = (
+      <p
+        data-testid="approval-decision-line"
+        data-status="expired"
+        className="flex items-center gap-1.5 text-muted-foreground text-sm"
+      >
+        <Hourglass aria-hidden className="size-4 shrink-0" />
+        No one decided within 24 hours. Nothing was run.
+      </p>
+    );
+  }
+  return (
+    <FooterBar stacked={stacked} state={status === "pending" ? "waiting" : "decided"}>
+      <div className={cn("flex min-h-16 items-center py-3", stacked && "min-h-11 py-0")}>{body}</div>
+    </FooterBar>
+  );
+}
+
+function ConfirmAction({
+  outcome,
+  view,
+  meId,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  outcome: "approved" | "denied" | null;
+  view: ToolCallApprovalView;
+  meId: string | null;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: (outcome: "approved" | "denied", note: string) => void;
+}) {
+  const noteId = useId();
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const [note, setNote] = useState("");
+  const [shown, setShown] = useState<"approved" | "denied">("approved");
+  useEffect(() => {
+    if (outcome) {
+      setShown(outcome);
+      setNote("");
+    }
+  }, [outcome]);
+  const approving = shown === "approved";
+  const bot = view.agent.displayName;
+  const tool = shortToolName(view.tool);
+  const mine = meId !== null && view.requestedFor.id === meId;
+  const counted = note.length >= 200;
+  return (
+    <Dialog open={outcome !== null} onOpenChange={(o) => !busy && !o && onCancel()}>
+      <DialogContent data-testid="approval-confirm" data-outcome={shown} initialFocus={cancelRef}>
+        <DialogHeader>
+          <DialogTitle>{approving ? "Approve this action?" : "Deny this action?"}</DialogTitle>
+          <DialogDescription>
+            {approving
+              ? `${bot} can run ${tool} once, with exactly these values, within 15 minutes. ${runsWithText(view, meId)}`
+              : mine
+                ? `${bot} won't run it.`
+                : `${bot} won't run it. ${view.requestedFor.displayName} sees that you denied it.`}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-2">
+          <Label htmlFor={noteId}>Note (optional)</Label>
+          <Textarea
+            id={noteId}
+            data-testid="approval-note-input"
+            value={note}
+            maxLength={APPROVAL_NOTE_MAX}
+            rows={3}
+            className="min-h-20"
+            placeholder={approving ? undefined : "Tell them why"}
+            aria-describedby={counted ? `${noteId}-count` : undefined}
+            disabled={busy}
+            onChange={(e) => setNote(e.target.value)}
+          />
+          {counted ? (
+            <p id={`${noteId}-count`} className="justify-self-end text-muted-foreground text-xs tabular-nums">
+              {note.length}/{APPROVAL_NOTE_MAX}
+            </p>
+          ) : null}
+        </div>
+        <DialogFooter>
+          <Button
+            ref={cancelRef}
+            variant="outline"
+            className="max-lg:h-11"
+            disabled={busy}
+            onClick={onCancel}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant={approving ? "default" : "destructive"}
+            className="max-lg:h-11"
+            disabled={busy}
+            data-testid="approval-confirm-submit"
+            onClick={() => onConfirm(shown, note)}
+          >
+            {busy ? <Spinner /> : approving ? <Check /> : <X />}
+            {approving ? "Approve" : "Deny"}
           </Button>
         </DialogFooter>
       </DialogContent>
