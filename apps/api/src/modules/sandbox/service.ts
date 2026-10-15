@@ -18,8 +18,10 @@ import {
   tenantOf,
 } from "@ocw/db";
 import { and, eq, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
+import type { Core } from "../../core";
 import type { AuditService } from "../audit";
 import { agentResource, type PermissionService } from "../organization";
+import type { SandboxdClient } from "./client";
 
 /**
  * The Sandbox domain (07.8-05; D-09, D-12; P-04, P-05): the organization's switch, kill state and caps, read from
@@ -160,22 +162,34 @@ export async function sandboxAvailable(
 const OCCUPYING: SandboxState[] = ["starting", "running"];
 
 /**
- * The organization cap on running sandboxes (`max_sandboxes`) or browsers (`max_browsers`), decided under a
- * transaction-scoped advisory lock per organization, so two first calls of two bots never both take the last slot.
- * A bot whose container is already starting or running needs no slot. Otherwise, unless `dryRun`, its row becomes
- * `starting` (the slot is taken until the API records the outcome of `ensure`). `ensure` tells the caller to ask
- * sandboxd for the container before using it.
+ * The organization's caps (D-09), decided under a transaction-scoped advisory lock per organization, so two first calls
+ * of two bots never both take the last slot:
+ * - the daily CPU minutes (`cpu_minutes_per_day`, UTC day): at or over it, every call answers `cpu_budget`, a running
+ *   bot's too (07.8-11);
+ * - a bot whose container is already starting or running needs no slot;
+ * - the total disk (`disk_total_mb`, the mirrored `sbx` disk): at or over it, a new sandbox answers `disk_full`
+ *   (07.8-11);
+ * - the running sandboxes (`max_sandboxes`) or browsers (`max_browsers`): `cap_reached`.
+ * A `starting` row older than five minutes is an orphan (the API process died between the reservation and the outcome
+ * of `ensure`): it is released to `unavailable` first, so it never holds a slot for good (WINDOWS #241). Otherwise,
+ * unless `dryRun`, the bot's row becomes `starting`. `ensure` tells the caller to ask sandboxd for the container first.
  */
 export async function reserveSandbox(
   tx: Tx,
   p: { agentId: string },
   container: SandboxContainer,
   opts: { dryRun?: boolean } = {},
-): Promise<{ ok: true; ensure: boolean } | { ok: false; reason: "cap_reached" }> {
+): Promise<
+  { ok: true; ensure: boolean } | { ok: false; reason: "cap_reached" | "cpu_budget" | "disk_full" }
+> {
   const { organizationId } = tenantOf(tx);
   await tx.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${`ocw.sandbox.cap:${container}:${organizationId}`}, 0))`,
   );
+  await releaseStaleReservations(tx, container);
+  const policy = await policyRow(tx);
+  const cpuCapMs = (policy?.cpuMinutesPerDay ?? DEFAULT_SANDBOX_SETTINGS.limits.cpuMinutesPerDay) * 60_000;
+  if ((await cpuMsToday(tx)) >= cpuCapMs) return { ok: false, reason: "cpu_budget" };
   const [own] = await tx
     .select({ state: botSandboxes.state })
     .from(botSandboxes)
@@ -183,7 +197,10 @@ export async function reserveSandbox(
     .limit(1);
   if (own?.state === "running") return { ok: true, ensure: false };
   if (own?.state === "starting") return { ok: true, ensure: true };
-  const policy = await policyRow(tx);
+  if (container === "sbx") {
+    const diskCap = (policy?.diskTotalMb ?? DEFAULT_SANDBOX_SETTINGS.limits.diskTotalMb) * MIB;
+    if ((await diskBytesTotal(tx)) >= diskCap) return { ok: false, reason: "disk_full" };
+  }
   const limit =
     container === "sbx"
       ? (policy?.maxSandboxes ?? DEFAULT_SANDBOX_SETTINGS.limits.maxSandboxes)
@@ -201,6 +218,23 @@ export async function reserveSandbox(
   if ((used?.n ?? 0) >= limit) return { ok: false, reason: "cap_reached" };
   if (!opts.dryRun) await markState(tx, { agentId: p.agentId, kind: container, state: "starting" });
   return { ok: true, ensure: true };
+}
+
+/** How long a reservation may wait for the outcome of `ensure` (the API's own deadlines stay well under it). */
+const STALE_RESERVATION = sql.raw("interval '5 minutes'");
+
+/** Releases orphan `starting` rows of this container kind (the organization's, under the cap lock). */
+async function releaseStaleReservations(tx: Tx, container: SandboxContainer): Promise<void> {
+  await tx
+    .update(botSandboxes)
+    .set({ state: "unavailable", stopReason: null, updatedAt: new Date().toISOString() })
+    .where(
+      and(
+        eq(botSandboxes.kind, container),
+        eq(botSandboxes.state, "starting"),
+        sql`${botSandboxes.updatedAt} < now() - ${STALE_RESERVATION}`,
+      ),
+    );
 }
 
 /** Records what sandboxd reported (or what the API decided) for one bot's container. */
@@ -377,4 +411,75 @@ export async function lifecycleRefusal(
   if (policy.killedAt) return "killed";
   const bot = await loadSandboxBot(tx, agentId);
   return bot?.switches.sandbox ? null : "bot_off";
+}
+
+// ---------------------------------------------------------------- purge of a deleted bot (07.8-11; D-01, R11)
+
+const PURGE_TIMEOUT_MS = 60_000;
+
+/**
+ * In the deletion's transaction: the bot's containers become a pending purge (`absent`, reason `user`) until sandboxd
+ * confirms; then the rows go. A deleted bot with rows left is what the events consumer retries.
+ */
+export async function markPurgePending(tx: Tx, agentId: string): Promise<void> {
+  const now = new Date().toISOString();
+  const set = { state: "absent" as const, stopReason: "user" as const, updatedAt: now };
+  await tx
+    .insert(botSandboxes)
+    .values({ organizationId: tenantOf(tx).organizationId, agentId, kind: "sbx", ...set })
+    .onConflictDoUpdate({
+      target: [botSandboxes.organizationId, botSandboxes.agentId, botSandboxes.kind],
+      set,
+    });
+  await tx
+    .update(botSandboxes)
+    .set(set)
+    .where(and(eq(botSandboxes.agentId, agentId), eq(botSandboxes.kind, "brw")));
+}
+
+/**
+ * Asks sandboxd to remove a deleted bot's containers, volumes and network (by label); on success its rows go. A failure
+ * is logged with ids only and left pending. Returns whether the purge was confirmed.
+ */
+export async function purgeBot(
+  core: Pick<Core, "db" | "log">,
+  client: SandboxdClient,
+  organizationId: string,
+  agentId: string,
+): Promise<boolean> {
+  try {
+    await client.call(
+      "purge",
+      { target: { orgId: organizationId, agentId } },
+      { timeoutMs: PURGE_TIMEOUT_MS },
+    );
+  } catch (err) {
+    core.log.warn(
+      { organizationId, agentId, error: err instanceof Error ? err.name : "unknown" },
+      "sandboxd did not purge a deleted bot's sandbox; the events consumer retries it",
+    );
+    return false;
+  }
+  await core.db.withTenant({ organizationId }, (tx) =>
+    tx.delete(botSandboxes).where(eq(botSandboxes.agentId, agentId)),
+  );
+  return true;
+}
+
+/** Retries the pending purges of one organization's deleted bots; returns how many are still pending. */
+export async function retryPendingPurges(
+  core: Pick<Core, "db" | "log">,
+  client: SandboxdClient,
+  organizationId: string,
+): Promise<number> {
+  const pending = await core.db.withTenant({ organizationId }, (tx) =>
+    tx
+      .selectDistinct({ agentId: botSandboxes.agentId })
+      .from(botSandboxes)
+      .innerJoin(agents, eq(agents.id, botSandboxes.agentId))
+      .where(isNotNull(agents.deletedAt)),
+  );
+  let left = 0;
+  for (const p of pending) if (!(await purgeBot(core, client, organizationId, p.agentId))) left++;
+  return left;
 }

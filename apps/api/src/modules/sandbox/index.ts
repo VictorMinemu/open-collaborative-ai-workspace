@@ -1,14 +1,18 @@
+import { type Tx, tenantOf } from "@ocw/db";
 import type { ApiModule, Core } from "../../core";
 import type { AuditService } from "../audit";
 import { createPermissionService, type PermissionService } from "../organization";
 import { createSandboxdClient, type SandboxdClient } from "./client";
+import { createSandboxEventsConsumer, type SandboxEventsConsumer } from "./events";
 import { registerSandboxPeopleRoutes } from "./routes";
 import {
   type Availability,
   type ConfinedKind,
   killSandboxes,
   loadSandboxPolicy,
+  markPurgePending,
   markState,
+  purgeBot,
   reserveSandbox,
   resumeSandboxes,
   sandboxAvailable,
@@ -23,6 +27,13 @@ export {
   SandboxdUnavailableError,
 } from "./client";
 export {
+  createSandboxEventsConsumer,
+  SANDBOX_EVENTS_LOCK_KEY,
+  type SandboxEventHandler,
+  type SandboxEventsConsumer,
+  type SandboxEventType,
+} from "./events";
+export {
   type Availability,
   type AvailabilityRefusal,
   type ConfinedKind,
@@ -33,6 +44,7 @@ export {
   sandboxAvailable,
   touchSandbox,
 } from "./service";
+export { pushPolicy } from "./settings";
 
 /**
  * The Sandbox module (07.8-05; SBX-02, SBX-05; D-02 (b), D-09, D-11, D-12): the bots' sandboxes as a Control Plane
@@ -60,6 +72,11 @@ export interface SandboxService {
   touch: typeof touchSandbox;
   kill(tx: Parameters<typeof killSandboxes>[0], actor: { userId: string }): Promise<{ changed: boolean }>;
   resume(tx: Parameters<typeof resumeSandboxes>[0], actor: { userId: string }): Promise<{ changed: boolean }>;
+  /**
+   * 07.8-11 (D-01, R11): called in a bot deletion's transaction. The bot's containers become a pending purge; after the
+   * commit sandboxd is asked to remove them (and the workspace); a failure stays pending and the events consumer retries.
+   */
+  onBotDeleted(tx: Tx, agentId: string): Promise<void>;
 }
 
 export interface SandboxModule {
@@ -67,6 +84,11 @@ export interface SandboxModule {
   service: SandboxService;
   /** null when `OCW_SANDBOX_URL` is not configured. */
   client: SandboxdClient | null;
+  /**
+   * The sandboxd events consumer (07.8-11), null without sandboxd. Started with the module (not under NODE_ENV=test,
+   * where tests drive their own consumers); other modules register handlers with `onEvent` (07.8-14: `browser`).
+   */
+  events: SandboxEventsConsumer | null;
 }
 
 export function createSandboxModule(
@@ -81,6 +103,9 @@ export function createSandboxModule(
       : core.env.OCW_SANDBOX_URL && core.env.OCW_SANDBOX_TOKEN
         ? createSandboxdClient({ url: core.env.OCW_SANDBOX_URL, token: core.env.OCW_SANDBOX_TOKEN })
         : null;
+  /** Organizations with a purge that failed in this process; the consumer retries them on every pass. */
+  const pendingPurges = new Set<string>();
+  const events = client ? createSandboxEventsConsumer(core, { client, pendingPurges }) : null;
   const service: SandboxService = {
     configured: client !== null,
     loadPolicy: loadSandboxPolicy,
@@ -90,14 +115,30 @@ export function createSandboxModule(
     touch: touchSandbox,
     kill: (tx, actor) => killSandboxes(tx, audit, actor),
     resume: (tx, actor) => resumeSandboxes(tx, audit, actor),
+    async onBotDeleted(tx, agentId) {
+      if (!client) return;
+      await markPurgePending(tx, agentId);
+      const { organizationId, afterCommit } = tenantOf(tx);
+      // Not awaited: the deletion answers at once; sandboxd's answer only decides whether the purge stays pending.
+      afterCommit(() => {
+        void purgeBot(core, client, organizationId, agentId).then((done) => {
+          if (!done) pendingPurges.add(organizationId);
+        });
+      });
+    },
   };
   return {
     service,
     client,
+    events,
     module: {
       name: "sandbox",
       register(app) {
         registerSandboxPeopleRoutes(app, core, { perms, client });
+        if (events && core.env.NODE_ENV !== "test") events.start();
+      },
+      async close() {
+        await events?.stop();
       },
     },
   };
