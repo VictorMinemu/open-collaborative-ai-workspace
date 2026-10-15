@@ -33,7 +33,7 @@ const box = (b) =>
   `position:absolute;left:${b.x}px;top:${b.y}px;width:${b.width}px;height:${b.height}px;box-sizing:border-box`;
 const page = (title, body, script = "") =>
   `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">` +
-  `<title>${title}</title><style>body{font:16px sans-serif;margin:0;background:#fff;color:#111}` +
+  `<title>${title}</title><style>body{font:16px sans-serif;margin:0;padding:8px 40px;background:#fff;color:#111}` +
   `label{position:absolute;font-size:12px;color:#555}input{font:16px monospace;padding:4px 8px}</style></head>` +
   `<body>${body}${script ? `<script>${script}</script>` : ""}</body></html>`;
 

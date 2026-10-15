@@ -12,7 +12,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { lint as lintCodeowners } from "./codeowners.mjs";
-import { checkFields, checkGraph, evaluate } from "./licenses.mjs";
+import { checkFields, checkGraph, collectLockfile, evaluate, NPM_LOCKFILES } from "./licenses.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const RUN = path.join(HERE, "run.mjs");
@@ -230,6 +230,34 @@ describe("guard: dependency licenses", () => {
     );
     // A look-alike name is not covered.
     assert.equal(checkGraph([entry("@anthropic-ai/claude-agent-sdkx", "Unknown")], policy).length, 1);
+  });
+
+  it("reads the browser agent's npm lockfile; an unknown license there fails naming it", () => {
+    const rel = "infra/sandbox/browser/package-lock.json";
+    assert.ok(NPM_LOCKFILES.includes(rel));
+    const real = collectLockfile(path.join(HERE, "..", ".."), rel);
+    assert.deepEqual(
+      real.map((e) => `${e.name}@${e.version} ${e.license}`),
+      ["playwright-core@1.63.0 Apache-2.0"],
+    );
+    assert.deepEqual(checkGraph(real, policy), []);
+    put(
+      rel,
+      JSON.stringify({
+        lockfileVersion: 3,
+        packages: {
+          "": { name: "ocw-sandbox-browser", license: "AGPL-3.0-only" },
+          "node_modules/playwright-core": { version: "1.63.0", license: "Apache-2.0" },
+          "node_modules/odd-codec": { version: "2.0.0", license: "SEE LICENSE IN EULA.txt" },
+        },
+      }),
+    );
+    const failures = checkGraph(collectLockfile(root, rel), policy);
+    assert.equal(failures.length, 1);
+    assert.match(
+      failures[0],
+      /odd-codec@2\.0\.0 \(SEE LICENSE IN EULA\.txt\) \[infra\/sandbox\/browser\/package-lock\.json\]/,
+    );
   });
 
   it("a clarification applies only to the pinned version", () => {
