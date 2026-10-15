@@ -24,7 +24,8 @@ import type { Core } from "../../core";
 // Types only: the memory service is injected by the caller (a value import would be a module cycle).
 import { type EffectiveVaultItem, effectiveVaultItems, unitAudienceAllows } from "../keychain";
 import type { MemoryAudience, MemoryService } from "../memory";
-import { agentResource, type PermissionService, type PrincipalRef } from "../organization";
+import { agentResource, orgResource, type PermissionService, type PrincipalRef } from "../organization";
+import { approvalModesFor } from "../tool-approval";
 import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
 import { loadAllGrants, loadCatalog, loadGrants } from "./catalog";
 import { loadTurnMemory } from "./memory";
@@ -108,6 +109,16 @@ const LIST_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: false
  * a direct write after the list needs a connector trusted for chained calls, as every MCP write does (Pitfall 6).
  */
 const LIST_CONNECTORS_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: false };
+/**
+ * `ocw_work_zone_projects` (07.5-08, D-03): the API's own list of the human's projects (names and ids only), trusted and
+ * read-only, so a tainted turn may still list.
+ */
+const WORK_ZONE_PROJECTS_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: false };
+/**
+ * `ocw_start_work_zone` (07.5-08, D-03, APPROVE-04): trusted answer, always side-effecting: a turn that read untrusted
+ * content can never propose a session (the proposal route claims it as side-effecting whatever the turn says).
+ */
+const START_WORK_ZONE_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
 
 /**
  * Whether a catalog source acts with the asking member's own account (07.4 D-01): a per-member MCP connector. Its tools
@@ -152,6 +163,8 @@ function assemble(
   board = false,
   /** At least one keychain item is usable on this turn (07.4-11); in the cell-wide view: the bot holds a key grant. */
   keys = false,
+  /** The turn's human holds `work_session.create` (07.5-08); never in the cell-wide view (no human). */
+  workZone = false,
 ): TurnTools {
   const tools: string[] = [];
   const toolFlags: Record<string, TurnToolFlags> = {};
@@ -178,6 +191,12 @@ function assemble(
   }
   // Agent Cards (06-14, P-11): every delivered turn, wherever the bot may reply (the card routes re-check posting).
   add(BUILTIN_TOOLS.agentCard, CARD_FLAGS);
+  // Work Zone proposals (07.5-08, D-03, P-08): only for a human who may start sessions (07.3's Work Zone module deny
+  // removes them); the proposal routes re-decide everything, and Start runs the human start's checks.
+  if (workZone) {
+    add(BUILTIN_TOOLS.workZoneProjects, WORK_ZONE_PROJECTS_FLAGS);
+    add(BUILTIN_TOOLS.startWorkZone, START_WORK_ZONE_FLAGS);
+  }
   // Board cards (07.1-10, D-07): only on a board channel's turns; every other turn keeps exactly its tool list.
   if (board && conversationKind === "channel") add(BUILTIN_TOOLS.boardCard, BOARD_FLAGS);
   // Per-member connectors and keys (07.4-11, D-04, D-07, C-01). A turn carries the per-member tools under their logical
@@ -258,6 +277,10 @@ async function computeTurn(
   const resource = agentResource(facts, p.humanUserId);
   const as: PrincipalRef = { kind: "agent", agentId: row.id, onBehalfOfUserId: p.humanUserId };
   const internet = (await perms.decide(tx, as, "bot.internet", resource)).allowed;
+  // 07.5-08: the human may start Work Zone sessions (the grain a proposal's Start needs), decided by the resolver.
+  const workZone = (
+    await perms.decide(tx, { kind: "user", userId: p.humanUserId }, "work_session.create", orgResource())
+  ).allowed;
   const effective = effectiveCapabilities({
     scope: row.scope,
     caps,
@@ -389,13 +412,30 @@ async function computeTurn(
       name: key.name.slice(0, 80),
     });
   }
+  const assembled = assemble(
+    effective,
+    p.conversationKind,
+    catalog,
+    allowed,
+    p.board === true,
+    usable.length > 0,
+    workZone,
+  );
+  // Per-tool approvals (07.5-11, D-01, D-04, APPROVE-01): every offered tool with an effective `always` or
+  // `when_tainted` rule for (bot, human) is flagged, so the gate sends exactly those calls' arguments. One policy load
+  // per turn computation; delivery and the call-time re-decision share it. The cell-wide view never calls this.
+  const modes = await approvalModesFor(tx, { agentId: row.id, userId: p.humanUserId }, assembled.tools);
+  for (const [tool, mode] of modes) {
+    const flags = assembled.toolFlags[tool];
+    if (flags) assembled.toolFlags[tool] = { ...flags, approval: mode };
+  }
   return {
     effective,
     botName: row.name,
     dailyLimit: effectiveDailyLimit(row.scope, caps, policy),
     withheld,
     keys: { usable, memberAccount, unitAudience },
-    ...assemble(effective, p.conversationKind, catalog, allowed, p.board === true, usable.length > 0),
+    ...assembled,
   };
 }
 

@@ -12,6 +12,7 @@ import { errorMessage } from "@/lib/api";
 import { useRuntimeConfig } from "@/lib/config";
 import { cn, relativeTime } from "@/lib/utils";
 import { useUpdatePrompt } from "@/lib/workzone-queries";
+import { ProposedByLine } from "./proposed-by-line";
 
 /** The shared queue: anyone can edit, remove or reorder queued prompts (drag, or the arrow buttons). */
 export function QueuePanel({ sessionId, prompts }: { sessionId: string; prompts: WorkPrompt[] }) {
@@ -112,6 +113,7 @@ function PromptMeta({ p }: { p: WorkPrompt }) {
     <span className="flex items-center gap-1.5 text-muted-foreground text-xs">
       <UserAvatar name={name} seed={p.authorUserId} className="size-4 text-[8px]" />
       <span className="truncate font-medium text-foreground/80">{name}</span>
+      {p.proposedBy ? <ProposedByLine agent={p.proposedBy} /> : null}
       <span>· {relativeTime(p.createdAt)}</span>
     </span>
   );

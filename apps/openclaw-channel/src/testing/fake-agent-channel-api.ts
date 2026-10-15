@@ -12,7 +12,13 @@
  *   POST /agent-channel/v1/agents/:id/status
  *   POST /agent-channel/v1/runtime         records the report (`runtimeReports`)
  *   POST /agent-channel/v1/provider-auth  (status per report: `authResponder`, default 200)
- *   POST /agent-channel/v1/tool-calls     records and allows (denies tools listed in `denyTools`)
+ *   POST /agent-channel/v1/tool-calls     records the full body and allows (denies tools listed in `denyTools`); a tool
+ *                                          set through POST /__test/tool-approval {tool, reply, waitingFor?, requesterName?}
+ *                                          (`toolApprovals`) answers that reply instead: "allow" / "grant" allow it, any
+ *                                          other reply is the refusal code, with `approval` {id, created, waitingFor,
+ *                                          requesterName} for approval_required / approval_pending (07.5-04). The same
+ *                                          control refuses /connectors/call for the logical tool `<connector>__<tool>`
+ *                                          and /http-requests for `ocw_http_request` (409, `details.approval` likewise)
  *   POST /agent-channel/v1/tool-calls/:id/result  records the outcome
  *   POST /agent-channel/v1/memories       records the note (dedupes exact text per event's bot; 409 for
  *                                          events listed in `refuseMemoryEvents`)
@@ -50,6 +56,14 @@
  *                                          model) or replace the call's content. The upstream credential the real API
  *                                          would use (`connectorToken`) never leaves the fake: not in /cell, not in an
  *                                          answer.
+ *   POST /agent-channel/v1/work-zone/projects   records the body (`workZone.projectLists`) and answers `workZone.projects`
+ *                                          (default: billing-api on MacBook Pro, online, Claude Code ready)
+ *   POST /agent-channel/v1/work-zone/proposals  records the body (`workZone.proposals`) and answers `{approvalId, created}`
+ *                                          (the same approval for the same event, project, device, prompt and runtime,
+ *                                          `created: false` then), or 200 `{refused: workZone.refused}`; 404 unknown_turn
+ *                                          when that is the refusal, like the real API. Both: 400 for any key beyond the
+ *                                          contract's (a mode, a model, a user id). POST /__test/work-zone
+ *                                          {refused?, projects?} sets the knobs ({} resets them)
  *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
  *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
  *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
@@ -76,6 +90,7 @@ import type {
   AgentChannelToolCallRequest,
   AgentChannelToolCallResult,
   AgentChannelTyping,
+  AgentChannelWorkZoneProjectsResponse,
   AgentMentionEvent,
   CellAgent,
   CellApprovedPlugin,
@@ -131,8 +146,52 @@ export type StoredBoardCard = AgentChannelBoardCreateCard & {
 export type StoredBoardPatch = AgentChannelBoardPatchCard & { messageId: string; status: number };
 /** Every POST /connectors/call body, as received (never a user id: the API reads the turn's human). */
 export type StoredConnectorCall = Record<string, unknown> & { receivedAt?: number; answeredAt?: number };
+/**
+ * 07.5-04: what the fake API answers a tool's calls (`POST /__test/tool-approval`). "allow" and "grant" (a used grant)
+ * allow the call; any other reply is the refusal code.
+ */
+export type ToolApprovalControl = {
+  reply:
+    | "approval_required"
+    | "approval_pending"
+    | "approval_denied"
+    | "approval_used"
+    | "arguments_too_large"
+    | "arguments_invalid"
+    | "too_many_pending"
+    | "policy_changed"
+    | "grant"
+    | "allow";
+  waitingFor?: string;
+  requesterName?: string;
+};
 /** Test knobs of the connector routes (`POST /__test/connectors` replaces them). */
 export type ConnectorControl = { slowMs?: number; refusal?: string; result?: string };
+/** The fake Work Zone: what the routes recorded and answer (07.5-10). */
+export type FakeWorkZone = {
+  /** Every POST /work-zone/projects body, in order. */
+  projectLists: Array<Record<string, unknown>>;
+  /** Every POST /work-zone/proposals body, in order (refused ones included). */
+  proposals: Array<Record<string, unknown>>;
+  /** What POST /work-zone/projects answers. */
+  projects: AgentChannelWorkZoneProjectsResponse["projects"];
+  /** When set, every proposal is refused with this code. */
+  refused?: string;
+};
+export const FAKE_WORK_ZONE_PROJECT = "0199a6f0-0000-7000-8000-00000000b111";
+export const FAKE_WORK_ZONE_DEVICE = "0199a6f0-0000-7000-8000-00000000d111";
+const fakeWorkZoneProjects = (): AgentChannelWorkZoneProjectsResponse["projects"] => [
+  {
+    projectId: FAKE_WORK_ZONE_PROJECT,
+    name: "billing-api",
+    device: { id: FAKE_WORK_ZONE_DEVICE, name: "MacBook Pro", online: true },
+    runtimes: [{ id: "claude-code", label: "Claude Code", available: true }],
+  },
+];
+const WORK_ZONE_BODY_KEYS = {
+  projects: ["eventId", "agentId"],
+  proposals: ["eventId", "agentId", "projectId", "deviceId", "prompt", "runtime"],
+} as const;
 /** In every refusal body of the connector routes: a plugin must never relay it to the model. */
 export const FAKE_ERROR_CANARY = "fake-api-error-body-canary";
 export type VerifyCall = {
@@ -157,6 +216,9 @@ export type FakeAgentChannelApi = {
   webSearchProvider: string | undefined;
   /** Tools whose `/tool-calls` the fake API denies (`denied_by_test`). */
   denyTools: Set<string>;
+  /** Tool (or logical connector tool) → the approval reply its calls get (07.5-04). */
+  toolApprovals: Map<string, ToolApprovalControl>;
+  /** Every POST /tool-calls body as received (the flagged tools' `arguments` included). */
   toolCalls: StoredToolCall[];
   toolResults: StoredToolResult[];
   /** Every POST /memories (also refused ones: `memoryId` "" and `created` false). */
@@ -199,6 +261,8 @@ export type FakeAgentChannelApi = {
   httpRequests: Array<Record<string, unknown>>;
   /** The knobs of the connector routes. */
   connectorControl: ConnectorControl;
+  /** The Work Zone proposal routes' records and knobs (07.5-10). */
+  workZone: FakeWorkZone;
   /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
   mcpServers: CellMcpServer[];
   /** Every POST /mcp/probe-results, in order. */
@@ -302,6 +366,30 @@ const CONNECTOR_BODY_KEYS = {
   http: ["eventId", "agentId", "handle", "method", "url", "headers", "body"],
 } as const;
 
+/** The refusal (and the approval it waits on) a tool's approval control answers; undefined = allowed. */
+function approvalRefusalOf(control: ToolApprovalControl | undefined):
+  | {
+      code: string;
+      approval?: { id: string; created: boolean; waitingFor: string; requesterName: string };
+    }
+  | undefined {
+  if (!control || control.reply === "allow" || control.reply === "grant") return undefined;
+  const waits = control.reply === "approval_required" || control.reply === "approval_pending";
+  return {
+    code: control.reply,
+    ...(waits
+      ? {
+          approval: {
+            id: randomUUID(),
+            created: control.reply === "approval_required",
+            waitingFor: control.waitingFor ?? "a lead of Sales",
+            requesterName: control.requesterName ?? "Ana Pérez",
+          },
+        }
+      : {}),
+  };
+}
+
 /** The status the real API answers a refusal code with. */
 function refusalStatus(code: string): number {
   if (code === "unknown_turn") return 404;
@@ -358,6 +446,8 @@ export async function startFakeAgentChannelApi(
   const sockets = new Set<WebSocket>();
   let failures = { n: 0, status: 503 };
   const byKey = new Map<string, StoredMessage>();
+  /** Work Zone proposal → approval id (a retry of the same proposal gets the same approval). */
+  const workZoneApprovals = new Map<string, string>();
   /** Current flow per plugin row (set when a plugin command is published), as `cell_plugins.flow_id`. */
   const pluginFlows = new Map<string, string>();
 
@@ -377,6 +467,7 @@ export async function startFakeAgentChannelApi(
     authFailures: 0,
     webSearchProvider: opts.webSearchProvider,
     denyTools: new Set(opts.denyTools ?? []),
+    toolApprovals: new Map<string, ToolApprovalControl>(),
     toolCalls: [] as StoredToolCall[],
     toolResults: [] as StoredToolResult[],
     memories: [] as StoredMemory[],
@@ -399,6 +490,7 @@ export async function startFakeAgentChannelApi(
     connectorLists: [] as Array<Record<string, unknown>>,
     httpRequests: [] as Array<Record<string, unknown>>,
     connectorControl: {} as ConnectorControl,
+    workZone: { projectLists: [], proposals: [], projects: fakeWorkZoneProjects() } as FakeWorkZone,
     // Never serialized: not in /cell, not in an answer, not in the state dump.
     connectorToken: opts.connectorToken ?? "fake-connector-token",
     mcpServers: opts.mcpServers ?? ([] as CellMcpServer[]),
@@ -470,6 +562,32 @@ export async function startFakeAgentChannelApi(
           };
           return json(res, 200, { ok: true, control: state.connectorControl });
         }
+        if (req.method === "POST" && url.pathname === "/__test/work-zone") {
+          // Replace the Work Zone knobs ({} resets them; the records stay).
+          const body = ((await readJson(req)) ?? {}) as {
+            refused?: unknown;
+            projects?: AgentChannelWorkZoneProjectsResponse["projects"];
+          };
+          state.workZone.projects = Array.isArray(body.projects) ? body.projects : fakeWorkZoneProjects();
+          if (typeof body.refused === "string") state.workZone.refused = body.refused;
+          else delete state.workZone.refused;
+          return json(res, 200, { ok: true });
+        }
+        if (req.method === "POST" && url.pathname === "/__test/tool-approval") {
+          // One tool's approval reply; no reply clears it.
+          const body = ((await readJson(req)) ?? {}) as Partial<ToolApprovalControl> & { tool?: string };
+          if (typeof body.tool !== "string" || !body.tool)
+            return json(res, 400, { error: { code: "bad_request" } });
+          if (typeof body.reply !== "string") state.toolApprovals.delete(body.tool);
+          else {
+            state.toolApprovals.set(body.tool, {
+              reply: body.reply,
+              ...(typeof body.waitingFor === "string" ? { waitingFor: body.waitingFor } : {}),
+              ...(typeof body.requesterName === "string" ? { requesterName: body.requesterName } : {}),
+            });
+          }
+          return json(res, 200, { ok: true });
+        }
         if (req.method === "POST" && url.pathname === "/__test/end-turn") {
           api.endTurn(String(((await readJson(req)) as { eventId?: string }).eventId ?? ""));
           return json(res, 200, { ok: true });
@@ -502,6 +620,7 @@ export async function startFakeAgentChannelApi(
             connectorCalls: state.connectorCalls,
             connectorLists: state.connectorLists,
             httpRequests: state.httpRequests,
+            workZone: state.workZone,
             mcpProbes: state.mcpProbes,
             cellReads: state.cellReads,
             plugins: state.plugins,
@@ -630,13 +749,15 @@ export async function startFakeAgentChannelApi(
       }
       if (req.method === "POST" && route === "/tool-calls") {
         const body = (await readJson(req)) as AgentChannelToolCallRequest;
-        const allowed = !state.denyTools.has(body.tool);
+        const refusal = approvalRefusalOf(state.toolApprovals.get(body.tool));
+        const allowed = !state.denyTools.has(body.tool) && !refusal;
         const stored: StoredToolCall = { ...body, callId: randomUUID(), allowed };
         state.toolCalls.push(stored);
         return json(res, 200, {
           callId: stored.callId,
           allowed,
-          reason: allowed ? null : "denied_by_test",
+          reason: allowed ? null : (refusal?.code ?? "denied_by_test"),
+          ...(refusal?.approval ? { approval: refusal.approval } : {}),
         });
       }
       const resultMatch = /^\/tool-calls\/([^/]+)\/result$/u.exec(route);
@@ -717,6 +838,23 @@ export async function startFakeAgentChannelApi(
           stored.receivedAt = Date.now();
           if (control.slowMs) await new Promise((r) => setTimeout(r, control.slowMs));
         }
+        const approvalRefusal = approvalRefusalOf(
+          state.toolApprovals.get(
+            connectorRoute === "call"
+              ? `${String(body.connector)}__${String(body.tool)}`
+              : "ocw_http_request",
+          ),
+        );
+        if (approvalRefusal) {
+          stored.answeredAt = Date.now();
+          return json(res, refusalStatus(approvalRefusal.code), {
+            error: {
+              code: approvalRefusal.code,
+              message: `refused by test ${FAKE_ERROR_CANARY}`,
+              ...(approvalRefusal.approval ? { details: { approval: approvalRefusal.approval } } : {}),
+            },
+          });
+        }
         if (control.refusal) {
           stored.answeredAt = Date.now();
           return json(res, refusalStatus(control.refusal), {
@@ -738,6 +876,45 @@ export async function startFakeAgentChannelApi(
           truncated: false,
           redirectHost: null,
         });
+      }
+      const workZoneRoute =
+        route === "/work-zone/projects"
+          ? "projects"
+          : route === "/work-zone/proposals"
+            ? "proposals"
+            : undefined;
+      if (req.method === "POST" && workZoneRoute) {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        const wz = state.workZone;
+        (workZoneRoute === "projects" ? wz.projectLists : wz.proposals).push({ ...body });
+        const allowed: readonly string[] = WORK_ZONE_BODY_KEYS[workZoneRoute];
+        const required = workZoneRoute === "proposals" ? ["projectId", "deviceId", "prompt"] : [];
+        if (
+          typeof body.eventId !== "string" ||
+          typeof body.agentId !== "string" ||
+          required.some((k) => typeof body[k] !== "string") ||
+          Object.keys(body).some((k) => !allowed.includes(k))
+        ) {
+          return json(res, 400, { error: { code: "bad_request", message: `bad body ${FAKE_ERROR_CANARY}` } });
+        }
+        if (workZoneRoute === "projects") return json(res, 200, { projects: wz.projects });
+        if (wz.refused === "unknown_turn") {
+          return json(res, 404, {
+            error: { code: "unknown_turn", message: `refused by test ${FAKE_ERROR_CANARY}` },
+          });
+        }
+        if (wz.refused) return json(res, 200, { refused: wz.refused });
+        const key = JSON.stringify([
+          body.eventId,
+          body.projectId,
+          body.deviceId,
+          body.prompt,
+          body.runtime ?? null,
+        ]);
+        const known = workZoneApprovals.get(key);
+        const approvalId = known ?? randomUUID();
+        workZoneApprovals.set(key, approvalId);
+        return json(res, 200, { approvalId, created: !known });
       }
       const memoryRoute = /^\/memory\/(list|read|write|propose)$/u.exec(route)?.[1] as
         | MemoryRoute
@@ -1075,6 +1252,9 @@ export async function startFakeAgentChannelApi(
     get denyTools() {
       return state.denyTools;
     },
+    get toolApprovals() {
+      return state.toolApprovals;
+    },
     get toolCalls() {
       return state.toolCalls;
     },
@@ -1146,6 +1326,9 @@ export async function startFakeAgentChannelApi(
     },
     set connectorControl(value: ConnectorControl) {
       state.connectorControl = value;
+    },
+    get workZone() {
+      return state.workZone;
     },
     get mcpServers() {
       return state.mcpServers;

@@ -188,7 +188,8 @@ describe("Agent Channel connector tools (D-02, D-07: the requester is the stored
         "tainted",
       ]),
     );
-    expect(AgentChannelToolRefusal.options).toHaveLength(14);
+    // 14 since 07.4; 07.5-01 appended the seven `ToolApprovalRefusal` values not already present.
+    expect(AgentChannelToolRefusal.options).toHaveLength(21);
   });
 });
 

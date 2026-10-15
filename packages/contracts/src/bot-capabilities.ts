@@ -249,6 +249,11 @@ export const TurnToolFlags = z.object({
   untrustedOutput: z.boolean(),
   /** Blocked after a taint unless the source is trusted for chained calls (D-08). */
   sideEffecting: z.boolean(),
+  /**
+   * Phase 07.5 (D-01): the tool has an approval policy for this bot and this human; the gate sends its full arguments
+   * and leaves the taint decision to the API (`when_tainted` asks only after outside content). Absent = no policy.
+   */
+  approval: z.enum(["always", "when_tainted"]).optional(),
 });
 export type TurnToolFlags = z.infer<typeof TurnToolFlags>;
 
@@ -351,6 +356,13 @@ export const BUILTIN_TOOLS = {
   connectorList: "ocw_connector_list",
   connectorCall: "ocw_connector_call",
   httpRequest: "ocw_http_request",
+  /**
+   * Phase 07.5 (D-03, P-08): Work Zone proposals. `ocw_work_zone_projects` lists the projects the turn's human may start
+   * on; `ocw_start_work_zone` proposes a session (project, device, prompt, runtime; never a mode) as a card the human
+   * starts. Offered only when the turn's human holds `work_session.create`; never approvable (their own flow).
+   */
+  workZoneProjects: "ocw_work_zone_projects",
+  startWorkZone: "ocw_start_work_zone",
 } as const;
 
 export const MAX_TOOL_CALLS_PER_TURN = 8;

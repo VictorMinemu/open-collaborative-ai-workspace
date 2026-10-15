@@ -79,6 +79,31 @@ export interface MentionPayload {
       reason: string;
       resource?: { kind: "connector" | "vault_item"; id: string; name: string };
     }>;
+    /**
+     * Per-tool gate flags (03.1, 07.5 D-01). `approval` set = the tool has an approval policy for this bot and this
+     * human: the gate sends the call's full `arguments` to `/tool-calls` (never for any other tool).
+     */
+    toolFlags?: Record<
+      string,
+      { untrustedOutput: boolean; sideEffecting: boolean; approval?: "always" | "when_tainted" }
+    >;
+  };
+}
+
+/**
+ * `agent.card_action.v1` (06-13, 07.5-06): built like a mention of the bot on its card's message. For an approved
+ * `tool.call` grant (07.5 D-02) `cardAction.grant` names the tool and its canonical arguments, to call exactly once.
+ */
+export interface CardActionPayload extends MentionPayload {
+  cardAction: {
+    messageId: string;
+    kind: string;
+    title: string;
+    outcome: "approved" | "denied";
+    decidedBy?: { id: string; displayName: string };
+    grant?: { tool: string; arguments: string; useBy: string };
+    /** The decider's note (07.5-11), absent without one. */
+    note?: string;
   };
 }
 
@@ -127,6 +152,12 @@ export interface FakeCellOptions {
    * directives (07.4-14: a member asks in plain words, the persona calls `ocw_connector_call`).
    */
   toolCallsFor?: (m: MentionPayload) => Array<{ tool: string; args: Record<string, unknown> }>;
+  /**
+   * Answer a denied card action (07.5-13) the way the plugin's mapper words it for the model: one line
+   * `Card <title>: denied by <decider> (“<note>”)` (the note from `cardAction.note` only, never parsed from the
+   * sentence). Off by default, so specs that count a bot's replies are unchanged.
+   */
+  replyOnDenied?: boolean;
 }
 
 /**
@@ -161,6 +192,16 @@ const MEMORY_FILE_DONE: Record<MemoryFileTool, string> = {
   ocw_memory_propose: "proposed",
 };
 const isMemoryFileTool = (name: string): name is MemoryFileTool => Object.hasOwn(MEMORY_FILE_TOOLS, name);
+
+/** The Work Zone proposal tools (07.5-08/10) and the Agent Channel route each one calls (`POST /work-zone/<route>`). */
+const WORK_ZONE_TOOLS = {
+  ocw_work_zone_projects: "projects",
+  ocw_start_work_zone: "proposals",
+} as const;
+type WorkZoneTool = keyof typeof WORK_ZONE_TOOLS;
+const isWorkZoneTool = (name: string): name is WorkZoneTool => Object.hasOwn(WORK_ZONE_TOOLS, name);
+/** The only fields a proposal carries besides the turn (07.5-10): never a user, a mode, a model or full access. */
+const PROPOSAL_FIELDS = ["projectId", "deviceId", "prompt", "runtime"] as const;
 
 /** The three static connector and keychain tools (07.4-09): self-validated by their own routes, never `/tool-calls`. */
 const CONNECTOR_TOOLS = ["ocw_connector_list", "ocw_connector_call", "ocw_http_request"] as const;
@@ -237,8 +278,12 @@ export function identityReply(m: MentionPayload): string {
 export class FakeCellPlugin {
   readonly events: FakeCellEvent[] = [];
   readonly replies: Array<{ messageId: string; created: boolean; mention: MentionPayload }> = [];
-  /** Every `POST /tool-calls` this fake cell made (06-12: a withheld tool never reaches the gate). */
-  readonly toolCallRequests: Array<{ eventId: string; tool: string }> = [];
+  /**
+   * Every `POST /tool-calls` this fake cell made (06-12: a withheld tool never reaches the gate). `arguments` is the
+   * body's field (07.5 D-01): present only for a tool whose delivered flags carry `approval`.
+   */
+  readonly toolCallRequests: Array<{ eventId: string; tool: string; arguments?: Record<string, unknown> }> =
+    [];
   snapshot: FakeCellSnapshot | null = null;
   lastSeq = 0;
   /** Subscription credentials this fake cell "holds" (provider → account), like OpenClaw's auth store. */
@@ -409,6 +454,29 @@ export class FakeCellPlugin {
             turnContextSuffix(m),
         );
       }
+      if (type === "agent.card_action.v1" && this.opts.autoReply) {
+        // An approved grant (07.5 D-02): call the granted tool once, with exactly the granted arguments.
+        const a = data as unknown as CardActionPayload;
+        const grant = a.cardAction?.outcome === "approved" ? a.cardAction.grant : undefined;
+        if (grant) {
+          let args: Record<string, unknown> = {};
+          try {
+            const parsed = JSON.parse(grant.arguments) as unknown;
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              args = parsed as Record<string, unknown>;
+            }
+          } catch {
+            /* the API sends canonical JSON; anything else re-runs with no arguments and is refused */
+          }
+          const lines = await this.simulateToolCalls(a, [{ tool: grant.tool, args }]);
+          this.grantReruns.push({ eventId: a.eventId, tool: grant.tool, lines });
+          await this.reply(a, lines.join("\n") + turnToolsSuffix(a) + turnContextSuffix(a));
+        } else if (a.cardAction?.outcome === "denied" && this.opts.replyOnDenied) {
+          const by = a.cardAction.decidedBy?.displayName ?? "an approver";
+          const note = a.cardAction.note ? ` (“${a.cardAction.note}”)` : "";
+          await this.reply(a, `Card ${a.cardAction.title}: denied by ${by}${note}`);
+        }
+      }
       if (this.opts.pluginTools && (type === "plugin.install.v1" || type === "plugin.uninstall.v1")) {
         await this.runPluginFlow(type, data);
       }
@@ -433,10 +501,12 @@ export class FakeCellPlugin {
    * (`boardCall`, 07.1-13: like memory, never `/tool-calls`); `ocw_memory_list|read|write|propose` call
    * `/agent-channel/v1/memory/<list|read|write|propose>` (`memoryCall`, 07.2-17); `ocw_connector_list|call` and
    * `ocw_http_request` call `/agent-channel/v1/connectors/list|call` and `/http-requests` (`connectorCall`, 07.4-14);
-   * any other tool asks
-   * `/agent-channel/v1/tool-calls` and, when allowed, reports a result. One line per call: `Tool <offered name>:
-   * allowed | denied (<reason>)`, `Tool <name>: saved | created | moved | waiting set | read | listed | written |
-   * proposed | refused (<code>) | not offered`.
+   * `ocw_work_zone_projects` / `ocw_start_work_zone` call `/agent-channel/v1/work-zone/projects|proposals`
+   * (`workZoneCall`, 07.5-12); any other tool asks `/agent-channel/v1/tool-calls` (with the call's `arguments` only when
+   * its delivered flags carry `approval`, 07.5 D-01) and, when allowed, reports a result. One line per call:
+   * `Tool <offered name>: allowed | denied (<reason>) | approval_required | approval_pending | approval_denied |
+   * approval_used`, `Tool <name>: saved | created | moved | waiting set | read | listed | written | proposed |
+   * refused (<code>) | not offered`.
    */
   async simulateToolCalls(
     m: MentionPayload,
@@ -490,18 +560,39 @@ export class FakeCellPlugin {
         lines.push(`Tool ${call.tool}: ${await this.memoryCall(m, name, call.args)}`);
         continue;
       }
+      if (isWorkZoneTool(name)) {
+        lines.push(`Tool ${call.tool}: ${await this.workZoneCall(m, name, call.args)}`);
+        continue;
+      }
       const params: { query?: string; url?: string } = {};
       if (typeof call.args.query === "string") params.query = call.args.query;
       if (typeof call.args.url === "string") params.url = call.args.url;
-      this.toolCallRequests.push({ eventId: m.eventId, tool: name });
+      // 07.5 D-01: the full arguments travel only for a tool with an approval policy on this turn.
+      const flagged = m.turn?.toolFlags?.[name]?.approval !== undefined;
+      this.toolCallRequests.push({
+        eventId: m.eventId,
+        tool: name,
+        ...(flagged ? { arguments: call.args } : {}),
+      });
       const res = await this.request<{ callId?: string; allowed?: boolean; reason?: string | null }>(
         "POST",
         "/tool-calls",
-        { eventId: m.eventId, agentId: m.agent.id, tool: name, params },
+        {
+          eventId: m.eventId,
+          agentId: m.agent.id,
+          tool: name,
+          params,
+          ...(flagged ? { arguments: call.args } : {}),
+        },
       );
       // The line names the tool the turn offered (`<safe>__echo` for an MCP tool), like the gate saw it.
       if (res.status !== 200 || !res.body.allowed || !res.body.callId) {
-        lines.push(`Tool ${name}: denied (${res.body.reason ?? res.status})`);
+        const reason = res.body?.reason ?? null;
+        lines.push(
+          reason?.startsWith("approval_")
+            ? `Tool ${name}: ${reason}`
+            : `Tool ${name}: denied (${reason ?? res.status})`,
+        );
         continue;
       }
       await this.request("POST", `/tool-calls/${res.body.callId}/result`, {
@@ -567,6 +658,43 @@ export class FakeCellPlugin {
       ...(args.body !== undefined ? { body: args.body } : {}),
     });
     return res.status === 200 ? `${res.body.status} ${res.body.body}` : refused(res);
+  }
+
+  /** Every grant re-run (07.5 D-02): the card action's event, the granted tool and the lines it produced. */
+  readonly grantReruns: Array<{ eventId: string; tool: string; lines: string[] }> = [];
+
+  /** Every Work Zone route call the simulated tools made, with the body sent and the answer (07.5-12). */
+  readonly workZoneRequests: Array<{
+    eventId: string;
+    route: string;
+    sent: Record<string, unknown>;
+    status: number;
+    body: unknown;
+  }> = [];
+
+  /**
+   * `ocw_work_zone_projects | ocw_start_work_zone` the way apps/openclaw-channel's work-zone-tools.ts sends them
+   * (07.5-10) to `POST /agent-channel/v1/work-zone/projects` and `/work-zone/proposals`: the mention's `eventId` and
+   * `agentId`, and for a proposal only `projectId`, `deviceId`, `prompt` and `runtime` from the model's arguments, never
+   * a user id or a mode (the API binds the human to the stored turn and always starts Supervised). Answers `listed`,
+   * `proposed`, `refused (<code>)` for an in-band refusal or an HTTP error.
+   */
+  private async workZoneCall(m: MentionPayload, tool: WorkZoneTool, args: Record<string, unknown>) {
+    const route = `/work-zone/${WORK_ZONE_TOOLS[tool]}`;
+    const sent: Record<string, unknown> = { eventId: m.eventId, agentId: m.agent.id };
+    if (tool === "ocw_start_work_zone") {
+      for (const key of PROPOSAL_FIELDS) if (args[key] !== undefined) sent[key] = args[key];
+    }
+    const res = await this.request<{
+      approvalId?: string;
+      refused?: string;
+      projects?: unknown[];
+      error?: { code?: string };
+    }>("POST", route, sent);
+    this.workZoneRequests.push({ eventId: m.eventId, route, sent, status: res.status, body: res.body });
+    if (res.status !== 200) return `refused (${res.body?.error?.code ?? res.status})`;
+    if (typeof res.body?.refused === "string") return `refused (${res.body.refused})`;
+    return tool === "ocw_work_zone_projects" ? "listed" : "proposed";
   }
 
   /** Every memory route call the simulated memory tools made, with the status and body it got (07.2-17). */

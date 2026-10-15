@@ -91,6 +91,8 @@ export const orgUnits = appSchema.table(
     // drizzle 1.0.0-rc.4 has no builder for it.
     uniqueIndex("org_units_sibling_name_uq").on(t.organizationId, t.parentId, sql`lower(${t.name})`),
     check("org_units_kind_check", sql`${t.kind} in ('department','team','project')`),
+    /** Phase 07.5: target of composite foreign keys that carry the organization (FKs bypass RLS). */
+    unique("org_units_org_id_uq").on(t.organizationId, t.id),
   ],
 );
 
@@ -622,6 +624,8 @@ export const agents = appSchema.table(
     check("agents_owner_scope_check", sql`(${t.scope} <> 'personal' or ${t.ownerUserId} is not null)`),
     index("agents_template_idx").on(t.organizationId, t.templateId).where(sql`template_id is not null`),
     check("agents_template_version_check", sql`${t.templateVersion} is null or ${t.templateVersion} >= 1`),
+    /** Phase 07.5: target of composite foreign keys that carry the organization (FKs bypass RLS). */
+    unique("agents_org_id_uq").on(t.organizationId, t.id),
   ],
 );
 
@@ -695,6 +699,11 @@ export const agentToolCalls = appSchema.table(
     durationMs: integer("duration_ms"),
     createdAt: createdAt(),
     completedAt: ts("completed_at"),
+    /**
+     * Phase 07.5 (D-02, APPROVE-02): the `tool.call` approval whose one-use grant this call consumed (the call ran with
+     * the human's approval, taint lifted for it alone). No foreign key: the ledger outlives requests, like its other ids.
+     */
+    approvalId: uuid("approval_id"),
   },
   (t) => [
     index("agent_tool_calls_org_event_idx").on(t.organizationId, t.eventId),
@@ -1055,6 +1064,8 @@ export const devices = appSchema.table(
   (t) => [
     index("devices_org_idx").on(t.organizationId),
     modeCheck("devices_share_max_mode_ck", t.shareMaxMode),
+    /** Phase 07.5: target of composite foreign keys that carry the organization (FKs bypass RLS). */
+    unique("devices_org_id_uq").on(t.organizationId, t.id),
   ],
 );
 
@@ -1133,7 +1144,11 @@ export const projects = appSchema.table(
     /** Set when the device stops announcing the project; sessions keep their history. */
     removedAt: ts("removed_at"),
   },
-  (t) => [uniqueIndex("projects_device_local_uq").on(t.deviceId, t.localId)],
+  (t) => [
+    uniqueIndex("projects_device_local_uq").on(t.deviceId, t.localId),
+    /** Phase 07.5: target of composite foreign keys that carry the organization and the project's device. */
+    unique("projects_org_id_device_uq").on(t.organizationId, t.id, t.deviceId),
+  ],
 );
 
 // ---------------------------------------------------------------- work sessions
@@ -1205,6 +1220,8 @@ export const workSessions = appSchema.table(
     index("work_sessions_conversation_idx").on(t.organizationId, t.conversationId),
     modeCheck("work_sessions_permission_mode_ck", t.permissionMode),
     check("work_sessions_title_source_ck", sql`${t.titleSource} in ('user','heuristic','auto')`),
+    /** Phase 07.5: target of composite foreign keys that carry the organization (FKs bypass RLS). */
+    unique("work_sessions_org_id_uq").on(t.organizationId, t.id),
   ],
 );
 
@@ -1228,10 +1245,26 @@ export const workPrompts = appSchema.table(
     createdAt: createdAt(),
     dispatchedAt: ts("dispatched_at"),
     completedAt: ts("completed_at"),
+    /**
+     * Phase 07.5 (D-03, APPROVE-03): the bot whose Work Zone proposal this prompt started ("Ana · proposed by @bot");
+     * `author_user_id` is the person who started it. Null for every prompt a person wrote; a deleted bot only unlinks.
+     */
+    proposedByAgentId: uuid("proposed_by_agent_id"),
   },
   (t) => [
     index("work_prompts_session_idx").on(t.organizationId, t.workSessionId, t.position),
     modeCheck("work_prompts_permission_mode_ck", t.permissionMode),
+    // Composite with the organization (FKs bypass RLS). The migration narrows the action to
+    // `SET NULL ("proposed_by_agent_id")` (PostgreSQL 15+; drizzle 1.0.0-rc.4 has no builder for the column list), so a
+    // deleted bot never nulls `organization_id`.
+    foreignKey({
+      name: "work_prompts_proposed_by_agent_fk",
+      columns: [t.organizationId, t.proposedByAgentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("set null"),
+    index("work_prompts_proposed_by_idx")
+      .on(t.organizationId, t.proposedByAgentId)
+      .where(sql`proposed_by_agent_id is not null`),
   ],
 );
 
@@ -2347,5 +2380,241 @@ export const agentTemplateVersions = appSchema.table(
       "agent_template_versions_ids_check",
       sql`cardinality(${t.requiredConnectorIds}) <= 16 and cardinality(${t.unitVaultItemIds}) <= 16`,
     ),
+  ],
+);
+
+// ---------------------------------------------------------------- per-tool approvals, Work Zone proposals (07.5)
+
+/** A lowercase hex SHA-256 (64 characters). */
+const SHA256_HEX = sql.raw(`'^[0-9a-f]{64}$'`);
+/** Stored tool arguments (D-04, `TOOL_APPROVAL_LIMITS.argumentsBytes`): bytes of the canonical JSON in UTF-8. */
+const TOOL_ARGUMENTS_MAX_BYTES = 32_768;
+/** Approvers a `users` rule may name (`TOOL_APPROVAL_LIMITS.approverUsersMax`). */
+const APPROVER_USERS_MAX = 20;
+/** A proposed Work Zone prompt (`WORK_ZONE_PROPOSAL_LIMITS.promptChars`). */
+const PROPOSAL_PROMPT_MAX_CHARS = 50_000;
+
+/**
+ * Per-tool approval policies (D-01, APPROVE-01, P-04): which agent tool calls need a person first. `scope_unit_id`
+ * null = the organization, otherwise the unit subtree (as `permission_rules`). `tool_pattern` is an exact approvable
+ * tool name or `<safe>__*` (every tool of one connector); the grammar lives in contracts (`ToolPattern`). `mode`:
+ * `never` (stated default), `always`, `when_tainted` (only when the turn read untrusted content); the strictest
+ * applicable rule wins. `approver_kind`: `requester` (the person the bot acts for), `users` (the 1–20 people in
+ * `approver_user_ids`), `unit_leads` (leads of the rule's unit, so a unit rule only) or `admins` (live org admins).
+ * One rule per (organization, scope, pattern), the organization scope included (NULLS NOT DISTINCT). `version` is the
+ * optimistic-concurrency counter of the policy routes. Never holds tool arguments.
+ */
+export const toolApprovalPolicies = appSchema.table(
+  "tool_approval_policies",
+  {
+    id: id(),
+    organizationId: orgId(),
+    scopeUnitId: uuid("scope_unit_id"),
+    toolPattern: text("tool_pattern").notNull(),
+    mode: text("mode", { enum: ["never", "always", "when_tainted"] }).notNull(),
+    approverKind: text("approver_kind", { enum: ["requester", "users", "unit_leads", "admins"] })
+      .notNull()
+      .default("requester"),
+    approverUserIds: uuid("approver_user_ids").array().notNull().default(sql`'{}'::uuid[]`),
+    version: integer("version").notNull().default(1),
+    createdBy: uuid("created_by"),
+    createdAt: createdAt(),
+    updatedBy: uuid("updated_by"),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    // Composite with the organization (FKs bypass RLS): a rule never names another organization's unit.
+    foreignKey({
+      name: "tool_approval_policies_unit_fk",
+      columns: [t.organizationId, t.scopeUnitId],
+      foreignColumns: [orgUnits.organizationId, orgUnits.id],
+    }).onDelete("cascade"),
+    unique("tool_approval_policies_scope_pattern_uq")
+      .on(t.organizationId, t.scopeUnitId, t.toolPattern)
+      .nullsNotDistinct(),
+    /** Target of `tool_call_approvals_policy_fk`. */
+    unique("tool_approval_policies_org_id_uq").on(t.organizationId, t.id),
+    check("tool_approval_policies_mode_check", sql`${t.mode} in ('never','always','when_tainted')`),
+    check(
+      "tool_approval_policies_approver_kind_check",
+      sql`${t.approverKind} in ('requester','users','unit_leads','admins')`,
+    ),
+    check(
+      "tool_approval_policies_approvers_check",
+      sql`array_position(${t.approverUserIds}, null) is null and case when ${t.approverKind} = 'users'
+        then cardinality(${t.approverUserIds}) between 1 and ${sql.raw(String(APPROVER_USERS_MAX))}
+        else cardinality(${t.approverUserIds}) = 0 end`,
+    ),
+    check(
+      "tool_approval_policies_unit_leads_scope_check",
+      sql`${t.approverKind} <> 'unit_leads' or ${t.scopeUnitId} is not null`,
+    ),
+    check(
+      "tool_approval_policies_never_requester_check",
+      sql`${t.mode} <> 'never' or ${t.approverKind} = 'requester'`,
+    ),
+    check("tool_approval_policies_version_check", sql`${t.version} >= 1`),
+    check(
+      "tool_approval_policies_tool_pattern_len_check",
+      sql`char_length(${t.toolPattern}) between 1 and 200`,
+    ),
+  ],
+);
+
+/**
+ * The stored action behind a `tool.call` approval (D-02, D-04, APPROVE-02, P-05, P-09): the resource of the 07.2
+ * `approval_requests` row (`resource_id`). `arguments_canonical` is the RFC 8785 canonical JSON of the call's arguments
+ * and the ONLY place tool arguments are ever stored (never in audit rows, logs, `agent_tool_calls`, realtime events or
+ * summary cards); `arguments_sha256` is its hash and `action_hash` the 07.2 hash over (agent, requester, conversation,
+ * tool, arguments_sha256), recomputed from this row at every decision and grant use. `tainted` = the requesting turn
+ * had read untrusted content (its re-run starts tainted). A client retry with the same (event, tool call id) finds the
+ * same row. Immutable once stored (trigger in the migration): only `policy_id` may be cleared, by the policy's
+ * deletion. Readable by the deciders and the requester through the approval view (tenant RLS here).
+ */
+export const toolCallApprovals = appSchema.table(
+  "tool_call_approvals",
+  {
+    id: id(),
+    organizationId: orgId(),
+    agentId: uuid("agent_id").notNull(),
+    requestedForUserId: uuid("requested_for_user_id").notNull(),
+    conversationId: uuid("conversation_id").notNull(),
+    threadRootMessageId: uuid("thread_root_message_id"),
+    /** The requesting turn (`agent_turns.event_id`). */
+    eventId: uuid("event_id").notNull(),
+    toolCallId: text("tool_call_id"),
+    tool: text("tool").notNull(),
+    sourceKind: text("source_kind", { enum: ["builtin", "mcp", "plugin", "vault"] }).notNull(),
+    sourceId: uuid("source_id"),
+    /** Domain or connector safe name, as in `agent_tool_calls.target`; never a full URL with query. */
+    target: text("target"),
+    argumentsCanonical: text("arguments_canonical").notNull(),
+    argumentsSha256: text("arguments_sha256").notNull(),
+    actionHash: text("action_hash").notNull(),
+    tainted: boolean("tainted").notNull(),
+    /** The rule that required the approval; a deleted rule only unlinks. */
+    policyId: uuid("policy_id"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    // Composite with the organization (FKs bypass RLS). The migration narrows the policy action to
+    // `SET NULL ("policy_id")` (PostgreSQL 15+; no drizzle builder), so a deleted rule never nulls `organization_id`.
+    foreignKey({
+      name: "tool_call_approvals_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "tool_call_approvals_policy_fk",
+      columns: [t.organizationId, t.policyId],
+      foreignColumns: [toolApprovalPolicies.organizationId, toolApprovalPolicies.id],
+    }).onDelete("set null"),
+    index("tool_call_approvals_hash_idx").on(t.organizationId, t.actionHash),
+    index("tool_call_approvals_requester_idx").on(
+      t.organizationId,
+      t.agentId,
+      t.requestedForUserId,
+      t.createdAt,
+    ),
+    index("tool_call_approvals_policy_idx")
+      .on(t.organizationId, t.policyId)
+      .where(sql`policy_id is not null`),
+    uniqueIndex("tool_call_approvals_event_call_uq")
+      .on(t.organizationId, t.eventId, t.toolCallId)
+      .where(sql`tool_call_id is not null`),
+    check(
+      "tool_call_approvals_source_kind_check",
+      sql`${t.sourceKind} in ('builtin','mcp','plugin','vault')`,
+    ),
+    check(
+      "tool_call_approvals_arguments_size_check",
+      sql`octet_length(${t.argumentsCanonical}) <= ${sql.raw(String(TOOL_ARGUMENTS_MAX_BYTES))}`,
+    ),
+    check("tool_call_approvals_arguments_sha256_check", sql`${t.argumentsSha256} ~ ${SHA256_HEX}`),
+    check("tool_call_approvals_action_hash_check", sql`${t.actionHash} ~ ${SHA256_HEX}`),
+    check("tool_call_approvals_tool_len_check", sql`char_length(${t.tool}) between 1 and 200`),
+    check(
+      "tool_call_approvals_tool_call_id_len_check",
+      sql`${t.toolCallId} is null or char_length(${t.toolCallId}) between 1 and 200`,
+    ),
+    check(
+      "tool_call_approvals_target_len_check",
+      sql`${t.target} is null or char_length(${t.target}) <= 255`,
+    ),
+  ],
+);
+
+/**
+ * Work Zone proposals (D-03, APPROVE-03, P-08): a bot asked to start a Work Zone session on a project and device for
+ * the person it acts for, who alone may start it (kind `work_zone.start`, the resource of its `approval_requests`
+ * row). No permission mode is stored: a proposed session always starts at `default`. `prompt_sha256` is the hash of
+ * `prompt`; a retry of the same (event, project, device, prompt) finds the same row. The project is on its device
+ * (composite FK). `work_session_id` is set when the person starts it (Phase 12 turns the same card into the live
+ * session card) and cleared when that session is deleted. Immutable otherwise (trigger in the migration).
+ */
+export const workZoneProposals = appSchema.table(
+  "work_zone_proposals",
+  {
+    id: id(),
+    organizationId: orgId(),
+    agentId: uuid("agent_id").notNull(),
+    requestedForUserId: uuid("requested_for_user_id").notNull(),
+    conversationId: uuid("conversation_id").notNull(),
+    threadRootMessageId: uuid("thread_root_message_id"),
+    /** The proposing turn (`agent_turns.event_id`). */
+    eventId: uuid("event_id").notNull(),
+    projectId: uuid("project_id").notNull(),
+    deviceId: uuid("device_id").notNull(),
+    runtime: text("runtime", { enum: ["claude-code", "codex"] }).notNull(),
+    prompt: text("prompt").notNull(),
+    promptSha256: text("prompt_sha256").notNull(),
+    workSessionId: uuid("work_session_id"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    // Composite with the organization (FKs bypass RLS). The migration narrows the session action to
+    // `SET NULL ("work_session_id")` (PostgreSQL 15+; no drizzle builder), so a deleted session keeps the proposal.
+    foreignKey({
+      name: "work_zone_proposals_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "work_zone_proposals_project_fk",
+      columns: [t.organizationId, t.projectId, t.deviceId],
+      foreignColumns: [projects.organizationId, projects.id, projects.deviceId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "work_zone_proposals_device_fk",
+      columns: [t.organizationId, t.deviceId],
+      foreignColumns: [devices.organizationId, devices.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "work_zone_proposals_session_fk",
+      columns: [t.organizationId, t.workSessionId],
+      foreignColumns: [workSessions.organizationId, workSessions.id],
+    }).onDelete("set null"),
+    uniqueIndex("work_zone_proposals_request_uq").on(
+      t.organizationId,
+      t.eventId,
+      t.projectId,
+      t.deviceId,
+      t.promptSha256,
+    ),
+    index("work_zone_proposals_requester_idx").on(
+      t.organizationId,
+      t.agentId,
+      t.requestedForUserId,
+      t.createdAt,
+    ),
+    index("work_zone_proposals_session_idx")
+      .on(t.organizationId, t.workSessionId)
+      .where(sql`work_session_id is not null`),
+    check("work_zone_proposals_runtime_check", sql`${t.runtime} in ('claude-code','codex')`),
+    check(
+      "work_zone_proposals_prompt_len_check",
+      sql`char_length(${t.prompt}) between 1 and ${sql.raw(String(PROPOSAL_PROMPT_MAX_CHARS))}`,
+    ),
+    check("work_zone_proposals_prompt_sha256_check", sql`${t.promptSha256} ~ ${SHA256_HEX}`),
   ],
 );

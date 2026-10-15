@@ -17,7 +17,14 @@ import {
   VAULT_HANDLE,
 } from "./agent-channel-protocol.js";
 import { type AgentChannelClient, AgentChannelHttpError } from "./api-client.js";
-import { type ActiveTurn, logicalToolOf, type ToolGuard } from "./tool-guard.js";
+import {
+  type ActiveTurn,
+  APPROVAL_SENTENCES,
+  approvalLabel,
+  isApprovalRefusal,
+  logicalToolOf,
+  type ToolGuard,
+} from "./tool-guard.js";
 
 /**
  * The per-member connector and keychain tools (07.4 D-02, D-07, C-01). OpenClaw plugin tool names are static (declared in
@@ -33,6 +40,10 @@ import { type ActiveTurn, logicalToolOf, type ToolGuard } from "./tool-guard.js"
  *     audits and holds the credential; nothing secret ever reaches the cell or the model),
  *   - answers with the API's content, or one fixed sentence per refusal code, never the API's error body and never a
  *     fallback to another credential. Logs carry ids and codes only.
+ * 07.5 (D-04): the routes decide per-tool approvals too. A 409 approval refusal is the gate's approval sentence naming
+ * the logical tool (`APPROVAL_SENTENCES`, with the approver and requester from `details.approval`, or who denied it and
+ * their note from `details.denial` (07.5-11), when valid); the
+ * local taint refusal is skipped for a logical tool (or `ocw_http_request`) whose flags carry `approval` (tool-guard.ts).
  * The call-time gate (`before_tool_call`, tool-guard.ts) has already checked the logical tool's flags, the taint and the
  * caps locally; these tools are self-validated by their own routes (never `/tool-calls`).
  */
@@ -66,8 +77,11 @@ export const UNIT_AUDIENCE =
 export const NO_TURN = "There is no active conversation turn, so I can't use this tool now.";
 export const UNREACHABLE = "The workspace could not be reached. Try again later.";
 
-/** What the model reads for each refusal code (the API's reason, never its details). */
-export const REFUSAL_SENTENCE: Record<AgentChannelToolRefusal, string> = {
+/** The refusal codes with an approval sentence of their own (07.5; built per call, they name the tool). */
+type ApprovalRefusalCode = Exclude<AgentChannelToolRefusal, keyof typeof REFUSAL_SENTENCE>;
+
+/** What the model reads for each refusal code (the API's reason, never its details); approval codes: below. */
+export const REFUSAL_SENTENCE = {
   unknown_turn: "This conversation turn is no longer active.",
   not_in_turn: "That tool is not available on this turn.",
   policy_changed: "The workspace no longer allows that tool here.",
@@ -82,7 +96,19 @@ export const REFUSAL_SENTENCE: Record<AgentChannelToolRefusal, string> = {
   egress_refused: "The workspace refused to contact that address.",
   upstream_error: "The service returned an error. Try again later.",
   timeout: "The service did not answer in time. Try again later.",
-};
+} as const satisfies Record<
+  Exclude<
+    AgentChannelToolRefusal,
+    | "approval_required"
+    | "approval_pending"
+    | "approval_denied"
+    | "approval_used"
+    | "arguments_too_large"
+    | "arguments_invalid"
+    | "too_many_pending"
+  >,
+  string
+>;
 
 const isRefusal = (v: string | undefined): v is AgentChannelToolRefusal =>
   v !== undefined && (AGENT_CHANNEL_TOOL_REFUSALS as readonly string[]).includes(v);
@@ -97,10 +123,29 @@ const answer = (text: string, ok: boolean, code?: string): ConnectorToolResult =
   details: code ? { ok, code } : { ok },
 });
 
+/** Who the approval sentences name: the logical tool and the turn's requester (the 409's own names first). */
+export type ApprovalContext = { tool: string; requesterName?: string | undefined };
+
 /** The API's code (or the status class) of a failure: a code for logs, a fixed sentence for the model. */
-export function refusalOf(error: unknown): { code: string; text: string } {
+export function refusalOf(error: unknown, approval?: ApprovalContext): { code: string; text: string } {
   if (error instanceof AgentChannelHttpError) {
-    if (isRefusal(error.code)) return { code: error.code, text: REFUSAL_SENTENCE[error.code] };
+    if (isApprovalRefusal(error.code)) {
+      const code: ApprovalRefusalCode = error.code;
+      const details = error.approval;
+      return {
+        code,
+        text: APPROVAL_SENTENCES[code]({
+          tool: approval?.tool ?? "that tool",
+          waitingFor: details?.waitingFor,
+          requesterName: approvalLabel(details?.requesterName) ?? approval?.requesterName,
+          denial: error.denial,
+        }),
+      };
+    }
+    if (isRefusal(error.code) && error.code in REFUSAL_SENTENCE) {
+      const code = error.code as keyof typeof REFUSAL_SENTENCE;
+      return { code, text: REFUSAL_SENTENCE[code] };
+    }
     if (error.status === 403 && error.code === "no_trigger") {
       return { code: "unknown_turn", text: REFUSAL_SENTENCE.unknown_turn };
     }
@@ -152,6 +197,8 @@ async function run<T>(
   call: () => Promise<T>,
   render: (r: T) => ConnectorToolResult,
   untrustedOutput = true,
+  /** The tool an approval sentence names (the logical connector tool; the static tool otherwise). */
+  approvalTool: string = name,
 ): Promise<ConnectorToolResult> {
   try {
     const r = await call();
@@ -161,7 +208,7 @@ async function run<T>(
     deps.logger?.info?.(`${name}: done for ${t.eventId}`);
     return render(r);
   } catch (error) {
-    const refusal = refusalOf(error);
+    const refusal = refusalOf(error, { tool: approvalTool, requesterName: t.requesterName });
     deps.logger?.warn?.(`${name}: ${t.eventId} refused (${refusal.code})`);
     return answer(refusal.text, false, refusal.code);
   }
@@ -243,6 +290,8 @@ function callTool(deps: Deps, ctx: ConnectorToolContext): OpenClawAgentTool {
             !r.isError,
             r.isError ? "tool_error" : undefined,
           ),
+        true,
+        named.logical,
       );
     },
   };

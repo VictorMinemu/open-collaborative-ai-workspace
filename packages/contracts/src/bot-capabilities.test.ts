@@ -227,6 +227,18 @@ describe("agent channel additions are backward compatible", () => {
   });
 });
 
+describe("Work Zone proposal tools (07.5 D-03)", () => {
+  it("the two Work Zone tools are built-ins, never dangerous", () => {
+    expect(BUILTIN_TOOLS).toMatchObject({
+      workZoneProjects: "ocw_work_zone_projects",
+      startWorkZone: "ocw_start_work_zone",
+    });
+    for (const t of ["ocw_work_zone_projects", "ocw_start_work_zone"]) {
+      expect(isDangerousToolName(t), t).toBe(false);
+    }
+  });
+});
+
 describe("per-member connector turns (07.4 D-03, D-07, R7)", () => {
   it("the three static connector and keychain tools are built-ins, never dangerous", () => {
     expect(BUILTIN_TOOLS).toMatchObject({

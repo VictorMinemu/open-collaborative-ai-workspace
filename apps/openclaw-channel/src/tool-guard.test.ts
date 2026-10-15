@@ -6,7 +6,7 @@ import type {
   TurnContext,
 } from "./agent-channel-protocol.js";
 import type { AgentChannelClient } from "./api-client.js";
-import { createToolGuard, registerToolGate, TOOL_GATE_PRIORITY } from "./tool-guard.js";
+import { createToolGuard, registerToolGate, TOOL_GATE_PRIORITY, TOOL_PIN_PRIORITY } from "./tool-guard.js";
 
 const WEB = { untrustedOutput: true, sideEffecting: false };
 const MEMORY = { untrustedOutput: false, sideEffecting: true };
@@ -191,7 +191,7 @@ describe("tool guard: after_tool_call", () => {
 });
 
 describe("hook registration (registerToolGate, called from registerCapabilities)", () => {
-  it("registers before_tool_call unscoped at the highest priority, and after_tool_call", async () => {
+  it("registers before_tool_call unscoped at the highest priority, the param pin at the lowest, and after_tool_call", async () => {
     const hooks: Array<{ name: string; opts: unknown; handler: (e: unknown, c: unknown) => unknown }> = [];
     const api = {
       on: (name: string, handler: (e: unknown, c: unknown) => unknown, opts?: unknown) =>
@@ -199,8 +199,15 @@ describe("hook registration (registerToolGate, called from registerCapabilities)
     };
     const guard = createToolGuard({ client: () => null });
     registerToolGate(api as never, guard);
-    expect(hooks.map((h) => h.name)).toEqual(["before_tool_call", "after_tool_call"]);
+    // 07.5-04: before_tool_call twice (the gate and the param pin), after_tool_call once.
+    expect(hooks.map((h) => h.name)).toEqual(["before_tool_call", "before_tool_call", "after_tool_call"]);
     expect(hooks[0]?.opts).toEqual({ priority: TOOL_GATE_PRIORITY });
+    expect(hooks[1]?.opts).toEqual({ priority: TOOL_PIN_PRIORITY });
+    expect(TOOL_PIN_PRIORITY).toBeLessThan(0);
+    // Nothing pinned → the pin handler changes nothing.
+    expect(
+      await hooks[1]?.handler({ toolName: "web_search", params: {}, toolCallId: "x" }, {}),
+    ).toBeUndefined();
     // No active turn → the registered handler blocks.
     expect(
       await hooks[0]?.handler({ toolName: "web_search", params: {} }, { sessionKey: "s" }),
@@ -315,6 +322,68 @@ describe("tool guard under abuse (Task 3)", () => {
     const board = await g.beforeToolCall(call("ocw_board_card", { action: "create" }), ctx());
     expect(board?.blockReason).toMatch(/read-only after untrusted content/u);
     expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
+  });
+
+  describe("Work Zone proposal tools (07.5-10, D-03, APPROVE-04)", () => {
+    const LIST = { untrustedOutput: false, sideEffecting: false };
+    const START = { untrustedOutput: false, sideEffecting: true };
+    const wzTurn = (start: TurnContext["toolFlags"][string] = START) =>
+      turn({
+        tools: ["web_search", "ocw_work_zone_projects", "ocw_start_work_zone"],
+        toolFlags: { web_search: WEB, ocw_work_zone_projects: LIST, ocw_start_work_zone: start },
+      });
+    const PROPOSAL = {
+      projectId: "0199a6f0-0000-7000-8000-00000000b111",
+      deviceId: "0199a6f0-0000-7000-8000-00000000d111",
+      prompt: "Fix the rounding error",
+    };
+
+    it("both are validated by their own routes: never sent to /tool-calls, still counted locally", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: wzTurn() });
+      expect(await g.beforeToolCall(call("ocw_work_zone_projects"), ctx())).toBeUndefined();
+      expect(await g.beforeToolCall(call("ocw_start_work_zone", PROPOSAL), ctx())).toBeUndefined();
+      expect(fake.requests).toHaveLength(0);
+      expect(g.activeTurn(SESSION)?.calls).toBe(2);
+      expect(g.activeTurn(SESSION)?.tainted).toBe(false);
+    });
+
+    it("ocw_start_work_zone stays side-effecting even when a turn's flags say otherwise: refused once tainted, with the Work Zone sentence", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        turn: wzTurn({ untrustedOutput: false, sideEffecting: false }),
+        requesterName: "Sam Lee",
+      });
+      expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+      expect(await g.beforeToolCall(call("ocw_start_work_zone", PROPOSAL), ctx())).toEqual({
+        block: true,
+        blockReason:
+          "I can't propose a Work Zone session after reading outside content in this turn. Tell Sam Lee to ask again in a new message.",
+      });
+      // The list is read-only: allowed on a tainted turn.
+      expect(await g.beforeToolCall(call("ocw_work_zone_projects"), ctx())).toBeUndefined();
+      expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
+    });
+
+    it("an approval flag on a turn never lifts the proposal's taint block", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        turn: wzTurn({ untrustedOutput: false, sideEffecting: true, approval: "always" }),
+      });
+      expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+      const r = await g.beforeToolCall(call("ocw_start_work_zone", PROPOSAL), ctx());
+      expect(r?.blockReason).toBe(
+        "I can't propose a Work Zone session after reading outside content in this turn. Tell the person who asked to ask again in a new message.",
+      );
+      expect(fake.requests.map((x) => x.tool)).toEqual(["web_search"]);
+    });
   });
 
   describe("connector and keychain tools (07.4 D-07)", () => {
@@ -708,5 +777,388 @@ describe("MCP tools through the gate (D-13, 03.1-10)", () => {
     const g = mcpGuard(fake);
     expect(await g.beforeToolCall(call(NOTE, { text: "first" }), ctx())).toBeUndefined();
     expect(await g.beforeToolCall(call(NOTE, { text: "second" }), ctx())).toMatchObject({ block: true });
+  });
+});
+
+describe("per-tool approvals (07.5-04, D-01, D-02, D-04, UI-SPEC R10)", () => {
+  const SAFE = "m1a2b3c4d";
+  const NOTE = `${SAFE}__write_note`;
+  const ECHO = `${SAFE}__echo`;
+  const DELETE = `${SAFE}__delete_note`;
+  const FLAGGED = { untrustedOutput: true, sideEffecting: true, approval: "always" as const };
+  const READ = { untrustedOutput: true, sideEffecting: false };
+  const WRITE = { untrustedOutput: true, sideEffecting: true };
+  const APPROVAL = {
+    id: "0199a6f0-0000-7000-8000-0000000000a1",
+    created: true,
+    waitingFor: "a lead of Sales",
+    requesterName: "Ana Pérez",
+  };
+
+  function approvalGuard(fake: FakeClient, requesterName: string | null = "Ana Pérez") {
+    const g = createToolGuard({ client: () => fake.client });
+    g.beginTurn(SESSION, {
+      eventId: "evt-ap",
+      agentId: "a1",
+      ...(requesterName ? { requesterName } : {}),
+      turn: turn({
+        tools: [NOTE, ECHO, DELETE],
+        toolFlags: { [NOTE]: FLAGGED, [ECHO]: READ, [DELETE]: WRITE },
+      }),
+    });
+    return g;
+  }
+  const refuse =
+    (
+      reason: string,
+      approval: typeof APPROVAL | null = null,
+      denial: { deciderName: string; note: string | null } | null = null,
+    ) =>
+    async (): Promise<AgentChannelToolCallDecision> => ({
+      callId: "c-ap",
+      allowed: false,
+      reason,
+      ...(approval ? { approval } : {}),
+      ...(denial ? { denial } : {}),
+    });
+
+  it("a flagged tool's call carries its full arguments; the approval-required sentence is returned at once", async () => {
+    const fake = fakeClient();
+    fake.decide = refuse("approval_required", APPROVAL);
+    const g = approvalGuard(fake);
+    const params = { text: "SENTINEL-77", n: 1 };
+    const ev = call(NOTE, params);
+    const r = await g.beforeToolCall(ev, ctx());
+    expect(fake.requests).toEqual([
+      {
+        eventId: "evt-ap",
+        agentId: "a1",
+        tool: NOTE,
+        toolCallId: ev.toolCallId,
+        params: {},
+        argsBytes: JSON.stringify(params).length,
+        arguments: params,
+      },
+    ]);
+    expect(r).toEqual({
+      block: true,
+      blockReason:
+        "This action needs approval. I posted a card and asked a lead of Sales. Tell Ana Pérez in one short sentence that you are waiting for that approval, without repeating the values. Don't call m1a2b3c4d__write_note again now: when it is approved you will get a new message with the exact arguments.",
+    });
+  });
+
+  it.each([
+    [
+      "approval_pending",
+      APPROVAL,
+      "This exact action is already waiting for approval in a card. Don't ask again; tell Ana Pérez it is still waiting.",
+    ],
+    [
+      "approval_denied",
+      { ...APPROVAL, created: false },
+      "A lead of Sales denied this exact action. Don't retry it. Tell Ana Pérez it was denied and ask what to change.",
+    ],
+    [
+      "approval_used",
+      null,
+      "That approval was already used once. Ask Ana Pérez if they want to run it again.",
+    ],
+    [
+      "arguments_invalid",
+      null,
+      "This action can't be approved because its values aren't valid JSON. Try again with plain values.",
+    ],
+    [
+      "too_many_pending",
+      null,
+      "Ana Pérez already has 5 actions waiting for approval from you. Wait for those first.",
+    ],
+    [
+      "arguments_too_large",
+      null,
+      "This action is too large to approve (over 32 KB). Ask Ana Pérez to split it.",
+    ],
+  ] as const)("%s → its fixed UI-SPEC sentence, never the API's text", async (reason, approval, sentence) => {
+    const fake = fakeClient();
+    fake.decide = refuse(reason, approval);
+    const g = approvalGuard(fake);
+    expect(await g.beforeToolCall(call(NOTE, { text: "x" }), ctx())).toEqual({
+      block: true,
+      blockReason: sentence,
+    });
+  });
+
+  it("07.5-11: approval_denied names the decider and quotes their note from the decision, sanitized and bounded", async () => {
+    const fake = fakeClient();
+    fake.decide = refuse("approval_denied", null, { deciderName: "Marta Gil", note: "Duplicate invoice" });
+    expect((await approvalGuard(fake).beforeToolCall(call(NOTE, { text: "x" }), ctx()))?.blockReason).toBe(
+      "Marta Gil denied this exact action. Their note: “Duplicate invoice”. Don't retry it. Tell Ana Pérez it was denied and ask what to change.",
+    );
+    fake.decide = refuse("approval_denied", null, {
+      deciderName: "Marta\nGil <admin>",
+      note: `Line one\nline \u202etwo \`x\` ${"y".repeat(400)}`,
+    });
+    const reason =
+      (await approvalGuard(fake).beforeToolCall(call(NOTE, { text: "x" }), ctx()))?.blockReason ?? "";
+    expect(
+      reason.startsWith("Marta Gil admin denied this exact action. Their note: “Line one line two x yyy"),
+    ).toBe(true);
+    expect(reason).not.toContain("\u202e");
+    expect(reason).not.toContain("y".repeat(281));
+    // Without a note there is no note; without a denial the approver label (or "An approver") is named.
+    fake.decide = refuse("approval_denied", null, { deciderName: "Marta Gil", note: null });
+    expect((await approvalGuard(fake).beforeToolCall(call(NOTE, {}), ctx()))?.blockReason).toBe(
+      "Marta Gil denied this exact action. Don't retry it. Tell Ana Pérez it was denied and ask what to change.",
+    );
+    fake.decide = refuse("approval_denied", null);
+    expect((await approvalGuard(fake).beforeToolCall(call(NOTE, {}), ctx()))?.blockReason).toBe(
+      "An approver denied this exact action. Don't retry it. Tell Ana Pérez it was denied and ask what to change.",
+    );
+  });
+
+  it("the requester's name comes from the decision first, then the turn, then a neutral fallback", async () => {
+    const fake = fakeClient();
+    fake.decide = refuse("approval_used", null);
+    const anonymous = approvalGuard(fake, null);
+    expect((await anonymous.beforeToolCall(call(NOTE, { text: "x" }), ctx()))?.blockReason).toBe(
+      "That approval was already used once. Ask the person who asked if they want to run it again.",
+    );
+    fake.decide = refuse("too_many_pending", null);
+    expect((await approvalGuard(fake, null).beforeToolCall(call(NOTE, {}), ctx()))?.blockReason).toBe(
+      "The person who asked already has 5 actions waiting for approval from you. Wait for those first.",
+    );
+    fake.decide = refuse("approval_pending", { ...APPROVAL, requesterName: "Sam\nLee <x>" });
+    expect((await approvalGuard(fake).beforeToolCall(call(NOTE, {}), ctx()))?.blockReason).toBe(
+      "This exact action is already waiting for approval in a card. Don't ask again; tell Sam Lee x it is still waiting.",
+    );
+  });
+
+  it("an unflagged tool's body has no arguments key at all, whatever its params contain", async () => {
+    const fake = fakeClient();
+    const g = approvalGuard(fake);
+    expect(await g.beforeToolCall(call(ECHO, { text: "SENTINEL-88" }), ctx())).toBeUndefined();
+    const body = fake.requests[0] as Record<string, unknown>;
+    expect(Object.keys(body)).not.toContain("arguments");
+    expect(JSON.stringify(body)).not.toContain("SENTINEL-88");
+  });
+
+  it("arguments over 32 KB are refused locally with the fixed sentence; nothing is posted", async () => {
+    const fake = fakeClient();
+    const g = approvalGuard(fake);
+    // {"text":"…"} = 11 bytes of JSON around the value: 32,769 bytes in all.
+    const big = { text: "x".repeat(32_769 - 11) };
+    expect(new TextEncoder().encode(JSON.stringify(big)).length).toBe(32_769);
+    expect(await g.beforeToolCall(call(NOTE, big), ctx())).toEqual({
+      block: true,
+      blockReason: "This action is too large to approve (over 32 KB). Ask Ana Pérez to split it.",
+    });
+    expect(fake.requests).toEqual([]);
+    // Exactly 32 KB still goes to the API.
+    expect(await g.beforeToolCall(call(NOTE, { text: "x".repeat(32_768 - 11) }), ctx())).toBeUndefined();
+    expect(fake.requests).toHaveLength(1);
+    const anonymous = approvalGuard(fakeClient(), null);
+    expect((await anonymous.beforeToolCall(call(NOTE, big), ctx()))?.blockReason).toBe(
+      "This action is too large to approve (over 32 KB). Ask the person who asked to split it.",
+    );
+  });
+
+  it("after taint a flagged tool goes to the API (it decides); an unflagged side-effecting one keeps today's local block", async () => {
+    const fake = fakeClient();
+    const g = approvalGuard(fake);
+    expect(await g.beforeToolCall(call(ECHO, { text: "read" }), ctx())).toBeUndefined();
+    expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+    expect(await g.beforeToolCall(call(NOTE, { text: "after taint" }), ctx())).toBeUndefined();
+    expect(fake.requests.map((q) => q.tool)).toEqual([ECHO, NOTE]);
+    expect(fake.requests[1]?.arguments).toEqual({ text: "after taint" });
+    const r = await g.beforeToolCall(call(DELETE, { id: 1 }), ctx());
+    expect(r).toEqual({
+      block: true,
+      blockReason: `Tool ${DELETE} blocked: this turn is read-only after untrusted content (web or tool output) was read.`,
+    });
+    expect(fake.requests).toHaveLength(2);
+  });
+
+  it("the flag never lifts the local taint block of the memory and board tools (validated by their own routes)", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    g.beginTurn(SESSION, {
+      eventId: "evt-ap",
+      agentId: "a1",
+      turn: turn({
+        tools: ["web_search", "ocw_memory_save"],
+        toolFlags: {
+          web_search: WEB,
+          ocw_memory_save: { untrustedOutput: false, sideEffecting: true, approval: "always" },
+        },
+      }),
+    });
+    await g.beforeToolCall(call("web_search", { query: "q" }), ctx());
+    expect(await g.beforeToolCall(call("ocw_memory_save", { text: "x" }), ctx())).toMatchObject({
+      block: true,
+      blockReason: expect.stringContaining("read-only"),
+    });
+  });
+
+  it("policy_changed keeps today's generic sentence; an allowed flagged call is counted and taints like any other", async () => {
+    const fake = fakeClient();
+    fake.decide = refuse("policy_changed");
+    const g = approvalGuard(fake);
+    expect(await g.beforeToolCall(call(NOTE, {}), ctx())).toEqual({
+      block: true,
+      blockReason: `Tool ${NOTE} blocked by the workspace policy (policy_changed).`,
+    });
+    fake.decide = async () => ({ callId: "c-ok", allowed: true, reason: null });
+    expect(await g.beforeToolCall(call(NOTE, { text: "go" }), ctx())).toBeUndefined();
+    expect(g.activeTurn(SESSION)).toMatchObject({ calls: 2, tainted: true });
+  });
+});
+
+describe("the param pin (07.5-04, D-04, Pitfall 3): what the API checked is what runs", () => {
+  const NOTE = "m1a2b3c4d__write_note";
+  const ECHO = "m1a2b3c4d__echo";
+  const FLAGGED = { untrustedOutput: true, sideEffecting: true, approval: "when_tainted" as const };
+
+  function pinGuard(fake: FakeClient, session = SESSION) {
+    const g = createToolGuard({ client: () => fake.client });
+    g.beginTurn(session, {
+      eventId: "evt-pin",
+      agentId: "a1",
+      turn: turn({
+        tools: [NOTE, ECHO, "ocw_connector_call"],
+        toolFlags: { [NOTE]: FLAGGED, [ECHO]: { untrustedOutput: true, sideEffecting: false } },
+      }),
+      connectorTools: ["m1a2b3c4d__create_invoice"],
+    });
+    return g;
+  }
+
+  it("an allowed flagged call is pinned under its call id: the pin returns a copy of exactly the checked params, once", async () => {
+    const fake = fakeClient();
+    const g = pinGuard(fake);
+    const params = { amount: 10, to: "billing@globex.example", lines: [{ sku: "A", qty: 2 }] };
+    expect(await g.beforeToolCall({ toolName: NOTE, params, toolCallId: "tc-p1" }, ctx())).toBeUndefined();
+    // A later mutation of the event's object never reaches the pin.
+    params.amount = 999;
+    const pinned = g.pinParams({ toolName: NOTE, params: { amount: 1 }, toolCallId: "tc-p1" }, ctx());
+    expect(pinned).toEqual({
+      params: { amount: 10, to: "billing@globex.example", lines: [{ sku: "A", qty: 2 }] },
+    });
+    expect(g.pinParams({ toolName: NOTE, params: {}, toolCallId: "tc-p1" }, ctx())).toBeUndefined();
+  });
+
+  it("only flagged calls the API allowed are pinned; another session never reads a pin", async () => {
+    const fake = fakeClient();
+    const g = pinGuard(fake);
+    await g.beforeToolCall({ toolName: ECHO, params: { text: "x" }, toolCallId: "tc-u" }, ctx());
+    expect(g.pinParams({ toolName: ECHO, params: {}, toolCallId: "tc-u" }, ctx())).toBeUndefined();
+    fake.decide = async () => ({ callId: "c", allowed: false, reason: "approval_pending" });
+    await g.beforeToolCall({ toolName: NOTE, params: { a: 1 }, toolCallId: "tc-r" }, ctx());
+    expect(g.pinParams({ toolName: NOTE, params: {}, toolCallId: "tc-r" }, ctx())).toBeUndefined();
+    fake.decide = async () => ({ callId: "c", allowed: true, reason: null });
+    await g.beforeToolCall({ toolName: NOTE, params: { a: 2 }, toolCallId: "tc-s" }, ctx());
+    expect(
+      g.pinParams({ toolName: NOTE, params: {}, toolCallId: "tc-s" }, ctx("agent:ocw-a1:ocw:channel:dm-9")),
+    ).toBeUndefined();
+    expect(g.pinParams({ toolName: NOTE, params: {}, toolCallId: "tc-s" }, ctx())).toEqual({
+      params: { a: 2 },
+    });
+  });
+
+  it("a flagged call without a tool call id is blocked with the fixed sentence and nothing is posted; the context's id counts", async () => {
+    const fake = fakeClient();
+    const g = pinGuard(fake);
+    expect(await g.beforeToolCall({ toolName: NOTE, params: { a: 1 } }, ctx())).toEqual({
+      block: true,
+      blockReason: `Tool ${NOTE} blocked: this action needs approval, but the call has no id to bind the approval to (fail closed).`,
+    });
+    expect(fake.requests).toEqual([]);
+    expect(g.activeTurn(SESSION)?.calls).toBe(0);
+    expect(
+      await g.beforeToolCall({ toolName: NOTE, params: { a: 1 } }, { ...ctx(), toolCallId: "tc-ctx" }),
+    ).toBeUndefined();
+    expect(fake.requests[0]?.toolCallId).toBe("tc-ctx");
+    expect(g.pinParams({ toolName: NOTE, params: {} }, { ...ctx(), toolCallId: "tc-ctx" })).toEqual({
+      params: { a: 1 },
+    });
+  });
+
+  it("pins are dropped when the turn ends (endTurn or its signal), so a blocked call never leaves one behind", async () => {
+    const fake = fakeClient();
+    const g = pinGuard(fake);
+    await g.beforeToolCall({ toolName: NOTE, params: { a: 1 }, toolCallId: "tc-e" }, ctx());
+    g.endTurn(SESSION);
+    expect(g.pinParams({ toolName: NOTE, params: {}, toolCallId: "tc-e" }, ctx())).toBeUndefined();
+    const abort = new AbortController();
+    const g2 = createToolGuard({ client: () => fake.client });
+    g2.beginTurn(
+      SESSION,
+      { eventId: "evt-a", agentId: "a1", turn: turn({ tools: [NOTE], toolFlags: { [NOTE]: FLAGGED } }) },
+      abort.signal,
+    );
+    await g2.beforeToolCall({ toolName: NOTE, params: { a: 1 }, toolCallId: "tc-a" }, ctx());
+    abort.abort();
+    expect(g2.pinParams({ toolName: NOTE, params: {}, toolCallId: "tc-a" }, ctx())).toBeUndefined();
+  });
+
+  it("self-validated tools are never pinned: their own route performs exactly what it decided on", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    g.beginTurn(SESSION, {
+      eventId: "evt-sv",
+      agentId: "a1",
+      turn: turn({
+        tools: ["ocw_connector_call"],
+        toolFlags: { m1a2b3c4d__create_invoice: FLAGGED },
+      }),
+      connectorTools: ["m1a2b3c4d__create_invoice"],
+    });
+    const params = { connector: "m1a2b3c4d", tool: "create_invoice", arguments: { amount: 10 } };
+    expect(await g.beforeToolCall({ toolName: "ocw_connector_call", params }, ctx())).toBeUndefined();
+    expect(fake.requests).toEqual([]);
+    expect(
+      g.pinParams({ toolName: "ocw_connector_call", params: {}, toolCallId: "tc-x" }, ctx()),
+    ).toBeUndefined();
+  });
+
+  it("ocw_connector_call and ocw_http_request skip the local taint block when the logical tool (or the keychain tool) is flagged", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    const begin = (approval: boolean) =>
+      g.beginTurn(SESSION, {
+        eventId: "evt-ct",
+        agentId: "a1",
+        turn: turn({
+          tools: ["web_search", "ocw_connector_call", "ocw_http_request"],
+          toolFlags: {
+            web_search: WEB,
+            m1a2b3c4d__create_invoice: {
+              untrustedOutput: true,
+              sideEffecting: true,
+              ...(approval ? { approval: "when_tainted" as const } : {}),
+            },
+            ocw_http_request: {
+              untrustedOutput: true,
+              sideEffecting: true,
+              ...(approval ? { approval: "always" as const } : {}),
+            },
+          },
+        }),
+        connectorTools: ["m1a2b3c4d__create_invoice"],
+      });
+    const invoice = { connector: "m1a2b3c4d", tool: "create_invoice", arguments: { amount: 10 } };
+    const post = { handle: "k_abcdefgh23", method: "POST", url: "https://erp.example/x" };
+    for (const approval of [true, false]) {
+      begin(approval);
+      await g.beforeToolCall(call("web_search", { query: "q" }), ctx());
+      const c = await g.beforeToolCall(call("ocw_connector_call", invoice), ctx());
+      const h = await g.beforeToolCall(call("ocw_http_request", post), ctx());
+      if (approval) {
+        expect(c).toBeUndefined();
+        expect(h).toBeUndefined();
+      } else {
+        expect(c?.blockReason).toContain("read-only after untrusted content");
+        expect(h?.blockReason).toContain("read-only after untrusted content");
+      }
+    }
   });
 });

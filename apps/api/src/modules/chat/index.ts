@@ -128,6 +128,7 @@ export {
   cardOf,
   mirrorCardClosed,
   mirrorCardDecision,
+  mirrorCardUsed,
   patchCard,
   withCards,
 } from "./card-actions";

@@ -63,6 +63,12 @@ CREATE POLICY auth_plane ON app.org_members AS PERMISSIVE FOR ALL TO ocw_auth US
 REVOKE UPDATE, TRUNCATE ON app.memory_file_revisions FROM ocw_app;
 REVOKE UPDATE, TRUNCATE ON app.memory_proposals FROM ocw_app;
 
+-- Per-tool approvals and Work Zone proposals (Phase 07.5): the stored action behind a `tool.call` approval and a
+-- proposal are immutable by trigger (UPDATE only), and triggers do not fire on TRUNCATE, which also ignores RLS. The app
+-- role never truncates them; DELETE stays granted for the cascades of a bot, project or device (ADR-0026).
+REVOKE TRUNCATE ON app.tool_call_approvals FROM ocw_app;
+REVOKE TRUNCATE ON app.work_zone_proposals FROM ocw_app;
+
 -- ADR-0010 ("the human can see and clear the notes; admins cannot" / admins "can never read its chat, memory or
 -- instructions"): every memory row of a personal scope, or of a personal bot's notebook, carries
 -- `personal_owner_user_id`. These SECURITY DEFINER trigger functions (owner ocw_migrator, which bypasses RLS to read the

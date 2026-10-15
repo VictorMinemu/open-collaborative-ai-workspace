@@ -1,12 +1,15 @@
 import { z } from "zod";
 import { Id, IsoDateTime } from "./common";
 import { MemoryProposalView } from "./memory";
+import { ApprovalOrigin, ToolCallApprovalView } from "./tool-approvals";
+import { WorkZoneProposalView } from "./work-zone-proposals";
 
 /**
  * Approve-and-apply (Phase 07.2, D-05, D-08, ADR-0023): a generic approval a person decides and the server applies
  * (`server_apply`) or that grants exactly one action (`grant`, Phase 07.5). Every decision names the hash of the exact
  * action the approver was shown; the server recomputes it and refuses a mismatch (`approval_action_changed`).
- * Never imports `chat.ts` or `agent-cards.ts` (agent-cards imports this file).
+ * Never imports `chat.ts` or `agent-cards.ts` (agent-cards imports this file); imports the 07.5 view files
+ * (`tool-approvals.ts`, `work-zone-proposals.ts`), which never import it.
  */
 
 /**
@@ -35,7 +38,7 @@ export type ApprovalKindId = z.infer<typeof ApprovalKindId>;
  * The kinds known so far. Append-only: later phases add theirs (07.5 tool calls, 07.6 automations) and never rename
  * one. A kind without a dedicated view uses the generic `fields` view.
  */
-export const KNOWN_APPROVAL_KINDS = ["memory.write"] as const;
+export const KNOWN_APPROVAL_KINDS = ["memory.write", "tool.call", "work_zone.start"] as const;
 export type KnownApprovalKind = (typeof KNOWN_APPROVAL_KINDS)[number];
 
 /** SHA-256 of the kind's fixed-order action tuple, lowercase hex. */
@@ -85,6 +88,28 @@ export const ApprovalHeadline = z.object({
   /** Who asked ("Scout for Sam Lee"). */
   requester: z.string().max(200),
   tags: z.array(ApprovalTag).max(8),
+  // Phase 07.5 (UI-SPEC Surface 2 rows): optional, so 07.2 headlines still parse.
+  /** The bot that asked (row avatar). */
+  agent: z
+    .object({ id: Id, displayName: z.string().max(200) })
+    .nullable()
+    .optional(),
+  /** Where it was asked ("# ops", "DM"). */
+  origin: ApprovalOrigin.nullable().optional(),
+  /** Row chips: the action's source, the Work Zone device with its state, outside content. */
+  chips: z
+    .array(
+      z.object({
+        kind: z.enum(["source", "device", "tainted"]),
+        label: z.string().trim().min(1).max(80),
+        icon: z.enum(["plug", "globe", "package"]).optional(),
+        state: z.enum(["online", "offline"]).optional(),
+      }),
+    )
+    .max(3)
+    .optional(),
+  /** An approved grant's use window end (`tool.call`). */
+  useBy: IsoDateTime.nullable().optional(),
 });
 export type ApprovalHeadline = z.infer<typeof ApprovalHeadline>;
 
@@ -105,8 +130,8 @@ export const ApprovalSummary = z.object({
   resultCode: z.string().max(64).nullable(),
   /** The resolver's live decision for the viewer. */
   viewerCan: z.array(z.enum(["decide"])),
-  /** The kind's one-line description for lists; absent for kinds without one (07.2-13). */
-  headline: ApprovalHeadline.optional(),
+  /** The kind's one-line description for lists; absent or null for kinds without one (07.2-13, 07.5-06). */
+  headline: ApprovalHeadline.nullable().optional(),
 });
 export type ApprovalSummary = z.infer<typeof ApprovalSummary>;
 
@@ -125,6 +150,9 @@ export const ApprovalView = z.discriminatedUnion("type", [
     title: z.string().trim().min(1).max(200),
     fields: z.array(ApprovalField).max(12),
   }),
+  // Phase 07.5: exactly the call a bot asks to run once, and a Work Zone session a bot proposes.
+  ToolCallApprovalView,
+  WorkZoneProposalView,
 ]);
 export type ApprovalView = z.infer<typeof ApprovalView>;
 
@@ -132,16 +160,31 @@ export type ApprovalView = z.infer<typeof ApprovalView>;
 export const ApprovalDetail = ApprovalSummary.extend({ view: ApprovalView });
 export type ApprovalDetail = z.infer<typeof ApprovalDetail>;
 
+/** `?kinds=tool.call,work_zone.start`: 1 to 4 kind ids, comma-separated (an empty item is refused). */
+export const ApprovalKindsParam = z
+  .string()
+  .max(300)
+  .transform((v) => v.split(","))
+  .pipe(z.array(ApprovalKindId).min(1).max(4));
+export type ApprovalKindsParam = z.infer<typeof ApprovalKindsParam>;
+
 /** `GET /api/v1/approvals`: what the caller may decide, or what the caller's agents asked for. */
 export const ApprovalListQuery = z.object({
   role: z.enum(["decider", "requester"]),
   status: ApprovalRequestStatus.optional(),
   kind: ApprovalKindId.optional(),
+  /** Phase 07.5 (UI-SPEC R1): only these kinds; combined with `kind` = the intersection; absent = all. */
+  kinds: ApprovalKindsParam.optional(),
   cursor: z.string().max(200).optional(),
 });
 export type ApprovalListQuery = z.infer<typeof ApprovalListQuery>;
 
-export const ApprovalList = z.object({ items: z.array(ApprovalSummary), nextCursor: z.string().nullable() });
+export const ApprovalList = z.object({
+  items: z.array(ApprovalSummary),
+  nextCursor: z.string().nullable(),
+  /** Phase 07.5: pending requests matching the filters, capped at 100 (nav badges and the tab count). */
+  total: z.number().int().min(0).max(100).optional(),
+});
 export type ApprovalList = z.infer<typeof ApprovalList>;
 
 export const ApprovalErrorCode = z.enum([

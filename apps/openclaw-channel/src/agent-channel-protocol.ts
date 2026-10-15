@@ -34,6 +34,10 @@
  *                                an AgentChannelToolRefusal code)
  *   POST /http-requests        ← AgentChannelHttpRequest → AgentChannelHttpResponse (ocw_http_request: a keychain
  *                                handle, never a value; same refusals)
+ *   POST /work-zone/projects   ← AgentChannelWorkZoneProjects → AgentChannelWorkZoneProjectsResponse
+ *                                (ocw_work_zone_projects, 07.5: the projects the turn's human may start a session on)
+ *   POST /work-zone/proposals  ← AgentChannelWorkZonePropose → `{approvalId, created}` or 200 `{refused}`
+ *                                (ocw_start_work_zone, 07.5: a proposal the turn's human starts; never a mode)
  *   POST /mcp/probe-results    ← AgentChannelMcpProbeResult (the tools an `mcp.probe` discovered; D-13)
  *   POST /plugins/report       ← AgentChannelPluginReport (a marketplace install / uninstall outcome; D-14)
  *   POST /plugins/verify-install, GET /plugins: used by infra/openclaw (install gate, boot render), not here
@@ -92,6 +96,12 @@ export type AgentChannelHistoryEntry = z.infer<typeof AgentChannelHistoryEntry>;
 export const TurnToolFlags = z.object({
   untrustedOutput: z.boolean(),
   sideEffecting: z.boolean(),
+  /**
+   * 07.5 (D-01): the tool has an approval policy for this bot and this human. The gate then sends the call's full
+   * arguments and leaves the taint decision to the API. An unknown value reads as absent (no arguments travel; the API
+   * refuses `policy_changed`), so a newer API never voids the whole turn.
+   */
+  approval: z.enum(["always", "when_tainted"]).optional().catch(undefined),
 });
 export type TurnToolFlags = z.infer<typeof TurnToolFlags>;
 
@@ -439,6 +449,30 @@ export const AgentCardActionEvent = AgentMentionEvent.omit({ type: true }).exten
     kind: z.string().max(64),
     title: z.string().max(400),
     outcome: z.enum(["approved", "denied"]),
+    /**
+     * 07.5 (P-06): who decided. For grant kinds the turn is delivered for the requester (`message.author`), so the
+     * decider is named here. A malformed value reads as absent.
+     */
+    decidedBy: z.object({ id: Id, displayName: z.string() }).optional().catch(undefined),
+    /**
+     * 07.5 (D-02): an approved `tool.call` grant: call `tool` once with exactly these canonical `arguments` before
+     * `useBy`. Lenient on purpose (sizes and names are bounded by the mapper, which drops an oversized grant and says
+     * so); a malformed value reads as absent.
+     */
+    grant: z
+      .object({ tool: z.string().min(1), arguments: z.string(), useBy: z.string() })
+      .optional()
+      .catch(undefined),
+    /**
+     * 07.5-11: the decider's own note, as a field (the mapper never parses it out of the sentence). Bounded and
+     * sanitized by the mapper; a malformed value reads as absent.
+     */
+    note: z.string().optional().catch(undefined),
+    /**
+     * 07.5-11: an approved request that failed to apply (a Work Zone Start: `device_offline`, …). The mapper turns
+     * known codes into words; a malformed value reads as absent.
+     */
+    resultCode: z.string().optional().catch(undefined),
   }),
 });
 export type AgentCardActionEvent = z.infer<typeof AgentCardActionEvent>;
@@ -661,7 +695,10 @@ export type AgentChannelRuntimeReport = {
   paused: { reason: "restart_loop_breaker"; detail: string | null; resumeAt: string | null } | null;
 };
 
-/** POST /tool-calls: only the search query / fetched URL travel (for the domain audit), never other params. */
+/**
+ * POST /tool-calls: only the search query / fetched URL travel (for the domain audit), never other params; the full
+ * `arguments` travel ONLY for a tool whose turn flags carry `approval` (07.5 D-01, serialized ≤ 32 KB).
+ */
 export type AgentChannelToolCallRequest = {
   eventId: string;
   agentId: string;
@@ -669,12 +706,38 @@ export type AgentChannelToolCallRequest = {
   toolCallId?: string;
   params: { query?: string; url?: string };
   argsBytes?: number;
+  arguments?: Record<string, unknown>;
 };
+
+/** 07.5: the approval a refused call waits on. The plugin tells the model who decides, never the arguments. */
+export const AgentChannelToolCallApproval = z.object({
+  id: Id,
+  /** false when an identical pending request was reused (no new card). */
+  created: z.boolean(),
+  /** The approver label ("a lead of Sales"). */
+  waitingFor: z.string().max(200),
+  requesterName: z.string().max(120),
+});
+export type AgentChannelToolCallApproval = z.infer<typeof AgentChannelToolCallApproval>;
+
+/**
+ * 07.5-11: who denied exactly this action (`approval_denied`): the decider's display name and their own note. Bounded
+ * and sanitized by the sentence that shows them; a malformed one reads as absent.
+ */
+export const AgentChannelApprovalDenial = z.object({
+  deciderName: z.string(),
+  note: z.string().nullable(),
+});
+export type AgentChannelApprovalDenial = z.infer<typeof AgentChannelApprovalDenial>;
 
 export const AgentChannelToolCallDecision = z.object({
   callId: Id,
   allowed: z.boolean(),
   reason: z.string().nullable().optional(),
+  /** 07.5: with `approval_required` / `approval_pending`. A malformed one reads as absent (the sentence falls back). */
+  approval: AgentChannelToolCallApproval.nullable().optional().catch(null),
+  /** 07.5-11: with `approval_denied`. A malformed one reads as absent (the sentence names "an approver"). */
+  denial: AgentChannelApprovalDenial.nullable().optional().catch(null),
 });
 export type AgentChannelToolCallDecision = z.infer<typeof AgentChannelToolCallDecision>;
 
@@ -727,6 +790,8 @@ export const AGENT_CARD_ROUTE_PREFIXES = [
   "/search",
   "/share",
   "/memory",
+  // Phase 07.5: the approvals inbox and review (`/approvals/<id>`).
+  "/approvals",
 ] as const;
 
 function hasControlCharacter(v: string): boolean {
@@ -988,9 +1053,52 @@ export const AGENT_CHANNEL_TOOL_REFUSALS = [
   "egress_refused",
   "upstream_error",
   "timeout",
+  // 07.5: every `ToolApprovalRefusal` (`policy_changed` is above).
+  "approval_required",
+  "approval_pending",
+  "approval_denied",
+  "approval_used",
+  "arguments_too_large",
+  "arguments_invalid",
+  "too_many_pending",
 ] as const;
 export const AgentChannelToolRefusal = z.enum(AGENT_CHANNEL_TOOL_REFUSALS);
 export type AgentChannelToolRefusal = z.infer<typeof AgentChannelToolRefusal>;
+
+/**
+ * 07.5 (contracts `ToolApprovalRefusal`): why the API refused a call that needs, or had, a person's approval. Each is a
+ * fixed sentence for the model (tool-guard.ts `APPROVAL_SENTENCES`), never the API's text.
+ */
+export const TOOL_APPROVAL_REFUSALS = [
+  "approval_required",
+  "approval_pending",
+  "approval_denied",
+  "approval_used",
+  "arguments_too_large",
+  "arguments_invalid",
+  "too_many_pending",
+  "policy_changed",
+] as const;
+export type ToolApprovalRefusal = (typeof TOOL_APPROVAL_REFUSALS)[number];
+
+/**
+ * 07.5: the `details` of a 409 approval refusal from `/connectors/call` and `/http-requests`: the approval waited on
+ * (`approval_required` / `approval_pending`) or, 07.5-11, who denied it (`approval_denied`). Each reads as absent when
+ * malformed.
+ */
+export const AgentChannelApprovalRefusalDetails = z.object({
+  approval: AgentChannelToolCallApproval.optional().catch(undefined),
+  denial: AgentChannelApprovalDenial.optional().catch(undefined),
+});
+export type AgentChannelApprovalRefusalDetails = z.infer<typeof AgentChannelApprovalRefusalDetails>;
+
+/** The bounds of contracts `TOOL_APPROVAL_LIMITS` the cell uses. */
+export const TOOL_APPROVAL_LIMITS = {
+  /** Serialized arguments of one approvable call. */
+  argumentsBytes: 32_768,
+  /** Pending requests per (agent, requester). */
+  pendingPerRequester: 5,
+} as const;
 
 /** An MCP server's immutable OpenClaw name: `m` + 8 hex characters. */
 export const CONNECTOR_SAFE_NAME = /^m[0-9a-f]{8}$/u;
@@ -1087,3 +1195,78 @@ export const AgentChannelHttpResponse = z.object({
   redirectHost: z.string().nullable().default(null),
 });
 export type AgentChannelHttpResponse = z.infer<typeof AgentChannelHttpResponse>;
+
+// ---------------------------------------------------------------- Work Zone proposals (Phase 07.5)
+
+/*
+ * `ocw_work_zone_projects` and `ocw_start_work_zone` (07.5 D-03, C-01): bound to a delivered turn like the connector
+ * tools. The human a session is proposed for is always the stored turn's, never a field: the bodies carry the event
+ * and the agent plus the tool's own fields. There is deliberately no mode, model or full-access field anywhere, so a
+ * bot can never choose how a session runs (APPROVE-04). Mirror of `packages/contracts/src/work-zone-proposals.ts`.
+ */
+
+/** The runtimes a proposal may name (contracts `RuntimeId`). */
+export const WORK_ZONE_RUNTIMES = ["claude-code", "codex"] as const;
+export type WorkZoneRuntime = (typeof WORK_ZONE_RUNTIMES)[number];
+
+/** The bounds of contracts `WORK_ZONE_PROPOSAL_LIMITS` the cell uses. */
+export const WORK_ZONE_PROPOSAL_LIMITS = {
+  promptChars: 50_000,
+  pendingPerRequester: 3,
+} as const;
+
+/** Why a proposal was refused before any card existed (contracts `WorkZoneProposalRefusal`). */
+export const WORK_ZONE_PROPOSAL_REFUSALS = [
+  "unknown_turn",
+  "not_in_turn",
+  "tainted",
+  "cap_reached",
+  "not_allowed",
+  "prompt_not_allowed",
+  "project_not_found",
+  "device_not_shared",
+  "device_offline",
+  "runtime_unavailable",
+  "too_many_pending",
+] as const;
+export type WorkZoneProposalRefusal = (typeof WORK_ZONE_PROPOSAL_REFUSALS)[number];
+
+/** `POST /work-zone/projects`: the turn's ids only. */
+export type AgentChannelWorkZoneProjects = { eventId: string; agentId: string };
+
+/** Names and ids only (a host path never leaves the device). Lenient: a newer runtime id stays a string. */
+export const AgentChannelWorkZoneProjectsResponse = z.object({
+  projects: z
+    .array(
+      z.object({
+        projectId: Id,
+        name: z.string(),
+        device: z.object({ id: Id, name: z.string(), online: z.boolean() }),
+        runtimes: z
+          .array(z.object({ id: z.string(), label: z.string(), available: z.boolean() }))
+          .default([]),
+      }),
+    )
+    .default([]),
+});
+export type AgentChannelWorkZoneProjectsResponse = z.infer<typeof AgentChannelWorkZoneProjectsResponse>;
+
+/** `POST /work-zone/proposals`: never a mode, a model or a user. */
+export type AgentChannelWorkZonePropose = {
+  eventId: string;
+  agentId: string;
+  projectId: string;
+  deviceId: string;
+  prompt: string;
+  runtime?: WorkZoneRuntime;
+};
+
+/**
+ * `{approvalId, created}` (created false: the same proposal was already pending) or a 200 `{refused}`. An unknown
+ * refusal code from a newer API stays a string (the plugin answers it with its generic sentence).
+ */
+export const AgentChannelWorkZoneProposeResponse = z.union([
+  z.object({ refused: z.string().min(1).max(64) }),
+  z.object({ approvalId: Id, created: z.boolean() }),
+]);
+export type AgentChannelWorkZoneProposeResponse = z.infer<typeof AgentChannelWorkZoneProposeResponse>;

@@ -1,5 +1,11 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/channel-core";
-import { registerToolGate, type ToolGuard, toolGuard } from "./tool-guard.js";
+import {
+  registerToolGate,
+  TOOL_GATE_PRIORITY,
+  TOOL_PIN_PRIORITY,
+  type ToolGuard,
+  toolGuard,
+} from "./tool-guard.js";
 
 /**
  * The plugin's capability registrations (`defineChannelPluginEntry({ registerCapabilities })`): the call-time
@@ -22,10 +28,15 @@ export function registerCapabilities(api: OpenClawPluginApi, guard: ToolGuard = 
 
 const announced = new Set<string>();
 
-/** One line per registration mode and process, so a cell's log proves where the gate is wired. */
+/**
+ * One line per registration mode and process, so a cell's log proves where the gate is wired, and at which priorities
+ * (OpenClaw runs `before_tool_call` handlers highest first; the 07.5 params pin must be the last, 07.5-15 smoke).
+ */
 function announce(api: OpenClawPluginApi): void {
   const mode = api.registrationMode ?? "unknown";
   if (announced.has(mode)) return;
   announced.add(mode);
-  api.logger?.info?.(`[ocw] tool gate registered (${mode} registry)`);
+  api.logger?.info?.(
+    `[ocw] tool gate registered (${mode} registry; gate priority ${TOOL_GATE_PRIORITY}, params pin priority ${TOOL_PIN_PRIORITY})`,
+  );
 }

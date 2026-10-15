@@ -39,6 +39,18 @@
 /packages/contracts/src/agent-templates.ts         @VictorMinemu
 /apps/openclaw-channel/src/connector-tools.ts      @VictorMinemu
 
+# Phase 07.5 (ADR-0026): per-tool approval policies and grants, the claim that consumes them, the Work Zone start path
+# and proposals, the approve-and-apply primitive, and the cell gate with its params pin.
+/apps/api/src/modules/tool-approval/               @VictorMinemu
+/apps/api/src/modules/approval/                    @VictorMinemu
+/apps/api/src/modules/work-session/start.ts        @VictorMinemu
+/apps/api/src/modules/work-session/proposals.ts    @VictorMinemu
+/apps/api/src/modules/agent-channel/work-zone.ts   @VictorMinemu
+/packages/contracts/src/tool-approvals.ts          @VictorMinemu
+/packages/contracts/src/work-zone-proposals.ts     @VictorMinemu
+/apps/openclaw-channel/src/tool-guard.ts           @VictorMinemu
+/apps/openclaw-channel/src/work-zone-tools.ts      @VictorMinemu
+
 # Runtime adapters (ADR-0012 path) and the OpenClaw plugin install gate.
 /apps/local-runtime/src/claude/                    @VictorMinemu
 /apps/local-runtime/src/codex/                     @VictorMinemu

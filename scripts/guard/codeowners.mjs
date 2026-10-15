@@ -22,6 +22,11 @@ export const REQUIRED_AREAS = [
   { area: "connector proxy", file: "apps/api/src/modules/agent-channel/connectors.ts" },
   { area: "keychain proxy", file: "apps/api/src/modules/agent-channel/http-requests.ts" },
   { area: "agent templates (caps)", file: "apps/api/src/modules/agent/templates.ts" },
+  // Phase 07.5 (ADR-0026): who must approve a bot's call, the one-use grant, and the cell's params pin.
+  { area: "tool approval policies and grants", file: "apps/api/src/modules/tool-approval/request.ts" },
+  { area: "approve-and-apply primitive", file: "apps/api/src/modules/approval/service.ts" },
+  { area: "Work Zone proposals", file: "apps/api/src/modules/work-session/proposals.ts" },
+  { area: "cell tool gate and params pin", file: "apps/openclaw-channel/src/tool-guard.ts" },
 ];
 
 /** GitHub CODEOWNERS pattern (gitignore subset) → RegExp over repo-relative paths. */

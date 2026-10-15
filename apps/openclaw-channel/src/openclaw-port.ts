@@ -345,6 +345,8 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         turn: { ...m.turn, tools: allowed },
         // 07.4: the logical connector tools only `ocw_connector_call` may name (never OpenClaw tools).
         connectorTools: m.connectorTools,
+        // 07.5: who asked (sanitized), named in the gate's approval sentences.
+        requesterName: m.sender.name,
       },
       signal,
     );

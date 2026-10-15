@@ -24,15 +24,36 @@ const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const now = 1_790_000_000;
 
 describe("permission vocabulary", () => {
-  it("has exactly the 64 agreed permissions", () => {
-    expect(Permission.options).toHaveLength(64);
-    expect(new Set(Permission.options).size).toBe(64);
+  it("has exactly the 65 agreed permissions", () => {
+    // 64 through 07.4; 07.5-01 appended `tool_approval.manage`.
+    expect(Permission.options).toHaveLength(65);
+    expect(new Set(Permission.options).size).toBe(65);
+  });
+
+  it("Phase 07.5 approval-policy grain exists exactly as 07.5-01 defines it (D-04, P-03)", () => {
+    // Appended at the end, never renamed.
+    expect(Permission.options.at(-1)).toBe("tool_approval.manage");
+    // `team` like `unit.modules.manage`: delegable to leads, outside the 07.3 module catalog's classified surfaces.
+    expect(PERMISSION_SURFACE["tool_approval.manage"]).toBe("team");
+    for (const role of OrgRole.options) {
+      if (role === "admin") expect(ROLE_PERMISSIONS[role]).toContain("tool_approval.manage");
+      else expect(ROLE_PERMISSIONS[role], role).not.toContain("tool_approval.manage");
+    }
+    // Leads manage rules on the subtree they lead (resolver); agents never decide what needs a person.
+    expect(LEAD_PERMISSIONS).toContain("tool_approval.manage");
+    expect(AGENT_PERMISSIONS).not.toContain("tool_approval.manage");
+    expect(NON_DELEGABLE_PERMISSIONS).not.toContain("tool_approval.manage");
+    expect(PermissionPattern.safeParse("tool_approval.manage").success).toBe(true);
+    expect(PERMISSION_DESCRIPTIONS["tool_approval.manage"]).toBe(
+      "Decide which bot actions need a person's approval (for the units you lead)",
+    );
   });
 
   it("Phase 07.4 connector, keychain and template grains exist exactly as 07.4-01 defines them (D-01, D-04, D-05)", () => {
     const grains = ["connector.connect", "vault.use", "vault.manage", "agent_template.manage"] as const;
     // Appended at the end, never renamed.
-    expect(Permission.options.slice(-4)).toEqual([...grains]);
+    // Positions 60–63 (07.5-01 appended `tool_approval.manage` after them).
+    expect(Permission.options.slice(60, 64)).toEqual([...grains]);
     expect(PERMISSION_SURFACE).toMatchObject({
       "connector.connect": "bots",
       "vault.use": "bots",
@@ -68,8 +89,8 @@ describe("permission vocabulary", () => {
 
   it("Phase 07.2 memory grains exist exactly as 07.2-01 defines them (MEM-04, MEM-07, D-04)", () => {
     const memory = ["memory.read", "memory.write", "memory.promote"] as const;
-    // Appended after 07.3's grains, never renamed (D-09); 07.4 appends after them.
-    expect(Permission.options.slice(-7, -4)).toEqual([...memory]);
+    // Appended after 07.3's grains, never renamed (D-09); 07.4 and 07.5 append after them (positions 57–59).
+    expect(Permission.options.slice(57, 60)).toEqual([...memory]);
     expect(PERMISSION_SURFACE).toMatchObject({
       "memory.read": "bots",
       "memory.write": "bots",
@@ -141,7 +162,8 @@ describe("permission vocabulary", () => {
     }
     // ADR-0024 (07.3-01) appended `unit.modules.manage`: lead rights over module access on the led subtree;
     // 07.2-01 appended `memory.write` and `memory.promote` (shared memory of the led subtree); 07.4-01 appended
-    // `vault.manage` and `agent_template.manage` (unit keys and templates of the led subtree).
+    // `vault.manage` and `agent_template.manage` (unit keys and templates of the led subtree); 07.5-01 appended
+    // `tool_approval.manage`.
     expect(LEAD_PERMISSIONS).toEqual([
       "unit.members.manage",
       "bot.manage_unit",
@@ -151,6 +173,8 @@ describe("permission vocabulary", () => {
       "memory.promote",
       "vault.manage",
       "agent_template.manage",
+      // 07.5-01: approval policies of the led subtree.
+      "tool_approval.manage",
     ]);
     for (const p of ["ai_chat.manage", "bot.manage_unit", "agent_card.approve"] as const) {
       expect(NON_DELEGABLE_PERMISSIONS, p).not.toContain(p);

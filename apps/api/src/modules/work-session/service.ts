@@ -21,6 +21,7 @@ import {
   type WorkZonePolicy,
 } from "@ocw/contracts";
 import {
+  agents,
   conversations,
   deviceCommands,
   devices,
@@ -32,7 +33,7 @@ import {
   workPrompts,
   workSessions,
 } from "@ocw/db";
-import { and, asc, count, desc, eq, inArray, min, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, min, type SQL, sql } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
 import { attachmentRowsForWorkPrompt, attachmentsForWorkPrompts, type ObjectStorage } from "../artifact";
 import type { AuditService } from "../audit";
@@ -206,7 +207,15 @@ export class WorkSessionService implements DeviceSessionHandler {
       tx,
       rows.map((r) => r.id),
     );
-    return rows.map((r) => toPrompt(r, dir.get(r.authorUserId)?.displayName ?? null, images.get(r.id) ?? []));
+    const bots = await proposerNames(tx, rows);
+    return rows.map((r) =>
+      toPrompt(
+        r,
+        dir.get(r.authorUserId)?.displayName ?? null,
+        images.get(r.id) ?? [],
+        proposedByOf(r, bots),
+      ),
+    );
   }
 
   async approvals(tx: Tx, sessionId: string): Promise<WorkApproval[]> {
@@ -239,11 +248,17 @@ export class WorkSessionService implements DeviceSessionHandler {
 
   async emitPrompt(tx: Tx, row: PromptRow): Promise<void> {
     const [dir, images] = await Promise.all([memberDirectory(tx), attachmentsForWorkPrompts(tx, [row.id])]);
+    const bots = await proposerNames(tx, [row]);
     await this.deps.realtime.appendEvent(
       tx,
       wsTopic(row.workSessionId),
       EventTypes.promptUpdated,
-      toPrompt(row, dir.get(row.authorUserId)?.displayName ?? null, images.get(row.id) ?? []),
+      toPrompt(
+        row,
+        dir.get(row.authorUserId)?.displayName ?? null,
+        images.get(row.id) ?? [],
+        proposedByOf(row, bots),
+      ),
     );
   }
 
@@ -1274,10 +1289,34 @@ export function normalizeEvent(ev: SessionEvent): SessionEvent {
   return ev;
 }
 
+/**
+ * Phase 07.5 (D-04, UI-SPEC Surface 3): the names of the bots that proposed these prompts. A deleted bot (soft
+ * delete; a hard delete already cleared the column) is gone, so its prompts show no proposer. One query, and only
+ * when a prompt has a proposer.
+ */
+async function proposerNames(tx: Tx, rows: readonly PromptRow[]): Promise<Map<string, string>> {
+  const ids = [...new Set(rows.flatMap((r) => (r.proposedByAgentId ? [r.proposedByAgentId] : [])))];
+  if (ids.length === 0) return new Map();
+  const found = await tx
+    .select({ id: agents.id, name: agents.name })
+    .from(agents)
+    .where(and(inArray(agents.id, ids), isNull(agents.deletedAt)));
+  return new Map(found.map((a) => [a.id, a.name]));
+}
+
+function proposedByOf(r: PromptRow, names: ReadonlyMap<string, string>): WorkPrompt["proposedBy"] {
+  const name = r.proposedByAgentId ? names.get(r.proposedByAgentId) : undefined;
+  return r.proposedByAgentId && name !== undefined
+    ? { agentId: r.proposedByAgentId, displayName: name.slice(0, 200) }
+    : null;
+}
+
 export function toPrompt(
   r: PromptRow,
   authorName: string | null,
   attachments: Attachment[] = [],
+  /** Phase 07.5: the bot whose Work Zone proposal created this prompt (`proposedByOf`); null for a person's prompt. */
+  proposedBy: WorkPrompt["proposedBy"] = null,
 ): WorkPrompt {
   return {
     id: r.id,
@@ -1292,6 +1331,7 @@ export function toPrompt(
     dispatchedAt: iso(r.dispatchedAt),
     completedAt: iso(r.completedAt),
     attachments,
+    proposedBy,
   };
 }
 

@@ -4,9 +4,12 @@ import type { MeResponse } from "@ocw/contracts";
 import { Menu, Search } from "lucide-react";
 import { usePathname } from "next/navigation";
 import { useSearchPalette } from "@/components/search/search-palette";
+import { Badge } from "@/components/ui/badge";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { countLabel } from "@/lib/approval-queries";
 import { RailContent } from "./app-rail";
-import { activeItem } from "./nav";
+import { activeItem, type NavItem } from "./nav";
+import { countedName, useNavCount } from "./nav-list";
 import { UserMenu } from "./user-menu";
 import { OrgAvatar } from "./workspace-switcher";
 
@@ -53,7 +56,13 @@ export function MobileTopBar({
 
       <div className="flex min-w-0 flex-1 items-center gap-2">
         <OrgAvatar name={me.organization.name} className="size-7 rounded-md text-xs" />
-        <span className="truncate font-semibold text-[15px]">{section?.label ?? me.organization.name}</span>
+        {section?.badge ? (
+          <CountedTitle item={section} />
+        ) : (
+          <span data-testid="mobile-topbar-title" className="truncate font-semibold text-[15px]">
+            {section?.label ?? me.organization.name}
+          </span>
+        )}
       </div>
 
       <button
@@ -67,5 +76,37 @@ export function MobileTopBar({
       </button>
       <UserMenu me={me} compact />
     </header>
+  );
+}
+
+/**
+ * The section title of a counted section (Approvals, Memory) with its live count, as on the rail: "☰ Approvals ②"
+ * (07.5 UI-SPEC, phone inbox; WINDOWS #223). Screen readers hear "Approvals, 2 to review"; the visual count is hidden
+ * from them.
+ */
+function CountedTitle({ item }: { item: NavItem }) {
+  const count = useNavCount(item);
+  if (count === 0) {
+    return (
+      <span data-testid="mobile-topbar-title" className="truncate font-semibold text-[15px]">
+        {item.label}
+      </span>
+    );
+  }
+  return (
+    <span data-testid="mobile-topbar-title" className="flex min-w-0 items-center gap-2">
+      <span aria-hidden className="truncate font-semibold text-[15px]">
+        {item.label}
+      </span>
+      <span className="sr-only">{countedName(item, count)}</span>
+      <Badge
+        variant="brand"
+        aria-hidden
+        data-testid="mobile-topbar-count"
+        className="h-5 min-w-5 shrink-0 rounded-full px-1.5 tabular-nums"
+      >
+        {countLabel(count)}
+      </Badge>
+    </span>
   );
 }

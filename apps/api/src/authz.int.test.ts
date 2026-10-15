@@ -70,6 +70,12 @@ describe("route authorization coverage (strict in tests)", () => {
     expect(modes.get("GET /agent-channel/v1/ws")).toBe<AuthzMode>("cell");
   });
 
+  it("the Work Zone proposal routes (07.5-08) are cell routes", () => {
+    const modes = stack.built.authz.routes;
+    expect(modes.get("POST /agent-channel/v1/work-zone/projects")).toBe<AuthzMode>("cell");
+    expect(modes.get("POST /agent-channel/v1/work-zone/proposals")).toBe<AuthzMode>("cell");
+  });
+
   it("a route that answers 2xx without a resolver decision fails with 500", async () => {
     const built = await buildApp(stack.env, { logger: false });
     try {

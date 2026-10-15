@@ -153,9 +153,18 @@ export function ToolsSection({
                       data-testid="tool-row"
                       data-tool={t.tool}
                     >
-                      <div className={cn("min-w-0 flex-1", blocked && "opacity-75")}>
+                      {/* A blocked tool reads quieter through its name only: dimming the whole row put its badge and
+                          description under AA contrast (axe, 07.5-15 full gate). The lock line and the disabled switch
+                          say why. */}
+                      <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                          <label htmlFor={id} className="font-medium font-mono text-[13px]">
+                          <label
+                            htmlFor={id}
+                            className={cn(
+                              "font-medium font-mono text-[13px]",
+                              blocked && "text-muted-foreground",
+                            )}
+                          >
                             {name}
                           </label>
                           <SideEffectBadge sideEffecting={t.sideEffecting} />

@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
-import { startTestDatabase, type TestDatabase } from "@ocw/db/testing";
+import { startAllOrNone, startTestDatabase, type TestDatabase } from "@ocw/db/testing";
 import { RedisContainer, type StartedRedisContainer } from "@testcontainers/redis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "./app";
@@ -193,7 +193,7 @@ async function until<T>(fn: () => T | undefined, timeoutMs = 15_000): Promise<T>
 }
 
 beforeAll(async () => {
-  [db, redis] = await Promise.all([startTestDatabase(), new RedisContainer("redis:8").start()]);
+  [db, redis] = await startAllOrNone([startTestDatabase(), new RedisContainer("redis:8").start()]);
 });
 
 afterAll(async () => {

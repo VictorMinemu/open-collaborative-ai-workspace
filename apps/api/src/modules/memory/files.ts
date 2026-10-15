@@ -473,26 +473,35 @@ export function createFileOps(d: FilesDeps) {
    */
   async function announceChange(tx: Tx, scope: LoadedScope, f: FileRow): Promise<void> {
     const ev: MemoryChangedEvent = { scopeId: scope.row.id, fileId: f.id, version: f.version };
-    const owner = scope.row.personalOwnerUserId;
-    if (owner) {
-      await core.realtime.appendEvent(tx, `user:${owner}`, EventTypes.memoryChanged, ev);
-      return;
+    for (const topic of await changeTopicsOf(tx, scope, f.path)) {
+      await core.realtime.appendEvent(tx, topic, EventTypes.memoryChanged, ev);
     }
+  }
+
+  /**
+   * The streams a change of `path` in `scope` is announced on (`announceChange`): the owner's `user:` stream, the
+   * organization's, or each reader's `user:` stream in ascending id order (the stream lock order, 07.5-16 / #224).
+   */
+  async function changeTopicsOf(tx: Tx, scope: LoadedScope, path: string): Promise<string[]> {
+    const owner = scope.row.personalOwnerUserId;
+    if (owner) return [`user:${owner}`];
     if (
       organizationWide(scope.facts) &&
-      !anyReadDeny(await loadRules(tx), memoryResource(scope.facts, f.path, null))
+      !anyReadDeny(await loadRules(tx), memoryResource(scope.facts, path, null))
     ) {
-      await core.realtime.appendEvent(tx, `org:${scope.row.organizationId}`, EventTypes.memoryChanged, ev);
-      return;
+      return [`org:${scope.row.organizationId}`];
     }
     const readers = await perms.usersAllowed(tx, {
       candidates: "members",
       permission: "memory.read",
-      resourceFor: (userId) => memoryResource(scope.facts, f.path, { kind: "user", id: userId }),
+      resourceFor: (userId) => memoryResource(scope.facts, path, { kind: "user", id: userId }),
     });
-    for (const userId of readers) {
-      await core.realtime.appendEvent(tx, `user:${userId}`, EventTypes.memoryChanged, ev);
-    }
+    return [...readers].sort().map((userId) => `user:${userId}`);
+  }
+
+  /** `changeTopicsOf` by scope id: what an approved proposal's apply will announce on (taken up front, #224). */
+  async function changeTopics(tx: Tx, scopeId: string, path: string): Promise<string[]> {
+    return changeTopicsOf(tx, await loadScope(tx, scopeId), path);
   }
 
   async function addRevision(
@@ -924,6 +933,7 @@ export function createFileOps(d: FilesDeps) {
   return {
     writeFile,
     appendToFile,
+    changeTopics,
     readFile,
     listReadableFiles,
     readableFileIds,

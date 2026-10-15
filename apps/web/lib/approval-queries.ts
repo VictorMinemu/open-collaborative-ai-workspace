@@ -21,19 +21,38 @@ import { useTopic } from "./realtime";
  * Approvals over REST (Phase 07.2, 07.2-13, MEM-06, D-08): the inbox (`/memory/proposals`), one request's review and
  * its decision, every response parsed with the contract schemas. The API decides who may see and decide each request
  * (a personal proposal is visible only to its owner, never an admin); these hooks only render what it returns.
+ *
+ * Phase 07.5 (UI-SPEC R1, D-04): two disjoint inboxes. `/memory/proposals` lists only `memory.write`; `/approvals`
+ * lists only actions (`tool.call`) and Work Zone proposals (`work_zone.start`). Every list and count names its kinds,
+ * so no request is ever shown or counted in both.
  */
 
 export type ApprovalRole = "decider" | "requester";
+
+/** The memory inbox's kind (`/memory/proposals`, the Memory nav badge). */
+export const MEMORY_KINDS = "memory.write";
+/** The `/approvals` kinds (the Approvals nav badge): bot actions and Work Zone proposals. */
+export const ACTION_KINDS = "tool.call,work_zone.start";
+
+/** Which requests a list asks for: a status (null = every status) and a comma-separated kind filter. */
+export interface ApprovalListOptions {
+  status?: ApprovalRequestStatus | null;
+  kinds?: string | null;
+  /** Rows one inbox page aims for (07.5 inbox: 30; 07.2's memory inbox: 50). */
+  pageSize?: number;
+}
 
 /** The inbox tabs (UI-SPEC "Proposals inbox"): what I may review now, what my bots asked for, what was decided. */
 export type ProposalBox = "review" | "requested" | "decided";
 
 export const approvalKeys = {
   all: ["approvals"] as const,
-  list: (role: ApprovalRole, status: ApprovalRequestStatus | null) =>
-    ["approvals", "list", role, status ?? "any"] as const,
+  list: (role: ApprovalRole, status: ApprovalRequestStatus | null, kinds: string | null = null) =>
+    ["approvals", "list", role, status ?? "any", kinds ?? "all"] as const,
   detail: (id: string) => ["approvals", "detail", id] as const,
+  /** Prefix of every count (the live handler invalidates them all at once). */
   count: ["approvals", "count"] as const,
+  countOf: (kinds: string) => ["approvals", "count", kinds] as const,
 };
 
 /** 4xx answers are decisions (404 = missing or not yours), never retried. */
@@ -53,33 +72,36 @@ const MAX_HOPS = 10;
 async function fetchFilled(
   role: ApprovalRole,
   status: ApprovalRequestStatus | null,
+  kinds: string | null,
   cursor: string | null,
   target: number,
   signal?: AbortSignal,
 ): Promise<ApprovalList> {
   const items: ApprovalSummary[] = [];
   let next = cursor;
+  let total: number | undefined;
   for (let hop = 0; hop < MAX_HOPS; hop++) {
     const params = new URLSearchParams({ role });
     if (status) params.set("status", status);
+    if (kinds) params.set("kinds", kinds);
     if (next) params.set("cursor", next);
     const page = await api.get(`/api/v1/approvals?${params.toString()}`, { schema: ApprovalList, signal });
     items.push(...page.items);
+    if (hop === 0 && page.total !== undefined) total = page.total;
     next = page.nextCursor;
     if (!next || items.length >= target) break;
   }
-  return { items, nextCursor: next };
+  return { items, nextCursor: next, ...(total !== undefined ? { total } : {}) };
 }
 
-/** A tab's list: `status` null lists every status; "Show more" follows the cursor. */
-export function useApprovals(
-  role: ApprovalRole,
-  status: ApprovalRequestStatus | null = null,
-  enabled = true,
-) {
+/** A tab's list: `status` null lists every status, `kinds` null every kind; "Show more" follows the cursor. */
+export function useApprovals(role: ApprovalRole, opts: ApprovalListOptions = {}, enabled = true) {
+  const status = opts.status ?? null;
+  const kinds = opts.kinds ?? null;
+  const target = opts.pageSize ?? PAGE_TARGET;
   const q = useInfiniteQuery({
-    queryKey: approvalKeys.list(role, status),
-    queryFn: ({ pageParam, signal }) => fetchFilled(role, status, pageParam, PAGE_TARGET, signal),
+    queryKey: approvalKeys.list(role, status, kinds),
+    queryFn: ({ pageParam, signal }) => fetchFilled(role, status, kinds, pageParam, target, signal),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.nextCursor,
     enabled,
@@ -89,11 +111,15 @@ export function useApprovals(
   return { ...q, items };
 }
 
-/** The items a tab shows (UI-SPEC: To review = pending for me; Decided = every closed one I could or did decide). */
+/**
+ * The items a memory inbox tab shows (UI-SPEC: To review = pending for me; Decided = every closed one I could or did
+ * decide). Every tab asks only for `memory.write` (07.5 UI-SPEC R1): tool calls and Work Zone proposals live in
+ * `/approvals`.
+ */
 export function useProposalBox(box: ProposalBox) {
-  const review = useApprovals("decider", "pending", box === "review");
-  const requested = useApprovals("requester", null, box === "requested");
-  const decided = useApprovals("decider", null, box === "decided");
+  const review = useApprovals("decider", { status: "pending", kinds: MEMORY_KINDS }, box === "review");
+  const requested = useApprovals("requester", { kinds: MEMORY_KINDS }, box === "requested");
+  const decided = useApprovals("decider", { kinds: MEMORY_KINDS }, box === "decided");
   const q = box === "review" ? review : box === "requested" ? requested : decided;
   const items = useMemo(
     () => (box === "decided" ? q.items.filter((i) => i.status !== "pending") : q.items),
@@ -102,10 +128,10 @@ export function useProposalBox(box: ProposalBox) {
   return { ...q, items };
 }
 
-/** Whether the viewer has anything in the inbox at all (may decide one, or their bots asked for one). */
+/** Whether the viewer has anything in the memory inbox at all (may decide one, or their bots asked for one). */
 export function useHasApprovals(enabled = true): boolean {
-  const decider = useApprovals("decider", null, enabled);
-  const requester = useApprovals("requester", null, enabled);
+  const decider = useApprovals("decider", { kinds: MEMORY_KINDS }, enabled);
+  const requester = useApprovals("requester", { kinds: MEMORY_KINDS }, enabled);
   return decider.items.length > 0 || requester.items.length > 0;
 }
 
@@ -142,32 +168,55 @@ export function useDecideApproval() {
       void qc.invalidateQueries({ queryKey: approvalKeys.detail(v.id) });
       // An applied proposal changed a file: its tree, open copy and history.
       void qc.invalidateQueries({ queryKey: ["memory"] });
+      // A started Work Zone proposal created a session.
+      void qc.invalidateQueries({ queryKey: ["wz", "sessions"] });
     },
   });
 }
 
 const COUNT_CAP = 100;
 
-/** How many proposals wait for the viewer (role decider, status pending), up to 100. Live. */
-export function usePendingApprovalCount(enabled = true): number {
+/** How many requests of `kinds` wait for the viewer (role decider, status pending), up to 100. */
+async function pendingCount(kinds: string, signal?: AbortSignal): Promise<number> {
+  let total = 0;
+  let cursor: string | null = null;
+  do {
+    const page: ApprovalList = await fetchFilled("decider", "pending", kinds, cursor, COUNT_CAP, signal);
+    // The API's pending total (07.5-06) is the count itself; older answers are counted page by page.
+    if (cursor === null && page.total !== undefined) return page.total;
+    total += page.items.length;
+    cursor = page.nextCursor;
+  } while (cursor && total < COUNT_CAP);
+  return total;
+}
+
+function usePendingCount(kinds: string, enabled: boolean): number {
   useApprovalLiveUpdates();
   const q = useQuery({
-    queryKey: approvalKeys.count,
-    queryFn: async ({ signal }) => {
-      let total = 0;
-      let cursor: string | null = null;
-      do {
-        const page: ApprovalList = await fetchFilled("decider", "pending", cursor, COUNT_CAP, signal);
-        total += page.items.length;
-        cursor = page.nextCursor;
-      } while (cursor && total < COUNT_CAP);
-      return total;
-    },
+    queryKey: approvalKeys.countOf(kinds),
+    queryFn: ({ signal }) => pendingCount(kinds, signal),
     enabled,
     retry: noRetryOn4xx,
     staleTime: 30_000,
+    // Live updates arrive only while a count is mounted: on a phone the nav drawer (the badge) unmounts when it closes,
+    // so a request created meanwhile would leave a cached count behind. Every surface that shows a count reads it
+    // fresh when it appears (07.5-13: the phone inbox said "To review 1" beside two rows).
+    refetchOnMount: "always",
   });
   return q.data ?? 0;
+}
+
+/**
+ * How many memory proposals wait for the viewer (`memory.write` only, UI-SPEC R1), up to 100. Live. The Memory nav
+ * badge, its Proposals row and the memory inbox's To review tab.
+ */
+export function usePendingApprovalCount(enabled = true): number {
+  return usePendingCount(MEMORY_KINDS, enabled);
+}
+
+/** How many actions and Work Zone proposals wait for the viewer (the Approvals nav badge), up to 100. Live. */
+export function usePendingActionApprovalCount(enabled = true): number {
+  return usePendingCount(ACTION_KINDS, enabled);
 }
 
 /** "3", or "99+" past 99. */
@@ -177,6 +226,12 @@ export const countLabel = (n: number) => (n > 99 ? "99+" : String(n));
 export function pendingLabel(label: string, n: number): string {
   if (n <= 0) return label;
   return `${label}, ${countLabel(n)} ${n === 1 ? "proposal" : "proposals"} to review`;
+}
+
+/** The Approvals nav entry's accessible name: "Approvals, 2 to review" (07.5 UI-SPEC "Nav badge"). */
+export function toReviewLabel(label: string, n: number): string {
+  if (n <= 0) return label;
+  return `${label}, ${countLabel(n)} to review`;
 }
 
 /**

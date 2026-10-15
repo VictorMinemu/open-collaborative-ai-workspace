@@ -77,30 +77,41 @@ export async function startAiStack(
 ): Promise<AiStack> {
   const fake = opts.fake ?? (await startFakeModel());
   const logs: string[] = [];
-  const stack = await startTestStack({
-    env: {
-      LOG_LEVEL: "debug",
-      OCW_MODEL_PROVIDER: "mock",
-      ...(opts.chatgptOverride === false
-        ? {}
-        : {
-            OCW_CHATGPT_API_BASE_URL: `${fake.baseUrl}/v1`,
-            OCW_CHATGPT_AUTH_BASE_URL: `${fake.baseUrl}/siwc`,
-          }),
-      OCW_AI_MOCK_BASE_URL: `${fake.baseUrl}/v1`,
-      OCW_AI_SEARXNG_URL: fake.baseUrl,
-      OCW_AI_SEND_RATE_LIMIT_PER_MINUTE: "600",
-      ...opts.env,
-    },
-    logStream: { write: (line: string) => void logs.push(line) },
-  });
+  let stack: TestStack;
+  try {
+    stack = await startTestStack({
+      env: {
+        LOG_LEVEL: "debug",
+        OCW_MODEL_PROVIDER: "mock",
+        ...(opts.chatgptOverride === false
+          ? {}
+          : {
+              OCW_CHATGPT_API_BASE_URL: `${fake.baseUrl}/v1`,
+              OCW_CHATGPT_AUTH_BASE_URL: `${fake.baseUrl}/siwc`,
+            }),
+        OCW_AI_MOCK_BASE_URL: `${fake.baseUrl}/v1`,
+        OCW_AI_SEARXNG_URL: fake.baseUrl,
+        OCW_AI_SEND_RATE_LIMIT_PER_MINUTE: "600",
+        ...opts.env,
+      },
+      logStream: { write: (line: string) => void logs.push(line) },
+    });
+  } catch (err) {
+    // A failed start never leaves the in-process fake model listening (WINDOWS #225).
+    if (!opts.fake) await fake.stop().catch(() => {});
+    throw err;
+  }
+  const started = stack;
   return {
-    ...stack,
+    ...started,
     fake,
     logs,
     async stop() {
-      await stack.stop();
-      if (!opts.fake) await fake.stop();
+      try {
+        await started.stop();
+      } finally {
+        if (!opts.fake) await fake.stop();
+      }
     },
   };
 }

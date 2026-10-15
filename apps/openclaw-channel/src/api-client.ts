@@ -1,5 +1,7 @@
 import {
   AGENT_CHANNEL_BASE_PATH,
+  type AgentChannelApprovalDenial,
+  AgentChannelApprovalRefusalDetails,
   AgentChannelBoardCardResponse,
   type AgentChannelBoardCreateCard,
   type AgentChannelBoardPatchCard,
@@ -32,10 +34,15 @@ import {
   type AgentChannelProviderAuthReport,
   type AgentChannelRuntimeReport,
   type AgentChannelStatusReport,
+  type AgentChannelToolCallApproval,
   AgentChannelToolCallDecision,
   type AgentChannelToolCallRequest,
   type AgentChannelToolCallResult,
   type AgentChannelTyping,
+  type AgentChannelWorkZoneProjects,
+  AgentChannelWorkZoneProjectsResponse,
+  type AgentChannelWorkZonePropose,
+  AgentChannelWorkZoneProposeResponse,
   CellSnapshot,
 } from "./agent-channel-protocol.js";
 import { backoffDelayMs, sleep } from "./backoff.js";
@@ -52,6 +59,10 @@ export class AgentChannelHttpError extends Error {
     message: string,
     /** The API's machine error code (`error.code`), when the body carried a well-formed one. Never free text. */
     readonly code?: string,
+    /** 07.5: the approval a 409 `approval_required` / `approval_pending` waits on (`error.details.approval`), if valid. */
+    readonly approval?: AgentChannelToolCallApproval,
+    /** 07.5-11: who denied a 409 `approval_denied` and their note (`error.details.denial`), if valid. */
+    readonly denial?: AgentChannelApprovalDenial,
   ) {
     super(message);
     this.name = "AgentChannelHttpError";
@@ -82,6 +93,27 @@ export function errorCodeOf(body: string): string | undefined {
   }
 }
 
+/** The well-formed `error.details` of an API approval refusal (07.5), else undefined. */
+function refusalDetailsOf(body: string): AgentChannelApprovalRefusalDetails | undefined {
+  try {
+    const details = (JSON.parse(body) as { error?: { details?: unknown } } | null)?.error?.details;
+    const parsed = AgentChannelApprovalRefusalDetails.safeParse(details);
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `error.details.approval` of an API error body when it is a well-formed approval (07.5), else undefined. */
+export function approvalOf(body: string): AgentChannelToolCallApproval | undefined {
+  return refusalDetailsOf(body)?.approval;
+}
+
+/** `error.details.denial` of an API error body when it is a well-formed denial (07.5-11), else undefined. */
+export function denialOf(body: string): AgentChannelApprovalDenial | undefined {
+  return refusalDetailsOf(body)?.denial;
+}
+
 /** 408/425/429 and 5xx are retried; every other 4xx is a permanent failure. */
 export function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
@@ -106,6 +138,9 @@ export type AgentChannelClient = ReturnType<typeof createAgentChannelClient>;
  * API answers `timeout` itself, and inside the cell turn (a 20 s call completes in the real cell, research A4).
  */
 export const CONNECTOR_REQUEST_TIMEOUT_MS = 35_000;
+
+/** Per-attempt budget of the Work Zone proposal routes (07.5-10): two attempts at most, both idempotent server side. */
+export const WORK_ZONE_REQUEST_TIMEOUT_MS = 10_000;
 
 export function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/u, "");
@@ -154,6 +189,8 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
           path,
           `${method} ${path} → ${res.status} ${detail}`,
           errorCodeOf(raw.slice(0, 4_000)),
+          approvalOf(raw.slice(0, 4_000)),
+          denialOf(raw.slice(0, 4_000)),
         );
         if (!isRetryableStatus(res.status)) throw err;
         lastError = err;
@@ -367,6 +404,31 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
     async httpRequest(req: AgentChannelHttpRequest, signal?: AbortSignal): Promise<AgentChannelHttpResponse> {
       return AgentChannelHttpResponse.parse(
         await request("POST", "/http-requests", req, signal, 1, CONNECTOR_REQUEST_TIMEOUT_MS),
+      );
+    },
+    /**
+     * `ocw_work_zone_projects` (07.5): the projects the turn's human may start a Work Zone session on, with device
+     * state and runtimes (names and ids only, never a path). Read-only: two attempts of 10 s at most.
+     */
+    async listWorkZoneProjects(
+      req: AgentChannelWorkZoneProjects,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelWorkZoneProjectsResponse> {
+      return AgentChannelWorkZoneProjectsResponse.parse(
+        await request("POST", "/work-zone/projects", req, signal, 2, WORK_ZONE_REQUEST_TIMEOUT_MS),
+      );
+    },
+    /**
+     * `ocw_start_work_zone` (07.5): a proposal the turn's human starts from a card; never a mode. Two attempts of 10 s
+     * at most: the API returns the same approval for the same (event, project, device, prompt), so a retry after a
+     * lost answer opens no second card. A refusal is a 200 `{refused}` (404 for an unknown turn). Never logs the prompt.
+     */
+    async proposeWorkZone(
+      req: AgentChannelWorkZonePropose,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelWorkZoneProposeResponse> {
+      return AgentChannelWorkZoneProposeResponse.parse(
+        await request("POST", "/work-zone/proposals", req, signal, 2, WORK_ZONE_REQUEST_TIMEOUT_MS),
       );
     },
     /**

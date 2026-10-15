@@ -7,6 +7,7 @@ import {
   type AgentChannelToolRefusal,
   BUILTIN_TOOLS,
   CONNECTOR_TOOL_LIMITS,
+  type ToolApprovalRefusal,
   TurnToolFlags,
 } from "@ocw/contracts";
 import { agentTurns, mcpServers, mcpServerTools, type Tx } from "@ocw/db";
@@ -31,6 +32,13 @@ import { type CellPrincipal, cellOf } from "./auth";
 import { noTrigger } from "./cards";
 import { type AgentTurnRow, auditUnknownTurn, claimToolCall, finishToolCall, liveTurn } from "./claim";
 import { type ConnectCardReason, postConnectCard } from "./connect-card";
+import {
+  APPROVAL_MESSAGES,
+  approvalDetails,
+  approvalVerdict,
+  type ToolApprovalGate,
+  turnAtCap,
+} from "./tool-calls";
 
 /**
  * The connector proxy (07.4-12; D-01, D-02, D-03, D-07; CONN-02 … CONN-04, SC2): the cell's `ocw_connector_call` runs one
@@ -43,7 +51,10 @@ import { type ConnectCardReason, postConnectCard } from "./connect-card";
  *   2. tx1, opened AS that human: the live turn → the connector and its logical tool `<safe>__<tool>` (unknown →
  *      `not_in_turn`) → the tool on the turn (`not_in_turn`, or `member_account` when the audience rule withholds it
  *      here now) → the turn re-decided now, audience rule and shares included (`policy_changed`) → the member's
- *      connection (`not_connected` / `needs_reconnect`) → the claim with the logical tool's flags (caps, taint);
+ *      connection (`not_connected` / `needs_reconnect`) → the approval decision (07.5-11, `approvalForCall` with the
+ *      logical tool and the call's arguments: none, the grant consumed for this call, or 409 `approval_required` /
+ *      `approval_pending` / `approval_denied` … with `details`; never a credential or an outbound call before it) → the
+ *      claim with the logical tool's flags (caps, taint; a grant lifts the taint condition for this call only);
  *      refusals before the claim are recorded and audited through `claimToolCall`;
  *   3. outside any tx: the member's token (`accessTokenFor`, refreshed serially when due) → the MCP call through the
  *      egress guard (`egress.bound` inside `callTool`, 30 s, every credential string redacted from the result). An
@@ -68,19 +79,23 @@ const TIMEOUT_MS = 30_000;
 /** A logical tool the turn carries no flags for is treated as the most dangerous kind. */
 const UNKNOWN_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
 
-type Refusal = Extract<
-  AgentChannelToolRefusal,
-  | "not_in_turn"
-  | "policy_changed"
-  | "member_account"
-  | "not_connected"
-  | "needs_reconnect"
-  | "cap_reached"
-  | "tainted"
->;
+type Refusal =
+  | Extract<
+      AgentChannelToolRefusal,
+      | "not_in_turn"
+      | "policy_changed"
+      | "member_account"
+      | "not_connected"
+      | "needs_reconnect"
+      | "cap_reached"
+      | "tainted"
+    >
+  | ToolApprovalRefusal;
 type Failure = Extract<AgentChannelToolRefusal, "egress_refused" | "upstream_error" | "timeout">;
 
 const MESSAGES: Record<Refusal | Failure, string> = {
+  // First, so this route's own wording of a shared code (`policy_changed`) stays exactly as before.
+  ...APPROVAL_MESSAGES,
   not_in_turn: "That connector tool was not offered on this turn",
   policy_changed: "That connector tool is no longer available on this turn",
   member_account: "That connector uses the member's own account and is not used in this conversation",
@@ -183,7 +198,12 @@ function failureOf(err: unknown): { code: Failure; outcome: "blocked" | "error" 
 
 type CallDecided =
   | { refused: "no_trigger" }
-  | { refused: Refusal; card?: { turn: AgentTurnRow; server: ServerRow; reason: ConnectCardReason } }
+  | {
+      refused: Refusal;
+      card?: { turn: AgentTurnRow; server: ServerRow; reason: ConnectCardReason };
+      /** 07.5-11: the 409's `details` (the approval waited on, or who denied it). */
+      details?: Record<string, unknown>;
+    }
   | { go: { turn: AgentTurnRow; server: ServerRow; tool: ToolRow; callId: string } };
 
 type ListDecided =
@@ -238,7 +258,12 @@ async function listedConnectors(
   }));
 }
 
-export function registerConnectorRoutes(scope: App, core: Core, perms: PermissionService): void {
+export function registerConnectorRoutes(
+  scope: App,
+  core: Core,
+  perms: PermissionService,
+  toolApproval: ToolApprovalGate,
+): void {
   scope.post(
     "/connectors/call",
     {
@@ -274,6 +299,7 @@ export function registerConnectorRoutes(scope: App, core: Core, perms: Permissio
           const refuse = async (
             reason: Refusal,
             flags: TurnToolFlags = UNKNOWN_FLAGS,
+            extra: Record<string, unknown> = {},
           ): Promise<CallDecided> => {
             await claimToolCall(tx, core, {
               cell,
@@ -285,7 +311,7 @@ export function registerConnectorRoutes(scope: App, core: Core, perms: Permissio
               sourceId: found?.server.id ?? null,
               target: body.connector,
               reason,
-              metadata: meta,
+              metadata: { ...meta, ...extra },
             });
             return { refused: reason };
           };
@@ -314,6 +340,25 @@ export function registerConnectorRoutes(scope: App, core: Core, perms: Permissio
             return { refused: reason, card: { turn, server, reason } };
           }
 
+          // 07.5-11 (D-04, APPROVE-01): the approval decision on the logical tool and these arguments, before any token
+          // or outbound call. With a rule, the caps first (a consumed grant is never given back).
+          if (now.toolFlags[logical]?.approval && (await turnAtCap(tx, turn.eventId, false))) {
+            return refuse("cap_reached", flags);
+          }
+          const verdict = approvalVerdict(
+            await toolApproval.approvalForCall(tx, {
+              turn: { eventId: turn.eventId, agentId: turn.agentId },
+              tool: logical,
+              args: body.arguments,
+              toolCallId: null,
+              source: { kind: "mcp", id: server.id, target: body.connector },
+            }),
+          );
+          if (verdict.reason) {
+            await refuse(verdict.reason, flags, verdict.metadata);
+            return { refused: verdict.reason, details: approvalDetails(verdict) };
+          }
+
           const claim = await claimToolCall(tx, core, {
             cell,
             turn,
@@ -325,6 +370,7 @@ export function registerConnectorRoutes(scope: App, core: Core, perms: Permissio
             target: body.connector,
             reason: null,
             metadata: meta,
+            grantApprovalId: verdict.grantApprovalId,
           });
           if (!claim.allowed) return { refused: claim.reason as Refusal };
           return { go: { turn, server, tool, callId: claim.callId } };
@@ -340,7 +386,12 @@ export function registerConnectorRoutes(scope: App, core: Core, perms: Permissio
             reason: decided.card.reason,
           });
         }
-        throw new HttpError(409, decided.refused, MESSAGES[decided.refused]);
+        throw new HttpError(
+          409,
+          decided.refused,
+          MESSAGES[decided.refused],
+          "details" in decided ? decided.details : undefined,
+        );
       }
 
       // 3. The member's token and the MCP call, outside any transaction.

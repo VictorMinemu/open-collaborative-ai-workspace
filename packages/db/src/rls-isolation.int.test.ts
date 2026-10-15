@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { DEFAULT_AI_CHAT_POLICY } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -461,7 +462,60 @@ async function seedOrg(c: pg.Client, org: string) {
     agentTemplate,
     personal,
   ]);
+
+  // Phase 07.5 (per-tool approvals and Work Zone proposals): one row per new table, and the two new columns set. An
+  // organization rule on every CRM tool and a unit rule naming its approvers; the stored action behind a `tool.call`
+  // approval the personal bot asked for in the DM (synthetic arguments); a Work Zone proposal of the same turn, started
+  // as the seeded session; a prompt that proposal wrote and the ledger row of the approved call.
+  const crmSafe = `m${crm.replace(/-/g, "").slice(0, 8)}`;
+  const toolPolicy = randomUUID();
+  await q(
+    "insert into app.tool_approval_policies (id, organization_id, scope_unit_id, tool_pattern, mode, approver_kind, created_by, updated_by) values ($1, $2, null, $3, 'always', 'admins', $4, $4)",
+    [toolPolicy, org, `${crmSafe}__*`, user],
+  );
+  await q(
+    "insert into app.tool_approval_policies (organization_id, scope_unit_id, tool_pattern, mode, approver_kind, approver_user_ids, created_by) values ($1, $2, 'ocw_http_request', 'when_tainted', 'users', ARRAY[$3]::uuid[], $3)",
+    [org, unit, user],
+  );
+  const toolApproval = randomUUID();
+  await q(
+    `insert into app.tool_call_approvals (id, organization_id, agent_id, requested_for_user_id, conversation_id, event_id, tool_call_id, tool, source_kind, source_id, target, arguments_canonical, arguments_sha256, action_hash, tainted, policy_id)
+     values ($1, $2, $3, $4, $5, $6, 'call-1', $7, 'mcp', $8, $9, '{"amount":10,"customer":"Acme"}', $10, $11, false, $12)`,
+    [
+      toolApproval,
+      org,
+      personal,
+      user,
+      dm,
+      eventId,
+      `${crmSafe}__create_invoice`,
+      crm,
+      crmSafe,
+      "a".repeat(64),
+      "b".repeat(64),
+      toolPolicy,
+    ],
+  );
+  await q(
+    `insert into app.work_zone_proposals (organization_id, agent_id, requested_for_user_id, conversation_id, event_id, project_id, device_id, runtime, prompt, prompt_sha256, work_session_id)
+     values ($1, $2, $3, $4, $5, $6, $7, 'claude-code', 'Fix the failing test', $8, $9)`,
+    [org, personal, user, dm, eventId, project, device, "c".repeat(64), ws],
+  );
+  await q(
+    "insert into app.work_prompts (organization_id, work_session_id, author_user_id, body, position, proposed_by_agent_id) values ($1, $2, $3, 'Fix the failing test', 2, $4)",
+    [org, ws, user, personal],
+  );
+  await q(
+    "insert into app.agent_tool_calls (organization_id, event_id, agent_id, user_id, tool, source_kind, source_id, target, decision, approval_id) values ($1, $2, $3, $4, $5, 'mcp', $6, $7, 'allowed', $8)",
+    [org, randomUUID(), personal, user, `${crmSafe}__create_invoice`, crm, crmSafe, toolApproval],
+  );
 }
+
+const TOOL_APPROVAL_TABLES = [
+  "app.tool_approval_policies",
+  "app.tool_call_approvals",
+  "app.work_zone_proposals",
+] as const;
 
 const CONNECTOR_TABLES = [
   "app.connector_oauth_clients",
@@ -1922,6 +1976,198 @@ describe("tenant isolation (RLS)", () => {
         B,
       ]);
       expect(still.rows[0].n, `${tbl} B rows intact`).toBe(seeded.rows[0].n);
+    }
+  });
+
+  it("Phase 07.5: the three approval-policy, stored-action and proposal tables are org-scoped, forced, seeded and invisible and unwritable across tenants", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    for (const tbl of TOOL_APPROVAL_TABLES) {
+      // Tenant isolation only: deciders other than the requester read the stored action (P-09), so no owner-only policy.
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: 1 });
+      const seeded = await migrator.query(
+        `select count(*)::int as n from ${tbl} where organization_id = $1`,
+        [B],
+      );
+      expect(seeded.rows[0].n, `${tbl} has B rows`).toBeGreaterThan(0);
+      const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
+      expect(own.rows[0].n, `${tbl} seeded for A`).toBeGreaterThan(0);
+      const cross = await inTenant(A, () =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [B]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant select`).toBe(0);
+      for (const stmt of [
+        `update ${tbl} set organization_id = organization_id where organization_id = $1`,
+        `delete from ${tbl} where organization_id = $1`,
+      ]) {
+        const n = await inTenant(A, () => app.query(stmt, [B]).then((res) => res.rowCount));
+        expect(n, `${tbl}: ${stmt}`).toBe(0);
+      }
+      // Moving one of A's own rows into B is refused: by the tenant policy, or first by the immutability trigger of the
+      // stored action and of the proposal (a stored row never changes, except the links a deletion clears).
+      await expect(
+        inTenant(A, () =>
+          app.query(`update ${tbl} set organization_id = $1 where organization_id = $2`, [B, A]),
+        ),
+        `${tbl} cross-tenant move`,
+      ).rejects.toThrow(tbl === "app.tool_approval_policies" ? /row-level security/ : /are immutable/);
+      const row = await migrator.query(
+        `select row_to_json(t) as j from ${tbl} t where organization_id = $1 limit 1`,
+        [B],
+      );
+      const cols = (
+        await migrator.query(
+          `select a.attname from pg_attribute a where a.attrelid = $1::regclass and a.attnum > 0
+             and not a.attisdropped and a.attgenerated = '' order by a.attnum`,
+          [tbl],
+        )
+      ).rows.map((r) => `"${r.attname}"`);
+      await expect(
+        inTenant(A, () =>
+          app.query(
+            `insert into ${tbl} (${cols.join(", ")}) select ${cols.join(", ")} from json_populate_record(null::${tbl}, $1::json)`,
+            [JSON.stringify(row.rows[0].j)],
+          ),
+        ),
+        `${tbl} cross-tenant insert`,
+      ).rejects.toThrow(/row-level security/);
+      const still = await migrator.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [
+        B,
+      ]);
+      expect(still.rows[0].n, `${tbl} B rows intact`).toBe(seeded.rows[0].n);
+    }
+
+    // Foreign keys bypass RLS, so every reference carries the organization (composite keys): a row of A naming B's bot,
+    // unit, project, device, session or rule is refused even though the app role cannot read any of them.
+    const ids = async (org: string) =>
+      (
+        await migrator.query(
+          `select (select id from app.agents where organization_id = $1 and scope = 'personal' limit 1) as agent,
+                  (select id from app.org_units where organization_id = $1 limit 1) as unit,
+                  (select id from app.projects where organization_id = $1 limit 1) as project,
+                  (select device_id from app.projects where organization_id = $1 limit 1) as device,
+                  (select id from app.work_sessions where organization_id = $1 limit 1) as session,
+                  (select id from app.tool_approval_policies where organization_id = $1 and scope_unit_id is null limit 1) as policy,
+                  (select user_id from app.org_members where organization_id = $1 limit 1) as user`,
+          [org],
+        )
+      ).rows[0];
+    const a = await ids(A);
+    const b = await ids(B);
+    const hash = "d".repeat(64);
+    const approval = (over: { agent?: string; policy?: string | null }) =>
+      app.query(
+        `insert into app.tool_call_approvals (organization_id, agent_id, requested_for_user_id, conversation_id, event_id, tool, source_kind, arguments_canonical, arguments_sha256, action_hash, tainted, policy_id)
+         values ($1, $2, $3, $4, $4, 'ocw_http_request', 'vault', '{}', $5, $5, false, $6)`,
+        [
+          A,
+          over.agent ?? a.agent,
+          a.user,
+          randomUUID(),
+          hash,
+          over.policy === undefined ? null : over.policy,
+        ],
+      );
+    const proposal = (over: { agent?: string; project?: string; device?: string; session?: string | null }) =>
+      app.query(
+        `insert into app.work_zone_proposals (organization_id, agent_id, requested_for_user_id, conversation_id, event_id, project_id, device_id, runtime, prompt, prompt_sha256, work_session_id)
+         values ($1, $2, $3, $4, $4, $5, $6, 'codex', 'Run the tests', $7, $8)`,
+        [
+          A,
+          over.agent ?? a.agent,
+          a.user,
+          randomUUID(),
+          over.project ?? a.project,
+          over.device ?? a.device,
+          hash,
+          over.session === undefined ? null : over.session,
+        ],
+      );
+    const fk = /violates foreign key constraint/;
+    await inTenant(A, async () => {
+      await approval({});
+      await approval({ policy: a.policy });
+      await proposal({ session: a.session });
+    });
+    await expect(inTenant(A, () => approval({ agent: b.agent }))).rejects.toThrow(fk);
+    await expect(inTenant(A, () => approval({ policy: b.policy }))).rejects.toThrow(fk);
+    await expect(inTenant(A, () => proposal({ agent: b.agent }))).rejects.toThrow(fk);
+    await expect(inTenant(A, () => proposal({ project: b.project, device: b.device }))).rejects.toThrow(fk);
+    await expect(inTenant(A, () => proposal({ session: b.session }))).rejects.toThrow(fk);
+    // A project is proposed on its own device only.
+    const otherDevice = randomUUID();
+    await migrator.query(
+      "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash) values ($1, $2, $3, 'desktop', 'linux', $4)",
+      [otherDevice, A, a.user, `dev-${otherDevice}`],
+    );
+    await expect(inTenant(A, () => proposal({ device: otherDevice }))).rejects.toThrow(fk);
+    await expect(
+      inTenant(A, () =>
+        app.query(
+          "insert into app.tool_approval_policies (organization_id, scope_unit_id, tool_pattern, mode) values ($1, $2, 'ocw_http_request', 'always')",
+          [A, b.unit],
+        ),
+      ),
+    ).rejects.toThrow(fk);
+    await expect(
+      inTenant(A, () =>
+        app.query(
+          "insert into app.work_prompts (organization_id, work_session_id, author_user_id, body, position, proposed_by_agent_id) values ($1, $2, $3, 'x', 9, $4)",
+          [A, a.session, a.user, b.agent],
+        ),
+      ),
+    ).rejects.toThrow(fk);
+
+    // The two new columns exist and are nullable; the ledger's approval link has no foreign key (it outlives requests).
+    const columns = await migrator.query(
+      `select table_name, column_name, data_type, is_nullable from information_schema.columns
+        where table_schema = 'app' and ((table_name = 'work_prompts' and column_name = 'proposed_by_agent_id')
+           or (table_name = 'agent_tool_calls' and column_name = 'approval_id')) order by table_name`,
+    );
+    expect(columns.rows).toEqual([
+      { table_name: "agent_tool_calls", column_name: "approval_id", data_type: "uuid", is_nullable: "YES" },
+      {
+        table_name: "work_prompts",
+        column_name: "proposed_by_agent_id",
+        data_type: "uuid",
+        is_nullable: "YES",
+      },
+    ]);
+    const ledgerFks = await migrator.query(
+      `select count(*)::int as n from pg_constraint c join pg_attribute a on a.attrelid = c.conrelid and a.attnum = any (c.conkey)
+        where c.conrelid = 'app.agent_tool_calls'::regclass and c.contype = 'f' and a.attname = 'approval_id'`,
+    );
+    expect(ledgerFks.rows[0].n).toBe(0);
+  });
+
+  it("Phase 07.5: the stored action and the Work Zone proposal cannot be truncated by the app role (WINDOWS #201)", async () => {
+    // The immutability triggers fire on UPDATE only; TRUNCATE would erase every stored action and proposal of every
+    // tenant at once (it ignores RLS), so the app role must not hold it. DELETE stays: cascades of a bot, project or
+    // device remove their rows.
+    for (const tbl of ["app.tool_call_approvals", "app.work_zone_proposals"]) {
+      const before = await migrator.query(`select count(*)::int as n from ${tbl}`);
+      await expect(
+        inTenant(A, () => app.query(`truncate ${tbl}`)),
+        `truncate ${tbl}`,
+      ).rejects.toThrow(/permission denied/);
+      const after = await migrator.query(`select count(*)::int as n from ${tbl}`);
+      expect(after.rows[0].n, `${tbl} rows intact`).toBe(before.rows[0].n);
+    }
+    // post-migrate.sql revokes it explicitly, like the memory history tables, so a broader grant added later (or by
+    // hand) is taken back on the next migrate. Checked inside a rolled-back transaction: DDL is transactional.
+    await migrator.query("begin");
+    try {
+      await migrator.query("grant truncate on app.tool_call_approvals, app.work_zone_proposals to ocw_app");
+      await migrator.query(readFileSync(new URL("../sql/post-migrate.sql", import.meta.url), "utf8"));
+      const held = await migrator.query(
+        `select t, has_table_privilege('ocw_app', t, 'TRUNCATE') as truncate
+           from unnest(array['app.tool_call_approvals', 'app.work_zone_proposals']) as t order by t`,
+      );
+      expect(held.rows).toEqual([
+        { t: "app.tool_call_approvals", truncate: false },
+        { t: "app.work_zone_proposals", truncate: false },
+      ]);
+    } finally {
+      await migrator.query("rollback");
     }
   });
 

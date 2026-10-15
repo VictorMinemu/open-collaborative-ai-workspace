@@ -11,7 +11,24 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createFakeMcp } from "../../../infra/fake-model/fake-mcp.mjs";
-import type { CellAgent, CellMcpServer, CellProvider, CellSnapshot } from "./agent-channel-protocol.js";
+import {
+  AGENT_CHANNEL_TOOL_REFUSALS,
+  AgentCardActionEvent,
+  AgentChannelApprovalRefusalDetails,
+  AgentChannelToolCallDecision,
+  AgentChannelWorkZoneProjectsResponse,
+  AgentChannelWorkZoneProposeResponse,
+  type CellAgent,
+  type CellMcpServer,
+  type CellProvider,
+  type CellSnapshot,
+  TOOL_APPROVAL_LIMITS,
+  TOOL_APPROVAL_REFUSALS,
+  TurnToolFlags,
+  WORK_ZONE_PROPOSAL_LIMITS,
+  WORK_ZONE_PROPOSAL_REFUSALS,
+  WORK_ZONE_RUNTIMES,
+} from "./agent-channel-protocol.js";
 import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
 import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
 import { MEMBER_ACCOUNT, NEEDS_RECONNECT, NOT_CONNECTED, REFUSAL_SENTENCE } from "./connector-tools.js";
@@ -35,7 +52,9 @@ import {
   type MentionInput,
   startFakeAgentChannelApi,
 } from "./testing/fake-agent-channel-api.js";
-import { createToolGuard } from "./tool-guard.js";
+import { createHostPluginApi, createTurnHookRunner, type HostRegistry } from "./testing/openclaw-host.js";
+import { APPROVAL_SENTENCES, createToolGuard } from "./tool-guard.js";
+import { WORK_ZONE_TOOL_NAMES } from "./work-zone-tools.js";
 
 const ARCHIE: CellAgent = {
   id: "agent-archie",
@@ -765,6 +784,23 @@ describe("real port dispatch: per-turn tool cap and active turn (D-08)", () => {
     expect(during).toEqual({ conversationId: "dm-1", threadRootId: null, messageId: "msg-1" });
   });
 
+  it("the active turn names the asking human (sanitized), for the approval sentences (07.5-04)", async () => {
+    const guard = createToolGuard({ client: () => null });
+    let requester: string | undefined;
+    const { runtime } = fakeRuntime((params) => {
+      requester = guard.activeTurn((params.route as { sessionKey: string }).sessionKey)?.requesterName;
+    });
+    const p = createOpenClawPort({ runtime, accountId: "default", cfg: {}, guard });
+    const asked = mention(1);
+    asked.message.author = { kind: "user", id: "u-ana", displayName: "Ana\nPérez <ana>" };
+    await p.dispatchMention(
+      mapMention(event({ ...asked, turn: TURN } as never), ARCHIE),
+      async () => {},
+      new AbortController().signal,
+    );
+    expect(requester).toBe("Ana Pérez ana");
+  });
+
   it("serialises two turns of the same session; the turn ends even when the dispatch throws", async () => {
     const guard = createToolGuard({ client: () => null });
     let running = 0;
@@ -846,6 +882,57 @@ describe("tool gate against the fake Agent Channel API (HTTP)", () => {
     expect(denied?.blockReason).toContain("denied_by_test");
   });
 
+  it("07.5 tracer: a flagged tool's call carries its full arguments; the API answers approval_required and the model hears the sentence at once", async () => {
+    const NOTE = "m1a2b3c4d__write_note";
+    const ECHO = "m1a2b3c4d__echo";
+    const set = await fetch(`${api.url}/__test/tool-approval`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        tool: NOTE,
+        reply: "approval_required",
+        waitingFor: "a lead of Sales",
+        requesterName: "Ana Pérez",
+      }),
+    });
+    expect(set.status).toBe(200);
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const guard = createToolGuard({ client: () => client });
+    guard.beginTurn("s-ap", {
+      eventId: "evt-ap",
+      agentId: ARCHIE.id,
+      requesterName: "Ana Pérez",
+      turn: {
+        ...TURN,
+        tools: [NOTE, ECHO],
+        toolFlags: {
+          [NOTE]: { untrustedOutput: true, sideEffecting: true, approval: "always" },
+          [ECHO]: { untrustedOutput: true, sideEffecting: false },
+        },
+      },
+    });
+    const started = Date.now();
+    const r = await guard.beforeToolCall(
+      { toolName: NOTE, params: { text: "SENTINEL-77", n: 1 }, toolCallId: "tc-ap1" },
+      { sessionKey: "s-ap" },
+    );
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(r?.blockReason).toBe(
+      "This action needs approval. I posted a card and asked a lead of Sales. Tell Ana Pérez in one short sentence that you are waiting for that approval, without repeating the values. Don't call m1a2b3c4d__write_note again now: when it is approved you will get a new message with the exact arguments.",
+    );
+    expect(
+      await guard.beforeToolCall(
+        { toolName: ECHO, params: { text: "SENTINEL-88" }, toolCallId: "tc-ap2" },
+        { sessionKey: "s-ap" },
+      ),
+    ).toBeUndefined();
+    expect(api.toolCalls.map((c) => c.tool)).toEqual([NOTE, ECHO]);
+    expect(api.toolCalls[0]?.arguments).toEqual({ text: "SENTINEL-77", n: 1 });
+    expect(api.toolCalls[0]?.allowed).toBe(false);
+    expect(Object.keys(api.toolCalls[1] ?? {})).not.toContain("arguments");
+    expect(JSON.stringify(api.toolCalls[1])).not.toContain("SENTINEL-88");
+  });
+
   it("the snapshot carries the bot's tools and the search provider", async () => {
     api.agents = [{ ...structuredClone(ARCHIE), capabilities: { tools: ["web_search"] } }];
     api.webSearchProvider = "searxng";
@@ -853,6 +940,258 @@ describe("tool gate against the fake Agent Channel API (HTTP)", () => {
     const cell = await client.getCell();
     expect(cell.agents[0]?.capabilities).toEqual({ tools: ["web_search"] });
     expect(cell.webSearch).toEqual({ provider: "searxng" });
+  });
+});
+
+describe("the param pin against a rewriting plugin (07.5-04, D-04, Pitfall 3; OpenClaw: isolated copies, the last returned params win)", () => {
+  const INVOICE = "m1a2b3c4d__create_invoice";
+  const ECHO = "m1a2b3c4d__echo";
+  const CHECKED = { amount: 10, to: "billing@globex.example" };
+
+  /** Our plugin registered as in production (`registerCapabilities`) plus another plugin at priority 0 that rewrites. */
+  function host() {
+    const registry: HostRegistry = {
+      mode: "discovery",
+      typedHooks: [],
+      tools: [],
+      channels: [],
+      runtimes: [],
+      diagnostics: [],
+    };
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const guard = createToolGuard({ client: () => client });
+    registerCapabilities(createHostPluginApi(registry, { id: "ocw", contractsTools: [] }) as never, guard);
+    const rewriter = createHostPluginApi(registry, { id: "rewriter", contractsTools: [] }) as {
+      on: (
+        hook: string,
+        handler: (event: { params?: Record<string, unknown> }) => unknown,
+        opts: { priority: number },
+      ) => void;
+    };
+    rewriter.on("before_tool_call", (event) => ({ params: { ...event.params, amount: 999 } }), {
+      priority: 0,
+    });
+    guard.beginTurn("s-pin", {
+      eventId: "evt-pin",
+      agentId: ARCHIE.id,
+      requesterName: "Ana Pérez",
+      turn: {
+        tools: [INVOICE, ECHO],
+        toolFlags: {
+          [INVOICE]: { untrustedOutput: false, sideEffecting: true, approval: "always" },
+          [ECHO]: { untrustedOutput: false, sideEffecting: false },
+        },
+        memory: [],
+        now: null,
+        maxToolCalls: 8,
+        maxWebCalls: 5,
+      },
+    });
+    const runner = createTurnHookRunner(registry);
+    /** What OpenClaw would execute: blocked, or the last params a handler returned, else the call's own. */
+    const run = async (call: { toolName: string; params: Record<string, unknown>; toolCallId?: string }) => {
+      const r = await runner.runBeforeToolCall(call, { sessionKey: "s-pin" });
+      return r.blocked ? { blocked: r.reason } : { executed: r.params ?? call.params };
+    };
+    return { guard, run, registry };
+  }
+
+  it("a flagged call the API allows (a grant) executes with exactly the checked params; an unflagged one is rewritten as before", async () => {
+    const set = await fetch(`${api.url}/__test/tool-approval`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tool: INVOICE, reply: "grant" }),
+    });
+    expect(set.status).toBe(200);
+    const { run, guard } = host();
+    expect(await run({ toolName: INVOICE, params: { ...CHECKED }, toolCallId: "tc-p1" })).toEqual({
+      executed: CHECKED,
+    });
+    expect(api.toolCalls[0]).toMatchObject({ tool: INVOICE, arguments: CHECKED, allowed: true });
+    // Without a pin (unflagged): today's behaviour, the other plugin's rewrite runs.
+    expect(await run({ toolName: ECHO, params: { amount: 10 }, toolCallId: "tc-p2" })).toEqual({
+      executed: { amount: 999 },
+    });
+    // The pin entry is gone after the call.
+    expect(
+      guard.pinParams({ toolName: INVOICE, params: {}, toolCallId: "tc-p1" }, { sessionKey: "s-pin" }),
+    ).toBe(undefined);
+  });
+
+  it("a flagged call the API refuses never executes; one without a tool call id is blocked and nothing is posted", async () => {
+    api.toolApprovals.set(INVOICE, { reply: "approval_required", waitingFor: "Marta Gil" });
+    const { run } = host();
+    expect(await run({ toolName: INVOICE, params: { ...CHECKED }, toolCallId: "tc-r1" })).toEqual({
+      blocked: APPROVAL_SENTENCES.approval_required({
+        tool: INVOICE,
+        waitingFor: "Marta Gil",
+        requesterName: "Ana Pérez",
+      }),
+    });
+    const posted = api.toolCalls.length;
+    expect(await run({ toolName: INVOICE, params: { ...CHECKED } })).toEqual({
+      blocked: APPROVAL_SENTENCES.no_call_id({ tool: INVOICE }),
+    });
+    expect(api.toolCalls).toHaveLength(posted);
+  });
+});
+
+describe("approval mirror parity (07.5-04: plugin ↔ packages/contracts tool-approvals.ts, agent-channel.ts, bot-capabilities.ts)", () => {
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean; data?: unknown } };
+  const load = async () => ({
+    approvals: (await import(contracts("tool-approvals.ts"))) as {
+      ToolApprovalRefusal: { options: string[] };
+      TOOL_APPROVAL_LIMITS: Record<string, number>;
+    },
+    channel: (await import(contracts("agent-channel.ts"))) as Record<string, Schema> & {
+      AgentChannelToolRefusal: { options: string[] };
+    },
+    caps: (await import(contracts("bot-capabilities.ts"))) as { TurnToolFlags: Schema },
+  });
+
+  it("the refusal lists and the limits are the contracts'", async () => {
+    const { approvals, channel } = await load();
+    expect([...TOOL_APPROVAL_REFUSALS].sort()).toEqual([...approvals.ToolApprovalRefusal.options].sort());
+    expect([...AGENT_CHANNEL_TOOL_REFUSALS]).toEqual([...channel.AgentChannelToolRefusal.options]);
+    expect(TOOL_APPROVAL_LIMITS.argumentsBytes).toBe(approvals.TOOL_APPROVAL_LIMITS.argumentsBytes);
+    expect(TOOL_APPROVAL_LIMITS.pendingPerRequester).toBe(approvals.TOOL_APPROVAL_LIMITS.pendingPerRequester);
+  });
+
+  it("turn flags and the decision: what the contract accepts reads the same in the mirror", async () => {
+    const { caps, channel } = await load();
+    for (const flags of [
+      { untrustedOutput: true, sideEffecting: true },
+      { untrustedOutput: true, sideEffecting: true, approval: "always" },
+      { untrustedOutput: false, sideEffecting: true, approval: "when_tainted" },
+    ]) {
+      expect(caps.TurnToolFlags.safeParse(flags).success).toBe(true);
+      expect(TurnToolFlags.parse(flags)).toEqual(flags);
+    }
+    const decision = {
+      callId: "0199a6f0-0000-7000-8000-0000000000c1",
+      allowed: false,
+      reason: "approval_required",
+      approval: {
+        id: "0199a6f0-0000-7000-8000-0000000000a1",
+        created: true,
+        waitingFor: "a lead of Sales",
+        requesterName: "Ana Pérez",
+      },
+    };
+    expect(channel.AgentChannelToolCallDecision?.safeParse(decision).success).toBe(true);
+    expect(AgentChannelToolCallDecision.parse(decision)).toEqual(decision);
+    // A grant card action the contract accepts reads the same in the mirror (decidedBy and grant kept as sent).
+    const cardEvent = {
+      eventId: "0199a6f0-0000-7000-8000-0000000000e1",
+      seq: 3,
+      type: "agent.card_action.v1",
+      organizationId: "0199a6f0-0000-7000-8000-0000000000f1",
+      cellId: "0199a6f0-0000-7000-8000-0000000000f1",
+      agent: { id: "0199a6f0-0000-7000-8000-0000000000b1", handle: "archie", displayName: "Archie" },
+      conversation: { id: "0199a6f0-0000-7000-8000-0000000000d1", kind: "dm", name: null },
+      thread: { rootMessageId: "0199a6f0-0000-7000-8000-0000000000c2" },
+      message: {
+        id: "0199a6f0-0000-7000-8000-0000000000c2",
+        text: "Marta Gil approved “Run create_invoice on Acme CRM”",
+        createdAt: "2026-10-08T10:31:00.000Z",
+        author: { kind: "user", id: "0199a6f0-0000-7000-8000-0000000000a2", displayName: "Ana Pérez" },
+        mentions: [{ kind: "agent", id: "0199a6f0-0000-7000-8000-0000000000b1" }],
+      },
+      threadHistory: [],
+      roster: [],
+      cardAction: {
+        messageId: "0199a6f0-0000-7000-8000-0000000000c2",
+        kind: "approval",
+        title: "Run create_invoice on Acme CRM",
+        outcome: "approved",
+        decidedBy: { id: "0199a6f0-0000-7000-8000-0000000000a3", displayName: "Marta Gil" },
+        grant: {
+          tool: "m1a2b3c4d__create_invoice",
+          arguments: '{"amount":10}',
+          useBy: "2026-10-08T10:46:00.000Z",
+        },
+      },
+    };
+    expect(channel.AgentCardActionEvent?.safeParse(cardEvent).success).toBe(true);
+    expect(AgentCardActionEvent.parse(cardEvent).cardAction).toEqual(cardEvent.cardAction);
+    // 07.5-11: the denial (gate decision and 409 details), the card action's note and a failed apply's result code.
+    const denial = { deciderName: "Marta Gil", note: "Duplicate invoice" };
+    const denied = { callId: decision.callId, allowed: false, reason: "approval_denied", denial };
+    expect(channel.AgentChannelToolCallDecision?.safeParse(denied).success).toBe(true);
+    expect(AgentChannelToolCallDecision.parse(denied)).toEqual(denied);
+    for (const details of [
+      { denial },
+      { approval: decision.approval },
+      { denial: { ...denial, note: null } },
+    ]) {
+      expect(channel.AgentChannelApprovalRefusalDetails?.safeParse(details).success).toBe(true);
+      expect(AgentChannelApprovalRefusalDetails.parse(details)).toEqual(details);
+    }
+    for (const extra of [
+      { outcome: "denied", note: "Duplicate invoice" },
+      { outcome: "approved", resultCode: "device_offline" },
+    ]) {
+      const ev = { ...cardEvent, cardAction: { ...cardEvent.cardAction, grant: undefined, ...extra } };
+      delete (ev.cardAction as Record<string, unknown>).grant;
+      expect(channel.AgentCardActionEvent?.safeParse(ev).success).toBe(true);
+      expect(AgentCardActionEvent.parse(ev).cardAction).toEqual(ev.cardAction);
+    }
+    // A value the contract does not know reads as absent in the mirror (never voids the turn or the decision).
+    expect(TurnToolFlags.parse({ untrustedOutput: true, sideEffecting: true, approval: "later" })).toEqual({
+      untrustedOutput: true,
+      sideEffecting: true,
+    });
+  });
+});
+
+describe("Work Zone proposal mirror parity (07.5-10: plugin ↔ packages/contracts work-zone-proposals.ts, session-events.ts, bot-capabilities.ts)", () => {
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean } };
+
+  it("the refusals, runtimes, limits and tool names are the contracts'; what the contract accepts reads the same", async () => {
+    const wz = (await import(contracts("work-zone-proposals.ts"))) as {
+      WorkZoneProposalRefusal: { options: string[] };
+      WORK_ZONE_PROPOSAL_LIMITS: Record<string, number>;
+      AgentChannelWorkZonePropose: Schema;
+      AgentChannelWorkZoneProjectsResponse: Schema;
+      AgentChannelWorkZoneProposeResponse: Schema;
+    };
+    const events = (await import(contracts("session-events.ts"))) as { RuntimeId: { options: string[] } };
+    const caps = (await import(contracts("bot-capabilities.ts"))) as {
+      BUILTIN_TOOLS: Record<string, string>;
+    };
+    expect([...WORK_ZONE_PROPOSAL_REFUSALS]).toEqual([...wz.WorkZoneProposalRefusal.options]);
+    expect([...WORK_ZONE_RUNTIMES]).toEqual([...events.RuntimeId.options]);
+    expect(WORK_ZONE_PROPOSAL_LIMITS.promptChars).toBe(wz.WORK_ZONE_PROPOSAL_LIMITS.promptChars);
+    expect(WORK_ZONE_PROPOSAL_LIMITS.pendingPerRequester).toBe(
+      wz.WORK_ZONE_PROPOSAL_LIMITS.pendingPerRequester,
+    );
+    expect([...WORK_ZONE_TOOL_NAMES]).toEqual([
+      caps.BUILTIN_TOOLS.workZoneProjects,
+      caps.BUILTIN_TOOLS.startWorkZone,
+    ]);
+    const projects = {
+      projects: [
+        {
+          projectId: "0199a6f0-0000-7000-8000-00000000b111",
+          name: "billing-api",
+          device: { id: "0199a6f0-0000-7000-8000-00000000d111", name: "MacBook Pro", online: true },
+          runtimes: [{ id: "claude-code", label: "Claude Code", available: true }],
+        },
+      ],
+    };
+    expect(wz.AgentChannelWorkZoneProjectsResponse.safeParse(projects).success).toBe(true);
+    expect(AgentChannelWorkZoneProjectsResponse.parse(projects)).toEqual(projects);
+    for (const answer of [
+      { approvalId: "0199a6f0-0000-7000-8000-0000000000a9", created: true },
+      { refused: "device_offline" },
+    ]) {
+      expect(wz.AgentChannelWorkZoneProposeResponse.safeParse(answer).success).toBe(true);
+      expect(AgentChannelWorkZoneProposeResponse.parse(answer)).toEqual(answer);
+    }
   });
 });
 
@@ -868,12 +1207,14 @@ const PLUGIN_TOOLS = [
   "ocw_connector_list",
   "ocw_connector_call",
   "ocw_http_request",
+  "ocw_work_zone_projects",
+  "ocw_start_work_zone",
 ];
 
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
   const MEMORY = { untrustedOutput: false, sideEffecting: true };
 
-  it("the manifest declares ocw_memory_save, the four memory file tools, ocw_agent_card and ocw_board_card in contracts.tools (OpenClaw discovers tool ownership there)", () => {
+  it("the manifest declares ocw_memory_save, the four memory file tools, ocw_agent_card, ocw_board_card, the connector tools and the two Work Zone tools in contracts.tools (OpenClaw discovers tool ownership there)", () => {
     const manifest = JSON.parse(
       readFileSync(path.join(import.meta.dirname, "..", "openclaw.plugin.json"), "utf8"),
     ) as { contracts?: { tools?: string[] } };
@@ -892,7 +1233,8 @@ describe("memory tool (D-10): manifest, registration and the fake API", () => {
     expect(hooks).toEqual(["gateway_start"]);
     expect(tools.map((t) => t.opts.name)).toEqual(PLUGIN_TOOLS);
     registerCapabilities(pluginApi as never, guard);
-    expect(hooks).toEqual(["gateway_start", "before_tool_call", "after_tool_call"]);
+    // 07.5-04: the gate, the param pin, then after_tool_call.
+    expect(hooks).toEqual(["gateway_start", "before_tool_call", "before_tool_call", "after_tool_call"]);
     expect(tools).toHaveLength(PLUGIN_TOOLS.length);
   });
 
@@ -951,7 +1293,15 @@ describe("board tool (07.1-13, BOARD-02): a board turn → ocw_board_card → PO
     const entry = planReconcile({}, { agents: [bot], providers: [FAKE] }).upsertAgents[
       openClawAgentIdFor(ARCHIE.id)
     ];
-    expect(entry?.tools).toMatchObject({ alsoAllow: ["web_search", "ocw_agent_card", "ocw_board_card"] });
+    expect(entry?.tools).toMatchObject({
+      alsoAllow: [
+        "web_search",
+        "ocw_agent_card",
+        "ocw_board_card",
+        "ocw_work_zone_projects",
+        "ocw_start_work_zone",
+      ],
+    });
     const boardTurn = {
       tools: ["web_search", "ocw_agent_card", "ocw_board_card"],
       toolFlags: { ocw_agent_card: CARD, ocw_board_card: BOARD },
@@ -1679,5 +2029,34 @@ describe("connector tools (07.4 D-07, C-01): registerFull → the real HTTP clie
       url: "https://elsewhere.example/",
     });
     expect(text(http)).toBe(REFUSAL_SENTENCE.host_not_allowed);
+  });
+
+  it("07.5: an approval refusal over HTTP is the approval sentence with the logical tool and the 409's details, never the body", async () => {
+    const { tool } = connectorSetup();
+    api.toolApprovals.set("m1a2b3c4d__whoami", {
+      reply: "approval_required",
+      waitingFor: "Marta Gil",
+      requesterName: "Sam Lee",
+    });
+    const r = await tool("ocw_connector_call").execute("tc-1", {
+      connector: "m1a2b3c4d",
+      tool: "whoami",
+      arguments: { a: 1 },
+    });
+    expect(text(r)).toBe(
+      APPROVAL_SENTENCES.approval_required({
+        tool: "m1a2b3c4d__whoami",
+        waitingFor: "Marta Gil",
+        requesterName: "Sam Lee",
+      }),
+    );
+    expect(JSON.stringify(r)).not.toContain(FAKE_ERROR_CANARY);
+    api.toolApprovals.set("ocw_http_request", { reply: "approval_used" });
+    const http = await tool("ocw_http_request").execute("tc-2", {
+      handle: "k_abcdefgh23",
+      method: "POST",
+      url: "https://api.example.com/v1/me",
+    });
+    expect(text(http)).toBe(APPROVAL_SENTENCES.approval_used({ tool: "ocw_http_request" }));
   });
 });

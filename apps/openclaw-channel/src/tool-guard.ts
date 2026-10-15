@@ -3,11 +3,16 @@ import {
   type AgentChannelToolCallRequest,
   CONNECTOR_SAFE_NAME,
   CONNECTOR_TOOL_LIMITS,
+  TOOL_APPROVAL_LIMITS,
+  TOOL_APPROVAL_REFUSALS,
+  type ToolApprovalRefusal,
   type TurnContext,
   type TurnToolFlags,
 } from "./agent-channel-protocol.js";
 import type { AgentChannelClient } from "./api-client.js";
 import { openClawAgentIdFor } from "./mention-mapper.js";
+// work-zone-tools.ts imports from this module too; the sentence is only called while a call runs (see the note there).
+import { workZoneTaintedSentence } from "./work-zone-tools.js";
 
 /**
  * The cell's call-time tool gate (D-08 guard 3), wired to OpenClaw's `before_tool_call` / `after_tool_call`
@@ -21,7 +26,11 @@ import { openClawAgentIdFor } from "./mention-mapper.js";
  *     `SELF_VALIDATED_TOOLS`) and blocks on a denial, an error or a
  *     timeout (fail closed, under OpenClaw's 15 s budget),
  *   - reports each allowed call's outcome (status, result count, provider, duration; never content).
- * Logs never include params or results.
+ * Per-tool approvals (07.5 D-01, D-02, D-04): for a tool whose turn flags carry `approval` (and only for those) the
+ * request also carries the call's full `arguments` (≤ 32 KB, else refused locally), the local taint block is skipped
+ * (the API decides: approval, a grant or a denial), and every approval refusal is a fixed sentence returned at once
+ * (`APPROVAL_SENTENCES`). Nothing here ever waits for a person: the approved call re-runs in a new turn.
+ * Logs never include params, arguments or results.
  */
 
 export interface ActiveTurn {
@@ -42,6 +51,8 @@ export interface ActiveTurn {
    * `connectorTools`). `turn.tools` is the run's OpenClaw tools only; these are reachable through `ocw_connector_call`.
    */
   connectorTools: string[];
+  /** 07.5: the asking human's display name (sanitized), for the approval sentences; absent → a neutral fallback. */
+  requesterName?: string;
   calls: number;
   webCalls: number;
   tainted: boolean;
@@ -75,8 +86,9 @@ export const WEB_TOOLS: ReadonlySet<string> = new Set(["web_search", "web_fetch"
  * `ocw_memory_save` (`POST /memories`, 03.1-07), `ocw_memory_write` / `ocw_memory_propose` (`/memory/write|propose`,
  * 07.2), `ocw_board_card` (`/board/*`, 07.1-10) and the connector and keychain tools (`/connectors/list|call`,
  * `/http-requests`, 07.4 D-07: the API re-decides the logical tool, the audience and the caps and taint, and audits each
- * call with the member's credential). Asking `/tool-calls` too would count the call twice, and
- * `/tool-calls` cannot offer the board tool (it does not know the board layout), so it would refuse it
+ * call with the member's credential), and the Work Zone proposal tools (`/work-zone/projects|proposals`, 07.5-10: the
+ * API re-decides the tool on the turn, the taint and the human's grains). Asking `/tool-calls` too would count the call
+ * twice, and `/tool-calls` cannot offer the board tool (it does not know the board layout), so it would refuse it
  * `policy_changed`. `ocw_memory_list` / `ocw_memory_read` change nothing and go through the generic gate.
  */
 const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
@@ -87,16 +99,21 @@ const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
   "ocw_connector_list",
   "ocw_connector_call",
   "ocw_http_request",
+  "ocw_work_zone_projects",
+  "ocw_start_work_zone",
 ]);
 /**
  * Always side-effecting, whatever flags a turn carries: writing memory or changing shared board work after untrusted
- * content is exactly the injection the taint rule exists for (D-08, T-03.1-07-02, 07.1-13, T-07.2-07-02). A proposal
- * is not here: a person approves it before anything is written, so a tainted turn may still propose (flagged by the API).
+ * content is exactly the injection the taint rule exists for (D-08, T-03.1-07-02, 07.1-13, T-07.2-07-02). A memory
+ * proposal is not here: a person approves it before anything is written, so a tainted turn may still propose (flagged by
+ * the API). A Work Zone proposal is (07.5 D-03, APPROVE-04): it would run code on a member's device, so a turn that read
+ * untrusted content never proposes one, even with a person's click still to come.
  */
 const ALWAYS_SIDE_EFFECTING: ReadonlySet<string> = new Set([
   "ocw_memory_save",
   "ocw_memory_write",
   "ocw_board_card",
+  "ocw_start_work_zone",
 ]);
 /** Unknown flags are treated as the most dangerous combination. */
 const UNKNOWN_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
@@ -113,15 +130,19 @@ const HTTP_WRITE_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: 
 const HTTP_READ_METHODS: ReadonlySet<string> = new Set(["GET", "HEAD"]);
 
 type Pending = { callId: string; tool: string; startedAt: number };
+/** 07.5: the params the API checked for an allowed flagged call, until the pin hands them to OpenClaw (or the turn ends). */
+type Pinned = { session: string; params: Record<string, unknown> };
 
 export type ToolGuardState = {
   turns: Map<string, ActiveTurn>;
   pending: Map<string, Pending>;
+  /** Keyed by `pinKey(session, toolCallId)`. */
+  pinned: Map<string, Pinned>;
   client: AgentChannelClient | null;
 };
 
 export function createToolGuardState(): ToolGuardState {
-  return { turns: new Map(), pending: new Map(), client: null };
+  return { turns: new Map(), pending: new Map(), pinned: new Map(), client: null };
 }
 
 function block(reason: string): ToolBlock {
@@ -129,6 +150,7 @@ function block(reason: string): ToolBlock {
 }
 
 const keyOf = (sessionKey: string | undefined) => (sessionKey ?? "").trim().toLowerCase();
+const pinKey = (session: string, toolCallId: string) => `${session}\u0000${toolCallId}`;
 
 /** The turn's own spelling of a tool name OpenClaw reports case-folded; the reported name when none matches. */
 export function canonicalToolName(turnTools: readonly string[], reported: string): string {
@@ -179,7 +201,10 @@ function callFlags(
   }
   if (tool === "ocw_http_request") {
     const method = typeof params?.method === "string" ? params.method.trim().toUpperCase() : "";
-    return HTTP_READ_METHODS.has(method) ? HTTP_READ_FLAGS : HTTP_WRITE_FLAGS;
+    const flags = HTTP_READ_METHODS.has(method) ? HTTP_READ_FLAGS : HTTP_WRITE_FLAGS;
+    // 07.5: an approval policy on the keychain tool itself routes a tainted write to a person (the API decides).
+    const approval = t.turn.toolFlags[tool]?.approval;
+    return approval ? { ...flags, approval } : flags;
   }
   return t.turn.toolFlags[tool] ?? UNKNOWN_FLAGS;
 }
@@ -198,6 +223,101 @@ function argsBytes(params: Record<string, unknown> | undefined): number {
   } catch {
     return 0;
   }
+}
+
+/** UTF-8 bytes of the serialized params, or undefined when they cannot be serialized as JSON. */
+function jsonBytes(params: Record<string, unknown> | undefined): number | undefined {
+  try {
+    return new TextEncoder().encode(JSON.stringify(params ?? {}) ?? "").length;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A name or label the API composed from human-chosen names, shown to the model inside a fixed sentence: one line, no
+ * invisible or structural characters, bounded. Undefined when nothing is left.
+ */
+export function approvalLabel(value: string | null | undefined, max = 120): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const flat = Array.from(value, (ch) => {
+    const c = ch.codePointAt(0) ?? 0;
+    if (c <= 0x1f || (c >= 0x7f && c <= 0x9f)) return " ";
+    // Zero-width, bidi controls and isolates: invisible in a sentence, never meaningful in a name.
+    if ((c >= 0x200b && c <= 0x200f) || (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069))
+      return "";
+    return ch === "<" || ch === ">" || ch === "`" ? "" : ch;
+  })
+    .join("")
+    .replace(/\s{2,}/gu, " ")
+    .trim()
+    .slice(0, max)
+    .trim();
+  return flat || undefined;
+}
+
+const ASKER = "the person who asked";
+const capitalized = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+export type ApprovalSentenceInput = {
+  tool: string;
+  /** The approver label from the API ("a lead of Sales"). */
+  waitingFor?: string | null | undefined;
+  /** The requester's display name (the decision's, else the turn's). */
+  requesterName?: string | null | undefined;
+  /** 07.5-11: who denied exactly this action and their own note (`approval_denied`), from the API's decision. */
+  denial?: { deciderName?: string | null; note?: string | null } | null | undefined;
+};
+
+/** The longest decider note the model is shown (contracts `APPROVAL_NOTE_MAX`). */
+const NOTE_MAX = 280;
+export type ApprovalSentenceKey = ToolApprovalRefusal | "too_large_local" | "no_call_id";
+
+/**
+ * What the model reads for each approval outcome (07.5-UI-SPEC "What the agent says while it waits", R10): fixed
+ * sentences returned at once, never the API's text, never the arguments. Names are sanitized; a missing requester is
+ * "the person who asked".
+ */
+export const APPROVAL_SENTENCES: Record<ApprovalSentenceKey, (p: ApprovalSentenceInput) => string> = {
+  approval_required: (p) =>
+    `This action needs approval. I posted a card and asked ${approvalLabel(p.waitingFor, 200) ?? "an approver"}. ` +
+    `Tell ${approvalLabel(p.requesterName) ?? ASKER} in one short sentence that you are waiting for that approval, ` +
+    `without repeating the values. Don't call ${p.tool} again now: when it is approved you will get a new message ` +
+    "with the exact arguments.",
+  approval_pending: (p) =>
+    "This exact action is already waiting for approval in a card. Don't ask again; tell " +
+    `${approvalLabel(p.requesterName) ?? ASKER} it is still waiting.`,
+  approval_denied: (p) => {
+    // 07.5-11: the decider by name when the API says who it was, and their note quoted (one line, bounded).
+    const decider =
+      approvalLabel(p.denial?.deciderName, 200) ?? approvalLabel(p.waitingFor, 200) ?? "an approver";
+    const note = approvalLabel(p.denial?.note, NOTE_MAX);
+    return (
+      `${capitalized(decider)} denied this exact action.${note ? ` Their note: “${note}”.` : ""} Don't retry it. ` +
+      `Tell ${approvalLabel(p.requesterName) ?? ASKER} it was denied and ask what to change.`
+    );
+  },
+  approval_used: (p) =>
+    `That approval was already used once. Ask ${approvalLabel(p.requesterName) ?? ASKER} if they want to run it again.`,
+  arguments_too_large: (p) =>
+    `This action is too large to approve (over 32 KB). Ask ${approvalLabel(p.requesterName) ?? ASKER} to split it.`,
+  too_large_local: (p) => APPROVAL_SENTENCES.arguments_too_large(p),
+  arguments_invalid: () =>
+    "This action can't be approved because its values aren't valid JSON. Try again with plain values.",
+  too_many_pending: (p) =>
+    `${capitalized(approvalLabel(p.requesterName) ?? ASKER)} already has ${TOOL_APPROVAL_LIMITS.pendingPerRequester} ` +
+    "actions waiting for approval from you. Wait for those first.",
+  policy_changed: (p) => `Tool ${p.tool} blocked by the workspace policy (policy_changed).`,
+  no_call_id: (p) =>
+    `Tool ${p.tool} blocked: this action needs approval, but the call has no id to bind the approval to (fail closed).`,
+};
+
+const APPROVAL_REFUSAL_SET: ReadonlySet<string> = new Set(TOOL_APPROVAL_REFUSALS);
+/** An API refusal code that has its own approval sentence (`policy_changed` keeps each caller's generic text). */
+export function isApprovalRefusal(
+  code: string | null | undefined,
+): code is Exclude<ToolApprovalRefusal, "policy_changed"> {
+  return typeof code === "string" && code !== "policy_changed" && APPROVAL_REFUSAL_SET.has(code);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -251,6 +371,9 @@ export function createToolGuard(
 ) {
   const timeoutMs = deps.timeoutMs ?? 10_000;
   const log = () => deps.log ?? {};
+  const dropPins = (session: string) => {
+    for (const [k, pin] of state.pinned) if (pin.session === session) state.pinned.delete(k);
+  };
 
   return {
     timeoutMs,
@@ -266,6 +389,7 @@ export function createToolGuard(
         threadRootId?: string | null;
         messageId?: string;
         connectorTools?: string[];
+        requesterName?: string;
       },
       signal?: AbortSignal,
     ): void {
@@ -280,15 +404,20 @@ export function createToolGuard(
       signal?.addEventListener(
         "abort",
         () => {
-          if (state.turns.get(key)?.eventId === t.eventId) state.turns.delete(key);
+          if (state.turns.get(key)?.eventId === t.eventId) {
+            state.turns.delete(key);
+            dropPins(key);
+          }
         },
         { once: true },
       );
     },
 
-    /** Ends the session's turn: any later call for it is blocked. */
+    /** Ends the session's turn: any later call for it is blocked, and its unused pins are dropped. */
     endTurn(sessionKey: string): void {
-      state.turns.delete(keyOf(sessionKey));
+      const key = keyOf(sessionKey);
+      state.turns.delete(key);
+      dropPins(key);
     },
 
     activeTurn(sessionKey: string): ActiveTurn | undefined {
@@ -340,16 +469,34 @@ export function createToolGuard(
       if (web && t.webCalls >= t.turn.maxWebCalls) {
         return block(`Tool ${tool} blocked: the turn reached its limit of ${t.turn.maxWebCalls} web calls.`);
       }
-      if (t.tainted && flags.sideEffecting) {
+      // 07.5 (D-04): a tool with an approval policy is decided by the API after taint (a person approves, or a grant
+      // is used); the memory and board tools keep their local block whatever a turn says.
+      const approval = ALWAYS_SIDE_EFFECTING.has(tool) ? undefined : flags.approval;
+      if (t.tainted && flags.sideEffecting && !approval) {
+        // 07.5-10: the proposal's refusal is the UI-SPEC sentence the model relays (R10).
+        if (tool === "ocw_start_work_zone") return block(workZoneTaintedSentence(t.requesterName));
         return block(
           `Tool ${tool} blocked: this turn is read-only after untrusted content (web or tool output) was read.`,
         );
+      }
+      const selfValidated = SELF_VALIDATED_TOOLS.has(tool);
+      // The arguments a flagged call is decided on (the API canonicalizes them; the connector tools send their own).
+      const sentence = { tool, requesterName: t.requesterName };
+      const approvalArgs = approval && !selfValidated ? (event.params ?? {}) : undefined;
+      // The id the approved params are pinned under (Pitfall 3): without one the pin cannot hold, so the call is blocked.
+      const callId = event.toolCallId ?? ctx.toolCallId;
+      if (approvalArgs) {
+        const bytes = jsonBytes(approvalArgs);
+        if (bytes === undefined) return block(APPROVAL_SENTENCES.arguments_invalid(sentence));
+        if (bytes > TOOL_APPROVAL_LIMITS.argumentsBytes)
+          return block(APPROVAL_SENTENCES.too_large_local(sentence));
+        if (!callId) return block(APPROVAL_SENTENCES.no_call_id(sentence));
       }
       // Count before awaiting the API so concurrent calls of one turn can never exceed the caps.
       t.calls++;
       if (web) t.webCalls++;
 
-      if (!SELF_VALIDATED_TOOLS.has(tool)) {
+      if (!selfValidated) {
         const client = deps.client();
         if (!client) return block(`Tool ${tool} blocked: the OCW tool gate is not connected (fail closed).`);
         let decision: Awaited<ReturnType<AgentChannelClient["authorizeToolCall"]>>;
@@ -363,9 +510,15 @@ export function createToolGuard(
                 eventId: t.eventId,
                 agentId: t.agentId,
                 tool,
-                ...(event.toolCallId ? { toolCallId: event.toolCallId.slice(0, 200) } : {}),
+                ...(approvalArgs && callId
+                  ? { toolCallId: callId.slice(0, 200) }
+                  : event.toolCallId
+                    ? { toolCallId: event.toolCallId.slice(0, 200) }
+                    : {}),
                 params: pickParams(event.params),
                 argsBytes: argsBytes(event.params),
+                // D-01: only a flagged tool's arguments ever leave the cell (structural: no key otherwise).
+                ...(approvalArgs ? { arguments: approvalArgs } : {}),
               },
               signal,
               timeoutMs,
@@ -385,14 +538,47 @@ export function createToolGuard(
         }
         if (!decision.allowed) {
           log().info?.(`tool gate: ${tool} for ${t.eventId} denied (${decision.reason ?? "denied"})`);
+          if (isApprovalRefusal(decision.reason)) {
+            return block(
+              APPROVAL_SENTENCES[decision.reason]({
+                tool,
+                waitingFor: decision.approval?.waitingFor,
+                requesterName: approvalLabel(decision.approval?.requesterName) ?? t.requesterName,
+                denial: decision.denial,
+              }),
+            );
+          }
           return block(`Tool ${tool} blocked by the workspace policy (${decision.reason ?? "denied"}).`);
         }
         if (event.toolCallId) {
           state.pending.set(event.toolCallId, { callId: decision.callId, tool, startedAt: Date.now() });
         }
+        if (approvalArgs && callId) {
+          // A copy: what the API checked, whatever happens later to the event's object.
+          state.pinned.set(pinKey(keyOf(ctx.sessionKey), callId), {
+            session: keyOf(ctx.sessionKey),
+            params: structuredClone(approvalArgs),
+          });
+        }
       }
       if (flags.untrustedOutput) t.tainted = true;
       return undefined;
+    },
+
+    /**
+     * 07.5 (D-04, Pitfall 3): the lowest-priority `before_tool_call` handler. OpenClaw gives each handler an isolated
+     * copy of the original event and lets the LAST returned `params` win, so a plugin hooked between our gate and the
+     * tool could change what a person approved. For a flagged call the gate allowed, this returns exactly the params the
+     * API checked (once: the entry is deleted); for anything else it changes nothing.
+     */
+    pinParams(event: ToolCallEvent, ctx: ToolCallContext): { params: Record<string, unknown> } | undefined {
+      const callId = event.toolCallId ?? ctx.toolCallId;
+      if (!callId) return undefined;
+      const key = pinKey(keyOf(ctx.sessionKey), callId);
+      const pin = state.pinned.get(key);
+      if (!pin) return undefined;
+      state.pinned.delete(key);
+      return { params: structuredClone(pin.params) };
     },
 
     async afterToolCall(event: ToolCallEvent, _ctx: ToolCallContext): Promise<void> {
@@ -446,16 +632,23 @@ export const toolGuard: ToolGuard = createToolGuard({ client: () => sharedState.
 
 /** Highest priority: our gate runs before any other plugin's tool hook; a block is terminal. */
 export const TOOL_GATE_PRIORITY = 10_000;
+/**
+ * 07.5: lowest priority, so the params pin returns last and its params win (OpenClaw: "the last returned params
+ * wins"). A plugin registered even lower could still rewrite after it; the real-cell smoke (07.5-15) records the order.
+ */
+export const TOOL_PIN_PRIORITY = -10_000;
 
 /**
  * Registers the gate on OpenClaw (`registerCapabilities`, so it also exists in the non-activated registry agent
  * turns run with). No matcher, so it sees EVERY tool: matchers reject wildcards,
  * and a tool we did not list must not slip through. A thrown error or a timeout in `before_tool_call` blocks the
- * call (OpenClaw's fail-closed policy for that hook).
+ * call (OpenClaw's fail-closed policy for that hook). 07.5: a second `before_tool_call` handler at TOOL_PIN_PRIORITY
+ * pins an approved call's params. OpenClaw's own approval hook result and exec approvals stay unused (D-02, C-01).
  */
 export function registerToolGate(api: OpenClawPluginApi, guard: ToolGuard = toolGuard): void {
   api.on("before_tool_call", (event, ctx) => guard.beforeToolCall(event, ctx), {
     priority: TOOL_GATE_PRIORITY,
   });
+  api.on("before_tool_call", (event, ctx) => guard.pinParams(event, ctx), { priority: TOOL_PIN_PRIORITY });
   api.on("after_tool_call", (event, ctx) => guard.afterToolCall(event, ctx));
 }
