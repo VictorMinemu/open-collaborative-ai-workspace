@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 134
+open_count: 136
 waived_count: 4
 fixed_count: 85
-total_count: 223
-last_updated: 2026-10-15T06:05:38.884Z
+total_count: 225
+last_updated: 2026-10-15T06:38:56.352Z
 ---
 
 # Broken Windows Ledger
@@ -238,6 +238,8 @@ last_updated: 2026-10-15T06:05:38.884Z
 | 221 | 07.5 | deviation | apps/api/src/modules/tool-approval/kind.ts |  | The tool.call 'target' field carries the internal MCP server name (e.g. mc4866abe); hide it in the API view and the 07.5-14 card | open |  | 2026-10-15T06:05:38.732Z |  |
 | 222 | 07.5 | deviation | apps/api/src/modules/realtime |  | A diagnostic run hit 'deadlock detected' writing to a user: stream, failing a bot reply with 500 (investigate in 07.5-16) | open |  | 2026-10-15T06:05:38.809Z |  |
 | 223 | 07.5 | deviation | e2e/tests |  | Decided approvals stay in the run's DB; specs must filter by their own ids; the phone top bar lacks the Approvals count the UI-SPEC asks for | open |  | 2026-10-15T06:05:38.884Z |  |
+| 224 | 07.5 | deviation | apps/api/src/modules/approval/service.ts |  | Remaining lock-order risks (not reproduced): a server_apply approval (e.g. memory) still notifies user: streams before the conversation; notifications notify in recipient order, not ascending; no retry on 40P01 | open |  | 2026-10-15T06:38:56.276Z |  |
+| 225 | 07.5 | deviation | apps/api/src/testing.ts |  | ConnectorsStack.stop(): a throwing stop leaves the fake server open and a half-built stack leaves containers alive (same family as the Redis leak); grants bind to the action not the bot run, so Sam's next normal turn may use it once (state in ADR-0026) | open |  | 2026-10-15T06:38:56.352Z |  |
 
 ````json
 [
@@ -2915,6 +2917,30 @@ last_updated: 2026-10-15T06:05:38.884Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T06:05:38.884Z",
+    "resolved_at": null
+  },
+  {
+    "id": 224,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/api/src/modules/approval/service.ts",
+    "line": null,
+    "description": "Remaining lock-order risks (not reproduced): a server_apply approval (e.g. memory) still notifies user: streams before the conversation; notifications notify in recipient order, not ascending; no retry on 40P01",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T06:38:56.276Z",
+    "resolved_at": null
+  },
+  {
+    "id": 225,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/api/src/testing.ts",
+    "line": null,
+    "description": "ConnectorsStack.stop(): a throwing stop leaves the fake server open and a half-built stack leaves containers alive (same family as the Redis leak); grants bind to the action not the bot run, so Sam's next normal turn may use it once (state in ADR-0026)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T06:38:56.352Z",
     "resolved_at": null
   }
 ]
