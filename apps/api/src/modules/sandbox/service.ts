@@ -76,10 +76,10 @@ export async function loadSandboxPolicy(tx: Tx): Promise<SandboxSettings> {
 }
 
 /**
- * The bot as the resolver sees it (facts only: scope, owner, disabled, unit path), and its own switch for `kind`.
- * Data, never a decision.
+ * A live bot as the resolver sees it (facts only: scope, owner, disabled, unit path), and its own switches. Data, never
+ * a decision; null when the id is not a live bot of the transaction's organization (RLS).
  */
-async function botOf(tx: Tx, agentId: string) {
+export async function loadSandboxBot(tx: Tx, agentId: string) {
   const [row] = await tx
     .select({
       id: agents.id,
@@ -103,6 +103,7 @@ async function botOf(tx: Tx, agentId: string) {
   const sandbox = BotCapabilities.shape.sandbox.safeParse(stored.sandbox);
   const browser = BotCapabilities.shape.browser.safeParse(stored.browser);
   return {
+    id: row.id,
     facts: {
       scope: row.scope,
       ownerUserId: row.ownerUserId,
@@ -129,7 +130,7 @@ export async function sandboxAvailable(
   p: { agentId: string; userId: string },
   kind: ConfinedKind,
 ): Promise<Availability> {
-  const bot = await botOf(tx, p.agentId);
+  const bot = await loadSandboxBot(tx, p.agentId);
   if (!bot) return { ok: false, reason: "not_allowed" };
   const decision = await perms.decide(
     tx,

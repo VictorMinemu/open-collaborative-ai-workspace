@@ -174,6 +174,18 @@ describe("cross-tenant guards derived from the authz registry (P-17, 07.4 #169)"
         expect((await policyOf(s.orgA))?.killed_at).not.toBeNull();
         await ok(resume(s.victor));
       },
+      // 07.8-11: people's file routes; organization B's admin with organization A's bot id is a 404.
+      "GET /api/v1/agents/:id/sandbox/files": async () => {
+        const r = (await s.eve.request("GET", `/api/v1/agents/${s.scoutId}/sandbox/files?path=`)) as Res;
+        expect(r.status).toBe(404);
+      },
+      "GET /api/v1/agents/:id/sandbox/files/download": async () => {
+        const r = (await s.eve.request(
+          "GET",
+          `/api/v1/agents/${s.scoutId}/sandbox/files/download?path=notes.txt`,
+        )) as Res;
+        expect(r.status).toBe(404);
+      },
       "POST /agent-channel/v1/sandbox/exec": async () => {
         const r = await exec(ev, ["echo", "hi"], tokenB);
         expect(r.status).toBe(403);

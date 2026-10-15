@@ -2,6 +2,7 @@ import { SandboxSettings } from "@ocw/contracts";
 import { type App, authOf, type Core, tenant } from "../../core";
 import type { PermissionService } from "../organization";
 import type { SandboxdClient } from "./client";
+import { registerSandboxFileRoutes } from "./files";
 import { killSandboxes, loadSandboxPolicy, resumeSandboxes } from "./service";
 
 /**
@@ -22,6 +23,9 @@ export function registerSandboxPeopleRoutes(
   core: Core,
   deps: { perms: PermissionService; client: SandboxdClient | null },
 ): void {
+  // 07.8-11: people's file routes for the bots they configure (the resolver's `sandbox.files`).
+  registerSandboxFileRoutes(app, core, { perms: deps.perms, client: deps.client });
+
   const manage = {
     config: { authz: "user" as const },
     preHandler: [core.identity.requireUser, deps.perms.requirePermission("bot.manage")],
