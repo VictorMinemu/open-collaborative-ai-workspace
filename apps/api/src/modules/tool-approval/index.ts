@@ -41,6 +41,8 @@ export {
   type ToolCallSource,
 } from "./request";
 export { type ApprovalFacts, type PolicyRow, type ResolvedApproval, resolveToolApproval } from "./resolve";
+/** 07.8-10: the turn activity masks every string with the same display masker as an approval card (R2). */
+export { cut, maskForDisplay } from "./view";
 
 export interface ToolApprovalDeps {
   approvals: ApprovalService;

@@ -623,6 +623,7 @@ export function createChatModule(core: Core): ApiModule {
       lenientThreadRoot: true,
       card: input.card,
       cardPlatformOwned: input.cardPlatformOwned === true,
+      onInserted: input.onInserted,
     });
     if (result.created) {
       // Observers (notifications) in the same transaction; a bot is never a recipient, only an actor.

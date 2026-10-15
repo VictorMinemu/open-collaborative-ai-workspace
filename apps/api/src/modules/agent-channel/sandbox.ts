@@ -1,6 +1,8 @@
 import {
   AgentChannelSandboxExec,
   AgentChannelSandboxExecResponse,
+  AgentChannelSandboxWrite,
+  AgentChannelSandboxWriteResponse,
   BUILTIN_TOOLS,
   CONFINED_TOOL_FLAGS,
   type ConfinedToolName,
@@ -8,13 +10,20 @@ import {
   SANDBOX_LIMITS,
   SANDBOX_REFUSAL_STATUS,
   type SandboxdErrorCode,
+  type SandboxdTarget,
+  SandboxFilePath,
   type SandboxRefusal,
+  SandboxRelativePath,
   type SandboxRuntime,
+  type SandboxToolName,
   type ToolApprovalRefusal,
 } from "@ocw/contracts";
-import { agentToolCalls, agentTurns, type Tx } from "@ocw/db";
+import { agentToolCalls, agentTurns, type Tx, withSavepoint } from "@ocw/db";
 import { and, eq, lt, type SQL, sql } from "drizzle-orm";
+import type { FastifyRequest } from "fastify";
+import type { z } from "zod";
 import type { App, Core } from "../../core";
+import { sha256Hex } from "../../lib/crypto";
 import { HttpError } from "../../lib/errors";
 import type { PermissionService } from "../organization";
 import {
@@ -27,6 +36,7 @@ import {
   sandboxAvailable,
   touchSandbox,
 } from "../sandbox";
+import { recordStep, type StepOutcomeInput, stepFor } from "./activity";
 import { type CellPrincipal, cellOf } from "./auth";
 import { noTrigger } from "./cards";
 import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, liveTurn } from "./claim";
@@ -34,8 +44,11 @@ import { APPROVAL_MESSAGES, approvalDetails, approvalVerdict, type ToolApprovalG
 
 /**
  * The bots' sandbox routes of the Agent Channel (07.8-05; SBX-02, SBX-04; D-02 (b), D-03, D-09, D-11 F-7, D-12; P-04,
- * P-06, P-07). `POST /agent-channel/v1/sandbox/exec` runs an argv array in the bot's own sandbox. Plans 10 and 14 add
- * the file, process and browser routes here, every one through `decideSandboxCall`.
+ * P-06, P-07). `POST /agent-channel/v1/sandbox/exec` runs an argv array in the bot's own sandbox; 07.8-10 adds
+ * `process`, `read`, `write`, `list`, `delete` and `share` (every one through `runSandboxCall` → `decideSandboxCall`,
+ * with its static flag class: read, list, process and exec taint the turn, write and delete do not, share is
+ * side-effecting) and records each decided call as a step of the turn's activity (`activity.ts`). 07.8-14 adds the
+ * browser routes.
  *
  * Order (refusals before sandboxd are recorded in `agent_tool_calls` and audited `bot.tool_call`; nothing calls out in
  * a transaction):
@@ -109,6 +122,9 @@ export function sandboxRefusal(code: SandboxCallRefusal, details?: Record<string
 /** sandboxd's refusal of a decided call → the code the bot gets (anything unexpected is the service failing). */
 function refusalOfSandboxd(code: SandboxdErrorCode): SandboxRefusal {
   switch (code) {
+    case "exists":
+      // `create` on a path that is there (and an import onto one): the bot is told the workspace is busy.
+      return "busy";
     case "disk_full":
     case "busy":
     case "invalid_path":
@@ -349,7 +365,8 @@ export async function finishSandboxCall(
     cell: CellPrincipal;
     turn: AgentTurnRow;
     callId: string;
-    action: string;
+    /** The outcome audit (`sandbox.exec`, `sandbox.file_written`, …); null = the ledger row only (reads and lists). */
+    action: string | null;
     status: "ok" | "error";
     durationMs: number;
     container: SandboxContainer;
@@ -362,6 +379,7 @@ export async function finishSandboxCall(
     .set({ status: p.status, durationMs, completedAt: new Date().toISOString() })
     .where(and(eq(agentToolCalls.id, p.callId), eq(agentToolCalls.decision, "allowed")));
   if (p.status === "ok") await touchSandbox(tx, { agentId: p.turn.agentId, kind: p.container });
+  if (!p.action) return;
   await core.audit.record(tx, {
     ...cellAuditBase(p.cell),
     action: p.action,
@@ -396,6 +414,253 @@ export function containerStateAfter(p: {
   return null;
 }
 
+/** A refusal the API reaches itself around sandboxd's answer (a folder where a file is needed, a share too large). */
+class LocalRefusal extends Error {
+  constructor(readonly code: SandboxRefusal) {
+    super(code);
+    this.name = "LocalRefusal";
+  }
+}
+
+/** The approval codes a step shows as waiting ("Needs approval"); every other refusal is a blocked step. */
+const WAITING: ReadonlySet<SandboxCallRefusal> = new Set(["approval_required", "approval_pending"]);
+
+/**
+ * Records a refusal the route reached before `decideSandboxCall` (07.8-10: share without storage or with a full
+ * reply): one denied `agent_tool_calls` row and its `bot.tool_call` audit, exactly like a refusal of the decision.
+ */
+export async function refuseSandboxCall(
+  tx: Tx,
+  deps: SandboxCallDeps,
+  p: { turn: AgentTurnRow; tool: ConfinedToolName; reason: SandboxCallRefusal; kind: ConfinedKind },
+): Promise<SandboxDecision> {
+  await recordCall(tx, deps.core, {
+    cell: deps.cell,
+    turn: p.turn,
+    tool: p.tool,
+    reason: p.reason,
+    approvalId: null,
+    metadata: { kind: p.kind },
+  });
+  return { ok: false, reason: p.reason };
+}
+
+interface CallOutcome<R> {
+  /** What the bot gets. */
+  response: R;
+  /** What the activity step may show (exec output, a write's size, a share's name); masked by `stepFor`. */
+  stepResult: Record<string, unknown> | null;
+  /** The outcome audit's metadata: ids, sizes, counts and codes only. */
+  audit: Record<string, unknown>;
+}
+
+/** One bot sandbox tool call, from the route's validated body to sandboxd and back (see `runSandboxCall`). */
+interface SandboxCallSpec<Raw, R> {
+  tool: SandboxToolName;
+  body: { eventId: string; agentId: string };
+  /** The canonical arguments a person approves (07.5): exactly what runs, never stored elsewhere. */
+  args: Record<string, unknown>;
+  /** The step's input (masked by `stepFor`; never content). */
+  stepInput: Record<string, unknown>;
+  /** The outcome audit action, or null for the ledger row only. */
+  auditAction: string | null;
+  /** The outcome audit's metadata when the call failed after its decision. */
+  failureAudit?: (reason: SandboxRefusal) => Record<string, unknown>;
+  /** Ensure and retry once when sandboxd says the container went away (exec: idle stop, restart). */
+  retryOnGone?: boolean;
+  /** A refusal before the decision, in its transaction (share). */
+  precheck?: (tx: Tx, turn: AgentTurnRow) => Promise<SandboxCallRefusal | null>;
+  /** sandboxd, outside any transaction. */
+  call: (client: SandboxdClient, target: SandboxdTarget) => Promise<Raw>;
+  /** In the outcome transaction (a savepoint: a throw undoes only its own writes). */
+  finish: (tx: Tx, raw: Raw, turn: AgentTurnRow) => Promise<CallOutcome<R>>;
+}
+
+/** How the step of a call refused at its decision reads. */
+const refusedOutcome = (reason: SandboxCallRefusal): StepOutcomeInput => ({
+  kind: WAITING.has(reason) ? "approval" : "blocked",
+  code: reason,
+});
+
+/** Codes only: a sandboxd or local refusal → the bot's code (anything else is the service failing). */
+function failureOf(err: unknown): SandboxRefusal {
+  if (err instanceof LocalRefusal) return err.code;
+  if (err instanceof SandboxdRefusedError) return refusalOfSandboxd(err.code);
+  return "service_unavailable";
+}
+
+/**
+ * Every bot sandbox tool call (07.8-05 exec; 07.8-10 process, read, write, list, delete, share), in four steps:
+ *   1. tx0: the turn's human (`turnHumanOf`, 403 `no_trigger`);
+ *   2. tx1 AS that human: the live turn, the route's precheck, `decideSandboxCall` (or the precheck's refusal), and the
+ *      turn activity's step (`running` while sandboxd works, `blocked`/`approval` when refused), published after commit;
+ *   3. outside any transaction: sandboxd (`ensure` first when the bot's container is not running);
+ *   4. tx2 AS the human: the container's state, the route's `finish` (in a savepoint), the ledger row's status and the
+ *      outcome audit (ids, sizes and codes only), and the step's outcome.
+ */
+async function runSandboxCall<Raw, R>(
+  core: Core,
+  deps: {
+    perms: Pick<PermissionService, "decide">;
+    toolApproval: ToolApprovalGate;
+    client: SandboxdClient | null;
+  },
+  cell: CellPrincipal,
+  spec: SandboxCallSpec<Raw, R>,
+): Promise<R> {
+  const { body, tool } = spec;
+  const humanUserId = await turnHumanOf(core, cell, { ...body, tool });
+  const ctx = { organizationId: cell.organizationId, userId: humanUserId };
+  const callDeps: SandboxCallDeps = {
+    core,
+    perms: deps.perms,
+    toolApproval: deps.toolApproval,
+    configured: deps.client !== null,
+    cell,
+  };
+
+  const decided = await core.db.withTenant(ctx, async (tx) => {
+    const turn = await liveTurn(tx, core, body);
+    if (!turn || turn.userId !== humanUserId) {
+      await auditUnknownTurn(tx, core, {
+        cell,
+        tool,
+        reason: "no_trigger",
+        metadata: { eventId: body.eventId },
+      });
+      return null;
+    }
+    const pre = spec.precheck ? await spec.precheck(tx, turn) : null;
+    const decision = pre
+      ? await refuseSandboxCall(tx, callDeps, { turn, tool, reason: pre, kind: "sandbox" })
+      : await decideSandboxCall(tx, callDeps, {
+          turn,
+          tool,
+          args: spec.args,
+          toolCallId: null,
+          kind: "sandbox",
+        });
+    const step = stepFor(
+      tool,
+      spec.stepInput,
+      decision.ok ? { kind: "running" } : refusedOutcome(decision.reason),
+    );
+    await recordStep(tx, core, { turn, step, inFlight: decision.ok });
+    return { turn, decision, stepId: step.id };
+  });
+  if (!decided) throw noTrigger();
+  const { turn, decision, stepId } = decided;
+  if (!decision.ok) throw sandboxRefusal(decision.reason, decision.details);
+  const client = deps.client;
+  if (!client) throw sandboxRefusal("service_unavailable");
+
+  // 3. sandboxd, outside any transaction.
+  const target = { orgId: cell.organizationId, agentId: turn.agentId };
+  const started = Date.now();
+  const box: { ensured: boolean; runtime: SandboxRuntime | null } = { ensured: false, runtime: null };
+  const ensure = async () => {
+    const status = await client.call("ensure", { target }, { timeoutMs: ENSURE_TIMEOUT_MS });
+    box.ensured = true;
+    box.runtime = status.runtime;
+  };
+  let raw: { value: Raw } | null = null;
+  let failure: SandboxRefusal | null = null;
+  try {
+    if (decision.claim.ensure) await ensure();
+    try {
+      raw = { value: await spec.call(client, target) };
+    } catch (err) {
+      // The container went away behind the API's back (idle stop, a restart): ensure it once and retry.
+      const gone = err instanceof SandboxdRefusedError && (err.code === "not_found" || err.code === "killed");
+      if (!spec.retryOnGone || !gone || box.ensured) throw err;
+      await ensure();
+      raw = { value: await spec.call(client, target) };
+    }
+  } catch (err) {
+    // Codes only: the error never names the argv, a path or content, and it is never logged with a body.
+    failure = failureOf(err);
+  }
+  const durationMs = Date.now() - started;
+
+  // 4. The outcome, audited with ids, sizes and codes only.
+  const response = await core.db.withTenant(ctx, async (tx) => {
+    const after = containerStateAfter({ reserved: decision.claim.ensure, ensured: box.ensured, failure });
+    if (after) {
+      await markState(tx, {
+        agentId: turn.agentId,
+        kind: "sbx",
+        state: after.state,
+        stopReason: after.stopReason,
+        ...(after.state === "running" ? { runtime: box.runtime, active: true } : {}),
+      });
+    }
+    let outcome: CallOutcome<R> | null = null;
+    if (raw && !failure) {
+      const value = raw.value;
+      try {
+        outcome = await withSavepoint(
+          tx,
+          (sp) => spec.finish(sp, value, turn),
+          () => true,
+        );
+      } catch (err) {
+        failure = failureOf(err);
+      }
+    }
+    await finishSandboxCall(tx, core, {
+      cell,
+      turn,
+      callId: decision.claim.callId,
+      action: spec.auditAction,
+      status: outcome ? "ok" : "error",
+      durationMs,
+      container: "sbx",
+      metadata: outcome
+        ? outcome.audit
+        : (spec.failureAudit?.(failure ?? "service_unavailable") ?? {
+            reason: failure ?? "service_unavailable",
+          }),
+    });
+    const step = stepFor(
+      tool,
+      spec.stepInput,
+      outcome
+        ? { kind: "ok", durationMs, result: outcome.stepResult }
+        : { kind: "error", code: failure ?? "service_unavailable", durationMs },
+      { id: stepId },
+    );
+    await recordStep(tx, core, { turn, step });
+    return outcome ? { value: outcome.response } : null;
+  });
+  if (!response) throw sandboxRefusal(failure ?? "service_unavailable");
+  return response.value;
+}
+
+/** A workspace path in an audit row: its length and hash, never the path (C-02, T-07.8-10-04). */
+const pathAudit = (path: string) => ({ pathLength: path.length, pathSha256: sha256Hex(path) });
+
+/**
+ * The body checks a person would expect before any decision: a path the contract refuses is 422 `invalid_path`
+ * (never a generic validation error), and write content over 1 MiB is 413 `too_large`. Runs before the schema.
+ */
+function guardBody(opts: { rootAllowed?: boolean; content?: boolean }) {
+  const pathSchema = opts.rootAllowed ? SandboxRelativePath : SandboxFilePath;
+  return async (req: FastifyRequest): Promise<void> => {
+    const body = req.body as Record<string, unknown> | null | undefined;
+    if (!body || typeof body !== "object") return;
+    if (typeof body.path === "string" && !pathSchema.safeParse(body.path).success) {
+      throw sandboxRefusal("invalid_path");
+    }
+    if (
+      opts.content &&
+      typeof body.content === "string" &&
+      Buffer.byteLength(body.content, "utf8") > SANDBOX_LIMITS.writeMaxBytes
+    ) {
+      throw sandboxRefusal("too_large");
+    }
+  };
+}
+
 export function registerSandboxRoutes(
   scope: App,
   core: Core,
@@ -405,134 +670,81 @@ export function registerSandboxRoutes(
     client: SandboxdClient | null;
   },
 ): void {
+  const route = <B extends z.ZodType, R extends z.ZodType>(body: B, response: R) => ({
+    config: { authz: "cell" as const },
+    schema: { tags, security: bearer, body, response: { 200: response } },
+  });
+
   scope.post(
     "/sandbox/exec",
+    route(AgentChannelSandboxExec, AgentChannelSandboxExecResponse),
+    async (req) => {
+      const body = req.body;
+      const yieldMs = body.background ? 0 : SANDBOX_LIMITS.execYieldMs;
+      return runSandboxCall(core, deps, cellOf(req), {
+        tool: EXEC,
+        body,
+        // The canonical action a person approves: exactly what runs.
+        args: {
+          argv: body.argv,
+          ...(body.cwd !== undefined ? { cwd: body.cwd } : {}),
+          ...(body.timeoutSeconds !== undefined ? { timeoutSeconds: body.timeoutSeconds } : {}),
+          ...(body.background !== undefined ? { background: body.background } : {}),
+        },
+        stepInput: { argv: body.argv, cwd: body.cwd },
+        auditAction: "sandbox.exec",
+        failureAudit: (reason) => ({ status: "error", exitCode: null, reason }),
+        retryOnGone: true,
+        call: (client, target) =>
+          client.call(
+            "exec",
+            {
+              target,
+              argv: body.argv,
+              cwd: body.cwd ?? "",
+              timeoutMs: (body.timeoutSeconds ?? DEFAULT_EXEC_TIMEOUT_SECONDS) * 1000,
+              yieldMs,
+            },
+            { timeoutMs: yieldMs + EXEC_ANSWER_MARGIN_MS },
+          ),
+        finish: async (_tx, result) => ({
+          response: result,
+          stepResult: result,
+          audit: { status: result.status, exitCode: result.status === "exited" ? result.exitCode : null },
+        }),
+      });
+    },
+  );
+
+  scope.post(
+    "/sandbox/write",
     {
-      config: { authz: "cell" as const },
-      schema: {
-        tags,
-        security: bearer,
-        body: AgentChannelSandboxExec,
-        response: { 200: AgentChannelSandboxExecResponse },
-      },
+      ...route(AgentChannelSandboxWrite, AgentChannelSandboxWriteResponse),
+      preValidation: guardBody({ content: true }),
     },
     async (req) => {
-      const cell = cellOf(req);
       const body = req.body;
-      const humanUserId = await turnHumanOf(core, cell, { ...body, tool: EXEC });
-
-      // 2. Decided as that human, in one short transaction without any outbound call.
-      const decided = await core.db.withTenant(
-        { organizationId: cell.organizationId, userId: humanUserId },
-        async (tx) => {
-          const turn = await liveTurn(tx, core, body);
-          if (!turn || turn.userId !== humanUserId) {
-            await auditUnknownTurn(tx, core, {
-              cell,
-              tool: EXEC,
-              reason: "no_trigger",
-              metadata: { eventId: body.eventId },
-            });
-            return null;
-          }
-          const decision = await decideSandboxCall(
-            tx,
-            {
-              core,
-              perms: deps.perms,
-              toolApproval: deps.toolApproval,
-              configured: deps.client !== null,
-              cell,
-            },
-            {
-              turn,
-              tool: EXEC,
-              // The canonical action a person approves: exactly what runs.
-              args: {
-                argv: body.argv,
-                ...(body.cwd !== undefined ? { cwd: body.cwd } : {}),
-                ...(body.timeoutSeconds !== undefined ? { timeoutSeconds: body.timeoutSeconds } : {}),
-                ...(body.background !== undefined ? { background: body.background } : {}),
-              },
-              toolCallId: null,
-              kind: "sandbox",
-            },
-          );
-          return { turn, decision };
-        },
-      );
-      if (!decided) throw noTrigger();
-      const { turn, decision } = decided;
-      if (!decision.ok) throw sandboxRefusal(decision.reason, decision.details);
-      const client = deps.client;
-      if (!client) throw sandboxRefusal("service_unavailable");
-
-      // 3. sandboxd, outside any transaction.
-      const target = { orgId: cell.organizationId, agentId: turn.agentId };
-      const yieldMs = body.background ? 0 : SANDBOX_LIMITS.execYieldMs;
-      const execInput = {
-        target,
-        argv: body.argv,
-        cwd: body.cwd ?? "",
-        timeoutMs: (body.timeoutSeconds ?? DEFAULT_EXEC_TIMEOUT_SECONDS) * 1000,
-        yieldMs,
-      };
-      const started = Date.now();
-      const box: { ensured: boolean; runtime: SandboxRuntime | null } = { ensured: false, runtime: null };
-      const ensure = async () => {
-        const status = await client.call("ensure", { target }, { timeoutMs: ENSURE_TIMEOUT_MS });
-        box.ensured = true;
-        box.runtime = status.runtime;
-      };
-      let result: AgentChannelSandboxExecResponse | null = null;
-      let failure: SandboxRefusal | null = null;
-      try {
-        if (decision.claim.ensure) await ensure();
-        try {
-          result = await client.call("exec", execInput, { timeoutMs: yieldMs + EXEC_ANSWER_MARGIN_MS });
-        } catch (err) {
-          // The container went away behind the API's back (idle stop, a restart): ensure it once and retry.
-          const gone =
-            err instanceof SandboxdRefusedError && (err.code === "not_found" || err.code === "killed");
-          if (!gone || box.ensured) throw err;
-          await ensure();
-          result = await client.call("exec", execInput, { timeoutMs: yieldMs + EXEC_ANSWER_MARGIN_MS });
-        }
-      } catch (err) {
-        // Codes only: the error never names the argv, and it is never logged with a body.
-        failure = err instanceof SandboxdRefusedError ? refusalOfSandboxd(err.code) : "service_unavailable";
-      }
-      const durationMs = Date.now() - started;
-
-      // 4. The outcome, audited with ids, exit code, duration and status only.
-      await core.db.withTenant({ organizationId: cell.organizationId, userId: humanUserId }, async (tx) => {
-        const after = containerStateAfter({ reserved: decision.claim.ensure, ensured: box.ensured, failure });
-        if (after) {
-          await markState(tx, {
-            agentId: turn.agentId,
-            kind: "sbx",
-            state: after.state,
-            stopReason: after.stopReason,
-            ...(after.state === "running" ? { runtime: box.runtime, active: true } : {}),
-          });
-        }
-        await finishSandboxCall(tx, core, {
-          cell,
-          turn,
-          callId: decision.claim.callId,
-          action: "sandbox.exec",
-          status: result ? "ok" : "error",
-          durationMs,
-          container: "sbx",
-          metadata: {
-            status: result?.status ?? "error",
-            exitCode: result?.status === "exited" ? result.exitCode : null,
-            ...(failure ? { reason: failure } : {}),
-          },
-        });
+      return runSandboxCall(core, deps, cellOf(req), {
+        tool: BUILTIN_TOOLS.sandboxWrite,
+        body,
+        args: { path: body.path, content: body.content, mode: body.mode },
+        stepInput: { path: body.path, content: body.content },
+        auditAction: "sandbox.file_written",
+        failureAudit: (reason) => ({ reason, ...pathAudit(body.path) }),
+        call: (client, target) =>
+          client.call("filesWrite", {
+            target,
+            path: body.path,
+            content: body.content,
+            encoding: "utf8",
+            mode: body.mode,
+          }),
+        finish: async (_tx, result) => ({
+          response: result,
+          stepResult: { size: result.size },
+          audit: { size: result.size, mode: body.mode, ...pathAudit(body.path) },
+        }),
       });
-      if (!result) throw sandboxRefusal(failure ?? "service_unavailable");
-      return result;
     },
   );
 }

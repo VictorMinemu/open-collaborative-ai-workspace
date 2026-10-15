@@ -32,6 +32,7 @@ import { channelResource, createPermissionService, type ResourceFacts } from "..
 import { cellApprovedPlugins } from "../plugins";
 import type { SandboxdClient } from "../sandbox";
 import type { WorkZoneProposalService } from "../work-session";
+import { finishActivity } from "./activity";
 import { cellOf, createCellAuth } from "./auth";
 import { registerBoardAgentRoutes } from "./board";
 import { noTrigger, registerCardActionHandler, registerCardRoutes, resolveReplyTarget } from "./cards";
@@ -370,6 +371,8 @@ export function createAgentChannelModule(
                 }),
               );
               if (!check) throw noTrigger();
+              // The turn the post answers, as resolved above (its agent and conversation were checked).
+              const turnEventId = body.eventId ?? null;
 
               let result: { messageId: string; created: boolean };
               try {
@@ -387,6 +390,15 @@ export function createAgentChannelModule(
                     idempotencyKey: body.idempotencyKey,
                     inReplyToMessageId: body.inReplyToMessageId,
                     onBehalfOfUserId: check.onBehalfOf,
+                    // 07.8-10 (R2): the reply to a turn carries what the bot did in its sandbox (the activity, attached
+                    // to the turn's first reply), before `message.created`.
+                    ...(turnEventId
+                      ? {
+                          onInserted: async (tx: Tx, messageId: string) => {
+                            await finishActivity(tx, { eventId: turnEventId, replyMessageId: messageId });
+                          },
+                        }
+                      : {}),
                   },
                 );
               } catch (err) {
