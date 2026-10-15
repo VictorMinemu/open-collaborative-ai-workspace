@@ -43,7 +43,17 @@ import {
   AgentChannelWorkZoneProjectsResponse,
   type AgentChannelWorkZonePropose,
   AgentChannelWorkZoneProposeResponse,
+  BROWSER_TOOL_RESPONSES,
+  BROWSER_TOOL_ROUTES,
+  type BrowserToolBodies,
+  type BrowserToolName,
+  type BrowserToolResponses,
   CellSnapshot,
+  SANDBOX_TOOL_RESPONSES,
+  SANDBOX_TOOL_ROUTES,
+  type SandboxToolBodies,
+  type SandboxToolName,
+  type SandboxToolResponses,
 } from "./agent-channel-protocol.js";
 import { backoffDelayMs, sleep } from "./backoff.js";
 
@@ -141,6 +151,23 @@ export const CONNECTOR_REQUEST_TIMEOUT_MS = 35_000;
 
 /** Per-attempt budget of the Work Zone proposal routes (07.5-10): two attempts at most, both idempotent server side. */
 export const WORK_ZONE_REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * 07.8: per-call budgets of the confined tools. Exec and process yield after 25 s server side (a process id), and a
+ * browser wait lasts up to 30 s, so they get 35 s; every other sandbox or browser call 20 s. One attempt each: the
+ * route counts the call against the turn's budget.
+ */
+export const CONFINED_LONG_TIMEOUT_MS = 35_000;
+export const CONFINED_TIMEOUT_MS = 20_000;
+const LONG_CONFINED_TOOLS: ReadonlySet<string> = new Set([
+  "ocw_sandbox_exec",
+  "ocw_sandbox_process",
+  "ocw_browser_wait",
+]);
+/** The budget of one confined call (35 s for exec, process and wait; 20 s otherwise). */
+export function confinedTimeoutMs(tool: string): number {
+  return LONG_CONFINED_TOOLS.has(tool) ? CONFINED_LONG_TIMEOUT_MS : CONFINED_TIMEOUT_MS;
+}
 
 export function trimTrailingSlash(url: string): string {
   return url.replace(/\/+$/u, "");
@@ -437,6 +464,32 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
      */
     async reportMcpProbe(report: AgentChannelMcpProbeResult, signal?: AbortSignal): Promise<void> {
       await request("POST", "/mcp/probe-results", report, signal, 3);
+    },
+    /**
+     * `ocw_sandbox_*` (07.8, D-02 b): one call to the tool's own route with the turn's ids and the tool's contract body
+     * only. One attempt, 35 s (exec, process) or 20 s budget. A refusal throws AgentChannelHttpError with its
+     * `SandboxRefusal` code. Never logs argv, paths, content or output.
+     */
+    async sandboxCall<T extends SandboxToolName>(
+      tool: T,
+      body: SandboxToolBodies[T],
+      signal?: AbortSignal,
+    ): Promise<SandboxToolResponses[T]> {
+      const raw = await request("POST", SANDBOX_TOOL_ROUTES[tool], body, signal, 1, confinedTimeoutMs(tool));
+      return SANDBOX_TOOL_RESPONSES[tool].parse(raw) as SandboxToolResponses[T];
+    },
+    /**
+     * `ocw_browser_*` (07.8, D-05): one call to the tool's own route with the turn's ids and the tool's contract body
+     * only. One attempt, 35 s (wait) or 20 s budget. A refusal throws AgentChannelHttpError with its `BrowserRefusal`
+     * code. Never logs URLs, page text, typed text or images.
+     */
+    async browserCall<T extends BrowserToolName>(
+      tool: T,
+      body: BrowserToolBodies[T],
+      signal?: AbortSignal,
+    ): Promise<BrowserToolResponses[T]> {
+      const raw = await request("POST", BROWSER_TOOL_ROUTES[tool], body, signal, 1, confinedTimeoutMs(tool));
+      return BROWSER_TOOL_RESPONSES[tool].parse(raw) as BrowserToolResponses[T];
     },
     /**
      * A marketplace install / uninstall outcome (D-14). Three attempts at most: the API applies a report only to the

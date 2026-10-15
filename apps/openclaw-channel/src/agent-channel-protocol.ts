@@ -396,6 +396,11 @@ export const TurnContext = z.object({
    * older API sends none (the legacy `memory` notes apply); an invalid list is dropped, the turn is kept.
    */
   memoryFiles: z.array(TurnMemoryFile).max(2).optional().catch(undefined),
+  /**
+   * 07.8 (D-11 F-7): sandbox and browser calls this turn may make, counted apart from `maxToolCalls`. Absent (an older
+   * API) or invalid → `SANDBOX_LIMITS.callsPerTurn`; the API counts and refuses `budget_exhausted` either way.
+   */
+  maxSandboxCalls: z.number().int().nonnegative().optional().catch(undefined),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -578,6 +583,12 @@ export const CellProvider = z.object({
   /** SECRET. Never log; written to OpenClaw only as an env reference. */
   apiKey: z.string().nullable(),
   models: z.array(z.string()),
+  /**
+   * 07.8 (D-14, spike ii): the ids of `models` that accept image input. The reconciler declares them
+   * `input: ["text", "image"]`, so a tool's image (`ocw_browser_screenshot`) reaches the model; absent or invalid = text
+   * only (OpenClaw then drops tool images).
+   */
+  imageModels: z.array(z.string()).optional().catch(undefined),
 });
 export type CellProvider = z.infer<typeof CellProvider>;
 
@@ -797,7 +808,8 @@ export const AGENT_CARD_ROUTE_PREFIXES = [
   "/approvals",
 ] as const;
 
-function hasControlCharacter(v: string): boolean {
+/** A C0/C1 control character or DEL. */
+export function hasControlCharacter(v: string): boolean {
   for (let i = 0; i < v.length; i++) {
     const c = v.charCodeAt(i);
     if (c <= 0x1f || (c >= 0x7f && c <= 0x9f)) return true;
@@ -1273,3 +1285,420 @@ export const AgentChannelWorkZoneProposeResponse = z.union([
   z.object({ approvalId: Id, created: z.boolean() }),
 ]);
 export type AgentChannelWorkZoneProposeResponse = z.infer<typeof AgentChannelWorkZoneProposeResponse>;
+
+// ---------------------------------------------------------------- confined sandbox tools (07.8, mirror of contracts
+// sandbox.ts and bot-capabilities.ts; parity test in sandbox-tools.test.ts)
+
+/**
+ * The bounds of contracts `SANDBOX_LIMITS` the cell checks before posting (the API re-validates everything with the
+ * strict contract schemas) and `MAX_SANDBOX_CALLS_PER_TURN` (`callsPerTurn`).
+ */
+export const SANDBOX_LIMITS = {
+  execTimeoutMaxSeconds: 600,
+  argvMax: 64,
+  argMaxChars: 8192,
+  pathMaxChars: 1024,
+  readMaxBytes: 262_144,
+  writeMaxBytes: 1_048_576,
+  /** Sandbox and browser calls per turn, separate from the cap of 8 (D-11 F-7). */
+  callsPerTurn: 40,
+} as const;
+
+/** The eight `ocw_sandbox_*` tools (contracts `SANDBOX_TOOL_NAMES`). */
+export const SANDBOX_TOOL_NAMES = [
+  "ocw_sandbox_exec",
+  "ocw_sandbox_process",
+  "ocw_sandbox_read",
+  "ocw_sandbox_write",
+  "ocw_sandbox_list",
+  "ocw_sandbox_delete",
+  "ocw_sandbox_share",
+  "ocw_sandbox_import",
+] as const;
+export type SandboxToolName = (typeof SANDBOX_TOOL_NAMES)[number];
+
+/** Each sandbox tool's own Agent Channel route (self-validated: never `/tool-calls`). */
+export const SANDBOX_TOOL_ROUTES: Readonly<Record<SandboxToolName, string>> = {
+  ocw_sandbox_exec: "/sandbox/exec",
+  ocw_sandbox_process: "/sandbox/process",
+  ocw_sandbox_read: "/sandbox/read",
+  ocw_sandbox_write: "/sandbox/write",
+  ocw_sandbox_list: "/sandbox/list",
+  ocw_sandbox_delete: "/sandbox/delete",
+  ocw_sandbox_share: "/sandbox/share",
+  ocw_sandbox_import: "/sandbox/import",
+};
+
+/** Why the API refused a sandbox call (contracts `SandboxRefusal`); the model reads one fixed sentence per code. */
+export const SANDBOX_REFUSALS = [
+  "no_trigger",
+  "sandbox_off",
+  "module_off",
+  "bot_off",
+  "not_allowed",
+  "killed",
+  "cap_reached",
+  "cpu_budget",
+  "disk_full",
+  "budget_exhausted",
+  "tainted",
+  "member_data",
+  "audience_narrower",
+  "approval_required",
+  "approval_pending",
+  "approval_denied",
+  "approval_used",
+  "too_many_pending",
+  "policy_changed",
+  "service_unavailable",
+  "timeout",
+  "not_found",
+  "too_large",
+  "invalid_path",
+  "busy",
+] as const;
+export const SandboxRefusal = z.enum(SANDBOX_REFUSALS);
+export type SandboxRefusal = z.infer<typeof SandboxRefusal>;
+
+/**
+ * Same rule as contracts `SandboxRelativePath`: relative and normalised (no leading `/`, no `.`/`..`/empty segment, no
+ * `\`, no NUL), at most 1024 characters; `""` is the workspace root, allowed only where the contract allows it.
+ */
+export function isSandboxPath(p: string, allowRoot: boolean): boolean {
+  if (p.length > SANDBOX_LIMITS.pathMaxChars) return false;
+  if (p === "") return allowRoot;
+  if (p.includes("\u0000") || p.includes("\\")) return false;
+  return p.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+}
+
+type TurnRef = { eventId: string; agentId: string };
+
+/** `POST /sandbox/exec`: an argv array (never a shell string; `sh -c` is just an argv). */
+export type AgentChannelSandboxExec = TurnRef & {
+  argv: string[];
+  cwd?: string;
+  timeoutSeconds?: number;
+  background?: boolean;
+};
+/** `POST /sandbox/process`: poll or kill a process an exec yielded. */
+export type AgentChannelSandboxProcess = TurnRef & { processId: string; action: "poll" | "kill" };
+export type AgentChannelSandboxRead = TurnRef & { path: string; offset?: number; limit?: number };
+export type AgentChannelSandboxWrite = TurnRef & {
+  path: string;
+  content: string;
+  mode: "create" | "overwrite" | "append";
+};
+export type AgentChannelSandboxList = TurnRef & { path: string };
+export type AgentChannelSandboxDelete = TurnRef & { path: string; recursive?: boolean };
+export type AgentChannelSandboxShare = TurnRef & { path: string };
+export type AgentChannelSandboxImport = TurnRef & { attachmentId: string; path?: string };
+
+const ExecCommon = {
+  stdout: z.string(),
+  stderr: z.string(),
+  truncated: z.boolean(),
+  durationMs: z.number().int().nonnegative(),
+};
+/** Finished, or still running under a process id (unknown fields dropped). */
+export const AgentChannelSandboxExecResponse = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("exited"), exitCode: z.number().int(), ...ExecCommon }),
+  z.object({ status: z.literal("running"), processId: z.string().min(1).max(64), ...ExecCommon }),
+]);
+export type AgentChannelSandboxExecResponse = z.infer<typeof AgentChannelSandboxExecResponse>;
+
+export const AgentChannelSandboxReadResponse = z.object({
+  path: z.string(),
+  content: z.string(),
+  encoding: z.enum(["utf8", "base64"]),
+  size: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+});
+export type AgentChannelSandboxReadResponse = z.infer<typeof AgentChannelSandboxReadResponse>;
+
+export const AgentChannelSandboxWriteResponse = z.object({
+  path: z.string(),
+  size: z.number().int().nonnegative(),
+});
+export type AgentChannelSandboxWriteResponse = z.infer<typeof AgentChannelSandboxWriteResponse>;
+
+export const SandboxFileEntry = z.object({
+  path: z.string(),
+  name: z.string(),
+  kind: z.enum(["file", "dir"]),
+  size: z.number().int().nonnegative().nullable(),
+  modifiedAt: z.string(),
+  hidden: z.boolean(),
+});
+export type SandboxFileEntry = z.infer<typeof SandboxFileEntry>;
+
+export const AgentChannelSandboxListResponse = z.object({
+  path: z.string(),
+  entries: z.array(SandboxFileEntry),
+  more: z.number().int().nonnegative(),
+});
+export type AgentChannelSandboxListResponse = z.infer<typeof AgentChannelSandboxListResponse>;
+
+export const AgentChannelSandboxDeleteResponse = z.object({
+  path: z.string(),
+  deleted: z.number().int().nonnegative(),
+});
+export type AgentChannelSandboxDeleteResponse = z.infer<typeof AgentChannelSandboxDeleteResponse>;
+
+export const AgentChannelSandboxShareResponse = z.object({
+  attachmentId: Id,
+  name: z.string(),
+  size: z.number().int().nonnegative(),
+});
+export type AgentChannelSandboxShareResponse = z.infer<typeof AgentChannelSandboxShareResponse>;
+
+export const AgentChannelSandboxImportResponse = AgentChannelSandboxWriteResponse;
+export type AgentChannelSandboxImportResponse = z.infer<typeof AgentChannelSandboxImportResponse>;
+
+/** Per tool: the body it posts and the answer it parses. */
+export type SandboxToolBodies = {
+  ocw_sandbox_exec: AgentChannelSandboxExec;
+  ocw_sandbox_process: AgentChannelSandboxProcess;
+  ocw_sandbox_read: AgentChannelSandboxRead;
+  ocw_sandbox_write: AgentChannelSandboxWrite;
+  ocw_sandbox_list: AgentChannelSandboxList;
+  ocw_sandbox_delete: AgentChannelSandboxDelete;
+  ocw_sandbox_share: AgentChannelSandboxShare;
+  ocw_sandbox_import: AgentChannelSandboxImport;
+};
+export const SANDBOX_TOOL_RESPONSES = {
+  ocw_sandbox_exec: AgentChannelSandboxExecResponse,
+  ocw_sandbox_process: AgentChannelSandboxExecResponse,
+  ocw_sandbox_read: AgentChannelSandboxReadResponse,
+  ocw_sandbox_write: AgentChannelSandboxWriteResponse,
+  ocw_sandbox_list: AgentChannelSandboxListResponse,
+  ocw_sandbox_delete: AgentChannelSandboxDeleteResponse,
+  ocw_sandbox_share: AgentChannelSandboxShareResponse,
+  ocw_sandbox_import: AgentChannelSandboxImportResponse,
+} as const satisfies Record<SandboxToolName, z.ZodType>;
+export type SandboxToolResponses = {
+  [K in SandboxToolName]: z.infer<(typeof SANDBOX_TOOL_RESPONSES)[K]>;
+};
+
+// ---------------------------------------------------------------- confined browser tools (07.8, mirror of contracts
+// browser.ts; parity test in browser-tools.test.ts)
+
+/** The bounds of contracts `BROWSER_LIMITS` the cell checks before posting. */
+export const BROWSER_LIMITS = {
+  urlMaxChars: 2000,
+  typeMaxChars: 2000,
+  reasonMaxChars: 200,
+} as const;
+
+/** The seven `ocw_browser_*` tools (contracts `BROWSER_TOOL_NAMES`). */
+export const BROWSER_TOOL_NAMES = [
+  "ocw_browser_open",
+  "ocw_browser_snapshot",
+  "ocw_browser_act",
+  "ocw_browser_screenshot",
+  "ocw_browser_wait",
+  "ocw_browser_signin",
+  "ocw_browser_close",
+] as const;
+export type BrowserToolName = (typeof BROWSER_TOOL_NAMES)[number];
+
+/** Each browser tool's own Agent Channel route (self-validated: never `/tool-calls`). */
+export const BROWSER_TOOL_ROUTES: Readonly<Record<BrowserToolName, string>> = {
+  ocw_browser_open: "/browser/open",
+  ocw_browser_snapshot: "/browser/snapshot",
+  ocw_browser_act: "/browser/act",
+  ocw_browser_screenshot: "/browser/screenshot",
+  ocw_browser_wait: "/browser/wait",
+  ocw_browser_signin: "/browser/signin",
+  ocw_browser_close: "/browser/close",
+};
+
+/** Why the API refused a browser call (contracts `BrowserRefusal`); the model reads one fixed sentence per code. */
+export const BROWSER_REFUSALS = [
+  "no_trigger",
+  "sandbox_off",
+  "module_off",
+  "bot_off",
+  "not_allowed",
+  "killed",
+  "cap_reached",
+  "cpu_budget",
+  "budget_exhausted",
+  "tainted",
+  "approval_required",
+  "approval_pending",
+  "approval_denied",
+  "approval_used",
+  "too_many_pending",
+  "policy_changed",
+  "service_unavailable",
+  "timeout",
+  "not_found",
+  "too_large",
+  "busy",
+  "paused",
+  "no_context",
+  "signin_not_allowed",
+  "signin_pending",
+  "element_gone",
+  "navigation_refused",
+  "screenshot_unavailable",
+] as const;
+export const BrowserRefusal = z.enum(BROWSER_REFUSALS);
+export type BrowserRefusal = z.infer<typeof BrowserRefusal>;
+
+export const BROWSER_ACT_ACTIONS = ["click", "type", "select", "press", "scroll"] as const;
+export const BROWSER_SCROLL_DIRECTIONS = ["up", "down", "left", "right"] as const;
+
+/** Same rule as contracts `BrowserUrl`: http(s), WHATWG-parsable, no user info, no control characters, ≤ 2000. */
+export function isBrowserUrl(v: string): boolean {
+  if (v.length < 1 || v.length > BROWSER_LIMITS.urlMaxChars || hasControlCharacter(v)) return false;
+  let u: URL;
+  try {
+    u = new URL(v);
+  } catch {
+    return false;
+  }
+  return (u.protocol === "http:" || u.protocol === "https:") && u.username === "" && u.password === "";
+}
+
+/** Same rule as contracts `BrowserRef`: an opaque snapshot ref, never a CSS, XPath or text selector. */
+export function isBrowserRef(v: string): boolean {
+  return /^[A-Za-z0-9_-]{1,64}$/u.test(v);
+}
+
+export type AgentChannelBrowserOpen = TurnRef & { url: string };
+export type AgentChannelBrowserAct = TurnRef & {
+  action: (typeof BROWSER_ACT_ACTIONS)[number];
+  ref?: string;
+  text?: string;
+  key?: string;
+  option?: string;
+  direction?: (typeof BROWSER_SCROLL_DIRECTIONS)[number];
+};
+export type AgentChannelBrowserWait = TurnRef & { for: "load" | "text" | "time"; text?: string; ms?: number };
+export type AgentChannelBrowserSignIn = TurnRef & { reason: string };
+
+export const AgentChannelBrowserOpenResponse = z.object({
+  contextId: Id,
+  host: z.string().min(1),
+  secure: z.boolean(),
+  title: z.string(),
+  signedIn: z.boolean(),
+});
+export type AgentChannelBrowserOpenResponse = z.infer<typeof AgentChannelBrowserOpenResponse>;
+
+/** Unknown fields are dropped: the plugin renders only the redacted text the contract defines (P-10). */
+export const AgentChannelBrowserSnapshotResponse = z.object({
+  contextId: Id,
+  host: z.string().min(1),
+  title: z.string(),
+  text: z.string(),
+  truncated: z.boolean(),
+  signedIn: z.boolean(),
+});
+export type AgentChannelBrowserSnapshotResponse = z.infer<typeof AgentChannelBrowserSnapshotResponse>;
+
+export const BrowserDownload = z.object({
+  name: z.string().min(1),
+  size: z.number().int().nonnegative(),
+  stored: z.enum(["workspace", "conversation"]),
+  path: z.string().optional(),
+  attachmentId: Id.optional(),
+});
+
+export const AgentChannelBrowserActResponse = z.object({
+  contextId: Id,
+  host: z.string().min(1),
+  signedIn: z.boolean(),
+  navigated: z.boolean(),
+  download: BrowserDownload.nullable(),
+});
+export type AgentChannelBrowserActResponse = z.infer<typeof AgentChannelBrowserActResponse>;
+
+export const AgentChannelBrowserScreenshotResponse = z.object({
+  contextId: Id,
+  host: z.string().min(1),
+  image: z.object({
+    mimeType: z.literal("image/jpeg"),
+    data: z.string().regex(/^[A-Za-z0-9+/]*={0,2}$/u),
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+    masked: z.number().int().nonnegative(),
+  }),
+});
+export type AgentChannelBrowserScreenshotResponse = z.infer<typeof AgentChannelBrowserScreenshotResponse>;
+
+export const AgentChannelBrowserWaitResponse = z.object({
+  contextId: Id,
+  host: z.string().min(1),
+  ok: z.boolean(),
+});
+export type AgentChannelBrowserWaitResponse = z.infer<typeof AgentChannelBrowserWaitResponse>;
+
+export const AgentChannelBrowserSignInResponse = z.object({
+  posted: z.literal(true),
+  host: z.string().min(1),
+});
+export type AgentChannelBrowserSignInResponse = z.infer<typeof AgentChannelBrowserSignInResponse>;
+
+export const AgentChannelBrowserCloseResponse = z.object({ closed: z.literal(true) });
+export type AgentChannelBrowserCloseResponse = z.infer<typeof AgentChannelBrowserCloseResponse>;
+
+/** Per tool: the body it posts and the answer it parses. */
+export type BrowserToolBodies = {
+  ocw_browser_open: AgentChannelBrowserOpen;
+  ocw_browser_snapshot: TurnRef;
+  ocw_browser_act: AgentChannelBrowserAct;
+  ocw_browser_screenshot: TurnRef;
+  ocw_browser_wait: AgentChannelBrowserWait;
+  ocw_browser_signin: AgentChannelBrowserSignIn;
+  ocw_browser_close: TurnRef;
+};
+export const BROWSER_TOOL_RESPONSES = {
+  ocw_browser_open: AgentChannelBrowserOpenResponse,
+  ocw_browser_snapshot: AgentChannelBrowserSnapshotResponse,
+  ocw_browser_act: AgentChannelBrowserActResponse,
+  ocw_browser_screenshot: AgentChannelBrowserScreenshotResponse,
+  ocw_browser_wait: AgentChannelBrowserWaitResponse,
+  ocw_browser_signin: AgentChannelBrowserSignInResponse,
+  ocw_browser_close: AgentChannelBrowserCloseResponse,
+} as const satisfies Record<BrowserToolName, z.ZodType>;
+export type BrowserToolResponses = {
+  [K in BrowserToolName]: z.infer<(typeof BROWSER_TOOL_RESPONSES)[K]>;
+};
+
+// ---------------------------------------------------------------- confined tool flags (07.8, mirror of contracts
+// CONFINED_TOOL_FLAGS; parity test in tool-guard.test.ts)
+
+export const CONFINED_TOOL_NAMES = [...SANDBOX_TOOL_NAMES, ...BROWSER_TOOL_NAMES] as const;
+export type ConfinedToolName = (typeof CONFINED_TOOL_NAMES)[number];
+
+/**
+ * The confined tools' static taint flags (D-11 F-7): command output, file content, listings and page text are untrusted;
+ * only `ocw_sandbox_share` changes something outside the sandbox (a conversation attachment). `ocw_browser_act` is
+ * side-effecting only while a member's session is loaded, which the API decides per call (07.8-14).
+ */
+export const CONFINED_TOOL_FLAGS: Readonly<
+  Record<ConfinedToolName, { untrustedOutput: boolean; sideEffecting: boolean }>
+> = {
+  ocw_sandbox_exec: { untrustedOutput: true, sideEffecting: false },
+  ocw_sandbox_process: { untrustedOutput: true, sideEffecting: false },
+  ocw_sandbox_read: { untrustedOutput: true, sideEffecting: false },
+  ocw_sandbox_write: { untrustedOutput: false, sideEffecting: false },
+  ocw_sandbox_list: { untrustedOutput: true, sideEffecting: false },
+  ocw_sandbox_delete: { untrustedOutput: false, sideEffecting: false },
+  ocw_sandbox_share: { untrustedOutput: false, sideEffecting: true },
+  ocw_sandbox_import: { untrustedOutput: false, sideEffecting: false },
+  ocw_browser_open: { untrustedOutput: true, sideEffecting: false },
+  ocw_browser_snapshot: { untrustedOutput: true, sideEffecting: false },
+  ocw_browser_act: { untrustedOutput: true, sideEffecting: false },
+  ocw_browser_screenshot: { untrustedOutput: true, sideEffecting: false },
+  ocw_browser_wait: { untrustedOutput: true, sideEffecting: false },
+  ocw_browser_signin: { untrustedOutput: false, sideEffecting: false },
+  ocw_browser_close: { untrustedOutput: false, sideEffecting: false },
+};
+
+const CONFINED_SET: ReadonlySet<string> = new Set(CONFINED_TOOL_NAMES);
+export function isConfinedTool(name: string): name is ConfinedToolName {
+  return CONFINED_SET.has(name);
+}

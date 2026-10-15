@@ -47,13 +47,23 @@
 # Scenario work_zone (07.5-15 / APPROVE-03, APPROVE-04, D-03): both Work Zone tools are in the bot's alsoAllow; the model
 # lists projects and proposes a session through `/work-zone/projects` and `/work-zone/proposals` with ids and the tool's
 # fields only (never a mode, model, full access or user); a turn that read outside content first is refused in the cell.
+# Scenario bot_sandbox (07.8-06 / SBX-02, SBX-04, D-02 b, D-11, C-01): a DM turn offering the static `ocw_sandbox_exec`
+# runs the plugin tool in OpenClaw, which posts the turn's event, the bot and the argv array only to
+# `POST /sandbox/exec` (self-validated, never `/tool-calls`); the model reads the exit code and the output. A turn that
+# lists OpenClaw's own `exec` still cannot offer it ("Tool exec not offered"): the reconciler never puts a dangerous name
+# in a bot's alsoAllow and the cell config denies it. (Scenario sandbox is the stdio MCP sidecar, 03.1-14.)
+# Scenario bot_browser (07.8-06 / BRW-01, D-05, D-11, D-14, P-10): `ocw_browser_open` and `ocw_browser_snapshot` post the
+# turn's ids (and the URL) only to `/browser/*`; the model reads the redacted snapshot (`[redacted]`) and never the fake's
+# password sentinel, kept in a field outside the contract; OpenClaw's own `browser` is never offered; once the API flags
+# the bot's model as image-capable, the reconciler declares `input: ["text", "image"]` and an `ocw_browser_screenshot`
+# reaches the model as an image part; the cell's own sandbox stays `mode: "off"` with exec, file and browser denied.
 # Scenario breaker (stability 2026-10-06): SIGKILLed boots trip OpenClaw's restart-loop breaker, which refuses the ocw
 # channel's automatic start; the plugin reports the pause to the API and starts the channel itself after its back-off.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
 #                            dm-isolation, memory, memory-files, card, board, connectors, mcp, approval, work_zone,
-#                            marketplace, breaker
+#                            marketplace, breaker, bot_sandbox, bot_browser
 #                            and sandbox (runs when it is listed, with SMOKE_BUILD=1, or when ocw-mcp-sandbox:local
 #                            exists; otherwise it prints "SKIP sandbox (image not built)")
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
@@ -259,7 +269,7 @@ docker run -d --name "${P}-api" "${OOM[@]}" --network "$NET" --network-alias api
   -e FAKE_BOT_ID=0199a6f0-0000-7000-8000-00000000a001 \
   -e FAKE_CELL_ID=0199a6f0-0000-7000-8000-0000000000c0 \
   -e FAKE_MODEL_BASE_URL=http://fake-model:18999/v1 \
-  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,ocw_memory_read,ocw_memory_propose,ocw_agent_card,ocw_connector_list,ocw_connector_call,ocw_http_request,${MCP_SAFE}__echo,${MCP_SAFE}__write_note,ocw_echo${SBX_TOOLS:-}" \
+  -e FAKE_AGENT_TOOLS="web_search,web_fetch,ocw_memory_save,ocw_memory_read,ocw_memory_propose,ocw_agent_card,ocw_connector_list,ocw_connector_call,ocw_http_request,ocw_sandbox_exec,ocw_browser_open,ocw_browser_snapshot,ocw_browser_screenshot,${MCP_SAFE}__echo,${MCP_SAFE}__write_note,ocw_echo${SBX_TOOLS:-}" \
   -e FAKE_MCP_SERVERS="$(mcp_servers_json '["echo"]')" \
   -e FAKE_CONNECTOR_TOKEN="$CONN_TOKEN" \
   -e FAKE_WEB_SEARCH_PROVIDER=searxng \
@@ -833,6 +843,185 @@ CRED_FILES="$(docker exec "${P}-openclaw" sh -c "grep -rlF 'Bearer $CONN_TOKEN' 
 CRED_LOGS="$(docker logs "${P}-openclaw" 2>&1 | grep -cF "$CONN_TOKEN" || true)"
 echo "   credential : $CRED_FILES state file(s) and $CRED_LOGS log line(s) carry the member's connector token"
 [[ "$CRED_FILES" -eq 0 && "$CRED_LOGS" -eq 0 ]] || { echo "FAIL: a member credential reached the cell"; exit 1; }
+fi
+
+# A DM mention for the confined-tool scenarios, from mention-connector.json: event `…e5<suffix>`, message `…d5<suffix>`,
+# the given text (the fake model's directives) and turn (JSON, replaces the fixture's).
+confined_mention() { # <suffix: 2 hex> <text> <turn JSON>
+  local out="$SECRETS/mention-confined-$1.json"
+  node -e '
+const [src, out, suffix, text, turn] = process.argv.slice(1);
+const e = JSON.parse(require("fs").readFileSync(src, "utf8"));
+e.eventId = `0199a6f0-0000-7000-8000-00000000e5${suffix}`;
+e.thread.rootMessageId = e.message.id = `0199a6f0-0000-7000-8000-00000000d5${suffix}`;
+e.message.text = text;
+e.turn = JSON.parse(turn);
+require("fs").writeFileSync(out, JSON.stringify(e));
+' "$ROOT/infra/openclaw/test/mention-connector.json" "$out" "$1" "$2" "$3"
+  printf '%s' "$out"
+}
+# Fake API knobs of the confined routes ({} resets them): `sandbox` or `browser`.
+confined_control() { # <sandbox|browser> <JS object literal>
+  api_exec "
+await fetch('http://127.0.0.1:4000/__test/$1', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify($2) });
+"
+}
+
+if want bot_sandbox; then
+echo "== [bot_sandbox] a DM turn offering ocw_sandbox_exec: the cell posts the turn's ids and the argv only to POST /sandbox/exec"
+confined_control sandbox '{ exec: { status: "exited", exitCode: 0, stdout: "hi\n", stderr: "", truncated: false, durationMs: 9 } }'
+SBX_TURN='{"tools":["ocw_sandbox_exec"],"toolFlags":{"ocw_sandbox_exec":{"untrustedOutput":true,"sideEffecting":false}},"memory":[],"now":null,"maxToolCalls":8,"maxWebCalls":5,"maxSandboxCalls":40}'
+FIXTURE="$(confined_mention a1 'run it [[call ocw_sandbox_exec {"argv":["sh","-c","echo hi"]}]]' "$SBX_TURN")"
+STATE="$(inject_and_wait "$FIXTURE" 0199a6f0-0000-7000-8000-00000000d5a1)"
+confined_control sandbox '{}'
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e5a1";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d5a1");
+if (!m) { console.log("FAIL: no reply to the sandbox mention"); process.exit(1); }
+const calls = (s.sandbox?.calls ?? []).filter((c) => c.body.eventId === EV);
+const gated = s.toolCalls.filter((c) => c.eventId === EV);
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   calls      :", JSON.stringify(calls));
+const c = calls[0];
+const ok =
+  m.text.includes("Tool ocw_sandbox_exec said: exit 0") && m.text.includes("hi") &&
+  /\[tools: 1 \| ocw_sandbox_exec\]/.test(m.text) &&
+  calls.length === 1 && c.route === "exec" && c.body.agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
+  JSON.stringify(c.body.argv) === JSON.stringify(["sh", "-c", "echo hi"]) &&
+  // Exactly the contract fields that were given: never a user, a command string or a token.
+  Object.keys(c.body).sort().join() === "agentId,argv,eventId" &&
+  // Self-validated by /sandbox/exec: never asked to /tool-calls.
+  gated.length === 0;
+if (!ok) { console.log("FAIL: expected one ocw_sandbox_exec through POST /sandbox/exec with the turn ids and argv only, and the output in the reply"); process.exit(1); }
+'
+
+echo "== [bot_sandbox] a turn that lists OpenClaw's own exec: the cell never offers it"
+CORE_TURN='{"tools":["exec","ocw_sandbox_exec"],"toolFlags":{"exec":{"untrustedOutput":true,"sideEffecting":true},"ocw_sandbox_exec":{"untrustedOutput":true,"sideEffecting":false}},"memory":[],"now":null,"maxToolCalls":8,"maxWebCalls":5,"maxSandboxCalls":40}'
+FIXTURE="$(confined_mention a2 'who am I [[call exec {"command":"id"}]]' "$CORE_TURN")"
+STATE="$(inject_and_wait "$FIXTURE" 0199a6f0-0000-7000-8000-00000000d5a2)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e5a2";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d5a2");
+if (!m) { console.log("FAIL: no reply to the core exec mention"); process.exit(1); }
+const calls = (s.sandbox?.calls ?? []).filter((c) => c.body.eventId === EV);
+const gated = s.toolCalls.filter((c) => c.eventId === EV);
+console.log("   reply      :", m.text);
+const ok = m.text.includes("Tool exec not offered") && /\[tools: 1 \| ocw_sandbox_exec\]/.test(m.text) &&
+  calls.length === 0 && gated.length === 0;
+if (!ok) { console.log("FAIL: OpenClaw exec reached the model"); process.exit(1); }
+'
+CONFIG="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json)"
+CONFIG="$CONFIG" node -e '
+const cfg = JSON.parse(process.env.CONFIG);
+const bots = Object.entries(cfg.agents?.entries ?? {}).filter(([id]) => id.startsWith("ocw-"));
+const core = ["exec", "read", "write", "process", "browser"];
+const denied = core.filter((t) => (cfg.tools?.deny ?? []).includes(t));
+console.log("   cell config: tools.deny has", denied.join(","), "| bot alsoAllow has ocw_sandbox_exec:", bots.every(([, b]) => (b.tools?.alsoAllow ?? []).includes("ocw_sandbox_exec")));
+const leaked = bots.filter(([, b]) => (b.tools?.alsoAllow ?? []).some((t) => core.includes(t)));
+if (denied.length !== core.length || leaked.length > 0 || bots.length === 0) {
+  console.log("FAIL: the cell config offers or does not deny a core exec/file/browser tool"); process.exit(1);
+}
+'
+echo "PASS bot_sandbox"
+fi
+
+if want bot_browser; then
+echo "== [bot_browser] a DM turn offering ocw_browser_open and ocw_browser_snapshot: the cell posts to /browser/* with the turn's ids only"
+confined_control browser '{}'
+BRW_TURN='{"tools":["ocw_browser_open","ocw_browser_snapshot"],"toolFlags":{"ocw_browser_open":{"untrustedOutput":true,"sideEffecting":false},"ocw_browser_snapshot":{"untrustedOutput":true,"sideEffecting":false}},"memory":[],"now":null,"maxToolCalls":8,"maxWebCalls":5,"maxSandboxCalls":40}'
+FIXTURE="$(confined_mention b1 'open the panel [[call ocw_browser_open {"url":"https://panel.example.test/"}]] [[call ocw_browser_snapshot {}]]' "$BRW_TURN")"
+STATE="$(inject_and_wait "$FIXTURE" 0199a6f0-0000-7000-8000-00000000d5b1)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e5b1";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d5b1");
+if (!m) { console.log("FAIL: no reply to the browser mention"); process.exit(1); }
+const calls = (s.browser?.calls ?? []).filter((c) => c.body.eventId === EV);
+const gated = s.toolCalls.filter((c) => c.eventId === EV);
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   calls      :", JSON.stringify(calls));
+const [open, snap] = calls;
+const ok =
+  m.text.includes("Tool ocw_browser_open said: Opened panel.example.test") &&
+  m.text.includes("Tool ocw_browser_snapshot said:") && m.text.includes("[redacted]") &&
+  !m.text.includes("OCW-SENTINEL-PW-5521") &&
+  /\[tools: 2 \| ocw_browser_open,ocw_browser_snapshot\]/.test(m.text) &&
+  calls.length === 2 && open.route === "open" && snap.route === "snapshot" &&
+  open.body.url === "https://panel.example.test/" && open.body.agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
+  Object.keys(open.body).sort().join() === "agentId,eventId,url" &&
+  Object.keys(snap.body).sort().join() === "agentId,eventId" &&
+  gated.length === 0;
+if (!ok) { console.log("FAIL: expected one open and one snapshot through /browser/* with the turn ids only, the redacted text and never the sentinel"); process.exit(1); }
+'
+LEAKS="$(docker exec "${P}-model" sh -c "grep -rlF 'OCW-SENTINEL-PW-5521' /tmp/capture 2>/dev/null | wc -l")"
+echo "   sentinel   : $LEAKS model request(s) carry the fake's unredacted value"
+[[ "$LEAKS" -eq 0 ]] || { echo "FAIL: a value outside the contract reached the model"; exit 1; }
+
+echo "== [bot_browser] a turn that lists OpenClaw's own browser: the cell never offers it"
+CORE_TURN='{"tools":["browser","ocw_browser_open"],"toolFlags":{"browser":{"untrustedOutput":true,"sideEffecting":true},"ocw_browser_open":{"untrustedOutput":true,"sideEffecting":false}},"memory":[],"now":null,"maxToolCalls":8,"maxWebCalls":5,"maxSandboxCalls":40}'
+FIXTURE="$(confined_mention b2 'open it yourself [[call browser {"action":"open"}]]' "$CORE_TURN")"
+STATE="$(inject_and_wait "$FIXTURE" 0199a6f0-0000-7000-8000-00000000d5b2)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e5b2";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d5b2");
+if (!m) { console.log("FAIL: no reply to the core browser mention"); process.exit(1); }
+const calls = (s.browser?.calls ?? []).filter((c) => c.body.eventId === EV);
+console.log("   reply      :", m.text);
+const ok = m.text.includes("Tool browser not offered") && /\[tools: 1 \| ocw_browser_open\]/.test(m.text) &&
+  calls.length === 0 && s.toolCalls.filter((c) => c.eventId === EV).length === 0;
+if (!ok) { console.log("FAIL: OpenClaw browser reached the model"); process.exit(1); }
+'
+
+echo "== [bot_browser] an image-capable model (D-14): the screenshot reaches the model as an image part"
+api_exec "
+await fetch('http://127.0.0.1:4000/__test/cell', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+  providers: [{ id: 'fake', kind: 'mock', api: 'openai-completions', baseUrl: 'http://fake-model:18999/v1', apiKey: 'mock-key-not-secret', models: ['mock-1'], imageModels: ['mock-1'] }],
+  reason: 'provider.updated',
+}) });
+"
+INPUT=""
+for i in $(seq 1 60); do
+  INPUT="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json | node -e '
+const cfg = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = (cfg.models?.providers?.fake?.models ?? []).find((x) => x.id === "mock-1");
+process.stdout.write(JSON.stringify(m?.input ?? null));
+')"
+  [[ "$INPUT" == '["text","image"]' ]] && break
+  sleep 1
+done
+echo "   fake/mock-1 input: $INPUT"
+[[ "$INPUT" == '["text","image"]' ]] || { echo "FAIL: the reconciler did not declare image input for the image model"; exit 1; }
+SHOT_TURN='{"tools":["ocw_browser_screenshot"],"toolFlags":{"ocw_browser_screenshot":{"untrustedOutput":true,"sideEffecting":false}},"memory":[],"now":null,"maxToolCalls":8,"maxWebCalls":5,"maxSandboxCalls":40}'
+FIXTURE="$(confined_mention b3 'what does it look like [[call ocw_browser_screenshot {}]]' "$SHOT_TURN")"
+STATE="$(inject_and_wait "$FIXTURE" 0199a6f0-0000-7000-8000-00000000d5b3)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e5b3";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d5b3");
+const calls = (s.browser?.calls ?? []).filter((c) => c.body.eventId === EV);
+console.log("   reply      :", m ? m.text : "(none)");
+if (!m || calls.length !== 1 || calls[0].route !== "screenshot" || Object.keys(calls[0].body).sort().join() !== "agentId,eventId") {
+  console.log("FAIL: expected one screenshot through /browser/screenshot with the turn ids only"); process.exit(1);
+}
+'
+IMAGES="$(docker exec "${P}-model" sh -c "grep -lF 'Image(s) from tool result' /tmp/capture/*.json 2>/dev/null | xargs -r grep -lF 'ocw_browser_screenshot' | xargs -r grep -lF '\"image_url\"' | wc -l")"
+echo "   image part : $IMAGES model request(s) carry the screenshot as an image (user message after the tool result)"
+[[ "$IMAGES" -ge 1 ]] || { echo "FAIL: the screenshot did not reach the image-capable model"; exit 1; }
+
+echo "== [bot_browser] the cell's own sandbox stays off and its exec, file and browser tools stay denied"
+CONFIG="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json)"
+CONFIG="$CONFIG" node -e '
+const cfg = JSON.parse(process.env.CONFIG);
+const mode = cfg.agents?.defaults?.sandbox?.mode;
+const overrides = Object.entries(cfg.agents?.entries ?? {}).filter(([, b]) => b && b.sandbox !== undefined);
+const denied = ["exec", "read", "write", "process", "browser"].filter((t) => (cfg.tools?.deny ?? []).includes(t));
+console.log("   sandbox    : agents.defaults.sandbox.mode =", JSON.stringify(mode), "| per-agent overrides:", overrides.length, "| denied:", denied.join(","));
+if (mode !== "off" || overrides.length > 0 || denied.length !== 5) { console.log("FAIL: OpenClaw sandbox or core tools are on"); process.exit(1); }
+'
+echo "PASS bot_browser"
 fi
 
 if want mcp; then

@@ -149,6 +149,39 @@ describe("renderConfig", () => {
     assert.equal(config.agents.defaults.compaction.memoryFlush.enabled, false);
   });
 
+  it("OpenClaw's own sandbox is pinned off; its exec, file, process and browser tools stay denied (07.8 D-11, F-1)", () => {
+    for (const env of [
+      base,
+      { ...base, OCW_BUNDLED_PLUGINS: "none" },
+      { ...base, OCW_SEARXNG_URL: "http://x:8080" },
+    ]) {
+      const { config } = renderConfig(env);
+      // Nothing else under sandbox: no backend, no scope, no browser, no docker settings.
+      assert.deepEqual(config.agents.defaults.sandbox, { mode: "off" });
+      for (const t of [
+        "exec",
+        "read",
+        "write",
+        "process",
+        "browser",
+        "canvas",
+        "group:runtime",
+        "group:fs",
+      ]) {
+        assert.ok(config.tools.deny.includes(t), `${t} must stay denied`);
+      }
+    }
+    // DANGEROUS_TOOLS is not shortened: every core exec, file and browser name is still there (the contracts parity test
+    // in apps/openclaw-channel/src/reconciler.test.ts holds it equal to DANGEROUS_TOOL_NAMES).
+    for (const t of ["exec", "read", "write", "process", "browser", "canvas", "apply_patch", "edit", "ls"]) {
+      assert.ok(DANGEROUS_TOOLS.includes(t), `${t} must stay in DANGEROUS_TOOLS`);
+    }
+    // The confined tools are never denied: they are the only way to a sandbox or a browser.
+    const { config } = renderConfig(base);
+    for (const t of ["ocw_sandbox_exec", "ocw_browser_open"])
+      assert.equal(config.tools.deny.includes(t), false);
+  });
+
   it("MCP: no server at boot (the plugin renders them from GET /cell), idle runtimes evicted after 10 minutes", () => {
     const { config } = renderConfig(base);
     assert.deepEqual(config.mcp, { sessionIdleTtlMs: 600000 });

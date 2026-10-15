@@ -118,6 +118,68 @@ describe("planReconcile", () => {
     expect(plan.results).toEqual([]);
   });
 
+  it("07.8 D-14: declares input [text, image] only for the provider's image models; a flag change re-renders", () => {
+    const vision: CellProvider = {
+      ...FAKE,
+      models: ["mock-1", "mock-text"],
+      imageModels: ["mock-1", "not-listed"],
+    };
+    const plan = planReconcile(
+      {},
+      { agents: [agent("a", { modelRef: "fake/mock-1" })], providers: [vision] },
+    );
+    expect(plan.upsertProviders.fake?.models).toEqual([
+      { id: "mock-1", name: "mock-1", input: ["text", "image"] },
+      { id: "mock-text", name: "mock-text" },
+    ]);
+    // Same ids, the image flag removed: the provider is rendered again (text only).
+    const current = {
+      providers: { fake: { ...desiredProviderEntry(vision), apiKey: "mock-key-not-secret" } },
+    };
+    expect(planReconcile(current, { agents: [], providers: [vision] }).upsertProviders.fake).toBeUndefined();
+    const textOnly = planReconcile(current, { agents: [], providers: [{ ...vision, imageModels: [] }] });
+    expect(textOnly.upsertProviders.fake?.models).toEqual([
+      { id: "mock-1", name: "mock-1" },
+      { id: "mock-text", name: "mock-text" },
+    ]);
+    // OpenClaw's runtime view fills `input: ["text"]` for undeclared models: still the same provider.
+    const enriched = {
+      providers: {
+        fake: {
+          ...desiredProviderEntry(FAKE),
+          apiKey: "mock-key-not-secret",
+          models: [{ id: "mock-1", name: "mock-1", input: ["text"], contextWindow: 128000 }],
+        },
+      },
+    };
+    expect(planReconcile(enriched, { agents: [], providers: [FAKE] }).upsertProviders.fake).toBeUndefined();
+  });
+
+  it("07.8 D-14: the snapshot's imageModels reads the same in the mirror as in the contract (absent = text only)", async () => {
+    const contracts = (await import(
+      new URL("../../../packages/contracts/src/agent-channel.ts", import.meta.url).href
+    )) as { CellProvider: { safeParse: (v: unknown) => { success: boolean } } };
+    const { CellProvider: Mirror } = await import("./agent-channel-protocol.js");
+    const vision = { ...FAKE, imageModels: ["mock-1"] };
+    expect(contracts.CellProvider.safeParse(vision).success).toBe(true);
+    expect(contracts.CellProvider.safeParse(FAKE).success).toBe(true);
+    expect(Mirror.parse(vision)).toEqual(vision);
+    // A malformed flag from a newer API reads as absent: the provider still renders, text only.
+    expect(Mirror.parse({ ...FAKE, imageModels: "mock-1" }).imageModels).toBeUndefined();
+  });
+
+  it("07.8 D-11: no bot entry overrides the cell's sandbox (OpenClaw's own sandbox stays off)", () => {
+    const entry = desiredAgentEntry(
+      agent("a", { capabilities: { tools: ["ocw_sandbox_exec", "ocw_browser_open", "exec", "browser"] } }),
+    );
+    expect(entry).not.toHaveProperty("sandbox");
+    expect(JSON.stringify(entry)).not.toContain('sandbox":');
+    const alsoAllow = (entry.tools as { alsoAllow?: string[] } | undefined)?.alsoAllow;
+    expect(alsoAllow).toContain("ocw_sandbox_exec");
+    expect(alsoAllow).not.toContain("exec");
+    expect(alsoAllow).not.toContain("browser");
+  });
+
   it("names env vars safely", () => {
     expect(providerKeyEnvName("openai-compatible")).toBe("OCW_PROVIDER_KEY_OPENAI_COMPATIBLE");
   });

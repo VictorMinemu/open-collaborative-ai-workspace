@@ -139,8 +139,16 @@ declare module "openclaw/plugin-sdk/channel-core" {
       toolCallId: string,
       params: unknown,
       signal?: AbortSignal,
-    ) => Promise<{ content: Array<{ type: "text"; text: string }>; details?: unknown }>;
+    ) => Promise<{ content: Array<TextContent | ImageContent>; details?: unknown }>;
   };
+
+  export type TextContent = { type: "text"; text: string };
+  /**
+   * An image block of a tool result (pi-ai `ImageContent`). It reaches the model only when the provider model declares
+   * `input: ["text", "image"]`; Chat Completions models then get it as a labelled `user` message after the tool message
+   * (07.8 spike ii). Otherwise OpenClaw replaces it with "(tool image omitted: model does not support images)".
+   */
+  export type ImageContent = { type: "image"; data: string; mimeType: string };
 
   /** How the registry being built was loaded (docs/plugins/sdk-entrypoints/registration-mode.md). */
   export type PluginRegistrationMode =

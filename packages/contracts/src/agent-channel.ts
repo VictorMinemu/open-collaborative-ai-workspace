@@ -452,6 +452,12 @@ export const CellProvider = z.object({
   baseUrl: z.string(),
   apiKey: z.string().nullable(),
   models: z.array(z.string()),
+  /**
+   * Additive (Phase 07.8, D-14): the ids of `models` that accept image input. The cell declares them
+   * `input: ["text", "image"]`, so `ocw_browser_screenshot` is useful only to bots on these models (07.8-14 offers it
+   * only there). Absent = every model is text only.
+   */
+  imageModels: z.array(z.string()).optional(),
 });
 export type CellProvider = z.infer<typeof CellProvider>;
 
