@@ -489,15 +489,20 @@ async function decide<X>(
     }
     const prepared = await prepare(tx, live);
     const turn = prepared.context?.sessionId ? await markMemberData(tx, live) : live;
-    const decision = await decideSandboxCall(tx, b.callDeps, {
-      turn,
-      tool,
-      args: prepared.args,
-      toolCallId: null,
-      kind: "browser",
-      ...(prepared.flags ? { flags: prepared.flags } : {}),
-      approval: prepared.approval,
-    });
+    // The page closed after the precheck (a crash, the bot's own close in a parallel call): refused before the claim,
+    // so the budget is not used for a call that cannot run.
+    const decision: SandboxDecision =
+      !prepared.context && !opts.create && b.available
+        ? await refuseSandboxCall(tx, b.callDeps, { turn, tool, reason: "no_context", kind: "browser" })
+        : await decideSandboxCall(tx, b.callDeps, {
+            turn,
+            tool,
+            args: prepared.args,
+            toolCallId: null,
+            kind: "browser",
+            ...(prepared.flags ? { flags: prepared.flags } : {}),
+            approval: prepared.approval,
+          });
     let context = prepared.context;
     let created = false;
     let held = false;
