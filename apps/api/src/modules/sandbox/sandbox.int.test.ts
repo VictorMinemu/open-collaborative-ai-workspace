@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { sha256Hex } from "../../lib/crypto";
-import type { TestClient } from "../../testing";
+import { type TestClient, WEB_ORIGIN } from "../../testing";
 import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
 import { invite } from "../../testing-workzone";
 
@@ -30,6 +30,15 @@ const policyOf = async (orgId: string) =>
     await s.su.query("select killed_at, killed_by from app.sandbox_policies where organization_id = $1", [
       orgId,
     ])
+  ).rows[0] as Json | undefined;
+
+/** 07.8-11: the settings row as stored (organization-B cases of the settings routes). */
+const settingsRowOf = async (orgId: string) =>
+  (
+    await s.su.query(
+      "select enabled, egress_allow_hosts, version, killed_at from app.sandbox_policies where organization_id = $1",
+      [orgId],
+    )
   ).rows[0] as Json | undefined;
 
 const audits = async (orgId: string, action: string) =>
@@ -173,6 +182,74 @@ describe("cross-tenant guards derived from the authz registry (P-17, 07.4 #169)"
         await ok(resume(s.eve));
         expect((await policyOf(s.orgA))?.killed_at).not.toBeNull();
         await ok(resume(s.victor));
+      },
+      // 07.8-11: people's file routes; organization B's admin with organization A's bot id is a 404.
+      "GET /api/v1/agents/:id/sandbox/files": async () => {
+        const r = (await s.eve.request("GET", `/api/v1/agents/${s.scoutId}/sandbox/files?path=`)) as Res;
+        expect(r.status).toBe(404);
+      },
+      "GET /api/v1/agents/:id/sandbox/files/download": async () => {
+        const r = (await s.eve.request(
+          "GET",
+          `/api/v1/agents/${s.scoutId}/sandbox/files/download?path=notes.txt`,
+        )) as Res;
+        expect(r.status).toBe(404);
+      },
+      "GET /api/v1/agents/:id/sandbox/files/content": async () => {
+        const r = (await s.eve.request(
+          "GET",
+          `/api/v1/agents/${s.scoutId}/sandbox/files/content?path=notes.txt`,
+        )) as Res;
+        expect(r.status).toBe(404);
+      },
+      "POST /api/v1/agents/:id/sandbox/files/upload": async () => {
+        const res = await fetch(
+          `${s.stack.baseUrl}/api/v1/agents/${s.scoutId}/sandbox/files/upload?path=&name=x.txt`,
+          {
+            method: "POST",
+            headers: {
+              origin: WEB_ORIGIN,
+              cookie: s.eve.cookieHeader,
+              "content-type": "application/octet-stream",
+            },
+            body: Buffer.from("x"),
+          },
+        );
+        expect(res.status).toBe(404);
+      },
+      "DELETE /api/v1/agents/:id/sandbox/files": async () => {
+        const r = (await s.eve.request(
+          "DELETE",
+          `/api/v1/agents/${s.scoutId}/sandbox/files?path=notes.txt`,
+        )) as Res;
+        expect(r.status).toBe(404);
+      },
+      "GET /api/v1/agents/:id/sandbox": async () => {
+        expect(((await s.eve.request("GET", `/api/v1/agents/${s.scoutId}/sandbox`)) as Res).status).toBe(404);
+      },
+      "POST /api/v1/agents/:id/sandbox/stop": async () => {
+        const r = (await s.eve.request("POST", `/api/v1/agents/${s.scoutId}/sandbox/stop`)) as Res;
+        expect(r.status).toBe(404);
+      },
+      "POST /api/v1/agents/:id/sandbox/restart": async () => {
+        const r = (await s.eve.request("POST", `/api/v1/agents/${s.scoutId}/sandbox/restart`)) as Res;
+        expect(r.status).toBe(404);
+      },
+      "GET /api/v1/sandbox/settings": async () => {
+        const b = (await ok(s.eve.request("GET", "/api/v1/sandbox/settings") as Promise<Res>)) as Json;
+        expect(b.settings.enabled).toBe(false);
+        expect((await settingsRowOf(s.orgA))?.enabled).toBe(true);
+      },
+      "PUT /api/v1/sandbox/settings": async () => {
+        const before = await settingsRowOf(s.orgA);
+        const b = (await ok(s.eve.request("GET", "/api/v1/sandbox/settings") as Promise<Res>)) as Json;
+        await ok(
+          s.eve.request("PUT", "/api/v1/sandbox/settings", {
+            expectedVersion: b.settings.version,
+            allowHosts: ["evil.example.com"],
+          }) as Promise<Res>,
+        );
+        expect(await settingsRowOf(s.orgA)).toEqual(before);
       },
       "POST /agent-channel/v1/sandbox/exec": async () => {
         const r = await exec(ev, ["echo", "hi"], tokenB);

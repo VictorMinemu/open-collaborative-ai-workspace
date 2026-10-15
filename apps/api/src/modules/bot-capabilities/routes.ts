@@ -33,13 +33,24 @@ import {
   type PrincipalRef,
   type ResourceFacts,
 } from "../organization";
-import { effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
+import { loadSandboxPolicy } from "../sandbox";
+import {
+  confinedCapabilities,
+  effectiveCapabilities,
+  effectiveTools,
+  readCapabilities,
+} from "./capabilities";
 import { loadCatalog, loadGrants, replaceGrants } from "./catalog";
 import { clearMemories, listMemories } from "./memory";
 import { availableSearchProviders, internetConfigured, loadPolicy, savePolicy } from "./policy";
 import { effectiveDailyLimit, nextResetAt, turnsToday } from "./usage";
 
 type AgentRow = typeof agents.$inferSelect;
+
+/** What the capability view needs from the Sandbox module (07.8-11): whether sandboxd is configured at all. */
+export interface ConfinedSource {
+  configured: boolean;
+}
 
 const tags = ["bot-capabilities"];
 const VIEWER_CANDIDATES: Permission[] = ["bot.read", "bot.configure", "bot.manage"];
@@ -154,6 +165,7 @@ async function capabilityView(
   req: FastifyRequest,
   tx: Tx,
   row: AgentRow,
+  sandbox?: ConfinedSource,
 ): Promise<BotCapabilityView> {
   const caller = authOf(req).userId;
   const resource = agentResource(await loadBotFacts(tx, row), caller);
@@ -172,6 +184,17 @@ async function capabilityView(
     toolAllowed.set(g.tool, await perms.can(req, tx, "bot.tool.use", toolRes, as ? { as } : {}));
   }
   const usage = await usageToday(tx, row.id);
+  // 07.8-11 (D-12, R11): the Sandbox and Browser rows; the module side is the resolver's answer for the viewer.
+  const sandboxPolicy = await loadSandboxPolicy(tx);
+  const confined = confinedCapabilities({
+    caps,
+    configured: sandbox?.configured ?? false,
+    settings: { enabled: sandboxPolicy.enabled, killed: sandboxPolicy.killed !== null },
+    moduleAllowed: {
+      sandbox: await perms.can(req, tx, "sandbox.use", resource),
+      browser: await perms.can(req, tx, "browser.use", resource),
+    },
+  });
   return {
     agentId: row.id,
     scope: row.scope,
@@ -194,6 +217,7 @@ async function capabilityView(
     usage: usageView(usage.get(row.id) ?? 0, row, caps, policy),
     dailyLimitMax: row.scope === "personal" ? policy.personalDailyLimitMax : MAX_DAILY_LIMIT,
     viewerCan: await perms.viewerCan(req, tx, resource, VIEWER_CANDIDATES),
+    confined,
   };
 }
 
@@ -231,6 +255,7 @@ export function registerBotCapabilityRoutes(
   core: Core,
   perms: PermissionService,
   memory: MemoryService,
+  sandbox?: ConfinedSource,
 ) {
   const requireUser = core.identity.requireUser;
   const user = { config: { authz: "user" as const }, preHandler: [requireUser] };
@@ -245,7 +270,7 @@ export function registerBotCapabilityRoutes(
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const row = await configurableBot(perms, req, tx, req.params.id);
-        return capabilityView(core, perms, req, tx, row);
+        return capabilityView(core, perms, req, tx, row, sandbox);
       }),
   );
 
@@ -337,7 +362,7 @@ export function registerBotCapabilityRoutes(
           });
           await notifyCellConfig(core, tx, "agent.capabilities_updated", row.id);
         }
-        return capabilityView(core, perms, req, tx, current);
+        return capabilityView(core, perms, req, tx, current, sandbox);
       }),
   );
 

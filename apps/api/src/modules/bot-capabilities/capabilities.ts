@@ -6,6 +6,7 @@ import {
   type BuiltinCapability,
   type CapabilityDenialReason,
   type CatalogTool,
+  type ConfinedCapabilityState,
   type ConnectorAuthMode,
   DEFAULT_CAPABILITIES,
   type EffectiveCapability,
@@ -148,4 +149,31 @@ export function effectiveTools(input: {
     }
   }
   return out;
+}
+
+/**
+ * The bot page's Sandbox and Browser rows (07.8-11; D-12, R11): `enabled` is the bot's own switch; `available` says
+ * whether turning it on would work for the viewer now. Reason precedence: `service_down` (sandboxd not configured) →
+ * `org_off` (the organization switch) → `killed` (the kill switch) → `module_off` (the resolver refused the viewer the
+ * module's grain on this bot). `moduleAllowed` is the resolver's answer; nothing here re-decides it.
+ */
+export function confinedCapabilities(input: {
+  caps: Pick<BotCapabilities, "sandbox" | "browser">;
+  configured: boolean;
+  settings: { enabled: boolean; killed: boolean };
+  moduleAllowed: { sandbox: boolean; browser: boolean };
+}): { sandbox: ConfinedCapabilityState; browser: ConfinedCapabilityState } {
+  const state = (kind: "sandbox" | "browser"): ConfinedCapabilityState => {
+    const reason: ConfinedCapabilityState["reason"] = !input.configured
+      ? "service_down"
+      : !input.settings.enabled
+        ? "org_off"
+        : input.settings.killed
+          ? "killed"
+          : input.moduleAllowed[kind]
+            ? null
+            : "module_off";
+    return { enabled: input.caps[kind], available: reason === null, reason };
+  };
+  return { sandbox: state("sandbox"), browser: state("browser") };
 }

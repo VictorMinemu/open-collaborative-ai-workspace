@@ -2617,3 +2617,95 @@ describe("unit keys and unit templates: the unit audience is decided in the reso
     });
   });
 });
+
+describe("sandbox.files needs bot.configure on the same bot (Phase 07.8, D-04, P-04; 07.8-11)", () => {
+  const OWNER = "u-owner";
+  const OTHER = "u-other";
+  const ADMIN_ID = "u-admin";
+  const UNIT = "unit-ops";
+  const owner = user("standard", { id: OWNER });
+  const other = user("developer", { id: OTHER });
+  const admin = user("admin", { id: ADMIN_ID });
+  const lead = user("lead", { id: "u-lead", memberUnitPaths: [[UNIT]], leadOfUnitIds: new Set([UNIT]) });
+  const personal = { scope: "personal" as const, ownerUserId: OWNER, disabled: false };
+  const team = { scope: "team" as const, ownerUserId: null, disabled: false };
+  const persona = { scope: "team" as const, ownerUserId: null, disabled: false, unitPath: [UNIT] };
+  const bot: PrincipalFacts = { ...user(null), kind: "agent", id: "bot-1" };
+  const denied = (p: PrincipalFacts, r: ResourceFacts, rules: RuleFact[] = []) =>
+    decide(p, r, rules, "sandbox.files");
+
+  it("the configurers of a bot hold it: the personal bot's owner, an admin on a team bot, a lead on a unit persona", () => {
+    expect(allowed(owner, agentResource(personal, OWNER), "sandbox.files")).toBe(true);
+    expect(allowed(admin, agentResource(team, ADMIN_ID), "sandbox.files")).toBe(true);
+    expect(allowed(lead, agentResource(persona, lead.id), "sandbox.files")).toBe(true);
+  });
+
+  it("anyone without bot.configure on that bot is denied, whatever their role", () => {
+    expect(denied(other, agentResource(team, OTHER))).toEqual({
+      allowed: false,
+      denial: { permission: "sandbox.files", layer: "resource", reason: "not_bot_configurer" },
+    });
+    expect(denied(other, agentResource(personal, OTHER)).allowed).toBe(false);
+    // An admin on someone else's personal bot: the personal-bot precondition removes bot.configure, so files go too.
+    expect(denied(admin, agentResource(personal, ADMIN_ID))).toEqual({
+      allowed: false,
+      denial: { permission: "sandbox.files", layer: "resource", reason: "not_bot_configurer" },
+    });
+    // A lead of another unit and a standard member of the persona's unit do not configure it.
+    expect(
+      denied(user("lead", { id: "u-l2", leadOfUnitIds: new Set(["unit-x"]) }), agentResource(persona, "u-l2"))
+        .allowed,
+    ).toBe(false);
+    expect(
+      denied(user("standard", { id: "u-m", memberUnitPaths: [[UNIT]] }), agentResource(persona, "u-m"))
+        .allowed,
+    ).toBe(false);
+  });
+
+  it("an allow rule for bot.configure grants it; a deny rule on bot.configure takes files away with it", () => {
+    const allowCfg = rule({
+      subjectKind: "user",
+      subjectId: OTHER,
+      permission: "bot.configure",
+      effect: "allow",
+    });
+    expect(allowed(other, agentResource(team, OTHER), "sandbox.files", [allowCfg])).toBe(true);
+    const denyCfg = rule({
+      subjectKind: "user",
+      subjectId: ADMIN_ID,
+      permission: "bot.configure",
+      effect: "deny",
+    });
+    expect(denied(admin, agentResource(team, ADMIN_ID), [denyCfg])).toMatchObject({
+      allowed: false,
+      denial: { reason: "not_bot_configurer" },
+    });
+  });
+
+  it("the Sandbox module off (a sandbox.* deny) removes it from a configurer", () => {
+    const moduleOff = rule({
+      subjectKind: "user",
+      subjectId: OWNER,
+      permission: "sandbox.*",
+      effect: "deny",
+    });
+    expect(denied(owner, agentResource(personal, OWNER), [moduleOff])).toMatchObject({
+      allowed: false,
+      denial: { reason: "denied_by_rule" },
+    });
+  });
+
+  it("every agent principal is denied, also its own bot and also acting for an owner", () => {
+    expect(denied(bot, agentResource(personal, null)).allowed).toBe(false);
+    expect(
+      decide(bot, agentResource(personal, null), [], "sandbox.files", {
+        principal: owner,
+        resource: agentResource(personal, OWNER),
+      }).allowed,
+    ).toBe(false);
+  });
+
+  it("the organization-scope answer stays the role's (the module gate reads it)", () => {
+    expect(allowed(user("standard"), orgResource(), "sandbox.files")).toBe(true);
+  });
+});
