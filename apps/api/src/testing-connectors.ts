@@ -124,96 +124,128 @@ export async function startConnectorsStack(
   });
 
   const logs: string[] = [];
-  const stack = await startTestStack({
-    env: {
-      OCW_MODEL_PROVIDER: "mock",
-      OCW_PUBLIC_API_URL: PUBLIC_API_URL,
-      OCW_EGRESS_TEST_HOSTS: "fake-mcp=127.0.0.1",
-      LOG_LEVEL: opts.logLevel ?? "info",
-      ...opts.env,
-    },
-    logStream: { write: (line: string) => void logs.push(line) },
-  });
-  const su = new pg.Client({ connectionString: stack.db.superuserUrl });
-  await su.connect();
-  const appRole = new pg.Client({ connectionString: stack.db.appUrl });
-  await appRole.connect();
+  // Whatever fails from here on, nothing outlives the start (WINDOWS #225): the stubbed fetch, the fake server, and the
+  // stack's containers once it is up.
+  const closeFake = async () => {
+    vi.unstubAllGlobals();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  };
+  let stack: TestStack;
+  try {
+    stack = await startTestStack({
+      env: {
+        OCW_MODEL_PROVIDER: "mock",
+        OCW_PUBLIC_API_URL: PUBLIC_API_URL,
+        OCW_EGRESS_TEST_HOSTS: "fake-mcp=127.0.0.1",
+        LOG_LEVEL: opts.logLevel ?? "info",
+        ...opts.env,
+      },
+      logStream: { write: (line: string) => void logs.push(line) },
+    });
+  } catch (err) {
+    await closeFake();
+    throw err;
+  }
+  const clients: pg.Client[] = [];
+  try {
+    return await prepare(stack);
+  } catch (err) {
+    await Promise.allSettled(clients.map((c) => c.end()));
+    await stack.stop().catch(() => {});
+    await closeFake();
+    throw err;
+  }
 
-  const victor = new TestClient(stack.baseUrl);
-  const setup = await ok(
-    victor.request("POST", "/api/v1/setup", {
-      token: TEST_SETUP_TOKEN,
-      name: "Víctor Ruiz",
-      email: "victor@example.test",
-      password: "correct-horse-battery",
-      orgName: "Autofy Labs",
-    }),
-  );
-  const orgA = setup.organization.id as string;
-  const victorId = setup.user.id as string;
-  const joinAs = async (email: string, name: string) => {
-    const inv = await ok(victor.request("POST", "/api/v1/invitations", { email, role: "standard" }));
-    const c = new TestClient(stack.baseUrl);
-    const acc = await ok(
-      c.request("POST", `/api/v1/invitations/${inv.id}/accept`, { name, password: "another-long-password" }),
+  async function prepare(stack: TestStack): Promise<ConnectorsStack> {
+    const su = new pg.Client({ connectionString: stack.db.superuserUrl });
+    clients.push(su);
+    await su.connect();
+    const appRole = new pg.Client({ connectionString: stack.db.appUrl });
+    clients.push(appRole);
+    await appRole.connect();
+
+    const victor = new TestClient(stack.baseUrl);
+    const setup = await ok(
+      victor.request("POST", "/api/v1/setup", {
+        token: TEST_SETUP_TOKEN,
+        name: "Víctor Ruiz",
+        email: "victor@example.test",
+        password: "correct-horse-battery",
+        orgName: "Autofy Labs",
+      }),
     );
-    return [c, acc.user.id as string] as const;
-  };
-  const [sam, samId] = await joinAs("sam@example.test", "Sam Lee");
-  const [alex, alexId] = await joinAs("alex@example.test", "Alex Kim");
-  const [eve, eveId] = await joinAs("eve@example.test", "Eve Black");
+    const orgA = setup.organization.id as string;
+    const victorId = setup.user.id as string;
+    const joinAs = async (email: string, name: string) => {
+      const inv = await ok(victor.request("POST", "/api/v1/invitations", { email, role: "standard" }));
+      const c = new TestClient(stack.baseUrl);
+      const acc = await ok(
+        c.request("POST", `/api/v1/invitations/${inv.id}/accept`, {
+          name,
+          password: "another-long-password",
+        }),
+      );
+      return [c, acc.user.id as string] as const;
+    };
+    const [sam, samId] = await joinAs("sam@example.test", "Sam Lee");
+    const [alex, alexId] = await joinAs("alex@example.test", "Alex Kim");
+    const [eve, eveId] = await joinAs("eve@example.test", "Eve Black");
 
-  // Org B: Eve moves into her own organization as its admin.
-  const orgB = randomUUID();
-  await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
-    orgB,
-    `evil-${orgB}`,
-  ]);
-  await su.query("delete from auth.member where user_id = $1", [eveId]);
-  await su.query("delete from app.org_members where user_id = $1", [eveId]);
-  await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
-    orgB,
-    eveId,
-  ]);
-  await su.query(
-    "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
-    [orgB, eveId],
-  );
-  await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, eveId]);
-  expect((await ok(eve.request("GET", "/api/v1/me/permissions"))).role).toBe("admin");
+    // Org B: Eve moves into her own organization as its admin.
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+      orgB,
+      `evil-${orgB}`,
+    ]);
+    await su.query("delete from auth.member where user_id = $1", [eveId]);
+    await su.query("delete from app.org_members where user_id = $1", [eveId]);
+    await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+      orgB,
+      eveId,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+      [orgB, eveId],
+    );
+    await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, eveId]);
+    expect((await ok(eve.request("GET", "/api/v1/me/permissions"))).role).toBe("admin");
 
-  return {
-    stack,
-    su,
-    appRole,
-    fake,
-    fakePort,
-    fakeBase: `http://fake-mcp:${fakePort}`,
-    browser: createEgress({ platformHosts: [], testHosts: new Map([["fake-mcp", "127.0.0.1"]]) }),
-    orgA,
-    orgB,
-    victor,
-    sam,
-    alex,
-    eve,
-    victorId,
-    samId,
-    alexId,
-    eveId,
-    globalFakeCalls,
-    logs,
-    setDown(value: boolean) {
-      down = value;
-    },
-    async stop() {
-      vi.unstubAllGlobals();
-      await appRole.end().catch(() => {});
-      await su.end().catch(() => {});
-      await stack.stop();
-      server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    },
-  };
+    return {
+      stack,
+      su,
+      appRole,
+      fake,
+      fakePort,
+      fakeBase: `http://fake-mcp:${fakePort}`,
+      browser: createEgress({ platformHosts: [], testHosts: new Map([["fake-mcp", "127.0.0.1"]]) }),
+      orgA,
+      orgB,
+      victor,
+      sam,
+      alex,
+      eve,
+      victorId,
+      samId,
+      alexId,
+      eveId,
+      globalFakeCalls,
+      logs,
+      setDown(value: boolean) {
+        down = value;
+      },
+      async stop() {
+        await appRole.end().catch(() => {});
+        await su.end().catch(() => {});
+        // The fake server closes whatever the stack's stop does (WINDOWS #225); its failure is still reported.
+        try {
+          await stack.stop();
+        } finally {
+          await closeFake();
+        }
+      },
+    };
+  }
 }
 
 /** Invites a standard member into org A (Víctor's organization). */

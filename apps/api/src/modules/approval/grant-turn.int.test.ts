@@ -369,6 +369,44 @@ describe("the requester lost access: the decision stands, no turn, no fallback t
   });
 });
 
+describe("WINDOWS #204: a server_apply decision by someone who cannot read the conversation starts no bot turn", () => {
+  it("Marta decides from /approvals a request whose card is in a private channel she is not in → applied, no card action, no turn, nothing metered", async () => {
+    const priv = (
+      await ok(victor.request("POST", "/api/v1/channels", { name: "apply-private", visibility: "private" }))
+    ).id as string;
+    for (const member of [
+      { kind: "user", id: samId },
+      { kind: "agent", id: keeperId },
+    ]) {
+      await ok(victor.request("POST", `/api/v1/channels/${priv}/members`, member));
+    }
+    const asked = await say(priv, "apply the private setting");
+    const r = await request("test.apply_turn", { conversationId: priv, asked });
+    const before = await turnsToday();
+    const res = await decide(marta, r.id, { outcome: "approved", actionHash: r.actionHash });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    // The decision stands and the action is applied: the kind decides who may approve, not who reads the card.
+    expect((await rowOf(r.id)).status).toBe("applied");
+    expect(await cardRow(r.cardMessageId)).toMatchObject({ decision: "approved", decided_by: martaId });
+    // No bot turn for a human who cannot read where it would answer (its reply would be refused anyway, D-05).
+    expect(await cardActionsOf(r.cardMessageId)).toHaveLength(0);
+    const turns = await su.query("select count(*)::int as n from app.agent_turns where message_id = $1", [
+      r.cardMessageId,
+    ]);
+    expect(turns.rows[0].n).toBe(0);
+    expect(await turnsToday()).toBe(before);
+  });
+
+  it("the same decision where Marta reads the channel still delivers her turn (unchanged)", async () => {
+    const asked = await say(room, "apply the shared setting");
+    const r = await request("test.apply_turn", { conversationId: room, asked });
+    expect((await decide(marta, r.id, { outcome: "approved", actionHash: r.actionHash })).status).toBe(200);
+    const [ev] = await cardActionsOf(r.cardMessageId);
+    expect(ev?.message.author.id).toBe(martaId);
+    expect(await turnOf(ev?.eventId as string)).toEqual({ user_id: martaId, tainted: false });
+  });
+});
+
 describe("WINDOWS #135: an approved grant's card reads as approved until the grant is used", () => {
   it("approved → card running (not succeeded); consumeGrant → card succeeded, announced live; denied → cancelled", async () => {
     const asked = await say(dm, "write the used note");

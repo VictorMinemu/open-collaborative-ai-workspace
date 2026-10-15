@@ -11,7 +11,7 @@
 //
 // Tools: `echo` (read-only: readOnlyHint true) → "echo: <text>"; `write_note` (destructiveHint true) →
 // "noted: <title or text>". With a token (`FAKE_MCP_TOKEN`), every MCP request needs
-// `Authorization: Bearer <token>` (401 otherwise).
+// `Authorization: Bearer <token>` (401 otherwise). `onToolCall` sees every tools/call's name and arguments.
 import { randomUUID } from "node:crypto";
 
 /** Newest first. An unsupported requested version gets the newest. */
@@ -86,6 +86,8 @@ function send(res, status, body, headers = {}) {
  */
 export function createFakeMcp(opts = {}) {
   const token = opts.token || null;
+  /** `opts.onToolCall({name, arguments})`: every tools/call exactly as received (the real-cell smoke reads them). */
+  const onToolCall = typeof opts.onToolCall === "function" ? opts.onToolCall : null;
   /** Streamable HTTP sessions: id → { protocolVersion }. */
   const sessions = new Map();
   /** SSE sessions: id → the open event-stream response. */
@@ -95,6 +97,11 @@ export function createFakeMcp(opts = {}) {
   function callTool(params) {
     const name = params?.name;
     const args = params?.arguments ?? {};
+    try {
+      onToolCall?.({ name, arguments: args });
+    } catch {
+      /* a test hook never breaks the fake */
+    }
     if (name === "echo") {
       if (typeof args.text !== "string") return textResult("echo: `text` must be a string", true);
       return textResult(`echo: ${args.text}`);

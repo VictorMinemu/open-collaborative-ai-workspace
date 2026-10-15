@@ -567,3 +567,62 @@ describe("units: keys and live agent templates block a delete like bots do (Phas
     expect((await audit("unit.deleted")).at(-1)?.metadata).toMatchObject({ removedTemplateIds: [archived] });
   });
 });
+
+describe("units: tool approval rules block a delete (07.5, WINDOWS #207)", () => {
+  const create = async (name: string) =>
+    (await ok(admin.request("POST", "/api/v1/units", { kind: "department", name, parentId: null })))
+      .id as string;
+  const exists = async (table: string, id: string) =>
+    (await su.query(`select 1 from app.${table} where id = $1`, [id])).rowCount === 1;
+  const insertPolicy = (client: pg.Client, unitId: string, pattern: string) =>
+    client.query(
+      "insert into app.tool_approval_policies (organization_id, scope_unit_id, tool_pattern, mode, approver_kind) values ($1, $2, $3, 'always', 'admins') returning id",
+      [orgId, unitId, pattern],
+    );
+
+  it("a unit with an approval rule is 409 unit_has_policies (never a cascade without its audit); nothing changes", async () => {
+    const unit = await create("With Rule");
+    const policy = (
+      await ok(
+        admin.request("POST", "/api/v1/tool-approval-policies", {
+          scopeUnitId: unit,
+          toolPattern: "ocw_http_request",
+          mode: "always",
+          approverKind: "admins",
+        }),
+        201,
+      )
+    ).id as string;
+    const deletedBefore = (await audit("unit.deleted")).length;
+    expect((await fails(admin.request("DELETE", `/api/v1/units/${unit}`), 409)).code).toBe(
+      "unit_has_policies",
+    );
+    expect(await exists("org_units", unit)).toBe(true);
+    expect(await exists("tool_approval_policies", policy)).toBe(true);
+    expect((await audit("unit.deleted")).length).toBe(deletedBefore);
+
+    // Once the rule is removed (audited by its own route), the unit deletes.
+    await ok(admin.request("DELETE", `/api/v1/tool-approval-policies/${policy}?expectedVersion=1`), 204);
+    await ok(admin.request("DELETE", `/api/v1/units/${unit}`));
+    expect(await exists("org_units", unit)).toBe(false);
+  });
+
+  it("a rule committed while the delete waits is still seen: 409, not a silent cascade", async () => {
+    const unit = await create("Racing Rule");
+    const other = new pg.Client({ connectionString: stack.db.superuserUrl });
+    await other.connect();
+    try {
+      await other.query("begin");
+      // The rule's FK check holds a KEY SHARE lock on the unit row until this transaction ends.
+      const policy = (await insertPolicy(other, unit, "ocw_http_request")).rows[0].id as string;
+      const pending = admin.request("DELETE", `/api/v1/units/${unit}`);
+      await new Promise((r) => setTimeout(r, 400));
+      await other.query("commit");
+      expect((await fails(pending, 409)).code).toBe("unit_has_policies");
+      expect(await exists("org_units", unit)).toBe(true);
+      expect(await exists("tool_approval_policies", policy)).toBe(true);
+    } finally {
+      await other.end();
+    }
+  });
+});

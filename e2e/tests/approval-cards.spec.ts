@@ -9,12 +9,12 @@ import {
 import { expectNoSeriousA11y } from "../support/a11y";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
 import {
-  ACME_CRM,
   clearApprovalPolicies,
   clearPendingApprovals,
   ensureUnitRole,
   LUIS,
   MARTA,
+  NORTHWIND_CRM,
   proposeWorkZoneFromDm,
   seedApprovalMcp,
   seedApprovalPeople,
@@ -109,7 +109,7 @@ async function resetBotPolicy() {
 }
 
 /**
- * A fresh team bot with Acme CRM's tools and the internet (so a turn can read outside content), ready in the cell,
+ * A fresh team bot with Northwind CRM's tools and the internet (so a turn can read outside content), ready in the cell,
  * and Sam's own DM with it: every DM test starts on an empty conversation, so its cards are the only ones on screen.
  */
 async function freshBotAndDm(): Promise<void> {
@@ -124,7 +124,9 @@ async function freshBotAndDm(): Promise<void> {
       })),
     },
   });
-  expect(granted.ok(), `grant Acme CRM to ${BOT}: ${granted.status()} ${await granted.text()}`).toBe(true);
+  expect(granted.ok(), `grant Northwind CRM to ${BOT}: ${granted.status()} ${await granted.text()}`).toBe(
+    true,
+  );
   await cell.ackAll();
   const dm = await samApi.post(`/api/v1/agents/${botId}/dm`);
   expect(dm.ok(), `Sam's DM with ${BOT}`).toBe(true);
@@ -179,6 +181,27 @@ async function reveal(card: Locator, block: "start" | "end" = "end") {
     (document.activeElement as HTMLElement | null)?.blur();
     el.scrollIntoView({ block: b });
   }, block);
+}
+
+/**
+ * WINDOWS #226: a live card grows once its approval link arrives; a reader who did not scroll stays at the bottom, so
+ * the card's end is in view (on a phone, above the composer) without scrolling.
+ */
+async function expectPinnedToBottom(page: Page, scroller: string, card: Locator) {
+  const list = page.getByTestId(scroller);
+  await expect
+    .poll(() => list.evaluate((el) => Math.round(el.scrollHeight - el.scrollTop - el.clientHeight)), {
+      timeout: 5_000,
+      message: `${scroller} stays at the bottom`,
+    })
+    .toBeLessThanOrEqual(2);
+  const [cardBox, listBox] = await Promise.all([card.boundingBox(), list.boundingBox()]);
+  expect(cardBox && listBox, "card and list are laid out").toBeTruthy();
+  if (cardBox && listBox) {
+    expect(cardBox.y + cardBox.height, "the card's end is in view").toBeLessThanOrEqual(
+      listBox.y + listBox.height + 1,
+    );
+  }
 }
 
 /** The newest pending `tool.call` request `api` asked for or may decide. */
@@ -264,8 +287,8 @@ test.beforeAll(async () => {
   const servers = (await (await admin.get("/api/v1/mcp-servers")).json()) as {
     servers: Array<{ id: string; name: string }>;
   };
-  crmId = servers.servers.find((s) => s.name === ACME_CRM)?.id ?? "";
-  expect(crmId, "Acme CRM is registered").not.toBe("");
+  crmId = servers.servers.find((s) => s.name === NORTHWIND_CRM)?.id ?? "";
+  expect(crmId, "Northwind CRM is registered").not.toBe("");
   await resetBotPolicy();
 
   for (const api of [samApi, martaApi, admin]) await clearPendingApprovals(api);
@@ -328,16 +351,18 @@ test("Sam approves his bot's action in the DM card and the card follows it to Us
     expect(cell.grantReruns.filter((r) => r.tool === writeNote())).toHaveLength(0);
 
     // ---- the exact card in Sam's DM
-    const card = cardWith(sam.page, "approval", "Run write_note on Acme CRM");
+    const card = cardWith(sam.page, "approval", "Run write_note on Northwind CRM");
     await expect(card).toBeVisible({ timeout: 15_000 });
     await expect(card.getByTestId("agent-card-kind")).toHaveText("Approval");
     await expect(card.getByTestId("agent-card-workspace")).toContainText("Created by the workspace");
     await expect(card.getByTestId("agent-card-status")).toHaveText("Pending");
-    await expect(card.getByTestId("agent-card-title")).toHaveText("Run write_note on Acme CRM");
+    await expect(card.getByTestId("agent-card-title")).toHaveText("Run write_note on Northwind CRM");
     await expect(card.getByRole("heading", { level: 4, name: "Action" })).toBeVisible();
     await expect(card.getByRole("heading", { level: 4, name: `What ${BOT} will send` })).toBeVisible();
     await expect(card.getByTestId("agent-card-action-field-tool")).toHaveText("write_note");
-    await expect(card.getByTestId("agent-card-action-field-source")).toHaveText(`${ACME_CRM} · MCP server`);
+    await expect(card.getByTestId("agent-card-action-field-source")).toHaveText(
+      `${NORTHWIND_CRM} · MCP server`,
+    );
     // WINDOWS #221: the internal server name is never on the card.
     await expect(card).not.toContainText(safeName);
     await expect(card.getByTestId("agent-card-value-field-to")).toHaveText("billing@globex.example");
@@ -353,6 +378,7 @@ test("Sam approves his bot's action in the DM card and the card follows it to Us
     await expect(card.getByTestId("agent-card-timer")).toHaveText(
       "Runs once, with exactly these values · Expires in 24 h",
     );
+    await expectPinnedToBottom(sam.page, "dm-scroll", card);
     await expect(card.getByTestId("agent-card-open")).toHaveAttribute("href", `/approvals/${id}`);
     await expect(card.getByTestId("agent-card-approve")).toHaveText("Approve");
     await expect(card.getByTestId("agent-card-deny")).toHaveText("Deny");
@@ -491,13 +517,14 @@ test("in a channel the card is a summary: a reader outside the audience never re
     await expect(card).toBeVisible({ timeout: 20_000 });
     await expect(card.getByTestId("agent-card-status")).toHaveText("Pending");
     await expect(card.getByTestId("agent-card-action-field-tool")).toHaveText("write_note");
-    await expect(card.getByTestId("agent-card-action-field-source")).toHaveText(ACME_CRM);
+    await expect(card.getByTestId("agent-card-action-field-source")).toHaveText(NORTHWIND_CRM);
     await expect(card.getByTestId("agent-card-waiting")).toHaveText(
       "Waiting for a lead of Sales · Expires in 24 h",
     );
     await expect(card.getByTestId("agent-card-privacy")).toHaveText(
       "Only Sam Lee and the approvers can see the details.",
     );
+    await expectPinnedToBottom(luis.page, "channel-scroll", card);
     await expect(card.getByTestId("agent-card-open")).toHaveCount(0);
     await expect(card.getByRole("button")).toHaveCount(0);
     await expect(card.getByRole("heading", { level: 4 })).toHaveCount(0);
@@ -555,7 +582,7 @@ test("a value too long for the card: the notice, Review as the primary action an
     await sam.page.goto(`${BASE_URL}/chat/dm/${dmId}`);
     await ask(sam.page, "Write the quarterly summary [[persona]]", `Tool ${writeNote()}: approval_required`);
     const { id } = await newestCall(samApi);
-    const card = cardWith(sam.page, "approval", "Run write_note on Acme CRM");
+    const card = cardWith(sam.page, "approval", "Run write_note on Northwind CRM");
     await expect(card).toBeVisible({ timeout: 15_000 });
     await expect(card.getByTestId("agent-card-truncated")).toHaveText(
       "Some values are too long for the card. Review them in full before approving.",
@@ -607,7 +634,7 @@ test("after outside content in the same turn the card warns, and a hidden charac
       `Read the supplier page and file it [[call web_fetch {"url":"https://example.org/supplier"}]] [[call write_note ${call}]]`,
       `Tool ${writeNote()}: approval_required`,
     );
-    const card = cardWith(sam.page, "approval", "Run write_note on Acme CRM");
+    const card = cardWith(sam.page, "approval", "Run write_note on Northwind CRM");
     await expect(card).toBeVisible({ timeout: 15_000 });
     const taint = card.getByTestId("agent-card-warning").filter({ hasText: "outside content" });
     await expect(taint).toHaveText(`${BOT} read outside content earlier in this turn. Check the values.`);
@@ -741,7 +768,7 @@ test("a card with twelve 500-character fields stays inside the message column wi
   try {
     await sam.page.goto(`${BASE_URL}/chat/dm/${dmId}`);
     await ask(sam.page, "File every detail [[persona]]", `Tool ${writeNote()}: approval_required`);
-    const card = cardWith(sam.page, "approval", "Run write_note on Acme CRM");
+    const card = cardWith(sam.page, "approval", "Run write_note on Northwind CRM");
     await expect(card).toBeVisible({ timeout: 15_000 });
     const blocks = card.getByTestId("agent-card-block-value");
     await expect(blocks).toHaveCount(10);

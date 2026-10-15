@@ -193,6 +193,9 @@ async function deliver(tx: Tx, deps: NotificationDeps, t: Target): Promise<void>
   const snippet = snippetOf(t.body);
   const now = Date.now();
 
+  // Stream lock order (07.5-16, WINDOWS #224): `user:` streams in ascending id order, as every other fan-out takes
+  // them, so two transactions notifying the same people never wait on each other crosswise.
+  rows.sort((a, b) => (a.user_id < b.user_id ? -1 : a.user_id > b.user_id ? 1 : 0));
   for (const r of rows) {
     const conversation = await refFor(r.user_id);
     if (!conversation) continue;

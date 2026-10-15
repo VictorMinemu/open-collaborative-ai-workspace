@@ -45,6 +45,8 @@ export interface MemoryWriteKindDeps {
       actor: MemoryActor,
       a: { scopeId: string; path: string; text: string },
     ): Promise<{ fileId: string; version: number }>;
+    /** The streams a change of `path` is announced on (`memory.changed`), `user:` ones in ascending id order. */
+    changeTopics(tx: Tx, scopeId: string, path: string): Promise<string[]>;
   };
   /**
    * Scans handed over by the proposal call to the card hook of the same request (in process, never stored): the card's
@@ -369,6 +371,12 @@ export function createMemoryWriteKind(deps: MemoryWriteKindDeps): ApprovalKind {
         summary: excerpt || title,
       };
       return { card, warnings };
+    },
+
+    async applyTopics(tx, row) {
+      const p = await loadProposal(tx, row);
+      if (!p || !(await scopeOrNull(tx, p.scopeId))) return [];
+      return deps.files.changeTopics(tx, p.scopeId, p.path);
     },
 
     async apply(tx, row): Promise<ApplyResult> {

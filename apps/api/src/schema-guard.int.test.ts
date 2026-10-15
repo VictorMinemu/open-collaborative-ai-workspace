@@ -4,7 +4,7 @@ import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkSchema } from "@ocw/db";
-import { startTestDatabase, type TestDatabase } from "@ocw/db/testing";
+import { startAllOrNone, startTestDatabase, type TestDatabase } from "@ocw/db/testing";
 import { RedisContainer, type StartedRedisContainer } from "@testcontainers/redis";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -108,7 +108,7 @@ async function newestMigration(): Promise<{ id: number; hash: string; created_at
 }
 
 beforeAll(async () => {
-  [tdb, redis] = await Promise.all([startTestDatabase(), new RedisContainer("redis:8").start()]);
+  [tdb, redis] = await startAllOrNone([startTestDatabase(), new RedisContainer("redis:8").start()]);
   su = new pg.Client({ connectionString: tdb.superuserUrl });
   await su.connect();
 });

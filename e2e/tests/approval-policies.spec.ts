@@ -2,10 +2,10 @@ import { type APIRequestContext, expect, type Page, test } from "@playwright/tes
 import { expectNoSeriousA11y } from "../support/a11y";
 import { apiAs, BASE_URL, openAs } from "../support/actors";
 import {
-  ACME_CRM,
   clearApprovalPolicies,
   LUIS,
   MARTA,
+  NORTHWIND_CRM,
   seedApprovalMcp,
   seedApprovalPeople,
   setApprovalPolicy,
@@ -20,8 +20,8 @@ import { ADMIN } from "./env";
 
 /**
  * Settings › Approval policies (07.5-09; APPROVE-01, D-01, UI-SPEC Surface 4, R2-R5, R11). An admin decides which bot
- * actions need a person: the fake MCP server is registered as "Acme CRM" (`echo` read-only, `write_note` destructive)
- * and every Acme CRM tool is set to "Always ask" with Admins approving, from the page, in a few clicks. Leads add
+ * actions need a person: the fake MCP server is registered as "Northwind CRM" (`echo` read-only, `write_note` destructive)
+ * and every Northwind CRM tool is set to "Always ask" with Admins approving, from the page, in a few clicks. Leads add
  * approvals for the units they lead and can never relax the organization's; everyone else does not see the section.
  * API calls seed the stack (scripts/e2e-isolated.sh); no provider is called.
  */
@@ -73,7 +73,7 @@ test.afterAll(async () => {
   await admin.dispose();
 });
 
-test("admin: Always ask for every Acme CRM tool, from Settings, shown on every row", async ({
+test("admin: Always ask for every Northwind CRM tool, from Settings, shown on every row", async ({
   browser,
 }, info) => {
   test.setTimeout(120_000);
@@ -85,9 +85,9 @@ test("admin: Always ask for every Acme CRM tool, from Settings, shown on every r
   await expect(root).toContainText("When a bot wants to use a tool with a rule, it stops and asks a person.");
   await expect(page.getByTestId("policy-scope")).toContainText("Organization");
   const crm = page.getByTestId(`policy-group-${safeName}`);
-  await expect(crm).toContainText(ACME_CRM);
+  await expect(crm).toContainText(NORTHWIND_CRM);
   await expect(crm).toContainText("MCP server · 2 tools");
-  await expect(crm.getByRole("button", { name: new RegExp(`^${ACME_CRM}`) })).toHaveAttribute(
+  await expect(crm.getByRole("button", { name: new RegExp(`^${NORTHWIND_CRM}`) })).toHaveAttribute(
     "aria-expanded",
     "false",
   );
@@ -97,9 +97,9 @@ test("admin: Always ask for every Acme CRM tool, from Settings, shown on every r
     "Web search, web pages, memory, cards and Work Zone proposals can't use these rules",
   );
 
-  // ---- Acme CRM expanded: the server row, then each tool with its effect, all Never ask
-  await expandGroup(page, ACME_CRM);
-  await expect(rowOf(page, serverPattern())).toContainText(`All ${ACME_CRM} tools`);
+  // ---- Northwind CRM expanded: the server row, then each tool with its effect, all Never ask
+  await expandGroup(page, NORTHWIND_CRM);
+  await expect(rowOf(page, serverPattern())).toContainText(`All ${NORTHWIND_CRM} tools`);
   await expect(rowOf(page, serverPattern())).toContainText("Never ask");
   await expect(rowOf(page, tool("echo"))).toContainText("Read-only");
   await expect(rowOf(page, tool("echo"))).toContainText("Never ask");
@@ -110,7 +110,7 @@ test("admin: Always ask for every Acme CRM tool, from Settings, shown on every r
   await editOf(page, serverPattern()).click();
   const dialog = page.getByTestId("policy-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText(`Approval for all ${ACME_CRM} tools`);
+  await expect(dialog).toContainText(`Approval for all ${NORTHWIND_CRM} tools`);
   await expect(dialog.getByTestId("policy-mode-never").locator("input")).toBeFocused();
   await expect(dialog.getByTestId("policy-save")).toBeDisabled();
   await dialog.getByTestId("policy-mode-always").click();
@@ -230,7 +230,7 @@ test("admin: specific people approve; reopening shows them checked", async ({ br
   const mobile = info.project.name === "mobile";
   const { page } = await openAs(browser, ADMIN, info.project.name);
   await openPolicies(page, mobile);
-  await expandGroup(page, ACME_CRM);
+  await expandGroup(page, NORTHWIND_CRM);
 
   let dialog = await openRule(page, tool("write_note"));
   await expect(dialog).toContainText("Applies to everyone");
@@ -299,7 +299,7 @@ test("admin: a concurrent change shows the conflict with Reload; Remove asks fir
   await dialog.getByTestId("policy-remove").click();
   const confirm = page.getByTestId("policy-remove-dialog");
   await expect(confirm).toContainText("Remove this rule?");
-  await expect(confirm).toContainText(`All ${ACME_CRM} tools go back to Never ask.`);
+  await expect(confirm).toContainText(`All ${NORTHWIND_CRM} tools go back to Never ask.`);
   await expect(confirm.getByRole("button", { name: "Cancel" })).toBeFocused();
   await confirm.getByTestId("policy-remove-confirm").click();
   await expect(toast(page, "Rule removed")).toBeVisible();
@@ -314,10 +314,10 @@ test("admin: a concurrent change shows the conflict with Reload; Remove asks fir
     await expect(sheet).toBeVisible();
     await expect(page).toHaveURL(/history=1/);
     const items = sheet.getByTestId("policy-history-item");
-    await expect(items.nth(0)).toContainText(`${ADMIN.name} removed the rule for All ${ACME_CRM} tools`);
-    await expect(items.nth(1)).toContainText(`${ADMIN.name} set All ${ACME_CRM} tools to Always ask`);
+    await expect(items.nth(0)).toContainText(`${ADMIN.name} removed the rule for All ${NORTHWIND_CRM} tools`);
+    await expect(items.nth(1)).toContainText(`${ADMIN.name} set All ${NORTHWIND_CRM} tools to Always ask`);
     await expect(items.nth(1)).toContainText("Approvers: The person who asked");
-    await expect(items.nth(2)).toContainText(`${ADMIN.name} set All ${ACME_CRM} tools to Always ask`);
+    await expect(items.nth(2)).toContainText(`${ADMIN.name} set All ${NORTHWIND_CRM} tools to Always ask`);
     await expect(items.nth(2)).toContainText("Approvers: Admins");
     await sheet.getByRole("button", { name: "Close" }).click();
     await expect(sheet).toBeHidden();
@@ -342,7 +342,7 @@ test("admin: Settings › MCP servers shows Needs approval and Asks after outsid
   });
   const { page } = await openAs(browser, ADMIN, info.project.name);
   await page.goto(`${BASE_URL}/settings/mcp-servers`);
-  const card = page.locator(`[data-testid="mcp-server"][data-name="${ACME_CRM}"]`);
+  const card = page.locator(`[data-testid="mcp-server"][data-name="${NORTHWIND_CRM}"]`);
   const toolRow = (name: string) => card.locator(`[data-testid="mcp-tool"][data-tool="${name}"]`);
   await expect(toolRow("write_note").getByTestId("tool-effect")).toHaveText("Changes data");
   await expect(toolRow("write_note").getByTestId("tool-needs-approval")).toHaveText("Needs approval");
@@ -433,7 +433,7 @@ test("review: the page, the rule dialog and the history at the project's width, 
   // ---- Settings › MCP servers with the chip
   if (!mobile) {
     await page.goto(`${BASE_URL}/settings/mcp-servers`);
-    const card = page.locator(`[data-testid="mcp-server"][data-name="${ACME_CRM}"]`);
+    const card = page.locator(`[data-testid="mcp-server"][data-name="${NORTHWIND_CRM}"]`);
     await expect(card.getByTestId("tool-needs-approval").first()).toBeVisible();
     await card.getByTestId("mcp-tools").scrollIntoViewIfNeeded();
     await captureReview(page, "mcp-tools-needs-approval-1440");

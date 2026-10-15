@@ -33,6 +33,7 @@ import {
   permissionRules,
   type Tx,
   tenantOf,
+  toolApprovalPolicies,
   unitMemberships,
   vaultItems,
 } from "@ocw/db";
@@ -361,6 +362,10 @@ export function registerUnitRoutes(
         await lockUnits(tx);
         const unit = await requireUnit(tx, req.params.id);
         await perms.assertCan(req, tx, "unit.manage", unitResource(unit));
+        // The unit row is locked before the checks below: a row that references it (a rule, a key, a template) and is
+        // being inserted holds a KEY SHARE lock on it until its transaction ends, so the checks then see it committed
+        // and answer 409 instead of a cascade without its audit or a foreign-key 500 (07.5, WINDOWS #207).
+        await tx.execute(sql`select 1 from ${orgUnits} where ${orgUnits.id} = ${unit.id} for update`);
         const [child] = await tx
           .select({ id: orgUnits.id })
           .from(orgUnits)
@@ -409,6 +414,14 @@ export function registerUnitRoutes(
           .where(and(eq(agentTemplates.unitId, unit.id), isNull(agentTemplates.archivedAt)))
           .limit(1);
         if (liveTemplate) throw conflict("Archive this unit's agent templates first", "unit_has_templates");
+        // Phase 07.5: a unit's approval rules would cascade with it, with no `tool_approval_policy.deleted` audit
+        // (principle 12) and their history unreachable. They are removed in Settings › Approval policies first.
+        const [policy] = await tx
+          .select({ id: toolApprovalPolicies.id })
+          .from(toolApprovalPolicies)
+          .where(eq(toolApprovalPolicies.scopeUnitId, unit.id))
+          .limit(1);
+        if (policy) throw conflict("Remove this unit's approval rules first", "unit_has_policies");
         // Pending proposals into the unit's memory cascade with its scope: their approvals close as failed
         // `scope_gone` right after the delete (cards updated live, closure audited; WINDOWS 144). Read directly, like
         // the memory check above.

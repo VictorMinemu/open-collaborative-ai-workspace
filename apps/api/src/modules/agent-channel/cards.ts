@@ -189,8 +189,8 @@ type StoredCardAction = Omit<AgentCardActionEvent, "seq">;
  * mention of the agent on the card's message (`buildMentionEvents`: live member agent, attributed history, roster,
  * `turnPolicy` for the deciding human, so daily limits apply) with the deciding human as author and the server sentence
  * "<actor> approved|denied “<title>”" (plus `: “<note>”` when the decider wrote one) as text, in the card's thread (flat where the conversation is flat), then appended
- * to `cell:<org>` as `agent.card_action.v1`. No event when none is produced (disabled agent, daily limit): the decision
- * stands either way.
+ * to `cell:<org>` as `agent.card_action.v1`. No event when none is produced (disabled agent, daily limit, a turn human
+ * who does not read the conversation): the decision stands either way.
  *
  * Phase 07.5 (P-06): a grant approval's re-run is delivered for `turnUserId` (the asker: author, `agent_turns.user_id`,
  * tools and limits), only while that human still reads the conversation; the sentence keeps the decider's name and the
@@ -221,12 +221,18 @@ export async function emitCardAction(
   const { organizationId } = tenantOf(tx);
   const directory = await memberDirectory(tx);
   const name = directory.get(a.actorUserId)?.displayName ?? "Former member";
-  // P-06: a grant's re-run belongs to the human it was asked for. That human must still read the conversation (a
-  // removed member, a lost grant): otherwise nothing is delivered and the decision stands. Never the decider instead.
+  // P-06: a grant's re-run belongs to the human it was asked for; every other decision's turn to the decider. That
+  // human must read the conversation the bot would answer in: a removed requester, or a decider who decided from
+  // /approvals without reading the card's conversation (WINDOWS #204: the bot's reply would be refused and the turn
+  // metered for nothing). Otherwise nothing is delivered and the decision stands. Never another human instead.
   const turnUserId = a.turnUserId ?? a.actorUserId;
-  if (a.turnUserId) {
-    const requester = directory.get(a.turnUserId);
-    if (!requester || !(await createConversationAccess(core).isReadable(tx, a.turnUserId, conv.id))) return;
+  if (
+    !directory.get(turnUserId) ||
+    !(await createConversationAccess(core).isReadable(tx, turnUserId, conv.id, {
+      kinds: ["channel", "dm", "group", "ai_chat"],
+    }))
+  ) {
+    return;
   }
   const authorName = directory.get(turnUserId)?.displayName ?? "Former member";
   const flat = conv.kind === "dm" || conv.kind === "group" || conv.kind === "ai_chat";

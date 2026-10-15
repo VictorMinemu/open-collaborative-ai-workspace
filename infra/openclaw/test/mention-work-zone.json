@@ -1,0 +1,64 @@
+{
+  "eventId": "0199a6f0-0000-7000-8000-00000000e0f1",
+  "agent": {
+    "id": "0199a6f0-0000-7000-8000-00000000a001",
+    "handle": "archie",
+    "displayName": "Archie"
+  },
+  "conversation": {
+    "id": "0199a6f0-0000-7000-8000-00000000c0f1",
+    "kind": "dm",
+    "name": null
+  },
+  "thread": {
+    "rootMessageId": "0199a6f0-0000-7000-8000-00000000d0f1"
+  },
+  "message": {
+    "id": "0199a6f0-0000-7000-8000-00000000d0f1",
+    "text": "please fix the rounding bug on my laptop [[call ocw_work_zone_projects {}]] [[call ocw_start_work_zone {\"projectId\":\"0199a6f0-0000-7000-8000-00000000b111\",\"deviceId\":\"0199a6f0-0000-7000-8000-00000000d111\",\"prompt\":\"Fix the rounding error in invoice totals.\"}]]",
+    "createdAt": "2026-10-15T09:10:00.000Z",
+    "author": {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f3",
+      "displayName": "Sam Lee"
+    },
+    "mentions": [
+      {
+        "kind": "agent",
+        "id": "0199a6f0-0000-7000-8000-00000000a001"
+      }
+    ]
+  },
+  "threadHistory": [],
+  "roster": [
+    {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f3",
+      "displayName": "Sam Lee",
+      "role": "member"
+    },
+    {
+      "kind": "agent",
+      "id": "0199a6f0-0000-7000-8000-00000000a001",
+      "displayName": "Archie",
+      "handle": "archie"
+    }
+  ],
+  "turn": {
+    "tools": ["ocw_work_zone_projects", "ocw_start_work_zone"],
+    "toolFlags": {
+      "ocw_work_zone_projects": {
+        "untrustedOutput": false,
+        "sideEffecting": false
+      },
+      "ocw_start_work_zone": {
+        "untrustedOutput": false,
+        "sideEffecting": true
+      }
+    },
+    "memory": [],
+    "now": null,
+    "maxToolCalls": 8,
+    "maxWebCalls": 5
+  }
+}

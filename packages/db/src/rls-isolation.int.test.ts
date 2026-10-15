@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { DEFAULT_AI_CHAT_POLICY } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -2136,6 +2137,38 @@ describe("tenant isolation (RLS)", () => {
         where c.conrelid = 'app.agent_tool_calls'::regclass and c.contype = 'f' and a.attname = 'approval_id'`,
     );
     expect(ledgerFks.rows[0].n).toBe(0);
+  });
+
+  it("Phase 07.5: the stored action and the Work Zone proposal cannot be truncated by the app role (WINDOWS #201)", async () => {
+    // The immutability triggers fire on UPDATE only; TRUNCATE would erase every stored action and proposal of every
+    // tenant at once (it ignores RLS), so the app role must not hold it. DELETE stays: cascades of a bot, project or
+    // device remove their rows.
+    for (const tbl of ["app.tool_call_approvals", "app.work_zone_proposals"]) {
+      const before = await migrator.query(`select count(*)::int as n from ${tbl}`);
+      await expect(
+        inTenant(A, () => app.query(`truncate ${tbl}`)),
+        `truncate ${tbl}`,
+      ).rejects.toThrow(/permission denied/);
+      const after = await migrator.query(`select count(*)::int as n from ${tbl}`);
+      expect(after.rows[0].n, `${tbl} rows intact`).toBe(before.rows[0].n);
+    }
+    // post-migrate.sql revokes it explicitly, like the memory history tables, so a broader grant added later (or by
+    // hand) is taken back on the next migrate. Checked inside a rolled-back transaction: DDL is transactional.
+    await migrator.query("begin");
+    try {
+      await migrator.query("grant truncate on app.tool_call_approvals, app.work_zone_proposals to ocw_app");
+      await migrator.query(readFileSync(new URL("../sql/post-migrate.sql", import.meta.url), "utf8"));
+      const held = await migrator.query(
+        `select t, has_table_privilege('ocw_app', t, 'TRUNCATE') as truncate
+           from unnest(array['app.tool_call_approvals', 'app.work_zone_proposals']) as t order by t`,
+      );
+      expect(held.rows).toEqual([
+        { t: "app.tool_call_approvals", truncate: false },
+        { t: "app.work_zone_proposals", truncate: false },
+      ]);
+    } finally {
+      await migrator.query("rollback");
+    }
   });
 
   it("Phase 4: accent-insensitive Spanish search, a stored tsvector and the search indexes", async () => {

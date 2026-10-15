@@ -39,3 +39,10 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   comes back to the chat; Settings › Connections and Keychain; keys used by handle and never seen by the model; one
   pinned, public-only egress guard for every outbound call; unit agent templates that members start as their own
   personal agent (ADR-0025).
+- **07.5 Per-tool approvals and Work Zone proposals:** admins and unit leads set per tool (or per MCP server or
+  connector) whether a bot's call needs a person — Never ask, Ask after outside content, Always ask — and who approves
+  (the asker, unit leads, admins or named people), in Settings › Approval policies; only those tools send their
+  arguments; a request is one card with the exact action in the asker's DM (a summary elsewhere) and a review in the new
+  `/approvals` inbox with its own badge; one approval allows exactly that call once, re-run as the asker's turn with the
+  approved values pinned in the cell; bots propose Work Zone sessions (project, device, prompt) that only the asker
+  starts, in Supervised mode, credited "proposed by" the bot (ADR-0026).
