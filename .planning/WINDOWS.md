@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 134
+open_count: 136
 waived_count: 4
 fixed_count: 101
-total_count: 239
-last_updated: 2026-10-15T16:49:17.151Z
+total_count: 241
+last_updated: 2026-10-15T17:21:21.854Z
 ---
 
 # Broken Windows Ledger
@@ -254,6 +254,8 @@ last_updated: 2026-10-15T16:49:17.151Z
 | 237 | 07.8 | deviation | infra/sandbox/brw |  | brw: iframes are outside the snapshot (screenshot masks them whole after human input); a page that rebuilds an input after typing loses the human-typed marker (password type fields stay redacted); live frames to other viewers are unmasked, F-5/U-2 must hold in the API (07.8-16) | open |  | 2026-10-15T16:43:10.209Z |  |
 | 238 | 07.8 | deviation | infra/sandbox/brw |  | sandboxd (07.8-13) must strip the context-id tag from type-0 frames and map the new brw codes (paused, internal, maskRects, resize mode); brw proven on arm64 Docker Desktop only, amd64 runc and the gVisor CI job remain (07.8-24); apt not pinned to a snapshot | open |  | 2026-10-15T16:43:10.294Z |  |
 | 239 | 07.8 | deviation | apps/openclaw-channel/src |  | API does not send CellProvider.imageModels or turn.maxSandboxCalls yet (07.8-05/14): screenshot reaches no model and the gate uses default 40; sign-in skipped/expired sentences unwired (07.8-21); OpenClaw image rescaling (imageMaxDimensionPx) untested (8x8 fake JPEG, 07.8-13/28) | open |  | 2026-10-15T16:49:17.151Z |  |
+| 240 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | 6 offered sandbox tools have no API route until 07.8-10 (404); confirm GET /cell alsoAllow carries ocw_sandbox_*/ocw_browser_* (plugin withTurnScopedTools); 403 (sandbox/board) vs 409 (07.4 connectors) refusal split: align or record in ADR-0029 | open |  | 2026-10-15T17:21:21.782Z |  |
+| 241 | 07.8 | deviation | apps/api/src/modules/sandbox |  | Orphan 'starting' reservation rows (API dies between reserve and ensure) hold a cap slot until cleaned (07.8-11); kill does not push policy {killed:true} to sandboxd nor bump settings version (07.8-11); sandbox approval cards read 'Web request' (07.8-14); OCW_SANDBOX_URL/TOKEN missing in e2e-isolated.sh, .woodpecker, compose, .env.example (07.8-08/24) | open |  | 2026-10-15T17:21:21.854Z |  |
 
 ````json
 [
@@ -3123,6 +3125,30 @@ last_updated: 2026-10-15T16:49:17.151Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T16:49:17.151Z",
+    "resolved_at": null
+  },
+  {
+    "id": 240,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/agent-channel",
+    "line": null,
+    "description": "6 offered sandbox tools have no API route until 07.8-10 (404); confirm GET /cell alsoAllow carries ocw_sandbox_*/ocw_browser_* (plugin withTurnScopedTools); 403 (sandbox/board) vs 409 (07.4 connectors) refusal split: align or record in ADR-0029",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T17:21:21.782Z",
+    "resolved_at": null
+  },
+  {
+    "id": 241,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/sandbox",
+    "line": null,
+    "description": "Orphan 'starting' reservation rows (API dies between reserve and ensure) hold a cap slot until cleaned (07.8-11); kill does not push policy {killed:true} to sandboxd nor bump settings version (07.8-11); sandbox approval cards read 'Web request' (07.8-14); OCW_SANDBOX_URL/TOKEN missing in e2e-isolated.sh, .woodpecker, compose, .env.example (07.8-08/24)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T17:21:21.854Z",
     "resolved_at": null
   }
 ]
