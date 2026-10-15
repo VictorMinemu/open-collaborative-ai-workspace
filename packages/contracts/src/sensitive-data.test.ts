@@ -285,12 +285,12 @@ const ADVERSARIAL_SHAPES = [
   "AB12 ",
 ];
 
-describe("linear time on 256 KiB adversarial runs", () => {
-  /** Best of three, after a warm-up: a busy shared CI runner can stall one pass, a super-linear rule is slow on every pass. */
+describe("linear time on adversarial runs", () => {
+  /** Best of five, after a warm-up: a busy shared CI runner can stall a pass, a super-linear rule is slow on every pass. */
   const bestOf = (run: () => unknown): number => {
     run();
     let best = Number.POSITIVE_INFINITY;
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 5; i++) {
       const t0 = performance.now();
       run();
       best = Math.min(best, performance.now() - t0);
@@ -301,12 +301,14 @@ describe("linear time on 256 KiB adversarial runs", () => {
   for (const shape of ADVERSARIAL_SHAPES) {
     it(`detectSensitive and redactSecrets scale linearly on ${JSON.stringify(shape)} repeated`, () => {
       for (const fn of [detectSensitive, redactSecrets]) {
-        const small = bestOf(() => fn(sized(shape, 64 * 1024)));
-        const large = bestOf(() => fn(sized(shape, 256 * 1024)));
+        // 256 KiB → 1 MiB keeps both timings in whole milliseconds, where scheduler noise cannot swing the ratio.
+        const small = bestOf(() => fn(sized(shape, 256 * 1024)));
+        const large = bestOf(() => fn(sized(shape, 1024 * 1024)));
         // 4x the input: about 4x the time when linear, 16x when quadratic (the ReDoS took 17 s at 256 KiB). The
-        // ratio does not depend on the machine's speed; the absolute cap still catches a catastrophic rule.
-        expect(large / Math.max(small, 1)).toBeLessThan(8);
-        expect(large).toBeLessThan(1000);
+        // 2 ms floor stops a sub-millisecond baseline from inflating the ratio; the absolute cap still catches a
+        // catastrophic rule.
+        expect(large / Math.max(small, 2)).toBeLessThan(10);
+        expect(large).toBeLessThan(2000);
       }
     });
   }
