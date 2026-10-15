@@ -1,0 +1,26 @@
+{
+  "name": "@ocw/sandboxd",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sandbox broker: the only holder of the Docker API; builds each bot's hardened sandbox from a fixed spec",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "engines": {
+    "node": ">=24.21.0 <25"
+  },
+  "scripts": {
+    "dev": "node --watch-path=src --import tsx src/main.ts",
+    "start": "node --import tsx src/main.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --root ../.. --project unit apps/sandboxd/src"
+  },
+  "dependencies": {
+    "@ocw/contracts": "workspace:*",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@ocw/config": "workspace:*",
+    "@types/node": "24.13.6",
+    "tsx": "4.23.15"
+  }
+}
