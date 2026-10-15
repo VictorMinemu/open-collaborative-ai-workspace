@@ -9,7 +9,8 @@ the phase gate, plan 07.5-15, with the decisions taken during execution and the 
 **Date:** 2026-10-15. **Extends** [ADR-0010](0010-personal-bots-capability-model-and-tool-gate.md) (the tool gate,
 taint and the OpenClaw upgrade checklist), [ADR-0020](0020-agent-personas-and-agent-cards.md) (who a card-action turn
 belongs to) and [ADR-0023](0023-scoped-memory-files-and-approve-and-apply.md) (the approve-and-apply primitive). None
-of them is edited. Supersedes nothing.
+of them is edited. Supersedes nothing. **Amended 2026-10-15** (owner decision after phase verification: decision
+notes, W-1 and I-1; argument wording, I-2), with dated notes in place below.
 
 ## Context
 
@@ -107,6 +108,17 @@ inside the cell, outside our cards, resolver and audit (C-01), so they stay unus
   and the server refuses an Approve from the card route (409 `review_required`); Deny stays. `summary` everywhere else:
   title, tool and source only, no value in the card, its message or its realtime events, and no in-card Approve.
   Approvers review the exact action at `/approvals/<id>`.
+- *Amended 2026-10-15 (owner decision on verifier warning W-1).* Old rule: the decision note followed ADR-0023 §12
+  as-is for `tool.call`, so `approval.decided` audited its text and the linked card showed it to every reader. New
+  rule: a note may quote the call's values, so it follows the arguments. The `tool.call` kind implements `isPrivate`:
+  `approval.decided` stores `noteChars` only, never the text, as memory does. A card that does not show the exact
+  action (`summary`, `review_only`) neither stores nor shows the note: not in `message_cards.decision_note`, the card's
+  `decision`, its `message.updated` events or the web render. The note stays in three places only: the `/approvals`
+  review (deciders now, the requester and the decider), the `exact` card in the requester's own DM, and the bot's
+  `cardAction.note` / `denial.note`, which reach the requester's turn only. A kind's `link()` output that fails
+  validation reads as `review_only`, so the card route refuses Approve (409 `review_required`) and shows no note
+  (verifier advisory I-1, fail closed). Proven by `tool-approvals.int` (W-1), `grant-turn.int` (I-1), the note
+  sentinels of `tool-args-leak.int` and `agent-card.test`.
 - **The `/approvals` inbox** lists `tool.call` and `work_zone.start` only, with its own badge; Memory's badge counts
   `memory.write` only, so the two never count the same request. Approvers learn through the badge and realtime, no bell
   notification kind (P-12).
@@ -136,6 +148,14 @@ inside the cell, outside our cards, resolver and audit (C-01), so they stay unus
   `tool_call_approvals.arguments_canonical`, retained with the organization's data (no purge in 07.5), readable only by
   the deciders and the requester through the view; never in audit rows, logs, the ledger, realtime events or summary
   cards.
+  *Amended 2026-10-15 (wording, verifier advisory I-2).* The sentence above is incomplete; the design (P-07) is
+  unchanged. Arguments are **stored** only in `tool_call_approvals.arguments_canonical`. By design they also
+  **appear** in exactly three more places, all tied to the requester's own DM: the fields of the card in that DM
+  (`message_cards.fields`; `exact`, or `review_only` with values cut at 500 characters), that DM's stream events (the
+  card's `message.created` / `message.updated`), and the cell's grant event (`agent.card_action.v1` with
+  `cardAction.grant`) for the requester's re-run. They are never in audit rows, logs, the ledger, Redis, any other
+  conversation's events or a `summary` card. `tool-args-leak.int` pins exactly this set (LEAK-SENTINEL-2) and their
+  absence everywhere for a summary audience (LEAK-SENTINEL-3).
 - **One stream lock order** for every transaction that fans out: the conversation, then `user:` streams in ascending
   id order, then the cell — what a message post does. A request locks its card's conversation and announced people up
   front; a `server_apply` decision locks the card's conversation and every `user:` stream its `apply` and `announce`

@@ -30,6 +30,10 @@ import { invite } from "../../testing-workzone";
  *     `agent.card_action.v1` grant of the re-run.
  *   - A summary audience (a channel, LEAK-SENTINEL-3): the arguments are in none of the channel's cards, messages or
  *     stream events.
+ *   - Decision notes (W-1, ADR-0026 amended 2026-10-15): never in an audit row (`noteChars` only). The exact DM card's
+ *     note (NOTE-SENTINEL-DM) lives on the request, that card, the DM's stream and the requester's turn; a summary
+ *     card's note (NOTE-SENTINEL-OPS) only on the request, the decider's answer and the requester's turn, never in
+ *     #ops.
  *   - Cross-tenant: organization B's cell cannot use organization A's turns on the three routes, never consumes A's
  *     grant with its own turn, and organization B's people never list or open A's approvals.
  *
@@ -45,6 +49,8 @@ const ECHO = `${NOTES}__echo`;
 const S1 = "LEAK-SENTINEL-1-unruled-echo";
 const S2 = "LEAK-SENTINEL-2-ruled-dm";
 const S3 = "LEAK-SENTINEL-3-summary-channel";
+const N_DM = "NOTE-SENTINEL-DM-exact-card";
+const N_OPS = "NOTE-SENTINEL-OPS-summary-card";
 
 let s: ConnectorsStack;
 let marta: TestClient;
@@ -140,11 +146,12 @@ const clearRules = () =>
 const approvalRow = async (id: string) =>
   (await s.su.query("select * from app.approval_requests where id = $1", [id])).rows[0] as Json;
 
-async function decide(who: TestClient, id: string, outcome: "approved" | "denied") {
+async function decide(who: TestClient, id: string, outcome: "approved" | "denied", note?: string) {
   const row = await approvalRow(id);
   const r = await who.request("POST", `/api/v1/approvals/${id}/decision`, {
     outcome,
     actionHash: row.action_hash,
+    ...(note ? { note } : {}),
   });
   expect(r.status, JSON.stringify(r.body)).toBe(200);
 }
@@ -355,6 +362,7 @@ afterAll(async () => {
 let ruledId = "";
 let ruledCard = "";
 let summaryId = "";
+let notedId = "";
 
 describe("the scenario: an unruled call, a ruled DM call approved and re-run, a ruled channel call", () => {
   it("unruled echo with arguments sent anyway (a misbehaving cell) → allowed exactly as today", async () => {
@@ -402,7 +410,7 @@ describe("the scenario: an unruled call, a ruled DM call approved and re-run, a 
     const dmMessages = await ok(s.sam.request("GET", `/api/v1/conversations/${samDm}/messages`));
     expect(JSON.stringify(dmMessages)).toContain(S2);
 
-    await decide(marta, ruledId, "approved");
+    await decide(marta, ruledId, "approved", N_DM);
     const rerun = await rerunOf(ruledId);
     expect(rerun.cardAction.grant.arguments).toBe(JSON.stringify({ text: S2 }));
     const used = await cell("/tool-calls", {
@@ -442,6 +450,21 @@ describe("the scenario: an unruled call, a ruled DM call approved and re-run, a 
     expect(
       JSON.stringify(await ok(marta.request("GET", `/api/v1/conversations/${ops}/messages`))),
     ).not.toContain(S3);
+  });
+
+  it("a second #ops request denied by Marta on the review with a note → the requester's turn hears it, #ops never does", async () => {
+    const ev = await turnOf(s.sam, ops, { mention: "keeper" });
+    const asked = await cell("/connectors/call", {
+      eventId: ev.eventId,
+      agentId: keeperId,
+      connector: crmSafe,
+      tool: "create_record",
+      arguments: { title: "a second record" },
+    });
+    expect(codeOf(asked)).toBe("approval_required");
+    notedId = asked.body?.error.details.approval.id as string;
+    await decide(marta, notedId, "denied", N_OPS);
+    expect((await rerunOf(notedId)).cardAction).toMatchObject({ outcome: "denied", note: N_OPS });
   });
 });
 
@@ -538,6 +561,53 @@ describe("the sweep: every sink, for each sentinel", () => {
       )
     ).rows;
     expect(opsCards).toHaveLength(1);
+  });
+});
+
+describe("the sweep: decision notes (W-1)", () => {
+  it(`exact DM card: ${N_DM} on the request, that card, the DM's stream and Sam's turn; never in audit`, async () => {
+    expect(await dbHits(N_DM)).toEqual([
+      "app.approval_requests.decision_note",
+      "app.message_cards.decision_note",
+      "app.stream_events.payload",
+    ]);
+    for (const e of await eventHits(N_DM)) {
+      const allowed =
+        (e.stream_id === `conv:${samDm}` && e.about === ruledCard) ||
+        (e.stream_id === `cell:${s.orgA}` && e.type === "agent.card_action.v1" && e.about === ruledCard);
+      expect(allowed, `${e.stream_id} ${e.type}`).toBe(true);
+    }
+    const meta = (
+      await s.su.query(
+        "select metadata from app.audit_events where action = 'approval.decided' and resource_id = $1",
+        [ruledId],
+      )
+    ).rows[0].metadata as Json;
+    expect(meta.noteChars).toBe(N_DM.length);
+    expect(await redisText()).not.toContain(N_DM);
+    expect(logsWith(N_DM)).toEqual([]);
+    expect(responsesWith(N_DM)).toEqual([`200 POST /api/v1/approvals/${ruledId}/decision`]);
+    expect([...new Set(framesWith(N_DM))]).toEqual([`Sam conv:${samDm}`]);
+  });
+
+  it(`summary card: ${N_OPS} only on the request, the decider's answer and Sam's turn; nowhere in #ops or audit`, async () => {
+    const card = (await approvalRow(notedId)).card_message_id as string;
+    expect(await dbHits(N_OPS)).toEqual(["app.approval_requests.decision_note", "app.stream_events.payload"]);
+    expect(await eventHits(N_OPS)).toEqual([
+      { stream_id: `cell:${s.orgA}`, type: "agent.card_action.v1", about: card },
+    ]);
+    const meta = (
+      await s.su.query(
+        "select metadata from app.audit_events where action = 'approval.decided' and resource_id = $1",
+        [notedId],
+      )
+    ).rows[0].metadata as Json;
+    expect(meta.noteChars).toBe(N_OPS.length);
+    expect(await redisText()).not.toContain(N_OPS);
+    expect(logsWith(N_OPS)).toEqual([]);
+    expect(responsesWith(N_OPS)).toEqual([`200 POST /api/v1/approvals/${notedId}/decision`]);
+    expect(framesWith(N_OPS)).toEqual([]);
+    expect(JSON.stringify(await ok(s.sam.request("GET", `/api/v1/cards/${card}`)))).not.toContain(N_OPS);
   });
 });
 

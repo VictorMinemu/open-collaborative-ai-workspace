@@ -605,7 +605,15 @@ test("a value too long for the card: the notice, Review as the primary action an
     await dialog.getByTestId("agent-card-confirm-submit").click();
     await expect(toast(sam.page, `Denied. ${BOT} won't run it.`)).toBeVisible({ timeout: 15_000 });
     await expect(card.getByTestId("agent-card-status")).toHaveText("Denied");
-    await expect(card.getByTestId("agent-card-note")).toHaveText("“Too long, split it”");
+    // W-1 (ADR-0026 amended 2026-10-15): a card that does not show the exact action never shows the note; the review
+    // does, for the people who may see the action.
+    await expect(card.getByTestId("agent-card-decision")).toContainText("Denied by Sam Lee");
+    await expect(card.getByTestId("agent-card-note")).toHaveCount(0);
+    await expect(card).not.toContainText("Too long, split it");
+    await sam.page.goto(`${BASE_URL}/approvals/${id}`);
+    await expect(sam.page.getByTestId("approval-decision-note")).toHaveText("“Too long, split it”", {
+      timeout: 15_000,
+    });
   } finally {
     await sam.context.close();
   }

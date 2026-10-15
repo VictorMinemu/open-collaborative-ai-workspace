@@ -498,6 +498,18 @@ const labelsKind = (): ApprovalKind => ({
   },
 });
 
+/**
+ * A kind whose `link()` says `exact` but breaks the contract (a `waitingFor` past 200 characters): the link must not
+ * lose its display and let the card approve; it reads as `review_only` (I-1, fail closed).
+ */
+const badLinkKind = (): ApprovalKind => ({
+  ...linkKind(),
+  kind: "test.bad_link",
+  async link() {
+    return { display: "exact", waitingFor: "x".repeat(201), actionFields: 2, useBy: null };
+  },
+});
+
 /** Inbox kinds without cards: `test.ka` has a viewer-aware headline, `test.kb` and `test.kc` have none. */
 const inboxKind = (kind: string, withHeadline: boolean): ApprovalKind => ({
   ...baseKind(kind, "grant", `Inbox ${kind}`),
@@ -570,6 +582,25 @@ describe("card link extras, inline decision and labels (Task 2, UI-SPEC R6, R7, 
   beforeAll(() => {
     approvals.register(linkKind());
     approvals.register(labelsKind());
+    approvals.register(badLinkKind());
+  });
+
+  it("a kind whose link() fails validation reads as review_only: the card refuses Approve (409 review_required), Deny works", async () => {
+    const asked = await say(room, "send it anyway");
+    const r = await request("test.bad_link", { conversationId: room, asked });
+    const card = await cardFor(marta, r.cardMessageId);
+    expect(card.approval).toMatchObject({ kind: "test.bad_link", display: "review_only" });
+    expect(card.approval).not.toHaveProperty("waitingFor");
+    const refused = await decideCard(marta, r.cardMessageId, {
+      outcome: "approved",
+      actionHash: r.actionHash,
+    });
+    expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+    expect((refused.body as Json).error.code).toBe("review_required");
+    expect((await rowOf(r.id)).status).toBe("pending");
+    const denied = await decideCard(marta, r.cardMessageId, { outcome: "denied", actionHash: r.actionHash });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(200);
+    expect((await rowOf(r.id)).status).toBe("denied");
   });
 
   it("a kind with link() → the snapshot's approval carries its extras plus kind, expiresAt and usedAt (set once used)", async () => {

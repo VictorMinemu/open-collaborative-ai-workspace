@@ -1075,14 +1075,20 @@ function CardDecision({
   );
 }
 
-/** The decided state of a 07.5 card's footer: the decision line (focus lands here after deciding) and the note. */
+/**
+ * The decided state of a 07.5 card's footer: the decision line (focus lands here after deciding) and the note. The note
+ * shows only on a card that shows the exact action (W-1): a summary or review-only card's readers may not see the
+ * values a note can quote, so the server leaves it out and the browser never renders one it got anyway.
+ */
 function DecidedBlock({
   decision,
+  display,
   verbs,
   focusRef,
   children,
 }: {
   decision: NonNullable<AgentCard["decision"]>;
+  display: AgentCardApprovalLink["display"];
   verbs?: { approved: string; denied: string };
   focusRef: RefObject<HTMLDivElement | null>;
   children?: ReactNode;
@@ -1095,7 +1101,7 @@ function DecidedBlock({
       className="grid min-w-0 basis-full gap-1 outline-none @[26rem]:ml-auto @[26rem]:basis-auto"
     >
       <DecisionLine decision={decision} {...(verbs ? { verbs } : {})} />
-      {decision.note ? (
+      {decision.note && display === "exact" ? (
         <p data-testid="agent-card-note" className="break-words text-muted-foreground text-xs leading-4">
           “{decision.note}”
         </p>
@@ -1308,7 +1314,9 @@ function ToolCallCard({
               />
             </span>
           ) : null}
-          {card.decision ? <DecidedBlock decision={card.decision} focusRef={after.ref} /> : null}
+          {card.decision ? (
+            <DecidedBlock decision={card.decision} display={display} focusRef={after.ref} />
+          ) : null}
         </div>
       ) : null}
     </>
@@ -1565,6 +1573,7 @@ function WorkZoneProposalCard({
           {card.decision && link.status !== "failed" ? (
             <DecidedBlock
               decision={card.decision}
+              display={link.display}
               verbs={{ approved: "Started", denied: "Dismissed" }}
               focusRef={after.ref}
             />

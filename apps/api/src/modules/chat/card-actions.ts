@@ -69,7 +69,16 @@ async function linksOf(tx: Tx, rows: CardRow[]): Promise<Map<string, LinkedCardI
 const approvalLink = (link: LinkedCardInfo | undefined): Pick<AgentCard, "approval"> =>
   link ? { approval: { ...link } } : {};
 
-function cardFromRow(row: CardRow, dir: Directory | null): AgentCard {
+/**
+ * W-1 (ADR-0026 amended 2026-10-15): a linked card that does not show the exact action (`summary`, `review_only`)
+ * never shows or stores the decision note, which may quote the values its readers may not see. The note stays on the
+ * request (`/approvals` review), on an `exact` card (the requester's own DM) and in the bot's card-action turn. Cards
+ * without a display (ordinary cards, 07.2 memory) are unchanged.
+ */
+const noteShown = (link: LinkedCardInfo | undefined): boolean =>
+  link?.display === undefined || link.display === "exact";
+
+function cardFromRow(row: CardRow, dir: Directory | null, link?: LinkedCardInfo): AgentCard {
   const decision: AgentCard["decision"] =
     row.decision && row.decidedAt
       ? {
@@ -82,7 +91,7 @@ function cardFromRow(row: CardRow, dir: Directory | null): AgentCard {
           },
           at: iso(row.decidedAt),
           // Absent without a note, so older snapshots keep their exact shape.
-          ...(row.decisionNote ? { note: row.decisionNote } : {}),
+          ...(row.decisionNote && noteShown(link) ? { note: row.decisionNote } : {}),
         }
       : null;
   return {
@@ -102,10 +111,10 @@ function cardFromRow(row: CardRow, dir: Directory | null): AgentCard {
 export async function cardOf(tx: Tx, messageId: string): Promise<AgentCard | null> {
   const [row] = await tx.select().from(messageCards).where(eq(messageCards.messageId, messageId)).limit(1);
   if (!row) return null;
-  const links = await linksOf(tx, [row]);
+  const link = (await linksOf(tx, [row])).get(row.messageId);
   return {
-    ...cardFromRow(row, row.decidedBy ? await loadDirectory(tx) : null),
-    ...approvalLink(links.get(row.messageId)),
+    ...cardFromRow(row, row.decidedBy ? await loadDirectory(tx) : null, link),
+    ...approvalLink(link),
   };
 }
 
@@ -188,7 +197,7 @@ export async function withCards(tx: Tx, list: Message[], viewerId: string | null
       viewerCan.push("decide");
     }
     cards.set(row.messageId, {
-      ...cardFromRow(row, dir),
+      ...cardFromRow(row, dir, link),
       ...approvalLink(link),
       following: following.has(row.messageId),
       viewerCan,
@@ -334,8 +343,8 @@ export async function announceCardMessage(
 
 /**
  * Mirrors an approval's decision on its platform-owned card (07.2-06), in the decision transaction: status, decision,
- * decider and note, a version bump, `message.updated` to every reader, then the agent hears it as
- * `agent.card_action.v1` (with the quoted note). Once: a card that already shows a decision is left as it is. Called
+ * decider and note (none on a card that does not show the exact action, W-1), a version bump, `message.updated` to
+ * every reader, then the agent hears it as `agent.card_action.v1` (with the quoted note). Once: a card that already shows a decision is left as it is. Called
  * by the approval module only; chat never decides an approval itself. The 07.5 turn fields (`turnUserId`,
  * `decidedBy`, `grant`, `tainted`) pass through to the card action unchanged (P-06).
  */
@@ -357,6 +366,8 @@ export async function mirrorCardDecision(
     beforeCardAction?: () => Promise<void>;
   } & Pick<CardAction, "turnUserId" | "decidedBy" | "grant" | "tainted" | "resultCode">,
 ): Promise<void> {
+  const linked = bridge?.linkedCards();
+  const onCard = noteShown(linked ? (await linked.linkOf(tx, [a.messageId])).get(a.messageId) : undefined);
   const [after] = await tx
     .update(messageCards)
     .set({
@@ -364,7 +375,7 @@ export async function mirrorCardDecision(
       decision: a.outcome,
       decidedBy: a.deciderUserId,
       decidedAt: sql`now()`,
-      decisionNote: a.note ?? null,
+      decisionNote: onCard ? (a.note ?? null) : null,
       version: sql`${messageCards.version} + 1`,
       updatedAt: sql`now()`,
     })
@@ -563,8 +574,10 @@ export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
     }
     // 07.5-11 (WINDOWS #211, P-07): a card that does not show the exact action (a `summary` in a shared conversation, or
     // `review_only` when a value was cut for the card) is approved only on the review, where the decider sees all of
-    // it. Deny stays possible here. Kinds without a display (07.2 memory) are unchanged.
-    if (outcome === "approved" && link.display !== undefined && link.display !== "exact") {
+    // it. Deny stays possible here. Kinds without a link hook (07.2 memory: no `kind`, no `display`) are unchanged; a
+    // linked kind without a display (its link failed validation) is never exact (I-1, fail closed).
+    const exact = link.display === "exact" || (link.display === undefined && link.kind === undefined);
+    if (outcome === "approved" && !exact) {
       throw conflict("Review the full action before approving it", "review_required");
     }
     await linked.decide(tx, { messageId: message.id, deciderUserId: userId, outcome, actionHash, note });

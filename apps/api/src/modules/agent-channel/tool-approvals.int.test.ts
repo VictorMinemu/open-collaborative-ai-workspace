@@ -666,6 +666,128 @@ describe("a card that does not show the exact action cannot be approved from the
   });
 });
 
+describe("a decision note stays with the people who may see the action (W-1, ADR-0026 amended 2026-10-15)", () => {
+  const NOTE_SUMMARY = "NOTE-SENTINEL-summary-refund-4411";
+  const NOTE_REVIEW = "NOTE-SENTINEL-review-approved-7720";
+  const NOTE_EXACT = "NOTE-SENTINEL-exact-dm-3108";
+
+  const cardOfApproval = async (who: TestClient, approvalId: string) =>
+    ok(who.request("GET", `/api/v1/cards/${(await approvalRow(approvalId)).card_message_id}`));
+  const decidedAudit = async (approvalId: string) =>
+    (
+      await s.su.query(
+        "select metadata from app.audit_events where action = 'approval.decided' and resource_id = $1",
+        [approvalId],
+      )
+    ).rows.map((r) => r.metadata as Json);
+  const auditsWith = async (needle: string) =>
+    (await s.su.query("select action from app.audit_events where strpos(metadata::text, $1) > 0", [needle]))
+      .rows;
+  const convEventsWith = async (conversationId: string, needle: string) =>
+    (
+      await s.su.query(
+        "select type from app.stream_events where stream_id = $1 and strpos(payload::text, $2) > 0",
+        [`conv:${conversationId}`, needle],
+      )
+    ).rows;
+  async function summaryAsk(detail: string): Promise<string> {
+    await clearRules();
+    await rule({ pattern: `${crmSafe}__*`, mode: "always", scopeUnitId: sales, approverKind: "unit_leads" });
+    const ev = await turnOf(s.sam, ops, true);
+    const asked = await cell("/connectors/call", {
+      eventId: ev.eventId,
+      agentId: keeperId,
+      connector: crmSafe,
+      tool: "whoami",
+      arguments: { detail },
+    });
+    expect(codeOf(asked)).toBe("approval_required");
+    return asked.body?.error.details.approval.id as string;
+  }
+
+  it("a summary card in #ops denied on the card with a note: the card, its row and #ops's stream never hold it", async () => {
+    const id = await summaryAsk("note-on-summary");
+    expect((await cardOfApproval(marta, id)).approval?.display).toBe("summary");
+    const row = await approvalRow(id);
+    const denied = await marta.request("POST", `/api/v1/cards/${row.card_message_id}/decision`, {
+      outcome: "denied",
+      actionHash: row.action_hash,
+      note: NOTE_SUMMARY,
+    });
+    expect(denied.status, JSON.stringify(denied.body)).toBe(200);
+    // The card the decider gets back and every reader's card: the decision without its note.
+    expect(denied.body?.decision).toMatchObject({ outcome: "denied" });
+    expect(denied.body?.decision).not.toHaveProperty("note");
+    for (const who of [marta, s.sam]) {
+      const card = await cardOfApproval(who, id);
+      expect(card.decision).toMatchObject({ outcome: "denied", by: { id: martaId } });
+      expect(JSON.stringify(card)).not.toContain(NOTE_SUMMARY);
+    }
+    expect(
+      (
+        await s.su.query("select decision_note from app.message_cards where message_id = $1", [
+          row.card_message_id,
+        ])
+      ).rows[0].decision_note,
+    ).toBeNull();
+    expect(await convEventsWith(ops, NOTE_SUMMARY)).toEqual([]);
+    expect(
+      JSON.stringify(await ok(s.sam.request("GET", `/api/v1/conversations/${ops}/messages`))),
+    ).not.toContain(NOTE_SUMMARY);
+    // The bot hears it, in the requester's own turn; the requester's next try quotes it.
+    const told = await rerunOf(id);
+    expect(told.message.author.id).toBe(s.samId);
+    expect(told.cardAction).toMatchObject({ outcome: "denied", note: NOTE_SUMMARY });
+    // The review shows it to the people who may see the action.
+    expect((await ok(marta.request("GET", `/api/v1/approvals/${id}`))).decisionNote).toBe(NOTE_SUMMARY);
+    expect((await ok(s.sam.request("GET", `/api/v1/approvals/${id}`))).decisionNote).toBe(NOTE_SUMMARY);
+    // Audit: the note's length, never its text (tool.call is private, like memory).
+    const [meta] = await decidedAudit(id);
+    expect(meta).toMatchObject({ outcome: "denied", noteChars: NOTE_SUMMARY.length });
+    expect(meta).not.toHaveProperty("note");
+    expect(await auditsWith(NOTE_SUMMARY)).toEqual([]);
+  });
+
+  it("a summary request approved on the review with a note: the card shows no note, the re-run turn carries it", async () => {
+    const id = await summaryAsk("note-on-review");
+    expect((await decide(marta, id, "approved", NOTE_REVIEW)).status).toBe(200);
+    const card = await cardOfApproval(s.sam, id);
+    expect(card.decision).toMatchObject({ outcome: "approved" });
+    expect(JSON.stringify(card)).not.toContain(NOTE_REVIEW);
+    expect(await convEventsWith(ops, NOTE_REVIEW)).toEqual([]);
+    const told = await rerunOf(id);
+    expect(told.message.author.id).toBe(s.samId);
+    expect(told.cardAction).toMatchObject({ outcome: "approved", note: NOTE_REVIEW });
+    expect(told.cardAction.grant).toBeDefined();
+    const [meta] = await decidedAudit(id);
+    expect(meta).toMatchObject({ outcome: "approved", noteChars: NOTE_REVIEW.length });
+    expect(await auditsWith(NOTE_REVIEW)).toEqual([]);
+  });
+
+  it("an exact card in the requester's own DM keeps the note on the card and in the turn; audit has its length only", async () => {
+    await clearRules();
+    await rule({ pattern: WRITE, mode: "always" });
+    const ev = await turnOf(s.sam, samDm);
+    const asked = await ask(ev, WRITE, { arguments: { text: "note-on-exact" } });
+    const id = asked.body?.approval.id as string;
+    expect((await cardOfApproval(s.sam, id)).approval?.display).toBe("exact");
+    const row = await approvalRow(id);
+    const decided = await s.sam.request("POST", `/api/v1/cards/${row.card_message_id}/decision`, {
+      outcome: "approved",
+      actionHash: row.action_hash,
+      note: NOTE_EXACT,
+    });
+    expect(decided.status, JSON.stringify(decided.body)).toBe(200);
+    expect(decided.body?.decision).toMatchObject({ outcome: "approved", note: NOTE_EXACT });
+    expect((await cardOfApproval(s.sam, id)).decision).toMatchObject({ note: NOTE_EXACT });
+    expect((await convEventsWith(samDm, NOTE_EXACT)).length).toBeGreaterThan(0);
+    expect((await rerunOf(id)).cardAction).toMatchObject({ outcome: "approved", note: NOTE_EXACT });
+    const [meta] = await decidedAudit(id);
+    expect(meta).toMatchObject({ noteChars: NOTE_EXACT.length, selfApproved: true });
+    expect(await auditsWith(NOTE_EXACT)).toEqual([]);
+  });
+});
+
 describe("a keychain request cannot bypass the rule", () => {
   let key: Json;
   let kcHost = "";
