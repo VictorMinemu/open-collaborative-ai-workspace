@@ -267,3 +267,32 @@ describe("POST /agent-channel/v1/sandbox/write", () => {
     expect(text).not.toContain("secret-plan");
   });
 });
+
+describe("POST /agent-channel/v1/sandbox/share without object storage", () => {
+  it("is 503 service_unavailable before the decision: recorded and shown blocked, never counted", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    await ok(write(ev, { path: "report.txt", content: "r" }));
+    const r = await s.cell("/sandbox/share", { eventId: ev.eventId, agentId: s.scoutId, path: "report.txt" });
+    expect(r.status).toBe(503);
+    expect(codeOf(r)).toBe("service_unavailable");
+    const turn = (
+      await s.su.query("select sandbox_calls from app.agent_turns where event_id = $1", [ev.eventId])
+    ).rows[0];
+    expect(turn.sandbox_calls).toBe(1);
+    const ledger = (
+      await s.su.query(
+        "select decision, reason from app.agent_tool_calls where event_id = $1 and tool = 'ocw_sandbox_share'",
+        [ev.eventId],
+      )
+    ).rows;
+    expect(ledger).toEqual([{ decision: "denied", reason: "service_unavailable" }]);
+    const steps = (
+      await s.su.query("select steps from app.bot_turn_activity where event_id = $1", [ev.eventId])
+    ).rows[0].steps as Json[];
+    expect(steps.at(-1)).toMatchObject({
+      verb: "blocked",
+      target: "report.txt",
+      outcome: { kind: "blocked", code: "service_unavailable" },
+    });
+  });
+});

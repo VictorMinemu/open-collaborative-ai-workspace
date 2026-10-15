@@ -7,11 +7,14 @@ import {
   AgentChannelSandboxProcess,
   AgentChannelSandboxRead,
   AgentChannelSandboxReadResponse,
+  AgentChannelSandboxShare,
+  AgentChannelSandboxShareResponse,
   AgentChannelSandboxWrite,
   AgentChannelSandboxWriteResponse,
   BUILTIN_TOOLS,
   CONFINED_TOOL_FLAGS,
   type ConfinedToolName,
+  MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_SANDBOX_CALLS_PER_TURN,
   SANDBOX_LIMITS,
   SANDBOX_REFUSAL_STATUS,
@@ -33,6 +36,7 @@ import type { z } from "zod";
 import type { App, Core } from "../../core";
 import { sha256Hex } from "../../lib/crypto";
 import { HttpError } from "../../lib/errors";
+import { createObjectStorage, pendingTurnAttachmentCount, storeServerAttachment } from "../artifact";
 import type { PermissionService } from "../organization";
 import {
   type ConfinedKind,
@@ -89,6 +93,8 @@ const DEFAULT_EXEC_TIMEOUT_SECONDS = 120;
 /** How much longer than the yield the API waits for sandboxd's answer. */
 const EXEC_ANSWER_MARGIN_MS = 15_000;
 const ENSURE_TIMEOUT_MS = 60_000;
+/** A shared file comes back from sandboxd as base64 JSON (up to the attachment limit). */
+const SHARE_DOWNLOAD_TIMEOUT_MS = 60_000;
 
 /** Every code a sandbox call can be refused with. */
 export type SandboxCallRefusal =
@@ -697,6 +703,9 @@ export function registerSandboxRoutes(
     client: SandboxdClient | null;
   },
 ): void {
+  // Shared files land in the conversation through the artifact storage (server credentials); null = not configured.
+  const storage = createObjectStorage(core.env, core.secretStore);
+  const attachmentMaxBytes = core.env.OCW_ATTACHMENT_MAX_BYTES;
   const route = <B extends z.ZodType, R extends z.ZodType>(body: B, response: R) => ({
     config: { authz: "cell" as const },
     schema: { tags, security: bearer, body, response: { 200: response } },
@@ -883,6 +892,59 @@ export function registerSandboxRoutes(
           stepResult: null,
           audit: { deleted: result.deleted, recursive, ...pathAudit(body.path) },
         }),
+      });
+    },
+  );
+
+  scope.post(
+    "/sandbox/share",
+    {
+      ...route(AgentChannelSandboxShare, AgentChannelSandboxShareResponse),
+      preValidation: guardBody({}),
+    },
+    async (req) => {
+      const body = req.body;
+      return runSandboxCall(core, deps, cellOf(req), {
+        tool: BUILTIN_TOOLS.sandboxShare,
+        body,
+        args: { path: body.path },
+        stepInput: { path: body.path },
+        auditAction: "sandbox.file_shared",
+        failureAudit: (reason) => ({ reason, ...pathAudit(body.path) }),
+        // Before the decision: nowhere to store it, or the reply already holds as many files as a message can.
+        precheck: async (tx, turn) => {
+          if (!storage) return "service_unavailable";
+          return (await pendingTurnAttachmentCount(tx, turn.eventId)) >= MAX_ATTACHMENTS_PER_MESSAGE
+            ? "too_large"
+            : null;
+        },
+        call: async (client, target) => {
+          const entry = await assertFile(client, target, body.path);
+          if (entry.size !== null && entry.size > attachmentMaxBytes) throw new LocalRefusal("too_large");
+          const file = await client.call(
+            "filesDownload",
+            { target, path: body.path },
+            { timeoutMs: SHARE_DOWNLOAD_TIMEOUT_MS },
+          );
+          const bytes = Buffer.from(file.data, "base64");
+          if (bytes.length > attachmentMaxBytes) throw new LocalRefusal("too_large");
+          return { name: file.name, bytes };
+        },
+        finish: async (tx, file, turn) => {
+          if (!storage) throw new LocalRefusal("service_unavailable");
+          const row = await storeServerAttachment(tx, storage, {
+            conversationId: turn.conversationId,
+            uploaderAgentId: turn.agentId,
+            eventId: turn.eventId,
+            name: file.name,
+            bytes: file.bytes,
+          });
+          return {
+            response: { attachmentId: row.id, name: row.filename, size: row.sizeBytes },
+            stepResult: { name: row.filename },
+            audit: { attachmentId: row.id, conversationId: row.conversationId, size: row.sizeBytes },
+          };
+        },
       });
     },
   );

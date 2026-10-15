@@ -25,6 +25,7 @@ import { type ApiModule, type App, authOf, type Core, tenant } from "../../core"
 import { randomToken, sha256Hex } from "../../lib/crypto";
 import { HttpError, notFound } from "../../lib/errors";
 import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgent } from "../agent";
+import { linkTurnAttachments } from "../artifact";
 import { cellAgentCapabilities, loadPolicy } from "../bot-capabilities";
 import { cellMcpServers } from "../mcp";
 import type { MemoryService } from "../memory";
@@ -391,11 +392,17 @@ export function createAgentChannelModule(
                     inReplyToMessageId: body.inReplyToMessageId,
                     onBehalfOfUserId: check.onBehalfOf,
                     // 07.8-10 (R2): the reply to a turn carries what the bot did in its sandbox (the activity, attached
-                    // to the turn's first reply), before `message.created`.
+                    // to the turn's first reply) and the files it shared in that turn, before `message.created`.
                     ...(turnEventId
                       ? {
                           onInserted: async (tx: Tx, messageId: string) => {
                             await finishActivity(tx, { eventId: turnEventId, replyMessageId: messageId });
+                            await linkTurnAttachments(tx, {
+                              eventId: turnEventId,
+                              conversationId: body.conversationId,
+                              uploaderAgentId: body.agentId,
+                              messageId,
+                            });
                           },
                         }
                       : {}),

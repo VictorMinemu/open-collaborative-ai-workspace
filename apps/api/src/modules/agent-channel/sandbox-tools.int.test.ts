@@ -1,16 +1,23 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { sha256Hex } from "../../lib/crypto";
+import { type TestClient, WEB_ORIGIN } from "../../testing";
 import { codeOf, type Json, ok, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
+import { startTestStorage, type TestStorage } from "../../testing-storage";
 
 /**
  * 07.8-10 Task 2 (SBX-02; D-02, D-11 F-7, P-06, P-07, P-17): the bot's file and process tools. Each route is decided by
  * `decideSandboxCall` with its static flag class (read, list and process taint the turn; write and delete do not),
  * counted against the per-turn budget of 40, audited with ids, sizes and counts only, recorded as a step of the turn's
- * activity, and refused for another organization's cell. Real PostgreSQL + Redis; the in-memory sandboxd (P-13).
+ * activity, and refused for another organization's cell. Task 3: `share` turns a sandbox file into an attachment of
+ * the bot's reply, the only confined tool that counts as leaving the sandbox. Real PostgreSQL + Redis + Garage (the
+ * artifact storage); the in-memory sandboxd (P-13).
  */
 
 const SENTINEL = "OCW-SENTINEL-FILE-9182";
+/** A small attachment limit, so a share over it needs no large file. */
+const ATTACHMENT_MAX = 65_536;
+let storage: TestStorage;
 let s: SandboxStack;
 
 const tool = (name: string, ev: Json, body: Json = {}, opts: { agentId?: string; token?: string } = {}) =>
@@ -55,12 +62,24 @@ async function seed(path: string, content: string, agentId = s.scoutId) {
 }
 
 beforeAll(async () => {
-  s = await startSandboxStack();
+  storage = await startTestStorage();
+  try {
+    s = await startSandboxStack({
+      env: { ...storage.env, OCW_ATTACHMENT_MAX_BYTES: String(ATTACHMENT_MAX) },
+    });
+  } catch (err) {
+    await storage.stop();
+    throw err;
+  }
   await s.setPolicy({ enabled: true });
 });
 
 afterAll(async () => {
-  await s?.stop();
+  try {
+    await s?.stop();
+  } finally {
+    await storage?.stop();
+  }
 });
 
 describe("read (taints; at most 256 KB; a folder is invalid_path)", () => {
@@ -250,6 +269,7 @@ describe("cross-tenant guards derived from the authz registry (P-17, 07.4 #169)"
       write: { path: "tenant/b.txt", content: "b", mode: "overwrite" },
       list: { path: "" },
       delete: { path: "tenant/a.txt" },
+      share: { path: "tenant/a.txt" },
     };
     const cases: Record<string, () => Promise<void>> = Object.fromEntries(
       Object.entries(bodies).map(([name, body]) => [
@@ -285,5 +305,194 @@ describe("cross-tenant guards derived from the authz registry (P-17, 07.4 #169)"
     const r = await tool("read", ev, { path: "x.txt" }, { agentId: other.id });
     expect(r.status).toBe(403);
     expect(codeOf(r)).toBe("no_trigger");
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: share
+
+/** The attachment download as a reader asks for it (302 to a presigned URL, or 404); never followed. */
+async function download(who: TestClient, attachmentId: string): Promise<Response> {
+  return fetch(`${s.stack.baseUrl}/api/v1/attachments/${attachmentId}/download`, {
+    redirect: "manual",
+    headers: { origin: WEB_ORIGIN, cookie: who.cookieHeader },
+  });
+}
+
+const replyTo = (ev: Json, text = "Here it is.") =>
+  ok(
+    s.cell("/messages", {
+      agentId: s.scoutId,
+      conversationId: ev.conversation.id,
+      threadRootMessageId: null,
+      eventId: ev.eventId,
+      text,
+      idempotencyKey: `reply-${randomUUID()}`,
+    }),
+  );
+
+const attachmentRow = async (id: string) =>
+  (
+    await s.su.query(
+      "select status, uploader_id, event_id, message_id, conversation_id, size_bytes, filename from app.attachments where id = $1",
+      [id],
+    )
+  ).rows[0] as Json | undefined;
+
+const sharedOf = async (eventId: string) =>
+  Number(
+    (await s.su.query("select count(*)::int as n from app.attachments where event_id = $1", [eventId]))
+      .rows[0].n,
+  );
+
+const approvalRow = async (id: string) =>
+  (await s.su.query("select * from app.approval_requests where id = $1", [id])).rows[0] as Json;
+
+/** The one `agent.card_action.v1` of the approval's card (the re-run turn). */
+async function rerunOf(approvalId: string): Promise<Json> {
+  const row = await approvalRow(approvalId);
+  const rows = (
+    await s.su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'agent.card_action.v1' and payload->'cardAction'->>'messageId' = $2 order by seq",
+      [`cell:${s.orgA}`, row.card_message_id],
+    )
+  ).rows;
+  expect(rows).toHaveLength(1);
+  return rows[0].payload as Json;
+}
+
+describe("share: a sandbox file becomes an attachment of the bot's reply (D-11 F-7: side-effecting)", () => {
+  it("on a clean turn: pending for the turn, linked to its reply for its readers only, audited with ids and size", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    const csv = "id,late\n1,yes\n";
+    await write(ev, "reports/late.csv", csv);
+    const shared = await ok(tool("share", ev, { path: "reports/late.csv" }));
+    expect(shared).toMatchObject({ name: "late.csv", size: csv.length });
+    const id = shared.attachmentId as string;
+    expect(await attachmentRow(id)).toMatchObject({
+      status: "pending",
+      uploader_id: s.scoutId,
+      event_id: ev.eventId,
+      message_id: null,
+      conversation_id: s.samDm,
+      filename: "late.csv",
+    });
+    // Nobody reads it before the reply, the turn's human included.
+    expect((await download(s.sam, id)).status).toBe(404);
+    // Sharing is not reading: the turn stays clean.
+    expect((await turnRow(ev.eventId)).tainted).toBe(false);
+
+    const posted = await replyTo(ev);
+    expect((await attachmentRow(id))?.status).toBe("ready");
+    expect((await attachmentRow(id))?.message_id).toBe(posted.messageId);
+    const list = (await ok(s.sam.request("GET", `/api/v1/conversations/${s.samDm}/messages?limit=50`)))
+      .messages as Json[];
+    const msg = list.find((m) => m.id === posted.messageId);
+    expect(msg?.attachments).toEqual([
+      expect.objectContaining({ id, filename: "late.csv", size: csv.length, status: "ready" }),
+    ]);
+    expect(msg?.activity?.steps.map((x: Json) => [x.verb, x.target])).toEqual([
+      ["wrote", "reports/late.csv · 14 B"],
+      ["shared", "late.csv"],
+    ]);
+
+    const res = await download(s.sam, id);
+    expect(res.status).toBe(302);
+    const bytes = await (await fetch(res.headers.get("location") as string)).text();
+    expect(bytes).toBe(csv);
+    expect((await download(s.alex, id)).status).toBe(404);
+
+    const audits = await auditOf("sandbox.file_shared", ev.eventId);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ agent_id: s.scoutId, user_id: s.samId, result: "success" });
+    expect(audits[0]?.metadata).toMatchObject({
+      attachmentId: id,
+      conversationId: s.samDm,
+      size: csv.length,
+    });
+    expect(JSON.stringify(audits[0])).not.toContain("late.csv");
+  });
+
+  it("after a read in the same turn (tainted) it is 403 tainted and nothing is stored", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    await write(ev, "loot.txt", "x");
+    await ok(tool("read", ev, { path: "loot.txt" }));
+    const r = await tool("share", ev, { path: "loot.txt" });
+    expect(r.status).toBe(403);
+    expect(codeOf(r)).toBe("tainted");
+    expect(await sharedOf(ev.eventId)).toBe(0);
+  });
+
+  it("a 07.5 `when_tainted` rule: the tainted share asks the requester; once approved the re-run shares it once", async () => {
+    await s.su.query(
+      `insert into app.tool_approval_policies
+         (organization_id, scope_unit_id, tool_pattern, mode, approver_kind, approver_user_ids, created_by, updated_by)
+       values ($1, null, 'ocw_sandbox_share', 'when_tainted', 'requester', '{}', $2, $2)`,
+      [s.orgA, s.victorId],
+    );
+    try {
+      const ev = await s.turnOf(s.sam, s.samDm);
+      await write(ev, "summary.txt", "ok");
+      await ok(tool("read", ev, { path: "summary.txt" }));
+      const asked = await tool("share", ev, { path: "summary.txt" });
+      expect(asked.status, JSON.stringify(asked.body)).toBe(409);
+      expect(codeOf(asked)).toBe("approval_required");
+      expect(await sharedOf(ev.eventId)).toBe(0);
+      const id = asked.body?.error.details.approval.id as string;
+      const row = await approvalRow(id);
+      expect(
+        (
+          await s.sam.request("POST", `/api/v1/approvals/${id}/decision`, {
+            outcome: "approved",
+            actionHash: row.action_hash,
+          })
+        ).status,
+      ).toBe(200);
+      const rerun = await rerunOf(id);
+      const done = await ok(tool("share", rerun, { path: "summary.txt" }));
+      expect(await attachmentRow(done.attachmentId)).toMatchObject({
+        event_id: rerun.eventId,
+        status: "pending",
+      });
+      const again = await tool("share", rerun, { path: "summary.txt" });
+      expect(codeOf(again)).toBe("approval_used");
+    } finally {
+      await s.su.query("delete from app.tool_approval_policies where organization_id = $1", [s.orgA]);
+    }
+  });
+
+  it("over the attachment size limit is 413 too_large and nothing is stored", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    await write(ev, "huge.txt", "z".repeat(ATTACHMENT_MAX + 1));
+    const r = await tool("share", ev, { path: "huge.txt" });
+    expect(r.status).toBe(413);
+    expect(codeOf(r)).toBe("too_large");
+    expect(await sharedOf(ev.eventId)).toBe(0);
+  });
+
+  it("a reply holds at most 10 files: the 11th share of a turn is 413 too_large", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    for (let i = 0; i < 11; i++) await seed(`batch/${i}.txt`, `${i}`);
+    for (let i = 0; i < 10; i++) await ok(tool("share", ev, { path: `batch/${i}.txt` }));
+    const r = await tool("share", ev, { path: "batch/10.txt" });
+    expect(r.status).toBe(413);
+    expect(codeOf(r)).toBe("too_large");
+    const posted = await replyTo(ev);
+    const linked = (
+      await s.su.query("select count(*)::int as n from app.attachments where message_id = $1", [
+        posted.messageId,
+      ])
+    ).rows[0].n;
+    expect(linked).toBe(10);
+  });
+
+  it("a share whose reply never comes stays pending and is due for the attachment sweeper after 24 h", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    await write(ev, "orphan.txt", "o");
+    const shared = await ok(tool("share", ev, { path: "orphan.txt" }));
+    const due = async (at: string) =>
+      (await s.su.query("select id from app.due_attachment_sweeps(1000, $1)", [at])).rows.map((r) => r.id);
+    expect(await due(new Date().toISOString())).not.toContain(shared.attachmentId);
+    expect(await due(new Date(Date.now() + 25 * 3600_000).toISOString())).toContain(shared.attachmentId);
+    expect((await attachmentRow(shared.attachmentId))?.status).toBe("pending");
   });
 });
