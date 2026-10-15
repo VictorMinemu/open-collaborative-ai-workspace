@@ -577,6 +577,42 @@ Verifications and in ADR-0025 › Validation). On an instance with HTTPS (`pnpm 
 3. **A phone.** Do steps 2 and 4 above from a phone: the card, the provider's sign-in, **Back to chat** and the share
    dialog must all fit and work with a thumb.
 
+## Per-tool approvals and Work Zone proposals (Phase 07.5)
+
+Phase 07.5 (ADR-0026). An organization decides, tool by tool, which bot actions need a person first; the person sees
+exactly what will run and approves it once. Bots can also propose a Work Zone session that only the person who asked
+can start. The demo's bots run through the fake cell, so the bot side is scripted; everything a person does is real.
+
+1. **A rule (Víctor).** Settings › **Approval policies** › Organization. Expand an MCP server (or a connector), open a
+   tool that changes data, choose **Always ask** and **The person who asked**, **Save rule**. Settings › MCP servers now
+   shows *Needs approval* next to that tool. **Change history** lists the change.
+2. **Ask in a DM (Sam).** Ask a bot that has the tool to use it. The bot says it is waiting for your approval, and a
+   card shows the exact action: the tool, the source and every value it will send, *Runs once, with exactly these
+   values · Expires in 24 h*. **Approve** (confirm): the card reads *Approved*, then *Used* once the bot ran it, and the
+   bot reports the result. The rail shows **Approvals** with a count while something waits.
+3. **A lead approves (Marta).** As Víctor, add a rule on the **Sales** unit for the same tool with **Leads of Sales**.
+   Sam (a Sales member) asks the bot in a channel: the channel shows a summary card only (*Only Sam Lee and the
+   approvers can see the details.*). Marta opens **Approvals**, reviews the exact action and **Approve**s: the bot runs
+   it as Sam's turn in the channel and Sam's card reads *Used*. Sam's own review says *Waiting for a lead of Sales*.
+4. **Deny with a note.** Repeat 3 and **Deny** with a note: the bot says Marta denied it and quotes the note; the same
+   action asked again within 24 h is refused without a new card.
+5. **A Work Zone proposal (Sam).** With Sam's device online, ask his bot to fix something in a project: a **Work Zone**
+   card proposes the session (project, device, runtime, *Supervised*, the prompt). Only Sam sees **Start session**;
+   others read *Only Sam Lee can start this session.* Start it: the session opens with the bot's prompt, credited
+   *Sam Lee · proposed by {bot}*. Take the device offline first to see Start wait with the reason.
+
+**Owner check** (never run by an agent; record the result in
+`.planning/phases/07.5-per-tool-approvals-and-work-zone-proposals/07.5-VALIDATION.md` › Manual-Only Verifications and
+in ADR-0026 › Validation). On your own stack, with a real connector or MCP server and a real model:
+
+1. Add an **Always ask** rule for one connector tool that writes something you can check at the provider.
+2. Ask your bot to use it in a DM: approve once **from the card**. Check at the provider that exactly the values on the
+   card were written, once.
+3. Ask again in a channel where the rule's approver is someone else: approve once **from `/approvals`**. Check the
+   channel only ever showed the summary card and the provider received exactly the reviewed values, once.
+4. From a **phone**, ask your bot to propose a Work Zone session on one of your devices and **Start** it from the card:
+   the session must start in Supervised mode, on that device, with the bot's prompt.
+
 ## Troubleshooting
 
 | Symptom | Fix |
