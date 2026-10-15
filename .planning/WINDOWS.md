@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 126
+open_count: 128
 waived_count: 4
 fixed_count: 101
-total_count: 231
-last_updated: 2026-10-15T15:08:27.379Z
+total_count: 233
+last_updated: 2026-10-15T15:10:12.922Z
 ---
 
 # Broken Windows Ledger
@@ -246,6 +246,8 @@ last_updated: 2026-10-15T15:08:27.379Z
 | 229 | 07.5 | deviation | apps/api/src/modules/approval |  | After #204 the bot does not hear decisions made from /approvals by someone outside the conversation; Work Zone Start has no applyTopics; cards still parse requester and runtime from server text | open |  | 2026-10-15T12:01:49.197Z |  |
 | 230 | 07.8 | deviation | packages/db/src/schema/app.ts |  | Hard-deleting a bot removes its browser_sessions rows but leaves their browser_session secrets; revoke/purge/sweeper in 07.8-21/27 must delete them; nothing cleans browser_sessions when a member leaves the org | open |  | 2026-10-15T15:08:27.289Z |  |
 | 231 | 07.8 | deviation | packages/db/src/schema/app.ts |  | DECIDE in 07.8-18: the app role can change an approved sandbox package's pinned fields (sha256, tree_sha256, lockfile, dependency_count, review_token); add an immutability trigger after approval. Every new secret kind now needs a migration (secrets_kind_check), note in ADR-0029 | open |  | 2026-10-15T15:08:27.379Z |  |
+| 232 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | Wiring left for later plans: turn.activity not registered in realtime EventTypes (07.8-10); SandboxdContextInput.events is loose until tightened to LiveInputFrame (07.8-16); PATCH /agents/:id/capabilities ignores sandbox/browser until 07.8-15 | open |  | 2026-10-15T15:10:12.850Z |  |
+| 233 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | File upload/download/import travel as base64 JSON up to 50 MiB (~67 MiB on the wire): check the body limit or stream (07.8-09/11); cap_reached/tainted answer 403 here vs 409 on 07.4 connector routes, unify in 05/10/14; npm lockfiles with sha1-only integrity fail PackageTreeEntry, refuse with a reason in 17/18 | open |  | 2026-10-15T15:10:12.922Z |  |
 
 ````json
 [
@@ -3019,6 +3021,30 @@ last_updated: 2026-10-15T15:08:27.379Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T15:08:27.379Z",
+    "resolved_at": null
+  },
+  {
+    "id": 232,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/contracts/src/sandbox.ts",
+    "line": null,
+    "description": "Wiring left for later plans: turn.activity not registered in realtime EventTypes (07.8-10); SandboxdContextInput.events is loose until tightened to LiveInputFrame (07.8-16); PATCH /agents/:id/capabilities ignores sandbox/browser until 07.8-15",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T15:10:12.850Z",
+    "resolved_at": null
+  },
+  {
+    "id": 233,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/contracts/src/sandbox.ts",
+    "line": null,
+    "description": "File upload/download/import travel as base64 JSON up to 50 MiB (~67 MiB on the wire): check the body limit or stream (07.8-09/11); cap_reached/tainted answer 403 here vs 409 on 07.4 connector routes, unify in 05/10/14; npm lockfiles with sha1-only integrity fail PackageTreeEntry, refuse with a reason in 17/18",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T15:10:12.922Z",
     "resolved_at": null
   }
 ]
