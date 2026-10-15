@@ -328,11 +328,23 @@ Deferred to later milestones. Tracked but not in the current roadmap.
 - **POL-V1X-04**: Cmd+K quick switcher; Zulip-style resolve/move thread; transcript export
 - **POL-V1X-05**: Effective-permission viewer UI (PRD §107.3)
 
+### Bot Sandboxes and Live Browser (SBX, BRW) — added 2026-10-14 by the owner
+
+- [ ] **SBX-01**: Each bot has its own isolated sandbox (separate container or VM boundary, persistent workspace with a quota, CPU/memory/process limits, no host mounts or Docker socket) that no other bot or cell process can reach
+- [ ] **SBX-02**: A bot reads and writes files and runs commands only inside its sandbox, through tools the Control Plane decides, audits and can stop; secrets never enter the sandbox environment
+- [ ] **SBX-03**: Sandbox egress goes only through the 07.4 egress policy (public-only, per-organization allowlist); the sandbox cannot reach platform services except the Agent Channel API
+- [ ] **SBX-04**: Plugins and tools refused by ADR-0010 today can be installed through the ADR-0011 approval flow when they run only inside the sandbox; platform-administration tools stay refused; 07.5 per-tool approvals apply
+- [ ] **SBX-05**: People who may configure a bot browse, download, upload and delete its sandbox files from the bot page; Sandbox is a module an admin turns on per organization or unit
+- [ ] **BRW-01**: A bot drives a real browser inside its sandbox through Control Plane tools (open, read, click, type), with navigation audited by host only
+- [ ] **BRW-02**: People who can read the conversation watch the bot's browser live in a small floating window that can be expanded
+- [ ] **BRW-03**: When a page needs a login the bot posts a platform-owned card; a person with the right takes control, signs in and hands control back; password fields never reach the bot, the model, logs or audit
+- [ ] **BRW-04**: The signed-in session is sealed per member and site in the keychain, reused only for that member's turns, expires and is revocable; Browser is a module an admin turns on
+
 ### Operations backlog (from the 2026-10-08 research, not yet scheduled)
 
 - **OPS-BL-01**: Organization groups — several organizations per user with a switcher, and consolidated aggregate reporting computed per organization under its own tenant context (needs an identity/tenancy ADR)
 - **OPS-BL-02**: Model comparison per task (text, code, image reading) through the model gateway, opt-in, dry-run first, metered as `eval` usage
-- **OPS-BL-03**: Browser-session logins for agents in a separate hardened browser cell (remote browser streamed to the user, sealed session state)
+- ~~**OPS-BL-03**~~: Browser-session logins for agents — scheduled as BRW-01..04 in Phase 07.8 (2026-10-14)
 - **OPS-BL-04**: Board columns synchronized from an external system's phases via connectors (two-way, compare-and-set)
 
 ## Out of Scope
@@ -507,6 +519,15 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | A2A-01 | Phase 07.7 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
 | A2A-02 | Phase 07.7 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
 | A2A-03 | Phase 07.7 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| SBX-01 | Phase 07.8 | Pending | New (owner, 2026-10-14) |
+| SBX-02 | Phase 07.8 | Pending | New (owner, 2026-10-14) |
+| SBX-03 | Phase 07.8 | Pending | New (owner, 2026-10-14) |
+| SBX-04 | Phase 07.8 | Pending | New (owner, 2026-10-14) |
+| SBX-05 | Phase 07.8 | Pending | New (owner, 2026-10-14) |
+| BRW-01 | Phase 07.8 | Pending | New (owner, 2026-10-14) |
+| BRW-02 | Phase 07.8 | Pending | New (owner, 2026-10-14) |
+| BRW-03 | Phase 07.8 | Pending | New (owner, 2026-10-14) |
+| BRW-04 | Phase 07.8 | Pending | New (owner, 2026-10-14) |
 | DEV-01 | Phase 8 | Partial | Session events + Device Link frames in `packages/contracts`; no `packages/protocol`; capability flags only inside the daemon |
 | DEV-02 | Phase 8 | Partial | One-time code + hashed bearer token (SLICE-13); no Ed25519 signed challenge or RFC 8628 |
 | DEV-03 | Phase 8 | Partial | Device list + immediate revocation (SLICE-13); no active sessions, no admin view |
