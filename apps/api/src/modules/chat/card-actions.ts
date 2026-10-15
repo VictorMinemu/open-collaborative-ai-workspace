@@ -349,6 +349,12 @@ export async function mirrorCardDecision(
     /** `running`: an approved grant not used yet (WINDOWS 135); `mirrorCardUsed` turns it `succeeded` on use. */
     status: "running" | "succeeded" | "failed" | "cancelled";
     note?: string | null | undefined;
+    /**
+     * Runs once, after the card's conversation event and before the bot's card action (also when the card already
+     * showed a decision and is left as it is): the approval module announces on the `user:` streams there, so one
+     * decision locks its streams in the order a message post does (conversation, `user:`, cell; 07.5-16).
+     */
+    beforeCardAction?: () => Promise<void>;
   } & Pick<CardAction, "turnUserId" | "decidedBy" | "grant" | "tainted" | "resultCode">,
 ): Promise<void> {
   const [after] = await tx
@@ -370,7 +376,10 @@ export async function mirrorCardDecision(
       ),
     )
     .returning();
-  if (!after) return;
+  if (!after) {
+    await a.beforeCardAction?.();
+    return;
+  }
   const [message] = await tx.select().from(messages).where(eq(messages.id, a.messageId)).limit(1);
   if (message && !message.deletedAt) {
     const dto = await cardMessageOf(tx, message, await loadDirectory(tx));
@@ -378,6 +387,7 @@ export async function mirrorCardDecision(
       message: dto,
     });
   }
+  await a.beforeCardAction?.();
   await deps.chatAgent.emitCardAction(
     tx,
     {

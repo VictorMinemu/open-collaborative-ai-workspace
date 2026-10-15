@@ -69,6 +69,14 @@ export interface RealtimeService {
     payload: unknown,
     opts?: { actorUserId?: string | null },
   ): Promise<number>;
+  /**
+   * Locks the streams of these topics, in the order given, until the caller's transaction ends (a missing stream is
+   * created at seq 0, as chat's `lockNextSeq` does). Every append locks its stream's row until commit, so two
+   * transactions appending to the same streams in different orders deadlock: a transaction that will append to several
+   * shared streams, some of them through other modules, calls this first with the order a message post follows (the
+   * conversation, then `user:` streams in ascending id order, then the cell; 07.5-16).
+   */
+  lockStreams(tx: Tx, topics: readonly string[]): Promise<void>;
   /** Current last seq of a topic (0 when the stream does not exist yet). Use for REST snapshots. */
   lastSeq(tx: Tx, topic: string): Promise<number>;
   /** Fire-and-forget ephemeral event (typing, deltas, presence): never persisted, no seq. */
@@ -213,6 +221,17 @@ export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): Re
         }
       });
       return seq;
+    },
+
+    async lockStreams(tx, topics) {
+      const ctx = tenantOf(tx);
+      for (const topic of topics) {
+        if (!parseTopic(topic)) throw new Error(`invalid topic ${topic}`);
+        await tx.execute(sql`
+          insert into app.streams (id, organization_id, last_seq) values (${topic}, ${ctx.organizationId}, 0)
+          on conflict (id) do nothing`);
+        await tx.execute(sql`select 1 from app.streams where id = ${topic} for update`);
+      }
     },
 
     async lastSeq(tx, topic) {

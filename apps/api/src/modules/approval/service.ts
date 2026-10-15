@@ -18,6 +18,7 @@ import { conflict, forbidden, HttpError, notFound } from "../../lib/errors";
 import {
   announceCardMessage,
   authorOf,
+  convTopic,
   type Directory,
   loadDirectory,
   mirrorCardClosed,
@@ -256,14 +257,27 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
     };
   }
 
-  /** The deciders' and the requester's `user:` streams (plus extra ids), ids and status only, never `org:`. */
+  /**
+   * The deciders' and the requester's `user:` streams (plus extra ids), ids and status only, never `org:`.
+   *
+   * Stream lock order (07.5-16): every append locks its stream's row until commit, so two transactions that touch the
+   * same streams in different orders deadlock. The order kept here is the one a message post already follows: the
+   * conversation's stream first, then `user:` streams in ascending id order, then the cell's stream. So the `user:`
+   * streams go in ascending id order (never the audience's order, which puts the requester first), and every caller
+   * announces after the card's conversation event and before the bot's card action.
+   */
   async function announce(tx: Tx, kind: ApprovalKind, row: ApprovalRow, extra: Array<string | null>) {
-    const to = new Set<string>(await kind.audience(tx, row));
-    for (const id of [row.requestedForUserId, ...extra]) if (id) to.add(id);
     const ev: ApprovalRequestUpdatedEvent = { id: row.id, status: row.status };
-    for (const userId of to) {
+    for (const userId of await announcedTo(tx, kind, row, extra)) {
       await core.realtime.appendEvent(tx, `user:${userId}`, EventTypes.approvalRequestUpdated, ev);
     }
+  }
+
+  /** Who `announce` tells, in ascending id order (the stream lock order). */
+  async function announcedTo(tx: Tx, kind: ApprovalKind, row: ApprovalRow, extra: Array<string | null>) {
+    const to = new Set<string>(await kind.audience(tx, row));
+    for (const id of [row.requestedForUserId, ...extra]) if (id) to.add(id);
+    return [...to].sort();
   }
 
   async function recompute(tx: Tx, kind: ApprovalKind, row: ApprovalRow): Promise<string> {
@@ -413,8 +427,16 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
           : {}),
         metadata: { ...auditIds(row), resourceType: row.resourceType, resourceId: row.resourceId },
       });
-      await announce(tx, kind, row, []);
+      // Stream lock order (`announce`): the card's conversation, then the `user:` streams, taken up front because the
+      // card's own post notifies people (their `user:` streams) before this request is announced.
+      if (input.card) {
+        await core.realtime.lockStreams(tx, [
+          convTopic(input.card.conversationId),
+          ...(await announcedTo(tx, kind, row, [])).map((id) => `user:${id}`),
+        ]);
+      }
       const cardMessageId = input.card ? await postMirror(tx, kind, row, input.card) : null;
+      await announce(tx, kind, row, []);
       return { id: row.id, actionHash: hash, cardMessageId };
     },
 
@@ -466,9 +488,11 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
       if (input.outcome === "approved" && kind.mode === "server_apply") {
         final = await applyApproved(tx, kind, decided, recomputed, input.deciderUserId);
       }
-      await announce(tx, kind, final, [input.deciderUserId]);
+      // Stream lock order (`announce`): the card's conversation, then the `user:` streams, then the bot's card action.
+      const announced = () => announce(tx, kind, final, [input.deciderUserId]);
       const dir = await loadDirectory(tx);
-      if (final.cardMessageId) {
+      if (!final.cardMessageId) await announced();
+      else {
         const status = final.status as keyof typeof CARD_STATUS;
         await mirrorCardDecision(tx, core, {
           messageId: final.cardMessageId,
@@ -483,6 +507,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
           ...(await cardTurnOf(tx, kind, final, input, dir)),
           // 07.5-11: an approved request that failed to apply tells the bot why (the card already shows it).
           ...(final.status === "failed" && final.resultCode ? { resultCode: final.resultCode } : {}),
+          beforeCardAction: announced,
         });
       }
       return summaryOf({ ...final, expired: false }, dir, false);
@@ -523,9 +548,9 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
         resourceId: used.id,
         metadata: auditIds(used),
       });
-      await announce(tx, kind, used, [used.decidedBy]);
       // WINDOWS 135: the card turns from "approved" (running) to "used" (succeeded) only now; approval row first, then card.
       if (used.cardMessageId) await mirrorCardUsed(tx, core, { messageId: used.cardMessageId });
+      await announce(tx, kind, used, [used.decidedBy]);
       return { ok: true };
     },
 
@@ -564,10 +589,10 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
           result: "error",
           metadata: { ...auditIds(final), resultCode: final.resultCode },
         });
-        await announce(tx, kind, final, []);
         if (final.cardMessageId) {
           await mirrorCardClosed(tx, core, { messageId: final.cardMessageId, status: "failed" });
         }
+        await announce(tx, kind, final, []);
         closed.push(final.id);
       }
       return closed;
