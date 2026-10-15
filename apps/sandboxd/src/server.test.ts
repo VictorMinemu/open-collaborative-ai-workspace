@@ -158,7 +158,7 @@ async function start(docker: FakeDocker, runtime: RuntimeSetting = "auto") {
   const sandboxes = createSandboxes({ docker, ns: NS, runtime, image: "ocw-sandbox-sbx:test" });
   const files = createFiles({
     sandboxes,
-    quota: { assertRoom: async () => {}, afterChange: async () => {} },
+    quota: { assertRoom: async () => 0, afterWrite: () => {}, afterChange: async () => {} },
   });
   const server = createServer({ token: TOKEN, sandboxes, files });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

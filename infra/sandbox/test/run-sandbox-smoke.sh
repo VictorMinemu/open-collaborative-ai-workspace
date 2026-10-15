@@ -5,10 +5,11 @@
 # smoke also `docker exec`s into that same labelled container on its own to check the file and its owner.
 #
 # 07.8-09 adds the files section: people's and bots' file operations through sandboxd (as 10001, realpath-confined,
-# through the network-none `files` helper when the sandbox is stopped or killed).
+# through the network-none `files` helper when the sandbox is stopped or killed), the soft quota (`quota`) and the idle
+# stop (`idle`). sandboxd runs with a 3 s sweep here (OCW_SANDBOXD_SWEEP_MS) so measurements come quickly.
 #
-# Usage (repo root):  bash infra/sandbox/test/run-sandbox-smoke.sh [--only core,files]
-#   --only <list>          run only these sections (comma separated): core, files; default all
+# Usage (repo root):  bash infra/sandbox/test/run-sandbox-smoke.sh [--only core,files,quota,idle]
+#   --only <list>          run only these sections (comma separated): core, files, quota, idle; default all
 #   DOCKER_SOCKET=<path>   the daemon socket (default: the current docker context's unix socket)
 #
 # Every Docker object it creates carries `ocw.namespace=ocw-smoke-<pid>` and is removed by that label before the run
@@ -32,7 +33,7 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-SECTIONS="core files"
+SECTIONS="core files quota idle"
 for s in ${ONLY//,/ }; do
   if [ "$s" != all ] && [[ " $SECTIONS " != *" $s "* ]]; then
     printf 'unknown section: %s (known: %s)\n' "$s" "$SECTIONS" >&2
@@ -200,7 +201,7 @@ fi
 # ---------------------------------------------------------------- sandboxd as a host process
 
 OCW_SANDBOX_TOKEN="$TOKEN" OCW_SANDBOX_NAMESPACE="$NS" OCW_SANDBOXD_HOST=127.0.0.1 OCW_SANDBOXD_PORT=0 \
-  OCW_SANDBOX_RUNTIME=auto OCW_SANDBOX_SBX_IMAGE="$IMAGE" \
+  OCW_SANDBOX_RUNTIME=auto OCW_SANDBOX_SBX_IMAGE="$IMAGE" OCW_SANDBOXD_SWEEP_MS=3000 \
   node --import tsx apps/sandboxd/src/main.ts >"$WORK/sandboxd.log" 2>&1 &
 SANDBOXD_PID=$!
 
@@ -602,10 +603,137 @@ section_files() {
   fi
 }
 
+# ================================================================ sections: quota and idle (07.8-09 Task 2; D-01, D-09, F-9)
+
+# policy_json <org> <diskQuotaBytes> <idleStopMs>: the organization's policy as the API pushes it (11).
+policy_json() {
+  printf '{"orgId":"%s","sandboxEgress":"off","browserEgress":"off","allowHosts":[],"privateHosts":[],"limits":{"nanoCpus":1000000000,"memoryBytes":1073741824,"pids":256,"diskQuotaBytes":%s,"idleStopMs":%s},"browserLimits":{"nanoCpus":1000000000,"memoryBytes":2147483648,"pids":512,"diskQuotaBytes":%s,"idleStopMs":300000},"killed":false}' \
+    "$1" "$2" "$3" "$2"
+}
+
+# usage_of <org> <agent> <field>: one bot's field from the usage op.
+usage_of() {
+  api POST /v1/usage "{\"orgId\":\"$1\"}" >/dev/null
+  node -e '
+    const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    const item = (j.items ?? []).find((i) => i.agentId === process.argv[2] && i.kind === "sbx");
+    process.stdout.write(item ? String(item[process.argv[3]]) : "");
+  ' "$WORK/body.json" "$2" "$3"
+}
+
+# wait_stopped <container> <seconds>: until it is not running.
+wait_stopped() {
+  for _ in $(seq 1 "$(($2 * 2))"); do
+    [ "$(running_of "$1")" = true ] || return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+MIB=1048576
+
+section_quota() {
+  QO="$(uuid)"
+  QA="$(uuid)"
+  status="$(api POST /v1/policy "$(policy_json "$QO" $((64 * MIB)) 600000)")"
+  [ "$status" = 200 ] && ok "quota: policy for org Q (quota 64 MiB) → 200" || fail "quota: policy → ${status} $(cat "$WORK/body.json")"
+  status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$QO" "$QA")}")"
+  [ "$status" = 200 ] || fail "quota: ensure → ${status}"
+  CID_Q="$(docker ps -q --filter "label=ocw.namespace=${NS}" --filter "label=ocw.agent=${QA}" --filter "label=ocw.kind=sbx")"
+
+  head -c $((50 * MIB)) /dev/urandom >"$WORK/fifty.bin"
+  upload_json "$QO" "$QA" data/fifty.bin "$WORK/fifty.bin" false >"$WORK/upload.json"
+  status="$(api_file POST /v1/files/upload "$WORK/upload.json")"
+  [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" size)" = $((50 * MIB)) ] &&
+    ok "quota: a 50 MiB upload under a 64 MiB quota → 200" || fail "quota: 50 MiB upload → ${status} $(head -c 200 "$WORK/body.json")"
+  disk="$(usage_of "$QO" "$QA" diskBytes)"
+  [ -n "$disk" ] && [ "$disk" -ge $((50 * MIB)) ] && ok "quota: usage reports diskBytes ${disk} for the bot" ||
+    fail "quota: usage diskBytes '${disk}' $(cat "$WORK/body.json")"
+
+  head -c $((20 * MIB)) /dev/urandom >"$WORK/twenty.bin"
+  upload_json "$QO" "$QA" data/twenty.bin "$WORK/twenty.bin" false >"$WORK/upload.json"
+  status="$(api_file POST /v1/files/upload "$WORK/upload.json")"
+  code="$(jfield "$WORK/body.json" error.code)"
+  leftovers="$(docker exec "$CID_Q" sh -c 'ls -a /workspace/data' 2>&1 | tr '\n' ' ')"
+  if [ "$status" = 409 ] && [ "$code" = disk_full ] && [ "$leftovers" = ". .. fifty.bin " ] &&
+    [ "$(running_of "$CID_Q")" = true ]; then
+    ok "quota: a further 20 MiB upload → 409 disk_full before writing (no partial file), sandbox still running"
+  else
+    fail "quota: 20 MiB upload → ${status} ${code}; data/: ${leftovers}; running=$(running_of "$CID_Q")"
+  fi
+
+  # The bot writes past the quota with its own shell: the next measurement stops it with disk_full.
+  run_in "$QO" "$QA" '["dd","if=/dev/zero","of=big.bin","bs=1M","count=80"]' 60000 >/dev/null
+  exited_with 0 || fail "quota: dd → $(head -c 200 "$WORK/body.json")"
+  if wait_stopped "$CID_Q" 30; then
+    ok "quota: an exec that writes 80 MiB → the next measurement stops the sandbox"
+  else
+    fail "quota: still running after 30 s"
+  fi
+  state="$(usage_of "$QO" "$QA" state)"
+  [ "$state" = disk_full ] && ok "quota: usage state → disk_full" || fail "quota: usage state '${state}'"
+  status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$QO" "$QA")}")"
+  [ "$status" = 409 ] && [ "$(jfield "$WORK/body.json" error.code)" = disk_full ] &&
+    ok "quota: ensure → 409 disk_full while over quota" || fail "quota: ensure while full → ${status} $(cat "$WORK/body.json")"
+  status="$(api POST /v1/files/write "$(path_json "$QO" "$QA" note.txt '"content":"x","encoding":"utf8","mode":"create"')")"
+  [ "$status" = 409 ] && [ "$(jfield "$WORK/body.json" error.code)" = disk_full ] &&
+    ok "quota: a write while full → 409 disk_full" || fail "quota: write while full → ${status}"
+
+  status="$(api POST /v1/files/delete "$(path_json "$QO" "$QA" big.bin)")"
+  HELPER_Q="$(docker ps -q --filter "label=ocw.namespace=${NS}" --filter "label=ocw.agent=${QA}" --filter "label=ocw.kind=files")"
+  if [ "$status" = 200 ] && [ -n "$HELPER_Q" ] && [ "$(running_of "$CID_Q")" = false ]; then
+    ok "quota: big.bin deleted through the files helper while the sandbox stays stopped"
+  else
+    fail "quota: delete big.bin → ${status} helper=${HELPER_Q:-none}"
+  fi
+  status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$QO" "$QA")}")"
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" state)" = running ]; then
+    ok "quota: the measurement after the delete clears disk_full; ensure → running"
+  else
+    fail "quota: ensure after delete → ${status} $(cat "$WORK/body.json")"
+  fi
+  status="$(api POST /v1/files/stat "$(path_json "$QO" "$QA" data/fifty.bin)")"
+  [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" size)" = $((50 * MIB)) ] &&
+    ok "quota: the 50 MiB file is still there" || fail "quota: stat fifty.bin → ${status}"
+  rm -f "$WORK/fifty.bin" "$WORK/twenty.bin" "$WORK/upload.json"
+}
+
+section_idle() {
+  IO="$(uuid)"
+  IA="$(uuid)"
+  status="$(api POST /v1/policy "$(policy_json "$IO" $((2048 * MIB)) 30000)")"
+  [ "$status" = 200 ] || fail "idle: policy → ${status}"
+  status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$IO" "$IA")}")"
+  [ "$status" = 200 ] || fail "idle: ensure → ${status}"
+  CID_I="$(docker ps -q --filter "label=ocw.namespace=${NS}" --filter "label=ocw.agent=${IA}" --filter "label=ocw.kind=sbx")"
+  status="$(api POST /v1/files/write "$(path_json "$IO" "$IA" keep.txt '"content":"still here","encoding":"utf8","mode":"create"')")"
+  [ "$status" = 200 ] || fail "idle: write → ${status}"
+  i0=$(date +%s)
+  if wait_stopped "$CID_I" 60; then
+    elapsed=$(($(date +%s) - i0))
+    if [ "$elapsed" -ge 29 ]; then
+      ok "idle: no op for 30 s → stopped after ${elapsed} s"
+    else
+      fail "idle: stopped too early (${elapsed} s)"
+    fi
+  else
+    fail "idle: still running after 60 s"
+  fi
+  state="$(usage_of "$IO" "$IA" state)"
+  [ "$state" = stopped ] && ok "idle: usage state → stopped" || fail "idle: usage state '${state}'"
+  status="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$IO" "$IA")}")"
+  [ "$status" = 200 ] || fail "idle: ensure again → ${status}"
+  status="$(api POST /v1/files/read "$(path_json "$IO" "$IA" keep.txt)")"
+  [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" content)" = "still here" ] && [ "$(running_of "$CID_I")" = true ] &&
+    ok "idle: after the next ensure the sandbox runs and its file is still there" || fail "idle: read after → ${status}"
+}
+
 # ================================================================ run the chosen sections
 
 if want core; then section_core; fi
 if want files; then section_files; fi
+if want quota; then section_quota; fi
+if want idle; then section_idle; fi
 
 if [ "$FAILURES" != 0 ]; then
   log "${FAILURES} check(s) failed"

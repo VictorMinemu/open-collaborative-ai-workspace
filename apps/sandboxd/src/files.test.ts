@@ -89,7 +89,11 @@ class MiniWorkspace {
 }
 
 function setup(ws = new MiniWorkspace()) {
-  const room: { incoming: number[]; full: boolean } = { incoming: [], full: false };
+  const room: { incoming: number[]; recorded: number[]; full: boolean } = {
+    incoming: [],
+    recorded: [],
+    full: false,
+  };
   const changed: string[] = [];
   const files = createFiles({
     sandboxes: {
@@ -103,6 +107,10 @@ function setup(ws = new MiniWorkspace()) {
           const { SandboxdFailure } = await import("./sandboxes");
           throw new SandboxdFailure("disk_full", 409, "the workspace is over its quota");
         }
+        return 100;
+      },
+      afterWrite(_t, bytes) {
+        room.recorded.push(bytes);
       },
       async afterChange(t) {
         changed.push(t.agentId);
@@ -288,6 +296,7 @@ describe("files: write, upload, download, delete", () => {
     const data = Buffer.alloc(3000, 7).toString("base64");
     await files.upload({ target, path: "a.bin", data, overwrite: false });
     expect(room.incoming).toEqual([3000]);
+    expect(room.recorded).toEqual([3100]);
     room.full = true;
     const before = ws.calls.length;
     expect(await refusal(files.upload({ target, path: "b.bin", data, overwrite: false }))).toMatchObject({
@@ -371,7 +380,7 @@ describe("files through sandboxd's containers (D-01, D-04, D-09, T-07.8-09-02)",
     await sandboxes.ensure(target);
     const files = createFiles({
       sandboxes,
-      quota: { assertRoom: async () => {}, afterChange: async () => {} },
+      quota: { assertRoom: async () => 0, afterWrite: () => {}, afterChange: async () => {} },
     });
     await files.list({ target, path: "", hidden: true });
     await files.upload({
@@ -397,7 +406,7 @@ describe("files through sandboxd's containers (D-01, D-04, D-09, T-07.8-09-02)",
     await sandboxes.stop({ target, reason: "user" });
     const files = createFiles({
       sandboxes,
-      quota: { assertRoom: async () => {}, afterChange: async () => {} },
+      quota: { assertRoom: async () => 0, afterWrite: () => {}, afterChange: async () => {} },
     });
     await files.list({ target, path: "", hidden: true });
 
@@ -437,7 +446,7 @@ describe("files through sandboxd's containers (D-01, D-04, D-09, T-07.8-09-02)",
     const sandboxes = createSandboxes({ docker, ns: NS, runtime: "auto", image: "sbx:test" });
     const files = createFiles({
       sandboxes,
-      quota: { assertRoom: async () => {}, afterChange: async () => {} },
+      quota: { assertRoom: async () => 0, afterWrite: () => {}, afterChange: async () => {} },
     });
     expect(await refusal(files.list({ target, path: "", hidden: true }))).toMatchObject({
       code: "not_found",
@@ -465,7 +474,7 @@ describe("files through sandboxd's containers (D-01, D-04, D-09, T-07.8-09-02)",
     });
     const files = createFiles({
       sandboxes,
-      quota: { assertRoom: async () => {}, afterChange: async () => {} },
+      quota: { assertRoom: async () => 0, afterWrite: () => {}, afterChange: async () => {} },
     });
     expect(await refusal(files.list({ target, path: "", hidden: true }))).toMatchObject({
       code: "label_mismatch",
@@ -499,7 +508,7 @@ describe("files routes on the sandboxd server", () => {
     await sandboxes.ensure(target);
     const files = createFiles({
       sandboxes,
-      quota: { assertRoom: async () => {}, afterChange: async () => {} },
+      quota: { assertRoom: async () => 0, afterWrite: () => {}, afterChange: async () => {} },
     });
     const server = createServer({ token: TOKEN, sandboxes, files });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

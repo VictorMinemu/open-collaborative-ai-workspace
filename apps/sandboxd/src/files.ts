@@ -30,8 +30,13 @@ export { OCW_FILES };
  */
 
 export interface FilesQuota {
-  /** Refuses (`disk_full`) when `incoming` bytes do not fit under the bot's soft quota; called before any write. */
-  assertRoom(target: SandboxdTarget, incoming: number): Promise<void>;
+  /**
+   * Refuses (`disk_full`) when `incoming` bytes do not fit under the bot's soft quota; called before any write.
+   * Returns the measured size of the workspace.
+   */
+  assertRoom(target: SandboxdTarget, incoming: number): Promise<number>;
+  /** Records the size after a write (measured + written, an upper bound until the next measurement). */
+  afterWrite(target: SandboxdTarget, estimatedBytes: number): void;
   /** Re-measures after a delete, so a `disk_full` sandbox clears once enough is gone. */
   afterChange(target: SandboxdTarget): Promise<void>;
 }
@@ -162,8 +167,9 @@ export function createFiles(deps: FilesDeps): Files {
     timeoutMs?: number,
   ) {
     // The soft quota is checked with the decoded size before the helper starts: a refused write leaves no file.
-    await quota.assertRoom(target, bytes.length);
+    const used = await quota.assertRoom(target, bytes.length);
     const res = await helper(target, ["write", path, mode], { stdin: bytes, timeoutMs });
+    quota.afterWrite(target, used + bytes.length);
     const size = Number.parseInt(res.stdout.toString("utf8").trim(), 10);
     return { path, size: Number.isFinite(size) && size >= 0 ? size : bytes.length };
   }

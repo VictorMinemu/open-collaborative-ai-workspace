@@ -23,6 +23,8 @@ export const IMPLEMENTED_OPS = [
   "kill",
   "killOrg",
   "purge",
+  "usage",
+  "policy",
   "filesList",
   "filesStat",
   "filesRead",
@@ -152,6 +154,11 @@ export function createServer(options: ServerOptions): http.Server {
     kill: (input) => sandboxes.kill(input.target),
     killOrg: (input) => sandboxes.killOrg(input.orgId),
     purge: (input) => sandboxes.purge(input.target),
+    usage: (input) => sandboxes.usage(input.orgId),
+    policy: (input) => {
+      sandboxes.setPolicy(input);
+      return { ok: true };
+    },
     filesList: (input) => files.list(input),
     filesStat: (input) => files.stat(input),
     filesRead: (input) => files.read(input),
