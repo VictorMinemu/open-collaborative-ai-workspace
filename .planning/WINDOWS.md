@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 133
+open_count: 131
 waived_count: 4
-fixed_count: 81
-total_count: 218
-last_updated: 2026-10-14T19:14:34.707Z
+fixed_count: 85
+total_count: 220
+last_updated: 2026-10-15T05:03:39.415Z
 ---
 
 # Broken Windows Ledger
@@ -224,15 +224,17 @@ last_updated: 2026-10-14T19:14:34.707Z
 | 207 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | DECIDED (fix in gate): deleting a unit cascades its tool approval policies with no tool_approval_policy.deleted audit (principle 12); answer 409 unit_has_policies as for keys and templates | open |  | 2026-10-14T15:40:25.353Z |  |
 | 208 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | History query has no audit_events index on (action, scopeUnitId); silent caps: /access 500 units, catalog 200 tools/group and 100 groups; a 'users' rule whose people are gone must count as no approver in 07.5-07 canDecide | open |  | 2026-10-14T15:40:25.495Z |  |
 | 209 | 07.5 | unrun-verify | apps/openclaw-channel/src/tool-guard.ts |  | The TOOL_PIN_PRIORITY pin relies on OpenClaw 2026.9.7 'last returned params win' (assumption A2), unverified; a plugin registered below -10000 could rewrite after the pin; the 07.5-15 real-cell smoke must record it | open |  | 2026-10-14T15:58:17.312Z |  |
-| 210 | 07.5 | deviation | apps/openclaw-channel/src/connector-tools.ts |  | Denial note parsed from the end of the server sentence (no cardAction.note in contracts); approval_denied does not say who decided; flagged connector tools still use the old 32 KB message; fake /tool-calls never answers no_trigger | open |  | 2026-10-14T15:58:17.419Z |  |
-| 211 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | MUST FIX (07.5-11/gate): a review_only tool.call card still carries Approve and the server accepts an approval from the card route; only the web hides it. Refuse server-side | open |  | 2026-10-14T17:45:03.509Z |  |
-| 212 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | 07.5-11 must map denial {deciderName, note} onto the 409 and add an explicit cardAction note to contracts + plugin mirror (replace sentence parsing); 'You can't approve your own request' copy must follow viewerCan; real use window is min(15 min, request expiry); review view counts readers with one check per member | open |  | 2026-10-14T17:45:03.593Z |  |
+| 210 | 07.5 | deviation | apps/openclaw-channel/src/connector-tools.ts |  | Denial note parsed from the end of the server sentence (no cardAction.note in contracts); approval_denied does not say who decided; flagged connector tools still use the old 32 KB message; fake /tool-calls never answers no_trigger | fixed |  | 2026-10-14T15:58:17.419Z | 2026-10-15T05:03:39.191Z |
+| 211 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | MUST FIX (07.5-11/gate): a review_only tool.call card still carries Approve and the server accepts an approval from the card route; only the web hides it. Refuse server-side | fixed |  | 2026-10-14T17:45:03.509Z | 2026-10-15T05:03:39.033Z |
+| 212 | 07.5 | deviation | apps/api/src/modules/tool-approval |  | 07.5-11 must map denial {deciderName, note} onto the 409 and add an explicit cardAction note to contracts + plugin mirror (replace sentence parsing); 'You can't approve your own request' copy must follow viewerCan; real use window is min(15 min, request expiry); review view counts readers with one check per member | fixed |  | 2026-10-14T17:45:03.593Z | 2026-10-15T05:03:39.115Z |
 | 213 | 07.5 | deviation | apps/api/src/testing.ts |  | Test Redis containers leak (208 redis:8 found running, 1-2 h old): TestStack.stop() awaits built.close() before stopping containers, so a throwing close skips redis.stop(); make it try/finally and check why Ryuk did not reap them (fix in the 07.5 gate) | open |  | 2026-10-14T17:47:21.500Z |  |
 | 214 | 07.5 | unrun-verify | apps/openclaw-channel/src/work-zone-tools.ts |  | Work Zone proposal tools unproven in a real cell (alsoAllow, model use, taint refusal) and only tested against the fake; 07.5-15 must run SMOKE_ONLY=work_zone and an API parity test after 07.5-08; import cycle tool-guard <-> work-zone-tools (harmless, commented) | open |  | 2026-10-14T17:49:14.525Z |  |
-| 215 | 07.5 | deviation | apps/api/src/modules/work-session |  | When a Work Zone proposal Start fails the bot hears 'approved' without the error code (add resultCode to CardAction); each Work Zone card read recomputes its live state with several queries | open |  | 2026-10-14T18:19:32.619Z |  |
+| 215 | 07.5 | deviation | apps/api/src/modules/work-session |  | When a Work Zone proposal Start fails the bot hears 'approved' without the error code (add resultCode to CardAction); each Work Zone card read recomputes its live state with several queries | fixed |  | 2026-10-14T18:19:32.619Z | 2026-10-15T05:03:39.267Z |
 | 216 | 07.5 | deviation | apps/web/components/ui/avatar.tsx |  | Shared avatar initials are 4.25-4.48:1 at 12 px (below AA, axe flaky by random id); move text from *-700 to *-800 | open |  | 2026-10-14T18:27:17.175Z |  |
 | 217 | 07.5 | deviation | apps/web/components/settings |  | Approval history shows a raw m…__* pattern for a rule on a deleted server; the policies page does not warn when /access or the catalog are truncated | open |  | 2026-10-14T18:27:17.253Z |  |
 | 218 | 07.5 | deviation | apps/web/components/approvals |  | Mobile shows 'Approvals' twice (top bar and back link, per UI-SPEC); 'To review' sorts client-side over loaded pages; the e2e fake cell answers approval_* without the plugin's fixed sentences | open |  | 2026-10-14T19:14:27.881Z |  |
+| 219 | 07.5 | unrun-verify | apps/api/src/modules/agent-channel |  | Approval card posted inside the claim transaction (<2 s measured) needs a concurrent-channel contention test (07.5-16); connector grant names the logical tool while the bot calls ocw_connector_call, unproven in a real cell (07.5-15 smoke); fake MCP has no 5xx after a consumed grant | open |  | 2026-10-15T05:03:39.342Z |  |
+| 220 | 07.5 | deviation | apps/api/src/modules/agent-channel |  | An ocw_http_request URL normalised differently counts as a different action and opens a new approval; plugin failure texts duplicate the UI-SPEC copy | open |  | 2026-10-15T05:03:39.415Z |  |
 
 ````json
 [
@@ -2751,10 +2753,10 @@ last_updated: 2026-10-14T19:14:34.707Z
     "file": "apps/openclaw-channel/src/connector-tools.ts",
     "line": null,
     "description": "Denial note parsed from the end of the server sentence (no cardAction.note in contracts); approval_denied does not say who decided; flagged connector tools still use the old 32 KB message; fake /tool-calls never answers no_trigger",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T15:58:17.419Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T05:03:39.191Z"
   },
   {
     "id": 211,
@@ -2763,10 +2765,10 @@ last_updated: 2026-10-14T19:14:34.707Z
     "file": "apps/api/src/modules/tool-approval",
     "line": null,
     "description": "MUST FIX (07.5-11/gate): a review_only tool.call card still carries Approve and the server accepts an approval from the card route; only the web hides it. Refuse server-side",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T17:45:03.509Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T05:03:39.033Z"
   },
   {
     "id": 212,
@@ -2775,10 +2777,10 @@ last_updated: 2026-10-14T19:14:34.707Z
     "file": "apps/api/src/modules/tool-approval",
     "line": null,
     "description": "07.5-11 must map denial {deciderName, note} onto the 409 and add an explicit cardAction note to contracts + plugin mirror (replace sentence parsing); 'You can't approve your own request' copy must follow viewerCan; real use window is min(15 min, request expiry); review view counts readers with one check per member",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T17:45:03.593Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T05:03:39.115Z"
   },
   {
     "id": 213,
@@ -2811,10 +2813,10 @@ last_updated: 2026-10-14T19:14:34.707Z
     "file": "apps/api/src/modules/work-session",
     "line": null,
     "description": "When a Work Zone proposal Start fails the bot hears 'approved' without the error code (add resultCode to CardAction); each Work Zone card read recomputes its live state with several queries",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-14T18:19:32.619Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-15T05:03:39.267Z"
   },
   {
     "id": 216,
@@ -2850,6 +2852,30 @@ last_updated: 2026-10-14T19:14:34.707Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-14T19:14:27.881Z",
+    "resolved_at": null
+  },
+  {
+    "id": 219,
+    "kind": "unrun-verify",
+    "phase": "07.5",
+    "file": "apps/api/src/modules/agent-channel",
+    "line": null,
+    "description": "Approval card posted inside the claim transaction (<2 s measured) needs a concurrent-channel contention test (07.5-16); connector grant names the logical tool while the bot calls ocw_connector_call, unproven in a real cell (07.5-15 smoke); fake MCP has no 5xx after a consumed grant",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T05:03:39.342Z",
+    "resolved_at": null
+  },
+  {
+    "id": 220,
+    "kind": "deviation",
+    "phase": "07.5",
+    "file": "apps/api/src/modules/agent-channel",
+    "line": null,
+    "description": "An ocw_http_request URL normalised differently counts as a different action and opens a new approval; plugin failure texts duplicate the UI-SPEC copy",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T05:03:39.415Z",
     "resolved_at": null
   }
 ]
