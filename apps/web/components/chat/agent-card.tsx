@@ -4,9 +4,11 @@ import {
   type AgentCard,
   type AgentCardApprovalLink,
   type AgentCardKind,
+  AgentCardRoute,
   type AgentCardStatus,
   APPROVAL_NOTE_MAX,
   type ApprovalRequestStatus,
+  type WorkZoneProposalView,
 } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -16,22 +18,50 @@ import {
   Check,
   CircleCheck,
   CircleX,
+  Clock,
   FileText,
+  FolderGit2,
   GitPullRequest,
   Hand,
   Hourglass,
+  Info,
+  KeyRound,
+  Laptop,
   LayoutGrid,
+  Lock,
+  type LucideIcon,
   Package,
+  Play,
+  Plug,
   Rocket,
   ShieldCheck,
   SquareTerminal,
   TriangleAlert,
+  Users,
   X,
   Zap,
 } from "lucide-react";
 import Link from "next/link";
-import { type ComponentType, useId, useRef, useState } from "react";
+import {
+  type ComponentType,
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
+import { pillOf, decisionError as reviewDecisionError } from "@/components/approvals/approval-review";
+import { UntrustedText } from "@/components/approvals/untrusted-text";
+import {
+  DeviceState,
+  deviceStateOf,
+  failedStartText,
+  liveStartBlock,
+  PROPOSAL_MODE,
+  startBlockedText,
+} from "@/components/approvals/work-zone-proposal-view";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -45,11 +75,13 @@ import {
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
+import { RUNTIMES } from "@/components/work-zone/meta";
 import { openTargetOf } from "@/lib/agent-cards";
 import { errorMessage, isApiError } from "@/lib/api";
 import { decideCard, followCard, refreshCard, useAgentCard } from "@/lib/card-queries";
 import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import { useDevices, useWorkZoneOrgSync } from "@/lib/workzone-queries";
 
 /**
  * The one Agent Card renderer (06-15, AGENT-04, D-07, D-08, P-11, P-13), used in channels, threads, DMs, group DMs and
@@ -141,7 +173,14 @@ function StatusPill({ status }: { status: AgentCardStatus }) {
   );
 }
 
-function DecisionLine({ decision }: { decision: NonNullable<AgentCard["decision"]> }) {
+function DecisionLine({
+  decision,
+  verbs = { approved: "Approved", denied: "Denied" },
+}: {
+  decision: NonNullable<AgentCard["decision"]>;
+  /** A Work Zone proposal reads "Started by" / "Dismissed by" (07.5-14, UI-SPEC Surface 3 States). */
+  verbs?: { approved: string; denied: string };
+}) {
   const approved = decision.outcome === "approved";
   const Icon = approved ? CircleCheck : CircleX;
   return (
@@ -156,7 +195,7 @@ function DecisionLine({ decision }: { decision: NonNullable<AgentCard["decision"
       <Icon className="mt-0.5 size-4 shrink-0" aria-hidden />
       {/* Wraps rather than truncates: at 390 a long name never hides who decided (06-16 review). */}
       <span className="min-w-0 break-words">
-        {approved ? "Approved" : "Denied"} by {decision.by.displayName}{" "}
+        {approved ? verbs.approved : verbs.denied} by {decision.by.displayName}{" "}
         <time dateTime={decision.at} className="whitespace-nowrap font-normal text-muted-foreground text-xs">
           · {decidedFmt.format(new Date(decision.at))}
         </time>
@@ -639,6 +678,921 @@ function LinkedFooter({
   );
 }
 
+// ---------------------------------------------------------------- 07.5-14: action and Work Zone proposal cards
+
+/**
+ * The two 07.5 linked kinds (D-02, D-03, D-04, P-07, UI-SPEC Surfaces 1 and 3, R6, R8, R9): a bot's action that needs
+ * approval (`tool.call`) and a Work Zone session a bot proposes (`work_zone.start`). The server composes every field,
+ * label and the card's display (`exact` in the requester's own DM, `summary` everywhere else, `review_only` when a
+ * value did not fit), so the browser never renders a value the server did not put in the card (T-07.5-14-01). Values
+ * are model output: `UntrustedText`, text nodes only, revealed characters as chips (T-07.5-14-02). Buttons follow
+ * `viewerCan`, the requester id and `display`, and the API decides again (T-07.5-14-03); a summary or review-only card
+ * never offers Approve, because the server refuses it there (T-07.5-14-04). Other cards never reach this code.
+ */
+
+type LinkedKind = "tool" | "work_zone";
+
+function linkedKindOf(link: AgentCardApprovalLink | null): LinkedKind | null {
+  if (link?.kind === "tool.call") return "tool";
+  if (link?.kind === "work_zone.start") return "work_zone";
+  return null;
+}
+
+const clockFmt = new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit" });
+const fullFmt = new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" });
+/** "10:33 AM". */
+const clockOf = (iso: string) => clockFmt.format(new Date(iso));
+
+/**
+ * The card's timer (UI-SPEC "Timer"): "Expires in {n} h" rounded to the nearest hour (a card posted a moment ago reads
+ * "24 h", as its request lasts 24 hours), "Expires in {n} min" under one hour, "Expired" after.
+ */
+export function cardExpiresIn(iso: string, now: number = Date.now()): string {
+  const left = new Date(iso).getTime() - now;
+  if (left <= 0) return "Expired";
+  const minutes = Math.max(1, Math.ceil(left / 60_000));
+  if (minutes < 60) return `Expires in ${minutes} min`;
+  return `Expires in ${Math.max(1, Math.round(left / 3_600_000))} h`;
+}
+
+/** Re-renders once `deadline` passes, so "Approved" turns "Not used" and a timer moves on without a reload. */
+function useNow(deadline: string | null | undefined): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!deadline) return;
+    const left = new Date(deadline).getTime() - Date.now();
+    if (left < 0 || left > 24 * 3_600_000 + 60_000) return;
+    const t = window.setTimeout(() => setNow(Date.now()), left + 1000);
+    return () => window.clearTimeout(t);
+  }, [deadline]);
+  return now;
+}
+
+/** The pill of a 07.5 card (UI-SPEC R6): Pending · Approved · Used · Not used · Denied · Expired, or the proposal's. */
+function LinkedPill({
+  kind,
+  status,
+  useBy,
+  now,
+}: {
+  kind: string;
+  status: ApprovalRequestStatus;
+  useBy: string | null | undefined;
+  now: number;
+}) {
+  const p = pillOf(kind, status, useBy, now);
+  const Icon = p.icon === "dot" || p.icon === "spinner" ? null : p.icon;
+  return (
+    <span
+      role="status"
+      aria-label={`Status: ${p.label}`}
+      data-testid="agent-card-status"
+      data-status={status}
+      className={cn(
+        "inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 font-medium text-xs",
+        "fade-in-0 zoom-in-95 animate-in duration-300 motion-reduce:animate-none",
+        p.tone,
+      )}
+    >
+      {Icon ? (
+        <Icon className="size-3.5 shrink-0" aria-hidden />
+      ) : p.icon === "spinner" ? (
+        <Spinner className="size-3.5" />
+      ) : (
+        <span
+          aria-hidden
+          className={cn(
+            "inline-flex size-1.5 rounded-full",
+            status === "pending" ? "bg-amber-500" : "bg-primary dark:bg-blue-300",
+          )}
+        />
+      )}
+      {p.label}
+    </span>
+  );
+}
+
+/** A section label inside the card (ACTION, WHAT {BOT} WILL SEND): the kind row's style, a level-4 heading. */
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <p
+      role="heading"
+      aria-level={4}
+      className="font-medium text-[11.5px] text-muted-foreground uppercase tracking-wider"
+    >
+      {children}
+    </p>
+  );
+}
+
+/** One quiet line under the fields (timer, waiting, privacy, state), 12/400 muted with its glyph. */
+function CardLine({
+  testId,
+  icon: Icon,
+  id,
+  tone,
+  children,
+}: {
+  testId: string;
+  icon: LucideIcon;
+  id?: string;
+  tone?: "danger";
+  children: ReactNode;
+}) {
+  return (
+    <p
+      id={id}
+      data-testid={testId}
+      className={cn(
+        "flex min-w-0 items-start gap-1.5 text-xs leading-4",
+        tone === "danger" ? "text-red-800 dark:text-red-300" : "text-muted-foreground",
+      )}
+    >
+      <Icon className="size-3.5 shrink-0" aria-hidden />
+      <span className="min-w-0 break-words">{children}</span>
+    </p>
+  );
+}
+
+/** A label's id-safe key: "Due date" → "due-date". */
+const keyOf = (label: string) =>
+  label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "") || "field";
+
+/** A value that reads as a block (UI-SPEC "Block values"): it has a newline or is longer than 160 characters. */
+const isBlock = (value: string) => value.includes("\n") || value.length > 160;
+
+/** A revealed invisible character as the server writes it (UI-SPEC "Untrusted text"). */
+const HIDDEN_MARKER = /⟨U\+[0-9A-F]{4,6}⟩/;
+
+/**
+ * A field list of an action card: label-left from 26rem, label over value below; values 14/400 through
+ * `UntrustedText`, block values clamped to 6 lines with Show more (display only: the full value is in the card).
+ */
+function ToolFieldList({
+  fields,
+  section,
+  inline = false,
+}: {
+  fields: AgentCard["fields"];
+  section: "action" | "value";
+  /** The summary card's two fields side by side from 26rem (UI-SPEC Surface 1 "Summary view"). */
+  inline?: boolean;
+}) {
+  return (
+    <dl
+      className={cn(
+        "grid min-w-0 gap-y-2.5 @[26rem]:gap-y-1.5",
+        inline && "@[26rem]:grid-cols-2 @[26rem]:gap-x-4",
+      )}
+    >
+      {fields.map((f, i) => {
+        const block = isBlock(f.value);
+        const mono = section === "action" && (f.label === "Tool" || f.label === "Target");
+        return (
+          <div
+            // biome-ignore lint/suspicious/noArrayIndexKey: fields have no id and are replaced as a whole
+            key={`${i}:${f.label}`}
+            className={cn(
+              "grid min-w-0 gap-y-0.5 @[26rem]:gap-x-3",
+              inline
+                ? "@[26rem]:grid-cols-[auto_minmax(0,1fr)]"
+                : "@[26rem]:grid-cols-[minmax(0,7.5rem)_minmax(0,1fr)]",
+            )}
+          >
+            <dt className="break-words pt-px text-muted-foreground text-xs leading-5">{f.label}</dt>
+            <dd
+              data-testid={`agent-card-${section}-field-${keyOf(f.label)}`}
+              className={cn(
+                "min-w-0 text-sm leading-5",
+                mono && "break-all font-mono text-[13px]",
+                section === "action" && f.label === "Source" && "flex items-start gap-1.5",
+              )}
+            >
+              {section === "action" && f.label === "Source" ? (
+                <Plug className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+              ) : null}
+              {block ? (
+                <div
+                  data-testid="agent-card-block-value"
+                  className="min-w-0 rounded-lg bg-muted/50 px-3 py-2 dark:bg-white/[0.03]"
+                >
+                  <UntrustedText text={f.value} clampLines={6} />
+                </div>
+              ) : (
+                <UntrustedText text={f.value} mono={mono} />
+              )}
+            </dd>
+          </div>
+        );
+      })}
+    </dl>
+  );
+}
+
+/** The server's notices, sorted by what they are (UI-SPEC Surface 1): known copy is matched exactly, the rest warns. */
+const TRUNCATED_NOTICE = "Some values are too long for the card. Review them in full before approving.";
+const HIDDEN_NOTICE = "Contains hidden characters, shown as ⟨U+…⟩.";
+const MASKED_NOTICE = "A value looks like a secret and is masked.";
+
+/** The requester's name in a summary title the server composed ("{bot} wants to run {tool} for {person}"). */
+function summaryRequester(card: AgentCard): string | null {
+  const tool = fieldOf(card, "Tool");
+  if (!tool) return null;
+  const marker = ` wants to run ${tool} for `;
+  const at = card.title.indexOf(marker);
+  return at >= 0 ? card.title.slice(at + marker.length).trim() || null : null;
+}
+
+/** "It runs with the organization's account." from the exact card's Source (the viewer is the requester). */
+function runsWith(card: AgentCard): string {
+  const source = fieldOf(card, "Source") ?? "";
+  if (source.endsWith(" · MCP server")) return "It runs with the organization's account.";
+  if (source.endsWith(" · your account") || source.startsWith("Keychain key ")) {
+    return "It runs with your account.";
+  }
+  return "It runs for you.";
+}
+
+/** A refused card decision in words; a changed action asks to open the review again (UI-SPEC Interaction › Card). */
+function cardDecisionError(err: unknown): string {
+  if (isApiError(err, 409) && err.code === "approval_action_changed") {
+    return "This request changed. Open it to review again.";
+  }
+  return reviewDecisionError(err);
+}
+
+type DialogCopy = {
+  title: string;
+  body: string;
+  confirm: string;
+  /** The optional note (07.2's Textarea, 280, counter from 200). */
+  note: boolean;
+  placeholder?: string;
+};
+
+/**
+ * The two decision buttons of a 07.5 card and their confirmation (Cancel focused first; a bottom sheet below 640).
+ * `approve` is null on a review-only card (Deny only). A disabled Start stays focusable (`aria-disabled`) and is
+ * described by its visible reason; clicking it does nothing. The decision names the hash the card rendered.
+ */
+function CardDecision({
+  messageId,
+  link,
+  approve,
+  deny,
+  copy,
+  onDecided,
+}: {
+  messageId: string;
+  link: AgentCardApprovalLink;
+  approve: { label: string; icon: LucideIcon; testId: string; disabledBy?: string | null } | null;
+  deny: { label: string; testId: string };
+  copy: Record<"approved" | "denied", DialogCopy>;
+  onDecided: (outcome: "approved" | "denied", decided: AgentCard) => void;
+}) {
+  const qc = useQueryClient();
+  const noteId = useId();
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const [asking, setAsking] = useState<"approved" | "denied" | null>(null);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const c = asking ? copy[asking] : null;
+  const ask = (outcome: "approved" | "denied") => {
+    setNote("");
+    setAsking(outcome);
+  };
+  const confirm = async () => {
+    if (!asking) return;
+    const outcome = asking;
+    setBusy(true);
+    try {
+      const decided = await decideCard(qc, messageId, {
+        outcome,
+        actionHash: link.actionHash,
+        note: copy[outcome].note ? note.trim() || undefined : undefined,
+      });
+      setAsking(null);
+      onDecided(outcome, decided);
+    } catch (err) {
+      toast.error(cardDecisionError(err));
+      setAsking(null);
+      // Changed, decided or expired meanwhile: show what the server holds now (never decided by itself).
+      if (isApiError(err, 409) || isApiError(err, 403)) void refreshCard(qc, messageId);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const counted = note.length >= 200;
+  const ApproveIcon = approve?.icon ?? Check;
+  return (
+    <>
+      {approve ? (
+        <Button
+          size="sm"
+          className="max-lg:h-11 max-sm:flex-1 aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
+          data-testid={approve.testId}
+          aria-disabled={approve.disabledBy ? true : undefined}
+          aria-describedby={approve.disabledBy ?? undefined}
+          onClick={() => (approve.disabledBy ? undefined : ask("approved"))}
+        >
+          <ApproveIcon />
+          {approve.label}
+        </Button>
+      ) : null}
+      <Button
+        size="sm"
+        variant="outline"
+        className="max-lg:h-11 max-sm:flex-1"
+        data-testid={deny.testId}
+        onClick={() => ask("denied")}
+      >
+        <X />
+        {deny.label}
+      </Button>
+      <Dialog open={asking !== null} onOpenChange={(o) => !busy && !o && setAsking(null)}>
+        <DialogContent
+          data-testid="agent-card-confirm"
+          data-outcome={asking ?? undefined}
+          initialFocus={cancelRef}
+        >
+          <DialogHeader>
+            <DialogTitle>{c?.title}</DialogTitle>
+            <DialogDescription>{c?.body}</DialogDescription>
+          </DialogHeader>
+          {c?.note ? (
+            <div className="grid gap-2">
+              <Label htmlFor={noteId}>Note (optional)</Label>
+              <Textarea
+                id={noteId}
+                data-testid="agent-card-note-input"
+                value={note}
+                maxLength={APPROVAL_NOTE_MAX}
+                rows={3}
+                className="min-h-20"
+                placeholder={c.placeholder}
+                aria-describedby={counted ? `${noteId}-count` : undefined}
+                disabled={busy}
+                onChange={(e) => setNote(e.target.value)}
+              />
+              {counted ? (
+                <p
+                  id={`${noteId}-count`}
+                  data-testid="agent-card-note-count"
+                  className="justify-self-end text-muted-foreground text-xs tabular-nums"
+                >
+                  {note.length}/{APPROVAL_NOTE_MAX}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button
+              ref={cancelRef}
+              variant="outline"
+              className="max-lg:h-11"
+              disabled={busy}
+              onClick={() => setAsking(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant={asking === "approved" ? "default" : "destructive"}
+              className="max-lg:h-11"
+              disabled={busy}
+              data-testid="agent-card-confirm-submit"
+              onClick={() => void confirm()}
+            >
+              {busy ? <Spinner /> : asking === "approved" ? <ApproveIcon /> : <X />}
+              {c?.confirm}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+/** The decided state of a 07.5 card's footer: the decision line (focus lands here after deciding) and the note. */
+function DecidedBlock({
+  decision,
+  verbs,
+  focusRef,
+  children,
+}: {
+  decision: NonNullable<AgentCard["decision"]>;
+  verbs?: { approved: string; denied: string };
+  focusRef: RefObject<HTMLDivElement | null>;
+  children?: ReactNode;
+}) {
+  return (
+    <div
+      ref={focusRef}
+      tabIndex={-1}
+      data-testid="agent-card-decided"
+      className="grid min-w-0 basis-full gap-1 outline-none @[26rem]:ml-auto @[26rem]:basis-auto"
+    >
+      <DecisionLine decision={decision} {...(verbs ? { verbs } : {})} />
+      {decision.note ? (
+        <p data-testid="agent-card-note" className="break-words text-muted-foreground text-xs leading-4">
+          “{decision.note}”
+        </p>
+      ) : null}
+      {children}
+    </div>
+  );
+}
+
+const FOOTER = "flex flex-wrap items-center gap-2 border-t bg-muted/35 px-3.5 py-2.5 dark:bg-white/[0.02]";
+
+/** Focus moves to the decided block once the server took a decision made in this card (UI-SPEC Focus management). */
+function useFocusAfterDecision(decided: boolean) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pending, setPending] = useState(false);
+  useEffect(() => {
+    if (pending && decided) {
+      ref.current?.focus();
+      setPending(false);
+    }
+  }, [pending, decided]);
+  return { ref, arm: () => setPending(true) };
+}
+
+/**
+ * A bot's action that needs approval (Surface 1). Exact: ACTION, WHAT {BOT} WILL SEND and the timer, Approve / Deny for
+ * a decider. Review-only: the truncation notice, Review (primary) and Deny. Summary: who wants what for whom, Tool and
+ * Source, the waiting and privacy lines, Review only for the requester and the deciders.
+ */
+function ToolCallCard({
+  messageId,
+  card,
+  link,
+  bot,
+}: {
+  messageId: string;
+  card: AgentCard;
+  link: AgentCardApprovalLink;
+  bot: string;
+}) {
+  const me = useMe({ enabled: false }).data?.user.id ?? null;
+  const now = useNow(link.status === "approved" ? link.useBy : link.expiresAt);
+  const after = useFocusAfterDecision(!!card.decision);
+  const display = link.display ?? "summary";
+  const known = card.viewerCan !== undefined;
+  const mayDecide = (card.viewerCan ?? []).includes("decide");
+  const requester = me !== null && link.requestedForUserId === me;
+  const pending = link.status === "pending" && !card.decision;
+  const decider = pending && mayDecide && display !== "summary";
+  const openTarget = openTargetOf(card);
+  const showOpen = !!openTarget && (mayDecide || requester || (me !== null && card.decision?.by.id === me));
+  const waitingFor = link.waitingFor ?? "Waiting for an approver";
+
+  const notices = link.warnings.filter((w) => w !== TRUNCATED_NOTICE);
+  const hidden = notices.includes(HIDDEN_NOTICE) || card.fields.some((f) => HIDDEN_MARKER.test(f.value));
+  const warnings = notices.filter((w) => w !== HIDDEN_NOTICE && w !== MASKED_NOTICE);
+  const masked = notices.includes(MASKED_NOTICE);
+
+  const actionCount =
+    display === "summary" ? card.fields.length : Math.min(link.actionFields ?? 2, card.fields.length);
+  const actionFields = card.fields.slice(0, actionCount);
+  const valueFields = card.fields.slice(actionCount);
+  const expires = link.expiresAt ? (
+    <time dateTime={link.expiresAt} title={fullFmt.format(new Date(link.expiresAt))}>
+      {cardExpiresIn(link.expiresAt, now)}
+    </time>
+  ) : null;
+  const useByPassed = !!link.useBy && new Date(link.useBy).getTime() < now;
+  const person = summaryRequester(card);
+  const tool = fieldOf(card, "Tool") ?? "it";
+
+  const stateLine = (() => {
+    switch (link.status) {
+      case "approved":
+        if (!link.useBy) return null;
+        return useByPassed ? (
+          <CardLine testId="agent-card-state-line" icon={Hourglass}>
+            Approved, but {bot} didn't run it before {clockOf(link.useBy)}. Ask again if you still need it.
+          </CardLine>
+        ) : (
+          <CardLine testId="agent-card-state-line" icon={Clock}>
+            {bot} runs it once, before {clockOf(link.useBy)}.
+          </CardLine>
+        );
+      case "applied":
+        return (
+          <CardLine testId="agent-card-state-line" icon={CircleCheck}>
+            {link.usedAt ? `Ran once at ${clockOf(link.usedAt)}.` : "Ran once."}
+          </CardLine>
+        );
+      case "expired":
+        return (
+          <CardLine testId="agent-card-state-line" icon={Hourglass}>
+            No one decided within 24 hours. Nothing was run.
+          </CardLine>
+        );
+      default:
+        return null;
+    }
+  })();
+
+  const onDecided = (outcome: "approved" | "denied") => {
+    if (outcome === "approved") toast.success(`Approved. ${bot} runs it once.`);
+    else toast(`Denied. ${bot} won't run it.`);
+    after.arm();
+  };
+
+  return (
+    <>
+      <div className="grid gap-3 px-3.5 pb-3.5">
+        {display === "summary" ? (
+          <ToolFieldList fields={actionFields} section="action" inline />
+        ) : (
+          <>
+            <div className="grid gap-2">
+              <SectionLabel>Action</SectionLabel>
+              <ToolFieldList fields={actionFields} section="action" />
+            </div>
+            {valueFields.length > 0 ? (
+              <div className="grid gap-2 border-t pt-3">
+                <SectionLabel>What {bot} will send</SectionLabel>
+                <ToolFieldList fields={valueFields} section="value" />
+              </div>
+            ) : null}
+          </>
+        )}
+        {warnings.map((w) => (
+          <WarningLine key={w} text={w} />
+        ))}
+        {hidden ? <WarningLine text={HIDDEN_NOTICE} /> : null}
+        {masked ? (
+          <CardLine testId="agent-card-masked" icon={KeyRound}>
+            {MASKED_NOTICE}
+          </CardLine>
+        ) : null}
+        {pending && display !== "summary" && (mayDecide || !known) ? (
+          <CardLine testId="agent-card-timer" icon={Clock}>
+            {display === "review_only" ? "Runs once" : "Runs once, with exactly these values"}
+            {expires ? <> · {expires}</> : null}
+          </CardLine>
+        ) : null}
+        {pending && known && !mayDecide && display !== "summary" ? (
+          <CardLine testId="agent-card-waiting" icon={Hourglass}>
+            {waitingFor}.{requester ? " You can't approve your own request." : ""}
+          </CardLine>
+        ) : null}
+        {pending && display === "summary" ? (
+          <CardLine testId="agent-card-waiting" icon={Hourglass}>
+            {waitingFor}
+            {expires ? <> · {expires}</> : null}
+          </CardLine>
+        ) : null}
+        {display === "summary" ? (
+          <CardLine testId="agent-card-privacy" icon={Users}>
+            Only {person ?? "the person who asked"} and the approvers can see the details.
+          </CardLine>
+        ) : null}
+        {stateLine}
+        {display === "review_only" && pending ? (
+          <CardLine testId="agent-card-truncated" icon={Info}>
+            {TRUNCATED_NOTICE}
+          </CardLine>
+        ) : null}
+      </div>
+      {showOpen || decider || card.decision ? (
+        <div data-testid="agent-card-actions" className={FOOTER}>
+          {showOpen && openTarget ? (
+            <Link
+              href={openTarget}
+              data-testid="agent-card-open"
+              className={cn(
+                buttonVariants({
+                  size: "sm",
+                  variant: decider && display === "review_only" ? "default" : "outline",
+                }),
+                "max-lg:h-11 max-sm:w-full",
+              )}
+            >
+              {card.actions.find((a) => a.kind === "open")?.label ?? "Review"}
+              <ArrowRight />
+            </Link>
+          ) : null}
+          {decider ? (
+            <span className="flex items-center gap-2 max-sm:w-full @[26rem]:ml-auto">
+              <CardDecision
+                messageId={messageId}
+                link={link}
+                approve={
+                  display === "exact" ? { label: "Approve", icon: Check, testId: "agent-card-approve" } : null
+                }
+                deny={{ label: "Deny", testId: "agent-card-deny" }}
+                copy={{
+                  approved: {
+                    title: "Approve this action?",
+                    body: `${bot} can run ${tool} once, with exactly these values, within 15 minutes. ${runsWith(card)}`,
+                    confirm: "Approve",
+                    note: true,
+                  },
+                  denied: {
+                    title: "Deny this action?",
+                    body: requester
+                      ? `${bot} won't run it.`
+                      : `${bot} won't run it. ${person ?? "The person who asked"} sees that you denied it.`,
+                    confirm: "Deny",
+                    note: true,
+                    placeholder: "Tell them why",
+                  },
+                }}
+                onDecided={onDecided}
+              />
+            </span>
+          ) : null}
+          {card.decision ? <DecidedBlock decision={card.decision} focusRef={after.ref} /> : null}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+/** One field of a Work Zone card: the existing label-over-value cell, with the field's glyph. */
+function WzField({
+  label,
+  testId,
+  icon: Icon,
+  wide,
+  children,
+}: {
+  label: string;
+  testId: string;
+  icon: LucideIcon | null;
+  wide: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className={cn("min-w-0", wide && "@[26rem]:col-span-2")}>
+      <dt className="truncate text-[11.5px] text-muted-foreground">{label}</dt>
+      <dd
+        data-testid={testId}
+        className="flex min-w-0 items-center gap-1.5 break-words text-[13.5px] leading-5"
+      >
+        {Icon ? <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden /> : null}
+        {children}
+      </dd>
+    </div>
+  );
+}
+
+/** The pill of a 07.5 card, re-rendered when its use window or expiry passes. */
+function LinkedApprovalPillNow({ link }: { link: AgentCardApprovalLink }) {
+  const now = useNow(link.status === "approved" ? link.useBy : link.expiresAt);
+  return <LinkedPill kind={link.kind ?? ""} status={link.status} useBy={link.useBy} now={now} />;
+}
+
+/** A server field's value with its trailing live state removed: "MacBook Pro · Online" → "MacBook Pro". */
+const deviceNameOf = (value: string | null) =>
+  (value ?? "").replace(/ · (Online|Offline)$/, "") || "the device";
+
+/**
+ * A Work Zone session a bot proposes (Surface 3). Same content for every reader; only the requester gets Review,
+ * Start session and Dismiss, with Start disabled (and the reason visible) while the device, runtime or project is
+ * unavailable. The Device value is live from `useDevices()` when the viewer knows the device (R9).
+ */
+function WorkZoneProposalCard({
+  messageId,
+  card,
+  link,
+  bot,
+}: {
+  messageId: string;
+  card: AgentCard;
+  link: AgentCardApprovalLink;
+  bot: string;
+}) {
+  const me = useMe({ enabled: false }).data?.user.id ?? null;
+  const now = useNow(link.expiresAt);
+  const after = useFocusAfterDecision(!!card.decision);
+  const reasonId = useId();
+  const devices = useDevices().data;
+  // Device presence on the org stream keeps the list live (R9: the card is never re-posted for it).
+  useWorkZoneOrgSync();
+  const known = card.viewerCan !== undefined;
+  const mayDecide = (card.viewerCan ?? []).includes("decide");
+  const requester = me !== null && link.requestedForUserId === me;
+  const pending = link.status === "pending" && !card.decision;
+
+  const project = fieldOf(card, "Project") ?? "";
+  const deviceField = fieldOf(card, "Device");
+  const deviceName = deviceNameOf(deviceField);
+  const runtimeLabel = fieldOf(card, "Runtime") ?? "";
+  const runtimeId =
+    (Object.entries(RUNTIMES).find(([, r]) => r.label === runtimeLabel)?.[0] as keyof typeof RUNTIMES) ??
+    "claude-code";
+  const forValue = fieldOf(card, "For");
+  const person = forValue?.split(" · proposed by ")[0]?.trim() || "the person it was proposed for";
+  const prompt = fieldOf(card, "Prompt");
+  // The proposal as the shared Work Zone helpers read it, from the server's card fields and link.
+  const online = !/ · Offline$/.test(deviceField ?? "");
+  const proposal: Pick<WorkZoneProposalView, "device" | "runtime" | "project" | "startBlocked"> = {
+    device: {
+      id: link.deviceId ?? "",
+      name: deviceName,
+      online,
+      usable: link.blocked !== "device_not_shared",
+    },
+    runtime: {
+      id: runtimeId,
+      label: runtimeLabel || "The runtime",
+      available: link.blocked !== "runtime_unavailable",
+    },
+    project: { id: "", name: project, removed: link.blocked === "project_not_found" },
+    startBlocked: link.blocked ?? null,
+  };
+
+  // Live device state (R9): only for a device in the viewer's own list; anyone else reads the server's text.
+  const live = link.deviceId ? devices?.find((d) => d.id === link.deviceId) : undefined;
+  const deviceState = live ? deviceStateOf(proposal, live, true) : null;
+  const block = pending
+    ? deviceState
+      ? liveStartBlock(proposal, deviceState, mayDecide)
+      : !mayDecide && known
+        ? "not_allowed"
+        : (link.blocked ?? null)
+    : null;
+
+  const openTarget = openTargetOf(card);
+  // The client re-checks the route like an Open target: only an internal app route is ever a link.
+  const resultRoute =
+    link.status === "applied" && link.resultRoute && AgentCardRoute.safeParse(link.resultRoute).success
+      ? link.resultRoute
+      : null;
+  const showButtons = pending && requester && known;
+  const readonly = pending && known && !requester;
+
+  const onDecided = (outcome: "approved" | "denied", decided: AgentCard) => {
+    const status = decided.approval?.status;
+    if (outcome === "denied") toast("Proposal dismissed");
+    else if (status === "applied" || status === "approved") toast.success(`Session started on ${deviceName}`);
+    else toast.error(failedStartText(decided.approval?.resultCode, proposal));
+    after.arm();
+  };
+
+  const field = (label: string, testId: string, icon: LucideIcon | null, value: ReactNode, wide = false) => (
+    <WzField label={label} testId={testId} icon={icon} wide={wide}>
+      {value}
+    </WzField>
+  );
+
+  return (
+    <>
+      <div className="grid gap-3 px-3.5 pb-3.5">
+        {link.status === "failed" ? (
+          <p
+            data-testid="agent-card-failed-reason"
+            className="flex min-w-0 items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-red-800 text-xs leading-4 dark:border-red-400/25 dark:bg-red-400/10 dark:text-red-300"
+          >
+            <CircleX className="size-4 shrink-0" aria-hidden />
+            <span className="min-w-0 break-words">{failedStartText(link.resultCode, proposal)}</span>
+          </p>
+        ) : null}
+        <dl data-testid="agent-card-fields" className="grid grid-cols-1 gap-x-4 gap-y-2 @[26rem]:grid-cols-2">
+          {field("Project", "agent-card-wz-project", FolderGit2, <span className="min-w-0">{project}</span>)}
+          {field(
+            "Device",
+            "agent-card-wz-device",
+            Laptop,
+            <span className="flex min-w-0 flex-wrap items-center gap-x-1.5">
+              <span className="min-w-0">{deviceName}</span>
+              <span aria-hidden className="text-muted-foreground">
+                ·
+              </span>
+              <DeviceState state={deviceState ?? (online ? "online" : "offline")} runtime={runtimeLabel} />
+            </span>,
+          )}
+          {field("Runtime", "agent-card-wz-runtime", null, <span className="min-w-0">{runtimeLabel}</span>)}
+          {field(
+            "Mode",
+            "agent-card-wz-mode",
+            Lock,
+            <span className="min-w-0">{PROPOSAL_MODE?.label ?? "Supervised"}</span>,
+          )}
+          {forValue ? field("For", "agent-card-wz-for", null, forValue, true) : null}
+        </dl>
+        {prompt ? (
+          <div className="grid min-w-0 gap-1">
+            <p className="text-[11.5px] text-muted-foreground">Prompt</p>
+            <div
+              data-testid="agent-card-wz-prompt"
+              className="min-w-0 rounded-lg bg-muted/50 px-3 py-2 text-sm dark:bg-white/[0.03]"
+            >
+              <UntrustedText text={prompt} clampLines={4} />
+            </div>
+          </div>
+        ) : null}
+        {link.status === "pending" || link.status === "approved" ? (
+          <p data-testid="agent-card-wz-mode-line" className="text-muted-foreground text-xs leading-4">
+            Asks before edits and commands. Bots never choose Full access.
+          </p>
+        ) : null}
+        {showButtons && block ? (
+          <CardLine testId="agent-card-wz-blocked" id={reasonId} icon={Info}>
+            {startBlockedText(block, proposal)}
+          </CardLine>
+        ) : null}
+        {link.status === "expired" ? (
+          <CardLine testId="agent-card-state-line" icon={Hourglass}>
+            No one started it within 24 hours.
+          </CardLine>
+        ) : null}
+        {pending && showButtons && link.expiresAt ? (
+          <CardLine testId="agent-card-timer" icon={Clock}>
+            <time dateTime={link.expiresAt} title={fullFmt.format(new Date(link.expiresAt))}>
+              {cardExpiresIn(link.expiresAt, now)}
+            </time>
+          </CardLine>
+        ) : null}
+      </div>
+      {showButtons || readonly || card.decision || link.status === "failed" ? (
+        <div data-testid="agent-card-actions" className={FOOTER}>
+          {showButtons && openTarget ? (
+            <Link
+              href={openTarget}
+              data-testid="agent-card-open"
+              className={cn(buttonVariants({ size: "sm", variant: "outline" }), "max-lg:h-11 max-sm:w-full")}
+            >
+              {card.actions.find((a) => a.kind === "open")?.label ?? "Review"}
+              <ArrowRight />
+            </Link>
+          ) : null}
+          {showButtons && mayDecide ? (
+            <span className="flex items-center gap-2 max-sm:w-full @[26rem]:ml-auto">
+              <CardDecision
+                messageId={messageId}
+                link={link}
+                approve={{
+                  label: "Start session",
+                  icon: Play,
+                  testId: "agent-card-start",
+                  disabledBy: block ? reasonId : null,
+                }}
+                deny={{ label: "Dismiss", testId: "agent-card-dismiss" }}
+                copy={{
+                  approved: {
+                    title: "Start this session?",
+                    body: `${runtimeLabel || "The runtime"} runs ${bot}'s prompt in ${project} on ${deviceName}, as you. It starts in Supervised mode: it asks before edits and commands.`,
+                    confirm: "Start session",
+                    note: false,
+                  },
+                  denied: {
+                    title: "Dismiss this proposal?",
+                    body: `No session starts. ${bot} is told you dismissed it.`,
+                    confirm: "Dismiss",
+                    note: true,
+                  },
+                }}
+                onDecided={onDecided}
+              />
+            </span>
+          ) : null}
+          {readonly ? (
+            <p
+              data-testid="agent-card-wz-readonly"
+              className="min-w-0 text-muted-foreground text-xs leading-4"
+            >
+              Only {person} can start this session.
+            </p>
+          ) : null}
+          {card.decision && link.status !== "failed" ? (
+            <DecidedBlock
+              decision={card.decision}
+              verbs={{ approved: "Started", denied: "Dismissed" }}
+              focusRef={after.ref}
+            />
+          ) : null}
+          {link.status === "failed" ? (
+            <p
+              data-testid="agent-card-wz-followup"
+              className="min-w-0 text-muted-foreground text-xs leading-4"
+            >
+              Ask {bot} again when it's fixed.
+            </p>
+          ) : null}
+          {resultRoute ? (
+            <Link
+              href={resultRoute}
+              data-testid="agent-card-open-session"
+              className={cn(buttonVariants({ size: "sm" }), "max-lg:h-11 max-sm:w-full")}
+            >
+              Open session
+              <ArrowRight />
+            </Link>
+          ) : null}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 export function AgentCardView({
   messageId,
   card: listed,
@@ -668,6 +1622,9 @@ export function AgentCardView({
     void followCard(qc, messageId, !following, card).catch((err) => toast.error(errorMessage(err)));
   const hasActions = !!openTarget || showFollow || showDecide;
   const link = approvalLinkOf(card);
+  // 07.5 kinds (an action, a Work Zone proposal) render their own body and footer; every other card is unchanged.
+  const linkedKind = linkedKindOf(link);
+  const bot = authorName ?? "the bot";
 
   return (
     <article
@@ -682,7 +1639,7 @@ export function AgentCardView({
       <p id={summaryId} className="sr-only">
         {summary}
       </p>
-      <div className="grid gap-2.5 px-3.5 pt-3 pb-3.5">
+      <div className={linkedKind ? "grid gap-2.5 px-3.5 pt-3 pb-3" : "grid gap-2.5 px-3.5 pt-3 pb-3.5"}>
         <div className="flex min-w-0 items-center justify-between gap-2">
           <span
             className={cn(
@@ -698,7 +1655,9 @@ export function AgentCardView({
             {link ? <WorkspaceBadge id={`${summaryId}-workspace`} /> : null}
           </span>
           {/* Keyed by status: a change re-mounts the pill only, which fades it in (nothing else moves). */}
-          {link ? (
+          {link && linkedKind ? (
+            <LinkedApprovalPillNow key={link.status} link={link} />
+          ) : link ? (
             <ApprovalStatusPill key={link.status} status={link.status} />
           ) : (
             <StatusPill key={card.status} status={card.status} />
@@ -711,7 +1670,7 @@ export function AgentCardView({
         >
           {card.title}
         </h3>
-        {link?.status === "failed" ? (
+        {link?.status === "failed" && !linkedKind ? (
           <p
             data-testid="agent-card-failed-reason"
             className="flex min-w-0 items-start gap-1.5 text-[13px] text-red-800 leading-5 dark:text-red-300"
@@ -722,7 +1681,7 @@ export function AgentCardView({
             </span>
           </p>
         ) : null}
-        {card.fields.length > 0 ? (
+        {card.fields.length > 0 && !linkedKind ? (
           <dl
             data-testid="agent-card-fields"
             className="grid grid-cols-1 gap-x-4 gap-y-2 @[26rem]:grid-cols-2"
@@ -737,12 +1696,16 @@ export function AgentCardView({
             ))}
           </dl>
         ) : null}
-        {link && summary.trim() && summary !== card.title ? <ChangePreview text={summary} /> : null}
-        {link?.warnings.map((w) => (
-          <WarningLine key={w} text={w} />
-        ))}
+        {link && !linkedKind && summary.trim() && summary !== card.title ? (
+          <ChangePreview text={summary} />
+        ) : null}
+        {linkedKind ? null : link?.warnings.map((w) => <WarningLine key={w} text={w} />)}
       </div>
-      {link ? (
+      {link && linkedKind === "tool" ? (
+        <ToolCallCard messageId={messageId} card={card} link={link} bot={bot} />
+      ) : link && linkedKind === "work_zone" ? (
+        <WorkZoneProposalCard messageId={messageId} card={card} link={link} bot={bot} />
+      ) : link ? (
         <LinkedFooter messageId={messageId} card={card} link={link} openTarget={openTarget} />
       ) : hasActions || card.decision ? (
         <div
