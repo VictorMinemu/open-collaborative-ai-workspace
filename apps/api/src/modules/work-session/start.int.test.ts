@@ -279,12 +279,13 @@ const CLAUDE_READY = { id: "claude-code", installed: true, version: "2.1.287", l
 let stanId: string;
 let danaId: string;
 let rexId: string;
+let rex: TestClient;
 
 describe("failures are result codes with no partial writes (D-04, Pitfall 9)", () => {
   beforeAll(async () => {
     ({ userId: stanId } = await invite(stack, admin, "stan@example.test", "Stan", "standard"));
     ({ userId: danaId } = await invite(stack, admin, "dana@example.test", "Dana", "developer"));
-    ({ userId: rexId } = await invite(stack, admin, "rex@example.test", "Rex", "developer"));
+    ({ client: rex, userId: rexId } = await invite(stack, admin, "rex@example.test", "Rex", "developer"));
   });
 
   it("not_allowed: a standard member without work_session.create", async () => {
@@ -526,6 +527,28 @@ describe("the start mode never rises without an explicit mode (APPROVE-04, T-07.
     const start = await device.command("session.start", res.session.id);
     expect(start.payload.permissionMode).toBe("plan");
     device.ack(start.id);
+  });
+
+  it("over HTTP too (WINDOWS #205): Rex posts without a mode and starts at plan; an explicit mode is still refused", async () => {
+    const lowered = await rex.request("POST", "/api/v1/work-sessions", {
+      projectId,
+      deviceId,
+      runtime: "claude-code",
+    });
+    expect(lowered.status, JSON.stringify(lowered.body)).toBe(200);
+    expect(lowered.body).toMatchObject({ createdBy: rexId, permissionMode: "plan", fullAccess: false });
+    const start = await device.command("session.start", (lowered.body as { id: string }).id);
+    expect(start.payload.permissionMode).toBe("plan");
+    device.ack(start.id);
+    // A mode the person picked is never lowered: the same answer as before (403, the grant's cap as the reason).
+    const explicit = await rex.request("POST", "/api/v1/work-sessions", {
+      projectId,
+      deviceId,
+      runtime: "claude-code",
+      permissionMode: "default",
+    });
+    expect(explicit.status, JSON.stringify(explicit.body)).toBe(403);
+    expect((explicit.body!.error as { code: string }).code).toBe("device_grant");
   });
 });
 

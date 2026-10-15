@@ -68,7 +68,11 @@ export const CreateWorkSessionRequest = z.object({
   runtime: RuntimeId.default("claude-code"),
   title: z.string().trim().min(1).max(200).optional(),
   model: z.string().trim().min(1).max(200).optional(),
-  permissionMode: PermissionMode.default("default"),
+  /**
+   * Absent = the person did not pick one: the start lowers `default` to the highest mode they may use on the device
+   * (e.g. `plan` under a capped grant). A picked mode is never lowered; it is refused with its reason (WINDOWS #205).
+   */
+  permissionMode: PermissionMode.optional(),
   effort: EffortLevel.optional(),
   fastMode: z.boolean().optional(),
   contextWindow: ContextWindow.optional(),
