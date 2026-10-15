@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 128
+open_count: 129
 waived_count: 4
 fixed_count: 101
-total_count: 233
-last_updated: 2026-10-15T15:10:12.922Z
+total_count: 234
+last_updated: 2026-10-15T15:23:46.137Z
 ---
 
 # Broken Windows Ledger
@@ -248,6 +248,7 @@ last_updated: 2026-10-15T15:10:12.922Z
 | 231 | 07.8 | deviation | packages/db/src/schema/app.ts |  | DECIDE in 07.8-18: the app role can change an approved sandbox package's pinned fields (sha256, tree_sha256, lockfile, dependency_count, review_token); add an immutability trigger after approval. Every new secret kind now needs a migration (secrets_kind_check), note in ADR-0029 | open |  | 2026-10-15T15:08:27.379Z |  |
 | 232 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | Wiring left for later plans: turn.activity not registered in realtime EventTypes (07.8-10); SandboxdContextInput.events is loose until tightened to LiveInputFrame (07.8-16); PATCH /agents/:id/capabilities ignores sandbox/browser until 07.8-15 | open |  | 2026-10-15T15:10:12.850Z |  |
 | 233 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | File upload/download/import travel as base64 JSON up to 50 MiB (~67 MiB on the wire): check the body limit or stream (07.8-09/11); cap_reached/tainted answer 403 here vs 409 on 07.4 connector routes, unify in 05/10/14; npm lockfiles with sha1-only integrity fail PackageTreeEntry, refuse with a reason in 17/18 | open |  | 2026-10-15T15:10:12.922Z |  |
+| 234 | 07.8 | deviation | packages/db/src/schema/app.ts |  | MUST (07.8-21): app.message_cards kind check and Drizzle enum accept only the 8 old kinds; a sign-in ('browser') card cannot be stored until a new migration (chained after 07.8-02) adds it. ApprovalToolSourceKind lacks a sandbox/browser source (07.8-14; update SOURCE_ICON) | open |  | 2026-10-15T15:23:46.137Z |  |
 
 ````json
 [
@@ -3045,6 +3046,18 @@ last_updated: 2026-10-15T15:10:12.922Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T15:10:12.922Z",
+    "resolved_at": null
+  },
+  {
+    "id": 234,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/db/src/schema/app.ts",
+    "line": null,
+    "description": "MUST (07.8-21): app.message_cards kind check and Drizzle enum accept only the 8 old kinds; a sign-in ('browser') card cannot be stored until a new migration (chained after 07.8-02) adds it. ApprovalToolSourceKind lacks a sandbox/browser source (07.8-14; update SOURCE_ICON)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T15:23:46.137Z",
     "resolved_at": null
   }
 ]
