@@ -38,12 +38,22 @@
 # the member's connector (`member_account`) hands the persona the share link (R7); `ocw_connector_list` and
 # `ocw_http_request` (a GET by key handle) go through their own routes; the cell's config has no per-member MCP server
 # and no state file or log line carries the member's connector token.
+# Scenario approval (07.5-15 / APPROVE-01, APPROVE-02, D-01, D-02, D-04): a DM turn offering an unruled `echo` and a
+# `write_note` with an "Always ask" rule sends arguments for write_note only (none for echo), hears the approval sentence
+# and runs nothing; an `agent.card_action.v1` carrying the grant leads the model to call write_note once with exactly the
+# approved arguments, which the fake MCP executes unchanged; the params pin is registered at the lowest priority and
+# holds in OpenClaw 2026.9.7's own hook runner against rewriting plugins (residuals printed, ADR-0026); an approved
+# connector grant (logical `<connector>__<tool>`) is used through `ocw_connector_call` with exactly its arguments.
+# Scenario work_zone (07.5-15 / APPROVE-03, APPROVE-04, D-03): both Work Zone tools are in the bot's alsoAllow; the model
+# lists projects and proposes a session through `/work-zone/projects` and `/work-zone/proposals` with ids and the tool's
+# fields only (never a mode, model, full access or user); a turn that read outside content first is refused in the cell.
 # Scenario breaker (stability 2026-10-06): SIGKILLed boots trip OpenClaw's restart-loop breaker, which refuses the ocw
 # channel's automatic start; the plugin reports the pause to the API and starts the channel itself after its back-off.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
-#                            dm-isolation, memory, memory-files, card, board, connectors, mcp, marketplace, breaker
+#                            dm-isolation, memory, memory-files, card, board, connectors, mcp, approval, work_zone,
+#                            marketplace, breaker
 #                            and sandbox (runs when it is listed, with SMOKE_BUILD=1, or when ocw-mcp-sandbox:local
 #                            exists; otherwise it prints "SKIP sandbox (image not built)")
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
@@ -960,6 +970,311 @@ echo "   cell log   : $LEAKS line(s) carry the MCP credential"
 [[ "$LEAKS" -eq 0 ]] || { echo "FAIL: the MCP credential appears in the cell log"; exit 1; }
 fi
 
+if want approval; then
+# 07.5 (D-01, D-02, D-04; WINDOWS #209, #219): per-tool approvals inside the real cell. The fake Agent Channel API
+# plays the API's decisions (POST /__test/tool-approval); the fake MCP captures every tool call it executes.
+APPROVAL_TOOL="${MCP_SAFE}__write_note"
+APPROVAL_ARGS='{"title":"Globex invoice","text":"Invoice for Globex, 1,250 EUR"}'
+# Every fake MCP tool call the server actually executed, from the fake model's capture directory.
+mcp_calls() {
+  docker exec "${P}-model" node -e '
+const fs = require("fs");
+const dir = "/tmp/capture";
+const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith("-mcp-call.json")).sort((a, b) => {
+  const [ta, na] = a.split("-").map(Number); const [tb, nb] = b.split("-").map(Number); return ta - tb || na - nb; }) : [];
+console.log(JSON.stringify(files.map((f) => JSON.parse(fs.readFileSync(`${dir}/${f}`, "utf8")))));'
+}
+approval_control() {
+  api_exec "
+await fetch('http://127.0.0.1:4000/__test/tool-approval', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify($1) });
+"
+}
+
+echo "== [approval] the server lets the bot use write_note too: the cell re-renders the tool filter"
+docker exec -e SERVERS="$(mcp_servers_json '["echo","write_note"]')" -i "${P}-api" node --input-type=module -e "
+const mcpServers = JSON.parse(process.env.SERVERS);
+await fetch('http://127.0.0.1:4000/__test/cell', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mcpServers, reason: 'tools.updated' }) });
+"
+FILTER=""
+for i in $(seq 1 60); do
+  FILTER="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json | MCP_SAFE="$MCP_SAFE" node -e '
+const cfg = JSON.parse(require("fs").readFileSync(0, "utf8"));
+console.log(JSON.stringify(cfg.mcp?.servers?.[process.env.MCP_SAFE]?.toolFilter?.include ?? null));
+')"
+  [[ "$FILTER" == '["echo","write_note"]' ]] && break
+  sleep 1
+done
+echo "   filter     : $FILTER"
+[[ "$FILTER" == '["echo","write_note"]' ]] || { echo "FAIL: the tool filter was not re-rendered with write_note"; exit 1; }
+
+echo "== [approval] a DM turn: echo (no rule) sends no arguments; write_note (Always ask) sends exactly its arguments and hears the approval sentence"
+approval_control "{ tool: '$APPROVAL_TOOL', reply: 'approval_required', waitingFor: 'Sam Lee', requesterName: 'Sam Lee' }"
+MCP_BEFORE="$(mcp_calls)"
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-approval.json" 0199a6f0-0000-7000-8000-00000000d0e1)"
+MCP_AFTER="$(mcp_calls)"
+echo "$STATE" | MCP_SAFE="$MCP_SAFE" ARGS="$APPROVAL_ARGS" BEFORE="$MCP_BEFORE" AFTER="$MCP_AFTER" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const safe = process.env.MCP_SAFE;
+const EV = "0199a6f0-0000-7000-8000-00000000e0e1";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0e1");
+if (!m) { console.log("FAIL: no reply to the approval mention"); process.exit(1); }
+const calls = s.toolCalls.filter((c) => c.eventId === EV);
+const echo = calls.find((c) => c.tool === `${safe}__echo`);
+const note = calls.find((c) => c.tool === `${safe}__write_note`);
+const executed = JSON.parse(process.env.AFTER).slice(JSON.parse(process.env.BEFORE).length);
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   tool calls :", JSON.stringify(calls.map((c) => ({ tool: c.tool, keys: Object.keys(c).sort(), allowed: c.allowed }))));
+console.log("   executed   :", JSON.stringify(executed));
+const ok =
+  echo && !("arguments" in echo) && !JSON.stringify(echo).includes("ECHO-SENTINEL-0755") && echo.allowed === true &&
+  note && JSON.stringify(note.arguments) === JSON.stringify(JSON.parse(process.env.ARGS)) && note.allowed === false &&
+  typeof note.toolCallId === "string" && note.toolCallId.length > 0 &&
+  m.text.includes("Tool write_note said:") && m.text.includes("needs approval") &&
+  // Nothing ran on the server except the read-only echo: the write waits for a person.
+  executed.length === 1 && executed[0].name === "echo";
+if (!ok) { console.log("FAIL: expected arguments only for the flagged tool, the approval sentence, and no write"); process.exit(1); }
+'
+
+echo "== [approval] the params pin is registered last (OpenClaw runs before_tool_call handlers highest priority first)"
+PIN_LINE="$(docker logs "${P}-openclaw" 2>&1 | grep -o "tool gate registered ([a-z-]* registry; gate priority 10000, params pin priority -10000)" | sort -u | tr '\n' ';')"
+echo "   registered : $PIN_LINE"
+[[ "$PIN_LINE" == *"params pin priority -10000"* ]] || { echo "FAIL: no log line shows the params pin at the lowest priority"; exit 1; }
+
+echo "== [approval] OpenClaw 2026.9.7's own hook runner with our gate and pin and rewriting plugins (assumption A2, #209)"
+cat >"$SECRETS/pin-probe.mjs" <<'PROBE'
+import { readdirSync, readFileSync } from "node:fs";
+import assert from "node:assert/strict";
+const dist = "/app/dist";
+// The chunk that defines OpenClaw's hook runner, and the name it exports it under (the bundle minifies export names).
+let createHookRunner;
+for (const f of readdirSync(dist).filter((x) => x.endsWith(".mjs"))) {
+  const src = readFileSync(`${dist}/${f}`, "utf8");
+  if (!src.includes("function createHookRunner(registry")) continue;
+  const alias = /createHookRunner as ([A-Za-z_$][\w$]*)/u.exec(src)?.[1];
+  if (alias) createHookRunner = (await import(`${dist}/${f}`))[alias];
+  break;
+}
+if (typeof createHookRunner !== "function") throw new Error("OpenClaw's hook runner was not found");
+const plugin = "/opt/ocw/openclaw-channel/dist";
+const { createToolGuard, registerToolGate, TOOL_PIN_PRIORITY } = await import(`${plugin}/tool-guard.js`);
+const TOOL = "m5e0c0de1__write_note";
+const APPROVED = { title: "Globex invoice", text: "Invoice for Globex, 1,250 EUR" };
+const SESSION = "agent:probe:ocw:dm:probe";
+const run = async (extra) => {
+  const typedHooks = [];
+  const api = { registrationMode: "probe", on: (hookName, handler, opts) => typedHooks.push({ pluginId: "ocw", hookName, handler, priority: opts?.priority }) };
+  const guard = createToolGuard({
+    client: () => ({ authorizeToolCall: async () => ({ callId: "c1", allowed: true, reason: null }), reportToolCallResult: async () => {} }),
+  });
+  registerToolGate(api, guard);
+  for (const [pluginId, priority, result] of extra) typedHooks.push({ pluginId, hookName: "before_tool_call", priority, handler: () => result });
+  guard.beginTurn(SESSION, {
+    eventId: "e1", agentId: "probe-bot",
+    turn: { tools: [TOOL], toolFlags: { [TOOL]: { untrustedOutput: true, sideEffecting: true, approval: "always" } }, memory: [], now: null, maxToolCalls: 8, maxWebCalls: 5 },
+  });
+  const runner = createHookRunner({ typedHooks, plugins: [] }, { catchErrors: true });
+  return runner.runBeforeToolCall({ toolName: TOOL, params: structuredClone(APPROVED), toolCallId: "call-1" }, { sessionKey: SESSION });
+};
+const rewrite = (text) => ({ params: { ...APPROVED, text, injected: true } });
+// Rewriting plugins above the pin (any priority higher than TOOL_PIN_PRIORITY): the pin's params win.
+const held = await run([["rewriter-high", 5000, rewrite("REWRITTEN-HIGH")], ["rewriter-zero", 0, rewrite("REWRITTEN-ZERO")], ["rewriter-late", TOOL_PIN_PRIORITY + 1, rewrite("REWRITTEN-LATE")]]);
+assert.notEqual(held?.block, true);
+assert.deepEqual(held?.params, APPROVED);
+console.log(`PIN_HOLDS priority=${TOOL_PIN_PRIORITY} params=${JSON.stringify(held.params)}`);
+// Recorded residuals (ADR-0026): a plugin registered below the pin, or one asking OpenClaw's own approval first, wins.
+const below = await run([["rewriter-below", TOOL_PIN_PRIORITY - 1, rewrite("REWRITTEN-BELOW")]]);
+console.log(`BELOW_PIN_WINS=${below?.params?.text === "REWRITTEN-BELOW"}`);
+const native = await run([["native-approval", 5000, { ...rewrite("REWRITTEN-NATIVE"), requireApproval: { title: "x", description: "x" } }]]);
+console.log(`NATIVE_APPROVAL_FREEZES_PARAMS=${native?.params?.text === "REWRITTEN-NATIVE"}`);
+PROBE
+docker cp "$SECRETS/pin-probe.mjs" "${P}-openclaw:/tmp/pin-probe.mjs" >/dev/null
+PROBE_OUT="$(docker exec "${P}-openclaw" node /tmp/pin-probe.mjs 2>&1)" || { echo "$PROBE_OUT" | sed 's/^/   /'; echo "FAIL: the pin does not hold in OpenClaw's real hook runner"; exit 1; }
+echo "$PROBE_OUT" | sed 's/^/   /'
+grep -q "^PIN_HOLDS" <<<"$PROBE_OUT" || { echo "FAIL: the pin probe did not report"; exit 1; }
+
+echo "== [approval] Sam approves: the re-run turn calls write_note once with exactly the approved arguments, executed unchanged"
+approval_control "{ tool: '$APPROVAL_TOOL', reply: 'grant' }"
+GRANT_EVENT="$SECRETS/approval-grant.json"
+# The canonical arguments (RFC 8785: keys sorted), as the API sends them in the grant.
+CANONICAL="$(ARGS="$APPROVAL_ARGS" node -e 'const a = JSON.parse(process.env.ARGS); console.log(JSON.stringify(Object.fromEntries(Object.keys(a).sort().map((k) => [k, a[k]]))))')"
+CANONICAL="$CANONICAL" APPROVAL_TOOL="$APPROVAL_TOOL" ARGS="$APPROVAL_ARGS" node -e '
+const fs = require("fs");
+const e = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+e.eventId = "0199a6f0-0000-7000-8000-00000000e0e2";
+const card = "0199a6f0-0000-7000-8000-00000000d0e2";
+e.thread = { rootMessageId: card };
+// The real API sends the server sentence; the directive drives the fake model (key order differs from the canonical).
+e.message = { ...e.message, id: card, text: `Sam Lee approved “Run write_note on Notes” [[call write_note ${process.env.ARGS}]]` };
+e.cardAction = {
+  messageId: card,
+  kind: "approval",
+  title: "Run write_note on Notes",
+  outcome: "approved",
+  decidedBy: { id: "0199a6f0-0000-7000-8000-0000000000f3", displayName: "Sam Lee" },
+  grant: { tool: process.env.APPROVAL_TOOL, arguments: process.env.CANONICAL, useBy: "2026-10-15T09:15:00.000Z" },
+};
+fs.writeFileSync(process.argv[2], JSON.stringify({ type: "agent.card_action.v1", data: e }));
+' "$ROOT/infra/openclaw/test/mention-approval.json" "$GRANT_EVENT"
+MCP_BEFORE="$(mcp_calls)"
+STATE="$(inject_and_wait "$GRANT_EVENT" 0199a6f0-0000-7000-8000-00000000d0e2 /__test/event)"
+MCP_AFTER="$(mcp_calls)"
+approval_control "{ tool: '$APPROVAL_TOOL' }"
+echo "$STATE" | MCP_SAFE="$MCP_SAFE" CANONICAL="$CANONICAL" BEFORE="$MCP_BEFORE" AFTER="$MCP_AFTER" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const safe = process.env.MCP_SAFE;
+const EV = "0199a6f0-0000-7000-8000-00000000e0e2";
+const canon = (v) => JSON.stringify(v, (_k, x) => (x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0e2");
+if (!m) { console.log("FAIL: no reply to the approved card action"); process.exit(1); }
+const calls = s.toolCalls.filter((c) => c.eventId === EV && c.tool === `${safe}__write_note`);
+const executed = JSON.parse(process.env.AFTER).slice(JSON.parse(process.env.BEFORE).length);
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   re-run     :", JSON.stringify(calls.map((c) => ({ arguments: c.arguments, allowed: c.allowed }))));
+console.log("   executed   :", JSON.stringify(executed));
+const ok =
+  calls.length === 1 && calls[0].allowed === true && canon(calls[0].arguments) === process.env.CANONICAL &&
+  executed.length === 1 && executed[0].name === "write_note" && canon(executed[0].arguments) === process.env.CANONICAL &&
+  m.text.includes("Tool write_note said: noted: Globex invoice");
+if (!ok) { console.log("FAIL: the approved call did not run once with exactly the approved arguments"); process.exit(1); }
+'
+# The model was told the grant: who approved, the tool and the exact canonical arguments (mention-mapper "Approved action").
+GRANTED="$(docker exec "${P}-model" sh -c "grep -l '0199a6f0-0000-7000-8000-00000000c0e1' /tmp/capture/*-openai.json 2>/dev/null | xargs -r grep -lF 'Approved by Sam Lee. Call ${APPROVAL_TOOL} once with exactly these arguments' | wc -l")"
+echo "   grant block: $GRANTED model request(s) carry the Approved action"
+[[ "$GRANTED" -ge 1 ]] || { echo "FAIL: the Approved action block did not reach the model"; exit 1; }
+
+echo "== [approval] an approved connector grant: the bot calls ocw_connector_call with exactly the approved arguments (#219)"
+CONN_TOOL="m1a2b3c4d__whoami"
+CONN_ARGS='{"scope":"profile","who":"me"}'
+CONN_TURN="$(printf '{"tools":["ocw_connector_call","%s"],"toolFlags":{"ocw_connector_call":{"untrustedOutput":true,"sideEffecting":false},"%s":{"untrustedOutput":true,"sideEffecting":true,"approval":"always"}}}' "$CONN_TOOL" "$CONN_TOOL")"
+CALL_DIRECTIVE="$(printf '[[call ocw_connector_call {"connector":"m1a2b3c4d","tool":"whoami","arguments":%s}]]' "$CONN_ARGS")"
+approval_control "{ tool: '$CONN_TOOL', reply: 'approval_required', waitingFor: 'Sam Lee', requesterName: 'Sam Lee' }"
+ASK_FIXTURE="$SECRETS/approval-connector.json"
+TURN="$CONN_TURN" TEXT="who am I in the CRM? $CALL_DIRECTIVE" node -e '
+const fs = require("fs");
+const e = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+e.eventId = "0199a6f0-0000-7000-8000-00000000e0e3";
+e.thread.rootMessageId = e.message.id = "0199a6f0-0000-7000-8000-00000000d0e3";
+e.message.text = process.env.TEXT;
+e.turn = { ...e.turn, ...JSON.parse(process.env.TURN) };
+fs.writeFileSync(process.argv[2], JSON.stringify(e));
+' "$ROOT/infra/openclaw/test/mention-approval.json" "$ASK_FIXTURE"
+STATE="$(inject_and_wait "$ASK_FIXTURE" 0199a6f0-0000-7000-8000-00000000d0e3)"
+echo "$STATE" | ARGS="$CONN_ARGS" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0e3");
+if (!m) { console.log("FAIL: no reply to the connector approval mention"); process.exit(1); }
+const calls = (s.connectorCalls ?? []).filter((c) => c.eventId === "0199a6f0-0000-7000-8000-00000000e0e3");
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   calls      :", JSON.stringify(calls.map(({ connector, tool, arguments: a }) => ({ connector, tool, arguments: a }))));
+const ok = calls.length === 1 && JSON.stringify(calls[0].arguments) === JSON.stringify(JSON.parse(process.env.ARGS)) &&
+  m.text.includes("Tool ocw_connector_call said:") && m.text.includes("needs approval") && !m.text.includes("whoami: sub_smoke");
+if (!ok) { console.log("FAIL: expected the connector call to wait for approval"); process.exit(1); }
+'
+approval_control "{ tool: '$CONN_TOOL', reply: 'grant' }"
+CONN_CANONICAL="$(ARGS="$CONN_ARGS" node -e 'const a = JSON.parse(process.env.ARGS); console.log(JSON.stringify(Object.fromEntries(Object.keys(a).sort().map((k) => [k, a[k]]))))')"
+CONN_GRANT="$SECRETS/approval-connector-grant.json"
+CANONICAL="$CONN_CANONICAL" TOOL="$CONN_TOOL" DIRECTIVE="$CALL_DIRECTIVE" node -e '
+const fs = require("fs");
+const e = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+e.eventId = "0199a6f0-0000-7000-8000-00000000e0e4";
+const card = "0199a6f0-0000-7000-8000-00000000d0e4";
+e.thread = { rootMessageId: card };
+e.message = { ...e.message, id: card, text: `Sam Lee approved “Run whoami on Smoke CRM” ${process.env.DIRECTIVE}` };
+e.cardAction = {
+  messageId: card, kind: "approval", title: "Run whoami on Smoke CRM", outcome: "approved",
+  decidedBy: { id: "0199a6f0-0000-7000-8000-0000000000f3", displayName: "Sam Lee" },
+  grant: { tool: process.env.TOOL, arguments: process.env.CANONICAL, useBy: "2026-10-15T09:20:00.000Z" },
+};
+fs.writeFileSync(process.argv[2], JSON.stringify({ type: "agent.card_action.v1", data: e }));
+' "$ASK_FIXTURE" "$CONN_GRANT"
+STATE="$(inject_and_wait "$CONN_GRANT" 0199a6f0-0000-7000-8000-00000000d0e4 /__test/event)"
+approval_control "{ tool: '$CONN_TOOL' }"
+echo "$STATE" | CANONICAL="$CONN_CANONICAL" TOOL="$CONN_TOOL" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const canon = (v) => JSON.stringify(Object.fromEntries(Object.keys(v ?? {}).sort().map((k) => [k, v[k]])));
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0e4");
+if (!m) { console.log("FAIL: no reply to the connector grant"); process.exit(1); }
+const calls = (s.connectorCalls ?? []).filter((c) => c.eventId === "0199a6f0-0000-7000-8000-00000000e0e4");
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   re-run     :", JSON.stringify(calls.map(({ connector, tool, arguments: a }) => ({ connector, tool, arguments: a }))));
+const ok = calls.length === 1 && `${calls[0].connector}__${calls[0].tool}` === process.env.TOOL &&
+  canon(calls[0].arguments) === process.env.CANONICAL && m.text.includes("Tool ocw_connector_call said: whoami: sub_smoke");
+if (!ok) { console.log("FAIL: the approved connector call did not run once through ocw_connector_call with exactly the approved arguments"); process.exit(1); }
+'
+fi
+
+if want work_zone; then
+# 07.5 (D-03, APPROVE-03/04; WINDOWS #214): the Work Zone proposal tools inside the real cell.
+echo "== [work_zone] both tools are in the bot's alsoAllow (turn-scoped, like ocw_board_card)"
+ALSO="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json | node -e '
+const cfg = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const lists = Object.values(cfg.agents?.entries ?? {}).map((a) => a.tools?.alsoAllow ?? []);
+console.log(JSON.stringify(lists.map((l) => l.filter((t) => t.startsWith("ocw_work_zone") || t === "ocw_start_work_zone"))));
+')"
+echo "   alsoAllow  : $ALSO"
+[[ "$ALSO" == *'"ocw_work_zone_projects"'* && "$ALSO" == *'"ocw_start_work_zone"'* ]] || { echo "FAIL: the Work Zone tools are not in the bot's alsoAllow"; exit 1; }
+
+echo "== [work_zone] the model lists the projects and proposes a session: ids and the tool's fields only, never a mode"
+api_exec "
+await fetch('http://127.0.0.1:4000/__test/work-zone', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+"
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-work-zone.json" 0199a6f0-0000-7000-8000-00000000d0f1)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e0f1";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0f1");
+if (!m) { console.log("FAIL: no reply to the Work Zone mention"); process.exit(1); }
+const lists = s.workZone.projectLists.filter((b) => b.eventId === EV);
+const proposals = s.workZone.proposals.filter((b) => b.eventId === EV);
+const keys = (b) => Object.keys(b).sort().join();
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   bodies     :", JSON.stringify({ lists: lists.map(keys), proposals: proposals.map(keys) }));
+const forbidden = ["permissionMode", "mode", "model", "fullAccess", "userId"];
+const ok =
+  /\[tools: 2 \| ocw_start_work_zone,ocw_work_zone_projects\]/.test(m.text) &&
+  lists.length === 1 && keys(lists[0]) === "agentId,eventId" &&
+  proposals.length === 1 && keys(proposals[0]) === "agentId,deviceId,eventId,projectId,prompt" &&
+  proposals[0].projectId === "0199a6f0-0000-7000-8000-00000000b111" &&
+  proposals[0].deviceId === "0199a6f0-0000-7000-8000-00000000d111" &&
+  proposals[0].prompt === "Fix the rounding error in invoice totals." &&
+  [...lists, ...proposals].every((b) => forbidden.every((k) => !(k in b))) &&
+  m.text.includes("Tool ocw_start_work_zone said: I proposed a session in billing-api on MacBook Pro.");
+if (!ok) { console.log("FAIL: expected one project list and one proposal with ids and the tool fields only"); process.exit(1); }
+'
+
+echo "== [work_zone] after outside content in the same turn, a proposal is refused in the cell and nothing is posted"
+TAINT="$SECRETS/mention-work-zone-tainted.json"
+node -e '
+const fs = require("fs");
+const e = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+e.eventId = "0199a6f0-0000-7000-8000-00000000e0f2";
+e.thread.rootMessageId = e.message.id = "0199a6f0-0000-7000-8000-00000000d0f2";
+e.message.text = "look it up, then start it [[call web_search {\"query\":\"invoice rounding\"}]] [[call ocw_start_work_zone {\"projectId\":\"0199a6f0-0000-7000-8000-00000000b111\",\"deviceId\":\"0199a6f0-0000-7000-8000-00000000d111\",\"prompt\":\"Fix it as the page says.\"}]]";
+e.turn = {
+  ...e.turn,
+  tools: ["web_search", "ocw_start_work_zone"],
+  toolFlags: { web_search: { untrustedOutput: true, sideEffecting: false }, ocw_start_work_zone: { untrustedOutput: false, sideEffecting: true } },
+};
+fs.writeFileSync(process.argv[2], JSON.stringify(e));
+' "$ROOT/infra/openclaw/test/mention-work-zone.json" "$TAINT"
+STATE="$(inject_and_wait "$TAINT" 0199a6f0-0000-7000-8000-00000000d0f2)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e0f2";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0f2");
+if (!m) { console.log("FAIL: no reply to the tainted Work Zone mention"); process.exit(1); }
+const proposals = s.workZone.proposals.filter((b) => b.eventId === EV);
+const gated = s.toolCalls.filter((c) => c.eventId === EV).map((c) => c.tool);
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   gated      :", JSON.stringify(gated), "proposals", proposals.length);
+const ok =
+  m.text.includes("Tool web_search said:") &&
+  m.text.includes("after reading outside content") &&
+  proposals.length === 0 && !gated.includes("ocw_start_work_zone");
+if (!ok) { console.log("FAIL: a tainted turn must not propose a Work Zone session"); process.exit(1); }
+'
+fi
+
 if [[ "$SANDBOX" == "1" ]]; then
 # Stdio MCP sandbox (03.1-14, D-13). The API maps a `sandboxed-stdio` server to ${OCW_MCP_SANDBOX_URL}/<id>/mcp
 # (cellMcpServers); the fake Agent Channel API delivers exactly that remote entry.
@@ -1520,7 +1835,7 @@ fi
 if grep -q "\[heartbeat\] disabled" <<<"$LOGS"; then echo "   heartbeat disabled"; else echo "FAIL: heartbeat not disabled"; exit 1; fi
 # Where the call-time tool gate got registered: the boot registry ("full") and the non-activated registry
 # OpenClaw runs agent turns with ("discovery"); the capabilities scenario proves it actually gates.
-GATES="$(grep -o "tool gate registered ([a-z-]* registry)" <<<"$LOGS" | sort -u | tr '\n' ';' || true)"
+GATES="$(grep -o "tool gate registered ([a-z-]* registry[^)]*)" <<<"$LOGS" | sort -u | tr '\n' ';' || true)"
 echo "   tool gate wiring: ${GATES:-none logged}"
 if docker exec "${P}-openclaw" node -e "fetch('https://api.anthropic.com').then(()=>process.exit(0)).catch(()=>process.exit(1))"; then
   echo "FAIL: container has internet egress"; exit 1

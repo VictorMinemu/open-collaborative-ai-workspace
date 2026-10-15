@@ -20,4 +20,8 @@ export const FAKE_MCP_TOOLS: ReadonlyArray<{
 /** Returns true when it owned the route (`/mcp`, `/sse`, `/sse/messages`). */
 export type FakeMcpHandler = (req: IncomingMessage, res: ServerResponse, url: URL) => boolean;
 
-export function createFakeMcp(opts?: { token?: string }): FakeMcpHandler;
+export function createFakeMcp(opts?: {
+  token?: string;
+  /** Every tools/call exactly as received (name and arguments). */
+  onToolCall?: (call: { name: string; arguments: Record<string, unknown> }) => void;
+}): FakeMcpHandler;

@@ -1,0 +1,65 @@
+{
+  "eventId": "0199a6f0-0000-7000-8000-00000000e0e1",
+  "agent": {
+    "id": "0199a6f0-0000-7000-8000-00000000a001",
+    "handle": "archie",
+    "displayName": "Archie"
+  },
+  "conversation": {
+    "id": "0199a6f0-0000-7000-8000-00000000c0e1",
+    "kind": "dm",
+    "name": null
+  },
+  "thread": {
+    "rootMessageId": "0199a6f0-0000-7000-8000-00000000d0e1"
+  },
+  "message": {
+    "id": "0199a6f0-0000-7000-8000-00000000d0e1",
+    "text": "check the order, then file the invoice note [[call echo {\"text\":\"ECHO-SENTINEL-0755\"}]] [[call write_note {\"title\":\"Globex invoice\",\"text\":\"Invoice for Globex, 1,250 EUR\"}]]",
+    "createdAt": "2026-10-15T09:00:00.000Z",
+    "author": {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f3",
+      "displayName": "Sam Lee"
+    },
+    "mentions": [
+      {
+        "kind": "agent",
+        "id": "0199a6f0-0000-7000-8000-00000000a001"
+      }
+    ]
+  },
+  "threadHistory": [],
+  "roster": [
+    {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f3",
+      "displayName": "Sam Lee",
+      "role": "member"
+    },
+    {
+      "kind": "agent",
+      "id": "0199a6f0-0000-7000-8000-00000000a001",
+      "displayName": "Archie",
+      "handle": "archie"
+    }
+  ],
+  "turn": {
+    "tools": ["m5e0c0de1__echo", "m5e0c0de1__write_note"],
+    "toolFlags": {
+      "m5e0c0de1__echo": {
+        "untrustedOutput": true,
+        "sideEffecting": false
+      },
+      "m5e0c0de1__write_note": {
+        "untrustedOutput": true,
+        "sideEffecting": true,
+        "approval": "always"
+      }
+    },
+    "memory": [],
+    "now": null,
+    "maxToolCalls": 8,
+    "maxWebCalls": 5
+  }
+}

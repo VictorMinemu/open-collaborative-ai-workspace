@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { createFakeClawhub } from "./fake-clawhub.mjs";
+import { createFakeMcp } from "./fake-mcp.mjs";
 import { composeReply, createFakeModelServer, humanNames, parseDirectives, planToolStep } from "./server.mjs";
 
 const fixture = JSON.parse(
@@ -789,6 +790,36 @@ describe("createFakeClawhub (in-process controls)", () => {
       ).json();
       assert.deepEqual(again.version.pluginManifestSummary.contracts.tools, ["notes_lookup"]);
       assert.equal(fake.requests.length, 1);
+    } finally {
+      await new Promise((r) => http.close(r));
+    }
+  });
+});
+
+// ---------------------------------------------------------------- fake MCP tool-call hook (07.5-15 real-cell smoke)
+
+describe("fake MCP onToolCall", () => {
+  it("reports every tools/call with exactly the arguments the server received", async () => {
+    const calls = [];
+    const mcp = createFakeMcp({ onToolCall: (c) => calls.push(c) });
+    const http = createServer((req, res) => {
+      if (!mcp(req, res, new URL(req.url ?? "/", "http://fake"))) {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    await new Promise((r) => http.listen(0, "127.0.0.1", r));
+    const base = `http://127.0.0.1:${http.address().port}`;
+    try {
+      const { session } = await initialize(base);
+      const args = { title: "Globex invoice", text: "Invoice for Globex, 1,250 EUR" };
+      const res = await rpc(
+        base,
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "write_note", arguments: args } },
+        { session },
+      );
+      assert.equal((await res.json()).result.content[0].text, "noted: Globex invoice");
+      assert.deepEqual(calls, [{ name: "write_note", arguments: args }]);
     } finally {
       await new Promise((r) => http.close(r));
     }

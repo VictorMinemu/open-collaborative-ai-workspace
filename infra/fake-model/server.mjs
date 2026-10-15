@@ -643,7 +643,13 @@ export function createFakeModelServer(opts = {}) {
       /* a test hook never breaks the fake */
     }
   };
-  const mcp = createFakeMcp?.({ token: opts.mcpToken ?? process.env.FAKE_MCP_TOKEN ?? "" }) ?? null;
+  const mcp =
+    createFakeMcp?.({
+      token: opts.mcpToken ?? process.env.FAKE_MCP_TOKEN ?? "",
+      // With FAKE_MODEL_CAPTURE_DIR, every fake MCP tool call is captured too (`*-mcp-call.json`): the real-cell
+      // smoke proves the server received exactly the approved arguments (07.5-15).
+      onToolCall: (call) => capture("mcp-call", call),
+    }) ?? null;
   const clawhub = createFakeClawhub?.({ artifactDir: opts.clawhubArtifactDir }) ?? null;
   const siwc = createFakeSiwc?.() ?? null;
   const redirects = (
