@@ -26,8 +26,34 @@ before(async () => {
   base = `http://127.0.0.1:${server.address().port}`;
 });
 after(() => new Promise((resolve) => server.close(resolve)));
+const policy = (orgId, killed = false, version = 1) => ({
+  orgId,
+  sandboxEgress: "off",
+  browserEgress: "off",
+  allowHosts: [],
+  privateHosts: [],
+  limits: {
+    nanoCpus: 1e9,
+    memoryBytes: 1073741824,
+    pids: 256,
+    diskQuotaBytes: 2147483648,
+    idleStopMs: 900000,
+  },
+  browserLimits: {
+    nanoCpus: 1e9,
+    memoryBytes: 2147483648,
+    pids: 512,
+    diskQuotaBytes: 2147483648,
+    idleStopMs: 300000,
+  },
+  killed,
+  version,
+});
+
 beforeEach(async () => {
   assert.equal((await fetch(`${base}/__control/reset`, { method: "POST" })).status, 200);
+  // Like sandboxd, the fake has no default policy: the API pushes one before anything runs.
+  for (const orgId of [ORG, OTHER_ORG]) assert.equal((await op("/v1/policy", policy(orgId))).status, 200);
 });
 
 async function op(path, body, token = TOKEN, method = "POST") {
@@ -157,6 +183,46 @@ describe("fake sandboxd", () => {
     const bad = await op("/v1/sandboxes/exec", { target: A, argv: "echo hi" });
     assert.equal(bad.status, 400);
     assert.equal(bad.body.error.code, "invalid_request");
+  });
+
+  it("no policy → ensure, exec and writes answer 409 policy_missing; killed → killed; a stale push is ignored", async () => {
+    await ensure(A);
+    assert.equal((await fetch(`${base}/__control/reboot`, { method: "POST" })).status, 200);
+    for (const r of [
+      await ensure(A),
+      await exec(A, ["echo", "hi"]),
+      await op("/v1/files/write", {
+        target: A,
+        path: "a.txt",
+        content: "x",
+        encoding: "utf8",
+        mode: "create",
+      }),
+    ]) {
+      assert.equal(r.status, 409);
+      assert.equal(r.body.error.code, "policy_missing");
+    }
+    assert.equal((await op("/v1/files/list", { target: A, path: "" })).status, 200);
+    assert.equal((await op("/v1/policy", policy(ORG, true, 2))).status, 200);
+    assert.equal((await op("/v1/policy", policy(ORG, false, 1))).status, 200);
+    assert.deepEqual(fake.policyOf(ORG), { killed: true });
+    const refused = await ensure(A);
+    assert.equal(refused.status, 409);
+    assert.equal(refused.body.error.code, "killed");
+    assert.equal((await op("/v1/policy", policy(ORG, false, 3))).status, 200);
+    assert.equal((await ensure(A)).status, 200);
+  });
+
+  it("reboot: a new boot id and an empty feed; the sandboxes stay", async () => {
+    await ensure(A);
+    const first = (await op("/v1/events?after=0&waitMs=0", undefined, TOKEN, "GET")).body;
+    assert.ok(first.events.length > 0);
+    await fetch(`${base}/__control/reboot`, { method: "POST" });
+    const next = (await op("/v1/events?after=0&waitMs=0", undefined, TOKEN, "GET")).body;
+    assert.notEqual(next.bootId, first.bootId);
+    assert.equal(next.events.length, 0);
+    assert.equal(fake.stateOf(A), "running");
+    assert.equal(fake.policyOf(ORG), null);
   });
 
   it("stats count calls per op and per organization, never bodies", async () => {

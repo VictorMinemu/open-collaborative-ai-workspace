@@ -4,6 +4,7 @@ import {
   type SandboxdErrorCode,
   type SandboxdInput,
   type SandboxdOp,
+  type SandboxdOrgPolicy,
   type SandboxdOutput,
 } from "@ocw/contracts";
 
@@ -144,6 +145,60 @@ export function createSandboxdClient(opts: SandboxdClientOptions): SandboxdClien
       const res = await send(op, input, { ...o, stream: true });
       if (!res.body) throw new SandboxdUnavailableError(op, res.status);
       return res.body;
+    },
+  };
+}
+
+/** The organization a sandboxd input names (`target.orgId` or `orgId`), or null. */
+function orgOf(input: unknown): string | null {
+  if (typeof input !== "object" || input === null) return null;
+  const o = input as { target?: { orgId?: unknown }; orgId?: unknown };
+  const id = o.target?.orgId ?? o.orgId;
+  return typeof id === "string" ? id : null;
+}
+
+/**
+ * The client the API uses (07.8 policy fix; D-09, the kill switch). sandboxd holds policies in memory only and has no
+ * default: after a restart it answers 409 `policy_missing` to anything that would start or run a container until it
+ * is told the organization's policy again. On that refusal this client loads the organization's current policy (the
+ * kill state and the settings version included), pushes it with the `policy` op and retries the call once. A killed
+ * organization's retry is still refused (`killed`) and nothing starts; a second `policy_missing` (the push was lost)
+ * is the caller's refusal as usual. The push itself is never retried here.
+ */
+export function withPolicyRecovery(
+  inner: SandboxdClient,
+  loadPolicy: (organizationId: string) => Promise<SandboxdOrgPolicy>,
+): SandboxdClient {
+  async function recovering<T>(op: SandboxdOp, input: unknown, run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (err) {
+      const orgId = orgOf(input);
+      if (
+        !(err instanceof SandboxdRefusedError) ||
+        err.code !== "policy_missing" ||
+        op === "policy" ||
+        !orgId
+      ) {
+        throw err;
+      }
+      let policy: SandboxdOrgPolicy;
+      try {
+        policy = await loadPolicy(orgId);
+      } catch {
+        // The database could not say what the policy is: nothing runs (the original refusal stands).
+        throw err;
+      }
+      await inner.call("policy", policy);
+      return run();
+    }
+  }
+  return {
+    call(op, input, o) {
+      return recovering(op, input, () => inner.call(op, input, o));
+    },
+    stream(op, input, o) {
+      return recovering(op, input, () => inner.stream(op, input, o));
     },
   };
 }

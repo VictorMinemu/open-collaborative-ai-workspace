@@ -7,8 +7,14 @@
 // The exec interpreter is deliberately tiny: `sh -c "<a> && <b>; <c>"`, `echo`, `cat`, `ls`, `id -u`, `env`,
 // `sleep N`, `exit N`, `true`, `false`, and `>` / `>>` into the workspace. Anything else exits 127.
 //
-// Test controls (no token): POST /__control/down | /__control/up | /__control/reset | /__control/emit (an event body),
-// GET /__control/stats.
+// Like sandboxd, it holds no default policy: until the API pushes an organization's policy, `ensure`, `restart` and
+// `exec` (they would start or run a container) and `filesWrite`, `filesUpload` and `filesImport` (they need the quota)
+// answer 409 `policy_missing`; with `killed` pushed, the first three answer 409 `killed`. A push older than the held
+// one (lower `version`) is ignored.
+//
+// Test controls (no token): POST /__control/down | /__control/up | /__control/reset | /__control/reboot |
+// /__control/emit (an event body), GET /__control/stats. `reboot` is a sandboxd restart: a new boot id, an empty feed
+// and no policy, while the sandboxes (Docker's objects) survive.
 import { randomUUID, timingSafeEqual } from "node:crypto";
 
 const SANDBOX_USER_ID = 10001;
@@ -33,6 +39,11 @@ const BROWSER_OPS = new Set([
   "/v1/browsers/contexts/input",
   "/v1/browsers/contexts/download",
 ]);
+
+/** Ops that start or run a container: no policy → policy_missing; a killed organization → killed. */
+const RUN_OPS = new Set(["ensure", "restart", "exec"]);
+/** Ops that write into the workspace and need the quota: no policy → policy_missing. */
+const QUOTA_OPS = new Set(["filesWrite", "filesUpload", "filesImport"]);
 
 /** Route path → op name (the counters' keys); browser and package ops are not served yet (08, 18). */
 const OPS = {
@@ -588,7 +599,11 @@ export function createFakeSandboxd(opts = {}) {
       }
       case "policy": {
         if (!UUID.test(String(body.orgId))) throw invalid("orgId");
-        policies.set(body.orgId, { killed: body.killed === true });
+        if (!Number.isInteger(body.version) || body.version < 0) throw invalid("version");
+        const held = policies.get(body.orgId);
+        if (!held || held.version <= body.version) {
+          policies.set(body.orgId, { killed: body.killed === true, version: body.version });
+        }
         return { ok: true };
       }
       case "filesList": {
@@ -700,6 +715,9 @@ export function createFakeSandboxd(opts = {}) {
       case "POST /__control/reset":
         api.reset();
         return send(res, 200, { ok: true });
+      case "POST /__control/reboot":
+        api.reboot();
+        return send(res, 200, { ok: true, bootId });
       case "POST /__control/emit": {
         const body = await readJson(req);
         if (!isObject(body) || typeof body.type !== "string") return send(res, 400, { error: "event" });
@@ -736,6 +754,11 @@ export function createFakeSandboxd(opts = {}) {
           : null;
       count(op, orgId);
       if (req.method === "POST" && !isObject(body)) throw invalid("body");
+      if (RUN_OPS.has(op) || QUOTA_OPS.has(op)) {
+        const held = orgId ? policies.get(orgId) : undefined;
+        if (!held) throw new OpError(409, "policy_missing", "no policy for this organization");
+        if (RUN_OPS.has(op) && held.killed) throw new OpError(409, "killed", "this organization is stopped");
+      }
       return send(res, 200, await dispatch(op, body, url));
     } catch (err) {
       if (err instanceof OpError) {
@@ -769,6 +792,17 @@ export function createFakeSandboxd(opts = {}) {
       waiters = [];
       for (const w of ready) w();
     },
+    /** A sandboxd restart: a new boot id, an empty feed, no policy and no process; the sandboxes stay. */
+    reboot() {
+      bootId = randomUUID();
+      events = [];
+      seq = 0;
+      policies = new Map();
+      processes = new Map();
+      const ready = waiters;
+      waiters = [];
+      for (const w of ready) w();
+    },
     emit(event) {
       pushEvent(event);
       return seq;
@@ -777,9 +811,10 @@ export function createFakeSandboxd(opts = {}) {
     stateOf(target) {
       return boxOf(target)?.state ?? "absent";
     },
-    /** The organization policy last pushed (`killed` only). */
+    /** The organization policy held now (`killed` only), or null when none was pushed in this boot. */
     policyOf(orgId) {
-      return policies.get(orgId) ?? null;
+      const held = policies.get(orgId);
+      return held ? { killed: held.killed } : null;
     },
   };
   return api;

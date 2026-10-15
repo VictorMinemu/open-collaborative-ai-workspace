@@ -34,11 +34,13 @@ export interface FakeSandboxd {
   setDown(value: boolean): void;
   /** Forgets every sandbox, process, event and counter. */
   reset(): void;
+  /** A sandboxd restart: a new boot id, an empty feed, no policy and no process; the sandboxes stay. */
+  reboot(): void;
   /** Queues one sandboxd event (seq and time added); returns its seq. */
   emit(event: Record<string, unknown>): number;
   /** A bot's sandbox state ("absent" when never ensured). */
   stateOf(target: FakeSandboxdTarget): string;
-  /** The organization policy last pushed with `policy` (only `killed` is kept), or null. */
+  /** The organization policy held now (only `killed` is shown), or null when none was pushed since the last boot. */
   policyOf(orgId: string): { killed: boolean } | null;
 }
 
