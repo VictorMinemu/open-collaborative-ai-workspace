@@ -261,6 +261,16 @@ export function parseArgs(t: Pick<ToolCallRow, "argumentsCanonical">): Record<st
 }
 
 /** An HTTP call's method and host, for its title (the host is the stored target; never a path or query). */
+/**
+ * The call's target as a person reads it, or null (WINDOWS #221). For an MCP server or a connector the stored target is
+ * the source's internal safe name (`mc4866abe`), the tool's own `<safe>__` prefix: an id, not a place, already named
+ * by Source. Only a real destination (an HTTP host) is shown. The stored value is unchanged (titles, audit, the claim).
+ */
+export function shownTarget(t: Pick<ToolCallRow, "target" | "tool">): string | null {
+  if (!t.target) return null;
+  return t.tool.startsWith(`${t.target}__`) ? null : t.target;
+}
+
 export function httpParts(t: Pick<ToolCallRow, "argumentsCanonical" | "target">): {
   method: string | null;
   host: string | null;
@@ -475,7 +485,7 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
         title: await titleOf(tx, t, source),
         tool: t.tool,
         source,
-        target: t.target,
+        target: shownTarget(t),
         preview: preview.fields,
         truncated: preview.truncated || all.cut,
         argumentsJson: all.json,

@@ -8,6 +8,7 @@ import {
   memberName,
   parseArgs,
   type SourceInfo,
+  shownTarget,
   sourceOf,
   type ToolCallRow,
   titleOf,
@@ -64,7 +65,7 @@ export async function cardDisplayOf(
     .limit(1);
   const humanIds = conv?.kind === "dm" ? await humanMembersOf(tx, t.conversationId) : [];
   const preview = orderPreview(parseArgs(t));
-  const exactActionFields = t.target ? 3 : 2;
+  const exactActionFields = shownTarget(t) ? 3 : 2;
   const display = cardDisplay({
     conversationKind: conv?.kind ?? null,
     humanIds,
@@ -121,10 +122,12 @@ export async function composeToolCallCard(
   }
 
   const title = await titleOf(tx, t, source);
+  const target = shownTarget(t);
   const fields: AgentCardField[] = [
     field("Tool", shortToolName(t.tool)),
     field("Source", sourceLabel(source, true)),
-    ...(t.target ? [field("Target", t.target)] : []),
+    // Never the internal server name (WINDOWS #221): only a real destination, such as an HTTP host.
+    ...(target ? [field("Target", target)] : []),
     ...preview.fields.slice(0, AGENT_CARD_FIELDS_MAX - actionFields).map((p) => field(p.label, p.value)),
   ];
   if (display === "review_only") warnings.push(TRUNCATED_WARNING);

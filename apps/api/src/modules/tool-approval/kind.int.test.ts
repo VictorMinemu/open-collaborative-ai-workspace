@@ -231,7 +231,8 @@ describe("who sees the request (P-09, 404-hiding)", () => {
       title: "Run write_note on Notes",
       tool: TOOL,
       source: { kind: "mcp", name: "Notes", account: "org", keyName: null },
-      target: SAFE,
+      // WINDOWS #221: the internal server name never reaches a person (it is the tool's own `<safe>__` prefix).
+      target: null,
       truncated: false,
       argumentsJson: '{\n  "amount": 1250,\n  "note": "a\\nb",\n  "to": "billing@globex.example"\n}',
       tainted: false,
@@ -275,10 +276,11 @@ describe("what the card shows to whom (P-07, Pitfall 7, UI-SPEC Surface 1)", () 
     expect(card.fields).toEqual([
       { label: "Tool", value: "write_note" },
       { label: "Source", value: "Notes · MCP server" },
-      { label: "Target", value: SAFE },
       { label: "To", value: "ana@example.test" },
       { label: "Text", value: "hello" },
     ]);
+    // WINDOWS #221: the internal MCP server name is nowhere on the card.
+    expect(JSON.stringify(card)).not.toContain(SAFE);
     expect(card.actions).toEqual([
       { kind: "approve", label: "Approve", denyLabel: "Deny" },
       { kind: "open", label: "Review", target: `/approvals/${id}` },
@@ -286,7 +288,7 @@ describe("what the card shows to whom (P-07, Pitfall 7, UI-SPEC Surface 1)", () 
     expect(card.approval).toMatchObject({
       kind: "tool.call",
       display: "exact",
-      actionFields: 3,
+      actionFields: 2,
       waitingFor: "Waiting for Sam Lee to approve",
       useBy: null,
       warnings: [],
