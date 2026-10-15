@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
 import { isActive, NAV_ITEMS, type NavItem } from "./nav";
 
 /** The count of a nav item that declares a badge (07.2-13, 07.5): live, `Badge brand`, hidden at 0. */
-function useNavCount(item: NavItem): number {
+export function useNavCount(item: NavItem): number {
   const memory = usePendingApprovalCount(item.badge === "pendingMemoryProposals");
   const actions = usePendingActionApprovalCount(item.badge === "pendingActionApprovals");
   return item.badge === "pendingActionApprovals"
@@ -27,7 +27,7 @@ function useNavCount(item: NavItem): number {
 }
 
 /** "Memory, 3 proposals to review" (07.2-13) · "Approvals, 2 to review" (07.5 UI-SPEC "Nav badge"). */
-const countedName = (item: NavItem, n: number) =>
+export const countedName = (item: NavItem, n: number) =>
   item.badge === "pendingActionApprovals" ? toReviewLabel(item.label, n) : pendingLabel(item.label, n);
 
 function NavLink(props: { item: NavItem; collapsed: boolean; onNavigate?: () => void }) {

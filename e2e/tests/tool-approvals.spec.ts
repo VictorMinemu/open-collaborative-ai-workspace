@@ -304,6 +304,14 @@ test("Sam approves his bot's note from the review and the bot runs it once", asy
     await expect(row).toContainText("DM");
     await expect(row).toContainText(ACME_CRM);
     await expect(sam.page.getByTestId("approvals-review-count")).toHaveText("2");
+    if (mobile) {
+      // WINDOWS #223: the phone top bar carries the section's count, as the UI-SPEC's "☰ Approvals ②" (the visual
+      // count is aria-hidden; screen readers hear the count in words).
+      await expect(sam.page.getByTestId("mobile-topbar-count")).toHaveText("2");
+      await expect(sam.page.getByTestId("mobile-topbar-title").locator(".sr-only")).toHaveText(
+        "Approvals, 2 to review",
+      );
+    }
     await invariants(
       sam.page,
       `inbox ${w}`,
