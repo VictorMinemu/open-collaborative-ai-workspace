@@ -181,6 +181,27 @@ async function reveal(card: Locator, block: "start" | "end" = "end") {
   }, block);
 }
 
+/**
+ * WINDOWS #226: a live card grows once its approval link arrives; a reader who did not scroll stays at the bottom, so
+ * the card's end is in view (on a phone, above the composer) without scrolling.
+ */
+async function expectPinnedToBottom(page: Page, scroller: string, card: Locator) {
+  const list = page.getByTestId(scroller);
+  await expect
+    .poll(() => list.evaluate((el) => Math.round(el.scrollHeight - el.scrollTop - el.clientHeight)), {
+      timeout: 5_000,
+      message: `${scroller} stays at the bottom`,
+    })
+    .toBeLessThanOrEqual(2);
+  const [cardBox, listBox] = await Promise.all([card.boundingBox(), list.boundingBox()]);
+  expect(cardBox && listBox, "card and list are laid out").toBeTruthy();
+  if (cardBox && listBox) {
+    expect(cardBox.y + cardBox.height, "the card's end is in view").toBeLessThanOrEqual(
+      listBox.y + listBox.height + 1,
+    );
+  }
+}
+
 /** The newest pending `tool.call` request `api` asked for or may decide. */
 async function newestCall(
   api: APIRequestContext,
@@ -353,6 +374,7 @@ test("Sam approves his bot's action in the DM card and the card follows it to Us
     await expect(card.getByTestId("agent-card-timer")).toHaveText(
       "Runs once, with exactly these values · Expires in 24 h",
     );
+    await expectPinnedToBottom(sam.page, "dm-scroll", card);
     await expect(card.getByTestId("agent-card-open")).toHaveAttribute("href", `/approvals/${id}`);
     await expect(card.getByTestId("agent-card-approve")).toHaveText("Approve");
     await expect(card.getByTestId("agent-card-deny")).toHaveText("Deny");
@@ -498,6 +520,7 @@ test("in a channel the card is a summary: a reader outside the audience never re
     await expect(card.getByTestId("agent-card-privacy")).toHaveText(
       "Only Sam Lee and the approvers can see the details.",
     );
+    await expectPinnedToBottom(luis.page, "channel-scroll", card);
     await expect(card.getByTestId("agent-card-open")).toHaveCount(0);
     await expect(card.getByRole("button")).toHaveCount(0);
     await expect(card.getByRole("heading", { level: 4 })).toHaveCount(0);
