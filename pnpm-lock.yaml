@@ -241,6 +241,9 @@ importers:
       '@ocw/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@ocw/egress-policy':
+        specifier: workspace:*
+        version: link:../../packages/egress-policy
       '@opentelemetry/api':
         specifier: 1.9.1
         version: 1.9.1
@@ -463,6 +466,9 @@ importers:
       '@ocw/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@ocw/egress-policy':
+        specifier: workspace:*
+        version: link:../../packages/egress-policy
       zod:
         specifier: 4.6.5
         version: 4.6.5
@@ -628,6 +634,12 @@ importers:
       drizzle-kit:
         specifier: 1.0.0-rc.4
         version: 1.0.0-rc.4
+
+  packages/egress-policy:
+    devDependencies:
+      '@ocw/config':
+        specifier: workspace:*
+        version: link:../config
 
   packages/realtime-client:
     dependencies:
