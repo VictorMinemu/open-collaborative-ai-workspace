@@ -563,6 +563,12 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
       };
     },
 
+    // W-1 (ADR-0026 amended 2026-10-15): a decider's note may quote the call's values, which audit never carries; the
+    // audit records the note's length only, as memory does (ADR-0023 §12).
+    async isPrivate() {
+      return true;
+    },
+
     async cardTurn(tx, row) {
       const t = await loadToolCall(tx, row);
       if (!t) return null;
