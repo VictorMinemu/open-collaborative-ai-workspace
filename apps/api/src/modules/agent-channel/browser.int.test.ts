@@ -1,7 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { sha256Hex } from "../../lib/crypto";
 import type { TestClient } from "../../testing";
-import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
+import {
+  codeOf,
+  type Json,
+  ok,
+  type Res,
+  SANDBOX_CELL_TOKEN,
+  type SandboxStack,
+  startSandboxStack,
+} from "../../testing-sandbox";
 import { createSandboxEventsConsumer, type SandboxdClient } from "../sandbox";
 
 /**
@@ -735,5 +744,288 @@ describe("D-13: signed-in data never leaves for another host without the request
     const r = await browser("open", mine.ev, { url: "https://evil.fake.test/x" }, { agentId: mine.bot.id });
     expect(r.status).toBe(409);
     expect(codeOf(r)).toBe("approval_required");
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: offering, screenshot, wait, close, budgets, caps
+
+const browserToolsOf = (ev: Json): string[] =>
+  (ev.turn.tools as string[]).filter((t) => t.startsWith("ocw_browser_"));
+
+describe("the browser tools are offered only where every layer allows them (D-09, D-12, P-05)", () => {
+  it("module off for Sam, the bot's switch off, the organization switch off or killed: none; the last two say why", async () => {
+    expect(browserToolsOf(await s.turnOf(s.sam, s.samDm))).toEqual([
+      "ocw_browser_open",
+      "ocw_browser_snapshot",
+      "ocw_browser_act",
+      "ocw_browser_screenshot",
+      "ocw_browser_wait",
+      "ocw_browser_close",
+    ]);
+
+    const setModule = (enabled: boolean) =>
+      ok(
+        s.victor.request("PUT", "/api/v1/module-access", {
+          module: "browser",
+          scopeUnitId: null,
+          subject: { kind: "user", userId: s.samId },
+          enabled,
+        }) as Promise<Res>,
+      );
+    await setModule(false);
+    try {
+      const ev = await s.turnOf(s.sam, s.samDm);
+      expect(browserToolsOf(ev)).toEqual([]);
+      expect(ev.turn.tools).toContain("ocw_sandbox_exec");
+      expect(ev.turn.withheld ?? []).toEqual([]);
+    } finally {
+      await setModule(true);
+    }
+
+    await setBotBrowser(s.scoutId, false);
+    try {
+      const ev = await s.turnOf(s.sam, s.samDm);
+      expect(browserToolsOf(ev)).toEqual([]);
+      expect(ev.turn.withheld ?? []).toEqual([]);
+    } finally {
+      await setBotBrowser(s.scoutId, true);
+    }
+
+    for (const [policy, reason] of [
+      [{ enabled: false }, "sandbox_off"],
+      [{ killed: true }, "killed"],
+    ] as const) {
+      await s.setPolicy(policy);
+      try {
+        const ev = await s.turnOf(s.sam, s.samDm);
+        expect(browserToolsOf(ev)).toEqual([]);
+        expect(ev.turn.maxSandboxCalls).toBeUndefined();
+        expect(ev.turn.withheld).toEqual([
+          { tool: "ocw_sandbox_*", reason },
+          { tool: "ocw_browser_*", reason },
+        ]);
+      } finally {
+        await s.setPolicy({ enabled: true, killed: false });
+      }
+    }
+  });
+
+  it("GET /cell declares the image-capable models (D-14, WINDOWS #239)", async () => {
+    const res = await fetch(`${s.stack.baseUrl}/agent-channel/v1/cell`, {
+      headers: { authorization: `Bearer ${SANDBOX_CELL_TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    const snapshot = (await res.json()) as Json;
+    expect(snapshot.providers.find((p: Json) => p.kind === "mock")).toMatchObject({
+      models: ["mock-1"],
+      imageModels: ["mock-1"],
+    });
+  });
+});
+
+describe("screenshot (D-14: image-capable models only), wait and close", () => {
+  it("an image-capable bot: the masked JPEG; the step has no image; the turn is tainted", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    expect(ev.turn.tools).toContain("ocw_browser_screenshot");
+    const opened = await ok(browser("open", ev, { url: "https://panel.fake.test/login" }));
+    const shot = await ok(browser("screenshot", ev));
+    expect(shot).toMatchObject({
+      contextId: opened.contextId,
+      host: "panel.fake.test",
+      image: { mimeType: "image/jpeg", width: 1280, height: 800, masked: 1 },
+    });
+    expect(Buffer.from(shot.image.data, "base64").subarray(0, 2).toString("hex")).toBe("ffd8");
+    const step = (await stepsOf(ev.eventId)).at(-1) as Json;
+    expect(step).toMatchObject({ verb: "screenshot", target: "panel.fake.test", details: null });
+    expect(JSON.stringify(await stepsOf(ev.eventId))).not.toContain(shot.image.data.slice(0, 40));
+    expect((await turnRow(ev.eventId)).tainted).toBe(true);
+  });
+
+  it("a text-only model is not offered the screenshot, and the route answers 404 screenshot_unavailable", async () => {
+    const bot = await browserBot("Reader");
+    await s.su.query(
+      "update app.agents set model_provider = 'openai-compatible', model_id = 'local-text-1' where id = $1",
+      [bot.id],
+    );
+    const ev = await s.turnOf(s.sam, bot.dm, bot.id);
+    expect(ev.turn.tools).toContain("ocw_browser_open");
+    expect(ev.turn.tools).not.toContain("ocw_browser_screenshot");
+    await ok(browser("open", ev, { url: "https://panel.fake.test/login" }, { agentId: bot.id }));
+    const shotsBefore = s.sandboxd.stats().calls.contextScreenshot ?? 0;
+    const r = await browser("screenshot", ev, {}, { agentId: bot.id });
+    expect(r.status).toBe(404);
+    expect(codeOf(r)).toBe("screenshot_unavailable");
+    expect(s.sandboxd.stats().calls.contextScreenshot ?? 0).toBe(shotsBefore);
+  });
+
+  it("wait for text (up to 30 s); close ends the context `closed_by_bot` with a `closed` step; then no_context", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    const opened = await ok(browser("open", ev, { url: "https://panel.fake.test/login" }));
+    expect(await ok(browser("wait", ev, { for: "text", text: "Sign in" }))).toEqual({
+      contextId: opened.contextId,
+      host: "panel.fake.test",
+      ok: true,
+    });
+    expect((await ok(browser("wait", ev, { for: "text", text: "Nothing like this", ms: 100 }))).ok).toBe(
+      false,
+    );
+    const tooLong = await browser("wait", ev, { for: "time", ms: 30_001 });
+    expect(tooLong.status).toBe(400);
+
+    expect(await ok(browser("close", ev))).toEqual({ closed: true });
+    expect(await contextRow(opened.contextId)).toMatchObject({ state: "ended", end_reason: "closed_by_bot" });
+    expect(fakeContext(opened.contextId)).toBeUndefined();
+    const closed = await auditOf("browser.closed", { contextId: opened.contextId });
+    expect(closed.map((a) => a.metadata)).toEqual([
+      { contextId: opened.contextId, host: "panel.fake.test", reason: "closed_by_bot", eventId: ev.eventId },
+    ]);
+    expect((await stepsOf(ev.eventId)).at(-1)).toMatchObject({ verb: "closed", target: "panel.fake.test" });
+    const after = await browser("snapshot", ev);
+    expect(after.status).toBe(404);
+    expect(codeOf(after)).toBe("no_context");
+  });
+});
+
+describe("budget, cap and kill switch (D-09, D-12, P-05)", () => {
+  it("the 40-call budget is shared by sandbox and browser calls", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    await ok(browser("open", ev, { url: "https://panel.fake.test/login" }));
+    for (let i = 1; i < 20; i += 1) expect((await browser("snapshot", ev)).status, String(i)).toBe(200);
+    for (let i = 20; i < 40; i += 1) {
+      const r = await s.cell("/sandbox/exec", { eventId: ev.eventId, agentId: s.scoutId, argv: ["true"] });
+      expect(r.status, String(i)).toBe(200);
+    }
+    expect((await turnRow(ev.eventId)).sandbox_calls).toBe(40);
+    const r = await browser("snapshot", ev);
+    expect(r.status).toBe(403);
+    expect(codeOf(r)).toBe("budget_exhausted");
+    const exec = await s.cell("/sandbox/exec", { eventId: ev.eventId, agentId: s.scoutId, argv: ["true"] });
+    expect(codeOf(exec)).toBe("budget_exhausted");
+  }, 120_000);
+
+  it("maxBrowsers 1 with Scout's browser running: another bot's open → 403 cap_reached, no browser started", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    await ok(browser("open", ev, { url: "https://panel.fake.test/login" }));
+    await s.su.query("update app.sandbox_policies set max_browsers = 1 where organization_id = $1", [s.orgA]);
+    try {
+      const other = await browserBot("Capped");
+      const ensureBefore = s.sandboxd.stats().calls.browserEnsure ?? 0;
+      const turn = await s.turnOf(s.sam, other.dm, other.id);
+      const r = await browser("open", turn, { url: "https://panel.fake.test/login" }, { agentId: other.id });
+      expect(r.status).toBe(403);
+      expect(codeOf(r)).toBe("cap_reached");
+      expect(s.sandboxd.stats().calls.browserEnsure ?? 0).toBe(ensureBefore);
+      // Scout, already running, needs no slot.
+      expect(
+        (await browser("open", await s.turnOf(s.sam, s.samDm), { url: "https://panel.fake.test/x" })).status,
+      ).toBe(200);
+    } finally {
+      await s.su.query("update app.sandbox_policies set max_browsers = 50 where organization_id = $1", [
+        s.orgA,
+      ]);
+    }
+  });
+
+  it("the kill switch closes every open context (`kill_switch`); the next open → 403 killed", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    const opened = await ok(browser("open", ev, { url: "https://panel.fake.test/login" }));
+    await ok(s.victor.request("POST", "/api/v1/sandbox/kill") as Promise<Res>);
+    try {
+      await pumpEvents();
+      const open = (
+        await s.su.query(
+          "select count(*)::int as n from app.browser_contexts where organization_id = $1 and closed_at is null",
+          [s.orgA],
+        )
+      ).rows[0].n as number;
+      expect(open).toBe(0);
+      expect(await contextRow(opened.contextId)).toMatchObject({ state: "ended", end_reason: "kill_switch" });
+      expect(
+        (await auditOf("browser.closed", { contextId: opened.contextId })).map((a) => a.metadata.reason),
+      ).toEqual(["kill_switch"]);
+      const r = await browser("open", ev, { url: "https://panel.fake.test/login" });
+      expect(r.status).toBe(403);
+      expect(codeOf(r)).toBe("killed");
+    } finally {
+      await ok(s.victor.request("POST", "/api/v1/sandbox/resume") as Promise<Res>);
+    }
+  });
+});
+
+describe("cross-tenant guards derived from the authz registry (P-17, 07.4 #169)", () => {
+  it("every /agent-channel/v1/browser/* route is a cell route and refuses organization B's cell with no_trigger", async () => {
+    const tokenB = `ocw_cell_${randomUUID()}${randomUUID()}`;
+    await s.su.query(
+      "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
+      [s.orgB, sha256Hex(tokenB)],
+    );
+    const ev = await s.turnOf(s.sam, s.samDm);
+    await ok(browser("open", ev, { url: "https://panel.fake.test/login" }));
+    const before = (await callsOf(ev.eventId)).length;
+    const opsBefore = JSON.stringify(s.sandboxd.stats().calls);
+    const bodies: Record<string, Json> = {
+      open: { url: "https://panel.fake.test/b" },
+      snapshot: {},
+      act: { action: "click", ref: "r4" },
+      screenshot: {},
+      wait: { for: "load" },
+      close: {},
+    };
+    const cases: Record<string, () => Promise<void>> = Object.fromEntries(
+      Object.entries(bodies).map(([name, body]) => [
+        `POST /agent-channel/v1/browser/${name}`,
+        async () => {
+          const r = await browser(name, ev, body, { token: tokenB });
+          expect(r.status, name).toBe(403);
+          expect(codeOf(r), name).toBe("no_trigger");
+        },
+      ]),
+    );
+    const registered = [...s.stack.built.authz.routes.keys()].filter((k) =>
+      k.startsWith("POST /agent-channel/v1/browser/"),
+    );
+    expect(registered.sort()).toEqual(Object.keys(cases).sort());
+    for (const [key, run] of Object.entries(cases)) {
+      expect(s.stack.built.authz.routes.get(key), key).toBe("cell");
+      await run();
+    }
+    expect((await callsOf(ev.eventId)).length).toBe(before);
+    expect(JSON.stringify(s.sandboxd.stats().calls)).toBe(opsBefore);
+  });
+});
+
+describe("sandbox approvals read as the sandbox and link their card (WINDOWS #234, #241, #245)", () => {
+  it("an `always` rule on ocw_sandbox_exec: the view and card name the Sandbox; the waiting step links the card", async () => {
+    const policy = (
+      await s.su.query(
+        `insert into app.tool_approval_policies
+           (organization_id, scope_unit_id, tool_pattern, mode, approver_kind, approver_user_ids, created_by, updated_by)
+         values ($1, null, 'ocw_sandbox_exec', 'always', 'requester', '{}', $2, $2) returning id`,
+        [s.orgA, s.victorId],
+      )
+    ).rows[0].id as string;
+    try {
+      const ev = await s.turnOf(s.sam, s.samDm);
+      const r = await s.cell("/sandbox/exec", {
+        eventId: ev.eventId,
+        agentId: s.scoutId,
+        argv: ["echo", "hi"],
+      });
+      expect(codeOf(r)).toBe("approval_required");
+      const id = r.body?.error.details.approval.id as string;
+      const v = await view(s.sam, id);
+      expect(v.view.source).toEqual({ kind: "sandbox", name: "Sandbox", account: null, keyName: null });
+      expect(v.view.title).not.toContain("Web request");
+      const row = await approvalRow(id);
+      const card = (
+        await s.su.query("select fields from app.message_cards where message_id = $1", [row.card_message_id])
+      ).rows[0] as Json;
+      expect(card.fields).toContainEqual({ label: "Source", value: "Sandbox" });
+      const step = (await stepsOf(ev.eventId)).at(-1) as Json;
+      expect(step).toMatchObject({ verb: "ran", outcome: { kind: "approval", code: "approval_required" } });
+      expect(step.approvalMessageRoute).toBe(`/chat/dm/${s.samDm}?m=${row.card_message_id}`);
+    } finally {
+      await s.su.query("delete from app.tool_approval_policies where id = $1", [policy]);
+    }
   });
 });
