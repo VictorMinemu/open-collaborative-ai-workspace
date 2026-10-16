@@ -532,6 +532,46 @@ describe("sandbox packages (D-03, D-11, P-12, SBX-05)", () => {
     ).toBe(2);
   });
 
+  it("an approved package's pins never change, for every role; its switches and state do (07.8-18, WINDOWS #231)", async () => {
+    const o = await seedOrg();
+    const id = await pkg(o, { name: "left-pad", version: "1.3.0" });
+    for (const [column, value] of [
+      ["source", "pypi"],
+      ["name", "right-pad"],
+      ["version", "1.3.1"],
+      ["sha256", "b".repeat(64)],
+      ["tree_sha256", "b".repeat(64)],
+      ["lockfile", '{"lockfileVersion":3,"packages":{}}'],
+      ["dependency_count", 7],
+      ["review_token", "another-review"],
+    ] as const) {
+      await expect(
+        db.query(`update app.sandbox_packages set ${column} = $2 where id = $1`, [id, value]),
+        column,
+      ).rejects.toMatchObject({ code: "23514", message: "sandbox package pins are immutable" });
+    }
+    // An update that leaves the pins as they are passes: the switches, the upstream flag and the removal.
+    await db.query(
+      `update app.sandbox_packages set enabled = false, personal_allowed = true, changed_upstream = true,
+         status = 'removed', sha256 = sha256, updated_at = now() where id = $1`,
+      [id],
+    );
+    const row = (
+      await db.query(
+        "select sha256, tree_sha256, enabled, personal_allowed, changed_upstream, status from app.sandbox_packages where id = $1",
+        [id],
+      )
+    ).rows[0];
+    expect(row).toEqual({
+      sha256: HASH,
+      tree_sha256: HASH,
+      enabled: false,
+      personal_allowed: true,
+      changed_upstream: true,
+      status: "removed",
+    });
+  });
+
   it("an install has a known status and a short detail", async () => {
     const o = await seedOrg();
     const id = await pkg(o);

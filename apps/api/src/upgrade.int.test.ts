@@ -81,6 +81,7 @@ const HEAD_ONLY = [
   "20261014125609_tool_approvals",
   "20261015141842_bot_sandboxes_browser",
   "20261015173538_share_attachment_turn",
+  "20261015235124_sandbox_package_pins_immutable",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
