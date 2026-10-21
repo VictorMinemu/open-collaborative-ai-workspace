@@ -2,6 +2,8 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import { SANDBOX_LIMITS, SANDBOXD_ROUTES, type SandboxdErrorCode, type SandboxdOp } from "@ocw/contracts";
 import type { z } from "zod";
+import { type Browsers, type FrameSink, frameWriter } from "./browser";
+import type { Egress } from "./egress-attach";
 import { createEvents, EVENTS_MAX_WAIT_MS, type Events } from "./events";
 import type { Files } from "./files";
 import { SandboxdFailure, type Sandboxes } from "./sandboxes";
@@ -13,7 +15,7 @@ import { SandboxdFailure, type Sandboxes } from "./sandboxes";
  * (never argv, output, paths or tokens). Listens on the internal `sandbox-control` network only; no published port.
  */
 
-/** The ops this server implements so far; any other path is 404 (later plans add browser and package ops). */
+/** The ops this server implements so far; any other path is 404 (a later plan adds the package ops). */
 export const IMPLEMENTED_OPS = [
   "info",
   "ensure",
@@ -35,6 +37,21 @@ export const IMPLEMENTED_OPS = [
   "filesUpload",
   "filesDownload",
   "filesImport",
+  "browserEnsure",
+  "contextOpen",
+  "contextNavigate",
+  "contextSnapshot",
+  "contextAct",
+  "contextScreenshot",
+  "contextWait",
+  "contextExportState",
+  "contextClose",
+  "contextHold",
+  "contextTakeover",
+  "contextResize",
+  "contextFrames",
+  "contextInput",
+  "contextDownload",
 ] as const satisfies readonly SandboxdOp[];
 type ImplementedOp = (typeof IMPLEMENTED_OPS)[number];
 
@@ -105,7 +122,11 @@ const base64Size = (bytes: number) => Math.ceil(bytes / 3) * 4;
  */
 export const TRANSFER_BODY_BYTES = 72 * 1024 * 1024;
 
+/** A member's storage state is at most 2 MiB of JSON text, carried as a JSON string (escaping can double it). */
+export const CONTEXT_OPEN_BODY_BYTES = 6 * 1024 * 1024;
+
 export const BODY_LIMITS: Partial<Record<ImplementedOp, number>> = {
+  contextOpen: CONTEXT_OPEN_BODY_BYTES,
   filesUpload: TRANSFER_BODY_BYTES,
   filesImport: TRANSFER_BODY_BYTES,
   filesDownload: TRANSFER_BODY_BYTES,
@@ -114,7 +135,12 @@ export const BODY_LIMITS: Partial<Record<ImplementedOp, number>> = {
 
 /** Large transfers held in memory at once (each up to ~67 MiB of JSON plus 50 MiB decoded); more answer 409 busy. */
 export const MAX_CONCURRENT_TRANSFERS = 2;
-const TRANSFER_OPS: ReadonlySet<ImplementedOp> = new Set(["filesUpload", "filesImport", "filesDownload"]);
+const TRANSFER_OPS: ReadonlySet<ImplementedOp> = new Set([
+  "filesUpload",
+  "filesImport",
+  "filesDownload",
+  "contextDownload",
+]);
 
 export interface LogLine {
   level: "info" | "warn" | "error";
@@ -128,6 +154,10 @@ export interface ServerOptions {
   files: Files;
   /** The event feed the sandboxes emit into (a fresh, empty one when omitted). */
   events?: Events;
+  /** Each bot's browser (07.8-13); without it every browser op answers 503. */
+  browsers?: Browsers | null;
+  /** The namespace's egress proxy: a pushed policy is written into it before `policy` answers. */
+  egress?: Egress | null;
   log?: (line: LogLine) => void;
 }
 
@@ -192,14 +222,22 @@ function findRoute(method: string, path: string): ImplementedOp | null {
 /** Ids for the log line only (target or org), when the parsed input carries them. */
 function idsOf(input: unknown): Record<string, string> {
   if (typeof input !== "object" || input === null) return {};
-  const o = input as { target?: { orgId?: string; agentId?: string }; orgId?: string };
+  const o = input as { target?: { orgId?: string; agentId?: string }; orgId?: string; agentId?: string };
   if (o.target) return { orgId: String(o.target.orgId), agentId: String(o.target.agentId) };
+  if (typeof o.orgId === "string" && typeof o.agentId === "string")
+    return { orgId: o.orgId, agentId: o.agentId };
   if (typeof o.orgId === "string") return { orgId: o.orgId };
   return {};
 }
 
 export function createServer(options: ServerOptions): http.Server {
   const { token, sandboxes, files } = options;
+  const browsers = options.browsers ?? null;
+  const egress = options.egress ?? null;
+  const noBrowser = () => {
+    throw new SandboxdFailure("docker_unavailable", 503, "the browser is not configured on this sandboxd");
+  };
+  const b = (): Browsers => browsers ?? noBrowser();
   const events = options.events ?? createEvents();
   const log = options.log ?? (() => {});
   let transfers = 0;
@@ -207,7 +245,8 @@ export function createServer(options: ServerOptions): http.Server {
   const handlers: {
     [Op in ImplementedOp]: (input: z.output<(typeof SANDBOXD_ROUTES)[Op]["input"]>) => unknown;
   } = {
-    info: () => sandboxes.info(),
+    // D-14: the browser posture is what a started browser reported, never assumed.
+    info: async () => ({ ...(await sandboxes.info()), browserSandbox: browsers?.posture() ?? null }),
     ensure: (input) => sandboxes.ensure(input.target),
     exec: (input) => sandboxes.exec(input),
     process: (input) => sandboxes.process(input),
@@ -219,8 +258,10 @@ export function createServer(options: ServerOptions): http.Server {
     usage: (input) => sandboxes.usage(input.orgId),
     // The API's long poll (P-04): sandboxd never calls the API. Capped at 25 s whatever the contract allows.
     events: (input) => events.since(input.after, Math.min(input.waitMs, EVENTS_MAX_WAIT_MS)),
-    policy: (input) => {
+    policy: async (input) => {
       sandboxes.setPolicy(input);
+      // The proxy enforces the same push (egress modes, hosts, kill) before the API is told it applied.
+      await egress?.setOrgPolicy(input);
       return { ok: true };
     },
     filesList: (input) => files.list(input),
@@ -231,7 +272,71 @@ export function createServer(options: ServerOptions): http.Server {
     filesUpload: (input) => files.upload(input),
     filesDownload: (input) => files.download(input),
     filesImport: (input) => files.upload(input),
+    browserEnsure: (input) => b().ensure(input.target),
+    contextOpen: (input) => b().open(input),
+    contextNavigate: (input) => b().navigate(input),
+    contextSnapshot: (input) => b().snapshot(input),
+    contextAct: (input) => b().act(input),
+    contextScreenshot: (input) => b().screenshot(input),
+    contextWait: (input) => b().wait(input),
+    contextExportState: (input) => b().exportState(input),
+    contextClose: (input) => b().close(input),
+    contextHold: (input) => b().hold(input),
+    contextTakeover: (input) => b().takeover(input),
+    contextResize: (input) => b().resize(input),
+    // A stream route: answered by `streamFrames` below, never through this JSON path.
+    contextFrames: () => noBrowser(),
+    contextInput: (input) => b().input(input),
+    contextDownload: (input) => b().download(input),
   };
+
+  /**
+   * `contextFrames`: one chunked response per viewer in the contract framing, for as long as the caller keeps it open
+   * and the context lives. Frame bytes are written and forgotten (latest-frame-wins per viewer), never logged.
+   */
+  async function streamFrames(
+    res: http.ServerResponse,
+    input: { orgId: string; agentId: string; contextId: string },
+  ) {
+    const target = { orgId: input.orgId, agentId: input.agentId };
+    let sink: FrameSink | null = null;
+    let unsubscribe: (() => void) | null = null;
+    let gone = false;
+    const end = () => {
+      if (gone) return;
+      gone = true;
+      unsubscribe?.();
+      sink?.end();
+    };
+    // `res` closes when the viewer goes away (the request's own `close` fires as soon as its empty body was read).
+    res.on("close", end);
+    sink = frameWriter(res);
+    const writeHead = () => {
+      if (!res.headersSent) {
+        res.writeHead(200, { "content-type": "application/octet-stream", "cache-control": "no-store" });
+        // The viewer learns at once that the stream is open (headers otherwise wait for the first frame).
+        res.flushHeaders();
+      }
+    };
+    // Headers go out before the first byte of the stream; a refusal before that is a JSON error.
+    const pending: FrameSink = {
+      frame: (jpeg) => {
+        writeHead();
+        sink?.frame(jpeg);
+      },
+      control: (m) => {
+        writeHead();
+        sink?.control(m);
+      },
+      end: () => {
+        writeHead();
+        sink?.end();
+      },
+    };
+    unsubscribe = await b().subscribe(target, input.contextId, pending);
+    writeHead();
+    if (gone) unsubscribe();
+  }
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     const started = Date.now();
@@ -292,6 +397,11 @@ export function createServer(options: ServerOptions): http.Server {
         // An op that names no organization cannot be checked: refused as if it had no policy (fail closed).
         if (!ids.orgId) throw new SandboxdFailure("policy_missing", 409, "no organization to check");
         sandboxes.requirePolicy(ids.orgId, { runnable: gate === "run" });
+      }
+      if (op === "contextFrames") {
+        await streamFrames(res, parsed.data as { orgId: string; agentId: string; contextId: string });
+        log({ level: "info", msg: "request", op, ...ids, status: 200, ms: Date.now() - started });
+        return;
       }
       const handler = handlers[op] as (input: unknown) => unknown;
       const result = await handler(parsed.data);

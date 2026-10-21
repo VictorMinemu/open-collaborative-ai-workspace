@@ -20,6 +20,7 @@ import {
   type SandboxStopReason,
 } from "@ocw/contracts";
 import { type Docker, DockerUnavailableError, demux } from "./docker";
+import type { Egress } from "./egress-attach";
 import {
   type ContainerLimits,
   type DockerRuntime,
@@ -87,6 +88,26 @@ export function startupRefusal(setting: RuntimeSetting, info: SandboxdInfo): str
   return null;
 }
 
+/**
+ * D-14: sandboxd must never carry the label it kills by (spike iii: a label-scoped kill once killed its own runner). The
+ * id of the container this process runs in, from `/proc/self/mountinfo` (Docker mounts `/etc/hostname` and friends
+ * from `.../containers/<id>/`) or `/proc/self/cgroup`; null for a host process.
+ */
+export function ownContainerId(mountinfo: string, cgroup: string): string | null {
+  const fromMounts = /\/containers\/([0-9a-f]{64})\//.exec(mountinfo);
+  if (fromMounts?.[1]) return fromMounts[1];
+  const fromCgroup = /(?:docker[-/])([0-9a-f]{64})(?:\.scope)?/.exec(cgroup);
+  return fromCgroup?.[1] ?? null;
+}
+
+/** Why sandboxd must not start in a container with these labels, or null: the kill and purge label is never its own. */
+export function ownLabelRefusal(labels: Record<string, string> | null | undefined): string | null {
+  if (labels?.[SANDBOXD_LABELS.sandbox] !== undefined) {
+    return `sandboxd's own container carries ${SANDBOXD_LABELS.sandbox}, the label it kills by`;
+  }
+  return null;
+}
+
 export interface Clock {
   now(): number;
 }
@@ -118,6 +139,11 @@ export interface SandboxesOptions {
   clock?: Clock;
   /** Every lifecycle change and usage sample (the event feed, 07.8-09 Task 3). */
   onEvent?: (event: SandboxdEventInput) => void;
+  /**
+   * The namespace's egress proxy (07.8-13): attached to each bot's shell network on `ensure`, detached before `purge`
+   * removes the bot's networks. Without it a shell has no way out at all (every mode behaves as `off`).
+   */
+  egress?: Egress | null;
 }
 
 /** Where a file operation runs: the bot's running `sbx`, or its network-none `files` helper on the same volume. */
@@ -172,6 +198,17 @@ export interface Sandboxes {
   setPolicy(policy: SandboxdOrgPolicy): void;
   /** The organization's pushed limits, or null when this boot has none (no default). */
   limitsFor(orgId: string): EffectiveLimits | null;
+  /** The organization's whole pushed policy (browser limits, egress), or null. */
+  policyOf(orgId: string): SandboxdOrgPolicy | null;
+  /**
+   * The Docker runtime new containers get: runsc when the daemon has it (or it is required), else runc; 503 when the
+   * daemon is too old or a required runsc is missing (D-14: never a silent fallback).
+   */
+  dockerRuntime(): Promise<DockerRuntime>;
+  /** Marks a container the broker is about to stop or kill, so its death is not reported as a crash. */
+  expectStop(containerId: string): void;
+  /** Whether the broker stopped or killed this container within the last minute. */
+  wasStoppedByBroker(containerId: string): boolean;
   /**
    * The pushed limits, else 409 `policy_missing`; with `runnable`, a killed organization is also refused (409
    * `killed`). Called before anything that would create, start or run a container, and before a write (the quota).
@@ -461,6 +498,13 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
       runtime,
       dockerRuntime,
     };
+  }
+
+  async function chooseRuntime(): Promise<DockerRuntime> {
+    const p = await probe();
+    if (!p.versionOk) throw failure("docker_unavailable", 503, DOCKER_TOO_OLD);
+    if (p.dockerRuntime === null) throw failure("docker_unavailable", 503, RUNSC_UNAVAILABLE);
+    return p.dockerRuntime;
   }
 
   // ------------------------------------------------------------ inspect and the label check
@@ -873,14 +917,13 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
       if (diskFull.has(targetKey(target))) {
         throw failure("disk_full", 409, "the workspace is over its quota");
       }
-      const p = await probe();
-      if (!p.versionOk) throw failure("docker_unavailable", 503, DOCKER_TOO_OLD);
-      const dockerRuntime = p.dockerRuntime;
-      if (dockerRuntime === null) throw failure("docker_unavailable", 503, RUNSC_UNAVAILABLE);
+      const dockerRuntime = await chooseRuntime();
       return locked(targetKey(target), async () => {
         let c = await ownedShell(target);
+        const network = await ensureNetwork(target);
+        // The proxy on the shell network before the shell runs (idempotent; a restarted proxy is re-attached here).
+        if (options.egress) await options.egress.attach(target, "sbx", network);
         if (!c) {
-          const network = await ensureNetwork(target);
           const volume = await ensureVolume(target);
           const spec = shellSpec({
             ns,
@@ -1048,6 +1091,8 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
           const res = await call("DELETE", `/volumes/${encodeURIComponent(v.Name)}`);
           if (res.status === 204) removed++;
         }
+        // A network with the proxy still on it cannot be removed.
+        if (options.egress) await options.egress.detachTarget(target);
         for (const n of await listNetworks(labels)) {
           const res = await call("DELETE", `/networks/${encodeURIComponent(n.Id)}`);
           if (res.status === 204) removed++;
@@ -1143,6 +1188,13 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     },
 
     limitsFor,
+    policyOf: (orgId) => policies.get(orgId) ?? null,
+    dockerRuntime: chooseRuntime,
+    expectStop,
+    wasStoppedByBroker(containerId) {
+      const at = expectedStops.get(containerId);
+      return at !== undefined && clock.now() - at <= EXPECTED_STOP_MS;
+    },
     requirePolicy,
 
     async usage(orgId) {

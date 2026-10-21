@@ -1,10 +1,13 @@
+import { readFileSync } from "node:fs";
 import type { SandboxdInfo } from "@ocw/contracts";
 import { z } from "zod";
+import { createBrowsers } from "./browser";
 import { createDocker } from "./docker";
+import { createEgress } from "./egress-attach";
 import { createEvents } from "./events";
 import { createFiles } from "./files";
 import { createQuota } from "./quota";
-import { createSandboxes, startupRefusal } from "./sandboxes";
+import { createSandboxes, ownContainerId, ownLabelRefusal, startupRefusal } from "./sandboxes";
 import { createServer, type LogLine } from "./server";
 import { NAMESPACE_RE } from "./spec";
 import { createSweeper, SWEEP_INTERVAL_MS } from "./sweeper";
@@ -20,6 +23,11 @@ import { createSweeper, SWEEP_INTERVAL_MS } from "./sweeper";
  *   OCW_SANDBOXD_PORT       listen port (default 8090; 0 picks a free port, logged as `listening`)
  *   OCW_SANDBOX_RUNTIME     auto | runsc | runc (default auto: runsc when the daemon has it)
  *   OCW_SANDBOX_SBX_IMAGE   the `sbx` image reference (digest or tag)
+ *   OCW_SANDBOX_BRW_IMAGE   the `brw` image (07.8-07); unset: every browser op answers 503 (nothing is guessed)
+ *   OCW_SANDBOX_EGRESS_IMAGE the `sandbox-egress` image (07.8-12); unset: no bot network gets a way out and every
+ *                           browser op answers 503
+ *   OCW_SANDBOX_BRW_SECCOMP the seccomp profile file for `brw` (infra/sandbox/browser/seccomp.json); unset: Docker's
+ *                           default, so on runc Chromium falls back to `container-only` and says so (D-14)
  *   DOCKER_SOCKET           the daemon socket (default /var/run/docker.sock)
  *   OCW_SANDBOXD_SWEEP_MS   the sweep interval: quota, idle stop, usage, files helpers (default 60000; smokes
  *                           use a few seconds)
@@ -33,6 +41,9 @@ const Env = z.object({
   OCW_SANDBOXD_PORT: z.coerce.number().int().min(0).max(65_535).default(8090),
   OCW_SANDBOX_RUNTIME: z.enum(["auto", "runsc", "runc"]).default("auto"),
   OCW_SANDBOX_SBX_IMAGE: z.string().min(1).max(300).default("ocw-sandbox-sbx:local"),
+  OCW_SANDBOX_BRW_IMAGE: z.string().min(1).max(300).optional(),
+  OCW_SANDBOX_EGRESS_IMAGE: z.string().min(1).max(300).optional(),
+  OCW_SANDBOX_BRW_SECCOMP: z.string().min(1).max(4096).optional(),
   DOCKER_SOCKET: z.string().min(1).default("/var/run/docker.sock"),
   OCW_SANDBOXD_SWEEP_MS: z.coerce.number().int().min(1000).max(3_600_000).default(SWEEP_INTERVAL_MS),
 });
@@ -51,14 +62,63 @@ async function main() {
   }
   const env = parsed.data;
 
+  let seccompProfile: string | null = null;
+  if (env.OCW_SANDBOX_BRW_SECCOMP) {
+    try {
+      // Sent inline to the Engine (the API takes the profile's JSON, not a path); validated and minified here.
+      seccompProfile = JSON.stringify(JSON.parse(readFileSync(env.OCW_SANDBOX_BRW_SECCOMP, "utf8")));
+    } catch {
+      writeLog({ level: "error", msg: "invalid environment", variables: "OCW_SANDBOX_BRW_SECCOMP" });
+      process.exit(1);
+    }
+  }
+
   const docker = createDocker({ socketPath: env.DOCKER_SOCKET });
+
+  // D-14: the container sandboxd runs in (if any) must not carry the label sandboxd kills and purges by.
+  try {
+    const id = ownContainerId(
+      readFileSync("/proc/self/mountinfo", "utf8"),
+      readFileSync("/proc/self/cgroup", "utf8"),
+    );
+    if (id) {
+      const self = await docker.request("GET", `/containers/${id}/json`);
+      const labels = (self.body as { Config?: { Labels?: Record<string, string> } } | null)?.Config?.Labels;
+      const refusal = self.status === 200 ? ownLabelRefusal(labels) : null;
+      if (refusal) {
+        writeLog({ level: "error", msg: "refusing to start", reason: refusal });
+        process.exit(1);
+      }
+    }
+  } catch {
+    // Not Linux, or not in a container this daemon knows: a host process carries no label.
+  }
+
   // Lifecycle and usage events for the API's long poll (ids, kinds, states and sizes only).
   const events = createEvents();
+  const egress = env.OCW_SANDBOX_EGRESS_IMAGE
+    ? createEgress({
+        docker,
+        ns: env.OCW_SANDBOX_NAMESPACE,
+        image: env.OCW_SANDBOX_EGRESS_IMAGE,
+        onEvent: (event) => events.emit(event),
+      })
+    : null;
   const sandboxes = createSandboxes({
     docker,
     ns: env.OCW_SANDBOX_NAMESPACE,
     runtime: env.OCW_SANDBOX_RUNTIME,
     image: env.OCW_SANDBOX_SBX_IMAGE,
+    onEvent: (event) => events.emit(event),
+    egress,
+  });
+  const browsers = createBrowsers({
+    docker,
+    sandboxes,
+    egress,
+    ns: env.OCW_SANDBOX_NAMESPACE,
+    image: env.OCW_SANDBOX_BRW_IMAGE ?? null,
+    seccompProfile,
     onEvent: (event) => events.emit(event),
   });
 
@@ -107,18 +167,29 @@ async function main() {
         error: err instanceof Error ? err.name : "unknown",
       }),
   });
-  const server = createServer({ token: env.OCW_SANDBOX_TOKEN, sandboxes, files, events, log: writeLog });
+  const server = createServer({
+    token: env.OCW_SANDBOX_TOKEN,
+    sandboxes,
+    files,
+    events,
+    browsers,
+    egress,
+    log: writeLog,
+  });
   let stopWatching = () => {};
   server.listen(env.OCW_SANDBOXD_PORT, env.OCW_SANDBOXD_HOST, () => {
     const address = server.address();
     const port = typeof address === "object" && address ? address.port : env.OCW_SANDBOXD_PORT;
     writeLog({ level: "info", msg: "listening", host: env.OCW_SANDBOXD_HOST, port, bootId: events.bootId });
     sweeper.start();
+    browsers.start();
     stopWatching = sandboxes.watch();
   });
 
   const shutdown = () => {
     sweeper.stop();
+    browsers.stop();
+    egress?.close();
     stopWatching();
     events.close();
     server.close(() => process.exit(0));
