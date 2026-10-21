@@ -62,10 +62,17 @@ const MODULE_ICONS: Record<ModuleId, LucideIcon> = {
   ai_chats: Sparkles,
   bots: Bot,
   memory: NotebookText,
-  // Phase 07.8 (UI-SPEC §4.1): the D-12 row hint and the settings page are plan 07.8-19's.
+  // Phase 07.8 (UI-SPEC §4.1, P-02): rows like every module, with the organization switch's hint below.
   sandbox: Container,
   browser: MonitorPlay,
 };
+
+/** D-12, P-02: Sandbox and Browser run only while the organization switch in Settings › Sandbox & Browser is on. */
+export const ORG_SWITCH_HINT = "Runs only when Sandbox & Browser is on for the organization.";
+/** U-1: a unit can never turn on what the organization turned off (deny wins); this says how to get "one team only". */
+export const ONE_TEAM_HINT =
+  "To turn it on for one team, turn it on for the organization, then off for the teams that shouldn't have it.";
+const ORG_SWITCHED: ReadonlySet<ModuleId> = new Set<ModuleId>(["sandbox", "browser"]);
 
 const ADMIN_ONLY = "Only an organization admin can change modules for an admin.";
 
@@ -327,6 +334,11 @@ function ModuleRow({
           ) : null}
         </p>
         <p className="mt-0.5 text-muted-foreground text-xs">{def.description}</p>
+        {ORG_SWITCHED.has(s.module) ? (
+          <p className="mt-0.5 text-muted-foreground text-xs" data-testid="module-org-hint">
+            {ORG_SWITCH_HINT}
+          </p>
+        ) : null}
         {s.state === "custom" ? (
           <p className="mt-1.5 text-muted-foreground text-xs">
             Part of this module is off by a manual rule. Turn it on to clear it.
@@ -343,6 +355,11 @@ function ModuleRow({
                 Change
               </Link>
             ) : null}
+          </p>
+        ) : null}
+        {locked && inherited?.scopeUnitId === null && ORG_SWITCHED.has(s.module) ? (
+          <p className="mt-1 text-muted-foreground text-xs" data-testid="module-unit-hint">
+            {ONE_TEAM_HINT}
           </p>
         ) : null}
         {warn ? (

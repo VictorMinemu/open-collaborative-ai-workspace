@@ -1,7 +1,7 @@
 import type { ModuleAccessModuleState, ModuleAccessPerson, ModuleAccessView } from "@ocw/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ModuleAccessPanel, offConfirmation } from "./module-access-card";
+import { ModuleAccessPanel, ONE_TEAM_HINT, ORG_SWITCH_HINT, offConfirmation } from "./module-access-card";
 
 /**
  * The Modules panel (07.3-04, ACCESS-02, P-06, P-07): one switch per catalog module with its state, what an ancestor
@@ -239,6 +239,46 @@ describe("ModuleAccessPanel", () => {
       new RegExp(
         `<a[^>]*href="/settings/organization\\?unit=${ENGINEERING}"[^>]*>[\\s\\S]*Engineering[\\s\\S]*Work Zone off`,
       ),
+    );
+  });
+});
+
+describe("Sandbox and Browser rows (07.8-19; D-12, P-02, U-1)", () => {
+  const all = () => [on("work_zone"), on("ai_chats"), on("bots"), on("memory"), on("sandbox"), on("browser")];
+
+  it("follow Memory with the organization switch's hint, and only they carry it", () => {
+    const html = render(view({ modules: all() }));
+    expect(ORG_SWITCH_HINT).toBe("Runs only when Sandbox & Browser is on for the organization.");
+    for (const m of ["sandbox", "browser"])
+      expect(rowOf(html, m).replace(/&amp;/g, "&")).toContain(ORG_SWITCH_HINT);
+    for (const m of ["work_zone", "ai_chats", "bots", "memory"])
+      expect(rowOf(html, m)).not.toContain("module-org-hint");
+    expect(html.indexOf('data-module="memory"')).toBeLessThan(html.indexOf('data-module="sandbox"'));
+    expect(html.indexOf('data-module="sandbox"')).toBeLessThan(html.indexOf('data-module="browser"'));
+  });
+
+  it("a unit row locked by the organization adds how to get one team only; other locks and modules do not", () => {
+    const fromOrg = { scopeUnitId: null, name: "Organization", state: "off" as const };
+    const fromDept = { scopeUnitId: ENGINEERING, name: "Engineering", state: "off" as const };
+    const html = render(
+      view({
+        modules: [
+          on("work_zone"),
+          on("ai_chats"),
+          { module: "bots", state: "on", inherited: fromOrg },
+          on("memory"),
+          { module: "sandbox", state: "on", inherited: fromOrg },
+          { module: "browser", state: "on", inherited: fromDept },
+        ],
+      }),
+    );
+    expect(rowOf(html, "sandbox")).toContain("Off for the whole organization");
+    expect(rowOf(html, "sandbox").replace(/&#x27;/g, "'")).toContain(ONE_TEAM_HINT);
+    expect(rowOf(html, "browser")).not.toContain("module-unit-hint");
+    expect(rowOf(html, "bots")).not.toContain("module-unit-hint");
+    // The inherited line itself is unchanged (07.3 specs read it exactly).
+    expect(rowOf(html, "sandbox")).toMatch(
+      /data-testid="module-inherited"[^>]*><span[^>]*>Off for the whole organization<\/span>/,
     );
   });
 });

@@ -1,6 +1,7 @@
 import type { Permission } from "@ocw/contracts";
 import {
   Blocks,
+  Container,
   Cpu,
   Hand,
   Laptop,
@@ -52,6 +53,14 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     label: "Bot policy",
     href: "/settings/bot-policy",
     icon: ShieldCheck,
+    permission: "bot.manage",
+  },
+  // 07.8-19 (D-12): the organization switch, isolation, limits, network and the kill switch.
+  {
+    id: "sandbox",
+    label: "Sandbox & Browser",
+    href: "/settings/sandbox",
+    icon: Container,
     permission: "bot.manage",
   },
   {
