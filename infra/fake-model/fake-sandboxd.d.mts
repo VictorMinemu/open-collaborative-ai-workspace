@@ -21,6 +21,8 @@ export interface FakeBrowserContextStats {
   siteLock: string | null;
   takeover: boolean;
   held: boolean;
+  /** The page's viewport (contextOpen, then contextResize). */
+  viewport: { width: number; height: number };
   /** Open frame streams (`contextFrames` subscribers). */
   viewers: number;
   /** Takeover input events per `type`; payloads are dropped on arrival. */
@@ -50,8 +52,11 @@ export interface FakeSandboxd {
   setDown(value: boolean): void;
   /** Forgets every sandbox, process, event and counter. */
   reset(): void;
-  /** A sandboxd restart: a new boot id, an empty feed, no policy and no process; the sandboxes stay. */
-  reboot(): void;
+  /**
+   * A sandboxd restart: a new boot id, an empty feed, no policy and no process; the sandboxes stay. `forgetContexts`
+   * also drops the browser context map (the real broker's behaviour, 07.8-16): contexts answer `no_context`.
+   */
+  reboot(opts?: { forgetContexts?: boolean }): void;
   /** Queues one sandboxd event (seq and time added); returns its seq. */
   emit(event: Record<string, unknown>): number;
   /** A bot's sandbox state ("absent" when never ensured). */

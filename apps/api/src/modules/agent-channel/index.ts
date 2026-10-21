@@ -52,6 +52,7 @@ import { registerSandboxRoutes } from "./sandbox";
 import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerWorkZoneRoutes } from "./work-zone";
 
+export { currentPhrase } from "./activity";
 export { emitCardAction } from "./cards";
 export { conversationAudience } from "./memory-files";
 export { buildMentionEvents } from "./mentions";

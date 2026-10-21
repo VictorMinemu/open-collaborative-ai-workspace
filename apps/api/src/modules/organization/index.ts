@@ -27,6 +27,8 @@ export {
   type AgentFacts,
   agentResource,
   agentTemplateResource,
+  type BrowserContextFacts,
+  browserContextResource,
   type ChannelFacts,
   channelMemberResource,
   channelResource,

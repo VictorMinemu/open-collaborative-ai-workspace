@@ -421,6 +421,11 @@ describe("live-view frames (P-08, UI-SPEC R3)", () => {
     });
     expect(LiveServerFrame.safeParse({ type: "lease", expiresAt: NOW }).success).toBe(true);
     expect(LiveServerFrame.safeParse({ type: "focus", sensitive: true }).success).toBe(true);
+    // 07.8-16 (additive): a refused `take` names its reason only.
+    expect(LiveServerFrame.safeParse({ type: "refused", op: "take", reason: "someone_else" }).success).toBe(
+      true,
+    );
+    expect(LiveServerFrame.safeParse({ type: "refused", op: "take", reason: "nope" }).success).toBe(false);
     for (const bad of [
       { ...state, privateReason: undefined },
       { ...state, state: "ended" },

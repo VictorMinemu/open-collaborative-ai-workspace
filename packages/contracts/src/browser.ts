@@ -403,6 +403,15 @@ export const LiveServerFrame = z.union([
   z.strictObject({ type: z.literal("lease"), expiresAt: IsoDateTime }),
   /** The focused field is password-like: the client shows the masking hint (never the value). */
   z.strictObject({ type: z.literal("focus"), sensitive: z.boolean() }),
+  /**
+   * 07.8-16 (additive): a `take` the server refused. `not_allowed`: the resolver's `browser.control` (only the member the
+   * bot browses for); `someone_else`: another socket holds the lease; `expired`: the page ended meanwhile.
+   */
+  z.strictObject({
+    type: z.literal("refused"),
+    op: z.literal("take"),
+    reason: z.enum(["not_allowed", "someone_else", "expired"]),
+  }),
 ]);
 export type LiveServerFrame = z.infer<typeof LiveServerFrame>;
 
