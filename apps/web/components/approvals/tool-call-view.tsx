@@ -3,9 +3,11 @@
 import type { ApprovalToolSourceKind, ToolApprovalMode, ToolCallApprovalView } from "@ocw/contracts";
 import {
   ArrowRight,
+  Container,
   Globe,
   KeyRound,
   type LucideIcon,
+  MonitorPlay,
   Package,
   Plug,
   TriangleAlert,
@@ -62,6 +64,10 @@ export function sourceText(view: ToolCallApprovalView, meId: string | null): str
       return `${s.name} · plugin`;
     case "http":
       return s.keyName ? `${s.name} · Keychain key ${s.keyName}` : s.name;
+    // 07.8-14: the bot's own sandbox or browser ("Sandbox", "Browser"), never "Web request".
+    case "sandbox":
+    case "browser":
+      return s.name;
     default:
       return `${s.name} · MCP server`;
   }
@@ -72,6 +78,8 @@ const SOURCE_ICON: Record<ApprovalToolSourceKind, LucideIcon> = {
   connector: Plug,
   plugin: Package,
   http: Globe,
+  sandbox: Container,
+  browser: MonitorPlay,
 };
 
 const people = (n: number, verb: [string, string]) =>

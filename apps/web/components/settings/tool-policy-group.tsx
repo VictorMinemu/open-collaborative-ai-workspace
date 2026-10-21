@@ -2,7 +2,17 @@
 
 import type { ApprovableGroup, ToolApprovalMode, ToolApprovalPolicyPage } from "@ocw/contracts";
 import { strictestMode } from "@ocw/contracts";
-import { ChevronDown, ChevronRight, Globe, Lock, Package, Plug, UserCheck } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Container,
+  Globe,
+  Lock,
+  MonitorPlay,
+  Package,
+  Plug,
+  UserCheck,
+} from "lucide-react";
 import { useId } from "react";
 import { SideEffectBadge } from "@/components/mcp/mcp-tools-list";
 import { Badge } from "@/components/ui/badge";
@@ -39,7 +49,14 @@ export function ModeChip({ mode, className }: { mode: ToolApprovalMode; classNam
   );
 }
 
-const SOURCE_ICON = { mcp: Plug, connector: Plug, plugin: Package, http: Globe } as const;
+const SOURCE_ICON = {
+  mcp: Plug,
+  connector: Plug,
+  plugin: Package,
+  http: Globe,
+  sandbox: Container,
+  browser: MonitorPlay,
+} as const satisfies Record<ApprovableGroup["source"]["kind"], unknown>;
 
 /** "MCP server · 2 tools", "Connector · 12 tools", "Approved plugin tools · 3", "HTTP requests with a Keychain key". */
 export function groupMeta(group: ApprovableGroup): string {
@@ -52,6 +69,10 @@ export function groupMeta(group: ApprovableGroup): string {
       return `Connector · ${tools}`;
     case "plugin":
       return `Approved plugin tools · ${n}`;
+    case "sandbox":
+      return `Sandbox · ${tools}`;
+    case "browser":
+      return `Browser · ${tools}`;
     default:
       return "HTTP requests with a Keychain key";
   }

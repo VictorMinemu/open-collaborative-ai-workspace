@@ -48,6 +48,11 @@ export interface RequestApprovalInput {
   requestedForUserId: string | null;
   eventId: string | null;
   /**
+   * 07.8-14 (D-12 U-5, R8): this request expires sooner than its kind's TTL (a browser action waits only as long as its
+   * page is held, 15 minutes). It can only shorten the kind's TTL, never extend it.
+   */
+  ttlMs?: number;
+  /**
    * Where to mirror the request as a platform-owned card: the agent that asked, posting in its conversation in reply
    * to the human's message (the kind must have a `card` hook). The post goes through chat's agent checks.
    */
@@ -123,6 +128,13 @@ const withExpiry = {
   row: approvalRequests,
   expired: sql<boolean>`${approvalRequests.expiresAt} <= now()`.as("expired"),
 };
+
+/** A request's TTL: the kind's, or a shorter positive one the caller asked for (never longer). */
+function ttlOf(kindTtlMs: number, requested: number | undefined): number {
+  return requested !== undefined && Number.isSafeInteger(requested) && requested > 0
+    ? Math.min(kindTtlMs, requested)
+    : kindTtlMs;
+}
 
 function iso(v: string): string {
   return new Date(v).toISOString();
@@ -429,7 +441,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
           requestedByAgentId: input.requestedByAgentId,
           requestedForUserId: input.requestedForUserId,
           eventId: input.eventId,
-          expiresAt: sql`now() + make_interval(secs => ${kind.ttlMs / 1000})`,
+          expiresAt: sql`now() + make_interval(secs => ${ttlOf(kind.ttlMs, input.ttlMs) / 1000})`,
         })
         .returning();
       if (!inserted) throw new Error("approval insert returned no row");

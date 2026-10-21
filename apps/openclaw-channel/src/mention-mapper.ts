@@ -192,6 +192,11 @@ function withheldReason(w: TurnWithheld, askerName: string, conversation: Withhe
       return `${askerName} may not use it`;
     case "member_account":
       return memberAccountReason(w.resource, askerName, conversation);
+    // 07.8-14: the bot's own switch is on, but the organization's is not (or an admin stopped everything).
+    case "sandbox_off":
+      return "Sandbox & Browser is turned off for this organization";
+    case "killed":
+      return "an admin stopped every sandbox and browser of this organization";
     default:
       return "not available in this conversation";
   }

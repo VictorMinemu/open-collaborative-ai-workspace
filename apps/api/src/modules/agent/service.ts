@@ -14,6 +14,7 @@ import {
   MOCK_MODEL,
   type ModelProvider,
   type ModelProviderKind,
+  modelAcceptsImages,
   modelLabel,
 } from "@ocw/contracts";
 import { agents, modelProviders, orgUnits, type Tx, tenantOf } from "@ocw/db";
@@ -356,6 +357,15 @@ export async function cellAgents(tx: Tx): Promise<CellAgent[]> {
  * Provider credentials for the cell, keys decrypted ON DEMAND inside the tenant tx. The result must only be
  * sent over the authenticated Agent Channel API and must never be logged.
  */
+/**
+ * 07.8-14 (D-14, WINDOWS #239): the provider's models that read images, so the cell declares them
+ * `input: ["text", "image"]` and a tool's screenshot reaches them. Absent when none does (older cells ignore it).
+ */
+function imageModelsOf(provider: string, models: readonly string[]): { imageModels?: string[] } {
+  const images = models.filter((m) => modelAcceptsImages(provider, m));
+  return images.length > 0 ? { imageModels: images } : {};
+}
+
 export async function cellProviders(core: Core, tx: Tx): Promise<CellProvider[]> {
   const rows = await tx.select().from(modelProviders).orderBy(asc(modelProviders.createdAt));
   const out: CellProvider[] = [];
@@ -381,6 +391,7 @@ export async function cellProviders(core: Core, tx: Tx): Promise<CellProvider[]>
       baseUrl,
       apiKey,
       models: p.allowedModels,
+      ...imageModelsOf(p.provider, p.allowedModels),
     });
   }
   if (core.env.OCW_MODEL_PROVIDER === "mock") {
@@ -391,6 +402,7 @@ export async function cellProviders(core: Core, tx: Tx): Promise<CellProvider[]>
       baseUrl: core.env.OCW_MOCK_MODEL_BASE_URL,
       apiKey: "mock-key-not-secret",
       models: [MOCK_MODEL.modelId],
+      ...imageModelsOf("mock", [MOCK_MODEL.modelId]),
     });
   }
   return out;

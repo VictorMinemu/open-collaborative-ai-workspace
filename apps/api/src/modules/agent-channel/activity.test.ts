@@ -192,3 +192,65 @@ describe("mergeStep: at most 50 steps, then `more`", () => {
     ).toHaveLength(50);
   });
 });
+
+describe("browser steps (07.8-14, UI-SPEC Surface 5)", () => {
+  const ctx = { contextId: "0b5c2e0e-6f4b-4b8f-9a62-3a8f5d5f0c11", signedIn: true };
+
+  it("verbs and targets: hosts only, element names as plain text, never the typed text", () => {
+    const open = stepFor("ocw_browser_open", { host: "panel.fake.test" }, { kind: "ok" }, ctx);
+    expect(open).toMatchObject({ verb: "opened", target: "panel.fake.test", ...ctx });
+    expect(stepFor("ocw_browser_snapshot", { host: "panel.fake.test" }, { kind: "ok" }).verb).toBe(
+      "read_page",
+    );
+    expect(stepFor("ocw_browser_screenshot", { host: "panel.fake.test" }, { kind: "ok" }).verb).toBe(
+      "screenshot",
+    );
+    expect(stepFor("ocw_browser_wait", { host: "panel.fake.test" }, { kind: "ok" }).verb).toBe("waited");
+    expect(stepFor("ocw_browser_close", { host: "panel.fake.test" }, { kind: "ok" }).verb).toBe("closed");
+    const click = stepFor(
+      "ocw_browser_act",
+      { host: "panel.fake.test", action: "click", elementName: "Orders" },
+      { kind: "ok" },
+    );
+    expect([click.verb, click.target]).toEqual(["clicked", "“Orders” on panel.fake.test"]);
+    const typed = stepFor(
+      "ocw_browser_act",
+      { host: "panel.fake.test", action: "type", elementName: "Search", text: "OCW-TYPED-SECRET" },
+      { kind: "ok" },
+    );
+    expect([typed.verb, typed.target]).toEqual(["typed", "“Search” on panel.fake.test"]);
+    expect(JSON.stringify(typed)).not.toContain("OCW-TYPED-SECRET");
+    expect(
+      stepFor("ocw_browser_act", { host: "panel.fake.test", action: "press", key: "Enter" }, { kind: "ok" })
+        .target,
+    ).toBe("Enter on panel.fake.test");
+    expect(
+      stepFor("ocw_browser_act", { host: "panel.fake.test", action: "select", option: "XL" }, { kind: "ok" })
+        .verb,
+    ).toBe("chose");
+    // Anything that is not a host reads "a page" (never a path or a query).
+    expect(stepFor("ocw_browser_open", { host: "x.test/a?b=c" }, { kind: "ok" }).target).toBe("a page");
+  });
+
+  it("a step waiting for approval links its card; any other outcome links nothing", () => {
+    const route = "/chat/dm/0b5c2e0e-6f4b-4b8f-9a62-3a8f5d5f0c11?m=1f5c2e0e-6f4b-4b8f-9a62-3a8f5d5f0c11";
+    const waiting = stepFor(
+      "ocw_browser_act",
+      { host: "shop.fake.test", action: "click", elementName: "Place order" },
+      { kind: "approval", code: "approval_required", approvalMessageRoute: route },
+      ctx,
+    );
+    expect(waiting.approvalMessageRoute).toBe(route);
+    expect(waiting.verb).toBe("clicked");
+    const done = stepFor(
+      "ocw_browser_act",
+      { host: "shop.fake.test", action: "click" },
+      {
+        kind: "ok",
+        approvalMessageRoute: route,
+      },
+    );
+    expect(done.approvalMessageRoute).toBeNull();
+    expect(currentPhrase(waiting)).toBe("clicking “Place order” on shop.fake.test");
+  });
+});

@@ -8,6 +8,7 @@ import {
   revealInvisible,
   TOOL_APPROVAL_LIMITS,
   type ToolApproverKind,
+  type ToolCallBrowserAction,
   type ToolCallPreviewField,
 } from "@ocw/contracts";
 
@@ -177,6 +178,10 @@ export function toolCallTitle(p: {
     case "mcp":
     case "connector":
       return cut(`Run ${tool} on ${revealInvisible(p.sourceName)}`, 200);
+    case "sandbox":
+      return cut(`Run ${tool} in the sandbox`, 200);
+    case "browser":
+      return cut(`Run ${tool} in the browser`, 200);
     case "http": {
       const method = p.method && METHOD.test(p.method) ? p.method.toUpperCase() : null;
       const host = p.host ? revealInvisible(p.host) : null;
@@ -222,4 +227,145 @@ export function approverText(p: {
       return cut(`Waiting for ${a} or ${p.names.length - 1} others`, 200);
     }
   }
+}
+
+// ---------------------------------------------------------------- 07.8-14: browser actions (UI-SPEC Surface 6, R8, D-13)
+
+const BROWSER_TOOLS: ReadonlySet<string> = new Set(["ocw_browser_open", "ocw_browser_act"]);
+
+/** The browser tools whose approval shows the R8 view (Action, Element, Page, Session). */
+export function isBrowserActionTool(tool: string): boolean {
+  return BROWSER_TOOLS.has(tool);
+}
+
+const ACTION_LABEL: Record<ToolCallBrowserAction["action"], string> = {
+  click: "Click",
+  type: "Type",
+  select: "Choose",
+  press: "Press",
+  scroll: "Scroll",
+  open: "Open",
+};
+
+const HOST_RE = /^[a-z0-9.\-[\]:]{1,260}$/;
+const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+const hostText = (v: unknown): string | null => {
+  const h = str(v)?.toLowerCase() ?? null;
+  return h && HOST_RE.test(h) ? h : null;
+};
+/** Page text or model output as a person sees it: masked, invisible characters revealed, one line, cut. */
+const plain = (v: string, max: number): string => cut(displayText(v.replace(/\s+/g, " ").trim()).text, max);
+
+export interface BrowserActionDisplay {
+  title: string;
+  browser: ToolCallBrowserAction;
+  /** The card and review fields in order: Action, Element, Page, Session, then Value or Option. */
+  fields: { label: string; value: string }[];
+}
+
+/**
+ * The browser action a person approves, from the stored canonical arguments only (`contextId`, `action`, `ref`, the
+ * element's role and name captured when the bot asked, `host`, `value`, `option`, `key`, the session flag and site, and
+ * for D-13 the host the bot would reach, `navigateTo` or an `open`'s own host). Pure; every string masked and revealed.
+ * `summary`: the card every reader of a shared conversation sees, which names the requester instead of "you" and never
+ * shows a value.
+ */
+export function browserActionView(
+  args: Record<string, unknown>,
+  opts: { requesterName?: string; summary?: boolean } = {},
+): BrowserActionDisplay {
+  const navigateTo = hostText(args.navigateTo);
+  const rawAction = str(args.action);
+  const action: ToolCallBrowserAction["action"] =
+    navigateTo || rawAction === "open"
+      ? "open"
+      : rawAction && rawAction in ACTION_LABEL
+        ? (rawAction as ToolCallBrowserAction["action"])
+        : "click";
+  const host = navigateTo ?? hostText(args.host) ?? "unknown";
+  const sessionSite = hostText(args.sessionSite);
+  const signedIn = args.signedIn === true || (action === "open" && sessionSite !== null);
+  const el =
+    args.element && typeof args.element === "object" && !Array.isArray(args.element)
+      ? (args.element as Record<string, unknown>)
+      : null;
+  const element =
+    el && (str(el.role) || str(el.name))
+      ? { role: plain(str(el.role) ?? "element", 60), name: plain(str(el.name) ?? "", 200) }
+      : null;
+  const value =
+    !opts.summary && action === "type" && str(args.value) !== null ? plain(String(args.value), 500) : null;
+  const option =
+    !opts.summary && action === "select" && str(args.option) ? plain(String(args.option), 200) : null;
+  const key = str(args.key) ? plain(String(args.key), 32) : null;
+  const named = element?.name ? `“${element.name}”` : null;
+
+  let title: string;
+  switch (action) {
+    case "open":
+      title = `Open ${host}`;
+      break;
+    case "type":
+      title = named ? `Type into ${named} on ${host}` : `Type on ${host}`;
+      break;
+    case "select":
+      title =
+        option && named
+          ? `Choose “${option}” in ${named} on ${host}`
+          : named
+            ? `Choose in ${named} on ${host}`
+            : `Choose on ${host}`;
+      break;
+    case "press":
+      title = key ? `Press ${key} on ${host}` : `Press a key on ${host}`;
+      break;
+    case "scroll":
+      title = `Scroll on ${host}`;
+      break;
+    default:
+      title = named ? `Click ${named} on ${host}` : `Click on ${host}`;
+  }
+
+  const who = opts.summary ? (opts.requesterName ?? "the person who asked") : "you";
+  const session = !signedIn
+    ? "Not signed in"
+    : action === "open" && sessionSite && sessionSite !== host
+      ? `Signed in as ${who} on ${sessionSite}`
+      : `Signed in as ${who}`;
+  const fields: { label: string; value: string }[] = [{ label: "Action", value: ACTION_LABEL[action] }];
+  if (element && !opts.summary)
+    fields.push({ label: "Element", value: `${element.role} ${named ?? ""}`.trim() });
+  fields.push({ label: "Page", value: host });
+  fields.push({ label: "Session", value: session });
+  if (value !== null) fields.push({ label: "Value", value: value || "(empty)" });
+  if (option !== null) fields.push({ label: "Option", value: option });
+
+  return {
+    title: cut(title, 200),
+    browser: {
+      action,
+      element: opts.summary ? null : element,
+      host,
+      secure: args.secure !== false,
+      signedIn,
+      sessionSite,
+      value,
+      option,
+    },
+    fields,
+  };
+}
+
+/** "{bot} wants to click on {host} for {requester}" (UI-SPEC Surface 6 summary card): no element, no value. */
+export function browserSummaryTitle(p: {
+  botName: string;
+  requesterName: string;
+  args: Record<string, unknown>;
+}): string {
+  const v = browserActionView(p.args, { summary: true, requesterName: p.requesterName });
+  if (v.browser.action === "open") {
+    return cut(`${p.botName} wants to open ${v.browser.host} for ${p.requesterName}`, 200);
+  }
+  const verb = v.browser.action === "select" ? "choose" : v.browser.action;
+  return cut(`${p.botName} wants to ${verb} on ${v.browser.host} for ${p.requesterName}`, 200);
 }

@@ -315,6 +315,10 @@ export const TurnWithheldReason = z.enum([
   "shared_with_group",
   "denied_for_you",
   "member_account",
+  // 07.8-14 (additive): the bot's sandbox or browser is switched on, but the organization's Sandbox & Browser switch is
+  // off (`sandbox_off`) or an admin stopped every sandbox and browser (`killed`), so the bot can say why.
+  "sandbox_off",
+  "killed",
 ]);
 export type TurnWithheldReason = z.infer<typeof TurnWithheldReason>;
 
