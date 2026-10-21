@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 141
+open_count: 143
 waived_count: 4
 fixed_count: 103
-total_count: 248
-last_updated: 2026-10-15T22:38:49.256Z
+total_count: 250
+last_updated: 2026-10-21T19:53:39.439Z
 ---
 
 # Broken Windows Ledger
@@ -263,6 +263,8 @@ last_updated: 2026-10-15T22:38:49.256Z
 | 246 | 07.8 | deviation | apps/sandboxd/src |  | MUST FIX (fail-open): sandboxd keeps policy, kill state and disk_full in memory; after a sandboxd restart the defaults apply (2 GiB, 15 min idle, NOT killed) until the API re-pushes, and the API only re-pushes for orgs with events. Fix: sandboxd refuses ensure/restart for an org with no policy (409 policy_missing) and the API pushes policy then retries; plus a boot event | open |  | 2026-10-15T22:14:34.757Z |  |
 | 247 | 07.8 | deviation | apps/sandboxd/src |  | Soft quota counts apparent size (sparse files in full) and may overshoot up to one 60 s sweep (document XFS hard quota at the gate); transfers hold ~67 MiB JSON + 50 MiB decoded in memory, two at once; after a sandboxd restart a running background process no longer prevents idling; a container death during the watcher's 2 s reconnect is not reported; OCW_SANDBOXD_SWEEP_MS needs compose and env parity (07.8-24) | open |  | 2026-10-15T22:14:34.840Z |  |
 | 248 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | When the org is killed or switched off the bot is not offered the sandbox tool and cannot say why (add a withheld reason killed/sandbox_off, 07.8-10/14/19); a message 1-2 s after a member turns Sandbox on can still get 'not offered' (UI should show applying, 07.8-15); cell-proof.sh PROOF_BUILD=1 still builds the demo's :local tags; e2e-reset.sh label cleanup untested locally | open |  | 2026-10-15T22:38:49.256Z |  |
+| 249 | 07.8 | deviation | apps/api/src/modules/browser |  | MUST FIX (D-11 floor): when an admins/unit_leads 07.5 policy applies to ocw_browser_act, those approvers decide a member's signed-in action instead of the member; signed-in acts must always need the requesting member's approval | open |  | 2026-10-21T19:53:39.333Z |  |
+| 250 | 07.8 | deviation | apps/api/src/modules/browser |  | act answers download:null until 07.8-25; a session counts as loaded by session_id but stored state is not passed to sandboxd until 07.8-21; kill does not close browser contexts in its own tx (rows stay open if sandboxd is down); image-capable model list is hand-kept; approval chip icons reuse package/globe | open |  | 2026-10-21T19:53:39.439Z |  |
 
 ````json
 [
@@ -3240,6 +3242,30 @@ last_updated: 2026-10-15T22:38:49.256Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T22:38:49.256Z",
+    "resolved_at": null
+  },
+  {
+    "id": 249,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser",
+    "line": null,
+    "description": "MUST FIX (D-11 floor): when an admins/unit_leads 07.5 policy applies to ocw_browser_act, those approvers decide a member's signed-in action instead of the member; signed-in acts must always need the requesting member's approval",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-21T19:53:39.333Z",
+    "resolved_at": null
+  },
+  {
+    "id": 250,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser",
+    "line": null,
+    "description": "act answers download:null until 07.8-25; a session counts as loaded by session_id but stored state is not passed to sandboxd until 07.8-21; kill does not close browser contexts in its own tx (rows stay open if sandboxd is down); image-capable model list is hand-kept; approval chip icons reuse package/globe",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-21T19:53:39.439Z",
     "resolved_at": null
   }
 ]
