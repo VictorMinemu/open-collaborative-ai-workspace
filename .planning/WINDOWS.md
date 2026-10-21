@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 143
+open_count: 145
 waived_count: 4
 fixed_count: 103
-total_count: 250
-last_updated: 2026-10-21T19:53:39.439Z
+total_count: 252
+last_updated: 2026-10-21T20:05:42.084Z
 ---
 
 # Broken Windows Ledger
@@ -265,6 +265,8 @@ last_updated: 2026-10-21T19:53:39.439Z
 | 248 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | When the org is killed or switched off the bot is not offered the sandbox tool and cannot say why (add a withheld reason killed/sandbox_off, 07.8-10/14/19); a message 1-2 s after a member turns Sandbox on can still get 'not offered' (UI should show applying, 07.8-15); cell-proof.sh PROOF_BUILD=1 still builds the demo's :local tags; e2e-reset.sh label cleanup untested locally | open |  | 2026-10-15T22:38:49.256Z |  |
 | 249 | 07.8 | deviation | apps/api/src/modules/browser |  | MUST FIX (D-11 floor): when an admins/unit_leads 07.5 policy applies to ocw_browser_act, those approvers decide a member's signed-in action instead of the member; signed-in acts must always need the requesting member's approval | open |  | 2026-10-21T19:53:39.333Z |  |
 | 250 | 07.8 | deviation | apps/api/src/modules/browser |  | act answers download:null until 07.8-25; a session counts as loaded by session_id but stored state is not passed to sandboxd until 07.8-21; kill does not close browser contexts in its own tx (rows stay open if sandboxd is down); image-capable model list is hand-kept; approval chip icons reuse package/globe | open |  | 2026-10-21T19:53:39.439Z |  |
+| 251 | 07.8 | deviation | e2e/tests/memory-files.spec.ts |  | FIX IN GATE: memory-files.spec.ts:548 (keyboard and ARIA on desktop) fails intermittently on the phase branch (2 of 3 runs alongside other specs; race between the tab stop and deep-link expansion); passes alone | open |  | 2026-10-21T20:05:41.977Z |  |
+| 252 | 07.8 | deviation | apps/web/components/bots |  | Sandbox file list route has no offset/cursor beyond 500 entries ('{n} more not listed'); Capabilities switches are 20x36 (<44 px, same as the existing Internet row); sandbox state events carry no runtime so a sandbox started outside the API ensure shows 'hardened' until restart; upload dialog does not intercept in-app navigation | open |  | 2026-10-21T20:05:42.084Z |  |
 
 ````json
 [
@@ -3266,6 +3268,30 @@ last_updated: 2026-10-21T19:53:39.439Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-21T19:53:39.439Z",
+    "resolved_at": null
+  },
+  {
+    "id": 251,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "e2e/tests/memory-files.spec.ts",
+    "line": null,
+    "description": "FIX IN GATE: memory-files.spec.ts:548 (keyboard and ARIA on desktop) fails intermittently on the phase branch (2 of 3 runs alongside other specs; race between the tab stop and deep-link expansion); passes alone",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-21T20:05:41.977Z",
+    "resolved_at": null
+  },
+  {
+    "id": 252,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/bots",
+    "line": null,
+    "description": "Sandbox file list route has no offset/cursor beyond 500 entries ('{n} more not listed'); Capabilities switches are 20x36 (<44 px, same as the existing Internet row); sandbox state events carry no runtime so a sandbox started outside the API ensure shows 'hardened' until restart; upload dialog does not intercept in-app navigation",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-21T20:05:42.084Z",
     "resolved_at": null
   }
 ]
