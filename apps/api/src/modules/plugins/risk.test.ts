@@ -411,3 +411,34 @@ describe("scoreSandboxPackageRisk (07.8-18, P-12)", () => {
     expect(r.reasons.map((x) => x.code)).toEqual(["platform_admin", "license_denied", "install_script"]);
   });
 });
+
+describe("native plugins with shell, file or browser tools stay refused with the R12 reason (07.8-18, D-11 F-3)", () => {
+  const R12 = "Runs inside the bot runtime, not a sandbox. Use a sandbox package instead.";
+
+  it.each(["run_shell", "write_file", "browser_open"])(
+    "a ClawHub plugin declaring %s → refuse (dangerous_tool) with the R12 reason",
+    (tool) => {
+      const r = scorePluginRisk(base({ declared: surface({ tools: ["notes_lookup", tool] }) }));
+      expect(r.risk).toBe("refuse");
+      expect(r.reasons.map((x) => x.code)).toEqual(["dangerous_tool"]);
+      expect(r.reasons[0]?.message.startsWith(R12)).toBe(true);
+      expect(r.reasons[0]?.message).toContain(tool);
+    },
+  );
+
+  it("a plugin declaring gateway_restart keeps its administration reason", () => {
+    const r = scorePluginRisk(base({ declared: surface({ tools: ["gateway_restart"] }) }));
+    expect(r.risk).toBe("refuse");
+    expect(r.reasons).toEqual([
+      { code: "dangerous_tool", message: "Declares tools that are never allowed for bots: gateway_restart" },
+    ]);
+  });
+
+  it("administration and shell tools together: the administration reason (refused everywhere) wins", () => {
+    const r = scorePluginRisk(base({ declared: surface({ tools: ["run_shell", "gateway_restart"] }) }));
+    expect(r.reasons.map((x) => x.code)).toEqual(["dangerous_tool"]);
+    expect(r.reasons[0]?.message).toBe(
+      "Declares tools that are never allowed for bots: run_shell, gateway_restart",
+    );
+  });
+});

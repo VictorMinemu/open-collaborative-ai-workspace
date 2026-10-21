@@ -44,6 +44,9 @@ export interface RiskVerdict {
 
 const RANK: Record<RiskLevel, number> = { low: 0, medium: 1, high: 2, refuse: 3 };
 
+/** R12 (07.8-18): why a native plugin with shell, file or browser tools is refused, and where the safe path is. */
+export const SANDBOX_INSTEAD = "Runs inside the bot runtime, not a sandbox. Use a sandbox package instead.";
+
 type Rule = { level: Exclude<RiskLevel, "low">; code: string; message: string };
 
 /** `other` families that bypass our controls. */
@@ -221,9 +224,18 @@ export function scorePluginRisk(input: RiskInput): RiskVerdict {
       `Declares messaging channels (${list(d.channels)}): a second message path around the Agent Channel API`,
     );
   }
+  // Native plugins run in the gateway (host "cell"). Shell, file and browser tools are refused here too, but they have a
+  // safe home: a sandbox package (07.8-18, D-11 F-3, R12). Administration and messaging tools are refused everywhere.
   const dangerous = d.tools.filter((t) => isDangerousToolName(t));
   if (dangerous.length > 0) {
-    add("refuse", "dangerous_tool", `Declares tools that are never allowed for bots: ${list(dangerous)}`);
+    const sandboxable = dangerous.every((t) => !isDangerousToolName(t, "sandbox"));
+    add(
+      "refuse",
+      "dangerous_tool",
+      sandboxable
+        ? `${SANDBOX_INSTEAD} (${list(dangerous)})`
+        : `Declares tools that are never allowed for bots: ${list(dangerous)}`,
+    );
   }
   if (d.mcpServers.length > 0) {
     add(
