@@ -886,6 +886,21 @@ describe("screenshot (D-14: image-capable models only), wait and close", () => {
   });
 });
 
+describe("a sandboxd restart (the policy fail-closed fix)", () => {
+  it("the browser keeps working: the client re-pushes the organization's policy and retries once", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    const opened = await ok(browser("open", ev, { url: "https://panel.fake.test/login" }));
+    const pushes = s.sandboxd.stats().calls.policy ?? 0;
+    s.sandboxd.fake.reboot();
+    const snap = await ok(browser("snapshot", ev));
+    expect(snap.contextId).toBe(opened.contextId);
+    expect(s.sandboxd.stats().calls.policy ?? 0).toBeGreaterThan(pushes);
+    expect((await ok(browser("open", ev, { url: "https://panel.fake.test/again" }))).contextId).toBe(
+      opened.contextId,
+    );
+  });
+});
+
 describe("budget, cap and kill switch (D-09, D-12, P-05)", () => {
   it("the 40-call budget is shared by sandbox and browser calls", async () => {
     const ev = await s.turnOf(s.sam, s.samDm);
