@@ -258,10 +258,10 @@ describe("cross-tenant guards derived from the authz registry (P-17, 07.4 #169)"
       },
     };
     // The bots' file and process tools (07.8-10) have their own registry-derived cases in
-    // agent-channel/sandbox-tools.int.test.ts.
+    // agent-channel/sandbox-tools.int.test.ts, the sandbox packages (07.8-18) in sandbox/packages.int.test.ts.
     const toolRoutes = /^POST \/agent-channel\/v1\/sandbox\/(process|read|write|list|delete|share)$/u;
     const registered = [...s.stack.built.authz.routes.keys()].filter(
-      (k) => k.includes("/sandbox") && !toolRoutes.test(k),
+      (k) => k.includes("/sandbox") && !toolRoutes.test(k) && !k.includes("/sandbox/packages"),
     );
     expect(registered.sort()).toEqual(Object.keys(cases).sort());
     for (const [key, run] of Object.entries(cases)) {

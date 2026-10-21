@@ -559,3 +559,144 @@ describe("fake sandboxd: browser ops", () => {
     assert.equal((await ctxOp("snapshot", A, ctx)).body.error.code, "no_context");
   });
 });
+
+// ---------------------------------------------------------------- sandbox packages (07.8-18, P-12)
+
+/** The contract's `packageTreeCanonical`, restated (the fake and its test stay dependency-free). */
+function canonicalTree(entries) {
+  const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  const sorted = [...entries].sort(
+    (x, y) => cmp(x.name, y.name) || cmp(x.version, y.version) || cmp(x.integrity, y.integrity),
+  );
+  return JSON.stringify(sorted.map((e) => ({ name: e.name, version: e.version, integrity: e.integrity })));
+}
+const sha256 = async (text) => (await import("node:crypto")).createHash("sha256").update(text).digest("hex");
+const pkgControl = async (path, body) =>
+  (
+    await fetch(`${base}/__control/${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+  ).status;
+
+const LEFT_PAD = { source: "npm", name: "left-pad", version: "1.3.0" };
+const review = (spec = LEFT_PAD, orgId = ORG) => op("/v1/packages/review", { orgId, ...spec });
+const installOf = (r, id = randomUUID()) => ({
+  id,
+  source: r.source,
+  name: r.name,
+  version: r.version,
+  sha256: r.sha256,
+  treeSha256: r.treeSha256,
+  lockfile: r.lockfile,
+});
+
+describe("fake sandboxd: sandbox packages (07.8-18)", () => {
+  it("review: a deterministic pinned tree (the package and one dependency) with its lockfile and tree hash", async () => {
+    const r = await review();
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    const b = r.body;
+    for (const key of [
+      "source",
+      "name",
+      "version",
+      "sha256",
+      "sizeBytes",
+      "license",
+      "publisher",
+      "hasInstallScript",
+      "dependencyCount",
+      "treeSha256",
+      "entries",
+      "lockfile",
+    ]) {
+      assert.ok(key in b, `packageReview answers ${key}`);
+    }
+    assert.deepEqual([b.source, b.name, b.version], ["npm", "left-pad", "1.3.0"]);
+    assert.match(b.sha256, /^[0-9a-f]{64}$/);
+    assert.equal(b.license, "MIT");
+    assert.equal(b.hasInstallScript, false);
+    assert.equal(b.entries.length, 2);
+    assert.equal(b.dependencyCount, 1);
+    for (const e of b.entries) assert.match(e.integrity, /^sha512-[A-Za-z0-9+/]{86}==$/);
+    assert.equal(b.treeSha256, await sha256(canonicalTree(b.entries)));
+    assert.equal(JSON.parse(b.lockfile).name, "left-pad");
+    // Deterministic: the same coordinates give the same tree, in any organization.
+    assert.deepEqual((await review(LEFT_PAD, OTHER_ORG)).body, b);
+    // PyPI, Debian and ClawHub pin sha256 files; ClawHub is a single tarball.
+    const py = (await review({ source: "pypi", name: "requests", version: "2.32.3" })).body;
+    for (const e of py.entries) assert.match(e.integrity, /^sha256:[0-9a-f]{64}$/);
+    const hub = (await review({ source: "clawhub", name: "notes-skill", version: "1.0.0" })).body;
+    assert.equal(hub.entries.length, 1);
+    assert.equal(hub.dependencyCount, 0);
+  });
+
+  it("controls: the top digest, one dependency's integrity, sha1-only integrity and a lying tree hash", async () => {
+    const before = (await review()).body;
+    assert.equal(await pkgControl("packages/set", { ...LEFT_PAD, depChanged: true }), 200);
+    const dep = (await review()).body;
+    assert.equal(dep.sha256, before.sha256, "only a dependency moved");
+    assert.notEqual(dep.treeSha256, before.treeSha256);
+    assert.equal(dep.treeSha256, await sha256(canonicalTree(dep.entries)));
+    assert.equal(await pkgControl("packages/set", { ...LEFT_PAD, topChanged: true }), 200);
+    assert.notEqual((await review()).body.sha256, before.sha256);
+    assert.equal(await pkgControl("packages/set", { ...LEFT_PAD, sha1: true, topChanged: false }), 200);
+    const weak = (await review()).body;
+    assert.ok(weak.entries.some((e) => /^sha1-[A-Za-z0-9+/]{27}=$/.test(e.integrity)));
+    assert.equal(await pkgControl("packages/set", { ...LEFT_PAD, badTreeHash: true }), 200);
+    const lying = (await review()).body;
+    assert.notEqual(lying.treeSha256, await sha256(canonicalTree(lying.entries)));
+    assert.equal(
+      await pkgControl("packages/set", { ...LEFT_PAD, license: "GPL-2.0-only", hasInstallScript: true }),
+      200,
+    );
+    const meta = (await review()).body;
+    assert.deepEqual([meta.license, meta.hasInstallScript], ["GPL-2.0-only", true]);
+    // An unknown package answers not_found.
+    const missing = await review({ source: "npm", name: "ocw-missing-package", version: "1.0.0" });
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.error.code, "not_found");
+  });
+
+  it("install: the recorded tree installs per bot; a moved dependency answers tree_changed, a moved top digest_mismatch", async () => {
+    const r = (await review()).body;
+    const pkg = installOf(r);
+    const ok = await op("/v1/packages/install", { target: A, packages: [pkg] });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.deepEqual(ok.body.results, [{ id: pkg.id, status: "installed", detail: "installed" }]);
+    assert.deepEqual(fake.packagesOf(A), [pkg.id]);
+    assert.deepEqual(fake.packagesOf(B), [], "another bot does not get it");
+    assert.equal((await stats()).calls.packageInstall, 1);
+
+    // A lockfile that is not the recorded one (its tree hash differs from the request's) is refused too.
+    const forged = await op("/v1/packages/install", {
+      target: B,
+      packages: [{ ...installOf(r), lockfile: JSON.stringify({ name: "left-pad", packages: {} }) }],
+    });
+    assert.equal(forged.body.results[0].code, "tree_changed");
+
+    await pkgControl("packages/set", { ...LEFT_PAD, depChanged: true });
+    const moved = await op("/v1/packages/install", { target: B, packages: [installOf(r)] });
+    assert.equal(moved.status, 200);
+    assert.equal(moved.body.results[0].status, "failed");
+    assert.equal(moved.body.results[0].code, "tree_changed");
+    assert.deepEqual(fake.packagesOf(B), []);
+
+    await pkgControl("packages/set", { ...LEFT_PAD, depChanged: false, topChanged: true });
+    const top = await op("/v1/packages/install", { target: B, packages: [installOf(r)] });
+    assert.equal(top.body.results[0].code, "digest_mismatch");
+
+    const removed = await op("/v1/packages/remove", { target: A, ids: [pkg.id] });
+    assert.deepEqual(removed.body, { removed: 1 });
+    assert.deepEqual(fake.packagesOf(A), []);
+    assert.deepEqual((await op("/v1/packages/remove", { target: A, ids: [pkg.id] })).body, { removed: 0 });
+  });
+
+  it("package ops need the token and never echo a lockfile in the stats", async () => {
+    const r = (await review()).body;
+    const denied = await op("/v1/packages/install", { target: A, packages: [installOf(r)] }, null);
+    assert.equal(denied.status, 401);
+    assert.ok(!JSON.stringify(await stats()).includes("lockfileVersion"));
+  });
+});

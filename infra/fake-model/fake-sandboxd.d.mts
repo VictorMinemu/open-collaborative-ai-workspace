@@ -41,6 +41,22 @@ export interface FakeSandboxdTarget {
   agentId: string;
 }
 
+export interface FakePackageCoords {
+  source: "npm" | "pypi" | "debian" | "clawhub";
+  name: string;
+  version: string;
+}
+
+export interface FakePackageControls {
+  topChanged?: boolean;
+  depChanged?: boolean;
+  sha1?: boolean;
+  badTreeHash?: boolean;
+  license?: string | null;
+  hasInstallScript?: boolean;
+  publisher?: string | null;
+}
+
 export interface FakeSandboxd {
   /** The node:http handler: answers every request (404 for an op it does not serve). */
   handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
@@ -56,6 +72,14 @@ export interface FakeSandboxd {
   emit(event: Record<string, unknown>): number;
   /** A bot's sandbox state ("absent" when never ensured). */
   stateOf(target: FakeSandboxdTarget): string;
+  /**
+   * Changes what the fake registries serve for one release (07.8-18): `topChanged` republishes the artifact,
+   * `depChanged` its dependency, `sha1` gives the dependency sha1-only integrity, `badTreeHash` makes the review report a
+   * tree hash that does not match its entries.
+   */
+  setPackage(coords: FakePackageCoords, patch: FakePackageControls): void;
+  /** The package ids installed in one bot's packages volume. */
+  packagesOf(target: FakeSandboxdTarget): string[];
   /** The organization policy held now (only `killed` is shown), or null when none was pushed since the last boot. */
   policyOf(orgId: string): { killed: boolean } | null;
 }

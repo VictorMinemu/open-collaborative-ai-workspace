@@ -40,6 +40,7 @@ import { createObjectStorage, pendingTurnAttachmentCount, storeServerAttachment 
 import type { PermissionService } from "../organization";
 import {
   type ConfinedKind,
+  ensureSandbox,
   markState,
   reserveSandbox,
   type SandboxContainer,
@@ -573,7 +574,8 @@ async function runSandboxCall<Raw, R>(
   const started = Date.now();
   const box: { ensured: boolean; runtime: SandboxRuntime | null } = { ensured: false, runtime: null };
   const ensure = async () => {
-    const status = await client.call("ensure", { target }, { timeoutMs: ENSURE_TIMEOUT_MS });
+    // 07.8-18: a start also brings the bot's sandbox packages up to date (never failing the call).
+    const status = await ensureSandbox(core, client, target, { timeoutMs: ENSURE_TIMEOUT_MS });
     box.ensured = true;
     box.runtime = status.runtime;
   };

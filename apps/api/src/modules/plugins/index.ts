@@ -18,7 +18,9 @@ export {
   OPENCLAW_HOST_VERSION,
   refusedReportedSurface,
   reviewTokenOf,
+  type SandboxPackageRiskInput,
   scorePluginRisk,
+  scoreSandboxPackageRisk,
 } from "./risk";
 export {
   approveInstall,

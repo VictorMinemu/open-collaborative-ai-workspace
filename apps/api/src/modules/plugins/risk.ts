@@ -438,3 +438,35 @@ export function reviewTokenOf(r: {
 export function bundledPluginIds(env: Pick<Env, "OCW_BUNDLED_PLUGINS">): string[] {
   return [...env.OCW_BUNDLED_PLUGINS];
 }
+
+// ---------------------------------------------------------------- sandbox packages (07.8-18; D-03, D-11 F-3, P-12)
+
+/**
+ * What the risk of a sandbox package is decided from: sandboxd's review facts (untrusted registry metadata, read only
+ * by sandboxd's containers) and the resolved tree.
+ */
+export interface SandboxPackageRiskInput {
+  source: "npm" | "pypi" | "debian" | "clawhub";
+  name: string;
+  publisher: string | null;
+  license: string | null;
+  hasInstallScript: boolean;
+  entries: readonly { name: string; version: string; integrity: string }[];
+}
+
+/**
+ * Sandbox package risk. PURE. A sandbox package runs only inside a bot's own sandbox (gVisor, its own network through
+ * the egress proxy, a read-only mount), so shell, file and browser capabilities are what it is for and never refuse it.
+ */
+export function scoreSandboxPackageRisk(input: SandboxPackageRiskInput): RiskVerdict {
+  const rules: Rule[] = [];
+  if (input.hasInstallScript) {
+    rules.push({
+      level: "medium",
+      code: "install_script",
+      message: "Runs an install script (only inside the installer container, never in the API or the cell)",
+    });
+  }
+  const risk = rules.reduce<RiskLevel>((worst, r) => (RANK[r.level] > RANK[worst] ? r.level : worst), "low");
+  return { risk, reasons: rules.map(({ code, message }) => ({ code, message })) };
+}

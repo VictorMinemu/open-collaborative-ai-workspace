@@ -1,9 +1,27 @@
-import { SandboxSettings, SandboxSettingsView } from "@ocw/contracts";
+import {
+  ApproveSandboxPackageRequest,
+  IdParams,
+  Ok,
+  ReviewSandboxPackageRequest,
+  SandboxPackage,
+  SandboxPackageList,
+  SandboxPackageReview,
+  SandboxSettings,
+  SandboxSettingsView,
+  UpdateSandboxPackageRequest,
+} from "@ocw/contracts";
 import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../core";
 import type { PermissionService } from "../organization";
 import type { SandboxdClient } from "./client";
 import { registerSandboxFileRoutes } from "./files";
+import {
+  approveSandboxPackage,
+  listSandboxPackages,
+  removeSandboxPackage,
+  reviewSandboxPackage,
+  updateSandboxPackage,
+} from "./packages";
 import { killSandboxes, loadSandboxPolicy, resumeSandboxes } from "./service";
 import { loadSettingsView, parseSettingsUpdate, pushPolicy, updateSandboxSettings } from "./settings";
 
@@ -14,7 +32,11 @@ import { loadSettingsView, parseSettingsUpdate, pushPolicy, updateSandboxSetting
  * writes the versioned settings. All four need `bot.manage` at the organization (admins; a lead's unit rights never reach
  * it), decided by the resolver. The state is committed first; only then is sandboxd told (the organization's policy,
  * and for a kill the stop of its containers). A failure there leaves the committed state in force (fail closed) and is
- * logged with ids only. Plan 18 adds the packages routes here.
+ * logged with ids only.
+ *
+ * 07.8-18 (D-03, D-11, P-12): the sandbox packages. `GET /sandbox/packages` needs `bot.manage` (read; `viewerCan.manage`
+ * is the resolver's `plugin.manage`); review, approve, change and remove need `plugin.manage`, so nobody else can make
+ * sandboxd reach a registry.
  */
 
 const tags = ["sandbox"];
@@ -97,6 +119,76 @@ export function registerSandboxPeopleRoutes(
       );
       await pushPolicy(core, deps.client, authOf(req).organizationId);
       return settings;
+    },
+  );
+
+  registerSandboxPackageRoutes(app, core, deps);
+}
+
+function registerSandboxPackageRoutes(
+  app: App,
+  core: Core,
+  deps: { perms: PermissionService; client: SandboxdClient | null },
+): void {
+  const read = {
+    config: { authz: "user" as const },
+    preHandler: [core.identity.requireUser, deps.perms.requirePermission("bot.manage")],
+  };
+  const manage = {
+    config: { authz: "user" as const },
+    preHandler: [core.identity.requireUser, deps.perms.requirePermission("plugin.manage")],
+  };
+
+  app.get(
+    "/sandbox/packages",
+    { ...read, schema: { tags, response: { 200: SandboxPackageList } } },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return core.db.withTenant(tenant(req), async (tx) =>
+        listSandboxPackages(tx, await deps.perms.can(req, tx, "plugin.manage")),
+      );
+    },
+  );
+
+  app.post(
+    "/sandbox/packages/review",
+    {
+      ...manage,
+      schema: { tags, body: ReviewSandboxPackageRequest, response: { 200: SandboxPackageReview } },
+    },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return reviewSandboxPackage(core, deps.client, tenant(req), req.body);
+    },
+  );
+
+  app.post(
+    "/sandbox/packages",
+    { ...manage, schema: { tags, body: ApproveSandboxPackageRequest, response: { 200: SandboxPackage } } },
+    async (req) => approveSandboxPackage(core, deps.client, tenant(req), req.body),
+  );
+
+  app.patch(
+    "/sandbox/packages/:id",
+    {
+      ...manage,
+      schema: {
+        tags,
+        params: IdParams,
+        body: UpdateSandboxPackageRequest,
+        response: { 200: SandboxPackage },
+      },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), (tx) => updateSandboxPackage(core, tx, req.params.id, req.body)),
+  );
+
+  app.delete(
+    "/sandbox/packages/:id",
+    { ...manage, schema: { tags, params: IdParams, response: { 200: Ok } } },
+    async (req) => {
+      await core.db.withTenant(tenant(req), (tx) => removeSandboxPackage(core, tx, req.params.id));
+      return { ok: true as const };
     },
   );
 }

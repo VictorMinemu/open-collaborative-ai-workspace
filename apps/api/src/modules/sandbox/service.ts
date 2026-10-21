@@ -22,6 +22,7 @@ import type { Core } from "../../core";
 import type { AuditService } from "../audit";
 import { agentResource, type PermissionService } from "../organization";
 import type { SandboxdClient } from "./client";
+import { applyInstalls } from "./packages";
 
 /**
  * The Sandbox domain (07.8-05; D-09, D-12; P-04, P-05): the organization's switch, kill state and caps, read from
@@ -235,6 +236,23 @@ async function releaseStaleReservations(tx: Tx, container: SandboxContainer): Pr
         sql`${botSandboxes.updatedAt} < now() - ${STALE_RESERVATION}`,
       ),
     );
+}
+
+/**
+ * Starts (or confirms) one bot's shell sandbox with sandboxd's `ensure`, then brings its sandbox packages up to date
+ * (07.8-18, P-12: `applyInstalls` installs the approved set from the stored lockfiles and removes what is no longer
+ * approved). The packages never fail the start: a refused or failed install is recorded per package and the call goes
+ * on without it.
+ */
+export async function ensureSandbox(
+  core: Pick<Core, "db" | "audit" | "log">,
+  client: SandboxdClient,
+  target: { orgId: string; agentId: string },
+  opts: { timeoutMs: number },
+): Promise<{ state: SandboxState; runtime: SandboxRuntime | null }> {
+  const status = await client.call("ensure", { target }, { timeoutMs: opts.timeoutMs });
+  await applyInstalls(core, client, target);
+  return status;
 }
 
 /** Records what sandboxd reported (or what the API decided) for one bot's container. */
