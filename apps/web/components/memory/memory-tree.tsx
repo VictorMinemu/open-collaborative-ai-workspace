@@ -8,31 +8,30 @@ import {
 } from "@headless-tree/core";
 import { useTree } from "@headless-tree/react";
 import { MEMORY_ROOT_FILE, type MemoryFileMeta, type MemoryScope } from "@ocw/contracts";
-import {
-  Bot,
-  ChevronRight,
-  FileText,
-  Folder,
-  FolderOpen,
-  Globe,
-  Lock,
-  type LucideIcon,
-  NotebookText,
-} from "lucide-react";
-import { type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Bot, FileText, Folder, FolderOpen, Globe, Lock, type LucideIcon, NotebookText } from "lucide-react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { create } from "zustand";
+import {
+  expandOrDownHotkey,
+  TREE_INDENT,
+  type TreeOpenVia,
+  TreeRowView,
+  TruncatedName,
+  treeTabStop,
+  useTreeKeyboard,
+} from "@/components/common/tree-row";
 import { UNIT_KIND_ICON, UNIT_KIND_LABEL } from "@/components/members/unit-chip";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tooltip } from "@/components/ui/tooltip";
 import { buildMemoryTree, fileNodeId, type MemoryNode, scopeAccessibleName } from "@/lib/memory-tree";
 import { cn } from "@/lib/utils";
 
 /**
  * The memory file tree (Phase 07.2, MEM-02, D-08, UI-SPEC "Tree rows" and "Interaction Contract › Tree"):
  * `@headless-tree/react` provides the ARIA tree (roving tab stop, levels, set sizes, expanded state, arrows,
- * Home/End); this file adds Enter/Space, typeahead and `*`, and renders the rows. Expanded state lives in a small
- * session store so leaving the tree (phone file screen, another page) and coming back keeps it.
+ * Home/End); the shared `TreeRowView` and `useTreeKeyboard` (07.8-15, R4) add Enter/Space, typeahead and `*` and draw
+ * the rows. Expanded state lives in a small session store so leaving the tree (phone file screen, another page) and
+ * coming back keeps it.
  */
 
 interface TreeUiState {
@@ -57,7 +56,7 @@ export const useMemoryTreeState = create<TreeUiState>()((set) => ({
   requestFocus: (id) => set({ focusRequest: id }),
 }));
 
-export type OpenVia = "pointer" | "keyboard";
+export type OpenVia = TreeOpenVia;
 
 const ROOT = "memory-root";
 const ROOT_NODE: MemoryNode = { id: ROOT, kind: "scope", name: "", scopeId: "" };
@@ -97,29 +96,6 @@ function accessibleName(node: MemoryNode): string {
 }
 
 const filesLabel = (n: number) => (n === 1 ? "1 file" : `${n} files`);
-
-/** A name that truncates; the full name shows in a Tooltip only when it is cut. */
-function TruncatedName({ children, className }: { children: React.ReactNode; className?: string }) {
-  const ref = useRef<HTMLSpanElement>(null);
-  const [cut, setCut] = useState(false);
-  const text = (
-    <span
-      ref={ref}
-      onPointerEnter={() => {
-        const el = ref.current;
-        setCut(!!el && el.scrollWidth > el.clientWidth);
-      }}
-      className={cn("min-w-0 truncate", className)}
-    >
-      {children}
-    </span>
-  );
-  return (
-    <Tooltip content={children} side="right" disabled={!cut}>
-      {text}
-    </Tooltip>
-  );
-}
 
 function FileName({ name }: { name: string }) {
   if (!name.endsWith(".md")) return <>{name}</>;
@@ -218,22 +194,7 @@ export function MemoryTree({
     },
     hotkeys: {
       // → on a file does nothing (UI-SPEC); on a closed scope or folder it expands; on an open one it enters.
-      expandOrDown: {
-        hotkey: "ArrowRight",
-        canRepeat: true,
-        handler: (_e, t) => {
-          const item = t.getFocusedItem();
-          if (!item.isFolder()) return;
-          if (!item.isExpanded()) {
-            item.expand();
-            return;
-          }
-          if (item.getChildren().length > 0) {
-            t.focusNextItem();
-            t.updateDomFocus();
-          }
-        },
-      },
+      expandOrDown: expandOrDownHotkey,
     },
     features: [syncDataLoaderFeature, selectionFeature, hotkeysCoreFeature],
   });
@@ -263,73 +224,19 @@ export function MemoryTree({
     el?.scrollIntoView({ block: "nearest", behavior: "auto" });
   }, [selectedId, index, tree, expanded]);
 
-  // Typeahead buffer (500 ms, UI-SPEC).
-  const typed = useRef({ text: "", at: 0 });
-
-  function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
-    if (e.altKey || e.ctrlKey || e.metaKey) return;
-    const target = e.target as HTMLElement;
-    if (target.getAttribute("role") !== "treeitem") return;
-    const item = tree.getFocusedItem();
-    if (!item) return;
-    const node = item.getItemData();
-    if (e.key === "F2" || e.key === "Delete") {
-      if (onRowKey?.(node, e.key)) e.preventDefault();
-      return;
-    }
-    if ((e.key === "F10" && e.shiftKey) || e.key === "ContextMenu") {
-      if (rowMenu) {
-        e.preventDefault();
-        setMenuFor(node.id);
-      }
-      return;
-    }
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
+  const onKeyDown = useTreeKeyboard<MemoryNode>({
+    tree,
+    onOpen: (item) => {
+      const node = item.getItemData();
       if (node.kind === "file") onOpenRef.current(node, "keyboard");
-      else if (item.isExpanded()) item.collapse();
-      else item.expand();
-      return;
-    }
-    if (e.key === "*") {
-      e.preventDefault();
-      const parent = item.getParent();
-      const siblings = parent
-        ? parent.getChildren()
-        : tree.getItems().filter((i) => i.getItemMeta().level === 0);
-      const ids = siblings.filter((s) => s.isFolder() && !s.isExpanded()).map((s) => s.getId());
-      if (ids.length > 0) setExpanded([...tree.getState().expandedItems, ...ids]);
-      return;
-    }
-    if (e.key.length === 1 && /\S/u.test(e.key)) {
-      const now = Date.now();
-      const buf = now - typed.current.at > 500 ? e.key : typed.current.text + e.key;
-      typed.current = { text: buf, at: now };
-      const items = tree.getItems();
-      const from = item.getItemMeta().index + (buf.length === 1 ? 1 : 0);
-      const wanted = buf.toLocaleLowerCase();
-      for (let k = 0; k < items.length; k++) {
-        const candidate = items[(from + k) % items.length];
-        if (candidate?.getItemName().toLocaleLowerCase().startsWith(wanted)) {
-          e.preventDefault();
-          candidate.setFocused();
-          tree.updateDomFocus();
-          return;
-        }
-      }
-    }
-  }
+    },
+    expandMany: (ids) => setExpanded([...tree.getState().expandedItems, ...ids]),
+    onRowKey: onRowKey ? (item, key) => onRowKey(item.getItemData(), key) : undefined,
+    onMenuKey: rowMenu ? (item) => setMenuFor(item.getId()) : undefined,
+  });
 
-  // One tab stop: the focused row when it is visible, else the open file, else the first row (a focused row inside a
-  // collapsed folder would otherwise leave the tree unreachable by Tab).
   const items = tree.getItems();
-  const focusedId = tree.getState().focusedItem;
-  const visible = (id: string | null) => !!id && items.some((i) => i.getId() === id);
-  const tabStop = visible(focusedId)
-    ? focusedId
-    : visible(selectedId)
-      ? selectedId
-      : (items[0]?.getId() ?? null);
+  const tabStop = treeTabStop(tree, selectedId);
 
   return (
     <div
@@ -358,8 +265,6 @@ export function MemoryTree({
     </div>
   );
 }
-
-const INDENT = 12;
 
 function TreeRow({
   item,
@@ -392,75 +297,48 @@ function TreeRow({
         : node.name === MEMORY_ROOT_FILE && level === 1
           ? NotebookText
           : FileText;
-  const pad = (stacked ? 4 : 8) + level * INDENT;
+  const pad = (stacked ? 4 : 8) + level * TREE_INDENT;
   const showEmpty = isScope && expanded && node.loaded && (node.children?.length ?? 0) === 0;
   const showLoading = isScope && expanded && !node.loaded;
-  const props = item.getProps();
 
   return (
     <>
-      <div
-        {...props}
-        role="treeitem"
-        tabIndex={tabStop ? 0 : -1}
+      <TreeRowView
+        itemProps={item.getProps()}
         // Tab (or a click) landing on a row makes it the tree's focused item, so the arrows start from it.
         onFocus={(e) => {
           if (e.target === e.currentTarget && !item.isFocused()) item.setFocused();
         }}
-        aria-label={accessibleName(node)}
-        aria-current={selected ? "page" : undefined}
-        data-testid="memory-tree-row"
-        data-kind={node.kind}
-        data-path={node.path}
-        data-scope-id={node.scopeId}
-        data-selected={selected || undefined}
-        className={cn(
-          "group relative flex cursor-pointer select-none items-center gap-2 rounded-md pr-2 text-sidebar-foreground text-sm outline-none",
-          "focus-visible:ring-[3px] focus-visible:ring-ring/40 focus-visible:ring-inset",
-          isScope ? (stacked ? "h-14 font-semibold" : "h-9 font-semibold") : stacked ? "h-11" : "h-8",
-          selected
-            ? "bg-sidebar-accent font-semibold text-sidebar-accent-foreground"
-            : "lg:hover:bg-sidebar-accent/60",
-        )}
-        style={{ paddingLeft: pad }}
+        label={accessibleName(node)}
+        current={selected}
+        dataAttributes={{
+          "data-testid": "memory-tree-row",
+          "data-kind": node.kind,
+          "data-path": node.path,
+          "data-scope-id": node.scopeId,
+          "data-selected": selected || undefined,
+        }}
+        level={level}
+        folder={folderish}
+        expanded={expanded}
+        heading={isScope}
+        selected={selected}
+        tabStop={tabStop}
+        stacked={stacked}
+        icon={Icon}
+        iconTile={isScope && stacked}
+        trailing={
+          isScope && scope ? (
+            <Badge aria-hidden variant="outline" className="ml-auto font-normal">
+              {scopeTag(scope)}
+            </Badge>
+          ) : null
+        }
+        menu={menu}
+        menuShown={!stacked || item.isFocused() || menuOpen}
+        menuOpen={menuOpen}
+        menuPushRight={!isScope}
       >
-        {selected ? (
-          <span aria-hidden className="absolute top-1.5 bottom-1.5 left-0 w-0.5 rounded-r-full bg-primary" />
-        ) : null}
-        {Array.from({ length: level }, (_, i) => (
-          <span
-            // biome-ignore lint/suspicious/noArrayIndexKey: one static guide per ancestor level
-            key={i}
-            aria-hidden
-            className="pointer-events-none absolute inset-y-0 w-px bg-border"
-            style={{ left: (stacked ? 4 : 8) + i * INDENT + (stacked ? 12 : 10) }}
-          />
-        ))}
-        {folderish ? (
-          <span
-            aria-hidden
-            className={cn(
-              "flex shrink-0 items-center justify-center text-muted-foreground",
-              stacked ? "size-6" : "size-5",
-            )}
-          >
-            <ChevronRight
-              className={cn("size-3.5 motion-safe:transition-transform", expanded && "rotate-90")}
-            />
-          </span>
-        ) : (
-          <span aria-hidden className={cn("shrink-0", stacked ? "size-6" : "size-5")} />
-        )}
-        {isScope && stacked ? (
-          <span aria-hidden className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
-            <Icon className="size-5 text-muted-foreground" />
-          </span>
-        ) : (
-          <Icon
-            aria-hidden
-            className={cn("size-4 shrink-0", selected ? "text-primary" : "text-muted-foreground")}
-          />
-        )}
         {isScope && stacked ? (
           <span className="flex min-w-0 flex-1 flex-col">
             <TruncatedName>{node.name}</TruncatedName>
@@ -473,31 +351,12 @@ function TreeRow({
             {node.kind === "file" ? <FileName name={node.name} /> : node.name}
           </TruncatedName>
         )}
-        {isScope && scope ? (
-          <Badge aria-hidden variant="outline" className="ml-auto font-normal">
-            {scopeTag(scope)}
-          </Badge>
-        ) : null}
-        {menu && (!stacked || item.isFocused() || menuOpen) ? (
-          <span
-            className={cn(
-              "flex shrink-0 items-center",
-              !isScope && "ml-auto",
-              !stacked &&
-                !selected &&
-                !menuOpen &&
-                "opacity-0 focus-within:opacity-100 group-hover:opacity-100 group-focus-visible:opacity-100",
-            )}
-          >
-            {menu}
-          </span>
-        ) : null}
-      </div>
+      </TreeRowView>
       {showEmpty ? (
         <div
           aria-hidden
           className={cn("flex items-center text-muted-foreground text-xs", stacked ? "h-11" : "h-8")}
-          style={{ paddingLeft: pad + INDENT + (stacked ? 32 : 28) }}
+          style={{ paddingLeft: pad + TREE_INDENT + (stacked ? 32 : 28) }}
         >
           No files yet
         </div>
@@ -506,7 +365,7 @@ function TreeRow({
         <div
           aria-hidden
           className={cn("flex items-center", stacked ? "h-11" : "h-8")}
-          style={{ paddingLeft: pad + INDENT + 28 }}
+          style={{ paddingLeft: pad + TREE_INDENT + 28 }}
         >
           <Skeleton className="h-3 w-32 motion-reduce:animate-none" />
         </div>
