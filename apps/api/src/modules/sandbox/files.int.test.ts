@@ -1,3 +1,4 @@
+import { request } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { TestClient } from "../../testing";
 import { WEB_ORIGIN } from "../../testing";
@@ -267,31 +268,45 @@ describe("upload and delete for configurers (D-01, F-9)", () => {
     const r = await upload(s.sam, mine, "", "big.bin", big);
     expect(r.status).toBe(413);
     expect(r.json?.error?.code).toBe("too_large");
-    // Chunked: no Content-Length, the body grows past the route's limit.
-    const chunk = Buffer.alloc(MiB, "z");
-    let sent = 0;
-    const stream = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        if (sent >= 51) return controller.close();
-        sent += 1;
-        controller.enqueue(chunk);
-      },
-    });
-    const res = await fetch(
-      `${s.stack.baseUrl}/api/v1/agents/${mine}/sandbox/files/upload?path=&name=big.bin`,
-      {
-        method: "POST",
-        headers: {
-          origin: WEB_ORIGIN,
-          cookie: s.sam.cookieHeader,
-          "content-type": "application/octet-stream",
+    // Chunked: no Content-Length, the body grows past the route's limit. The API answers 413 and closes while the
+    // client is still writing, so the write may fail with EPIPE; node:http still delivers the response.
+    const chunked = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = request(
+        `${s.stack.baseUrl}/api/v1/agents/${mine}/sandbox/files/upload?path=&name=big.bin`,
+        {
+          method: "POST",
+          headers: {
+            origin: WEB_ORIGIN,
+            cookie: s.sam.cookieHeader,
+            "content-type": "application/octet-stream",
+          },
         },
-        body: stream,
-        duplex: "half",
-      } as RequestInit,
-    );
-    expect(res.status).toBe(413);
-    expect(((await res.json()) as Json).error.code).toBe("too_large");
+        (res) => {
+          let body = "";
+          res.setEncoding("utf8");
+          res.on("data", (d: string) => {
+            body += d;
+          });
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+          res.on("error", reject);
+        },
+      );
+      req.on("error", (e: NodeJS.ErrnoException) => {
+        if (e.code !== "EPIPE" && e.code !== "ECONNRESET") reject(e);
+      });
+      const chunk = Buffer.alloc(MiB, "z");
+      let sent = 0;
+      const pump = (): void => {
+        while (sent < 51 && !req.destroyed) {
+          sent += 1;
+          if (!req.write(chunk)) return void req.once("drain", pump);
+        }
+        if (!req.destroyed) req.end();
+      };
+      pump();
+    });
+    expect(chunked.status).toBe(413);
+    expect((JSON.parse(chunked.body) as Json).error.code).toBe("too_large");
     expect(fakeCalls("filesUpload")).toBe(before);
   });
 
