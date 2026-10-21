@@ -11,6 +11,7 @@ import {
   AgentChannelSandboxShareResponse,
   AgentChannelSandboxWrite,
   AgentChannelSandboxWriteResponse,
+  type BrowserRefusal,
   BUILTIN_TOOLS,
   CONFINED_TOOL_FLAGS,
   type ConfinedToolName,
@@ -28,6 +29,7 @@ import {
   type SandboxRuntime,
   type SandboxToolName,
   type ToolApprovalRefusal,
+  type TurnToolFlags,
 } from "@ocw/contracts";
 import { agentToolCalls, agentTurns, type Tx, withSavepoint } from "@ocw/db";
 import { and, eq, lt, type SQL, sql } from "drizzle-orm";
@@ -49,6 +51,7 @@ import {
   sandboxAvailable,
   touchSandbox,
 } from "../sandbox";
+import { approvalMessageRouteOf } from "../tool-approval";
 import { recordStep, type StepOutcomeInput, stepFor } from "./activity";
 import { type CellPrincipal, cellOf } from "./auth";
 import { noTrigger } from "./cards";
@@ -101,6 +104,9 @@ const SHARE_DOWNLOAD_TIMEOUT_MS = 60_000;
 export type SandboxCallRefusal =
   | SandboxRefusal
   | Extract<ToolApprovalRefusal, "arguments_too_large" | "arguments_invalid">;
+
+/** Every code a confined call (sandbox or browser, 07.8-14) can be refused with. */
+export type ConfinedCallRefusal = SandboxCallRefusal | BrowserRefusal;
 
 const MESSAGES: Record<SandboxCallRefusal, string> = {
   ...APPROVAL_MESSAGES,
@@ -175,7 +181,7 @@ export interface SandboxClaim {
 
 export type SandboxDecision =
   | { ok: true; claim: SandboxClaim }
-  | { ok: false; reason: SandboxCallRefusal; details?: Record<string, unknown> };
+  | { ok: false; reason: ConfinedCallRefusal; details?: Record<string, unknown> };
 
 /** One `agent_tool_calls` row and its `bot.tool_call` audit (ids, tool and reason only; never the arguments). */
 async function recordCall(
@@ -185,11 +191,14 @@ async function recordCall(
     cell: CellPrincipal;
     turn: AgentTurnRow;
     tool: string;
-    reason: SandboxCallRefusal | null;
+    reason: ConfinedCallRefusal | null;
     approvalId: string | null;
     metadata: Record<string, unknown>;
+    /** The ledger's and audit's target: `sandbox` or (07.8-14) `browser`. */
+    target?: "sandbox" | "browser";
   },
 ): Promise<string> {
+  const target = p.target ?? "sandbox";
   const [row] = await tx
     .insert(agentToolCalls)
     .values({
@@ -200,7 +209,7 @@ async function recordCall(
       tool: p.tool,
       sourceKind: "builtin",
       sourceId: null,
-      target: "sandbox",
+      target,
       decision: p.reason ? "denied" : "allowed",
       reason: p.reason,
       approvalId: p.approvalId,
@@ -221,7 +230,7 @@ async function recordCall(
       tool: p.tool,
       sourceKind: "builtin",
       sourceId: null,
-      target: "sandbox",
+      target,
       reason: p.reason,
       eventId: p.turn.eventId,
       ...p.metadata,
@@ -247,14 +256,28 @@ export async function decideSandboxCall(
     args: Record<string, unknown>;
     toolCallId: string | null;
     kind: ConfinedKind;
+    /**
+     * 07.8-14 (D-11 F-7): this call's flag class when the API decides it per call (`ocw_browser_act` is side-effecting
+     * only while a member session is loaded for the page); never looser than the static class's taint.
+     */
+    flags?: TurnToolFlags;
+    /** 07.8-14 (P-06, P-18): the approval floor and the shorter pending TTL of a browser action. */
+    approval?: { floor?: "always"; pendingTtlMs?: number };
   },
 ): Promise<SandboxDecision> {
   const { turn } = p;
   const container: SandboxContainer = p.kind === "sandbox" ? "sbx" : "brw";
-  const flags = CONFINED_TOOL_FLAGS[p.tool];
+  const target = p.kind === "sandbox" ? "sandbox" : "browser";
+  const base = CONFINED_TOOL_FLAGS[p.tool];
+  const flags = p.flags
+    ? {
+        untrustedOutput: base.untrustedOutput || p.flags.untrustedOutput,
+        sideEffecting: base.sideEffecting || p.flags.sideEffecting,
+      }
+    : base;
   const meta = { kind: p.kind };
   const refuse = async (
-    reason: SandboxCallRefusal,
+    reason: ConfinedCallRefusal,
     extra: { details?: Record<string, unknown>; metadata?: Record<string, unknown> } = {},
   ): Promise<SandboxDecision> => {
     await recordCall(tx, deps.core, {
@@ -264,6 +287,7 @@ export async function decideSandboxCall(
       reason,
       approvalId: null,
       metadata: { ...meta, ...extra.metadata },
+      target,
     });
     return { ok: false, reason, ...(extra.details ? { details: extra.details } : {}) };
   };
@@ -297,7 +321,9 @@ export async function decideSandboxCall(
       tool: p.tool,
       args: p.args,
       toolCallId: p.toolCallId,
-      source: { kind: "builtin", id: null, target: "sandbox" },
+      source: { kind: "builtin", id: null, target },
+      ...(p.approval?.floor ? { floor: p.approval.floor } : {}),
+      ...(p.approval?.pendingTtlMs !== undefined ? { pendingTtlMs: p.approval.pendingTtlMs } : {}),
     }),
   );
   if (verdict.reason) {
@@ -335,6 +361,7 @@ export async function decideSandboxCall(
     reason: null,
     approvalId: verdict.grantApprovalId,
     metadata: meta,
+    target,
   });
   return { ok: true, claim: { callId, ensure: reserved.ensure, approvalId: verdict.grantApprovalId } };
 }
@@ -438,7 +465,7 @@ class LocalRefusal extends Error {
 }
 
 /** The approval codes a step shows as waiting ("Needs approval"); every other refusal is a blocked step. */
-const WAITING: ReadonlySet<SandboxCallRefusal> = new Set(["approval_required", "approval_pending"]);
+export const WAITING: ReadonlySet<ConfinedCallRefusal> = new Set(["approval_required", "approval_pending"]);
 
 /**
  * Records a refusal the route reached before `decideSandboxCall` (07.8-10: share without storage or with a full
@@ -447,7 +474,7 @@ const WAITING: ReadonlySet<SandboxCallRefusal> = new Set(["approval_required", "
 export async function refuseSandboxCall(
   tx: Tx,
   deps: SandboxCallDeps,
-  p: { turn: AgentTurnRow; tool: ConfinedToolName; reason: SandboxCallRefusal; kind: ConfinedKind },
+  p: { turn: AgentTurnRow; tool: ConfinedToolName; reason: ConfinedCallRefusal; kind: ConfinedKind },
 ): Promise<SandboxDecision> {
   await recordCall(tx, deps.core, {
     cell: deps.cell,
@@ -456,6 +483,7 @@ export async function refuseSandboxCall(
     reason: p.reason,
     approvalId: null,
     metadata: { kind: p.kind },
+    target: p.kind === "sandbox" ? "sandbox" : "browser",
   });
   return { ok: false, reason: p.reason };
 }
@@ -491,11 +519,22 @@ interface SandboxCallSpec<Raw, R> {
   finish: (tx: Tx, raw: Raw, turn: AgentTurnRow) => Promise<CallOutcome<R>>;
 }
 
-/** How the step of a call refused at its decision reads. */
-const refusedOutcome = (reason: SandboxCallRefusal): StepOutcomeInput => ({
+/** How the step of a call refused at its decision reads (a waiting one links its approval card, WINDOWS #245). */
+export const refusedOutcome = (
+  reason: ConfinedCallRefusal,
+  approvalMessageRoute: string | null = null,
+): StepOutcomeInput => ({
   kind: WAITING.has(reason) ? "approval" : "blocked",
   code: reason,
+  approvalMessageRoute,
 });
+
+/** The card permalink of a decision waiting for a person, or null (read in the decision's transaction). */
+export async function waitingRoute(tx: Tx, decision: SandboxDecision): Promise<string | null> {
+  if (decision.ok || !WAITING.has(decision.reason)) return null;
+  const approval = decision.details?.approval as { id?: unknown } | undefined;
+  return typeof approval?.id === "string" ? approvalMessageRouteOf(tx, approval.id) : null;
+}
 
 /** Codes only: a sandboxd or local refusal → the bot's code (anything else is the service failing). */
 function failureOf(err: unknown): SandboxRefusal {
@@ -558,14 +597,14 @@ async function runSandboxCall<Raw, R>(
     const step = stepFor(
       tool,
       spec.stepInput,
-      decision.ok ? { kind: "running" } : refusedOutcome(decision.reason),
+      decision.ok ? { kind: "running" } : refusedOutcome(decision.reason, await waitingRoute(tx, decision)),
     );
     await recordStep(tx, core, { turn, step, inFlight: decision.ok });
     return { turn, decision, stepId: step.id };
   });
   if (!decided) throw noTrigger();
   const { turn, decision, stepId } = decided;
-  if (!decision.ok) throw sandboxRefusal(decision.reason, decision.details);
+  if (!decision.ok) throw sandboxRefusal(decision.reason as SandboxCallRefusal, decision.details);
   const client = deps.client;
   if (!client) throw sandboxRefusal("service_unavailable");
 

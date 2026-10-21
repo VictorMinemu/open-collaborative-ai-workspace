@@ -35,6 +35,28 @@ export function isSubscriptionProvider(p: string): p is SubscriptionProviderKind
   return SubscriptionProviderKind.safeParse(p).success;
 }
 
+/**
+ * 07.8-14 (D-14): whether a model reads images, so a screenshot a tool returns reaches it (the cell renders it with
+ * `input: ["text", "image"]`, and `ocw_browser_screenshot` is offered only to such a bot). Known families only, failing
+ * closed: an `openai-compatible` model is unknown, and a subscription model's input comes from OpenClaw's own discovery,
+ * which no real-cell smoke has confirmed yet. The mock model (E2E) reads images.
+ */
+export function modelAcceptsImages(provider: string, modelId: string): boolean {
+  const id = modelId.toLowerCase();
+  switch (provider) {
+    case "anthropic":
+      return /^claude-/u.test(id);
+    case "openai":
+      return /^(gpt-4o|gpt-4\.1|gpt-5|o3|o4)/u.test(id);
+    case "openrouter":
+      return /^(anthropic\/claude-|openai\/(gpt-4o|gpt-4\.1|gpt-5|o3|o4)|google\/gemini-)/u.test(id);
+    case "mock":
+      return true;
+    default:
+      return false;
+  }
+}
+
 export const ProviderAuthMode = z.enum(["api_key", "subscription"]);
 export type ProviderAuthMode = z.infer<typeof ProviderAuthMode>;
 

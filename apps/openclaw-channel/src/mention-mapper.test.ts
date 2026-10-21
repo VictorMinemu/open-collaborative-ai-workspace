@@ -254,6 +254,20 @@ describe("AI chats (06-10, D-07, P-10)", () => {
     expect(m.allowedTools).toEqual([]);
   });
 
+  it("07.8-14: a sandbox or browser withheld by the organization's switch or kill says why", () => {
+    const withheld = [
+      { tool: "ocw_sandbox_*", reason: "killed" },
+      { tool: "ocw_browser_*", reason: "sandbox_off" },
+    ];
+    const m = mapMention(mention({ turn: { ...turn, withheld } } as never), BOT);
+    const block = m.contextBlocks.find((b) => b.type === "withheld_tools");
+    expect(block?.payload.withheld).toEqual([
+      "ocw_sandbox_* — an admin stopped every sandbox and browser of this organization",
+      "ocw_browser_* — Sandbox & Browser is turned off for this organization",
+    ]);
+    expect(m.allowedTools).not.toContain("ocw_sandbox_exec");
+  });
+
   it("an invalid withheld list is dropped without dropping the turn (informational only)", () => {
     const parsed = AgentMentionEvent.parse({
       ...aiChat(),

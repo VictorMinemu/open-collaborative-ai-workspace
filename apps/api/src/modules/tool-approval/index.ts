@@ -18,7 +18,8 @@ import type { ResolvedApproval } from "./resolve";
 import { registerToolApprovalRoutes } from "./routes";
 
 export { TOOL_CALL_KIND } from "@ocw/contracts";
-export { TOOL_CALL_RESOURCE } from "./kind";
+/** 07.8-14: the card permalink of an approval (the activity's "Needs approval →"). */
+export { approvalMessageRouteOf, TOOL_CALL_RESOURCE } from "./kind";
 export {
   type ApprovalSubject,
   approvableCatalog,
@@ -39,6 +40,7 @@ export {
   type ApprovalOutcome,
   approvalForCall,
   type ToolCallSource,
+  usableGrantArgs,
 } from "./request";
 export { type ApprovalFacts, type PolicyRow, type ResolvedApproval, resolveToolApproval } from "./resolve";
 /** 07.8-10: the turn activity masks every string with the same display masker as an approval card (R2). */

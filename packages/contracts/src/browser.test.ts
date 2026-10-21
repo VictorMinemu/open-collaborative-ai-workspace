@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
+import { modelAcceptsImages } from "./agent";
 import * as browser from "./browser";
 import {
   AgentChannelBrowserAct,
@@ -559,5 +560,19 @@ describe("sign-in card link, sessions and the Browser tab (R1, R7, D-08, D-12 U-
     expect(BrowserActivityItem.safeParse({ ...activity, url: "https://panel.autofy.app/x" }).success).toBe(
       false,
     );
+  });
+});
+
+describe("modelAcceptsImages (07.8-14, D-14)", () => {
+  it("known image families read images; unknown and subscription models fail closed", () => {
+    expect(modelAcceptsImages("anthropic", "claude-sonnet-5-5")).toBe(true);
+    expect(modelAcceptsImages("openai", "gpt-5-mini")).toBe(true);
+    expect(modelAcceptsImages("openai", "gpt-4.1")).toBe(true);
+    expect(modelAcceptsImages("openrouter", "anthropic/claude-sonnet-5.5")).toBe(true);
+    expect(modelAcceptsImages("mock", "mock-1")).toBe(true);
+    expect(modelAcceptsImages("openai", "text-embedding-3-small")).toBe(false);
+    expect(modelAcceptsImages("openai-compatible", "llama-3.1-70b")).toBe(false);
+    expect(modelAcceptsImages("openai-codex", "gpt-5-codex")).toBe(false);
+    expect(modelAcceptsImages("openrouter", "meta-llama/llama-3.1-8b")).toBe(false);
   });
 });

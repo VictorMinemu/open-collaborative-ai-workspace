@@ -31,6 +31,7 @@ import { type ApprovalService, createApprovalModule } from "./modules/approval";
 import { createArtifactModule, type ObjectStorage } from "./modules/artifact";
 import { createAuditService } from "./modules/audit";
 import { createBotCapabilitiesModule, loadCatalog } from "./modules/bot-capabilities";
+import { type BrowserModule, createBrowserModule } from "./modules/browser";
 import { createChatModule, createConversationAccess } from "./modules/chat";
 import { createConnectorsModule } from "./modules/connectors";
 import { createDeviceModule, type DeviceHub } from "./modules/device";
@@ -70,6 +71,8 @@ export interface BuiltApp {
   toolApprovals: ToolApprovalService;
   /** Bot sandboxes (07.8-05): the domain service and the sandboxd client (null when not configured). */
   sandbox: SandboxModule;
+  /** Bot browsers (07.8-14): the context module and its `browser` events handler (tests drive their own consumers). */
+  browser: BrowserModule;
   close(): Promise<void>;
 }
 
@@ -297,6 +300,8 @@ export async function buildApp(
   // Phase 07.8: bot sandboxes (D-02 (b), D-09, D-11); built before the Agent Channel, which serves the bots' sandbox
   // routes with its sandboxd client.
   const sandbox = createSandboxModule(core);
+  // 07.8-14: the bots' browser contexts; sandboxd's `browser` events update them (host, crash, close).
+  const browser = createBrowserModule(core, { events: sandbox.events });
   const modules: ApiModule[] = [
     createIdentityModule({
       identity,
@@ -337,6 +342,7 @@ export async function buildApp(
     createMemoryModule(core, memory), // Phase 07.2: memory scopes, files and history (MEM-01, MEM-02, MEM-07)
     toolApproval.module, // Phase 07.5: approval policies per tool (APPROVE-01)
     sandbox.module, // Phase 07.8: kill switch, settings, files, the events consumer (05, 11); packages from 18
+    browser.module, // Phase 07.8-14: browser contexts (the bots' routes are the Agent Channel's)
   ];
   for (const m of modules) {
     await app.register(async (scope) => m.register(scope as unknown as App), {
@@ -354,6 +360,7 @@ export async function buildApp(
     memory,
     toolApprovals: toolApproval.service,
     sandbox,
+    browser,
     async close() {
       await app.close();
       for (const m of modules) await m.close?.();

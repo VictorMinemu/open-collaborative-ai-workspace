@@ -13,7 +13,27 @@ import {
   type ToolCallRow,
   titleOf,
 } from "./kind";
-import { orderPreview, type PreviewResult, shortToolName, summaryTitle } from "./view";
+import {
+  browserActionView,
+  browserSummaryTitle,
+  isBrowserActionTool,
+  maskForDisplay,
+  orderPreview,
+  type PreviewResult,
+  shortToolName,
+  summaryTitle,
+} from "./view";
+
+/** 07.8-14 (R8): a browser action's fields as the card's preview (the values a person checks before approving). */
+function browserPreview(args: Record<string, unknown>): PreviewResult {
+  const v = browserActionView(args);
+  const raw = typeof args.value === "string" ? args.value : "";
+  return {
+    fields: v.fields.map((f) => ({ key: f.label.toLowerCase(), label: f.label, value: f.value })),
+    truncated: raw.length > 500,
+    notices: { hiddenCharacters: false, maskedSecret: raw !== "" && maskForDisplay(raw).masked },
+  };
+}
 
 /**
  * The platform-owned card that mirrors a `tool.call` request in its conversation (07.5-07, P-07, Pitfall 7, UI-SPEC
@@ -64,8 +84,10 @@ export async function cardDisplayOf(
     .where(eq(conversations.id, t.conversationId))
     .limit(1);
   const humanIds = conv?.kind === "dm" ? await humanMembersOf(tx, t.conversationId) : [];
-  const preview = orderPreview(parseArgs(t));
-  const exactActionFields = shownTarget(t) ? 3 : 2;
+  const browser = isBrowserActionTool(t.tool);
+  const preview = browser ? browserPreview(parseArgs(t)) : orderPreview(parseArgs(t));
+  // A browser action's card is its R8 fields alone (Action, Element, Page, Session, Value or Option).
+  const exactActionFields = browser ? 0 : shownTarget(t) ? 3 : 2;
   const display = cardDisplay({
     conversationKind: conv?.kind ?? null,
     humanIds,
@@ -86,6 +108,9 @@ function sourceLabel(s: SourceInfo, exact: boolean): string {
       return exact ? `${s.name} · plugin` : s.name;
     case "http":
       return exact && s.keyName ? `Keychain key ${s.keyName}` : "Web request";
+    case "sandbox":
+    case "browser":
+      return s.name;
   }
 }
 
@@ -108,7 +133,9 @@ export async function composeToolCallCard(
 
   if (display === "summary") {
     const requesterName = (await memberName(tx, t.requestedForUserId)) ?? "Former member";
-    const title = summaryTitle({ botName: bot, tool: t.tool, requesterName });
+    const title = isBrowserActionTool(t.tool)
+      ? browserSummaryTitle({ botName: bot, requesterName, args: parseArgs(t) })
+      : summaryTitle({ botName: bot, tool: t.tool, requesterName });
     const card: AgentCardInput = {
       kind: "approval",
       title,
@@ -123,13 +150,15 @@ export async function composeToolCallCard(
 
   const title = await titleOf(tx, t, source);
   const target = shownTarget(t);
-  const fields: AgentCardField[] = [
-    field("Tool", shortToolName(t.tool)),
-    field("Source", sourceLabel(source, true)),
-    // Never the internal server name (WINDOWS #221): only a real destination, such as an HTTP host.
-    ...(target ? [field("Target", target)] : []),
-    ...preview.fields.slice(0, AGENT_CARD_FIELDS_MAX - actionFields).map((p) => field(p.label, p.value)),
-  ];
+  const fields: AgentCardField[] = isBrowserActionTool(t.tool)
+    ? preview.fields.slice(0, AGENT_CARD_FIELDS_MAX).map((p) => field(p.label, p.value))
+    : [
+        field("Tool", shortToolName(t.tool)),
+        field("Source", sourceLabel(source, true)),
+        // Never the internal server name (WINDOWS #221): only a real destination, such as an HTTP host.
+        ...(target ? [field("Target", target)] : []),
+        ...preview.fields.slice(0, AGENT_CARD_FIELDS_MAX - actionFields).map((p) => field(p.label, p.value)),
+      ];
   if (display === "review_only") warnings.push(TRUNCATED_WARNING);
   if (preview.notices.hiddenCharacters) warnings.push(HIDDEN_WARNING);
   if (preview.notices.maskedSecret) warnings.push(MASKED_WARNING);
