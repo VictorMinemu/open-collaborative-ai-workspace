@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 148
+open_count: 147
 waived_count: 4
-fixed_count: 103
-total_count: 255
-last_updated: 2026-10-21T20:09:54.014Z
+fixed_count: 105
+total_count: 256
+last_updated: 2026-10-21T20:12:08.217Z
 ---
 
 # Broken Windows Ledger
@@ -245,9 +245,9 @@ last_updated: 2026-10-21T20:09:54.014Z
 | 228 | 07.5 | deviation | apps/openclaw-channel/src/tool-guard.ts |  | Pin limits (ADR-0026): a plugin registered below -10000 or one answering OpenClaw's own approval first can still beat TOOL_PIN_PRIORITY | open |  | 2026-10-15T12:01:49.128Z |  |
 | 229 | 07.5 | deviation | apps/api/src/modules/approval |  | After #204 the bot does not hear decisions made from /approvals by someone outside the conversation; Work Zone Start has no applyTopics; cards still parse requester and runtime from server text | open |  | 2026-10-15T12:01:49.197Z |  |
 | 230 | 07.8 | deviation | packages/db/src/schema/app.ts |  | Hard-deleting a bot removes its browser_sessions rows but leaves their browser_session secrets; revoke/purge/sweeper in 07.8-21/27 must delete them; nothing cleans browser_sessions when a member leaves the org | open |  | 2026-10-15T15:08:27.289Z |  |
-| 231 | 07.8 | deviation | packages/db/src/schema/app.ts |  | DECIDE in 07.8-18: the app role can change an approved sandbox package's pinned fields (sha256, tree_sha256, lockfile, dependency_count, review_token); add an immutability trigger after approval. Every new secret kind now needs a migration (secrets_kind_check), note in ADR-0029 | open |  | 2026-10-15T15:08:27.379Z |  |
+| 231 | 07.8 | deviation | packages/db/src/schema/app.ts |  | DECIDE in 07.8-18: the app role can change an approved sandbox package's pinned fields (sha256, tree_sha256, lockfile, dependency_count, review_token); add an immutability trigger after approval. Every new secret kind now needs a migration (secrets_kind_check), note in ADR-0029 | fixed |  | 2026-10-15T15:08:27.379Z | 2026-10-21T20:12:08.062Z |
 | 232 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | Wiring left for later plans: turn.activity not registered in realtime EventTypes (07.8-10); SandboxdContextInput.events is loose until tightened to LiveInputFrame (07.8-16); PATCH /agents/:id/capabilities ignores sandbox/browser until 07.8-15 | open |  | 2026-10-15T15:10:12.850Z |  |
-| 233 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | File upload/download/import travel as base64 JSON up to 50 MiB (~67 MiB on the wire): check the body limit or stream (07.8-09/11); cap_reached/tainted answer 403 here vs 409 on 07.4 connector routes, unify in 05/10/14; npm lockfiles with sha1-only integrity fail PackageTreeEntry, refuse with a reason in 17/18 | open |  | 2026-10-15T15:10:12.922Z |  |
+| 233 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | File upload/download/import travel as base64 JSON up to 50 MiB (~67 MiB on the wire): check the body limit or stream (07.8-09/11); cap_reached/tainted answer 403 here vs 409 on 07.4 connector routes, unify in 05/10/14; npm lockfiles with sha1-only integrity fail PackageTreeEntry, refuse with a reason in 17/18 | fixed |  | 2026-10-15T15:10:12.922Z | 2026-10-21T20:12:08.140Z |
 | 234 | 07.8 | deviation | packages/db/src/schema/app.ts |  | MUST (07.8-21): app.message_cards kind check and Drizzle enum accept only the 8 old kinds; a sign-in ('browser') card cannot be stored until a new migration (chained after 07.8-02) adds it. ApprovalToolSourceKind lacks a sandbox/browser source (07.8-14; update SOURCE_ICON) | open |  | 2026-10-15T15:23:46.137Z |  |
 | 235 | 07.8 | deviation | apps/sandboxd/src |  | sandboxd: running processes tracked in memory only (unpollable after a restart, still end at timeout); /tmp/ocw-proc group files not removed; runtime_unavailable and docker_too_old share docker_unavailable; diskBytes 0 until 07.8-09 | open |  | 2026-10-15T16:42:21.790Z |  |
 | 236 | 07.8 | deviation | infra/sandbox |  | sbx apt versions approved but not pinned in the Dockerfile (later builds pick newer security versions); gVisor path proven by unit tests only until the 07.8-24 CI job; CODEOWNERS lacks apps/sandboxd (07.8-29) | open |  | 2026-10-15T16:42:21.880Z |  |
@@ -270,6 +270,7 @@ last_updated: 2026-10-21T20:09:54.014Z
 | 253 | 07.8 | deviation | infra/sandbox/sbx |  | sbx has no HTTP(S)_PROXY env, so curl/pip/npm in the shell ignore the egress proxy unless given -x (allowlisted egress unusable by default); set the proxy env in the sbx spec (07.8-17/24) | open |  | 2026-10-21T20:09:53.837Z |  |
 | 254 | 07.8 | deviation | apps/sandboxd/src/egress/proxy.ts |  | The proxy passes an upstream X-OCW-Egress header through (a site can make its own http page look refused): strip it; a failed policy write to the proxy answers 503 after sandboxd stored it (proxy lags until retry); a recreated proxy restores each bot's egress only on its next ensure | open |  | 2026-10-21T20:09:53.930Z |  |
 | 255 | 07.8 | deviation | apps/sandboxd/src |  | A sandboxd restart forgets its context map (agent answers no_context until it closes after 5 idle min, API must reopen); browserLimits idleStopMs/diskQuotaBytes unused (fixed 5 min); API owes resize mode, browserSandbox and http navigation_refused handling (07.8-16); 24 owes OCW_SANDBOX_BRW_IMAGE/EGRESS_IMAGE/BRW_SECCOMP env and gVisor/amd64 runs | open |  | 2026-10-21T20:09:54.014Z |  |
+| 256 | 07.8 | deviation | apps/api/src/modules/sandbox |  | Package installs run synchronously on the first call of a stopped sandbox (up to 600 s per package, can outlast the plugin deadline); a package reaches a running sandbox only at its next start (UI copy in 07.8-23); newerVersion always null; failed installs notify no admin beyond audit; package audit metadata includes registry name/version/digests | open |  | 2026-10-21T20:12:08.217Z |  |
 
 ````json
 [
@@ -3040,10 +3041,10 @@ last_updated: 2026-10-21T20:09:54.014Z
     "file": "packages/db/src/schema/app.ts",
     "line": null,
     "description": "DECIDE in 07.8-18: the app role can change an approved sandbox package's pinned fields (sha256, tree_sha256, lockfile, dependency_count, review_token); add an immutability trigger after approval. Every new secret kind now needs a migration (secrets_kind_check), note in ADR-0029",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-15T15:08:27.379Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-21T20:12:08.062Z"
   },
   {
     "id": 232,
@@ -3064,10 +3065,10 @@ last_updated: 2026-10-21T20:09:54.014Z
     "file": "packages/contracts/src/sandbox.ts",
     "line": null,
     "description": "File upload/download/import travel as base64 JSON up to 50 MiB (~67 MiB on the wire): check the body limit or stream (07.8-09/11); cap_reached/tainted answer 403 here vs 409 on 07.4 connector routes, unify in 05/10/14; npm lockfiles with sha1-only integrity fail PackageTreeEntry, refuse with a reason in 17/18",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-15T15:10:12.922Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-21T20:12:08.140Z"
   },
   {
     "id": 234,
@@ -3331,6 +3332,18 @@ last_updated: 2026-10-21T20:09:54.014Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-21T20:09:54.014Z",
+    "resolved_at": null
+  },
+  {
+    "id": 256,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/sandbox",
+    "line": null,
+    "description": "Package installs run synchronously on the first call of a stopped sandbox (up to 600 s per package, can outlast the plugin deadline); a package reaches a running sandbox only at its next start (UI copy in 07.8-23); newerVersion always null; failed installs notify no admin beyond audit; package audit metadata includes registry name/version/digests",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-21T20:12:08.217Z",
     "resolved_at": null
   }
 ]
