@@ -193,6 +193,8 @@ export function SandboxStatusCard({
   if (packages) meta.push(packages);
   if (state === "stopped") meta.push(`Starts when ${bot} needs it.`);
   const canAct = state === "running" && status.viewerCan.control;
+  // Nothing to isolate yet, or nothing known while the service is down: no isolation claim at all.
+  const showIsolation = state !== "unavailable" && state !== "absent";
 
   const buttons = canAct ? (
     <div className={cn("flex gap-2", actions === "row" ? "w-full" : "ml-auto shrink-0")}>
@@ -238,7 +240,7 @@ export function SandboxStatusCard({
           {actions === "inline" ? buttons : null}
         </div>
         <p className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-muted-foreground text-xs leading-4 md:pl-12">
-          {state !== "unavailable" ? (
+          {showIsolation ? (
             <span
               data-testid="sandbox-isolation"
               className="inline-flex items-center gap-1 max-md:basis-full"
@@ -259,7 +261,7 @@ export function SandboxStatusCard({
           {/* A dot between items; the one after the isolation hides on phones, where the isolation has its own line. */}
           {meta.map((m, i) => (
             <span key={m} className="inline-flex items-center gap-1.5">
-              {i > 0 || state !== "unavailable" ? (
+              {i > 0 || showIsolation ? (
                 <span aria-hidden className={cn(i === 0 && "max-md:hidden")}>
                   ·
                 </span>

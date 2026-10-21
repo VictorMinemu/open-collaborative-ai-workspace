@@ -139,6 +139,8 @@ function LoadedSandboxTab({ agent, status }: { agent: Agent; status: SandboxStat
   const [expanded, setExpanded] = useState<string[]>([]);
   const [selected, setSelected] = useState<PreviewFile | null>(null);
   const [openedVia, setOpenedVia] = useState<TreeOpenVia>("pointer");
+  /** Phones: the file sheet; closing it keeps the file selected in the tree (its ⋯ stays at hand). */
+  const [sheetOpen, setSheetOpen] = useState(false);
   /** A newer version the bot wrote while the file is open (from the 10 s refresh). */
   const [newer, setNewer] = useState<PreviewFile | null>(null);
   const [downloading, setDownloading] = useState(false);
@@ -148,6 +150,7 @@ function LoadedSandboxTab({ agent, status }: { agent: Agent; status: SandboxStat
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
   const [upload, setUpload] = useState<{ folder: string; files: File[] } | null>(null);
   const [existing, setExisting] = useState<ReadonlySet<string>>(new Set());
+  const [empty, setEmpty] = useState(false);
 
   const del = useDeleteSandboxPath(agentId);
   const lifecycle = useSandboxLifecycle(agentId);
@@ -159,6 +162,7 @@ function LoadedSandboxTab({ agent, status }: { agent: Agent; status: SandboxStat
     setOpenedVia(via);
     setNewer(null);
     setSelected(previewFileOf(entry));
+    setSheetOpen(true);
   };
 
   const onEntries = (entries: readonly SandboxFileEntry[]) => {
@@ -281,15 +285,17 @@ function LoadedSandboxTab({ agent, status }: { agent: Agent; status: SandboxStat
                 </span>
                 <span className="truncate font-mono text-muted-foreground text-xs">/workspace</span>
               </p>
-              <Button
-                variant="outline"
-                size="sm"
-                className="max-md:h-11 max-md:w-full"
-                data-testid="sandbox-upload"
-                onClick={() => openUpload(tree.current?.uploadFolder() ?? "")}
-              >
-                <Upload /> Upload
-              </Button>
+              {empty ? null : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="max-md:h-11 max-md:w-full"
+                  data-testid="sandbox-upload"
+                  onClick={() => openUpload(tree.current?.uploadFolder() ?? "")}
+                >
+                  <Upload /> Upload
+                </Button>
+              )}
             </div>
             <div className="scrollbar-thin min-h-0 flex-1 px-2 py-2 lg:overflow-y-auto">
               <SandboxTree
@@ -306,6 +312,7 @@ function LoadedSandboxTab({ agent, status }: { agent: Agent; status: SandboxStat
                 onDelete={askDelete}
                 onUploadHere={(folder) => openUpload(folder)}
                 onDropFiles={(folder, files) => openUpload(folder, files)}
+                onEmptyChange={setEmpty}
               />
             </div>
           </div>
@@ -351,13 +358,13 @@ function LoadedSandboxTab({ agent, status }: { agent: Agent; status: SandboxStat
       {!desktop ? (
         <SandboxFileSheet
           agentId={agentId}
-          file={selected}
+          file={sheetOpen ? selected : null}
           changed={newer !== null}
           downloading={downloading}
           onReload={reload}
           onDownload={() => selected && download(selected.path, selected.name)}
           onDelete={() => selected && askDelete({ path: selected.path, name: selected.name, kind: "file" })}
-          onClose={() => setSelected(null)}
+          onClose={() => setSheetOpen(false)}
         />
       ) : null}
 

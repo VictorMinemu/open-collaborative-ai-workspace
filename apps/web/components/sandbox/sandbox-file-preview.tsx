@@ -149,7 +149,11 @@ function MetaLine({ file, withFolder = false }: { file: PreviewFile; withFolder?
   const folder = folderOfPath(file.path);
   return (
     <p className="truncate text-muted-foreground text-xs">
-      {withFolder && folder ? <span className="font-mono">{folder}/ · </span> : null}
+      {withFolder && folder ? (
+        <>
+          <span className="font-mono">{folder}/</span> ·{" "}
+        </>
+      ) : null}
       <span className="font-mono">{formatBytes(file.size)}</span> ·{" "}
       <Tooltip content={new Date(file.modifiedAt).toLocaleString()}>
         <span>

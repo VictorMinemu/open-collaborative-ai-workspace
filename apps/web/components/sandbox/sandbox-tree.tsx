@@ -115,6 +115,8 @@ export interface SandboxTreeProps {
   onUploadHere: (folder: string) => void;
   /** Files dropped onto a folder row (desktop). */
   onDropFiles: (folder: string, files: File[]) => void;
+  /** Whether `/workspace` is empty (the tab drops its header Upload while the empty state offers one). */
+  onEmptyChange?: (empty: boolean) => void;
 }
 
 const SKELETON_WIDTHS = ["w-[70%]", "w-[55%]", "w-[80%]", "w-[60%]", "w-[75%]", "w-[50%]"];
@@ -148,6 +150,7 @@ export const SandboxTree = forwardRef<SandboxTreeHandle, SandboxTreeProps>(funct
     onDelete,
     onUploadHere,
     onDropFiles,
+    onEmptyChange,
   },
   ref,
 ) {
@@ -236,6 +239,8 @@ export const SandboxTree = forwardRef<SandboxTreeHandle, SandboxTreeProps>(funct
   }, [refresh]);
 
   const items = tree.getItems();
+  const empty = root.status === "ready" && root.count === 0 && items.length === 0;
+  useEffect(() => onEmptyChange?.(empty), [empty, onEmptyChange]);
 
   // A requested row gets focus once it is rendered (after an upload, the new file).
   useEffect(() => {
@@ -284,7 +289,7 @@ export const SandboxTree = forwardRef<SandboxTreeHandle, SandboxTreeProps>(funct
     );
   }
   if (root.status === "loading") return <SandboxTreeSkeleton stacked={stacked} />;
-  if (root.count === 0 && items.length === 0) {
+  if (empty) {
     return (
       <div
         data-testid="sandbox-files-empty"

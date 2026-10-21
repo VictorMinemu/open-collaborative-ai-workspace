@@ -106,6 +106,8 @@ export function UploadDialog({
   const [uploading, setUploading] = useState(false);
   const [askLeave, setAskLeave] = useState(false);
   const current = useRef<SandboxUpload | null>(null);
+  /** Rows still asking Replace / Skip when an upload run ends. */
+  const conflictsLeft = useRef(false);
   const stopped = useRef(false);
 
   const add = (files: File[]) => {
@@ -159,11 +161,15 @@ export function UploadDialog({
   const setState = (key: string, state: RowState) =>
     setRows((prev) => prev.map((r) => (r.key === key ? { ...r, state } : r)));
 
-  const count = rows.filter(eligible).length;
+  // While a run is going, the button keeps the run's size ("Upload 2"), not what is left to send.
+  const count = rows.filter(
+    (r) => eligible(r) || (uploading && (r.state.kind === "uploading" || r.state.kind === "done")),
+  ).length;
 
   async function start() {
     const queue = rows.filter(eligible);
     if (queue.length === 0) return;
+    conflictsLeft.current = rows.some((r) => r.state.kind === "conflict");
     setUploading(true);
     stopped.current = false;
     const done: string[] = [];
@@ -203,19 +209,20 @@ export function UploadDialog({
     }
     current.current = null;
     setUploading(false);
-    if (done.length > 0) {
-      onUploaded(folder, done);
-      if (failed === 0 && !stopped.current) {
-        toast.success(
-          done.length === 1
-            ? `1 file uploaded to ${folderLabel(folder)}`
-            : `${done.length} files uploaded to ${folderLabel(folder)}`,
-        );
-        onClose();
-        return;
-      }
-      setRows((prev) => prev.filter((r) => r.state.kind !== "done"));
+    if (done.length === 0) return;
+    onUploaded(folder, done);
+    toast.success(
+      done.length === 1
+        ? `1 file uploaded to ${folderLabel(folder)}`
+        : `${done.length} files uploaded to ${folderLabel(folder)}`,
+    );
+    // Closes when nothing is left to decide: files that failed or still ask Replace / Skip keep it open.
+    const keepOpen = stopped.current || failed > 0 || conflictsLeft.current;
+    if (!keepOpen) {
+      onClose();
+      return;
     }
+    setRows((prev) => prev.filter((r) => r.state.kind !== "done"));
   }
 
   const stop = () => {
@@ -250,7 +257,7 @@ export function UploadDialog({
               Files go into {bot}'s sandbox. {bot} can read and change them.
             </DialogDescription>
           </DialogHeader>
-          <DialogBody className="grid content-start gap-3">
+          <DialogBody className="grid content-start gap-3 max-sm:flex-1">
             <input
               ref={input}
               type="file"

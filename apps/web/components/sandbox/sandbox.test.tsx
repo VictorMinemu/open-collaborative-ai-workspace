@@ -163,6 +163,8 @@ describe("SandboxStatusCard", () => {
     const absent = card({ state: "absent", runtime: null, lastActiveAt: null });
     expect(absent).toContain('aria-label="Status: Not started yet"');
     expect(absent).toContain("No sandbox yet. It's created the first time Scout needs it.");
+    // Nothing runs yet: no isolation is claimed.
+    expect(absent).not.toContain('data-testid="sandbox-isolation"');
   });
 
   it("a stop reason names the stronger cause of a stopped sandbox", () => {
