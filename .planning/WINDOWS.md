@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 147
+open_count: 145
 waived_count: 4
-fixed_count: 105
+fixed_count: 107
 total_count: 256
-last_updated: 2026-10-21T20:12:08.217Z
+last_updated: 2026-10-21T20:35:29.061Z
 ---
 
 # Broken Windows Ledger
@@ -260,10 +260,10 @@ last_updated: 2026-10-21T20:12:08.217Z
 | 243 | 07.8 | deviation | apps/sandboxd/src/egress/proxy.ts |  | Egress proxy: public mode proven by unit tests only (real egress in 07.8-13/24); no per-network tunnel limit; platform names refused by name (not resolved) | open |  | 2026-10-15T18:33:30.267Z |  |
 | 244 | 07.8 | deviation | apps/api/src/modules/sandbox |  | Pending purges and policy re-push after a sandboxd restart reach only orgs with events or a failed purge in this process (needs a SECURITY DEFINER org list or a sandboxd boot event); no 'crashed' stop reason in contract/DB; egress audit hourly dedupe queries audit_events metadata without an index; the event consumer holds a pool connection; fake sandboxd stores files as UTF-8 text (breaks binaries) | open |  | 2026-10-15T21:29:49.204Z |  |
 | 245 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | Sandbox activity steps never carry approvalMessageRoute (07.8-14/20); bot_turn_activity.running stays true for a turn that never replies, web live label needs a timeout (07.8-20); a write body over Fastify's 2 MiB limit returns Fastify's 413 not too_large; shared images show as downloads, no preview (07.8-25); fake sandboxd codes (404 read folder, 409 busy delete) to check against the real one (07.8-08/09) | open |  | 2026-10-15T22:12:53.836Z |  |
-| 246 | 07.8 | deviation | apps/sandboxd/src |  | MUST FIX (fail-open): sandboxd keeps policy, kill state and disk_full in memory; after a sandboxd restart the defaults apply (2 GiB, 15 min idle, NOT killed) until the API re-pushes, and the API only re-pushes for orgs with events. Fix: sandboxd refuses ensure/restart for an org with no policy (409 policy_missing) and the API pushes policy then retries; plus a boot event | open |  | 2026-10-15T22:14:34.757Z |  |
+| 246 | 07.8 | deviation | apps/sandboxd/src |  | MUST FIX (fail-open): sandboxd keeps policy, kill state and disk_full in memory; after a sandboxd restart the defaults apply (2 GiB, 15 min idle, NOT killed) until the API re-pushes, and the API only re-pushes for orgs with events. Fix: sandboxd refuses ensure/restart for an org with no policy (409 policy_missing) and the API pushes policy then retries; plus a boot event | fixed |  | 2026-10-15T22:14:34.757Z | 2026-10-21T20:35:29.061Z |
 | 247 | 07.8 | deviation | apps/sandboxd/src |  | Soft quota counts apparent size (sparse files in full) and may overshoot up to one 60 s sweep (document XFS hard quota at the gate); transfers hold ~67 MiB JSON + 50 MiB decoded in memory, two at once; after a sandboxd restart a running background process no longer prevents idling; a container death during the watcher's 2 s reconnect is not reported; OCW_SANDBOXD_SWEEP_MS needs compose and env parity (07.8-24) | open |  | 2026-10-15T22:14:34.840Z |  |
 | 248 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | When the org is killed or switched off the bot is not offered the sandbox tool and cannot say why (add a withheld reason killed/sandbox_off, 07.8-10/14/19); a message 1-2 s after a member turns Sandbox on can still get 'not offered' (UI should show applying, 07.8-15); cell-proof.sh PROOF_BUILD=1 still builds the demo's :local tags; e2e-reset.sh label cleanup untested locally | open |  | 2026-10-15T22:38:49.256Z |  |
-| 249 | 07.8 | deviation | apps/api/src/modules/browser |  | MUST FIX (D-11 floor): when an admins/unit_leads 07.5 policy applies to ocw_browser_act, those approvers decide a member's signed-in action instead of the member; signed-in acts must always need the requesting member's approval | open |  | 2026-10-21T19:53:39.333Z |  |
+| 249 | 07.8 | deviation | apps/api/src/modules/browser |  | MUST FIX (D-11 floor): when an admins/unit_leads 07.5 policy applies to ocw_browser_act, those approvers decide a member's signed-in action instead of the member; signed-in acts must always need the requesting member's approval | fixed |  | 2026-10-21T19:53:39.333Z | 2026-10-21T20:35:28.921Z |
 | 250 | 07.8 | deviation | apps/api/src/modules/browser |  | act answers download:null until 07.8-25; a session counts as loaded by session_id but stored state is not passed to sandboxd until 07.8-21; kill does not close browser contexts in its own tx (rows stay open if sandboxd is down); image-capable model list is hand-kept; approval chip icons reuse package/globe | open |  | 2026-10-21T19:53:39.439Z |  |
 | 251 | 07.8 | deviation | e2e/tests/memory-files.spec.ts |  | FIX IN GATE: memory-files.spec.ts:548 (keyboard and ARIA on desktop) fails intermittently on the phase branch (2 of 3 runs alongside other specs; race between the tab stop and deep-link expansion); passes alone | open |  | 2026-10-21T20:05:41.977Z |  |
 | 252 | 07.8 | deviation | apps/web/components/bots |  | Sandbox file list route has no offset/cursor beyond 500 entries ('{n} more not listed'); Capabilities switches are 20x36 (<44 px, same as the existing Internet row); sandbox state events carry no runtime so a sandbox started outside the API ensure shows 'hardened' until restart; upload dialog does not intercept in-app navigation | open |  | 2026-10-21T20:05:42.084Z |  |
@@ -3221,10 +3221,10 @@ last_updated: 2026-10-21T20:12:08.217Z
     "file": "apps/sandboxd/src",
     "line": null,
     "description": "MUST FIX (fail-open): sandboxd keeps policy, kill state and disk_full in memory; after a sandboxd restart the defaults apply (2 GiB, 15 min idle, NOT killed) until the API re-pushes, and the API only re-pushes for orgs with events. Fix: sandboxd refuses ensure/restart for an org with no policy (409 policy_missing) and the API pushes policy then retries; plus a boot event",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-15T22:14:34.757Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-21T20:35:29.061Z"
   },
   {
     "id": 247,
@@ -3257,10 +3257,10 @@ last_updated: 2026-10-21T20:12:08.217Z
     "file": "apps/api/src/modules/browser",
     "line": null,
     "description": "MUST FIX (D-11 floor): when an admins/unit_leads 07.5 policy applies to ocw_browser_act, those approvers decide a member's signed-in action instead of the member; signed-in acts must always need the requesting member's approval",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-21T19:53:39.333Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-21T20:35:28.921Z"
   },
   {
     "id": 250,
