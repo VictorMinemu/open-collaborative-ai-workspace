@@ -487,19 +487,30 @@ async function contextNavigate(input) {
     const host = hostOf(url);
     if (!host || !/^https?:/i.test(url) || url.length > 2000) fail("invalid_request", "an http(s) URL");
     return withCrossSite(ctx, input.allowCrossSite, async () => {
+      let response = null;
       try {
-        await ctx.page.goto(url, { waitUntil: "load", timeout: LIMITS.navigationTimeoutMs });
+        response = await ctx.page.goto(url, { waitUntil: "load", timeout: LIMITS.navigationTimeoutMs });
       } catch (err) {
         if (!ctx.opBlocked) {
           if (err?.name === "TimeoutError") fail("timeout", "the page did not load in time");
           fail("navigation_refused", "the page could not be loaded");
         }
       }
+      // An https refusal fails the tunnel (above); an http one is the proxy's own 403/502 answer, marked with
+      // X-OCW-Egress (07.8-12): the same refusal, never a page the bot "reached" (07.8-13).
+      if (refusedByProxy(response)) fail("navigation_refused", "the page could not be loaded");
       ctx.signInHost ??= hostOf(ctx.page.url());
       const state = await pageState(ctx);
       return { ...state, blockedNavigation: ctx.opBlocked };
     });
   });
+}
+
+/** The egress proxy's own refusal of a plain-http request (its 403 or 502 with the X-OCW-Egress reason header). */
+function refusedByProxy(response) {
+  if (!response) return false;
+  const status = response.status();
+  return (status === 403 || status === 502) && typeof response.headers()["x-ocw-egress"] === "string";
 }
 
 /** The only view of a page the caller ever gets (redact.mjs over the accessibility tree). */

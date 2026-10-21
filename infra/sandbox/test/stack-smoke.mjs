@@ -9,6 +9,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { appendFileSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { LOGIN_LAYOUT } from "./fake-site.mjs";
 
 const args = process.argv.slice(2);
 const opt = (name) => {
@@ -280,6 +281,30 @@ async function watch(target, contextId) {
   };
 }
 
+// ---------------------------------------------------------------- takeover input frames (as the live view sends)
+
+const center = (b) => ({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
+const clickAt = ({ x, y }) => [
+  { type: "mouse", event: "move", x, y, button: "none" },
+  { type: "mouse", event: "down", x, y, button: "left" },
+  { type: "mouse", event: "up", x, y, button: "left" },
+];
+const PUNCT = { "@": "Digit2", "-": "Minus", ".": "Period", _: "Minus", " ": "Space" };
+const keyCode = (ch) =>
+  /[a-z]/i.test(ch)
+    ? `Key${ch.toUpperCase()}`
+    : /[0-9]/.test(ch)
+      ? `Digit${ch}`
+      : (PUNCT[ch] ?? "Unidentified");
+const keyFrames = (s) =>
+  [...s].flatMap((ch) => {
+    const modifiers = /[A-Z@_]/.test(ch) ? 8 : 0;
+    return [
+      { type: "key", event: "down", key: ch, code: keyCode(ch), modifiers },
+      { type: "key", event: "up", key: ch, code: keyCode(ch), modifiers },
+    ];
+  });
+
 const findNode = (snap, role, name) => snap.nodes.find((n) => n.role === role && n.name === name);
 
 // ---------------------------------------------------------------- the run
@@ -326,6 +351,16 @@ async function waitText(target, contextId, text) {
   );
   return r.ok === true;
 }
+async function input(target, contextId, events) {
+  for (let i = 0; i < events.length; i += 64) {
+    await okPost(
+      "/v1/browsers/contexts/input",
+      { target, contextId, events: events.slice(i, i + 64) },
+      "contextInput",
+    );
+  }
+}
+
 async function setup() {
   await startSandboxd();
   await pollEvents();
@@ -512,6 +547,234 @@ async function stepOpen() {
   await okPost("/v1/browsers/contexts/close", { target: tA, contextId: ctx }, "contextClose");
 }
 
+async function stepFull() {
+  log("== takeover: a person signs in through input frames; bot ops wait");
+  const ctx = await openContext(tA);
+  await navigate(tA, ctx, `http://${PANEL}/login`);
+  await okPost("/v1/browsers/contexts/takeover", { target: tA, contextId: ctx, active: true }, "takeover on");
+  const paused = await post("/v1/browsers/contexts/snapshot", { target: tA, contextId: ctx });
+  ok(paused.status === 409 && codeOf(paused) === "paused", `a bot op during takeover → ${codeOf(paused)}`);
+  const L = LOGIN_LAYOUT;
+  await input(tA, ctx, [...clickAt(center(L.email)), ...keyFrames(SECRETS.username)]);
+  await input(tA, ctx, [...clickAt(center(L.password)), ...keyFrames(SECRETS.password)]);
+  await input(tA, ctx, [...clickAt(center(L.otp)), { type: "text", text: SECRETS.otp }]);
+  await input(tA, ctx, clickAt(center(L.submit)));
+  await okPost(
+    "/v1/browsers/contexts/takeover",
+    { target: tA, contextId: ctx, active: false },
+    "takeover off",
+  );
+  ok(await waitText(tA, ctx, "Welcome"), "the person's input signed in on the fake site");
+  ok(fakeStats().logins >= 1, "the fake site counted the login");
+  const focus = await waitEvent(
+    (e) => e.type === "browser" && e.event === "focus_sensitive" && e.contextId === ctx,
+  );
+  ok(Boolean(focus), "a focus_sensitive event when the password field took focus");
+
+  const state = await okPost(
+    "/v1/browsers/contexts/export-state",
+    { target: tA, contextId: ctx },
+    "exportState",
+  );
+  const cookies = JSON.parse(state.storageState).cookies.map((c) => c.name);
+  ok(
+    cookies.includes("panel_session") && !cookies.includes("idp_session"),
+    `export keeps the site's cookie only (${cookies})`,
+  );
+
+  log("== downloads: by token, then into the workspace as 10001");
+  await navigate(tA, ctx, `http://${PANEL}/files`);
+  const files = await snapshot(tA, ctx);
+  const link = findNode(files, "link", "Download report");
+  const act = await okPost(
+    "/v1/browsers/contexts/act",
+    { target: tA, contextId: ctx, action: "click", ref: link?.ref },
+    "act",
+  );
+  ok(
+    act.download?.name === "report.csv",
+    `the click downloaded report.csv (${JSON.stringify(act.download)})`,
+  );
+  const dl = await waitEvent((e) => e.type === "browser" && e.event === "download" && e.contextId === ctx);
+  ok(dl?.download?.token === act.download?.token, "a download event carries the same token");
+  const content = await okPost(
+    "/v1/browsers/contexts/download",
+    { target: tA, contextId: ctx, token: act.download.token },
+    "contextDownload",
+  );
+  const bytes = Buffer.from(content.data, "base64");
+  ok(
+    bytes.toString("utf8").startsWith("row-000,") && bytes.length === content.size,
+    `contextDownload streams the file (${bytes.length} bytes)`,
+  );
+  await okPost(
+    "/v1/files/import",
+    { target: tA, path: "downloads/report.csv", data: content.data, overwrite: true },
+    "filesImport",
+  );
+  const st = docker("exec", nameFor("sbx", A), "stat", "-c", "%u %s", "/workspace/downloads/report.csv");
+  ok(
+    st.out === `10001 ${bytes.length}`,
+    `filesImport wrote /workspace/downloads/report.csv as 10001 (${st.out})`,
+  );
+
+  log("== resize: phone frames at the phone size");
+  await navigate(tA, ctx, `http://${PANEL}/app`);
+  const w = await watch(tA, ctx);
+  await sleep(500);
+  const since = Date.now();
+  await okPost(
+    "/v1/browsers/contexts/resize",
+    { target: tA, contextId: ctx, width: 390, height: 640, mode: "phone" },
+    "resize phone",
+  );
+  let phone = null;
+  for (let i = 0; i < 50 && !phone; i++) {
+    await sleep(100);
+    phone = w.out.jpegs.find((f) => {
+      const s = f.at >= since ? jpegSize(f.jpeg) : null;
+      return s?.width === 390 && s?.height === 640;
+    });
+  }
+  ok(Boolean(phone), "frames at 390x640 after a phone resize");
+  ok(await waitText(tA, ctx, "Layout: phone"), "the page laid out for a phone");
+  await okPost(
+    "/v1/browsers/contexts/resize",
+    { target: tA, contextId: ctx, width: 960, height: 600 },
+    "resize small",
+  );
+  await w.stop();
+
+  log("== two bots: B's browser egress is off; A reaches nothing of B's");
+  const statusB = await okPost("/v1/browsers/ensure", { target: tB }, "browserEnsure B");
+  ok(statusB.state === "running", "B's browser is running");
+  await okPost("/v1/sandboxes/ensure", { target: tB }, "ensure sbx B");
+  const ctxB = await openContext(tB);
+  const navB = await navigate(tB, ctxB, `http://${PANEL}/app`);
+  ok(
+    navB.status === 422 && codeOf(navB) === "navigation_refused",
+    `B (browser egress off) cannot navigate (${codeOf(navB)})`,
+  );
+  const refusedB = await waitEvent(
+    (e) => e.type === "egress" && e.target.agentId === B && e.kind === "brw" && e.host === "panel.fake.test",
+  );
+  ok(refusedB?.allowed === false, "an egress event: refused for B's browser");
+
+  const bSbxIp = ipOn(nameFor("sbx", B), nameFor("net", B));
+  const bBrwIp = ipOn(nameFor("brw", B), nameFor("bnet", B));
+  const proxyOnB = ipOn(EGRESS, nameFor("net", B));
+  const aSbxIp = ipOn(nameFor("sbx", A), nameFor("net", A));
+  const reach = (from, ip, port) =>
+    docker(
+      "exec",
+      from,
+      "node",
+      "-e",
+      `const s=require("net").connect(${port},"${ip}");s.on("connect",()=>process.exit(0));s.on("error",()=>process.exit(1));setTimeout(()=>process.exit(1),3000);`,
+    ).status === 0;
+  ok(!reach(nameFor("brw", A), bSbxIp, 8080), `A's brw cannot connect to B's sbx (${bSbxIp})`);
+  ok(!reach(nameFor("brw", A), bBrwIp, 9), `A's brw cannot connect to B's brw (${bBrwIp})`);
+  ok(!reach(nameFor("brw", A), aSbxIp, 8080), "A's brw cannot connect to A's own sbx (separate networks)");
+
+  // The single shared hop: listed private hosts that are B's container or the proxy itself stay refused.
+  orgPolicy = policy(ORG, {
+    allowHosts: [PANEL, `${bSbxIp}:8080`, `${proxyOnB}:3128`],
+    privateHosts: [PANEL, IDP, `${bSbxIp}:8080`, `${proxyOnB}:3128`],
+    version: ++orgVersion,
+  });
+  await okPost("/v1/policy", orgPolicy, "policy A v3");
+  const toB = await viaProxy(tA, `http://${bSbxIp}:8080/`);
+  ok(
+    toB.code === "403" && toB.reason === "bot_network",
+    `A's sbx → B's sbx through the proxy (${toB.code} ${toB.reason})`,
+  );
+  const toProxy = await viaProxy(tA, `http://${proxyOnB}:3128/`);
+  ok(
+    toProxy.code === "403" && toProxy.reason === "proxy_self",
+    `A's sbx → the proxy on B's network (${toProxy.code} ${toProxy.reason})`,
+  );
+  const refusedA = await waitEvent((e) => e.type === "egress" && e.target.agentId === A && e.host === bSbxIp);
+  ok(refusedA?.allowed === false, "an egress event: refused for A's shell");
+
+  log("== site lock (D-13): blocked, then one approved navigation passes");
+  orgPolicy = policy(ORG, { allowHosts: [PANEL], privateHosts: [PANEL, IDP, EVIL], version: ++orgVersion });
+  await okPost("/v1/policy", orgPolicy, "policy A v4");
+  const locked = await openContext(tA, { siteLock: PANEL });
+  await navigate(tA, locked, `http://${PANEL}/lock`);
+  const lockSnap = await snapshot(tA, locked);
+  const exportRef = findNode(lockSnap, "link", "Export")?.ref;
+  const collectBefore = fakeStats().collect;
+  const blocked = await okPost(
+    "/v1/browsers/contexts/act",
+    { target: tA, contextId: locked, action: "click", ref: exportRef },
+    "act blocked",
+  );
+  ok(
+    blocked.blockedNavigation?.host === EVIL,
+    `the lock blocked ${JSON.stringify(blocked.blockedNavigation)}`,
+  );
+  ok(fakeStats().collect === collectBefore, "the blocked host was never reached");
+  const passed = await okPost(
+    "/v1/browsers/contexts/act",
+    { target: tA, contextId: locked, action: "click", ref: exportRef, allowCrossSite: true },
+    "act allowCrossSite",
+  );
+  ok(
+    passed.navigated === true && passed.blockedNavigation === null,
+    "allowCrossSite lets that one navigation through",
+  );
+  ok(fakeStats().collect === collectBefore + 1, "the approved navigation reached the other host once");
+
+  log("== restart: a new sandboxd re-attaches to the running browser");
+  const startedAt = inspect(nameFor("brw", A)).State.StartedAt;
+  await stopSandboxd();
+  await startSandboxd();
+  const info0 = await api("GET", "/v1/info");
+  ok(info0.body?.browserSandbox === null, "a new sandboxd reports no posture before a browser is seen");
+  const missing = await post("/v1/browsers/ensure", { target: tA });
+  ok(
+    missing.status === 409 && codeOf(missing) === "policy_missing",
+    `no policy after the restart → ${codeOf(missing)}`,
+  );
+  await okPost("/v1/policy", orgPolicy, "policy A again");
+  await okPost("/v1/policy", policy(ORG_B, { browserEgress: "off" }), "policy B again");
+  const again = await okPost("/v1/browsers/ensure", { target: tA }, "browserEnsure A after restart");
+  ok(
+    again.browserSandbox === posture,
+    `the re-attached browser reports the same posture (${again.browserSandbox})`,
+  );
+  ok(
+    inspect(nameFor("brw", A)).State.StartedAt === startedAt,
+    "the running brw was re-attached, not restarted",
+  );
+  const ctx2 = await openContext(tA);
+  const nav2 = await navigate(tA, ctx2, `http://${PANEL}/app`);
+  ok(
+    nav2.status === 200 && nav2.body.host === PANEL,
+    "a new context works after the restart (the proxy policy too)",
+  );
+  ok((await api("GET", "/v1/info")).body?.browserSandbox === posture, "info reports the posture again");
+
+  log("== kill switch: killOrg stops every sbx and brw of the organization");
+  const killed = await okPost("/v1/orgs/kill", { orgId: ORG }, "killOrg");
+  ok(killed.removed >= 2, `killOrg removed ${killed.removed}`);
+  ok(inspect(nameFor("sbx", A)).State.Running === false, "A's sbx is stopped");
+  ok(inspect(nameFor("brw", A)).State.Running === false, "A's brw is stopped");
+  ok(inspect(nameFor("brw", B)).State.Running === true, "the other organization's browser still runs");
+  ok(inspect(EGRESS).State.Running === true, "the namespace's proxy is untouched by an organization's kill");
+  const killedEv = await waitEvent(
+    (e) => e.type === "state" && e.kind === "brw" && e.target.agentId === A && e.state === "killed",
+  );
+  ok(Boolean(killedEv), "a killed state event for A's browser");
+  orgPolicy = policy(ORG, { killed: true, version: ++orgVersion });
+  await okPost("/v1/policy", orgPolicy, "policy A killed");
+  const refused = await post("/v1/browsers/ensure", { target: tA });
+  ok(
+    refused.status === 409 && codeOf(refused) === "killed",
+    `a killed organization's browser does not start (${codeOf(refused)})`,
+  );
+}
+
 function noSecretsLeaked() {
   const text = readFileSync(LOG, "utf8") + JSON.stringify(seen);
   for (const [k, v] of Object.entries(SECRETS))
@@ -525,6 +788,7 @@ function noSecretsLeaked() {
 try {
   await setup();
   await stepOpen();
+  if (ONLY === "all") await stepFull();
   noSecretsLeaked();
 } catch (err) {
   failures += 1;

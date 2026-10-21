@@ -6,6 +6,18 @@
 # frames streamed over HTTP, takeover input, downloads into the workspace, resize, two bots kept apart, the site lock,
 # a sandboxd restart that re-attaches to a running browser, and the kill switch.
 #
+# Steps after `open` (stack-smoke.mjs `stepFull`):
+#   takeover    contextTakeover on → bot ops answer `paused`; input frames sign in on the fake site; takeover off
+#   state       contextExportState keeps the site's cookie only
+#   downloads   contextDownload streams the downloaded file by its token, never through the broker's disk;
+#               filesImport writes it to /workspace/downloads of A's sbx, owned by 10001
+#   resize      a phone resize streams frames at the phone size
+#   two bots    B's browser egress `off` → navigation_refused and a refused egress event; A's brw reaches neither B's
+#               sbx nor B's brw; A's sbx gets bot_network / proxy_self for B's address and the proxy's, though listed
+#   site lock   blockedNavigation, then one allowCrossSite navigation
+#   restart     a new sandboxd re-attaches to the running brw (no restart), policy_missing until the push
+#   kill        killOrg stops every sbx and brw of the organization; the other org and the proxy keep running
+#
 # Usage (repo root):  bash infra/sandbox/test/run-stack-smoke.sh [--only open|full]
 #   --only open    Task 1's tracer only: open → navigate → snapshot → frames → egress event, containment checks
 #   (default)      every step
