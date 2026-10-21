@@ -23,13 +23,6 @@ export interface ContainerLimits {
   pids: number;
 }
 
-/** The research defaults for `sbx` (1 CPU, 1 GiB, 256 pids) until the API pushes the org limits. */
-export const DEFAULT_SBX_LIMITS: ContainerLimits = {
-  nanoCpus: 1_000_000_000,
-  memoryBytes: 1024 * 1024 * 1024,
-  pids: 256,
-};
-
 /** No container is ever wider than this, whatever limits arrive (4 CPUs, 8 GiB, 4096 pids). */
 export const HARD_MAX: ContainerLimits = {
   nanoCpus: 4_000_000_000,

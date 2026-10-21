@@ -9,12 +9,18 @@ import { OCW_FILES } from "./spec";
  * `ensure` refuses until a measurement is back under it (people delete through the files helper). A write that would
  * not fit is refused before any byte reaches the workspace. A hard quota (XFS `pquota`) is host hardening, documented
  * for the phase gate.
+ *
+ * The quota is the organization's pushed policy; there is no default. Without one (sandboxd restarted and the API has not
+ * pushed yet) a measurement is recorded but decides nothing, and a write is refused with `policy_missing` (409).
  */
 
 export interface Quota {
   /** Measures the workspace, records it, and marks or clears `disk_full`; never counts as the bot's activity. */
   measure(target: SandboxdTarget): Promise<number>;
-  /** `disk_full` (409) when the workspace is over quota or `incoming` bytes would not fit; else the measured size. */
+  /**
+   * `policy_missing` (409) without a pushed policy; `disk_full` (409) when the workspace is over quota or `incoming`
+   * bytes would not fit; else the measured size.
+   */
   assertRoom(target: SandboxdTarget, incoming: number): Promise<number>;
   /** Records the size after a write without measuring again (the next measurement corrects it). */
   afterWrite(target: SandboxdTarget, estimatedBytes: number): void;
@@ -25,7 +31,14 @@ export interface Quota {
 export interface QuotaDeps {
   sandboxes: Pick<
     Sandboxes,
-    "workspace" | "run" | "limitsFor" | "recordDisk" | "isDiskFull" | "markDiskFull" | "clearDiskFull"
+    | "workspace"
+    | "run"
+    | "limitsFor"
+    | "requirePolicy"
+    | "recordDisk"
+    | "isDiskFull"
+    | "markDiskFull"
+    | "clearDiskFull"
   >;
 }
 
@@ -42,7 +55,9 @@ export function createQuota(deps: QuotaDeps): Quota {
       throw new SandboxdFailure("docker_unavailable", 500, "the workspace could not be measured");
     }
     sandboxes.recordDisk(target, bytes);
-    const { diskQuotaBytes } = sandboxes.limitsFor(target.orgId);
+    // No policy, no quota: nothing is marked or cleared until the API pushes the organization's policy.
+    const diskQuotaBytes = sandboxes.limitsFor(target.orgId)?.diskQuotaBytes;
+    if (diskQuotaBytes === undefined) return bytes;
     if (bytes > diskQuotaBytes) {
       if (!sandboxes.isDiskFull(target)) await sandboxes.markDiskFull(target);
     } else if (sandboxes.isDiskFull(target)) {
@@ -55,8 +70,9 @@ export function createQuota(deps: QuotaDeps): Quota {
     measure,
 
     async assertRoom(target, incoming) {
+      sandboxes.requirePolicy(target.orgId);
       const used = await measure(target);
-      const { diskQuotaBytes } = sandboxes.limitsFor(target.orgId);
+      const { diskQuotaBytes } = sandboxes.requirePolicy(target.orgId);
       if (used > diskQuotaBytes) {
         throw new SandboxdFailure("disk_full", 409, "the workspace is over its quota");
       }
