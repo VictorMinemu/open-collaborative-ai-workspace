@@ -19,7 +19,7 @@ import { and, count, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { sha256Hex } from "../../lib/crypto";
 import { type ApprovalService, actionHash } from "../approval";
 import { loadPrincipalFacts } from "../organization";
-import { currentRule, memberName, parseArgs, waitingForOf } from "./kind";
+import { currentRule, memberName, parseArgs, toolCallHashTuple, waitingForOf } from "./kind";
 import type { ResolvedApproval } from "./resolve";
 
 /**
@@ -72,9 +72,10 @@ export interface ApprovalForCallInput {
   toolCallId: string | null;
   source: ToolCallSource;
   /**
-   * 07.8-14 (D-11, D-13, P-06, P-18): a mode this call needs whatever the policies say. `always` makes the call need a
-   * person even with no rule (the requester decides then); a rule that applies keeps its approvers, and the stricter of
-   * the two modes wins. Additive: absent, 07.5 behaves exactly as before.
+   * 07.8 (D-11, D-13, P-06, P-18; ADR-0029): the member-session floor, for a call that runs with the requester's own
+   * signed-in session (a signed-in browser act; a D-13 navigation or exec once member data is in the turn). The call
+   * always needs a person, and that person is the requester alone: see `withFloor`. Additive: absent, 07.5 behaves
+   * exactly as before.
    */
   floor?: "always";
   /** 07.8-14 (D-12 U-5, R8): the new request expires after this (shorter than the kind's 24 h only). */
@@ -83,19 +84,29 @@ export interface ApprovalForCallInput {
 
 const refused = (reason: ToolApprovalRefusal): ApprovalOutcome => ({ kind: "refused", reason });
 
-/** The rule a call is decided by: a policy's, raised to the floor (no policy: the floor, decided by the requester). */
+/** The rule a call is decided by: a policy's, or the member-session floor's. */
 type EffectiveRule = Omit<ResolvedApproval, "policyId"> & { policyId: string | null };
 
+/**
+ * The member-session floor (07.8, D-11 "acting with a signed-in session requires the member's approval at minimum; an
+ * admin can't relax it", D-13; ADR-0029; 07.8-14 broken window 7). Chosen semantics: the requesting member is the ONLY
+ * decider of such a call, whatever 07.5 rule applies. A rule that applies still counts (its id is stored, its mode can
+ * only be as strict as `always`), but its approvers (admins, unit leads, named people) never decide in the member's
+ * place: the call acts with the member's own account, and ADR-0023's "the decision right decides" gives that right to
+ * the member here. A stricter rule cannot remove the member, and no admin or lead can relax this. A second, additional
+ * approver on top of the member is not built: the 07.2 primitive has one decision per request (an ADR-0029 note).
+ * The flag is stored on the action (`requester_decides`) and is part of its hash, so a grant decided without the floor
+ * never serves a call under it.
+ */
 function withFloor(rule: ResolvedApproval | null, floor: "always" | undefined): EffectiveRule | null {
   if (floor !== "always") return rule;
-  if (rule) return rule.mode === "always" ? rule : { ...rule, mode: "always" };
   return {
     mode: "always",
     approverKind: "requester",
     approverUserIds: [],
-    policyId: null,
+    policyId: rule?.policyId ?? null,
     scopeUnitId: null,
-    pattern: "",
+    pattern: rule?.pattern ?? "",
   };
 }
 
@@ -165,13 +176,18 @@ export async function approvalForCall(
     return refused("arguments_too_large");
   }
   const argumentsSha256 = sha256Hex(canonical);
-  const hash = actionHash(TOOL_CALL_KIND, [
-    turn.agentId,
-    turn.userId,
-    turn.conversationId,
-    c.tool,
-    argumentsSha256,
-  ]);
+  const requesterDecides = c.floor === "always";
+  const hash = actionHash(
+    TOOL_CALL_KIND,
+    toolCallHashTuple({
+      agentId: turn.agentId,
+      requestedForUserId: turn.userId,
+      conversationId: turn.conversationId,
+      tool: c.tool,
+      argumentsSha256,
+      requesterDecides,
+    }),
+  );
   const toolCallId =
     c.toolCallId && c.toolCallId.length >= 1 && c.toolCallId.length <= 200 ? c.toolCallId : null;
 
@@ -349,6 +365,7 @@ export async function approvalForCall(
       actionHash: hash,
       tainted: turn.tainted,
       policyId: rule.policyId ?? null,
+      requesterDecides,
     })
     .returning({ id: toolCallApprovals.id });
   if (!stored) throw new Error("tool call approval insert returned no row");

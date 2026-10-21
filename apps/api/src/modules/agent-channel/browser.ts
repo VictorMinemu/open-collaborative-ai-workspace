@@ -92,7 +92,8 @@ import { approvalDetails, approvalVerdict, type ToolApprovalGate } from "./tool-
  *      used); for `act` on a ref, one internal snapshot (outside any transaction) reads the element's role and name, and
  *      a ref that is gone is 409 `element_gone` (a grant waiting for it stays unused: "Not used");
  *   3. tx1 AS the human: `decideSandboxCall` with the canonical arguments, the act's per-call flag class (side-effecting
- *      only while a member session is loaded for the page, F-7) and the approval floor (signed-in act; D-13 open), the
+ *      only while a member session is loaded for the page, F-7) and the member-session approval floor (signed-in act;
+ *      D-13 open; decided by the requester alone, never by a policy's admins or leads: `withFloor`, ADR-0029), the
  *      context created for a first `open` (host only), the page held while an approval waits (U-5), and the step;
  *   4. outside any transaction: sandboxd (`browserEnsure` first when the bot's browser is not running, after pushing the
  *      organization's policy so a restarted broker never runs on defaults);

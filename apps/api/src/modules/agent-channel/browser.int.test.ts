@@ -1044,3 +1044,171 @@ describe("sandbox approvals read as the sandbox and link their card (WINDOWS #23
     }
   });
 });
+
+describe("the member-session floor: a policy's approvers never decide a signed-in action (D-11, D-13; 07.8-14 BW 7)", () => {
+  /** An org-wide (or unit) 07.5 rule on a browser tool, deleted by the caller. */
+  async function policy(tool: string, approverKind: "admins" | "unit_leads", unitId: string | null = null) {
+    return (
+      await s.su.query(
+        `insert into app.tool_approval_policies
+           (organization_id, scope_unit_id, tool_pattern, mode, approver_kind, approver_user_ids, created_by, updated_by)
+         values ($1, $2, $3, 'always', $4, '{}', $5, $5) returning id`,
+        [s.orgA, unitId, tool, approverKind, s.victorId],
+      )
+    ).rows[0].id as string;
+  }
+  const dropPolicy = (id: string) => s.su.query("delete from app.tool_approval_policies where id = $1", [id]);
+
+  /** A fresh bot, Sam's turn with it, its page open on panel.fake.test with Sam's session loaded. */
+  async function signedInPage(name: string) {
+    const bot = await browserBot(name);
+    const ev = await s.turnOf(s.sam, bot.dm, bot.id);
+    const opened = await ok(
+      browser("open", ev, { url: "https://panel.fake.test/cart" }, { agentId: bot.id }),
+    );
+    await s.su.query("update app.browser_contexts set session_id = $2 where id = $1", [
+      opened.contextId,
+      await seedSession(s.samId, bot.id, "panel.fake.test"),
+    ]);
+    return { bot, ev, contextId: opened.contextId as string };
+  }
+
+  const rerunCount = async (approvalId: string) => {
+    const row = await approvalRow(approvalId);
+    return (
+      await s.su.query(
+        "select count(*)::int as n from app.stream_events where stream_id = $1 and type = 'agent.card_action.v1' and payload->'cardAction'->>'messageId' = $2",
+        [`cell:${s.orgA}`, row.card_message_id],
+      )
+    ).rows[0].n as number;
+  };
+
+  /** `who` tries to approve: refused (not a decider; the request does not even show to them), nothing runs. */
+  async function cannotApprove(who: TestClient, id: string): Promise<void> {
+    const row = await approvalRow(id);
+    const r = (await who.request("POST", `/api/v1/approvals/${id}/decision`, {
+      outcome: "approved",
+      actionHash: row.action_hash,
+    })) as Res;
+    expect(r.status).toBe(404);
+    expect(await approvalRow(id)).toMatchObject({ status: "pending", decided_by: null, consumed_at: null });
+    expect(await rerunCount(id)).toBe(0);
+  }
+
+  for (const kind of ["admins", "unit_leads"] as const) {
+    it(`a \`${kind}\` policy on ocw_browser_act: the ${kind === "admins" ? "admin" : "lead"}'s approval does not act; only Sam's does`, async () => {
+      let unitId: string | null = null;
+      if (kind === "unit_leads") {
+        // Only a Lead (or an admin) may lead a unit: Alex is made one for this test.
+        await s.su.query("update app.org_members set role = 'lead' where user_id = $1", [s.alexId]);
+        unitId = (
+          await ok(
+            s.victor.request("POST", "/api/v1/units", {
+              kind: "department",
+              name: `Floor ${randomUUID().slice(0, 4)}`,
+              parentId: null,
+            }) as Promise<Res>,
+          )
+        ).id as string;
+        await ok(
+          s.victor.request("POST", `/api/v1/units/${unitId}/members`, {
+            userId: s.alexId,
+            role: "lead",
+          }) as Promise<Res>,
+        );
+        await ok(
+          s.victor.request("POST", `/api/v1/units/${unitId}/members`, { userId: s.samId }) as Promise<Res>,
+        );
+      }
+      const rule = await policy(ACT, kind, unitId);
+      try {
+        const { bot, ev, contextId } = await signedInPage(`Floor ${kind}`);
+        const actsBefore = s.sandboxd.stats().calls.contextAct ?? 0;
+        const r = await browser("act", ev, { action: "click", ref: "r4" }, { agentId: bot.id });
+        expect(r.status).toBe(409);
+        expect(codeOf(r)).toBe("approval_required");
+        expect(r.body?.error.details.approval).toMatchObject({
+          waitingFor: "Waiting for Sam Lee to approve",
+        });
+        const id = r.body?.error.details.approval.id as string;
+
+        await cannotApprove(kind === "admins" ? s.victor : s.alex, id);
+        expect(s.sandboxd.stats().calls.contextAct ?? 0).toBe(actsBefore);
+        // Still waiting for Sam: the same act asks again with the same request.
+        const again = await browser("act", ev, { action: "click", ref: "r4" }, { agentId: bot.id });
+        expect(again.body?.error.details.approval).toMatchObject({ id, created: false });
+
+        const v = await view(s.sam, id);
+        expect(v.view.approverLabel).toBe("Waiting for Sam Lee to approve");
+        await decideApproval(s.sam, id, "approved");
+        const rerun = await rerunOf(id);
+        const done = await ok(browser("act", rerun, { action: "click", ref: "r4" }, { agentId: bot.id }));
+        expect(done).toMatchObject({ contextId, signedIn: true });
+        expect(s.sandboxd.stats().calls.contextAct ?? 0).toBe(actsBefore + 1);
+        expect(await approvalRow(id)).toMatchObject({ decided_by: s.samId, status: "applied" });
+      } finally {
+        await dropPolicy(rule);
+        if (unitId) {
+          await s.su.query("delete from app.unit_memberships where unit_id = $1", [unitId]);
+          await s.su.query("update app.org_members set role = 'standard' where user_id = $1", [s.alexId]);
+        }
+      }
+    });
+  }
+
+  it("without a signed-in session the `admins` policy applies unchanged: the admin decides, Sam cannot", async () => {
+    const rule = await policy(ACT, "admins");
+    try {
+      const bot = await browserBot("Anon");
+      const ev = await s.turnOf(s.sam, bot.dm, bot.id);
+      await ok(browser("open", ev, { url: "https://panel.fake.test/login" }, { agentId: bot.id }));
+      const actsBefore = s.sandboxd.stats().calls.contextAct ?? 0;
+      const r = await browser("act", ev, { action: "click", ref: "r4" }, { agentId: bot.id });
+      expect(codeOf(r)).toBe("approval_required");
+      expect(r.body?.error.details.approval).toMatchObject({ waitingFor: "Waiting for an admin" });
+      const id = r.body?.error.details.approval.id as string;
+      const row = await approvalRow(id);
+      const bySam = (await s.sam.request("POST", `/api/v1/approvals/${id}/decision`, {
+        outcome: "approved",
+        actionHash: row.action_hash,
+      })) as Res;
+      expect(bySam.status).toBe(403);
+      await decideApproval(s.victor, id, "approved");
+      const rerun = await rerunOf(id);
+      const done = await ok(browser("act", rerun, { action: "click", ref: "r4" }, { agentId: bot.id }));
+      expect(done).toMatchObject({ signedIn: false });
+      expect(s.sandboxd.stats().calls.contextAct ?? 0).toBe(actsBefore + 1);
+      expect(await approvalRow(id)).toMatchObject({ decided_by: s.victorId, status: "applied" });
+    } finally {
+      await dropPolicy(rule);
+    }
+  });
+
+  it("D-13 cross-site after member data, with an `admins` policy on ocw_browser_open: the admin cannot let it leave; Sam can", async () => {
+    // The page is open with Sam's session first; the rule on `open` then applies to Sam's next turn.
+    const { bot, contextId } = await signedInPage("Floor courier");
+    const rule = await policy(OPEN, "admins");
+    try {
+      const ev = await s.turnOf(s.sam, bot.dm, bot.id);
+      expect((await turnRow(ev.eventId)).member_data).toBe(false);
+      // Any call on the signed-in page marks the turn (D-13).
+      await ok(browser("snapshot", ev, {}, { agentId: bot.id }));
+      expect((await turnRow(ev.eventId)).member_data).toBe(true);
+      const navBefore = navigations();
+      const r = await browser("open", ev, { url: "https://evil.fake.test/x" }, { agentId: bot.id });
+      expect(codeOf(r)).toBe("approval_required");
+      expect(r.body?.error.details.approval).toMatchObject({ waitingFor: "Waiting for Sam Lee to approve" });
+      const id = r.body?.error.details.approval.id as string;
+      await cannotApprove(s.victor, id);
+      expect(navigations()).toBe(navBefore);
+
+      await decideApproval(s.sam, id, "approved");
+      const rerun = await rerunOf(id);
+      const went = await ok(browser("open", rerun, { url: "https://evil.fake.test/x" }, { agentId: bot.id }));
+      expect(went).toMatchObject({ contextId, host: "evil.fake.test" });
+      expect(navigations()).toBe(navBefore + 1);
+    } finally {
+      await dropPolicy(rule);
+    }
+  });
+});
