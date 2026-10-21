@@ -59,6 +59,9 @@ import {
  * a lead of the rule's unit or of an ancestor (`unit_leads`), or a current organization admin (`admins`). The decision
  * right decides, not who asked (ADR-0023 decision 15 as amended): a requester who holds it decides their own request
  * and the primitive audits `selfApproved`.
+ *
+ * 07.8 (D-11, D-13, ADR-0029): a stored action under the member-session floor (`requester_decides`, it acts with the
+ * requester's own signed-in session) is decided by the requester alone, whatever rule applies now (`decidingRule`).
  */
 
 export const TOOL_CALL_RESOURCE = "tool_call";
@@ -68,6 +71,28 @@ export type ToolCallRow = typeof toolCallApprovals.$inferSelect;
 export interface ToolCallKindDeps {
   core: Core;
   perms: PermissionService;
+}
+
+/** The action hash's tuple element added for a call under the member-session floor (absent otherwise: 07.5 hashes). */
+export const REQUESTER_DECIDES_ATOM = "requester_decides";
+
+/** The `tool.call` action hash tuple of a stored or asked call (`kind.hashInput` recomputes it from the stored row). */
+export function toolCallHashTuple(t: {
+  agentId: string;
+  requestedForUserId: string;
+  conversationId: string;
+  tool: string;
+  argumentsSha256: string;
+  requesterDecides: boolean;
+}): string[] {
+  return [
+    t.agentId,
+    t.requestedForUserId,
+    t.conversationId,
+    t.tool,
+    t.argumentsSha256,
+    ...(t.requesterDecides ? [REQUESTER_DECIDES_ATOM] : []),
+  ];
 }
 
 /** The stored action of a request (null when it is gone or belongs to another organization). */
@@ -166,6 +191,17 @@ export async function currentRule(
 ): Promise<ResolvedApproval | null> {
   const r = await resolveFor(tx, { agentId: t.agentId, userId: t.requestedForUserId }, t.tool);
   return r && r.mode !== "never" ? r : null;
+}
+
+/**
+ * The rule that names who decides the stored call now: the live rule, except under the member-session floor, where the
+ * requester alone decides (null reads as the requester everywhere below; see `withFloor` in `request.ts`).
+ */
+export async function decidingRule(
+  tx: Tx,
+  t: Pick<ToolCallRow, "agentId" | "requestedForUserId" | "tool" | "requesterDecides">,
+): Promise<ResolvedApproval | null> {
+  return t.requesterDecides ? null : currentRule(tx, t);
 }
 
 interface RuleUnit {
@@ -456,14 +492,15 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
     async hashInput(tx, row) {
       const t = await loadToolCall(tx, row);
       if (!t) throw new Error("tool call approval without its stored action");
-      // From the stored row only, the arguments' hash recomputed from the canonical text itself (P-05).
-      return [t.agentId, t.requestedForUserId, t.conversationId, t.tool, sha256Hex(t.argumentsCanonical)];
+      // From the stored row only, the arguments' hash recomputed from the canonical text itself (P-05); the
+      // member-session floor is bound into it (07.8, ADR-0029).
+      return toolCallHashTuple({ ...t, argumentsSha256: sha256Hex(t.argumentsCanonical) });
     },
 
     async canDecide(tx, deciderUserId, row) {
       const t = await loadToolCall(tx, row);
       if (!t) return false;
-      const rule = await currentRule(tx, t);
+      const rule = await decidingRule(tx, t);
       const facts = await loadPrincipalFacts(tx, { kind: "user", userId: deciderUserId });
       return holdsRight(facts, rule, await ruleUnit(tx, rule), t.requestedForUserId);
     },
@@ -471,7 +508,7 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
     async audience(tx, row) {
       const t = await loadToolCall(tx, row);
       if (!t) return [];
-      const rule = await currentRule(tx, t);
+      const rule = await decidingRule(tx, t);
       const deciders = await decidersOf(tx, t, rule, await ruleUnit(tx, rule));
       return [...new Set([t.requestedForUserId, ...deciders])];
     },
@@ -495,9 +532,11 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
       const args = parseArgs(t);
       const preview = orderPreview(args);
       const all = argumentsDisplay(args);
+      // The rule that applies (shown as the policy) and the one that names the deciders differ only under the floor.
       const rule = await currentRule(tx, t);
       const unit = await ruleUnit(tx, rule);
-      const deciders = await decidersOf(tx, t, rule, unit);
+      const deciding = await decidingRule(tx, t);
+      const deciders = await decidersOf(tx, t, deciding, await ruleUnit(tx, deciding));
       const a = await askedIn(tx, t);
       const canManage = rule
         ? (
@@ -530,7 +569,7 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
           id: t.requestedForUserId,
           displayName: (await memberName(tx, t.requestedForUserId)) ?? "Former member",
         },
-        approverLabel: await waitingForOf(tx, t, rule),
+        approverLabel: await waitingForOf(tx, t, deciding),
         policy: rule
           ? {
               scopeUnitId: rule.scopeUnitId,
@@ -581,7 +620,7 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
     async card(tx, row) {
       const t = await loadToolCall(tx, row);
       if (!t) throw new Error("tool call approval without its stored action");
-      return composeToolCallCard(tx, row, t, await waitingForOf(tx, t, await currentRule(tx, t)));
+      return composeToolCallCard(tx, row, t, await waitingForOf(tx, t, await decidingRule(tx, t)));
     },
 
     async link(tx, row) {
@@ -591,7 +630,7 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
       return {
         display: d.display,
         useBy: useByOf(row),
-        waitingFor: await waitingForOf(tx, t, await currentRule(tx, t)),
+        waitingFor: await waitingForOf(tx, t, await decidingRule(tx, t)),
         actionFields: d.actionFields,
       };
     },

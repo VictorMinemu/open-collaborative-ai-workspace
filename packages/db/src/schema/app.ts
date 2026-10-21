@@ -2527,6 +2527,11 @@ export const toolCallApprovals = appSchema.table(
     tainted: boolean("tainted").notNull(),
     /** The rule that required the approval; a deleted rule only unlinks. */
     policyId: uuid("policy_id"),
+    /**
+     * 07.8 (D-11, D-13, ADR-0029): the action runs with the requester's own signed-in session (the member-session
+     * floor), so the requester alone decides it, whatever rule applies; part of the action hash when true.
+     */
+    requesterDecides: boolean("requester_decides").notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [
