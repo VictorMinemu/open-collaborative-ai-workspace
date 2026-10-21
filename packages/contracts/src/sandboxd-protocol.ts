@@ -7,7 +7,7 @@ import {
   AgentChannelSandboxWriteResponse,
   AllowHost,
   BrowserSandboxMode,
-  PackageTreeEntry,
+  ReviewedTreeEntry,
   SANDBOX_LIMITS,
   SandboxArgv,
   SandboxEgressMode,
@@ -642,7 +642,7 @@ export const SandboxdPackageReviewResult = z.object({
   hasInstallScript: z.boolean(),
   dependencyCount: z.number().int().min(0).max(SANDBOX_LIMITS.packageTreeMaxEntries),
   treeSha256: Sha256Hex,
-  entries: z.array(PackageTreeEntry).max(SANDBOX_LIMITS.packageTreeMaxEntries),
+  entries: z.array(ReviewedTreeEntry).max(SANDBOX_LIMITS.packageTreeMaxEntries),
   lockfile: Lockfile,
 });
 export type SandboxdPackageReviewResult = z.infer<typeof SandboxdPackageReviewResult>;

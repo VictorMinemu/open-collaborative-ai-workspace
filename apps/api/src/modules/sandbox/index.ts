@@ -35,10 +35,12 @@ export {
   type SandboxEventsConsumer,
   type SandboxEventType,
 } from "./events";
+export { applyInstalls, desiredPackagesFor } from "./packages";
 export {
   type Availability,
   type AvailabilityRefusal,
   type ConfinedKind,
+  ensureSandbox,
   loadSandboxPolicy,
   markState,
   reserveSandbox,
@@ -54,8 +56,8 @@ export { pushPolicy } from "./settings";
  * the human, the organization switch and kill state, the bot's switch, then the cap. sandboxd is reached only through
  * `client` (`OCW_SANDBOX_URL` + `OCW_SANDBOX_TOKEN`); without them `client` is null and nothing runs.
  *
- * Routes (people, `/api/v1`): `POST /sandbox/kill`, `POST /sandbox/resume` (this plan); the bots' routes live in the
- * Agent Channel (`agent-channel/sandbox.ts`).
+ * Routes (people, `/api/v1`): `POST /sandbox/kill`, `POST /sandbox/resume` (this plan); the sandbox packages
+ * (`/sandbox/packages*`, 07.8-18); the bots' routes live in the Agent Channel (`agent-channel/sandbox.ts`).
  */
 
 export interface SandboxService {

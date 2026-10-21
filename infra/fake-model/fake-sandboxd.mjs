@@ -1,6 +1,6 @@
 // The in-memory sandboxd (Phase 07.8-05, P-13): every shell, file and browser operation of `SANDBOXD_ROUTES`
 // (packages/contracts/src/sandboxd-protocol.ts) over a per-bot workspace and per-bot browser contexts kept in memory, so
-// the API's integration tests and the e2e harness (08) never need Docker. Package ops arrive with 07.8-18. Dependency-free; every answer has the contract's shape (the API's client
+// the API's integration tests and the e2e harness (08) never need Docker. Dependency-free; every answer has the contract's shape (the API's client
 // parses each one with the contract). It never logs or stores request bodies beyond the workspace itself, and its
 // counters hold call counts per op and per organization only.
 //
@@ -24,9 +24,16 @@
 // answer 409 `policy_missing`; with `killed` pushed, the first three answer 409 `killed`. A push older than the held
 // one (lower `version`) is ignored.
 //
+// Packages (07.8-18, P-12): `packageReview` resolves a deterministic tree per (source, name, version): the package and
+// one dependency (`<name>-dep@1.0.0`; ClawHub is a single tarball), npm `sha512-` or `sha256:` integrity, a lockfile and
+// `treeSha256` over the contract's canonical entries. `packageInstall` installs per bot only when the request's lockfile
+// and `treeSha256` match the current tree (`tree_changed` otherwise; a moved top artifact is `digest_mismatch`);
+// `packageRemove` forgets the ids. Controls: POST /__control/packages/set {source, name, version, topChanged?,
+// depChanged?, sha1?, badTreeHash?, license?, hasInstallScript?, publisher?}; a name starting `ocw-missing` is 404.
+//
 // `POST /__control/reboot` is a sandboxd restart: a new boot id, an empty feed and no policy, while the sandboxes
 // (Docker's objects) survive.
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 const SANDBOX_USER_ID = 10001;
@@ -63,7 +70,7 @@ const RUN_OPS = new Set([
 /** Ops that write into the workspace and need the quota: no policy → policy_missing. */
 const QUOTA_OPS = new Set(["filesWrite", "filesUpload", "filesImport"]);
 
-/** Route path → op name (the counters' keys); package ops are not served yet (18). */
+/** Route path → op name (the counters' keys). */
 const OPS = {
   "GET /v1/info": "info",
   "POST /v1/sandboxes/ensure": "ensure",
@@ -100,6 +107,9 @@ const OPS = {
   "GET /v1/browsers/contexts/frames": "contextFrames",
   "POST /v1/browsers/contexts/input": "contextInput",
   "POST /v1/browsers/contexts/download": "contextDownload",
+  "POST /v1/packages/review": "packageReview",
+  "POST /v1/packages/install": "packageInstall",
+  "POST /v1/packages/remove": "packageRemove",
 };
 
 /** The JPEG fixtures, read once on first use. */
@@ -295,6 +305,10 @@ export function createFakeSandboxd(opts = {}) {
   /** frame subscribers to end on reset or close: Set<() => void>. */
   let streams = new Set();
   let leakNext = false;
+  /** `${source}/${name}@${version}` → the registry controls of that release. */
+  let packageSpecs = new Map();
+  /** `${org}/${agent}` → Map<package id, { name, version }>: what each bot's packages volume holds. */
+  let installs = new Map();
 
   const keyOf = (t) => `${t.orgId}/${t.agentId}`;
   const now = () => new Date().toISOString();
@@ -742,6 +756,137 @@ export function createFakeSandboxd(opts = {}) {
     return box;
   }
 
+  // ---------------------------------------------------------------- sandbox packages (07.8-18)
+
+  const SOURCES = new Set(["npm", "pypi", "debian", "clawhub"]);
+  const PKG_NAME = /^(@[a-z0-9][a-z0-9._-]*\/)?[A-Za-z0-9][A-Za-z0-9._+-]*$/;
+  const PKG_VERSION = /^[A-Za-z0-9][A-Za-z0-9.+:~_-]*$/;
+  const hashOf = (algo, text) => createHash(algo).update(text).digest();
+  const sha256Hex = (text) => hashOf("sha256", text).toString("hex");
+
+  function coordsOf(body) {
+    if (!SOURCES.has(body?.source)) throw invalid("source");
+    if (typeof body.name !== "string" || body.name.length > 214 || !PKG_NAME.test(body.name))
+      throw invalid("name");
+    if (typeof body.version !== "string" || body.version.length > 128 || !PKG_VERSION.test(body.version)) {
+      throw invalid("version");
+    }
+    return { source: body.source, name: body.name, version: body.version };
+  }
+  const specKey = (c) => `${c.source}/${c.name}@${c.version}`;
+
+  /** The contract's `packageTreeCanonical`, restated (dependency-free). */
+  function canonicalTree(entries) {
+    const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+    const sorted = [...entries].sort(
+      (x, y) => cmp(x.name, y.name) || cmp(x.version, y.version) || cmp(x.integrity, y.integrity),
+    );
+    return JSON.stringify(sorted.map((e) => ({ name: e.name, version: e.version, integrity: e.integrity })));
+  }
+
+  function integrityOf(source, seed, weak) {
+    if (weak) return `sha1-${hashOf("sha1", seed).toString("base64")}`;
+    return source === "npm"
+      ? `sha512-${hashOf("sha512", seed).toString("base64")}`
+      : `sha256:${sha256Hex(seed)}`;
+  }
+
+  /** The tree the fake registries serve now for these coordinates (`treeSha256` is the true hash of `entries`). */
+  function treeOf(c) {
+    const spec = packageSpecs.get(specKey(c)) ?? {};
+    const top = `${specKey(c)}#top${spec.topChanged ? ":republished" : ""}`;
+    const dep = `${specKey(c)}#dep${spec.depChanged ? ":republished" : ""}`;
+    const entries = [{ name: c.name, version: c.version, integrity: integrityOf(c.source, top, false) }];
+    if (c.source !== "clawhub") {
+      entries.push({
+        name: `fake-dep-${sha256Hex(c.name).slice(0, 8)}`,
+        version: "1.0.0",
+        integrity: integrityOf(c.source, dep, spec.sha1 === true),
+      });
+    }
+    const lockfile = JSON.stringify({
+      name: c.name,
+      version: c.version,
+      source: c.source,
+      lockfileVersion: 3,
+      packages: entries,
+    });
+    return { spec, sha256: sha256Hex(top), entries, lockfile, treeSha256: sha256Hex(canonicalTree(entries)) };
+  }
+
+  /** The tree a lockfile records (what an installer would install from it); [] when it is not one of ours. */
+  function entriesOfLockfile(lockfile) {
+    try {
+      const parsed = JSON.parse(lockfile);
+      if (!Array.isArray(parsed?.packages)) return [];
+      return parsed.packages
+        .filter((e) => isObject(e))
+        .map((e) => ({
+          name: String(e.name),
+          version: String(e.version),
+          integrity: String(e.integrity),
+        }));
+    } catch {
+      return [];
+    }
+  }
+
+  function packageReview(body) {
+    const c = coordsOf(body);
+    if (c.name.startsWith("ocw-missing")) throw new OpError(404, "not_found", "no such package or version");
+    const t = treeOf(c);
+    return {
+      ...c,
+      sha256: t.sha256,
+      sizeBytes: 4096 + c.name.length,
+      license: t.spec.license === undefined ? "MIT" : t.spec.license,
+      publisher: t.spec.publisher === undefined ? "fake-publisher" : t.spec.publisher,
+      hasInstallScript: t.spec.hasInstallScript === true,
+      dependencyCount: t.entries.length - 1,
+      treeSha256: t.spec.badTreeHash ? sha256Hex(`${t.treeSha256}:lie`) : t.treeSha256,
+      entries: t.entries,
+      lockfile: t.lockfile,
+    };
+  }
+
+  function packageInstall(body) {
+    const target = targetOf(body);
+    if (!Array.isArray(body.packages) || body.packages.length === 0 || body.packages.length > 200) {
+      throw invalid("packages");
+    }
+    const key = keyOf(target);
+    const held = installs.get(key) ?? new Map();
+    const results = body.packages.map((p) => {
+      if (!isObject(p) || !UUID.test(String(p.id)) || typeof p.lockfile !== "string")
+        throw invalid("package");
+      const c = coordsOf(p);
+      const now = treeOf(c);
+      const recorded = sha256Hex(canonicalTree(entriesOfLockfile(p.lockfile)));
+      // Like `npm ci` over the recorded lockfile, then the recomputed hash (P-12): nothing is written on a mismatch.
+      if (recorded !== p.treeSha256)
+        return { id: p.id, status: "failed", detail: "tree changed", code: "tree_changed" };
+      if (now.sha256 !== p.sha256) {
+        return { id: p.id, status: "failed", detail: "digest mismatch", code: "digest_mismatch" };
+      }
+      if (now.treeSha256 !== p.treeSha256) {
+        return { id: p.id, status: "failed", detail: "tree changed", code: "tree_changed" };
+      }
+      held.set(p.id, { name: c.name, version: c.version });
+      return { id: p.id, status: "installed", detail: "installed" };
+    });
+    installs.set(key, held);
+    return { results };
+  }
+
+  function packageRemove(body) {
+    const target = targetOf(body);
+    if (!Array.isArray(body.ids) || body.ids.length === 0 || body.ids.length > 200) throw invalid("ids");
+    const held = installs.get(keyOf(target));
+    let removed = 0;
+    for (const id of body.ids) if (held?.delete(id)) removed += 1;
+    return { removed };
+  }
+
   async function dispatch(op, body, url) {
     switch (op) {
       case "info":
@@ -1078,6 +1223,12 @@ export function createFakeSandboxd(opts = {}) {
           data: DOWNLOAD_BYTES.toString("base64"),
         };
       }
+      case "packageReview":
+        return packageReview(body);
+      case "packageInstall":
+        return packageInstall(body);
+      case "packageRemove":
+        return packageRemove(body);
       case "events": {
         const after = Number(url.searchParams.get("after") ?? "0");
         const waitMs = Math.min(30_000, Math.max(0, Number(url.searchParams.get("waitMs") ?? "25000")));
@@ -1128,6 +1279,11 @@ export function createFakeSandboxd(opts = {}) {
       }
       case "GET /__control/stats":
         return send(res, 200, api.stats());
+      case "POST /__control/packages/set": {
+        const body = await readJson(req);
+        api.setPackage(body, body);
+        return send(res, 200, { ok: true });
+      }
       case "POST /__control/browser/leak":
         leakNext = true;
         return send(res, 200, { ok: true });
@@ -1240,6 +1396,8 @@ export function createFakeSandboxd(opts = {}) {
       contexts = new Map();
       streams = new Set();
       leakNext = false;
+      packageSpecs = new Map();
+      installs = new Map();
       const ready = waiters;
       waiters = [];
       for (const w of ready) w();
@@ -1262,6 +1420,24 @@ export function createFakeSandboxd(opts = {}) {
     /** A bot's sandbox state as the fake holds it ("absent" when never ensured). */
     stateOf(target) {
       return boxOf(target)?.state ?? "absent";
+    },
+    /**
+     * Changes what the fake registries serve for one release (07.8-18): `topChanged` (the artifact is republished),
+     * `depChanged` (its dependency is republished), `sha1` (the dependency carries sha1-only integrity), `badTreeHash`
+     * (the review reports a tree hash that does not match its entries), `license`, `hasInstallScript`, `publisher`.
+     */
+    setPackage(coords, patch) {
+      const c = coordsOf(coords);
+      const next = { ...(packageSpecs.get(specKey(c)) ?? {}) };
+      for (const k of ["topChanged", "depChanged", "sha1", "badTreeHash", "hasInstallScript"]) {
+        if (patch[k] !== undefined) next[k] = patch[k] === true;
+      }
+      for (const k of ["license", "publisher"]) if (patch[k] !== undefined) next[k] = patch[k];
+      packageSpecs.set(specKey(c), next);
+    },
+    /** The package ids installed in one bot's packages volume. */
+    packagesOf(target) {
+      return [...(installs.get(keyOf(target))?.keys() ?? [])];
     },
     /** The organization policy held now (`killed` only), or null when none was pushed in this boot. */
     policyOf(orgId) {

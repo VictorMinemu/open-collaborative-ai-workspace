@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
 import {
+  PackageTreeEntry,
   SANDBOX_LIMITS,
   SANDBOXD_ROUTES,
   SandboxdActResult,
@@ -229,6 +230,13 @@ describe("broker package primitives (P-12, T-07.8-01-06)", () => {
         entries: [{ ...entry, integrity: `sha256:${SHA256}` }],
       }).success,
     ).toBe(true);
+    // 07.8-18 (WINDOWS #233): a well-formed sha1-only entry (old npm lockfiles) reaches the API, which scores the
+    // package `refuse` with a reason instead of failing the parse; a pinned tree entry still never takes sha1.
+    const sha1 = `sha1-${"A".repeat(27)}=`;
+    expect(
+      SandboxdPackageReviewResult.safeParse({ ...review, entries: [{ ...entry, integrity: sha1 }] }).success,
+    ).toBe(true);
+    expect(PackageTreeEntry.safeParse({ ...entry, integrity: sha1 }).success).toBe(false);
   });
 
   it("an install names the recorded tree; results say why a package failed", () => {

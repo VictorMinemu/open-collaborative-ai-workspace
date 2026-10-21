@@ -627,6 +627,24 @@ export const PackageTreeEntry = z.object({
 });
 export type PackageTreeEntry = z.infer<typeof PackageTreeEntry>;
 
+/**
+ * One entry of a tree as sandboxd resolved it (07.8-18, WINDOWS #233): like `PackageTreeEntry`, but a well-formed npm
+ * `sha1-<base64>` integrity is also carried, so an old lockfile whose dependencies have only sha1 reaches the API, which
+ * scores the package `refuse` with a reason (sha1 cannot pin it) instead of failing the parse. Nothing with sha1 is
+ * ever approved or installed.
+ */
+export const ReviewedTreeEntry = z.object({
+  name: SandboxPackageName,
+  version: SandboxPackageVersion,
+  integrity: z
+    .string()
+    .regex(
+      /^(sha512-[A-Za-z0-9+/]{86}==|sha256:[0-9a-f]{64}|sha1-[A-Za-z0-9+/]{27}=)$/,
+      "sha512, sha256 or sha1 integrity",
+    ),
+});
+export type ReviewedTreeEntry = z.infer<typeof ReviewedTreeEntry>;
+
 const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
@@ -634,7 +652,7 @@ const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
  * `[{name, version, integrity}, …]`. The API and sandboxd hash it with `node:crypto` sha256 into `treeSha256`;
  * contracts take no crypto dependency.
  */
-export function packageTreeCanonical(entries: readonly PackageTreeEntry[]): string {
+export function packageTreeCanonical(entries: readonly (PackageTreeEntry | ReviewedTreeEntry)[]): string {
   const sorted = [...entries].sort(
     (x, y) => cmp(x.name, y.name) || cmp(x.version, y.version) || cmp(x.integrity, y.integrity),
   );

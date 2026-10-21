@@ -20,6 +20,7 @@ import { type App, authOf, type Core, tenant } from "../../core";
 import { badRequest, HttpError, notFound } from "../../lib/errors";
 import { agentResource, type PermissionService } from "../organization";
 import { type SandboxdClient, SandboxdRefusedError } from "./client";
+import { applyInstalls } from "./packages";
 import {
   CONTAINER_LIMITS,
   cpuMsToday,
@@ -550,6 +551,8 @@ export function registerSandboxFileRoutes(app: App, core: Core, deps: FileRouteD
       let failure: HttpError | null = null;
       try {
         status = await client.call("restart", { target }, { timeoutMs: RESTART_TIMEOUT_MS });
+        // 07.8-18: a start brings the bot's sandbox packages up to date (never failing the restart).
+        await applyInstalls(core, client, target);
       } catch (err) {
         failure = fromSandboxd(err);
       }
