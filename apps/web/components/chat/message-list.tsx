@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Bookmark, Pin, RotateCw, Trash2 } from "lucide-react";
 import { Fragment, memo, type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { BotActivity } from "@/components/browser/bot-activity";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
@@ -520,6 +521,10 @@ const MessageRow = memo(function MessageRow({
             </Tooltip>
           </div>
         )}
+        {/* 07.8-20 (R2): what the bot did in its sandbox and browser this turn, above its reply, for every reader. */}
+        {!deleted && message.activity ? (
+          <BotActivity activity={message.activity} viewer={{ meId: meId || null, requester: null }} />
+        ) : null}
         {deleted ? (
           <p
             data-testid="message-tombstone"
