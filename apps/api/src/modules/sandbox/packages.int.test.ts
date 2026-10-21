@@ -422,3 +422,103 @@ describe("cross-tenant guards derived from the authz registry (P-17, 07.4 #169)"
     ).toBe(0);
   });
 });
+
+describe("risk, acknowledgement, switches, update and removal for the four sources (D-03, P-12)", () => {
+  const TINY: Coords = { source: "npm", name: "tiny-cli", version: "1.0.0" };
+  const scout = () => ({ orgId: s.orgA, agentId: s.scoutId });
+  /** Scout starts again (stop, then a call): the packages are synced. */
+  async function restartScout(): Promise<void> {
+    await stopSandbox(s.scoutId);
+    expect((await execIn(s.sam, s.samDm, s.scoutId)).status).toBe(200);
+  }
+
+  it("a high risk needs the typed acknowledgement: 400 acknowledgement_required, then approved and audited", async () => {
+    const GPL: Coords = { source: "npm", name: "copyleft-tool", version: "2.1.0" };
+    s.sandboxd.fake.setPackage(GPL, { license: "GPL-2.0-only" });
+    const r = await ok(review(s.victor, GPL));
+    expect(r.risk).toBe("high");
+    expect(r.riskReasons).toEqual(["Its license (GPL-2.0-only) is not one the workspace allows"]);
+    const no = await approve(s.victor, r.reviewToken);
+    expect(no.status).toBe(400);
+    expect(codeOf(no)).toBe("acknowledgement_required");
+    const p = await ok(approve(s.victor, r.reviewToken, "install anyway"));
+    expect(p.risk).toBe("high");
+    const [audit] = (await audits(s.orgA, "sandbox.package_approved")).filter((a) => a.resource_id === p.id);
+    expect(audit?.metadata).toMatchObject({ acknowledged: true, riskCodes: ["license_denied"] });
+  });
+
+  it("an install script is at least medium; sha1-only integrity is refused with a reason (403 package_refused)", async () => {
+    const SCRIPTED: Coords = { source: "npm", name: "post-hook", version: "1.0.0" };
+    s.sandboxd.fake.setPackage(SCRIPTED, { hasInstallScript: true });
+    expect((await ok(review(s.victor, SCRIPTED))).risk).toBe("medium");
+
+    const OLD: Coords = { source: "npm", name: "old-lockfile", version: "0.4.0" };
+    s.sandboxd.fake.setPackage(OLD, { sha1: true });
+    const r = await ok(review(s.victor, OLD));
+    expect(r.risk).toBe("refuse");
+    expect(r.riskReasons[0]).toContain("sha1");
+    const no = await approve(s.victor, r.reviewToken, "install anyway");
+    expect(no.status).toBe(403);
+    expect(codeOf(no)).toBe("package_refused");
+    expect(
+      (await s.su.query("select count(*)::int as n from app.sandbox_packages where name = 'old-lockfile'"))
+        .rows[0].n,
+    ).toBe(0);
+  });
+
+  it("switched off: every sandbox drops it at its next start (packageRemove, rows removed); on again: reinstalled", async () => {
+    const p = await approved(TINY);
+    await restartScout();
+    expect(s.sandboxd.fake.packagesOf(scout())).toContain(p.id);
+    expect((await ok(patch(s.victor, p.id, { enabled: false }))).enabled).toBe(false);
+    const [updated] = (await audits(s.orgA, "sandbox.package_updated")).filter((a) => a.resource_id === p.id);
+    expect(updated?.metadata).toEqual({ source: "npm", name: "tiny-cli", version: "1.0.0", enabled: false });
+    const removes = calls("packageRemove");
+    await restartScout();
+    expect(calls("packageRemove")).toBe(removes + 1);
+    expect(s.sandboxd.fake.packagesOf(scout())).not.toContain(p.id);
+    expect(await installRow(s.scoutId, p.id)).toBeUndefined();
+    await ok(patch(s.victor, p.id, { enabled: true }));
+    await restartScout();
+    expect(await installRow(s.scoutId, p.id)).toEqual({ status: "installed", detail: null });
+  });
+
+  it("update to another version: a new review and approval replaces the row; the old one goes at the next start", async () => {
+    const [old] = (await ok(list(s.victor))).items.filter((p: Json) => p.name === "tiny-cli");
+    const next = await approved({ ...TINY, version: "2.0.0" });
+    expect(next.version).toBe("2.0.0");
+    expect((await packageRow(old.id))?.status).toBe("removed");
+    const [updated] = (await audits(s.orgA, "sandbox.package_updated")).filter(
+      (a) => a.resource_id === old.id && a.metadata.replacedBy,
+    );
+    expect(updated?.metadata.replacedBy).toEqual({ version: "2.0.0" });
+    await restartScout();
+    expect(s.sandboxd.fake.packagesOf(scout())).toContain(next.id);
+    expect(s.sandboxd.fake.packagesOf(scout())).not.toContain(old.id);
+    expect(await installRow(s.scoutId, old.id)).toBeUndefined();
+  });
+
+  it("removed: status removed, gone from every sandbox at the next start, and the same name may be reviewed again", async () => {
+    const [p] = (await ok(list(s.victor))).items.filter((x: Json) => x.name === "tiny-cli");
+    expect(await ok(remove(s.victor, p.id))).toEqual({ ok: true });
+    expect((await packageRow(p.id))?.status).toBe("removed");
+    expect((await audits(s.orgA, "sandbox.package_removed")).map((a) => a.resource_id)).toContain(p.id);
+    expect((await ok(list(s.victor))).items.map((x: Json) => x.id)).not.toContain(p.id);
+    expect((await remove(s.victor, p.id)).status).toBe(404);
+    expect((await patch(s.victor, p.id, { enabled: true })).status).toBe(404);
+    await restartScout();
+    expect(s.sandboxd.fake.packagesOf(scout())).not.toContain(p.id);
+    const again = await approved(TINY);
+    expect(again.id).not.toBe(p.id);
+  });
+
+  it("Debian and ClawHub go through the same flow; the API never parses registry metadata itself", async () => {
+    const deb = await approved({ source: "debian", name: "jq", version: "1.7.1-3" });
+    const hub = await approved({ source: "clawhub", name: "notes-skill", version: "1.0.0" });
+    expect(deb.dependencyCount).toBe(1);
+    expect(hub.dependencyCount).toBe(0);
+    await restartScout();
+    expect(await installRow(s.scoutId, deb.id)).toEqual({ status: "installed", detail: null });
+    expect(await installRow(s.scoutId, hub.id)).toEqual({ status: "installed", detail: null });
+  });
+});

@@ -1,4 +1,5 @@
-import { type DeclaredSurface, EMPTY_DECLARED_SURFACE } from "@ocw/contracts";
+import { readFileSync } from "node:fs";
+import { type DeclaredSurface, EMPTY_DECLARED_SURFACE, isDangerousToolName } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
 import {
   bundledPluginIds,
@@ -6,7 +7,10 @@ import {
   OPENCLAW_HOST_VERSION,
   type RiskInput,
   reviewTokenOf,
+  SANDBOX_LICENSE_POLICY,
+  type SandboxPackageRiskInput,
   scorePluginRisk,
+  scoreSandboxPackageRisk,
 } from "./risk";
 
 const surface = (over: Partial<DeclaredSurface> = {}): DeclaredSurface => ({
@@ -276,5 +280,134 @@ describe("bundledPluginIds", () => {
       "searxng",
     ]);
     expect(bundledPluginIds({ OCW_BUNDLED_PLUGINS: [] })).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------- sandbox packages (07.8-18; D-03, D-11 F-3, P-12)
+
+const SHA512 = `sha512-${"A".repeat(86)}==`;
+const sbx = (over: Partial<SandboxPackageRiskInput> = {}): SandboxPackageRiskInput => ({
+  source: "npm",
+  name: "left-pad",
+  publisher: "fake-publisher",
+  license: "MIT",
+  hasInstallScript: false,
+  entries: [
+    { name: "left-pad", version: "1.3.0", integrity: SHA512 },
+    { name: "fake-dep", version: "1.0.0", integrity: SHA512 },
+  ],
+  ...over,
+});
+const sbxCodes = (over: Partial<SandboxPackageRiskInput> = {}) =>
+  scoreSandboxPackageRisk(sbx(over)).reasons.map((r) => r.code);
+
+describe("scoreSandboxPackageRisk (07.8-18, P-12)", () => {
+  it("a permissive, scriptless, fully pinned package → low, no reasons", () => {
+    expect(scoreSandboxPackageRisk(sbx())).toEqual({ risk: "low", reasons: [] });
+  });
+
+  it("an install script → at least medium (install_script)", () => {
+    const r = scoreSandboxPackageRisk(sbx({ hasInstallScript: true }));
+    expect(r.risk).toBe("medium");
+    expect(r.reasons.map((x) => x.code)).toEqual(["install_script"]);
+  });
+
+  it.each([
+    "GPL-2.0-only",
+    "SSPL-1.0",
+    "BUSL-1.1",
+    "UNLICENSED",
+    "Unknown",
+    "SEE LICENSE IN LICENSE",
+    "(MIT AND GPL-2.0-only)",
+  ])("a license the guard denies (%s) → high (license_denied)", (license) => {
+    const r = scoreSandboxPackageRisk(sbx({ license }));
+    expect(r.risk).toBe("high");
+    expect(r.reasons.map((x) => x.code)).toEqual(["license_denied"]);
+  });
+
+  it("no license at all → high (license_unknown); permissive expressions stay low", () => {
+    expect(sbxCodes({ license: null })).toEqual(["license_unknown"]);
+    expect(scoreSandboxPackageRisk(sbx({ license: null })).risk).toBe("high");
+    for (const license of ["MIT", "Apache-2.0", "(MIT OR GPL-2.0-only)", "BSD-3-Clause", "ISC"]) {
+      expect(scoreSandboxPackageRisk(sbx({ license })).risk, license).toBe("low");
+    }
+  });
+
+  it("the license lists mirror the guard's policy (scripts/guard/license-policy.json)", () => {
+    const policy = JSON.parse(
+      readFileSync(new URL("../../../../../scripts/guard/license-policy.json", import.meta.url), "utf8"),
+    ) as { allow: string[]; deny: string[] };
+    expect([...SANDBOX_LICENSE_POLICY.allow].sort()).toEqual([...policy.allow].sort());
+    expect([...SANDBOX_LICENSE_POLICY.deny].sort()).toEqual([...policy.deny].sort());
+  });
+
+  it("a name one typo away from a top package, published by someone else → high (typosquat)", () => {
+    for (const [source, name] of [
+      ["npm", "lodahs"],
+      ["npm", "1odash"],
+      ["npm", "lodashh"],
+      ["npm", "expres"],
+      ["pypi", "requets"],
+    ] as const) {
+      const r = scoreSandboxPackageRisk(sbx({ source, name }));
+      expect(r.risk, name).toBe("high");
+      expect(
+        r.reasons.map((x) => x.code),
+        name,
+      ).toEqual(["typosquat"]);
+    }
+    // The top package itself, its own publisher, and names further away are not flagged.
+    expect(sbxCodes({ name: "lodash" })).toEqual([]);
+    expect(sbxCodes({ name: "lodahs", publisher: "jdalton" })).toEqual([]);
+    expect(sbxCodes({ name: "lodash-es" })).toEqual([]);
+    // PyPI names compare normalised (case, `-`, `_` and `.` are one).
+    expect(sbxCodes({ source: "pypi", name: "Requests" })).toEqual([]);
+  });
+
+  it("sha1-only integrity cannot pin a dependency → refuse (weak_integrity), never a parse failure", () => {
+    const r = scoreSandboxPackageRisk(
+      sbx({
+        entries: [
+          { name: "left-pad", version: "1.3.0", integrity: SHA512 },
+          { name: "old-dep", version: "0.1.0", integrity: `sha1-${"A".repeat(27)}=` },
+        ],
+      }),
+    );
+    expect(r.risk).toBe("refuse");
+    expect(r.reasons.map((x) => x.code)).toEqual(["weak_integrity"]);
+    expect(r.reasons[0]?.message).toContain("sha1");
+  });
+
+  it("refuse never comes from a sandbox package's shell, file or browser words (they run in the sandbox)", () => {
+    for (const name of [
+      "shelljs",
+      "puppeteer",
+      "playwright",
+      "exec-sh",
+      "fs-extra",
+      "browser-sync",
+      "canvas",
+    ]) {
+      expect(scoreSandboxPackageRisk(sbx({ name })).risk, name).not.toBe("refuse");
+    }
+    // The host-aware rule the scorer follows (D-03): these are sandbox-hosted capabilities.
+    for (const tool of ["run_shell", "write_file", "browser_open", "puppeteer_click"]) {
+      expect(isDangerousToolName(tool, "sandbox"), tool).toBe(false);
+      expect(isDangerousToolName(tool), tool).toBe(true);
+    }
+  });
+
+  it("the OpenClaw platform itself stays refused everywhere (D-03): openclaw, @openclaw/*", () => {
+    for (const name of ["openclaw", "@openclaw/cli", "OpenClaw"]) {
+      expect(scoreSandboxPackageRisk(sbx({ name })).risk, name).toBe("refuse");
+      expect(sbxCodes({ name }), name).toEqual(["platform_admin"]);
+    }
+  });
+
+  it("worst first, deduplicated, and the verdict is the worst level", () => {
+    const r = scoreSandboxPackageRisk(sbx({ name: "openclaw", hasInstallScript: true, license: "SSPL-1.0" }));
+    expect(r.risk).toBe("refuse");
+    expect(r.reasons.map((x) => x.code)).toEqual(["platform_admin", "license_denied", "install_script"]);
   });
 });
