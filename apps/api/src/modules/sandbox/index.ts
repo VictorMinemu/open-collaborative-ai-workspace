@@ -2,7 +2,7 @@ import { type Tx, tenantOf } from "@ocw/db";
 import type { ApiModule, Core } from "../../core";
 import type { AuditService } from "../audit";
 import { createPermissionService, type PermissionService } from "../organization";
-import { createSandboxdClient, type SandboxdClient } from "./client";
+import { createSandboxdClient, type SandboxdClient, withPolicyRecovery } from "./client";
 import { createSandboxEventsConsumer, type SandboxEventsConsumer } from "./events";
 import { registerSandboxPeopleRoutes } from "./routes";
 import {
@@ -18,6 +18,7 @@ import {
   sandboxAvailable,
   touchSandbox,
 } from "./service";
+import { loadOrgPolicy } from "./settings";
 
 export {
   createSandboxdClient,
@@ -25,6 +26,7 @@ export {
   type SandboxdClient,
   SandboxdRefusedError,
   SandboxdUnavailableError,
+  withPolicyRecovery,
 } from "./client";
 export {
   createSandboxEventsConsumer,
@@ -97,12 +99,17 @@ export function createSandboxModule(
 ): SandboxModule {
   const perms = deps.perms ?? createPermissionService(core);
   const audit = deps.audit ?? core.audit;
-  const client =
+  const raw =
     deps.client !== undefined
       ? deps.client
       : core.env.OCW_SANDBOX_URL && core.env.OCW_SANDBOX_TOKEN
         ? createSandboxdClient({ url: core.env.OCW_SANDBOX_URL, token: core.env.OCW_SANDBOX_TOKEN })
         : null;
+  // sandboxd forgets every policy when it restarts and then refuses to start anything (`policy_missing`): every caller
+  // of this module's client gets the organization's current policy pushed and its call retried once.
+  const client = raw
+    ? withPolicyRecovery(raw, (organizationId) => loadOrgPolicy(core, organizationId))
+    : null;
   /** Organizations with a purge that failed in this process; the consumer retries them on every pass. */
   const pendingPurges = new Set<string>();
   const events = client ? createSandboxEventsConsumer(core, { client, pendingPurges }) : null;

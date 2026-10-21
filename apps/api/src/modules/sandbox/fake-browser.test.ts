@@ -18,6 +18,25 @@ const viewport = { width: 960, height: 600 };
 beforeAll(async () => {
   fake = await startFakeSandboxd();
   client = createSandboxdClient({ url: fake.url, token: fake.token });
+  // sandboxd holds no default policy: push one for the target's organization first, as the API's consumer does.
+  const limits = {
+    nanoCpus: 1_000_000_000,
+    memoryBytes: 1024 ** 3,
+    pids: 256,
+    diskQuotaBytes: 2 * 1024 ** 3,
+    idleStopMs: 900_000,
+  };
+  await client.call("policy", {
+    orgId: target.orgId,
+    sandboxEgress: "off",
+    browserEgress: "off",
+    allowHosts: [],
+    privateHosts: [],
+    limits,
+    browserLimits: { ...limits, memoryBytes: 2 * 1024 ** 3, pids: 512, idleStopMs: 300_000 },
+    killed: false,
+    version: 1,
+  });
 });
 
 afterAll(async () => {

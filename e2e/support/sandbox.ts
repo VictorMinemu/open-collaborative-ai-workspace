@@ -110,9 +110,34 @@ export function fakeSandboxd(env: Readonly<Record<string, string | undefined>> =
     if (!res.ok) throw new Error(`fake sandboxd ${path}: HTTP ${res.status} ${text.slice(0, 200)}`);
     return (text ? JSON.parse(text) : {}) as T;
   };
+  /**
+   * sandboxd holds no default policy (07.8 policy fix): a seed pushes a permissive one at version 0 first. The API's own
+   * push (version ≥ 1, the organization's real settings and kill state) always wins over it.
+   */
+  const seedPolicy = (orgId: string) => {
+    const limits = {
+      nanoCpus: 1_000_000_000,
+      memoryBytes: 1024 ** 3,
+      pids: 256,
+      diskQuotaBytes: 2 * 1024 ** 3,
+      idleStopMs: 900_000,
+    };
+    return call("/v1/policy", {
+      orgId,
+      sandboxEgress: "off",
+      browserEgress: "off",
+      allowHosts: [],
+      privateHosts: [],
+      limits,
+      browserLimits: { ...limits, memoryBytes: 2 * 1024 ** 3, pids: 512, idleStopMs: 300_000 },
+      killed: false,
+      version: 0,
+    });
+  };
   return {
     /** Writes a file into the bot's workspace (its sandbox is started first, like a first exec would). */
     async seedFile(target: SandboxTarget, path: string, content: string): Promise<void> {
+      await seedPolicy(target.orgId);
       await call("/v1/sandboxes/ensure", { target });
       await call("/v1/files/write", { target, path, content, encoding: "utf8", mode: "overwrite" });
     },
@@ -125,6 +150,7 @@ export function fakeSandboxd(env: Readonly<Record<string, string | undefined>> =
       opts: { url?: string; signedIn?: boolean; siteLock?: string; contextId?: string } = {},
     ): Promise<string> {
       const contextId = opts.contextId ?? crypto.randomUUID();
+      await seedPolicy(target.orgId);
       await call("/v1/browsers/ensure", { target });
       await call("/v1/browsers/contexts/open", {
         target,

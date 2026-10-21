@@ -21,6 +21,12 @@ import { pushPolicy } from "./settings";
  * What an event does: `state` mirrors a container into `bot_sandboxes` (and audits sandboxd's own stops: idle, disk full,
  * a crash); `usage` adds CPU to today's `sandbox_usage_daily` and updates the disk mirror; `egress` audits the host once
  * per (bot, host, allowed) per hour; `browser` goes to the handlers other modules register (`onEvent`, 07.8-14).
+ *
+ * A new boot id (sandboxd restarted, or the first poll of this process) means sandboxd may hold no policy at all, and it
+ * has no default: it refuses to start anything (`policy_missing`) until told. The consumer then pushes the current
+ * policy of every organization that has sandboxes (`app.sandbox_organizations`, ids only), whether or not it sends
+ * events, and retries their pending purges. Until every push succeeded it tries again on the next pass. The client's
+ * own re-push on `policy_missing` covers the calls in between.
  */
 
 /** Any constant shared by every API process; only one of them consumes at a time. */
@@ -31,6 +37,8 @@ const ERROR_BACKOFF_MS = 5_000;
 /** A poison event (it fails its transaction every time) is skipped after this many passes, logged with ids. */
 const MAX_EVENT_ATTEMPTS = 3;
 const EGRESS_AUDIT_WINDOW = "1 hour";
+/** Organizations read per page from `app.sandbox_organizations` when a new boot needs every policy again. */
+const ORGANIZATIONS_PAGE = 500;
 
 export type SandboxEventType = SandboxdEvent["type"];
 export type SandboxEventOf<T extends SandboxEventType> = Extract<SandboxdEvent, { type: T }>;
@@ -85,6 +93,37 @@ export function createSandboxEventsConsumer(
   let loop: Promise<void> | null = null;
   let abort: AbortController | null = null;
   let pass: Promise<PassResult> | null = null;
+  /** The boot every organization's policy was pushed to (null: none yet in this process). */
+  let pushedBoot: string | null = null;
+
+  /** Every organization with a sandbox row (ids only, across organizations: a narrow SECURITY DEFINER lister). */
+  async function sandboxOrganizations(): Promise<string[]> {
+    const out: string[] = [];
+    let after: string | null = null;
+    for (;;) {
+      const page: { rows: Array<{ organization_id: string }> } = await core.db.pool.query<{
+        organization_id: string;
+      }>("select organization_id from app.sandbox_organizations($1, $2)", [after, ORGANIZATIONS_PAGE]);
+      const rows = page.rows;
+      out.push(...rows.map((r) => r.organization_id));
+      const last: { organization_id: string } | undefined = rows.at(-1);
+      if (rows.length < ORGANIZATIONS_PAGE || !last) return out;
+      after = last.organization_id;
+    }
+  }
+
+  /** On a boot not yet served: every organization's policy again (sandboxd has none), and its pending purges. */
+  async function pushEveryPolicy(bootId: string): Promise<Set<string>> {
+    const orgs = new Set<string>();
+    if (pushedBoot === bootId) return orgs;
+    let all = true;
+    for (const orgId of await sandboxOrganizations()) {
+      orgs.add(orgId);
+      if (!(await pushPolicy(core, deps.client, orgId))) all = false;
+    }
+    if (all) pushedBoot = bootId;
+    return orgs;
+  }
 
   async function acquire(): Promise<boolean> {
     if (lockClient) return true;
@@ -271,6 +310,8 @@ export function createSandboxEventsConsumer(
       if (res.events[0]?.seq !== 1) res = await poll(0);
     }
     position.bootId = res.bootId;
+    // Before any event: sandboxd refuses every start until it has the organizations' policies again.
+    const pushed = await pushEveryPolicy(res.bootId);
     let applied = 0;
     let skipped = 0;
     const orgs = new Set<string>();
@@ -305,8 +346,8 @@ export function createSandboxEventsConsumer(
       position.seq = e.seq;
     }
     // sandboxd forgot its policies when it restarted; pending purges of deleted bots get another try.
-    for (const orgId of repush) await pushPolicy(core, deps.client, orgId);
-    for (const orgId of new Set([...orgs, ...(deps.pendingPurges ?? [])])) {
+    for (const orgId of repush) if (!pushed.has(orgId)) await pushPolicy(core, deps.client, orgId);
+    for (const orgId of new Set([...orgs, ...pushed, ...(deps.pendingPurges ?? [])])) {
       const left = await retryPendingPurges(core, deps.client, orgId);
       if (left === 0) deps.pendingPurges?.delete(orgId);
     }

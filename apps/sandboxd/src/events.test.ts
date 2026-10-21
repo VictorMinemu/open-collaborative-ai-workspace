@@ -2,6 +2,7 @@ import { SandboxdEventsResponse } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
 import { createEvents } from "./events";
 import { nameFor } from "./spec";
+import { testPolicy } from "./testing/policy";
 
 const ORG = "0199f0a0-0000-7000-8000-00000000000a";
 const AGENT = "0199f0a0-1111-7000-8000-00000000000b";
@@ -104,6 +105,7 @@ describe("events from sandboxd's lifecycle (D-09, T-07.8-09-04)", () => {
       image: "sbx:test",
       onEvent: (e) => events.emit(e),
     });
+    sandboxes.setPolicy(testPolicy(ORG));
     const quota = createQuota({ sandboxes });
     const files = createFiles({ sandboxes, quota });
     return { docker, events, sandboxes, files };

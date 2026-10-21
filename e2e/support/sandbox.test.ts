@@ -67,7 +67,8 @@ describe("fakeSandboxd()", () => {
     expect((await exec(["true"])).error?.code).toBe("docker_unavailable");
     await fake.up();
     await fake.reset();
-    expect((await exec(["true"])).error?.code).toBe("not_found");
+    // reset also forgets every pushed policy: sandboxd then refuses to run anything for the organization.
+    expect((await exec(["true"])).error?.code).toBe("policy_missing");
   });
 
   it("refuses the real broker and an environment that does not name the fake", () => {

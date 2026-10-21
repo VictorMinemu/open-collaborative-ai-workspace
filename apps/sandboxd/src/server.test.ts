@@ -6,6 +6,7 @@ import { createFiles } from "./files";
 import { createSandboxes, type RuntimeSetting, startupRefusal } from "./sandboxes";
 import { createServer, tokenMatches } from "./server";
 import { nameFor } from "./spec";
+import { testPolicy } from "./testing/policy";
 
 const TOKEN = "t".repeat(40);
 const NS = "ocw-unit";
@@ -160,6 +161,7 @@ afterEach(() => {
 
 async function start(docker: FakeDocker, runtime: RuntimeSetting = "auto") {
   const sandboxes = createSandboxes({ docker, ns: NS, runtime, image: "ocw-sandbox-sbx:test" });
+  sandboxes.setPolicy(testPolicy(ORG));
   const files = createFiles({
     sandboxes,
     quota: { assertRoom: async () => 0, afterWrite: () => {}, afterChange: async () => {} },
