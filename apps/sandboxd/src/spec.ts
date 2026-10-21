@@ -55,10 +55,10 @@ export function clampLimits(limits: ContainerLimits): ContainerLimits {
 export type DockerRuntime = "runsc" | "runc";
 
 /**
- * Object name kinds: containers (`sbx`, `brw`, the `files` helper), volumes (`ws`, `pkg`) and the bot's network
- * (`net`).
+ * Object name kinds: containers (`sbx`, `brw`, the `files` helper), volumes (`ws`, `pkg`), the bot's shell network
+ * (`net`) and its browser network (`bnet`).
  */
-export type NameKind = "sbx" | "brw" | "files" | "ws" | "pkg" | "net";
+export type NameKind = "sbx" | "brw" | "files" | "ws" | "pkg" | "net" | "bnet";
 
 /** A namespace is part of every object name: lower-case letters, digits and dashes. */
 export const NAMESPACE_RE = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
@@ -210,5 +210,176 @@ export function filesSpec(p: FilesSpecInput) {
     Cmd: ["sleep", String(FILES_HELPER_SECONDS)],
     Labels: labelsFor({ ns: p.ns, orgId: p.orgId, agentId: p.agentId, kind: "files" }),
     HostConfig: { ...spec.HostConfig, NetworkMode: "none" },
+  };
+}
+
+// ---------------------------------------------------------------- the browser (07.8-13, D-01, D-05, D-11, D-14)
+
+/** The proxy's name on every bot network (the network alias of the namespace's `sandbox-egress`). */
+export const EGRESS_ALIAS = "sandbox-egress";
+export const EGRESS_PORT = 3128;
+/** What `brw`'s Chromium is told to use: the only way out of a bot network. */
+export const BROWSER_PROXY = `http://${EGRESS_ALIAS}:${EGRESS_PORT}`;
+/** Chromium's shared memory (spike i): Playwright's `--disable-dev-shm-usage` aside, the renderer needs room. */
+export const BRW_SHM_BYTES = 512 * 1024 * 1024;
+
+/**
+ * The bot's browser network: `internal: true` like the shell's, holding only its `brw` and `sandbox-egress`. The proxy
+ * tells bots apart by the address a connection arrived on, so the browser gets its own network and its own egress
+ * mode (`browserEgress`), and member cookies in `brw` never share a network with the bot's exec container.
+ */
+export function browserNetworkSpec(p: ObjectSpecInput) {
+  return {
+    Name: nameFor("bnet", p.ns, p.agentId),
+    Driver: "bridge",
+    Internal: true,
+    Attachable: false,
+    EnableIPv6: false,
+    Labels: labelsFor({ ns: p.ns, orgId: p.orgId, agentId: p.agentId, kind: "brw" }),
+  };
+}
+
+export interface BrowserSpecInput extends ObjectSpecInput {
+  /** The configured `brw` image (OCW_SANDBOX_BRW_IMAGE), never a caller's. */
+  image: string;
+  runtime: DockerRuntime;
+  network: string;
+  limits: ContainerLimits;
+  /** Chromium's own sandbox (D-14): always on under runsc; on runc the agent may fall back and says so. */
+  chromiumSandbox: boolean;
+  /** The seccomp profile JSON (Docker default + userns, infra/sandbox/browser/seccomp.json), or null for Docker's. */
+  seccompProfile?: string | null;
+}
+
+/**
+ * The `ContainerCreate` body of a bot's `brw` (07.8-07's agent): `shellSpec`'s hardened profile without a workspace
+ * volume, `ShmSize` 512 MiB, a tmpfs `/tmp` (downloads live there), and stdin kept open so sandboxd speaks to the agent
+ * over the attached stdio only. No port, no CDP endpoint, no host IPC: Chromium is driven over a pipe inside.
+ */
+export function brwSpec(p: BrowserSpecInput) {
+  if (p.runtime === "runsc" && !p.chromiumSandbox) {
+    // D-14: never a silent fallback under gVisor.
+    throw new Error("Chromium's sandbox stays on under runsc");
+  }
+  const limits = clampLimits(p.limits);
+  const securityOpt = ["no-new-privileges:true"];
+  if (p.seccompProfile) securityOpt.push(`seccomp=${p.seccompProfile}`);
+  return {
+    Image: p.image,
+    User: SANDBOX_USER,
+    WorkingDir: "/tmp",
+    Env: [
+      "HOME=/tmp",
+      `OCW_BROWSER_PROXY=${BROWSER_PROXY}`,
+      `OCW_BROWSER_CHROMIUM_SANDBOX=${p.chromiumSandbox ? "on" : "off"}`,
+      `OCW_BROWSER_RUNTIME=${p.runtime}`,
+    ],
+    Labels: labelsFor({ ns: p.ns, orgId: p.orgId, agentId: p.agentId, kind: "brw" }),
+    AttachStdin: true,
+    AttachStdout: true,
+    AttachStderr: true,
+    OpenStdin: true,
+    StdinOnce: false,
+    Tty: false,
+    StopTimeout: 5,
+    HostConfig: {
+      Runtime: p.runtime,
+      Privileged: false,
+      ReadonlyRootfs: true,
+      CapDrop: ["ALL"],
+      SecurityOpt: securityOpt,
+      Init: true,
+      PidsLimit: limits.pids,
+      Memory: limits.memoryBytes,
+      MemorySwap: limits.memoryBytes,
+      NanoCpus: limits.nanoCpus,
+      ShmSize: BRW_SHM_BYTES,
+      Tmpfs: { "/tmp": "rw,noexec,nosuid,nodev,size=256m" },
+      Mounts: [],
+      NetworkMode: p.network,
+      PublishAllPorts: false,
+      RestartPolicy: { Name: "no" },
+      IpcMode: "private",
+      LogConfig: { Type: "none", Config: {} },
+    },
+  };
+}
+
+// ---------------------------------------------------------------- the namespace's egress proxy (07.8-12/13, D-11)
+
+/** The tmpfs the broker writes the proxy's policy into (root-owned 0755: the proxy reads it, never rewrites it). */
+export const EGRESS_POLICY_DIR = "/run/ocw-egress";
+export const EGRESS_POLICY_FILE = `${EGRESS_POLICY_DIR}/policy.json`;
+/** The proxy's own user (not the bot's 10001). */
+export const EGRESS_USER = "10002:10002";
+
+/** One proxy per namespace: modest, fixed limits (it only relays bytes). */
+export const EGRESS_LIMITS: ContainerLimits = {
+  nanoCpus: 1_000_000_000,
+  memoryBytes: 256 * 1024 * 1024,
+  pids: 256,
+};
+
+/** `ocw-egress-<ns>` (the container) and `ocw-egress-out-<ns>` (its outbound network). */
+export function egressNames(ns: string) {
+  return { container: `ocw-egress-${ns}`, network: `ocw-egress-out-${ns}` };
+}
+
+/** The proxy belongs to the namespace, not to an organization or a bot: no org or agent label, so no kill reaches it. */
+export function egressLabels(ns: string): Record<string, string> {
+  return {
+    [SANDBOXD_LABELS.sandbox]: "1",
+    [SANDBOXD_LABELS.namespace]: ns,
+    [SANDBOXD_LABELS.kind]: "egress",
+  };
+}
+
+/**
+ * The proxy's outbound network: an ordinary bridge (the only non-internal network sandboxd creates), with no other
+ * member and inter-container traffic off. Never the network the API and sandboxd share.
+ */
+export function egressNetworkSpec(ns: string) {
+  return {
+    Name: egressNames(ns).network,
+    Driver: "bridge",
+    Internal: false,
+    Attachable: false,
+    EnableIPv6: false,
+    Options: { "com.docker.network.bridge.enable_icc": "false" },
+    Labels: egressLabels(ns),
+  };
+}
+
+/** The `sandbox-egress` container (07.8-12's image): non-root, read-only, the policy tmpfs, the outbound network. */
+export function egressSpec(p: { ns: string; image: string }) {
+  const limits = EGRESS_LIMITS;
+  return {
+    Image: p.image,
+    User: EGRESS_USER,
+    Labels: egressLabels(p.ns),
+    AttachStdin: false,
+    AttachStdout: true,
+    AttachStderr: true,
+    OpenStdin: false,
+    Tty: false,
+    StopTimeout: 5,
+    HostConfig: {
+      Privileged: false,
+      ReadonlyRootfs: true,
+      CapDrop: ["ALL"],
+      SecurityOpt: ["no-new-privileges:true"],
+      Init: true,
+      PidsLimit: limits.pids,
+      Memory: limits.memoryBytes,
+      MemorySwap: limits.memoryBytes,
+      NanoCpus: limits.nanoCpus,
+      Tmpfs: { [EGRESS_POLICY_DIR]: "rw,noexec,nosuid,nodev,size=1m,mode=0755" },
+      Mounts: [],
+      NetworkMode: egressNames(p.ns).network,
+      PublishAllPorts: false,
+      RestartPolicy: { Name: "no" },
+      IpcMode: "private",
+      LogConfig: { Type: "none", Config: {} },
+    },
   };
 }

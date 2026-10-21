@@ -8,6 +8,7 @@ import {
   SandboxdContextInput,
   SandboxdContextNavigate,
   SandboxdContextOpen,
+  SandboxdContextResize,
   SandboxdError,
   SandboxdExportStateResult,
   SandboxdPackageInstall,
@@ -165,6 +166,13 @@ describe("broker browser primitives (D-07, D-13, P-10, P-18, T-07.8-01-03)", () 
         .success,
     ).toBe(true);
     expect(SandboxdContextInput.safeParse({ target, contextId: ID, events: [] }).success).toBe(false);
+  });
+
+  it("a resize may name the live view's mode (07.8-13); phone carries its size", () => {
+    const base = { target, contextId: ID, width: 390, height: 700 };
+    expect(SandboxdContextResize.parse({ ...base, mode: "phone" }).mode).toBe("phone");
+    expect(SandboxdContextResize.parse(base).mode).toBeUndefined();
+    expect(SandboxdContextResize.safeParse({ ...base, mode: "custom" }).success).toBe(false);
   });
 
   it("the route table uses the browser and package schemas", () => {

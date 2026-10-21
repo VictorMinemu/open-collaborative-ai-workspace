@@ -554,11 +554,16 @@ export const SandboxdContextTakeover = z.strictObject({
 });
 export type SandboxdContextTakeover = z.infer<typeof SandboxdContextTakeover>;
 
+/**
+ * `mode` (07.8-13, additive): the live view's R10 size. `phone` also turns on mobile emulation and touch at the given
+ * size; without it the agent uses `small` or `expanded` for their fixed sizes and a plain viewport otherwise.
+ */
 export const SandboxdContextResize = z.strictObject({
   target: SandboxdTarget,
   contextId: Id,
   width: z.number().int().min(200).max(4096),
   height: z.number().int().min(200).max(4096),
+  mode: z.enum(["small", "expanded", "phone"]).optional(),
 });
 export type SandboxdContextResize = z.infer<typeof SandboxdContextResize>;
 
