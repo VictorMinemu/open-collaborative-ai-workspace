@@ -268,7 +268,7 @@ CREATE POLICY personal_owner_only ON app.browser_sessions AS RESTRICTIVE FOR ALL
   WITH CHECK (user_id = nullif(current_setting('app.user_id', true), '')::uuid);
 
 -- The browser sweep (07.8-21; D-08, R7, R9): sign-in cards that waited 15 minutes expire, and sessions expired for 7
--- days are removed. The sweep runs without a user, across organizations:
+-- days are removed; since 07.8-28 (WINDOWS #271) takeover leases left by a dead API instance are cleared. The sweep runs without a user, across organizations:
 -- - `browser_sweep_organizations` lists the organizations that have such work (ids only, keyset-paged by id); the API
 --   then works inside each organization's own withTenant() transaction;
 -- - `purge_browser_sessions` deletes, in the CALLER's organization only (`app.organization_id` of the tenant
@@ -284,6 +284,10 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
     WHERE r.status IN ('waiting', 'signing_in') AND r.expires_at <= p_now
     UNION
     SELECT b.organization_id FROM app.browser_sessions b WHERE b.expires_at < p_before
+    UNION
+    -- 07.8-28 (WINDOWS #271, #244): a takeover lease whose holding API instance died (nobody released it).
+    SELECT c.organization_id FROM app.browser_contexts c
+    WHERE c.controller_user_id IS NOT NULL AND c.closed_at IS NULL AND c.lease_expires_at <= p_now
   ) o
   WHERE p_after IS NULL OR o.organization_id > p_after
   ORDER BY o.organization_id
@@ -297,6 +301,24 @@ LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS 
     AND b.expires_at < p_before
   RETURNING b.id, b.user_id, b.agent_id, b.site_key
 $fn$;
+-- 07.8-28 (WINDOWS #287): a bot's deletion is a soft delete (`agents.deleted_at`), so the FK cascade that takes its
+-- sessions on a hard delete never fires. `purge_deleted_bot_browser_sessions` deletes, in the CALLER's organization
+-- only, every member's sealed session with that bot, past the owner-only policy (the person deleting the bot, an admin
+-- or its owner, reads none of the other members' rows), and only once the bot is deleted: a live bot's sessions are
+-- never touched. Their secrets go with them (`browser_session_secret_cleanup`). Returns ids, owner, bot and site for the
+-- audit only.
+CREATE OR REPLACE FUNCTION app.purge_deleted_bot_browser_sessions(p_agent uuid)
+RETURNS TABLE (id uuid, user_id uuid, agent_id uuid, site_key text)
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  DELETE FROM app.browser_sessions b
+  WHERE b.organization_id = nullif(current_setting('app.organization_id', true), '')::uuid
+    AND b.agent_id = p_agent
+    AND EXISTS (SELECT 1 FROM app.agents a
+                 WHERE a.organization_id = b.organization_id AND a.id = p_agent AND a.deleted_at IS NOT NULL)
+  RETURNING b.id, b.user_id, b.agent_id, b.site_key
+$fn$;
+REVOKE ALL ON FUNCTION app.purge_deleted_bot_browser_sessions(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.purge_deleted_bot_browser_sessions(uuid) TO ocw_app;
 REVOKE ALL ON FUNCTION app.browser_sweep_organizations(timestamptz, timestamptz, uuid, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app.purge_browser_sessions(timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.browser_sweep_organizations(timestamptz, timestamptz, uuid, integer) TO ocw_app;

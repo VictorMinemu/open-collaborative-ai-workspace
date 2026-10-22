@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { codeOf, type Json, ok, type Res } from "../../testing-sandbox";
 import { type LiveStack, liveSocket, startLiveStack, waitState } from "./live-testing";
@@ -264,9 +265,11 @@ describe("Keychain › Browser sessions: list, expiry, purge and revoke (R7)", (
   });
 
   it("Sam revokes: 204, the secret is gone, the page that had it loaded ends, audited by ids and site", async () => {
-    const id = await seal(l.s.samId, l.s.scoutId, "shop.fake.test", "revoke-1");
-    const ev = await l.s.turnOf(l.s.sam, l.s.samDm);
-    const opened = await ok(openFresh(ev, "https://shop.fake.test/cart"));
+    // Sam's DM with Scout has sticky member data from panel.fake.test (07.8-28, #292): shop.fake.test would be another
+    // site there. Sam's DM with the other bot never loaded a session.
+    const id = await seal(l.s.samId, other.id, "shop.fake.test", "revoke-1");
+    const ev = await l.s.turnOf(l.s.sam, other.dm, other.id);
+    const opened = await ok(openFresh(ev, "https://shop.fake.test/cart", other.id));
     expect(opened.signedIn).toBe(true);
     const secretId = (await sessionRow(id))?.secret_id as string;
     const r = (await l.s.sam.request("DELETE", `/api/v1/browser-sessions/${id}`)) as Res;
@@ -276,7 +279,7 @@ describe("Keychain › Browser sessions: list, expiry, purge and revoke (R7)", (
     expect(await contextRow(opened.contextId)).toMatchObject({ end_reason: "access_lost", session_id: null });
     expect(fakeContext(opened.contextId)).toBeUndefined();
     expect((await audits("browser_session.revoked", id)).map((a) => a.metadata)).toEqual([
-      { sessionId: id, agentId: l.s.scoutId, site: "shop.fake.test" },
+      { sessionId: id, agentId: other.id, site: "shop.fake.test" },
     ]);
   });
 });
@@ -289,6 +292,57 @@ describe("clean-up with the bot and the member (WINDOWS #230)", () => {
     await l.s.su.query("delete from app.agents where id = $1", [bot.id]);
     expect(await sessionRow(id)).toBeUndefined();
     expect(await secretRow(secretId)).toBeUndefined();
+  });
+
+  it("a soft-deleted bot (DELETE /agents/:id by an admin) takes every member's sessions and secrets at once, audited by ids and site (#287)", async () => {
+    const bot = await l.s.newBot("Gone");
+    const sams = await seal(l.s.samId, bot.id);
+    const alexs = await seal(l.s.alexId, bot.id, "other.fake.test");
+    const keep = await seal(l.s.samId, other.id, "kept-too.fake.test");
+    const secrets = [
+      (await sessionRow(sams))?.secret_id as string,
+      (await sessionRow(alexs))?.secret_id as string,
+    ];
+    // The admin deleting the bot reads none of these rows (owner-only); the deletion still removes them all.
+    await ok(l.s.victor.request("DELETE", `/api/v1/agents/${bot.id}`) as Promise<Res>);
+    expect(
+      (await l.s.su.query("select deleted_at from app.agents where id = $1", [bot.id])).rows[0].deleted_at,
+    ).not.toBeNull();
+    expect(await sessionRow(sams)).toBeUndefined();
+    expect(await sessionRow(alexs)).toBeUndefined();
+    for (const id of secrets) expect(await secretRow(id)).toBeUndefined();
+    expect(await sessionRow(keep)).toBeDefined();
+    const purged = await audits("browser_session.purged", sams);
+    expect(purged).toHaveLength(1);
+    expect(purged[0]).toMatchObject({ actor_kind: "system", user_id: l.s.samId, agent_id: bot.id });
+    expect(purged[0]?.metadata).toEqual({
+      sessionId: sams,
+      agentId: bot.id,
+      site: HOST,
+      reason: "bot_deleted",
+    });
+    expect((await audits("browser_session.purged", alexs))[0]?.metadata.site).toBe("other.fake.test");
+  });
+
+  it("the purge function refuses a live bot and another organization's bot (tenant-scoped, deleted bots only)", async () => {
+    const live = await seal(l.s.samId, other.id, "live.fake.test");
+    const asOrg = (organizationId: string, agentId: string) =>
+      core().db.withTenant({ organizationId, userId: null }, async (tx) => {
+        return (
+          await tx.execute<{ id: string }>(
+            sql`select id from app.purge_deleted_bot_browser_sessions(${agentId}::uuid)`,
+          )
+        ).rows;
+      });
+    expect(await asOrg(l.s.orgA, other.id)).toEqual([]);
+    expect(await sessionRow(live)).toBeDefined();
+    // Organization B's tenant asking for org A's (deleted) bot removes nothing.
+    const doomed = await l.s.newBot("Doomed");
+    const doomedSession = await seal(l.s.samId, doomed.id);
+    await l.s.su.query("update app.agents set deleted_at = now() where id = $1", [doomed.id]);
+    expect(await asOrg(l.s.orgB, doomed.id)).toEqual([]);
+    expect(await sessionRow(doomedSession)).toBeDefined();
+    expect(await asOrg(l.s.orgA, doomed.id)).toEqual([{ id: doomedSession }]);
   });
 
   it("a member who leaves the organization (deactivated) loses every session and secret there", async () => {

@@ -95,6 +95,11 @@ const auditOf = async (action: string, contextId: string) =>
     )
   ).rows as Json[];
 const states = (s: { json: Json[] }) => s.json.filter((f) => f.type === "state");
+const ok200 = async (r: Promise<{ status: number; body: Json | null }>) => {
+  const res = await r;
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  return res.body as Json;
+};
 /** The error code of a bot route's answer (local: importing the testing modules would load the app before OTel). */
 const codeOf = (r: { body: Json | null }) => (r.body?.error as Json | undefined)?.code;
 
@@ -350,5 +355,61 @@ describe("the idle lease (D-07: warning at 9 minutes, released at 10)", () => {
       sam.close();
       alex.close();
     }
+  });
+});
+
+describe("a lease left by a dead API instance (WINDOWS #271, #244)", () => {
+  it("nobody watches the page: the browser sweep clears it as idle once its grace passed, audited once, sandboxd's takeover off; organization B's tenant clears nothing of A's", async () => {
+    const ev = await l.turnIn(l.s.sam);
+    const contextId = await l.open(ev);
+    const { agent_id: agentId } = (
+      await l.s.su.query("select agent_id from app.browser_contexts where id = $1", [contextId])
+    ).rows[0] as Json;
+    // A takeover started through an instance that died: the row still names Sam, sandboxd still has it on.
+    await l.s.su.query(
+      "update app.browser_contexts set controller_user_id = $2, lease_expires_at = now() + interval '1 minute' where id = $1",
+      [contextId, l.s.samId],
+    );
+    await l.s.stack.built.sandbox.client?.call(
+      "contextTakeover",
+      { target: { orgId: l.s.orgA, agentId }, contextId, active: true },
+      { timeoutMs: 5_000 },
+    );
+    expect(fakeContext(contextId)?.takeover).toBe(true);
+    const row = async () =>
+      (
+        await l.s.su.query(
+          "select controller_user_id, lease_expires_at from app.browser_contexts where id = $1",
+          [contextId],
+        )
+      ).rows[0] as Json;
+    const sweeper = l.s.stack.built.browser.sweeper;
+
+    // Not expired yet, then expired but within the grace its own live view would use: untouched.
+    expect((await sweeper.runOnce()).leases).toBe(0);
+    expect((await sweeper.runOnce(Date.now() + 90_000)).leases).toBe(0);
+    expect((await row()).controller_user_id).toBe(l.s.samId);
+
+    // Organization B's tenant does not see A's page (RLS): it clears nothing.
+    const { clearDeadLeases } = await import("./takeover");
+    const core = l.s.stack.built.core;
+    const inB = await core.db.withTenant({ organizationId: l.s.orgB, userId: null }, (tx) =>
+      clearDeadLeases(tx, core, Date.now() + 10 * 60_000),
+    );
+    expect(inB).toEqual([]);
+    expect((await row()).controller_user_id).toBe(l.s.samId);
+
+    const cleared = await sweeper.runOnce(Date.now() + 3 * 60_000);
+    expect(cleared.leases).toBe(1);
+    expect(await row()).toEqual({ controller_user_id: null, lease_expires_at: null });
+    await T.waitFor(() => fakeContext(contextId)?.takeover === false);
+    const ended = await auditOf("browser.takeover_ended", contextId);
+    expect(ended).toHaveLength(1);
+    expect(ended[0]).toMatchObject({ actor_kind: "system", user_id: l.s.samId });
+    expect(ended[0]?.metadata).toEqual({ contextId, host: "panel.fake.test", reason: "idle" });
+    // The bot is not paused any more.
+    await ok200(l.browser("snapshot", ev));
+    expect((await sweeper.runOnce(Date.now() + 4 * 60_000)).leases).toBe(0);
+    expect(await auditOf("browser.takeover_ended", contextId)).toHaveLength(1);
   });
 });

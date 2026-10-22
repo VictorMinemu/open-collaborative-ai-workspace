@@ -17,7 +17,10 @@
 // Test controls (no token): POST /__control/down | /__control/up | /__control/reset | /__control/emit (an event body),
 // GET /__control/stats; browser: POST /__control/browser/leak (the next snapshot carries OCW-SENTINEL-PW-5521 on a
 // redacted node, to prove the API's second pass), /__control/browser/signed-in {contextId} (the context's site is
-// signed in), /__control/browser/event {target, contextId, event: crashed|closed|focus_sensitive|download}
+// signed in), /__control/browser/pre-cookie {contextId, name?, value?} (07.8-28: the site sets a cookie that is no sign-in,
+// e.g. a consent or CSRF cookie, carried by every export), /__control/browser/fail-lock (07.8-28: the next contextLock
+// answers 500 internal), /__control/browser/site-data {text} (07.8-28: every signed-in page shows that text to the
+// bot), /__control/browser/event {target, contextId, event: crashed|closed|focus_sensitive|download}
 // (focus_sensitive also writes the control `{kind: "focus", sensitive: true}` on the context's open frame streams).
 //
 // Like sandboxd, it holds no default policy: until the API pushes an organization's policy, `ensure`, `restart`,
@@ -315,6 +318,9 @@ export function createFakeSandboxd(opts = {}) {
   /** frame subscribers to end on reset or close: Set<() => void>. */
   let streams = new Set();
   let leakNext = false;
+  let failLockNext = false;
+  /** 07.8-28: text every signed-in page shows (`/__control/browser/site-data {text}`), null for none. */
+  let siteData = null;
   /** `${source}/${name}@${version}` → the registry controls of that release. */
   let packageSpecs = new Map();
   /** `${org}/${agent}` → Map<package id, { name, version }>: what each bot's packages volume holds. */
@@ -599,8 +605,12 @@ export function createFakeSandboxd(opts = {}) {
             redacted: false,
             depth: 1,
           },
+          // 07.8-28: what the signed-in page shows the bot (`site-data`), e.g. a sentinel it then tries to send away.
+          ...(siteData
+            ? [{ ref: "r9", role: "cell", name: siteData, value: null, redacted: false, depth: 1 }]
+            : []),
         ],
-        text: "Dashboard\nSign out\nExport\nDownload report",
+        text: `Dashboard\nSign out\nExport\nDownload report${siteData ? `\n${siteData}` : ""}`,
       };
     }
     return {
@@ -652,8 +662,13 @@ export function createFakeSandboxd(opts = {}) {
 
   function storageStateOf(ctx) {
     const host = ctx.siteLock ?? ctx.host;
-    const cookies =
-      ctx.signedIn && host
+    const pre =
+      host && ctx.preCookies
+        ? ctx.preCookies.map((c) => ({ ...c, domain: host.split(":")[0], path: "/", expires: -1 }))
+        : [];
+    const cookies = [
+      ...pre,
+      ...(ctx.signedIn && host
         ? [
             {
               name: "fake_session",
@@ -663,7 +678,8 @@ export function createFakeSandboxd(opts = {}) {
               expires: ctx.cookieExpires ?? -1,
             },
           ]
-        : [];
+        : []),
+    ];
     return JSON.stringify({ cookies, origins: [] });
   }
 
@@ -1231,6 +1247,10 @@ export function createFakeSandboxd(opts = {}) {
       case "contextLock": {
         // 07.8-21: the page a person signed in to by hand is site-locked in place (idempotent for the same host).
         const ctx = contextOf(body);
+        if (failLockNext) {
+          failLockNext = false;
+          throw new OpError(500, "internal", "the lock could not be installed");
+        }
         const lock = typeof body.siteLock === "string" ? body.siteLock : "";
         if (hostOfUrl(`https://${lock}/`) !== lock) throw invalid("siteLock");
         if (ctx.siteLock && ctx.siteLock !== lock) throw invalid("siteLock");
@@ -1350,6 +1370,27 @@ export function createFakeSandboxd(opts = {}) {
         if (typeof body.expires === "number") ctx.cookieExpires = body.expires;
         return send(res, 200, { ok: true });
       }
+      case "POST /__control/browser/pre-cookie": {
+        const body = await readJson(req);
+        const ctx = contexts.get(body?.contextId);
+        if (!ctx) return send(res, 404, { error: "no such context" });
+        ctx.preCookies = [
+          ...(ctx.preCookies ?? []),
+          {
+            name: typeof body.name === "string" ? body.name : "consent",
+            value: typeof body.value === "string" ? body.value : "accepted",
+          },
+        ];
+        return send(res, 200, { ok: true });
+      }
+      case "POST /__control/browser/site-data": {
+        const body = await readJson(req);
+        siteData = typeof body?.text === "string" && body.text.length <= 200 ? body.text : null;
+        return send(res, 200, { ok: true });
+      }
+      case "POST /__control/browser/fail-lock":
+        failLockNext = true;
+        return send(res, 200, { ok: true });
       case "POST /__control/browser/event": {
         const body = await readJson(req);
         const ctx = contexts.get(body?.contextId);

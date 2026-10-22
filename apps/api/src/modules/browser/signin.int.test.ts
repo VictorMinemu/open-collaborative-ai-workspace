@@ -330,9 +330,16 @@ const CRM = "crm.fake.test";
 
 /** A fresh page on `host` in Sam's DM and the bot's sign-in request for it; returns the turn, page and card. */
 async function asked(host = CRM) {
-  const ev = await l.s.turnOf(l.s.sam, l.s.samDm);
-  const closed = await l.browser("close", ev);
+  const closing = await l.s.turnOf(l.s.sam, l.s.samDm);
+  const closed = await l.browser("close", closing);
   expect([200, 404]).toContain(closed.status);
+  // These cases are about how a sign-in ends, not D-13: Task 1 loaded Sam's session in this DM, which made its member
+  // data sticky (07.8-28, #292). Each case starts as if Scout's history in Sam's DM had been reset.
+  await l.s.su.query("delete from app.agent_member_data where agent_id = $1 and conversation_id = $2", [
+    l.s.scoutId,
+    l.s.samDm,
+  ]);
+  const ev = await l.s.turnOf(l.s.sam, l.s.samDm);
   const contextId = (await ok(l.browser("open", ev, { url: `https://${host}/login` }))).contextId as string;
   await ok(l.browser("signin", ev, { reason: "Read the open invoices" }));
   const req = (await requestsOf(contextId))[0] as Json;
@@ -462,5 +469,71 @@ describe("every way a sign-in ends: skipped, expired, refused takes, stopped (Ta
       sam.close();
       await ok(l.s.victor.request("POST", "/api/v1/sandbox/resume") as Promise<Res>);
     }
+  });
+});
+
+describe("a sign-in signal, not just a cookie (07.8-28, WINDOWS #284)", () => {
+  it("a site that set a cookie before Sam took control: a hand back that changed nothing seals nothing and the card waits; signing in for real then seals", async () => {
+    const site = "consent.fake.test";
+    const { contextId, messageId } = await asked(site);
+    await control("/browser/pre-cookie", { contextId, name: "consent", value: "accepted" });
+    const sam = await liveSocket(l.s.stack.baseUrl, await l.s.sam.token(), contextId);
+    try {
+      await waitFor(() => lastState(sam));
+      sam.send({ type: "take" });
+      await waitState(sam, "controlling");
+      await until(async () => (await requestsOf(contextId))[0]?.status === "signing_in");
+      // Sam only looked: the site's state is what it was when he took control.
+      sam.send({ type: "release" });
+      await until(async () => (await requestsOf(contextId))[0]?.status === "waiting");
+      expect(await sessionsOf(site)).toEqual([]);
+      expect(((await ok(card(messageId))) as Json).browserSignIn.status).toBe("waiting");
+      expect(await cardActionsOf(messageId)).toEqual([]);
+
+      // He takes control again and signs in: the session cookie is new, so the hand back seals.
+      sam.send({ type: "take" });
+      await waitState(sam, "controlling");
+      await control("/browser/signed-in", { contextId, cookieValue: "consent-site-session" });
+      sam.send({ type: "release" });
+      await until(async () => (await requestsOf(contextId))[0]?.status === "signed_in");
+      expect(await sessionsOf(site)).toHaveLength(1);
+    } finally {
+      sam.close();
+    }
+  });
+
+  it("a page that cannot be locked after the seal ends at once, never silently: closed in sandboxd, audited with lockFailed; the next open loads the session locked", async () => {
+    const site = "locks.fake.test";
+    const since = new Date(Date.now() - 1000);
+    const { contextId } = await asked(site);
+    const sam = await liveSocket(l.s.stack.baseUrl, await l.s.sam.token(), contextId);
+    try {
+      await waitFor(() => lastState(sam));
+      sam.send({ type: "take" });
+      await waitState(sam, "controlling");
+      await control("/browser/signed-in", { contextId, cookieValue: "locks-site-session" });
+      await control("/browser/fail-lock");
+      sam.send({ type: "release" });
+      await until(async () => (await requestsOf(contextId))[0]?.status === "signed_in");
+    } finally {
+      sam.close();
+    }
+    expect(await contextRow(contextId)).toMatchObject({ end_reason: "crashed" });
+    expect(fakeContext(contextId)).toBeUndefined();
+    const audited = await auditsOf(["browser.closed", "browser.signin_decided"], since);
+    expect(
+      audited.find((a) => a.action === "browser.closed" && a.metadata.contextId === contextId)?.metadata,
+    ).toMatchObject({ reason: "crashed", lockFailed: true });
+    expect(
+      audited.find((a) => a.action === "browser.signin_decided" && a.metadata.contextId === contextId)
+        ?.metadata,
+    ).toMatchObject({ outcome: "signed_in", lockFailed: true });
+    expect(await sessionsOf(site)).toHaveLength(1);
+    // The bot's next page on that site loads the session, locked from its start.
+    const next = await l.s.turnOf(l.s.sam, l.s.samDm);
+    const opened = await ok(l.browser("open", next, { url: `https://${site}/home` }));
+    expect(opened).toMatchObject({ host: site, signedIn: true });
+    expect(fakeContext(opened.contextId as string)).toMatchObject({ siteLock: site, loadedState: true });
+    await ok(l.browser("close", next));
   });
 });

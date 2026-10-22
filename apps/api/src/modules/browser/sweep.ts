@@ -2,11 +2,13 @@ import type { Core } from "../../core";
 import type { SandboxdClient } from "../sandbox";
 import { PURGE_AFTER_MS, purgeExpired } from "./sessions";
 import { expireSignIns } from "./signin";
-import { announce } from "./takeover";
+import { announce, clearDeadLeases } from "./takeover";
 
 /**
  * The browser sweep (07.8-21; D-08, R7, R9): every 30 s, sign-in cards that waited 15 minutes expire (their pages are
- * released from the hold, in sandboxd too) and sessions expired for 7 days are purged with their secrets. The
+ * released from the hold, in sandboxd too), sessions expired for 7 days are purged with their secrets, and takeover leases
+ * a dead API instance left behind are cleared (07.8-28, WINDOWS #271: sandboxd's takeover off, the bot no longer
+ * paused). The
  * organizations with work come from the SECURITY DEFINER `app.browser_sweep_organizations` (ids only); every change
  * happens in that organization's own user-less `withTenant` transaction. One API process sweeps at a time.
  */
@@ -18,14 +20,14 @@ const SWEEP_LOCK_KEY = 0x0c3a_0821;
 
 export interface BrowserSweeper {
   /** One pass at `nowMs` (tests pass a clock); how many sign-ins expired and sessions were purged. */
-  runOnce(nowMs?: number): Promise<{ expired: number; purged: number }>;
+  runOnce(nowMs?: number): Promise<{ expired: number; purged: number; leases: number }>;
   start(): void;
   stop(): void;
 }
 
 export function createBrowserSweeper(core: Core, client: SandboxdClient | null): BrowserSweeper {
   let timer: NodeJS.Timeout | null = null;
-  let running: Promise<{ expired: number; purged: number }> | null = null;
+  let running: Promise<{ expired: number; purged: number; leases: number }> | null = null;
 
   async function organizations(nowMs: number): Promise<string[]> {
     const out: string[] = [];
@@ -47,20 +49,37 @@ export function createBrowserSweeper(core: Core, client: SandboxdClient | null):
     const lock = await core.db.pool.connect();
     let expired = 0;
     let purged = 0;
+    let leases = 0;
     try {
       const got = await lock.query<{ ok: boolean }>("select pg_try_advisory_lock($1) as ok", [
         SWEEP_LOCK_KEY,
       ]);
-      if (!got.rows[0]?.ok) return { expired, purged };
+      if (!got.rows[0]?.ok) return { expired, purged, leases };
       try {
         for (const organizationId of await organizations(nowMs)) {
           try {
             const result = await core.db.withTenant({ organizationId, userId: null }, async (tx) => ({
               released: await expireSignIns(tx, core, nowMs),
               purged: await purgeExpired(tx, core, nowMs),
+              leases: await clearDeadLeases(tx, core, nowMs),
             }));
             expired += result.released.length;
             purged += result.purged;
+            leases += result.leases.length;
+            for (const page of result.leases) {
+              await client
+                ?.call(
+                  "contextTakeover",
+                  {
+                    target: { orgId: organizationId, agentId: page.agentId },
+                    contextId: page.contextId,
+                    active: false,
+                  },
+                  { timeoutMs: 15_000 },
+                )
+                .catch(() => {});
+              await announce(core.bus, organizationId, page.contextId);
+            }
             for (const page of result.released) {
               await client
                 ?.call(
@@ -89,7 +108,7 @@ export function createBrowserSweeper(core: Core, client: SandboxdClient | null):
     } finally {
       lock.release();
     }
-    return { expired, purged };
+    return { expired, purged, leases };
   }
 
   function runOnce(nowMs = Date.now()) {
