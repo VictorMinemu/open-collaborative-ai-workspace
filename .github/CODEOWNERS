@@ -51,6 +51,24 @@
 /apps/openclaw-channel/src/tool-guard.ts           @VictorMinemu
 /apps/openclaw-channel/src/work-zone-tools.ts      @VictorMinemu
 
+# Phase 07.8 (ADR-0029): the broker that alone holds the Docker socket, the egress proxy every bot network shares and
+# its rules, the sandbox and browser images, the API's decisions on confined calls, sealed member sessions, the live
+# view and takeover, the activity readers see, the contracts and the cell's thin callers.
+/apps/sandboxd/                                    @VictorMinemu
+/packages/egress-policy/                           @VictorMinemu
+/infra/sandbox/                                    @VictorMinemu
+/apps/api/src/modules/sandbox/                     @VictorMinemu
+/apps/api/src/modules/browser/                     @VictorMinemu
+/apps/api/src/modules/agent-channel/sandbox.ts     @VictorMinemu
+/apps/api/src/modules/agent-channel/browser.ts     @VictorMinemu
+/apps/api/src/modules/agent-channel/activity.ts    @VictorMinemu
+/packages/contracts/src/sandbox.ts                 @VictorMinemu
+/packages/contracts/src/sandboxd-protocol.ts       @VictorMinemu
+/packages/contracts/src/browser.ts                 @VictorMinemu
+/apps/openclaw-channel/src/sandbox-tools.ts        @VictorMinemu
+/apps/openclaw-channel/src/browser-tools.ts        @VictorMinemu
+/apps/web/components/browser/live-*                @VictorMinemu
+
 # Runtime adapters (ADR-0012 path) and the OpenClaw plugin install gate.
 /apps/local-runtime/src/claude/                    @VictorMinemu
 /apps/local-runtime/src/codex/                     @VictorMinemu

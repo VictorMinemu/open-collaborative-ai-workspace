@@ -261,7 +261,7 @@ describe("guard: dependency licenses", () => {
     const real = collectLockfile(path.join(HERE, "..", ".."), rel);
     assert.deepEqual(
       real.map((e) => `${e.name}@${e.version} ${e.license}`),
-      ["playwright-core@1.63.0 Apache-2.0"],
+      ["playwright-core@1.64.1 Apache-2.0"],
     );
     assert.deepEqual(checkGraph(real, policy), []);
     put(
