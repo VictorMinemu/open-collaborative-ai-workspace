@@ -409,7 +409,8 @@ test("takeover privacy and input that never leaves the page: Alex sees Private a
     .map((f) => f.key)
     .join("");
   expect(typed).toContain(SENTINEL);
-  expect(samTap.sent()).toContainEqual({ type: "text", text: SENTINEL });
+  // The pasted text frame, literally: the one place the whole sentinel may travel.
+  expect(samTap.sent()).toContainEqual({ type: "text", text: "OCW-SENTINEL-TYPED-8842" });
   for (const [p, tap] of taps) {
     const leaks = tap
       .all()
