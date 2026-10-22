@@ -544,6 +544,11 @@ export const BrowserContextRow = z.strictObject({
   viewerCan: z.strictObject({ watch: z.boolean(), control: z.boolean() }),
   /** The person the view is private for (display name), or null. */
   privateFor: z.string().max(NAME_MAX).nullable(),
+  /**
+   * Why the row is private (07.8-27; UI-SPEC § 3.6): `takeover` = someone is signing in ("Private sign-in in progress"),
+   * `member_session` = the page carries a member's saved sign-in ("Private browsing for {member}"). Null otherwise.
+   */
+  privateReason: BrowserPrivateReason.nullable().optional(),
 });
 export type BrowserContextRow = z.infer<typeof BrowserContextRow>;
 

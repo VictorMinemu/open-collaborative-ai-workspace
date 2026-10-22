@@ -162,6 +162,16 @@ export function fakeSandboxd(env: Readonly<Record<string, string | undefined>> =
       if (opts.url) await call("/v1/browsers/contexts/navigate", { target, contextId, url: opts.url });
       return contextId;
     },
+    /**
+     * The fake site of an open page becomes signed in, as a person typing their password in the live view does (07.8-21
+     * control); `expires` is the session cookie's expiry in unix seconds (default: a session cookie).
+     */
+    async signedIn(contextId: string, expires?: number): Promise<void> {
+      await call("/__control/browser/signed-in", {
+        contextId,
+        ...(expires !== undefined ? { expires } : {}),
+      });
+    },
     /** Queues a sandboxd event (`/v1/events`); returns its seq. */
     async emit(event: Json): Promise<number> {
       return (await call<{ seq: number }>("/__control/emit", event)).seq;

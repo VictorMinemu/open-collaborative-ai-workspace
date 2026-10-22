@@ -5,6 +5,7 @@ import { ArrowUpRight, Bot, NotebookText, RotateCcw } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { BrowserTab } from "@/components/browser/browser-tab";
 import { EmptyState } from "@/components/common/empty-state";
 import { UNIT_KIND_LABEL } from "@/components/members/unit-chip";
 import { FileSkeleton, focusHeadingNext, MemoryFile } from "@/components/memory/memory-file";
@@ -45,11 +46,14 @@ import { CapabilitiesPanel } from "./capabilities-panel";
  *   the API lets manage this bot's sandbox (its status answers; a 404 means the tab is absent) with the Sandbox module
  *   on for them, and not while the organization has Sandbox & Browser off for a bot that never had one.
  *   `?tab=sandbox` falls back to Memory when the tab is absent.
+ * - Browser (07.8-27, BRW-02, D-06, UI-SPEC § 3.6): the pages the bot has open that the viewer may watch and the
+ *   host-level activity in conversations they read, after Sandbox, while the Browser module is on for the viewer (the
+ *   API filters every row). `?tab=browser` falls back to Memory when the tab is absent.
  * A bot the viewer may not see (someone else's personal bot, admins included; ADR-0010) is the not-found state: the
  * bots list the API returns is the authority, and an unknown id never reaches the memory API.
  */
 
-type AgentTab = "memory" | "capabilities" | "sandbox";
+type AgentTab = "memory" | "capabilities" | "sandbox" | "browser";
 
 export function AgentPage({ agentId }: { agentId: string }) {
   useBotsRealtime();
@@ -99,6 +103,7 @@ function LoadedAgentPage({ agent }: { agent: Agent }) {
   const split = useMediaQuery(MEMORY_SPLIT_QUERY, true);
   const memoryModule = useModule("memory");
   const sandboxModule = useModule("sandbox");
+  const browserModule = useModule("browser");
   const asked = search.get("tab");
   // The status decides the tab: the API answers only people who may manage this bot's sandbox (404 otherwise).
   const sandboxStatus = useSandboxStatus(agent.id, {
@@ -115,9 +120,16 @@ function LoadedAgentPage({ agent }: { agent: Agent }) {
       orgOff: caps.data?.confined?.sandbox.reason === "org_off",
       capsSettled: !caps.isPending,
     });
+  const showBrowser = browserModule !== "off";
   const tab: AgentTab =
-    asked === "capabilities" ? "capabilities" : asked === "sandbox" && showSandbox ? "sandbox" : "memory";
-  const tabCount = 2 + (showSandbox ? 1 : 0);
+    asked === "capabilities"
+      ? "capabilities"
+      : asked === "sandbox" && showSandbox
+        ? "sandbox"
+        : asked === "browser" && showBrowser
+          ? "browser"
+          : "memory";
+  const tabCount = 2 + (showSandbox ? 1 : 0) + (showBrowser ? 1 : 0);
   // Two tabs keep the 07.2 halves below 1024; more use the underline row, spread over the width (UI-SPEC IA).
   const triggerClass = split ? "lg:min-h-10" : tabCount > 2 ? "flex-1 justify-center" : "justify-center";
 
@@ -147,6 +159,11 @@ function LoadedAgentPage({ agent }: { agent: Agent }) {
               Sandbox
             </TabsTrigger>
           ) : null}
+          {showBrowser ? (
+            <TabsTrigger value="browser" className={triggerClass} data-testid="agent-tab-browser">
+              Browser
+            </TabsTrigger>
+          ) : null}
         </TabsList>
         <TabsContent value="memory" className="flex min-h-0 flex-col">
           {memoryModule === "off" ? (
@@ -158,6 +175,11 @@ function LoadedAgentPage({ agent }: { agent: Agent }) {
         {showSandbox ? (
           <TabsContent value="sandbox" className="flex min-h-0 flex-col">
             <SandboxTab agent={agent} status={sandboxStatus} />
+          </TabsContent>
+        ) : null}
+        {showBrowser ? (
+          <TabsContent value="browser" className="flex min-h-0 flex-col">
+            <BrowserTab agent={agent} />
           </TabsContent>
         ) : null}
         <TabsContent value="capabilities" className="scrollbar-thin overflow-y-auto">

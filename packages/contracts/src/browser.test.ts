@@ -578,6 +578,10 @@ describe("sign-in card link, sessions and the Browser tab (R1, R7, D-08, D-12 U-
       }).success,
     ).toBe(false);
     expect(BrowserActivityItem.safeParse({ ...activity, kind: "navigated" }).success).toBe(false);
+    // 07.8-27: a private row names its reason (a takeover, or a member's saved sign-in on the page).
+    const privateRow = { ...row, state: "private", privateFor: "Sam Ruiz", privateReason: "member_session" };
+    expect(BrowserContextRow.parse(privateRow)).toEqual(privateRow);
+    expect(BrowserContextRow.safeParse({ ...privateRow, privateReason: "cookie" }).success).toBe(false);
     // Hosts only: never a page address.
     expect(BrowserActivityItem.safeParse({ ...activity, url: "https://panel.autofy.app/x" }).success).toBe(
       false,

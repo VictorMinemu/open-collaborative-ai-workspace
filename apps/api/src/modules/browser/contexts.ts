@@ -151,6 +151,8 @@ export async function contextFor(
       requestedForUserId: turn.userId,
       eventId: turn.eventId,
       host,
+      // Where the page opened, kept as the page moves on (the Browser tab's "Opened {host}", WINDOWS #286).
+      openedHost: host,
       secure: p.secure,
       state: "live",
       sessionId: p.session?.id ?? null,

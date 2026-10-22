@@ -27,7 +27,7 @@ import { useOptionalLiveView } from "./live-view-provider";
  * (UI-SPEC §1.4 Controls). Icon buttons are named exactly as their tooltips.
  */
 
-const DOT: Partial<Record<LiveUiState, string>> = {
+export const DOT: Partial<Record<LiveUiState, string>> = {
   live: "bg-emerald-500 dark:bg-emerald-400",
   paused: "bg-amber-500 dark:bg-amber-400",
   controlling: "bg-amber-500 dark:bg-amber-400",
@@ -35,7 +35,7 @@ const DOT: Partial<Record<LiveUiState, string>> = {
   ended: "bg-muted-foreground",
 };
 
-const TONE: Record<LiveUiState, string> = {
+export const TONE: Record<LiveUiState, string> = {
   connecting: "bg-muted text-muted-foreground",
   reconnecting: "bg-muted text-muted-foreground",
   live: "bg-emerald-100 text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-300",

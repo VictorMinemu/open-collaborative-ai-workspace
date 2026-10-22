@@ -16,7 +16,7 @@ import {
   orgMembers,
   type Tx,
 } from "@ocw/db";
-import { and, desc, eq, inArray, isNotNull, isNull, lt } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { markDecided } from "../../authz";
@@ -57,8 +57,12 @@ export interface BrowserRouteDeps {
 
 type Conv = typeof conversations.$inferSelect;
 
-/** The conversation as the tab names it, with the app route the web opens (an internal card route only). */
-function conversationOf(conv: Conv, parent: Conv | null) {
+/**
+ * The conversation as the tab names it for this viewer (07.8-27): "# ops", "Thread in # ops", "DM with you" (a DM the
+ * viewer is in), "DM with {member}" (a DM the bot's owner sees but does not read), "Group chat", an AI chat's title; with
+ * the app route the web opens (an internal card route only).
+ */
+function conversationOf(conv: Conv, parent: Conv | null, viewer: { reads: boolean; requester: string }) {
   const kind: BrowserConversationKind =
     conv.kind === "thread" ? "thread" : (conv.kind as BrowserConversationKind);
   const route =
@@ -71,7 +75,19 @@ function conversationOf(conv: Conv, parent: Conv | null) {
           : conv.kind === "ai_chat"
             ? `/chat/ai/${conv.id}`
             : "/chat";
-  const name = (conv.kind === "thread" ? parent?.name : conv.name) ?? "";
+  const channel = (conv.kind === "thread" ? parent?.name : conv.name) ?? "";
+  const name =
+    kind === "channel"
+      ? `# ${channel}`
+      : kind === "thread"
+        ? `Thread in # ${channel}`
+        : kind === "dm"
+          ? viewer.reads
+            ? "DM with you"
+            : `DM with ${viewer.requester}`
+          : kind === "group"
+            ? conv.name || "Group chat"
+            : conv.name || "AI chat";
   return { kind, name: name.slice(0, 200), route: isAgentCardRoute(route) ? route : "/chat" };
 }
 
@@ -227,10 +243,16 @@ export function registerBrowserRoutes(app: App, deps: BrowserRouteDeps): void {
       const watch = await perms.decide(tx, principal, "browser.watch", resource);
       const control = await perms.decide(tx, principal, "browser.control", resource);
       const leased = leaseLive(page) && page.controllerUserId !== viewerId;
-      const privateFor =
+      const privateReason =
         !watch.allowed && watch.denial?.reason === "member_session"
-          ? (names.get(page.requestedForUserId) ?? "a member")
+          ? ("member_session" as const)
           : leased
+            ? ("takeover" as const)
+            : null;
+      const privateFor =
+        privateReason === "member_session"
+          ? (names.get(page.requestedForUserId) ?? "a member")
+          : privateReason === "takeover"
             ? (names.get(page.controllerUserId ?? "") ?? "a member")
             : null;
       if (!watch.allowed && privateFor === null) continue;
@@ -239,10 +261,14 @@ export function registerBrowserRoutes(app: App, deps: BrowserRouteDeps): void {
         host: page.host,
         secure: page.secure,
         state: privateFor ? "private" : page.pausedFor ? "paused" : page.state === "idle" ? "idle" : "live",
-        conversation: conversationOf(c.conv, c.parent),
+        conversation: conversationOf(c.conv, c.parent, {
+          reads: reader,
+          requester: names.get(page.requestedForUserId) ?? "a former member",
+        }),
         openedAt: new Date(String(page.openedAt)).toISOString(),
         viewerCan: { watch: watch.allowed && !privateFor, control: control.allowed && !privateFor },
         privateFor: privateFor ? privateFor.slice(0, 200) : null,
+        privateReason,
       });
     }
 
@@ -251,7 +277,8 @@ export function registerBrowserRoutes(app: App, deps: BrowserRouteDeps): void {
     const opened = await tx
       .select({
         at: browserContexts.openedAt,
-        host: browserContexts.host,
+        // The host it opened on (#286), not where the page is now; rows older than the column fall back to `host`.
+        host: sql<string>`coalesce(${browserContexts.openedHost}, ${browserContexts.host})`,
         conversationId: browserContexts.conversationId,
       })
       .from(browserContexts)
@@ -312,7 +339,11 @@ export function registerBrowserRoutes(app: App, deps: BrowserRouteDeps): void {
       }
       const c = await convOf(e.conversationId);
       if (!c) continue;
-      const { route: _route, ...conversation } = conversationOf(c.conv, c.parent);
+      // Activity is only ever from conversations the viewer reads.
+      const { route: _route, ...conversation } = conversationOf(c.conv, c.parent, {
+        reads: true,
+        requester: "",
+      });
       activity.push({
         kind: e.kind,
         host: e.host,
