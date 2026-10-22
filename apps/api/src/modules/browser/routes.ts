@@ -16,7 +16,7 @@ import {
   orgMembers,
   type Tx,
 } from "@ocw/db";
-import { and, desc, eq, inArray, isNotNull, isNull, lt } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { markDecided } from "../../authz";
@@ -277,7 +277,8 @@ export function registerBrowserRoutes(app: App, deps: BrowserRouteDeps): void {
     const opened = await tx
       .select({
         at: browserContexts.openedAt,
-        host: browserContexts.host,
+        // The host it opened on (#286), not where the page is now; rows older than the column fall back to `host`.
+        host: sql<string>`coalesce(${browserContexts.openedHost}, ${browserContexts.host})`,
         conversationId: browserContexts.conversationId,
       })
       .from(browserContexts)

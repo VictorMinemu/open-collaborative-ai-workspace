@@ -325,6 +325,15 @@ describe("the bot page's Browser tab (UI-SPEC § 3.6)", () => {
     expect(mine.signedIn).toBe(true);
     const opsEv = await l.turnIn(l.s.alex);
     const ops = await ok(openFresh(opsEv, "https://status.fake.test/"));
+    // The bot moves that page to another host (WINDOWS #286): the row follows it, the activity keeps where it opened.
+    await ok(
+      l.s.cell("/browser/open", {
+        eventId: opsEv.eventId,
+        agentId: l.s.scoutId,
+        url: "https://later.fake.test/",
+      }),
+    );
+    expect((await contextRow(ops.contextId as string)).host).toBe("later.fake.test");
 
     const samView = await ok(l.s.sam.request("GET", `/api/v1/agents/${l.s.scoutId}/browser`) as Promise<Res>);
     const samRow = (samView.open as Json[]).find((r) => r.contextId === mine.contextId);
@@ -343,7 +352,7 @@ describe("the bot page's Browser tab (UI-SPEC § 3.6)", () => {
     const opsName = (await l.s.su.query("select name from app.conversations where id = $1", [l.ops])).rows[0]
       .name as string;
     expect((samView.open as Json[]).find((r) => r.contextId === ops.contextId)).toMatchObject({
-      host: "status.fake.test",
+      host: "later.fake.test",
       viewerCan: { watch: true, control: false },
       conversation: { kind: "channel", name: `# ${opsName}` },
     });
@@ -375,6 +384,7 @@ describe("the bot page's Browser tab (UI-SPEC § 3.6)", () => {
     expect((alex.activity as Json[]).some((a) => a.kind === "opened" && a.host === "status.fake.test")).toBe(
       true,
     );
+    expect((alex.activity as Json[]).some((a) => a.host === "later.fake.test")).toBe(false);
     // Alex reads every conversation his activity names: his own DM reads "DM with you".
     for (const a of alex.activity as Json[]) {
       if (a.conversation.kind === "dm") expect(a.conversation.name).toBe("DM with you");

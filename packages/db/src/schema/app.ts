@@ -2892,7 +2892,13 @@ export const browserContexts = appSchema.table(
     requestedForUserId: uuid("requested_for_user_id").notNull(),
     /** The opening turn (`agent_turns.event_id`). */
     eventId: uuid("event_id").notNull(),
+    /** The page's CURRENT host (it follows navigation). */
     host: text("host").notNull(),
+    /**
+     * The host the page was opened on, never updated (07.8-27, WINDOWS #286): the Browser tab's "Opened {host}". Null only
+     * for a row written by code older than this column; readers fall back to `host`.
+     */
+    openedHost: text("opened_host"),
     secure: boolean("secure").notNull(),
     state: text("state", { enum: ["live", "idle", "paused", "ended"] }).notNull(),
     sessionId: uuid("session_id"),
@@ -2932,6 +2938,7 @@ export const browserContexts = appSchema.table(
       .on(t.organizationId, t.sessionId)
       .where(sql`session_id is not null`),
     browserHostCheck("browser_contexts_host_check", t.host),
+    browserHostCheck("browser_contexts_opened_host_check", t.openedHost),
     check("browser_contexts_state_check", sql`${t.state} in ('live','idle','paused','ended')`),
     check(
       "browser_contexts_paused_for_check",
