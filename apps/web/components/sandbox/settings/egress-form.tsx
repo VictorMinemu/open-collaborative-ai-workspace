@@ -26,7 +26,8 @@ export const PACKAGE_REGISTRIES = [
 
 export const HOST_INVALID = "Use a host like api.example.com or *.example.com, with an optional :port";
 export const HOST_DUPLICATE = "Already listed";
-export const HOST_LIMIT = `Up to ${SANDBOX_LIMITS.allowHostsMax} hosts`;
+/** `SANDBOX_LIMITS.allowHostsMax` is 64; settings.test.tsx checks the sentence against the contract. */
+export const HOST_LIMIT = "Up to 64 hosts";
 
 /** Adds one typed host (trimmed, lower-cased) or says why not. */
 export function addHost(hosts: readonly string[], input: string): { hosts: string[] } | { error: string } {

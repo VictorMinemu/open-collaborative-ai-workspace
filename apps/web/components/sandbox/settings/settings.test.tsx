@@ -1,5 +1,6 @@
 import {
   DEFAULT_SANDBOX_SETTINGS,
+  SANDBOX_LIMITS,
   type SandboxIsolationInfo,
   type SandboxSettings,
   type SandboxSettingsView,
@@ -281,7 +282,7 @@ describe("Network", () => {
     expect(addHost(["pypi.org"], "pypi.org")).toEqual({ error: HOST_DUPLICATE });
     const full = Array.from({ length: 64 }, (_, i) => `h${i}.example.com`);
     expect(addHost(full, "one-more.example.com")).toEqual({ error: HOST_LIMIT });
-    expect(HOST_LIMIT).toBe("Up to 64 hosts");
+    expect(HOST_LIMIT).toBe(`Up to ${SANDBOX_LIMITS.allowHostsMax} hosts`);
   });
 
   it("adds the four package registries and skips the ones already listed", () => {
