@@ -11,6 +11,7 @@ import {
 } from "@ocw/contracts";
 import {
   agents,
+  agentTurns,
   approvalRequests,
   cellPlugins,
   conversationMembers,
@@ -45,7 +46,10 @@ import {
   browserActionView,
   cardBrowserOf,
   isBrowserActionTool,
+  isSandboxExecAfterSignIn,
   orderPreview,
+  sandboxExecPreview,
+  sandboxExecView,
   toolCallTitle,
 } from "./view";
 
@@ -97,6 +101,16 @@ export function toolCallHashTuple(t: {
 }
 
 /** The stored action of a request (null when it is gone or belongs to another organization). */
+/** Whether the turn that asked had used a member's sign-in (`agent_turns.member_data`, D-13). */
+async function sourceMemberData(tx: Tx, eventId: string): Promise<boolean> {
+  const [turn] = await tx
+    .select({ memberData: agentTurns.memberData })
+    .from(agentTurns)
+    .where(eq(agentTurns.eventId, eventId))
+    .limit(1);
+  return turn?.memberData === true;
+}
+
 export async function loadToolCall(
   tx: Tx,
   row: Pick<ApprovalRow, "resourceId">,
@@ -350,6 +364,12 @@ export function httpParts(t: Pick<ToolCallRow, "argumentsCanonical" | "target">)
 export async function titleOf(tx: Tx, t: ToolCallRow, source?: SourceInfo): Promise<string> {
   // 07.8-14 (R8): a browser action reads as what it does ("Click “Place order” on shop.example.com").
   if (isBrowserActionTool(t.tool)) return browserActionView(parseArgs(t)).title;
+  // 07.8-25 (D-13): a command with internet access after the requester's sign-in reads as what it risks.
+  const args = parseArgs(t);
+  if (isSandboxExecAfterSignIn(t.tool, args)) {
+    const requesterName = (await memberName(tx, t.requestedForUserId)) ?? "Former member";
+    return sandboxExecView(args, { requesterName }).title;
+  }
   const s = source ?? (await sourceOf(tx, t));
   return toolCallTitle({ tool: t.tool, sourceKind: s.kind, sourceName: s.name, ...httpParts(t) });
 }
@@ -531,7 +551,7 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
       if (!t) return { type: "fields", title: "This action no longer exists.", fields: [] };
       const source = await sourceOf(tx, t);
       const args = parseArgs(t);
-      const preview = orderPreview(args);
+      const preview = isSandboxExecAfterSignIn(t.tool, args) ? sandboxExecPreview(args) : orderPreview(args);
       const all = argumentsDisplay(args);
       // The rule that applies (shown as the policy) and the one that names the deciders differ only under the floor.
       const rule = await currentRule(tx, t);
@@ -654,6 +674,8 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
           : {}),
         // The request turn's taint, stored under its lock: the re-run starts tainted (D-04, APPROVE-04).
         sourceTainted: t.tainted,
+        // 07.8-25 (D-13): the re-run continues a turn that used the requester's sign-in, so it has member data too.
+        ...((await sourceMemberData(tx, t.eventId)) ? { sourceMemberData: true } : {}),
       };
     },
   };

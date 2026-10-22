@@ -100,6 +100,11 @@ export type ApprovalCardLink = Pick<
 export interface ApprovalCardTurn {
   grant?: { tool: string; arguments: string; useBy: string };
   sourceTainted?: boolean;
+  /**
+   * 07.8-25 (D-13, P-18): the requesting turn had used a member's sign-in (`agent_turns.member_data`), so the re-run
+   * turn has member data from its start and D-13's approvals keep applying to it.
+   */
+  sourceMemberData?: boolean;
 }
 
 export interface ApprovalRegistry {

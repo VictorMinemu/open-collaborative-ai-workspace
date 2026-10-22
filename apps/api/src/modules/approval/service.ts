@@ -827,7 +827,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
     row: ApprovalRow,
     input: DecideInput,
     dir: Directory,
-  ): Promise<Pick<CardAction, "turnUserId" | "decidedBy" | "grant" | "tainted">> {
+  ): Promise<Pick<CardAction, "turnUserId" | "decidedBy" | "grant" | "tainted" | "memberData">> {
     const decidedBy = {
       id: input.deciderUserId,
       displayName: authorOf(dir, "user", input.deciderUserId).displayName,
@@ -839,6 +839,7 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
       turnUserId: row.requestedForUserId,
       ...(turn?.grant && input.outcome === "approved" ? { grant: turn.grant } : {}),
       ...(turn?.sourceTainted === true ? { tainted: true } : {}),
+      ...(turn?.sourceMemberData === true ? { memberData: true } : {}),
     };
   }
 

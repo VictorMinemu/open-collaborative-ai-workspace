@@ -31,6 +31,7 @@ import {
   type SandboxRuntime,
   type SandboxToolName,
   sanitizeFilename,
+  TOOL_APPROVAL_LIMITS,
   type ToolApprovalRefusal,
   type TurnToolFlags,
 } from "@ocw/contracts";
@@ -56,6 +57,7 @@ import {
   type ConfinedKind,
   ensureSandbox,
   loadSandboxBot,
+  loadSandboxPolicy,
   markState,
   reserveSandbox,
   type SandboxContainer,
@@ -344,6 +346,22 @@ export async function decideSandboxCall(
   }
   if (locked.sandboxCalls >= MAX_SANDBOX_CALLS_PER_TURN) return refuse("budget_exhausted");
 
+  // D-13 (P-18): once a member's sign-in was used in this turn, a command that can reach the internet waits for the
+  // requester's own approval, every time, for 15 minutes (`withFloor`: the requester alone decides, whatever 07.5 rule
+  // applies). The organization's shell egress is read from its settings now, never from the request, and is part of
+  // the canonical action, so a grant given under `allowlist` never serves a call under `public`. Egress `off` is exempt.
+  let args = p.args;
+  let approval = p.approval;
+  if (base.memberData === "egress_exec" && locked.memberData) {
+    const egress = (await loadSandboxPolicy(tx)).sandboxEgress;
+    if (egress !== "off") {
+      args = { ...p.args, egress };
+      approval = { floor: "always", pendingTtlMs: TOOL_APPROVAL_LIMITS.browserPendingTtlMs };
+      meta.memberData = "egress_exec";
+      meta.egress = egress;
+    }
+  }
+
   // The organization cap before the approval: a grant consumed by a call the cap then refuses is never given back.
   // The advisory lock taken here is held until commit, so the reservation below cannot fail.
   const cap = await reserveSandbox(tx, { agentId: turn.agentId }, container, { dryRun: true });
@@ -353,11 +371,11 @@ export async function decideSandboxCall(
     await deps.toolApproval.approvalForCall(tx, {
       turn: { eventId: turn.eventId, agentId: turn.agentId },
       tool: p.tool,
-      args: p.args,
+      args,
       toolCallId: p.toolCallId,
       source: { kind: "builtin", id: null, target },
-      ...(p.approval?.floor ? { floor: p.approval.floor } : {}),
-      ...(p.approval?.pendingTtlMs !== undefined ? { pendingTtlMs: p.approval.pendingTtlMs } : {}),
+      ...(approval?.floor ? { floor: approval.floor } : {}),
+      ...(approval?.pendingTtlMs !== undefined ? { pendingTtlMs: approval.pendingTtlMs } : {}),
     }),
   );
   if (verdict.reason) {
