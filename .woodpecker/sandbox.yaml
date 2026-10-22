@@ -102,15 +102,12 @@ steps:
       - bash -c 'set -o pipefail; bash infra/sandbox/test/run-sandbox-smoke.sh --only core 2>&1 | tee "$$TMPDIR/gvisor-sbx.log"'
       - grep -q "runtime gvisor" "$${TMPDIR}/gvisor-sbx.log"
 
-  # The browser under gVisor: Chromium keeps its own sandbox on (`chromium+gvisor`, asserted). KNOWN FAILURE, ignored
-  # until sandboxd stops addressing the egress proxy by its Docker DNS alias: runsc does not answer Docker's embedded
-  # DNS (127.0.0.11) on the internal bot networks (07.8-24 probe: name lookups EAI_AGAIN, the proxy's IP answers), so
-  # under gVisor every navigation and shell download fails closed (`navigation_refused`). Remove `failure: ignore` with
-  # that fix (WINDOWS ledger, 07.8-24).
+  # The browser under gVisor: Chromium keeps its own sandbox on (`chromium+gvisor`, asserted), and every navigation and
+  # shell request goes through the egress proxy. runsc does not answer Docker's embedded DNS (127.0.0.11) on the
+  # internal bot networks, so sandboxd names the proxy by its address in each sandbox's /etc/hosts (07.8 DNS fix).
   - name: gvisor-browser
     image: ocw-ci:local
     pull: false
-    failure: ignore
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
