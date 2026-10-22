@@ -198,3 +198,170 @@ describe("compose.yaml: isolation knobs (D-18)", () => {
     },
   );
 });
+
+describe("compose.yaml: the `sandbox` profile (07.8-24; D-01, D-11, D-12, principle 10)", () => {
+  const SANDBOX_SERVICES = ["sandboxd", "sandbox-sbx-image", "sandbox-brw-image", "sandbox-egress-image"];
+  const IMAGE_SERVICES = {
+    "sandbox-sbx-image": "OCW_SANDBOX_SBX_IMAGE",
+    "sandbox-brw-image": "OCW_SANDBOX_BRW_IMAGE",
+    "sandbox-egress-image": "OCW_SANDBOX_EGRESS_IMAGE",
+  };
+  /** Every profile and the e2e override: the widest service set an install or a gate can run. */
+  const everything = (vars = REQUIRED) =>
+    config(vars, { files: ["compose.yaml", "compose.e2e.yaml"], args: ["--profile", "*"] });
+  const withSandbox = (vars = REQUIRED) => config(vars, { args: ["--profile", "sandbox"] });
+  const mountsSocket = (s) =>
+    (s.volumes ?? []).some(
+      (v) => String(v.source ?? v).includes("docker.sock") || String(v.target).includes("docker.sock"),
+    );
+
+  it(
+    "sandboxd is the only service, in any profile, that mounts the Docker socket (T-07.8-24-01)",
+    needsDocker,
+    () => {
+      const cfg = everything();
+      const holders = Object.entries(cfg.services)
+        .filter(([, s]) => mountsSocket(s))
+        .map(([name]) => name);
+      assert.deepEqual(holders, ["sandboxd"]);
+      const sock = cfg.services.sandboxd.volumes.find((v) => String(v.target).includes("docker.sock"));
+      assert.equal(sock.source, "/var/run/docker.sock");
+      assert.equal(sock.target, "/var/run/docker.sock");
+      assert.match(compose, /\/var\/run\/docker\.sock/);
+      assert.equal(
+        compose.split("\n").filter((l) => l.includes("/var/run/docker.sock")).length,
+        1,
+        "one line of compose.yaml names the socket: its mount",
+      );
+    },
+  );
+
+  it(
+    "sandboxd: no port, read-only root, no capability, no-new-privileges, init, only `sandbox-control`",
+    needsDocker,
+    () => {
+      const s = withSandbox().services.sandboxd;
+      assert.equal(s.ports, undefined, "no published port");
+      assert.equal(s.expose, undefined, "nothing exposed");
+      assert.equal(s.read_only, true);
+      assert.deepEqual(s.cap_drop, ["ALL"]);
+      assert.equal(s.cap_add, undefined);
+      assert.equal(s.privileged ?? false, false);
+      assert.ok((s.security_opt ?? []).includes("no-new-privileges:true"));
+      assert.equal(s.init, true);
+      assert.ok(
+        (s.tmpfs ?? []).some((t) => t.startsWith("/tmp")),
+        "a tmpfs at /tmp",
+      );
+      assert.deepEqual(Object.keys(s.networks ?? {}), ["sandbox-control"]);
+      assert.equal(s.image, "ocw-sandboxd:local");
+      assert.equal(s.build.dockerfile, "infra/sandbox/sandboxd/Dockerfile");
+    },
+  );
+
+  it(
+    "`sandbox-control` is internal and its members are exactly api and sandboxd (T-07.8-24-05)",
+    needsDocker,
+    () => {
+      for (const cfg of [everything(), withSandbox(), config(REQUIRED)]) {
+        assert.equal(cfg.networks["sandbox-control"]?.internal, true);
+        const members = Object.entries(cfg.services)
+          .filter(([, s]) => Object.keys(s.networks ?? {}).includes("sandbox-control"))
+          .map(([name]) => name)
+          .sort();
+        const expected = "sandboxd" in cfg.services ? ["api", "sandboxd"] : ["api"];
+        assert.deepEqual(members, expected);
+      }
+    },
+  );
+
+  it("the openclaw cell carries no OCW_SANDBOX_* variable, with or without the profile", needsDocker, () => {
+    const vars = { ...REQUIRED, OCW_SANDBOX_URL: "http://sandboxd:8090", OCW_SANDBOX_TOKEN: "t".repeat(48) };
+    for (const cfg of [config(vars), withSandbox(vars), everything(vars)]) {
+      const keys = Object.keys(cfg.services.openclaw.environment ?? {});
+      assert.deepEqual(
+        keys.filter((k) => k.startsWith("OCW_SANDBOX")),
+        [],
+      );
+    }
+  });
+
+  it("the image-only services never start and build exactly the images sandboxd runs", needsDocker, () => {
+    const cfg = withSandbox({ ...REQUIRED, OCW_IMAGE_TAG: "gate-x" });
+    const env = cfg.services.sandboxd.environment;
+    for (const [svc, variable] of Object.entries(IMAGE_SERVICES)) {
+      const s = cfg.services[svc];
+      assert.equal(s.scale, 0, `${svc} has scale 0`);
+      assert.ok(s.build, `${svc} is built by compose`);
+      assert.match(s.image, /^ocw-sandbox-(sbx|brw|egress):gate-x$/, svc);
+      assert.equal(env[variable], s.image, `${variable} is ${svc}'s image`);
+      assert.equal(s.networks, undefined, `${svc} joins no network`);
+    }
+    assert.equal(cfg.services.sandboxd.image, "ocw-sandboxd:gate-x");
+  });
+
+  it(
+    "sandboxd's environment: namespace = project, registries, ClawHub equal to the API's, sweep, seccomp",
+    needsDocker,
+    () => {
+      const env = withSandbox({ ...REQUIRED, OCW_SANDBOX_TOKEN: "t".repeat(48) }).services.sandboxd
+        .environment;
+      assert.equal(env.OCW_SANDBOX_TOKEN, "t".repeat(48));
+      assert.equal(env.OCW_SANDBOX_NAMESPACE, PROJECT);
+      assert.equal(env.OCW_SANDBOXD_HOST, "0.0.0.0");
+      assert.equal(env.OCW_SANDBOXD_PORT, "8090");
+      assert.equal(env.OCW_SANDBOX_RUNTIME, "auto");
+      assert.equal(env.OCW_SANDBOX_BRW_SECCOMP, "/app/brw-seccomp.json");
+      assert.equal(env.OCW_SANDBOXD_SWEEP_MS, "60000");
+      assert.equal(env.OCW_SANDBOX_NPM_REGISTRY, "https://registry.npmjs.org/");
+      assert.equal(env.OCW_SANDBOX_PYPI_INDEX, "https://pypi.org/simple/");
+      assert.equal(env.OCW_SANDBOX_REGISTRIES, "");
+      assert.equal(env.DOCKER_SOCKET, undefined, "the image's default socket path, the mounted one");
+      // No value sandboxd would refuse: every variable it parses is set or has a default (an empty string is not unset).
+      for (const k of ["OCW_SANDBOX_SBX_IMAGE", "OCW_SANDBOX_BRW_IMAGE", "OCW_SANDBOX_EGRESS_IMAGE"])
+        assert.ok(env[k], k);
+
+      const set = withSandbox({
+        ...REQUIRED,
+        OCW_CLAWHUB_URL: "http://clawhub.internal:8080",
+        OCW_SANDBOX_RUNTIME: "runsc",
+        OCW_SANDBOX_NAMESPACE: "ocw-prod",
+        OCW_SANDBOXD_SWEEP_MS: "5000",
+        OCW_SANDBOX_NPM_REGISTRY: "https://npm.internal/",
+        OCW_SANDBOX_PYPI_INDEX: "https://pypi.internal/simple/",
+        OCW_SANDBOX_REGISTRIES: "npm.internal,pypi.internal",
+      }).services;
+      assert.equal(set.sandboxd.environment.OCW_CLAWHUB_URL, set.api.environment.OCW_CLAWHUB_URL);
+      assert.equal(set.sandboxd.environment.OCW_CLAWHUB_URL, "http://clawhub.internal:8080");
+      assert.equal(set.sandboxd.environment.OCW_SANDBOX_RUNTIME, "runsc");
+      assert.equal(set.sandboxd.environment.OCW_SANDBOX_NAMESPACE, "ocw-prod");
+      assert.equal(set.sandboxd.environment.OCW_SANDBOXD_SWEEP_MS, "5000");
+      assert.equal(set.sandboxd.environment.OCW_SANDBOX_NPM_REGISTRY, "https://npm.internal/");
+      assert.equal(set.sandboxd.environment.OCW_SANDBOX_PYPI_INDEX, "https://pypi.internal/simple/");
+      assert.equal(set.sandboxd.environment.OCW_SANDBOX_REGISTRIES, "npm.internal,pypi.internal");
+    },
+  );
+
+  it(
+    "without the profile: no sandbox service, the api's sandboxd URL is empty; the API takes URL and token from .env",
+    needsDocker,
+    () => {
+      const cfg = config(REQUIRED);
+      for (const s of SANDBOX_SERVICES) assert.equal(cfg.services[s], undefined, s);
+      assert.equal(cfg.services.api.environment.OCW_SANDBOX_URL, "");
+      assert.equal(cfg.services.api.environment.OCW_SANDBOX_TOKEN, "");
+      const set = config({
+        ...REQUIRED,
+        OCW_SANDBOX_URL: "http://sandboxd:8090",
+        OCW_SANDBOX_TOKEN: "t".repeat(48),
+      });
+      assert.equal(set.services.api.environment.OCW_SANDBOX_URL, "http://sandboxd:8090");
+      assert.equal(set.services.api.environment.OCW_SANDBOX_TOKEN, "t".repeat(48));
+      assert.doesNotMatch(
+        compose,
+        /\$\{OCW_SANDBOX_TOKEN:\?/,
+        "no guard: compose interpolates inactive profiles too",
+      );
+    },
+  );
+});
