@@ -42,5 +42,8 @@ Shared resources:
   dangling images, and stopped containers, unused networks and unused volumes older than 3 hours. Tag clean-ups, the
   over-budget image prune and dropping the caches wait until no other workflow is running.
 
+Events: verify, e2e, cell-smoke and sandbox run on pull requests and manual runs only. A push to main runs images (a
+cached build check of the merged tree; it publishes nothing) and housekeeping.
+
 Agent: `WOODPECKER_MAX_WORKFLOWS` sets how many workflows run at once (the host is shared with production; 3 is the
 intended value).

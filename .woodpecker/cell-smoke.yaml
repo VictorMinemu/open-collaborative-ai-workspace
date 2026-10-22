@@ -5,11 +5,9 @@
 # It runs next to the other workflows as the slot `cell-smoke` (infra/ci/README.md): the smoke's containers, networks and
 # volume are named ocw-ci-cell-smoke-* (SMOKE_PREFIX), its networks use the smoke's own subnets (10.231.76/77.0/24),
 # and it publishes no port.
-# Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event).
+# Pull requests and manual runs only: a push to main re-tests the tree its pull request already passed.
 when:
   - event: [pull_request, manual]
-  - event: push
-    branch: main
 
 variables:
   - &docker_sock /var/run/docker.sock:/var/run/docker.sock

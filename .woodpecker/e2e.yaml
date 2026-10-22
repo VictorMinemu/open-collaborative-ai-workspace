@@ -6,11 +6,9 @@
 # Both viewports run at once next to the other workflows (infra/ci/README.md): each is its own slot e2e-<viewport>,
 # with its own compose project, workspace and port block PORT_BLOCK (web NN00, API NN01, postgres NN02, redis NN03,
 # Garage NN04 from `pnpm setup:env --ports`, the fake on NN91), which infra/ci/slots.test.mjs keeps disjoint.
-# Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event).
+# Pull requests and manual runs only: a push to main re-tests the tree its pull request already passed.
 when:
   - event: [pull_request, manual]
-  - event: push
-    branch: main
 
 matrix:
   include:

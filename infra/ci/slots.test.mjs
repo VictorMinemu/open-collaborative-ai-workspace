@@ -4,7 +4,8 @@
 // Woodpecker substitutes them (matrix entries, CI_COMMIT_SHA), every heavy workflow run owns a slot whose compose
 // projects, label namespaces, names, port block and directories never meet another slot's, and
 // infra/ci/slot-reset.sh, run against a fake `docker` listing every slot's objects (and a demo, a gate, Woodpecker's
-// own and the pre-parallel CI names), removes exactly its own slot's objects.
+// own and the pre-parallel CI names), removes exactly its own slot's objects. Push to main runs only images and
+// housekeeping.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
@@ -206,6 +207,23 @@ describe("CI slots: each parallel workflow run owns its names, ports and directo
       assert.ok(images.length > 0);
       for (const i of images) assert.equal(i, `ocw-ci:${SHA}`, r.file);
       assert.match(code(r.text), new RegExp(`sh infra/ci/build-image.sh ocw-ci:${SHA}`, "u"));
+    }
+  });
+
+  it("a push to main runs images and housekeeping only; housekeeping's other dependencies are optional", () => {
+    const pushes = (r) => /- event: push\s*\n\s*branch: main/u.test(r.text);
+    for (const r of RUNS) {
+      assert.equal(
+        pushes(r),
+        ["images.yaml", "housekeeping.yaml"].includes(r.file),
+        `${r.file} on push to main`,
+      );
+      assert.match(r.text, /event: \[pull_request, manual\]/u, `${r.file} runs on pull requests`);
+    }
+    const hk = RUNS.find((r) => r.file === "housekeeping.yaml").text;
+    assert.match(hk, /depends_on:\n\s+- images\n/u);
+    for (const w of ["verify", "e2e", "cell-smoke", "sandbox"]) {
+      assert.match(hk, new RegExp(`- name: ${w}\\n\\s+optional: true`, "u"), `${w} is optional`);
     }
   });
 });

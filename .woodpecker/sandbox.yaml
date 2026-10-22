@@ -10,11 +10,9 @@
 # its own EXIT trap, again by infra/ci/slot-reset.sh before each run (a cancelled run skips its cleanup) and in the
 # cleanup step; never a prune, never another slot's. The proof's ports are the slot's block 24 (24xx).
 # housekeeping.yaml keeps the dind disk inside its budget afterwards.
-# Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event).
+# Pull requests and manual runs only: a push to main re-tests the tree its pull request already passed.
 when:
   - event: [pull_request, manual]
-  - event: push
-    branch: main
 
 variables:
   - &docker_sock /var/run/docker.sock:/var/run/docker.sock

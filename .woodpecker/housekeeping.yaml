@@ -1,13 +1,23 @@
 # Last workflow of every pipeline: keeps the dind daemon's disk inside its budget (infra/ci/disk-budget.sh), without
 # removing anything a workflow of another pipeline running at the same time could still use.
 # Only the dind socket is mounted; nothing here can reach the host's Docker.
-# Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event).
+# Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event). The heavy workflows run
+# on pull requests and manual runs only, so they are optional dependencies (a push to main has images only).
 when:
   - event: [pull_request, manual]
   - event: push
     branch: main
 
-depends_on: [verify, e2e, images, cell-smoke, sandbox]
+depends_on:
+  - images
+  - name: verify
+    optional: true
+  - name: e2e
+    optional: true
+  - name: cell-smoke
+    optional: true
+  - name: sandbox
+    optional: true
 runs_on: [success, failure]
 
 steps:
