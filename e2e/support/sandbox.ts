@@ -164,7 +164,7 @@ export function fakeSandboxd(env: Readonly<Record<string, string | undefined>> =
     },
     /**
      * The fake site of an open page becomes signed in, as a person typing their password in the live view does (07.8-21
-     * control); `expires` is the session cookie's expiry in unix seconds (default: a session cookie).
+     * control; 07.8-26: its frames show the dashboard); `expires` is the session cookie's expiry in unix seconds (default: a session cookie).
      */
     async signedIn(contextId: string, expires?: number): Promise<void> {
       await call("/__control/browser/signed-in", {

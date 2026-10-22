@@ -572,3 +572,27 @@ export const BrowserTabView = z.strictObject({
   browserSandbox: BrowserSandboxMode.nullable().optional(),
 });
 export type BrowserTabView = z.infer<typeof BrowserTabView>;
+
+// ---------------------------------------------------------------- the conversation's open pages (07.8-26, Surface 1b)
+
+/**
+ * An open page of a conversation (or of one of its threads) the viewer may watch: what the conversation header's live
+ * chip shows ("{bot} · {host}"). The host only, never a path; the resolver's `browser.watch` decided each row.
+ */
+export const ConversationBrowserItem = z.strictObject({
+  contextId: Id,
+  host: BrowserHost,
+  secure: z.boolean(),
+  bot: z.strictObject({
+    id: Id,
+    displayName: z.string().max(NAME_MAX),
+    avatarUrl: z.string().max(2048).nullable(),
+  }),
+  /** The thread the page was opened in (its root message), or null for the conversation itself. */
+  threadRootId: Id.nullable(),
+});
+export type ConversationBrowserItem = z.infer<typeof ConversationBrowserItem>;
+
+/** `GET /api/v1/conversations/:id/browsers`. */
+export const ConversationBrowserList = z.strictObject({ items: z.array(ConversationBrowserItem).max(50) });
+export type ConversationBrowserList = z.infer<typeof ConversationBrowserList>;

@@ -75,7 +75,8 @@ export function AppShell({ me, children }: { me: MeResponse; children: ReactNode
               {isDesktop ? null : (
                 <MobileTopBar me={me} open={mobileOpen} onOpenChange={setMobileOpen} onSlot={setSlot} />
               )}
-              <main className="flex min-h-0 min-w-0 flex-1">{children}</main>
+              {/* 07.8-26: the phone live dock sets --live-dock-h, so the composer stays above it (UI-SPEC §1.5). */}
+              <main className="flex min-h-0 min-w-0 flex-1 pb-[var(--live-dock-h,0px)]">{children}</main>
             </div>
           </div>
           <SearchPalette />

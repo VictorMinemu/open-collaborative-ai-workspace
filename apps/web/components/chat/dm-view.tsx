@@ -25,6 +25,7 @@ import { toast } from "sonner";
 import { BotSettingsSheet } from "@/components/bots/bot-settings-sheet";
 import { MemoryPanel } from "@/components/bots/memory-panel";
 import { useLiveActivity } from "@/components/browser/bot-activity";
+import { LiveChip } from "@/components/browser/live-chip";
 import { EmptyState } from "@/components/common/empty-state";
 import { ModuleOff, useModule } from "@/components/shell/module-gate";
 import { PageHeader } from "@/components/shell/page-header";
@@ -587,6 +588,8 @@ function DmConversation({
             }
             actions={
               <>
+                {/* 07.8-26 (UI-SPEC Surface 1b): a bot's open browser in this conversation, first in the cluster. */}
+                <LiveChip conversationId={dm.id} />
                 <PinnedButton count={pins.data?.pins.length ?? 0} onClick={() => setPinsOpen(true)} />
                 <ConversationNotifyMenu
                   conversation={{ id: dm.id, kind: dm.kind === "group" ? "group" : "dm" }}

@@ -17,7 +17,8 @@
 // Test controls (no token): POST /__control/down | /__control/up | /__control/reset | /__control/emit (an event body),
 // GET /__control/stats; browser: POST /__control/browser/leak (the next snapshot carries OCW-SENTINEL-PW-5521 on a
 // redacted node, to prove the API's second pass), /__control/browser/signed-in {contextId} (the context's site is
-// signed in), /__control/browser/event {target, contextId, event: crashed|closed|focus_sensitive|download}.
+// signed in), /__control/browser/event {target, contextId, event: crashed|closed|focus_sensitive|download}
+// (focus_sensitive also writes the control `{kind: "focus", sensitive: true}` on the context's open frame streams).
 //
 // Like sandboxd, it holds no default policy: until the API pushes an organization's policy, `ensure`, `restart`,
 // `exec`, the browser context ops and the package ops (they would start or run a container) and `filesWrite`,
@@ -691,6 +692,7 @@ export function createFakeSandboxd(opts = {}) {
       ended = true;
       clearInterval(timer);
       ctx.subscribers.delete(end);
+      ctx.controls?.delete(control);
       streams.delete(end);
       if (!res.writableEnded) {
         // A restart that forgot the context (`lost`) drops the stream without a word, like a dead broker.
@@ -699,6 +701,7 @@ export function createFakeSandboxd(opts = {}) {
       }
     };
     ctx.subscribers.add(end);
+    ctx.controls?.add(control);
     streams.add(end);
     req.on("close", end);
     res.on("close", end);
@@ -1130,6 +1133,8 @@ export function createFakeSandboxd(opts = {}) {
           inputs: {},
           downloads: new Map(),
           subscribers: new Set(),
+          // 07.8-26: the open frame streams' control writers (the agent's `focus` control on a sensitive field).
+          controls: new Set(),
         });
         return { contextId: body.contextId };
       }
@@ -1353,6 +1358,10 @@ export function createFakeSandboxd(opts = {}) {
           addDownload(ctx);
         } else if (body.event === "closed") {
           closeContext(ctx);
+        } else if (body.event === "focus_sensitive") {
+          // 07.8-26: like the agent, the open frame streams hear it too (the live view's `focus` frame).
+          for (const write of ctx.controls ?? []) write({ kind: "focus", sensitive: true });
+          browserEvent(ctx, body.event, { host: ctx.host ?? undefined });
         } else {
           browserEvent(ctx, body.event, body.event === "crashed" ? {} : { host: ctx.host ?? undefined });
         }

@@ -1,5 +1,5 @@
 import { type AgentCardBrowserSignInLink, BROWSER_LIMITS } from "@ocw/contracts";
-import { agents, browserContexts, browserSigninRequests, type Tx, tenantOf } from "@ocw/db";
+import { agents, browserContexts, browserSigninRequests, orgMembers, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { PlatformCardInput, SignInCards } from "../../lib/chat-agent-bridge";
@@ -494,12 +494,19 @@ export async function signInLinksOf(
   const out = new Map<string, AgentCardBrowserSignInLink>();
   if (messageIds.length === 0) return out;
   const rows = await tx
-    .select({ r: browserSigninRequests, secure: browserContexts.secure })
+    .select({
+      r: browserSigninRequests,
+      secure: browserContexts.secure,
+      requesterName: orgMembers.displayName,
+    })
     .from(browserSigninRequests)
     .innerJoin(browserContexts, eq(browserContexts.id, browserSigninRequests.contextId))
+    // 07.8-26: the requester's name, so every reader's card words "Only {person} can sign in here." (a member who left
+    // has no row: the card then says "the person the bot asked").
+    .leftJoin(orgMembers, eq(orgMembers.userId, browserSigninRequests.requesterUserId))
     .where(inArray(browserSigninRequests.cardMessageId, [...messageIds]));
   const iso = (v: string | Date | null) => (v === null ? null : new Date(String(v)).toISOString());
-  for (const { r, secure } of rows) {
+  for (const { r, secure, requesterName } of rows) {
     if (!r.cardMessageId) continue;
     const expired = (r.status === "waiting" || r.status === "signing_in") && !live(r, nowMs);
     out.set(r.cardMessageId, {
@@ -511,6 +518,9 @@ export async function signInLinksOf(
       expiresAt: iso(r.expiresAt) as string,
       sessionExpiresAt: r.status === "signed_in" ? iso(r.sessionExpiresAt) : null,
       stopReason: r.status === "stopped" ? (r.stopReason ?? null) : null,
+      ...(requesterName ? { requesterName: requesterName.slice(0, 200) } : {}),
+      // A request past its expiry the sweep has not written yet was decided by the clock at its expiry.
+      decidedAt: expired ? iso(r.expiresAt) : iso(r.decidedAt ?? null),
     });
   }
   return out;

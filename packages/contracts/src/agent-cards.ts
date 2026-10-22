@@ -159,6 +159,13 @@ export const AgentCardBrowserSignInLink = z.object({
   sessionExpiresAt: IsoDateTime.nullable(),
   /** Why a `stopped` card stopped (the live view's ended reasons). */
   stopReason: BrowserEndReason.nullable(),
+  /**
+   * 07.8-26 (additive): the requester's display name, so every reader's card says "Only {person} can sign in here." and
+   * "{person} signed in." (the same for every reader, no viewer field).
+   */
+  requesterName: z.string().max(200).optional(),
+  /** 07.8-26 (additive): when the sign-in was decided (signed in, skipped, expired, stopped): "Signed in by … · {time}". */
+  decidedAt: IsoDateTime.nullable().optional(),
 });
 export type AgentCardBrowserSignInLink = z.infer<typeof AgentCardBrowserSignInLink>;
 

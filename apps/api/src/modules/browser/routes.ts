@@ -26,6 +26,7 @@ import { agentFactsOf, type ConversationAccess, loadDirectory } from "../chat";
 import { agentResource, browserContextResource, type PermissionService } from "../organization";
 import type { SandboxdClient } from "../sandbox";
 import { auditClosed, closeContext } from "./contexts";
+import { registerConversationBrowsers } from "./conversation-browsers";
 import { listMine, revoke } from "./sessions";
 import { announce, leaseLive } from "./takeover";
 
@@ -94,6 +95,8 @@ function conversationOf(conv: Conv, parent: Conv | null, viewer: { reads: boolea
 export function registerBrowserRoutes(app: App, deps: BrowserRouteDeps): void {
   const { core, perms, access } = deps;
   const user = { config: { authz: "user" as const }, preHandler: [core.identity.requireUser] };
+  // 07.8-26: the conversation header's live chip.
+  registerConversationBrowsers(app, { core, perms, access });
 
   app.get(
     "/browser-sessions",

@@ -6,6 +6,7 @@ import {
   type CompositionEvent,
   type KeyboardEvent,
   type MouseEvent,
+  type PointerEvent,
   useEffect,
   useRef,
 } from "react";
@@ -24,7 +25,10 @@ import {
   mouseFrame,
   moveGate,
   pasteFrame,
+  phoneViewport,
   SMALL_PAGE,
+  swipeFrame,
+  tapFrames,
   wheelFrame,
 } from "./live-input";
 import { endedSentence, type LiveUiState, type LiveView, showsFrames } from "./live-store";
@@ -40,6 +44,10 @@ import { useOptionalLiveView } from "./live-view-provider";
  * listeners exist only while the person controls the page; `Shift+Esc` never reaches it and moves focus to Hand back.
  * IME: the area is not an editable element (an editable one would hold the composed text in the DOM), so composed text
  * arrives through `compositionend` where the platform raises it, and paste always works.
+ *
+ * 07.8-26 (phones, `phone`): in control the area fills the sheet and maps a tap to the page's touch events and a swipe
+ * to a scroll, at the phone viewport's coordinates (R10); typing goes through the sheet's keyboard input, never through
+ * this area. Pinch zooms the workspace page locally (`touch-action: pinch-zoom`); nothing of it reaches the page.
  */
 
 export interface Placeholder {
@@ -199,6 +207,7 @@ export function LiveFrame({
   onFocusChange,
   frameRef,
   chrome = 104,
+  phone = false,
 }: {
   view: LiveView;
   state: LiveUiState;
@@ -210,6 +219,8 @@ export function LiveFrame({
   frameRef?: React.RefObject<HTMLDivElement | null>;
   /** Pixels of chrome around the frame in the large view (header, bars, footer). */
   chrome?: number;
+  /** 07.8-26: the phone dock or full sheet (touch input in control; the area fills the sheet). */
+  phone?: boolean;
 }) {
   const live = useOptionalLiveView();
   const img = useRef<HTMLImageElement | null>(null);
@@ -217,17 +228,24 @@ export function LiveFrame({
   const area = frameRef ?? ownArea;
   const placeholder = placeholderOf(view, state);
   const framed = showsFrames(state);
-  const controlling = state === "controlling" && large;
+  const controlling = state === "controlling" && (large || phone);
+  const fill = phone && controlling;
   const host = view.server?.host ?? null;
   useFrames(img, framed);
 
   // Input only while this person controls the page (D-07); every listener goes away with the lease.
-  const page = view.expanded ? EXPANDED_PAGE : SMALL_PAGE;
+  const page = phone
+    ? view.phoneArea
+      ? phoneViewport(view.phoneArea.width, view.phoneArea.height)
+      : SMALL_PAGE
+    : view.expanded
+      ? EXPANDED_PAGE
+      : SMALL_PAGE;
   const boxOf = (): Box | null => boxOfFrame(img.current, area.current);
   const gate = useRef(moveGate());
   useEffect(() => {
     const el = area.current;
-    if (!controlling || !el || !live) return;
+    if (!controlling || phone || !el || !live) return;
     // A native listener: React's wheel listener is passive and could not keep the workspace from scrolling.
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
@@ -237,7 +255,7 @@ export function LiveFrame({
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
-  }, [controlling, live, page, area]);
+  }, [controlling, phone, live, page, area]);
 
   const pointer = (event: "move" | "down" | "up") => (e: MouseEvent<HTMLDivElement>) => {
     if (!live) return;
@@ -300,30 +318,70 @@ export function LiveFrame({
   };
   const block = (e: { preventDefault(): void }) => e.preventDefault();
 
-  const capture = controlling
-    ? {
-        tabIndex: 0,
-        role: "application",
-        "aria-roledescription": "remote browser",
-        "aria-label": `${host ?? "The page"}, controlled by you`,
-        "aria-describedby": hintId,
-        onKeyDown,
-        onKeyUp,
-        onPaste,
-        onCompositionEnd,
-        onMouseDown: pointer("down"),
-        onMouseUp: pointer("up"),
-        onMouseMove: pointer("move"),
-        onContextMenu: block,
-        onDrop: block,
-        onDragOver: block,
-        onFocus: () => onFocusChange?.(true),
-        onBlur: () => {
-          releaseHeld();
-          onFocusChange?.(false);
-        },
-      }
-    : {};
+  // Phones: a tap is the page's touch, a swipe its scroll (UI-SPEC "Input (phone)").
+  const finger = useRef<{ id: number; clientX: number; clientY: number } | null>(null);
+  const onFingerDown = (e: PointerEvent<HTMLDivElement>) => {
+    if (!e.isPrimary) return;
+    finger.current = { id: e.pointerId, clientX: e.clientX, clientY: e.clientY };
+  };
+  const onFingerUp = (e: PointerEvent<HTMLDivElement>) => {
+    const from = finger.current;
+    finger.current = null;
+    if (!live || !from || from.id !== e.pointerId) return;
+    const box = boxOf();
+    if (!box) return;
+    const swipe = swipeFrame(from, e, box, page);
+    if (swipe) {
+      live.input(swipe);
+      return;
+    }
+    for (const frame of tapFrames(from, box, page) ?? []) live.input(frame);
+  };
+  const onFingerCancel = () => {
+    finger.current = null;
+  };
+
+  const touchCapture = {
+    tabIndex: -1,
+    role: "application",
+    "aria-roledescription": "remote browser",
+    "aria-label": `${host ?? "The page"}, controlled by you`,
+    "aria-describedby": hintId,
+    onPointerDown: onFingerDown,
+    onPointerUp: onFingerUp,
+    onPointerCancel: onFingerCancel,
+    onContextMenu: block,
+    onDrop: block,
+    onDragOver: block,
+  };
+
+  const capture =
+    controlling && phone
+      ? touchCapture
+      : controlling
+        ? {
+            tabIndex: 0,
+            role: "application",
+            "aria-roledescription": "remote browser",
+            "aria-label": `${host ?? "The page"}, controlled by you`,
+            "aria-describedby": hintId,
+            onKeyDown,
+            onKeyUp,
+            onPaste,
+            onCompositionEnd,
+            onMouseDown: pointer("down"),
+            onMouseUp: pointer("up"),
+            onMouseMove: pointer("move"),
+            onContextMenu: block,
+            onDrop: block,
+            onDragOver: block,
+            onFocus: () => onFocusChange?.(true),
+            onBlur: () => {
+              releaseHeld();
+              onFocusChange?.(false);
+            },
+          }
+        : {};
 
   return (
     <div
@@ -332,11 +390,11 @@ export function LiveFrame({
       data-controlling={controlling ? "true" : undefined}
       className={cn(
         "relative w-full overflow-hidden bg-muted outline-none dark:bg-black/40",
-        "aspect-[16/10]",
-        large && "mx-auto",
+        fill ? "h-full touch-pinch-zoom select-none" : "aspect-[16/10]",
+        large && !phone && "mx-auto",
         controlling && "cursor-default",
       )}
-      style={large ? { maxWidth: `calc((100dvh - 2rem - ${chrome}px) * 1.6)` } : undefined}
+      style={large && !phone ? { maxWidth: `calc((100dvh - 2rem - ${chrome}px) * 1.6)` } : undefined}
       {...capture}
     >
       {framed ? (
