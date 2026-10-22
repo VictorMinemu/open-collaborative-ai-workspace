@@ -36,6 +36,9 @@ export const REQUIRED_AREAS = [
   { area: "browser live view and takeover", file: "apps/api/src/modules/browser/live-view.ts" },
   { area: "sealed browser sessions", file: "apps/api/src/modules/browser/sessions.ts" },
   { area: "confined sandbox and browser calls", file: "apps/api/src/modules/agent-channel/sandbox.ts" },
+  // 07.8 verification: the refused-tool table and confined flags (D-13 exec floor), and the Docker socket mount.
+  { area: "bot tool refusals and confined flags", file: "packages/contracts/src/bot-capabilities.ts" },
+  { area: "compose (Docker socket mount)", file: "compose.yaml" },
 ];
 
 /** GitHub CODEOWNERS pattern (gitignore subset) → RegExp over repo-relative paths. */

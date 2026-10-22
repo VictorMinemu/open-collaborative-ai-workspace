@@ -68,6 +68,11 @@
 /apps/openclaw-channel/src/sandbox-tools.ts        @VictorMinemu
 /apps/openclaw-channel/src/browser-tools.ts        @VictorMinemu
 /apps/web/components/browser/live-*                @VictorMinemu
+/packages/contracts/src/bot-capabilities.ts        @VictorMinemu
+/compose.yaml                                      @VictorMinemu
+/apps/api/src/modules/plugins/risk.ts              @VictorMinemu
+/infra/openclaw/render-config.mjs                  @VictorMinemu
+/apps/openclaw-channel/src/reconciler.ts           @VictorMinemu
 
 # Runtime adapters (ADR-0012 path) and the OpenClaw plugin install gate.
 /apps/local-runtime/src/claude/                    @VictorMinemu

@@ -412,7 +412,9 @@ sandbox profile; recorded in `07.8-VALIDATION.md`. **Owner check pending:** `doc
   human" (#302).
 - The open 07.8 ledger entries at the gate, by id: #235, #236, #238, #242, #243, #244, #245, #248, #250, #252, #256,
   #257, #258, #261, #262, #264, #266, #267, #268, #269, #270, #274, #277, #278, #279, #280, #281, #282, #283, #285,
-  #288, #289, #290, #293, #298, #299, #300, #301, #302 (`.planning/WINDOWS.md`; #251 and #254 are fixed by this gate).
+  #288, #289, #290, #293, #298, #299, #300, #301, #302, #303, #304 (`.planning/WINDOWS.md`; #251 and #254 are fixed
+  by this gate). #303 (the web keeps the previous session's query cache when a session expires without a sign-out) and
+  #304 (other `useTopic` callers may multiply invalidations) predate this phase.
   The ones that change behaviour: version listing for packages (#268), IME composition in the live view (#280, #289),
   a running sandbox keeping a stale proxy entry after a proxy restart (#279), a 15-minute sign-in expiring under a
   member still in control (#285), and the CI image and Woodpecker evidence owed at the first push (#277, #301).
