@@ -1389,6 +1389,7 @@ export function dockerPackageRunner(options: DockerRunnerOptions): PackageRunner
 
       try {
         let networkMode = "none";
+        let egressAddress: string | null = null;
         if (opts.network && egress) {
           const spec = packageRunNetworkSpec({
             ns,
@@ -1401,7 +1402,8 @@ export function dockerPackageRunner(options: DockerRunnerOptions): PackageRunner
           if (created.status !== 201) throw down("cannot create the package run's network");
           networkCreated = true;
           attached = true;
-          await egress.attach(target, kind, names.network);
+          // A fresh run on a fresh network: the proxy's address there goes into the run's /etc/hosts (gVisor DNS).
+          egressAddress = await egress.attach(target, kind, names.network);
           networkMode = names.network;
         }
         const base = {
@@ -1414,6 +1416,7 @@ export function dockerPackageRunner(options: DockerRunnerOptions): PackageRunner
           network: networkMode,
           env,
           lifetimeSeconds: Math.ceil(opts.lifetimeMs / 1000),
+          egressAddress,
         };
         const spec =
           kind === "installer"

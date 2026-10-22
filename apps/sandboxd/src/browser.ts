@@ -30,7 +30,14 @@ import { AgentError, type AgentLink, openAgentLink } from "./agent-link";
 import { type Docker, DockerUnavailableError } from "./docker";
 import type { Egress } from "./egress-attach";
 import { type Clock, type SandboxdEventInput, SandboxdFailure, type Sandboxes } from "./sandboxes";
-import { browserNetworkSpec, brwSpec, type DockerRuntime, nameFor, ownerLabels } from "./spec";
+import {
+  browserNetworkSpec,
+  brwSpec,
+  type DockerRuntime,
+  egressHostsCurrent,
+  nameFor,
+  ownerLabels,
+} from "./spec";
 
 /**
  * Each bot's browser as sandboxd runs it (07.8-13, D-01, D-05, D-06, D-07, D-09, D-11, D-12, D-13, D-14, BRW-01/02).
@@ -427,9 +434,21 @@ export function createBrowsers(options: BrowsersOptions): Browsers {
 
     // The proxy first, so the browser's first request already has a way out (or a refusal) waiting.
     const network = await ensureBrowserNetwork(target);
-    await egress.attach(target, "brw", network);
+    // Its address there now names the proxy in brw's /etc/hosts (gVisor answers no Docker DNS on the bot network).
+    const egressAddress = await egress.attach(target, "brw", network);
 
     let c = await inspectBrowser(target);
+    if (
+      c &&
+      asRecord(c.State).Running !== true &&
+      !egressHostsCurrent(asRecord(c.HostConfig).ExtraHosts, egressAddress)
+    ) {
+      // Stopped with a stale entry (the proxy restarted, or brw predates the entry): created again below. brw keeps
+      // nothing outside its tmpfs, so removing the stopped container loses nothing.
+      const removed = await call("DELETE", `/containers/${encodeURIComponent(String(c.Id))}?force=1`);
+      if (removed.status !== 204 && removed.status !== 404) throw down("the Docker daemon is unavailable");
+      c = null;
+    }
     if (!c) {
       const spec = brwSpec({
         ns,
@@ -445,6 +464,7 @@ export function createBrowsers(options: BrowsersOptions): Browsers {
         },
         chromiumSandbox: true,
         seccompProfile: options.seccompProfile,
+        egressAddress,
       });
       const name = nameFor("brw", ns, target.agentId);
       const created = await call("POST", `/containers/create?name=${encodeURIComponent(name)}`, spec);

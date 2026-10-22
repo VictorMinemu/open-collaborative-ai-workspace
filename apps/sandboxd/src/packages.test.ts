@@ -860,6 +860,7 @@ describe("dockerPackageRunner", () => {
       ensure: async () => undefined,
       attach: async (target: unknown, kind: string, network: string) => {
         attached.push({ target, kind, network });
+        return "10.6.0.2";
       },
       detachTarget: async () => undefined,
       detachNetwork: async (network: string) => {
@@ -908,6 +909,8 @@ describe("dockerPackageRunner", () => {
       HostConfig: { Mounts: { Source?: string; ReadOnly: boolean }[]; NetworkMode: string };
     };
     expect(created.HostConfig.NetworkMode).toBe(nets[0]?.Name);
+    // The proxy by its address on the run's network (runsc answers no Docker DNS there).
+    expect((created.HostConfig as { ExtraHosts?: string[] }).ExtraHosts).toEqual(["sandbox-egress:10.6.0.2"]);
     expect(created.HostConfig.Mounts[0]).toMatchObject({
       Source: `ocw-pkg-ocw-unit-${A.slice(-4)}`,
       ReadOnly: false,
@@ -958,6 +961,10 @@ describe("dockerPackageRunner", () => {
       (s.docker.containerCreates[0]?.body as { HostConfig?: { NetworkMode?: string } } | undefined)
         ?.HostConfig?.NetworkMode,
     ).toBe("none");
+    expect(
+      (s.docker.containerCreates[0]?.body as { HostConfig?: { ExtraHosts?: string[] } } | undefined)
+        ?.HostConfig?.ExtraHosts,
+    ).toEqual([]);
     await run.close();
   });
 
