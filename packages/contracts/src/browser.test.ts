@@ -29,6 +29,8 @@ import {
   BrowserSessionList,
   BrowserSignInStatus,
   BrowserTabView,
+  ConversationBrowserItem,
+  ConversationBrowserList,
   LiveClientFrame,
   LiveInputFrame,
   LiveServerFrame,
@@ -582,6 +584,58 @@ describe("sign-in card link, sessions and the Browser tab (R1, R7, D-08, D-12 U-
     expect(BrowserActivityItem.safeParse({ ...activity, url: "https://panel.autofy.app/x" }).success).toBe(
       false,
     );
+  });
+});
+
+describe("07.8-26: the sign-in card's names and the conversation's open pages (UI-SPEC Surface 1b, Surface 2)", () => {
+  const link = {
+    contextId: ID,
+    host: "panel.autofy.app",
+    secure: true,
+    requesterId: ID2,
+    status: "signed_in",
+    expiresAt: NOW,
+    sessionExpiresAt: NOW,
+    stopReason: null,
+  };
+
+  it("the sign-in link may name its requester and when it was decided (additive, bounded)", () => {
+    const named = index.AgentCardBrowserSignInLink.parse({
+      ...link,
+      requesterName: "Sam Lee",
+      decidedAt: NOW,
+    });
+    expect(named.requesterName).toBe("Sam Lee");
+    expect(named.decidedAt).toBe(NOW);
+    expect(index.AgentCardBrowserSignInLink.parse(link).requesterName).toBe(undefined);
+    expect(
+      index.AgentCardBrowserSignInLink.safeParse({ ...link, requesterName: "x".repeat(201) }).success,
+    ).toBe(false);
+    expect(index.AgentCardBrowserSignInLink.safeParse({ ...link, decidedAt: "yesterday" }).success).toBe(
+      false,
+    );
+  });
+
+  it("a conversation's open pages: the page's host, the bot and the thread, nothing about the page itself", () => {
+    const item = {
+      contextId: ID,
+      host: "panel.autofy.app",
+      secure: true,
+      bot: { id: ID2, displayName: "Scout", avatarUrl: null },
+      threadRootId: null,
+    };
+    expect(ConversationBrowserItem.parse(item)).toEqual(item);
+    expect(
+      ConversationBrowserList.parse({ items: [item, { ...item, threadRootId: ID }] }).items,
+    ).toHaveLength(2);
+    expect(ConversationBrowserItem.safeParse({ ...item, url: "https://panel.autofy.app/x" }).success).toBe(
+      false,
+    );
+    expect(ConversationBrowserItem.safeParse({ ...item, host: "https://panel.autofy.app/x" }).success).toBe(
+      false,
+    );
+    expect(ConversationBrowserList.safeParse({ items: Array(51).fill(item) }).success).toBe(false);
+    expect(index.ConversationBrowserList).toBe(ConversationBrowserList);
   });
 });
 
