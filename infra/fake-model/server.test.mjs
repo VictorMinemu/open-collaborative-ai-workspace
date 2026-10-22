@@ -88,6 +88,37 @@ describe("planToolStep (OpenClaw message layout)", () => {
   });
 });
 
+describe("planToolStep: a ref read from the latest snapshot (07.8-28)", () => {
+  it("`{{ref:<name>}}` in a directive's arguments becomes the ref of the element with that name in the turn's latest tool result", () => {
+    const offered = ["ocw_browser_snapshot", "ocw_browser_act"];
+    const ask =
+      '[[call ocw_browser_snapshot {}]] [[call ocw_browser_act {"action":"click","ref":"{{ref:Export}}"}]]';
+    const snapshot =
+      'Page: “Orders” on panel.fake.test:8080\n- [e3] heading "Orders"\n  - [e17] link "Export"';
+    const step = planToolStep(
+      [
+        { role: "user", content: ask },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            { id: "c1", type: "function", function: { name: "ocw_browser_snapshot", arguments: "{}" } },
+          ],
+        },
+        { role: "tool", tool_call_id: "c1", content: snapshot },
+      ],
+      offered,
+    );
+    assert.deepEqual(step?.call, { name: "ocw_browser_act", args: { action: "click", ref: "e17" } });
+    // No such element yet: the placeholder stays (the API answers element_gone).
+    const none = planToolStep(
+      [{ role: "user", content: '[[call ocw_browser_act {"action":"click","ref":"{{ref:Export}}"}]]' }],
+      offered,
+    );
+    assert.deepEqual(none?.call?.args, { action: "click", ref: "{{ref:Export}}" });
+  });
+});
+
 describe("parseDirectives", () => {
   it("finds [[call <tool> <json>]] directives in order, JSON with brackets included", () => {
     assert.deepEqual(
