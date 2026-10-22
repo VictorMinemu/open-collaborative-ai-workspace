@@ -57,6 +57,8 @@ const RUN_TIMEOUT_MS = 60_000;
 const STDIN_CHUNK = 64 * 1024;
 /** A broker-caused stop is matched to its `die` event within this window. */
 const EXPECTED_STOP_MS = 60_000;
+/** The longest a kill waits for the container's last usage sample (best-effort; the kill never waits longer). */
+const KILL_SAMPLE_BUDGET_MS = 250;
 const WATCH_RETRY_MS = 2_000;
 /** A Docker event line longer than this is dropped (they are a few hundred bytes). */
 const MAX_EVENT_LINE = 64 * 1024;
@@ -750,24 +752,33 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
   async function killListed(
     listed: Array<{ Id: string; Labels?: Record<string, string> }>,
   ): Promise<{ removed: number }> {
-    let removed = 0;
-    for (const c of listed) {
-      const t = targetOfLabels(c.Labels);
-      const kind = c.Labels?.[SANDBOXD_LABELS.kind];
-      if (t && kind === "sbx") await sampleUsageOf(t, c.Id).catch(() => undefined);
-      expectStop(c.Id);
-      const res = await call("POST", `/containers/${encodeURIComponent(c.Id)}/kill`);
-      if (res.status !== 204) continue;
-      removed++;
-      if (t && (kind === "sbx" || kind === "brw")) {
-        if (kind === "sbx") {
-          stopReasons.set(targetKey(t), "kill_switch");
-          cpuLast.delete(targetKey(t));
+    // The kill switch is an emergency stop: every container is killed at once, and the last usage sample before a
+    // kill is best-effort, bounded so a slow `stats` on a loaded daemon never holds the kill up (sandbox-proof step 3
+    // measured 11.9 s on CI with sequential sampling).
+    const results = await Promise.all(
+      listed.map(async (c) => {
+        const t = targetOfLabels(c.Labels);
+        const kind = c.Labels?.[SANDBOXD_LABELS.kind];
+        if (t && kind === "sbx") {
+          await Promise.race([
+            sampleUsageOf(t, c.Id).catch(() => undefined),
+            new Promise<void>((resolve) => setTimeout(resolve, KILL_SAMPLE_BUDGET_MS)),
+          ]);
         }
-        emit({ type: "state", target: t, kind, state: "killed", reason: "kill_switch" });
-      }
-    }
-    return { removed };
+        expectStop(c.Id);
+        const res = await call("POST", `/containers/${encodeURIComponent(c.Id)}/kill`);
+        if (res.status !== 204) return 0;
+        if (t && (kind === "sbx" || kind === "brw")) {
+          if (kind === "sbx") {
+            stopReasons.set(targetKey(t), "kill_switch");
+            cpuLast.delete(targetKey(t));
+          }
+          emit({ type: "state", target: t, kind, state: "killed", reason: "kill_switch" });
+        }
+        return 1;
+      }),
+    );
+    return { removed: results.reduce<number>((sum, n) => sum + n, 0) };
   }
 
   // ------------------------------------------------------------ exec

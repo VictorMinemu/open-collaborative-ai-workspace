@@ -144,6 +144,20 @@ describe("events from sandboxd's lifecycle (D-09, T-07.8-09-04)", () => {
     for (const e of res.events) expect(e).toMatchObject({ target });
   });
 
+  it("killOrg stops every container at once, even when each usage sample is slow (kill switch within 5 s)", async () => {
+    const { docker, sandboxes } = await stack();
+    const others = ["agent-b", "agent-c", "agent-d"].map((agentId) => ({ orgId: ORG, agentId }));
+    for (const t of [target, ...others]) await sandboxes.ensure(t);
+    // A loaded daemon: every one-shot stats call takes 2 s. Sequential sampling before each kill took 8 s here.
+    docker.statsDelayMs = 2_000;
+    const started = Date.now();
+    const { removed } = await sandboxes.killOrg(ORG);
+    const elapsed = Date.now() - started;
+    expect(removed).toBe(4);
+    expect([...docker.containers.values()].filter((c) => c.Running)).toEqual([]);
+    expect(elapsed).toBeLessThan(1_500);
+  });
+
   it("a container that dies without the broker → state stopped (reason null); the broker's own stops are not crashes", async () => {
     const { docker, events, sandboxes } = await stack();
     const stopWatching = sandboxes.watch();

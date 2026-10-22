@@ -67,16 +67,20 @@ export function registerSandboxPeopleRoutes(
       });
       // After the commit, every time (a retry of a kill whose sandboxd call failed stops what is still running).
       if (deps.client) {
-        try {
-          await deps.client.call("killOrg", { orgId: a.organizationId }, { timeoutMs: KILL_TIMEOUT_MS });
-        } catch (err) {
-          req.log.warn(
-            { organizationId: a.organizationId, error: err instanceof Error ? err.name : "unknown" },
-            "sandboxd did not confirm the organization kill; the organization stays killed",
-          );
-        }
-        // 07.8-11 (WINDOWS #241): sandboxd and its egress proxy hold `killed: true` too.
-        await pushPolicy(core, deps.client, a.organizationId);
+        const client = deps.client;
+        // Both at once: the kill stops what runs, and the pushed policy (07.8-11, WINDOWS #241: sandboxd and its egress
+        // proxy hold `killed: true` too) refuses any start that races the kill. Neither waits for the other.
+        await Promise.all([
+          client
+            .call("killOrg", { orgId: a.organizationId }, { timeoutMs: KILL_TIMEOUT_MS })
+            .catch((err: unknown) => {
+              req.log.warn(
+                { organizationId: a.organizationId, error: err instanceof Error ? err.name : "unknown" },
+                "sandboxd did not confirm the organization kill; the organization stays killed",
+              );
+            }),
+          pushPolicy(core, client, a.organizationId),
+        ]);
       }
       return settings;
     },

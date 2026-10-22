@@ -49,6 +49,8 @@ export class FakeDocker implements Docker {
   volumes = new Map<string, FakeObject>();
   execs = new Map<string, ExecCall & { exitCode: number | null }>();
   onExec: ExecHandler = () => ({ exitCode: 0 });
+  /** How long a stats call takes (a loaded Docker daemon can take seconds per one-shot sample). */
+  statsDelayMs = 0;
   /** The Docker events stream the broker follows (push JSON lines with `emitEvent`). */
   eventStreams: PassThrough[] = [];
   private seq = 0;
@@ -104,6 +106,7 @@ export class FakeDocker implements Docker {
     }
     m = /^\/containers\/([^/]+)\/stats$/.exec(path);
     if (method === "GET" && m) {
+      if (this.statsDelayMs > 0) await new Promise((r) => setTimeout(r, this.statsDelayMs));
       const c = this.container(m[1] as string);
       if (!c) return json(404);
       return json(200, { cpu_stats: { cpu_usage: { total_usage: c.Running ? (c.cpuNs ?? 0) : 0 } } });
