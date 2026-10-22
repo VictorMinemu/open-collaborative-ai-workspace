@@ -378,6 +378,7 @@ function fakeEgress() {
       attached.push({ kind, network });
     },
     detachTarget: async () => undefined,
+    detachNetwork: async () => undefined,
     setOrgPolicy: async () => undefined,
     entries: () => [],
     close: () => undefined,

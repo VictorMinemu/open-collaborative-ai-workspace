@@ -6,6 +6,7 @@ import { createDocker } from "./docker";
 import { createEgress } from "./egress-attach";
 import { createEvents } from "./events";
 import { createFiles } from "./files";
+import { createPackages, dockerPackageRunner, type RegistryConfig, registryConfig, runEnv } from "./packages";
 import { createQuota } from "./quota";
 import { createSandboxes, ownContainerId, ownLabelRefusal, startupRefusal } from "./sandboxes";
 import { createServer, type LogLine } from "./server";
@@ -31,6 +32,11 @@ import { createSweeper, SWEEP_INTERVAL_MS } from "./sweeper";
  *   DOCKER_SOCKET           the daemon socket (default /var/run/docker.sock)
  *   OCW_SANDBOXD_SWEEP_MS   the sweep interval: quota, idle stop, usage, files helpers (default 60000; smokes
  *                           use a few seconds)
+ *   OCW_SANDBOX_NPM_REGISTRY  npm registry of package reviews and installs (default https://registry.npmjs.org/)
+ *   OCW_SANDBOX_PYPI_INDEX    PyPI simple index (default https://pypi.org/simple/)
+ *   OCW_CLAWHUB_URL           ClawHub, the same value the API uses (default https://clawhub.ai)
+ *   OCW_SANDBOX_REGISTRIES    comma list of hosts a review or installer run may reach (default: the npm, PyPI, Debian
+ *                             and ClawHub hosts); fake registries in tests. Package runs need the egress image.
  */
 const Env = z.object({
   OCW_SANDBOX_TOKEN: z.string().min(32, "OCW_SANDBOX_TOKEN must be at least 32 characters"),
@@ -73,6 +79,18 @@ async function main() {
     }
   }
 
+  let registries: RegistryConfig;
+  try {
+    registries = registryConfig(process.env);
+  } catch {
+    writeLog({
+      level: "error",
+      msg: "invalid environment",
+      variables: "OCW_SANDBOX_NPM_REGISTRY, OCW_SANDBOX_PYPI_INDEX, OCW_CLAWHUB_URL, OCW_SANDBOX_REGISTRIES",
+    });
+    process.exit(1);
+  }
+
   const docker = createDocker({ socketPath: env.DOCKER_SOCKET });
 
   // D-14: the container sandboxd runs in (if any) must not carry the label sandboxd kills and purges by.
@@ -102,6 +120,7 @@ async function main() {
         ns: env.OCW_SANDBOX_NAMESPACE,
         image: env.OCW_SANDBOX_EGRESS_IMAGE,
         onEvent: (event) => events.emit(event),
+        registries: registries.registries,
       })
     : null;
   const sandboxes = createSandboxes({
@@ -152,6 +171,18 @@ async function main() {
     }
   }
 
+  // Sandbox packages (07.8-17): review and installer containers from the `sbx` image, through the egress proxy.
+  const packages = createPackages({
+    runner: dockerPackageRunner({
+      docker,
+      sandboxes,
+      egress,
+      ns: env.OCW_SANDBOX_NAMESPACE,
+      image: env.OCW_SANDBOX_SBX_IMAGE,
+      env: runEnv(registries),
+    }),
+  });
+
   const quota = createQuota({ sandboxes });
   const files = createFiles({ sandboxes, quota });
   const sweeper = createSweeper({
@@ -174,6 +205,7 @@ async function main() {
     events,
     browsers,
     egress,
+    packages,
     log: writeLog,
   });
   let stopWatching = () => {};

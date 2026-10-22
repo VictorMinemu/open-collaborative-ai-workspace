@@ -490,8 +490,9 @@ section_core() {
 
   status="$(api POST /v1/sandboxes/purge "{\"target\":$(target "$ORG" "$B")}")"
   left_b=$(($(docker ps -aq --filter "label=ocw.agent=${B}" | wc -l) + $(docker volume ls -q --filter "label=ocw.agent=${B}" | wc -l) + $(docker network ls -q --filter "label=ocw.agent=${B}" | wc -l)))
-  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" removed)" = 3 ] && [ "$left_b" = 0 ] && [ "$(running_of "$CID_A")" = false ]; then
-    ok "purge B removes its container, volume and network (A's objects stay)"
+  # 07.8-17: four objects since the bot's packages volume exists (container, workspace, packages volume, network).
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" removed)" = 4 ] && [ "$left_b" = 0 ] && [ "$(running_of "$CID_A")" = false ]; then
+    ok "purge B removes its container, workspace and packages volumes and network (A's objects stay)"
   else
     fail "purge B → ${status} $(cat "$WORK/body.json"), ${left_b} object(s) left"
   fi

@@ -1,11 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
   agentKey,
+  filesSpec,
   HARD_MAX,
+  INSTALLER_LIMITS,
+  installerSpec,
   labelsFor,
   nameFor,
   networkSpec,
+  PACKAGES_DIR,
+  packageRunNames,
+  packageRunNetworkSpec,
+  packagesVolumeSpec,
+  reviewSpec,
+  SHELL_ENV,
   type ShellSpecInput,
+  STAGING_DIR,
   shellSpec,
   volumeSpec,
 } from "./spec";
@@ -21,6 +31,7 @@ const base: ShellSpecInput = {
   runtime: "runc",
   network: "ocw-net-ocw-test-abc",
   volume: "ocw-ws-ocw-test-abc",
+  packagesVolume: "ocw-pkg-ocw-test-abc",
   limits: { nanoCpus: 1_000_000_000, memoryBytes: 1024 ** 3, pids: 256 },
 };
 
@@ -48,11 +59,12 @@ describe("shellSpec (D-01, D-11 hardened profile)", () => {
     expect(tmp.split(",")).toEqual(expect.arrayContaining(["noexec", "nosuid", "nodev"]));
   });
 
-  it("has exactly one volume mount at /workspace and no bind, port, privilege or capability", () => {
+  it("mounts the workspace read-write and the packages volume read-only, and no bind, port, privilege or capability", () => {
     const spec = shellSpec(base);
     const hc = spec.HostConfig as Record<string, unknown>;
     expect(spec.HostConfig.Mounts).toEqual([
       { Type: "volume", Source: base.volume, Target: "/workspace", ReadOnly: false },
+      { Type: "volume", Source: base.packagesVolume, Target: "/opt/ocw-packages", ReadOnly: true },
     ]);
     expect(hc.Binds).toBeUndefined();
     expect(hc.Privileged === undefined || hc.Privileged === false).toBe(true);
@@ -75,8 +87,22 @@ describe("shellSpec (D-01, D-11 hardened profile)", () => {
     });
   });
 
-  it("sets no environment beyond HOME (no OCW_ variable, no token)", () => {
-    expect(shellSpec(base).Env).toEqual(["HOME=/workspace"]);
+  it("sets exactly HOME, the package paths and the egress proxy (no OCW_ variable, no token, no secret)", () => {
+    // 07.8-17: package bins come after the system paths; curl, pip and npm use the proxy by default (WINDOWS #253).
+    expect(shellSpec(base).Env).toEqual([
+      "HOME=/workspace",
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ocw-packages/bin",
+      "NODE_PATH=/opt/ocw-packages/node_modules",
+      "PYTHONPATH=/opt/ocw-packages/python",
+      "HTTP_PROXY=http://sandbox-egress:3128",
+      "HTTPS_PROXY=http://sandbox-egress:3128",
+      "http_proxy=http://sandbox-egress:3128",
+      "https_proxy=http://sandbox-egress:3128",
+      "NO_PROXY=localhost,127.0.0.1,::1",
+      "no_proxy=localhost,127.0.0.1,::1",
+    ]);
+    expect(shellSpec(base).Env).toEqual([...SHELL_ENV]);
+    for (const line of SHELL_ENV) expect(line).not.toMatch(/OCW_|TOKEN|SECRET|PASSWORD|@/i);
   });
 
   it("clamps limits over HARD_MAX and nonsense values to a safe range", () => {
@@ -144,6 +170,7 @@ describe("shellSpec (D-01, D-11 hardened profile)", () => {
         runtime: base.runtime,
         network: base.network,
         volume: base.volume,
+        packagesVolume: base.packagesVolume,
       } as ShellSpecInput);
       expect(spec).toEqual(clean);
     }
@@ -172,5 +199,115 @@ describe("names and the other objects", () => {
     const vol = volumeSpec({ ns: "ocw-test", orgId: ORG, agentId: AGENT });
     expect(vol.Name).toBe(nameFor("ws", "ocw-test", AGENT));
     expect(vol.Labels["ocw.agent"]).toBe(AGENT);
+  });
+});
+
+describe("the files helper keeps only the workspace (07.8-17)", () => {
+  it("mounts no packages volume and joins no network", () => {
+    const spec = filesSpec({
+      ns: "ocw-test",
+      orgId: ORG,
+      agentId: AGENT,
+      image: "img",
+      runtime: "runc",
+      volume: base.volume,
+    });
+    expect(spec.HostConfig.Mounts).toEqual([
+      { Type: "volume", Source: base.volume, Target: "/workspace", ReadOnly: false },
+    ]);
+    expect(spec.HostConfig.NetworkMode).toBe("none");
+  });
+});
+
+describe("sandbox package review and installer containers (07.8-17, D-03, D-11, P-12)", () => {
+  const RUN = "0199f0a0-2222-7000-8000-00000000000c";
+  const env = ["HTTP_PROXY=http://sandbox-egress:3128", "npm_config_registry=https://registry.npmjs.org/"];
+  const runBase = {
+    ns: "ocw-test",
+    orgId: ORG,
+    agentId: AGENT,
+    runId: RUN,
+    image: "ocw-sandbox-sbx:test",
+    runtime: "runc" as const,
+    network: "ocw-pnet-ocw-test-abc",
+    env,
+    lifetimeSeconds: 600,
+  };
+
+  it("names a run's network and container from its own run id", () => {
+    const names = packageRunNames("ocw-test", RUN);
+    expect(names.network).toBe(`ocw-pnet-ocw-test-${agentKey(RUN)}`);
+    expect(names.container).toBe(`ocw-prun-ocw-test-${agentKey(RUN)}`);
+    expect(packageRunNames("ocw-test", AGENT).network).not.toBe(names.network);
+  });
+
+  it("gives each run an internal network labelled with its kind and owner", () => {
+    const net = packageRunNetworkSpec({
+      ns: "ocw-test",
+      orgId: ORG,
+      agentId: AGENT,
+      runId: RUN,
+      kind: "installer",
+    });
+    expect(net.Internal).toBe(true);
+    expect(net.Attachable).toBe(false);
+    expect(net.Name).toBe(packageRunNames("ocw-test", RUN).network);
+    expect(net.Labels).toEqual(labelsFor({ ns: "ocw-test", orgId: ORG, agentId: AGENT, kind: "installer" }));
+  });
+
+  it("names the bot's packages volume ocw-pkg-<ns>-<key> with the bot's labels", () => {
+    const vol = packagesVolumeSpec({ ns: "ocw-test", orgId: ORG, agentId: AGENT });
+    expect(vol.Name).toBe(nameFor("pkg", "ocw-test", AGENT));
+    expect(vol.Labels).toEqual(labelsFor({ ns: "ocw-test", orgId: ORG, agentId: AGENT, kind: "sbx" }));
+  });
+
+  it("the installer has the shell's hardened profile, the packages volume read-write and a labelled scratch volume", () => {
+    const spec = installerSpec({ ...runBase, packagesVolume: "ocw-pkg-ocw-test-abc" });
+    expect(spec.User).toBe("10001:10001");
+    expect(spec.HostConfig.ReadonlyRootfs).toBe(true);
+    expect(spec.HostConfig.CapDrop).toEqual(["ALL"]);
+    expect(spec.HostConfig.SecurityOpt).toEqual(["no-new-privileges:true"]);
+    expect(spec.HostConfig.Privileged).toBe(false);
+    expect(spec.HostConfig.Init).toBe(true);
+    expect(spec.HostConfig.AutoRemove).toBe(true);
+    expect(spec.HostConfig.NetworkMode).toBe(runBase.network);
+    expect(spec.HostConfig.NanoCpus).toBe(INSTALLER_LIMITS.nanoCpus);
+    expect(spec.HostConfig.Memory).toBe(INSTALLER_LIMITS.memoryBytes);
+    expect(spec.HostConfig.PidsLimit).toBe(INSTALLER_LIMITS.pids);
+    const labels = labelsFor({ ns: "ocw-test", orgId: ORG, agentId: AGENT, kind: "installer" });
+    expect(spec.Labels).toEqual(labels);
+    expect(spec.HostConfig.Mounts).toEqual([
+      { Type: "volume", Source: "ocw-pkg-ocw-test-abc", Target: PACKAGES_DIR, ReadOnly: false },
+      { Type: "volume", Target: STAGING_DIR, ReadOnly: false, VolumeOptions: { Labels: labels } },
+    ]);
+    expect(spec.Env).toEqual(["HOME=/staging/home", ...env]);
+    expect(spec.Cmd).toEqual(["sleep", "600"]);
+    const hc = spec.HostConfig as Record<string, unknown>;
+    expect(hc.Binds).toBeUndefined();
+    expect(hc.CapAdd).toBeUndefined();
+    expect(hc.PortBindings).toBeUndefined();
+  });
+
+  it("the installer for a removal joins no network", () => {
+    const spec = installerSpec({ ...runBase, network: "none", packagesVolume: "ocw-pkg-ocw-test-abc" });
+    expect(spec.HostConfig.NetworkMode).toBe("none");
+  });
+
+  it("the review container mounts nothing persistent: only its own scratch volume", () => {
+    const spec = reviewSpec(runBase);
+    const labels = labelsFor({ ns: "ocw-test", orgId: ORG, agentId: AGENT, kind: "review" });
+    expect(spec.Labels).toEqual(labels);
+    expect(spec.HostConfig.Mounts).toEqual([
+      { Type: "volume", Target: STAGING_DIR, ReadOnly: false, VolumeOptions: { Labels: labels } },
+    ]);
+    expect(spec.HostConfig.ReadonlyRootfs).toBe(true);
+    expect(spec.HostConfig.AutoRemove).toBe(true);
+    expect(JSON.stringify(spec)).not.toContain('/workspace","ReadOnly');
+    expect(JSON.stringify(spec)).not.toContain(PACKAGES_DIR);
+  });
+
+  it("never copies a caller's extra key into a run spec", () => {
+    const hostile = { ...runBase, Privileged: true, Binds: ["/:/host"], HostConfig: { Privileged: true } };
+    expect(reviewSpec(hostile as typeof runBase)).toEqual(reviewSpec(runBase));
   });
 });
