@@ -62,11 +62,17 @@ on_exit() {
     log "--- proxy log (decision lines and operational lines) ---"
     docker logs "$PROXY" 2>&1 | tail -n 40 >&2 || true
   fi
-  cleanup_ns
+  # A removed container can hold its network and volumes for a moment after `rm -f` returns (CI dind, pipeline 52):
+  # retry the label cleanup briefly before counting what is left, as run-sandbox-smoke.sh does.
+  local left attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    cleanup_ns
+    left="$(docker ps -aq --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')"
+    left=$((left + $(docker network ls -q --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')))
+    [ "$left" = "0" ] && break
+    sleep 1
+  done
   docker image rm -f "$PROXY_IMAGE" "$CLIENT_IMAGE" >/dev/null 2>&1 || true
-  local left
-  left="$(docker ps -aq --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')"
-  left=$((left + $(docker network ls -q --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')))
   if [ "$left" != "0" ]; then
     log "FAIL ${left} object(s) labelled ocw.namespace=${NS} left after cleanup"
     code=1
