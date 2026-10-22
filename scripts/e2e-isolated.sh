@@ -289,6 +289,20 @@ if [ "$sandbox" -eq 1 ]; then
   [ "$listening" -eq 1 ] || { echo "e2e-isolated: sandboxd did not start"; tail -20 "$RUN_DIR/sandboxd.log"; exit 1; }
   export OCW_SANDBOX_URL="http://127.0.0.1:$SANDBOX_PORT" OCW_SANDBOX_TOKEN="$sandbox_token"
   export OCW_E2E_SANDBOX=real OCW_E2E_SANDBOX_NAMESPACE="$SANDBOX_NS"
+  # 07.8-28: the fake sites of the browser journey (infra/sandbox/test/fake-site.mjs on the pinned node base, no image
+  # built): panel.fake.test, idp.fake.test and evil.fake.test on :8080, on their own internal network. Both carry
+  # ocw.namespace=ocw-e2e, so the label cleanup removes them. Only the egress proxy joins that network
+  # (e2e/support/sandbox.ts `useFakeSites`, as the stack smoke does): sandboxd's outbound network keeps
+  # inter-container traffic off, so a site attached there would be unreachable.
+  fake_site_base="node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20"
+  docker network create --internal --label "ocw.namespace=$SANDBOX_NS" "$SANDBOX_NS-sites" >/dev/null
+  docker run -d --name "$SANDBOX_NS-fake-site" --label "ocw.namespace=$SANDBOX_NS" --network "$SANDBOX_NS-sites" \
+    --network-alias panel.fake.test --network-alias idp.fake.test --network-alias evil.fake.test \
+    --user 1000:1000 --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+    -v "$PWD/infra/sandbox/test/fake-site.mjs:/site/fake-site.mjs:ro" "$fake_site_base" node /site/fake-site.mjs >/dev/null
+  export OCW_E2E_FAKE_SITES_NET="$SANDBOX_NS-sites" OCW_E2E_FAKE_SITE="$SANDBOX_NS-fake-site"
+  # The logs a full-stack sweep reads (the API's and sandboxd's), by path only.
+  export OCW_E2E_RUN_DIR="$RUN_DIR"
   echo "e2e-isolated: real sandboxd on $OCW_SANDBOX_URL (namespace $SANDBOX_NS)"
 fi
 

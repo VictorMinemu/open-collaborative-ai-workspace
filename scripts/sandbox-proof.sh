@@ -11,8 +11,16 @@
 # It creates ONLY a cell, a fake model container, a network and a volume, all named ocw-proof-sandbox-* and labelled
 # ocw.namespace=ocw-proof-sandbox, removed by label by the EXIT trap (the sandboxes themselves are e2e-isolated.sh's
 # ocw.namespace=ocw-e2e objects, removed by it). Images are tagged :e2e (never :local) and removed when this run built
-# them. It reads the ocw_e2e database read-only, except the organization switch (e2e/support/sandbox.ts) until the
-# settings route of 07.8-11 exists. Plan 07.8-28 extends it with the browser journey; 07.8-24 runs it in Woodpecker.
+# them. It reads the ocw_e2e database read-only (settings, private hosts and switches go through the API).
+# 07.8-28 adds the sign-in journey with real Chromium (steps 6-10): the real `brw`, the fake sites scripts/e2e-isolated.sh
+# --sandbox starts (panel, idp and evil.fake.test), a takeover over the real live-view socket typing the four E1
+# strings, takeover and member-session privacy, the
+# D-13 attempts to reach evil.fake.test (open, the Export link, curl to /collect) and the E1 sweep over the database, the
+# API, sandboxd, brw, egress and cell logs and every model request. 07.8-24 runs it in Woodpecker. The E1 strings:
+#   username   ana@example.test
+#   password   S3cr3t-Hunter2-OCW
+#   one-time   735190
+#   revealed   Visible-Secret-99   (typed after the show-password toggle)
 #   PROOF_BUILD=1          build ocw-openclaw:e2e and ocw-fake-model:e2e from this tree first (else they must exist)
 #   PROOF_OUT=<dir>        where state.json, cell.log, fake-model.log and audit.tsv are written (default: a temp dir)
 #   PROOF_SUBNET           proof network subnet (default 10.231.80.0/24)
@@ -180,8 +188,13 @@ step 2 "PASS 2. Echo's cat note.txt: No such file; the two sbx containers are on
 step 3 "PASS 3. kill switch: no running container of the organization within 5 s; the next exec answered the killed sentence"
 step 4 "PASS 4. sandbox.exec rows for both bots and one sandbox.killed row by Ana, ids, codes and durations only"
 step 5 "PASS 5. after the resume, env in the sandbox holds neither the cell token, nor the sandbox token, nor an OCW_ name"
+step 6 "PASS 6. Guide (team, Ana's) asked Sam to sign in to panel.fake.test; Sam typed ana@example.test, S3cr3t-Hunter2-OCW, 735190 and Visible-Secret-99 through the live view; the card turned signed in"
+step 7 "PASS 7. the bot continued signed in: its snapshot read Welcome"
+step 8 "PASS 8. D-13: open of evil.fake.test and the Export click answered approval required, curl to evil.fake.test member_data; /collect hits 0; two pending approvals for Sam, 15 minutes"
+step 9 "PASS 9. reused without a card, revoked, never Ana's; Ana (owner) and Sam's other device got 0 frames during the takeover and the signed-in page; frames again afterwards"
+step 10 "PASS 10. E1 sweep: none of the four strings in any column, audit row, stream event, API, sandboxd or cell log, or model request; brw and egress keep no log (driver none)"
 if [[ -f "$OUT/state.json" ]]; then
-  node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`== timings: first exec (cold sbx start, through the cell) ${s.coldStartMs} ms after ${s.firstExecAttempts} ask(s); kill switch to no running container ${s.killLatencyMs} ms`)' "$OUT/state.json"
+  node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`== timings: first exec (cold sbx start, through the cell) ${s.coldStartMs} ms after ${s.firstExecAttempts} ask(s); kill switch to no running container ${s.killLatencyMs} ms`);if(s.journey)console.log(`== journey: take to signed in ${s.journey.signInMs} ms; controller frames ${s.journey.controllerFrames}; Ana frames while private ${s.journey.anaFrames.length}; other device ${s.journey.otherDeviceFrames.length}; /collect hits ${s.journey.collectHits}; pending approvals ${s.journey.pendingApprovals}`)' "$OUT/state.json"
 fi
 
 # ---------------------------------------------------------------- audit rows (read-only)

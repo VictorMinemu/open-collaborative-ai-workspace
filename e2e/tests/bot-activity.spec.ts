@@ -366,7 +366,8 @@ test("07.8-21: Scout asks Sam to sign in; the step says â€œAsked you to sign inâ
     .filter({ has: page.getByTestId("agent-card-title").getByText(`Sign in to ${host}`, { exact: true }) })
     .last();
   await expect(card).toBeVisible({ timeout: 20_000 });
-  await expect(card.getByTestId("agent-card-fields")).toContainText("The invoices need your account.");
+  // The sign-in card's own body (07.8-26) shows the reason in quotes, under "Why".
+  await expect(card).toContainText("The invoices need your account.");
   await expect(card).not.toContainText("page=2");
   await expect(row).not.toContainText("/invoices");
   await invariants(
