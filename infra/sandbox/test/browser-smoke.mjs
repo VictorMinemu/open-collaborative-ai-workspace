@@ -318,7 +318,7 @@ steps.open = async (agent) => {
   const ready = await agent.event((e) => e.event === "ready");
   assert.ok(["chromium", "container-only", "chromium+gvisor"].includes(ready.browserSandbox));
   const info = await agent.ok("info");
-  assert.equal(info.browserVersion, "153.0.8010.12");
+  assert.equal(info.browserVersion, "156.0.8078.47");
   log(`   runtime ${info.runtime}, browserSandbox ${info.browserSandbox}, Chromium ${info.browserVersion}`);
 
   const ctx = await open(agent);

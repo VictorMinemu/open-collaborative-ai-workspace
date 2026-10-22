@@ -1272,7 +1272,7 @@ if (process.argv.includes("--check")) {
     process.exit(1);
   }
   const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
-  if (pkg.dependencies?.["playwright-core"] !== "1.63.0") process.exit(1);
+  if (pkg.dependencies?.["playwright-core"] !== "1.64.1") process.exit(1);
   process.stdout.write("ok\n");
   process.exit(0);
 }
