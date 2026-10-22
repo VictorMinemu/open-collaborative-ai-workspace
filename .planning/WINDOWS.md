@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 160
 waived_count: 4
-fixed_count: 110
-total_count: 274
-last_updated: 2026-10-22T03:47:12.229Z
+fixed_count: 114
+total_count: 278
+last_updated: 2026-10-22T04:13:28.997Z
 ---
 
 # Broken Windows Ledger
@@ -261,7 +261,7 @@ last_updated: 2026-10-22T03:47:12.229Z
 | 244 | 07.8 | deviation | apps/api/src/modules/sandbox |  | Pending purges and policy re-push after a sandboxd restart reach only orgs with events or a failed purge in this process (needs a SECURITY DEFINER org list or a sandboxd boot event); no 'crashed' stop reason in contract/DB; egress audit hourly dedupe queries audit_events metadata without an index; the event consumer holds a pool connection; fake sandboxd stores files as UTF-8 text (breaks binaries) | open |  | 2026-10-15T21:29:49.204Z |  |
 | 245 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | Sandbox activity steps never carry approvalMessageRoute (07.8-14/20); bot_turn_activity.running stays true for a turn that never replies, web live label needs a timeout (07.8-20); a write body over Fastify's 2 MiB limit returns Fastify's 413 not too_large; shared images show as downloads, no preview (07.8-25); fake sandboxd codes (404 read folder, 409 busy delete) to check against the real one (07.8-08/09) | open |  | 2026-10-15T22:12:53.836Z |  |
 | 246 | 07.8 | deviation | apps/sandboxd/src |  | MUST FIX (fail-open): sandboxd keeps policy, kill state and disk_full in memory; after a sandboxd restart the defaults apply (2 GiB, 15 min idle, NOT killed) until the API re-pushes, and the API only re-pushes for orgs with events. Fix: sandboxd refuses ensure/restart for an org with no policy (409 policy_missing) and the API pushes policy then retries; plus a boot event | fixed |  | 2026-10-15T22:14:34.757Z | 2026-10-21T20:35:29.061Z |
-| 247 | 07.8 | deviation | apps/sandboxd/src |  | Soft quota counts apparent size (sparse files in full) and may overshoot up to one 60 s sweep (document XFS hard quota at the gate); transfers hold ~67 MiB JSON + 50 MiB decoded in memory, two at once; after a sandboxd restart a running background process no longer prevents idling; a container death during the watcher's 2 s reconnect is not reported; OCW_SANDBOXD_SWEEP_MS needs compose and env parity (07.8-24) | open |  | 2026-10-15T22:14:34.840Z |  |
+| 247 | 07.8 | deviation | apps/sandboxd/src |  | Soft quota counts apparent size (sparse files in full) and may overshoot up to one 60 s sweep (document XFS hard quota at the gate); transfers hold ~67 MiB JSON + 50 MiB decoded in memory, two at once; after a sandboxd restart a running background process no longer prevents idling; a container death during the watcher's 2 s reconnect is not reported; OCW_SANDBOXD_SWEEP_MS needs compose and env parity (07.8-24) | fixed |  | 2026-10-15T22:14:34.840Z | 2026-10-22T04:13:28.623Z |
 | 248 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | When the org is killed or switched off the bot is not offered the sandbox tool and cannot say why (add a withheld reason killed/sandbox_off, 07.8-10/14/19); a message 1-2 s after a member turns Sandbox on can still get 'not offered' (UI should show applying, 07.8-15); cell-proof.sh PROOF_BUILD=1 still builds the demo's :local tags; e2e-reset.sh label cleanup untested locally | open |  | 2026-10-15T22:38:49.256Z |  |
 | 249 | 07.8 | deviation | apps/api/src/modules/browser |  | MUST FIX (D-11 floor): when an admins/unit_leads 07.5 policy applies to ocw_browser_act, those approvers decide a member's signed-in action instead of the member; signed-in acts must always need the requesting member's approval | fixed |  | 2026-10-21T19:53:39.333Z | 2026-10-21T20:35:28.921Z |
 | 250 | 07.8 | deviation | apps/api/src/modules/browser |  | act answers download:null until 07.8-25; a session counts as loaded by session_id but stored state is not passed to sandboxd until 07.8-21; kill does not close browser contexts in its own tx (rows stay open if sandboxd is down); image-capable model list is hand-kept; approval chip icons reuse package/globe | open |  | 2026-10-21T19:53:39.439Z |  |
@@ -269,15 +269,15 @@ last_updated: 2026-10-22T03:47:12.229Z
 | 252 | 07.8 | deviation | apps/web/components/bots |  | Sandbox file list route has no offset/cursor beyond 500 entries ('{n} more not listed'); Capabilities switches are 20x36 (<44 px, same as the existing Internet row); sandbox state events carry no runtime so a sandbox started outside the API ensure shows 'hardened' until restart; upload dialog does not intercept in-app navigation | open |  | 2026-10-21T20:05:42.084Z |  |
 | 253 | 07.8 | deviation | infra/sandbox/sbx |  | sbx has no HTTP(S)_PROXY env, so curl/pip/npm in the shell ignore the egress proxy unless given -x (allowlisted egress unusable by default); set the proxy env in the sbx spec (07.8-17/24) | fixed |  | 2026-10-21T20:09:53.837Z | 2026-10-22T02:53:29.247Z |
 | 254 | 07.8 | deviation | apps/sandboxd/src/egress/proxy.ts |  | The proxy passes an upstream X-OCW-Egress header through (a site can make its own http page look refused): strip it; a failed policy write to the proxy answers 503 after sandboxd stored it (proxy lags until retry); a recreated proxy restores each bot's egress only on its next ensure | open |  | 2026-10-21T20:09:53.930Z |  |
-| 255 | 07.8 | deviation | apps/sandboxd/src |  | A sandboxd restart forgets its context map (agent answers no_context until it closes after 5 idle min, API must reopen); browserLimits idleStopMs/diskQuotaBytes unused (fixed 5 min); API owes resize mode, browserSandbox and http navigation_refused handling (07.8-16); 24 owes OCW_SANDBOX_BRW_IMAGE/EGRESS_IMAGE/BRW_SECCOMP env and gVisor/amd64 runs | open |  | 2026-10-21T20:09:54.014Z |  |
+| 255 | 07.8 | deviation | apps/sandboxd/src |  | A sandboxd restart forgets its context map (agent answers no_context until it closes after 5 idle min, API must reopen); browserLimits idleStopMs/diskQuotaBytes unused (fixed 5 min); API owes resize mode, browserSandbox and http navigation_refused handling (07.8-16); 24 owes OCW_SANDBOX_BRW_IMAGE/EGRESS_IMAGE/BRW_SECCOMP env and gVisor/amd64 runs | fixed |  | 2026-10-21T20:09:54.014Z | 2026-10-22T04:13:28.548Z |
 | 256 | 07.8 | deviation | apps/api/src/modules/sandbox |  | Package installs run synchronously on the first call of a stopped sandbox (up to 600 s per package, can outlast the plugin deadline); a package reaches a running sandbox only at its next start (UI copy in 07.8-23); newerVersion always null; failed installs notify no admin beyond audit; package audit metadata includes registry name/version/digests | open |  | 2026-10-21T20:12:08.217Z |  |
 | 257 | 07.8 | deviation | apps/web/components/sandbox/settings/limits-form.tsx |  | 07.8-19: the container limits line copies the API CONTAINER_LIMITS because the settings view does not expose them (low) | open |  | 2026-10-22T02:52:51.781Z |  |
 | 258 | 07.8 | deviation | infra/fake-model/fake-sandboxd.mjs |  | 07.8-19: the fake sandboxd always reports gVisor; no switch to fake hardened, Docker too old or container-only runtimes (low) | open |  | 2026-10-22T02:52:51.861Z |  |
-| 259 | 07.8 | deviation | apps/api/src/modules/sandbox |  | SHOULD FIX (07.8-17): the API's sandboxd client uses plain fetch (undici 300 s default); a package install taking 300-540 s fails at the API while sandboxd completes it. Give package install/review an explicit 600 s timeout (07.8-24/28) | open |  | 2026-10-22T02:53:29.323Z |  |
+| 259 | 07.8 | deviation | apps/api/src/modules/sandbox |  | SHOULD FIX (07.8-17): the API's sandboxd client uses plain fetch (undici 300 s default); a package install taking 300-540 s fails at the API while sandboxd completes it. Give package install/review an explicit 600 s timeout (07.8-24/28) | fixed |  | 2026-10-22T02:53:29.323Z | 2026-10-22T04:13:28.698Z |
 | 260 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: a sandboxd crash mid review/install leaves its ocw-pnet-* network behind (container and temp volume self-remove); add to 28's orphan sweep | open |  | 2026-10-22T02:53:29.401Z |  |
 | 261 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: the per-bot packages volume has no disk quota of its own (only the sandbox quota policy); record in ADR-0029 soft-quota note (29) | open |  | 2026-10-22T02:53:29.477Z |  |
 | 262 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: when two packages provide the same bin or module name the first on PATH/NODE_PATH wins silently; surface a conflict at review (low) | open |  | 2026-10-22T02:53:29.552Z |  |
-| 263 | 07.8 | deviation | infra/compose |  | MUST (07.8-24): add OCW_SANDBOX_NPM_REGISTRY, OCW_SANDBOX_PYPI_INDEX, OCW_CLAWHUB_URL (must equal the API's) and OCW_SANDBOX_REGISTRIES to sandboxd in compose and Woodpecker | open |  | 2026-10-22T02:53:29.628Z |  |
+| 263 | 07.8 | deviation | infra/compose |  | MUST (07.8-24): add OCW_SANDBOX_NPM_REGISTRY, OCW_SANDBOX_PYPI_INDEX, OCW_CLAWHUB_URL (must equal the API's) and OCW_SANDBOX_REGISTRIES to sandboxd in compose and Woodpecker | fixed |  | 2026-10-22T02:53:29.628Z | 2026-10-22T04:13:28.471Z |
 | 264 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: npm 11.19 warns about allowScripts but still runs install scripts; a future npm enforcing it needs an allow-list (low); Debian packages only unit-tested (VALIDATION manual row) | open |  | 2026-10-22T02:53:29.706Z |  |
 | 265 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-20 (for 21): ActivityStep has no requester, so sign-in and paused rows cannot name the person ("Asked you / Asked Sam" is built and tested, waiting for data) | open |  | 2026-10-22T03:14:25.296Z |  |
 | 266 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-20: activity steps carry no http/https flag, so step hosts show no lock or Not secure (only the card and review do) (low) | open |  | 2026-10-22T03:14:25.387Z |  |
@@ -289,6 +289,10 @@ last_updated: 2026-10-22T03:47:12.229Z
 | 272 | 07.8 | deviation | apps/api/src/modules/browser/live-view.ts |  | 07.8-16: watching resizes the bot's page from 1280x800 to 960x600 (UI-SPEC default); 22/28 decide whether the small default stays (low) | open |  | 2026-10-22T03:47:12.076Z |  |
 | 273 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-16: the live-view state frame has no browserSandbox, so the floating window cannot show isolation per page (low, 22/26) | open |  | 2026-10-22T03:47:12.153Z |  |
 | 274 | 07.8 | deviation | infra/fake-model/fake-sandboxd.mjs |  | 07.8-16: a crashed event in the fake sandboxd does not end the frame stream (the real broker does) (low); the live-input Semgrep rule covers only declared types and field names in listed paths (low) | open |  | 2026-10-22T03:47:12.229Z |  |
+| 275 | 07.8 | deviation | apps/sandboxd/src/egress-attach.ts |  | MUST FIX (07.8-24): under gVisor (runsc) Docker's embedded DNS 127.0.0.11 does not answer on bot networks, so sbx/brw cannot resolve sandbox-egress and have no egress at all (fails closed; breaks every gVisor install). Give each sandbox the proxy IP (ExtraHosts or pinned address); then drop failure: ignore on gvisor-browser in .woodpecker/sandbox.yaml | open |  | 2026-10-22T04:13:28.773Z |  |
+| 276 | 07.8 | deviation | infra/fake-model/server.test.mjs |  | MUST FIX: "serves the fake sandboxd behind its token ... exec round trip" gets 409 policy_missing since the fake requires a policy push (red since policyfix); runs in cell-smoke on Woodpecker and GitHub | open |  | 2026-10-22T04:13:28.849Z |  |
+| 277 | 07.8 | unrun-verify | .woodpecker/sandbox.yaml |  | 07.8-24: no real Woodpecker run of sandbox.yaml yet (steps run by hand in dind); record link and duration on first push; full gate:compose --with-sandbox (with Playwright, proxy, backup) not run | open |  | 2026-10-22T04:13:28.921Z |  |
+| 278 | 07.8 | deviation | apps/api/Dockerfile |  | 07.8-24: no retry for pnpm first-use binary download (timed out on Docker Desktop); CI dind keeps docker:dind (~500 MB) between gVisor runs (low) | open |  | 2026-10-22T04:13:28.997Z |  |
 
 ````json
 [
@@ -3251,10 +3255,10 @@ last_updated: 2026-10-22T03:47:12.229Z
     "file": "apps/sandboxd/src",
     "line": null,
     "description": "Soft quota counts apparent size (sparse files in full) and may overshoot up to one 60 s sweep (document XFS hard quota at the gate); transfers hold ~67 MiB JSON + 50 MiB decoded in memory, two at once; after a sandboxd restart a running background process no longer prevents idling; a container death during the watcher's 2 s reconnect is not reported; OCW_SANDBOXD_SWEEP_MS needs compose and env parity (07.8-24)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-15T22:14:34.840Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T04:13:28.623Z"
   },
   {
     "id": 248,
@@ -3347,10 +3351,10 @@ last_updated: 2026-10-22T03:47:12.229Z
     "file": "apps/sandboxd/src",
     "line": null,
     "description": "A sandboxd restart forgets its context map (agent answers no_context until it closes after 5 idle min, API must reopen); browserLimits idleStopMs/diskQuotaBytes unused (fixed 5 min); API owes resize mode, browserSandbox and http navigation_refused handling (07.8-16); 24 owes OCW_SANDBOX_BRW_IMAGE/EGRESS_IMAGE/BRW_SECCOMP env and gVisor/amd64 runs",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-21T20:09:54.014Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T04:13:28.548Z"
   },
   {
     "id": 256,
@@ -3395,10 +3399,10 @@ last_updated: 2026-10-22T03:47:12.229Z
     "file": "apps/api/src/modules/sandbox",
     "line": null,
     "description": "SHOULD FIX (07.8-17): the API's sandboxd client uses plain fetch (undici 300 s default); a package install taking 300-540 s fails at the API while sandboxd completes it. Give package install/review an explicit 600 s timeout (07.8-24/28)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-22T02:53:29.323Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T04:13:28.698Z"
   },
   {
     "id": 260,
@@ -3443,10 +3447,10 @@ last_updated: 2026-10-22T03:47:12.229Z
     "file": "infra/compose",
     "line": null,
     "description": "MUST (07.8-24): add OCW_SANDBOX_NPM_REGISTRY, OCW_SANDBOX_PYPI_INDEX, OCW_CLAWHUB_URL (must equal the API's) and OCW_SANDBOX_REGISTRIES to sandboxd in compose and Woodpecker",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-22T02:53:29.628Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T04:13:28.471Z"
   },
   {
     "id": 264,
@@ -3578,6 +3582,54 @@ last_updated: 2026-10-22T03:47:12.229Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-22T03:47:12.229Z",
+    "resolved_at": null
+  },
+  {
+    "id": 275,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/egress-attach.ts",
+    "line": null,
+    "description": "MUST FIX (07.8-24): under gVisor (runsc) Docker's embedded DNS 127.0.0.11 does not answer on bot networks, so sbx/brw cannot resolve sandbox-egress and have no egress at all (fails closed; breaks every gVisor install). Give each sandbox the proxy IP (ExtraHosts or pinned address); then drop failure: ignore on gvisor-browser in .woodpecker/sandbox.yaml",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T04:13:28.773Z",
+    "resolved_at": null
+  },
+  {
+    "id": 276,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/fake-model/server.test.mjs",
+    "line": null,
+    "description": "MUST FIX: \"serves the fake sandboxd behind its token ... exec round trip\" gets 409 policy_missing since the fake requires a policy push (red since policyfix); runs in cell-smoke on Woodpecker and GitHub",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T04:13:28.849Z",
+    "resolved_at": null
+  },
+  {
+    "id": 277,
+    "kind": "unrun-verify",
+    "phase": "07.8",
+    "file": ".woodpecker/sandbox.yaml",
+    "line": null,
+    "description": "07.8-24: no real Woodpecker run of sandbox.yaml yet (steps run by hand in dind); record link and duration on first push; full gate:compose --with-sandbox (with Playwright, proxy, backup) not run",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T04:13:28.921Z",
+    "resolved_at": null
+  },
+  {
+    "id": 278,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/Dockerfile",
+    "line": null,
+    "description": "07.8-24: no retry for pnpm first-use binary download (timed out on Docker Desktop); CI dind keeps docker:dind (~500 MB) between gVisor runs (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T04:13:28.997Z",
     "resolved_at": null
   }
 ]
