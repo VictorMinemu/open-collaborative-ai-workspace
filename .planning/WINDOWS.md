@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 162
+open_count: 165
 waived_count: 5
 fixed_count: 121
-total_count: 288
-last_updated: 2026-10-22T06:39:03.462Z
+total_count: 291
+last_updated: 2026-10-22T06:53:46.333Z
 ---
 
 # Broken Windows Ledger
@@ -303,6 +303,9 @@ last_updated: 2026-10-22T06:39:03.462Z
 | 286 | 07.8 | deviation | apps/api/src/modules/browser |  | 07.8-21: the Browser tab activity shows the page's current host (low) | fixed |  | 2026-10-22T05:37:51.461Z | 2026-10-22T06:39:03.293Z |
 | 287 | 07.8 | deviation | apps/api/src/modules/browser |  | SHOULD FIX (07.8-27, medium): deleting a bot is a soft delete and the #230 secret clean-up trigger fires only on hard delete, so a deleted bot's sealed sessions stay until expiry or the 7-day purge (listed and revocable, never loaded) — 28 | open |  | 2026-10-22T06:39:03.378Z |  |
 | 288 | 07.8 | deviation | apps/web/components/browser |  | 07.8-27: no "sign-in pending for you" flag on the row so Open live view is never primary; Browser tab polls every 10 s (no realtime); rows before the opened_host migration show the current host; "Stopped on {host}" copy differs from UI-SPEC (low) | open |  | 2026-10-22T06:39:03.462Z |  |
+| 289 | 07.8 | deviation | apps/web/components/browser |  | 07.8-26 (medium, with #280): IME composition on the phone's hidden input stays in the input until compositionend; the hidden input may also fix desktop IME | open |  | 2026-10-22T06:53:46.168Z |  |
+| 290 | 07.8 | deviation | apps/web/components/browser |  | 07.8-26: the live chip refreshes on turn.activity, focus and every 20 s, so a page closed for idleness can show up to 20 s; closing with no open page shows a "Blocked: a page" step (from 20); the AI chat has no chip (low) | open |  | 2026-10-22T06:53:46.251Z |  |
+| 291 | 07.8 | deviation | infra/sandbox/browser |  | 07.8-26: the phone viewport is proven only against the fake sandboxd; the real brw smoke for phone mode is not run | open |  | 2026-10-22T06:53:46.333Z |  |
 
 ````json
 [
@@ -3760,6 +3763,42 @@ last_updated: 2026-10-22T06:39:03.462Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-22T06:39:03.462Z",
+    "resolved_at": null
+  },
+  {
+    "id": 289,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/browser",
+    "line": null,
+    "description": "07.8-26 (medium, with #280): IME composition on the phone's hidden input stays in the input until compositionend; the hidden input may also fix desktop IME",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:53:46.168Z",
+    "resolved_at": null
+  },
+  {
+    "id": 290,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/browser",
+    "line": null,
+    "description": "07.8-26: the live chip refreshes on turn.activity, focus and every 20 s, so a page closed for idleness can show up to 20 s; closing with no open page shows a \"Blocked: a page\" step (from 20); the AI chat has no chip (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:53:46.251Z",
+    "resolved_at": null
+  },
+  {
+    "id": 291,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/sandbox/browser",
+    "line": null,
+    "description": "07.8-26: the phone viewport is proven only against the fake sandboxd; the real brw smoke for phone mode is not run",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:53:46.333Z",
     "resolved_at": null
   }
 ]
