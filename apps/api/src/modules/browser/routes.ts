@@ -19,6 +19,7 @@ import {
 import { and, desc, eq, inArray, isNotNull, isNull, lt } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
+import { markDecided } from "../../authz";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { notFound } from "../../lib/errors";
 import { agentFactsOf, type ConversationAccess, loadDirectory } from "../chat";
@@ -83,12 +84,17 @@ export function registerBrowserRoutes(app: App, deps: BrowserRouteDeps): void {
     { ...user, schema: { tags, response: { 200: BrowserSessionList } } },
     async (req, reply) => {
       reply.header("cache-control", "no-store");
+      // The member's own rows, whatever their modules say (a session they can no longer use is still theirs to see
+      // and revoke): the owner-only policy is the decision, as for their connector connections.
+      markDecided(req);
       const { userId } = authOf(req);
       return { items: await core.db.withTenant(tenant(req), (tx) => listMine(tx, userId)) };
     },
   );
 
   app.delete("/browser-sessions/:id", { ...user, schema: { tags, params: IdParams } }, async (req, reply) => {
+    // Owner-only: the policy decides (anyone else's id is 404 below), whatever the caller's modules say.
+    markDecided(req);
     const { userId, organizationId } = authOf(req);
     const ended = await core.db.withTenant(tenant(req), async (tx) => {
       // The owner-only policy decides first: anyone else's id (an admin's attempt included) is simply missing.
