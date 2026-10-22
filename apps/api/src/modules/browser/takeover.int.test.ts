@@ -263,10 +263,11 @@ describe("member-session privacy (U-2, T-07.8-16-02)", () => {
         expect(sam.json[0]).toEqual({ type: "viewerCan", watch: true, control: true });
         await T.sleep(1000);
         expect(alex.binary).toHaveLength(0);
-        expect(victor.binary.length).toBeLessThanOrEqual(vAt + 1);
-        const settled = victor.binary.length;
+        // Proof pipeline 55: from the moment the live view learns of the session it holds Víctor's frames until his new
+        // answer (`private`) is sent, so nothing arrives after that state frame (no "one frame in flight" either).
+        expect(victor.binary.length).toBe(vAt);
         await T.sleep(1000);
-        expect(victor.binary.length).toBe(settled);
+        expect(victor.binary.length).toBe(vAt);
       } finally {
         alex.close();
         sam.close();

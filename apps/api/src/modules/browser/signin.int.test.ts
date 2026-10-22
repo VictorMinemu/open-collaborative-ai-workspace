@@ -5,6 +5,7 @@ import {
   type LiveStack,
   lastState,
   liveSocket,
+  sleep,
   startLiveStack,
   waitFor,
   waitState,
@@ -546,5 +547,88 @@ describe("a sign-in signal, not just a cookie (07.8-28, WINDOWS #284)", () => {
     expect(opened).toMatchObject({ host: site, signedIn: true });
     expect(fakeContext(opened.contextId as string)).toMatchObject({ siteLock: site, loadedState: true });
     await ok(l.browser("close", next));
+  });
+});
+
+// ---------------------------------------------------------------- the hand back is private end to end (proof pipeline 55)
+
+/**
+ * The real-stack proof (pipeline 55, step 9) caught the bot's owner and the member's other device receiving one frame
+ * while Sam's sign-in was on the page. Here Víctor (Scout's owner: he watches Sam's DM page while it is public) and
+ * Sam's second device watch a whole sign-in. From the take until the session is sealed, frames go to Sam's controlling
+ * socket only (F-5); once it is sealed, to Sam only (U-2). Neither may receive a frame, nor a state that lets frames
+ * through, in between: not while the hand back waits for sandboxd (the fake holds `contextLock` 2.5 s, two of the live
+ * view's 1 s polls), and not when the live view learns that the session is loaded.
+ */
+describe("the hand back never opens the page to anyone else (F-5, U-2; proof pipeline 55)", () => {
+  const states = (s: LiveSocket, from: number) =>
+    s.json.slice(from).filter((f) => f.type === "state") as Array<Json & { state: string }>;
+
+  /** A page on `host` with Sam's waiting sign-in, Víctor and Sam's other device watching, Sam in control. */
+  async function takenWithWatchers(host: string) {
+    const { contextId } = await asked(host);
+    const victor = await liveSocket(l.s.stack.baseUrl, await l.s.victor.token(), contextId);
+    const other = await liveSocket(l.s.stack.baseUrl, await l.s.sam.token(), contextId);
+    const sam = await liveSocket(l.s.stack.baseUrl, await l.s.sam.token(), contextId);
+    // Public before the take: the owner and the other device both see it.
+    await waitFor(() => victor.binary.length >= 2 && other.binary.length >= 2);
+    sam.send({ type: "take" });
+    await waitState(sam, "controlling");
+    await waitState(victor, "private");
+    await waitState(other, "private");
+    await until(async () => (await requestsOf(contextId))[0]?.status === "signing_in");
+    return { contextId, victor, other, sam };
+  }
+
+  it("a slow hand back: while sandboxd locks the page, nobody but Sam's controlling socket gets a frame or a frame state", async () => {
+    const { contextId, victor, other, sam } = await takenWithWatchers("slow.fake.test");
+    try {
+      await control("/browser/signed-in", { contextId, cookieValue: "slow-hand-back-session" });
+      await control("/browser/delay", { op: "contextLock", ms: 2500 });
+      const v = { json: victor.json.length, bin: victor.binary.length };
+      const o = { json: other.json.length, bin: other.binary.length };
+      sam.send({ type: "release" });
+      await sleep(2000);
+      // Still handing back (the lock has not answered): the seal has not happened yet.
+      expect((await requestsOf(contextId))[0]?.status).toBe("signing_in");
+      // (The 10 s heartbeat may repeat the current state: only `private` is acceptable.)
+      expect(other.binary.length, "Sam's other device while the hand back waits").toBe(o.bin);
+      expect(states(other, o.json).every((f) => f.state === "private")).toBe(true);
+      expect(lastState(other)).toMatchObject({ state: "private", privateReason: "takeover" });
+      expect(victor.binary.length, "Víctor while the hand back waits").toBe(v.bin);
+      expect(states(victor, v.json).every((f) => f.state === "private")).toBe(true);
+
+      await until(async () => (await requestsOf(contextId))[0]?.status === "signed_in");
+      // The seal's refresh and every viewer's new decision.
+      await sleep(1500);
+      expect(victor.binary.length, "Víctor from the take to after the seal").toBe(v.bin);
+      expect(states(victor, v.json).every((f) => f.state === "private")).toBe(true);
+      expect(lastState(victor)).toMatchObject({ state: "private", privateReason: "member_session" });
+      // U-2 lets the member watch his own signed-in page: his devices get frames again (nothing over-blocked).
+      await waitFor(() => other.binary.length > o.bin && lastState(other)?.state === "live");
+      await waitFor(() => lastState(sam)?.state === "live");
+    } finally {
+      victor.close();
+      other.close();
+      sam.close();
+    }
+  });
+
+  it("a plain hand back: from the take on, the owner only ever receives `private` and never a frame", async () => {
+    const { contextId, victor, other, sam } = await takenWithWatchers("fast.fake.test");
+    try {
+      const v = { json: victor.json.length, bin: victor.binary.length };
+      await control("/browser/signed-in", { contextId, cookieValue: "fast-hand-back-session" });
+      sam.send({ type: "release" });
+      await until(async () => (await requestsOf(contextId))[0]?.status === "signed_in");
+      await sleep(1500);
+      expect(states(victor, v.json).map((f) => f.state)).toEqual(states(victor, v.json).map(() => "private"));
+      expect(victor.binary.length, "Víctor from the take to after the seal").toBe(v.bin);
+      expect(lastState(victor)).toMatchObject({ state: "private", privateReason: "member_session" });
+    } finally {
+      victor.close();
+      other.close();
+      sam.close();
+    }
   });
 });
