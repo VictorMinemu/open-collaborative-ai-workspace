@@ -386,6 +386,32 @@ export async function purgeExpired(tx: Tx, deps: Pick<Core, "audit">, nowMs = Da
   return rows.length;
 }
 
+/**
+ * 07.8-28 (WINDOWS #287): a deleted bot's sealed sessions go with its (soft) deletion, every member's, in the caller's
+ * organization only, through the SECURITY DEFINER `app.purge_deleted_bot_browser_sessions` (the deleting person reads
+ * no other member's row; the function refuses a bot that is not deleted). Their secrets go with them; each is audited
+ * `browser_session.purged` with ids, the site and `reason: bot_deleted`. Returns how many went.
+ */
+export async function purgeBotSessions(tx: Tx, deps: Pick<Core, "audit">, agentId: string): Promise<number> {
+  const rows = (
+    await tx.execute<{ id: string; user_id: string; agent_id: string; site_key: string }>(
+      sql`select id, user_id, agent_id, site_key from app.purge_deleted_bot_browser_sessions(${agentId}::uuid)`,
+    )
+  ).rows;
+  for (const r of rows) {
+    await deps.audit.record(tx, {
+      action: "browser_session.purged",
+      actorKind: "system",
+      agentId: r.agent_id,
+      userId: r.user_id,
+      resourceType: "browser_session",
+      resourceId: r.id,
+      metadata: { sessionId: r.id, agentId: r.agent_id, site: r.site_key, reason: "bot_deleted" },
+    });
+  }
+  return rows.length;
+}
+
 /** The site keys of sessions among `ids` visible to this transaction's member (the context's loaded session). */
 export async function siteKeysOf(tx: Tx, ids: string[]): Promise<Map<string, string>> {
   if (ids.length === 0) return new Map();

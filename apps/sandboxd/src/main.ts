@@ -172,16 +172,24 @@ async function main() {
   }
 
   // Sandbox packages (07.8-17): review and installer containers from the `sbx` image, through the egress proxy.
-  const packages = createPackages({
-    runner: dockerPackageRunner({
-      docker,
-      sandboxes,
-      egress,
-      ns: env.OCW_SANDBOX_NAMESPACE,
-      image: env.OCW_SANDBOX_SBX_IMAGE,
-      env: runEnv(registries),
-    }),
+  const runner = dockerPackageRunner({
+    docker,
+    sandboxes,
+    egress,
+    ns: env.OCW_SANDBOX_NAMESPACE,
+    image: env.OCW_SANDBOX_SBX_IMAGE,
+    env: runEnv(registries),
   });
+  if (info) {
+    // 07.8-28 (WINDOWS #260): a run lives within one process; what a crashed process left of its runs goes now.
+    try {
+      const swept = await runner.sweepOrphans?.();
+      writeLog({ level: "info", msg: "package runs swept", namespace: env.OCW_SANDBOX_NAMESPACE, ...swept });
+    } catch {
+      writeLog({ level: "warn", msg: "package run sweep failed" });
+    }
+  }
+  const packages = createPackages({ runner });
 
   const quota = createQuota({ sandboxes });
   const files = createFiles({ sandboxes, quota });

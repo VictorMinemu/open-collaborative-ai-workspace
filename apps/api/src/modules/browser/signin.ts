@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { type AgentCardBrowserSignInLink, BROWSER_LIMITS } from "@ocw/contracts";
 import { agents, browserContexts, browserSigninRequests, orgMembers, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, inArray, isNull, lte, sql } from "drizzle-orm";
@@ -7,7 +8,7 @@ import { conflict, forbidden, notFound } from "../../lib/errors";
 import { announceCardMessage } from "../chat";
 import type { SandboxdClient } from "../sandbox";
 import { auditClosed, closeContext, type LoadedContext } from "./contexts";
-import { keepForSite, sealSession, sessionExpiredFor, siteKeyOf } from "./sessions";
+import { type KeptState, keepForSite, sealSession, sessionExpiredFor, siteKeyOf } from "./sessions";
 import { syncCard } from "./signin-card";
 import { announce } from "./takeover";
 
@@ -253,6 +254,89 @@ export async function backToWaiting(
 export type HandBack = "sealed" | "none" | "failed";
 
 /**
+ * 07.8-28 (WINDOWS #284): a sign-in is sealed only when the member hands back AND the site's state changed during their
+ * control. A site that sets a cookie before any sign-in (consent, CSRF) used to be sealed as "signed in" when the member
+ * only looked. At `take` (the member's control starts on a page with their waiting sign-in) the page's state for the
+ * sign-in site is exported and fingerprinted; at the hand back the same fingerprint means nothing changed, so nothing
+ * is sealed and the card waits again. The fingerprint is a SHA-256 over the site's cookies and origins in a fixed order,
+ * held in this process's memory only (the take and the hand back happen on the same socket of the same instance), never
+ * stored, logged or sent. Without a baseline (its export failed) the earlier rule holds: anything of the site is kept.
+ */
+const BASELINE_MAX = 10_000;
+const baselines = new Map<string, string>();
+const baselineKey = (contextId: string, userId: string) => `${contextId}:${userId}`;
+
+/** The order-independent fingerprint of a kept state (SHA-256 hex); the empty state when nothing was kept. */
+export function stateFingerprint(kept: KeptState | null): string {
+  let cookies: string[] = [];
+  let origins: string[] = [];
+  if (kept && kept.items > 0) {
+    try {
+      const v = JSON.parse(kept.state) as { cookies?: unknown[]; origins?: unknown[] };
+      cookies = (v.cookies ?? []).map((c) => {
+        const o = (c ?? {}) as Record<string, unknown>;
+        return JSON.stringify([o.name, o.domain, o.path, o.value]);
+      });
+      origins = (v.origins ?? []).map((x) => {
+        const o = (x ?? {}) as { origin?: unknown; localStorage?: unknown };
+        const items = Array.isArray(o.localStorage)
+          ? (o.localStorage as Array<{ name?: unknown; value?: unknown }>)
+              .map((i) => JSON.stringify([i?.name, i?.value]))
+              .sort()
+          : [];
+        return JSON.stringify([o.origin, items]);
+      });
+    } catch {
+      cookies = [kept.state];
+    }
+  }
+  return createHash("sha256")
+    .update(JSON.stringify([cookies.sort(), origins.sort()]))
+    .digest("hex");
+}
+
+/**
+ * The member's control starts on a page with their waiting sign-in: the site's state before they type, fingerprinted
+ * (see above). Best effort: a failed export leaves no baseline. Nothing when there is no live sign-in on the page.
+ */
+export async function captureSignInBaseline(
+  deps: { core: Core; client: SandboxdClient | null },
+  p: { organizationId: string; contextId: string; userId: string },
+): Promise<void> {
+  const { core, client } = deps;
+  const key = baselineKey(p.contextId, p.userId);
+  baselines.delete(key);
+  if (!client) return;
+  const found = await core.db.withTenant(
+    { organizationId: p.organizationId, userId: p.userId },
+    async (tx) => {
+      const r = await liveRequestOf(tx, p.contextId, p.userId);
+      return r ? { host: r.host, agentId: r.agentId } : null;
+    },
+  );
+  if (!found) return;
+  try {
+    const raw = (
+      await client.call(
+        "contextExportState",
+        { target: { orgId: p.organizationId, agentId: found.agentId }, contextId: p.contextId },
+        { timeoutMs: OP_TIMEOUT_MS },
+      )
+    ).storageState;
+    if (baselines.size >= BASELINE_MAX) {
+      const oldest = baselines.keys().next().value;
+      if (oldest !== undefined) baselines.delete(oldest);
+    }
+    baselines.set(key, stateFingerprint(keepForSite(raw, found.host)));
+  } catch (err) {
+    core.log.warn(
+      { contextId: p.contextId, error: (err as Error | undefined)?.name },
+      "sign-in baseline export failed",
+    );
+  }
+}
+
+/**
  * The member handed control back (the live view's `release`): when their sign-in waits on this page, the page's state
  * is exported, the page site-locked and the state sealed for them (see the file comment). Nothing to do otherwise.
  * A failed export leaves the card waiting (the member may try again); nothing is sealed.
@@ -300,8 +384,14 @@ export async function onHandBack(
   }
   const kept = raw === null ? null : keepForSite(raw, request.host);
   raw = null;
-  // Handed back without signing in (nothing of the site kept): nothing is sealed and the card waits again.
-  if (!client || !kept || kept.items === 0) {
+  const key = baselineKey(p.contextId, p.userId);
+  const baseline = baselines.get(key);
+  baselines.delete(key);
+  // 07.8-28 (#284): the site's state is what it was when the member took control: they did not sign in.
+  const unchanged = baseline !== undefined && baseline === stateFingerprint(kept);
+  // Handed back without signing in (nothing of the site kept, or nothing changed): nothing is sealed and the card
+  // waits again.
+  if (!client || !kept || kept.items === 0 || unchanged) {
     await core.db.withTenant(tenant, (tx) => backToWaiting(tx, core, p));
     return "failed";
   }
@@ -316,10 +406,13 @@ export async function onHandBack(
     );
   } catch (err) {
     locked = false;
-    core.log.warn({ contextId: p.contextId, error: (err as Error | undefined)?.name }, "sign-in lock failed");
-    await client
-      .call("contextClose", { target, contextId: p.contextId }, { timeoutMs: OP_TIMEOUT_MS })
-      .catch(() => {});
+    // 07.8-28 (#284): never silent. The page is ended at once (it holds the member's cookies without a lock), the
+    // close and the decision are audited with `lockFailed`, and the bot's next open loads the session into a new page
+    // locked from its start.
+    core.log.error(
+      { contextId: p.contextId, error: (err as Error | undefined)?.name },
+      "sign-in lock failed",
+    );
   }
   const sealed = await core.db.withTenant(tenant, async (tx, after) => {
     const r = await liveRequestOf(tx, p.contextId, p.userId);
@@ -349,7 +442,7 @@ export async function onHandBack(
       await releaseSignInHold(tx, p.contextId);
     } else {
       const row = await closeContext(tx, p.contextId, "crashed");
-      if (row) await auditClosed(tx, core, row, "crashed");
+      if (row) await auditClosed(tx, core, row, "crashed", { lockFailed: true });
     }
     await syncCard(tx, core, r, "signed_in");
     await core.audit.record(tx, {
@@ -366,6 +459,7 @@ export async function onHandBack(
         host: r.host,
         outcome: "signed_in",
         sessionId: session.sessionId,
+        ...(locked ? {} : { lockFailed: true }),
       },
     });
     if (r.cardMessageId) {
@@ -383,6 +477,13 @@ export async function onHandBack(
     }
     return true;
   });
+  if (!locked) {
+    // Closed in sandboxd only once its row ended as `crashed` (lockFailed): sandboxd's own `closed` event then finds
+    // the row closed and changes nothing. The page is still held for the sign-in until then, so the bot cannot use it.
+    await client
+      .call("contextClose", { target, contextId: p.contextId }, { timeoutMs: OP_TIMEOUT_MS })
+      .catch(() => {});
+  }
   if (!sealed) return "none";
   await holdInSandboxd(core, client, { ...target, contextId: p.contextId, hold: false });
   await announce(core.bus, p.organizationId, p.contextId);

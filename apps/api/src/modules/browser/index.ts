@@ -1,4 +1,5 @@
 import type { ActivityStep } from "@ocw/contracts";
+import type { Tx } from "@ocw/db";
 import type { ApiModule, Core } from "../../core";
 import { createConversationAccess } from "../chat";
 import { createPermissionService } from "../organization";
@@ -6,6 +7,7 @@ import type { SandboxdClient, SandboxEventsConsumer } from "../sandbox";
 import { onBrowserEvent } from "./contexts";
 import { type LiveViewHub, registerLiveView } from "./live-view";
 import { registerBrowserRoutes } from "./routes";
+import { purgeBotSessions } from "./sessions";
 import { signInCardsProvider } from "./signin";
 import { type BrowserSweeper, createBrowserSweeper } from "./sweep";
 
@@ -68,6 +70,8 @@ export interface BrowserModule {
   live(): LiveViewHub | null;
   /** The sign-in expiry and session purge (07.8-21; tests call `runOnce(nowMs)`). */
   sweeper: BrowserSweeper;
+  /** 07.8-28 (WINDOWS #287): a bot's (soft) deletion removes every member's sealed session with it, in its transaction. */
+  onBotDeleted(tx: Tx, agentId: string): Promise<void>;
 }
 
 export function createBrowserModule(
@@ -93,6 +97,9 @@ export function createBrowserModule(
     onBrowserEvent: handler,
     live: () => hub,
     sweeper,
+    async onBotDeleted(tx, agentId) {
+      await purgeBotSessions(tx, core, agentId);
+    },
     module: {
       name: "browser",
       register(app) {

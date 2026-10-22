@@ -173,6 +173,39 @@ export async function clearExpired(
   return before.controller;
 }
 
+/** A lease is left to its holder's own live view this long past its expiry before the shared sweep clears it. */
+export const DEAD_LEASE_GRACE_MS = 60_000;
+
+/**
+ * 07.8-28 (WINDOWS #271, #244): the leases of this organization's open pages that expired with nobody to release them
+ * (the holding API instance died and no live view reads the row), cleared as `idle` by the browser sweep, each audited
+ * once (`clearExpired`). Runs in the organization's own transaction (RLS); returns the pages it cleared, so the caller
+ * turns sandboxd's takeover off and announces them after the commit.
+ */
+export async function clearDeadLeases(
+  tx: Tx,
+  core: Pick<Core, "audit">,
+  nowMs = Date.now(),
+): Promise<Array<{ contextId: string; agentId: string }>> {
+  const rows = await tx
+    .select({ id: browserContexts.id, agentId: browserContexts.agentId })
+    .from(browserContexts)
+    .where(
+      and(
+        isNull(browserContexts.closedAt),
+        isNotNull(browserContexts.controllerUserId),
+        lte(browserContexts.leaseExpiresAt, iso(nowMs - DEAD_LEASE_GRACE_MS)),
+      ),
+    )
+    .limit(500);
+  const out: Array<{ contextId: string; agentId: string }> = [];
+  for (const r of rows) {
+    if (await clearExpired(tx, core, { contextId: r.id, nowMs }))
+      out.push({ contextId: r.id, agentId: r.agentId });
+  }
+  return out;
+}
+
 /** `browser.takeover_ended` for a lease that ended with its page (closed, killed): ids, the host and the reason. */
 export async function auditEnded(
   tx: Tx,

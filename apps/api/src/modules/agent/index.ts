@@ -146,6 +146,8 @@ export interface AgentModuleDeps {
   approvals: { closeGone(tx: Tx, which: { requestedByAgentId: string }): Promise<unknown> };
   /** 07.8-11 (D-01, R11): the bot's sandbox is purged after the deletion commits (structural; no module import). */
   sandbox?: { onBotDeleted(tx: Tx, agentId: string): Promise<void> };
+  /** 07.8-28 (WINDOWS #287): every member's sealed browser sessions with the bot go at its deletion. */
+  browser?: { onBotDeleted(tx: Tx, agentId: string): Promise<void> };
 }
 
 export function createAgentModule(core: Core, deps: AgentModuleDeps): ApiModule {
@@ -822,6 +824,8 @@ export function createAgentModule(core: Core, deps: AgentModuleDeps): ApiModule 
             await deps.approvals.closeGone(tx, { requestedByAgentId: row.id });
             // Its sandbox (containers, workspace, packages) is removed by sandboxd after the commit (07.8-11).
             await deps.sandbox?.onBotDeleted(tx, row.id);
+            // Its members' sealed browser sessions (and their secrets) go now, not at expiry (07.8-28, #287).
+            await deps.browser?.onBotDeleted(tx, row.id);
             await publishAgentDeleted(core, tx, row);
             await notifyCell(core, tx, "agent.deleted", row.id);
             return { ok: true as const };

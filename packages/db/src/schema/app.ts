@@ -700,6 +700,44 @@ export const agentTurns = appSchema.table(
   ],
 );
 
+/**
+ * Phase 07.8 (07.8-28, WINDOWS #292, ADR-0029): member data is sticky per (bot, conversation). Once a member's sealed
+ * browser session was loaded in a turn of this bot in this conversation, the bot's history there (its OpenClaw
+ * transcript, its replies in the chat window) may hold what it read signed in, so every later turn of that bot in that
+ * conversation starts with `agent_turns.member_data` (the D-11/D-13 floors, download routing, import refusal, P-11).
+ * One row per pair; `sites` are the site keys (hosts only) whose sessions were loaded there: the hosts a later turn may
+ * open without the requester's cross-site approval. The row goes with the bot or the conversation (the bot's history
+ * goes with them); no route reads or lists it.
+ */
+export const agentMemberData = appSchema.table(
+  "agent_member_data",
+  {
+    organizationId: orgId(),
+    agentId: uuid("agent_id").notNull(),
+    conversationId: uuid("conversation_id").notNull(),
+    sites: text("sites").array().notNull().default(sql`'{}'::text[]`),
+    /** The turn that first loaded a member's session here (`agent_turns.event_id`). */
+    firstEventId: uuid("first_event_id").notNull(),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.organizationId, t.agentId, t.conversationId] }),
+    // Composite with the organization (FKs bypass RLS, 07.4 #169).
+    foreignKey({
+      name: "agent_member_data_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "agent_member_data_conversation_fk",
+      columns: [t.organizationId, t.conversationId],
+      foreignColumns: [conversations.organizationId, conversations.id],
+    }).onDelete("cascade"),
+    check("agent_member_data_sites_check", sql`cardinality(${t.sites}) <= 64`),
+  ],
+);
+
 /** Every gated tool call the cell asked about (D-08): decision + outcome, never arguments or results. */
 export const agentToolCalls = appSchema.table(
   "agent_tool_calls",

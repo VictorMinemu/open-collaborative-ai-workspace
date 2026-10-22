@@ -390,3 +390,29 @@ describe("a command with internet access after a member's sign-in (07.8-25, D-13
     expect(isSandboxExecAfterSignIn("ocw_sandbox_write", { egress: "public" })).toBe(false);
   });
 });
+
+describe("secret flags in any approval's arguments (07.8-28, WINDOWS #294)", () => {
+  const ARGS = {
+    argv: ["deploy", "--password=hunter2", "-p", "--api-key=abc123", "--auth-token=t0k3n", "--name=prod"],
+  };
+
+  it("the generic preview of a plain 07.5 exec masks `--password=x` style flags like the D-13 view", () => {
+    const p = orderPreview(ARGS);
+    const shown = p.fields[0]?.value ?? "";
+    expect(shown).toContain("--password=••••");
+    expect(shown).toContain("--api-key=••••");
+    expect(shown).toContain("--auth-token=••••");
+    expect(shown).toContain("--name=prod");
+    for (const secret of ["hunter2", "abc123", "t0k3n"]) expect(shown).not.toContain(secret);
+    expect(p.notices.maskedSecret).toBe(true);
+  });
+
+  it("the review's All arguments masks them too; a value that only mentions a flag in prose is left alone", () => {
+    const d = argumentsDisplay(ARGS);
+    for (const secret of ["hunter2", "abc123", "t0k3n"]) expect(d.json).not.toContain(secret);
+    expect(d.masked).toBe(true);
+    const prose = orderPreview({ note: "use --password=hunter2 later" });
+    expect(prose.fields[0]?.value).toBe("use --password=hunter2 later");
+    expect(orderPreview({ argv: ["ls", "-la"] }).notices.maskedSecret).toBe(false);
+  });
+});

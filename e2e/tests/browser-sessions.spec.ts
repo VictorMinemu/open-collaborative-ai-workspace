@@ -51,14 +51,22 @@ test.beforeAll(async () => {
   samApi = await apiAs(SAM);
   await enableSandboxOrg(admin);
   await resume(admin);
-  botId = await freshTeamBot(admin, BOT);
-  await enableBotSandbox(admin, botId, { sandbox: true, browser: true });
   cell = new FakeCellPlugin({ apiUrl: API_URL, token: cellToken(), autoAck: true, autoReply: false });
   await cell.start();
+});
+
+/**
+ * A new Scout and Sam's DM with it, for each test: once a bot loaded a member's session in a conversation, every later
+ * turn there keeps member data and asks before another site (07.8-28, WINDOWS #292), so each test starts in a DM
+ * where no session was ever loaded. The previous Scout's deletion takes its sealed sessions with it (#287).
+ */
+async function freshScout(): Promise<void> {
+  botId = await freshTeamBot(admin, BOT);
+  await enableBotSandbox(admin, botId, { sandbox: true, browser: true });
   const dm = await samApi.post(`/api/v1/agents/${botId}/dm`);
   expect(dm.ok(), `Sam's DM with ${BOT}`).toBe(true);
   dmId = ((await dm.json()) as { dmId: string }).dmId;
-});
+}
 
 test.afterEach(async () => {
   for (const c of open.splice(0)) await c.close();
@@ -122,6 +130,7 @@ test("tracer: Sam revokes a saved sign-in from Settings › Keychain; Scout's ne
   browser,
 }, info) => {
   const project = info.project.name;
+  await freshScout();
   await clearSessions(samApi);
   const page = await signIn(browser, SAM, project);
   const sealed = await signInThroughBot(turnFor(page), PANEL, { tag: `tracer ${widthOf(project)}` });
@@ -182,6 +191,7 @@ test("expiring in amber, expired with Remove, nobody else's rows (an admin inclu
 }, info) => {
   const project = info.project.name;
   const mobile = project === "mobile";
+  await freshScout();
   await clearSessions(samApi);
   const page = await signIn(browser, SAM, project);
   const t = turnFor(page);

@@ -32,6 +32,10 @@
 // `[[pause:N]]` (07.8-08) in the same message delays the turn's FIRST tool call by N seconds (at most 30): a model
 // that thinks before acting, so a full-stack proof can change state between a turn's delivery and its call.
 //
+// `{{ref:<name>}}` (07.8-28) as a string argument of a directive is replaced by the ref of the element named <name>
+// (`- [<ref>] <role> "<name>"`, the snapshot line format) in the turn's latest tool result that has one, so a real
+// browser's refs can be acted on; without such an element the placeholder stays as it is.
+//
 // Fake sandboxd (fake-sandboxd.mjs, 07.8-08): with FAKE_SANDBOX_TOKEN set, every sandboxd route under `/__sandboxd`
 // (`/__sandboxd/v1/...` behind the bearer, `/__sandboxd/__control/...` without), so the e2e API's OCW_SANDBOX_URL can
 // point here (scripts/e2e-isolated.sh default mode).
@@ -352,11 +356,46 @@ export function planToolStep(messages, offered) {
       continue;
     }
     const done = calls[k];
-    if (!done) return { call: { name, args: d.args }, ...(k === 0 && pauseMs > 0 ? { pauseMs } : {}) };
+    if (!done) {
+      const latest = [...after]
+        .reverse()
+        .filter((m) => m.role === "tool")
+        .map((m) => contentText(m.content));
+      return {
+        call: { name, args: withRefs(d.args, latest) },
+        ...(k === 0 && pauseMs > 0 ? { pauseMs } : {}),
+      };
+    }
     k++;
     lines.push(`Tool ${d.tool} said: ${summarizeResult(results.get(done.id) ?? "")}`);
   }
   return { reply: `${lines.join("\n")} ${toolsSuffix(offered.length, offered)}` };
+}
+
+/** `{{ref:<name>}}` string arguments → the ref of that element in the newest tool result naming it (07.8-28). */
+function withRefs(args, toolResultsNewestFirst) {
+  const out = {};
+  for (const [k, v] of Object.entries(args)) {
+    const m = typeof v === "string" ? /^\{\{ref:(.{1,200})\}\}$/u.exec(v) : null;
+    if (!m) {
+      out[k] = v;
+      continue;
+    }
+    const line = new RegExp(
+      `- \\[([^\\]\\s]{1,64})\\] \\S+ ${JSON.stringify(m[1]).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`,
+      "u",
+    );
+    let ref = null;
+    for (const text of toolResultsNewestFirst) {
+      const found = line.exec(text);
+      if (found) {
+        ref = found[1];
+        break;
+      }
+    }
+    out[k] = ref ?? v;
+  }
+  return out;
 }
 
 /** Fake SearXNG `/search?format=json`: one deterministic result per query. */

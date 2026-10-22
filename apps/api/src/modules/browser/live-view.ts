@@ -26,7 +26,7 @@ import { browserContextResource, orgResource, type PermissionService } from "../
 import { authenticateUpgrade, SESSION_RECHECK_MS } from "../realtime";
 import { type SandboxdClient, SandboxdRefusedError } from "../sandbox";
 import { auditClosed, type BrowserContextRecord, closeContext, contextById } from "./contexts";
-import { backToWaiting, markSigningIn, onHandBack } from "./signin";
+import { backToWaiting, captureSignInBaseline, markSigningIn, onHandBack } from "./signin";
 import {
   announce,
   auditEnded,
@@ -881,6 +881,14 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
       .catch((err: unknown) =>
         log.warn({ contextId: w.contextId, error: name(err) }, "sign-in state failed"),
       );
+    // 07.8-28 (#284): the site's state before the member types, so a hand back that changed nothing seals nothing.
+    // Captured before the lease frame, which is what lets the member's page start sending input.
+    await captureSignInBaseline(
+      { core, client: deps.client },
+      { organizationId: auth.organizationId, contextId: w.contextId, userId: auth.userId },
+    ).catch((err: unknown) =>
+      log.warn({ contextId: w.contextId, error: name(err) }, "sign-in baseline failed"),
+    );
     sendJson(v, { type: "lease", expiresAt: taken.lease.expiresAt });
     await announce(core.bus, w.orgId, w.contextId);
     refresh(w);

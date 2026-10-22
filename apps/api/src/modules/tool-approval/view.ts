@@ -74,6 +74,43 @@ export function maskForDisplay(text: string): { text: string; masked: boolean } 
   return { text: out, masked: true };
 }
 
+/**
+ * `--password=…`, `--api-key=…`: a flag whose value a person never needs in full. The 07.2 detector (`maskForDisplay`)
+ * finds tokens, keys and `NAME_PASSWORD=` assignments, not lowercase command-line flags; display only.
+ */
+const SECRET_FLAG =
+  /^(--?[A-Za-z0-9_-]*(?:pass(?:word|wd|phrase)?|secret|token|api[-_]?key|auth)[A-Za-z0-9_-]*=)(.+)$/i;
+
+/**
+ * 07.8-28 (WINDOWS #294): every string value of an approval's arguments that is exactly a secret flag
+ * (`--password=x`, an argv entry) keeps its flag and loses its value, in the generic preview and in All arguments, as
+ * the D-13 exec view does. A string that only mentions a flag in prose is left as it is. Display only; the stored
+ * arguments and their hash are unchanged.
+ */
+export function maskSecretFlags(value: unknown, depth = 0): { value: unknown; masked: boolean } {
+  if (typeof value === "string") {
+    const flag = SECRET_FLAG.exec(value);
+    return flag ? { value: `${flag[1]}${MASK}`, masked: true } : { value, masked: false };
+  }
+  if (depth > 32 || value === null || typeof value !== "object") return { value, masked: false };
+  let masked = false;
+  if (Array.isArray(value)) {
+    const out = value.map((v) => {
+      const m = maskSecretFlags(v, depth + 1);
+      masked ||= m.masked;
+      return m.value;
+    });
+    return { value: masked ? out : value, masked };
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    const m = maskSecretFlags(v, depth + 1);
+    masked ||= m.masked;
+    out[k] = m.value;
+  }
+  return { value: masked ? out : value, masked };
+}
+
 /** A text as a person sees it: masked, then every invisible character revealed as `⟨U+XXXX⟩`. */
 export function displayText(raw: string): { text: string; masked: boolean; hidden: boolean } {
   const masked = maskForDisplay(raw);
@@ -123,11 +160,13 @@ function rawText(value: unknown): string {
 }
 
 /** The preview of the arguments: ordered, labelled, masked, revealed and cut at 500 characters (UI-SPEC R7). */
-export function orderPreview(args: Record<string, unknown>): PreviewResult {
+export function orderPreview(raw: Record<string, unknown>): PreviewResult {
+  const flags = maskSecretFlags(raw);
+  const args = flags.value as Record<string, unknown>;
   const keys = orderKeys(Object.keys(args));
   let truncated = keys.length > TOOL_APPROVAL_LIMITS.previewFields;
   let hiddenCharacters = false;
-  let maskedSecret = false;
+  let maskedSecret = flags.masked;
   const fields = keys.slice(0, TOOL_APPROVAL_LIMITS.previewFields).map((key) => {
     const shown = displayText(rawText(args[key]));
     if (shown.hidden || hasInvisible(key)) hiddenCharacters = true;
@@ -148,20 +187,24 @@ const ARGUMENTS_JSON_MAX = 65_536;
  * "All arguments" for the review: the pretty canonical JSON, masked and revealed. When that does not fit the view's
  * bound, the compact canonical form; when even that does not, the compact form cut (and `cut` is set).
  */
-export function argumentsDisplay(args: unknown): {
+export function argumentsDisplay(raw: unknown): {
   json: string;
   masked: boolean;
   hidden: boolean;
   cut: boolean;
 } {
+  const secretFlags = maskSecretFlags(raw);
+  const args = secretFlags.value;
+  const flags = (d: { masked: boolean; hidden: boolean }) => ({
+    masked: d.masked || secretFlags.masked,
+    hidden: d.hidden,
+  });
   const pretty = displayText(prettyCanonicalJson(args));
   if (pretty.text.length <= ARGUMENTS_JSON_MAX) return { json: pretty.text, ...flags(pretty), cut: false };
   const compact = displayText(canonicalJson(args));
   if (compact.text.length <= ARGUMENTS_JSON_MAX) return { json: compact.text, ...flags(compact), cut: false };
   return { json: cut(compact.text, ARGUMENTS_JSON_MAX), ...flags(compact), cut: true };
 }
-
-const flags = (d: { masked: boolean; hidden: boolean }) => ({ masked: d.masked, hidden: d.hidden });
 
 const METHOD = /^[A-Za-z]{1,10}$/;
 
@@ -389,12 +432,6 @@ export function cardBrowserOf(args: Record<string, unknown>): {
 
 /** The internet access a D-13 command would have, as people read it (the organization's sandbox egress mode). */
 const EGRESS_LABEL = { allowlist: "Allowed hosts only", public: "Any public host" } as const;
-/**
- * `--password=…`, `--api-key=…`: a flag whose value a person never needs in full. The 07.2 detector (`maskForDisplay`)
- * finds tokens, keys and `NAME_PASSWORD=` assignments, not lowercase command-line flags; display only.
- */
-const SECRET_FLAG =
-  /^(--?[A-Za-z0-9_-]*(?:pass(?:word|wd|phrase)?|secret|token|api[-_]?key|auth)[A-Za-z0-9_-]*=)(.+)$/i;
 const COMMAND_SHOWN = 200;
 
 /**

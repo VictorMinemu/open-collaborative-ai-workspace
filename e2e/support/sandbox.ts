@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import type { APIRequestContext } from "@playwright/test";
 import { asSuperuser } from "./superuser";
 
@@ -208,4 +209,71 @@ export function fakeSandboxd(env: Readonly<Record<string, string | undefined>> =
     up: async () => void (await call("/__control/up", {})),
     reset: async () => void (await call("/__control/reset", {})),
   };
+}
+
+// ---------------------------------------------------------------- the real broker's fake sites (--sandbox, 07.8-28)
+
+/** The fake sites' hosts as the organization's private hosts name them (they resolve to a private address). */
+export const FAKE_SITE_HOSTS = ["panel.fake.test:8080", "idp.fake.test:8080", "evil.fake.test:8080"] as const;
+
+function dockerOut(args: string[]): string {
+  return execFileSync("docker", args, { encoding: "utf8" }).trim();
+}
+
+/**
+ * Lets the organization's bots reach the fake sites `scripts/e2e-isolated.sh --sandbox` started (07.8-28): their three
+ * `host:8080` entries become the organization's private hosts (07.4's list, the one the sandbox policy carries), the
+ * sandbox settings are saved once more so the API pushes that policy to sandboxd now, and the egress proxy joins the
+ * sites' network (once it exists: a first sandbox or browser start creates it). Real broker only.
+ */
+export async function useFakeSites(
+  admin: APIRequestContext,
+  settings: { sandboxEgress?: "off" | "allowlist" | "public"; allowHosts?: string[] } = {},
+): Promise<void> {
+  const net = process.env.OCW_E2E_FAKE_SITES_NET ?? "";
+  if (process.env.OCW_E2E_SANDBOX !== "real" || !net) {
+    throw new Error("useFakeSites(): run through scripts/e2e-isolated.sh --sandbox");
+  }
+  await json(
+    await admin.put("/api/v1/keychain/private-hosts", { data: { hosts: [...FAKE_SITE_HOSTS] } }),
+    "PUT /keychain/private-hosts",
+  );
+  const view = await json<{ settings: { version: number } }>(
+    await admin.get("/api/v1/sandbox/settings"),
+    "GET /sandbox/settings",
+  );
+  await json(
+    await admin.put("/api/v1/sandbox/settings", {
+      data: { expectedVersion: view.settings.version, browserEgress: "public", ...settings },
+    }),
+    "PUT /sandbox/settings",
+  );
+  connectFakeSites();
+}
+
+/**
+ * The egress proxy joins the fake sites' network (idempotent). The proxy exists once a first sandbox or browser of the
+ * namespace started; before that this throws, so a spec starts one first (any exec does).
+ */
+export function connectFakeSites(): void {
+  const net = process.env.OCW_E2E_FAKE_SITES_NET ?? "";
+  const ns = process.env.OCW_E2E_SANDBOX_NAMESPACE ?? "ocw-e2e";
+  const proxy = `ocw-egress-${ns}`;
+  const attached = dockerOut(["inspect", "-f", "{{json .NetworkSettings.Networks}}", proxy]);
+  if (!(JSON.parse(attached) as Record<string, unknown>)[net]) dockerOut(["network", "connect", net, proxy]);
+}
+
+/** The fake sites' counters (`/__stats`: logins, collect, …), read inside their container. */
+export function fakeSiteStats(): Record<string, number> {
+  const site = process.env.OCW_E2E_FAKE_SITE ?? "";
+  if (!site) throw new Error("fakeSiteStats(): run through scripts/e2e-isolated.sh --sandbox");
+  return JSON.parse(
+    dockerOut([
+      "exec",
+      site,
+      "node",
+      "-e",
+      'fetch("http://127.0.0.1:8080/__stats").then(async (r) => process.stdout.write(await r.text()))',
+    ]),
+  ) as Record<string, number>;
 }
