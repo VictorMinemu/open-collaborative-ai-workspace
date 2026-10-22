@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 165
 waived_count: 5
-fixed_count: 129
-total_count: 299
-last_updated: 2026-10-22T09:00:45.461Z
+fixed_count: 132
+total_count: 302
+last_updated: 2026-10-22T09:40:58.083Z
 ---
 
 # Broken Windows Ledger
@@ -309,11 +309,14 @@ last_updated: 2026-10-22T09:00:45.461Z
 | 292 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | MUST FIX (07.8-25, coordinator decision for 28 + ADR-0029): member_data (P-11, D-13) holds only for the turn that loaded the session, but the bot's OpenClaw history in that conversation may still contain what it read. Decision: member_data is sticky per (bot, conversation) once a member session was loaded there, until the bot's history for that conversation is reset; every later turn there carries it (floors, routing, import refusal) | fixed |  | 2026-10-22T06:56:37.815Z | 2026-10-22T09:00:44.543Z |
 | 293 | 07.8 | deviation | apps/api/src/modules/sandbox |  | 07.8-25: a download that only arrives through the event feed (not in the act response) is not stored; audienceCovers checks person by person and refuses above 1,000 (low) | open |  | 2026-10-22T06:56:37.891Z |  |
 | 294 | 07.8 | deviation | apps/api/src/modules/tool-approval |  | 07.8-25: in a plain 07.5 exec approval the generic view does not mask --password=x style flags (only the D-13 view does) (low, 28) | fixed |  | 2026-10-22T06:56:37.968Z | 2026-10-22T09:00:44.925Z |
-| 295 | 07.8 | deviation | infra/sandbox/browser |  | MUST FIX before 29 (07.8-28): pinned Chromium 153.0.8010.12 is an August beta; stable 156.0.8078.47 and several stable security releases are missing. Bump playwright-core (1.64.x ships Chromium 156) or the current stable CfT build, re-pin digests, re-run browser/stack smokes | open |  | 2026-10-22T09:00:45.152Z |  |
-| 296 | 07.8 | deviation | infra/sandbox/browser |  | SHOULD FIX (07.8-28, medium): the first contextOpen on a freshly started brw sometimes does not answer (2 of ~9 starts on Docker Desktop) and the API answers service_unavailable after 15 s; a retry works; brw keeps no logs so it cannot be diagnosed | open |  | 2026-10-22T09:00:45.226Z |  |
-| 297 | 07.8 | deviation | apps/api/src/modules/keychain |  | SHOULD FIX (07.8-28, medium): PUT /keychain/private-hosts does not re-push the sandbox policy to sandboxd; it keeps the old allowlist until the next settings change, kill/resume or restart | open |  | 2026-10-22T09:00:45.302Z |  |
+| 295 | 07.8 | deviation | infra/sandbox/browser |  | MUST FIX before 29 (07.8-28): pinned Chromium 153.0.8010.12 is an August beta; stable 156.0.8078.47 and several stable security releases are missing. Bump playwright-core (1.64.x ships Chromium 156) or the current stable CfT build, re-pin digests, re-run browser/stack smokes | fixed |  | 2026-10-22T09:00:45.152Z | 2026-10-22T09:40:57.707Z |
+| 296 | 07.8 | deviation | infra/sandbox/browser |  | SHOULD FIX (07.8-28, medium): the first contextOpen on a freshly started brw sometimes does not answer (2 of ~9 starts on Docker Desktop) and the API answers service_unavailable after 15 s; a retry works; brw keeps no logs so it cannot be diagnosed | fixed |  | 2026-10-22T09:00:45.226Z | 2026-10-22T09:40:57.779Z |
+| 297 | 07.8 | deviation | apps/api/src/modules/keychain |  | SHOULD FIX (07.8-28, medium): PUT /keychain/private-hosts does not re-push the sandbox policy to sandboxd; it keeps the old allowlist until the next settings change, kill/resume or restart | fixed |  | 2026-10-22T09:00:45.302Z | 2026-10-22T09:40:57.851Z |
 | 298 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | 07.8-28: confirm a DM can never gain human participants (else another person would decide D-13 approvals over Sam's data); member_data marking (#292) has no reset, so in a DM where a session was loaded every other site asks for approval forever; a page opened unsigned in a marked turn is locked to its host (too strict) (low) | open |  | 2026-10-22T09:00:45.383Z |  |
 | 299 | 07.8 | deviation | infra |  | 07.8-28: bump CI Docker 29.8.2 -> 29.9.2 and local Docker Desktop 29.6.2 (CVE not reachable from a bot) (low) | open |  | 2026-10-22T09:00:45.461Z |  |
+| 300 | 07.8 | deviation | infra/sandbox/browser |  | hardening: nothing watches new stable Chrome releases for brw; each one needs the same bump (CfT stable build, sha256 pinned) — add a scheduled check (low) | open |  | 2026-10-22T09:40:57.925Z |  |
+| 301 | 07.8 | deviation | .woodpecker |  | hardening: rebuild the ocw-ci image for Playwright 1.64.1 browsers; gVisor with Chromium 156 unverified until the first push (gvisor-browser job) | open |  | 2026-10-22T09:40:58.007Z |  |
+| 302 | 07.8 | deviation | apps/api/src/modules/chat |  | hardening: "a DM never gains humans" is enforced only in the API; a DB trigger would be defence in depth (low) | open |  | 2026-10-22T09:40:58.083Z |  |
 
 ````json
 [
@@ -3852,10 +3855,10 @@ last_updated: 2026-10-22T09:00:45.461Z
     "file": "infra/sandbox/browser",
     "line": null,
     "description": "MUST FIX before 29 (07.8-28): pinned Chromium 153.0.8010.12 is an August beta; stable 156.0.8078.47 and several stable security releases are missing. Bump playwright-core (1.64.x ships Chromium 156) or the current stable CfT build, re-pin digests, re-run browser/stack smokes",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-22T09:00:45.152Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T09:40:57.707Z"
   },
   {
     "id": 296,
@@ -3864,10 +3867,10 @@ last_updated: 2026-10-22T09:00:45.461Z
     "file": "infra/sandbox/browser",
     "line": null,
     "description": "SHOULD FIX (07.8-28, medium): the first contextOpen on a freshly started brw sometimes does not answer (2 of ~9 starts on Docker Desktop) and the API answers service_unavailable after 15 s; a retry works; brw keeps no logs so it cannot be diagnosed",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-22T09:00:45.226Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T09:40:57.779Z"
   },
   {
     "id": 297,
@@ -3876,10 +3879,10 @@ last_updated: 2026-10-22T09:00:45.461Z
     "file": "apps/api/src/modules/keychain",
     "line": null,
     "description": "SHOULD FIX (07.8-28, medium): PUT /keychain/private-hosts does not re-push the sandbox policy to sandboxd; it keeps the old allowlist until the next settings change, kill/resume or restart",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-22T09:00:45.302Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T09:40:57.851Z"
   },
   {
     "id": 298,
@@ -3903,6 +3906,42 @@ last_updated: 2026-10-22T09:00:45.461Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-22T09:00:45.461Z",
+    "resolved_at": null
+  },
+  {
+    "id": 300,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/sandbox/browser",
+    "line": null,
+    "description": "hardening: nothing watches new stable Chrome releases for brw; each one needs the same bump (CfT stable build, sha256 pinned) — add a scheduled check (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T09:40:57.925Z",
+    "resolved_at": null
+  },
+  {
+    "id": 301,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": ".woodpecker",
+    "line": null,
+    "description": "hardening: rebuild the ocw-ci image for Playwright 1.64.1 browsers; gVisor with Chromium 156 unverified until the first push (gvisor-browser job)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T09:40:58.007Z",
+    "resolved_at": null
+  },
+  {
+    "id": 302,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/chat",
+    "line": null,
+    "description": "hardening: \"a DM never gains humans\" is enforced only in the API; a DB trigger would be defence in depth (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T09:40:58.083Z",
     "resolved_at": null
   }
 ]
