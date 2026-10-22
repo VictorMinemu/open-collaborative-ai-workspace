@@ -1,3 +1,4 @@
+import { AgentCardBrowserAction } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
 import { shownTarget } from "./kind";
 import {
@@ -5,6 +6,7 @@ import {
   argumentsDisplay,
   browserActionView,
   browserSummaryTitle,
+  cardBrowserOf,
   humanizeKey,
   maskForDisplay,
   NO_APPROVER,
@@ -320,5 +322,26 @@ describe("browser actions (07.8-14, UI-SPEC Surface 6, R8, D-13)", () => {
     expect(el).not.toContain("\n");
     expect(el).toContain("⟨U+200B⟩");
     expect(v.title.length).toBeLessThanOrEqual(200);
+  });
+});
+
+describe("the card's page of a browser action (07.8-20, R8, T-07.8-20-03)", () => {
+  it("action, host, scheme and session only: never the element, a typed value or an option", () => {
+    const args = {
+      contextId: "5b3a1f0e-7d2c-4c1a-9a55-1f7b2b0f3c11",
+      action: "type",
+      ref: "r2",
+      element: { role: "textbox", name: "Email" },
+      host: "intranet.fake.test",
+      secure: false,
+      signedIn: true,
+      sessionSite: "intranet.fake.test",
+      value: "sam.lee@shop.example",
+    };
+    const page = cardBrowserOf(args);
+    expect(page).toEqual({ action: "type", host: "intranet.fake.test", secure: false, signedIn: true });
+    expect(AgentCardBrowserAction.strict().parse(page)).toEqual(page);
+    expect(JSON.stringify(page)).not.toContain("Email");
+    expect(JSON.stringify(page)).not.toContain("sam.lee");
   });
 });

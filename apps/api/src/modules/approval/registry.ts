@@ -93,7 +93,7 @@ export interface ApprovalCardContent {
 /** The kind-composed fields of a card's approval link (`ApprovalKind.link`). */
 export type ApprovalCardLink = Pick<
   AgentCardApprovalLink,
-  "display" | "useBy" | "waitingFor" | "actionFields" | "deviceId" | "resultRoute" | "blocked"
+  "display" | "useBy" | "waitingFor" | "actionFields" | "deviceId" | "resultRoute" | "blocked" | "browser"
 >;
 
 /** What a grant kind adds to the re-run turn of a decision (`ApprovalKind.cardTurn`). */

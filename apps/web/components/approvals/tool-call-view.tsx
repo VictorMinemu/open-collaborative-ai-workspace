@@ -6,16 +6,19 @@ import {
   Container,
   Globe,
   KeyRound,
+  LockKeyhole,
   type LucideIcon,
   MonitorPlay,
   Package,
   Plug,
+  Timer,
   TriangleAlert,
   UserCheck,
   Users,
 } from "lucide-react";
 import Link from "next/link";
 import type { ReactNode } from "react";
+import { HostChip } from "@/components/browser/host-chip";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { ArgumentsView } from "./arguments-view";
@@ -160,6 +163,49 @@ export function waitingFor(view: Pick<ToolCallApprovalView, "approverLabel">): s
     : null;
 }
 
+// ---------------------------------------------------------------- browser actions (07.8, UI-SPEC Surface 6, R8)
+
+type BrowserAction = NonNullable<ToolCallApprovalView["browser"]>;
+
+const BROWSER_ACTION_WORD: Record<BrowserAction["action"], string> = {
+  click: "Click",
+  type: "Type",
+  select: "Choose",
+  press: "Press",
+  scroll: "Scroll",
+  open: "Open",
+};
+
+/** "Signed in as you", "Signed in as Sam Lee", "Signed in as you on shop.example.com" (D-13 open), "Not signed in". */
+export function browserSessionText(view: ToolCallApprovalView, meId: string | null): string {
+  const b = view.browser;
+  if (!b?.signedIn) return "Not signed in";
+  const who = own(view, meId) ? "you" : view.requestedFor.displayName;
+  return b.action === "open" && b.sessionSite && b.sessionSite !== b.host
+    ? `Signed in as ${who} on ${b.sessionSite}`
+    : `Signed in as ${who}`;
+}
+
+/** "{bot} is signed in to {host} with your account, so it asks before acting." */
+export function browserWhyText(view: ToolCallApprovalView, meId: string | null): string | null {
+  const b = view.browser;
+  if (!b?.signedIn) return null;
+  const site = b.sessionSite ?? b.host;
+  const account = own(view, meId) ? "your account" : `${view.requestedFor.displayName}'s account`;
+  return `${view.agent.displayName} is signed in to ${site} with ${account}, so it asks before acting.`;
+}
+
+/** The "Not used" line of an approved browser action whose page closed or changed (Surface 6 › States). */
+export const browserNotUsedText = (bot: string) =>
+  `The page closed or changed before ${bot} could do it. Ask again if you still need it.`;
+
+/** "Expires in 14 min" (browser approvals live as long as the held page, 15 minutes). */
+function minutesLeft(iso: string, now: number = Date.now()): string {
+  const left = new Date(iso).getTime() - now;
+  if (left <= 0) return "Expired";
+  return `Expires in ${Math.max(1, Math.ceil(left / 60_000))} min`;
+}
+
 // ---------------------------------------------------------------- pieces
 
 const SECTION_TITLE = "font-semibold text-muted-foreground text-xs uppercase tracking-wider";
@@ -254,8 +300,19 @@ function Notice({
 
 // ---------------------------------------------------------------- the view
 
-export function ToolCallView({ view, meId }: { view: ToolCallApprovalView; meId: string | null }) {
+export function ToolCallView({
+  view,
+  meId,
+  expiresAt = null,
+}: {
+  view: ToolCallApprovalView;
+  meId: string | null;
+  /** A pending request's expiry: a browser action reads "Runs once, while the page is open · Expires in {n} min". */
+  expiresAt?: string | null;
+}) {
   const bot = view.agent.displayName;
+  const browser = view.browser ?? null;
+  const browserWhy = browserWhyText(view, meId);
   const SourceIcon = SOURCE_ICON[view.source.kind];
   const target = targetOf(view);
   const readers = view.audience.detailReaders;
@@ -318,7 +375,35 @@ export function ToolCallView({ view, meId }: { view: ToolCallApprovalView; meId:
               <span className="min-w-0 break-words">{untrustedNodes(sourceText(view, meId))}</span>
             </span>
           </Field>
-          {target ? (
+          {browser ? (
+            <>
+              <Field label="Action" testId="tool-call-browser-action">
+                {BROWSER_ACTION_WORD[browser.action]}
+              </Field>
+              {browser.element ? (
+                <Field label="Element" testId="tool-call-browser-element">
+                  <UntrustedText text={`${browser.element.role} “${browser.element.name}”`.trim()} />
+                </Field>
+              ) : null}
+              {browser.option !== null ? (
+                <Field label="Option" testId="tool-call-browser-option">
+                  <UntrustedText text={browser.option} />
+                </Field>
+              ) : null}
+              <Field label="Page" testId="tool-call-browser-page">
+                <HostChip host={browser.host} secure={browser.secure} className="text-[13px]" />
+              </Field>
+              <Field label="Session" testId="tool-call-browser-session">
+                <span className="inline-flex min-w-0 items-start gap-1.5">
+                  {browser.signedIn ? (
+                    <LockKeyhole aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                  ) : null}
+                  <span className="min-w-0 break-words">{browserSessionText(view, meId)}</span>
+                </span>
+              </Field>
+            </>
+          ) : null}
+          {target && !browser ? (
             <Field label="Target" testId="tool-call-target">
               <span className="break-all font-mono text-[13px]">{untrustedNodes(target)}</span>
             </Field>
@@ -370,27 +455,65 @@ export function ToolCallView({ view, meId }: { view: ToolCallApprovalView; meId:
         </div>
       ) : null}
 
-      <section aria-labelledby="tool-call-send" className="grid min-w-0 gap-3">
-        <h2 id="tool-call-send" className={SECTION_TITLE}>
-          What {bot} will send
-        </h2>
-        {view.preview.length > 0 ? (
-          <dl className="grid min-w-0 gap-2.5" data-testid="tool-call-preview">
-            {view.preview.map((f) => (
-              <Field key={f.key} label={untrustedNodes(f.label)} testId={`preview-field-${f.key}`}>
-                <PreviewValue value={f.value} />
+      {browser ? (
+        <div className="grid gap-2" data-testid="tool-call-browser-lines">
+          {browserWhy ? (
+            <p
+              data-testid="tool-call-browser-why"
+              className="flex items-start gap-1.5 text-muted-foreground text-xs"
+            >
+              <LockKeyhole aria-hidden className="mt-px size-3.5 shrink-0" />
+              <span className="min-w-0">{browserWhy}</span>
+            </p>
+          ) : null}
+          {expiresAt ? (
+            <p
+              data-testid="tool-call-browser-timer"
+              className="flex items-start gap-1.5 text-muted-foreground text-xs"
+            >
+              <Timer aria-hidden className="mt-px size-3.5 shrink-0" />
+              <span className="min-w-0">Runs once, while the page is open · {minutesLeft(expiresAt)}</span>
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {browser ? (
+        browser.action === "type" ? (
+          <section aria-labelledby="tool-call-type" className="grid min-w-0 gap-3">
+            <h2 id="tool-call-type" className={SECTION_TITLE}>
+              What {bot} will type
+            </h2>
+            <dl className="grid min-w-0 gap-2.5" data-testid="tool-call-browser-value">
+              <Field label="Value" testId="preview-field-value">
+                <PreviewValue value={browser.value ?? ""} />
               </Field>
-            ))}
-          </dl>
-        ) : (
-          <p className="text-muted-foreground text-sm">No values.</p>
-        )}
-        {view.truncated ? (
-          <p data-testid="tool-call-truncated" className="text-muted-foreground text-xs">
-            Some values are cut here. All arguments shows them in full.
-          </p>
-        ) : null}
-      </section>
+            </dl>
+          </section>
+        ) : null
+      ) : (
+        <section aria-labelledby="tool-call-send" className="grid min-w-0 gap-3">
+          <h2 id="tool-call-send" className={SECTION_TITLE}>
+            What {bot} will send
+          </h2>
+          {view.preview.length > 0 ? (
+            <dl className="grid min-w-0 gap-2.5" data-testid="tool-call-preview">
+              {view.preview.map((f) => (
+                <Field key={f.key} label={untrustedNodes(f.label)} testId={`preview-field-${f.key}`}>
+                  <PreviewValue value={f.value} />
+                </Field>
+              ))}
+            </dl>
+          ) : (
+            <p className="text-muted-foreground text-sm">No values.</p>
+          )}
+          {view.truncated ? (
+            <p data-testid="tool-call-truncated" className="text-muted-foreground text-xs">
+              Some values are cut here. All arguments shows them in full.
+            </p>
+          ) : null}
+        </section>
+      )}
 
       <ArgumentsView json={view.argumentsJson} bytes={view.argumentsBytes} />
 

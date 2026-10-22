@@ -2,6 +2,7 @@
 
 import type { Message } from "@ocw/contracts";
 import type { ReactNode } from "react";
+import { BotActivity } from "@/components/browser/bot-activity";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { Markdown } from "./markdown";
@@ -67,6 +68,8 @@ export function MessageCard({
               </time>
             </Tooltip>
           </div>
+          {/* 07.8-20 (R2): a bot reply keeps its sandbox and browser activity here too, collapsed. */}
+          {message.activity ? <BotActivity activity={message.activity} /> : null}
           {/* Long messages are clipped; "Jump" opens them whole in their conversation. */}
           <div className="max-h-44 overflow-hidden text-[14px]">
             <Markdown body={message.body} />

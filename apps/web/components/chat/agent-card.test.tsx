@@ -896,3 +896,142 @@ describe("cardExpiresIn (UI-SPEC Timer)", () => {
     expect(cardExpiresIn(at(left), now)).toBe(text);
   });
 });
+
+// ---------------------------------------------------------------- 07.8-20: signed-in browser actions (Surface 6, R8)
+
+const in15min = () => new Date(Date.now() + 15 * 60_000 - 20_000).toISOString();
+
+/** The browser card the server composes in Sam's DM (07.8-14 `composeToolCallCard`, R8 fields, display exact). */
+function browserCard(over: Partial<AgentCard> = {}, link: Partial<AgentCardApprovalLink> = {}): AgentCard {
+  return toolCard(
+    {
+      title: "Type into “Email” on shop.fake.test",
+      fields: [
+        { label: "Action", value: "Type" },
+        { label: "Element", value: "textbox “Email”" },
+        { label: "Page", value: "shop.fake.test" },
+        { label: "Session", value: "Signed in as you" },
+        { label: "Value", value: "sam.lee@shop.example" },
+      ],
+      ...over,
+    },
+    {
+      actionFields: 0,
+      expiresAt: in15min(),
+      waitingFor: "Waiting for Sam Lee to approve",
+      browser: { action: "type", host: "shop.fake.test", secure: true, signedIn: true },
+      ...link,
+    },
+  );
+}
+const renderBrowser = (card: AgentCard, me = ME) =>
+  render(card, `${card.title}. Waiting.`, { me, authorName: "Scout" });
+
+describe("AgentCardView: a signed-in browser action (07.8-20, UI-SPEC Surface 6, R8)", () => {
+  it("exact view: Action, Element, Page as the host chip, Session, What Scout will type, the explanation and the timer", () => {
+    const html = renderBrowser(browserCard());
+    expect(html).toContain(">Type into “Email” on shop.fake.test<");
+    expect(html).toMatch(/role="heading" aria-level="4"[^>]*>Action</);
+    expect(html).toMatch(/role="heading" aria-level="4"[^>]*>What Scout will type</);
+    expect(html).not.toContain("What Scout will send");
+    expect(textOf(html, "agent-card-action-field-action")).toBe("Type");
+    expect(textOf(html, "agent-card-action-field-element")).toBe("textbox “Email”");
+    const page = /data-testid="agent-card-action-field-page"[\s\S]*?<\/dd>/.exec(html)?.[0] ?? "";
+    expect(page).toContain('data-testid="host-chip"');
+    expect(page).toContain('data-secure="true"');
+    expect(page).toContain("lucide-lock-keyhole");
+    expect(textOf(html, "agent-card-action-field-session")).toBe("Signed in as you");
+    expect(textOf(html, "agent-card-value-field-value")).toBe("sam.lee@shop.example");
+    expect(textOf(html, "agent-card-browser-why")).toBe(
+      "Scout is signed in to shop.fake.test with your account, so it asks before acting.",
+    );
+    expect(textOf(html, "agent-card-timer")).toBe("Runs once, while the page is open · Expires in 15 min");
+    expect(buttons(html)).toEqual(["Approve", "Deny"]);
+  });
+
+  it("an http page reads “Not secure” as a word in the Page field", () => {
+    const html = renderBrowser(
+      browserCard(
+        {},
+        { browser: { action: "click", host: "intranet.fake.test", secure: false, signedIn: true } },
+      ),
+    );
+    const page = /data-testid="agent-card-action-field-page"[\s\S]*?<\/dd>/.exec(html)?.[0] ?? "";
+    expect(page).toContain('data-secure="false"');
+    expect(page).toContain("Not secure");
+    expect(page).toContain("intranet.fake.test");
+  });
+
+  it("a click has no type section; expired says what was not clicked or typed", () => {
+    const click = browserCard(
+      {
+        title: "Click “Place order” on shop.fake.test",
+        fields: [
+          { label: "Action", value: "Click" },
+          { label: "Element", value: "button “Place order”" },
+          { label: "Page", value: "shop.fake.test" },
+          { label: "Session", value: "Signed in as you" },
+        ],
+      },
+      { browser: { action: "click", host: "shop.fake.test", secure: true, signedIn: true } },
+    );
+    expect(renderBrowser(click)).not.toContain("will type");
+    const expired = (card: AgentCard) =>
+      renderBrowser({
+        ...card,
+        approval: { ...(card.approval as AgentCardApprovalLink), status: "expired" },
+      });
+    expect(textOf(expired(click), "agent-card-state-line")).toBe(
+      "No one decided within 15 minutes. Nothing was clicked.",
+    );
+    expect(textOf(expired(browserCard()), "agent-card-state-line")).toBe(
+      "No one decided within 15 minutes. Nothing was typed.",
+    );
+  });
+
+  it("approved but the page closed or changed: Not used with the browser line", () => {
+    const html = renderBrowser(
+      browserCard(
+        {
+          decision: {
+            outcome: "approved",
+            by: { kind: "user", id: ME, displayName: "Sam Lee" },
+            at: new Date(Date.now() - 20 * 60_000).toISOString(),
+          },
+        },
+        { status: "approved", useBy: new Date(Date.now() - 5 * 60_000).toISOString() },
+      ),
+    );
+    expect(html).toContain('aria-label="Status: Not used"');
+    expect(textOf(html, "agent-card-state-line")).toBe(
+      "The page closed or changed before Scout could do it. Ask again if you still need it.",
+    );
+  });
+
+  it("summary view for any other reader: who wants to click where for whom; no element, value, chip or explanation", () => {
+    const html = renderBrowser(
+      browserCard(
+        {
+          title: "Scout wants to click on shop.fake.test for Sam Lee",
+          fields: [
+            { label: "Tool", value: "ocw_browser_act" },
+            { label: "Source", value: "Browser" },
+          ],
+          actions: [{ kind: "open", label: "Review", target: `/approvals/${APPROVAL_ID}` }],
+          viewerCan: [],
+        },
+        {
+          display: "summary",
+          requestedForUserId: OTHER,
+          browser: { action: "click", host: "shop.fake.test", secure: true, signedIn: true },
+        },
+      ),
+    );
+    expect(html).toContain(">Scout wants to click on shop.fake.test for Sam Lee<");
+    expect(textOf(html, "agent-card-privacy")).toBe("Only Sam Lee and the approvers can see the details.");
+    expect(html).not.toContain("agent-card-browser-why");
+    expect(html).not.toContain('data-testid="host-chip"');
+    expect(html).not.toContain("Element");
+    expect(buttons(html)).toEqual([]);
+  });
+});

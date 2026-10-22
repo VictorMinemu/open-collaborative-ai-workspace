@@ -161,6 +161,7 @@ export type LinkedCardInfo = LinkedCardBase &
       | "deviceId"
       | "resultRoute"
       | "blocked"
+      | "browser"
     >
   >;
 
