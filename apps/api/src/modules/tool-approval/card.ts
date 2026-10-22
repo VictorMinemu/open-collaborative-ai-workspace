@@ -17,9 +17,11 @@ import {
   browserActionView,
   browserSummaryTitle,
   isBrowserActionTool,
+  isSandboxExecAfterSignIn,
   maskForDisplay,
   orderPreview,
   type PreviewResult,
+  sandboxExecPreview,
   shortToolName,
   summaryTitle,
 } from "./view";
@@ -85,7 +87,13 @@ export async function cardDisplayOf(
     .limit(1);
   const humanIds = conv?.kind === "dm" ? await humanMembersOf(tx, t.conversationId) : [];
   const browser = isBrowserActionTool(t.tool);
-  const preview = browser ? browserPreview(parseArgs(t)) : orderPreview(parseArgs(t));
+  const args = parseArgs(t);
+  // 07.8-25 (D-13): a command with internet access after a sign-in shows its Command and Internet access.
+  const preview = browser
+    ? browserPreview(args)
+    : isSandboxExecAfterSignIn(t.tool, args)
+      ? sandboxExecPreview(args)
+      : orderPreview(args);
   // A browser action's card is its R8 fields alone (Action, Element, Page, Session, Value or Option).
   const exactActionFields = browser ? 0 : shownTarget(t) ? 3 : 2;
   const display = cardDisplay({

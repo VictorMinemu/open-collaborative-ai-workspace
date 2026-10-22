@@ -384,3 +384,78 @@ export function cardBrowserOf(args: Record<string, unknown>): {
   const b = browserActionView(args, { summary: true }).browser;
   return { action: b.action, host: b.host, secure: b.secure, signedIn: b.signedIn };
 }
+
+// ---------------------------------------------------------------- 07.8-25: D-13 exec after a member's sign-in (P-18)
+
+/** The internet access a D-13 command would have, as people read it (the organization's sandbox egress mode). */
+const EGRESS_LABEL = { allowlist: "Allowed hosts only", public: "Any public host" } as const;
+/**
+ * `--password=…`, `--api-key=…`: a flag whose value a person never needs in full. The 07.2 detector (`maskForDisplay`)
+ * finds tokens, keys and `NAME_PASSWORD=` assignments, not lowercase command-line flags; display only.
+ */
+const SECRET_FLAG =
+  /^(--?[A-Za-z0-9_-]*(?:pass(?:word|wd|phrase)?|secret|token|api[-_]?key|auth)[A-Za-z0-9_-]*=)(.+)$/i;
+const COMMAND_SHOWN = 200;
+
+/**
+ * The stored arguments of an `ocw_sandbox_exec` that D-13 sent for the requester's approval: the API adds the
+ * organization's egress mode (`egress`) to the canonical action only then (`decideSandboxCall`).
+ */
+export function isSandboxExecAfterSignIn(tool: string, args: Record<string, unknown>): boolean {
+  return tool === "ocw_sandbox_exec" && (args.egress === "allowlist" || args.egress === "public");
+}
+
+export interface SandboxExecDisplay {
+  title: string;
+  /** Command (masked, at most 200 characters), then Internet access. */
+  fields: { label: string; value: string }[];
+  /** The command was cut at 200 characters, a value in it was masked, it holds invisible characters. */
+  truncated: boolean;
+  masked: boolean;
+  hidden: boolean;
+}
+
+/** One argv entry as a shell would read it back (quoted where needed). */
+function shellWord(a: string): string {
+  return a === "" || /[\s'"\\$`;&|<>(){}*?!#~]/.test(a) ? `'${a.replace(/'/g, `'\\''`)}'` : a;
+}
+
+/**
+ * The D-13 exec a person approves (07.8-25, D-13, P-18): "Run a command with internet access after using {member}'s
+ * sign-in", the command (secret-looking values and secret flags masked, invisible characters revealed, first 200
+ * characters) and the internet access it would have. From the stored canonical arguments only. Pure.
+ */
+export function sandboxExecView(
+  args: Record<string, unknown>,
+  opts: { requesterName?: string } = {},
+): SandboxExecDisplay {
+  const argv = Array.isArray(args.argv) ? args.argv.filter((a): a is string => typeof a === "string") : [];
+  const words = argv.map((a) => {
+    const flag = SECRET_FLAG.exec(a);
+    return shellWord(flag ? `${flag[1]}${MASK}` : a);
+  });
+  const shown = displayText(words.join(" "));
+  const command = cut(shown.text, COMMAND_SHOWN);
+  const egress = args.egress === "public" ? "public" : "allowlist";
+  const who = opts.requesterName ? revealInvisible(opts.requesterName) : "the requester";
+  return {
+    title: cut(`Run a command with internet access after using ${who}'s sign-in`, 200),
+    fields: [
+      { label: "Command", value: command || "(empty)" },
+      { label: "Internet access", value: EGRESS_LABEL[egress] },
+    ],
+    truncated: shown.text.length > COMMAND_SHOWN,
+    masked: shown.masked || words.some((w, i) => w !== shellWord(argv[i] ?? "")),
+    hidden: shown.hidden,
+  };
+}
+
+/** The D-13 exec's fields as the card's and the review's preview (what a person checks before approving). */
+export function sandboxExecPreview(args: Record<string, unknown>): PreviewResult {
+  const v = sandboxExecView(args);
+  return {
+    fields: v.fields.map((f) => ({ key: f.label.toLowerCase(), label: f.label, value: f.value })),
+    truncated: v.truncated,
+    notices: { hiddenCharacters: v.hidden, maskedSecret: v.masked },
+  };
+}

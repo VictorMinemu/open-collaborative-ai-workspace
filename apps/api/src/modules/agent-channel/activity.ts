@@ -253,6 +253,52 @@ export function stepFor(
   };
 }
 
+/** 07.8-25 (F-8): why a browser download was not kept, as the step reads it. */
+const DOWNLOAD_NOT_KEPT: Record<string, string> = {
+  sandbox_off: "Download not kept: the sandbox is off",
+  too_large: "Download not kept: the file is too large",
+  busy: "Download not kept: no free name in downloads",
+  service_unavailable: "Download not kept: it could not be saved",
+};
+
+/**
+ * 07.8-25 (D-11 F-8, P-11): the step of a file the bot's browser downloaded during an act: `shared` with its name when
+ * it became an attachment of the conversation, `imported` with its workspace path, or a blocked step that says why it
+ * was not kept. Pure; never the file's content.
+ */
+export function downloadStep(
+  d:
+    | { stored: "conversation"; name: string }
+    | { stored: "workspace"; path: string }
+    | { stored: null; reason: string },
+  opts: { signedIn?: boolean; contextId?: string | null } = {},
+): ActivityStep {
+  const verb: ActivityVerb =
+    d.stored === "conversation" ? "shared" : d.stored === "workspace" ? "imported" : "blocked";
+  const target =
+    d.stored === "conversation"
+      ? cut(maskActivityText(d.name), TARGET_MAX)
+      : d.stored === "workspace"
+        ? displayPath(d.path)
+        : (DOWNLOAD_NOT_KEPT[d.reason] ?? DOWNLOAD_NOT_KEPT.service_unavailable ?? "Download not kept");
+  return {
+    id: randomUUID(),
+    tool: "ocw_browser_act",
+    verb,
+    target,
+    outcome: {
+      kind: d.stored === null ? "blocked" : "ok",
+      code: d.stored === null ? d.reason.slice(0, 64) : null,
+      exitCode: null,
+      durationMs: null,
+    },
+    signedIn: opts.signedIn === true,
+    contextId: opts.contextId ?? null,
+    approvalMessageRoute: null,
+    details: null,
+  };
+}
+
 const PHRASES: Partial<Record<ActivityVerb, (target: string) => string>> = {
   ran: (t) => `running ${t}`,
   checked_process: () => "checking a running command",

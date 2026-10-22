@@ -403,7 +403,7 @@ export async function mirrorCardDecision(
      * decision locks its streams in the order a message post does (conversation, `user:`, cell; 07.5-16).
      */
     beforeCardAction?: () => Promise<void>;
-  } & Pick<CardAction, "turnUserId" | "decidedBy" | "grant" | "tainted" | "resultCode">,
+  } & Pick<CardAction, "turnUserId" | "decidedBy" | "grant" | "tainted" | "memberData" | "resultCode">,
 ): Promise<void> {
   const linked = bridge?.linkedCards();
   const onCard = noteShown(linked ? (await linked.linkOf(tx, [a.messageId])).get(a.messageId) : undefined);
@@ -449,6 +449,7 @@ export async function mirrorCardDecision(
       ...(a.decidedBy ? { decidedBy: a.decidedBy } : {}),
       ...(a.grant ? { grant: a.grant } : {}),
       ...(a.tainted ? { tainted: true } : {}),
+      ...(a.memberData ? { memberData: true } : {}),
       ...(a.resultCode ? { resultCode: a.resultCode } : {}),
     },
     tenantOf(tx).afterCommit,

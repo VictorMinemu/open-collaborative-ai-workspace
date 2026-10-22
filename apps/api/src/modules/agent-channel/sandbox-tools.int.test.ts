@@ -270,6 +270,8 @@ describe("cross-tenant guards derived from the authz registry (P-17, 07.4 #169)"
       list: { path: "" },
       delete: { path: "tenant/a.txt" },
       share: { path: "tenant/a.txt" },
+      // 07.8-25: an attachment id is never resolved for another organization's cell (no turn first).
+      import: { attachmentId: randomUUID() },
     };
     const cases: Record<string, () => Promise<void>> = Object.fromEntries(
       Object.entries(bodies).map(([name, body]) => [

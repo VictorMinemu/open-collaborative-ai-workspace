@@ -3,6 +3,8 @@ import {
   AgentChannelSandboxDeleteResponse,
   AgentChannelSandboxExec,
   AgentChannelSandboxExecResponse,
+  AgentChannelSandboxImport,
+  AgentChannelSandboxImportResponse,
   AgentChannelSandboxList,
   AgentChannelSandboxProcess,
   AgentChannelSandboxRead,
@@ -28,6 +30,8 @@ import {
   SandboxRelativePath,
   type SandboxRuntime,
   type SandboxToolName,
+  sanitizeFilename,
+  TOOL_APPROVAL_LIMITS,
   type ToolApprovalRefusal,
   type TurnToolFlags,
 } from "@ocw/contracts";
@@ -38,11 +42,22 @@ import type { z } from "zod";
 import type { App, Core } from "../../core";
 import { sha256Hex } from "../../lib/crypto";
 import { HttpError } from "../../lib/errors";
-import { createObjectStorage, pendingTurnAttachmentCount, storeServerAttachment } from "../artifact";
-import type { PermissionService } from "../organization";
+import {
+  type AttachmentRow,
+  AttachmentTooLargeError,
+  attachmentRowsByIds,
+  createObjectStorage,
+  pendingTurnAttachmentCount,
+  readAttachmentBytes,
+  storeServerAttachment,
+} from "../artifact";
+import { createConversationAccess } from "../chat";
+import { audienceCoverFacts, audienceCovers, type PermissionService } from "../organization";
 import {
   type ConfinedKind,
   ensureSandbox,
+  loadSandboxBot,
+  loadSandboxPolicy,
   markState,
   reserveSandbox,
   type SandboxContainer,
@@ -131,6 +146,17 @@ const MESSAGES: Record<SandboxCallRefusal, string> = {
   invalid_path: "That path is not inside the workspace",
   busy: "The sandbox is busy",
 };
+
+/**
+ * The sandbox tools that change a bot's workspace (P-11): refused on a team bot once its turn has member data. Read,
+ * list, process and share leave the workspace as it is (share moves a file towards the conversation, never into it).
+ */
+const WORKSPACE_MUTATIONS: ReadonlySet<ConfinedToolName> = new Set([
+  BUILTIN_TOOLS.sandboxWrite,
+  BUILTIN_TOOLS.sandboxDelete,
+  BUILTIN_TOOLS.sandboxExec,
+  BUILTIN_TOOLS.sandboxImport,
+]);
 
 const statusOf = (code: SandboxCallRefusal): number =>
   code in SANDBOX_REFUSAL_STATUS ? SANDBOX_REFUSAL_STATUS[code as SandboxRefusal] : 409;
@@ -263,6 +289,8 @@ export async function decideSandboxCall(
     flags?: TurnToolFlags;
     /** 07.8-14 (P-06, P-18): the approval floor and the shorter pending TTL of a browser action. */
     approval?: { floor?: "always"; pendingTtlMs?: number };
+    /** 07.8-25: ids the call's audit rows carry (an import's attachment id); never a path or content. */
+    metadata?: Record<string, unknown>;
   },
 ): Promise<SandboxDecision> {
   const { turn } = p;
@@ -275,7 +303,7 @@ export async function decideSandboxCall(
         sideEffecting: base.sideEffecting || p.flags.sideEffecting,
       }
     : base;
-  const meta = { kind: p.kind };
+  const meta: Record<string, unknown> = { kind: p.kind, ...p.metadata };
   const refuse = async (
     reason: ConfinedCallRefusal,
     extra: { details?: Record<string, unknown>; metadata?: Record<string, unknown> } = {},
@@ -302,13 +330,37 @@ export async function decideSandboxCall(
   if (!turn.tools.includes(p.tool)) return refuse("policy_changed");
   if (!deps.configured) return refuse("service_unavailable");
 
-  // The per-turn budget, under the turn row lock (the claim below re-checks it in its UPDATE).
+  // The turn row, locked: the per-turn budget (the claim below re-checks it in its UPDATE) and its member data.
   const [locked] = await tx
-    .select({ sandboxCalls: agentTurns.sandboxCalls })
+    .select({ sandboxCalls: agentTurns.sandboxCalls, memberData: agentTurns.memberData })
     .from(agentTurns)
     .where(eq(agentTurns.eventId, turn.eventId))
     .for("update");
-  if (!locked || locked.sandboxCalls >= MAX_SANDBOX_CALLS_PER_TURN) return refuse("budget_exhausted");
+  if (!locked) return refuse("budget_exhausted");
+
+  // P-11 (D-11 F-8, Pitfall 13): once a member's session was loaded in this turn, a team bot puts nothing into the
+  // workspace other people's turns read, for the rest of the turn. A personal bot's workspace is its owner's alone.
+  if (locked.memberData && WORKSPACE_MUTATIONS.has(p.tool)) {
+    const bot = await loadSandboxBot(tx, turn.agentId);
+    if (bot?.facts.scope !== "personal") return refuse("member_data");
+  }
+  if (locked.sandboxCalls >= MAX_SANDBOX_CALLS_PER_TURN) return refuse("budget_exhausted");
+
+  // D-13 (P-18): once a member's sign-in was used in this turn, a command that can reach the internet waits for the
+  // requester's own approval, every time, for 15 minutes (`withFloor`: the requester alone decides, whatever 07.5 rule
+  // applies). The organization's shell egress is read from its settings now, never from the request, and is part of
+  // the canonical action, so a grant given under `allowlist` never serves a call under `public`. Egress `off` is exempt.
+  let args = p.args;
+  let approval = p.approval;
+  if (base.memberData === "egress_exec" && locked.memberData) {
+    const egress = (await loadSandboxPolicy(tx)).sandboxEgress;
+    if (egress !== "off") {
+      args = { ...p.args, egress };
+      approval = { floor: "always", pendingTtlMs: TOOL_APPROVAL_LIMITS.browserPendingTtlMs };
+      meta.memberData = "egress_exec";
+      meta.egress = egress;
+    }
+  }
 
   // The organization cap before the approval: a grant consumed by a call the cap then refuses is never given back.
   // The advisory lock taken here is held until commit, so the reservation below cannot fail.
@@ -319,11 +371,11 @@ export async function decideSandboxCall(
     await deps.toolApproval.approvalForCall(tx, {
       turn: { eventId: turn.eventId, agentId: turn.agentId },
       tool: p.tool,
-      args: p.args,
+      args,
       toolCallId: p.toolCallId,
       source: { kind: "builtin", id: null, target },
-      ...(p.approval?.floor ? { floor: p.approval.floor } : {}),
-      ...(p.approval?.pendingTtlMs !== undefined ? { pendingTtlMs: p.approval.pendingTtlMs } : {}),
+      ...(approval?.floor ? { floor: approval.floor } : {}),
+      ...(approval?.pendingTtlMs !== undefined ? { pendingTtlMs: approval.pendingTtlMs } : {}),
     }),
   );
   if (verdict.reason) {
@@ -474,7 +526,13 @@ export const WAITING: ReadonlySet<ConfinedCallRefusal> = new Set(["approval_requ
 export async function refuseSandboxCall(
   tx: Tx,
   deps: SandboxCallDeps,
-  p: { turn: AgentTurnRow; tool: ConfinedToolName; reason: ConfinedCallRefusal; kind: ConfinedKind },
+  p: {
+    turn: AgentTurnRow;
+    tool: ConfinedToolName;
+    reason: ConfinedCallRefusal;
+    kind: ConfinedKind;
+    metadata?: Record<string, unknown>;
+  },
 ): Promise<SandboxDecision> {
   await recordCall(tx, deps.core, {
     cell: deps.cell,
@@ -482,7 +540,7 @@ export async function refuseSandboxCall(
     tool: p.tool,
     reason: p.reason,
     approvalId: null,
-    metadata: { kind: p.kind },
+    metadata: { kind: p.kind, ...p.metadata },
     target: p.kind === "sandbox" ? "sandbox" : "browser",
   });
   return { ok: false, reason: p.reason };
@@ -511,8 +569,10 @@ interface SandboxCallSpec<Raw, R> {
   failureAudit?: (reason: SandboxRefusal) => Record<string, unknown>;
   /** Ensure and retry once when sandboxd says the container went away (exec: idle stop, restart). */
   retryOnGone?: boolean;
-  /** A refusal before the decision, in its transaction (share). */
+  /** A refusal before the decision, in its transaction (share, import). */
   precheck?: (tx: Tx, turn: AgentTurnRow) => Promise<SandboxCallRefusal | null>;
+  /** Ids every audit row of this call carries (an import's attachment id); never a path or content. */
+  auditIds?: Record<string, unknown>;
   /** sandboxd, outside any transaction. */
   call: (client: SandboxdClient, target: SandboxdTarget) => Promise<Raw>;
   /** In the outcome transaction (a savepoint: a throw undoes only its own writes). */
@@ -586,13 +646,20 @@ async function runSandboxCall<Raw, R>(
     }
     const pre = spec.precheck ? await spec.precheck(tx, turn) : null;
     const decision = pre
-      ? await refuseSandboxCall(tx, callDeps, { turn, tool, reason: pre, kind: "sandbox" })
+      ? await refuseSandboxCall(tx, callDeps, {
+          turn,
+          tool,
+          reason: pre,
+          kind: "sandbox",
+          ...(spec.auditIds ? { metadata: spec.auditIds } : {}),
+        })
       : await decideSandboxCall(tx, callDeps, {
           turn,
           tool,
           args: spec.args,
           toolCallId: null,
           kind: "sandbox",
+          ...(spec.auditIds ? { metadata: spec.auditIds } : {}),
         });
     const step = stepFor(
       tool,
@@ -735,11 +802,17 @@ async function assertFile(
   return entry;
 }
 
+/** Where an import lands when the bot names no path: `downloads/<the attachment's name>` (sanitized). */
+function importPathOf(row: Pick<AttachmentRow, "id" | "filename">): string {
+  const path = `downloads/${sanitizeFilename(row.filename)}`;
+  return SandboxFilePath.safeParse(path).success ? path : `downloads/attachment-${row.id.slice(0, 8)}`;
+}
+
 export function registerSandboxRoutes(
   scope: App,
   core: Core,
   deps: {
-    perms: Pick<PermissionService, "decide">;
+    perms: Pick<PermissionService, "decide" | "usersAllowed">;
     toolApproval: ToolApprovalGate;
     client: SandboxdClient | null;
   },
@@ -986,6 +1059,80 @@ export function registerSandboxRoutes(
             audit: { attachmentId: row.id, conversationId: row.conversationId, size: row.sizeBytes },
           };
         },
+      });
+    },
+  );
+
+  // 07.8-25 (D-11 F-8, P-11): an attachment of the turn's own conversation copied into the workspace, only when the
+  // conversation's audience already covers the workspace's (`audienceCovers`, the resolver's rule: refuse when unsure).
+  const access = createConversationAccess(core);
+  const isReadable = (tx: Tx, userId: string, conversationId: string) =>
+    access.isReadable(tx, userId, conversationId, { kinds: ["channel", "dm", "group", "ai_chat"] });
+  scope.post(
+    "/sandbox/import",
+    {
+      ...route(AgentChannelSandboxImport, AgentChannelSandboxImportResponse),
+      preValidation: guardBody({}),
+    },
+    async (req) => {
+      const body = req.body;
+      // The attachment as the precheck resolved it in the turn's transaction (RLS, bound to the turn's conversation).
+      let found: AttachmentRow | null = null;
+      const stepInput: Record<string, unknown> = { path: body.path ?? "downloads" };
+      return runSandboxCall(core, deps, cellOf(req), {
+        tool: BUILTIN_TOOLS.sandboxImport,
+        body,
+        // The canonical action a person approves: which attachment, and where (null = `downloads/<name>`).
+        args: { attachmentId: body.attachmentId, path: body.path ?? null },
+        stepInput,
+        auditIds: { attachmentId: body.attachmentId },
+        auditAction: "sandbox.file_imported",
+        failureAudit: (reason) => ({ reason, attachmentId: body.attachmentId }),
+        precheck: async (tx, turn) => {
+          if (!storage) return "service_unavailable";
+          const [row] = await attachmentRowsByIds(tx, [body.attachmentId]);
+          // Another conversation's file, one nobody can read yet (pending) or one gone: no such file for this turn.
+          if (!row || row.conversationId !== turn.conversationId || row.status !== "ready")
+            return "not_found";
+          if (row.sizeBytes > SANDBOX_LIMITS.uploadMaxBytes) return "too_large";
+          const facts = await audienceCoverFacts(
+            tx,
+            { perms: deps.perms, isReadable },
+            { conversationId: turn.conversationId, agentId: turn.agentId },
+          );
+          if (!audienceCovers(facts)) return "audience_narrower";
+          found = row;
+          stepInput.path = body.path ?? importPathOf(row);
+          return null;
+        },
+        call: async (client, target) => {
+          const row = found;
+          if (!row || !storage) throw new LocalRefusal("not_found");
+          let bytes: Uint8Array;
+          try {
+            bytes = await readAttachmentBytes(storage, row, "original", SANDBOX_LIMITS.uploadMaxBytes);
+          } catch (err) {
+            throw new LocalRefusal(
+              err instanceof AttachmentTooLargeError ? "too_large" : "service_unavailable",
+            );
+          }
+          return client.call("filesImport", {
+            target,
+            path: body.path ?? importPathOf(row),
+            data: Buffer.from(bytes).toString("base64"),
+            overwrite: false,
+          });
+        },
+        finish: async (_tx, put) => ({
+          response: { path: put.path, size: put.size },
+          stepResult: { size: put.size },
+          audit: {
+            attachmentId: body.attachmentId,
+            conversationId: found?.conversationId ?? null,
+            size: put.size,
+            ...pathAudit(put.path),
+          },
+        }),
       });
     },
   );

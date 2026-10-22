@@ -8,9 +8,11 @@ import {
   browserSummaryTitle,
   cardBrowserOf,
   humanizeKey,
+  isSandboxExecAfterSignIn,
   maskForDisplay,
   NO_APPROVER,
   orderPreview,
+  sandboxExecView,
   shortToolName,
   summaryTitle,
   toolCallTitle,
@@ -343,5 +345,48 @@ describe("the card's page of a browser action (07.8-20, R8, T-07.8-20-03)", () =
     expect(AgentCardBrowserAction.strict().parse(page)).toEqual(page);
     expect(JSON.stringify(page)).not.toContain("Email");
     expect(JSON.stringify(page)).not.toContain("sam.lee");
+  });
+});
+
+describe("a command with internet access after a member's sign-in (07.8-25, D-13, P-18)", () => {
+  it("titles the action after the member and shows the command and its internet access", () => {
+    const v = sandboxExecView(
+      { argv: ["curl", "-s", "https://api.fake.test/report"], egress: "allowlist" },
+      { requesterName: "Sam" },
+    );
+    expect(v.title).toBe("Run a command with internet access after using Sam's sign-in");
+    expect(v.fields).toEqual([
+      { label: "Command", value: "curl -s https://api.fake.test/report" },
+      { label: "Internet access", value: "Allowed hosts only" },
+    ]);
+    expect(sandboxExecView({ argv: ["true"], egress: "public" }).fields[1]).toEqual({
+      label: "Internet access",
+      value: "Any public host",
+    });
+  });
+
+  it("masks a password flag and secret-looking values, quotes words with spaces, and shows the first 200 characters", () => {
+    const v = sandboxExecView({
+      argv: ["deploy", "--password=x", `--key=${ANTHROPIC_KEY}`, "DB_PASSWORD=hunter2hunter2", "two words"],
+      egress: "public",
+    });
+    const command = v.fields[0]?.value ?? "";
+    expect(command).toContain("--password=••••");
+    expect(command).not.toContain("--password=x");
+    expect(command).not.toContain(ANTHROPIC_KEY);
+    expect(command).not.toContain("hunter2hunter2");
+    expect(command).toContain("'two words'");
+    const long =
+      sandboxExecView({ argv: ["echo", "a".repeat(400)], egress: "allowlist" }).fields[0]?.value ?? "";
+    expect(long).toHaveLength(200);
+    expect(long.endsWith("…")).toBe(true);
+  });
+
+  it("is used only for an exec that D-13 sent for approval (the egress mode is in its arguments)", () => {
+    expect(isSandboxExecAfterSignIn("ocw_sandbox_exec", { argv: ["ls"], egress: "allowlist" })).toBe(true);
+    expect(isSandboxExecAfterSignIn("ocw_sandbox_exec", { argv: ["ls"], egress: "public" })).toBe(true);
+    expect(isSandboxExecAfterSignIn("ocw_sandbox_exec", { argv: ["ls"] })).toBe(false);
+    expect(isSandboxExecAfterSignIn("ocw_sandbox_exec", { argv: ["ls"], egress: "off" })).toBe(false);
+    expect(isSandboxExecAfterSignIn("ocw_sandbox_write", { egress: "public" })).toBe(false);
   });
 });

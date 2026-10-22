@@ -262,10 +262,14 @@ export async function emitCardAction(
   });
   // Taint never escapes through a re-run (T-07.5-06-07): the turn rows written for these events start tainted, in this
   // transaction, before any event is appended, so the cell can never act on an untainted re-run.
-  if (a.tainted && events.length > 0) {
+  // D-13 (07.8-25): a re-run of a turn that used a member's sign-in has member data from its start, likewise.
+  if ((a.tainted || a.memberData) && events.length > 0) {
     await tx
       .update(agentTurns)
-      .set({ tainted: true })
+      .set({
+        ...(a.tainted ? { tainted: true } : {}),
+        ...(a.memberData ? { memberData: true } : {}),
+      })
       .where(
         inArray(
           agentTurns.eventId,

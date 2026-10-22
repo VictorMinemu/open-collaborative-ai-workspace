@@ -131,11 +131,12 @@ const WORK_ZONE_PROJECTS_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEf
 const START_WORK_ZONE_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
 
 /**
- * The sandbox tools a turn is offered (07.8-05, D-12, P-05, P-06): every `ocw_sandbox_*` tool except
- * `ocw_sandbox_import`, which 07.8-25 offers with its audience check. Their static flags come from
- * `CONFINED_TOOL_FLAGS` (the D-13 member-data rule stays server-side). Browser tools are offered from 07.8-14.
+ * The sandbox tools a turn is offered (07.8-05, D-12, P-05, P-06): every `ocw_sandbox_*` tool, `ocw_sandbox_import`
+ * included since 07.8-25 (its route copies an attachment only when the conversation's audience covers the workspace's,
+ * `audienceCovers`). Their static flags come from `CONFINED_TOOL_FLAGS` (the D-13 member-data rule and P-11's team-bot
+ * rule stay server-side). Browser tools are offered from 07.8-14.
  */
-const OFFERED_SANDBOX_TOOLS = SANDBOX_TOOL_NAMES.filter((name) => name !== BUILTIN_TOOLS.sandboxImport);
+const OFFERED_SANDBOX_TOOLS = SANDBOX_TOOL_NAMES;
 
 /**
  * The browser tools a turn is offered (07.8-14, D-05, D-14, P-14): open, snapshot, act, wait and close, and the
