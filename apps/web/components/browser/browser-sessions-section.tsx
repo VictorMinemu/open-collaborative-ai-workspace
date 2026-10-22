@@ -239,26 +239,25 @@ export function SessionRow({
           </span>
           {expired ? <Badge variant="outline">Expired</Badge> : null}
         </div>
-        <p
-          className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-muted-foreground text-xs"
-          data-testid="browser-session-meta"
-        >
+        {/* Inline text: when the line wraps, "· expires …" moves down whole (the separator never dangles). */}
+        <p className="mt-1 text-muted-foreground text-xs leading-5" data-testid="browser-session-meta">
           {expired ? (
             lines.expired
           ) : (
             <>
-              <span>{lines.used}</span>
-              {" · "}
-              <span
-                data-testid="browser-session-expiry"
-                data-soon={lines.expires?.soon ? "true" : undefined}
-                className={cn(
-                  "inline-flex items-center gap-1",
-                  lines.expires?.soon && "text-amber-700 dark:text-amber-300",
-                )}
-              >
-                {lines.expires?.soon ? <TriangleAlert aria-hidden className="size-3" /> : null}
-                {lines.expires?.text}
+              {lines.used}{" "}
+              <span className="whitespace-nowrap">
+                {"· "}
+                <span
+                  data-testid="browser-session-expiry"
+                  data-soon={lines.expires?.soon ? "true" : undefined}
+                  className={cn(lines.expires?.soon && "text-amber-700 dark:text-amber-300")}
+                >
+                  {lines.expires?.soon ? (
+                    <TriangleAlert aria-hidden className="mr-1 inline size-3 align-[-2px]" />
+                  ) : null}
+                  {lines.expires?.text}
+                </span>
               </span>
             </>
           )}
