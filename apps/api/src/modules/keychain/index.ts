@@ -1,6 +1,6 @@
 import type { ApiModule, Core } from "../../core";
 import { createPermissionService } from "../organization";
-import { registerKeychainRoutes } from "./routes";
+import { type KeychainDeps, registerKeychainRoutes } from "./routes";
 
 export { clientCredentialsToken, forgetClientCredentialsToken } from "./client-credentials";
 export {
@@ -12,6 +12,7 @@ export {
   sanitizeModelHeaders,
   secretParts,
 } from "./inject";
+export type { KeychainDeps } from "./routes";
 export {
   type EffectiveVaultItem,
   effectiveVaultItems,
@@ -33,12 +34,12 @@ export {
  * (07.4-11). Routes (all `authz: user`): GET/POST `/keychain`, GET/PATCH/DELETE `/keychain/:id`,
  * PUT `/keychain/:id/agents`, GET/PUT `/keychain/private-hosts` (admins: `bot.manage`).
  */
-export function createKeychainModule(core: Core): ApiModule {
+export function createKeychainModule(core: Core, deps: KeychainDeps = {}): ApiModule {
   const perms = createPermissionService(core);
   return {
     name: "keychain",
     register(app) {
-      registerKeychainRoutes(app, core, perms);
+      registerKeychainRoutes(app, core, perms, deps);
     },
   };
 }

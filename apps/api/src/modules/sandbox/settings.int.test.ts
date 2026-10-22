@@ -326,6 +326,66 @@ describe("PUT /api/v1/sandbox/settings: versioned, validated, audited, pushed", 
   });
 });
 
+describe("PUT /api/v1/keychain/private-hosts re-pushes the sandbox policy (07.8 hardening)", () => {
+  const putPrivate = (who: TestClient, hosts: string[]) =>
+    who.request("PUT", "/api/v1/keychain/private-hosts", { hosts }) as Promise<Res>;
+
+  it("the new list reaches sandboxd at once, with the organization's current settings and version", async () => {
+    const pushed = recorder.policies.length;
+    const version = await versionOf();
+    expect(await ok(putPrivate(s.victor, ["nas.lan", "files.corp.lan:8443"]))).toEqual({
+      hosts: ["nas.lan", "files.corp.lan:8443"],
+    });
+    expect(recorder.policies).toHaveLength(pushed + 1);
+    expect(recorder.policies.at(-1)).toMatchObject({
+      orgId: s.orgA,
+      privateHosts: ["nas.lan", "files.corp.lan:8443"],
+      browserEgress: "allowlist",
+      killed: false,
+      version,
+    });
+    // The fake sandboxd took it (it keeps only the kill state).
+    expect(s.sandboxd.fake.policyOf(s.orgA)).toEqual({ killed: false });
+
+    // Emptied: the proxy loses every private host too.
+    await ok(putPrivate(s.victor, []));
+    expect(recorder.policies).toHaveLength(pushed + 2);
+    expect(recorder.policies.at(-1)).toMatchObject({ orgId: s.orgA, privateHosts: [], version });
+    await ok(putPrivate(s.victor, ["nas.lan"]));
+  });
+
+  it("a refused change pushes nothing: a lead, a member, a platform or loopback host", async () => {
+    const pushed = recorder.policies.length;
+    for (const who of [s.sam, marta]) expect((await putPrivate(who, ["evil.lan"])).status).toBe(403);
+    expect((await putPrivate(s.victor, ["127.0.0.1"])).status).toBe(400);
+    expect(recorder.policies).toHaveLength(pushed);
+  });
+
+  it("sandboxd down: the list is saved, the push is retried by the next change (never a 5xx)", async () => {
+    s.sandboxd.fake.setDown(true);
+    try {
+      expect(await ok(putPrivate(s.victor, ["nas.lan", "backup.lan"]))).toEqual({
+        hosts: ["nas.lan", "backup.lan"],
+      });
+    } finally {
+      s.sandboxd.fake.setDown(false);
+    }
+    await ok(putPrivate(s.victor, ["nas.lan"]));
+    expect(recorder.policies.at(-1)).toMatchObject({ orgId: s.orgA, privateHosts: ["nas.lan"] });
+  });
+
+  it("organization B's admin changes and pushes organization B's policy only", async () => {
+    const pushed = recorder.policies.length;
+    await ok(putPrivate(s.eve, ["b-nas.lan"]));
+    expect(recorder.policies).toHaveLength(pushed + 1);
+    expect(recorder.policies.at(-1)).toMatchObject({ orgId: s.orgB, privateHosts: ["b-nas.lan"] });
+    expect(recorder.policies.slice(pushed).some((p) => p.orgId === s.orgA)).toBe(false);
+    expect(await ok(s.victor.request("GET", "/api/v1/keychain/private-hosts") as Promise<Res>)).toEqual({
+      hosts: ["nas.lan"],
+    });
+  });
+});
+
 describe("the kill switch reaches sandboxd and bumps the version (WINDOWS #241)", () => {
   it("kill pushes killed: true; resume pushes killed: false; each bumps the version once", async () => {
     const v0 = await versionOf();

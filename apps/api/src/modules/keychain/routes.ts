@@ -23,13 +23,27 @@ import {
 
 const tags = ["keychain"];
 
+export interface KeychainDeps {
+  /**
+   * Called after the commit of a private-host change, with the organization's id (07.8 hardening): the app pushes the
+   * organization's sandbox policy to sandboxd, the same path as a settings change, so the egress proxy enforces the new
+   * list at once. Injected so this module never imports the sandbox module.
+   */
+  onPrivateHostsChanged?: (organizationId: string) => Promise<unknown>;
+}
+
 /**
  * Settings › Keychain (Phase 07.4, D-04, D-06; UI-SPEC § 3). Every route is `authz: user` and decided by the resolver
  * in the service: personal items are their owner's alone, unit items need `vault.manage` on their unit, another
  * member's or another organization's item is 404. No response carries a value (`hasValue` only). The private-host
  * allowlist is an organization policy (`bot.manage`, UI-SPEC R5).
  */
-export function registerKeychainRoutes(app: App, core: Core, perms: PermissionService) {
+export function registerKeychainRoutes(
+  app: App,
+  core: Core,
+  perms: PermissionService,
+  deps: KeychainDeps = {},
+) {
   const user = { config: { authz: "user" as const }, preHandler: [core.identity.requireUser] };
   const admin = {
     config: { authz: "user" as const },
@@ -69,8 +83,14 @@ export function registerKeychainRoutes(app: App, core: Core, perms: PermissionSe
   app.put(
     "/keychain/private-hosts",
     { ...admin, schema: { tags, body: PrivateHostsSettings, response: { 200: PrivateHostsSettings } } },
-    async (req) =>
-      core.db.withTenant(tenant(req), (tx) => setPrivateHosts(core, tx, req.body.hosts, authOf(req).userId)),
+    async (req) => {
+      const saved = await core.db.withTenant(tenant(req), (tx) =>
+        setPrivateHosts(core, tx, req.body.hosts, authOf(req).userId),
+      );
+      // After the commit: sandboxd and its egress proxy get the organization's policy with the new list (never throws).
+      await deps.onPrivateHostsChanged?.(authOf(req).organizationId);
+      return saved;
+    },
   );
 
   app.get(
