@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 165
 waived_count: 5
-fixed_count: 132
-total_count: 302
-last_updated: 2026-10-22T09:40:58.083Z
+fixed_count: 134
+total_count: 304
+last_updated: 2026-10-22T12:38:31.229Z
 ---
 
 # Broken Windows Ledger
@@ -265,10 +265,10 @@ last_updated: 2026-10-22T09:40:58.083Z
 | 248 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | When the org is killed or switched off the bot is not offered the sandbox tool and cannot say why (add a withheld reason killed/sandbox_off, 07.8-10/14/19); a message 1-2 s after a member turns Sandbox on can still get 'not offered' (UI should show applying, 07.8-15); cell-proof.sh PROOF_BUILD=1 still builds the demo's :local tags; e2e-reset.sh label cleanup untested locally | open |  | 2026-10-15T22:38:49.256Z |  |
 | 249 | 07.8 | deviation | apps/api/src/modules/browser |  | MUST FIX (D-11 floor): when an admins/unit_leads 07.5 policy applies to ocw_browser_act, those approvers decide a member's signed-in action instead of the member; signed-in acts must always need the requesting member's approval | fixed |  | 2026-10-21T19:53:39.333Z | 2026-10-21T20:35:28.921Z |
 | 250 | 07.8 | deviation | apps/api/src/modules/browser |  | act answers download:null until 07.8-25; a session counts as loaded by session_id but stored state is not passed to sandboxd until 07.8-21; kill does not close browser contexts in its own tx (rows stay open if sandboxd is down); image-capable model list is hand-kept; approval chip icons reuse package/globe | open |  | 2026-10-21T19:53:39.439Z |  |
-| 251 | 07.8 | deviation | e2e/tests/memory-files.spec.ts |  | FIX IN GATE: memory-files.spec.ts:548 (keyboard and ARIA on desktop) fails intermittently on the phase branch (2 of 3 runs alongside other specs; race between the tab stop and deep-link expansion); passes alone | open |  | 2026-10-21T20:05:41.977Z |  |
+| 251 | 07.8 | deviation | e2e/tests/memory-files.spec.ts |  | FIX IN GATE: memory-files.spec.ts:548 (keyboard and ARIA on desktop) fails intermittently on the phase branch (2 of 3 runs alongside other specs; race between the tab stop and deep-link expansion); passes alone | fixed |  | 2026-10-21T20:05:41.977Z | 2026-10-22T12:38:30.998Z |
 | 252 | 07.8 | deviation | apps/web/components/bots |  | Sandbox file list route has no offset/cursor beyond 500 entries ('{n} more not listed'); Capabilities switches are 20x36 (<44 px, same as the existing Internet row); sandbox state events carry no runtime so a sandbox started outside the API ensure shows 'hardened' until restart; upload dialog does not intercept in-app navigation | open |  | 2026-10-21T20:05:42.084Z |  |
 | 253 | 07.8 | deviation | infra/sandbox/sbx |  | sbx has no HTTP(S)_PROXY env, so curl/pip/npm in the shell ignore the egress proxy unless given -x (allowlisted egress unusable by default); set the proxy env in the sbx spec (07.8-17/24) | fixed |  | 2026-10-21T20:09:53.837Z | 2026-10-22T02:53:29.247Z |
-| 254 | 07.8 | deviation | apps/sandboxd/src/egress/proxy.ts |  | The proxy passes an upstream X-OCW-Egress header through (a site can make its own http page look refused): strip it; a failed policy write to the proxy answers 503 after sandboxd stored it (proxy lags until retry); a recreated proxy restores each bot's egress only on its next ensure | open |  | 2026-10-21T20:09:53.930Z |  |
+| 254 | 07.8 | deviation | apps/sandboxd/src/egress/proxy.ts |  | The proxy passes an upstream X-OCW-Egress header through (a site can make its own http page look refused): strip it; a failed policy write to the proxy answers 503 after sandboxd stored it (proxy lags until retry); a recreated proxy restores each bot's egress only on its next ensure | fixed |  | 2026-10-21T20:09:53.930Z | 2026-10-22T12:38:31.073Z |
 | 255 | 07.8 | deviation | apps/sandboxd/src |  | A sandboxd restart forgets its context map (agent answers no_context until it closes after 5 idle min, API must reopen); browserLimits idleStopMs/diskQuotaBytes unused (fixed 5 min); API owes resize mode, browserSandbox and http navigation_refused handling (07.8-16); 24 owes OCW_SANDBOX_BRW_IMAGE/EGRESS_IMAGE/BRW_SECCOMP env and gVisor/amd64 runs | fixed |  | 2026-10-21T20:09:54.014Z | 2026-10-22T04:13:28.548Z |
 | 256 | 07.8 | deviation | apps/api/src/modules/sandbox |  | Package installs run synchronously on the first call of a stopped sandbox (up to 600 s per package, can outlast the plugin deadline); a package reaches a running sandbox only at its next start (UI copy in 07.8-23); newerVersion always null; failed installs notify no admin beyond audit; package audit metadata includes registry name/version/digests | open |  | 2026-10-21T20:12:08.217Z |  |
 | 257 | 07.8 | deviation | apps/web/components/sandbox/settings/limits-form.tsx |  | 07.8-19: the container limits line copies the API CONTAINER_LIMITS because the settings view does not expose them (low) | open |  | 2026-10-22T02:52:51.781Z |  |
@@ -317,6 +317,8 @@ last_updated: 2026-10-22T09:40:58.083Z
 | 300 | 07.8 | deviation | infra/sandbox/browser |  | hardening: nothing watches new stable Chrome releases for brw; each one needs the same bump (CfT stable build, sha256 pinned) — add a scheduled check (low) | open |  | 2026-10-22T09:40:57.925Z |  |
 | 301 | 07.8 | deviation | .woodpecker |  | hardening: rebuild the ocw-ci image for Playwright 1.64.1 browsers; gVisor with Chromium 156 unverified until the first push (gvisor-browser job) | open |  | 2026-10-22T09:40:58.007Z |  |
 | 302 | 07.8 | deviation | apps/api/src/modules/chat |  | hardening: "a DM never gains humans" is enforced only in the API; a DB trigger would be defence in depth (low) | open |  | 2026-10-22T09:40:58.083Z |  |
+| 303 | 07.8 | deviation | apps/web |  | 07.8-29 (medium): useSignIn does not clear the previous session's query cache on sign-in | open |  | 2026-10-22T12:38:31.152Z |  |
+| 304 | 07.8 | deviation | apps/web |  | 07.8-29: other useTopic callers may multiply invalidations the same way /me/permissions did (low) | open |  | 2026-10-22T12:38:31.229Z |  |
 
 ````json
 [
@@ -3327,10 +3329,10 @@ last_updated: 2026-10-22T09:40:58.083Z
     "file": "e2e/tests/memory-files.spec.ts",
     "line": null,
     "description": "FIX IN GATE: memory-files.spec.ts:548 (keyboard and ARIA on desktop) fails intermittently on the phase branch (2 of 3 runs alongside other specs; race between the tab stop and deep-link expansion); passes alone",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-21T20:05:41.977Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T12:38:30.998Z"
   },
   {
     "id": 252,
@@ -3363,10 +3365,10 @@ last_updated: 2026-10-22T09:40:58.083Z
     "file": "apps/sandboxd/src/egress/proxy.ts",
     "line": null,
     "description": "The proxy passes an upstream X-OCW-Egress header through (a site can make its own http page look refused): strip it; a failed policy write to the proxy answers 503 after sandboxd stored it (proxy lags until retry); a recreated proxy restores each bot's egress only on its next ensure",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-21T20:09:53.930Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T12:38:31.073Z"
   },
   {
     "id": 255,
@@ -3942,6 +3944,30 @@ last_updated: 2026-10-22T09:40:58.083Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-22T09:40:58.083Z",
+    "resolved_at": null
+  },
+  {
+    "id": 303,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web",
+    "line": null,
+    "description": "07.8-29 (medium): useSignIn does not clear the previous session's query cache on sign-in",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T12:38:31.152Z",
+    "resolved_at": null
+  },
+  {
+    "id": 304,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web",
+    "line": null,
+    "description": "07.8-29: other useTopic callers may multiply invalidations the same way /me/permissions did (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T12:38:31.229Z",
     "resolved_at": null
   }
 ]
