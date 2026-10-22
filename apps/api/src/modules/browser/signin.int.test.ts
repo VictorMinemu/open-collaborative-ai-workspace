@@ -200,7 +200,7 @@ describe("Sam signs in for Scout by typing in the page himself (tracer)", () => 
       const opened = await core.db.withTenant({ organizationId: l.s.orgA, userId: l.s.samId }, (tx) =>
         core.secrets.revealSealed(tx, session.secret_id, aad),
       );
-      expect(JSON.parse(opened).cookies.map((c: Json) => c.value)).toEqual([SENTINEL]);
+      expect(JSON.parse(opened).cookies.map((c: Json) => c.value)).toEqual(["OCW-SENTINEL-COOKIE-3307"]);
       for (const wrong of [
         browserSessionAad({
           organizationId: l.s.orgA,
