@@ -369,3 +369,18 @@ export function browserSummaryTitle(p: {
   const verb = v.browser.action === "select" ? "choose" : v.browser.action;
   return cut(`${p.botName} wants to ${verb} on ${v.browser.host} for ${p.requesterName}`, 200);
 }
+
+/**
+ * 07.8-20 (R8, T-07.8-20-03): what a browser action's card link carries for every reader of the card: the action, the
+ * host, its scheme and whether a member's session is loaded. Never the element, a typed value or an option (those stay
+ * in the requester's exact card fields and the review).
+ */
+export function cardBrowserOf(args: Record<string, unknown>): {
+  action: ToolCallBrowserAction["action"];
+  host: string;
+  secure: boolean;
+  signedIn: boolean;
+} {
+  const b = browserActionView(args, { summary: true }).browser;
+  return { action: b.action, host: b.host, secure: b.secure, signedIn: b.signedIn };
+}

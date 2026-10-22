@@ -323,7 +323,7 @@ function Words({ words, signedIn }: { words: StepWords; signedIn: boolean }) {
       {words.target ? (
         <span
           data-testid="activity-target"
-          className="min-w-0 basis-full break-all font-mono text-[12px] text-muted-foreground @[26rem]:basis-auto @[26rem]:truncate"
+          className="min-w-0 basis-full break-words font-mono text-[12px] text-muted-foreground @[26rem]:basis-auto @[26rem]:truncate"
         >
           {words.target}
         </span>

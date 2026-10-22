@@ -43,6 +43,7 @@ import {
   approverText,
   argumentsDisplay,
   browserActionView,
+  cardBrowserOf,
   isBrowserActionTool,
   orderPreview,
   toolCallTitle,
@@ -593,6 +594,8 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
         useBy: useByOf(row),
         waitingFor: await waitingForOf(tx, t, await currentRule(tx, t)),
         actionFields: d.actionFields,
+        // 07.8-20 (R8, T-07.8-20-03): the page's host and scheme for the card's Page field, never an element or value.
+        ...(isBrowserActionTool(t.tool) ? { browser: cardBrowserOf(parseArgs(t)) } : {}),
       };
     },
 

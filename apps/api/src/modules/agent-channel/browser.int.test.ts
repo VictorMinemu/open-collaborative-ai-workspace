@@ -472,6 +472,17 @@ describe("a member's session loaded: every action needs the requester's approval
       { label: "Page", value: "panel.fake.test" },
       { label: "Session", value: "Signed in as you" },
     ]);
+    // 07.8-20 (R8): the card's link names the page for every reader (host and scheme), never the element or a value.
+    const listed = (await ok(
+      s.sam.request("GET", `/api/v1/conversations/${bot.dm}/messages`) as Promise<Res>,
+    )) as { messages: Json[] };
+    const posted = listed.messages.find((msg) => msg.id === row.card_message_id) as Json;
+    expect(posted.card.approval.browser).toEqual({
+      action: "click",
+      host: "panel.fake.test",
+      secure: true,
+      signedIn: true,
+    });
 
     await decideApproval(s.sam, approval.id, "approved");
     const rerun = await rerunOf(approval.id);

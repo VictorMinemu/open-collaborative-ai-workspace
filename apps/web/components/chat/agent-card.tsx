@@ -29,6 +29,7 @@ import {
   Laptop,
   LayoutGrid,
   Lock,
+  LockKeyhole,
   LogIn,
   type LucideIcon,
   Package,
@@ -37,6 +38,7 @@ import {
   Rocket,
   ShieldCheck,
   SquareTerminal,
+  Timer,
   TriangleAlert,
   Users,
   X,
@@ -63,6 +65,7 @@ import {
   PROPOSAL_MODE,
   startBlockedText,
 } from "@/components/approvals/work-zone-proposal-view";
+import { HostChip } from "@/components/browser/host-chip";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -838,11 +841,14 @@ function ToolFieldList({
   fields,
   section,
   inline = false,
+  browser = null,
 }: {
   fields: AgentCard["fields"];
   section: "action" | "value";
   /** The summary card's two fields side by side from 26rem (UI-SPEC Surface 1 "Summary view"). */
   inline?: boolean;
+  /** 07.8 (Surface 6): a browser action's page, so Page reads as the host chip and Session carries the lock. */
+  browser?: NonNullable<AgentCardApprovalLink["browser"]> | null;
 }) {
   return (
     <dl
@@ -854,6 +860,8 @@ function ToolFieldList({
       {fields.map((f, i) => {
         const block = isBlock(f.value);
         const mono = section === "action" && (f.label === "Tool" || f.label === "Target");
+        const page = !!browser && section === "action" && f.label === "Page";
+        const session = !!browser && section === "action" && f.label === "Session" && browser.signedIn;
         return (
           <div
             // biome-ignore lint/suspicious/noArrayIndexKey: fields have no id and are replaced as a whole
@@ -871,13 +879,19 @@ function ToolFieldList({
               className={cn(
                 "min-w-0 text-sm leading-5",
                 mono && "break-all font-mono text-[13px]",
-                section === "action" && f.label === "Source" && "flex items-start gap-1.5",
+                ((section === "action" && f.label === "Source") || session) && "flex items-start gap-1.5",
               )}
             >
               {section === "action" && f.label === "Source" ? (
                 <Plug className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
               ) : null}
-              {block ? (
+              {session ? (
+                <LockKeyhole className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+              ) : null}
+              {page && browser ? (
+                // The host from the server's stored call (never bot text), with its scheme: T-07.8-20-03.
+                <HostChip host={browser.host} secure={browser.secure} className="text-[13px]" />
+              ) : block ? (
                 <div
                   data-testid="agent-card-block-value"
                   className="min-w-0 rounded-lg bg-muted/50 px-3 py-2 dark:bg-white/[0.03]"
@@ -902,6 +916,11 @@ const MASKED_NOTICE = "A value looks like a secret and is masked.";
 
 /** The requester's name in a summary title the server composed ("{bot} wants to run {tool} for {person}"). */
 function summaryRequester(card: AgentCard): string | null {
+  // 07.8 (Surface 6): "{bot} wants to click on {host} for {requester}" (the server's browser summary title).
+  if (approvalLinkOf(card)?.browser) {
+    const at = card.title.lastIndexOf(" for ");
+    return at >= 0 ? card.title.slice(at + 5).trim() || null : null;
+  }
   const tool = fieldOf(card, "Tool");
   if (!tool) return null;
   const marker = ` wants to run ${tool} for `;
@@ -1134,6 +1153,16 @@ function useFocusAfterDecision(decided: boolean) {
  * a decider. Review-only: the truncation notice, Review (primary) and Deny. Summary: who wants what for whom, Tool and
  * Source, the waiting and privacy lines, Review only for the requester and the deciders.
  */
+/** What did not happen when a browser approval expires ("Nothing was clicked."). */
+const BROWSER_DONE: Record<NonNullable<AgentCardApprovalLink["browser"]>["action"], string> = {
+  click: "clicked",
+  type: "typed",
+  select: "chosen",
+  press: "pressed",
+  scroll: "done",
+  open: "opened",
+};
+
 function ToolCallCard({
   messageId,
   card,
@@ -1163,10 +1192,21 @@ function ToolCallCard({
   const warnings = notices.filter((w) => w !== HIDDEN_NOTICE && w !== MASKED_NOTICE);
   const masked = notices.includes(MASKED_NOTICE);
 
+  // 07.8 (UI-SPEC Surface 6, R8): a browser action's card is Action, Element, Page and Session, then what it types.
+  const browser = link.browser ?? null;
+  const browserVerb = browser ? BROWSER_DONE[browser.action] : null;
   const actionCount =
     display === "summary" ? card.fields.length : Math.min(link.actionFields ?? 2, card.fields.length);
-  const actionFields = card.fields.slice(0, actionCount);
-  const valueFields = card.fields.slice(actionCount);
+  const actionFields = browser
+    ? display === "summary"
+      ? card.fields
+      : card.fields.filter((f) => f.label !== "Value")
+    : card.fields.slice(0, actionCount);
+  const valueFields = browser
+    ? display === "summary"
+      ? []
+      : card.fields.filter((f) => f.label === "Value")
+    : card.fields.slice(actionCount);
   const expires = link.expiresAt ? (
     <time dateTime={link.expiresAt} title={fullFmt.format(new Date(link.expiresAt))}>
       {cardExpiresIn(link.expiresAt, now)}
@@ -1182,7 +1222,9 @@ function ToolCallCard({
         if (!link.useBy) return null;
         return useByPassed ? (
           <CardLine testId="agent-card-state-line" icon={Hourglass}>
-            Approved, but {bot} didn't run it before {clockOf(link.useBy)}. Ask again if you still need it.
+            {browser
+              ? `The page closed or changed before ${bot} could do it. Ask again if you still need it.`
+              : `Approved, but ${bot} didn't run it before ${clockOf(link.useBy)}. Ask again if you still need it.`}
           </CardLine>
         ) : (
           <CardLine testId="agent-card-state-line" icon={Clock}>
@@ -1198,7 +1240,9 @@ function ToolCallCard({
       case "expired":
         return (
           <CardLine testId="agent-card-state-line" icon={Hourglass}>
-            No one decided within 24 hours. Nothing was run.
+            {browserVerb
+              ? `No one decided within 15 minutes. Nothing was ${browserVerb}.`
+              : "No one decided within 24 hours. Nothing was run."}
           </CardLine>
         );
       default:
@@ -1221,11 +1265,11 @@ function ToolCallCard({
           <>
             <div className="grid gap-2">
               <SectionLabel>Action</SectionLabel>
-              <ToolFieldList fields={actionFields} section="action" />
+              <ToolFieldList fields={actionFields} section="action" browser={browser} />
             </div>
             {valueFields.length > 0 ? (
               <div className="grid gap-2 border-t pt-3">
-                <SectionLabel>What {bot} will send</SectionLabel>
+                <SectionLabel>{browser ? `What ${bot} will type` : `What ${bot} will send`}</SectionLabel>
                 <ToolFieldList fields={valueFields} section="value" />
               </div>
             ) : null}
@@ -1240,9 +1284,18 @@ function ToolCallCard({
             {MASKED_NOTICE}
           </CardLine>
         ) : null}
+        {browser?.signedIn && display !== "summary" ? (
+          <CardLine testId="agent-card-browser-why" icon={LockKeyhole}>
+            {bot} is signed in to {browser.host} with your account, so it asks before acting.
+          </CardLine>
+        ) : null}
         {pending && display !== "summary" && (mayDecide || !known) ? (
-          <CardLine testId="agent-card-timer" icon={Clock}>
-            {display === "review_only" ? "Runs once" : "Runs once, with exactly these values"}
+          <CardLine testId="agent-card-timer" icon={browser ? Timer : Clock}>
+            {browser
+              ? "Runs once, while the page is open"
+              : display === "review_only"
+                ? "Runs once"
+                : "Runs once, with exactly these values"}
             {expires ? <> · {expires}</> : null}
           </CardLine>
         ) : null}
@@ -1299,7 +1352,9 @@ function ToolCallCard({
                 copy={{
                   approved: {
                     title: "Approve this action?",
-                    body: `${bot} can run ${tool} once, with exactly these values, within 15 minutes. ${runsWith(card)}`,
+                    body: browser
+                      ? `${bot} does it once, while the page is open${browser.signedIn ? `, signed in to ${browser.host} as you` : ""}.`
+                      : `${bot} can run ${tool} once, with exactly these values, within 15 minutes. ${runsWith(card)}`,
                     confirm: "Approve",
                     note: true,
                   },

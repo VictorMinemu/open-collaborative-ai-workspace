@@ -84,6 +84,21 @@ export const AgentCardDecision = z.object({
 });
 export type AgentCardDecision = z.infer<typeof AgentCardDecision>;
 
+/**
+ * Phase 07.8 (UI-SPEC Surface 6, R8; T-07.8-20-03): the page a browser-action approval acts on, composed by the server
+ * from the stored call: the action, the host (never a path or a query), its scheme (`secure`: the card says "Not
+ * secure" for http) and whether a member's saved session is loaded. Never the element or a value: those reach only the
+ * requester's exact card fields and the review. Every reader of the card may read it (the summary title names the
+ * action and the host already).
+ */
+export const AgentCardBrowserAction = z.object({
+  action: z.enum(["click", "type", "select", "press", "scroll", "open"]),
+  host: BrowserHost,
+  secure: z.boolean(),
+  signedIn: z.boolean(),
+});
+export type AgentCardBrowserAction = z.infer<typeof AgentCardBrowserAction>;
+
 /** A platform-owned card's link to its approval request (Phase 07.2, D-05, UI-SPEC R6). */
 export const AgentCardApprovalLink = z.object({
   id: Id,
@@ -122,6 +137,8 @@ export const AgentCardApprovalLink = z.object({
   resultRoute: AgentCardRoute.nullable().optional(),
   /** Why Start is not possible right now (Work Zone proposals). */
   blocked: WorkZoneStartBlock.nullable().optional(),
+  /** Phase 07.8: a browser action's page (`ocw_browser_act` / D-13 `ocw_browser_open`); absent on every other card. */
+  browser: AgentCardBrowserAction.nullable().optional(),
 });
 export type AgentCardApprovalLink = z.infer<typeof AgentCardApprovalLink>;
 
