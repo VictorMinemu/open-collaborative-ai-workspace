@@ -268,9 +268,17 @@ describe("upload and delete for configurers (D-01, F-9)", () => {
     const r = await upload(s.sam, mine, "", "big.bin", big);
     expect(r.status).toBe(413);
     expect(r.json?.error?.code).toBe("too_large");
-    // Chunked: no Content-Length, the body grows past the route's limit. The API answers 413 and closes while the
-    // client is still writing, so the write may fail with EPIPE; node:http still delivers the response.
-    const chunked = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+    // Chunked: no Content-Length, the body grows past the route's limit. The API answers 413 and stops reading while
+    // the client is still writing: the client either reads the 413 or, when the socket closes first, sees EPIPE /
+    // ECONNRESET with no response. Both are a refusal; what must hold in every case is that sandboxd never saw a byte.
+    const chunked = await new Promise<{ status: number; body: string } | "reset">((resolve, reject) => {
+      let settled = false;
+      const settle = (v: { status: number; body: string } | "reset"): void => {
+        if (settled) return;
+        settled = true;
+        req.destroy();
+        resolve(v);
+      };
       const req = request(
         `${s.stack.baseUrl}/api/v1/agents/${mine}/sandbox/files/upload?path=&name=big.bin`,
         {
@@ -287,12 +295,14 @@ describe("upload and delete for configurers (D-01, F-9)", () => {
           res.on("data", (d: string) => {
             body += d;
           });
-          res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
-          res.on("error", reject);
+          res.on("end", () => settle({ status: res.statusCode ?? 0, body }));
+          res.on("error", () => settle({ status: res.statusCode ?? 0, body }));
         },
       );
       req.on("error", (e: NodeJS.ErrnoException) => {
-        if (e.code !== "EPIPE" && e.code !== "ECONNRESET") reject(e);
+        // A response may still be in flight on the same socket: give it a moment before calling it a reset.
+        if (e.code === "EPIPE" || e.code === "ECONNRESET") setTimeout(() => settle("reset"), 500);
+        else if (!settled) reject(e);
       });
       const chunk = Buffer.alloc(MiB, "z");
       let sent = 0;
@@ -305,8 +315,10 @@ describe("upload and delete for configurers (D-01, F-9)", () => {
       };
       pump();
     });
-    expect(chunked.status).toBe(413);
-    expect((JSON.parse(chunked.body) as Json).error.code).toBe("too_large");
+    if (chunked !== "reset") {
+      expect(chunked.status).toBe(413);
+      expect((JSON.parse(chunked.body) as Json).error.code).toBe("too_large");
+    }
     expect(fakeCalls("filesUpload")).toBe(before);
   });
 
