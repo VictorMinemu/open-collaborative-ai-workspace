@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 145
+open_count: 147
 waived_count: 4
 fixed_count: 107
-total_count: 256
-last_updated: 2026-10-21T20:35:29.061Z
+total_count: 258
+last_updated: 2026-10-22T02:52:51.861Z
 ---
 
 # Broken Windows Ledger
@@ -271,6 +271,8 @@ last_updated: 2026-10-21T20:35:29.061Z
 | 254 | 07.8 | deviation | apps/sandboxd/src/egress/proxy.ts |  | The proxy passes an upstream X-OCW-Egress header through (a site can make its own http page look refused): strip it; a failed policy write to the proxy answers 503 after sandboxd stored it (proxy lags until retry); a recreated proxy restores each bot's egress only on its next ensure | open |  | 2026-10-21T20:09:53.930Z |  |
 | 255 | 07.8 | deviation | apps/sandboxd/src |  | A sandboxd restart forgets its context map (agent answers no_context until it closes after 5 idle min, API must reopen); browserLimits idleStopMs/diskQuotaBytes unused (fixed 5 min); API owes resize mode, browserSandbox and http navigation_refused handling (07.8-16); 24 owes OCW_SANDBOX_BRW_IMAGE/EGRESS_IMAGE/BRW_SECCOMP env and gVisor/amd64 runs | open |  | 2026-10-21T20:09:54.014Z |  |
 | 256 | 07.8 | deviation | apps/api/src/modules/sandbox |  | Package installs run synchronously on the first call of a stopped sandbox (up to 600 s per package, can outlast the plugin deadline); a package reaches a running sandbox only at its next start (UI copy in 07.8-23); newerVersion always null; failed installs notify no admin beyond audit; package audit metadata includes registry name/version/digests | open |  | 2026-10-21T20:12:08.217Z |  |
+| 257 | 07.8 | deviation | apps/web/components/sandbox/settings/limits-form.tsx |  | 07.8-19: the container limits line copies the API CONTAINER_LIMITS because the settings view does not expose them (low) | open |  | 2026-10-22T02:52:51.781Z |  |
+| 258 | 07.8 | deviation | infra/fake-model/fake-sandboxd.mjs |  | 07.8-19: the fake sandboxd always reports gVisor; no switch to fake hardened, Docker too old or container-only runtimes (low) | open |  | 2026-10-22T02:52:51.861Z |  |
 
 ````json
 [
@@ -3344,6 +3346,30 @@ last_updated: 2026-10-21T20:35:29.061Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-21T20:12:08.217Z",
+    "resolved_at": null
+  },
+  {
+    "id": 257,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/sandbox/settings/limits-form.tsx",
+    "line": null,
+    "description": "07.8-19: the container limits line copies the API CONTAINER_LIMITS because the settings view does not expose them (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:52:51.781Z",
+    "resolved_at": null
+  },
+  {
+    "id": 258,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/fake-model/fake-sandboxd.mjs",
+    "line": null,
+    "description": "07.8-19: the fake sandboxd always reports gVisor; no switch to fake hardened, Docker too old or container-only runtimes (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:52:51.861Z",
     "resolved_at": null
   }
 ]
