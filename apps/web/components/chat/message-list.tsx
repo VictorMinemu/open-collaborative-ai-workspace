@@ -552,6 +552,9 @@ const MessageRow = memo(function MessageRow({
             card={message.card}
             summary={message.body}
             authorName={author.displayName}
+            {...(isBot && author.id
+              ? { author: { id: author.id, name: author.displayName, avatarUrl: author.avatarUrl } }
+              : {})}
           />
         ) : editing ? (
           <MessageEditor message={message} onDone={() => setEditing(false)} />

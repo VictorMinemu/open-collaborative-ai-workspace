@@ -76,6 +76,9 @@ function view(over: Partial<LiveView> = {}): LiveView {
     sensitive: false,
     hasFrame: true,
     attempt: 0,
+    signIn: null,
+    closeOnRefuse: false,
+    phoneArea: null,
     ...over,
   };
 }

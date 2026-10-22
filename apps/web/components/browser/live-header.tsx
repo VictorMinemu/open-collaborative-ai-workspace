@@ -75,18 +75,21 @@ export function StateChip({ state }: { state: LiveUiState }) {
   );
 }
 
-function IconButton({
+export function IconButton({
   label,
   icon: Icon,
   testId,
   onClick,
   buttonRef,
+  iconClassName,
 }: {
   label: string;
   icon: LucideIcon;
   testId: string;
   onClick: () => void;
   buttonRef?: Ref<HTMLButtonElement>;
+  /** 07.8-26: e.g. the phone dock's chevron turned 180°. */
+  iconClassName?: string;
 }) {
   return (
     <Tooltip content={label}>
@@ -100,13 +103,13 @@ function IconButton({
         onClick={onClick}
         className="text-muted-foreground hover:text-foreground pointer-coarse:size-11 max-md:size-11"
       >
-        <Icon aria-hidden className="size-4" />
+        <Icon aria-hidden className={cn("size-4", iconClassName)} />
       </Button>
     </Tooltip>
   );
 }
 
-function Where({ view }: { view: LiveView }) {
+export function Where({ view }: { view: LiveView }) {
   const host = view.server?.host;
   return host ? (
     <HostChip

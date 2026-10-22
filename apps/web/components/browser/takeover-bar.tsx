@@ -9,16 +9,19 @@ import { useOptionalLiveView } from "./live-view-provider";
 /**
  * The bar under the large view's header while the person controls the page (07.8-22; UI-SPEC §1.3 `TakeoverBar`):
  * who is paused and where typing goes, or, in the lease's last minute without input, "Still there?" with Keep control.
- * Warning notice tones (amber, AA in both themes).
+ * Warning notice tones (amber, AA in both themes). On a phone (07.8-26, `phone`) the keyboard hint is left out: the sheet
+ * says how to type there ("Tap to click. Pinch to zoom. Paste works.").
  */
 export function TakeoverBar({
   view,
   frameFocused,
   hintId,
+  phone = false,
 }: {
   view: LiveView;
   frameFocused: boolean;
   hintId: string;
+  phone?: boolean;
 }) {
   const live = useOptionalLiveView();
   const [now, setNow] = useState(() => Date.now());
@@ -59,14 +62,16 @@ export function TakeoverBar({
             <MousePointerClick aria-hidden className="size-3.5 shrink-0" />
             <span>You're in control. {bot} is paused.</span>
           </p>
-          <p className="flex min-w-0 items-center gap-1.5 text-xs">
-            <Keyboard aria-hidden className="size-3.5 shrink-0" />
-            <span id={hintId}>
-              {frameFocused
-                ? "Typing goes to the page · Shift+Esc gives your keyboard back"
-                : "Click the page to type"}
-            </span>
-          </p>
+          {phone ? null : (
+            <p className="flex min-w-0 items-center gap-1.5 text-xs">
+              <Keyboard aria-hidden className="size-3.5 shrink-0" />
+              <span id={hintId}>
+                {frameFocused
+                  ? "Typing goes to the page · Shift+Esc gives your keyboard back"
+                  : "Click the page to type"}
+              </span>
+            </p>
+          )}
         </>
       )}
     </div>

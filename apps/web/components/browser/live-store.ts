@@ -31,6 +31,15 @@ export interface LiveTarget {
   bot: LiveBot;
 }
 
+/** 07.8-26: the sign-in card a view was opened from ("Open and sign in", "Return to sign-in"). */
+export interface LiveSignIn {
+  messageId: string;
+  host: string;
+}
+
+/** 07.8-26 (UI-SPEC §1.5): the phone dock's height, persisted (`ocw:live-dock`). */
+export type LiveDockState = "peek" | "mini";
+
 export interface LiveView extends LiveTarget {
   /** Large view (desktop dialog) instead of the small window. */
   expanded: boolean;
@@ -50,10 +59,26 @@ export interface LiveView extends LiveTarget {
   hasFrame: boolean;
   /** Bumped by Try again: the provider reconnects. */
   attempt: number;
+  /** 07.8-26: opened from a sign-in card (the refusal words and the "Signed in to {host}" toast follow it). */
+  signIn: LiveSignIn | null;
+  /** 07.8-26: a take refused for a view its opener just opened closes it again (the card stays as it was). */
+  closeOnRefuse: boolean;
+  /** 07.8-26 (R10): the phone sheet's frame area while in control (CSS px), the phone viewport the page gets. */
+  phoneArea: { width: number; height: number } | null;
 }
 
 export const CORNER_KEY = "ocw:live-corner";
+export const DOCK_KEY = "ocw:live-dock";
 const CORNERS: LiveCorner[] = ["top-left", "top-right", "bottom-left", "bottom-right"];
+
+function savedDock(): LiveDockState {
+  if (typeof window === "undefined") return "peek";
+  try {
+    return window.localStorage.getItem(DOCK_KEY) === "mini" ? "mini" : "peek";
+  } catch {
+    return "peek";
+  }
+}
 
 function savedCorner(): LiveCorner {
   if (typeof window === "undefined") return "bottom-right";
@@ -68,17 +93,36 @@ function savedCorner(): LiveCorner {
 interface LiveStore {
   view: LiveView | null;
   corner: LiveCorner;
-  open(target: LiveTarget & { takeControl?: boolean; expanded?: boolean }): void;
+  /** 07.8-26: the phone dock's height (peek or mini). */
+  dock: LiveDockState;
+  /**
+   * 07.8-26: a hand back from a sign-in card's view, waiting for the card to say "Signed in" (then the toast reads
+   * "Signed in to {host}. {bot} continues."; after a few seconds without it, "{bot} continues."). Outside the view, so a
+   * Close while in control still gets its toast.
+   */
+  signInHandBack: { messageId: string; host: string; bot: string; at: number } | null;
+  open(
+    target: LiveTarget & {
+      takeControl?: boolean;
+      expanded?: boolean;
+      signIn?: { messageId: string; host: string } | null;
+    },
+  ): void;
   close(): void;
   patch(contextId: string, p: Partial<LiveView>): void;
   setCorner(corner: LiveCorner): void;
+  setDock(dock: LiveDockState): void;
+  setSignInHandBack(v: LiveStore["signInHandBack"]): void;
 }
 
 export const useLiveStore = create<LiveStore>()((set, get) => ({
   view: null,
   corner: savedCorner(),
+  dock: savedDock(),
+  signInHandBack: null,
   open(target) {
     const current = get().view;
+    const signIn = target.signIn ? { ...target.signIn } : null;
     if (current && current.contextId === target.contextId) {
       set({
         view: {
@@ -86,6 +130,9 @@ export const useLiveStore = create<LiveStore>()((set, get) => ({
           bot: target.bot,
           expanded: current.expanded || !!target.expanded || !!target.takeControl,
           wantControl: current.wantControl || !!target.takeControl,
+          signIn: signIn ?? current.signIn,
+          // Already showing it: a refused take leaves it as it was.
+          closeOnRefuse: false,
         },
       });
       return;
@@ -105,6 +152,9 @@ export const useLiveStore = create<LiveStore>()((set, get) => ({
         sensitive: false,
         hasFrame: false,
         attempt: 0,
+        signIn,
+        closeOnRefuse: !!target.takeControl && !!signIn,
+        phoneArea: null,
       },
     });
   },
@@ -123,6 +173,17 @@ export const useLiveStore = create<LiveStore>()((set, get) => ({
       // Private mode: the corner holds for this tab only.
     }
     set({ corner });
+  },
+  setDock(dock) {
+    try {
+      window.localStorage.setItem(DOCK_KEY, dock);
+    } catch {
+      // Private mode: the dock state holds for this tab only.
+    }
+    set({ dock });
+  },
+  setSignInHandBack(signInHandBack) {
+    set({ signInHandBack });
   },
 }));
 
@@ -262,14 +323,15 @@ export function watchOnlyLine(v: Pick<LiveView, "server" | "viewerCan">, state: 
   return who ? `Only ${who} can take control here.` : null;
 }
 
-/** The fixed sentence of a refused take (UI-SPEC Refusals). */
+/** The fixed sentence of a refused take (UI-SPEC Refusals); a sign-in card's open words it as a sign-in. */
 export function refusalSentence(
   reason: "not_allowed" | "someone_else" | "expired",
-  v: Pick<LiveView, "server" | "bot">,
+  v: Pick<LiveView, "server" | "bot"> & { signIn?: LiveSignIn | null },
 ): string {
   if (reason === "someone_else") return "Someone else is in control right now.";
   if (reason === "expired") return `This sign-in expired. Ask ${v.bot.name} again.`;
   const who = v.server?.requesterName;
+  if (v.signIn) return who ? `Only ${who} can sign in here.` : "You can't sign in here.";
   return who ? `Only ${who} can take control here.` : "You can't take control here.";
 }
 

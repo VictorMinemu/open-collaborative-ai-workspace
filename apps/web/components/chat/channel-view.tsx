@@ -35,6 +35,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useLiveActivity } from "@/components/browser/bot-activity";
+import { LiveChip } from "@/components/browser/live-chip";
 import { EmptyState } from "@/components/common/empty-state";
 import { PresenceStack, usePresentPeople } from "@/components/presence/presence-stack";
 import { PageHeader } from "@/components/shell/page-header";
@@ -675,6 +676,9 @@ export function ChannelView({ channelId }: { channelId: string }) {
             description={channel.topic ?? undefined}
             actions={
               <>
+                {/* 07.8-26 (UI-SPEC Surface 1b): a bot's open browser here or in a thread, first in the cluster;
+                    "Live" only while a thread panel narrows the column, so the channel's name keeps its room. */}
+                <LiveChip conversationId={channel.id} compact={!!threadId} />
                 <PresenceStack people={present} />
                 <PinnedButton count={pins.data?.pins.length ?? 0} onClick={() => setPinsOpen(true)} />
                 {channel.isMember ? (

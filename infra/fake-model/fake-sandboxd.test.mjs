@@ -525,6 +525,24 @@ describe("fake sandboxd: browser ops", () => {
     assert.equal((await ctxOp("snapshot", A, ctx)).body.error.code, "no_context", "closed ends the context");
   });
 
+  it("07.8-26: focus_sensitive also tells the open frame streams (control {kind: focus, sensitive: true})", async () => {
+    const ctx = await browser(A);
+    await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/login" });
+    const reading = readFrames(A, ctx, 900);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(
+      (await control("event", { target: A, contextId: ctx, event: "focus_sensitive" })).status,
+      200,
+    );
+    const controls = (await reading)
+      .filter((f) => f.type === 1)
+      .map((f) => JSON.parse(f.payload.toString("utf8")));
+    assert.deepEqual(
+      controls.filter((c) => c.kind === "focus"),
+      [{ kind: "focus", sensitive: true }],
+    );
+  });
+
   it("an act on ref `gone` answers element_gone; an unknown context answers no_context", async () => {
     const ctx = await browser(A);
     await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app" });

@@ -179,3 +179,128 @@ export function moveGate(hz: number = BROWSER_LIMITS.mouseMoveHz) {
     return true;
   };
 }
+
+// ---------------------------------------------------------------- phones (07.8-26; UI-SPEC "Input (phone)", R10, U-4)
+
+/** A tap on the frame as the page's touch events (tap = touchStart then touchEnd), or null outside the drawn page. */
+export function tapFrames(
+  point: { clientX: number; clientY: number },
+  box: Box,
+  page: PageSize,
+): LiveInputFrame[] | null {
+  const at = toPage(point.clientX, point.clientY, box, page);
+  if (!at) return null;
+  return [
+    { type: "touch", event: "start", x: at.x, y: at.y },
+    { type: "touch", event: "end", x: at.x, y: at.y },
+  ];
+}
+
+/** A finger that moved more than this (CSS px) scrolls the page instead of tapping it. */
+export const SWIPE_PX = 10;
+
+/**
+ * A swipe on the frame as one wheel event at its start: the page scrolls the way the finger moved (a finger moving up
+ * scrolls down), scaled from the drawn frame to the page. Null when it was a tap or started outside the drawn page.
+ */
+export function swipeFrame(
+  from: { clientX: number; clientY: number },
+  to: { clientX: number; clientY: number },
+  box: Box,
+  page: PageSize,
+): LiveInputFrame | null {
+  const dx = to.clientX - from.clientX;
+  const dy = to.clientY - from.clientY;
+  if (Math.hypot(dx, dy) <= SWIPE_PX) return null;
+  const scale = Math.min(box.width / page.width, box.height / page.height);
+  if (!(scale > 0)) return null;
+  return wheelFrame(
+    // `0 - x` keeps a still axis at +0 (never -0).
+    {
+      clientX: from.clientX,
+      clientY: from.clientY,
+      deltaX: 0 - dx / scale,
+      deltaY: 0 - dy / scale,
+      deltaMode: 0,
+    },
+    box,
+    page,
+  );
+}
+
+/** Keys the phone keyboard input forwards as key presses (everything else arrives as text through `beforeinput`). */
+const SOFT_KEYS = new Set([
+  "Backspace",
+  "Delete",
+  "Enter",
+  "Tab",
+  "Escape",
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+  "Home",
+  "End",
+]);
+
+const pressOf = (key: string, code: string, modifiers = 0): LiveInputFrame[] => [
+  { type: "key", event: "down", key, code, modifiers },
+  { type: "key", event: "up", key, code, modifiers },
+];
+
+/**
+ * A `keydown` in the phone keyboard input that is a key press for the page (Backspace, Enter, arrows, Tab…), as a down
+ * and up pair; null for a character (it comes through `beforeinput` as text) or an IME composition key.
+ */
+export function softKeyFrames(e: KeyLike): LiveInputFrame[] | null {
+  if (isComposingKey(e) || !SOFT_KEYS.has(e.key)) return null;
+  return pressOf(e.key, e.code && e.code.length <= KEY_MAX ? e.code : e.key, modifiersOf(e));
+}
+
+/**
+ * A `beforeinput` of the phone keyboard input as frames: typed or replaced text as one `text` frame, deletions and line
+ * breaks as key presses. Composition updates are left to `compositionend` (sent once, whole) and paste to `paste`.
+ */
+export function beforeInputFrames(e: { inputType: string; data: string | null }): LiveInputFrame[] | null {
+  switch (e.inputType) {
+    case "insertText":
+    case "insertReplacementText": {
+      const text = pasteFrame(e.data);
+      return text ? [text] : null;
+    }
+    case "deleteContentBackward":
+    case "deleteWordBackward":
+      return pressOf("Backspace", "Backspace");
+    case "deleteContentForward":
+    case "deleteWordForward":
+      return pressOf("Delete", "Delete");
+    case "insertLineBreak":
+    case "insertParagraph":
+      return pressOf("Enter", "Enter");
+    default:
+      return null;
+  }
+}
+
+/**
+ * Sends `frames` on the live-view socket and empties the phone keyboard input at once, so what was typed never stays
+ * in our DOM (P-10, T-07.8-26-01): the input only ever holds the character being typed, never what came before.
+ */
+export function forwardSoftInput(
+  input: { value: string },
+  frames: readonly LiveInputFrame[] | null,
+  send: (frame: LiveInputFrame) => void,
+): void {
+  if (frames) for (const frame of frames) send(frame);
+  input.value = "";
+}
+
+/** The phone keyboard input's type: `password` while the page's focused field is sensitive, so the OS keyboard never
+ * learns it (no suggestions, no autocorrect memory). */
+export const softInputType = (sensitive: boolean): "password" | "text" => (sensitive ? "password" : "text");
+
+/** The phone viewport the page gets (R10): the sheet's frame area in whole CSS pixels, within the contract's bounds. */
+export function phoneViewport(width: number, height: number): PageSize {
+  const bound = (v: number) => Math.min(2000, Math.max(200, Math.round(v)));
+  return { width: bound(width), height: bound(height) };
+}

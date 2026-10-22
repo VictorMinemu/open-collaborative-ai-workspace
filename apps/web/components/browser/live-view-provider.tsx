@@ -13,7 +13,11 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
+import { useIsDesktop } from "@/hooks/use-media-query";
+import { LiveDock } from "./live-dock";
 import { LiveExpanded } from "./live-expanded";
+import { LiveFullSheet } from "./live-full-sheet";
+import { phoneViewport } from "./live-input";
 import { connectLive, type LiveConnection } from "./live-socket";
 import {
   canTake,
@@ -33,8 +37,14 @@ import { LiveWindow } from "./live-window";
  * state stops showing the page, so a private or ended view never keeps an earlier frame), and renders the small window
  * or the large view in a portal, so the view survives in-app navigation.
  *
- * Openers call `useLiveView().open({ contextId, bot })` (the activity's Watch, later the live chip and the sign-in card);
+ * Openers call `useLiveView().open({ contextId, bot })` (the activity's Watch, the live chip, the sign-in card);
  * `takeControl` opens the large view and asks for control once the server allows it.
+ *
+ * 07.8-26: below 768 the view is the phone dock (peek and mini, non-modal) and the full-screen sheet (expand and
+ * control) instead of the small window and the large view; while the person controls the page from the sheet, the page
+ * gets a phone viewport the size of the sheet's frame area (R10) and goes back to 960×600 on hand back. A view opened
+ * from a sign-in card words its refusals as a sign-in, closes again when its take is refused, and its hand back toasts
+ * "Signed in to {host}. {bot} continues." once the card says so.
  */
 
 export interface OpenLiveView {
@@ -43,6 +53,8 @@ export interface OpenLiveView {
   takeControl?: boolean;
   /** Focus returns here when the live view closes (the Watch link, the chip, the card button). */
   trigger?: HTMLElement | null;
+  /** 07.8-26: opened from a sign-in card ("Open and sign in", "Return to sign-in"). */
+  signIn?: { messageId: string; host: string } | null;
 }
 
 interface FrameBus {
@@ -84,9 +96,12 @@ export function useOptionalLiveView(): LiveActions | null {
 }
 
 const RELEASE_FALLBACK_MS = 3_000;
+/** How long a sign-in hand back waits for the card's "Signed in" before the plain "{bot} continues." toast. */
+export const SIGNIN_TOAST_WAIT_MS = 8_000;
 
 export function LiveViewProvider({ children }: { children: ReactNode }) {
   const view = useLiveStore((s) => s.view);
+  const isDesktop = useIsDesktop();
   const contextId = view?.contextId ?? null;
   const attempt = view?.attempt ?? 0;
   const conn = useRef<LiveConnection | null>(null);
@@ -131,6 +146,13 @@ export function LiveViewProvider({ children }: { children: ReactNode }) {
       if (!v || v.contextId !== id) return;
       switch (frame.type) {
         case "viewerCan":
+          if (!frame.control && v.wantControl && v.closeOnRefuse) {
+            // A sign-in card's open that the server will not let take control: the card stays as it was.
+            toast(refusalSentence("not_allowed", v));
+            patch({ viewerCan: { watch: frame.watch, control: frame.control }, wantControl: false });
+            finishClose();
+            return;
+          }
           patch({
             viewerCan: { watch: frame.watch, control: frame.control },
             ...(frame.control ? {} : { wantControl: false }),
@@ -152,6 +174,7 @@ export function LiveViewProvider({ children }: { children: ReactNode }) {
         case "refused":
           patch({ pending: null, wantControl: false });
           toast(refusalSentence(frame.reason, v));
+          if (v.closeOnRefuse) finishClose();
           return;
         case "state": {
           const before = uiStateOf(v);
@@ -164,13 +187,22 @@ export function LiveViewProvider({ children }: { children: ReactNode }) {
           if (v.server?.host && frame.host && v.server.host !== frame.host) announce(`Now on ${frame.host}`);
           if (after === "controlling") {
             if (v.pending === "take") next.pending = null;
+            next.closeOnRefuse = false;
           } else {
             next.leaseDeadline = null;
             if (before === "controlling") {
               leaseSeen.current = null;
               const handedBack = v.pending === "release";
               if (handedBack) next.pending = null;
-              if (handedBack || v.closeAfterRelease) {
+              if ((handedBack || v.closeAfterRelease) && v.signIn) {
+                // The card says whether the sign-in was kept; its "Signed in" brings the toast (or the fallback).
+                store().setSignInHandBack({
+                  messageId: v.signIn.messageId,
+                  host: v.signIn.host,
+                  bot: v.bot.name,
+                  at: Date.now(),
+                });
+              } else if (handedBack || v.closeAfterRelease) {
                 toast(`${v.bot.name} continues.`);
               } else if (v.leaseDeadline !== null && Date.now() >= v.leaseDeadline - 5_000) {
                 toast(`You were away, so control went back to ${v.bot.name}.`);
@@ -219,20 +251,53 @@ export function LiveViewProvider({ children }: { children: ReactNode }) {
   const state = view ? uiStateOf(view) : null;
   const viewerCan = view?.viewerCan ?? null;
   const connOpen = view?.conn === "open";
+  const closeOnRefuse = view?.closeOnRefuse ?? false;
   useEffect(() => {
     if (!wantControl || !contextId || !connOpen || !state) return;
+    if (state === "private" && closeOnRefuse) {
+      // Someone (or this person on another device) holds the page: a sign-in card's open is refused as a take is.
+      const v = useLiveStore.getState().view;
+      if (v) toast(refusalSentence("someone_else", v));
+      finishClose();
+      return;
+    }
     if (!canTake({ viewerCan }, state)) return;
     if (send({ type: "take" })) {
       useLiveStore.getState().patch(contextId, { wantControl: false, pending: "take" });
     }
-  }, [wantControl, contextId, connOpen, state, viewerCan, send]);
+  }, [wantControl, contextId, connOpen, state, viewerCan, send, closeOnRefuse, finishClose]);
 
-  // The page's size follows this viewer's view (R10): small 960×600, large 1280×800.
+  // The page's size follows this viewer's view (R10): small 960×600, large 1280×800; on a phone, the sheet's frame area
+  // while this person controls the page (a phone viewport), else 960×600.
   const expanded = view?.expanded ?? false;
+  const controlling = state === "controlling";
+  const phoneW = view?.phoneArea?.width ?? null;
+  const phoneH = view?.phoneArea?.height ?? null;
   useEffect(() => {
     if (!connOpen) return;
+    if (!isDesktop) {
+      if (controlling && expanded && phoneW !== null && phoneH !== null) {
+        send({ type: "resize", mode: "phone", ...phoneViewport(phoneW, phoneH) });
+      } else {
+        send({ type: "resize", mode: "small" });
+      }
+      return;
+    }
     send({ type: "resize", mode: expanded ? "expanded" : "small" });
-  }, [expanded, connOpen, send]);
+  }, [expanded, connOpen, send, isDesktop, controlling, phoneW, phoneH]);
+
+  // A sign-in hand back the card never confirmed (nothing of the site was kept): the plain toast, once.
+  const handBack = useLiveStore((s) => s.signInHandBack);
+  useEffect(() => {
+    if (!handBack) return;
+    const t = setTimeout(() => {
+      const now = useLiveStore.getState().signInHandBack;
+      if (now?.at !== handBack.at) return;
+      useLiveStore.getState().setSignInHandBack(null);
+      toast(`${handBack.bot} continues.`);
+    }, SIGNIN_TOAST_WAIT_MS);
+    return () => clearTimeout(t);
+  }, [handBack]);
 
   // A hand back that the server never confirms still closes (the socket's close ends the lease server-side).
   const closeAfterRelease = view?.closeAfterRelease ?? false;
@@ -252,6 +317,7 @@ export function LiveViewProvider({ children }: { children: ReactNode }) {
           contextId: target.contextId,
           bot: target.bot,
           takeControl: target.takeControl,
+          signIn: target.signIn ?? null,
         });
         if (same) {
           // Already showing it: bring it to the person.
@@ -337,7 +403,19 @@ export function LiveViewProvider({ children }: { children: ReactNode }) {
                 {announcement.text}
                 {announcement.n % 2 === 1 ? " " : ""}
               </div>
-              {view ? view.expanded ? <LiveExpanded view={view} /> : <LiveWindow view={view} /> : null}
+              {view ? (
+                isDesktop ? (
+                  view.expanded ? (
+                    <LiveExpanded view={view} />
+                  ) : (
+                    <LiveWindow view={view} />
+                  )
+                ) : view.expanded ? (
+                  <LiveFullSheet view={view} />
+                ) : (
+                  <LiveDock view={view} />
+                )
+              ) : null}
             </>,
             document.body,
           )

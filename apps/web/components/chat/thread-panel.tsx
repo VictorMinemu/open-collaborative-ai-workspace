@@ -6,6 +6,7 @@ import { MessagesSquare, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useLiveActivity } from "@/components/browser/bot-activity";
+import { LiveChip } from "@/components/browser/live-chip";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useIsDesktop } from "@/hooks/use-media-query";
@@ -142,6 +143,8 @@ function ThreadBody({
             ))}
           </div>
         ) : null}
+        {/* 07.8-26 (UI-SPEC Surface 1b): a bot's browser opened in this thread. */}
+        <LiveChip conversationId={channel.id} threadRootId={rootId} />
         <button
           type="button"
           aria-label="Close thread"

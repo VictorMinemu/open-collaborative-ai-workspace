@@ -66,6 +66,8 @@ import {
   startBlockedText,
 } from "@/components/approvals/work-zone-proposal-view";
 import { HostChip } from "@/components/browser/host-chip";
+import type { LiveBot } from "@/components/browser/live-store";
+import { SignInCardBody, SignInPill, signInStatusOf } from "@/components/browser/sign-in-card-body";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -104,7 +106,7 @@ const KIND: Record<AgentCardKind, { label: string; icon: ComponentType<{ classNa
   deployment: { label: "Deployment", icon: Rocket },
   pr: { label: "Pull request", icon: GitPullRequest },
   generic: { label: "Card", icon: LayoutGrid },
-  // Phase 07.8 (UI-SPEC R1): the platform-owned sign-in card; its body is plan 07.8-26's.
+  // Phase 07.8 (UI-SPEC R1, Surface 2): the platform-owned sign-in card (body: `SignInCardBody`, 07.8-26).
   browser: { label: "Sign-in", icon: LogIn },
 };
 
@@ -1665,12 +1667,15 @@ export function AgentCardView({
   card: listed,
   summary,
   authorName,
+  author,
 }: {
   messageId: string;
   card: AgentCard;
   summary: string;
   /** The posting agent's name, for copy that names the bot (a failed proposal's reason). */
   authorName?: string | undefined;
+  /** 07.8-26: the posting bot (id and avatar), so a sign-in card opens its live view. */
+  author?: LiveBot | undefined;
 }) {
   const qc = useQueryClient();
   const card = useAgentCard(messageId, listed);
@@ -1692,6 +1697,9 @@ export function AgentCardView({
   // 07.5 kinds (an action, a Work Zone proposal) render their own body and footer; every other card is unchanged.
   const linkedKind = linkedKindOf(link);
   const bot = authorName ?? "the bot";
+  // 07.8-26 (UI-SPEC Surface 2): the platform's sign-in card renders its own body and footer under the kind row.
+  const signIn = card.platformOwned === true && card.kind === "browser" ? (card.browserSignIn ?? null) : null;
+  const badge = !!link || !!signIn;
 
   return (
     <article
@@ -1706,23 +1714,39 @@ export function AgentCardView({
       <p id={summaryId} className="sr-only">
         {summary}
       </p>
-      <div className={linkedKind ? "grid gap-2.5 px-3.5 pt-3 pb-3" : "grid gap-2.5 px-3.5 pt-3 pb-3.5"}>
-        <div className="flex min-w-0 items-center justify-between gap-2">
+      <div
+        className={
+          signIn
+            ? "grid gap-2.5 px-3.5 pt-3"
+            : linkedKind
+              ? "grid gap-2.5 px-3.5 pt-3 pb-3"
+              : "grid gap-2.5 px-3.5 pt-3 pb-3.5"
+        }
+      >
+        <div
+          className={cn(
+            "flex min-w-0 items-center justify-between gap-2",
+            // The sign-in pill is long ("Sign-in needed"): on a narrow card it drops under the kind and badge.
+            signIn && "flex-wrap gap-y-1.5",
+          )}
+        >
           <span
             className={cn(
               "flex min-w-0 items-center gap-1.5 font-medium text-[11.5px] text-muted-foreground uppercase tracking-wider",
               // A linked card's badge wraps under the kind on narrow cards instead of hiding it.
-              link && "flex-wrap gap-y-1",
+              badge && "flex-wrap gap-y-1",
             )}
           >
             <KindIcon className="size-3.5 shrink-0" aria-hidden />
-            <span className={cn("truncate", link && "shrink-0")} data-testid="agent-card-kind">
+            <span className={cn("truncate", badge && "shrink-0")} data-testid="agent-card-kind">
               {kind.label}
             </span>
-            {link ? <WorkspaceBadge id={`${summaryId}-workspace`} /> : null}
+            {badge ? <WorkspaceBadge id={`${summaryId}-workspace`} /> : null}
           </span>
           {/* Keyed by status: a change re-mounts the pill only, which fades it in (nothing else moves). */}
-          {link && linkedKind ? (
+          {signIn ? (
+            <SignInPillNow key={signIn.status} link={signIn} />
+          ) : link && linkedKind ? (
             <LinkedApprovalPillNow key={link.status} link={link} />
           ) : link ? (
             <ApprovalStatusPill key={link.status} status={link.status} />
@@ -1748,7 +1772,7 @@ export function AgentCardView({
             </span>
           </p>
         ) : null}
-        {card.fields.length > 0 && !linkedKind ? (
+        {card.fields.length > 0 && !linkedKind && !signIn ? (
           <dl
             data-testid="agent-card-fields"
             className="grid grid-cols-1 gap-x-4 gap-y-2 @[26rem]:grid-cols-2"
@@ -1768,7 +1792,14 @@ export function AgentCardView({
         ) : null}
         {linkedKind ? null : link?.warnings.map((w) => <WarningLine key={w} text={w} />)}
       </div>
-      {link && linkedKind === "tool" ? (
+      {signIn ? (
+        <SignInCardBody
+          messageId={messageId}
+          card={card}
+          link={signIn}
+          bot={author ?? { id: messageId, name: bot, avatarUrl: null }}
+        />
+      ) : link && linkedKind === "tool" ? (
         <ToolCallCard messageId={messageId} card={card} link={link} bot={bot} />
       ) : link && linkedKind === "work_zone" ? (
         <WorkZoneProposalCard messageId={messageId} card={card} link={link} bot={bot} />
@@ -1821,4 +1852,18 @@ export function AgentCardView({
       ) : null}
     </article>
   );
+}
+
+/** The sign-in card's pill, moving to Expired on its own when the countdown runs out (07.8-26). */
+function SignInPillNow({ link }: { link: NonNullable<AgentCard["browserSignIn"]> }) {
+  const [now, setNow] = useState(() => Date.now());
+  const waiting = link.status === "waiting" || link.status === "signing_in";
+  useEffect(() => {
+    if (!waiting) return;
+    const left = Date.parse(link.expiresAt) - Date.now();
+    if (left < 0 || left > 24 * 3_600_000) return;
+    const t = window.setTimeout(() => setNow(Date.now()), left + 250);
+    return () => window.clearTimeout(t);
+  }, [waiting, link.expiresAt]);
+  return <SignInPill status={signInStatusOf(link, now)} />;
 }

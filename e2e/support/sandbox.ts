@@ -162,6 +162,13 @@ export function fakeSandboxd(env: Readonly<Record<string, string | undefined>> =
       if (opts.url) await call("/v1/browsers/contexts/navigate", { target, contextId, url: opts.url });
       return contextId;
     },
+    /**
+     * 07.8-26: the page of `contextId` is now signed in (as if the person finished the site's sign-in form): its frames
+     * show the dashboard and its exported state carries the site's session cookie.
+     */
+    async signedIn(contextId: string): Promise<void> {
+      await call("/__control/browser/signed-in", { contextId });
+    },
     /** Queues a sandboxd event (`/v1/events`); returns its seq. */
     async emit(event: Json): Promise<number> {
       return (await call<{ seq: number }>("/__control/emit", event)).seq;

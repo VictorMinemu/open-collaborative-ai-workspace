@@ -42,6 +42,20 @@ function batchLogged(input: SandboxdContextInput) {
   core.log.warn({ contextId: input.contextId, events: input.events }, "input not delivered");
 }
 
+// 07.8-26: the phone keyboard input (the DOM event and the element), before anything becomes a frame.
+function domInputLogged(e: InputEvent, el: HTMLInputElement, c: CompositionEvent, p: ClipboardEvent) {
+  // ruleid: ocw.live-input-logging
+  console.log(e.data);
+  // ruleid: ocw.live-input-logging
+  console.debug("typed", el.value);
+  // ruleid: ocw.live-input-logging
+  console.info({ composed: c.data });
+  // ruleid: ocw.live-input-logging
+  console.warn(p.clipboardData);
+  // ok: ocw.live-input-logging
+  console.log(e.inputType);
+}
+
 function idsOnly(contextId: string, err: Error) {
   // ok: ocw.live-input-logging
   core.log.warn({ contextId, error: err.name }, "live view input not delivered");

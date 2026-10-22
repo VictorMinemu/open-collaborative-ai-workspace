@@ -136,8 +136,8 @@ rules:
     severity: ERROR
     message: >-
       What a person types while controlling a bot's browser is never logged (07.8 D-07, P-10, ADR-0029): a live input
-      frame, a live client frame, a sandboxd input batch, or their `text`, `key`, `events` or `inputs` fields must not
-      reach a logger. Log the context id and an error name only.
+      frame, a live client frame, a sandboxd input batch, their `text`, `key`, `events` or `inputs` fields, or the web's
+      DOM input (`data`, `value`, `clipboardData`) must not reach a logger. Log the context id and an error name only.
     patterns:
       - pattern-inside: $LOG.$LEVEL(...)
       - metavariable-regex:
@@ -168,6 +168,11 @@ rules:
           - pattern: $X.key
           - pattern: $X.events
           - pattern: $X.inputs
+          # 07.8-26: the web's DOM input itself (an InputEvent's or CompositionEvent's `data`, the phone keyboard
+          # input's `value`, a paste's `clipboardData`), before it becomes a frame.
+          - pattern: $X.data
+          - pattern: $X.value
+          - pattern: $X.clipboardData
     paths:
       # Where live input is handled: the API's live view and takeover, the bots' browser routes, sandboxd's browser
       # broker, its agent link and its HTTP server. Fixture: .semgrep/tests/live-input-logging.ts.
