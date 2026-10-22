@@ -7,6 +7,7 @@ import {
   type SandboxdOrgPolicy,
   type SandboxdOutput,
 } from "@ocw/contracts";
+import { Agent, fetch as undiciFetch } from "undici";
 
 /**
  * The API's only way to reach `sandboxd` (07.8-05, D-11, P-03): a bearer-token HTTP client over `SANDBOXD_ROUTES`,
@@ -68,15 +69,32 @@ export interface SandboxdClientOptions {
   token: string;
   /** Default deadline of one call (ms). */
   timeoutMs?: number;
-  /** Test hook: the fetch implementation (default: the global one). */
+  /**
+   * Transport header timeout in ms (default 0 = none). Each call's own deadline (`timeoutMs`, an AbortSignal) is the
+   * limit until the answer's headers arrive: the global fetch's 300 s header timeout would end a package install (up to
+   * 600 s at sandboxd) while sandboxd completes it (07.8-24, #259). The body keeps undici's idle timeout (300 s between
+   * chunks), so an abandoned stream is still released. Tests set a small value.
+   */
+  transportTimeoutMs?: number;
+  /** Test hook: the fetch implementation (default: undici's fetch over the client's own dispatcher). */
   fetch?: typeof fetch;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/** undici's fetch over a dispatcher with the given header timeout (0 disables it). */
+function transportFetch(timeoutMs: number): typeof fetch {
+  const dispatcher = new Agent({ headersTimeout: timeoutMs });
+  return ((url: string, init: RequestInit) =>
+    undiciFetch(url, {
+      ...(init as Parameters<typeof undiciFetch>[1]),
+      dispatcher,
+    })) as unknown as typeof fetch;
+}
+
 export function createSandboxdClient(opts: SandboxdClientOptions): SandboxdClient {
   const base = opts.url.replace(/\/+$/u, "");
-  const doFetch = opts.fetch ?? fetch;
+  const doFetch = opts.fetch ?? transportFetch(opts.transportTimeoutMs ?? 0);
   const defaultTimeout = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   async function send<Op extends SandboxdOp>(

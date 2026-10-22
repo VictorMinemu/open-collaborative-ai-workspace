@@ -3,13 +3,16 @@
 // failure until the next CI run). Every `OCW_*` variable `scripts/e2e-isolated.sh` exports in its default mode must be
 // set to the same value in the `&env` block of `.woodpecker/e2e.yaml`, or be listed in ALLOWED_DIFFERENCES with the
 // reason it differs (ports and URLs CI derives from its own stack). The checks run on text read from both files, so a
-// mutated copy proves the tripwire fires. The `--sandbox` mode's parity case is 07.8-24's (`.woodpecker/sandbox.yaml`).
+// mutated copy proves the tripwire fires. The `--sandbox` mode's case (07.8-24) compares the `sandbox-proof` step of
+// `.woodpecker/sandbox.yaml` with the canonical local command of the real-stack proof and the runner's `--sandbox` mode.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 const RUNNER = readFileSync(new URL("./e2e-isolated.sh", import.meta.url), "utf8");
 const CI = readFileSync(new URL("../.woodpecker/e2e.yaml", import.meta.url), "utf8");
+const SANDBOX_CI = readFileSync(new URL("../.woodpecker/sandbox.yaml", import.meta.url), "utf8");
+const PROOF = readFileSync(new URL("./sandbox-proof.sh", import.meta.url), "utf8");
 
 /** Runner variables CI sets differently or not at all, each with the reason. Every entry must still be exported. */
 const ALLOWED_DIFFERENCES = {
@@ -69,10 +72,10 @@ function defaultMode(script) {
 }
 
 /** Every `OCW_*` the runner exports in its default mode, with its value (later exports win, as in bash). */
-function runnerExports(script) {
+function runnerExports(script, { sandbox = false } = {}) {
   const vars = constants(script);
   const out = {};
-  for (const raw of defaultMode(script).split("\n")) {
+  for (const raw of (sandbox ? script : defaultMode(script)).split("\n")) {
     const line = raw.trim();
     if (!line.startsWith("export ")) continue;
     const re = /([A-Z_][A-Z0-9_]*)=("(?:[^"\\]|\\.)*"|'[^']*'|[^\s]*)/gu;
@@ -177,6 +180,166 @@ describe("e2e env parity: scripts/e2e-isolated.sh (default mode) ↔ .woodpecker
       start.includes(`FAKE_SANDBOX_TOKEN=${token}`) ||
         start.includes("FAKE_SANDBOX_TOKEN=$${OCW_SANDBOX_TOKEN}"),
       "the CI fake server gets FAKE_SANDBOX_TOKEN",
+    );
+  });
+});
+
+// ---------------------------------------------------------------- --sandbox mode ↔ the `sandbox-proof` CI step (07.8-24)
+
+/** Step env entries the `--sandbox` exports may differ from, each with the reason (none today). */
+const SANDBOX_ALLOWED_OVERRIDES = {};
+
+/**
+ * The canonical local command of the real-stack proof, from scripts/sandbox-proof.sh's header: the `NAME=value`
+ * assignments before `bash scripts/e2e-isolated.sh --sandbox --cmd "bash scripts/sandbox-proof.sh"`.
+ */
+function canonicalCallerVars(proof) {
+  const header = proof
+    .split("\n")
+    .filter((l) => l.startsWith("#"))
+    .map((l) => l.replace(/^#\s?/u, ""))
+    .join("\n")
+    .replace(/\\\n\s*/gu, " ");
+  const line = header
+    .split("\n")
+    .find((l) => l.includes('bash scripts/e2e-isolated.sh --sandbox --cmd "bash scripts/sandbox-proof.sh"'));
+  assert.ok(line, "scripts/sandbox-proof.sh documents its canonical command");
+  const out = {};
+  for (const m of line.split("bash scripts/e2e-isolated.sh")[0].matchAll(/([A-Z_][A-Z0-9_]*)=(\S+)/gu)) {
+    out[m[1]] = unquote(m[2]);
+  }
+  return out;
+}
+
+/** Variables the runner reads from its caller (`${NAME:-…}`, `${NAME-}`, `${!v-}` lists, `-z "${NAME:-}"`). */
+function runnerCallerVars(script) {
+  const out = new Set();
+  for (const m of script.matchAll(/\$\{([A-Z_][A-Z0-9_]*):?-/gu)) out.add(m[1]);
+  for (const m of script.matchAll(/^for v in ([A-Z0-9_ ]+); do$/gmu))
+    for (const v of m[1].split(" ")) out.add(v);
+  return out;
+}
+
+/** The `environment` mapping of the step named `name` (flat `KEY: value` lines). */
+function stepEnv(yaml, name) {
+  const lines = yaml.split("\n");
+  const at = lines.findIndex((l) => new RegExp(`^\\s*- name: ${name}\\s*$`, "u").test(l));
+  assert.notEqual(at, -1, `the ${name} step exists`);
+  const stepIndent = lines[at].search(/\S/u);
+  const out = {};
+  let envIndent = -1;
+  for (const line of lines.slice(at + 1)) {
+    if (line.trim() === "" || line.trim().startsWith("#")) continue;
+    const indent = line.search(/\S/u);
+    if (indent <= stepIndent) break;
+    if (envIndent === -1) {
+      if (/^\s*environment:\s*$/u.test(line)) envIndent = indent;
+      continue;
+    }
+    if (indent <= envIndent) break;
+    const m = /^\s*([A-Za-z_][A-Za-z0-9_]*):\s*(.*?)\s*$/u.exec(line);
+    if (m) out[m[1]] = unquote(m[2].replace(/\s+#.*$/u, ""));
+  }
+  assert.ok(Object.keys(out).length > 0, `the ${name} step has an inline environment mapping`);
+  return out;
+}
+
+/** The step's commands as one string (to check it runs the canonical command). */
+function stepCommands(yaml, name) {
+  const lines = yaml.split("\n");
+  const at = lines.findIndex((l) => new RegExp(`^\\s*- name: ${name}\\s*$`, "u").test(l));
+  const stepIndent = lines[at].search(/\S/u);
+  const body = [];
+  for (const line of lines.slice(at + 1)) {
+    if (line.trim() !== "" && line.search(/\S/u) <= stepIndent) break;
+    body.push(line);
+  }
+  return body.join("\n");
+}
+
+function sandboxParityProblems(script, yaml, proof, allowed = SANDBOX_ALLOWED_OVERRIDES) {
+  const problems = [];
+  const canonical = canonicalCallerVars(proof);
+  const step = stepEnv(yaml, "sandbox-proof");
+  const honoured = runnerCallerVars(script);
+  for (const [key, value] of Object.entries(canonical)) {
+    if (!honoured.has(key) && !proof.includes(`\${${key}`))
+      problems.push(`${key} is in the canonical command but neither the runner nor the proof reads it`);
+    if (!(key in step))
+      problems.push(`${key} is set by the canonical command but not in the sandbox-proof step`);
+    else if (step[key] !== value) problems.push(`${key}: canonical "${value}" vs CI "${step[key]}"`);
+  }
+  const exports = runnerExports(script, { sandbox: true });
+  for (const [key, value] of Object.entries(step)) {
+    if (!(key in exports) || key in allowed) continue;
+    if (exports[key] !== value)
+      problems.push(`${key}: the step overrides the --sandbox export "${exports[key]}" with "${value}"`);
+  }
+  for (const key of Object.keys(step)) {
+    if (key.startsWith("OCW_SANDBOX_") && !honoured.has(key) && !(key in exports))
+      problems.push(`${key} is set in the step but the runner never reads it`);
+  }
+  if (
+    !stepCommands(yaml, "sandbox-proof").includes(
+      'bash scripts/e2e-isolated.sh --sandbox --cmd "bash scripts/sandbox-proof.sh"',
+    )
+  )
+    problems.push("the sandbox-proof step does not run the canonical command");
+  return problems;
+}
+
+describe("e2e env parity: scripts/e2e-isolated.sh --sandbox ↔ the sandbox-proof step of .woodpecker/sandbox.yaml", () => {
+  it("reads the canonical command and the runner's --sandbox exports", () => {
+    assert.deepEqual(canonicalCallerVars(PROOF), {
+      OCW_BUNDLED_PLUGINS: "none",
+      OCW_E2E_API_HOST: "0.0.0.0",
+      OCW_MOCK_MODEL_BASE_URL: "http://fake-model:18999/v1",
+      PROOF_BUILD: "1",
+    });
+    const exports = runnerExports(RUNNER, { sandbox: true });
+    assert.equal(exports.OCW_E2E_SANDBOX, "real");
+    assert.equal(exports.OCW_SANDBOX_URL, "http://127.0.0.1:4293");
+    const honoured = runnerCallerVars(RUNNER);
+    for (const v of [
+      "OCW_BUNDLED_PLUGINS",
+      "OCW_MOCK_MODEL_BASE_URL",
+      "OCW_E2E_API_HOST",
+      "OCW_SANDBOX_RUNTIME",
+    ]) {
+      assert.ok(honoured.has(v), `the runner reads ${v} from its caller`);
+    }
+  });
+
+  it("the step sets every caller variable of the canonical command with the same value and overrides no export", () => {
+    assert.deepEqual(sandboxParityProblems(RUNNER, SANDBOX_CI, PROOF), []);
+  });
+
+  it("the tripwire fires: a step without OCW_E2E_API_HOST, with PROOF_BUILD 0, or overriding an export fails", () => {
+    const without = SANDBOX_CI.split("\n")
+      .filter((l) => !/^\s*OCW_E2E_API_HOST:/u.test(l))
+      .join("\n");
+    assert.match(
+      sandboxParityProblems(RUNNER, without, PROOF).join("\n"),
+      /OCW_E2E_API_HOST is set by the canonical command but not in the sandbox-proof step/u,
+    );
+    const noBuild = SANDBOX_CI.replace(/(\n\s*PROOF_BUILD:\s*)"1"/u, '$1"0"');
+    assert.notEqual(noBuild, SANDBOX_CI);
+    assert.match(
+      sandboxParityProblems(RUNNER, noBuild, PROOF).join("\n"),
+      /PROOF_BUILD: canonical "1" vs CI "0"/u,
+    );
+    const override = SANDBOX_CI.replace(
+      /(\n(\s*)PROOF_BUILD: "1")/u,
+      "$1\n$2OCW_SANDBOX_URL: http://127.0.0.1:4291/__sandboxd",
+    );
+    assert.match(
+      sandboxParityProblems(RUNNER, override, PROOF).join("\n"),
+      /OCW_SANDBOX_URL: the step overrides/u,
+    );
+    const otherCmd = SANDBOX_CI.replace('--cmd "bash scripts/sandbox-proof.sh"', '--cmd "true"');
+    assert.match(
+      sandboxParityProblems(RUNNER, otherCmd, PROOF).join("\n"),
+      /does not run the canonical command/u,
     );
   });
 });
