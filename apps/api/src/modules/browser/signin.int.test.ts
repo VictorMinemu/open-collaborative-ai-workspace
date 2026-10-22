@@ -500,6 +500,17 @@ describe("a sign-in signal, not just a cookie (07.8-28, WINDOWS #284)", () => {
     } finally {
       sam.close();
     }
+    // Closing that page reads nothing of it: the closing turn gets no member data and the DM does not become sticky
+    // (#292), so the bot can still open another site there without an approval.
+    const next = await l.s.turnOf(l.s.sam, l.s.samDm);
+    await ok(l.browser("close", next));
+    const marked = await l.s.su.query(
+      "select (select member_data from app.agent_turns where event_id = $1) as turn, (select count(*)::int from app.agent_member_data where agent_id = $2 and conversation_id = $3) as sticky",
+      [next.eventId, l.s.scoutId, l.s.samDm],
+    );
+    expect(marked.rows[0]).toEqual({ turn: false, sticky: 0 });
+    await ok(l.browser("open", next, { url: `https://${CRM}/` }));
+    await ok(l.browser("close", next));
   });
 
   it("a page that cannot be locked after the seal ends at once, never silently: closed in sandboxd, audited with lockFailed; the next open loads the session locked", async () => {

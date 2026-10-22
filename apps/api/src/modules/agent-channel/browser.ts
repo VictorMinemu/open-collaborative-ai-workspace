@@ -534,9 +534,11 @@ async function decide<X>(
       return null;
     }
     const prepared = await prepare(tx, live);
-    const turn = prepared.context?.sessionId
-      ? await markMemberData(tx, live, prepared.context.sessionSite)
-      : live;
+    // Closing a signed-in page reads nothing of it (07.8-28): no member data, and the conversation is not made sticky.
+    const turn =
+      prepared.context?.sessionId && tool !== CLOSE
+        ? await markMemberData(tx, live, prepared.context.sessionSite)
+        : live;
     // The page closed after the precheck (a crash, the bot's own close in a parallel call): refused before the claim,
     // so the budget is not used for a call that cannot run.
     const decision: SandboxDecision =
