@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 158
+open_count: 160
 waived_count: 4
-fixed_count: 108
-total_count: 270
-last_updated: 2026-10-22T03:43:44.276Z
+fixed_count: 110
+total_count: 274
+last_updated: 2026-10-22T03:47:12.229Z
 ---
 
 # Broken Windows Ledger
@@ -246,12 +246,12 @@ last_updated: 2026-10-22T03:43:44.276Z
 | 229 | 07.5 | deviation | apps/api/src/modules/approval |  | After #204 the bot does not hear decisions made from /approvals by someone outside the conversation; Work Zone Start has no applyTopics; cards still parse requester and runtime from server text | open |  | 2026-10-15T12:01:49.197Z |  |
 | 230 | 07.8 | deviation | packages/db/src/schema/app.ts |  | Hard-deleting a bot removes its browser_sessions rows but leaves their browser_session secrets; revoke/purge/sweeper in 07.8-21/27 must delete them; nothing cleans browser_sessions when a member leaves the org | open |  | 2026-10-15T15:08:27.289Z |  |
 | 231 | 07.8 | deviation | packages/db/src/schema/app.ts |  | DECIDE in 07.8-18: the app role can change an approved sandbox package's pinned fields (sha256, tree_sha256, lockfile, dependency_count, review_token); add an immutability trigger after approval. Every new secret kind now needs a migration (secrets_kind_check), note in ADR-0029 | fixed |  | 2026-10-15T15:08:27.379Z | 2026-10-21T20:12:08.062Z |
-| 232 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | Wiring left for later plans: turn.activity not registered in realtime EventTypes (07.8-10); SandboxdContextInput.events is loose until tightened to LiveInputFrame (07.8-16); PATCH /agents/:id/capabilities ignores sandbox/browser until 07.8-15 | open |  | 2026-10-15T15:10:12.850Z |  |
+| 232 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | Wiring left for later plans: turn.activity not registered in realtime EventTypes (07.8-10); SandboxdContextInput.events is loose until tightened to LiveInputFrame (07.8-16); PATCH /agents/:id/capabilities ignores sandbox/browser until 07.8-15 | fixed |  | 2026-10-15T15:10:12.850Z | 2026-10-22T03:47:11.925Z |
 | 233 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | File upload/download/import travel as base64 JSON up to 50 MiB (~67 MiB on the wire): check the body limit or stream (07.8-09/11); cap_reached/tainted answer 403 here vs 409 on 07.4 connector routes, unify in 05/10/14; npm lockfiles with sha1-only integrity fail PackageTreeEntry, refuse with a reason in 17/18 | fixed |  | 2026-10-15T15:10:12.922Z | 2026-10-21T20:12:08.140Z |
 | 234 | 07.8 | deviation | packages/db/src/schema/app.ts |  | MUST (07.8-21): app.message_cards kind check and Drizzle enum accept only the 8 old kinds; a sign-in ('browser') card cannot be stored until a new migration (chained after 07.8-02) adds it. ApprovalToolSourceKind lacks a sandbox/browser source (07.8-14; update SOURCE_ICON) | open |  | 2026-10-15T15:23:46.137Z |  |
 | 235 | 07.8 | deviation | apps/sandboxd/src |  | sandboxd: running processes tracked in memory only (unpollable after a restart, still end at timeout); /tmp/ocw-proc group files not removed; runtime_unavailable and docker_too_old share docker_unavailable; diskBytes 0 until 07.8-09 | open |  | 2026-10-15T16:42:21.790Z |  |
 | 236 | 07.8 | deviation | infra/sandbox |  | sbx apt versions approved but not pinned in the Dockerfile (later builds pick newer security versions); gVisor path proven by unit tests only until the 07.8-24 CI job; CODEOWNERS lacks apps/sandboxd (07.8-29) | open |  | 2026-10-15T16:42:21.880Z |  |
-| 237 | 07.8 | deviation | infra/sandbox/brw |  | brw: iframes are outside the snapshot (screenshot masks them whole after human input); a page that rebuilds an input after typing loses the human-typed marker (password type fields stay redacted); live frames to other viewers are unmasked, F-5/U-2 must hold in the API (07.8-16) | open |  | 2026-10-15T16:43:10.209Z |  |
+| 237 | 07.8 | deviation | infra/sandbox/brw |  | brw: iframes are outside the snapshot (screenshot masks them whole after human input); a page that rebuilds an input after typing loses the human-typed marker (password type fields stay redacted); live frames to other viewers are unmasked, F-5/U-2 must hold in the API (07.8-16) | fixed |  | 2026-10-15T16:43:10.209Z | 2026-10-22T03:47:11.846Z |
 | 238 | 07.8 | deviation | infra/sandbox/brw |  | sandboxd (07.8-13) must strip the context-id tag from type-0 frames and map the new brw codes (paused, internal, maskRects, resize mode); brw proven on arm64 Docker Desktop only, amd64 runc and the gVisor CI job remain (07.8-24); apt not pinned to a snapshot | open |  | 2026-10-15T16:43:10.294Z |  |
 | 239 | 07.8 | deviation | apps/openclaw-channel/src |  | API does not send CellProvider.imageModels or turn.maxSandboxCalls yet (07.8-05/14): screenshot reaches no model and the gate uses default 40; sign-in skipped/expired sentences unwired (07.8-21); OpenClaw image rescaling (imageMaxDimensionPx) untested (8x8 fake JPEG, 07.8-13/28) | open |  | 2026-10-15T16:49:17.151Z |  |
 | 240 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | 6 offered sandbox tools have no API route until 07.8-10 (404); confirm GET /cell alsoAllow carries ocw_sandbox_*/ocw_browser_* (plugin withTurnScopedTools); 403 (sandbox/board) vs 409 (07.4 connectors) refusal split: align or record in ADR-0029 | fixed |  | 2026-10-15T17:21:21.782Z | 2026-10-15T22:12:53.756Z |
@@ -285,6 +285,10 @@ last_updated: 2026-10-22T03:43:44.276Z
 | 268 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-23 (medium): no package version listing in sandboxd or the API, so the web version picker is a typed field and "Update to {version}" never appears | open |  | 2026-10-22T03:43:44.118Z |  |
 | 269 | 07.8 | deviation | apps/api/src/modules/sandbox |  | 07.8-23: the package list carries no install failure code (17's timeout cannot show) and no removing count; an approved package with no started sandbox reads Installing and polls every 5 s (low) | open |  | 2026-10-22T03:43:44.197Z |  |
 | 270 | 07.8 | deviation | apps/web/components/ui/sheet.tsx |  | 07.8-23: the shared sheet close button is 32 px on phones (marketplace plugin review sheet too); the packages review sheet has its own 44 px close (low) | open |  | 2026-10-22T03:43:44.276Z |  |
+| 271 | 07.8 | deviation | apps/api/src/modules/browser/takeover.ts |  | 07.8-16 (medium): a takeover lease held by an API instance that died stays until expiry; only a live view reading the row clears it (same cross-organization lister gap as #244) — 28's sweep | open |  | 2026-10-22T03:47:12.000Z |  |
+| 272 | 07.8 | deviation | apps/api/src/modules/browser/live-view.ts |  | 07.8-16: watching resizes the bot's page from 1280x800 to 960x600 (UI-SPEC default); 22/28 decide whether the small default stays (low) | open |  | 2026-10-22T03:47:12.076Z |  |
+| 273 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-16: the live-view state frame has no browserSandbox, so the floating window cannot show isolation per page (low, 22/26) | open |  | 2026-10-22T03:47:12.153Z |  |
+| 274 | 07.8 | deviation | infra/fake-model/fake-sandboxd.mjs |  | 07.8-16: a crashed event in the fake sandboxd does not end the frame stream (the real broker does) (low); the live-input Semgrep rule covers only declared types and field names in listed paths (low) | open |  | 2026-10-22T03:47:12.229Z |  |
 
 ````json
 [
@@ -3067,10 +3071,10 @@ last_updated: 2026-10-22T03:43:44.276Z
     "file": "packages/contracts/src/sandbox.ts",
     "line": null,
     "description": "Wiring left for later plans: turn.activity not registered in realtime EventTypes (07.8-10); SandboxdContextInput.events is loose until tightened to LiveInputFrame (07.8-16); PATCH /agents/:id/capabilities ignores sandbox/browser until 07.8-15",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-15T15:10:12.850Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T03:47:11.925Z"
   },
   {
     "id": 233,
@@ -3127,10 +3131,10 @@ last_updated: 2026-10-22T03:43:44.276Z
     "file": "infra/sandbox/brw",
     "line": null,
     "description": "brw: iframes are outside the snapshot (screenshot masks them whole after human input); a page that rebuilds an input after typing loses the human-typed marker (password type fields stay redacted); live frames to other viewers are unmasked, F-5/U-2 must hold in the API (07.8-16)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-15T16:43:10.209Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T03:47:11.846Z"
   },
   {
     "id": 238,
@@ -3526,6 +3530,54 @@ last_updated: 2026-10-22T03:43:44.276Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-22T03:43:44.276Z",
+    "resolved_at": null
+  },
+  {
+    "id": 271,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser/takeover.ts",
+    "line": null,
+    "description": "07.8-16 (medium): a takeover lease held by an API instance that died stays until expiry; only a live view reading the row clears it (same cross-organization lister gap as #244) — 28's sweep",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:47:12.000Z",
+    "resolved_at": null
+  },
+  {
+    "id": 272,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser/live-view.ts",
+    "line": null,
+    "description": "07.8-16: watching resizes the bot's page from 1280x800 to 960x600 (UI-SPEC default); 22/28 decide whether the small default stays (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:47:12.076Z",
+    "resolved_at": null
+  },
+  {
+    "id": 273,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/contracts/src/browser.ts",
+    "line": null,
+    "description": "07.8-16: the live-view state frame has no browserSandbox, so the floating window cannot show isolation per page (low, 22/26)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:47:12.153Z",
+    "resolved_at": null
+  },
+  {
+    "id": 274,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/fake-model/fake-sandboxd.mjs",
+    "line": null,
+    "description": "07.8-16: a crashed event in the fake sandboxd does not end the frame stream (the real broker does) (low); the live-input Semgrep rule covers only declared types and field names in listed paths (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:47:12.229Z",
     "resolved_at": null
   }
 ]
