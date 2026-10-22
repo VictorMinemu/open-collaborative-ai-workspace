@@ -323,3 +323,144 @@ describe("Sam signs in for Scout by typing in the page himself (tracer)", () => 
     expect(JSON.stringify(snap.body)).not.toContain(SENTINEL);
   });
 });
+
+// ---------------------------------------------------------------- Task 3: every way a sign-in can end
+
+const CRM = "crm.fake.test";
+
+/** A fresh page on `host` in Sam's DM and the bot's sign-in request for it; returns the turn, page and card. */
+async function asked(host = CRM) {
+  const ev = await l.s.turnOf(l.s.sam, l.s.samDm);
+  const closed = await l.browser("close", ev);
+  expect([200, 404]).toContain(closed.status);
+  const contextId = (await ok(l.browser("open", ev, { url: `https://${host}/login` }))).contextId as string;
+  await ok(l.browser("signin", ev, { reason: "Read the open invoices" }));
+  const req = (await requestsOf(contextId))[0] as Json;
+  return { ev, contextId, messageId: req.card_message_id as string };
+}
+const cardActionsOf = async (messageId: string) =>
+  (
+    await l.s.su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'agent.card_action.v1' and payload->'cardAction'->>'messageId' = $2",
+      [`cell:${l.s.orgA}`, messageId],
+    )
+  ).rows.map((r) => r.payload as Json);
+const sessionsOf = async (site: string) =>
+  (await l.s.su.query("select id from app.browser_sessions where site_key = $1", [site])).rows as Json[];
+const decide = (messageId: string, outcome: "approved" | "denied", who = l.s.sam) =>
+  who.request("POST", `/api/v1/cards/${messageId}/decision`, { outcome }) as Promise<Res>;
+
+describe("every way a sign-in ends: skipped, expired, refused takes, stopped (Task 3)", () => {
+  it("“Not now” by Sam: skipped, the page released, the bot hears the skipped sentence in Sam's turn", async () => {
+    const { contextId, messageId } = await asked();
+    expect(codeOf(await decide(messageId, "approved"))).toBe("card_not_decidable");
+    expect((await decide(messageId, "denied", l.s.alex)).status).toBe(404);
+    const shown = await ok(decide(messageId, "denied"));
+    expect(shown).toMatchObject({ status: "cancelled", browserSignIn: { status: "skipped" } });
+    expect(shown.viewerCan).not.toContain("sign_in");
+    expect((await requestsOf(contextId))[0]).toMatchObject({ status: "skipped" });
+    expect(await contextRow(contextId)).toMatchObject({ paused_for: null, state: "live" });
+    await waitFor(() => fakeContext(contextId)?.held === false);
+    const [action, ...more] = await cardActionsOf(messageId);
+    expect(more).toHaveLength(0);
+    expect(action?.cardAction).toMatchObject({ outcome: "denied", signIn: { status: "skipped", host: CRM } });
+    expect(action?.message.text).toBe(`Sam Lee chose not to sign in to ${CRM}.`);
+    expect(action?.message.author.id).toBe(l.s.samId);
+    expect(await sessionsOf(CRM)).toEqual([]);
+    // Once only.
+    expect(codeOf(await decide(messageId, "denied"))).toBe("card_already_decided");
+  });
+
+  it("another turn while a sign-in waits on the page: 409 signin_pending, no second card", async () => {
+    const { contextId } = await asked();
+    const next = await l.s.turnOf(l.s.sam, l.s.samDm);
+    const r = await l.browser("signin", next, { reason: "Again please" });
+    expect(r.status).toBe(409);
+    expect(codeOf(r)).toBe("signin_pending");
+    expect(await requestsOf(contextId)).toHaveLength(1);
+  });
+
+  it("15 minutes without a sign-in: expired, the hold released, no turn; an expired card's take answers expired", async () => {
+    const { ev, contextId, messageId } = await asked();
+    const res = await l.s.stack.built.browser.sweeper.runOnce(Date.now() + 16 * 60_000);
+    expect(res.expired).toBeGreaterThanOrEqual(1);
+    expect((await requestsOf(contextId))[0]).toMatchObject({ status: "expired" });
+    const shown = await ok(card(messageId));
+    expect(shown).toMatchObject({ status: "cancelled", browserSignIn: { status: "expired" } });
+    expect(shown.viewerCan).not.toContain("sign_in");
+    expect(await contextRow(contextId)).toMatchObject({ paused_for: null, held_until: null });
+    expect(fakeContext(contextId)?.held).toBe(false);
+    expect(await cardActionsOf(messageId)).toEqual([]);
+    // The page goes (the bot's close): Open on the expired card cannot take it any more.
+    await ok(l.browser("close", ev));
+    const socket = await liveSocket(l.s.stack.baseUrl, await l.s.sam.token(), contextId);
+    try {
+      await waitFor(() => lastState(socket));
+      socket.send({ type: "take" });
+      const refused = await waitFor(() => socket.json.find((f) => f.type === "refused"), 3000).catch(
+        () => null,
+      );
+      // A page that ended answers `ended` at once (the socket closes); a live one refuses the take as expired.
+      if (refused) expect(refused).toMatchObject({ op: "take", reason: "expired" });
+      else expect(lastState(socket)).toMatchObject({ state: "ended" });
+    } finally {
+      socket.close();
+    }
+  });
+
+  it("refused takes: the bot's owner (not the requester) → not_allowed; Sam's other device while he controls → someone_else", async () => {
+    const { contextId, messageId } = await asked();
+    const owner = await liveSocket(l.s.stack.baseUrl, await l.s.victor.token(), contextId);
+    const first = await liveSocket(l.s.stack.baseUrl, await l.s.sam.token(), contextId);
+    const second = await liveSocket(l.s.stack.baseUrl, await l.s.sam.token(), contextId);
+    try {
+      await waitFor(() => lastState(owner) && lastState(first) && lastState(second));
+      owner.send({ type: "take" });
+      expect(await waitFor(() => owner.json.find((f) => f.type === "refused"))).toMatchObject({
+        reason: "not_allowed",
+      });
+      first.send({ type: "take" });
+      await waitState(first, "controlling");
+      second.send({ type: "take" });
+      expect(await waitFor(() => second.json.find((f) => f.type === "refused"))).toMatchObject({
+        reason: "someone_else",
+      });
+      expect(((await ok(card(messageId))) as Json).browserSignIn.status).toBe("signing_in");
+      // Handing back without signing in seals nothing: the card waits again.
+      first.send({ type: "release" });
+      await waitState(first, "paused");
+      expect((await requestsOf(contextId))[0]).toMatchObject({ status: "waiting", session_id: null });
+      expect(await sessionsOf(CRM)).toEqual([]);
+    } finally {
+      owner.close();
+      first.close();
+      second.close();
+    }
+  });
+
+  it("the kill switch during a takeover: the lease ends, the card reads stopped (kill_switch), nothing is sealed", async () => {
+    const { contextId, messageId } = await asked("billing.fake.test");
+    const sam = await liveSocket(l.s.stack.baseUrl, await l.s.sam.token(), contextId);
+    try {
+      sam.send({ type: "take" });
+      await waitState(sam, "controlling");
+      await control("/browser/signed-in", { contextId, cookieValue: "KILLED-NOT-SEALED" });
+      await ok(l.s.victor.request("POST", "/api/v1/sandbox/kill") as Promise<Res>);
+      await waitState(sam, "ended", 6000);
+      expect(lastState(sam)).toMatchObject({ endReason: "kill_switch" });
+      const [req] = await requestsOf(contextId);
+      expect(req).toMatchObject({ status: "stopped", stop_reason: "kill_switch", session_id: null });
+      const shown = await ok(card(messageId));
+      expect(shown).toMatchObject({
+        status: "cancelled",
+        browserSignIn: { status: "stopped", stopReason: "kill_switch" },
+      });
+      expect(await sessionsOf("billing.fake.test")).toEqual([]);
+      expect(await columnsHolding("KILLED-NOT-SEALED")).toEqual([]);
+      expect(await cardActionsOf(messageId)).toEqual([]);
+    } finally {
+      sam.close();
+      await ok(l.s.victor.request("POST", "/api/v1/sandbox/resume") as Promise<Res>);
+    }
+  });
+});

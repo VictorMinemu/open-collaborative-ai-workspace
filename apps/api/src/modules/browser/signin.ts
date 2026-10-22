@@ -300,7 +300,8 @@ export async function onHandBack(
   }
   const kept = raw === null ? null : keepForSite(raw, request.host);
   raw = null;
-  if (!client || !kept) {
+  // Handed back without signing in (nothing of the site kept): nothing is sealed and the card waits again.
+  if (!client || !kept || kept.items === 0) {
     await core.db.withTenant(tenant, (tx) => backToWaiting(tx, core, p));
     return "failed";
   }

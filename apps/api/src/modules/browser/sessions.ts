@@ -48,6 +48,8 @@ function domainMatch(hostname: string, cookieDomain: unknown): boolean {
 export interface KeptState {
   /** The storage state of the site only, as JSON text. */
   state: string;
+  /** How many cookies and origins were kept (0: nothing of the site's sign-in is there). */
+  items: number;
   /** The earliest expiry (ms) of the kept cookies that have one; null when none has. */
   cookieExpiryMs: number | null;
 }
@@ -84,7 +86,11 @@ export function keepForSite(raw: string, siteKey: string): KeptState | null {
     const expires = typeof c.expires === "number" ? c.expires : -1;
     if (expires > 0) cookieExpiryMs = Math.min(cookieExpiryMs ?? Number.POSITIVE_INFINITY, expires * 1000);
   }
-  return { state: JSON.stringify({ cookies, origins }), cookieExpiryMs };
+  return {
+    state: JSON.stringify({ cookies, origins }),
+    items: cookies.length + origins.length,
+    cookieExpiryMs,
+  };
 }
 
 /** The organization's `browser_session_max_days` (P-09), the default without a policy row. */
