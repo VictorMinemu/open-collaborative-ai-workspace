@@ -353,7 +353,11 @@ export const BrowserContextState = z.enum([
 ]);
 export type BrowserContextState = z.infer<typeof BrowserContextState>;
 
-/** The server's `endReason` (UI-SPEC ended-reasons table). */
+/**
+ * The server's `endReason` (UI-SPEC ended-reasons table). `takeover_abandoned`: a person's control ended without a hand
+ * back (socket closed, idle, access lost, a dead instance's lease swept) after they sent input in it, or with a member's
+ * session loaded, so the page was closed instead of going back to the bot and its watchers (ADR-0029).
+ */
 export const BrowserEndReason = z.enum([
   "closed_by_bot",
   "idle",
@@ -361,6 +365,7 @@ export const BrowserEndReason = z.enum([
   "module_off",
   "crashed",
   "access_lost",
+  "takeover_abandoned",
 ]);
 export type BrowserEndReason = z.infer<typeof BrowserEndReason>;
 

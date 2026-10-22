@@ -263,10 +263,11 @@ describe("member-session privacy (U-2, T-07.8-16-02)", () => {
         expect(sam.json[0]).toEqual({ type: "viewerCan", watch: true, control: true });
         await T.sleep(1000);
         expect(alex.binary).toHaveLength(0);
-        expect(victor.binary.length).toBeLessThanOrEqual(vAt + 1);
-        const settled = victor.binary.length;
+        // Proof pipeline 55: from the moment the live view learns of the session it holds Víctor's frames until his new
+        // answer (`private`) is sent, so nothing arrives after that state frame (no "one frame in flight" either).
+        expect(victor.binary.length).toBe(vAt);
         await T.sleep(1000);
-        expect(victor.binary.length).toBe(settled);
+        expect(victor.binary.length).toBe(vAt);
       } finally {
         alex.close();
         sam.close();
@@ -411,5 +412,216 @@ describe("a lease left by a dead API instance (WINDOWS #271, #244)", () => {
     await ok200(l.browser("snapshot", ev));
     expect((await sweeper.runOnce(Date.now() + 4 * 60_000)).leases).toBe(0);
     expect(await auditOf("browser.takeover_ended", contextId)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------- an abandoned takeover closes the page (ADR-0029)
+
+/**
+ * A takeover that ends WITHOUT a hand back (the socket closed, the 10-minute idle release, access lost, or a dead API
+ * instance's lease swept) after the member sent input in that lease (typed, clicked, pasted), or with a member's session
+ * loaded, closes the page (`takeover_abandoned`): it never goes back to the bot and its watchers with whatever the member
+ * left in it. Without input (looking, moving the pointer) the page stays and is public again, as before.
+ */
+describe("a takeover abandoned after input closes the page (takeover_abandoned)", () => {
+  const ABANDONED = "takeover_abandoned";
+  const typeSomething = (s: { send(f: unknown): void }) => {
+    s.send({ type: "mouse", event: "down", x: 100, y: 120, button: "left" });
+    s.send({ type: "mouse", event: "up", x: 100, y: 120, button: "left" });
+    s.send({ type: "text", text: "half-typed" });
+  };
+  const contextRow = async (contextId: string) =>
+    (
+      await l.s.su.query(
+        "select closed_at, end_reason, controller_user_id, lease_expires_at from app.browser_contexts where id = $1",
+        [contextId],
+      )
+    ).rows[0] as Json;
+  /** The abandonment's `browser.closed` row: ids and fixed reasons only (no host, no path, nothing typed). */
+  async function expectAbandonedAudit(contextId: string, leaseEnd: string) {
+    const closed = (await auditOf("browser.closed", contextId)).filter(
+      (a) => a.metadata.reason === ABANDONED,
+    );
+    expect(closed).toHaveLength(1);
+    expect(closed[0]?.metadata).toEqual({ contextId, reason: ABANDONED, leaseEnd });
+    expect(closed[0]).toMatchObject({ actor_kind: "system", user_id: l.s.samId });
+  }
+  /** After `ended`, the socket is closed and no binary frame arrives (the count settles for 1 s). */
+  async function noFrameAfterEnd(s: { binary: unknown[]; closed: Promise<unknown> }) {
+    await s.closed;
+    const at = s.binary.length;
+    await T.sleep(1000);
+    expect(s.binary.length).toBe(at);
+  }
+  /** Someone opening the page afterwards sees it ended and gets zero frames. */
+  async function lateViewerSeesEnded(contextId: string) {
+    const late = await T.liveSocket(l.s.stack.baseUrl, await l.s.alex.token(), contextId);
+    try {
+      expect(await T.waitState(late, "ended")).toMatchObject({ endReason: ABANDONED });
+      await noFrameAfterEnd(late);
+      expect(late.binary).toHaveLength(0);
+    } finally {
+      late.close();
+    }
+  }
+
+  it("idle release after Sam typed: closed for everyone (owner, reader, Sam) and in sandboxd; no frame after; audited with ids only", async () => {
+    const { ev, contextId, sam, alex } = await pageWithViewers();
+    const victor = await T.liveSocket(l.s.stack.baseUrl, await l.s.victor.token(), contextId);
+    try {
+      await T.waitFor(() => victor.binary.length >= 1);
+      sam.send({ type: "take" });
+      await T.waitState(sam, "controlling");
+      typeSomething(sam);
+      await T.waitFor(() => (fakeContext(contextId)?.inputs.text ?? 0) >= 1);
+      await l.s.stack.built.browser.live()?.sweep(Date.now() + 10 * 60_000 + 30_000);
+      for (const s of [sam, alex, victor]) {
+        expect(await T.waitState(s, "ended")).toMatchObject({ endReason: ABANDONED });
+      }
+      for (const s of [sam, alex, victor]) await noFrameAfterEnd(s);
+      expect(await contextRow(contextId)).toMatchObject({ end_reason: ABANDONED, controller_user_id: null });
+      await T.waitFor(() => !fakeContext(contextId));
+      const ended = await auditOf("browser.takeover_ended", contextId);
+      expect(ended.map((e) => e.metadata.reason)).toEqual(["idle"]);
+      await expectAbandonedAudit(contextId, "idle");
+      await lateViewerSeesEnded(contextId);
+      // The bot's page is gone: its next call on it answers no_context.
+      expect((await l.browser("snapshot", ev)).status).toBe(404);
+    } finally {
+      sam.close();
+      alex.close();
+      victor.close();
+    }
+  });
+
+  it("the controller's socket closes after input (tab closed): the page closes, nobody gets a frame after", async () => {
+    const { contextId, sam, alex } = await pageWithViewers();
+    try {
+      sam.send({ type: "take" });
+      await T.waitState(sam, "controlling");
+      await T.waitState(alex, "private");
+      typeSomething(sam);
+      await T.waitFor(() => (fakeContext(contextId)?.inputs.text ?? 0) >= 1);
+      const alexAt = alex.binary.length;
+      sam.close();
+      expect(await T.waitState(alex, "ended")).toMatchObject({ endReason: ABANDONED });
+      await noFrameAfterEnd(alex);
+      expect(alex.binary.length).toBe(alexAt);
+      expect(await contextRow(contextId)).toMatchObject({ end_reason: ABANDONED });
+      await T.waitFor(() => !fakeContext(contextId));
+      await expectAbandonedAudit(contextId, "closed");
+      await lateViewerSeesEnded(contextId);
+    } finally {
+      sam.close();
+      alex.close();
+    }
+  });
+
+  it("a dead instance's lease after input: the browser sweep closes the page (nobody watching) instead of handing it back", async () => {
+    const ev = await l.turnIn(l.s.sam);
+    const contextId = await l.open(ev);
+    const { agent_id: agentId } = (
+      await l.s.su.query("select agent_id from app.browser_contexts where id = $1", [contextId])
+    ).rows[0] as Json;
+    // The holding instance died after Sam's input reached the page: the row still names Sam and records the input.
+    await l.s.su.query(
+      "update app.browser_contexts set controller_user_id = $2, lease_expires_at = now() + interval '1 minute', lease_input = true where id = $1",
+      [contextId, l.s.samId],
+    );
+    await l.s.stack.built.sandbox.client?.call(
+      "contextTakeover",
+      { target: { orgId: l.s.orgA, agentId }, contextId, active: true },
+      { timeoutMs: 5_000 },
+    );
+    const cleared = await l.s.stack.built.browser.sweeper.runOnce(Date.now() + 3 * 60_000);
+    expect(cleared.leases).toBe(1);
+    expect(await contextRow(contextId)).toMatchObject({
+      end_reason: ABANDONED,
+      controller_user_id: null,
+      lease_expires_at: null,
+    });
+    await T.waitFor(() => !fakeContext(contextId));
+    await expectAbandonedAudit(contextId, "idle");
+    expect((await l.browser("snapshot", ev)).status).toBe(404);
+  });
+
+  it("a dead instance's lease after input, noticed by a live view on another instance: closed, never shown", async () => {
+    const { contextId, sam, alex } = await pageWithViewers();
+    sam.close();
+    try {
+      await T.waitFor(() => alex.binary.length >= 2);
+      // Sam's lease, held through an instance that died, expired: the row records his input.
+      await l.s.su.query(
+        "update app.browser_contexts set controller_user_id = $2, lease_expires_at = now() - interval '1 second', lease_input = true where id = $1",
+        [contextId, l.s.samId],
+      );
+      expect(await T.waitState(alex, "ended")).toMatchObject({ endReason: ABANDONED });
+      await noFrameAfterEnd(alex);
+      await T.waitFor(() => !fakeContext(contextId));
+      await expectAbandonedAudit(contextId, "idle");
+    } finally {
+      alex.close();
+    }
+  });
+
+  it("no input (Sam only looked and moved the pointer): the socket closes, the page stays and is public again", async () => {
+    const { contextId, sam, alex } = await pageWithViewers();
+    try {
+      sam.send({ type: "take" });
+      await T.waitState(sam, "controlling");
+      await T.waitState(alex, "private");
+      sam.send({ type: "mouse", event: "move", x: 50, y: 60, button: "none" });
+      sam.send({ type: "wheel", x: 50, y: 60, dx: 0, dy: 120 });
+      await T.waitFor(() => (fakeContext(contextId)?.inputs.wheel ?? 0) >= 1);
+      const alexAt = alex.binary.length;
+      sam.close();
+      await T.waitState(alex, "live");
+      await T.waitFor(() => alex.binary.length > alexAt + 1);
+      expect(await contextRow(contextId)).toMatchObject({ closed_at: null, controller_user_id: null });
+      expect(fakeContext(contextId)?.takeover).toBe(false);
+      expect(
+        (await auditOf("browser.closed", contextId)).filter((a) => a.metadata.reason === ABANDONED),
+      ).toEqual([]);
+    } finally {
+      sam.close();
+      alex.close();
+    }
+  });
+
+  it("with Sam's session loaded, a lease that ends without a hand back closes the page even without input", async () => {
+    const ev = await l.turnIn(l.s.sam);
+    const contextId = await l.open(ev);
+    const secret = (
+      await l.s.su.query(
+        "insert into app.secrets (organization_id, name, kind, ciphertext, iv, tag) values ($1, $2, 'browser_session', 'x', 'x', 'x') returning id",
+        [l.s.orgA, `browser-session-abandon-${contextId.slice(0, 8)}`],
+      )
+    ).rows[0].id as string;
+    const session = (
+      await l.s.su.query(
+        `insert into app.browser_sessions (organization_id, user_id, agent_id, site_key, secret_id, expires_at)
+         values ($1, $2, $3, 'panel.fake.test', $4, now() + interval '30 days')
+         on conflict (organization_id, user_id, agent_id, site_key) do update set secret_id = excluded.secret_id
+         returning id`,
+        [l.s.orgA, l.s.samId, l.s.scoutId, secret],
+      )
+    ).rows[0].id as string;
+    await l.s.su.query("update app.browser_contexts set session_id = $2 where id = $1", [contextId, session]);
+    const sam = await T.liveSocket(l.s.stack.baseUrl, await l.s.sam.token(), contextId);
+    const other = await T.liveSocket(l.s.stack.baseUrl, await l.s.sam.token(), contextId);
+    try {
+      await T.waitFor(() => sam.binary.length >= 1);
+      sam.send({ type: "take" });
+      await T.waitState(sam, "controlling");
+      await T.waitState(other, "private");
+      sam.close();
+      expect(await T.waitState(other, "ended")).toMatchObject({ endReason: ABANDONED });
+      await noFrameAfterEnd(other);
+      expect(await contextRow(contextId)).toMatchObject({ end_reason: ABANDONED });
+      await expectAbandonedAudit(contextId, "closed");
+    } finally {
+      sam.close();
+      other.close();
+    }
   });
 });

@@ -52,6 +52,25 @@ describe("FrameSlot (drop-on-slow)", () => {
     expect(slot.sent).toBe(2);
   });
 
+  it("the privacy gate is asked when the frame is handed to the socket: a frame that waited while the page turned private is dropped (proof pipeline 55)", () => {
+    const k = sink();
+    let allowed = true;
+    const slot = new FrameSlot({ ...k.s, allowed: () => allowed });
+    slot.offer(frame(1));
+    // Frame 2 waits behind the slow write of frame 1; the page turns private before its turn.
+    slot.offer(frame(2));
+    allowed = false;
+    k.pending.shift()?.();
+    expect(k.written).toEqual([1]);
+    expect(slot.dropped).toBe(1);
+    // Nothing is kept for later either: once the gate opens again, only a new frame is written.
+    allowed = true;
+    k.pending.shift()?.();
+    expect(k.written).toEqual([1]);
+    slot.offer(frame(3));
+    expect(k.written).toEqual([1, 3]);
+  });
+
   it("a closed socket is never written; clear() drops the waiting frame (the privacy filter turned it off)", () => {
     const k = sink();
     let open = true;

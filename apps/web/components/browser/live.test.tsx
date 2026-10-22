@@ -409,6 +409,11 @@ describe("every state of UI-SPEC §1.4: chip, frame area, activity line and cont
       ["kill_switch", "An admin stopped all bot browsers."],
       ["module_off", "Browser was turned off for you."],
       ["crashed", "The browser stopped unexpectedly. Scout can open it again."],
+      // ADR-0029: control ended without a hand back after input, so the page was closed instead of handed back.
+      [
+        "takeover_abandoned",
+        "Control ended without a hand back, so the browser closed. Scout can open it again.",
+      ],
     ];
     for (const [endReason, sentence] of reasons) {
       const v = view({

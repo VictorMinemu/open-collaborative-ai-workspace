@@ -21,7 +21,9 @@
 // e.g. a consent or CSRF cookie, carried by every export), /__control/browser/fail-lock (07.8-28: the next contextLock
 // answers 500 internal), /__control/browser/site-data {text} (07.8-28: every signed-in page shows that text to the
 // bot), /__control/browser/event {target, contextId, event: crashed|closed|focus_sensitive|download}
-// (focus_sensitive also writes the control `{kind: "focus", sensitive: true}` on the context's open frame streams).
+// (focus_sensitive also writes the control `{kind: "focus", sensitive: true}` on the context's open frame streams),
+// /__control/browser/delay {op, ms} (the next call of that context op answers only after `ms`, ≤ 10 s, while the page's
+// frame streams keep running: it holds a privacy transition open, e.g. the hand back's `contextLock`).
 //
 // Like sandboxd, it holds no default policy: until the API pushes an organization's policy, `ensure`, `restart`,
 // `exec`, the browser context ops and the package ops (they would start or run a container) and `filesWrite`,
@@ -319,6 +321,8 @@ export function createFakeSandboxd(opts = {}) {
   let streams = new Set();
   let leakNext = false;
   let failLockNext = false;
+  /** op → ms: the next call of that context op waits this long before it answers (`/__control/browser/delay`). */
+  let delayNext = new Map();
   /** 07.8-28: text every signed-in page shows (`/__control/browser/site-data {text}`), null for none. */
   let siteData = null;
   /** `${source}/${name}@${version}` → the registry controls of that release. */
@@ -1391,6 +1395,15 @@ export function createFakeSandboxd(opts = {}) {
       case "POST /__control/browser/fail-lock":
         failLockNext = true;
         return send(res, 200, { ok: true });
+      case "POST /__control/browser/delay": {
+        const body = await readJson(req);
+        const op = typeof body?.op === "string" ? body.op : "";
+        const ms = Number(body?.ms);
+        if (!op.startsWith("context") || !Number.isInteger(ms) || ms < 0 || ms > 10_000)
+          return send(res, 400, { error: "delay" });
+        delayNext.set(op, ms);
+        return send(res, 200, { ok: true });
+      }
       case "POST /__control/browser/event": {
         const body = await readJson(req);
         const ctx = contexts.get(body?.contextId);
@@ -1444,6 +1457,11 @@ export function createFakeSandboxd(opts = {}) {
         const held = orgId ? policies.get(orgId) : undefined;
         if (!held) throw new OpError(409, "policy_missing", "no policy for this organization");
         if (RUN_OPS.has(op) && held.killed) throw new OpError(409, "killed", "this organization is stopped");
+      }
+      const delay = delayNext.get(op);
+      if (delay !== undefined) {
+        delayNext.delete(op);
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
       return send(res, 200, await dispatch(op, body, url));
     } catch (err) {
@@ -1501,6 +1519,8 @@ export function createFakeSandboxd(opts = {}) {
       contexts = new Map();
       streams = new Set();
       leakNext = false;
+      failLockNext = false;
+      delayNext = new Map();
       packageSpecs = new Map();
       installs = new Map();
       const ready = waiters;
