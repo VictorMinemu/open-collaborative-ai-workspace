@@ -407,7 +407,7 @@ of the thin Work Zone that Phase 1 already ships.
 **Operations features (inserted 2026-10-08, owner).** Phases 07.1–07.7 turn the 2026-10-06 operations meeting into
 generic capabilities for any organization (research: `.planning/research/OPS-FEATURES.md`). Each feature is owned by the
 Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits → Agent Card when a human approves);
-OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.6 → 07.7 (07.8 added 2026-10-14 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
+OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.6 → 07.7 (07.8 added 2026-10-14 and 07.9 added 2026-10-22 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
 (F17), ERP-driven board columns beyond watched records.
 
 ### Phase 07.1: Board channels and record templates (INSERTED)
@@ -689,6 +689,7 @@ in themselves, so the bot never sees a password; the Control Plane still decides
 transport; prior art Steel Browser, neko; `.planning/research/OPS-FEATURES.md` F2 part 2)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
+
   1. Every bot runs file, shell and plugin tools only inside its own sandbox (no host mounts, no Docker socket, CPU,
      memory, disk and process limits, egress only through the 07.4 policy); one bot can never see another bot's sandbox
   2. Plugins and tools that ADR-0010 refuses today can be installed through the ADR-0011 approval flow when they run
@@ -733,6 +734,22 @@ Plans:
 - [ ] 07.8-28-PLAN.md — Wave 8: Prove the phase's security properties across every layer: the registry-driven cross-tenant matrix, the API sentinel
 - [ ] 07.8-29-PLAN.md — Wave 9: Run the full gate, fix what it finds at the source, write ADR-0029 (incl. D-13, the single shared hop, full-tree pinning, the durable cursor) and the operator and owner docs, update STATUS, AGENTS and CODEOWNERS, sign VALIDATION
 - [ ] 07.8-30-PLAN.md — Wave 1: Contracts part 01b, in parallel with 01: browser and live-view protocol, modules and permissions, 07.5 approval hooks (incl. the D-13 `open` action) and agent cards, and the web module maps
+
+### Phase 07.9: Shared Work Zone projects and session visibility (INSERTED)
+
+**Goal**: In a team project every member with access to the project can work in it, and the project decides whether new
+Work Zone sessions start public (visible to everyone with project access) or private (only the owner). Any session can
+be opened up or narrowed at any time: to everyone with project access, to the project's assigned teams, or to specific
+people. Who can see a session is obvious at a glance, with very little visual noise, on desktop and mobile, and every
+change of visibility is decided by the permission resolver and audited.
+**Requirements**: TBD (discuss-phase)
+**Depends on:** Phase 07.8 (merged first); builds on the Work Zone (MVP 2–4), projects and the OrgUnit permission
+resolver (ADR-0024).
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.9 to break down)
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
