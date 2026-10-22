@@ -174,6 +174,24 @@ export function fakeSandboxd(env: Readonly<Record<string, string | undefined>> =
     async leakNextSnapshot(): Promise<void> {
       await call("/__control/browser/leak", {});
     },
+    /**
+     * What the fake registries serve for one release (07.8-18 controls): `topChanged` republishes the artifact,
+     * `depChanged` its dependency, `sha1` gives the dependency sha1-only integrity (refused), `license: null` or a denied
+     * license is high risk, `hasInstallScript` medium. A name starting `ocw-missing` is not in any registry.
+     */
+    async setPackage(
+      coords: { source: "npm" | "pypi" | "debian" | "clawhub"; name: string; version: string },
+      patch: {
+        topChanged?: boolean;
+        depChanged?: boolean;
+        sha1?: boolean;
+        license?: string | null;
+        hasInstallScript?: boolean;
+        publisher?: string | null;
+      },
+    ): Promise<void> {
+      await call("/__control/packages/set", { ...coords, ...patch });
+    },
     /** Call counts per op and organization, and per browser context its flags and input counts (never payloads). */
     stats: () => call<Json>("/__control/stats"),
     down: async () => void (await call("/__control/down", {})),

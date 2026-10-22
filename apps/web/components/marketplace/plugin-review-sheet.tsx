@@ -427,19 +427,22 @@ function Review({
   );
 }
 
-function RiskPanel({
+/** The risk verdict with every reason (also the sandbox package review's, 07.8-23). */
+export function RiskPanel({
   level,
   reasons,
+  testId = "plugin-risk",
 }: {
   level: RiskLevel;
   reasons: Array<{ code: string; message: string }>;
+  testId?: string;
 }) {
   const copy = RISK_COPY[level];
   const Icon = RISK[level].icon;
   return (
     <section
       className={cn("grid gap-3 rounded-xl border p-4", copy.tone)}
-      data-testid="plugin-risk"
+      data-testid={testId}
       data-risk={level}
       aria-label={`Risk: ${copy.title}`}
     >
