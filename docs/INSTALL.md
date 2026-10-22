@@ -200,6 +200,10 @@ Then run `docker compose up -d --build --wait` and open Settings › Sandbox & B
 Developers run the real-Docker smokes with `bash infra/sandbox/test/run-sandbox-smoke.sh` (and `run-egress-`,
 `run-browser-`, `run-stack-` and `run-packages-smoke.sh`). Each one removes everything it created, by label.
 
+Settings, limits, network modes, sandbox packages and sign-ins are explained in
+[self-hosting/sandbox.md](self-hosting/sandbox.md); the gVisor install, rootless Docker, a Docker authorization plugin
+and XFS project quotas in [infra/sandbox/README.md](../infra/sandbox/README.md).
+
 ## Back up, restore and upgrade
 
 ```bash

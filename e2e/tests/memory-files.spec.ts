@@ -413,6 +413,12 @@ async function keyboardDesktop(page: Page) {
   const listed = await readerScopes();
   await page.goto(`${BASE_URL}/memory/${seed.departmentScopeId}/MEMORY.md`);
   await expect(page.getByTestId("memory-file")).toHaveAttribute("data-path", "MEMORY.md");
+  // The file pane and the tree load apart: the open file's row exists only once its scope's file list arrives, and
+  // until then the tree's one tab stop is its first row (with other specs' bot notebooks listed first, that list can
+  // arrive after the file pane: WINDOWS #251). Tab is pressed only once the row is rendered and holds the tab stop.
+  const openRow = row(page, "MEMORY.md", seed.departmentScopeId);
+  await expect(openRow).toHaveAttribute("aria-current", "page");
+  await expect(openRow).toHaveAttribute("tabindex", "0");
 
   // Tab from the search field lands on the open file's row (one tab stop).
   await page.getByRole("searchbox", { name: "Search memory" }).focus();

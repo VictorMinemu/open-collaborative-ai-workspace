@@ -309,6 +309,53 @@ describe("sandbox-egress: absolute-URI HTTP", () => {
     }
   });
 
+  it("never forwards an X-OCW-Egress header either way: a site cannot forge the proxy's refusal (#254)", async () => {
+    const seen: http.IncomingHttpHeaders[] = [];
+    const upstream = http.createServer((req, res) => {
+      seen.push(req.headers);
+      // A site answering its own http page with the proxy's refusal shape.
+      res.writeHead(403, {
+        "content-type": "text/plain",
+        connection: "close",
+        "X-OCW-Egress": "refused_address",
+      });
+      res.end("forged");
+    });
+    const upstreamPort = await listen(upstream);
+    const h = await harness({
+      policy: () => snapshot({ "127.0.0.1": network() }),
+      answers: { "public.test": PUBLIC },
+      upstreamPort,
+    });
+    const res = await new Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }>(
+      (resolve, reject) => {
+        const req = http.request({
+          host: "127.0.0.1",
+          port: h.port,
+          method: "GET",
+          path: "http://public.test/page",
+          headers: { host: "public.test", "x-ocw-egress": "egress_off" },
+          agent: false,
+        });
+        req.on("response", (r) => {
+          let body = "";
+          r.on("data", (d) => {
+            body += d;
+          });
+          r.on("end", () => resolve({ status: r.statusCode ?? 0, body, headers: r.headers }));
+        });
+        req.on("error", reject);
+        req.end();
+      },
+    );
+    // The site's own answer passes through, but never as the proxy's refusal.
+    expect(res.status).toBe(403);
+    expect(res.body).toBe("forged");
+    expect(res.headers["x-ocw-egress"]).toBeUndefined();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.["x-ocw-egress"]).toBeUndefined();
+  });
+
   it("an https absolute URI, user info or an origin-form request is refused with 400", async () => {
     const h = await harness({
       policy: () => snapshot({ "127.0.0.1": network() }),

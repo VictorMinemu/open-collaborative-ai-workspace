@@ -24,7 +24,9 @@ export function usePermissions() {
   const orgId = me.data?.organization.id ?? null;
   const userId = me.data?.user.id ?? null;
 
-  // A role, unit or rule change re-decides what this user may do.
+  // A role, unit or rule change re-decides what this user may do. Every component that reads the permissions runs
+  // this handler for the same event, so a refetch already in flight is joined, never cancelled and restarted: one
+  // event is one request, not one aborted request per component (07.8-29).
   useTopic(orgId ? topic("org", orgId) : null, (frame) => {
     if (frame.op !== "ev") return;
     const data = frame.data as { userId?: string } | null;
@@ -33,11 +35,11 @@ export function usePermissions() {
       frame.type === EventTypes.unitsUpdated ||
       frame.type === EventTypes.permissionRulesUpdated
     ) {
-      void qc.invalidateQueries({ queryKey: permissionKeys.mine });
+      void qc.invalidateQueries({ queryKey: permissionKeys.mine }, { cancelRefetch: false });
     }
     // Our own role or profile changed: /me carries both (workspace switcher label, user menu).
     if (frame.type === EventTypes.memberUpdated && data?.userId === userId) {
-      void qc.invalidateQueries({ queryKey: queryKeys.me });
+      void qc.invalidateQueries({ queryKey: queryKeys.me }, { cancelRefetch: false });
     }
   });
 

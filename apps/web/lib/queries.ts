@@ -32,6 +32,16 @@ function retryUnlessClientError(failureCount: number, err: unknown): boolean {
 
 // ---- identity ----
 
+/**
+ * The signed-in member, or null. A `/me` that answered 401 means the session ended (revoked, signed out elsewhere,
+ * deactivated) even though the cache still holds the last `/me`: TanStack Query keeps data on error. Every auth
+ * guard decides with this one rule, so the app never renders a dead session and the sign-in page never sends it
+ * back to the app (that ping-pong mounted the whole shell and its queries every frame, 07.8-29).
+ */
+export function signedInMe(me: { data?: MeResponse; error: unknown }): MeResponse | null {
+  return me.data && !isApiError(me.error, 401) ? me.data : null;
+}
+
 /** Pass `enabled: false` to only observe the cached value (never triggers a request). */
 export function useMe({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery({

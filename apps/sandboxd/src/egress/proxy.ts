@@ -199,6 +199,9 @@ const HOP_BY_HOP = new Set([
   "trailer",
   "transfer-encoding",
   "upgrade",
+  // The proxy's own refusal header (#254): only the proxy may say a request was refused, so an upstream site can never
+  // make its own answer read as a refusal (the browser agent maps it to navigation_refused), and a bot never sends it on.
+  "x-ocw-egress",
 ]);
 
 const defaultLookup: ProxyLookup = async (host) => {
