@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 152
+open_count: 155
 waived_count: 4
 fixed_count: 108
-total_count: 264
-last_updated: 2026-10-22T02:53:29.706Z
+total_count: 267
+last_updated: 2026-10-22T03:14:25.479Z
 ---
 
 # Broken Windows Ledger
@@ -279,6 +279,9 @@ last_updated: 2026-10-22T02:53:29.706Z
 | 262 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: when two packages provide the same bin or module name the first on PATH/NODE_PATH wins silently; surface a conflict at review (low) | open |  | 2026-10-22T02:53:29.552Z |  |
 | 263 | 07.8 | deviation | infra/compose |  | MUST (07.8-24): add OCW_SANDBOX_NPM_REGISTRY, OCW_SANDBOX_PYPI_INDEX, OCW_CLAWHUB_URL (must equal the API's) and OCW_SANDBOX_REGISTRIES to sandboxd in compose and Woodpecker | open |  | 2026-10-22T02:53:29.628Z |  |
 | 264 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: npm 11.19 warns about allowScripts but still runs install scripts; a future npm enforcing it needs an allow-list (low); Debian packages only unit-tested (VALIDATION manual row) | open |  | 2026-10-22T02:53:29.706Z |  |
+| 265 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-20 (for 21): ActivityStep has no requester, so sign-in and paused rows cannot name the person ("Asked you / Asked Sam" is built and tested, waiting for data) | open |  | 2026-10-22T03:14:25.296Z |  |
+| 266 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-20: activity steps carry no http/https flag, so step hosts show no lock or Not secure (only the card and review do) (low) | open |  | 2026-10-22T03:14:25.387Z |  |
+| 267 | 07.8 | deviation | apps/web/components/browser/bot-activity.tsx |  | 07.8-20: for a top-level channel mention the live label shows in the main list while the reply lands in the thread; a tab opened mid-turn shows no label until the next step (low) | open |  | 2026-10-22T03:14:25.479Z |  |
 
 ````json
 [
@@ -3448,6 +3451,42 @@ last_updated: 2026-10-22T02:53:29.706Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-22T02:53:29.706Z",
+    "resolved_at": null
+  },
+  {
+    "id": 265,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/contracts/src/browser.ts",
+    "line": null,
+    "description": "07.8-20 (for 21): ActivityStep has no requester, so sign-in and paused rows cannot name the person (\"Asked you / Asked Sam\" is built and tested, waiting for data)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:14:25.296Z",
+    "resolved_at": null
+  },
+  {
+    "id": 266,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/contracts/src/browser.ts",
+    "line": null,
+    "description": "07.8-20: activity steps carry no http/https flag, so step hosts show no lock or Not secure (only the card and review do) (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:14:25.387Z",
+    "resolved_at": null
+  },
+  {
+    "id": 267,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/browser/bot-activity.tsx",
+    "line": null,
+    "description": "07.8-20: for a top-level channel mention the live label shows in the main list while the reply lands in the thread; a tab opened mid-turn shows no label until the next step (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:14:25.479Z",
     "resolved_at": null
   }
 ]
