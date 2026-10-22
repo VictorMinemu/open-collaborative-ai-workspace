@@ -110,6 +110,7 @@ const OPS = {
   "POST /v1/browsers/contexts/export-state": "contextExportState",
   "POST /v1/browsers/contexts/close": "contextClose",
   "POST /v1/browsers/contexts/hold": "contextHold",
+  "POST /v1/browsers/contexts/lock": "contextLock",
   "POST /v1/browsers/contexts/takeover": "contextTakeover",
   "POST /v1/browsers/contexts/resize": "contextResize",
   "GET /v1/browsers/contexts/frames": "contextFrames",
@@ -655,10 +656,10 @@ export function createFakeSandboxd(opts = {}) {
         ? [
             {
               name: "fake_session",
-              value: "fake-signed-in",
+              value: ctx.cookieValue ?? "fake-signed-in",
               domain: host.split(":")[0],
               path: "/",
-              expires: -1,
+              expires: ctx.cookieExpires ?? -1,
             },
           ]
         : [];
@@ -1092,6 +1093,8 @@ export function createFakeSandboxd(opts = {}) {
           throw invalid("siteLock");
         }
         let signedIn = false;
+        let cookieValue = null;
+        let cookieExpires = -1;
         if (body.storageState !== undefined) {
           let state;
           try {
@@ -1100,13 +1103,24 @@ export function createFakeSandboxd(opts = {}) {
             throw invalid("storageState");
           }
           if (!isObject(state)) throw invalid("storageState");
-          signedIn = Array.isArray(state.cookies) && state.cookies.some((c) => c?.name === "fake_session");
+          const session = Array.isArray(state.cookies)
+            ? state.cookies.find((c) => c?.name === "fake_session")
+            : undefined;
+          signedIn = session !== undefined;
+          // A loaded session keeps its cookie (value and expiry) so a later export rolls the same one (07.8-21).
+          if (session) {
+            cookieValue = typeof session.value === "string" ? session.value : null;
+            cookieExpires = typeof session.expires === "number" ? session.expires : -1;
+          }
         }
         contexts.set(body.contextId, {
           id: body.contextId,
           target,
           host: null,
           signedIn,
+          cookieValue,
+          cookieExpires,
+          loadedState: body.storageState !== undefined,
           siteLock: body.siteLock ?? null,
           memberId: body.memberId ?? null,
           viewport: { width: v.width, height: v.height },
@@ -1206,7 +1220,19 @@ export function createFakeSandboxd(opts = {}) {
       case "contextHold": {
         const ctx = contextOf(body);
         ctx.held = body.hold === true;
+        ctx.holdReason = ctx.held ? (body.reason ?? null) : null;
         return { held: ctx.held };
+      }
+      case "contextLock": {
+        // 07.8-21: the page a person signed in to by hand is site-locked in place (idempotent for the same host).
+        const ctx = contextOf(body);
+        const lock = typeof body.siteLock === "string" ? body.siteLock : "";
+        if (hostOfUrl(`https://${lock}/`) !== lock) throw invalid("siteLock");
+        if (ctx.siteLock && ctx.siteLock !== lock) throw invalid("siteLock");
+        if (!UUID.test(String(body.memberId))) throw invalid("memberId");
+        ctx.siteLock = lock;
+        ctx.memberId = body.memberId;
+        return { locked: true };
       }
       case "contextTakeover": {
         const ctx = contextOf(body);
@@ -1314,6 +1340,9 @@ export function createFakeSandboxd(opts = {}) {
         const ctx = contexts.get(body?.contextId);
         if (!ctx) return send(res, 404, { error: "no such context" });
         ctx.signedIn = true;
+        // 07.8-21: the session cookie's value and expiry (unix seconds, -1 = a session cookie) the export carries.
+        if (typeof body.cookieValue === "string") ctx.cookieValue = body.cookieValue;
+        if (typeof body.expires === "number") ctx.cookieExpires = body.expires;
         return send(res, 200, { ok: true });
       }
       case "POST /__control/browser/event": {
@@ -1394,6 +1423,8 @@ export function createFakeSandboxd(opts = {}) {
             siteLock: c.siteLock,
             takeover: c.takeover,
             held: c.held,
+            holdReason: c.holdReason ?? null,
+            loadedState: c.loadedState === true,
             viewport: { ...c.viewport },
             viewportMode: c.viewportMode ?? null,
             viewers: c.subscribers.size,

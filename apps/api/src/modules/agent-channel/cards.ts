@@ -243,8 +243,13 @@ export async function emitCardAction(
     messageId: message.id,
     agentIds: [card.agentId],
     author: { kind: "user", id: turnUserId, displayName: authorName },
-    // A decision note is human-authored text: quoted after the server sentence, never reworded (UI-SPEC R4).
-    body: `${name} ${a.outcome} “${card.title}”${a.note ? `: “${a.note}”` : ""}`,
+    // A decision note is human-authored text: quoted after the server sentence, never reworded (UI-SPEC R4). A sign-in
+    // card's outcome is said in words (07.8-21): the host only.
+    body: a.signIn
+      ? a.signIn.status === "signed_in"
+        ? `${name} signed in to ${a.signIn.host}.`
+        : `${name} chose not to sign in to ${a.signIn.host}.`
+      : `${name} ${a.outcome} “${card.title}”${a.note ? `: “${a.note}”` : ""}`,
     createdAt: new Date().toISOString(),
     delivery: flat ? "dm" : "thread",
   };
@@ -282,6 +287,7 @@ export async function emitCardAction(
         // 07.5-11: the note as a field (the sentence still quotes it) and a failed apply's code.
         ...(a.note ? { note: a.note } : {}),
         ...(a.resultCode && a.outcome === "approved" ? { resultCode: a.resultCode.slice(0, 64) } : {}),
+        ...(a.signIn && card.kind === "browser" ? { signIn: a.signIn } : {}),
       },
     };
     await core.realtime.appendEvent(

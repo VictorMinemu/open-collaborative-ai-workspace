@@ -1692,8 +1692,19 @@ export const messageCards = appSchema.table(
     agentId: uuid("agent_id")
       .notNull()
       .references(() => agents.id),
+    /** Phase 07.8 (UI-SPEC R1): `browser` is the platform-owned sign-in card (never an agent's own post). */
     kind: text("kind", {
-      enum: ["work_zone", "approval", "report", "artifact", "automation", "deployment", "pr", "generic"],
+      enum: [
+        "work_zone",
+        "approval",
+        "report",
+        "artifact",
+        "automation",
+        "deployment",
+        "pr",
+        "generic",
+        "browser",
+      ],
     }).notNull(),
     title: text("title").notNull(),
     fields: jsonb("fields").$type<Array<{ label: string; value: string }>>().notNull().default([]),
@@ -1723,7 +1734,7 @@ export const messageCards = appSchema.table(
     ),
     check(
       "message_cards_kind_check",
-      sql`${t.kind} in ('work_zone','approval','report','artifact','automation','deployment','pr','generic')`,
+      sql`${t.kind} in ('work_zone','approval','report','artifact','automation','deployment','pr','generic','browser')`,
     ),
     check(
       "message_cards_status_check",
@@ -2966,6 +2977,11 @@ export const browserSigninRequests = appSchema.table(
       enum: ["closed_by_bot", "idle", "kill_switch", "module_off", "crashed", "access_lost"],
     }),
     sessionId: uuid("session_id"),
+    /**
+     * 07.8-21: until when the session this sign-in sealed lasts (the card's "Signed in until {date}"), copied at the
+     * seal so every reader of the card sees it without reading the owner-only session row. Null until signed in.
+     */
+    sessionExpiresAt: ts("session_expires_at"),
     expiresAt: ts("expires_at").notNull(),
     decidedAt: ts("decided_at"),
     createdAt: createdAt(),

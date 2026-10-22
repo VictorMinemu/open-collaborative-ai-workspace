@@ -37,6 +37,7 @@ export {
   currentTurn,
   currentTurnTools,
   memberAccountAllowed,
+  memberAccountFacts,
   recordLimitReached,
   type TurnAudience,
   type TurnDecision,

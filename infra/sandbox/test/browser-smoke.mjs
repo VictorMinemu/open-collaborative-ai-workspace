@@ -604,6 +604,25 @@ steps.state = async (agent) => {
     [`http://${PANEL}`],
   );
   assert.ok(state.origins[0].localStorage.some((i) => i.name === "panel_pref"));
+  // 07.8-21 (D-13): the page a person signed in to by hand is site-locked in place before the bot continues on it.
+  await agent.ok("contextLock", {
+    contextId: ctx,
+    memberId: "33333333-3333-4333-8333-333333333333",
+    siteLock: PANEL,
+  });
+  const locked = await agent.ok("contextNavigate", { contextId: ctx, url: `http://${EVIL}/landing` });
+  assert.deepEqual(locked.blockedNavigation, { host: EVIL }, "a locked sign-in page cannot leave its site");
+  assert.equal(locked.host, PANEL);
+  assert.equal(
+    (
+      await agent.call("contextLock", {
+        contextId: ctx,
+        memberId: "33333333-3333-4333-8333-333333333333",
+        siteLock: EVIL,
+      })
+    ).ok,
+    false,
+  );
   await agent.ok("contextClose", { contextId: ctx });
 
   const again = await open(agent, { storageState, siteLock: PANEL });

@@ -11,6 +11,7 @@ import {
   type TurnContext,
   type TurnWithheld,
 } from "./agent-channel-protocol.js";
+import { SIGNIN_SENTENCES } from "./signin-sentences.js";
 import { withTurnScopedTools } from "./turn-scoped-tools.js";
 
 export const CHANNEL_ID = "ocw";
@@ -431,6 +432,11 @@ function resultCodeOf(raw: string | undefined): string | undefined {
   return typeof raw === "string" && /^[a-z][a-z0-9_]{0,63}$/u.test(raw) ? raw : undefined;
 }
 
+/** A sign-in card's host as the model reads it: a lower-case host only, anything else is "that site" (07.8-21). */
+function signInHost(raw: string): string {
+  return /^[a-z0-9.\-[\]:]{1,260}$/u.test(raw) ? raw : "that site";
+}
+
 /**
  * `agent.card_action.v1` (06-14, P-11): a human approved or denied one of the agent's cards. Mapped exactly like a
  * mention of the agent on the card's message (same sender, roster, history, thread or flat placement, session and
@@ -468,6 +474,13 @@ export function mapCardAction(event: AgentCardActionEvent, bot: CellAgent | unde
     instruction =
       `${by} approved “${sanitizeCardTitle(cardAction.title)}”, but it failed: ${reason}. ` +
       `Don't retry on your own; tell ${requester} what went wrong.`;
+  } else if (cardAction.signIn) {
+    // 07.8-21: a sign-in card's outcome, in the UI-SPEC's model-facing words (the host only, never anything typed).
+    label = "Sign-in";
+    const host = signInHost(cardAction.signIn.host);
+    instruction = SIGNIN_SENTENCES[cardAction.signIn.status === "signed_in" ? "signedIn" : "skipped"]
+      .replaceAll("{requester}", requester)
+      .replaceAll("{host}", host);
   } else if (cardAction.outcome === "denied" && decider) {
     const what = grant ? sanitizeToolName(grant.tool) : `“${sanitizeCardTitle(cardAction.title)}”`;
     const note = decisionNote(cardAction.note);
@@ -486,6 +499,9 @@ export function mapCardAction(event: AgentCardActionEvent, bot: CellAgent | unde
       outcome: cardAction.outcome,
       ...(decider ? { decidedBy: decider } : {}),
       ...(resultCode && cardAction.outcome === "approved" ? { resultCode } : {}),
+      ...(cardAction.signIn
+        ? { signIn: { status: cardAction.signIn.status, host: signInHost(cardAction.signIn.host) } }
+        : {}),
       ...(instruction ? { instruction } : {}),
     },
   };

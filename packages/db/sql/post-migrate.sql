@@ -267,6 +267,41 @@ CREATE POLICY personal_owner_only ON app.browser_sessions AS RESTRICTIVE FOR ALL
   USING (user_id = nullif(current_setting('app.user_id', true), '')::uuid)
   WITH CHECK (user_id = nullif(current_setting('app.user_id', true), '')::uuid);
 
+-- The browser sweep (07.8-21; D-08, R7, R9): sign-in cards that waited 15 minutes expire, and sessions expired for 7
+-- days are removed. The sweep runs without a user, across organizations:
+-- - `browser_sweep_organizations` lists the organizations that have such work (ids only, keyset-paged by id); the API
+--   then works inside each organization's own withTenant() transaction;
+-- - `purge_browser_sessions` deletes, in the CALLER's organization only (`app.organization_id` of the tenant
+--   transaction, never an argument), the sessions that expired before `p_before`, past the owner-only policy no
+--   user-less session could cross. Their sealed secrets go with them (`browser_session_secret_cleanup`). It returns the
+--   ids, the owner, the bot and the site for the audit only: never a secret id or any sealed value.
+CREATE OR REPLACE FUNCTION app.browser_sweep_organizations(
+  p_now timestamptz, p_before timestamptz, p_after uuid, p_limit integer)
+RETURNS TABLE (organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT o.organization_id FROM (
+    SELECT r.organization_id FROM app.browser_signin_requests r
+    WHERE r.status IN ('waiting', 'signing_in') AND r.expires_at <= p_now
+    UNION
+    SELECT b.organization_id FROM app.browser_sessions b WHERE b.expires_at < p_before
+  ) o
+  WHERE p_after IS NULL OR o.organization_id > p_after
+  ORDER BY o.organization_id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+CREATE OR REPLACE FUNCTION app.purge_browser_sessions(p_before timestamptz)
+RETURNS TABLE (id uuid, user_id uuid, agent_id uuid, site_key text)
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  DELETE FROM app.browser_sessions b
+  WHERE b.organization_id = nullif(current_setting('app.organization_id', true), '')::uuid
+    AND b.expires_at < p_before
+  RETURNING b.id, b.user_id, b.agent_id, b.site_key
+$fn$;
+REVOKE ALL ON FUNCTION app.browser_sweep_organizations(timestamptz, timestamptz, uuid, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app.purge_browser_sessions(timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.browser_sweep_organizations(timestamptz, timestamptz, uuid, integer) TO ocw_app;
+GRANT EXECUTE ON FUNCTION app.purge_browser_sessions(timestamptz) TO ocw_app;
+
 -- Pre-tenant lookups (bearer tokens / pairing codes arrive before the organization is known).
 -- SECURITY DEFINER as ocw_migrator (BYPASSRLS); each returns only the ids needed to open withTenant().
 CREATE OR REPLACE FUNCTION app.lookup_device_token(p_token_hash text)

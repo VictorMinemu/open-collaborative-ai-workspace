@@ -547,6 +547,20 @@ export const SandboxdContextHold = z.strictObject({
 });
 export type SandboxdContextHold = z.infer<typeof SandboxdContextHold>;
 
+/**
+ * 07.8-21 (additive; D-08, D-13, P-18): site-locks an open context in place, after a member signed in to it by hand
+ * (the takeover of a sign-in card). From then on it behaves as a context opened with a sealed session: every top-level
+ * or pop-up navigation to another host is blocked and reported, and the state export keeps that host's cookies only.
+ * Idempotent for the same host; another host than the one already locked is refused (`invalid_request`).
+ */
+export const SandboxdContextLock = z.strictObject({
+  target: SandboxdTarget,
+  contextId: Id,
+  memberId: Id,
+  siteLock: SiteHost,
+});
+export type SandboxdContextLock = z.infer<typeof SandboxdContextLock>;
+
 /** A person holds the lease: bot actions answer `paused`; fields that receive input are redacted from then on. */
 export const SandboxdContextTakeover = z.strictObject({
   target: SandboxdTarget,
@@ -763,6 +777,7 @@ export const SandboxdOp = z.enum([
   "contextExportState",
   "contextClose",
   "contextHold",
+  "contextLock",
   "contextTakeover",
   "contextResize",
   "contextFrames",
@@ -901,6 +916,12 @@ export const SANDBOXD_ROUTES = {
     path: "/v1/browsers/contexts/hold",
     input: SandboxdContextHold,
     output: z.object({ held: z.boolean() }),
+  },
+  contextLock: {
+    method: "POST",
+    path: "/v1/browsers/contexts/lock",
+    input: SandboxdContextLock,
+    output: z.object({ locked: z.literal(true) }),
   },
   contextTakeover: {
     method: "POST",

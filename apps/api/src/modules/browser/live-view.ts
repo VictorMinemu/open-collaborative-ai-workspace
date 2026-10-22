@@ -26,6 +26,7 @@ import { browserContextResource, orgResource, type PermissionService } from "../
 import { authenticateUpgrade, SESSION_RECHECK_MS } from "../realtime";
 import { type SandboxdClient, SandboxdRefusedError } from "../sandbox";
 import { auditClosed, type BrowserContextRecord, closeContext, contextById } from "./contexts";
+import { backToWaiting, markSigningIn, onHandBack } from "./signin";
 import {
   announce,
   auditEnded,
@@ -872,6 +873,14 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
       sendJson(v, { type: "refused", op: "take", reason: "expired" });
       return;
     }
+    // 07.8-21: the member's waiting sign-in on this page reads "Signing in…".
+    await core.db
+      .withTenant({ organizationId: auth.organizationId, userId: auth.userId }, (tx) =>
+        markSigningIn(tx, core, { contextId: w.contextId, userId: auth.userId }),
+      )
+      .catch((err: unknown) =>
+        log.warn({ contextId: w.contextId, error: name(err) }, "sign-in state failed"),
+      );
     sendJson(v, { type: "lease", expiresAt: taken.lease.expiresAt });
     await announce(core.bus, w.orgId, w.contextId);
     refresh(w);
@@ -892,6 +901,22 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
       log.warn({ contextId: w.contextId, error: name(err) }, "live view lease release failed");
     }
     await takeoverOff(w);
+    // 07.8-21: a hand back on a page with the member's waiting sign-in seals it (export, lock, seal, "Signed in");
+    // control that ended any other way leaves the card waiting again.
+    try {
+      if (reason === "released") {
+        await onHandBack(
+          { core, client: deps.client },
+          { organizationId: auth.organizationId, contextId: w.contextId, userId: auth.userId },
+        );
+      } else {
+        await core.db.withTenant({ organizationId: auth.organizationId, userId: auth.userId }, (tx) =>
+          backToWaiting(tx, core, { contextId: w.contextId, userId: auth.userId }),
+        );
+      }
+    } catch (err) {
+      log.warn({ contextId: w.contextId, error: name(err) }, "sign-in hand back failed");
+    }
     await announce(core.bus, w.orgId, w.contextId);
     refresh(w);
   }

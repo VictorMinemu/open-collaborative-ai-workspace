@@ -331,3 +331,53 @@ test("a browser turn: open, read and click read as three steps with the host", a
     await selectorOf(row),
   );
 });
+
+test("07.8-21: Scout asks Sam to sign in; the step says “Asked you to sign in” and the card names the site", async ({
+  browser,
+}, info) => {
+  const project = info.project.name;
+  const page = await signIn(browser, SAM, project);
+  await page.goto(`${BASE_URL}/chat/dm/${dmId}`);
+  await expect(page.getByTestId("composer")).toBeVisible();
+
+  const host = "invoices.fake.test";
+  const asked = await postAs(samApi, dmId, `Read my invoices ${widthOf(project)}`);
+  const m = await mentionOf(asked.id);
+  // A fresh page for this turn (an earlier test's page in this DM would carry its own sign-in).
+  await cell.browser(m, "ocw_browser_close", {});
+  expect(await cell.browser(m, "ocw_browser_open", { url: `https://${host}/invoices?page=2` })).toBe(
+    `opened ${host}`,
+  );
+  expect(await cell.browser(m, "ocw_browser_signin", { reason: "The invoices need your account." })).toBe(
+    `sign-in requested for ${host}`,
+  );
+  const replyText = `Please sign in to ${host} in the card ${widthOf(project)}.`;
+  await cell.reply(m, replyText);
+
+  const row = replyRow(page, replyText);
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  const toggle = row.getByTestId("bot-activity-toggle");
+  await toggle.click();
+  const steps = row.getByTestId("activity-step");
+  await expect(steps.last()).toContainText(`Asked you to sign in to ${host}`);
+  // The platform's card for Sam: the page's host and the bot's reason, never the path it opened.
+  const card = page
+    .getByTestId("agent-card")
+    .filter({ has: page.getByTestId("agent-card-title").getByText(`Sign in to ${host}`, { exact: true }) })
+    .last();
+  await expect(card).toBeVisible({ timeout: 20_000 });
+  await expect(card.getByTestId("agent-card-fields")).toContainText("The invoices need your account.");
+  await expect(card).not.toContainText("page=2");
+  await expect(row).not.toContainText("/invoices");
+  await invariants(
+    page,
+    `sign-in activity ${widthOf(project)}`,
+    row.getByTestId("bot-activity"),
+    await selectorOf(row),
+  );
+  await row.evaluate((el) => {
+    (document.activeElement as HTMLElement | null)?.blur();
+    el.scrollIntoView({ block: "end" });
+  });
+  await captureReview(page, `chat-activity-signin-${widthOf(project)}`);
+});

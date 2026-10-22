@@ -48,6 +48,7 @@ export const IMPLEMENTED_OPS = [
   "contextExportState",
   "contextClose",
   "contextHold",
+  "contextLock",
   "contextTakeover",
   "contextResize",
   "contextFrames",
@@ -101,6 +102,8 @@ export const POLICY_GATE: Record<SandboxdOp, "run" | "policy" | "none"> = {
   contextExportState: "none",
   contextClose: "none",
   contextHold: "run",
+  // Locking only narrows what an open page may do: it starts nothing, so a killed organization may still lock.
+  contextLock: "none",
   contextTakeover: "run",
   contextResize: "run",
   contextFrames: "none",
@@ -301,6 +304,7 @@ export function createServer(options: ServerOptions): http.Server {
     contextExportState: (input) => b().exportState(input),
     contextClose: (input) => b().close(input),
     contextHold: (input) => b().hold(input),
+    contextLock: (input) => b().lock(input),
     contextTakeover: (input) => b().takeover(input),
     contextResize: (input) => b().resize(input),
     // A stream route: answered by `streamFrames` below, never through this JSON path.

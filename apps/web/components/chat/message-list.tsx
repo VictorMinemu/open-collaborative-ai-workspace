@@ -5,7 +5,12 @@ import { useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Bookmark, Pin, RotateCw, Trash2 } from "lucide-react";
 import { Fragment, memo, type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { BotActivity, BotActivityLive, type LiveActivityRow } from "@/components/browser/bot-activity";
+import {
+  BotActivity,
+  BotActivityLive,
+  type LiveActivityRow,
+  stepViewerOf,
+} from "@/components/browser/bot-activity";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
@@ -525,7 +530,7 @@ const MessageRow = memo(function MessageRow({
         {!deleted && message.activity ? (
           <BotActivity
             activity={message.activity}
-            viewer={{ meId: meId || null, requester: null }}
+            viewer={stepViewerOf(message.activity, meId || null)}
             bot={
               isBot && author.id
                 ? { id: author.id, name: author.displayName, avatarUrl: author.avatarUrl }

@@ -368,6 +368,7 @@ describe("sandboxd protocol (D-11, Pattern 1)", () => {
     "contextExportState",
     "contextClose",
     "contextHold",
+    "contextLock",
     "contextTakeover",
     "contextResize",
     "contextFrames",

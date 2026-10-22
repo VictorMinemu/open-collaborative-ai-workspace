@@ -1,6 +1,7 @@
 import {
   AgentCard,
   type AgentCardAction,
+  type AgentCardBrowserSignInLink,
   AgentCardDecisionRequest,
   type AgentCardInput,
   AgentCardParams,
@@ -13,7 +14,12 @@ import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { markDecided } from "../../authz";
 import { type App, authOf, type Core, tenant } from "../../core";
-import type { CardAction, ChatAgentBridge, LinkedCardInfo } from "../../lib/chat-agent-bridge";
+import type {
+  CardAction,
+  ChatAgentBridge,
+  LinkedCardInfo,
+  PlatformCardInput,
+} from "../../lib/chat-agent-bridge";
 import { badRequest, conflict, forbidden, gone, notFound } from "../../lib/errors";
 import { channelResource, type PermissionService } from "../organization";
 import { authorOf, type Directory, loadDirectory } from "./directory";
@@ -52,7 +58,7 @@ let decider: Pick<PermissionService, "decide"> | null = null;
  * The bridge whose `linkedCards()` knows which platform-owned cards mirror an approval (07.2-06). Set with `decider`;
  * unset or without a provider = no card is linked (no `approval`, never `decide`: fail closed).
  */
-let bridge: Pick<ChatAgentBridge, "linkedCards"> | null = null;
+let bridge: Pick<ChatAgentBridge, "linkedCards" | "signInCards"> | null = null;
 
 /** The approval links of the platform-owned cards among `rows` (one query through the provider). */
 async function linksOf(tx: Tx, rows: CardRow[]): Promise<Map<string, LinkedCardInfo>> {
@@ -61,6 +67,25 @@ async function linksOf(tx: Tx, rows: CardRow[]): Promise<Map<string, LinkedCardI
   if (owned.length === 0 || !linked) return new Map();
   return linked.linkOf(tx, owned);
 }
+
+/** The sign-in links of the `browser` cards among `rows` (07.8-21; one query through the browser module's provider). */
+async function signInsOf(tx: Tx, rows: CardRow[]): Promise<Map<string, AgentCardBrowserSignInLink>> {
+  const ids = rows.filter((r) => r.platformOwned && r.kind === "browser").map((r) => r.messageId);
+  const provider = bridge?.signInCards();
+  if (ids.length === 0 || !provider) return new Map();
+  return provider.linkOf(tx, ids);
+}
+
+/** A sign-in card's link, when there is one (absent on every other card, so their snapshots keep their shape). */
+const signInLink = (link: AgentCardBrowserSignInLink | undefined): Pick<AgentCard, "browserSignIn"> =>
+  link ? { browserSignIn: link } : {};
+
+/** The requester of a waiting sign-in may open the live view to sign in (UI-SPEC Surface 2, `viewerCan.sign_in`). */
+const maySignIn = (link: AgentCardBrowserSignInLink | undefined, viewerId: string | null): boolean =>
+  !!link &&
+  viewerId !== null &&
+  link.requesterId === viewerId &&
+  (link.status === "waiting" || link.status === "signing_in");
 
 /**
  * The card's approval link as the provider composed it: the 07.2 fields, plus the 07.5 extras (kind, expiry, use time
@@ -115,6 +140,7 @@ export async function cardOf(tx: Tx, messageId: string): Promise<AgentCard | nul
   return {
     ...cardFromRow(row, row.decidedBy ? await loadDirectory(tx) : null, link),
     ...approvalLink(link),
+    ...signInLink((await signInsOf(tx, [row])).get(row.messageId)),
   };
 }
 
@@ -180,6 +206,7 @@ export async function withCards(tx: Tx, list: Message[], viewerId: string | null
   // Linked cards (07.2-06): the approval's kind decides who may decide, live; `agent_card.approve` and the card's
   // approver list are not consulted. A platform-owned card without a link offers no decision.
   const links = await linksOf(tx, rows);
+  const signIns = await signInsOf(tx, rows);
   const linked = bridge?.linkedCards();
   const linkedDeciders =
     viewerId && linked && links.size > 0
@@ -187,18 +214,21 @@ export async function withCards(tx: Tx, list: Message[], viewerId: string | null
       : new Set<string>();
   const cards = new Map<string, AgentCard>();
   for (const row of rows) {
-    const viewerCan: Array<"follow" | "decide"> = viewerId ? ["follow"] : [];
+    const viewerCan: Array<"follow" | "decide" | "sign_in"> = viewerId ? ["follow"] : [];
     const link = links.get(row.messageId);
+    const signIn = signIns.get(row.messageId);
     if (row.platformOwned) {
       if (link && link.status === "pending" && !row.decision && linkedDeciders.has(row.messageId)) {
         viewerCan.push("decide");
       }
+      if (maySignIn(signIn, viewerId)) viewerCan.push("sign_in");
     } else if (viewerId && decisionBlock(row, viewerId) === null && (await mayApprove(row.conversationId))) {
       viewerCan.push("decide");
     }
     cards.set(row.messageId, {
       ...cardFromRow(row, dir, link),
       ...approvalLink(link),
+      ...signInLink(signIn),
       following: following.has(row.messageId),
       viewerCan,
     });
@@ -212,8 +242,17 @@ export async function withCards(tx: Tx, list: Message[], viewerId: string | null
 /** Inserts the card of an agent's new message (version 1), in the message transaction. */
 export async function insertCard(
   tx: Tx,
-  a: { message: MessageRow; agentId: string; input: AgentCardInput; platformOwned?: boolean },
+  a: {
+    message: MessageRow;
+    agentId: string;
+    input: AgentCardInput | PlatformCardInput;
+    platformOwned?: boolean;
+  },
 ): Promise<AgentCard> {
+  // A sign-in card is the platform's alone (07.8-21, UI-SPEC R1): never stored as an agent's own card.
+  if (a.input.kind === "browser" && a.platformOwned !== true) {
+    throw new Error("a browser card is platform-owned");
+  }
   const [row] = await tx
     .insert(messageCards)
     .values({
@@ -589,6 +628,30 @@ export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
   }
 
   /**
+   * A sign-in card (07.8-21, UI-SPEC Surface 2): its only decision is the requester's "Not now" (`denied`), decided by
+   * the browser module (requester only, only while it waits; the bot hears it as a card action). Signing in itself
+   * happens in the live view, never here: `approved` has nothing to decide (409).
+   */
+  async function decideSignIn(
+    req: FastifyRequest<{ Params: { messageId: string }; Body: AgentCardDecisionRequest }>,
+    tx: Tx,
+  ) {
+    const userId = authOf(req).userId;
+    const { conv, message } = await readableCard(req, tx, req.params.messageId);
+    if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");
+    const provider = bridge?.signInCards();
+    if (!provider || req.body.outcome !== "denied") {
+      throw conflict("This card has nothing to decide", "card_not_decidable");
+    }
+    await provider.skip(tx, { messageId: message.id, userId });
+    markDecided(req);
+    const dto = await cardMessageOf(tx, message, await loadDirectory(tx));
+    const [shown] = await withCards(tx, [dto], userId);
+    if (!shown?.card) throw new Error("skipped card missing");
+    return shown.card;
+  }
+
+  /**
    * One decision per card, decided by the server (the client only says approved or denied): the caller reads the
    * conversation (404), holds `agent_card.approve` there (403, deny rules win; in an AI chat only the owner or a `chat`
    * grantee holds it, a `view` grantee is 403 `ai_chat_view_only`), the card has an approve action (409
@@ -607,10 +670,11 @@ export function registerCardActionRoutes(app: App, ctx: ChatRouteCtx): void {
         const userId = authOf(req).userId;
         const { outcome } = req.body;
         const [kind] = await tx
-          .select({ platformOwned: messageCards.platformOwned })
+          .select({ platformOwned: messageCards.platformOwned, kind: messageCards.kind })
           .from(messageCards)
           .where(eq(messageCards.messageId, req.params.messageId))
           .limit(1);
+        if (kind?.platformOwned && kind.kind === "browser") return decideSignIn(req, tx);
         if (kind?.platformOwned) return decideLinked(req, tx);
         const { card, conv, facts, message } = await readableCard(req, tx, req.params.messageId, true);
         if (conv.archivedAt) throw gone("This conversation is archived", "channel_archived");

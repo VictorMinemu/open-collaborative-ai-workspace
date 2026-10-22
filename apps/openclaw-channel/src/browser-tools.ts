@@ -30,6 +30,7 @@ import {
   type RefusalFamily,
   SANDBOX_REFUSAL_SENTENCE,
 } from "./sandbox-tools.js";
+import { SIGNIN_SENTENCES } from "./signin-sentences.js";
 
 /**
  * The confined browser tools (07.8 D-05, D-07, D-11, P-07, P-10, C-01). The bot's browser is a real Chromium in its own
@@ -45,21 +46,7 @@ import {
  *     Chat Completions models read it as a labelled `user` message, which the taint protects.
  */
 
-export { BROWSER_TOOL_ROUTES };
-
-/**
- * The sign-in sentences of the UI-SPEC (Copywriting › Sign-in card › Model-facing sentences), verbatim. `posted` is the
- * answer of `ocw_browser_signin`; `skipped` and `expired` are what the card's outcome tells the model in a later turn.
- */
-export const SIGNIN_SENTENCES = {
-  posted:
-    "I posted a sign-in card for {host}. Tell {requester} in one short sentence that they need to sign in there; don't ask for passwords.",
-  skipped:
-    "{requester} chose not to sign in to {host}. Don't ask again in this turn; tell them what you can do without it.",
-  expired: "No one signed in to {host} in time. Tell {requester} they can ask again.",
-  notAllowed: "Signing in only works in {requester}'s private chat with you. Tell them to ask you there.",
-  moduleOff: "The browser is turned off for {requester}.",
-} as const;
+export { BROWSER_TOOL_ROUTES, SIGNIN_SENTENCES };
 
 /**
  * What the model reads for each browser refusal (the API's `error.code`; never its message or details). Approval codes

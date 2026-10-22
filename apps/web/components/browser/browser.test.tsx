@@ -2,7 +2,14 @@ import type { ActivityStep, BotTurnActivity } from "@ocw/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ActivityStepRow } from "./activity-step";
-import { activityLabel, BotActivity, BotActivityLive, liveLabel, livePhrase } from "./bot-activity";
+import {
+  activityLabel,
+  BotActivity,
+  BotActivityLive,
+  liveLabel,
+  livePhrase,
+  stepViewerOf,
+} from "./bot-activity";
 import { HostChip } from "./host-chip";
 
 /**
@@ -219,6 +226,18 @@ describe("browser steps (UI-SPEC Surface 5 › Steps)", () => {
       </ol>,
     );
     expect(text(theirs)).toMatch(/^Asked Sam to sign in to panel\.autofy\.app/);
+  });
+
+  it("07.8-21 (#265): the server's requester reaches the sign-in row through stepViewerOf", () => {
+    const s = b("asked_signin", "panel.autofy.app", { tool: "ocw_browser_signin" });
+    const a = activity([s], { requester: { id: sam.id, displayName: sam.name } });
+    expect(stepViewerOf(a, sam.id)).toEqual({ meId: sam.id, requester: sam });
+    const mine = html(<BotActivity activity={a} viewer={stepViewerOf(a, sam.id)} defaultOpen />);
+    expect(text(mine)).toContain("Asked you to sign in to panel.autofy.app");
+    const theirs = html(<BotActivity activity={a} viewer={stepViewerOf(a, "someone-else")} defaultOpen />);
+    expect(text(theirs)).toContain("Asked Sam to sign in to panel.autofy.app");
+    // Older snapshots carry no requester: no name is invented.
+    expect(stepViewerOf(activity([s]), sam.id)).toEqual({ meId: sam.id, requester: null });
   });
 
   it("a step under the requester's saved session carries the outline 'Signed in' badge", () => {

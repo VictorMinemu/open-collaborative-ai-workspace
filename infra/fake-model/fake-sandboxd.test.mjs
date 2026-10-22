@@ -303,6 +303,7 @@ const REQUIRED = {
   contextExportState: ["storageState"],
   contextClose: ["closed"],
   contextHold: ["held"],
+  contextLock: ["locked"],
   contextTakeover: ["active"],
   contextResize: ["ok"],
   contextInput: ["accepted"],
@@ -454,6 +455,45 @@ describe("fake sandboxd: browser ops", () => {
     await ctxOp("navigate", A, fresh, { url: "https://panel.fake.test/app" });
     assert.equal((await stats()).browser.contexts.find((c) => c.contextId === fresh).signedIn, true);
     assert.match((await ctxOp("snapshot", A, fresh)).body.title, /signed in/i);
+  });
+
+  it("07.8-21: the signed-in cookie's value and expiry round-trip through a loaded state; lock pins the host", async () => {
+    const ctx = await browser(A);
+    await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app" });
+    await control("signed-in", { contextId: ctx, cookieValue: "rolled-1", expires: 2_000_000_000 });
+    const blob = JSON.parse((await ctxOp("export-state", A, ctx)).body.storageState);
+    assert.deepEqual(
+      blob.cookies.map((c) => [c.value, c.expires]),
+      [["rolled-1", 2_000_000_000]],
+    );
+    const member = randomUUID();
+    const locked = shaped(
+      "contextLock",
+      (await ctxOp("lock", A, ctx, { memberId: member, siteLock: "panel.fake.test" })).body,
+    );
+    assert.equal(locked.locked, true);
+    assert.equal(
+      (await stats()).browser.contexts.find((c) => c.contextId === ctx).siteLock,
+      "panel.fake.test",
+    );
+    assert.equal(
+      (await ctxOp("lock", A, ctx, { memberId: member, siteLock: "other.fake.test" })).status,
+      400,
+    );
+    const nav = (await ctxOp("navigate", A, ctx, { url: "https://other.fake.test/" })).body;
+    assert.deepEqual(nav.blockedNavigation, { host: "other.fake.test" });
+    const fresh = await browser(A, randomUUID(), {
+      storageState: JSON.stringify(blob),
+      siteLock: "panel.fake.test",
+      memberId: member,
+    });
+    const row = (await stats()).browser.contexts.find((c) => c.contextId === fresh);
+    assert.equal(row.loadedState, true);
+    await ctxOp("navigate", A, fresh, { url: "https://panel.fake.test/app" });
+    const again = JSON.parse((await ctxOp("export-state", A, fresh)).body.storageState);
+    assert.equal(again.cookies[0].value, "rolled-1");
+    await ctxOp("hold", A, fresh, { hold: true, reason: "signin" });
+    assert.equal((await stats()).browser.contexts.find((c) => c.contextId === fresh).holdReason, "signin");
   });
 
   it("downloads: a download control emits the event; the token returns fixed bytes once", async () => {

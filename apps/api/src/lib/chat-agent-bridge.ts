@@ -1,6 +1,8 @@
 import type {
   AgentCardApprovalLink,
+  AgentCardBrowserSignInLink,
   AgentCardInput,
+  AgentCardKind,
   ApprovalRequestStatus,
   ApprovalSummary,
 } from "@ocw/contracts";
@@ -91,10 +93,10 @@ export interface PostAgentMessageInput {
    * An Agent Card (06-13, P-11): `body` is its plain-text summary; the card row is inserted in the message transaction
    * (version 1, this agent) and `message.created` carries it.
    */
-  card?: AgentCardInput;
+  card?: AgentCardInput | PlatformCardInput;
   /**
    * Phase 07.2 (D-08): the card is composed by the server (an approval mirror), not by the agent; the agent can never
-   * PATCH it (403 `card_platform_owned`).
+   * PATCH it (403 `card_platform_owned`). A `browser` (sign-in) card is only ever platform-owned (07.8-21).
    */
   cardPlatformOwned?: boolean;
   /**
@@ -104,6 +106,12 @@ export interface PostAgentMessageInput {
    */
   onInserted?: (tx: Tx, messageId: string) => Promise<void>;
 }
+
+/**
+ * A card the platform composes (07.8-21): any kind, `browser` (the sign-in card) included, which no agent may post
+ * (`AgentCardInput` excludes it). Chat stores it only with `cardPlatformOwned: true`.
+ */
+export type PlatformCardInput = Omit<AgentCardInput, "kind"> & { kind: AgentCardKind };
 
 /** A reader's single decision on an Agent Card (06-13): delivered to the card's agent as `agent.card_action.v1`. */
 export interface CardAction {
@@ -130,6 +138,22 @@ export interface CardAction {
    * the bot hears what went wrong, not only "approved".
    */
   resultCode?: string | undefined;
+  /**
+   * Phase 07.8 (07.8-21): a sign-in card's outcome for the requester (`cardAction.signIn`). The turn's sentence says
+   * it in words ("Sam signed in to panel.example"); the host only, never a cookie or anything typed.
+   */
+  signIn?: { status: "signed_in" | "skipped"; host: string } | undefined;
+}
+
+/**
+ * Phase 07.8 (07.8-21): registered by the browser module, so chat shows a sign-in card's state and lets its requester
+ * say "Not now" without importing the browser module. No registration = no sign-in link, nothing to skip.
+ */
+export interface SignInCards {
+  /** The sign-in each `browser` card among `messageIds` mirrors (no viewer fields: every reader sees the same). */
+  linkOf(tx: Tx, messageIds: readonly string[]): Promise<Map<string, AgentCardBrowserSignInLink>>;
+  /** "Not now" by `userId` on the card: only its requester, only while it waits (throws the HTTP refusal). */
+  skip(tx: Tx, input: { messageId: string; userId: string }): Promise<void>;
 }
 
 /** The approval a platform-owned card mirrors, as chat shows it (no viewer fields): the 07.2 link. */
@@ -229,6 +253,9 @@ export interface ChatAgentBridge {
   registerLinkedCards(provider: LinkedCards): void;
   /** The registered provider, or null (then no card is linked and nothing is decided through it). */
   linkedCards(): LinkedCards | null;
+  registerSignInCards(provider: SignInCards): void;
+  /** The browser module's sign-in cards, or null (no sign-in link is shown, "Not now" is refused). */
+  signInCards(): SignInCards | null;
 }
 
 export function createChatAgentBridge(): ChatAgentBridge {
@@ -237,6 +264,7 @@ export function createChatAgentBridge(): ChatAgentBridge {
   let poster: AgentPoster | undefined;
   let posterIn: AgentPosterIn | undefined;
   let linked: LinkedCards | null = null;
+  let signIns: SignInCards | null = null;
   let context: ThreadContextProvider | undefined;
   let typing: AgentTyping | undefined;
   return {
@@ -283,5 +311,9 @@ export function createChatAgentBridge(): ChatAgentBridge {
       linked = provider;
     },
     linkedCards: () => linked,
+    registerSignInCards(provider) {
+      signIns = provider;
+    },
+    signInCards: () => signIns,
   };
 }
