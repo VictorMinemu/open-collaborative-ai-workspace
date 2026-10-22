@@ -49,6 +49,9 @@ const FRAME_FILES = ["logged-out", "login-form", "typing", "signed-in"];
 const FRAMES_DIR = new URL("./fixtures/sandbox/frames/", import.meta.url);
 const DOWNLOAD_BYTES = Buffer.from("id,amount\n1,1250\n", "utf8");
 const EXPORT_HOST = "evil.fake.test";
+// The egress proxy refuses this host (07.8-13: the agent maps the proxy's refusal of a plain-http page to
+// `navigation_refused`, sandboxd answers 422): the context stays where it was.
+const REFUSED_HOST = "refused.fake.test";
 const BROWSER_EVENTS = new Set(["crashed", "closed", "focus_sensitive", "download"]);
 
 /** Ops that start or run a container: no policy → policy_missing; a killed organization → killed. */
@@ -689,7 +692,8 @@ export function createFakeSandboxd(opts = {}) {
       ctx.subscribers.delete(end);
       streams.delete(end);
       if (!res.writableEnded) {
-        if (!contexts.has(ctx.id)) control({ kind: "closed" });
+        // A restart that forgot the context (`lost`) drops the stream without a word, like a dead broker.
+        if (!contexts.has(ctx.id) && !ctx.lost) control({ kind: "closed" });
         res.end();
       }
     };
@@ -1119,6 +1123,8 @@ export function createFakeSandboxd(opts = {}) {
         const ctx = botContext(body);
         const host = hostOfUrl(body.url);
         if (!host) throw invalid("url");
+        if (host === REFUSED_HOST)
+          throw new OpError(422, "navigation_refused", "the page could not be loaded");
         const blocked = go(ctx, host, body.allowCrossSite);
         const page = pageOf(ctx);
         return { host: ctx.host ?? host, secure: true, title: page.title, blockedNavigation: blocked };
@@ -1211,6 +1217,8 @@ export function createFakeSandboxd(opts = {}) {
         const ctx = contextOf(body);
         if (!Number.isInteger(body.width) || !Number.isInteger(body.height)) throw invalid("size");
         ctx.viewport = { width: body.width, height: body.height };
+        // 07.8-16: the live view's R10 mode (small, expanded, phone), as the agent receives it.
+        ctx.viewportMode = typeof body.mode === "string" ? body.mode : null;
         return { ok: true };
       }
       case "contextInput": {
@@ -1386,6 +1394,8 @@ export function createFakeSandboxd(opts = {}) {
             siteLock: c.siteLock,
             takeover: c.takeover,
             held: c.held,
+            viewport: { ...c.viewport },
+            viewportMode: c.viewportMode ?? null,
             viewers: c.subscribers.size,
             inputs: { ...c.inputs },
           })),
@@ -1416,8 +1426,18 @@ export function createFakeSandboxd(opts = {}) {
       waiters = [];
       for (const w of ready) w();
     },
-    /** A sandboxd restart: a new boot id, an empty feed, no policy and no process; the sandboxes stay. */
-    reboot() {
+    /**
+     * A sandboxd restart: a new boot id, an empty feed, no policy and no process; the sandboxes stay. With
+     * `forgetContexts` (07.8-16), like the real broker, it also forgets its browser context map: every context answers
+     * `no_context` from now on and its frame streams end, while the browsers themselves keep running.
+     */
+    reboot(opts = {}) {
+      if (opts.forgetContexts === true) {
+        for (const ctx of [...contexts.values()]) {
+          ctx.lost = true;
+          closeContext(ctx, false);
+        }
+      }
       bootId = randomUUID();
       events = [];
       seq = 0;

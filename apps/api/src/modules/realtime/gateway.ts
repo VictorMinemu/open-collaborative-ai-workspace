@@ -71,6 +71,32 @@ function offeredToken(header: string | string[] | undefined): string | null {
   return entry ? entry.slice(WS_AUTH_PROTOCOL_PREFIX.length) || null : null;
 }
 
+/** A browser WebSocket upgrade refused before it completes: 403 for a foreign Origin, 401 without a valid token. */
+export interface UpgradeRefusal {
+  status: 401 | 403;
+  error: { code: "forbidden_origin" | "unauthorized"; message: string };
+}
+
+/**
+ * The authentication of every browser WebSocket (`/ws`, and the live view of 07.8-16): an allowed `Origin`, then the
+ * access JWT offered as the `ocw.auth.<jwt>` subprotocol entry, verified BEFORE the upgrade (AUTH-06, D-01). Cookies never
+ * open a socket (T-02-08-05). Returns the principal, or the refusal the route answers with.
+ */
+export async function authenticateUpgrade(
+  req: FastifyRequest,
+  deps: { identity: IdentityService; allowedOrigins: Set<string> },
+): Promise<{ auth: AuthContext } | { refused: UpgradeRefusal }> {
+  const origin = req.headers.origin;
+  if (!origin || !deps.allowedOrigins.has(origin)) {
+    return { refused: { status: 403, error: { code: "forbidden_origin", message: "Origin not allowed" } } };
+  }
+  const token = offeredToken(req.headers["sec-websocket-protocol"]);
+  const auth = token ? await deps.identity.verifyAccessToken(token) : null;
+  if (!auth)
+    return { refused: { status: 401, error: { code: "unauthorized", message: "Sign in required" } } };
+  return { auth };
+}
+
 /**
  * Browser realtime gateway `GET /ws` (research Pattern 5): Origin allowlist + access JWT (subprotocol
  * `ocw.auth.<jwt>`) BEFORE the upgrade, then `sub`/`unsub`/`ping`/`eph` frames. Subscribe = authorize → listen (buffer) → replay from
@@ -286,19 +312,14 @@ export function registerGateway(
       config: { authz: "user" },
       schema: { hide: true },
       onRequest: async (req, reply) => {
-        const origin = req.headers.origin;
-        if (!origin || !deps.allowedOrigins.has(origin)) {
-          return reply.code(403).send({ error: { code: "forbidden_origin", message: "Origin not allowed" } });
+        // AUTH-06: Origin allowlist, then the access JWT from the Sec-WebSocket-Protocol entry, BEFORE the upgrade.
+        const verdict = await authenticateUpgrade(req, deps);
+        if ("refused" in verdict) {
+          return reply.code(verdict.refused.status).send({ error: verdict.refused.error });
         }
-        // AUTH-06: the access JWT arrives as a Sec-WebSocket-Protocol entry and is verified BEFORE the
-        // upgrade. Cookies no longer open the socket (D-01, T-02-08-05).
-        const token = offeredToken(req.headers["sec-websocket-protocol"]);
-        const auth = token ? await deps.identity.verifyAccessToken(token) : null;
-        if (!auth)
-          return reply.code(401).send({ error: { code: "unauthorized", message: "Sign in required" } });
         // Subscribed before the upgrade completes, so no revocation can slip between accept and register.
         await Promise.all([watchRevocations(), watchInvalidations()]);
-        req.auth = auth;
+        req.auth = verdict.auth;
       },
     },
     (socket: WebSocket, req: FastifyRequest) => {

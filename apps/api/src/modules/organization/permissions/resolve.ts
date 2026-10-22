@@ -33,7 +33,14 @@ export type Relation =
   | "full_access_grantee"
   | "inviter"
   /** Memory (Phase 07.2): an agent principal deciding on a scope that belongs to that agent itself. */
-  | "scope_agent";
+  | "scope_agent"
+  /**
+   * Browser contexts (07.8-16, D-06): the principal reads the conversation where the bot acts, as the resolver's own
+   * `channel.read` decided it (the readable set, P-03); never derived here.
+   */
+  | "reader"
+  /** Browser contexts (07.8-16, D-07): the member the bot browses for (the turn's human). */
+  | "requester";
 export type ResourceState =
   | "private"
   | "archived"
@@ -54,7 +61,9 @@ export type ResourceState =
    */
   | "memory_personal"
   | "memory_agent"
-  | "memory_unit";
+  | "memory_unit"
+  /** Browser contexts (07.8-16, D-12 U-2): a member's sealed session is loaded in the page. */
+  | "member_session";
 export type ResourceType =
   | "organization"
   | "unit"
@@ -69,7 +78,9 @@ export type ResourceType =
   /** A memory scope or one file in it (Phase 07.2). */
   | "memory"
   /** An agent template (Phase 07.4): `unitPath` ends with its unit; organization templates carry none. */
-  | "agent_template";
+  | "agent_template"
+  /** A bot's open browser page (Phase 07.8-16): who may watch it live and who may take control. */
+  | "browser_context";
 
 export interface PrincipalFacts {
   kind: "user" | "agent" | "cell" | "device";

@@ -40,6 +40,9 @@ export const RELATION_PERMISSIONS: Record<ResourceType, Partial<Record<Relation,
   // promotes its memory; the surface filter still applies (`memory.promote` sits on `team`).
   memory: { owner: ["memory.read", "memory.write", "memory.promote"] },
   agent_template: {},
+  // 07.8-16: watching and controlling come from the role (`browser.watch`, `browser.control`); the browser-context
+  // preconditions below decide who among the holders may (reader, owner, requester, member session).
+  browser_context: {},
 };
 
 /** Reason reported when a permission is simply not granted (default `missing_permission`). */
@@ -161,6 +164,32 @@ function memoryPrecondition(p: PrincipalFacts, r: ResourceFacts, perm: Permissio
   return { layer: "resource", reason: "unit_memory" };
 }
 
+/**
+ * A bot's browser page (Phase 07.8-16; D-06, D-07, D-11 F-5, D-12 U-2; P-08), judged on a browser-context resource only;
+ * at organization scope the role and the 07.3 module rules decide alone (the module gate):
+ * - `browser.watch`: people only; a reader of the conversation where the bot acts (`reader`, decided by the resolver's
+ *   own `channel.read`) or the bot's owner (`owner`). While a member's sealed session is loaded (`member_session`), only
+ *   that member (`requester`) watches: everyone else is told `member_session` and the live view shows them "Private
+ *   browsing for {member}" with no frame;
+ * - `browser.control`: only the member the bot browses for (`requester`), and only while they may watch (the
+ *   prerequisite below). The takeover lease itself (one controller at a time) is runtime state in `browser/takeover.ts`.
+ * This is the only copy of the rule (07.4 N5): the live view asks the resolver, never re-implements it.
+ */
+function browserContextPrecondition(p: PrincipalFacts, r: ResourceFacts, perm: Permission): Denial | null {
+  if (r.type !== "browser_context") return null;
+  if (p.kind !== "user") return { layer: "resource", reason: "browser_people_only" };
+  if (perm === "browser.control") {
+    return r.relations.has("requester") ? null : { layer: "resource", reason: "not_browser_requester" };
+  }
+  if (!r.relations.has("reader") && !r.relations.has("owner")) {
+    return { layer: "resource", reason: "not_conversation_reader" };
+  }
+  if (r.state.has("member_session") && !r.relations.has("requester")) {
+    return { layer: "resource", reason: "member_session" };
+  }
+  return null;
+}
+
 export const PRECONDITIONS: readonly Precondition[] = [
   {
     // Private channels (and, for agents, every channel) are readable by members only.
@@ -255,6 +284,10 @@ export const PRECONDITIONS: readonly Precondition[] = [
     check: memoryPrecondition,
   },
   {
+    applies: (perm) => perm === "browser.watch" || perm === "browser.control",
+    check: browserContextPrecondition,
+  },
+  {
     applies: (perm) => UNIT_OWNED[perm] !== undefined,
     check: unitOwnedPrecondition,
   },
@@ -309,6 +342,13 @@ export const PREREQUISITES: readonly Prerequisite[] = [
   // D-04 (07.8-11): a bot's sandbox files are for the people who may configure that bot. The organization-scope answer
   // stays the role's (the web's module gate reads it); agents never hold `bot.configure`, so they never get here.
   { permission: "sandbox.files", requires: "bot.configure", on: "agent", reason: "not_bot_configurer" },
+  // 07.8-16 (D-07): taking control of a page needs watching it (reader or owner, the module, the member-session rule).
+  {
+    permission: "browser.control",
+    requires: "browser.watch",
+    on: "browser_context",
+    reason: "not_browser_watcher",
+  },
 ];
 
 /** The first prerequisite of `permission` that `held` does not satisfy on `r`, or null. */
@@ -534,6 +574,33 @@ export function agentResource(a: AgentFacts, principalUserId: string | null): Re
       ...when(unitPath.length > 0, "unit_scoped" as const),
     ],
     unitPath,
+  );
+}
+
+// ---------------------------------------------------------------- browser contexts (Phase 07.8-16)
+
+/** What the resolver needs about one of a bot's browser pages, for one person. */
+export interface BrowserContextFacts {
+  /** The person reads the conversation where the bot acts: the resolver's `channel.read` (the readable set, P-03). */
+  reader: boolean;
+  /** The person owns the bot. */
+  botOwner: boolean;
+  /** The person is the member the bot browses for (`browser_contexts.requested_for_user_id`). */
+  requester: boolean;
+  /** A member's sealed session is loaded in the page (`browser_contexts.session_id`, D-12 U-2). */
+  memberSession: boolean;
+}
+
+/** A bot's browser page as a resource: relations `reader`, `owner`, `requester`; state `member_session`. */
+export function browserContextResource(c: BrowserContextFacts): ResourceFacts {
+  return facts(
+    "browser_context",
+    [
+      ...when(c.reader, "reader" as const),
+      ...when(c.botOwner, "owner" as const),
+      ...when(c.requester, "requester" as const),
+    ],
+    when(c.memberSession, "member_session" as const),
   );
 }
 

@@ -89,7 +89,12 @@ describe("fake sandboxd browser ops parse with the contract (createSandboxdClien
       active: true,
     });
     expect(
-      await client.call("contextInput", { target, contextId, events: [{ type: "key", key: "a" }] }),
+      // 07.8-16: input events are the live view's LiveInputFrame (the contract refuses a looser record).
+      await client.call("contextInput", {
+        target,
+        contextId,
+        events: [{ type: "key", event: "down", key: "a", code: "KeyA", modifiers: 0 }],
+      }),
     ).toEqual({ accepted: 1 });
     expect(await client.call("contextTakeover", { target, contextId, active: false })).toEqual({
       active: false,

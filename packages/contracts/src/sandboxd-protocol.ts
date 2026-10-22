@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { LiveInputFrame } from "./browser";
 import { Id, IsoDateTime } from "./common";
 import {
   AgentChannelSandboxDeleteResponse,
@@ -585,14 +586,14 @@ export const SandboxdFrameControl = z.discriminatedUnion("kind", [
 export type SandboxdFrameControl = z.infer<typeof SandboxdFrameControl>;
 
 /**
- * Takeover input, forwarded by the API after validating each event with the live-view `LiveInputFrame` (07.8-30's
- * contract, not imported here so both contract plans build alone). Never logged by Fastify, OpenTelemetry, sandboxd or
- * the agent.
+ * Takeover input, forwarded by the API from the controller's live-view socket: each event is the live view's own
+ * `LiveInputFrame` (07.8-16 tightened it from a loose record), so sandboxd and the agent receive only the closed set of
+ * key, text, mouse, wheel and touch events. Never logged by Fastify, OpenTelemetry, sandboxd or the agent.
  */
 export const SandboxdContextInput = z.strictObject({
   target: SandboxdTarget,
   contextId: Id,
-  events: z.array(z.record(z.string(), z.unknown())).min(1).max(64),
+  events: z.array(LiveInputFrame).min(1).max(64),
 });
 export type SandboxdContextInput = z.infer<typeof SandboxdContextInput>;
 

@@ -5,7 +5,12 @@ import { registerGateway } from "./gateway";
 import { createOnlineSet, type OnlineSet } from "./online";
 import { createPresenceStore } from "./presence";
 
-export { PRESENCE_RATE_LIMIT, SESSION_RECHECK_MS } from "./gateway";
+export {
+  authenticateUpgrade,
+  PRESENCE_RATE_LIMIT,
+  SESSION_RECHECK_MS,
+  type UpgradeRefusal,
+} from "./gateway";
 export { createOnlineSet, type OnlineSet, onlineKey } from "./online";
 export {
   createPresenceStore,

@@ -169,6 +169,23 @@ describe("broker browser primitives (D-07, D-13, P-10, P-18, T-07.8-01-03)", () 
     expect(SandboxdContextInput.safeParse({ target, contextId: ID, events: [] }).success).toBe(false);
   });
 
+  it("input events are the live view's closed LiveInputFrame set, nothing looser (07.8-16)", () => {
+    const ok = (events: unknown[]) =>
+      SandboxdContextInput.safeParse({ target, contextId: ID, events }).success;
+    expect(
+      ok([
+        { type: "key", event: "down", key: "a", code: "KeyA", modifiers: 0 },
+        { type: "mouse", event: "down", x: 10, y: 20, button: "left" },
+        { type: "wheel", x: 1, y: 1, dx: 0, dy: 120 },
+        { type: "touch", event: "start", x: 5, y: 5 },
+      ]),
+    ).toBe(true);
+    expect(ok([{ type: "script", source: "alert(1)" }])).toBe(false);
+    expect(ok([{ type: "text", text: "a", selector: "#password" }])).toBe(false);
+    expect(ok([{ type: "take" }])).toBe(false);
+    expect(ok([{ type: "text", text: "x".repeat(1001) }])).toBe(false);
+  });
+
   it("a resize may name the live view's mode (07.8-13); phone carries its size", () => {
     const base = { target, contextId: ID, width: 390, height: 700 };
     expect(SandboxdContextResize.parse({ ...base, mode: "phone" }).mode).toBe("phone");

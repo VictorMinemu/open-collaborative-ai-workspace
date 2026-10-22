@@ -25,7 +25,7 @@ import { HttpError } from "./lib/errors";
 import { RedisBus } from "./lib/redis";
 import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
 import { createAgentModule } from "./modules/agent";
-import { createAgentChannelModule } from "./modules/agent-channel";
+import { createAgentChannelModule, currentPhrase } from "./modules/agent-channel";
 import { createAiChatModule } from "./modules/ai-chat";
 import { type ApprovalService, createApprovalModule } from "./modules/approval";
 import { createArtifactModule, type ObjectStorage } from "./modules/artifact";
@@ -301,7 +301,13 @@ export async function buildApp(
   // routes with its sandboxd client.
   const sandbox = createSandboxModule(core);
   // 07.8-14: the bots' browser contexts; sandboxd's `browser` events update them (host, crash, close).
-  const browser = createBrowserModule(core, { events: sandbox.events });
+  // 07.8-16: and serves the people's live view (frames from sandboxd, the gateway's origins, the activity phrase).
+  const browser = createBrowserModule(core, {
+    events: sandbox.events,
+    client: sandbox.client,
+    allowedOrigins,
+    activityPhrase: currentPhrase,
+  });
   const modules: ApiModule[] = [
     createIdentityModule({
       identity,

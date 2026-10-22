@@ -14,6 +14,7 @@ import {
   BROWSER_LIMITS,
   BROWSER_REFUSAL_STATUS,
   type BrowserRefusal,
+  type BrowserSandboxMode,
   type BrowserToolName,
   BUILTIN_TOOLS,
   canonicalJson,
@@ -578,6 +579,23 @@ async function holdInSandboxd(
 interface Box {
   ensured: boolean;
   runtime: SandboxRuntime | null;
+  /** Chromium's own sandbox posture as sandboxd reported it on `browserEnsure` (D-14), null before or unknown. */
+  browserSandbox: BrowserSandboxMode | null;
+}
+
+/**
+ * D-14 (07.8-13 owed to 16): under gVisor, Chromium must run with its own sandbox on (`chromium+gvisor`); any other
+ * reported posture there is a silent fallback and the browser is refused (`service_unavailable`). On hardened runc,
+ * `chromium` and `container-only` are both honest postures (the latter shown as weaker isolation). A broker that does
+ * not report one (null) is not judged.
+ */
+export function postureRefused(status: {
+  runtime: SandboxRuntime | null;
+  browserSandbox: BrowserSandboxMode | null;
+}): boolean {
+  if (status.browserSandbox === null) return false;
+  if (status.runtime === "gvisor") return status.browserSandbox !== "chromium+gvisor";
+  return status.browserSandbox === "chromium+gvisor";
 }
 
 /** Step 4: sandboxd, outside any transaction. `ensure` pushes the organization's policy, then starts the browser. */
@@ -588,7 +606,7 @@ async function runInSandboxd<R>(
   needEnsure: boolean,
   fn: (client: SandboxdClient, ensure: () => Promise<void>, box: Box) => Promise<R>,
 ): Promise<{ raw: R | null; failure: ConfinedCallRefusal | null; box: Box; durationMs: number }> {
-  const box: Box = { ensured: false, runtime: null };
+  const box: Box = { ensured: false, runtime: null, browserSandbox: null };
   const started = Date.now();
   if (!client) return { raw: null, failure: "service_unavailable", box, durationMs: 0 };
   const ensure = async () => {
@@ -596,6 +614,8 @@ async function runInSandboxd<R>(
     const status = await client.call("browserEnsure", { target }, { timeoutMs: ENSURE_TIMEOUT_MS });
     box.ensured = true;
     box.runtime = status.runtime;
+    box.browserSandbox = status.browserSandbox;
+    if (postureRefused(status)) throw new LocalRefusal("service_unavailable");
   };
   try {
     if (needEnsure) await ensure();
@@ -870,11 +890,19 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
         },
       );
       if (run.failure && d.created) {
-        // A context sandboxd never opened is no page: it ends at once.
+        // A context sandboxd never opened is no page: it ends at once. A first navigation the egress refused
+        // (`navigation_refused`, 07.8-13) is the bot's own open ending, not a crash; sandboxd closes its blank page too.
+        const refused = run.failure === "navigation_refused";
+        const reason = refused ? "closed_by_bot" : "crashed";
         await core.db.withTenant(b.tenant, async (tx) => {
-          const row = await closeContext(tx, d.context.id, "crashed");
-          if (row) await auditClosed(tx, core, row, "crashed");
+          const row = await closeContext(tx, d.context.id, reason);
+          if (row) await auditClosed(tx, core, row, reason, refused ? { refused: "navigation_refused" } : {});
         });
+        if (refused && deps.client) {
+          await deps.client
+            .call("contextClose", { target, contextId: d.context.id }, { timeoutMs: OP_TIMEOUT_MS })
+            .catch(() => {});
+        }
       }
       return conclude(core, b, d, OPEN, run, {
         client: deps.client,
@@ -894,6 +922,8 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
             audit: {
               host,
               ...(nav.blockedNavigation ? { blockedHost: validHost(nav.blockedNavigation.host) } : {}),
+              // D-14: the isolation the page runs under when this call started the browser (a fixed enum).
+              ...(run.box.browserSandbox ? { browserSandbox: run.box.browserSandbox } : {}),
             },
             stepInput: { host },
             host,
