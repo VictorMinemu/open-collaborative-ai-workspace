@@ -28,3 +28,28 @@ steps:
     volumes: [*docker_sock]
     commands:
       - docker build -f infra/openclaw/Dockerfile -t ocw-openclaw:ci .
+
+  # Bot sandboxes (07.8-24): the broker and the three images it runs, as the `sandbox` compose profile builds them.
+  - name: sandboxd
+    image: docker:29.8.2-cli
+    volumes: [*docker_sock]
+    commands:
+      - docker build -f infra/sandbox/sandboxd/Dockerfile -t ocw-sandboxd:ci .
+
+  - name: sandbox-sbx
+    image: docker:29.8.2-cli
+    volumes: [*docker_sock]
+    commands:
+      - docker build -t ocw-sandbox-sbx:ci infra/sandbox/sbx
+
+  - name: sandbox-brw
+    image: docker:29.8.2-cli
+    volumes: [*docker_sock]
+    commands:
+      - docker build -t ocw-sandbox-brw:ci infra/sandbox/browser
+
+  - name: sandbox-egress
+    image: docker:29.8.2-cli
+    volumes: [*docker_sock]
+    commands:
+      - docker build -f infra/sandbox/egress/Dockerfile -t ocw-sandbox-egress:ci .

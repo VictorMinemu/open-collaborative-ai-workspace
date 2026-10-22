@@ -55,6 +55,11 @@ jobs:
       OCW_E2E_FAKE_MCP_TOKEN: e2e-mcp-token
       # Per-member connectors (07.4): the fake OAuth MCP server's registered name; test-only, refused in production.
       OCW_EGRESS_TEST_HOSTS: fake-mcp=127.0.0.1
+      # Bot sandboxes (07.8, as scripts/e2e-isolated.sh and .woodpecker/e2e.yaml): the API's broker is the fake sandboxd
+      # the fake server mounts at /__sandboxd behind this fixed, loopback-only test token.
+      OCW_SANDBOX_URL: http://127.0.0.1:4291/__sandboxd
+      OCW_SANDBOX_TOKEN: e2e-sandbox-token-0123456789abcdef0123456789
+      OCW_E2E_SANDBOX: fake
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -69,9 +74,9 @@ jobs:
           pnpm setup:env
           docker compose up -d --wait postgres redis garage
           pnpm db:migrate
-      - name: Fake model, MCP and ClawHub (loopback, no internet)
+      - name: Fake model, MCP, ClawHub and sandboxd (loopback, no internet)
         run: |
-          (PORT=4291 FAKE_MODEL_HOST=127.0.0.1 FAKE_MCP_TOKEN=e2e-mcp-token FAKE_MCP_OAUTH_REDIRECTS=http://localhost:4000/api/v1/connectors/oauth/callback,http://127.0.0.1:4000/api/v1/connectors/oauth/callback nohup node infra/fake-model/server.mjs > fake.log 2>&1 &)
+          (PORT=4291 FAKE_MODEL_HOST=127.0.0.1 FAKE_MCP_TOKEN=e2e-mcp-token FAKE_SANDBOX_TOKEN=$OCW_SANDBOX_TOKEN FAKE_MCP_OAUTH_REDIRECTS=http://localhost:4000/api/v1/connectors/oauth/callback,http://127.0.0.1:4000/api/v1/connectors/oauth/callback nohup node infra/fake-model/server.mjs > fake.log 2>&1 &)
           for i in $(seq 1 20); do curl -sf -o /dev/null localhost:4291/v1/models && break; sleep 1; done
       - name: Start API and web
         run: |
@@ -129,6 +134,11 @@ jobs:
       - run: docker build -f apps/web/Dockerfile -t ocw-web:ci .
       # The shipped cell image with the bundled search plugins (pinned + sha512-checked at build time).
       - run: docker build -f infra/openclaw/Dockerfile -t ocw-openclaw:ci .
+      # Bot sandboxes (07.8-24): the broker and the three images it runs, as the `sandbox` compose profile builds them.
+      - run: docker build -f infra/sandbox/sandboxd/Dockerfile -t ocw-sandboxd:ci .
+      - run: docker build -t ocw-sandbox-sbx:ci infra/sandbox/sbx
+      - run: docker build -t ocw-sandbox-brw:ci infra/sandbox/browser
+      - run: docker build -f infra/sandbox/egress/Dockerfile -t ocw-sandbox-egress:ci .
 
   cell-smoke:
     name: openclaw cell smoke (real container, offline)
@@ -153,3 +163,24 @@ jobs:
       # plugin + fake model + fake Agent Channel API on an egress-less network: no real model, no real web.
       - name: Container smoke (all scenarios)
         run: SMOKE_BUILD=1 bash infra/openclaw/test/run-container-smoke.sh
+
+  sandbox:
+    # Mirror of .woodpecker/sandbox.yaml's runc smokes (07.8-24): real Docker, hardened runc, every object removed by
+    # its label. The gVisor job and the real-stack proof run in Woodpecker only (nested runsc daemon, real cell).
+    name: bot sandbox smokes (real Docker, runc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - run: bash infra/sandbox/test/run-sandbox-smoke.sh
+      - run: bash infra/sandbox/test/run-egress-smoke.sh
+      - run: bash infra/sandbox/test/run-browser-smoke.sh
+      - run: bash infra/sandbox/test/run-stack-smoke.sh
+      - run: bash infra/sandbox/test/run-packages-smoke.sh

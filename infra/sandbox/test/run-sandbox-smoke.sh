@@ -84,12 +84,18 @@ on_exit() {
     kill "$SANDBOXD_PID" 2>/dev/null || true
     wait "$SANDBOXD_PID" 2>/dev/null || true
   fi
-  cleanup_ns
+  # Under gVisor a removed container can hold its volumes and network for a moment after `rm -f` returns (07.8-24, CI
+  # gVisor job): retry the label cleanup briefly before counting what is left.
+  local left attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    cleanup_ns
+    left="$(docker ps -aq --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')"
+    left=$((left + $(docker volume ls -q --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')))
+    left=$((left + $(docker network ls -q --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')))
+    [ "$left" = "0" ] && break
+    sleep 1
+  done
   docker image rm -f "$IMAGE" >/dev/null 2>&1 || true
-  local left
-  left="$(docker ps -aq --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')"
-  left=$((left + $(docker volume ls -q --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')))
-  left=$((left + $(docker network ls -q --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')))
   if [ "$left" != "0" ]; then
     log "FAIL ${left} object(s) labelled ocw.namespace=${NS} left after cleanup"
     code=1
