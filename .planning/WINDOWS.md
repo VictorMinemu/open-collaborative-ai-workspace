@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 147
+open_count: 152
 waived_count: 4
-fixed_count: 107
-total_count: 258
-last_updated: 2026-10-22T02:52:51.861Z
+fixed_count: 108
+total_count: 264
+last_updated: 2026-10-22T02:53:29.706Z
 ---
 
 # Broken Windows Ledger
@@ -267,12 +267,18 @@ last_updated: 2026-10-22T02:52:51.861Z
 | 250 | 07.8 | deviation | apps/api/src/modules/browser |  | act answers download:null until 07.8-25; a session counts as loaded by session_id but stored state is not passed to sandboxd until 07.8-21; kill does not close browser contexts in its own tx (rows stay open if sandboxd is down); image-capable model list is hand-kept; approval chip icons reuse package/globe | open |  | 2026-10-21T19:53:39.439Z |  |
 | 251 | 07.8 | deviation | e2e/tests/memory-files.spec.ts |  | FIX IN GATE: memory-files.spec.ts:548 (keyboard and ARIA on desktop) fails intermittently on the phase branch (2 of 3 runs alongside other specs; race between the tab stop and deep-link expansion); passes alone | open |  | 2026-10-21T20:05:41.977Z |  |
 | 252 | 07.8 | deviation | apps/web/components/bots |  | Sandbox file list route has no offset/cursor beyond 500 entries ('{n} more not listed'); Capabilities switches are 20x36 (<44 px, same as the existing Internet row); sandbox state events carry no runtime so a sandbox started outside the API ensure shows 'hardened' until restart; upload dialog does not intercept in-app navigation | open |  | 2026-10-21T20:05:42.084Z |  |
-| 253 | 07.8 | deviation | infra/sandbox/sbx |  | sbx has no HTTP(S)_PROXY env, so curl/pip/npm in the shell ignore the egress proxy unless given -x (allowlisted egress unusable by default); set the proxy env in the sbx spec (07.8-17/24) | open |  | 2026-10-21T20:09:53.837Z |  |
+| 253 | 07.8 | deviation | infra/sandbox/sbx |  | sbx has no HTTP(S)_PROXY env, so curl/pip/npm in the shell ignore the egress proxy unless given -x (allowlisted egress unusable by default); set the proxy env in the sbx spec (07.8-17/24) | fixed |  | 2026-10-21T20:09:53.837Z | 2026-10-22T02:53:29.247Z |
 | 254 | 07.8 | deviation | apps/sandboxd/src/egress/proxy.ts |  | The proxy passes an upstream X-OCW-Egress header through (a site can make its own http page look refused): strip it; a failed policy write to the proxy answers 503 after sandboxd stored it (proxy lags until retry); a recreated proxy restores each bot's egress only on its next ensure | open |  | 2026-10-21T20:09:53.930Z |  |
 | 255 | 07.8 | deviation | apps/sandboxd/src |  | A sandboxd restart forgets its context map (agent answers no_context until it closes after 5 idle min, API must reopen); browserLimits idleStopMs/diskQuotaBytes unused (fixed 5 min); API owes resize mode, browserSandbox and http navigation_refused handling (07.8-16); 24 owes OCW_SANDBOX_BRW_IMAGE/EGRESS_IMAGE/BRW_SECCOMP env and gVisor/amd64 runs | open |  | 2026-10-21T20:09:54.014Z |  |
 | 256 | 07.8 | deviation | apps/api/src/modules/sandbox |  | Package installs run synchronously on the first call of a stopped sandbox (up to 600 s per package, can outlast the plugin deadline); a package reaches a running sandbox only at its next start (UI copy in 07.8-23); newerVersion always null; failed installs notify no admin beyond audit; package audit metadata includes registry name/version/digests | open |  | 2026-10-21T20:12:08.217Z |  |
 | 257 | 07.8 | deviation | apps/web/components/sandbox/settings/limits-form.tsx |  | 07.8-19: the container limits line copies the API CONTAINER_LIMITS because the settings view does not expose them (low) | open |  | 2026-10-22T02:52:51.781Z |  |
 | 258 | 07.8 | deviation | infra/fake-model/fake-sandboxd.mjs |  | 07.8-19: the fake sandboxd always reports gVisor; no switch to fake hardened, Docker too old or container-only runtimes (low) | open |  | 2026-10-22T02:52:51.861Z |  |
+| 259 | 07.8 | deviation | apps/api/src/modules/sandbox |  | SHOULD FIX (07.8-17): the API's sandboxd client uses plain fetch (undici 300 s default); a package install taking 300-540 s fails at the API while sandboxd completes it. Give package install/review an explicit 600 s timeout (07.8-24/28) | open |  | 2026-10-22T02:53:29.323Z |  |
+| 260 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: a sandboxd crash mid review/install leaves its ocw-pnet-* network behind (container and temp volume self-remove); add to 28's orphan sweep | open |  | 2026-10-22T02:53:29.401Z |  |
+| 261 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: the per-bot packages volume has no disk quota of its own (only the sandbox quota policy); record in ADR-0029 soft-quota note (29) | open |  | 2026-10-22T02:53:29.477Z |  |
+| 262 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: when two packages provide the same bin or module name the first on PATH/NODE_PATH wins silently; surface a conflict at review (low) | open |  | 2026-10-22T02:53:29.552Z |  |
+| 263 | 07.8 | deviation | infra/compose |  | MUST (07.8-24): add OCW_SANDBOX_NPM_REGISTRY, OCW_SANDBOX_PYPI_INDEX, OCW_CLAWHUB_URL (must equal the API's) and OCW_SANDBOX_REGISTRIES to sandboxd in compose and Woodpecker | open |  | 2026-10-22T02:53:29.628Z |  |
+| 264 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: npm 11.19 warns about allowScripts but still runs install scripts; a future npm enforcing it needs an allow-list (low); Debian packages only unit-tested (VALIDATION manual row) | open |  | 2026-10-22T02:53:29.706Z |  |
 
 ````json
 [
@@ -3307,10 +3313,10 @@ last_updated: 2026-10-22T02:52:51.861Z
     "file": "infra/sandbox/sbx",
     "line": null,
     "description": "sbx has no HTTP(S)_PROXY env, so curl/pip/npm in the shell ignore the egress proxy unless given -x (allowlisted egress unusable by default); set the proxy env in the sbx spec (07.8-17/24)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-21T20:09:53.837Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T02:53:29.247Z"
   },
   {
     "id": 254,
@@ -3370,6 +3376,78 @@ last_updated: 2026-10-22T02:52:51.861Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-22T02:52:51.861Z",
+    "resolved_at": null
+  },
+  {
+    "id": 259,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/sandbox",
+    "line": null,
+    "description": "SHOULD FIX (07.8-17): the API's sandboxd client uses plain fetch (undici 300 s default); a package install taking 300-540 s fails at the API while sandboxd completes it. Give package install/review an explicit 600 s timeout (07.8-24/28)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:53:29.323Z",
+    "resolved_at": null
+  },
+  {
+    "id": 260,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/packages.ts",
+    "line": null,
+    "description": "07.8-17: a sandboxd crash mid review/install leaves its ocw-pnet-* network behind (container and temp volume self-remove); add to 28's orphan sweep",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:53:29.401Z",
+    "resolved_at": null
+  },
+  {
+    "id": 261,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/packages.ts",
+    "line": null,
+    "description": "07.8-17: the per-bot packages volume has no disk quota of its own (only the sandbox quota policy); record in ADR-0029 soft-quota note (29)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:53:29.477Z",
+    "resolved_at": null
+  },
+  {
+    "id": 262,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/packages.ts",
+    "line": null,
+    "description": "07.8-17: when two packages provide the same bin or module name the first on PATH/NODE_PATH wins silently; surface a conflict at review (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:53:29.552Z",
+    "resolved_at": null
+  },
+  {
+    "id": 263,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/compose",
+    "line": null,
+    "description": "MUST (07.8-24): add OCW_SANDBOX_NPM_REGISTRY, OCW_SANDBOX_PYPI_INDEX, OCW_CLAWHUB_URL (must equal the API's) and OCW_SANDBOX_REGISTRIES to sandboxd in compose and Woodpecker",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:53:29.628Z",
+    "resolved_at": null
+  },
+  {
+    "id": 264,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/packages.ts",
+    "line": null,
+    "description": "07.8-17: npm 11.19 warns about allowScripts but still runs install scripts; a future npm enforcing it needs an allow-list (low); Debian packages only unit-tested (VALIDATION manual row)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:53:29.706Z",
     "resolved_at": null
   }
 ]
