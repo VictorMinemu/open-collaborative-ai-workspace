@@ -7,6 +7,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { useAgents, useLiveTurns } from "@/lib/chat-queries";
 import { cn } from "@/lib/utils";
 import { ActivityStepRow, type StepViewer } from "./activity-step";
+import type { LiveBot } from "./live-store";
 
 /**
  * What a bot did in its sandbox and browser during a turn (07.8-20; R2, UI-SPEC Surface 5). The API composes the
@@ -35,11 +36,14 @@ export function activityLabel(a: Pick<BotTurnActivity, "steps" | "more">): strin
 export function BotActivity({
   activity,
   viewer = NO_VIEWER,
+  bot,
   defaultOpen = false,
   className,
 }: {
   activity: BotTurnActivity;
   viewer?: StepViewer;
+  /** The bot that acted (the reply's author): browser steps whose page is open offer Watch (07.8-22). */
+  bot?: LiveBot;
   defaultOpen?: boolean;
   className?: string;
 }) {
@@ -78,7 +82,7 @@ export function BotActivity({
         )}
       >
         {activity.steps.map((s: ActivityStep) => (
-          <ActivityStepRow key={s.id} step={s} viewer={viewer} />
+          <ActivityStepRow key={s.id} step={s} viewer={viewer} bot={bot} />
         ))}
         {activity.more > 0 ? (
           <li data-testid="activity-more" className="px-3 py-2 text-muted-foreground text-xs">

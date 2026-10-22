@@ -26,9 +26,12 @@ import {
 import Link from "next/link";
 import { useId, useState } from "react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { HostChip } from "./host-chip";
+import type { LiveBot } from "./live-store";
+import { useOptionalLiveView } from "./live-view-provider";
 
 /**
  * One step of a bot turn's activity (07.8-20; R2, UI-SPEC Surface 5, Steps table). The API composed and masked every
@@ -387,14 +390,41 @@ function Details({ step, id, open }: { step: ActivityStep; id: string; open: boo
   );
 }
 
+/** A browser step offers Watch while its page is open (the server's `contextOpen`) and the bot is known (07.8-22). */
+export function watchable(step: ActivityStep, bot: LiveBot | undefined): boolean {
+  return !!bot && isBrowserTool(step.tool) && !!step.contextId && step.contextOpen === true;
+}
+
+/** `Watch` (UI-SPEC Surface 1b): opens the live view on the step's page; focus comes back here when it closes. */
+function WatchLink({ step, bot }: { step: ActivityStep; bot: LiveBot }) {
+  const live = useOptionalLiveView();
+  const contextId = step.contextId;
+  if (!contextId) return null;
+  return (
+    <Button
+      variant="link"
+      size="sm"
+      data-testid="activity-watch"
+      disabled={!live}
+      onClick={(e) => live?.open({ contextId, bot, trigger: e.currentTarget })}
+      className="h-6 max-md:h-11 max-md:min-w-11"
+    >
+      Watch
+    </Button>
+  );
+}
+
 /** One `<li>` of the activity's steps: a toggle when the step has details (exec, process), a plain row otherwise. */
 export function ActivityStepRow({
   step,
   viewer,
+  bot,
   defaultOpen = false,
 }: {
   step: ActivityStep;
   viewer: StepViewer;
+  /** The bot that acted; with it, a browser step whose page is open offers Watch. */
+  bot?: LiveBot;
   defaultOpen?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -445,6 +475,11 @@ export function ActivityStepRow({
         {step.outcome.kind === "approval" ? (
           <span className="flex shrink-0 items-start py-2 pr-3">
             <ApprovalOutcome step={step} />
+          </span>
+        ) : null}
+        {bot && watchable(step, bot) ? (
+          <span className="flex shrink-0 items-start py-2 pr-3 max-md:py-0.5">
+            <WatchLink step={step} bot={bot} />
           </span>
         ) : null}
       </div>

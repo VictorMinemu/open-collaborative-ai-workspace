@@ -3,6 +3,7 @@
 import type { MeResponse } from "@ocw/contracts";
 import { usePathname } from "next/navigation";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { LiveViewProvider } from "@/components/browser/live-view-provider";
 import { OsNotifier } from "@/components/notifications/os-notifier";
 import { SearchPalette, SearchPaletteProvider, useSearchPalette } from "@/components/search/search-palette";
 import { useIsDesktop } from "@/hooks/use-media-query";
@@ -62,20 +63,23 @@ export function AppShell({ me, children }: { me: MeResponse; children: ReactNode
   return (
     <ShellContext.Provider value={ctx}>
       <SearchPaletteProvider>
-        <SearchHotkey />
-        <OsNotifier />
-        {/* `relative`: absolutely positioned descendants (every `sr-only` text) resolve against the shell, which clips
+        {/* 07.8-22: the live view of a bot's browser, one at a time, in a portal that survives in-app navigation. */}
+        <LiveViewProvider>
+          <SearchHotkey />
+          <OsNotifier />
+          {/* `relative`: absolutely positioned descendants (every `sr-only` text) resolve against the shell, which clips
             them, instead of the page, which they would make scrollable (07.1 gate). */}
-        <div data-testid="app-shell" className="relative flex h-dvh w-full overflow-hidden bg-background">
-          {isDesktop ? <AppRail me={me} /> : null}
-          <div className="flex min-w-0 flex-1 flex-col">
-            {isDesktop ? null : (
-              <MobileTopBar me={me} open={mobileOpen} onOpenChange={setMobileOpen} onSlot={setSlot} />
-            )}
-            <main className="flex min-h-0 min-w-0 flex-1">{children}</main>
+          <div data-testid="app-shell" className="relative flex h-dvh w-full overflow-hidden bg-background">
+            {isDesktop ? <AppRail me={me} /> : null}
+            <div className="flex min-w-0 flex-1 flex-col">
+              {isDesktop ? null : (
+                <MobileTopBar me={me} open={mobileOpen} onOpenChange={setMobileOpen} onSlot={setSlot} />
+              )}
+              <main className="flex min-h-0 min-w-0 flex-1">{children}</main>
+            </div>
           </div>
-        </div>
-        <SearchPalette />
+          <SearchPalette />
+        </LiveViewProvider>
       </SearchPaletteProvider>
     </ShellContext.Provider>
   );
