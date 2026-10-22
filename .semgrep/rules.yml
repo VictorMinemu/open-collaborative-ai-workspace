@@ -177,5 +177,8 @@ rules:
         - /apps/sandboxd/src/browser.ts
         - /apps/sandboxd/src/agent-link.ts
         - /apps/sandboxd/src/server.ts
+        # 07.8-22: the web live view (the input mappers, the socket and the frame that captures the keyboard).
+        - /apps/web/components/browser/
       exclude:
         - "*.test.ts"
+        - "*.test.tsx"

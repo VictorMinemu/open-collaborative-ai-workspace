@@ -227,6 +227,41 @@ describe("a bot writes a file and every reader sees it on the reply (tracer)", (
   });
 });
 
+describe("Watch needs an open page (07.8-22)", () => {
+  it("a browser step says whether its page is still open when the reply is served; sandbox steps never say", async () => {
+    await s.su.query(
+      "update app.agents set capabilities = capabilities || jsonb_build_object('browser', true) where id = $1",
+      [s.scoutId],
+    );
+    const ev = await s.turnOf(s.sam, s.samDm);
+    const browser = (name: string, body: Json = {}) =>
+      s.cell(`/browser/${name}`, { eventId: ev.eventId, agentId: s.scoutId, ...body });
+    // A page left open by an earlier test of this file would be reused: start from none.
+    expect([200, 404]).toContain((await browser("close")).status);
+    const opened = await ok(browser("open", { url: "https://panel.fake.test/app" }));
+    await ok(write(ev, { path: "notes/watch.txt", content: "ok" }));
+    const posted = await ok(reply(ev, "The panel is open."));
+
+    const stepsOf = async () =>
+      ((await listOf(s.sam, s.samDm)).find((m) => m.id === posted.messageId)?.activity?.steps ??
+        []) as Json[];
+    let steps = await stepsOf();
+    const open = steps.find((x) => x.verb === "opened");
+    expect(open).toMatchObject({ contextId: opened.contextId, contextOpen: true });
+    expect(steps.find((x) => x.verb === "wrote")?.contextOpen).toBeUndefined();
+
+    const next = await s.turnOf(s.sam, s.samDm);
+    expect((await s.cell("/browser/close", { eventId: next.eventId, agentId: s.scoutId })).status).toBe(200);
+    steps = await stepsOf();
+    expect(steps.find((x) => x.verb === "opened")).toMatchObject({ contextOpen: false });
+    // Never stored: the row keeps the step as recorded.
+    const { rows } = await s.su.query("select steps from app.bot_turn_activity where event_id = $1", [
+      ev.eventId,
+    ]);
+    expect(JSON.stringify(rows[0]?.steps)).not.toContain("contextOpen");
+  });
+});
+
 describe("POST /agent-channel/v1/sandbox/write", () => {
   it("create on an existing path is 409 busy; a refused path is 422 invalid_path; over 1 MB is 413 too_large", async () => {
     const ev = await s.turnOf(s.sam, s.samDm);

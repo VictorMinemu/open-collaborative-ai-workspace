@@ -103,6 +103,11 @@ export interface LiveViewDeps {
   sessionRecheckMs?: number;
   /** Lease sweep interval (default 15 s); `sweep(nowMs)` is also callable (tests). */
   sweepMs?: number;
+  /**
+   * 07.8-22: every viewer gets its current state again this often (default 10 s; `heartbeat()` is also callable), so a
+   * client tells a dead socket (no message for 20 s) from a quiet page (a static page sends no frame).
+   */
+  heartbeatMs?: number;
 }
 
 /**
@@ -221,6 +226,8 @@ export interface LiveViewStats {
 export interface LiveViewHub {
   /** Ends idle leases (10 minutes without input) and warns their controller at 9 minutes. */
   sweep(nowMs?: number): Promise<void>;
+  /** Sends every open viewer its current state frame again (the client's liveness signal). */
+  heartbeat(): void;
   stats(): LiveViewStats;
   close(): Promise<void>;
 }
@@ -571,7 +578,12 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
         close: LIVE_CLOSE.ended,
       };
     }
-    const page = { host: row.host, secure: row.secure };
+    // 07.8-22: the requester's name travels with the page only, never to a viewer the page is withheld from.
+    const page = {
+      host: row.host,
+      secure: row.secure,
+      ...(view.memberName ? { requesterName: view.memberName.slice(0, 200) } : {}),
+    };
     if (leaseLive(row)) {
       if (w.lease?.viewer === v) {
         return {
@@ -959,6 +971,18 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
   const sweeper = setInterval(() => void sweep().catch(() => {}), deps.sweepMs ?? 15_000);
   sweeper.unref();
 
+  /** The liveness signal: the last state each viewer was sent, again (no new decision, nothing else). */
+  function heartbeat(): void {
+    for (const w of watched.values()) {
+      for (const v of w.viewers) {
+        if (v.closed || !v.last.state || v.socket.readyState !== v.socket.OPEN) continue;
+        v.socket.send(v.last.state);
+      }
+    }
+  }
+  const beat = setInterval(heartbeat, deps.heartbeatMs ?? 10_000);
+  beat.unref();
+
   // ---------------------------------------------------------------- the route
 
   function watchedFor(orgId: string, contextId: string): Watched {
@@ -1144,6 +1168,7 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
 
   return {
     sweep,
+    heartbeat,
     stats() {
       return {
         contexts: [...watched.values()].map((w) => ({
@@ -1161,6 +1186,7 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
     },
     async close() {
       clearInterval(sweeper);
+      clearInterval(beat);
       for (const w of watched.values()) {
         clearInterval(w.poll);
         if (w.retry) clearTimeout(w.retry);

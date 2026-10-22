@@ -386,6 +386,11 @@ export const LiveStateFrame = z
     memberName: z.string().max(NAME_MAX).optional(),
     /** The pending approval's permalink (the `Review` link of the paused state). */
     approvalRoute: AgentCardRoute.optional(),
+    /**
+     * 07.8-22 (additive): the member the bot browses for, sent only with the page (states that carry the host). The web
+     * words "Only {person} can take control here." and "Waiting for {person} to sign in" with it.
+     */
+    requesterName: z.string().max(NAME_MAX).optional(),
   })
   .superRefine((v, ctx) => {
     if (v.state === "ended" && v.endReason === undefined) {

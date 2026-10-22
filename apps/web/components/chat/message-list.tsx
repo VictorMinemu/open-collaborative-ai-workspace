@@ -523,7 +523,15 @@ const MessageRow = memo(function MessageRow({
         )}
         {/* 07.8-20 (R2): what the bot did in its sandbox and browser this turn, above its reply, for every reader. */}
         {!deleted && message.activity ? (
-          <BotActivity activity={message.activity} viewer={{ meId: meId || null, requester: null }} />
+          <BotActivity
+            activity={message.activity}
+            viewer={{ meId: meId || null, requester: null }}
+            bot={
+              isBot && author.id
+                ? { id: author.id, name: author.displayName, avatarUrl: author.avatarUrl }
+                : undefined
+            }
+          />
         ) : null}
         {deleted ? (
           <p

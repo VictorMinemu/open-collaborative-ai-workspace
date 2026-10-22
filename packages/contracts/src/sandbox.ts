@@ -555,6 +555,11 @@ export const ActivityStep = z.object({
   /** The step ran with a member's sealed browser session loaded. */
   signedIn: z.boolean(),
   contextId: Id.nullable(),
+  /**
+   * 07.8-22 (additive): whether the step's page is still open, computed when the reply is served (never stored), so a
+   * reader sees `Watch` only while there is something to watch. Absent on steps without a page.
+   */
+  contextOpen: z.boolean().optional(),
   /** The approval card's message route while the step waits for one. */
   approvalMessageRoute: z.string().max(500).nullable(),
   /** Exec only: the masked command, its folder, exit code and the last lines of output (≤ 4 KB). */

@@ -92,6 +92,43 @@ describe("a reader of the conversation watches the bot's browser (tracer)", () =
   });
 });
 
+describe("what the web client needs (07.8-22)", () => {
+  it("a state with the page names the requester; a state without it never does", async () => {
+    const ev = await l.turnIn(l.s.sam);
+    const contextId = await l.open(ev);
+    const alex = await liveSocket(l.s.stack.baseUrl, await l.s.alex.token(), contextId);
+    const nia = await liveSocket(l.s.stack.baseUrl, await l.nia.token(), contextId);
+    try {
+      expect(await waitState(alex, "live")).toMatchObject({
+        host: "panel.fake.test",
+        requesterName: "Sam Lee",
+      });
+      const refused = await waitState(nia, "no_permission");
+      expect(refused.requesterName).toBeUndefined();
+      expect(refused.host).toBeNull();
+    } finally {
+      alex.close();
+      nia.close();
+    }
+  });
+
+  it("the heartbeat sends every viewer its current state again, so a client can tell a dead socket from a quiet one", async () => {
+    const ev = await l.turnIn(l.s.sam);
+    const contextId = await l.open(ev);
+    const sam = await liveSocket(l.s.stack.baseUrl, await l.s.sam.token(), contextId);
+    try {
+      const first = await waitState(sam, "live");
+      const states = () => sam.json.filter((f) => f.type === "state").length;
+      const before = states();
+      l.s.stack.built.browser.live()?.heartbeat();
+      await waitFor(() => states() === before + 1);
+      expect(lastState(sam)).toEqual(first);
+    } finally {
+      sam.close();
+    }
+  });
+});
+
 describe("nobody else sees a frame (D-06, T-07.8-16-05, tenant isolation)", () => {
   it("a member who cannot read #ops: viewerCan false, no_permission without the page, closed, zero frames", async () => {
     const ev = await l.turnIn(l.s.sam);
