@@ -6,7 +6,7 @@ import { FullPageLoader } from "@/components/common/full-page-loader";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { AppShell } from "@/components/shell/app-shell";
 import { isApiError } from "@/lib/api";
-import { useMe, useSetupStatus } from "@/lib/queries";
+import { signedInMe, useMe, useSetupStatus } from "@/lib/queries";
 
 /**
  * Client-side auth guard for every workspace page: `/me` → shell; 401 → /setup (fresh server) or /login.
@@ -25,7 +25,9 @@ export default function AppLayout({ children }: { children: ReactNode }) {
     else router.replace(`/login?next=${encodeURIComponent(pathname)}`);
   }, [unauthenticated, setup.data, pathname, router]);
 
-  if (me.data) return <AppShell me={me.data}>{children}</AppShell>;
+  // A 401 wins over the cached `/me`: the session ended, so the shell is not rendered while sign-in opens.
+  const member = signedInMe(me);
+  if (member) return <AppShell me={member}>{children}</AppShell>;
 
   const failed = (me.isError && !unauthenticated) || setup.isError;
   if (failed) {

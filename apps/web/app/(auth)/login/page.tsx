@@ -16,7 +16,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { useAuthCapabilities } from "@/lib/account-queries";
 import { errorMessage, isApiError } from "@/lib/api";
 import { type FieldErrors, validate } from "@/lib/form";
-import { useMe, useSetupStatus, useSignIn } from "@/lib/queries";
+import { signedInMe, useMe, useSetupStatus, useSignIn } from "@/lib/queries";
 
 type Field = "email" | "password";
 
@@ -46,10 +46,12 @@ function LoginContent() {
   const [errors, setErrors] = useState<FieldErrors<Field>>({});
   const [formError, setFormError] = useState<string | null>(null);
 
-  // Already signed in → straight to the app. Fresh server → first-run setup.
+  // Already signed in → straight to the app. Fresh server → first-run setup. A cached `/me` of a session that
+  // ended (401) is not signed in: the app would send this page straight back here.
+  const signedIn = signedInMe(me) !== null;
   useEffect(() => {
-    if (me.data) router.replace(next);
-  }, [me.data, next, router]);
+    if (signedIn) router.replace(next);
+  }, [signedIn, next, router]);
   useEffect(() => {
     if (status.data && !status.data.setupComplete) router.replace("/setup");
   }, [status.data, router]);
@@ -79,7 +81,7 @@ function LoginContent() {
     }
   }
 
-  if (status.isPending || (status.data && !status.data.setupComplete) || me.data) {
+  if (status.isPending || (status.data && !status.data.setupComplete) || signedIn) {
     return <AuthCardSkeleton />;
   }
 

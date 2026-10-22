@@ -369,6 +369,77 @@ test("admins deactivate, reactivate and issue one-time reset links; never on the
   await a.context().close();
 });
 
+test("an open tab whose session ended lands on sign-in and stays there, without a request loop", async ({
+  browser,
+}, info) => {
+  test.setTimeout(60_000);
+  const project = info.project.name;
+  const nora = person(project, "Nora");
+  const { id, api: noraApi } = await createMember(nora, "developer");
+  // Nora's tab holds her cached session data (`/me`, permissions) when the session ends under it.
+  const n = await pageAs(browser, noraApi, project);
+  await n.clock.install();
+  await n.goto(`${BASE_URL}/chat`);
+  await expect(n.getByTestId("app-shell")).toBeVisible();
+  let permissionCalls = 0;
+  let meCalls = 0;
+  n.on("request", (r) => {
+    if (r.url().includes("/api/v1/me/permissions")) permissionCalls++;
+    else if (/\/api\/v1\/me(\?|$)/u.test(r.url())) meCalls++;
+  });
+
+  // Her account is deactivated (every session ends). Later the tab refetches its stale `/me` (here: the network
+  // comes back after two minutes) and gets 401 while the last `/me` is still cached.
+  const res = await admin.post(`/api/v1/members/${id}/deactivate`, { data: {} });
+  expect(res.ok(), `deactivate: ${res.status()}`).toBe(true);
+  await n.clock.fastForward("02:00");
+  await n.context().setOffline(true);
+  await n.context().setOffline(false);
+  await expect(n).toHaveURL(/\/login\?next=/u, { timeout: 15_000 });
+  await expect(n.getByTestId("login-form")).toBeVisible();
+
+  // It stays on the sign-in page: the stale `/me` of the ended session never sends it back to the app (which would
+  // send it to sign in again, in a loop that mounts the whole shell and its queries every frame).
+  permissionCalls = 0;
+  meCalls = 0;
+  await n.waitForTimeout(3_000);
+  await expect(n).toHaveURL(/\/login\?next=/u);
+  await expect(n.getByTestId("app-shell")).toHaveCount(0);
+  expect(permissionCalls, "/me/permissions requests while on the sign-in page").toBeLessThanOrEqual(2);
+  expect(meCalls, "/me requests while on the sign-in page").toBeLessThanOrEqual(2);
+
+  await n.context().close();
+  await noraApi.dispose();
+});
+
+test("a role change refetches the member's permissions once, not once per component", async ({
+  browser,
+}, info) => {
+  test.setTimeout(60_000);
+  const project = info.project.name;
+  const omar = person(project, "Omar");
+  const { id, api: omarApi } = await createMember(omar, "developer");
+  const o = await pageAs(browser, omarApi, project);
+  await o.goto(`${BASE_URL}/settings`);
+  await expect(o.getByTestId("app-shell")).toBeVisible();
+  // The page's own first load of the permissions is over before counting.
+  await o.waitForLoadState("networkidle");
+  let permissionCalls = 0;
+  o.on("request", (r) => {
+    if (r.url().includes("/api/v1/me/permissions")) permissionCalls++;
+  });
+
+  // One role change is one decision to refetch, however many components read the permissions.
+  const res = await admin.patch(`/api/v1/members/${id}/role`, { data: { role: "lead" } });
+  expect(res.ok(), `role: ${res.status()}`).toBe(true);
+  await expect.poll(() => permissionCalls, { timeout: 10_000 }).toBeGreaterThan(0);
+  await o.waitForTimeout(2_000);
+  expect(permissionCalls, "/me/permissions requests after one role change").toBeLessThanOrEqual(3);
+
+  await o.context().close();
+  await omarApi.dispose();
+});
+
 test("anyone opens a member's profile from Members and from a channel", async ({ browser }, info) => {
   test.setTimeout(90_000);
   const project = info.project.name;
