@@ -1058,6 +1058,8 @@ export function createFakeSandboxd(opts = {}) {
         const ctx = contextOf(body);
         if (!Number.isInteger(body.width) || !Number.isInteger(body.height)) throw invalid("size");
         ctx.viewport = { width: body.width, height: body.height };
+        // 07.8-16: the live view's R10 mode (small, expanded, phone), as the agent receives it.
+        ctx.viewportMode = typeof body.mode === "string" ? body.mode : null;
         return { ok: true };
       }
       case "contextInput": {
@@ -1223,6 +1225,7 @@ export function createFakeSandboxd(opts = {}) {
             takeover: c.takeover,
             held: c.held,
             viewport: { ...c.viewport },
+            viewportMode: c.viewportMode ?? null,
             viewers: c.subscribers.size,
             inputs: { ...c.inputs },
           })),

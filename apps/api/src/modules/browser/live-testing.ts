@@ -21,7 +21,7 @@ export interface LiveStack {
   ops: string;
   /** `who` mentions Scout in `conversationId` (default `#ops`); returns the delivered turn. */
   turnIn(who: TestClient, conversationId?: string): Promise<Json>;
-  /** Scout opens `url` in the turn's page; returns the context id. */
+  /** Scout opens `url` in a fresh page of the turn's (bot, conversation, member); returns the context id. */
   open(ev: Json, url?: string): Promise<string>;
   /** A bot route of the turn (`/agent-channel/v1/browser/<name>`). */
   browser(name: string, ev: Json, body?: Json): Promise<Res>;
@@ -88,8 +88,13 @@ export async function startLiveStack(): Promise<LiveStack> {
     };
     const browser = (name: string, ev: Json, body: Json = {}) =>
       s.cell(`/browser/${name}`, { eventId: ev.eventId, agentId: s.scoutId, ...body });
-    const open = async (ev: Json, url = "https://panel.fake.test/login") =>
-      (await ok(browser("open", ev, { url }))).contextId as string;
+    // One open page per (bot, conversation, member): every test gets a fresh one, so the bot closes the previous page
+    // first (`closed_by_bot`; 404 `no_context` when there is none).
+    const open = async (ev: Json, url = "https://panel.fake.test/login") => {
+      const closed = await browser("close", ev);
+      expect([200, 404]).toContain(closed.status);
+      return (await ok(browser("open", ev, { url }))).contextId as string;
+    };
 
     return { s, nia, niaId, ops, turnIn, open, browser, stop: () => s.stop() };
   } catch (err) {

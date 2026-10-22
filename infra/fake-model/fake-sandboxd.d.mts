@@ -23,6 +23,8 @@ export interface FakeBrowserContextStats {
   held: boolean;
   /** The page's viewport (contextOpen, then contextResize). */
   viewport: { width: number; height: number };
+  /** The live view's mode of the last resize (`small`, `expanded`, `phone`), null before any. */
+  viewportMode: string | null;
   /** Open frame streams (`contextFrames` subscribers). */
   viewers: number;
   /** Takeover input events per `type`; payloads are dropped on arrival. */
