@@ -242,8 +242,9 @@ test("1. two bots, both switches on; Scout writes and reads its own file in its 
   );
   expect(reply).toContain("Tool ocw_sandbox_exec said: exit 0");
   expect(reply).toContain(MARK);
-  // The turn narrows the agent entry: the API offers no browser tool yet (07.8-14), whatever alsoAllow lists.
-  expect(reply).not.toContain("ocw_browser_");
+  // Since 07.8-14 the API offers the browser tools to a bot whose Browser switch is on (both are on here); the first
+  // CI run of this proof (07.8-24) found the old "no browser tool yet" expectation stale.
+  expect(reply).toContain("ocw_browser_open");
   state.coldStartMs = ms;
   state.firstExecAttempts = attempts;
   await ana.dispose();
