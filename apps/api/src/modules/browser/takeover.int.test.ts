@@ -288,7 +288,8 @@ describe("input reaches the page and nothing else (P-10, T-07.8-16-03)", () => {
       alex.send({ type: "text", text: `${SENTINEL}-alex` });
       alex.send({ type: "key", event: "down", key: "a", code: "KeyA", modifiers: 0 });
       sam.send({ type: "text", text: SENTINEL, selector: "#password" });
-      sam.socket.send(`{"type":"text","text":"${SENTINEL}"`);
+      // A truncated JSON frame carrying the sentinel literally: dropped without an echo or a log line.
+      sam.socket.send('{"type":"text","text":"OCW-SENTINEL-TYPED-8842"');
       await T.waitFor(() => (fakeContext(contextId)?.inputs.key ?? 0) >= 2);
       await T.sleep(500);
       expect(fakeContext(contextId)?.inputs).toEqual({ mouse: 2, text: 1, key: 2 });
