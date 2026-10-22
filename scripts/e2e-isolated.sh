@@ -22,15 +22,18 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 E2E_DB=ocw_e2e          # the ONLY database this script may drop; never parameterised
 E2E_REDIS_DB=9
-API_PORT=4290           # Node fetch blocks some ports (e.g. 4190); 4290/3290 are verified usable
-WEB_PORT=3290
-FAKE_PORT=4291          # fake model + fake MCP (/mcp, bearer FAKE_MCP_TOKEN) + fake ClawHub (/api/v1/*)
-STORAGE_PORT=4292       # Garage S3 API of the harness's own compose project
-STORAGE_PROJECT=ocw-e2e-storage   # the ONLY compose project this script runs lifecycle commands on
+# Ports, the storage project and the sandbox namespace take OCW_E2E_* overrides only so that CI runs this harness next
+# to other workflows on one Docker daemon (.woodpecker/sandbox.yaml, its slot in infra/ci/README.md); locally keep the
+# defaults.
+API_PORT="${OCW_E2E_API_PORT:-4290}"   # Node fetch blocks some ports (e.g. 4190); 4290/3290 are verified usable
+WEB_PORT="${OCW_E2E_WEB_PORT:-3290}"
+FAKE_PORT="${OCW_E2E_FAKE_PORT:-4291}"   # fake model + fake MCP (/mcp, bearer FAKE_MCP_TOKEN) + fake ClawHub (/api/v1/*)
+STORAGE_PORT="${OCW_E2E_STORAGE_PORT:-4292}"   # Garage S3 API of the harness's own compose project
+STORAGE_PROJECT="${OCW_E2E_STORAGE_PROJECT:-ocw-e2e-storage}"   # the ONLY compose project this script runs lifecycle commands on
 WEB_DIST=.next-e2e
 LOCK=/tmp/ocw-e2e.lock
-SANDBOX_PORT=4293       # --sandbox: the real sandboxd broker (host process, loopback)
-SANDBOX_NS=ocw-e2e      # --sandbox: the ONLY label namespace this script removes (ocw.namespace=ocw-e2e)
+SANDBOX_PORT="${OCW_E2E_SANDBOX_PORT:-4293}"   # --sandbox: the real sandboxd broker (host process, loopback)
+SANDBOX_NS="${OCW_E2E_SANDBOX_NS:-ocw-e2e}"    # --sandbox: the ONLY label namespace this script removes
 # Default mode: the fake sandboxd behind this fixed, loopback-only test token (never a real broker's token).
 FAKE_SANDBOX_TOKEN=e2e-sandbox-token-0123456789abcdef0123456789
 

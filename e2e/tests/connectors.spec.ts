@@ -1,7 +1,7 @@
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { expectNoSeriousA11y } from "../support/a11y";
 import { apiAs, BASE_URL, createChannel, ensureMember, openAs, SAM } from "../support/actors";
-import { FAKE_URL } from "../support/bot-tools";
+import { FAKE_MCP_HOST, FAKE_URL } from "../support/bot-tools";
 import { bothThemes } from "../support/files";
 import { asSuperuser } from "../support/superuser";
 import { ADMIN } from "./env";
@@ -19,7 +19,7 @@ import { ADMIN } from "./env";
 test.use({ launchOptions: { args: ["--host-resolver-rules=MAP fake-mcp 127.0.0.1"] } });
 test.describe.configure({ mode: "serial" });
 
-const FAKE_HOST = "fake-mcp:4291";
+const FAKE_HOST = FAKE_MCP_HOST;
 const OAUTH_MCP_URL = `http://${FAKE_HOST}/mcp-oauth/mcp`;
 const ISSUER = `http://${FAKE_HOST}/mcp-oauth`;
 /** The fake's pre-registered public client (redirect http://127.0.0.1:4290/api/v1/connectors/oauth/callback). */

@@ -36,12 +36,12 @@ const ALLOWED_DIFFERENCES = {
 
 // ---------------------------------------------------------------- the runner (bash)
 
-/** Top-level `NAME=value` assignments (the script's constants), for `$NAME` expansion. */
+/** Top-level `NAME=value` assignments (the script's constants, `${OCW_E2E_*:-default}` read as the default). */
 function constants(script) {
   const out = {};
   for (const line of script.split("\n")) {
     const m = /^([A-Z_][A-Z0-9_]*)=("[^"]*"|'[^']*'|[^\s#]*)/u.exec(line);
-    if (m && !m[2].includes("$(")) out[m[1]] = unquote(m[2]);
+    if (m && !m[2].includes("$(")) out[m[1]] = expand(unquote(m[2]), out);
   }
   return out;
 }
