@@ -5,6 +5,7 @@ import {
   packageTreeCanonical,
   ReviewedTreeEntry,
   SANDBOX_LIMITS,
+  SANDBOXD_LABELS,
   type SandboxdPackageInstall,
   type SandboxdPackageInstallResult,
   type SandboxdPackageRemove,
@@ -951,6 +952,13 @@ export interface PackageRunner {
     target: SandboxdTarget,
     opts: { network: boolean; lifetimeMs: number },
   ): Promise<PackageRun>;
+  /**
+   * 07.8-28 (WINDOWS #260): at boot, the review and installer objects of this namespace that a run of a sandboxd process
+   * that died left behind (its `ocw-prun-*` container, still running until its lifetime, and its own `ocw-pnet-*`
+   * network, which nothing else removes). Found by labels (namespace and kind), named like a run; never a bot's object
+   * or another namespace's.
+   */
+  sweepOrphans?(): Promise<{ containers: number; networks: number }>;
 }
 
 /** Under the API's 600 s per package (07.8-18) and 180 s per review, with room for the HTTP round trip. */
@@ -1358,7 +1366,45 @@ export function dockerPackageRunner(options: DockerRunnerOptions): PackageRunner
     };
   }
 
+  const runFilter = (kind: "installer" | "review") =>
+    encodeURIComponent(
+      JSON.stringify({
+        label: [
+          `${SANDBOXD_LABELS.sandbox}=1`,
+          `${SANDBOXD_LABELS.namespace}=${ns}`,
+          `${SANDBOXD_LABELS.kind}=${kind}`,
+        ],
+      }),
+    );
+  const runPrefix = (kind: "pnet" | "prun") => `ocw-${kind}-`;
+
   return {
+    async sweepOrphans() {
+      let containers = 0;
+      let networks = 0;
+      for (const kind of ["installer", "review"] as const) {
+        const listed = await call("GET", `/containers/json?all=1&filters=${runFilter(kind)}`);
+        const rows = Array.isArray(listed.body)
+          ? (listed.body as Array<{ Id: string; Names?: string[] }>)
+          : [];
+        for (const c of rows) {
+          const name = (c.Names?.[0] ?? "").replace(/^\//, "");
+          if (!name.startsWith(runPrefix("prun"))) continue;
+          const res = await call("DELETE", `/containers/${encodeURIComponent(c.Id)}?force=1&v=1`);
+          if (res.status === 204 || res.status === 404) containers += 1;
+        }
+        const nets = await call("GET", `/networks?filters=${runFilter(kind)}`);
+        const netRows = Array.isArray(nets.body) ? (nets.body as Array<{ Name: string }>) : [];
+        for (const n of netRows) {
+          if (!n.Name.startsWith(runPrefix("pnet"))) continue;
+          await egress?.detachNetwork(n.Name).catch(() => undefined);
+          const res = await call("DELETE", `/networks/${encodeURIComponent(n.Name)}`);
+          if (res.status === 204 || res.status === 404) networks += 1;
+        }
+      }
+      return { containers, networks };
+    },
+
     async open(kind, target, opts) {
       if (opts.network && !egress) throw down("no egress proxy is configured for package runs");
       const runId = randomUUID();

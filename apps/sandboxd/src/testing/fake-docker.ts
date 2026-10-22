@@ -193,7 +193,26 @@ export class FakeDocker implements Docker {
           })),
       );
     }
-    if (method === "GET" && path === "/networks") return json(200, []);
+    if (method === "GET" && path === "/networks") {
+      const want = (JSON.parse(url.searchParams.get("filters") ?? "{}").label ?? []) as string[];
+      // Without a label filter, the default networks only (as a fresh Docker would list them).
+      if (want.length === 0) return json(200, []);
+      return json(
+        200,
+        [...this.networks.values()]
+          .filter((n) =>
+            want.every((kv) => n.Labels[kv.split("=")[0] as string] === kv.split("=").slice(1).join("=")),
+          )
+          .map((n) => ({ Id: n.Id, Name: n.Name, Labels: n.Labels })),
+      );
+    }
+    m = /^\/networks\/([^/]+)$/.exec(path);
+    if (method === "DELETE" && m) {
+      const n = this.find(this.networks, m[1] as string);
+      if (!n) return json(404);
+      this.networks.delete(n.Name);
+      return json(204);
+    }
     if (method === "GET" && path === "/volumes") {
       const want = (JSON.parse(url.searchParams.get("filters") ?? "{}").label ?? []) as string[];
       return json(200, {

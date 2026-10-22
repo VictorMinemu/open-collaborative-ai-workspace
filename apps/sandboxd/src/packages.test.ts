@@ -985,6 +985,56 @@ describe("dockerPackageRunner", () => {
     expect(docker.containerCreates).toHaveLength(0);
   });
 
+  it("at boot it removes what a crashed run left (its container and its own network), by labels; a bot's network and another namespace's run stay (07.8-28, #260)", async () => {
+    const s = await setup();
+    await s.runner.open("installer", { orgId: ORG, agentId: A }, { network: true, lifetimeMs: 600_000 });
+    // sandboxd dies here: nothing closes the run.
+    const runNet = [...s.docker.networks.keys()][0] as string;
+    expect(runNet.startsWith("ocw-pnet-ocw-unit-")).toBe(true);
+    const labels = (ns: string, kind: string) => ({
+      "ocw.sandbox": "1",
+      "ocw.namespace": ns,
+      "ocw.org": ORG,
+      "ocw.agent": A,
+      "ocw.kind": kind,
+    });
+    s.docker.networks.set("ocw-net-ocw-unit-bot", {
+      Id: "netbot00000",
+      Name: "ocw-net-ocw-unit-bot",
+      Labels: labels("ocw-unit", "sbx"),
+      Running: false,
+    });
+    s.docker.networks.set("ocw-pnet-ocw-other-run", {
+      Id: "netother000",
+      Name: "ocw-pnet-ocw-other-run",
+      Labels: labels("ocw-other", "installer"),
+      Running: false,
+    });
+    s.docker.containers.set("ocw-prun-ocw-other-run", {
+      Id: "prunother00",
+      Name: "ocw-prun-ocw-other-run",
+      Labels: labels("ocw-other", "review"),
+      Running: true,
+    });
+    s.docker.networks.set("decoy-pnet", {
+      Id: "decoy000000",
+      Name: "decoy-pnet",
+      Labels: {},
+      Running: false,
+    });
+
+    expect(await s.runner.sweepOrphans?.()).toEqual({ containers: 1, networks: 1 });
+    expect([...s.docker.containers.keys()]).toEqual(["ocw-prun-ocw-other-run"]);
+    expect([...s.docker.networks.keys()].sort()).toEqual([
+      "decoy-pnet",
+      "ocw-net-ocw-unit-bot",
+      "ocw-pnet-ocw-other-run",
+    ]);
+    expect(s.detached).toEqual([runNet]);
+    // Nothing left: a second sweep does nothing.
+    expect(await s.runner.sweepOrphans?.()).toEqual({ containers: 0, networks: 0 });
+  });
+
   it("cleans up what it created when the container cannot start", async () => {
     const s = await setup();
     const original = s.docker.request.bind(s.docker);
