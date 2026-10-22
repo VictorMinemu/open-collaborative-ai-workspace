@@ -85,6 +85,7 @@ const HEAD_ONLY = [
   "20261021200025_tool_call_requester_decides",
   "20261022040054_signin_card_kind",
   "20261022061052_browser_context_opened_host",
+  "20261022070138_agent_member_data",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [

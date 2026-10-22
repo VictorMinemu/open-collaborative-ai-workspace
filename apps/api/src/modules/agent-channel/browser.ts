@@ -38,7 +38,13 @@ import type { App, Core } from "../../core";
 import { HttpError } from "../../lib/errors";
 import { audienceOf } from "../ai-chat";
 import { createObjectStorage } from "../artifact";
-import { memberAccountAllowed, memberAccountFacts } from "../bot-capabilities";
+import {
+  crossSiteFor,
+  memberAccountAllowed,
+  memberAccountFacts,
+  recordMemberData,
+  stickyMemberData,
+} from "../bot-capabilities";
 import {
   auditClosed,
   type BrowserContextRecord,
@@ -415,8 +421,18 @@ async function refuseEarly(
   throw browserRefusal(reason);
 }
 
-/** A turn that operates a context with a member's session has member data (D-13, P-11): never cleared. */
-async function markMemberData(tx: Tx, turn: AgentTurnRow): Promise<AgentTurnRow> {
+/**
+ * A turn that operates a context with a member's session has member data (D-13, P-11): never cleared. Since 07.8-28
+ * (WINDOWS #292) the pair (bot, conversation) keeps it too, with the session's site: every later turn of this bot in
+ * this conversation starts with member data (`turnPolicy`).
+ */
+async function markMemberData(tx: Tx, turn: AgentTurnRow, site: string | null): Promise<AgentTurnRow> {
+  await recordMemberData(tx, {
+    agentId: turn.agentId,
+    conversationId: turn.conversationId,
+    eventId: turn.eventId,
+    site,
+  });
   if (turn.memberData) return turn;
   await tx
     .update(agentTurns)
@@ -518,7 +534,9 @@ async function decide<X>(
       return null;
     }
     const prepared = await prepare(tx, live);
-    const turn = prepared.context?.sessionId ? await markMemberData(tx, live) : live;
+    const turn = prepared.context?.sessionId
+      ? await markMemberData(tx, live, prepared.context.sessionSite)
+      : live;
     // The page closed after the precheck (a crash, the bot's own close in a parallel call): refused before the claim,
     // so the budget is not used for a call that cannot run.
     const decision: SandboxDecision =
@@ -560,7 +578,7 @@ async function decide<X>(
       created = made.created;
       if (loaded && created) {
         // D-13 in the same transaction as the load: from now on this turn has member data.
-        turnNow = await markMemberData(tx, turn);
+        turnNow = await markMemberData(tx, turn, loaded.siteKey);
         await core.audit.record(tx, {
           action: "browser_session.used",
           actorKind: "agent",
@@ -821,7 +839,9 @@ const freshContext = (tx: Tx, turn: AgentTurnRow) => openContextOf(tx, tripleOf(
 
 /**
  * Opens the context in sandboxd, site-locked to the member's session's host while one is loaded (D-13), with the
- * session's storage state when this call loaded it (07.8-21; the plaintext lives only in this request).
+ * session's storage state when this call loaded it (07.8-21; the plaintext lives only in this request). A page opened
+ * without a session by a turn that has member data (sticky, WINDOWS #292) is locked to the host it opens (`lockTo`),
+ * so a link or redirect to another host stops at the lock and asks the requester like a signed-in page does.
  */
 async function openInSandboxd(
   client: SandboxdClient,
@@ -830,14 +850,20 @@ async function openInSandboxd(
   ensure: () => Promise<void>,
   box: Box,
   loaded: LoadedSession | null = null,
+  lockTo: string | null = null,
 ): Promise<void> {
   const locked =
     !!context.sessionId && !!context.sessionSite && SiteHost.safeParse(context.sessionSite).success;
+  const siteLock = locked
+    ? (context.sessionSite as string)
+    : lockTo && SiteHost.safeParse(lockTo).success
+      ? lockTo
+      : null;
   const input = {
     target,
     contextId: context.id,
     viewport: VIEWPORT,
-    ...(locked ? { memberId: context.requestedForUserId, siteLock: context.sessionSite as string } : {}),
+    ...(siteLock ? { memberId: context.requestedForUserId, siteLock } : {}),
     ...(locked && loaded && loaded.sessionId === context.sessionId ? { storageState: loaded.state } : {}),
   };
   try {
@@ -969,9 +995,18 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
         async (tx, turn) => {
           const context = await freshContext(tx, turn);
           const memberData = turn.memberData || !!context?.sessionId;
-          const sessionSite = context?.sessionSite ?? null;
           // D-13: once member data is in the turn, another host than the session's site needs the requester's yes.
-          const crossSite = memberData && sessionSite !== null && to.host !== sessionSite;
+          // Without a session on the page (sticky member data, WINDOWS #292, or a page closed after the load), the
+          // sites loaded by this bot in this conversation are the only hosts it may open without asking.
+          const sticky =
+            memberData && !context?.sessionSite ? await stickyMemberData(tx, tripleOf(turn)) : null;
+          const sessionSite = context?.sessionSite ?? sticky?.sites[0] ?? null;
+          const crossSite = crossSiteFor({
+            memberData,
+            host: to.host,
+            sessionSite: context?.sessionSite ?? null,
+            stickySites: sticky?.sites ?? [],
+          });
           const base = {
             action: "open",
             url: body.url,
@@ -1031,8 +1066,10 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
               .call("contextClose", { target, contextId: d.replaced.id }, { timeoutMs: OP_TIMEOUT_MS })
               .catch(() => {});
           }
+          // Member data without a session on the page (WINDOWS #292): lock it to the host it opens.
+          const lockTo = d.turn.memberData ? to.host : null;
           if (d.created) {
-            await openInSandboxd(client, target, d.context, ensure, box, d.loaded);
+            await openInSandboxd(client, target, d.context, ensure, box, d.loaded, lockTo);
             return navigate();
           }
           try {
@@ -1041,7 +1078,7 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
             // sandboxd lost the context (its browser restarted): open it again, then navigate. A page whose session
             // was not loaded by this call cannot be reopened with it: it reopens site-locked, signed out.
             if (!isNoContext(err)) throw err;
-            await openInSandboxd(client, target, d.context, ensure, box);
+            await openInSandboxd(client, target, d.context, ensure, box, null, lockTo);
             return navigate();
           }
         },

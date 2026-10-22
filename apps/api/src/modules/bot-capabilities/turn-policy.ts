@@ -38,6 +38,7 @@ import { sandboxAvailable } from "../sandbox";
 import { approvalModesFor } from "../tool-approval";
 import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
 import { loadAllGrants, loadCatalog, loadGrants } from "./catalog";
+import { stickyMemberData } from "./member-data";
 import { loadTurnMemory } from "./memory";
 import { internetConfigured, loadPolicy, type SearchEnv } from "./policy";
 import { findBot, loadBotFacts } from "./routes";
@@ -858,6 +859,9 @@ export async function turnPolicy(
     ...(opts.audience || computed.withheld.length > 0 ? { withheld: computed.withheld } : {}),
     ...(memoryFiles.length > 0 ? { memoryFiles } : {}),
   };
+  // 07.8-28 (WINDOWS #292, ADR-0029): a member's session loaded earlier by this bot in this conversation keeps its
+  // member data for every later turn here (the bot's history may hold what it read signed in).
+  const sticky = await stickyMemberData(tx, { agentId: p.agentId, conversationId: p.conversationId });
   await tx.insert(agentTurns).values({
     eventId: p.eventId,
     organizationId: tenantOf(tx).organizationId,
@@ -868,6 +872,7 @@ export async function turnPolicy(
     messageId: p.messageId,
     tools: turn.tools,
     toolFlags: turn.toolFlags,
+    ...(sticky ? { memberData: true } : {}),
   });
   return { deliver: true, turn };
 }

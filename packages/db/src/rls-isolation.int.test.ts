@@ -565,6 +565,11 @@ async function seedOrg(c: pg.Client, org: string) {
     [org, personal, sandboxPackage],
   );
   await q("update app.agent_turns set sandbox_calls = 3, member_data = true where event_id = $1", [eventId]);
+  // 07.8-28 (WINDOWS #292): the bot's member data in this DM is sticky.
+  await q(
+    "insert into app.agent_member_data (organization_id, agent_id, conversation_id, sites, first_event_id) values ($1, $2, $3, '{panel.example.test}', $4)",
+    [org, personal, dm, eventId],
+  );
 }
 
 const SANDBOX_TABLES = [
@@ -578,6 +583,7 @@ const SANDBOX_TABLES = [
   "app.bot_turn_activity",
   "app.sandbox_packages",
   "app.sandbox_package_installs",
+  "app.agent_member_data",
 ] as const;
 
 const TOOL_APPROVAL_TABLES = [
@@ -2242,7 +2248,7 @@ describe("tenant isolation (RLS)", () => {
     }
   });
 
-  it("Phase 07.8: the ten sandbox and browser tables are org-scoped, forced, seeded and invisible and unwritable across tenants", async () => {
+  it("Phase 07.8: the eleven sandbox and browser tables (agent_member_data since 07.8-28) are org-scoped, forced, seeded and invisible and unwritable across tenants", async () => {
     const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
     const sessionOwner = async (org: string) =>
       (

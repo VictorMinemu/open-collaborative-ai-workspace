@@ -13,6 +13,13 @@ export {
 } from "./capabilities";
 export { loadAllGrants, loadCatalog, loadGrants, replaceGrants } from "./catalog";
 export {
+  crossSiteFor,
+  MEMBER_DATA_SITES_MAX,
+  recordMemberData,
+  type StickyMemberData,
+  stickyMemberData,
+} from "./member-data";
+export {
   bulletsOf,
   clearMemories,
   flattenNote,
