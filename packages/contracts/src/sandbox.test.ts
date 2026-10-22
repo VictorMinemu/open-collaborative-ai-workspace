@@ -689,6 +689,19 @@ describe("turn activity on replies (R2, UI-SPEC Surface 5)", () => {
     expect(BotTurnActivity.safeParse({ ...activity(1), current: "x".repeat(81) }).success).toBe(false);
   });
 
+  it("07.8-22: a browser step may say whether its page is still open (computed when served, optional)", () => {
+    const browserStep = {
+      ...step,
+      tool: "ocw_browser_open",
+      verb: "opened",
+      target: "panel.fake.test",
+      details: null,
+    };
+    expect(ActivityStep.parse({ ...browserStep, contextId: ID, contextOpen: true }).contextOpen).toBe(true);
+    expect(ActivityStep.parse({ ...browserStep, contextId: ID }).contextOpen).toBeUndefined();
+    expect(ActivityStep.safeParse({ ...browserStep, contextId: ID, contextOpen: "yes" }).success).toBe(false);
+  });
+
   it("the live event names the conversation, thread and agent", () => {
     const ev = {
       type: "turn.activity",

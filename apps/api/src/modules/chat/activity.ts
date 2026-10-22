@@ -1,6 +1,6 @@
 import { ActivityStep, type BotTurnActivity, type Message } from "@ocw/contracts";
-import { botTurnActivity, type Tx } from "@ocw/db";
-import { inArray } from "drizzle-orm";
+import { botTurnActivity, browserContexts, type Tx } from "@ocw/db";
+import { and, inArray, isNull } from "drizzle-orm";
 import { z } from "zod";
 
 /**
@@ -19,18 +19,37 @@ export async function activityFor(tx: Tx, messageIds: string[]): Promise<Map<str
     .select()
     .from(botTurnActivity)
     .where(inArray(botTurnActivity.replyMessageId, messageIds));
-  for (const row of rows) {
+  const parsed = rows.map((row) => ({ row, steps: StoredSteps.parse(row.steps) }));
+  const open = await openContexts(
+    tx,
+    parsed.flatMap((p) => p.steps.map((step) => step.contextId)),
+  );
+  for (const { row, steps } of parsed) {
     if (!row.replyMessageId) continue;
     out.set(row.replyMessageId, {
       eventId: row.eventId,
       // Stored steps were built against the contract; anything else is dropped rather than shown.
-      steps: StoredSteps.parse(row.steps),
+      // 07.8-22: a step with a page says whether it is still open (the reader's `Watch`); computed here, never stored.
+      steps: steps.map((step) =>
+        step.contextId ? { ...step, contextOpen: open.has(step.contextId) } : step,
+      ),
       more: row.more,
       running: row.running,
       current: null,
     });
   }
   return out;
+}
+
+/** Which of these browser contexts are still open (the caller's tenant; one query). */
+async function openContexts(tx: Tx, ids: Array<string | null>): Promise<Set<string>> {
+  const wanted = [...new Set(ids.filter((id): id is string => !!id))];
+  if (wanted.length === 0) return new Set();
+  const rows = await tx
+    .select({ id: browserContexts.id })
+    .from(browserContexts)
+    .where(and(inArray(browserContexts.id, wanted), isNull(browserContexts.closedAt)));
+  return new Set(rows.map((r) => r.id));
 }
 
 /** Adds `activity` to the agent replies among `list` that have a turn activity attached. */

@@ -365,6 +365,23 @@ describe("live-view frames (P-08, UI-SPEC R3)", () => {
     expect(LiveInputFrame.safeParse({ type: "text", text: "hola" }).success).toBe(true);
   });
 
+  it("07.8-22: a state with the page names the member the bot browses for (requesterName, bounded, optional)", () => {
+    const live = {
+      type: "state",
+      state: "live",
+      pausedFor: null,
+      activity: "clicking “Orders”",
+      host: "panel.autofy.app",
+      secure: true,
+      controller: null,
+      requesterName: "Sam Lee",
+    };
+    expect(LiveServerFrame.parse(live)).toEqual(live);
+    const { requesterName: _omit, ...without } = live;
+    expect(LiveServerFrame.parse(without)).toEqual(without);
+    expect(LiveServerFrame.safeParse({ ...live, requesterName: "x".repeat(201) }).success).toBe(false);
+  });
+
   it("server frames: state (incl. private for a member session), viewerCan, lease and focus", () => {
     const state = {
       type: "state",
