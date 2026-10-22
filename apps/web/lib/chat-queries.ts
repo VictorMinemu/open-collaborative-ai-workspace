@@ -2,6 +2,7 @@
 
 import {
   AgentList,
+  type BotTurnActivity,
   type ChannelList,
   ChannelList as ChannelListSchema,
   ChannelMemberList,
@@ -39,6 +40,7 @@ import {
   type ThreadResponse,
   ThreadResponse as ThreadResponseSchema,
   type ThreadUpdatedEvent,
+  type TurnActivityEvent,
   UNREAD_CAP,
   type UpdateChannelRequest,
   type UpdateConversationNotificationSettingsRequest,
@@ -51,7 +53,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { mergeCard } from "./agent-cards";
 import { api, isApiError } from "./api";
 
@@ -71,6 +73,8 @@ export const chatKeys = {
   threadList: ["chat", "thread-list"] as const,
   agents: ["chat", "agents"] as const,
   dms: ["chat", "dms"] as const,
+  /** 07.8-20: the running bot turns of a conversation (ephemeral `turn.activity`); not under `messages`. */
+  turnActivity: (convId: string) => ["chat", "turn-activity", convId] as const,
 };
 
 function retryUnlessClientError(failureCount: number, err: unknown): boolean {
@@ -421,6 +425,8 @@ export function postMessage(
  * top-level message joins the live tail only: a detached permalink window never grows at the bottom by itself.
  */
 export function applyMessage(qc: QueryClient, message: Message) {
+  // 07.8-20: the reply that carries a turn's activity ends that turn's live label.
+  if (message.activity) finishTurnActivity(qc, message.conversationId, message.activity.eventId);
   if (message.threadId) {
     qc.setQueryData<ThreadResponse>(chatKeys.thread(message.threadId), (prev) => {
       if (!prev || prev.replies.some((r) => r.id === message.id)) return prev;
@@ -495,6 +501,7 @@ function mergeMessage(prev: Message, next: Message): Message {
 
 /** Applies an edited message (PATCH response or `message.updated`) to the page and thread caches. */
 export function applyMessageUpdate(qc: QueryClient, message: Message) {
+  if (message.activity) finishTurnActivity(qc, message.conversationId, message.activity.eventId);
   const patch = (m: Message) => (m.id === message.id ? mergeMessage(m, message) : m);
   if (message.threadId) {
     qc.setQueryData<ThreadResponse>(chatKeys.thread(message.threadId), (prev) =>
@@ -1024,4 +1031,119 @@ export function useReadHold(id: string): number | null {
     () => readHoldOf(id),
     () => null,
   );
+}
+
+// ---------------------------------------------------------------- running bot turns (07.8-20, R2, UI-SPEC Surface 5)
+
+/**
+ * How long a running turn's live label stays without a new `turn.activity`. The API keeps
+ * `bot_turn_activity.running` true for a turn that never replies (a crashed cell, a model that stopped), and nothing
+ * sweeps it (WINDOWS #245), so the browser stops showing "{bot} is …" after this much silence. A confined call answers
+ * within about 30 s (an exec yields at 25 s), so two minutes without a step means the turn is gone.
+ */
+export const LIVE_ACTIVITY_TIMEOUT_MS = 120_000;
+/** Finished turns are remembered this long, so a late `turn.activity` never brings a label back. */
+const FINISHED_KEEP_MS = 10 * 60_000;
+
+export interface LiveTurn {
+  eventId: string;
+  agentId: string;
+  threadRootMessageId: string | null;
+  activity: BotTurnActivity;
+  /** The last live phrase the server sent for this turn, kept between two calls (`current` is null there). */
+  phrase: string | null;
+  startedAt: number;
+  updatedAt: number;
+}
+
+type TurnEntry = LiveTurn | { finished: true; at: number };
+export type LiveTurns = Record<string, TurnEntry>;
+
+const isLive = (e: TurnEntry | undefined): e is LiveTurn => !!e && !("finished" in e);
+
+function pruneTurns(map: LiveTurns, now: number): LiveTurns {
+  const out: LiveTurns = {};
+  for (const [id, e] of Object.entries(map)) {
+    if (isLive(e) ? now - e.updatedAt < FINISHED_KEEP_MS : now - e.at < FINISHED_KEEP_MS) out[id] = e;
+  }
+  return out;
+}
+
+/** Pure: the turns map after one `turn.activity` event. A finished turn stays finished. */
+export function nextTurns(prev: LiveTurns | undefined, ev: TurnActivityEvent, now: number): LiveTurns {
+  const map = pruneTurns(prev ?? {}, now);
+  const id = ev.activity.eventId;
+  const cur = map[id];
+  if (cur && !isLive(cur)) return map;
+  if (!ev.activity.running) {
+    map[id] = { finished: true, at: now };
+    return map;
+  }
+  map[id] = {
+    eventId: id,
+    agentId: ev.agentId,
+    threadRootMessageId: ev.threadRootMessageId,
+    activity: ev.activity,
+    phrase: ev.activity.current ?? cur?.phrase ?? null,
+    startedAt: cur?.startedAt ?? now,
+    updatedAt: now,
+  };
+  return map;
+}
+
+/** Applies an ephemeral `turn.activity` frame of `conv:<id>` (readers of the conversation only). */
+export function applyTurnActivity(qc: QueryClient, ev: TurnActivityEvent, now: number = Date.now()) {
+  qc.setQueryData<LiveTurns>(chatKeys.turnActivity(ev.conversationId), (prev) => nextTurns(prev, ev, now));
+}
+
+/** The reply with this turn's activity arrived: its label goes, and stays gone. */
+export function finishTurnActivity(
+  qc: QueryClient,
+  convId: string,
+  eventId: string,
+  now: number = Date.now(),
+) {
+  const key = chatKeys.turnActivity(convId);
+  qc.setQueryData<LiveTurns>(key, (p) => ({
+    ...pruneTurns(p ?? {}, now),
+    [eventId]: { finished: true, at: now },
+  }));
+}
+
+/** Pure: the turns still running in one place (`threadRootId` null = the conversation's main list), oldest first. */
+export function liveTurnsOf(
+  map: LiveTurns | undefined,
+  threadRootId: string | null,
+  now: number,
+): LiveTurn[] {
+  return Object.values(map ?? {})
+    .filter(isLive)
+    .filter(
+      (t) =>
+        t.threadRootMessageId === threadRootId &&
+        t.activity.running &&
+        now - t.updatedAt < LIVE_ACTIVITY_TIMEOUT_MS,
+    )
+    .sort((a, b) => a.startedAt - b.startedAt);
+}
+
+/** The running turns of a conversation (or one of its threads) as React state; a silent turn expires on its own. */
+export function useLiveTurns(convId: string, threadRootId: string | null): LiveTurn[] {
+  const { data } = useQuery({
+    queryKey: chatKeys.turnActivity(convId),
+    queryFn: () => ({}) as LiveTurns,
+    enabled: false,
+    initialData: {} as LiveTurns,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+  // Re-renders when the oldest live turn times out, so its label goes without any new event.
+  const [, setTick] = useState(0);
+  const live = liveTurnsOf(data, threadRootId, Date.now());
+  const next = live.length > 0 ? Math.min(...live.map((t) => t.updatedAt)) + LIVE_ACTIVITY_TIMEOUT_MS : null;
+  useEffect(() => {
+    if (next === null) return;
+    const t = window.setTimeout(() => setTick((n) => n + 1), Math.max(0, next - Date.now()) + 50);
+    return () => window.clearTimeout(t);
+  }, [next]);
+  return live;
 }

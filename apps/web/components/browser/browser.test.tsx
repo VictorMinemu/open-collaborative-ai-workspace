@@ -2,7 +2,8 @@ import type { ActivityStep, BotTurnActivity } from "@ocw/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ActivityStepRow } from "./activity-step";
-import { activityLabel, BotActivity } from "./bot-activity";
+import { activityLabel, BotActivity, BotActivityLive, liveLabel, livePhrase } from "./bot-activity";
+import { HostChip } from "./host-chip";
 
 /**
  * The bot's sandbox and browser activity in chat (07.8-20; R2, UI-SPEC Surface 5): the server composes and masks every
@@ -153,5 +154,138 @@ describe("ActivityStepRow", () => {
     const markup = row(failedExec({ details: { command: "ls", exitCode: 2 } }), true);
     expect(text(markup)).toContain("in workspace · exit 2 · 2.1 s");
     expect(text(markup)).toContain("No output");
+  });
+});
+
+describe("HostChip (UI-SPEC §1.1)", () => {
+  it("https: a lock and the host only", () => {
+    const markup = html(<HostChip host="panel.autofy.app" secure />);
+    expect(markup).toContain('data-secure="true"');
+    expect(markup).toContain("lucide-lock-keyhole");
+    expect(text(markup)).toBe("panel.autofy.app");
+    expect(markup).not.toContain("Not secure");
+  });
+
+  it("http: the amber glyph and the word 'Not secure'", () => {
+    const markup = html(<HostChip host="intranet.example.com" secure={false} />);
+    expect(markup).toContain('data-secure="false"');
+    expect(markup).toContain("lucide-triangle-alert");
+    expect(markup).toMatch(/text-amber-700[^"]*dark:text-amber-300/);
+    expect(text(markup)).toBe("Not secure intranet.example.com");
+  });
+
+  it("a 60-character host truncates at its end, keeps the whole host in the DOM and is a tooltip trigger", () => {
+    const host = `${"a".repeat(49)}.example.com`;
+    expect(host).toHaveLength(61);
+    const markup = html(<HostChip host={host} secure />);
+    const span = /<span[^>]*data-testid="host-chip-host"[^>]*>([^<]*)<\/span>/.exec(markup);
+    expect(span?.[0]).toContain("truncate");
+    expect(span?.[1]).toBe(host);
+    // Base UI's trigger props (the Tooltip shows the full host on hover).
+    expect(span?.[0]).toMatch(/data-(?:popup-)?(?:closed|state)|aria-describedby|data-base-ui/);
+  });
+});
+
+describe("browser steps (UI-SPEC Surface 5 › Steps)", () => {
+  const b = (verb: ActivityStep["verb"], target: string, over: Partial<ActivityStep> = {}) =>
+    step({ tool: verb === "opened" ? "ocw_browser_open" : "ocw_browser_act", verb, target, ...over });
+  const sam = { id: "01a11635-d6e7-7c87-9f17-b6b1dc048900", name: "Sam" };
+
+  it("opened, read, clicked and typed read as the UI-SPEC verbs with the host as a host chip; never the typed text", () => {
+    expect(text(row(b("opened", "panel.autofy.app")))).toMatch(/^Opened panel\.autofy\.app/);
+    expect(text(row(b("read_page", "panel.autofy.app", { tool: "ocw_browser_snapshot" })))).toMatch(
+      /^Read the page on panel\.autofy\.app/,
+    );
+    expect(text(row(b("clicked", "“Orders” on panel.autofy.app")))).toMatch(
+      /^Clicked “Orders” on panel\.autofy\.app/,
+    );
+    const typed = row(b("typed", "“Search” on panel.autofy.app"));
+    expect(text(typed)).toMatch(/^Typed into “Search” on panel\.autofy\.app/);
+    expect(typed).toContain('data-testid="activity-host"');
+    expect(typed).toContain('data-testid="activity-host-host"');
+  });
+
+  it("the sign-in step says 'you' to the requester and the requester's name to everyone else", () => {
+    const s = b("asked_signin", "panel.autofy.app", { tool: "ocw_browser_signin" });
+    const mine = html(
+      <ol>
+        <ActivityStepRow step={s} viewer={{ meId: sam.id, requester: sam }} />
+      </ol>,
+    );
+    expect(text(mine)).toMatch(/^Asked you to sign in to panel\.autofy\.app/);
+    const theirs = html(
+      <ol>
+        <ActivityStepRow step={s} viewer={{ meId: "someone-else", requester: sam }} />
+      </ol>,
+    );
+    expect(text(theirs)).toMatch(/^Asked Sam to sign in to panel\.autofy\.app/);
+  });
+
+  it("a step under the requester's saved session carries the outline 'Signed in' badge", () => {
+    const markup = row(b("clicked", "“Orders” on panel.autofy.app", { signedIn: true }));
+    expect(markup).toContain('data-testid="activity-signed-in"');
+    expect(text(markup)).toContain("Signed in");
+    expect(row(b("clicked", "“Orders” on panel.autofy.app"))).not.toContain("activity-signed-in");
+  });
+
+  it("outcomes: Needs approval links the card; a blocked host and a reached cap read as the UI-SPEC sentences", () => {
+    const waiting = row(
+      b("clicked", "“Place order” on shop.fake.test", {
+        signedIn: true,
+        outcome: { kind: "approval", code: "approval_required", exitCode: null, durationMs: null },
+        approvalMessageRoute:
+          "/chat/dm/01a11635-d6e7-7c87-9f17-b6b1dc048941?m=01a11635-d6e7-7c87-9f17-b6b1dc048942",
+      }),
+    );
+    expect(text(waiting)).toContain("Needs approval");
+    expect(waiting).toMatch(
+      /<a[^>]*href="\/chat\/dm\/01a11635-d6e7-7c87-9f17-b6b1dc048941\?m=01a11635-d6e7-7c87-9f17-b6b1dc048942"/,
+    );
+    // Never an outside link, whatever the step says.
+    const outside = row(
+      b("clicked", "“Pay” on shop.fake.test", {
+        outcome: { kind: "approval", code: "approval_required", exitCode: null, durationMs: null },
+        approvalMessageRoute: "//evil.example/x",
+      }),
+    );
+    expect(outside).not.toContain("<a");
+
+    const egress = row(
+      b("blocked", "x.com", {
+        tool: "ocw_browser_open",
+        outcome: { kind: "blocked", code: "navigation_refused", exitCode: null, durationMs: null },
+      }),
+    );
+    expect(text(egress)).toMatch(/^Blocked: x\.com isn't allowed by the network rules/);
+    const cap = row(
+      step({
+        tool: "ocw_sandbox_exec",
+        verb: "blocked",
+        target: "ls",
+        outcome: { kind: "blocked", code: "cap_reached", exitCode: null, durationMs: null },
+        details: null,
+      }),
+    );
+    expect(text(cap)).toMatch(/^Couldn't start the sandbox: the organization's limit is reached/);
+    expect(text(cap)).toContain("Blocked");
+  });
+});
+
+describe("live label (UI-SPEC Surface 5 › While the turn runs)", () => {
+  it("'{bot} is {activity} · step {n}', from the server's phrase, else the last phrase, else the latest step", () => {
+    const a = activity([step({ outcome: { kind: "ok", code: null, exitCode: null, durationMs: 3 } })], {
+      running: true,
+    });
+    expect(liveLabel("Scout", livePhrase({ ...a, current: "writing reports/late.csv" }), 1)).toBe(
+      "Scout is writing reports/late.csv · step 1",
+    );
+    expect(livePhrase(a, "running python fetch.py")).toBe("running python fetch.py");
+    expect(livePhrase(a)).toBe("writing reports/late.csv");
+    const markup = html(
+      <BotActivityLive bot="Scout" phrase="clicking “Orders” on panel.autofy.app" step={4} />,
+    );
+    expect(text(markup)).toContain("Scout is clicking “Orders” on panel.autofy.app · step 4");
+    expect(markup).toContain('aria-live="polite"');
+    expect(markup).toContain('data-state="running"');
   });
 });

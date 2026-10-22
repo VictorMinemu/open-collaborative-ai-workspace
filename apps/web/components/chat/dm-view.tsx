@@ -13,6 +13,7 @@ import {
   type MessageUpdatedEvent,
   type PinUpdatedEvent,
   type ReactionUpdatedEvent,
+  type TurnActivityEvent,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQueryClient } from "@tanstack/react-query";
@@ -23,6 +24,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { BotSettingsSheet } from "@/components/bots/bot-settings-sheet";
 import { MemoryPanel } from "@/components/bots/memory-panel";
+import { useLiveActivity } from "@/components/browser/bot-activity";
 import { EmptyState } from "@/components/common/empty-state";
 import { ModuleOff, useModule } from "@/components/shell/module-gate";
 import { PageHeader } from "@/components/shell/page-header";
@@ -41,6 +43,7 @@ import {
   applyMessageUpdate,
   applyPinUpdate,
   applyReactionUpdate,
+  applyTurnActivity,
   bumpDmLatest,
   chatKeys,
   isBotDm,
@@ -253,10 +256,17 @@ function DmConversation({
     linkedTop: permalinkId,
   });
   const { detached, shown } = win;
+  // 07.8-20: what the bot is doing in its sandbox or browser right now (the live label under the last message).
+  const live = useLiveActivity(conversationId, null, messages.data?.messages ?? []);
 
   // ---------------------------------------------------------------- realtime
   const onFrame = (frame: TopicFrame) => {
     if (frame.op === "eph") {
+      // 07.8-20 (R2): a bot turn's sandbox and browser activity while it runs (readers of this conversation only).
+      if (frame.type === EphemeralTypes.turnActivity) {
+        applyTurnActivity(qc, frame.data as TurnActivityEvent);
+        return;
+      }
       if (frame.type === EphemeralTypes.agentTyping) {
         const d = frame.data as AgentTypingEvent;
         touch({ kind: "agent", id: d.agentId, name: d.displayName, threadRootId: null });
@@ -706,6 +716,7 @@ function DmConversation({
                       canUnpinAny
                       dividerAfterSeq={reading.dividerAfterSeq}
                       onMarkUnread={markUnreadFrom}
+                      live={detached ? [] : live}
                     />
                     {loadingNewer ? (
                       <div className="flex justify-center py-3 text-muted-foreground">

@@ -235,3 +235,99 @@ test("in a channel another reader sees the same activity; someone who cannot rea
     ).toEqual([]);
   }
 });
+
+test("while the turn runs Sam sees the live label; the reply replaces it with the collapsed group", async ({
+  browser,
+}, info) => {
+  const project = info.project.name;
+  const page = await signIn(browser, SAM, project);
+  await page.goto(`${BASE_URL}/chat/dm/${dmId}`);
+  await expect(page.getByTestId("composer")).toBeVisible();
+
+  const asked = await postAs(samApi, dmId, `Check the late orders again ${widthOf(project)}`);
+  const m = await mentionOf(asked.id);
+  // The cell holds the turn open after its first call: the label keeps the last thing the bot did.
+  expect(
+    await cell.sandbox(m, "ocw_sandbox_write", {
+      path: "reports/late.csv",
+      content: LATE_CSV,
+      mode: "overwrite",
+    }),
+  ).toContain("wrote reports/late.csv");
+  const live = page.getByTestId("bot-activity-row");
+  await expect(live).toHaveCount(1, { timeout: 20_000 });
+  await expect(live.getByTestId("bot-activity-live")).toHaveText(
+    "Scout is writing reports/late.csv · step 1",
+  );
+  await expect(live.getByTestId("message-author-live")).toHaveText(BOT);
+  await expect(live.getByTestId("bot-activity-announce")).toHaveAttribute("aria-live", "polite");
+  await expect(live.getByTestId("bot-activity-announce")).toHaveText(
+    "Scout is writing reports/late.csv · step 1",
+  );
+  // The newest content stays in view (WINDOWS #226: the list follows growth without a new message).
+  const scroller = page.getByTestId("dm-scroll");
+  await expect
+    .poll(() => scroller.evaluate((el) => Math.round(el.scrollHeight - el.scrollTop - el.clientHeight)), {
+      timeout: 5_000,
+    })
+    .toBeLessThanOrEqual(2);
+  await expectNoSeriousA11y(page, '[data-testid="bot-activity-row"]');
+  if (project === "desktop") await captureReview(page, "chat-activity-running-1440");
+
+  expect(
+    await cell.sandbox(m, "ocw_sandbox_exec", { argv: ["python", "fetch.py", "--since", "2026-10-01"] }),
+  ).toContain("exit 127");
+  await expect(live.getByTestId("bot-activity-live")).toHaveText(
+    "Scout is running python fetch.py --since 2026-10-01 · step 2",
+  );
+
+  const replyText = `Still 3 late ${widthOf(project)}.`;
+  await cell.reply(m, replyText);
+  const row = replyRow(page, replyText);
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await expect(live).toHaveCount(0);
+  await expect(row.getByTestId("bot-activity-toggle")).toHaveText("Used its sandbox · 2 steps");
+  await expect(row.getByTestId("bot-activity-toggle")).toHaveAttribute("aria-expanded", "false");
+});
+
+test("a browser turn: open, read and click read as three steps with the host", async ({ browser }, info) => {
+  const project = info.project.name;
+  const page = await signIn(browser, SAM, project);
+  await page.goto(`${BASE_URL}/chat/dm/${dmId}`);
+  await expect(page.getByTestId("composer")).toBeVisible();
+
+  const asked = await postAs(samApi, dmId, `Open the panel ${widthOf(project)}`);
+  const m = await mentionOf(asked.id);
+  expect(await cell.browser(m, "ocw_browser_open", { url: "https://panel.fake.test/orders?token=abc" })).toBe(
+    "opened panel.fake.test",
+  );
+  expect(await cell.browser(m, "ocw_browser_snapshot", {})).toContain("snapshot panel.fake.test");
+  expect(await cell.browser(m, "ocw_browser_act", { action: "click", ref: "r4" })).toBe(
+    "acted on panel.fake.test",
+  );
+  const replyText = `The panel asks for a sign-in ${widthOf(project)}.`;
+  await cell.reply(m, replyText);
+
+  const row = replyRow(page, replyText);
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  const toggle = row.getByTestId("bot-activity-toggle");
+  await expect(toggle).toHaveText("Used its browser · 3 steps");
+  await toggle.click();
+  const steps = row.getByTestId("activity-step");
+  await expect(steps).toHaveCount(3);
+  await expect(steps.nth(0)).toContainText("Opened panel.fake.test");
+  await expect(steps.nth(1)).toContainText("Read the page on panel.fake.test");
+  await expect(steps.nth(2)).toContainText("Clicked “Sign in” on panel.fake.test");
+  for (let i = 0; i < 3; i++) {
+    await expect(steps.nth(i).getByTestId("activity-host-host")).toHaveText("panel.fake.test");
+  }
+  // Host only: never the path or the query of the page it opened.
+  await expect(row).not.toContainText("token=abc");
+  await expect(row).not.toContainText("/orders");
+  await invariants(
+    page,
+    `browser activity ${widthOf(project)}`,
+    row.getByTestId("bot-activity"),
+    await selectorOf(row),
+  );
+});

@@ -1,9 +1,10 @@
 "use client";
 
-import type { ActivityStep, BotTurnActivity } from "@ocw/contracts";
+import type { ActivityStep, BotTurnActivity, Message } from "@ocw/contracts";
 import { ChevronRight, Wrench } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { Spinner } from "@/components/ui/spinner";
+import { useAgents, useLiveTurns } from "@/lib/chat-queries";
 import { cn } from "@/lib/utils";
 import { ActivityStepRow, type StepViewer } from "./activity-step";
 
@@ -169,4 +170,46 @@ export function BotActivityLive({ bot, phrase, step }: { bot: string; phrase: st
       </span>
     </div>
   );
+}
+
+/** One running turn as the message list shows it: the bot's author block with the live label. */
+export interface LiveActivityRow {
+  eventId: string;
+  agentId: string;
+  name: string;
+  avatarUrl: string | null;
+  phrase: string;
+  step: number;
+  startedAt: number;
+}
+
+/**
+ * The running turns of a conversation (`threadRootId` null) or a thread, named: the bot's name from its latest message
+ * here, else the organization's bot list. Ephemeral `turn.activity` only (readers of the conversation); a silent turn
+ * expires after `LIVE_ACTIVITY_TIMEOUT_MS`.
+ */
+export function useLiveActivity(
+  convId: string,
+  threadRootId: string | null,
+  messages: readonly Message[],
+): LiveActivityRow[] {
+  const turns = useLiveTurns(convId, threadRootId);
+  const agents = useAgents();
+  return turns.map((t) => {
+    let author: Message["author"];
+    for (let i = messages.length - 1; i >= 0 && !author; i--) {
+      const m = messages[i];
+      if (m?.authorKind === "agent" && m.authorId === t.agentId) author = m.author;
+    }
+    const agent = agents.data?.agents.find((a) => a.id === t.agentId);
+    return {
+      eventId: t.eventId,
+      agentId: t.agentId,
+      name: author?.displayName ?? agent?.name ?? "The bot",
+      avatarUrl: author?.avatarUrl ?? agent?.avatarUrl ?? null,
+      phrase: livePhrase(t.activity, t.phrase),
+      step: stepCount(t.activity),
+      startedAt: t.startedAt,
+    };
+  });
 }
