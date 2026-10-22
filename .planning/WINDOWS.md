@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 160
+open_count: 161
 waived_count: 5
-fixed_count: 117
-total_count: 282
-last_updated: 2026-10-22T05:12:57.408Z
+fixed_count: 120
+total_count: 286
+last_updated: 2026-10-22T05:37:51.461Z
 ---
 
 # Broken Windows Ledger
@@ -244,11 +244,11 @@ last_updated: 2026-10-22T05:12:57.408Z
 | 227 | 07.5 | deviation | apps/web/components/chat/composer.tsx |  | Composer hint text is under AA contrast; e2e specs share one DB so fixture names collide across phases; e2e specs reading response bodies across a navigation can hang | open |  | 2026-10-15T12:01:49.057Z |  |
 | 228 | 07.5 | deviation | apps/openclaw-channel/src/tool-guard.ts |  | Pin limits (ADR-0026): a plugin registered below -10000 or one answering OpenClaw's own approval first can still beat TOOL_PIN_PRIORITY | open |  | 2026-10-15T12:01:49.128Z |  |
 | 229 | 07.5 | deviation | apps/api/src/modules/approval |  | After #204 the bot does not hear decisions made from /approvals by someone outside the conversation; Work Zone Start has no applyTopics; cards still parse requester and runtime from server text | open |  | 2026-10-15T12:01:49.197Z |  |
-| 230 | 07.8 | deviation | packages/db/src/schema/app.ts |  | Hard-deleting a bot removes its browser_sessions rows but leaves their browser_session secrets; revoke/purge/sweeper in 07.8-21/27 must delete them; nothing cleans browser_sessions when a member leaves the org | open |  | 2026-10-15T15:08:27.289Z |  |
+| 230 | 07.8 | deviation | packages/db/src/schema/app.ts |  | Hard-deleting a bot removes its browser_sessions rows but leaves their browser_session secrets; revoke/purge/sweeper in 07.8-21/27 must delete them; nothing cleans browser_sessions when a member leaves the org | fixed |  | 2026-10-15T15:08:27.289Z | 2026-10-22T05:37:51.070Z |
 | 231 | 07.8 | deviation | packages/db/src/schema/app.ts |  | DECIDE in 07.8-18: the app role can change an approved sandbox package's pinned fields (sha256, tree_sha256, lockfile, dependency_count, review_token); add an immutability trigger after approval. Every new secret kind now needs a migration (secrets_kind_check), note in ADR-0029 | fixed |  | 2026-10-15T15:08:27.379Z | 2026-10-21T20:12:08.062Z |
 | 232 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | Wiring left for later plans: turn.activity not registered in realtime EventTypes (07.8-10); SandboxdContextInput.events is loose until tightened to LiveInputFrame (07.8-16); PATCH /agents/:id/capabilities ignores sandbox/browser until 07.8-15 | fixed |  | 2026-10-15T15:10:12.850Z | 2026-10-22T03:47:11.925Z |
 | 233 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | File upload/download/import travel as base64 JSON up to 50 MiB (~67 MiB on the wire): check the body limit or stream (07.8-09/11); cap_reached/tainted answer 403 here vs 409 on 07.4 connector routes, unify in 05/10/14; npm lockfiles with sha1-only integrity fail PackageTreeEntry, refuse with a reason in 17/18 | fixed |  | 2026-10-15T15:10:12.922Z | 2026-10-21T20:12:08.140Z |
-| 234 | 07.8 | deviation | packages/db/src/schema/app.ts |  | MUST (07.8-21): app.message_cards kind check and Drizzle enum accept only the 8 old kinds; a sign-in ('browser') card cannot be stored until a new migration (chained after 07.8-02) adds it. ApprovalToolSourceKind lacks a sandbox/browser source (07.8-14; update SOURCE_ICON) | open |  | 2026-10-15T15:23:46.137Z |  |
+| 234 | 07.8 | deviation | packages/db/src/schema/app.ts |  | MUST (07.8-21): app.message_cards kind check and Drizzle enum accept only the 8 old kinds; a sign-in ('browser') card cannot be stored until a new migration (chained after 07.8-02) adds it. ApprovalToolSourceKind lacks a sandbox/browser source (07.8-14; update SOURCE_ICON) | fixed |  | 2026-10-15T15:23:46.137Z | 2026-10-22T05:37:50.996Z |
 | 235 | 07.8 | deviation | apps/sandboxd/src |  | sandboxd: running processes tracked in memory only (unpollable after a restart, still end at timeout); /tmp/ocw-proc group files not removed; runtime_unavailable and docker_too_old share docker_unavailable; diskBytes 0 until 07.8-09 | open |  | 2026-10-15T16:42:21.790Z |  |
 | 236 | 07.8 | deviation | infra/sandbox |  | sbx apt versions approved but not pinned in the Dockerfile (later builds pick newer security versions); gVisor path proven by unit tests only until the 07.8-24 CI job; CODEOWNERS lacks apps/sandboxd (07.8-29) | open |  | 2026-10-15T16:42:21.880Z |  |
 | 237 | 07.8 | deviation | infra/sandbox/brw |  | brw: iframes are outside the snapshot (screenshot masks them whole after human input); a page that rebuilds an input after typing loses the human-typed marker (password type fields stay redacted); live frames to other viewers are unmasked, F-5/U-2 must hold in the API (07.8-16) | fixed |  | 2026-10-15T16:43:10.209Z | 2026-10-22T03:47:11.846Z |
@@ -279,7 +279,7 @@ last_updated: 2026-10-22T05:12:57.408Z
 | 262 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: when two packages provide the same bin or module name the first on PATH/NODE_PATH wins silently; surface a conflict at review (low) | open |  | 2026-10-22T02:53:29.552Z |  |
 | 263 | 07.8 | deviation | infra/compose |  | MUST (07.8-24): add OCW_SANDBOX_NPM_REGISTRY, OCW_SANDBOX_PYPI_INDEX, OCW_CLAWHUB_URL (must equal the API's) and OCW_SANDBOX_REGISTRIES to sandboxd in compose and Woodpecker | fixed |  | 2026-10-22T02:53:29.628Z | 2026-10-22T04:13:28.471Z |
 | 264 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: npm 11.19 warns about allowScripts but still runs install scripts; a future npm enforcing it needs an allow-list (low); Debian packages only unit-tested (VALIDATION manual row) | open |  | 2026-10-22T02:53:29.706Z |  |
-| 265 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-20 (for 21): ActivityStep has no requester, so sign-in and paused rows cannot name the person ("Asked you / Asked Sam" is built and tested, waiting for data) | open |  | 2026-10-22T03:14:25.296Z |  |
+| 265 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-20 (for 21): ActivityStep has no requester, so sign-in and paused rows cannot name the person ("Asked you / Asked Sam" is built and tested, waiting for data) | fixed |  | 2026-10-22T03:14:25.296Z | 2026-10-22T05:37:51.148Z |
 | 266 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-20: activity steps carry no http/https flag, so step hosts show no lock or Not secure (only the card and review do) (low) | open |  | 2026-10-22T03:14:25.387Z |  |
 | 267 | 07.8 | deviation | apps/web/components/browser/bot-activity.tsx |  | 07.8-20: for a top-level channel mention the live label shows in the main list while the reply lands in the thread; a tab opened mid-turn shows no label until the next step (low) | open |  | 2026-10-22T03:14:25.479Z |  |
 | 268 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-23 (medium): no package version listing in sandboxd or the API, so the web version picker is a typed field and "Update to {version}" never appears | open |  | 2026-10-22T03:43:44.118Z |  |
@@ -297,6 +297,10 @@ last_updated: 2026-10-22T05:12:57.408Z
 | 280 | 07.8 | deviation | apps/web/components/browser |  | 07.8-22 (medium): non-Latin IME input does not work on the desktop live-view frame during a takeover (paste works); an editable frame would leak composed text into our DOM | open |  | 2026-10-22T05:12:57.253Z |  |
 | 281 | 07.8 | deviation | apps/web/components/browser |  | 07.8-22: a reply on screen keeps its Watch link after the page closes until the list refetches (shows Ended) (low); at 320 px the host truncates early (low) | open |  | 2026-10-22T05:12:57.333Z |  |
 | 282 | 07.8 | deviation | apps/local-runtime |  | 07.8-22: a local-runtime test fails when the repo is checked out outside the home folder (low) | open |  | 2026-10-22T05:12:57.408Z |  |
+| 283 | 07.8 | unrun-verify | infra/sandbox/browser |  | 07.8-21: the brw smoke for the new sandboxd op contextLock (site lock on a member-signed-in page) was not run against the real brw image | open |  | 2026-10-22T05:37:51.226Z |  |
+| 284 | 07.8 | deviation | apps/api/src/modules/browser |  | 07.8-21 (medium): a site that sets a cookie before any login is sealed as signed in; re-seal runs only after each call; a lock failure ends the page as crashed | open |  | 2026-10-22T05:37:51.300Z |  |
+| 285 | 07.8 | deviation | apps/api/src/modules/browser |  | 07.8-21: the 15-minute sign-in expiry can hit a member still in control; a page holding a departed member's cookies lives until the 5-minute idle stop; an expired sign-in delivers no turn to the bot (expired sentence unused) | open |  | 2026-10-22T05:37:51.379Z |  |
+| 286 | 07.8 | deviation | apps/api/src/modules/browser |  | 07.8-21: the Browser tab activity shows the page's current host (low) | open |  | 2026-10-22T05:37:51.461Z |  |
 
 ````json
 [
@@ -3055,10 +3059,10 @@ last_updated: 2026-10-22T05:12:57.408Z
     "file": "packages/db/src/schema/app.ts",
     "line": null,
     "description": "Hard-deleting a bot removes its browser_sessions rows but leaves their browser_session secrets; revoke/purge/sweeper in 07.8-21/27 must delete them; nothing cleans browser_sessions when a member leaves the org",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-15T15:08:27.289Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T05:37:51.070Z"
   },
   {
     "id": 231,
@@ -3103,10 +3107,10 @@ last_updated: 2026-10-22T05:12:57.408Z
     "file": "packages/db/src/schema/app.ts",
     "line": null,
     "description": "MUST (07.8-21): app.message_cards kind check and Drizzle enum accept only the 8 old kinds; a sign-in ('browser') card cannot be stored until a new migration (chained after 07.8-02) adds it. ApprovalToolSourceKind lacks a sandbox/browser source (07.8-14; update SOURCE_ICON)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-15T15:23:46.137Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T05:37:50.996Z"
   },
   {
     "id": 235,
@@ -3475,10 +3479,10 @@ last_updated: 2026-10-22T05:12:57.408Z
     "file": "packages/contracts/src/browser.ts",
     "line": null,
     "description": "07.8-20 (for 21): ActivityStep has no requester, so sign-in and paused rows cannot name the person (\"Asked you / Asked Sam\" is built and tested, waiting for data)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-22T03:14:25.296Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T05:37:51.148Z"
   },
   {
     "id": 266,
@@ -3682,6 +3686,54 @@ last_updated: 2026-10-22T05:12:57.408Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-22T05:12:57.408Z",
+    "resolved_at": null
+  },
+  {
+    "id": 283,
+    "kind": "unrun-verify",
+    "phase": "07.8",
+    "file": "infra/sandbox/browser",
+    "line": null,
+    "description": "07.8-21: the brw smoke for the new sandboxd op contextLock (site lock on a member-signed-in page) was not run against the real brw image",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:37:51.226Z",
+    "resolved_at": null
+  },
+  {
+    "id": 284,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser",
+    "line": null,
+    "description": "07.8-21 (medium): a site that sets a cookie before any login is sealed as signed in; re-seal runs only after each call; a lock failure ends the page as crashed",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:37:51.300Z",
+    "resolved_at": null
+  },
+  {
+    "id": 285,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser",
+    "line": null,
+    "description": "07.8-21: the 15-minute sign-in expiry can hit a member still in control; a page holding a departed member's cookies lives until the 5-minute idle stop; an expired sign-in delivers no turn to the bot (expired sentence unused)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:37:51.379Z",
+    "resolved_at": null
+  },
+  {
+    "id": 286,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser",
+    "line": null,
+    "description": "07.8-21: the Browser tab activity shows the page's current host (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:37:51.461Z",
     "resolved_at": null
   }
 ]
