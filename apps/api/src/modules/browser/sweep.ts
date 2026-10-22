@@ -8,7 +8,7 @@ import { announce, clearDeadLeases } from "./takeover";
  * The browser sweep (07.8-21; D-08, R7, R9): every 30 s, sign-in cards that waited 15 minutes expire (their pages are
  * released from the hold, in sandboxd too), sessions expired for 7 days are purged with their secrets, and takeover leases
  * a dead API instance left behind are cleared (07.8-28, WINDOWS #271: sandboxd's takeover off, the bot no longer
- * paused). The
+ * paused; ADR-0029: a lease abandoned after input closes its page instead). The
  * organizations with work come from the SECURITY DEFINER `app.browser_sweep_organizations` (ids only); every change
  * happens in that organization's own user-less `withTenant` transaction. One API process sweeps at a time.
  */
@@ -67,17 +67,16 @@ export function createBrowserSweeper(core: Core, client: SandboxdClient | null):
             purged += result.purged;
             leases += result.leases.length;
             for (const page of result.leases) {
-              await client
-                ?.call(
-                  "contextTakeover",
-                  {
-                    target: { orgId: organizationId, agentId: page.agentId },
-                    contextId: page.contextId,
-                    active: false,
-                  },
-                  { timeoutMs: 15_000 },
-                )
-                .catch(() => {});
+              const target = { orgId: organizationId, agentId: page.agentId };
+              // ADR-0029: a lease abandoned after input closed its page (`takeover_abandoned`): sandboxd closes it too.
+              await (page.closed
+                ? client?.call("contextClose", { target, contextId: page.contextId }, { timeoutMs: 15_000 })
+                : client?.call(
+                    "contextTakeover",
+                    { target, contextId: page.contextId, active: false },
+                    { timeoutMs: 15_000 },
+                  )
+              )?.catch(() => {});
               await announce(core.bus, organizationId, page.contextId);
             }
             for (const page of result.released) {

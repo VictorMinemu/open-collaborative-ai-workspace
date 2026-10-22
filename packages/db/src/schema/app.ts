@@ -2720,7 +2720,7 @@ const PACKAGE_TREE_MAX_ENTRIES = 5_000;
 const PACKAGE_LOCKFILE_MAX_BYTES = 2_097_152;
 /** Why a browser context ended (`BrowserEndReason`). */
 const BROWSER_END_REASONS = sql.raw(
-  `('closed_by_bot','idle','kill_switch','module_off','crashed','access_lost')`,
+  `('closed_by_bot','idle','kill_switch','module_off','crashed','access_lost','takeover_abandoned')`,
 );
 /**
  * A host as the API stores it (a browser context's, a sign-in request's or a session's site key): the URL's lower-case
@@ -2942,12 +2942,26 @@ export const browserContexts = appSchema.table(
     sessionId: uuid("session_id"),
     controllerUserId: uuid("controller_user_id"),
     leaseExpiresAt: ts("lease_expires_at"),
+    /**
+     * The lease holder sent input (typed, clicked, pasted) during the CURRENT lease, recorded before the input reaches the
+     * page. A lease that ends without a hand back then closes the page (`takeover_abandoned`), on whichever instance or
+     * sweep ends it. Reset when a lease starts or ends.
+     */
+    leaseInput: boolean("lease_input").notNull().default(false),
     pausedFor: text("paused_for", { enum: ["approval", "signin"] }),
     heldUntil: ts("held_until"),
     openedAt: ts("opened_at").notNull().defaultNow(),
     closedAt: ts("closed_at"),
     endReason: text("end_reason", {
-      enum: ["closed_by_bot", "idle", "kill_switch", "module_off", "crashed", "access_lost"],
+      enum: [
+        "closed_by_bot",
+        "idle",
+        "kill_switch",
+        "module_off",
+        "crashed",
+        "access_lost",
+        "takeover_abandoned",
+      ],
     }),
   },
   (t) => [
@@ -3019,7 +3033,15 @@ export const browserSigninRequests = appSchema.table(
       .notNull()
       .default("waiting"),
     stopReason: text("stop_reason", {
-      enum: ["closed_by_bot", "idle", "kill_switch", "module_off", "crashed", "access_lost"],
+      enum: [
+        "closed_by_bot",
+        "idle",
+        "kill_switch",
+        "module_off",
+        "crashed",
+        "access_lost",
+        "takeover_abandoned",
+      ],
     }),
     sessionId: uuid("session_id"),
     /**

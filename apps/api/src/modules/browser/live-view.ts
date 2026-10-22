@@ -35,6 +35,7 @@ import {
   LEASE_CHANNEL,
   type LeaseEndReason,
   leaseLive,
+  markInput,
   parseAnnouncement,
   release,
   TAKEOVER_MS,
@@ -82,6 +83,13 @@ const INPUT_BATCH_MAX = 64;
 const OP_TIMEOUT_MS = 15_000;
 const RECONNECT_MS = 1_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Input that may leave something in the page (ADR-0029: typed, clicked, pasted, tapped). Pointer moves and wheel scrolls
+ * enter nothing: a person who only looked hands nothing over when their control ends.
+ */
+const entersSomething = (e: LiveInputFrame) =>
+  !(e.type === "wheel" || (e.type === "mouse" && e.event === "move"));
 
 /** Close codes of the live-view socket (4xxx: application). */
 export const LIVE_CLOSE = { ended: 1000, noPermission: 4403, sessionExpired: 4401 } as const;
@@ -221,6 +229,8 @@ interface LocalLease {
    * own transaction ends it (F-5 holds meanwhile on every instance); no input, keep or second end is taken.
    */
   ending: boolean;
+  /** The row records that the holder sent input in this lease (`markInput`, before the first such input is sent). */
+  inputMarked: boolean;
 }
 
 interface Watched {
@@ -379,10 +389,16 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
             ended = closed;
           }
         } else if (ctx.controllerUserId && !leaseLive(ctx)) {
-          // The holder's instance is gone and nobody released it: cleared as idle (once, conditional).
-          await clearExpired(tx, core, { contextId: ctx.id });
-          row = { ...ctx, controllerUserId: null, leaseExpiresAt: null };
-          tenantOf(tx).afterCommit(() => takeoverOff(w));
+          // The holder's instance is gone and nobody released it: cleared as idle (once, conditional). Abandoned after
+          // input (or with a member's session loaded), the page closes with it and every viewer gets `ended` (ADR-0029).
+          const cleared = await clearExpired(tx, core, { contextId: ctx.id });
+          if (cleared?.closed) {
+            row = cleared.closed;
+            ended = cleared.closed;
+          } else {
+            row = { ...ctx, controllerUserId: null, leaseExpiresAt: null, leaseInput: false };
+            tenantOf(tx).afterCommit(() => takeoverOff(w));
+          }
         }
       }
       const activity = row.closedAt === null ? await activityOf(tx, row) : { phrase: null, route: null };
@@ -933,6 +949,7 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
       lastKeepMs: now,
       warned: false,
       ending: false,
+      inputMarked: false,
     };
     try {
       await takeoverIn(w, true);
@@ -981,29 +998,38 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
     const { auth } = lease.viewer;
     const tenant = { organizationId: auth.organizationId, userId: auth.userId };
     const p = { organizationId: auth.organizationId, contextId: w.contextId, userId: auth.userId };
-    const end = (tx: Tx) => release(tx, core, { contextId: w.contextId, userId: auth.userId, reason });
+    // ADR-0029: a lease abandoned after input (or with a member's session loaded) closes the page in the transaction
+    // that ends it (`release`); `closed` is that page, closed in sandboxd once it committed.
+    let closed: BrowserContextRecord | null = null;
+    const end = async (tx: Tx) => {
+      const ended = await release(tx, core, { contextId: w.contextId, userId: auth.userId, reason });
+      closed = ended?.closed ?? null;
+      return ended;
+    };
     await takeoverOff(w);
     try {
       if (reason === "released") {
         // 07.8-21: a hand back on a page with the member's waiting sign-in seals it (export, lock, seal, "Signed in").
         await onHandBack({ core, client: deps.client }, p, end);
       } else {
-        // Control that ended any other way leaves the card waiting again.
+        // Control that ended any other way leaves the card waiting again, unless the page closed with it.
         await core.db.withTenant(tenant, async (tx) => {
-          await end(tx);
-          await backToWaiting(tx, core, p);
+          if (!(await end(tx))?.closed) await backToWaiting(tx, core, p);
         });
       }
     } catch (err) {
+      closed = null;
       log.warn({ contextId: w.contextId, error: name(err) }, "sign-in hand back failed");
       // The lease ends whatever failed (idempotent: nothing is written when it already ended).
       await core.db
         .withTenant(tenant, (tx) => end(tx))
-        .catch((e: unknown) =>
-          log.warn({ contextId: w.contextId, error: name(e) }, "live view lease release failed"),
-        );
+        .catch((e: unknown) => {
+          closed = null;
+          log.warn({ contextId: w.contextId, error: name(e) }, "live view lease release failed");
+        });
     }
     if (w.lease === lease) w.lease = null;
+    if (closed) await afterEnded(w, closed);
     await announce(core.bus, w.orgId, w.contextId);
     refresh(w);
   }
@@ -1048,7 +1074,26 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
     w.flushing = true;
     try {
       while (w.inputs.length && deps.client && w.view && w.lease) {
+        const lease = w.lease;
         const events = w.inputs.splice(0, INPUT_BATCH_MAX);
+        if (!lease.inputMarked && events.some(entersSomething)) {
+          // ADR-0029: the row learns of the holder's input before the page does, so a lease abandoned from here on
+          // closes the page on any instance or sweep. Not recorded (the lease ended, the database failed): nothing of
+          // it is sent (fail closed).
+          const { auth } = lease.viewer;
+          const marked = await core.db
+            .withTenant({ organizationId: auth.organizationId, userId: auth.userId }, (tx) =>
+              markInput(tx, { contextId: w.contextId, userId: auth.userId }),
+            )
+            .catch(() => false);
+          if (!marked || w.lease !== lease || lease.ending) {
+            w.inputs = [];
+            if (!marked) log.warn({ contextId: w.contextId }, "live view input not recorded, dropped");
+            return;
+          }
+          lease.inputMarked = true;
+        }
+        if (!w.view) return;
         const target = { orgId: w.orgId, agentId: w.view.row.agentId };
         try {
           await deps.client.call(
