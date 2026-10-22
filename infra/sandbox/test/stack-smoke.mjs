@@ -3,7 +3,9 @@
 // and drives it only through its HTTP API, as the API does; `docker` is used only to look at what sandboxd built.
 //
 //   node stack-smoke.mjs --ns <ns> --work <dir> --fixtures <net> --fake <container> --sbx <img> --brw <img>
-//                        --egress <img> --seccomp <file> [--only open|all]
+//                        --egress <img> --seccomp <file> [--only open|all|coldstart]
+//   coldstart  STACK_COLDSTARTS (default 8) fresh browsers, each in its own organization: ensure, then the first
+//              contextOpen at once (as the API does), timed; each first open must answer within 15 s (07.8 hardening)
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -135,7 +137,7 @@ async function stopSandboxd() {
 
 // ---------------------------------------------------------------- the API's view of sandboxd
 
-async function api(method, path, body) {
+async function api(method, path, body, timeoutMs = 120_000) {
   const res = await fetch(`http://127.0.0.1:${PORT}${path}`, {
     method,
     headers: {
@@ -143,7 +145,7 @@ async function api(method, path, body) {
       ...(body === undefined ? {} : { "content-type": "application/json" }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const text = await res.text();
   let json = null;
@@ -775,6 +777,49 @@ async function stepFull() {
   );
 }
 
+/**
+ * 07.8 hardening (07.8-28 candidate 1): a fresh brw's first contextOpen, sent right after browserEnsure answered, as
+ * the API sends it. Each round is a new organization and bot (a fresh container), purged afterwards.
+ */
+async function stepColdstart() {
+  const rounds = Number(process.env.STACK_COLDSTARTS ?? 8);
+  log(`== coldstart: ${rounds} fresh browsers, the first open right after ensure`);
+  const results = [];
+  for (let i = 0; i < rounds; i++) {
+    const t = { orgId: randomUUID(), agentId: randomUUID() };
+    await okPost("/v1/policy", policy(t.orgId), `policy coldstart ${i}`);
+    let started = Date.now();
+    const ensured = await post("/v1/browsers/ensure", { target: t });
+    const ensureMs = Date.now() - started;
+    started = Date.now();
+    let open = { status: 0, body: null };
+    try {
+      open = await api(
+        "POST",
+        "/v1/browsers/contexts/open",
+        { target: t, contextId: randomUUID(), viewport },
+        15_000,
+      );
+    } catch (err) {
+      open = { status: 0, body: { error: { code: err?.name ?? "error" } } };
+    }
+    const openMs = Date.now() - started;
+    results.push({ ensure: ensured.status, ensureMs, open: open.status, openMs });
+    log(
+      `   round ${i + 1}: ensure ${ensured.status} in ${ensureMs} ms; first open ${open.status} ${codeOf(open)} in ${openMs} ms`,
+    );
+    // Purged, so the rounds never run the daemon out of network address pools.
+    await okPost("/v1/sandboxes/purge", { target: t }, `purge coldstart ${i}`);
+  }
+  const bad = results.filter((r) => r.ensure !== 200 || r.open !== 200);
+  ok(
+    bad.length === 0,
+    `every fresh brw answered its first open within 15 s (${rounds - bad.length}/${rounds})`,
+  );
+  const slowest = Math.max(...results.map((r) => r.openMs));
+  ok(slowest < 15_000, `the slowest first open took ${slowest} ms`);
+}
+
 function noSecretsLeaked() {
   const text = readFileSync(LOG, "utf8") + JSON.stringify(seen);
   for (const [k, v] of Object.entries(SECRETS))
@@ -787,8 +832,11 @@ function noSecretsLeaked() {
 
 try {
   await setup();
-  await stepOpen();
-  if (ONLY === "all") await stepFull();
+  if (ONLY === "coldstart") await stepColdstart();
+  else {
+    await stepOpen();
+    if (ONLY === "all") await stepFull();
+  }
   noSecretsLeaked();
 } catch (err) {
   failures += 1;

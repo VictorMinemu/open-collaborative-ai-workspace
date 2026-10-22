@@ -392,7 +392,9 @@ steps.open = async (agent) => {
     const r = await runc.event((e) => e.event === "ready" || e.event === "fatal", 90_000);
     assert.equal(r.event, "ready");
     assert.equal(r.browserSandbox, "container-only");
-    assert.match(runc.err, /chromium sandbox unavailable on runc; running container-only/);
+    // The structured diagnostics sandboxd forwards (07.8 hardening): the fallback is said, never silent.
+    assert.match(runc.err, /\{"brw":1,"ev":"sandbox_fallback","t":\d+\}/);
+    assert.match(runc.err, /"ev":"launched","t":\d+,"ms":\d+,"posture":"container-only","runtime":"runc"/);
   } finally {
     await runc.stop();
   }
@@ -401,6 +403,10 @@ steps.open = async (agent) => {
     const r = await runsc.event((e) => e.event === "ready" || e.event === "fatal", 90_000);
     assert.equal(r.event, "fatal", "no silent fallback under gVisor");
     assert.equal(await runsc.exited, 1);
+    assert.match(
+      runsc.err,
+      /"ev":"launch_failed","t":\d+,"code":"launch_failed","reason":"no_usable_sandbox"/,
+    );
   } finally {
     await runsc.stop();
   }

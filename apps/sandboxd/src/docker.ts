@@ -32,8 +32,12 @@ export interface Docker {
     body?: unknown,
     options?: DockerRequestOptions,
   ): Promise<DockerResponse>;
-  /** A hijacked connection (`Connection: Upgrade`, `Upgrade: tcp`): exec start and attach. */
-  hijack(path: string, body: unknown): Promise<Duplex>;
+  /**
+   * A hijacked connection (`Connection: Upgrade`, `Upgrade: tcp`): exec start (a JSON body) and attach (`null`: no
+   * body at all). An attach must send no body: the Engine can hand the body's bytes to the container's stdin once the
+   * connection is hijacked (07.8 hardening: a stray `{}` before the brw agent's first request line).
+   */
+  hijack(path: string, body: unknown | null): Promise<Duplex>;
   /** A streaming GET with no timeout (the Engine's `/events` feed): the body as it arrives. */
   stream(path: string): Promise<Readable>;
 }
@@ -92,16 +96,16 @@ export function createDocker(options: { socketPath: string }): Docker {
     });
   }
 
-  function hijack(path: string, body: unknown): Promise<Duplex> {
+  function hijack(path: string, body: unknown | null): Promise<Duplex> {
     return new Promise((resolve, reject) => {
-      const payload = Buffer.from(JSON.stringify(body ?? {}));
+      const payload = body === null ? Buffer.alloc(0) : Buffer.from(JSON.stringify(body ?? {}));
       const req = http.request({
         socketPath,
         method: "POST",
         path: fullPath(path),
         headers: {
           Host: "docker",
-          "Content-Type": "application/json",
+          ...(body === null ? {} : { "Content-Type": "application/json" }),
           "Content-Length": payload.length,
           Connection: "Upgrade",
           Upgrade: "tcp",
@@ -116,7 +120,7 @@ export function createDocker(options: { socketPath: string }): Docker {
         reject(new DockerUnavailableError(`hijack refused with ${res.statusCode ?? 0}`));
       });
       req.on("error", (err) => reject(new DockerUnavailableError(err.message)));
-      req.write(payload);
+      if (payload.length > 0) req.write(payload);
       req.end();
     });
   }

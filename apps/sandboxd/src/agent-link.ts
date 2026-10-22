@@ -1,4 +1,5 @@
 import type { Duplex } from "node:stream";
+import { z } from "zod";
 import { Demuxer, type Docker, DockerUnavailableError } from "./docker";
 
 /**
@@ -6,12 +7,14 @@ import { Demuxer, type Docker, DockerUnavailableError } from "./docker";
  * attaches to the container's main process (the hijacked `POST /containers/{id}/attach`, multiplexed stdout and stderr,
  * no TTY) and is the only thing that ever speaks to the agent. There is no port to connect to.
  *
- *   stdin   JSON lines `{ id, op, ...input }`.
+ *   stdin   JSON lines `{ id, op, ...input }`, each after a newline (an empty line is skipped by the agent).
  *   stdout  agent frames: 4-byte big-endian length, 1-byte type, payload. Type 0 is one screencast JPEG tagged with its
  *           context id (`[id length][id][JPEG]`), type 1 one JSON message (a response `{ id, ok, result | error }` or
  *           an event `{ event, contextId?, ... }`).
- *   stderr  the agent's fixed diagnostic lines: read and dropped here, never logged (they could only repeat fixed text,
- *           but nothing from the browser container reaches sandboxd's log).
+ *   stderr  the agent's structured diagnostics (`{ brw: 1, ev, t, ... }`, 07.8 hardening): each line is parsed against
+ *           `AgentDiag` (fixed event, op, phase, posture and reason names, error codes and names, durations, context
+ *           ids; nothing else, unknown keys refused) and only what passes reaches `onDiag`. Any other stderr text
+ *           (Chromium's launch lines) is dropped, never logged.
  *
  * The link strips the context-id tag (callers get the bare JPEG per context) and never logs or keeps a request, a
  * response, an input payload or a frame.
@@ -90,6 +93,128 @@ export class AgentOutputReader {
   }
 }
 
+/** The agent's op names (agent.mjs `OPS`): the only `op` a diagnostic may name. */
+export const AGENT_OPS = [
+  "info",
+  "contextOpen",
+  "contextNavigate",
+  "contextSnapshot",
+  "contextAct",
+  "contextScreenshot",
+  "contextWait",
+  "contextFrames",
+  "contextTakeover",
+  "contextInput",
+  "contextResize",
+  "contextHold",
+  "contextLock",
+  "contextExportState",
+  "contextDownload",
+  "contextClose",
+] as const;
+
+const Code = z.string().regex(/^[a-z_]{1,32}$/);
+const Ms = z.number().int().min(0).max(86_400_000);
+
+/**
+ * One diagnostic line of the agent, as sandboxd accepts it: no free text anywhere (a URL, a host, page text, typed
+ * input, a cookie or an error message cannot pass), so a forwarded line can only repeat names, codes, ids and numbers.
+ */
+export const AgentDiag = z
+  .object({
+    brw: z.literal(1),
+    ev: z.enum([
+      "start",
+      "launched",
+      "launch_failed",
+      "sandbox_fallback",
+      "ready",
+      "stdin_first",
+      "op_start",
+      "op",
+      "op_error",
+      "open_phase",
+      "crashed",
+      "exit",
+      "check_failed",
+      "bad_line",
+    ]),
+    t: Ms,
+    op: z.enum(AGENT_OPS).optional(),
+    ctx: z
+      .string()
+      .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
+      .optional(),
+    ms: Ms.optional(),
+    outcome: Code.optional(),
+    code: Code.optional(),
+    reason: Code.optional(),
+    error: z
+      .string()
+      .regex(/^[A-Za-z]{1,40}$/)
+      .optional(),
+    phase: z.enum(["context", "page", "cdp"]).optional(),
+    posture: z.enum(["chromium", "chromium+gvisor", "container-only"]).nullable().optional(),
+    runtime: z.enum(["runsc", "runc"]).optional(),
+    scope: z.enum(["browser", "page"]).optional(),
+    bytes: z
+      .number()
+      .int()
+      .min(0)
+      .max(1 << 30)
+      .optional(),
+  })
+  .strict();
+export type AgentDiag = z.infer<typeof AgentDiag>;
+
+/** A stderr line longer than this is not a diagnostic (and is dropped unread). */
+const DIAG_LINE_MAX = 1024;
+
+/**
+ * The agent's stderr split into lines; returns the lines that parse as `AgentDiag`. Everything else, including an
+ * overlong line, is dropped.
+ */
+export class AgentDiagReader {
+  private pending = "";
+  private skipping = false;
+
+  push(chunk: Buffer): AgentDiag[] {
+    const out: AgentDiag[] = [];
+    let text = this.pending + chunk.toString("utf8");
+    for (;;) {
+      const nl = text.indexOf("\n");
+      if (nl < 0) break;
+      const line = text.slice(0, nl);
+      text = text.slice(nl + 1);
+      if (this.skipping) {
+        this.skipping = false;
+        continue;
+      }
+      const diag = parseDiag(line);
+      if (diag) out.push(diag);
+    }
+    if (text.length > DIAG_LINE_MAX) {
+      // An overlong line: dropped, and so is its rest up to the next newline.
+      this.skipping = true;
+      text = "";
+    }
+    this.pending = text;
+    return out;
+  }
+}
+
+function parseDiag(line: string): AgentDiag | null {
+  if (line.length > DIAG_LINE_MAX || !line.startsWith("{")) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  const parsed = AgentDiag.safeParse(raw);
+  return parsed.success ? parsed.data : null;
+}
+
 /** What the agent says once Chromium is up (`ready`), or what `info` answers on a re-attach. */
 export interface AgentReady {
   browserSandbox: string | null;
@@ -105,6 +230,8 @@ export interface AgentLink {
   onFrame(listener: (contextId: string, jpeg: Buffer) => void): void;
   /** Every agent event except `ready` and `fatal`. */
   onEvent(listener: (event: Record<string, unknown>) => void): void;
+  /** Every stderr diagnostic that passed `AgentDiag` (07.8 hardening). */
+  onDiag(listener: (diag: AgentDiag) => void): void;
   onClose(listener: () => void): void;
   readonly closed: boolean;
   close(): void;
@@ -121,6 +248,8 @@ export function linkOverStream(stream: Duplex): AgentLink {
   const frameListeners: Array<(contextId: string, jpeg: Buffer) => void> = [];
   const eventListeners: Array<(event: Record<string, unknown>) => void> = [];
   const closeListeners: Array<() => void> = [];
+  const diagListeners: Array<(diag: AgentDiag) => void> = [];
+  const diagReader = new AgentDiagReader();
   let readyState: { ok: true; value: AgentReady } | { ok: false; error: AgentError } | null = null;
   const readyWaiters: Array<() => void> = [];
   let nextId = 1;
@@ -189,7 +318,20 @@ export function linkOverStream(stream: Duplex): AgentLink {
     if (closed) return;
     try {
       for (const frame of demuxer.push(chunk)) {
-        if (frame.stream !== 1) continue; // stderr: dropped, never logged
+        if (frame.stream === 2) {
+          // stderr: only allowlisted diagnostics go on; everything else is dropped, never logged.
+          for (const diag of diagReader.push(frame.data)) {
+            for (const l of diagListeners) {
+              try {
+                l(diag);
+              } catch {
+                // A diagnostic never breaks the link.
+              }
+            }
+          }
+          continue;
+        }
+        if (frame.stream !== 1) continue;
         for (const out of reader.push(frame.data)) {
           if (out.type === "jpeg") for (const l of frameListeners) l(out.contextId, out.jpeg);
           else onMessage(out.message);
@@ -227,8 +369,10 @@ export function linkOverStream(stream: Duplex): AgentLink {
             reject(e);
           },
         });
-        // The input is written once to the agent's stdin and kept nowhere else.
-        stream.write(`${JSON.stringify({ ...input, id, op })}\n`);
+        // The input is written once to the agent's stdin and kept nowhere else. The leading newline ends whatever
+        // stray bytes reached the agent's stdin before this line (they become a line of their own, refused with no
+        // id), so a request is never glued to them and left unanswered (07.8 hardening).
+        stream.write(`\n${JSON.stringify({ ...input, id, op })}\n`);
       });
     },
 
@@ -258,6 +402,9 @@ export function linkOverStream(stream: Duplex): AgentLink {
     onEvent(listener) {
       eventListeners.push(listener);
     },
+    onDiag(listener) {
+      diagListeners.push(listener);
+    },
     onClose(listener) {
       if (closed) listener();
       else closeListeners.push(listener);
@@ -270,9 +417,10 @@ export function linkOverStream(stream: Duplex): AgentLink {
 export async function openAgentLink(docker: Docker, containerId: string): Promise<AgentLink> {
   let stream: Duplex;
   try {
+    // No request body: on an attach with stdin, the Engine could pass it on to the agent's stdin (see `hijack`).
     stream = await docker.hijack(
       `/containers/${encodeURIComponent(containerId)}/attach?stream=1&stdin=1&stdout=1&stderr=1`,
-      {},
+      null,
     );
   } catch (err) {
     if (err instanceof DockerUnavailableError)

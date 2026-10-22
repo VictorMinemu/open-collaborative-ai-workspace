@@ -10,6 +10,8 @@ declare const log: {
   error(...args: unknown[]): void;
 };
 declare const req: { log: typeof log };
+declare function brwLog(target: unknown, level: string, msg: string, fields?: object): void;
+declare function writeLog(line: object): void;
 declare const core: { log: typeof log };
 
 function frameLogged(frame: LiveInputFrame) {
@@ -61,4 +63,16 @@ function idsOnly(contextId: string, err: Error) {
   core.log.warn({ contextId, error: err.name }, "live view input not delivered");
   // ok: ocw.live-input-logging
   log.info({ contextId, state: "controlling" }, "lease taken");
+}
+
+// 07.8 hardening: sandboxd's own writers (the browser broker's brw lines).
+function sandboxdWriters(input: SandboxdContextInput, target: unknown, ms: number) {
+  // ruleid: ocw.live-input-logging
+  brwLog(target, "info", "brw input", { events: input.events });
+  // ruleid: ocw.live-input-logging
+  writeLog({ level: "info", msg: "brw input", typed: input.events });
+  // ok: ocw.live-input-logging
+  brwLog(target, "info", "brw ready", { posture: "chromium", ms });
+  // ok: ocw.live-input-logging
+  writeLog({ level: "info", msg: "brw started", ms });
 }
