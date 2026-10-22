@@ -139,10 +139,19 @@ rules:
       frame, a live client frame, a sandboxd input batch, their `text`, `key`, `events` or `inputs` fields, or the web's
       DOM input (`data`, `value`, `clipboardData`) must not reach a logger. Log the context id and an error name only.
     patterns:
-      - pattern-inside: $LOG.$LEVEL(...)
-      - metavariable-regex:
-          metavariable: $LEVEL
-          regex: ^(trace|debug|info|warn|error|fatal|log)$
+      - pattern-either:
+          - patterns:
+              - pattern-inside: $LOG.$LEVEL(...)
+              - metavariable-regex:
+                  metavariable: $LEVEL
+                  regex: ^(trace|debug|info|warn|error|fatal|log)$
+          # 07.8 hardening: sandboxd's own log writers (its `log` option, the browser broker's brw lifecycle and agent
+          # diagnostics lines).
+          - patterns:
+              - pattern-inside: $FN(...)
+              - metavariable-regex:
+                  metavariable: $FN
+                  regex: ^(log|writeLog|brwLog)$
       - pattern-either:
           # A value declared as a live input frame, a client frame or an input batch (parameter or binding). Typed
           # metavariables (`($F: LiveInputFrame)`) are avoided: they break the SQL fixture's rule test (semgrep 1.178).

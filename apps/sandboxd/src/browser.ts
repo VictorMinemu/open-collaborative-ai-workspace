@@ -27,10 +27,11 @@ import {
   type ScreenshotResult,
   type SnapshotResult,
 } from "@ocw/contracts";
-import { AgentError, type AgentLink, openAgentLink } from "./agent-link";
+import { type AgentDiag, AgentError, type AgentLink, openAgentLink } from "./agent-link";
 import { type Docker, DockerUnavailableError } from "./docker";
 import type { Egress } from "./egress-attach";
 import { type Clock, type SandboxdEventInput, SandboxdFailure, type Sandboxes } from "./sandboxes";
+import type { LogLine } from "./server";
 import {
   browserNetworkSpec,
   brwSpec,
@@ -233,6 +234,11 @@ export interface BrowsersOptions {
   /** Tests inject a fake link; production attaches to the container. */
   openLink?: (docker: Docker, containerId: string) => Promise<AgentLink>;
   readyTimeoutMs?: number;
+  /**
+   * sandboxd's log (07.8 hardening): each browser start (create, start, ready, posture, durations) and the agent's
+   * diagnostics that passed `AgentDiag`, with the bot's ids. Never a URL, a host, page text, typed input or a cookie.
+   */
+  log?: (line: LogLine) => void;
 }
 
 export interface Browsers {
@@ -274,6 +280,14 @@ export function createBrowsers(options: BrowsersOptions): Browsers {
   const emit = options.onEvent ?? (() => {});
   const openLink = options.openLink ?? openAgentLink;
   const readyTimeoutMs = options.readyTimeoutMs ?? BROWSER_READY_MS;
+  const writeLog = options.log ?? (() => {});
+  const brwLog = (target: SandboxdTarget, level: LogLine["level"], msg: string, fields: object = {}) =>
+    writeLog({ level, msg, orgId: target.orgId, agentId: target.agentId, ...fields });
+  /** One agent diagnostic, re-labelled with the bot's ids (the agent never knows them). */
+  const onDiag = (target: SandboxdTarget, diag: AgentDiag) => {
+    const { brw: _brw, ev, ...fields } = diag;
+    brwLog(target, ev === "launch_failed" || ev === "crashed" ? "warn" : "info", `brw ${ev}`, fields);
+  };
   const bots = new Map<string, BotBrowser>();
   const locks = new Map<string, Promise<unknown>>();
   let lastPosture: BrowserSandboxMode | null = null;
@@ -478,14 +492,17 @@ export function createBrowsers(options: BrowsersOptions): Browsers {
     const containerId = String(c.Id);
     const containerRuntime: DockerRuntime = asRecord(c.HostConfig).Runtime === "runsc" ? "runsc" : "runc";
     const wasRunning = asRecord(c.State).Running === true;
+    const since = clock.now();
 
     // Attach before starting, so the agent's `ready` (or its refusal) is never missed.
     let link: AgentLink;
     try {
       link = await openLink(docker, containerId);
     } catch (err) {
+      brwLog(target, "warn", "brw attach failed", { error: err instanceof Error ? err.name : "unknown" });
       throw agentFailure(err);
     }
+    link.onDiag((diag) => onDiag(target, diag));
     let posture: string | null;
     try {
       if (wasRunning) {
@@ -494,15 +511,27 @@ export function createBrowsers(options: BrowsersOptions): Browsers {
       } else {
         const started = await call("POST", `/containers/${encodeURIComponent(containerId)}/start`);
         if (started.status !== 204 && started.status !== 304) throw down("the Docker daemon is unavailable");
+        brwLog(target, "info", "brw started", { ms: clock.now() - since });
         posture = (await link.ready(readyTimeoutMs)).browserSandbox;
       }
     } catch (err) {
       link.close();
+      brwLog(target, "warn", "brw not ready", {
+        reattach: wasRunning,
+        code:
+          err instanceof AgentError
+            ? err.code.slice(0, 32)
+            : err instanceof SandboxdFailure
+              ? err.code
+              : "unknown",
+        ms: clock.now() - since,
+      });
       if (err instanceof SandboxdFailure) throw err;
       // `fatal` (e.g. sandbox_required under runsc), a timeout or a lost link: the browser did not start.
       await stopContainer(containerId).catch(() => undefined);
       throw down("the browser could not start");
     }
+    brwLog(target, "info", "brw ready", { reattach: wasRunning, posture, ms: clock.now() - since });
     if (!postureAllowed(containerRuntime, posture)) {
       // D-14: a posture the runtime cannot have is a lie or a silent fallback; never reported, never used.
       link.close();

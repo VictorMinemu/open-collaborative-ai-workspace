@@ -1,13 +1,17 @@
 // The bot browser agent (07.8-07, D-05, D-06, D-07, D-08, D-11, D-13, D-14, P-07, P-09, P-10, P-18).
 //
 // One process per `brw` container, spoken to only by sandboxd over stdio:
-//   stdin   JSON lines `{ id, op, ...input }` (the sandboxd browser op input; `target` is ignored).
+//   stdin   JSON lines `{ id, op, ...input }` (the sandboxd browser op input; `target` is ignored); empty lines are
+//           skipped (sandboxd starts every request with a newline).
 //   stdout  frames: 4-byte big-endian payload length, 1-byte type, payload.
 //             type 0  one screencast JPEG: 1-byte context-id length, the context id (ASCII), the JPEG bytes;
 //             type 1  one JSON message: a response `{ id, ok: true, result }` / `{ id, ok: false, error: { code,
 //                     message } }`, or an event `{ event, contextId?, ... }` (ready, navigated host, download,
 //                     blockedNavigation, focus, size, crashed, closed).
-//   stderr  fixed diagnostic lines only: never a URL, page text, typed text or frame bytes.
+//   stderr  diagnostics only: one JSON object per line, `{ brw: 1, ev, t, ... }` (`diag`), with fixed event names, op
+//           names, error codes, durations and context ids; never a URL, a host, page text, typed text, a cookie, an
+//           error message or frame bytes. sandboxd forwards the lines that pass its allowlist (agent-link.ts) to its
+//           own log; at launch only, Chromium's own fatal lines go out as plain `ocw-brw:` text, which sandboxd drops.
 //
 // Chromium is launched by playwright-core over a pipe (Playwright's `--remote-debugging-pipe`): there is no debugging
 // port, no listening socket and no host IPC. The caller never gets page script, DOM, HTML, cookies, storage, HAR or
@@ -60,7 +64,14 @@ function writeFrame(type, payload) {
 }
 const sendJson = (msg) => writeFrame(FRAME_JSON, Buffer.from(JSON.stringify(msg), "utf8"));
 const emit = (event, fields = {}) => sendJson({ event, ...fields });
-const diag = (line) => process.stderr.write(`ocw-brw: ${line}\n`);
+const T0 = Date.now();
+/** One structured diagnostic line (see the header): `ev` and every field are fixed names, codes, ids or numbers. */
+const diag = (ev, fields = {}) =>
+  process.stderr.write(`${JSON.stringify({ brw: 1, ev, t: Date.now() - T0, ...fields })}\n`);
+/** Chromium's own launch lines (sandbox, missing libraries): plain text, never forwarded by sandboxd. */
+const rawDiag = (line) => process.stderr.write(`ocw-brw: ${line}\n`);
+/** An error's class name only (`TimeoutError`, `Error`), never its message. */
+const errorName = (err) => (/^[A-Za-z]{1,40}$/.test(String(err?.name)) ? err.name : "Error");
 
 function sendJpeg(contextId, jpeg) {
   // Drop on slow: a frame is never queued behind a reader that does not keep up.
@@ -250,19 +261,23 @@ function launchOptions(sandbox) {
 async function launch() {
   const want = (process.env.OCW_BROWSER_CHROMIUM_SANDBOX ?? "on").trim().toLowerCase() !== "off";
   if (!want && runtime === "runsc") fail("sandbox_required", "Chromium's sandbox stays on under gVisor");
+  const started = Date.now();
   try {
     browser = await chromium.launch(launchOptions(want));
     browserSandbox = want ? (runtime === "runsc" ? "chromium+gvisor" : "chromium") : "container-only";
+    diag("launched", { ms: Date.now() - started, posture: browserSandbox, runtime });
   } catch (err) {
     // D-14: only on hardened runc, only when Chromium itself says it has no usable sandbox (a host that restricts
     // unprivileged user namespaces). Never under gVisor, never silently: the posture is reported as container-only.
     const noSandbox = /No usable sandbox/.test(String(err?.message ?? ""));
     if (!want || runtime === "runsc" || !noSandbox) throw err;
-    diag("chromium sandbox unavailable on runc; running container-only");
+    diag("sandbox_fallback");
     browser = await chromium.launch(launchOptions(false));
     browserSandbox = "container-only";
+    diag("launched", { ms: Date.now() - started, posture: browserSandbox, runtime });
   }
   browser.on("disconnected", () => {
+    diag("crashed", { scope: "browser" });
     emit("crashed", { scope: "browser" });
     process.exit(3);
   });
@@ -323,7 +338,10 @@ function attachPage(ctx) {
         secure: url.startsWith("https:"),
       });
   });
-  page.on("crash", () => emit("crashed", { contextId: ctx.id }));
+  page.on("crash", () => {
+    diag("crashed", { scope: "page", ctx: ctx.id });
+    emit("crashed", { contextId: ctx.id });
+  });
   page.on("download", (download) => onDownload(ctx, download));
   ctx.context.on("request", (req) => {
     if (isMainNavigation(req, page)) ctx.pendingNav.add(req);
@@ -401,6 +419,8 @@ async function contextOpen(input) {
   const siteLock = input.siteLock ? String(input.siteLock).toLowerCase() : null;
   const viewport = viewportOf(input.viewport);
   const storageState = parseStorageState(input.storageState);
+  const phase = (name, since) => diag("open_phase", { ctx: id, phase: name, ms: Date.now() - since });
+  let since = Date.now();
   const context = await browser.newContext({
     viewport,
     storageState,
@@ -408,6 +428,7 @@ async function contextOpen(input) {
     // A service worker could answer a navigation outside request routing (and so outside the site lock).
     serviceWorkers: "block",
   });
+  phase("context", since);
   const ctx = {
     id,
     context,
@@ -442,10 +463,14 @@ async function contextOpen(input) {
       await context.route("**/*", (route) => onRoute(ctx, route));
       ctx.routed = true;
     }
+    since = Date.now();
     ctx.page = await context.newPage();
+    phase("page", since);
+    since = Date.now();
     ctx.cdp = await context.newCDPSession(ctx.page);
     await ctx.cdp.send("Page.enable");
     await setWorldScript(ctx);
+    phase("cdp", since);
     attachPage(ctx);
     context.on("page", (p) => onPopup(ctx, p));
   } catch (err) {
@@ -1171,6 +1196,8 @@ async function info() {
   };
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const OPS = {
   info,
   contextOpen,
@@ -1195,6 +1222,8 @@ async function handle(line) {
   try {
     msg = JSON.parse(line);
   } catch {
+    // Its size only: the line may carry a typed text or a storage state.
+    diag("bad_line", { bytes: Buffer.byteLength(line, "utf8") });
     sendJson({ id: null, ok: false, error: { code: "invalid_request", message: "not JSON" } });
     return;
   }
@@ -1204,6 +1233,12 @@ async function handle(line) {
     sendJson({ id, ok: false, error: { code: "invalid_request", message: "unknown op" } });
     return;
   }
+  // Every op but the live input (one per keystroke batch) is logged by name, outcome and duration, never its input.
+  const logged = msg.op !== "contextInput";
+  const ctxId = typeof msg.contextId === "string" && UUID.test(msg.contextId) ? msg.contextId : undefined;
+  const started = Date.now();
+  if (logged) diag("op_start", { op: msg.op, ctx: ctxId });
+  let outcome = "ok";
   let timer;
   try {
     const result = await Promise.race([
@@ -1218,20 +1253,28 @@ async function handle(line) {
     sendJson({ id, ok: true, result });
   } catch (err) {
     if (err instanceof OpError) {
+      outcome = err.code;
       sendJson({ id, ok: false, error: { code: err.code, message: err.message } });
     } else {
       // Never the error's message: it can quote a URL or page text.
-      diag(`op ${msg.op} failed (${err?.name ?? "Error"})`);
+      outcome = "internal";
+      diag("op_error", { op: msg.op, ctx: ctxId, error: errorName(err) });
       sendJson({ id, ok: false, error: { code: "internal", message: "the browser operation failed" } });
     }
   } finally {
     clearTimeout(timer);
+    if (logged) diag("op", { op: msg.op, ctx: ctxId, ms: Date.now() - started, outcome });
   }
 }
 
 function readStdin() {
   let buf = Buffer.alloc(0);
+  let first = true;
   process.stdin.on("data", (chunk) => {
+    if (first) {
+      first = false;
+      diag("stdin_first", { bytes: chunk.length });
+    }
     buf = Buffer.concat([buf, chunk]);
     let nl = buf.indexOf(0x0a);
     while (nl >= 0) {
@@ -1241,11 +1284,14 @@ function readStdin() {
       nl = buf.indexOf(0x0a);
     }
     if (buf.length > LIMITS.stdinLineMaxBytes) {
-      diag("input line too long; exiting");
+      diag("exit", { reason: "line_too_long" });
       process.exit(2);
     }
   });
-  process.stdin.on("end", () => shutdown(0));
+  process.stdin.on("end", () => {
+    diag("exit", { reason: "stdin_end" });
+    shutdown(0);
+  });
 }
 
 function reapIdle() {
@@ -1268,29 +1314,45 @@ async function shutdown(code) {
 if (process.argv.includes("--check")) {
   const exe = process.env.OCW_BROWSER_EXECUTABLE;
   if (!exe || !existsSync(exe) || (statSync(exe).mode & 0o111) === 0) {
-    diag("Chromium is missing");
+    diag("check_failed", { reason: "chromium_missing" });
     process.exit(1);
   }
   const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
-  if (pkg.dependencies?.["playwright-core"] !== "1.63.0") process.exit(1);
+  if (pkg.dependencies?.["playwright-core"] !== "1.64.1") process.exit(1);
   process.stdout.write("ok\n");
   process.exit(0);
 }
 
 mkdirSync(DOWNLOAD_DIR, { recursive: true, mode: 0o700 });
-process.on("SIGTERM", () => shutdown(0));
+process.on("SIGTERM", () => {
+  diag("exit", { reason: "sigterm" });
+  shutdown(0);
+});
+diag("start", { runtime });
 try {
   await launch();
 } catch (err) {
   const code = err instanceof OpError ? err.code : "launch_failed";
-  diag(`browser launch failed (${code})`);
+  const message = String(err?.message ?? "");
+  const reason = /No usable sandbox/.test(message)
+    ? "no_usable_sandbox"
+    : /error while loading shared libraries/.test(message)
+      ? "missing_library"
+      : err?.name === "TimeoutError"
+        ? "timeout"
+        : /FATAL/.test(message)
+          ? "fatal"
+          : "other";
+  diag("launch_failed", { code, reason });
   // At launch no page exists yet: Chromium's own fatal lines (sandbox, missing libraries) are safe and needed.
-  for (const l of String(err?.message ?? "").split("\n")) {
-    if (/FATAL|No usable sandbox|error while loading shared libraries/.test(l)) diag(l.trim().slice(0, 300));
+  for (const l of message.split("\n")) {
+    if (/FATAL|No usable sandbox|error while loading shared libraries/.test(l))
+      rawDiag(l.trim().slice(0, 300));
   }
   emit("fatal", { code, runtime });
   process.exit(1);
 }
 emit("ready", { browserSandbox, runtime, browserVersion: browser.version() });
+diag("ready", { posture: browserSandbox });
 setInterval(reapIdle, 30_000).unref();
 readStdin();

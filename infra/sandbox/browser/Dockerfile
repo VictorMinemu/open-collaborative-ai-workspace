@@ -9,9 +9,11 @@
 #
 # Every input is pinned and checked at build time (07.8-07 package gate):
 #   - base image by digest;
-#   - playwright-core@1.63.0 from the committed lockfile, its npm sha512 integrity asserted;
-#   - the Chromium headless shell that playwright-core 1.63.0 pins (revision 1243, 153.0.8010.12) from Playwright's CDN,
-#     verified by sha256 (identical to Google's Chrome for Testing archive of the same version);
+#   - playwright-core@1.64.1 from the committed lockfile, its npm sha512 integrity asserted;
+#   - the Chrome for Testing headless shell of the current Chrome stable, 156.0.8078.47 (Google's official bucket,
+#     verified by sha256). playwright-core 1.64.1 is built against Chromium 156.0.8078.4 (revision 1248), a 156 beta;
+#     the stable build of the same milestone and branch carries the security fixes the beta lacks (07.8 hardening).
+#     The build asserts that the agent's playwright-core targets this milestone and branch (156.0.8078.x).
 #   - Debian packages: playwright-core's `install-deps chromium` list without `xvfb` (headless shell needs no X server),
 #     refused unless apt resolves every package from Debian 12 (bookworm / bookworm-security).
 ARG BASE=node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
@@ -20,12 +22,12 @@ ARG TARGETARCH
 FROM ${BASE} AS base
 
 FROM base AS chromium-amd64
-ADD --checksum=sha256:a9da028861a0cf789ff25c2fed45f5f1aaf969ed9247835b6a7821a4f7af9d1d \
-    https://cdn.playwright.dev/builds/cft/153.0.8010.12/linux64/chrome-headless-shell-linux64.zip /chromium.zip
+ADD --checksum=sha256:0d5acc62c3e213f8c87d3c298d66ffcf9a236d12ea4b9f85318bf85dbc279daa \
+    https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.47/linux64/chrome-headless-shell-linux64.zip /chromium.zip
 
 FROM base AS chromium-arm64
-ADD --checksum=sha256:d433c45172c7836e38124fe545f767b02210bfb43a6262f08a297473a8e91c99 \
-    https://cdn.playwright.dev/builds/cft/153.0.8010.12/linux-arm64/chrome-headless-shell-linux-arm64.zip /chromium.zip
+ADD --checksum=sha256:955059fa7020d7be85eb503e21339fd4d718f51f5996d3b60633fbf908bda132 \
+    https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.47/linux-arm64/chrome-headless-shell-linux-arm64.zip /chromium.zip
 
 FROM chromium-${TARGETARCH} AS chromium-zip
 
@@ -33,13 +35,13 @@ FROM base AS agent
 WORKDIR /app
 COPY package.json package-lock.json ./
 # Exact pin, sha512 integrity per tarball, no lifecycle scripts, no dev dependencies; network at build time only.
-RUN grep -q '"integrity": "sha512-rYCsBF/M5HjUch52bbtVONEFjv6Xu8sm8h72dNlR5bzIE1fvC/bxgspzkjSfU+MweEMmPM8KJebG6nnyxo5mCg=="' package-lock.json \
+RUN grep -q '"integrity": "sha512-BC4s8y6SEVA6Q1rSxZTto8hI1KUI3xXlHGZgvGqP4IqPdI/a6FX9H29IDNz7vKo9l21b6LfYosScPL6M3xxyDQ=="' package-lock.json \
  && npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
  && rm -rf node_modules/.package-lock.json /root/.npm
 COPY unzip.mjs ./
 RUN --mount=type=bind,from=chromium-zip,source=/chromium.zip,target=/tmp/chromium.zip \
     node unzip.mjs /tmp/chromium.zip /opt/chromium \
- && test "$(node -p 'JSON.parse(require("fs").readFileSync("node_modules/playwright-core/browsers.json", "utf8")).browsers.find((b) => b.name === "chromium-headless-shell").revision')" = 1243
+ && test "$(node -p 'JSON.parse(require("fs").readFileSync("node_modules/playwright-core/browsers.json", "utf8")).browsers.find((b) => b.name === "chromium-headless-shell").browserVersion.split(".").slice(0, 3).join(".")')" = 156.0.8078
 
 FROM base
 # Only Debian 12 sources, then only Debian 12 origins for every package apt would install (the gate's condition).

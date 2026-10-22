@@ -21,7 +21,7 @@
   },
   "devDependencies": {
     "@ocw/config": "workspace:*",
-    "@playwright/test": "1.63.0",
+    "@playwright/test": "1.64.1",
     "@types/node": "24.13.6",
     "electron": "44.4.5",
     "electron-builder": "26.16.1",

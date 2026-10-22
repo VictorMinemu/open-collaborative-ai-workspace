@@ -139,6 +139,8 @@ async function main() {
     image: env.OCW_SANDBOX_BRW_IMAGE ?? null,
     seccompProfile,
     onEvent: (event) => events.emit(event),
+    // 07.8 hardening: the browser's lifecycle and the agent's allowlisted diagnostics (ids, names, codes, durations).
+    log: writeLog,
   });
 
   let info: SandboxdInfo | null = null;

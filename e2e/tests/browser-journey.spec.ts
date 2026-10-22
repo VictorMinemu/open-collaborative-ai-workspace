@@ -168,13 +168,9 @@ test("the bot can't read the page → it asks → Open and sign in → Sam types
   await cell.sandbox(m, "ocw_sandbox_exec", { argv: ["true"] });
   connectFakeSites();
   await cell.browser(m, "ocw_browser_close", {});
-  // A fresh brw's first contextOpen sometimes never answers (the API says service_unavailable after 15 s; seen in 2 of
-  // 9 fresh starts on Docker Desktop, recorded for 07.8-29). One retry, logged, so the journey itself is proven.
-  let first = await cell.browser(m, "ocw_browser_open", { url: `http://${SITE}/login` });
-  if (first === "refused (service_unavailable)") {
-    console.log(`[journey ${w}] first open: ${first}; retrying once`);
-    first = await cell.browser(m, "ocw_browser_open", { url: `http://${SITE}/login` });
-  }
+  // A fresh brw's first open answers at once (07.8 hardening: sandboxd's attach no longer sends a body the Engine could
+  // pass on to the agent's stdin, which once left the first request unanswered). No retry: a regression fails here.
+  const first = await cell.browser(m, "ocw_browser_open", { url: `http://${SITE}/login` });
   expect(first).toBe(`opened ${SITE}`);
   const read = await cell.browser(m, "ocw_browser_snapshot", {});
   expect(read).toContain("Sign in to Panel");

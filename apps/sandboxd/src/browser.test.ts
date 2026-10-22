@@ -3,7 +3,14 @@ import type { AddressInfo } from "node:net";
 import { PassThrough } from "node:stream";
 import { decodeFrameHeader, FRAME_TYPES, SANDBOXD_LABELS, SandboxdFrameControl } from "@ocw/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import { AgentError, type AgentLink, AgentOutputReader, type AgentReady, linkOverStream } from "./agent-link";
+import {
+  type AgentDiag,
+  AgentError,
+  type AgentLink,
+  AgentOutputReader,
+  type AgentReady,
+  linkOverStream,
+} from "./agent-link";
 import {
   agentFailure,
   BROWSER_HOLD_MS,
@@ -335,6 +342,7 @@ class FakeLink implements AgentLink {
   private frames: Array<(c: string, j: Buffer) => void> = [];
   private events: Array<(e: Record<string, unknown>) => void> = [];
   private closes: Array<() => void> = [];
+  private diags: Array<(d: AgentDiag) => void> = [];
   closed = false;
   constructor(public posture: string | null = "chromium") {}
   async request(op: string, input: Record<string, unknown>) {
@@ -364,6 +372,12 @@ class FakeLink implements AgentLink {
   }
   onClose(l: () => void) {
     this.closes.push(l);
+  }
+  onDiag(l: (d: AgentDiag) => void) {
+    this.diags.push(l);
+  }
+  emitDiag(d: AgentDiag) {
+    for (const l of this.diags) l(d);
   }
   close() {
     if (this.closed) return;
@@ -413,7 +427,9 @@ function setup(opts: { posture?: string | null; runtimes?: string[] } = {}) {
   sandboxes.setPolicy(testPolicy(ORG));
   const { egress, attached, proxy } = fakeEgress();
   const links: FakeLink[] = [];
+  const logs: LogLine[] = [];
   const browsers = createBrowsers({
+    log: (line) => logs.push(line),
     docker,
     sandboxes,
     egress,
@@ -436,6 +452,7 @@ function setup(opts: { posture?: string | null; runtimes?: string[] } = {}) {
     attached,
     proxy,
     links,
+    logs,
     advance: (ms: number) => {
       now += ms;
     },
@@ -446,6 +463,39 @@ function setup(opts: { posture?: string | null; runtimes?: string[] } = {}) {
 const viewport = { width: 960, height: 600 };
 
 describe("createBrowsers", () => {
+  it("logs each start (started, ready, posture, durations) and the agent's diagnostics with the bot's ids only", async () => {
+    const s = setup();
+    await s.browsers.ensure(target);
+    const link = s.links[0] as FakeLink;
+    link.emitDiag({ brw: 1, ev: "op", t: 90, op: "contextOpen", ctx: CTX, ms: 58, outcome: "ok" });
+    link.emitDiag({ brw: 1, ev: "launch_failed", t: 1, code: "launch_failed", reason: "no_usable_sandbox" });
+    const ids = { orgId: ORG, agentId: AGENT };
+    expect(s.logs).toEqual([
+      { level: "info", msg: "brw started", ...ids, ms: 0 },
+      { level: "info", msg: "brw ready", ...ids, reattach: false, posture: "chromium", ms: 0 },
+      { level: "info", msg: "brw op", ...ids, t: 90, op: "contextOpen", ctx: CTX, ms: 58, outcome: "ok" },
+      {
+        level: "warn",
+        msg: "brw launch_failed",
+        ...ids,
+        t: 1,
+        code: "launch_failed",
+        reason: "no_usable_sandbox",
+      },
+    ]);
+    // A browser that does not start says why, with a code only.
+    const fatal = setup({ posture: null });
+    await expect(fatal.browsers.ensure(target)).rejects.toMatchObject({ status: 503 });
+    expect(fatal.logs.at(-1)).toEqual({
+      level: "warn",
+      msg: "brw not ready",
+      ...ids,
+      reattach: false,
+      code: "sandbox_required",
+      ms: 0,
+    });
+  });
+
   it("browserEnsure: brw on the bot's browser network, the proxy attached first, posture reported (D-14)", async () => {
     const s = setup();
     expect(s.browsers.posture()).toBeNull();

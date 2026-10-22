@@ -44,7 +44,7 @@ import { createNotificationModule } from "./modules/notification";
 import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
 import { createPluginsModule } from "./modules/plugins";
 import { createOnlineSet, createRealtimeModule, createRealtimeService } from "./modules/realtime";
-import { createSandboxModule, type SandboxModule } from "./modules/sandbox";
+import { createSandboxModule, pushPolicy, type SandboxModule } from "./modules/sandbox";
 import { createSearchModule } from "./modules/search";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createToolApprovalModule, type ToolApprovalService } from "./modules/tool-approval";
@@ -332,7 +332,11 @@ export async function buildApp(
     createBotCapabilitiesModule(core, { memory, sandbox: sandbox.service }),
     createMcpModule(core), // Phase 3.1: MCP server registry (D-13)
     createConnectorsModule(core), // Phase 07.4: members' own connector accounts (D-01 … D-03, CONN-01 … CONN-03)
-    createKeychainModule(core), // Phase 07.4: keys bots use by handle (D-04, CONN-05)
+    // Phase 07.4: keys bots use by handle (D-04, CONN-05); 07.8 hardening: a private-host change re-pushes the sandbox
+    // policy, as a settings change does.
+    createKeychainModule(core, {
+      onPrivateHostsChanged: (organizationId) => pushPolicy(core, sandbox.client, organizationId),
+    }),
     createPluginsModule(core), // Phase 3.1: OpenClaw Marketplace (D-14)
     // B2; 06-10: model labels in persona history; 07.2-11: memory tools and memory files in the turn
     createAgentChannelModule(core, {

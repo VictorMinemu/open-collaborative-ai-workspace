@@ -252,7 +252,7 @@ export function createEgress(options: EgressOptions): Egress {
     try {
       stream = await docker.hijack(
         `/containers/${encodeURIComponent(id)}/attach?stream=1&stdout=1&stderr=1`,
-        {},
+        null,
       );
     } catch {
       throw dockerDown("cannot follow the egress proxy");

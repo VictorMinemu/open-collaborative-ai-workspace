@@ -20,7 +20,9 @@
 #
 # Usage (repo root):  bash infra/sandbox/test/run-stack-smoke.sh [--only open|full]
 #   --only open    Task 1's tracer only: open → navigate → snapshot → frames → egress event, containment checks
+#   --only coldstart  fresh browsers, each first contextOpen right after ensure, timed (STACK_COLDSTARTS, default 8)
 #   (default)      every step
+#   STACK_KEEP_LOG=<file>  copy sandboxd's log there on exit
 #   STACK_REAL_EGRESS=0  skip the public-internet navigation (on by default; recorded when the network forbids it)
 #   DOCKER_SOCKET=<path> the daemon socket (default: the current docker context's unix socket)
 #
@@ -46,8 +48,8 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
-case "$ONLY" in all | open) ;; *)
-  printf 'unknown --only: %s (open or all)\n' "$ONLY" >&2
+case "$ONLY" in all | open | coldstart) ;; *)
+  printf 'unknown --only: %s (open, coldstart or all)\n' "$ONLY" >&2
   exit 2
   ;;
 esac
@@ -97,6 +99,8 @@ on_exit() {
     log "--- sandboxd log (ids, ops and statuses only) ---"
     tail -n 40 "$WORK/sandboxd.log" >&2 || true
   fi
+  # STACK_KEEP_LOG=<file>: keep sandboxd's log (ids, ops, statuses, brw diagnostics) for a diagnosis.
+  if [ -n "${STACK_KEEP_LOG:-}" ] && [ -f "$WORK/sandboxd.log" ]; then cp "$WORK/sandboxd.log" "$STACK_KEEP_LOG" || true; fi
   cleanup_ns
   docker image rm -f "$SBX_IMAGE" "$BRW_IMAGE" "$EGRESS_IMAGE" >/dev/null 2>&1 || true
   local left
