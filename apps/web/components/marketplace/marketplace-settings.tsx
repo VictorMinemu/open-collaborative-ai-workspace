@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -42,6 +43,8 @@ export function MarketplaceSettings() {
 
   return (
     <Shell>
+      <SandboxPackagesPointer />
+
       {installed.isPending ? (
         <Skeleton className="h-36 rounded-2xl" />
       ) : installed.isError ? (
@@ -61,6 +64,19 @@ export function MarketplaceSettings() {
         onOpenChange={(o) => !o && setOpen(null)}
       />
     </Shell>
+  );
+}
+
+/** R12: tools that run commands, files or a browser belong in a bot's sandbox, as sandbox packages (07.8-23). */
+function SandboxPackagesPointer() {
+  return (
+    <p className="-mb-6 text-muted-foreground text-xs" data-testid="marketplace-sandbox-pointer">
+      Packages for bot sandboxes are in{" "}
+      <Link href="/settings/sandbox" className="font-medium text-foreground underline underline-offset-2">
+        Settings › Sandbox &amp; Browser
+      </Link>
+      .
+    </p>
   );
 }
 

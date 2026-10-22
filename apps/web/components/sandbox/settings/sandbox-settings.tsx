@@ -24,13 +24,14 @@ import { IsolationCard, unavailableReason } from "./isolation-card";
 import { KillSwitchBanner, KillSwitchCard } from "./kill-switch-card";
 import { CONFLICT_NOTICE, LimitsForm, type SaveResult } from "./limits-form";
 import { OrgSwitchCard } from "./org-switch-card";
+import { SandboxPackages } from "./sandbox-packages";
 
 /**
  * Settings › Sandbox & Browser (07.8-19; SBX-03, SBX-05, BRW-04, D-09, D-11, D-12, UI-SPEC §4.2-4.3): top to bottom the
  * kill-switch banner (only when engaged), the organization switch, the isolation in use, Limits, Network and Stop
  * everything. The page decides nothing: the nav entry and the page come from `bot.manage` as the API resolves it, the
- * API answers 403 to anyone else, and every state shown is the API's view. Sandbox packages (07.8-23) mount between
- * Network and Stop everything.
+ * API answers 403 to anyone else, and every state shown is the API's view. Sandbox packages (07.8-23) sit between
+ * Network and Stop everything; managing them needs `plugin.manage` too (read-only otherwise).
  */
 
 type Section = "limits" | "network";
@@ -172,6 +173,8 @@ function SettingsBody({ view }: { view: SandboxSettingsView }) {
             }}
           />
         </Section>
+
+        <SandboxPackages />
 
         <Section title="Stop everything">
           <KillSwitchCard
