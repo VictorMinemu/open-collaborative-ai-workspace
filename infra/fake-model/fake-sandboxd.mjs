@@ -20,7 +20,8 @@
 // signed in), /__control/browser/event {target, contextId, event: crashed|closed|focus_sensitive|download}.
 //
 // Like sandboxd, it holds no default policy: until the API pushes an organization's policy, `ensure`, `restart`,
-// `exec` and the browser context ops (they would start or run a container) and `filesWrite`, `filesUpload` and `filesImport` (they need the quota)
+// `exec`, the browser context ops and the package ops (they would start or run a container) and `filesWrite`,
+// `filesUpload` and `filesImport` (they need the quota)
 // answer 409 `policy_missing`; with `killed` pushed, the first three answer 409 `killed`. A push older than the held
 // one (lower `version`) is ignored.
 //
@@ -66,6 +67,10 @@ const RUN_OPS = new Set([
   "contextTakeover",
   "contextResize",
   "contextInput",
+  // Package runs start review and installer containers (sandboxd's POLICY_GATE "run", 07.8-17).
+  "packageReview",
+  "packageInstall",
+  "packageRemove",
 ]);
 /** Ops that write into the workspace and need the quota: no policy → policy_missing. */
 const QUOTA_OPS = new Set(["filesWrite", "filesUpload", "filesImport"]);
@@ -861,7 +866,16 @@ export function createFakeSandboxd(opts = {}) {
         throw invalid("package");
       const c = coordsOf(p);
       const now = treeOf(c);
-      const recorded = sha256Hex(canonicalTree(entriesOfLockfile(p.lockfile)));
+      const recordedEntries = entriesOfLockfile(p.lockfile);
+      // Like sandboxd (07.8-17): nothing pinned by sha1 is ever installed.
+      if (recordedEntries.some((e) => !/^(sha512-|sha256:)/.test(e.integrity))) {
+        return {
+          id: p.id,
+          status: "failed",
+          detail: "a dependency is pinned by sha1 only; it cannot be installed (review it again)",
+        };
+      }
+      const recorded = sha256Hex(canonicalTree(recordedEntries));
       // Like `npm ci` over the recorded lockfile, then the recomputed hash (P-12): nothing is written on a mismatch.
       if (recorded !== p.treeSha256)
         return { id: p.id, status: "failed", detail: "tree changed", code: "tree_changed" };

@@ -667,7 +667,10 @@ export const SandboxdPackageInstall = z.strictObject({
 });
 export type SandboxdPackageInstall = z.infer<typeof SandboxdPackageInstall>;
 
-/** Per package; `digest_mismatch` / `tree_changed` mark the package `package_changed_upstream`. */
+/**
+ * Per package; `digest_mismatch` / `tree_changed` mark the package `package_changed_upstream`. `timeout` (07.8-17): the
+ * install outlasted sandboxd's deadline (under the API's 600 s), nothing was written; a later start tries again.
+ */
 export const SandboxdPackageInstallResult = z.object({
   results: z
     .array(
@@ -675,7 +678,7 @@ export const SandboxdPackageInstallResult = z.object({
         id: Id,
         status: z.enum(["installed", "failed"]),
         detail: z.string().max(200),
-        code: z.enum(["digest_mismatch", "tree_changed"]).optional(),
+        code: z.enum(["digest_mismatch", "tree_changed", "timeout"]).optional(),
       }),
     )
     .max(200),

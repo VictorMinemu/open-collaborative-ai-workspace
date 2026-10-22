@@ -15,12 +15,14 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
 
 # The bot's user. /workspace exists and belongs to 10001 in the image, so a fresh named volume mounted there inherits
-# that owner (Pitfall 4). /opt/ocw-packages is where approved sandbox packages are mounted read-only later (P-12).
-# No setuid or setgid binary is left (no-new-privileges already neutralises them; this is defence in depth).
+# that owner (Pitfall 4). /opt/ocw-packages is the bot's packages volume (read-only in `sbx`, written only by an
+# installer run, 07.8-17, P-12); /staging is the scratch volume of a package review or installer run. Both belong to
+# 10001 for the same reason. No setuid or setgid binary is left (no-new-privileges already neutralises them; this is
+# defence in depth).
 RUN groupadd --gid 10001 ocw \
  && useradd --uid 10001 --gid 10001 --home-dir /workspace --no-create-home --shell /bin/sh ocw \
- && mkdir -p /workspace /opt/ocw-packages \
- && chown 10001:10001 /workspace /opt/ocw-packages \
+ && mkdir -p /workspace /opt/ocw-packages /staging \
+ && chown 10001:10001 /workspace /opt/ocw-packages /staging \
  && find / -xdev -type f -perm /6000 -exec chmod a-s {} + \
  && test -z "$(find / -xdev -type f -perm /6000 -print -quit)"
 
@@ -29,7 +31,12 @@ RUN groupadd --gid 10001 ocw \
 COPY --chmod=0755 ocw-run /usr/local/bin/ocw-run
 COPY --chmod=0755 ocw-files /usr/local/bin/ocw-files
 
-ENV HOME=/workspace
+# sandboxd sets the whole environment of every container it creates (spec.ts SHELL_ENV); this default only keeps a
+# hand-run container in the same order: approved package bins after the system paths, never before them.
+ENV HOME=/workspace \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/ocw-packages/bin \
+    NODE_PATH=/opt/ocw-packages/node_modules \
+    PYTHONPATH=/opt/ocw-packages/python
 WORKDIR /workspace
 USER 10001:10001
 # sandboxd always sets Cmd and Init (docker-init as PID 1); this default only keeps the container idle.

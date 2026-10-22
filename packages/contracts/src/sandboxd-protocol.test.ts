@@ -263,6 +263,12 @@ describe("broker package primitives (P-12, T-07.8-01-06)", () => {
       ],
     };
     expect(SandboxdPackageInstallResult.parse(result).results[0]?.code).toBe("tree_changed");
+    // 07.8-17: an install past sandboxd's deadline says so with its own code.
+    expect(
+      SandboxdPackageInstallResult.parse({
+        results: [{ id: ID, status: "failed", detail: "the install took too long", code: "timeout" }],
+      }).results[0]?.code,
+    ).toBe("timeout");
     expect(
       SandboxdPackageInstallResult.safeParse({
         results: [{ id: ID, status: "failed", detail: "", code: "other" }],

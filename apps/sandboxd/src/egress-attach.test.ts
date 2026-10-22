@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { Docker, DockerMethod, DockerResponse } from "./docker";
 import { compileEgressPolicy, createEgress, type EgressEntry, parseDecisionLine } from "./egress-attach";
 import type { SandboxdEventInput } from "./sandboxes";
-import { browserNetworkSpec, egressNames, networkSpec } from "./spec";
+import { browserNetworkSpec, egressNames, networkSpec, packageRunNetworkSpec } from "./spec";
 import { testPolicy } from "./testing/policy";
 
 const ORG = "0199f0a0-0000-7000-8000-00000000000a";
@@ -22,7 +22,7 @@ const policy = (orgId: string, over: Partial<SandboxdOrgPolicy> = {}) =>
     ...over,
   });
 
-const entry = (address: string, orgId: string, agentId: string, kind: "sbx" | "brw"): EgressEntry => ({
+const entry = (address: string, orgId: string, agentId: string, kind: EgressEntry["kind"]): EgressEntry => ({
   network: `${kind}-${agentId}`,
   address,
   target: { orgId, agentId },
@@ -97,6 +97,52 @@ describe("compileEgressPolicy", () => {
     expect(
       compileEgressPolicy({ ...base, entries: [entry("10.1.0.2", ORG, A, "sbx")], botSubnets: [] }),
     ).toBeNull();
+  });
+});
+
+describe("compileEgressPolicy: package review and installer runs (07.8-17, P-12)", () => {
+  const REGISTRIES = ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"];
+
+  it("gives an installer or review network the registries only, whatever the bot's shell egress", () => {
+    const file = compileEgressPolicy({
+      entries: [entry("10.4.0.2", ORG, A, "installer"), entry("10.5.0.2", ORG, B, "review")],
+      policies: new Map([[ORG, policy(ORG, { sandboxEgress: "off", allowHosts: ["evil.example"] })]]),
+      botSubnets: ["10.4.0.0/24", "10.5.0.0/24"],
+      ownAddresses: ["10.4.0.2", "10.5.0.2"],
+      registries: REGISTRIES,
+    });
+    for (const n of file?.networks ?? []) {
+      expect(n.mode).toBe("allowlist");
+      expect(n.allowHosts).toEqual(REGISTRIES);
+      // The organization's private-host fixtures still apply (an internal mirror), never its allow-list.
+      expect(n.privateHosts).toEqual(["panel.fake.test:8080"]);
+    }
+    expect(file?.networks.map((n) => n.kind)).toEqual(["installer", "review"]);
+  });
+
+  it("fails closed for runs too: no policy, a killed organization or no registries is off", () => {
+    const base = { botSubnets: ["10.4.0.0/24"], ownAddresses: ["10.4.0.2"] };
+    const none = compileEgressPolicy({
+      ...base,
+      entries: [entry("10.4.0.2", ORG, A, "installer")],
+      policies: new Map(),
+      registries: REGISTRIES,
+    });
+    expect(none?.networks[0]).toMatchObject({ mode: "off", allowHosts: [], privateHosts: [] });
+    const killed = compileEgressPolicy({
+      ...base,
+      entries: [entry("10.4.0.2", ORG, A, "installer")],
+      policies: new Map([[ORG, policy(ORG, { killed: true })]]),
+      registries: REGISTRIES,
+    });
+    expect(killed?.networks[0]?.mode).toBe("off");
+    const empty = compileEgressPolicy({
+      ...base,
+      entries: [entry("10.4.0.2", ORG, A, "review")],
+      policies: new Map([[ORG, policy(ORG)]]),
+      registries: [],
+    });
+    expect(empty?.networks[0]?.mode).toBe("off");
   });
 });
 
@@ -309,6 +355,7 @@ function setup() {
     onEvent: (e) => events.push(e),
     reloadTimeoutMs: 500,
     retryMs: 10_000,
+    registries: ["registry.test"],
   });
   return { docker, egress, events, sbxNet: sbxNet.Name, brwNet: brwNet.Name, bSbx: bSbx.Name };
 }
@@ -404,6 +451,29 @@ describe("createEgress", () => {
         allowed: true,
       },
     ]);
+    s.egress.close();
+  });
+
+  it("attaches to a package run's own network with the registries-only policy and detaches from that one only", async () => {
+    const s = setup();
+    const RUN = "0199f0a0-3333-7000-8000-00000000000d";
+    const run = packageRunNetworkSpec({ ns: NS, orgId: ORG, agentId: A, runId: RUN, kind: "installer" });
+    s.docker.addBotNetwork(run.Name, run.Labels, "10.6.0.0/24");
+    await s.egress.setOrgPolicy(policy(ORG, { sandboxEgress: "off" }));
+    await s.egress.attach({ orgId: ORG, agentId: A }, "sbx", s.sbxNet);
+    // The installer label must match the kind asked for.
+    await expect(s.egress.attach({ orgId: ORG, agentId: A }, "review", run.Name)).rejects.toMatchObject({
+      code: "label_mismatch",
+    });
+    await s.egress.attach({ orgId: ORG, agentId: A }, "installer", run.Name);
+    const f = file(s.docker);
+    const inst = f.networks.find((n: { kind: string }) => n.kind === "installer");
+    expect(inst).toMatchObject({ mode: "allowlist", allowHosts: ["registry.test"] });
+    expect(f.networks.find((n: { kind: string }) => n.kind === "sbx").mode).toBe("off");
+    expect(f.botNetworks).toContain("10.6.0.0/24");
+    await s.egress.detachNetwork(run.Name);
+    expect(s.egress.entries().map((e) => e.kind)).toEqual(["sbx"]);
+    expect(file(s.docker).networks.map((n: { kind: string }) => n.kind)).toEqual(["sbx"]);
     s.egress.close();
   });
 

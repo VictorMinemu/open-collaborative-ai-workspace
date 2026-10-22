@@ -58,7 +58,7 @@ export type DockerRuntime = "runsc" | "runc";
  * Object name kinds: containers (`sbx`, `brw`, the `files` helper), volumes (`ws`, `pkg`), the bot's shell network
  * (`net`) and its browser network (`bnet`).
  */
-export type NameKind = "sbx" | "brw" | "files" | "ws" | "pkg" | "net" | "bnet";
+export type NameKind = "sbx" | "brw" | "files" | "ws" | "pkg" | "net" | "bnet" | "pnet" | "prun";
 
 /** A namespace is part of every object name: lower-case letters, digits and dashes. */
 export const NAMESPACE_RE = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
@@ -147,8 +147,44 @@ export interface ShellSpecInput extends ObjectSpecInput {
   runtime: DockerRuntime;
   network: string;
   volume: string;
+  /** The bot's packages volume (`ocw-pkg-<ns>-<key>`), mounted read-only at /opt/ocw-packages (07.8-17). */
+  packagesVolume: string;
   limits: ContainerLimits;
 }
+
+/** Where approved sandbox packages live (P-12): read-only in `sbx`, read-write only in the installer. */
+export const PACKAGES_DIR = "/opt/ocw-packages";
+/** The scratch volume of a review or installer run: downloads and builds happen here, never in the bot's volume. */
+export const STAGING_DIR = "/staging";
+
+/** The namespace's egress proxy as every bot network names it (07.8-12/13): the only way out. */
+export const EGRESS_ALIAS = "sandbox-egress";
+export const EGRESS_PORT = 3128;
+export const EGRESS_PROXY_URL = `http://${EGRESS_ALIAS}:${EGRESS_PORT}`;
+const NO_PROXY = "localhost,127.0.0.1,::1";
+
+/** The proxy variables curl, pip, npm, apt and Python honour; no credential: identity is the arrival network. */
+export const PROXY_ENV: readonly string[] = [
+  `HTTP_PROXY=${EGRESS_PROXY_URL}`,
+  `HTTPS_PROXY=${EGRESS_PROXY_URL}`,
+  `http_proxy=${EGRESS_PROXY_URL}`,
+  `https_proxy=${EGRESS_PROXY_URL}`,
+  `NO_PROXY=${NO_PROXY}`,
+  `no_proxy=${NO_PROXY}`,
+];
+
+/**
+ * The whole environment of a bot's `sbx` (07.8-17, WINDOWS #253): package bins after the system paths (a package never
+ * shadows a system command), Node and Python find approved packages, and every tool uses the egress proxy by default.
+ * Constants only: nothing here comes from a request, and no secret is ever set.
+ */
+export const SHELL_ENV: readonly string[] = [
+  `HOME=${WORKSPACE}`,
+  `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PACKAGES_DIR}/bin`,
+  `NODE_PATH=${PACKAGES_DIR}/node_modules`,
+  `PYTHONPATH=${PACKAGES_DIR}/python`,
+  ...PROXY_ENV,
+];
 
 /**
  * The `ContainerCreate` body of a bot's `sbx` (research Code Examples, hardened profile table). The command only keeps
@@ -161,7 +197,7 @@ export function shellSpec(p: ShellSpecInput) {
     User: SANDBOX_USER,
     Cmd: ["sleep", "infinity"],
     WorkingDir: WORKSPACE,
-    Env: [`HOME=${WORKSPACE}`],
+    Env: [...SHELL_ENV],
     Labels: labelsFor({ ns: p.ns, orgId: p.orgId, agentId: p.agentId, kind: "sbx" }),
     AttachStdin: false,
     AttachStdout: false,
@@ -181,7 +217,10 @@ export function shellSpec(p: ShellSpecInput) {
       MemorySwap: limits.memoryBytes,
       NanoCpus: limits.nanoCpus,
       Tmpfs: { "/tmp": "rw,noexec,nosuid,nodev,size=256m" },
-      Mounts: [{ Type: "volume", Source: p.volume, Target: WORKSPACE, ReadOnly: false }],
+      Mounts: [
+        { Type: "volume", Source: p.volume, Target: WORKSPACE, ReadOnly: false },
+        { Type: "volume", Source: p.packagesVolume, Target: PACKAGES_DIR, ReadOnly: true },
+      ],
       NetworkMode: p.network,
       PublishAllPorts: false,
       RestartPolicy: { Name: "no" },
@@ -204,22 +243,24 @@ export interface FilesSpecInput extends ObjectSpecInput {
  * `ocw-files`.
  */
 export function filesSpec(p: FilesSpecInput) {
-  const spec = shellSpec({ ...p, network: "none", limits: FILES_HELPER_LIMITS });
+  const spec = shellSpec({ ...p, network: "none", packagesVolume: "", limits: FILES_HELPER_LIMITS });
   return {
     ...spec,
     Cmd: ["sleep", String(FILES_HELPER_SECONDS)],
     Labels: labelsFor({ ns: p.ns, orgId: p.orgId, agentId: p.agentId, kind: "files" }),
-    HostConfig: { ...spec.HostConfig, NetworkMode: "none" },
+    // The workspace only: people's file operations never see the packages volume.
+    HostConfig: {
+      ...spec.HostConfig,
+      NetworkMode: "none",
+      Mounts: [{ Type: "volume", Source: p.volume, Target: WORKSPACE, ReadOnly: false }],
+    },
   };
 }
 
 // ---------------------------------------------------------------- the browser (07.8-13, D-01, D-05, D-11, D-14)
 
-/** The proxy's name on every bot network (the network alias of the namespace's `sandbox-egress`). */
-export const EGRESS_ALIAS = "sandbox-egress";
-export const EGRESS_PORT = 3128;
 /** What `brw`'s Chromium is told to use: the only way out of a bot network. */
-export const BROWSER_PROXY = `http://${EGRESS_ALIAS}:${EGRESS_PORT}`;
+export const BROWSER_PROXY = EGRESS_PROXY_URL;
 /** Chromium's shared memory (spike i): Playwright's `--disable-dev-shm-usage` aside, the renderer needs room. */
 export const BRW_SHM_BYTES = 512 * 1024 * 1024;
 
@@ -382,4 +423,145 @@ export function egressSpec(p: { ns: string; image: string }) {
       LogConfig: { Type: "none", Config: {} },
     },
   };
+}
+
+// ---------------------------------------------------------------- sandbox packages (07.8-17, D-03, D-11, P-12)
+
+/** The bot's packages volume: approved packages, written only by an installer run, read-only in `sbx`. */
+export function packagesVolumeSpec(p: ObjectSpecInput) {
+  return {
+    Name: nameFor("pkg", p.ns, p.agentId),
+    Driver: "local",
+    Labels: labelsFor({ ns: p.ns, orgId: p.orgId, agentId: p.agentId, kind: "sbx" }),
+  };
+}
+
+/** A review or installer run: fixed limits, whatever the organization's (it only downloads, builds and copies). */
+export const INSTALLER_LIMITS: ContainerLimits = {
+  nanoCpus: 2_000_000_000,
+  memoryBytes: 2 * 1024 * 1024 * 1024,
+  pids: 1024,
+};
+
+/** `ocw-pnet-<ns>-<key>` (the run's own network) and `ocw-prun-<ns>-<key>` (its container), from the run's id. */
+export function packageRunNames(ns: string, runId: string) {
+  return { network: nameFor("pnet", ns, runId), container: nameFor("prun", ns, runId) };
+}
+
+export interface PackageRunInput extends ObjectSpecInput {
+  /** A fresh id per run: two runs never share a network or a container. */
+  runId: string;
+}
+
+/**
+ * Each review or install run gets its own internal network holding only its container and the egress proxy, which
+ * applies the registries-only policy to it (`kind` installer or review), so two organizations' installers never meet.
+ */
+export function packageRunNetworkSpec(p: PackageRunInput & { kind: "installer" | "review" }) {
+  return {
+    Name: packageRunNames(p.ns, p.runId).network,
+    Driver: "bridge",
+    Internal: true,
+    Attachable: false,
+    EnableIPv6: false,
+    Labels: labelsFor({ ns: p.ns, orgId: p.orgId, agentId: p.agentId, kind: p.kind }),
+  };
+}
+
+export interface RunSpecInput extends PackageRunInput {
+  /** The configured `sbx` image (it carries node, npm, python3, pip, apt and dpkg-deb), never a caller's. */
+  image: string;
+  runtime: DockerRuntime;
+  /** The run's own network, or "none" (a removal reaches nothing). */
+  network: string;
+  /** The run's environment, built by sandboxd from its configuration (proxy and registry URLs; no secret). */
+  env: readonly string[];
+  /** The container ends on its own after this long, and Docker removes it (AutoRemove) with its scratch volume. */
+  lifetimeSeconds: number;
+}
+
+function runSpec(p: RunSpecInput, kind: "installer" | "review", packagesVolume: string | null) {
+  const limits = clampLimits(INSTALLER_LIMITS);
+  const labels = labelsFor({ ns: p.ns, orgId: p.orgId, agentId: p.agentId, kind });
+  const mounts: Array<Record<string, unknown>> = [];
+  if (packagesVolume !== null) {
+    mounts.push({ Type: "volume", Source: packagesVolume, Target: PACKAGES_DIR, ReadOnly: false });
+  }
+  // An anonymous volume (removed with the container): staging never touches the bot's volume until it is verified.
+  mounts.push({ Type: "volume", Target: STAGING_DIR, ReadOnly: false, VolumeOptions: { Labels: labels } });
+  return {
+    Image: p.image,
+    User: SANDBOX_USER,
+    Cmd: ["sleep", String(Math.max(60, Math.floor(p.lifetimeSeconds)))],
+    WorkingDir: STAGING_DIR,
+    Env: [`HOME=${STAGING_DIR}/home`, ...p.env],
+    Labels: labels,
+    AttachStdin: false,
+    AttachStdout: false,
+    AttachStderr: false,
+    OpenStdin: false,
+    Tty: false,
+    StopTimeout: 5,
+    HostConfig: {
+      Runtime: p.runtime,
+      Privileged: false,
+      ReadonlyRootfs: true,
+      CapDrop: ["ALL"],
+      SecurityOpt: ["no-new-privileges:true"],
+      Init: true,
+      PidsLimit: limits.pids,
+      Memory: limits.memoryBytes,
+      MemorySwap: limits.memoryBytes,
+      NanoCpus: limits.nanoCpus,
+      Tmpfs: { "/tmp": "rw,noexec,nosuid,nodev,size=256m" },
+      Mounts: mounts,
+      NetworkMode: p.network,
+      PublishAllPorts: false,
+      RestartPolicy: { Name: "no" },
+      AutoRemove: true,
+      IpcMode: "private",
+      LogConfig: { Type: "none", Config: {} },
+    },
+  };
+}
+
+/**
+ * The installer (P-12): `shellSpec`'s hardened profile with the bot's packages volume read-write and a scratch volume.
+ * Install scripts run here and only here, never in sandboxd or the cell.
+ */
+export function installerSpec(p: RunSpecInput & { packagesVolume: string }) {
+  return runSpec(
+    {
+      ns: p.ns,
+      orgId: p.orgId,
+      agentId: p.agentId,
+      runId: p.runId,
+      image: p.image,
+      runtime: p.runtime,
+      network: p.network,
+      env: p.env,
+      lifetimeSeconds: p.lifetimeSeconds,
+    },
+    "installer",
+    p.packagesVolume,
+  );
+}
+
+/** The review run (P-12): the same profile with nothing persistent mounted (no bot data, workspace or session). */
+export function reviewSpec(p: RunSpecInput) {
+  return runSpec(
+    {
+      ns: p.ns,
+      orgId: p.orgId,
+      agentId: p.agentId,
+      runId: p.runId,
+      image: p.image,
+      runtime: p.runtime,
+      network: p.network,
+      env: p.env,
+      lifetimeSeconds: p.lifetimeSeconds,
+    },
+    "review",
+    null,
+  );
 }

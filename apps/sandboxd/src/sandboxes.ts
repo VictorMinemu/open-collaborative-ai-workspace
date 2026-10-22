@@ -29,6 +29,7 @@ import {
   networkSpec,
   OCW_RUN,
   ownerLabels,
+  packagesVolumeSpec,
   SANDBOX_USER,
   shellSpec,
   volumeSpec,
@@ -188,6 +189,8 @@ export interface Sandboxes {
   run(handle: WorkspaceHandle, cmd: string[], options?: RunOptions): Promise<RunResult>;
   /** The bot's sandbox as sandboxd sees it now (inspect plus the broker's disk and stop state). */
   status(target: SandboxdTarget): Promise<SandboxdSandboxStatus>;
+  /** The bot's packages volume (created with the bot's labels when absent; refused when its labels name another). */
+  packagesVolume(target: SandboxdTarget): Promise<string>;
 
   // ------------------------------------------------------------ policy, quota, idle and usage (07.8-09 Task 2)
 
@@ -560,7 +563,20 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
   }
 
   async function ensureVolume(target: SandboxdTarget): Promise<string> {
-    const spec = volumeSpec({ ns, orgId: target.orgId, agentId: target.agentId });
+    return ensureNamedVolume(target, volumeSpec({ ns, orgId: target.orgId, agentId: target.agentId }));
+  }
+
+  async function ensurePackagesVolume(target: SandboxdTarget): Promise<string> {
+    return ensureNamedVolume(
+      target,
+      packagesVolumeSpec({ ns, orgId: target.orgId, agentId: target.agentId }),
+    );
+  }
+
+  async function ensureNamedVolume(
+    target: SandboxdTarget,
+    spec: { Name: string; Driver: string; Labels: Record<string, string> },
+  ): Promise<string> {
     const res = await call("GET", `/volumes/${encodeURIComponent(spec.Name)}`);
     if (res.status === 200) {
       if (!labelsMatch(asRecord(res.body).Labels as Record<string, string>, target, "sbx")) throw mismatch();
@@ -925,6 +941,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         if (options.egress) await options.egress.attach(target, "sbx", network);
         if (!c) {
           const volume = await ensureVolume(target);
+          const packagesVolume = await ensurePackagesVolume(target);
           const spec = shellSpec({
             ns,
             orgId: target.orgId,
@@ -933,6 +950,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
             runtime: dockerRuntime,
             network,
             volume,
+            packagesVolume,
             limits: lim.container,
           });
           const name = nameFor("sbx", ns, target.agentId);
@@ -1180,6 +1198,8 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     async status(target) {
       return statusOf(target, await ownedShell(target));
     },
+
+    packagesVolume: (target) => ensurePackagesVolume(target),
 
     setPolicy(policy) {
       const held = policies.get(policy.orgId);

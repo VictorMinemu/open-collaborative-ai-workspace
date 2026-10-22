@@ -693,6 +693,46 @@ describe("fake sandboxd: sandbox packages (07.8-18)", () => {
     assert.deepEqual((await op("/v1/packages/remove", { target: A, ids: [pkg.id] })).body, { removed: 0 });
   });
 
+  it("package review, install and removal follow ensure's gate: policy_missing, then killed (07.8-17)", async () => {
+    const r = (await review()).body;
+    const pkg = installOf(r);
+    assert.equal((await fetch(`${base}/__control/reboot`, { method: "POST" })).status, 200);
+    for (const res of [
+      await review(),
+      await op("/v1/packages/install", { target: A, packages: [pkg] }),
+      await op("/v1/packages/remove", { target: A, ids: [pkg.id] }),
+    ]) {
+      assert.equal(res.status, 409);
+      assert.equal(res.body.error.code, "policy_missing");
+    }
+    assert.equal((await op("/v1/policy", policy(ORG, true, 2))).status, 200);
+    const killed = await op("/v1/packages/install", { target: A, packages: [pkg] });
+    assert.equal(killed.status, 409);
+    assert.equal(killed.body.error.code, "killed");
+    assert.deepEqual(fake.packagesOf(A), [], "the volume stays untouched");
+    assert.equal((await op("/v1/policy", policy(ORG, false, 3))).status, 200);
+    assert.equal((await op("/v1/packages/install", { target: A, packages: [pkg] })).status, 200);
+    assert.deepEqual(fake.packagesOf(A), [pkg.id]);
+  });
+
+  it("install never takes a sha1-pinned entry, and is idempotent per package id (07.8-17)", async () => {
+    await pkgControl("packages/set", { ...LEFT_PAD, sha1: true });
+    const weak = (await review()).body;
+    const refused = await op("/v1/packages/install", { target: A, packages: [installOf(weak)] });
+    assert.equal(refused.body.results[0].status, "failed");
+    assert.match(refused.body.results[0].detail, /sha1/);
+    assert.deepEqual(fake.packagesOf(A), []);
+    await pkgControl("packages/set", { ...LEFT_PAD, sha1: false });
+    const pkg = installOf((await review()).body);
+    const [x, y] = await Promise.all([
+      op("/v1/packages/install", { target: A, packages: [pkg] }),
+      op("/v1/packages/install", { target: A, packages: [pkg] }),
+    ]);
+    assert.equal(x.body.results[0].status, "installed");
+    assert.equal(y.body.results[0].status, "installed");
+    assert.deepEqual(fake.packagesOf(A), [pkg.id]);
+  });
+
   it("package ops need the token and never echo a lockfile in the stats", async () => {
     const r = (await review()).body;
     const denied = await op("/v1/packages/install", { target: A, packages: [installOf(r)] }, null);

@@ -3,6 +3,7 @@ import { SANDBOXD_ROUTES, type SandboxdOp, type SandboxdOrgPolicy } from "@ocw/c
 import { afterEach, describe, expect, it } from "vitest";
 import { createEvents } from "./events";
 import { createFiles } from "./files";
+import type { Packages } from "./packages";
 import { createQuota } from "./quota";
 import { createSandboxes, type SandboxdEventInput } from "./sandboxes";
 import { createServer, POLICY_GATE } from "./server";
@@ -281,5 +282,155 @@ describe("the server's policy gate covers every op", () => {
       status: 200,
       body: { state: "running" },
     });
+  });
+
+  it("package review, install and removal follow the same gate: no policy or a killed one opens no installer (07.8-17)", async () => {
+    const t = boot();
+    const calls: string[] = [];
+    const packages: Packages = {
+      review: async () => {
+        calls.push("review");
+        throw new Error("not in this test");
+      },
+      install: async (input) => {
+        calls.push("install");
+        return {
+          results: input.packages.map((p) => ({
+            id: p.id,
+            status: "installed" as const,
+            detail: "installed",
+          })),
+        };
+      },
+      remove: async () => {
+        calls.push("remove");
+        return { removed: 0 };
+      },
+    };
+    const server = createServer({
+      token: TOKEN,
+      sandboxes: t.sandboxes,
+      files: t.files,
+      events: t.events,
+      packages,
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    close = () => new Promise<void>((resolve) => server.close(() => resolve()));
+    const port = (server.address() as AddressInfo).port;
+    const post = async (path: string, body: unknown) => {
+      const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, body: (await res.json()) as { error?: { code: string } } };
+    };
+    const PKG = "0199f0a0-4444-7000-8000-000000000001";
+    const hex = "a".repeat(64);
+    const install = {
+      target,
+      packages: [
+        {
+          id: PKG,
+          source: "npm",
+          name: "left-pad",
+          version: "1.3.0",
+          sha256: hex,
+          treeSha256: hex,
+          lockfile: "{}",
+        },
+      ],
+    };
+    const review = { orgId: ORG, source: "npm", name: "left-pad", version: "1.3.0" };
+    const remove = { target, ids: [PKG] };
+    for (const [path, body] of [
+      ["/v1/packages/install", install],
+      ["/v1/packages/review", review],
+      ["/v1/packages/remove", remove],
+    ] as const) {
+      expect(await post(path, body), path).toMatchObject({
+        status: 409,
+        body: { error: { code: "policy_missing" } },
+      });
+    }
+    expect((await post("/v1/policy", policy({ killed: true }))).status).toBe(200);
+    for (const [path, body] of [
+      ["/v1/packages/install", install],
+      ["/v1/packages/review", review],
+      ["/v1/packages/remove", remove],
+    ] as const) {
+      expect(await post(path, body), path).toMatchObject({
+        status: 409,
+        body: { error: { code: "killed" } },
+      });
+    }
+    expect(calls).toEqual([]);
+    expect(t.docker.containerCreates).toHaveLength(0);
+    expect((await post("/v1/policy", policy({ version: 2 }))).status).toBe(200);
+    expect(await post("/v1/packages/install", install)).toMatchObject({ status: 200 });
+    expect(await post("/v1/packages/remove", remove)).toMatchObject({ status: 200 });
+    expect(calls).toEqual(["install", "remove"]);
+  });
+
+  it("an install body carries a 2 MiB lockfile (escaped) and is not refused as too large", async () => {
+    const t = boot();
+    const seen: number[] = [];
+    const packages = {
+      review: async () => {
+        throw new Error("unused");
+      },
+      install: async (input: { packages: { id: string; lockfile: string }[] }) => {
+        seen.push(input.packages[0]?.lockfile.length ?? 0);
+        return { results: [] };
+      },
+      remove: async () => ({ removed: 0 }),
+    } as unknown as Packages;
+    const server = createServer({
+      token: TOKEN,
+      sandboxes: t.sandboxes,
+      files: t.files,
+      events: t.events,
+      packages,
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    close = () => new Promise<void>((resolve) => server.close(() => resolve()));
+    const port = (server.address() as AddressInfo).port;
+    t.sandboxes.setPolicy(policy());
+    const lockfile = '"'.repeat(2 * 1024 * 1024 - 16);
+    const res = await fetch(`http://127.0.0.1:${port}/v1/packages/install`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        target,
+        packages: [
+          {
+            id: "0199f0a0-4444-7000-8000-000000000001",
+            source: "npm",
+            name: "left-pad",
+            version: "1.3.0",
+            sha256: "a".repeat(64),
+            treeSha256: "a".repeat(64),
+            lockfile,
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(seen).toEqual([lockfile.length]);
+  });
+
+  it("without a package runner every package op answers 503", async () => {
+    const t = boot();
+    const server = createServer({ token: TOKEN, sandboxes: t.sandboxes, files: t.files, events: t.events });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    close = () => new Promise<void>((resolve) => server.close(() => resolve()));
+    const port = (server.address() as AddressInfo).port;
+    t.sandboxes.setPolicy(policy());
+    const res = await fetch(`http://127.0.0.1:${port}/v1/packages/remove`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ target, ids: ["0199f0a0-4444-7000-8000-000000000001"] }),
+    });
+    expect(res.status).toBe(503);
   });
 });

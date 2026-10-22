@@ -6,6 +6,7 @@ import { type Browsers, type FrameSink, frameWriter } from "./browser";
 import type { Egress } from "./egress-attach";
 import { createEvents, EVENTS_MAX_WAIT_MS, type Events } from "./events";
 import type { Files } from "./files";
+import type { Packages } from "./packages";
 import { SandboxdFailure, type Sandboxes } from "./sandboxes";
 
 /**
@@ -15,7 +16,7 @@ import { SandboxdFailure, type Sandboxes } from "./sandboxes";
  * (never argv, output, paths or tokens). Listens on the internal `sandbox-control` network only; no published port.
  */
 
-/** The ops this server implements so far; any other path is 404 (a later plan adds the package ops). */
+/** The ops this server implements; any other path is 404. Every contract op is implemented since 07.8-17. */
 export const IMPLEMENTED_OPS = [
   "info",
   "ensure",
@@ -52,6 +53,9 @@ export const IMPLEMENTED_OPS = [
   "contextFrames",
   "contextInput",
   "contextDownload",
+  "packageReview",
+  "packageInstall",
+  "packageRemove",
 ] as const satisfies readonly SandboxdOp[];
 type ImplementedOp = (typeof IMPLEMENTED_OPS)[number];
 
@@ -125,8 +129,12 @@ export const TRANSFER_BODY_BYTES = 72 * 1024 * 1024;
 /** A member's storage state is at most 2 MiB of JSON text, carried as a JSON string (escaping can double it). */
 export const CONTEXT_OPEN_BODY_BYTES = 6 * 1024 * 1024;
 
+/** One package install carries its lockfile (at most 2 MiB of text, escaping can double it); the API sends one per call. */
+export const PACKAGE_INSTALL_BODY_BYTES = 6 * 1024 * 1024;
+
 export const BODY_LIMITS: Partial<Record<ImplementedOp, number>> = {
   contextOpen: CONTEXT_OPEN_BODY_BYTES,
+  packageInstall: PACKAGE_INSTALL_BODY_BYTES,
   filesUpload: TRANSFER_BODY_BYTES,
   filesImport: TRANSFER_BODY_BYTES,
   filesDownload: TRANSFER_BODY_BYTES,
@@ -158,6 +166,8 @@ export interface ServerOptions {
   browsers?: Browsers | null;
   /** The namespace's egress proxy: a pushed policy is written into it before `policy` answers. */
   egress?: Egress | null;
+  /** Sandbox packages (07.8-17); without them every package op answers 503. */
+  packages?: Packages | null;
   log?: (line: LogLine) => void;
 }
 
@@ -238,6 +248,15 @@ export function createServer(options: ServerOptions): http.Server {
     throw new SandboxdFailure("docker_unavailable", 503, "the browser is not configured on this sandboxd");
   };
   const b = (): Browsers => browsers ?? noBrowser();
+  const packages = options.packages ?? null;
+  const pk = (): Packages => {
+    if (packages) return packages;
+    throw new SandboxdFailure(
+      "docker_unavailable",
+      503,
+      "sandbox packages are not configured on this sandboxd",
+    );
+  };
   const events = options.events ?? createEvents();
   const log = options.log ?? (() => {});
   let transfers = 0;
@@ -288,6 +307,10 @@ export function createServer(options: ServerOptions): http.Server {
     contextFrames: () => noBrowser(),
     contextInput: (input) => b().input(input),
     contextDownload: (input) => b().download(input),
+    // P-12: review and installs run in their own containers; the policy gate ("run") was applied above.
+    packageReview: (input) => pk().review(input),
+    packageInstall: (input) => pk().install(input),
+    packageRemove: (input) => pk().remove(input),
   };
 
   /**

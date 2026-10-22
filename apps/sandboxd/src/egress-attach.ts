@@ -23,7 +23,13 @@ import {
  * organization policies are memory only and default to `off` (fail closed) until the API pushes them again.
  */
 
-export type EgressKind = "sbx" | "brw";
+/**
+ * The networks the proxy serves: a bot's shell and browser networks, and the own network of each package review or
+ * installer run (07.8-17), which gets the registries-only policy whatever the bot's shell egress mode is (P-12).
+ */
+export type EgressKind = "sbx" | "brw" | "installer" | "review";
+const EGRESS_KINDS: readonly EgressKind[] = ["sbx", "brw", "installer", "review"];
+const isRunKind = (kind: EgressKind) => kind === "installer" || kind === "review";
 
 /** One bot network the proxy is attached to: the proxy's address there names the policy entry. */
 export interface EgressEntry {
@@ -59,7 +65,10 @@ export function compileEgressPolicy(input: {
   policies: ReadonlyMap<string, SandboxdOrgPolicy>;
   botSubnets: readonly string[];
   ownAddresses: readonly string[];
+  /** The package registries (`host`, `host:port`, `*.domain`): the only hosts a review or installer run reaches. */
+  registries?: readonly string[];
 }): EgressPolicyFile | null {
+  const registries = input.registries ?? [];
   if (input.entries.length === 0 || input.botSubnets.length === 0 || input.ownAddresses.length === 0)
     return null;
   const seen = new Set<string>();
@@ -68,6 +77,20 @@ export function compileEgressPolicy(input: {
     if (seen.has(e.address)) continue;
     seen.add(e.address);
     const p = input.policies.get(e.target.orgId);
+    if (isRunKind(e.kind)) {
+      // Registries only (P-12); the organization's private-host fixtures (an internal mirror) still need listing.
+      const off = !p || p.killed || registries.length === 0;
+      networks.push({
+        address: e.address,
+        orgId: e.target.orgId,
+        agentId: e.target.agentId,
+        kind: e.kind,
+        mode: off ? "off" : "allowlist",
+        allowHosts: off ? [] : [...registries],
+        privateHosts: off || !p ? [] : [...p.privateHosts],
+      });
+      continue;
+    }
     const mode = !p || p.killed ? "off" : e.kind === "brw" ? p.browserEgress : p.sandboxEgress;
     networks.push({
       address: e.address,
@@ -109,6 +132,8 @@ export interface Egress {
   attach(target: SandboxdTarget, kind: EgressKind, network: string): Promise<void>;
   /** Detaches the proxy from every network of the bot (before a purge removes them) and rewrites the policy. */
   detachTarget(target: SandboxdTarget): Promise<void>;
+  /** Detaches the proxy from one network (a finished package run's) and rewrites the policy. */
+  detachNetwork(network: string): Promise<void>;
   /** A pushed organization policy (newest version only); the file is rewritten when the org has a network. */
   setOrgPolicy(policy: SandboxdOrgPolicy): Promise<void>;
   /** The attachments known now (tests, logs). */
@@ -125,6 +150,8 @@ export interface EgressOptions {
   reloadTimeoutMs?: number;
   /** Delay before re-following the proxy after its output ended. */
   retryMs?: number;
+  /** The package registries a review or installer run may reach (07.8-17); none: every run's egress is off. */
+  registries?: readonly string[];
 }
 
 const MAX_LINE = 64 * 1024;
@@ -140,6 +167,7 @@ export function createEgress(options: EgressOptions): Egress {
   const emit = options.onEvent ?? (() => {});
   const reloadTimeoutMs = options.reloadTimeoutMs ?? 5_000;
   const retryMs = options.retryMs ?? 2_000;
+  const registries = [...(options.registries ?? [])];
   const names = egressNames(ns);
   const policies = new Map<string, SandboxdOrgPolicy>();
   const entries = new Map<string, EgressEntry>(); // by network name
@@ -311,12 +339,12 @@ export function createEgress(options: EgressOptions): Egress {
     const kind = l[SANDBOXD_LABELS.kind];
     const orgId = l[SANDBOXD_LABELS.org];
     const agentId = l[SANDBOXD_LABELS.agent];
-    if ((kind !== "sbx" && kind !== "brw") || !orgId || !agentId) return null;
+    if (!EGRESS_KINDS.includes(kind as EgressKind) || !orgId || !agentId) return null;
     const config = asRecord(n.IPAM).Config;
     const subnets = (Array.isArray(config) ? config : [])
       .map((c) => asRecord(c).Subnet)
       .filter((s): s is string => typeof s === "string" && s.length > 0);
-    return { target: { orgId, agentId }, kind, subnets };
+    return { target: { orgId, agentId }, kind: kind as EgressKind, subnets };
   }
 
   /** Every bot network of the namespace (attached or not): their subnets are refused for every bot. */
@@ -360,6 +388,7 @@ export function createEgress(options: EgressOptions): Egress {
       policies,
       botSubnets: entries.size > 0 ? await allBotSubnets() : [],
       ownAddresses,
+      registries,
     });
     const msg = file ? "policy loaded" : "policy missing";
     const before = seen.get(msg) ?? 0;
@@ -509,6 +538,26 @@ export function createEgress(options: EgressOptions): Egress {
           changed = true;
         }
         if (changed && asRecord(c.State).Running === true) await writePolicyLocked();
+      });
+    },
+
+    detachNetwork(network) {
+      return serial(async () => {
+        const c = await inspectSelf();
+        if (!c) {
+          entries.delete(network);
+          return;
+        }
+        containerId = String(c.Id);
+        if (attachedNetworks(c)[network]) {
+          const res = await call("POST", `/networks/${encodeURIComponent(network)}/disconnect`, {
+            Container: containerId,
+            Force: true,
+          });
+          if (res.status !== 200 && res.status !== 404) throw dockerDown("cannot detach the egress proxy");
+        }
+        const had = entries.delete(network);
+        if (had && asRecord(c.State).Running === true) await writePolicyLocked();
       });
     },
 
