@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 161
-waived_count: 4
-fixed_count: 114
-total_count: 279
-last_updated: 2026-10-22T05:12:46.799Z
+open_count: 160
+waived_count: 5
+fixed_count: 117
+total_count: 282
+last_updated: 2026-10-22T05:12:57.408Z
 ---
 
 # Broken Windows Ledger
@@ -286,14 +286,17 @@ last_updated: 2026-10-22T05:12:46.799Z
 | 269 | 07.8 | deviation | apps/api/src/modules/sandbox |  | 07.8-23: the package list carries no install failure code (17's timeout cannot show) and no removing count; an approved package with no started sandbox reads Installing and polls every 5 s (low) | open |  | 2026-10-22T03:43:44.197Z |  |
 | 270 | 07.8 | deviation | apps/web/components/ui/sheet.tsx |  | 07.8-23: the shared sheet close button is 32 px on phones (marketplace plugin review sheet too); the packages review sheet has its own 44 px close (low) | open |  | 2026-10-22T03:43:44.276Z |  |
 | 271 | 07.8 | deviation | apps/api/src/modules/browser/takeover.ts |  | 07.8-16 (medium): a takeover lease held by an API instance that died stays until expiry; only a live view reading the row clears it (same cross-organization lister gap as #244) — 28's sweep | open |  | 2026-10-22T03:47:12.000Z |  |
-| 272 | 07.8 | deviation | apps/api/src/modules/browser/live-view.ts |  | 07.8-16: watching resizes the bot's page from 1280x800 to 960x600 (UI-SPEC default); 22/28 decide whether the small default stays (low) | open |  | 2026-10-22T03:47:12.076Z |  |
-| 273 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-16: the live-view state frame has no browserSandbox, so the floating window cannot show isolation per page (low, 22/26) | open |  | 2026-10-22T03:47:12.153Z |  |
+| 272 | 07.8 | deviation | apps/api/src/modules/browser/live-view.ts |  | 07.8-16: watching resizes the bot's page from 1280x800 to 960x600 (UI-SPEC default); 22/28 decide whether the small default stays (low) | fixed |  | 2026-10-22T03:47:12.076Z | 2026-10-22T05:12:57.096Z |
+| 273 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-16: the live-view state frame has no browserSandbox, so the floating window cannot show isolation per page (low, 22/26) | waived | 07.8-22: the UI-SPEC never shows isolation in the live window, only on the Browser tab and in Settings | 2026-10-22T03:47:12.153Z | 2026-10-22T05:12:57.169Z |
 | 274 | 07.8 | deviation | infra/fake-model/fake-sandboxd.mjs |  | 07.8-16: a crashed event in the fake sandboxd does not end the frame stream (the real broker does) (low); the live-input Semgrep rule covers only declared types and field names in listed paths (low) | open |  | 2026-10-22T03:47:12.229Z |  |
-| 275 | 07.8 | deviation | apps/sandboxd/src/egress-attach.ts |  | MUST FIX (07.8-24): under gVisor (runsc) Docker's embedded DNS 127.0.0.11 does not answer on bot networks, so sbx/brw cannot resolve sandbox-egress and have no egress at all (fails closed; breaks every gVisor install). Give each sandbox the proxy IP (ExtraHosts or pinned address); then drop failure: ignore on gvisor-browser in .woodpecker/sandbox.yaml | open |  | 2026-10-22T04:13:28.773Z |  |
-| 276 | 07.8 | deviation | infra/fake-model/server.test.mjs |  | MUST FIX: "serves the fake sandboxd behind its token ... exec round trip" gets 409 policy_missing since the fake requires a policy push (red since policyfix); runs in cell-smoke on Woodpecker and GitHub | open |  | 2026-10-22T04:13:28.849Z |  |
+| 275 | 07.8 | deviation | apps/sandboxd/src/egress-attach.ts |  | MUST FIX (07.8-24): under gVisor (runsc) Docker's embedded DNS 127.0.0.11 does not answer on bot networks, so sbx/brw cannot resolve sandbox-egress and have no egress at all (fails closed; breaks every gVisor install). Give each sandbox the proxy IP (ExtraHosts or pinned address); then drop failure: ignore on gvisor-browser in .woodpecker/sandbox.yaml | fixed |  | 2026-10-22T04:13:28.773Z | 2026-10-22T05:12:56.931Z |
+| 276 | 07.8 | deviation | infra/fake-model/server.test.mjs |  | MUST FIX: "serves the fake sandboxd behind its token ... exec round trip" gets 409 policy_missing since the fake requires a policy push (red since policyfix); runs in cell-smoke on Woodpecker and GitHub | fixed |  | 2026-10-22T04:13:28.849Z | 2026-10-22T05:12:57.014Z |
 | 277 | 07.8 | unrun-verify | .woodpecker/sandbox.yaml |  | 07.8-24: no real Woodpecker run of sandbox.yaml yet (steps run by hand in dind); record link and duration on first push; full gate:compose --with-sandbox (with Playwright, proxy, backup) not run | open |  | 2026-10-22T04:13:28.921Z |  |
 | 278 | 07.8 | deviation | apps/api/Dockerfile |  | 07.8-24: no retry for pnpm first-use binary download (timed out on Docker Desktop); CI dind keeps docker:dind (~500 MB) between gVisor runs (low) | open |  | 2026-10-22T04:13:28.997Z |  |
 | 279 | 07.8 | deviation | apps/sandboxd/src/egress-attach.ts |  | dnsfix: if the egress proxy restarts with a new IP, a running sandbox keeps the old /etc/hosts entry and has no egress until its next start/restart (fails closed; runc used to follow via Docker DNS) (low); packages smoke does not print its runtime | open |  | 2026-10-22T05:12:46.799Z |  |
+| 280 | 07.8 | deviation | apps/web/components/browser |  | 07.8-22 (medium): non-Latin IME input does not work on the desktop live-view frame during a takeover (paste works); an editable frame would leak composed text into our DOM | open |  | 2026-10-22T05:12:57.253Z |  |
+| 281 | 07.8 | deviation | apps/web/components/browser |  | 07.8-22: a reply on screen keeps its Watch link after the page closes until the list refetches (shows Ended) (low); at 320 px the host truncates early (low) | open |  | 2026-10-22T05:12:57.333Z |  |
+| 282 | 07.8 | deviation | apps/local-runtime |  | 07.8-22: a local-runtime test fails when the repo is checked out outside the home folder (low) | open |  | 2026-10-22T05:12:57.408Z |  |
 
 ````json
 [
@@ -3556,10 +3559,10 @@ last_updated: 2026-10-22T05:12:46.799Z
     "file": "apps/api/src/modules/browser/live-view.ts",
     "line": null,
     "description": "07.8-16: watching resizes the bot's page from 1280x800 to 960x600 (UI-SPEC default); 22/28 decide whether the small default stays (low)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-22T03:47:12.076Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T05:12:57.096Z"
   },
   {
     "id": 273,
@@ -3568,10 +3571,10 @@ last_updated: 2026-10-22T05:12:46.799Z
     "file": "packages/contracts/src/browser.ts",
     "line": null,
     "description": "07.8-16: the live-view state frame has no browserSandbox, so the floating window cannot show isolation per page (low, 22/26)",
-    "status": "open",
-    "reason": "",
+    "status": "waived",
+    "reason": "07.8-22: the UI-SPEC never shows isolation in the live window, only on the Browser tab and in Settings",
     "recorded_at": "2026-10-22T03:47:12.153Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T05:12:57.169Z"
   },
   {
     "id": 274,
@@ -3592,10 +3595,10 @@ last_updated: 2026-10-22T05:12:46.799Z
     "file": "apps/sandboxd/src/egress-attach.ts",
     "line": null,
     "description": "MUST FIX (07.8-24): under gVisor (runsc) Docker's embedded DNS 127.0.0.11 does not answer on bot networks, so sbx/brw cannot resolve sandbox-egress and have no egress at all (fails closed; breaks every gVisor install). Give each sandbox the proxy IP (ExtraHosts or pinned address); then drop failure: ignore on gvisor-browser in .woodpecker/sandbox.yaml",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-22T04:13:28.773Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T05:12:56.931Z"
   },
   {
     "id": 276,
@@ -3604,10 +3607,10 @@ last_updated: 2026-10-22T05:12:46.799Z
     "file": "infra/fake-model/server.test.mjs",
     "line": null,
     "description": "MUST FIX: \"serves the fake sandboxd behind its token ... exec round trip\" gets 409 policy_missing since the fake requires a policy push (red since policyfix); runs in cell-smoke on Woodpecker and GitHub",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-22T04:13:28.849Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-22T05:12:57.014Z"
   },
   {
     "id": 277,
@@ -3643,6 +3646,42 @@ last_updated: 2026-10-22T05:12:46.799Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-22T05:12:46.799Z",
+    "resolved_at": null
+  },
+  {
+    "id": 280,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/browser",
+    "line": null,
+    "description": "07.8-22 (medium): non-Latin IME input does not work on the desktop live-view frame during a takeover (paste works); an editable frame would leak composed text into our DOM",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:12:57.253Z",
+    "resolved_at": null
+  },
+  {
+    "id": 281,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/browser",
+    "line": null,
+    "description": "07.8-22: a reply on screen keeps its Watch link after the page closes until the list refetches (shows Ended) (low); at 320 px the host truncates early (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:12:57.333Z",
+    "resolved_at": null
+  },
+  {
+    "id": 282,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/local-runtime",
+    "line": null,
+    "description": "07.8-22: a local-runtime test fails when the repo is checked out outside the home folder (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:12:57.408Z",
     "resolved_at": null
   }
 ]
