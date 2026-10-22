@@ -903,7 +903,7 @@ describe("/__sandboxd (07.8-08: the e2e harness's fake sandboxd)", () => {
     }
   }
 
-  it("serves the fake sandboxd behind its token: info 200, no token 401, an exec round trip", async () => {
+  it("serves the fake sandboxd behind its token: info 200, no token 401, policy gate, an exec round trip", async () => {
     await withServer({ sandboxToken: TOKEN }, async (base) => {
       const auth = { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" };
       const info = await fetch(`${base}/__sandboxd/v1/info`, { headers: auth });
@@ -914,16 +914,41 @@ describe("/__sandboxd (07.8-08: the e2e harness's fake sandboxd)", () => {
         orgId: "00000000-0000-4000-8000-000000000001",
         agentId: "00000000-0000-4000-8000-000000000002",
       };
-      assert.equal(
-        (
-          await fetch(`${base}/__sandboxd/v1/sandboxes/ensure`, {
-            method: "POST",
-            headers: auth,
-            body: JSON.stringify({ target }),
-          })
-        ).status,
-        200,
-      );
+      const ensure = () =>
+        fetch(`${base}/__sandboxd/v1/sandboxes/ensure`, {
+          method: "POST",
+          headers: auth,
+          body: JSON.stringify({ target }),
+        });
+      // Fail closed like the real sandboxd: no container op before the API pushes the organization's policy.
+      const refused = await ensure();
+      assert.equal(refused.status, 409);
+      assert.equal((await refused.json()).error.code, "policy_missing");
+      // The organization's policy, as the API pushes it (e2e/support/sandbox.ts seedPolicy).
+      const limits = {
+        nanoCpus: 1_000_000_000,
+        memoryBytes: 1024 ** 3,
+        pids: 256,
+        diskQuotaBytes: 2 * 1024 ** 3,
+        idleStopMs: 900_000,
+      };
+      const pushed = await fetch(`${base}/__sandboxd/v1/policy`, {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({
+          orgId: target.orgId,
+          sandboxEgress: "off",
+          browserEgress: "off",
+          allowHosts: [],
+          privateHosts: [],
+          limits,
+          browserLimits: { ...limits, memoryBytes: 2 * 1024 ** 3, pids: 512, idleStopMs: 300_000 },
+          killed: false,
+          version: 0,
+        }),
+      });
+      assert.equal(pushed.status, 200);
+      assert.equal((await ensure()).status, 200);
       const exec = await fetch(`${base}/__sandboxd/v1/sandboxes/exec`, {
         method: "POST",
         headers: auth,
