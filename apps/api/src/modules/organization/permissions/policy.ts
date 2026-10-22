@@ -668,3 +668,29 @@ export function memoryResource(
   }
   return path === undefined ? r : { ...r, path };
 }
+
+// ---------------------------------------------------------------- data flow between audiences (Phase 07.8-25)
+
+/** More people than this to check is "unsure", so `audienceCovers` refuses (fail closed). */
+export const AUDIENCE_COVER_MAX = 1_000;
+
+/**
+ * What `audienceCovers` decides with (D-11 F-8): the people who read a bot's workspace and, of those, the ones who read
+ * the conversation. Null = unknown. Loaded by `audienceCoverFacts` (`audience.ts`).
+ */
+export interface AudienceCoverFacts {
+  workspace: readonly string[] | null;
+  readers: ReadonlySet<string> | null;
+}
+
+/**
+ * Whether a conversation's audience already covers a bot's workspace audience (Phase 07.8-25; D-11 F-8; ADR-0029):
+ * every person who reads the workspace (its turns or its files) also reads the conversation, so copying one of its
+ * attachments into the workspace shows it to nobody new. Data moves only from a broader audience to a narrower one.
+ * Unknown facts, an empty audience or anyone left out → false (refuse when unsure). This is the only copy of the rule.
+ */
+export function audienceCovers(f: AudienceCoverFacts): boolean {
+  if (!f.workspace || !f.readers || f.workspace.length === 0) return false;
+  const readers = f.readers;
+  return f.workspace.every((id) => readers.has(id));
+}

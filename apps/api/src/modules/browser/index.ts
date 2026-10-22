@@ -28,6 +28,14 @@ export {
   updateHost,
   validHost,
 } from "./contexts";
+export {
+  type DownloadDiscard,
+  type DownloadTurn,
+  downloadPaths,
+  downloadPlace,
+  type RoutedDownload,
+  routeDownload,
+} from "./downloads";
 export { FrameSlot, LIVE_CLOSE, type LiveViewHub, type LiveViewStats } from "./live-view";
 export {
   browserSessionAad,

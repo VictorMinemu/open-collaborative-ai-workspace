@@ -269,6 +269,7 @@ const SANDBOX_TOOLS_OFFERED = [
   "ocw_sandbox_list",
   "ocw_sandbox_delete",
   "ocw_sandbox_share",
+  "ocw_sandbox_import",
 ];
 
 const confinedOf = (ev: Json): string[] =>
@@ -295,7 +296,7 @@ async function denyRule(subjectKind: "user" | "agent", subjectId: string, permis
 }
 
 describe("the sandbox tools are offered only when every layer allows it (D-12, P-05)", () => {
-  it("all on: the seven tools (never import), their confined flags, the budget of 40, no browser tool", async () => {
+  it("all on: the eight tools (import too, 07.8-25), their confined flags, the budget of 40, no browser tool", async () => {
     const ev = await s.turnOf(s.sam, s.samDm);
     expect(confinedOf(ev)).toEqual(SANDBOX_TOOLS_OFFERED);
     for (const name of SANDBOX_TOOLS_OFFERED) {

@@ -15,6 +15,7 @@ import {
   AgentChannelBrowserWaitResponse,
   BROWSER_LIMITS,
   BROWSER_REFUSAL_STATUS,
+  type BrowserDownload,
   type BrowserRefusal,
   type BrowserSandboxMode,
   type BrowserToolName,
@@ -36,6 +37,7 @@ import { z } from "zod";
 import type { App, Core } from "../../core";
 import { HttpError } from "../../lib/errors";
 import { audienceOf } from "../ai-chat";
+import { createObjectStorage } from "../artifact";
 import { memberAccountAllowed, memberAccountFacts } from "../bot-capabilities";
 import {
   auditClosed,
@@ -49,9 +51,11 @@ import {
   type LoadedSession,
   loadSessionFor,
   openContextOf,
+  type RoutedDownload,
   releaseHold,
   requestSignIn,
   resealSession,
+  routeDownload,
   sessionLoadedFor,
   takeoverActive,
   updateHost,
@@ -66,7 +70,7 @@ import {
   sandboxAvailable,
 } from "../sandbox";
 import { usableGrantArgs } from "../tool-approval";
-import { recordStep, type StepOutcomeInput, stepFor } from "./activity";
+import { downloadStep, recordStep, type StepOutcomeInput, stepFor } from "./activity";
 import { type CellPrincipal, cellOf } from "./auth";
 import { noTrigger } from "./cards";
 import { type AgentTurnRow, auditUnknownTurn, liveTurn } from "./claim";
@@ -927,7 +931,18 @@ async function resealAfter(
   }
 }
 
+/** What the act tells the bot about a download it caused (F-8): where it landed, or null when it was not kept. */
+function downloadOf(r: RoutedDownload | null): BrowserDownload | null {
+  if (!r || r.stored === null) return null;
+  return r.stored === "conversation"
+    ? { name: r.name, size: r.size, stored: "conversation", attachmentId: r.attachmentId }
+    : { name: r.name, size: r.size, stored: "workspace", path: r.path };
+}
+
 export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps): void {
+  // 07.8-25 (F-8): downloads under a member's session become attachments of the conversation (server credentials).
+  const storage = createObjectStorage(core.env, core.secretStore);
+  const attachmentMaxBytes = core.env.OCW_ATTACHMENT_MAX_BYTES;
   const route = <B extends z.ZodType, R extends z.ZodType>(body: B, response: R) => ({
     config: { authz: "cell" as const },
     schema: { tags, security: bearer, body, response: { 200: response } },
@@ -1258,6 +1273,31 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
         : null;
       return { result, host: where ? validHost(where.host) : null };
     });
+    // F-8 (P-11): a file the act downloaded goes where its audience allows: the conversation under a member's session
+    // (or a team bot's member data), the workspace otherwise, or nowhere; never both.
+    const reported = run.failure ? null : (run.raw?.result.download ?? null);
+    const routed: RoutedDownload | null =
+      reported && deps.client
+        ? await routeDownload(
+            { core, perms: deps.perms, client: deps.client, storage, attachmentMaxBytes },
+            {
+              tenant: b.tenant,
+              turn: {
+                eventId: d.turn.eventId,
+                agentId: d.turn.agentId,
+                userId: d.turn.userId,
+                conversationId: d.turn.conversationId,
+              },
+              context: {
+                id: d.context.id,
+                host: run.raw?.host ?? d.prepared.host ?? d.context.host,
+                sessionId: d.context.sessionId,
+              },
+              target,
+              download: reported,
+            },
+          )
+        : null;
     const acted = await conclude(core, b, d, ACT, run, {
       client: deps.client,
       auditAction: "browser.acted",
@@ -1278,14 +1318,19 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
         }
         if (d.decision.claim.approvalId) await releaseHold(tx, d.context.id);
         const blocked = result.blockedNavigation ? validHost(result.blockedNavigation.host) : null;
+        if (routed) {
+          await recordStep(tx, core, {
+            turn: d.turn,
+            step: downloadStep(routed, stepOpts(d.context, host)),
+          });
+        }
         return {
-          // Downloads are 07.8-25's (F-8): until then the bot is told none landed.
           response: {
             contextId: d.context.id,
             host,
             signedIn: sessionLoadedFor(d.context, host),
             navigated: result.navigated,
-            download: null,
+            download: downloadOf(routed),
           },
           audit: {
             host: d.prepared.host ?? host,

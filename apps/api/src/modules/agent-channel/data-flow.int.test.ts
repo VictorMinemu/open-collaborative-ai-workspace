@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { type TestClient, WEB_ORIGIN } from "../../testing";
 import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
 import { startTestStorage, type TestStorage } from "../../testing-storage";
 import { keepForSite, sealSession } from "../browser/sessions";
+import { createConversationAccess } from "../chat";
+import { audienceCoverFacts, audienceCovers, createPermissionService } from "../organization";
 
 /**
  * 07.8-25 (BRW-04, SBX-02; D-11 F-8, D-13; P-11, P-18; Pitfall 13): what a bot saw with a member's sign-in stays with
@@ -256,5 +259,327 @@ describe("a team bot that used Sam's sign-in cannot put what it saw into its sha
     );
     await ok(sandbox("delete", ev, scout.id, { path: "notes/old.txt" }));
     expect((await callsOf(ev.eventId)).filter((c) => c.reason === "member_data")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: downloads routed by audience, and import
+
+const approvalRow = async (id: string) =>
+  (await s.su.query("select * from app.approval_requests where id = $1", [id])).rows[0] as Json;
+
+async function decideApproval(who: TestClient, id: string, outcome: "approved" | "denied") {
+  const row = await approvalRow(id);
+  return ok(
+    who.request("POST", `/api/v1/approvals/${id}/decision`, {
+      outcome,
+      actionHash: row.action_hash,
+    }) as Promise<Res>,
+  );
+}
+
+/** The one `agent.card_action.v1` of the approval's card (the re-run turn). */
+async function rerunOf(approvalId: string): Promise<Json> {
+  const row = await approvalRow(approvalId);
+  const rows = (
+    await s.su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'agent.card_action.v1' and payload->'cardAction'->>'messageId' = $2 order by seq",
+      [`cell:${s.orgA}`, row.card_message_id],
+    )
+  ).rows;
+  expect(rows).toHaveLength(1);
+  return rows[0].payload as Json;
+}
+
+/** The bot's reply for a turn (links the files the turn stored for the conversation). */
+const replyTo = (ev: Json, agentId: string, text = "Here it is.") =>
+  ok(
+    s.cell("/messages", {
+      agentId,
+      conversationId: ev.conversation.id,
+      threadRootMessageId: null,
+      eventId: ev.eventId,
+      text,
+      idempotencyKey: `reply-${randomUUID()}`,
+    }),
+  );
+
+const attachmentRow = async (id: string) =>
+  (
+    await s.su.query(
+      "select status, uploader_id, event_id, message_id, conversation_id, size_bytes, filename from app.attachments where id = $1",
+      [id],
+    )
+  ).rows[0] as Json | undefined;
+
+function download(who: TestClient, attachmentId: string): Promise<Response> {
+  return fetch(`${s.stack.baseUrl}/api/v1/attachments/${attachmentId}/download`, {
+    redirect: "manual",
+    headers: { origin: WEB_ORIGIN, cookie: who.cookieHeader },
+  });
+}
+
+const DOWNLOADED = "id,amount\n1,1250\n";
+
+/** A ready attachment of `conv`, shared by `agentId` from its workspace and linked to its reply. */
+async function sharedAttachment(
+  who: TestClient,
+  conv: string,
+  agentId: string,
+  content: string,
+): Promise<string> {
+  const ev = await s.turnOf(who, conv, agentId);
+  const name = `in-${randomUUID().slice(0, 6)}.csv`;
+  await seedFile(agentId, `out/${name}`, content);
+  const shared = await ok(sandbox("share", ev, agentId, { path: `out/${name}` }));
+  await replyTo(ev, agentId);
+  expect((await attachmentRow(shared.attachmentId as string))?.status).toBe("ready");
+  return shared.attachmentId as string;
+}
+
+describe("a download lands where its audience allows (F-8, P-11)", () => {
+  it("with Sam's session loaded: a pending attachment of the conversation for the reply, never the workspace", async () => {
+    const { ev, contextId } = await signedInTurn(scout);
+    const importsBefore = fakeCalls("filesImport");
+    // A signed-in click waits for Sam first (07.8-14's floor).
+    const asked = await browser("act", ev, scout.id, { action: "click", ref: "download-link" });
+    expect(codeOf(asked)).toBe("approval_required");
+    const id = asked.body?.error.details.approval.id as string;
+    await decideApproval(s.sam, id, "approved");
+    const rerun = await rerunOf(id);
+    const acted = await ok(browser("act", rerun, scout.id, { action: "click", ref: "download-link" }));
+    expect(acted.download).toMatchObject({
+      stored: "conversation",
+      name: "report.csv",
+      size: DOWNLOADED.length,
+    });
+    expect(acted.download.path).toBeUndefined();
+    const attachmentId = acted.download.attachmentId as string;
+    expect(fakeCalls("filesImport")).toBe(importsBefore);
+    expect(await attachmentRow(attachmentId)).toMatchObject({
+      status: "pending",
+      uploader_id: scout.id,
+      event_id: rerun.eventId,
+      conversation_id: scout.dm,
+      message_id: null,
+    });
+    expect((await download(s.sam, attachmentId)).status).toBe(404);
+
+    const posted = await replyTo(rerun, scout.id);
+    expect(await attachmentRow(attachmentId)).toMatchObject({
+      status: "ready",
+      message_id: posted.messageId,
+    });
+    const res = await download(s.sam, attachmentId);
+    expect(res.status).toBe(302);
+    expect(await (await fetch(res.headers.get("location") as string)).text()).toBe(DOWNLOADED);
+    expect((await download(s.alex, attachmentId)).status).toBe(404);
+
+    const stored = await auditOf("browser.download_stored", rerun.eventId);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({ agent_id: scout.id, user_id: s.samId, result: "success" });
+    expect(stored[0]?.metadata).toEqual({
+      eventId: rerun.eventId,
+      contextId,
+      host: HOST,
+      size: DOWNLOADED.length,
+      stored: "conversation",
+      attachmentId,
+      conversationId: scout.dm,
+    });
+    const steps = await stepsOf(rerun.eventId);
+    expect(steps.map((st) => [st.verb, st.target, st.outcome.kind])).toContainEqual([
+      "shared",
+      "report.csv",
+      "ok",
+    ]);
+  });
+
+  it("without a session: `downloads/report.csv` in the bot's workspace, then a free name; audited by path hash only", async () => {
+    // The signed-in page of the previous test is still open for (Scout, Sam's DM, Sam): the bot closes it first.
+    const closing = await s.turnOf(s.sam, scout.dm, scout.id);
+    await ok(browser("close", closing, scout.id));
+    const ev = await s.turnOf(s.sam, scout.dm, scout.id);
+    await ok(browser("open", ev, scout.id, { url: "https://docs.fake.test/files" }));
+    expect((await turnRow(ev.eventId)).member_data).toBe(false);
+    const importsBefore = fakeCalls("filesImport");
+    const first = await ok(browser("act", ev, scout.id, { action: "click", ref: "download-link" }));
+    expect(first.download).toEqual({
+      stored: "workspace",
+      name: "report.csv",
+      size: DOWNLOADED.length,
+      path: "downloads/report.csv",
+    });
+    expect(fakeCalls("filesImport")).toBe(importsBefore + 1);
+    const second = await ok(browser("act", ev, scout.id, { action: "click", ref: "download-link" }));
+    expect(second.download.path).toBe("downloads/report-2.csv");
+    const read = await ok(sandbox("read", ev, scout.id, { path: "downloads/report.csv" }));
+    expect(read.content).toBe(DOWNLOADED);
+
+    const stored = await auditOf("browser.download_stored", ev.eventId);
+    expect(stored.map((a) => a.metadata.stored)).toEqual(["workspace", "workspace"]);
+    expect(stored[0]?.metadata).toMatchObject({
+      host: "docs.fake.test",
+      size: DOWNLOADED.length,
+      pathLength: 20,
+    });
+    expect(JSON.stringify(stored)).not.toContain("report");
+    const steps = await stepsOf(ev.eventId);
+    expect(steps.filter((st) => st.verb === "imported").map((st) => st.target)).toEqual([
+      "downloads/report.csv",
+      "downloads/report-2.csv",
+    ]);
+  });
+
+  it("the bot's sandbox off: the download is not kept; the act says so and the activity shows why", async () => {
+    const clipper = await s.newBot(`Clipper ${randomUUID().slice(0, 4)}`);
+    await s.su.query(
+      `update app.agents set capabilities = capabilities || '{"sandbox": false, "browser": true}'::jsonb where id = $1`,
+      [clipper.id],
+    );
+    const ev = await s.turnOf(s.sam, clipper.dm, clipper.id);
+    await ok(browser("open", ev, clipper.id, { url: "https://docs.fake.test/files" }));
+    const importsBefore = fakeCalls("filesImport");
+    const acted = await ok(browser("act", ev, clipper.id, { action: "click", ref: "download-link" }));
+    expect(acted.download).toBeNull();
+    expect(fakeCalls("filesImport")).toBe(importsBefore);
+    const discarded = await auditOf("browser.download_discarded", ev.eventId);
+    expect(discarded).toHaveLength(1);
+    expect(discarded[0]?.metadata).toMatchObject({ reason: "sandbox_off", host: "docs.fake.test" });
+    const steps = await stepsOf(ev.eventId);
+    expect(steps.at(-1)).toMatchObject({
+      verb: "blocked",
+      target: "Download not kept: the sandbox is off",
+      outcome: { kind: "blocked", code: "sandbox_off" },
+    });
+  });
+});
+
+describe("ocw_sandbox_import: only when the conversation's audience covers the workspace's (F-8, audienceCovers)", () => {
+  let salesAll: string;
+
+  beforeAll(async () => {
+    salesAll = (
+      await ok(
+        s.victor.request("POST", "/api/v1/channels", {
+          name: `sales-all-${randomUUID().slice(0, 4)}`,
+          visibility: "private",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    for (const [kind, id] of [
+      ["user", s.samId],
+      ["user", s.alexId],
+      ["agent", ops.id],
+    ] as const) {
+      await ok(
+        s.victor.request("POST", `/api/v1/channels/${salesAll}/members`, { kind, id }) as Promise<Res>,
+      );
+    }
+  });
+
+  it("is offered with the other sandbox tools", async () => {
+    const ev = await s.turnOf(s.sam, scout.dm, scout.id);
+    expect(ev.turn.tools).toContain("ocw_sandbox_import");
+    expect(ev.turn.toolFlags.ocw_sandbox_import).toEqual({ untrustedOutput: false, sideEffecting: false });
+  });
+
+  it("Scout (personal) in Sam's DM copies a DM attachment into its workspace; audited with ids and size only", async () => {
+    const attachmentId = await sharedAttachment(s.sam, scout.dm, scout.id, "a,b\n1,2\n");
+    const ev = await s.turnOf(s.sam, scout.dm, scout.id);
+    const imported = await ok(sandbox("import", ev, scout.id, { attachmentId, path: "inbox/numbers.csv" }));
+    expect(imported).toEqual({ path: "inbox/numbers.csv", size: 8 });
+    expect((await ok(sandbox("read", ev, scout.id, { path: "inbox/numbers.csv" }))).content).toBe(
+      "a,b\n1,2\n",
+    );
+    const audits = await auditOf("sandbox.file_imported", ev.eventId);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ agent_id: scout.id, user_id: s.samId, result: "success" });
+    expect(audits[0]?.metadata).toMatchObject({
+      attachmentId,
+      conversationId: scout.dm,
+      size: 8,
+      pathLength: 17,
+    });
+    expect(JSON.stringify(audits)).not.toContain("numbers");
+    const step = (await stepsOf(ev.eventId)).find((st) => st.tool === "ocw_sandbox_import");
+    expect(step).toMatchObject({ verb: "imported", target: "inbox/numbers.csv", outcome: { kind: "ok" } });
+    // Without a path it goes to `downloads/<name>`.
+    const again = await ok(sandbox("import", ev, scout.id, { attachmentId }));
+    expect(again.path).toMatch(/^downloads\/in-[0-9a-f]{6}\.csv$/u);
+  });
+
+  it("Ops (team bot of Sales) in Sam's DM → 403 audience_narrower; nothing reaches sandboxd", async () => {
+    const attachmentId = await sharedAttachment(s.sam, ops.dm, ops.id, "secret,1\n");
+    const ev = await s.turnOf(s.sam, ops.dm, ops.id);
+    const before = fakeCalls("filesImport");
+    const r = await sandbox("import", ev, ops.id, { attachmentId });
+    expect(r.status).toBe(403);
+    expect(codeOf(r)).toBe("audience_narrower");
+    expect(fakeCalls("filesImport")).toBe(before);
+    const refused = (await auditOf("bot.tool_call", ev.eventId)).filter(
+      (a) => a.metadata.reason === "audience_narrower",
+    );
+    expect(refused).toHaveLength(1);
+    expect(refused[0]?.metadata).toMatchObject({ tool: "ocw_sandbox_import", attachmentId });
+    expect((await turnRow(ev.eventId)).sandbox_calls).toBe(0);
+  });
+
+  it("Ops in #sales-all, read by everyone Ops serves, imports; an attachment of another conversation is 404 not_found", async () => {
+    const mention = async () => {
+      const msg = await ok(
+        s.sam.request("POST", `/api/v1/conversations/${salesAll}/messages`, {
+          body: `@ops please ${randomUUID().slice(0, 6)}`,
+        }) as Promise<Res>,
+      );
+      const rows = (
+        await s.su.query(
+          "select payload from app.stream_events where stream_id = $1 and type = 'agent.mention.v1' and payload->'message'->>'id' = $2 and payload->'agent'->>'id' = $3",
+          [`cell:${s.orgA}`, msg.id, ops.id],
+        )
+      ).rows;
+      expect(rows).toHaveLength(1);
+      return rows[0].payload as Json;
+    };
+    const share = await mention();
+    await seedFile(ops.id, "out/q3.csv", "q,3\n");
+    const shared = await ok(sandbox("share", share, ops.id, { path: "out/q3.csv" }));
+    await replyTo(share, ops.id);
+
+    const ev = await mention();
+    const imported = await ok(
+      sandbox("import", ev, ops.id, { attachmentId: shared.attachmentId, path: "q3.csv" }),
+    );
+    expect(imported).toEqual({ path: "q3.csv", size: 4 });
+
+    const dmAttachment = await sharedAttachment(s.sam, scout.dm, scout.id, "x\n");
+    const other = await sandbox("import", ev, ops.id, { attachmentId: dmAttachment });
+    expect(other.status).toBe(404);
+    expect(codeOf(other)).toBe("not_found");
+    const missing = await sandbox("import", ev, ops.id, { attachmentId: randomUUID() });
+    expect(codeOf(missing)).toBe("not_found");
+  });
+
+  it("the resolver's facts in another organization's tenant know neither bot nor conversation: not covered", async () => {
+    const core = s.stack.built.core;
+    const perms = createPermissionService(core);
+    const access = createConversationAccess(core);
+    const facts = await core.db.withTenant({ organizationId: s.orgB, userId: s.eveId }, (tx) =>
+      audienceCoverFacts(
+        tx,
+        { perms, isReadable: (t, u, c) => access.isReadable(t, u, c) },
+        { conversationId: scout.dm, agentId: scout.id },
+      ),
+    );
+    expect(facts).toEqual({ workspace: null, readers: null });
+    expect(audienceCovers(facts)).toBe(false);
+    // The same call in organization A covers Sam's DM with his personal bot.
+    const mine = await core.db.withTenant({ organizationId: s.orgA, userId: s.samId }, (tx) =>
+      audienceCoverFacts(
+        tx,
+        { perms, isReadable: (t, u, c) => access.isReadable(t, u, c) },
+        { conversationId: scout.dm, agentId: scout.id },
+      ),
+    );
+    expect(audienceCovers(mine)).toBe(true);
   });
 });
