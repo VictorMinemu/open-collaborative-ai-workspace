@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 155
+open_count: 158
 waived_count: 4
 fixed_count: 108
-total_count: 267
-last_updated: 2026-10-22T03:14:25.479Z
+total_count: 270
+last_updated: 2026-10-22T03:43:44.276Z
 ---
 
 # Broken Windows Ledger
@@ -282,6 +282,9 @@ last_updated: 2026-10-22T03:14:25.479Z
 | 265 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-20 (for 21): ActivityStep has no requester, so sign-in and paused rows cannot name the person ("Asked you / Asked Sam" is built and tested, waiting for data) | open |  | 2026-10-22T03:14:25.296Z |  |
 | 266 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-20: activity steps carry no http/https flag, so step hosts show no lock or Not secure (only the card and review do) (low) | open |  | 2026-10-22T03:14:25.387Z |  |
 | 267 | 07.8 | deviation | apps/web/components/browser/bot-activity.tsx |  | 07.8-20: for a top-level channel mention the live label shows in the main list while the reply lands in the thread; a tab opened mid-turn shows no label until the next step (low) | open |  | 2026-10-22T03:14:25.479Z |  |
+| 268 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-23 (medium): no package version listing in sandboxd or the API, so the web version picker is a typed field and "Update to {version}" never appears | open |  | 2026-10-22T03:43:44.118Z |  |
+| 269 | 07.8 | deviation | apps/api/src/modules/sandbox |  | 07.8-23: the package list carries no install failure code (17's timeout cannot show) and no removing count; an approved package with no started sandbox reads Installing and polls every 5 s (low) | open |  | 2026-10-22T03:43:44.197Z |  |
+| 270 | 07.8 | deviation | apps/web/components/ui/sheet.tsx |  | 07.8-23: the shared sheet close button is 32 px on phones (marketplace plugin review sheet too); the packages review sheet has its own 44 px close (low) | open |  | 2026-10-22T03:43:44.276Z |  |
 
 ````json
 [
@@ -3487,6 +3490,42 @@ last_updated: 2026-10-22T03:14:25.479Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-22T03:14:25.479Z",
+    "resolved_at": null
+  },
+  {
+    "id": 268,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/packages.ts",
+    "line": null,
+    "description": "07.8-23 (medium): no package version listing in sandboxd or the API, so the web version picker is a typed field and \"Update to {version}\" never appears",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:43:44.118Z",
+    "resolved_at": null
+  },
+  {
+    "id": 269,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/sandbox",
+    "line": null,
+    "description": "07.8-23: the package list carries no install failure code (17's timeout cannot show) and no removing count; an approved package with no started sandbox reads Installing and polls every 5 s (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:43:44.197Z",
+    "resolved_at": null
+  },
+  {
+    "id": 270,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/ui/sheet.tsx",
+    "line": null,
+    "description": "07.8-23: the shared sheet close button is 32 px on phones (marketplace plugin review sheet too); the packages review sheet has its own 44 px close (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:43:44.276Z",
     "resolved_at": null
   }
 ]
