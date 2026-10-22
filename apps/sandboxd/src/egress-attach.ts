@@ -128,8 +128,13 @@ export function parseDecisionLine(line: string): { network: string; host: string
 export interface Egress {
   /** The outbound network and the proxy container exist and run; the proxy's output is followed. */
   ensure(): Promise<void>;
-  /** Attaches the proxy to a bot network (alias `sandbox-egress`) and rewrites the policy. */
-  attach(target: SandboxdTarget, kind: EgressKind, network: string): Promise<void>;
+  /**
+   * Attaches the proxy to a bot network (alias `sandbox-egress`), rewrites the policy, and answers the proxy's address
+   * on that network as Docker reports it now. Containers name the proxy by that address in their /etc/hosts
+   * (`egressHosts`), because gVisor answers no Docker DNS on the bot networks; a restarted proxy has a new address, so
+   * callers ask again for every container they create or start.
+   */
+  attach(target: SandboxdTarget, kind: EgressKind, network: string): Promise<string>;
   /** Detaches the proxy from every network of the bot (before a purge removes them) and rewrites the policy. */
   detachTarget(target: SandboxdTarget): Promise<void>;
   /** Detaches the proxy from one network (a finished package run's) and rewrites the policy. */
@@ -510,9 +515,10 @@ export function createEgress(options: EgressOptions): Egress {
         const address = attachedNetworks(c)[network]?.IPAddress;
         if (!address) throw dockerDown("the egress proxy has no address on the bot network");
         const known = entries.get(network);
-        if (known?.address === address) return;
+        if (known?.address === address) return address;
         entries.set(network, { network, address, target, kind });
         await writePolicyLocked();
+        return address;
       });
     },
 

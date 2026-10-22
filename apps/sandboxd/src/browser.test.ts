@@ -103,6 +103,14 @@ describe("brwSpec", () => {
     const smuggled = { ...base, HostConfig: { Privileged: true }, Env: ["X=1"], Binds: ["/:/host"] };
     expect(brwSpec(smuggled)).toEqual(brwSpec(base));
   });
+
+  it("names the proxy by its address in /etc/hosts (runsc answers no Docker DNS on the bot network)", () => {
+    expect(brwSpec({ ...base, egressAddress: "10.2.0.2" }).HostConfig.ExtraHosts).toEqual([
+      "sandbox-egress:10.2.0.2",
+    ]);
+    expect(brwSpec(base).HostConfig.ExtraHosts).toEqual([]);
+    expect(() => brwSpec({ ...base, egressAddress: "10.2.0.2 evil" })).toThrow(/address/);
+  });
 });
 
 describe("browserNetworkSpec and the egress specs", () => {
@@ -372,10 +380,13 @@ class FakeLink implements AgentLink {
 
 function fakeEgress() {
   const attached: Array<{ kind: string; network: string }> = [];
+  /** The proxy's address on the bot's browser network (a restarted proxy gets a new one). */
+  const proxy = { address: "10.2.0.2" };
   const egress: Egress = {
     ensure: async () => undefined,
     attach: async (_t, kind, network) => {
       attached.push({ kind, network });
+      return proxy.address;
     },
     detachTarget: async () => undefined,
     detachNetwork: async () => undefined,
@@ -383,7 +394,7 @@ function fakeEgress() {
     entries: () => [],
     close: () => undefined,
   };
-  return { egress, attached };
+  return { egress, attached, proxy };
 }
 
 function setup(opts: { posture?: string | null; runtimes?: string[] } = {}) {
@@ -400,7 +411,7 @@ function setup(opts: { posture?: string | null; runtimes?: string[] } = {}) {
     onEvent: (e) => events.push(e),
   });
   sandboxes.setPolicy(testPolicy(ORG));
-  const { egress, attached } = fakeEgress();
+  const { egress, attached, proxy } = fakeEgress();
   const links: FakeLink[] = [];
   const browsers = createBrowsers({
     docker,
@@ -423,6 +434,7 @@ function setup(opts: { posture?: string | null; runtimes?: string[] } = {}) {
     browsers,
     events,
     attached,
+    proxy,
     links,
     advance: (ms: number) => {
       now += ms;
@@ -455,6 +467,33 @@ describe("createBrowsers", () => {
     // A second ensure reuses the running browser.
     await s.browsers.ensure(target);
     expect(s.links).toHaveLength(1);
+  });
+
+  it("names the proxy by its address in brw's /etc/hosts; a stopped brw with a stale entry is recreated (gVisor DNS)", async () => {
+    const s = setup();
+    const name = nameFor("brw", NS, AGENT);
+    const hosts = () =>
+      (s.docker.container(name)?.Spec as { HostConfig?: { ExtraHosts?: string[] } } | undefined)?.HostConfig
+        ?.ExtraHosts;
+    await s.browsers.ensure(target);
+    expect(hosts()).toEqual(["sandbox-egress:10.2.0.2"]);
+    const first = s.docker.container(name)?.Id;
+    // Stopped with a current entry: started again as it is.
+    (s.links[0] as FakeLink).close();
+    (s.docker.container(name) as { Running: boolean }).Running = false;
+    await s.browsers.ensure(target);
+    expect(s.docker.container(name)?.Id).toBe(first);
+    // The proxy restarted and has a new address: the stopped brw is removed and created again with it.
+    (s.links[1] as FakeLink).close();
+    (s.docker.container(name) as { Running: boolean }).Running = false;
+    s.proxy.address = "10.2.0.7";
+    await s.browsers.ensure(target);
+    expect(s.docker.container(name)?.Id).not.toBe(first);
+    expect(hosts()).toEqual(["sandbox-egress:10.2.0.7"]);
+    expect(s.docker.container(name)?.Running).toBe(true);
+    expect(
+      s.docker.calls.filter((c) => c.method === "DELETE" && c.path.includes(first as string)),
+    ).toHaveLength(1);
   });
 
   it("D-14: refuses a posture the runtime cannot have, and a browser that did not start", async () => {

@@ -477,6 +477,23 @@ describe("createEgress", () => {
     s.egress.close();
   });
 
+  it("attach answers the proxy's address on the bot network, read again from Docker after the proxy restarts", async () => {
+    const s = setup();
+    await s.egress.setOrgPolicy(policy(ORG));
+    await expect(s.egress.attach({ orgId: ORG, agentId: A }, "sbx", s.sbxNet)).resolves.toBe("10.1.0.2");
+    // Idempotent: attached already, same answer, no second connect.
+    await expect(s.egress.attach({ orgId: ORG, agentId: A }, "sbx", s.sbxNet)).resolves.toBe("10.1.0.2");
+    expect(s.docker.calls.filter((c) => c.path.endsWith("/connect"))).toHaveLength(1);
+    // The proxy stopped and Docker gives it a new address on the bot network when it starts again.
+    const c = s.docker.container as NonNullable<typeof s.docker.container>;
+    c.Running = false;
+    c.nets.set(s.sbxNet, "10.1.0.7");
+    await expect(s.egress.attach({ orgId: ORG, agentId: A }, "sbx", s.sbxNet)).resolves.toBe("10.1.0.7");
+    expect(s.egress.entries().map((e) => e.address)).toEqual(["10.1.0.7"]);
+    expect(file(s.docker).networks.map((n: { address: string }) => n.address)).toEqual(["10.1.0.7"]);
+    s.egress.close();
+  });
+
   it("rebuilds its attachments from Docker after a restart, with every mode off until the API pushes", async () => {
     const s = setup();
     await s.egress.setOrgPolicy(policy(ORG));

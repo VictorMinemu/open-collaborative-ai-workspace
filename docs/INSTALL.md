@@ -180,6 +180,9 @@ Then run `docker compose up -d --build --wait` and open Settings › Sandbox & B
   **container-only**. To install gVisor, use the GitHub release `google/gvisor` `release-20261005.0`, check its SHA512,
   and install the whole tarball (`runsc` plus `gvisor-bin/`); `runsc` alone does not start. Then register it in
   `/etc/docker/daemon.json` with `--platform=systrap`. `OCW_SANDBOX_RUNTIME=runsc` refuses to start without it.
+  gVisor does not answer Docker's internal DNS on the sandbox networks, so sandboxd writes the egress proxy's address
+  into each sandbox's `/etc/hosts` when it creates it. If the proxy restarts, a stopped sandbox is recreated with the
+  new address on its next start (its workspace is kept), and a running one at its next restart or start.
 - **Host hardening.** Anyone who controls sandboxd controls the host's Docker. Consider rootless Docker or a Docker
   authorization plugin behind the socket, and an XFS project quota for hard disk limits. Docker 26 or later is
   required: older internal networks forward DNS.

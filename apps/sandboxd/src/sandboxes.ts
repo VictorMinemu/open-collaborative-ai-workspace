@@ -24,6 +24,7 @@ import type { Egress } from "./egress-attach";
 import {
   type ContainerLimits,
   type DockerRuntime,
+  egressHostsCurrent,
   filesSpec,
   nameFor,
   networkSpec,
@@ -294,7 +295,7 @@ interface ContainerInspect {
   Id: string;
   Config?: { Labels?: Record<string, string> | null; Image?: string };
   State?: { Running?: boolean; Restarting?: boolean; Status?: string; StartedAt?: string };
-  HostConfig?: { Runtime?: string };
+  HostConfig?: { Runtime?: string; ExtraHosts?: string[] | null };
 }
 
 interface ProcessRecord {
@@ -908,6 +909,50 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     return { status: "running", processId: rec.id, ...common };
   }
 
+  /**
+   * The bot's `sbx` from `shellSpec`, with the proxy's current address in its /etc/hosts (`egressAddress`, from the
+   * attach just made): under gVisor that entry is the only way the shell resolves `sandbox-egress`.
+   */
+  async function createShell(
+    target: SandboxdTarget,
+    limits: ContainerLimits,
+    dockerRuntime: DockerRuntime,
+    network: string,
+    egressAddress: string | null,
+  ): Promise<ContainerInspect> {
+    const volume = await ensureVolume(target);
+    const packagesVolume = await ensurePackagesVolume(target);
+    const spec = shellSpec({
+      ns,
+      orgId: target.orgId,
+      agentId: target.agentId,
+      image,
+      runtime: dockerRuntime,
+      network,
+      volume,
+      packagesVolume,
+      limits,
+      egressAddress,
+    });
+    const name = nameFor("sbx", ns, target.agentId);
+    const created = await call("POST", `/containers/create?name=${encodeURIComponent(name)}`, spec);
+    if (created.status !== 201 && created.status !== 409) throw dockerDown();
+    const c = await ownedShell(target);
+    if (!c) throw dockerDown();
+    return c;
+  }
+
+  /**
+   * Removes the bot's own `sbx` (already label-checked by `ownedShell`) so it can be created again with a current
+   * /etc/hosts entry. The container only: no `v=1`, so the workspace and packages volumes stay (its root is read-only,
+   * so nothing else is lost).
+   */
+  async function removeShell(c: ContainerInspect): Promise<void> {
+    if (c.State?.Running) expectStop(c.Id);
+    const res = await call("DELETE", `/containers/${encodeURIComponent(c.Id)}?force=1`);
+    if (res.status !== 204 && res.status !== 404) throw dockerDown();
+  }
+
   async function killRecord(rec: ProcessRecord): Promise<void> {
     if (rec.ended) return;
     const c = await inspectContainer(nameFor("sbx", ns, rec.agentId));
@@ -937,28 +982,20 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
       return locked(targetKey(target), async () => {
         let c = await ownedShell(target);
         const network = await ensureNetwork(target);
-        // The proxy on the shell network before the shell runs (idempotent; a restarted proxy is re-attached here).
-        if (options.egress) await options.egress.attach(target, "sbx", network);
-        if (!c) {
-          const volume = await ensureVolume(target);
-          const packagesVolume = await ensurePackagesVolume(target);
-          const spec = shellSpec({
-            ns,
-            orgId: target.orgId,
-            agentId: target.agentId,
-            image,
-            runtime: dockerRuntime,
-            network,
-            volume,
-            packagesVolume,
-            limits: lim.container,
-          });
-          const name = nameFor("sbx", ns, target.agentId);
-          const created = await call("POST", `/containers/create?name=${encodeURIComponent(name)}`, spec);
-          if (created.status !== 201 && created.status !== 409) throw dockerDown();
-          c = await ownedShell(target);
-          if (!c) throw dockerDown();
+        // The proxy on the shell network before the shell runs (idempotent; a restarted proxy is re-attached here),
+        // and its address there now, for the shell's /etc/hosts.
+        const egressAddress = options.egress ? await options.egress.attach(target, "sbx", network) : null;
+        if (
+          c &&
+          !c.State?.Running &&
+          options.egress &&
+          !egressHostsCurrent(c.HostConfig?.ExtraHosts, egressAddress)
+        ) {
+          // Stopped with a stale entry (the proxy restarted, or the shell predates the entry): created again below.
+          await removeShell(c);
+          c = null;
         }
+        if (!c) c = await createShell(target, lim.container, dockerRuntime, network, egressAddress);
         if (!c.State?.Running) {
           const started = await call("POST", `/containers/${encodeURIComponent(c.Id)}/start`);
           if (started.status !== 204 && started.status !== 304) throw dockerDown();
@@ -1059,11 +1096,28 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
 
     async restart(target) {
       return locked(targetKey(target), async () => {
-        requirePolicy(target.orgId, { runnable: true });
+        const lim = requirePolicy(target.orgId, { runnable: true });
         const c = await ownedShell(target);
         if (!c) throw failure("not_found", 404, "this bot has no sandbox");
         if (diskFull.has(targetKey(target)))
           throw failure("disk_full", 409, "the workspace is over its quota");
+        if (options.egress) {
+          const network = await ensureNetwork(target);
+          const egressAddress = await options.egress.attach(target, "sbx", network);
+          if (!egressHostsCurrent(c.HostConfig?.ExtraHosts, egressAddress)) {
+            // A Docker restart keeps a stale /etc/hosts entry: the shell is created again with the current address.
+            const dockerRuntime = await chooseRuntime();
+            await removeShell(c);
+            const fresh = await createShell(target, lim.container, dockerRuntime, network, egressAddress);
+            const started = await call("POST", `/containers/${encodeURIComponent(fresh.Id)}/start`);
+            if (started.status !== 204 && started.status !== 304) throw dockerDown();
+            lastActive.set(targetKey(target), clock.now());
+            stopReasons.delete(targetKey(target));
+            cpuLast.delete(targetKey(target));
+            emit({ type: "state", target, kind: "sbx", state: "running", reason: null });
+            return statusOf(target, await ownedShell(target));
+          }
+        }
         expectStop(c.Id);
         const res = await call("POST", `/containers/${encodeURIComponent(c.Id)}/restart?t=5`);
         if (res.status !== 204) throw dockerDown();

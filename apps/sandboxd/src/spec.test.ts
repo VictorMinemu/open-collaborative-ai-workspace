@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   agentKey,
+  egressHosts,
+  egressHostsCurrent,
   filesSpec,
   HARD_MAX,
   INSTALLER_LIMITS,
@@ -309,5 +311,66 @@ describe("sandbox package review and installer containers (07.8-17, D-03, D-11, 
   it("never copies a caller's extra key into a run spec", () => {
     const hostile = { ...runBase, Privileged: true, Binds: ["/:/host"], HostConfig: { Privileged: true } };
     expect(reviewSpec(hostile as typeof runBase)).toEqual(reviewSpec(runBase));
+  });
+});
+
+describe("the proxy's address in /etc/hosts (07.8 gVisor DNS fix)", () => {
+  // runsc does not answer Docker's embedded DNS (127.0.0.11) on the internal bot networks, so the alias
+  // `sandbox-egress` in HTTP(S)_PROXY and Chromium's proxy flag only resolves through an /etc/hosts entry.
+  const runBase = {
+    ns: "ocw-test",
+    orgId: ORG,
+    agentId: AGENT,
+    runId: "0199f0a0-2222-7000-8000-00000000000c",
+    image: "ocw-sandbox-sbx:test",
+    runtime: "runsc" as const,
+    network: "ocw-pnet-ocw-test-abc",
+    env: [],
+    lifetimeSeconds: 600,
+  };
+
+  it("names the proxy by its address on the bot network, as one ExtraHosts entry", () => {
+    expect(egressHosts("10.1.0.2")).toEqual(["sandbox-egress:10.1.0.2"]);
+    expect(egressHosts(null)).toEqual([]);
+    expect(shellSpec({ ...base, egressAddress: "10.1.0.2" }).HostConfig.ExtraHosts).toEqual([
+      "sandbox-egress:10.1.0.2",
+    ]);
+    expect(
+      installerSpec({ ...runBase, packagesVolume: "p", egressAddress: "10.6.0.2" }).HostConfig.ExtraHosts,
+    ).toEqual(["sandbox-egress:10.6.0.2"]);
+    expect(reviewSpec({ ...runBase, egressAddress: "10.6.0.3" }).HostConfig.ExtraHosts).toEqual([
+      "sandbox-egress:10.6.0.3",
+    ]);
+  });
+
+  it("adds no entry without a proxy, and never one to the network-none files helper", () => {
+    expect(shellSpec(base).HostConfig.ExtraHosts).toEqual([]);
+    expect(reviewSpec({ ...runBase, network: "none" }).HostConfig.ExtraHosts).toEqual([]);
+    const files = filesSpec({
+      ns: "ocw-test",
+      orgId: ORG,
+      agentId: AGENT,
+      image: "i",
+      runtime: "runc",
+      volume: "v",
+    });
+    expect(files.HostConfig.ExtraHosts).toEqual([]);
+  });
+
+  it("refuses anything but an IPv4 address (no host name, no second entry, no option smuggled in)", () => {
+    for (const bad of ["sandbox-egress", "10.1.0.2 evil", "10.1.0.2\n1.2.3.4 x", "::1", "10.1.0.256", ""]) {
+      expect(() => egressHosts(bad)).toThrow(/address/);
+      expect(() => shellSpec({ ...base, egressAddress: bad })).toThrow(/address/);
+    }
+  });
+
+  it("tells a container's entry is current only when it names exactly the proxy's address now", () => {
+    expect(egressHostsCurrent(["sandbox-egress:10.1.0.2"], "10.1.0.2")).toBe(true);
+    expect(egressHostsCurrent(["sandbox-egress:10.1.0.9"], "10.1.0.2")).toBe(false);
+    expect(egressHostsCurrent(null, "10.1.0.2")).toBe(false); // created before this fix
+    expect(egressHostsCurrent(undefined, "10.1.0.2")).toBe(false);
+    expect(egressHostsCurrent(["sandbox-egress:10.1.0.2", "x:1.2.3.4"], "10.1.0.2")).toBe(false);
+    expect(egressHostsCurrent(null, null)).toBe(true);
+    expect(egressHostsCurrent([], null)).toBe(true);
   });
 });

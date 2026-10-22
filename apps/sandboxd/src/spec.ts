@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isIPv4 } from "node:net";
 import { SANDBOXD_LABELS, type SandboxdKind } from "@ocw/contracts";
 
 /**
@@ -150,6 +151,8 @@ export interface ShellSpecInput extends ObjectSpecInput {
   /** The bot's packages volume (`ocw-pkg-<ns>-<key>`), mounted read-only at /opt/ocw-packages (07.8-17). */
   packagesVolume: string;
   limits: ContainerLimits;
+  /** The egress proxy's address on `network` (from Docker, at attach), or none: no proxy, no entry. */
+  egressAddress?: string | null;
 }
 
 /** Where approved sandbox packages live (P-12): read-only in `sbx`, read-write only in the installer. */
@@ -172,6 +175,29 @@ export const PROXY_ENV: readonly string[] = [
   `NO_PROXY=${NO_PROXY}`,
   `no_proxy=${NO_PROXY}`,
 ];
+
+/**
+ * The `/etc/hosts` entry naming the proxy on one bot network (07.8 gVisor DNS fix). gVisor `runsc` does not answer
+ * Docker's embedded DNS (127.0.0.11) on the internal bot networks, so the alias in `HTTP(S)_PROXY` and in Chromium's
+ * proxy flag resolves only through this entry; under runc it gives the same answer as Docker's DNS. The address is the
+ * proxy's on that network, read from Docker each time sandboxd attaches it, never a caller's: anything but a dotted
+ * IPv4 address (the bot networks have no IPv6) is refused, so no host name or second entry reaches `ExtraHosts`.
+ */
+export function egressHosts(address: string | null | undefined): string[] {
+  if (address === null || address === undefined) return [];
+  if (!isIPv4(address)) throw new Error("the egress proxy's address is not an IPv4 address");
+  return [`${EGRESS_ALIAS}:${address}`];
+}
+
+/**
+ * Whether a container's `HostConfig.ExtraHosts` (as Docker inspects it: null when empty) is exactly the entry for the
+ * proxy's address now. A proxy that restarted has a new address, and a container created before this fix has none.
+ */
+export function egressHostsCurrent(extraHosts: unknown, address: string | null): boolean {
+  const have = Array.isArray(extraHosts) ? extraHosts : [];
+  const want = egressHosts(address);
+  return have.length === want.length && have.every((h, i) => h === want[i]);
+}
 
 /**
  * The whole environment of a bot's `sbx` (07.8-17, WINDOWS #253): package bins after the system paths (a package never
@@ -222,6 +248,7 @@ export function shellSpec(p: ShellSpecInput) {
         { Type: "volume", Source: p.packagesVolume, Target: PACKAGES_DIR, ReadOnly: true },
       ],
       NetworkMode: p.network,
+      ExtraHosts: egressHosts(p.egressAddress),
       PublishAllPorts: false,
       RestartPolicy: { Name: "no" },
       IpcMode: "private",
@@ -243,7 +270,13 @@ export interface FilesSpecInput extends ObjectSpecInput {
  * `ocw-files`.
  */
 export function filesSpec(p: FilesSpecInput) {
-  const spec = shellSpec({ ...p, network: "none", packagesVolume: "", limits: FILES_HELPER_LIMITS });
+  const spec = shellSpec({
+    ...p,
+    network: "none",
+    packagesVolume: "",
+    limits: FILES_HELPER_LIMITS,
+    egressAddress: null,
+  });
   return {
     ...spec,
     Cmd: ["sleep", String(FILES_HELPER_SECONDS)],
@@ -252,6 +285,7 @@ export function filesSpec(p: FilesSpecInput) {
     HostConfig: {
       ...spec.HostConfig,
       NetworkMode: "none",
+      ExtraHosts: [],
       Mounts: [{ Type: "volume", Source: p.volume, Target: WORKSPACE, ReadOnly: false }],
     },
   };
@@ -290,6 +324,8 @@ export interface BrowserSpecInput extends ObjectSpecInput {
   chromiumSandbox: boolean;
   /** The seccomp profile JSON (Docker default + userns, infra/sandbox/browser/seccomp.json), or null for Docker's. */
   seccompProfile?: string | null;
+  /** The egress proxy's address on `network` (from Docker, at attach), or none. */
+  egressAddress?: string | null;
 }
 
 /**
@@ -338,6 +374,7 @@ export function brwSpec(p: BrowserSpecInput) {
       Tmpfs: { "/tmp": "rw,noexec,nosuid,nodev,size=256m" },
       Mounts: [],
       NetworkMode: p.network,
+      ExtraHosts: egressHosts(p.egressAddress),
       PublishAllPorts: false,
       RestartPolicy: { Name: "no" },
       IpcMode: "private",
@@ -478,6 +515,8 @@ export interface RunSpecInput extends PackageRunInput {
   env: readonly string[];
   /** The container ends on its own after this long, and Docker removes it (AutoRemove) with its scratch volume. */
   lifetimeSeconds: number;
+  /** The egress proxy's address on the run's network (from Docker, at attach), or none (a removal has no network). */
+  egressAddress?: string | null;
 }
 
 function runSpec(p: RunSpecInput, kind: "installer" | "review", packagesVolume: string | null) {
@@ -516,6 +555,7 @@ function runSpec(p: RunSpecInput, kind: "installer" | "review", packagesVolume: 
       Tmpfs: { "/tmp": "rw,noexec,nosuid,nodev,size=256m" },
       Mounts: mounts,
       NetworkMode: p.network,
+      ExtraHosts: p.network === "none" ? [] : egressHosts(p.egressAddress),
       PublishAllPorts: false,
       RestartPolicy: { Name: "no" },
       AutoRemove: true,
@@ -541,6 +581,7 @@ export function installerSpec(p: RunSpecInput & { packagesVolume: string }) {
       network: p.network,
       env: p.env,
       lifetimeSeconds: p.lifetimeSeconds,
+      egressAddress: p.egressAddress ?? null,
     },
     "installer",
     p.packagesVolume,
@@ -560,6 +601,7 @@ export function reviewSpec(p: RunSpecInput) {
       network: p.network,
       env: p.env,
       lifetimeSeconds: p.lifetimeSeconds,
+      egressAddress: p.egressAddress ?? null,
     },
     "review",
     null,
