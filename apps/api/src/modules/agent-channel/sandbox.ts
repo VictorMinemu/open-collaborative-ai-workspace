@@ -43,6 +43,7 @@ import type { PermissionService } from "../organization";
 import {
   type ConfinedKind,
   ensureSandbox,
+  loadSandboxBot,
   markState,
   reserveSandbox,
   type SandboxContainer,
@@ -131,6 +132,17 @@ const MESSAGES: Record<SandboxCallRefusal, string> = {
   invalid_path: "That path is not inside the workspace",
   busy: "The sandbox is busy",
 };
+
+/**
+ * The sandbox tools that change a bot's workspace (P-11): refused on a team bot once its turn has member data. Read,
+ * list, process and share leave the workspace as it is (share moves a file towards the conversation, never into it).
+ */
+const WORKSPACE_MUTATIONS: ReadonlySet<ConfinedToolName> = new Set([
+  BUILTIN_TOOLS.sandboxWrite,
+  BUILTIN_TOOLS.sandboxDelete,
+  BUILTIN_TOOLS.sandboxExec,
+  BUILTIN_TOOLS.sandboxImport,
+]);
 
 const statusOf = (code: SandboxCallRefusal): number =>
   code in SANDBOX_REFUSAL_STATUS ? SANDBOX_REFUSAL_STATUS[code as SandboxRefusal] : 409;
@@ -302,13 +314,21 @@ export async function decideSandboxCall(
   if (!turn.tools.includes(p.tool)) return refuse("policy_changed");
   if (!deps.configured) return refuse("service_unavailable");
 
-  // The per-turn budget, under the turn row lock (the claim below re-checks it in its UPDATE).
+  // The turn row, locked: the per-turn budget (the claim below re-checks it in its UPDATE) and its member data.
   const [locked] = await tx
-    .select({ sandboxCalls: agentTurns.sandboxCalls })
+    .select({ sandboxCalls: agentTurns.sandboxCalls, memberData: agentTurns.memberData })
     .from(agentTurns)
     .where(eq(agentTurns.eventId, turn.eventId))
     .for("update");
-  if (!locked || locked.sandboxCalls >= MAX_SANDBOX_CALLS_PER_TURN) return refuse("budget_exhausted");
+  if (!locked) return refuse("budget_exhausted");
+
+  // P-11 (D-11 F-8, Pitfall 13): once a member's session was loaded in this turn, a team bot puts nothing into the
+  // workspace other people's turns read, for the rest of the turn. A personal bot's workspace is its owner's alone.
+  if (locked.memberData && WORKSPACE_MUTATIONS.has(p.tool)) {
+    const bot = await loadSandboxBot(tx, turn.agentId);
+    if (bot?.facts.scope !== "personal") return refuse("member_data");
+  }
+  if (locked.sandboxCalls >= MAX_SANDBOX_CALLS_PER_TURN) return refuse("budget_exhausted");
 
   // The organization cap before the approval: a grant consumed by a call the cap then refuses is never given back.
   // The advisory lock taken here is held until commit, so the reservation below cannot fail.

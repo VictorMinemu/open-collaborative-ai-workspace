@@ -41,6 +41,7 @@ export {
   type AvailabilityRefusal,
   type ConfinedKind,
   ensureSandbox,
+  loadSandboxBot,
   loadSandboxPolicy,
   markState,
   reserveSandbox,
