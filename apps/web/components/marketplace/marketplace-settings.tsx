@@ -71,9 +71,9 @@ export function MarketplaceSettings() {
 function SandboxPackagesPointer() {
   return (
     <p className="-mb-6 text-muted-foreground text-xs" data-testid="marketplace-sandbox-pointer">
-      Packages for bot sandboxes are in{" "}
+      Packages for bot sandboxes are in Settings ›{" "}
       <Link href="/settings/sandbox" className="font-medium text-foreground underline underline-offset-2">
-        Settings › Sandbox &amp; Browser
+        Sandbox &amp; Browser
       </Link>
       .
     </p>
