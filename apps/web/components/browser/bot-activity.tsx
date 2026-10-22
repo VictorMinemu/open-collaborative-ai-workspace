@@ -20,6 +20,15 @@ import { ActivityStepRow, type StepViewer } from "./activity-step";
 
 const NO_VIEWER: StepViewer = { meId: null, requester: null };
 
+/**
+ * Who reads the turn's steps (07.8-21, WINDOWS #265): the server names the person the bot acted for
+ * (`activity.requester`), so a sign-in row says "Asked you" to them and "Asked {name}" to everyone else.
+ */
+export function stepViewerOf(activity: Pick<BotTurnActivity, "requester">, meId: string | null): StepViewer {
+  const r = activity.requester;
+  return { meId, requester: r ? { id: r.id, name: r.displayName } : null };
+}
+
 /** Total steps of a turn: the ones listed plus the ones counted in `more`. */
 export const stepCount = (a: Pick<BotTurnActivity, "steps" | "more">) => a.steps.length + a.more;
 

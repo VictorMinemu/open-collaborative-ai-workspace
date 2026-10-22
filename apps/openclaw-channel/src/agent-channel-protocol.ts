@@ -478,6 +478,14 @@ export const AgentCardActionEvent = AgentMentionEvent.omit({ type: true }).exten
      * known codes into words; a malformed value reads as absent.
      */
     resultCode: z.string().optional().catch(undefined),
+    /**
+     * 07.8-21: a platform sign-in card's outcome for the requester (`signed_in` or `skipped`) and the page's host. The
+     * mapper words it with the UI-SPEC's model-facing sentences; a malformed value reads as absent.
+     */
+    signIn: z
+      .object({ status: z.enum(["signed_in", "skipped"]), host: z.string().min(1).max(260) })
+      .optional()
+      .catch(undefined),
   }),
 });
 export type AgentCardActionEvent = z.infer<typeof AgentCardActionEvent>;

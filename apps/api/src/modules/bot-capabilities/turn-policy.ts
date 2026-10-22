@@ -140,12 +140,16 @@ const OFFERED_SANDBOX_TOOLS = SANDBOX_TOOL_NAMES.filter((name) => name !== BUILT
 /**
  * The browser tools a turn is offered (07.8-14, D-05, D-14, P-14): open, snapshot, act, wait and close, and the
  * screenshot only when the bot's model reads images (spike ii: an image from a tool reaches only a model declared
- * `input: ["text", "image"]`; any other model would read "(tool image omitted)"). `ocw_browser_signin` is 07.8-21's.
+ * `input: ["text", "image"]`; any other model would read "(tool image omitted)"). `ocw_browser_signin` (07.8-21, D-11)
+ * only where the member-account audience rule allows a member's own sign-in (`signIn`).
  */
-function offeredBrowserTools(bot: { modelProvider: string; modelId: string }): BrowserToolName[] {
+function offeredBrowserTools(
+  bot: { modelProvider: string; modelId: string },
+  signIn: boolean,
+): BrowserToolName[] {
   return BROWSER_TOOL_NAMES.filter(
     (name) =>
-      name !== BUILTIN_TOOLS.browserSignIn &&
+      (name !== BUILTIN_TOOLS.browserSignIn || signIn) &&
       (name !== BUILTIN_TOOLS.browserScreenshot || modelAcceptsImages(bot.modelProvider, bot.modelId)),
   );
 }
@@ -490,7 +494,17 @@ async function computeTurn(
       },
       {
         kind: "browser" as const,
-        tools: offeredBrowserTools(row) as readonly ConfinedToolName[],
+        // D-11: a member's own sign-in follows 07.4's member-account rule (their private chat with the bot); a
+        // browser session has no share, so a shared conversation never offers it.
+        tools: offeredBrowserTools(
+          row,
+          member !== null &&
+            memberAccountAllowed({
+              scopeKind: member.scopeKind,
+              aiChatShared: member.aiChatShared,
+              hasShare: false,
+            }),
+        ) as readonly ConfinedToolName[],
         on: caps.browser,
       },
     ];
@@ -617,6 +631,20 @@ async function isBoardChannel(tx: Tx, conversationId: string, conversationKind: 
     .where(eq(conversations.id, conversationId))
     .limit(1);
   return row?.layout === "board";
+}
+
+/**
+ * The member-account rule's facts for a delivered turn (07.8-21): what `memberAccountAllowed` decides a member's own
+ * browser sign-in and sealed session with (D-11), at call time. An AI chat is judged with its readers now
+ * (`audienceOf`, passed by the caller); without them it counts as shared (fail closed).
+ */
+export async function memberAccountFacts(
+  tx: Tx,
+  p: { conversationId: string; conversationKind: string; agentId: string; humanUserId: string },
+  audience: TurnAudience | null,
+): Promise<{ scopeKind: string; aiChatShared: boolean | null }> {
+  const facts = await memberAccountContext(tx, { ...p, audience });
+  return { scopeKind: facts.scopeKind, aiChatShared: facts.aiChatShared };
 }
 
 /**

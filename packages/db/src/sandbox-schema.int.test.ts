@@ -638,15 +638,15 @@ describe("deletions", () => {
       bot_turn_activity: 0,
       sandbox_package_installs: 0,
     });
-    // The other bot keeps its rows; the organization keeps the approved package. The sealed secret is the API's to
-    // delete (it opens only with the member's AAD); it is no longer referenced by any session.
+    // The other bot keeps its rows; the organization keeps the approved package. 07.8-21 (WINDOWS #230): the sealed
+    // secret goes with its session (`browser_session_secret_cleanup`), so no sealed state outlives a deleted bot.
     expect(await left(o.helper)).toMatchObject({
       bot_sandboxes: 1,
       sandbox_usage_daily: 1,
       sandbox_package_installs: 1,
     });
     expect(await count("app.sandbox_packages where id = $1", [id])).toBe(1);
-    expect(await count("app.secrets where id = $1", [secret])).toBe(1);
+    expect(await count("app.secrets where id = $1", [secret])).toBe(0);
   });
 
   it("deleting a session only unlinks its contexts and sign-in requests; deleting its secret removes the session", async () => {

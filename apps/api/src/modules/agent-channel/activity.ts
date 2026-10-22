@@ -7,7 +7,7 @@ import {
   SANDBOX_LIMITS,
   type TurnActivityEvent,
 } from "@ocw/contracts";
-import { botTurnActivity, messages, type Tx, tenantOf } from "@ocw/db";
+import { botTurnActivity, messages, orgMembers, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, isNull } from "drizzle-orm";
 import type { Core } from "../../core";
 import { convTopic } from "../chat";
@@ -338,12 +338,19 @@ export async function recordStep(
     .update(botTurnActivity)
     .set({ steps: merged.steps, more: merged.more, running, updatedAt: new Date().toISOString() })
     .where(eq(botTurnActivity.eventId, turn.eventId));
+  // WINDOWS #265 (07.8-21): who the bot acts for, so sign-in and paused rows say "Asked you" / "Asked Sam".
+  const [asker] = await tx
+    .select({ name: orgMembers.displayName })
+    .from(orgMembers)
+    .where(eq(orgMembers.userId, turn.userId))
+    .limit(1);
   const activity: BotTurnActivity = {
     eventId: turn.eventId,
     steps: merged.steps,
     more: merged.more,
     running,
     current: running && p.inFlight ? currentPhrase(p.step) || null : null,
+    requester: { id: turn.userId, displayName: (asker?.name ?? "Former member").slice(0, 200) },
   };
   const event: TurnActivityEvent = {
     type: EphemeralTypes.turnActivity,

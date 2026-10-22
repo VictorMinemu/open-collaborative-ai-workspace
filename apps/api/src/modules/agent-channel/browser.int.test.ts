@@ -154,7 +154,8 @@ describe("a bot opens a page and reads it through the Control Plane (tracer)", (
     expect(ev.turn.tools).toEqual(
       expect.arrayContaining([OPEN, "ocw_browser_snapshot", ACT, "ocw_browser_wait", "ocw_browser_close"]),
     );
-    expect(ev.turn.tools).not.toContain("ocw_browser_signin");
+    // 07.8-21: Sam's one-person DM with the bot is where the member-account rule lets him sign in.
+    expect(ev.turn.tools).toContain("ocw_browser_signin");
     expect(ev.turn.maxSandboxCalls).toBe(40);
 
     const opened = await ok(browser("open", ev, { url: "https://panel.fake.test/app?token=abc" }));
@@ -771,6 +772,7 @@ describe("the browser tools are offered only where every layer allows them (D-09
       "ocw_browser_act",
       "ocw_browser_screenshot",
       "ocw_browser_wait",
+      "ocw_browser_signin",
       "ocw_browser_close",
     ]);
 
@@ -995,6 +997,7 @@ describe("cross-tenant guards derived from the authz registry (P-17, 07.4 #169)"
       act: { action: "click", ref: "r4" },
       screenshot: {},
       wait: { for: "load" },
+      signin: { reason: "Read the orders" },
       close: {},
     };
     const cases: Record<string, () => Promise<void>> = Object.fromEntries(

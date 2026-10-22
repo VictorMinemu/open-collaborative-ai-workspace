@@ -568,6 +568,29 @@ describe("createBrowsers", () => {
     expect(s.links[0]?.calls.filter((c) => c.op === "contextClose")).toHaveLength(1);
   });
 
+  it("lock (07.8-21): site-locks an open context in place for the member; another bot's context is no context", async () => {
+    const s = setup();
+    await s.browsers.open({ target, contextId: CTX, viewport });
+    const link = s.links[0] as FakeLink;
+    link.replies.contextLock = () => ({ locked: true });
+    const member = "33333333-3333-4333-8333-333333333333";
+    await expect(
+      s.browsers.lock({ target, contextId: CTX, memberId: member, siteLock: "panel.example.test" }),
+    ).resolves.toEqual({ locked: true });
+    expect(link.calls.at(-1)).toEqual({
+      op: "contextLock",
+      input: { contextId: CTX, memberId: member, siteLock: "panel.example.test" },
+    });
+    await expect(
+      s.browsers.lock({
+        target: { ...target, agentId: "44444444-4444-4444-8444-444444444444" },
+        contextId: CTX,
+        memberId: member,
+        siteLock: "panel.example.test",
+      }),
+    ).rejects.toMatchObject({ code: "no_context" });
+  });
+
   it("two slow subscribers each get only the latest frame, as bare JPEGs without the context tag", async () => {
     const s = setup();
     await s.browsers.open({ target, contextId: CTX, viewport });

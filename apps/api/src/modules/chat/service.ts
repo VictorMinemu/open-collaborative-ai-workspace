@@ -23,6 +23,7 @@ import {
 } from "@ocw/db";
 import { and, asc, desc, eq, gt, inArray, isNull, lt, type SQL, sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
+import type { PlatformCardInput } from "../../lib/chat-agent-bridge";
 import { badRequest, notFound } from "../../lib/errors";
 import { attachmentsForMessages, linkAttachments } from "../artifact";
 import type { AuditService } from "../audit";
@@ -846,7 +847,7 @@ export interface PostInput {
    * An Agent Card (P-11, agents only): inserted with the message before `message.created` is appended, so the event
    * carries it; `body` is its plain-text summary.
    */
-  card?: AgentCardInput | undefined;
+  card?: AgentCardInput | PlatformCardInput | undefined;
   /** Phase 07.2: the card is server-composed (an approval mirror); agents can never patch it. */
   cardPlatformOwned?: boolean | undefined;
   /**

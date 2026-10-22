@@ -21,6 +21,10 @@ export interface FakeBrowserContextStats {
   siteLock: string | null;
   takeover: boolean;
   held: boolean;
+  /** Why the page is held (`approval`, `signin`), null when it is not. */
+  holdReason: string | null;
+  /** The page was opened with a member's storage state (07.8-21); never the state itself. */
+  loadedState: boolean;
   /** The page's viewport (contextOpen, then contextResize). */
   viewport: { width: number; height: number };
   /** The live view's mode of the last resize (`small`, `expanded`, `phone`), null before any. */

@@ -37,8 +37,10 @@ export interface SecretsService {
       /**
        * `user_model_credential`: a member's ChatGPT bundle (P-10). `connector_credential`: a member's connector token
        * bundle or key (Phase 07.4, D-01). `vault_item`: a keychain item's value, AAD `<orgId>:vault:<itemId>` (D-04).
+       * `browser_session`: a member's browser storage state for one site and bot (Phase 07.8, D-08, P-09), AAD
+       * `<orgId>:<userId>:browser:<agentId>:<siteKey>`; only `browser/sessions.ts` seals and opens it.
        */
-      kind: "user_model_credential" | "connector_credential" | "vault_item";
+      kind: "user_model_credential" | "connector_credential" | "vault_item" | "browser_session";
       provider?: string | null;
       value: string;
       aad: string;

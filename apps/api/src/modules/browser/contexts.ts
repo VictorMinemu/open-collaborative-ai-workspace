@@ -12,6 +12,7 @@ import {
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { SandboxEventHandler } from "../sandbox";
+import { stopSignIns } from "./signin-card";
 
 /**
  * A bot's browser contexts as the Control Plane records them (07.8-14; D-05, D-09, D-12, BRW-01). One open context per
@@ -109,7 +110,13 @@ export interface ContextTurn {
  */
 export async function contextFor(
   tx: Tx,
-  p: { turn: ContextTurn; host: string; secure: boolean },
+  p: {
+    turn: ContextTurn;
+    host: string;
+    secure: boolean;
+    /** 07.8-21: the member's sealed session loaded into the new page (its site is the page's lock). */
+    session?: { id: string; siteKey: string } | null;
+  },
 ): Promise<{ context: LoadedContext; created: boolean } | null> {
   const { turn } = p;
   const host = validHost(p.host);
@@ -146,10 +153,11 @@ export async function contextFor(
       host,
       secure: p.secure,
       state: "live",
+      sessionId: p.session?.id ?? null,
     })
     .returning();
   if (!row) throw new Error("browser context insert returned no row");
-  return { context: { ...row, sessionSite: null }, created: true };
+  return { context: { ...row, sessionSite: p.session?.siteKey ?? null }, created: true };
 }
 
 /** A member's sealed session is loaded for this host: the context carries a session whose site is exactly the host. */
@@ -245,14 +253,18 @@ export async function closeOrganizationContexts(
     .returning();
 }
 
-/** `browser.closed` for a context the platform ended (ids, the host and the reason only). */
+/**
+ * `browser.closed` for a context the platform ended (ids, the host and the reason only). A sign-in still waiting on it
+ * reads "Stopped" with that reason from now on (07.8-21; nothing is sealed).
+ */
 export async function auditClosed(
   tx: Tx,
-  core: Pick<Core, "audit">,
+  core: Pick<Core, "audit" | "realtime">,
   row: Pick<BrowserContextRecord, "id" | "agentId" | "requestedForUserId" | "host">,
   reason: BrowserEndReason,
   extra: Record<string, unknown> = {},
 ): Promise<void> {
+  await stopSignIns(tx, core, { contextId: row.id, reason });
   await core.audit.record(tx, {
     action: "browser.closed",
     actorKind: reason === "closed_by_bot" ? "agent" : "system",
@@ -272,7 +284,7 @@ export async function auditClosed(
  * `idle` otherwise (the broker's idle stop). A context the API already closed, another bot's id, or a value that is not a
  * host changes nothing. Downloads and sensitive focus belong to 16 and 25.
  */
-export function onBrowserEvent(core: Pick<Core, "audit">): SandboxEventHandler<"browser"> {
+export function onBrowserEvent(core: Pick<Core, "audit" | "realtime">): SandboxEventHandler<"browser"> {
   return async (tx, e) => {
     const ctx = await contextById(tx, e.contextId);
     if (!ctx || ctx.closedAt !== null || ctx.agentId !== e.target.agentId) return;

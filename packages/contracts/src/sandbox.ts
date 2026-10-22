@@ -576,6 +576,14 @@ export const BotTurnActivity = z.object({
   more: z.number().int().nonnegative(),
   running: z.boolean(),
   current: z.string().max(80).nullable(),
+  /**
+   * 07.8-21 (WINDOWS #265): the person the bot acted for in this turn (the asker), so sign-in and paused rows say
+   * "Asked you" / "Asked Sam". Every reader of the reply already sees who asked. Optional: older snapshots have none.
+   */
+  requester: z
+    .object({ id: Id, displayName: z.string().max(200) })
+    .nullable()
+    .optional(),
 });
 export type BotTurnActivity = z.infer<typeof BotTurnActivity>;
 

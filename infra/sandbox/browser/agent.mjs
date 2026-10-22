@@ -415,6 +415,7 @@ async function contextOpen(input) {
     cdp: null,
     siteLock,
     signInHost: siteLock,
+    routed: false,
     memberId: input.memberId ?? null,
     viewport,
     mode: "small",
@@ -437,7 +438,10 @@ async function contextOpen(input) {
     queue: Promise.resolve(),
   };
   try {
-    if (siteLock) await context.route("**/*", (route) => onRoute(ctx, route));
+    if (siteLock) {
+      await context.route("**/*", (route) => onRoute(ctx, route));
+      ctx.routed = true;
+    }
     ctx.page = await context.newPage();
     ctx.cdp = await context.newCDPSession(ctx.page);
     await ctx.cdp.send("Page.enable");
@@ -1035,6 +1039,28 @@ async function contextResize(input) {
   });
 }
 
+/**
+ * 07.8-21 (D-08, D-13, P-18): site-locks an open context in place after a member signed in to it by hand, so it
+ * behaves from now on as a context opened with their sealed session: other hosts are blocked and reported, and the
+ * export keeps this host's state only. Idempotent for the same host; another host is refused.
+ */
+async function contextLock(input) {
+  const ctx = getContext(input);
+  const lock = typeof input.siteLock === "string" ? input.siteLock.toLowerCase() : "";
+  if (!/^[a-z0-9.\-[\]:]{1,260}$/.test(lock)) fail("invalid_request", "siteLock is not a host");
+  if (ctx.siteLock && ctx.siteLock !== lock) fail("invalid_request", "the context is locked to another host");
+  return serialize(ctx, async () => {
+    ctx.siteLock = lock;
+    ctx.signInHost = lock;
+    ctx.memberId = typeof input.memberId === "string" ? input.memberId : ctx.memberId;
+    if (!ctx.routed) {
+      await ctx.context.route("**/*", (route) => onRoute(ctx, route));
+      ctx.routed = true;
+    }
+    return { locked: true };
+  });
+}
+
 async function contextHold(input) {
   const ctx = getContext(input);
   ctx.holdUntil = input.hold === true ? Date.now() + LIMITS.holdMs : 0;
@@ -1158,6 +1184,7 @@ const OPS = {
   contextInput,
   contextResize,
   contextHold,
+  contextLock,
   contextExportState,
   contextDownload,
   contextClose,

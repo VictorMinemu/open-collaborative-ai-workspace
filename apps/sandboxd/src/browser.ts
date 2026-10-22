@@ -11,6 +11,7 @@ import {
   type SandboxdContextDownload,
   type SandboxdContextHold,
   type SandboxdContextInput,
+  type SandboxdContextLock,
   type SandboxdContextNavigate,
   type SandboxdContextOpen,
   type SandboxdContextResize,
@@ -238,6 +239,8 @@ export interface Browsers {
   exportState(input: { target: SandboxdTarget; contextId: string }): Promise<SandboxdExportStateResult>;
   close(input: { target: SandboxdTarget; contextId: string }): Promise<{ closed: true }>;
   hold(input: SandboxdContextHold): Promise<{ held: boolean }>;
+  /** 07.8-21: site-locks an open context in place after a member signed in to it (D-13). */
+  lock(input: SandboxdContextLock): Promise<{ locked: true }>;
   takeover(input: SandboxdContextTakeover): Promise<{ active: boolean }>;
   resize(input: SandboxdContextResize): Promise<{ ok: true }>;
   input(input: SandboxdContextInput): Promise<{ accepted: number }>;
@@ -637,6 +640,11 @@ export function createBrowsers(options: BrowsersOptions): Browsers {
       ctx.holdUntil = input.hold ? Math.min(now + BROWSER_HOLD_MS, ctx.lastActivity + BROWSER_HOLD_MS) : 0;
       await onContext<unknown>(input, "contextHold", { hold: input.hold }, { activity: false });
       return { held: ctx.holdUntil > now };
+    },
+
+    async lock(input) {
+      await onContext<unknown>(input, "contextLock", { memberId: input.memberId, siteLock: input.siteLock });
+      return { locked: true };
     },
 
     async takeover(input) {

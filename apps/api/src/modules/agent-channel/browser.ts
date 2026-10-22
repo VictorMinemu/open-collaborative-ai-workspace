@@ -7,6 +7,8 @@ import {
   AgentChannelBrowserOpenResponse,
   AgentChannelBrowserScreenshot,
   AgentChannelBrowserScreenshotResponse,
+  AgentChannelBrowserSignIn,
+  AgentChannelBrowserSignInResponse,
   AgentChannelBrowserSnapshot,
   AgentChannelBrowserSnapshotResponse,
   AgentChannelBrowserWait,
@@ -33,6 +35,8 @@ import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { App, Core } from "../../core";
 import { HttpError } from "../../lib/errors";
+import { audienceOf } from "../ai-chat";
+import { memberAccountAllowed, memberAccountFacts } from "../bot-capabilities";
 import {
   auditClosed,
   type BrowserContextRecord,
@@ -42,8 +46,12 @@ import {
   holdContext,
   hostOf,
   type LoadedContext,
+  type LoadedSession,
+  loadSessionFor,
   openContextOf,
   releaseHold,
+  requestSignIn,
+  resealSession,
   sessionLoadedFor,
   takeoverActive,
   updateHost,
@@ -116,6 +124,7 @@ const ACT = BUILTIN_TOOLS.browserAct;
 const SCREENSHOT = BUILTIN_TOOLS.browserScreenshot;
 const WAIT = BUILTIN_TOOLS.browserWait;
 const CLOSE = BUILTIN_TOOLS.browserClose;
+const SIGNIN = BUILTIN_TOOLS.browserSignIn;
 
 const VIEWPORT = { width: BROWSER_LIMITS.expandedWidth, height: BROWSER_LIMITS.expandedHeight };
 /** The page is held this long while an approval waits (U-5), and the approval expires with it (R8). */
@@ -462,6 +471,10 @@ interface Decided<X> {
   created: boolean;
   stepId: string;
   prepared: Prepared<X>;
+  /** 07.8-21: the member's sealed state loaded into the new page (in memory only, for `contextOpen`). */
+  loaded: LoadedSession | null;
+  /** 07.8-21: the page without a session that the new signed-in page replaced (closed in sandboxd too). */
+  replaced: BrowserContextRecord | null;
 }
 
 /**
@@ -476,7 +489,18 @@ async function decide<X>(
   b: Begun,
   tool: BrowserToolName,
   prepare: (tx: Tx, turn: AgentTurnRow) => Promise<Prepared<X>>,
-  opts: { create?: { host: string; secure: boolean } } = {},
+  opts: {
+    create?: {
+      host: string;
+      secure: boolean;
+      /**
+       * 07.8-21 (D-08, D-13): the member's sealed session for the page's host, opened in this transaction AS the member
+       * once the call is allowed (`loadSessionFor`, under the member-account rule). A page without a session is
+       * replaced by a new one that loads it; `member_data` is set in this same transaction.
+       */
+      session?: (tx: Tx, turn: AgentTurnRow, context: LoadedContext | null) => Promise<LoadedSession | null>;
+    };
+  } = {},
 ): Promise<Decided<X>> {
   const out = await core.db.withTenant(b.tenant, async (tx) => {
     const live = await liveTurn(tx, core, b.body);
@@ -508,11 +532,50 @@ async function decide<X>(
     let context = prepared.context;
     let created = false;
     let held = false;
+    let loaded: LoadedSession | null = null;
+    let replaced: BrowserContextRecord | null = null;
+    let turnNow = turn;
+    if (decision.ok && opts.create?.session && !context?.sessionId) {
+      loaded = await opts.create.session(tx, turn, context);
+      if (loaded && context) {
+        // The page open without the member's session is replaced by one that loads it (a new sandboxd context).
+        replaced = await closeContext(tx, context.id, "closed_by_bot");
+        if (replaced) await auditClosed(tx, core, replaced, "closed_by_bot", { replaced: true });
+        context = null;
+      }
+    }
     if (decision.ok && !context && opts.create) {
-      const made = await contextFor(tx, { turn, host: opts.create.host, secure: opts.create.secure });
+      const made = await contextFor(tx, {
+        turn,
+        host: opts.create.host,
+        secure: opts.create.secure,
+        session: loaded ? { id: loaded.sessionId, siteKey: loaded.siteKey } : null,
+      });
       if (!made) throw browserRefusal("no_trigger");
       context = made.context;
       created = made.created;
+      if (loaded && created) {
+        // D-13 in the same transaction as the load: from now on this turn has member data.
+        turnNow = await markMemberData(tx, turn);
+        await core.audit.record(tx, {
+          action: "browser_session.used",
+          actorKind: "agent",
+          actorId: turn.agentId,
+          agentId: turn.agentId,
+          userId: turn.userId,
+          resourceType: "browser_session",
+          resourceId: loaded.sessionId,
+          metadata: {
+            sessionId: loaded.sessionId,
+            agentId: turn.agentId,
+            site: loaded.siteKey,
+            contextId: context.id,
+            eventId: turn.eventId,
+          },
+        });
+      } else if (loaded) {
+        loaded = null;
+      }
     }
     if (!decision.ok && WAITING.has(decision.reason) && context) {
       await holdContext(tx, context.id, Date.now() + HOLD_MS);
@@ -525,8 +588,8 @@ async function decide<X>(
       decision.ok ? { kind: "running" } : refusedOutcome(decision.reason, await waitingRoute(tx, decision)),
       stepOpts(context, prepared.host),
     );
-    await recordStep(tx, core, { turn, step, inFlight: decision.ok });
-    return { turn, decision, context, created, held, stepId: step.id, prepared };
+    await recordStep(tx, core, { turn: turnNow, step, inFlight: decision.ok });
+    return { turn: turnNow, decision, context, created, held, stepId: step.id, prepared, loaded, replaced };
   });
   if (!out) throw noTrigger();
   if (out.held && out.context && deps.client) {
@@ -546,6 +609,8 @@ async function decide<X>(
     created: out.created,
     stepId: out.stepId,
     prepared: out.prepared,
+    loaded: out.loaded,
+    replaced: out.replaced,
   };
 }
 
@@ -750,21 +815,26 @@ const targetOf = (b: Begun, agentId: string): SandboxdTarget => ({
 /** The context row as the decision reads it (fresh, with its session's site). */
 const freshContext = (tx: Tx, turn: AgentTurnRow) => openContextOf(tx, tripleOf(turn));
 
-/** Opens the context in sandboxd (site-locked to the member's session's host while one is loaded, D-13). */
+/**
+ * Opens the context in sandboxd, site-locked to the member's session's host while one is loaded (D-13), with the
+ * session's storage state when this call loaded it (07.8-21; the plaintext lives only in this request).
+ */
 async function openInSandboxd(
   client: SandboxdClient,
   target: SandboxdTarget,
   context: LoadedContext,
   ensure: () => Promise<void>,
   box: Box,
+  loaded: LoadedSession | null = null,
 ): Promise<void> {
+  const locked =
+    !!context.sessionId && !!context.sessionSite && SiteHost.safeParse(context.sessionSite).success;
   const input = {
     target,
     contextId: context.id,
     viewport: VIEWPORT,
-    ...(context.sessionId && context.sessionSite && SiteHost.safeParse(context.sessionSite).success
-      ? { memberId: context.requestedForUserId, siteLock: context.sessionSite }
-      : {}),
+    ...(locked ? { memberId: context.requestedForUserId, siteLock: context.sessionSite as string } : {}),
+    ...(locked && loaded && loaded.sessionId === context.sessionId ? { storageState: loaded.state } : {}),
   };
   try {
     await client.call("contextOpen", input, { timeoutMs: OP_TIMEOUT_MS });
@@ -802,6 +872,59 @@ async function crossSiteApproval(
   const decision: SandboxDecision = { ok: false, reason, ...(details ? { details } : {}) };
   if (WAITING.has(reason)) await holdContext(tx, d.context.id, Date.now() + HOLD_MS);
   return { reason, ...(details ? { details } : {}), route: await waitingRoute(tx, decision) };
+}
+
+/**
+ * D-11 (07.8-21): a member's own sign-in and sealed session follow 07.4's member-account rule, decided by
+ * `memberAccountAllowed` itself (never a copy): their private chat with the bot, or an AI chat nobody else reads now.
+ * A browser session has no share, so a shared conversation never qualifies.
+ */
+async function memberSessionAllowed(tx: Tx, turn: AgentTurnRow): Promise<boolean> {
+  const facts = await memberAccountFacts(
+    tx,
+    {
+      conversationId: turn.conversationId,
+      conversationKind: turn.conversationKind,
+      agentId: turn.agentId,
+      humanUserId: turn.userId,
+    },
+    turn.conversationKind === "ai_chat" ? await audienceOf(tx, turn.conversationId) : null,
+  );
+  return memberAccountAllowed({
+    scopeKind: facts.scopeKind,
+    aiChatShared: facts.aiChatShared,
+    hasShare: false,
+  });
+}
+
+/**
+ * The rolling re-seal (07.8-21, D-08): after a call on a page with the member's session (and before the bot closes
+ * it), its state is exported and sealed again in place AS the member, so an idle stop loses nothing. Best effort and
+ * never the bot's answer: a failure is logged by name only.
+ */
+async function resealAfter(
+  core: Core,
+  client: SandboxdClient | null,
+  b: Begun,
+  context: Pick<LoadedContext, "id" | "agentId" | "sessionId">,
+): Promise<void> {
+  if (!client || !context.sessionId) return;
+  const sessionId = context.sessionId;
+  try {
+    const { storageState } = await client.call(
+      "contextExportState",
+      { target: targetOf(b, context.agentId), contextId: context.id },
+      { timeoutMs: OP_TIMEOUT_MS },
+    );
+    await core.db.withTenant(b.tenant, (tx) =>
+      resealSession(tx, core, { userId: b.tenant.userId, sessionId, state: storageState }),
+    );
+  } catch (err) {
+    core.log.warn(
+      { contextId: context.id, error: (err as Error | undefined)?.name ?? "Error" },
+      "browser session re-seal failed",
+    );
+  }
 }
 
 export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps): void {
@@ -854,7 +977,20 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
             extra: { crossSite: crossSite || blockedGrant !== null, base },
           };
         },
-        { create: { host: to.host, secure: to.secure } },
+        {
+          create: {
+            host: to.host,
+            secure: to.secure,
+            session: async (tx, turn) =>
+              (await memberSessionAllowed(tx, turn))
+                ? await loadSessionFor(tx, core, {
+                    userId: turn.userId,
+                    agentId: turn.agentId,
+                    host: to.host,
+                  }).then((s) => (s === "expired" ? null : s))
+                : null,
+          },
+        },
       );
       const target = targetOf(b, d.turn.agentId);
       const allowCrossSite = d.prepared.extra.crossSite && d.decision.claim.approvalId !== null;
@@ -875,14 +1011,20 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
               },
               { timeoutMs: OP_TIMEOUT_MS },
             );
+          if (d.replaced) {
+            await client
+              .call("contextClose", { target, contextId: d.replaced.id }, { timeoutMs: OP_TIMEOUT_MS })
+              .catch(() => {});
+          }
           if (d.created) {
-            await openInSandboxd(client, target, d.context, ensure, box);
+            await openInSandboxd(client, target, d.context, ensure, box, d.loaded);
             return navigate();
           }
           try {
             return await navigate();
           } catch (err) {
-            // sandboxd lost the context (its browser restarted): open it again, then navigate.
+            // sandboxd lost the context (its browser restarted): open it again, then navigate. A page whose session
+            // was not loaded by this call cannot be reopened with it: it reopens site-locked, signed out.
             if (!isNoContext(err)) throw err;
             await openInSandboxd(client, target, d.context, ensure, box);
             return navigate();
@@ -904,7 +1046,7 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
             .catch(() => {});
         }
       }
-      return conclude(core, b, d, OPEN, run, {
+      const opened = await conclude(core, b, d, OPEN, run, {
         client: deps.client,
         auditAction: "browser.opened",
         finish: async (tx, nav) => {
@@ -938,6 +1080,8 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
           return crossSiteApproval(tx, deps, d, OPEN, { ...d.prepared.extra.base, navigateTo: blocked });
         },
       });
+      await resealAfter(core, deps.client, b, d.context);
+      return opened;
     },
   );
 
@@ -1114,7 +1258,7 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
         : null;
       return { result, host: where ? validHost(where.host) : null };
     });
-    return conclude(core, b, d, ACT, run, {
+    const acted = await conclude(core, b, d, ACT, run, {
       client: deps.client,
       auditAction: "browser.acted",
       finish: async (tx, { result, host: moved }) => {
@@ -1162,6 +1306,8 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
         return crossSiteApproval(tx, deps, d, ACT, { ...d.prepared.extra.base, navigateTo: blocked });
       },
     });
+    await resealAfter(core, deps.client, b, d.context);
+    return acted;
   });
 
   // ---------------------------------------------------------------- screenshot (D-14: image-capable models only)
@@ -1264,7 +1410,7 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
           { timeoutMs: ms + WAIT_MARGIN_MS },
         ),
       );
-      return conclude(core, b, d, WAIT, run, {
+      const waited = await conclude(core, b, d, WAIT, run, {
         client: deps.client,
         auditAction: null,
         finish: async (tx, waited) => {
@@ -1275,6 +1421,72 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
             audit: { host },
             stepInput: { host },
             host,
+          };
+        },
+      });
+      await resealAfter(core, deps.client, b, d.context);
+      return waited;
+    },
+  );
+
+  // ---------------------------------------------------------------- sign-in (07.8-21; D-07, D-11, R1, R9)
+  scope.post(
+    "/browser/signin",
+    route(AgentChannelBrowserSignIn, AgentChannelBrowserSignInResponse),
+    async (req) => {
+      const body = req.body;
+      const b = await begin(core, deps, cellOf(req), body, SIGNIN);
+      const context0 = await requireContext(core, b, SIGNIN);
+      // D-11: only where 07.4's member-account rule allows a member's own account (refused before the decision, so it
+      // never counts): their private chat with the bot, never a shared conversation.
+      if (b.available && context0) {
+        const allowed = await core.db.withTenant(b.tenant, (tx) => memberSessionAllowed(tx, b.turn));
+        if (!allowed) await refuseEarly(core, b, SIGNIN, "signin_not_allowed", { host: context0.host });
+      }
+      const d = await decide(core, deps, b, SIGNIN, async (tx, turn) => {
+        const context = await freshContext(tx, turn);
+        return {
+          // The reason is the bot's text: it decides nothing and is never part of an approval (never approvable).
+          args: { contextId: context?.id ?? null, host: context?.host ?? null },
+          stepInput: { host: context?.host ?? null },
+          approval: { pendingTtlMs: PENDING_TTL_MS },
+          context,
+          host: context?.host ?? null,
+          extra: null,
+        };
+      });
+      const target = targetOf(b, d.turn.agentId);
+      // R9: sandboxd keeps the page open while the card waits (best effort; the API's hold is the record).
+      const run = await runInSandboxd(core, deps.client, target, false, async (client) => {
+        await client
+          .call(
+            "contextHold",
+            { target, contextId: d.context.id, hold: true, reason: "signin" },
+            { timeoutMs: OP_TIMEOUT_MS },
+          )
+          .catch((err: unknown) =>
+            core.log.warn(
+              { contextId: d.context.id, error: (err as Error | undefined)?.name ?? "Error" },
+              "sandboxd did not confirm the sign-in hold",
+            ),
+          );
+        return true;
+      });
+      return conclude(core, b, d, SIGNIN, run, {
+        client: deps.client,
+        auditAction: null,
+        finish: async (tx) => {
+          const asked = await requestSignIn(tx, core, {
+            turn: d.turn,
+            context: d.context,
+            reason: body.reason,
+          });
+          if ("refused" in asked) throw new LocalRefusal(asked.refused);
+          return {
+            response: { posted: true as const, host: asked.host },
+            audit: { host: asked.host, requestId: asked.requestId },
+            stepInput: { host: asked.host },
+            host: asked.host,
           };
         },
       });
@@ -1301,6 +1513,8 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
         };
       });
       const target = targetOf(b, d.turn.agentId);
+      // The member's session is sealed once more before its page goes (07.8-21, the rolling re-seal).
+      await resealAfter(core, deps.client, b, d.context);
       const run = await runInSandboxd(core, deps.client, target, false, async (client) => {
         try {
           await client.call(

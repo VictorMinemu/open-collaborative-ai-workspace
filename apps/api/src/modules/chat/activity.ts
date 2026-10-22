@@ -1,6 +1,6 @@
 import { ActivityStep, type BotTurnActivity, type Message } from "@ocw/contracts";
-import { botTurnActivity, type Tx } from "@ocw/db";
-import { inArray } from "drizzle-orm";
+import { agentTurns, botTurnActivity, orgMembers, type Tx } from "@ocw/db";
+import { eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 
 /**
@@ -16,10 +16,12 @@ export async function activityFor(tx: Tx, messageIds: string[]): Promise<Map<str
   const out = new Map<string, BotTurnActivity>();
   if (messageIds.length === 0) return out;
   const rows = await tx
-    .select()
+    .select({ row: botTurnActivity, userId: agentTurns.userId, name: orgMembers.displayName })
     .from(botTurnActivity)
+    .leftJoin(agentTurns, eq(agentTurns.eventId, botTurnActivity.eventId))
+    .leftJoin(orgMembers, eq(orgMembers.userId, agentTurns.userId))
     .where(inArray(botTurnActivity.replyMessageId, messageIds));
-  for (const row of rows) {
+  for (const { row, userId, name } of rows) {
     if (!row.replyMessageId) continue;
     out.set(row.replyMessageId, {
       eventId: row.eventId,
@@ -28,6 +30,8 @@ export async function activityFor(tx: Tx, messageIds: string[]): Promise<Map<str
       more: row.more,
       running: row.running,
       current: null,
+      // WINDOWS #265 (07.8-21): the person the bot acted for ("Asked you" / "Asked Sam").
+      requester: userId ? { id: userId, displayName: (name ?? "Former member").slice(0, 200) } : null,
     });
   }
   return out;
