@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // `pnpm setup:env`: alias of `pnpm ocw setup` (scripts/ocw/setup.mjs), kept for existing installs and docs. Generates
-// a local .env with random secrets; explicit command only, nothing is ever generated at boot. Refuses to overwrite
+// a local .env with random secrets (database passwords, auth, cell and sandbox tokens such as OCW_SANDBOX_TOKEN, S3
+// keys); explicit command only, nothing is ever generated at boot. Refuses to overwrite
 // unless --force. Prints which keys it wrote and where, never a value.
 //   pnpm setup:env                 # fresh .env from .env.example with random secrets
 //   pnpm setup:env --force         # overwrite (rotates EVERY secret)

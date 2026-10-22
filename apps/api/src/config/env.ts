@@ -148,7 +148,10 @@ export const EnvSchema = z
      * `service_unavailable`. The API never holds the Docker socket; it only calls this URL.
      */
     OCW_SANDBOX_URL: optionalUrl,
-    /** Bearer token of every sandboxd call (shared with sandboxd; `NAME` or `NAME_FILE`). Required with the URL. */
+    /**
+     * Bearer token of every sandboxd call (shared with sandboxd; `NAME` or `NAME_FILE`). Required with the URL; without
+     * it the token is unused (the `sandbox` profile is off).
+     */
     OCW_SANDBOX_TOKEN: z.preprocess(
       (v) => (v === "" ? undefined : v),
       z
@@ -313,19 +316,13 @@ export const EnvSchema = z
     ),
   })
   .superRefine((v, ctx) => {
-    // The sandbox broker is configured with both its URL and its token, or not at all (07.8-05).
+    // The URL configures the sandbox broker and needs its token (07.8-05). A token alone configures nothing: `pnpm ocw
+    // setup` writes it for every install, and the URL is set only with the `sandbox` compose profile (07.8-24).
     if (v.OCW_SANDBOX_URL && !v.OCW_SANDBOX_TOKEN) {
       ctx.addIssue({
         code: "custom",
         path: ["OCW_SANDBOX_TOKEN"],
         message: "is required when OCW_SANDBOX_URL is set",
-      });
-    }
-    if (v.OCW_SANDBOX_TOKEN && !v.OCW_SANDBOX_URL) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["OCW_SANDBOX_URL"],
-        message: "is required when OCW_SANDBOX_TOKEN is set",
       });
     }
     if (v.OCW_SMTP_URL === "memory:" && v.NODE_ENV !== "test") {

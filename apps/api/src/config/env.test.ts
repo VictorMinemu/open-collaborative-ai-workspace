@@ -249,9 +249,15 @@ describe("sandboxd variables (07.8-05, D-11)", () => {
     }
   });
 
-  it("both or neither, a token of at least 32 characters, never the value in the message", () => {
+  it("a token without a URL is an install with the `sandbox` profile off: not configured, boots (07.8-24)", () => {
+    // `pnpm ocw setup` writes the token for every install; the URL is set only when the profile is enabled.
+    const env = loadEnv({ ...base, OCW_SANDBOX_URL: "", OCW_SANDBOX_TOKEN: token });
+    expect(env.OCW_SANDBOX_URL).toBeNull();
+    expect(env.OCW_SANDBOX_TOKEN).toBe(token);
+  });
+
+  it("a URL needs a token of at least 32 characters, never the value in the message", () => {
     expect(() => loadEnv({ ...base, OCW_SANDBOX_URL: "http://sandboxd:8090" })).toThrow(/OCW_SANDBOX_TOKEN/);
-    expect(() => loadEnv({ ...base, OCW_SANDBOX_TOKEN: token })).toThrow(/OCW_SANDBOX_URL/);
     const short = "short-sandbox-token";
     let message = "";
     try {
