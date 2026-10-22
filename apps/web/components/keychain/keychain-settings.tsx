@@ -16,6 +16,7 @@ import {
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { type ReactNode, useRef, useState } from "react";
 import { toast } from "sonner";
+import { BrowserSessionsSection } from "@/components/browser/browser-sessions-section";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -55,6 +56,7 @@ const ORG = "org";
  * Settings › Keychain (07.4-13; D-04, CONN-05; UI-SPEC § 3, R3): the member's personal keys and, where they manage a
  * unit, that unit's keys. A key's value is never shown again: rows say `Value set · updated {valueUpdatedAt}`, and the
  * edit dialog only offers to replace it. The private-host list is an organization policy on Settings › MCP servers (R5).
+ * Below the keys, the member's own saved browser sign-ins (07.8-27, `BrowserSessionsSection`).
  */
 export function KeychainSettings() {
   const router = useRouter();
@@ -222,6 +224,8 @@ export function KeychainSettings() {
         Values are encrypted, injected by the server only towards the listed hosts and never returned. Each
         use is audited without the value.
       </p>
+
+      <BrowserSessionsSection />
 
       <VaultItemDialog mode={dialog} units={units} onOpenChange={(o) => !o && setDialog(null)} />
       <DeleteKeyDialog item={toDelete} onDone={() => setToDelete(null)} />

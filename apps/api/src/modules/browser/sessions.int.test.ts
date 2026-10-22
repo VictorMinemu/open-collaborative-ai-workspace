@@ -328,11 +328,24 @@ describe("the bot page's Browser tab (UI-SPEC § 3.6)", () => {
 
     const samView = await ok(l.s.sam.request("GET", `/api/v1/agents/${l.s.scoutId}/browser`) as Promise<Res>);
     const samRow = (samView.open as Json[]).find((r) => r.contextId === mine.contextId);
-    expect(samRow).toMatchObject({ host: HOST, privateFor: null, viewerCan: { watch: true, control: true } });
-    expect(samRow?.conversation).toMatchObject({ kind: "dm", route: `/chat/dm/${l.s.samDm}` });
+    expect(samRow).toMatchObject({
+      host: HOST,
+      privateFor: null,
+      privateReason: null,
+      viewerCan: { watch: true, control: true },
+    });
+    // 07.8-27: the conversation is named as the viewer reads it ("DM with you", "# ops"), never a raw id.
+    expect(samRow?.conversation).toMatchObject({
+      kind: "dm",
+      name: "DM with you",
+      route: `/chat/dm/${l.s.samDm}`,
+    });
+    const opsName = (await l.s.su.query("select name from app.conversations where id = $1", [l.ops])).rows[0]
+      .name as string;
     expect((samView.open as Json[]).find((r) => r.contextId === ops.contextId)).toMatchObject({
       host: "status.fake.test",
       viewerCan: { watch: true, control: false },
+      conversation: { kind: "channel", name: `# ${opsName}` },
     });
     // Víctor owns Scout but Sam's signed-in page is Sam's alone (U-2): a private row, no frames, no button.
     const owner = await ok(
@@ -341,7 +354,10 @@ describe("the bot page's Browser tab (UI-SPEC § 3.6)", () => {
     expect((owner.open as Json[]).find((r) => r.contextId === mine.contextId)).toMatchObject({
       state: "private",
       privateFor: "Sam Lee",
+      privateReason: "member_session",
       viewerCan: { watch: false, control: false },
+      // Víctor does not read Sam's DM: it is named for whose it is, never "DM with you".
+      conversation: { kind: "dm", name: "DM with Sam Lee" },
     });
     // Alex reads #ops, not Sam's DM: no row and no activity from it.
     const alex = await ok(l.s.alex.request("GET", `/api/v1/agents/${l.s.scoutId}/browser`) as Promise<Res>);
@@ -359,6 +375,10 @@ describe("the bot page's Browser tab (UI-SPEC § 3.6)", () => {
     expect((alex.activity as Json[]).some((a) => a.kind === "opened" && a.host === "status.fake.test")).toBe(
       true,
     );
+    // Alex reads every conversation his activity names: his own DM reads "DM with you".
+    for (const a of alex.activity as Json[]) {
+      if (a.conversation.kind === "dm") expect(a.conversation.name).toBe("DM with you");
+    }
     expect(JSON.stringify(alex)).not.toContain("/orders");
     // While Alex holds control of the #ops page, Sam sees it private.
     const socket = await liveSocket(l.s.stack.baseUrl, await l.s.alex.token(), ops.contextId);
@@ -371,6 +391,7 @@ describe("the bot page's Browser tab (UI-SPEC § 3.6)", () => {
       expect((during.open as Json[]).find((r) => r.contextId === ops.contextId)).toMatchObject({
         state: "private",
         privateFor: "Alex Kim",
+        privateReason: "takeover",
       });
     } finally {
       socket.close();
