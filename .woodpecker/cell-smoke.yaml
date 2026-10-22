@@ -2,6 +2,9 @@
 # infra/openclaw/Dockerfile) + the working-tree plugin + fake model + fake Agent Channel API on an egress-less
 # network. The smoke bind-mounts files from the checkout and from `mktemp -d`, so both live under /home/ocw-ci,
 # which exists at the same path on the dind daemon (see verify.yaml).
+# It runs next to the other workflows as the slot `cell-smoke` (infra/ci/README.md): the smoke's containers, networks and
+# volume are named ocw-ci-cell-smoke-* (SMOKE_PREFIX), its networks use the smoke's own subnets (10.231.76/77.0/24),
+# and it publishes no port.
 # Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event).
 when:
   - event: [pull_request, manual]
@@ -12,30 +15,33 @@ variables:
   - &docker_sock /var/run/docker.sock:/var/run/docker.sock
   - &shared /home/ocw-ci:/home/ocw-ci
   - &env
+    OCW_CI_SLOT: cell-smoke
     W: /home/ocw-ci/ws/cell-smoke
     PNPM_STORE: /home/ocw-ci/cache/pnpm-store
     TMPDIR: /home/ocw-ci/tmp/cell-smoke
+    SMOKE_PREFIX: ocw-ci-cell-smoke
 
 steps:
   - name: ci-image
     image: docker:29.8.2-cli
     volumes: [*docker_sock]
     commands:
-      - sh infra/ci/build-image.sh
+      - sh infra/ci/build-image.sh ocw-ci:${CI_COMMIT_SHA}
 
   - name: install
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
+      - sh infra/ci/slot-lease.sh acquire
       - rm -rf "$${W}" "$${TMPDIR}" && mkdir -p "$${W}" "$${TMPDIR}" && cp -a . "$${W}/"
       - cd "$${W}" && pnpm install --frozen-lockfile --store-dir "$${PNPM_STORE}"
       # Stdio MCP sandbox dependencies (locked, no lifecycle scripts).
       - npm ci --prefix infra/mcp-sandbox --ignore-scripts --no-audit --no-fund
 
   - name: unit-tests
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     # The Caddy profile test adapts the Caddyfile with the pinned caddy image (`docker run`).
     volumes: [*docker_sock, *shared]
@@ -44,25 +50,26 @@ steps:
       - cd "$${W}" && node --test 'infra/**/*.test.mjs'
 
   - name: smoke
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
       - cd "$${W}"
-      # A cancelled run skips its cleanup step: remove anything it left behind first.
-      - sh infra/ci/smoke-reset.sh
+      # A cancelled run of this slot skips its cleanup step: remove what it left (only this slot's objects).
+      - sh infra/ci/slot-reset.sh
       - pnpm --filter @ocw/openclaw-channel build
       - SMOKE_BUILD=1 bash infra/openclaw/test/run-container-smoke.sh
 
   - name: cleanup
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
       # The smoke removes its own containers, volume and networks on exit; this covers a killed step.
-      - sh infra/ci/smoke-reset.sh
+      - sh infra/ci/slot-reset.sh
       - rm -rf "$${W}" "$${TMPDIR}"
+      - sh infra/ci/slot-lease.sh release
     when:
       status: [success, failure]

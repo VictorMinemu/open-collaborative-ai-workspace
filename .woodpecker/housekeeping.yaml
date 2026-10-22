@@ -1,4 +1,5 @@
-# Last workflow of every pipeline: keeps the dind daemon's disk inside its budget (infra/ci/disk-budget.sh).
+# Last workflow of every pipeline: keeps the dind daemon's disk inside its budget (infra/ci/disk-budget.sh), without
+# removing anything a workflow of another pipeline running at the same time could still use.
 # Only the dind socket is mounted; nothing here can reach the host's Docker.
 # Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event).
 when:
@@ -16,4 +17,5 @@ steps:
       - /var/run/docker.sock:/var/run/docker.sock
       - /home/ocw-ci:/home/ocw-ci
     commands:
+      # Keeps this pipeline's step image tag (ocw-ci:<commit>) and drops the others' once nothing else runs.
       - sh infra/ci/disk-budget.sh

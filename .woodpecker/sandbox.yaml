@@ -3,9 +3,13 @@
 # dind socket as the other workflows do; only the gVisor job needs a nested daemon with runsc (infra/ci/gvisor-dind.sh),
 # because the Woodpecker dind is never reconfigured. The smokes start sandboxd as a process in their step and bind-mount
 # files from the checkout and from TMPDIR, so both live under /home/ocw-ci (same path on the dind daemon).
-# Every object a run creates carries an ocw.namespace label (ocw-smoke-*, ocw-e2e, ocw-proof-*) and is removed by that
-# label by its own EXIT trap, again by infra/ci/smoke-reset.sh before each run (a cancelled run skips its cleanup) and
-# in the cleanup step; never a prune. housekeeping.yaml keeps the dind disk inside its budget afterwards.
+# It runs next to the other workflows as the slot `sandbox` (infra/ci/README.md). Every object a run creates belongs to
+# the slot's prefix ocw-ci-sandbox: the smokes' label namespaces (ocw-ci-sandbox-smoke-*), the isolated runner's
+# sandboxes (ocw-ci-sandbox-e2e) and Garage project (ocw-ci-sandbox-storage), the proof's cell (ocw-ci-sandbox-proof),
+# the proof's compose project (ocw-ci-sandbox) and the nested gVisor daemon (ocw-ci-sandbox-gvisor). Each is removed by
+# its own EXIT trap, again by infra/ci/slot-reset.sh before each run (a cancelled run skips its cleanup) and in the
+# cleanup step; never a prune, never another slot's. The proof's ports are the slot's block 24 (24xx).
+# housekeeping.yaml keeps the dind disk inside its budget afterwards.
 # Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event).
 when:
   - event: [pull_request, manual]
@@ -16,42 +20,47 @@ variables:
   - &docker_sock /var/run/docker.sock:/var/run/docker.sock
   - &shared /home/ocw-ci:/home/ocw-ci
   - &env
+    OCW_CI_SLOT: sandbox
     W: /home/ocw-ci/ws/sandbox
     PNPM_STORE: /home/ocw-ci/cache/pnpm-store
     TMPDIR: /home/ocw-ci/tmp/sandbox
     # The smokes' sandboxd and docker CLI use the dind socket (scripts default to the docker context's socket).
     DOCKER_SOCKET: /var/run/docker.sock
+    # The smokes' label namespaces: ocw-ci-sandbox-smoke-<pid> (and -pkg-<pid>).
+    OCW_SMOKE_NS_PREFIX: ocw-ci-sandbox-smoke
 
 steps:
   - name: ci-image
     image: docker:29.8.2-cli
     volumes: [*docker_sock]
     commands:
-      - sh infra/ci/build-image.sh
+      - sh infra/ci/build-image.sh ocw-ci:${CI_COMMIT_SHA}
 
   - name: install
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
+      - sh infra/ci/slot-lease.sh acquire
       - rm -rf "$${W}" "$${TMPDIR}" && mkdir -p "$${W}" "$${TMPDIR}" && cp -a . "$${W}/"
       - cd "$${W}" && pnpm install --frozen-lockfile --store-dir "$${PNPM_STORE}"
 
   # Hardened runc on the amd64 dind (D-14: Chromium falls back to `container-only` on this Ubuntu 24.04 host, which
   # restricts unprivileged user namespaces; the smokes accept and report it).
   - name: sandbox-smoke
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
       - cd "$${W}"
-      - sh infra/ci/smoke-reset.sh
+      # A cancelled run of this slot skips its cleanup step: remove what it left (only this slot's objects).
+      - sh infra/ci/slot-reset.sh
       - bash infra/sandbox/test/run-sandbox-smoke.sh
 
   - name: egress-smoke
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
@@ -60,7 +69,7 @@ steps:
       - bash infra/sandbox/test/run-egress-smoke.sh
 
   - name: browser-smoke
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
@@ -70,7 +79,7 @@ steps:
 
   # Includes one real public-internet navigation through the egress proxy (STACK_REAL_EGRESS defaults to on).
   - name: stack-smoke
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
@@ -79,7 +88,7 @@ steps:
       - bash infra/sandbox/test/run-stack-smoke.sh
 
   - name: packages-smoke
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
@@ -90,7 +99,7 @@ steps:
   # gVisor (D-14): a nested daemon with runsc; `auto` picks runsc for `sbx`, and the step fails unless the smoke
   # reports it. The daemon stays up for gvisor-browser; gvisor-browser and cleanup take it down.
   - name: gvisor-smoke
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
@@ -106,13 +115,14 @@ steps:
   # shell request goes through the egress proxy. runsc does not answer Docker's embedded DNS (127.0.0.11) on the
   # internal bot networks, so sandboxd names the proxy by its address in each sandbox's /etc/hosts (07.8 DNS fix).
   - name: gvisor-browser
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
       - cd "$${W}"
-      - export DOCKER_HOST="unix:///home/ocw-ci/run/gvisor/docker.sock" DOCKER_SOCKET=/home/ocw-ci/run/gvisor/docker.sock
+      - sock="$$(sh infra/ci/gvisor-dind.sh sock)"
+      - export DOCKER_HOST="unix://$${sock}" DOCKER_SOCKET="$${sock}"
       - rc=0; bash -c 'set -o pipefail; bash infra/sandbox/test/run-stack-smoke.sh --only open 2>&1 | tee "$$TMPDIR/gvisor-stack.log"' || rc=1
       - unset DOCKER_HOST DOCKER_SOCKET && sh infra/ci/gvisor-dind.sh down
       - grep -q "browserSandbox reported (chromium+gvisor)" "$${TMPDIR}/gvisor-stack.log"
@@ -124,17 +134,28 @@ steps:
   # network namespace, where the published compose ports live (as e2e.yaml). scripts/e2e-env-parity.test.mjs fails if
   # this environment drifts from the runner's --sandbox caller variables and exports.
   - name: sandbox-proof
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     network_mode: host
     volumes: [*docker_sock, *shared]
     environment:
+      OCW_CI_SLOT: sandbox
       W: /home/ocw-ci/ws/sandbox
       PNPM_STORE: /home/ocw-ci/cache/pnpm-store
       TMPDIR: /home/ocw-ci/tmp/sandbox
       DOCKER_SOCKET: /var/run/docker.sock
-      COMPOSE_PROJECT_NAME: ocw-e2e-sandbox
+      COMPOSE_PROJECT_NAME: ocw-ci-sandbox
       PROOF_OUT: /home/ocw-ci/tmp/sandbox/proof-out
+      # The slot's ports (block 24: postgres 2402 and redis 2403 from `pnpm setup:env --ports 24`) and names for the
+      # isolated runner (its defaults 4290-4293 are for local runs) and the proof.
+      OCW_E2E_WEB_PORT: "2400"
+      OCW_E2E_API_PORT: "2401"
+      OCW_E2E_FAKE_PORT: "2491"
+      OCW_E2E_STORAGE_PORT: "2492"
+      OCW_E2E_SANDBOX_PORT: "2493"
+      OCW_E2E_STORAGE_PROJECT: ocw-ci-sandbox-storage
+      OCW_E2E_SANDBOX_NS: ocw-ci-sandbox-e2e
+      OCW_PROOF_NS: ocw-ci-sandbox-proof
       # The canonical local command's caller variables (scripts/sandbox-proof.sh header, 07.8-08 verify).
       OCW_BUNDLED_PLUGINS: none
       OCW_E2E_API_HOST: 0.0.0.0
@@ -142,16 +163,15 @@ steps:
       PROOF_BUILD: "1"
     commands:
       - cd "$${W}"
-      # A cancelled run skips its cleanup step: start from nothing either way.
-      - sh infra/ci/e2e-reset.sh
-      - sh infra/ci/smoke-reset.sh
-      - pnpm setup:env
+      # A cancelled run of this slot skips its cleanup step: start from nothing either way (only this slot's objects).
+      - sh infra/ci/slot-reset.sh
+      - pnpm setup:env --ports 24 --project "$${COMPOSE_PROJECT_NAME}"
       - docker compose up -d --wait postgres redis
       - pnpm db:migrate
       - bash scripts/e2e-isolated.sh --sandbox --cmd "bash scripts/sandbox-proof.sh"
 
   - name: failure-logs
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
@@ -167,14 +187,14 @@ steps:
       status: [failure]
 
   - name: cleanup
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
       - sh infra/ci/gvisor-dind.sh down
-      - sh infra/ci/smoke-reset.sh
-      - sh infra/ci/e2e-reset.sh
+      - sh infra/ci/slot-reset.sh
       - rm -rf "$${W}" "$${TMPDIR}"
+      - sh infra/ci/slot-lease.sh release
     when:
       status: [success, failure]
