@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 161
+open_count: 162
 waived_count: 5
-fixed_count: 120
-total_count: 286
-last_updated: 2026-10-22T05:37:51.461Z
+fixed_count: 121
+total_count: 288
+last_updated: 2026-10-22T06:39:03.462Z
 ---
 
 # Broken Windows Ledger
@@ -300,7 +300,9 @@ last_updated: 2026-10-22T05:37:51.461Z
 | 283 | 07.8 | unrun-verify | infra/sandbox/browser |  | 07.8-21: the brw smoke for the new sandboxd op contextLock (site lock on a member-signed-in page) was not run against the real brw image | open |  | 2026-10-22T05:37:51.226Z |  |
 | 284 | 07.8 | deviation | apps/api/src/modules/browser |  | 07.8-21 (medium): a site that sets a cookie before any login is sealed as signed in; re-seal runs only after each call; a lock failure ends the page as crashed | open |  | 2026-10-22T05:37:51.300Z |  |
 | 285 | 07.8 | deviation | apps/api/src/modules/browser |  | 07.8-21: the 15-minute sign-in expiry can hit a member still in control; a page holding a departed member's cookies lives until the 5-minute idle stop; an expired sign-in delivers no turn to the bot (expired sentence unused) | open |  | 2026-10-22T05:37:51.379Z |  |
-| 286 | 07.8 | deviation | apps/api/src/modules/browser |  | 07.8-21: the Browser tab activity shows the page's current host (low) | open |  | 2026-10-22T05:37:51.461Z |  |
+| 286 | 07.8 | deviation | apps/api/src/modules/browser |  | 07.8-21: the Browser tab activity shows the page's current host (low) | fixed |  | 2026-10-22T05:37:51.461Z | 2026-10-22T06:39:03.293Z |
+| 287 | 07.8 | deviation | apps/api/src/modules/browser |  | SHOULD FIX (07.8-27, medium): deleting a bot is a soft delete and the #230 secret clean-up trigger fires only on hard delete, so a deleted bot's sealed sessions stay until expiry or the 7-day purge (listed and revocable, never loaded) — 28 | open |  | 2026-10-22T06:39:03.378Z |  |
+| 288 | 07.8 | deviation | apps/web/components/browser |  | 07.8-27: no "sign-in pending for you" flag on the row so Open live view is never primary; Browser tab polls every 10 s (no realtime); rows before the opened_host migration show the current host; "Stopped on {host}" copy differs from UI-SPEC (low) | open |  | 2026-10-22T06:39:03.462Z |  |
 
 ````json
 [
@@ -3731,9 +3733,33 @@ last_updated: 2026-10-22T05:37:51.461Z
     "file": "apps/api/src/modules/browser",
     "line": null,
     "description": "07.8-21: the Browser tab activity shows the page's current host (low)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-22T05:37:51.461Z",
+    "resolved_at": "2026-10-22T06:39:03.293Z"
+  },
+  {
+    "id": 287,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser",
+    "line": null,
+    "description": "SHOULD FIX (07.8-27, medium): deleting a bot is a soft delete and the #230 secret clean-up trigger fires only on hard delete, so a deleted bot's sealed sessions stay until expiry or the 7-day purge (listed and revocable, never loaded) — 28",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:39:03.378Z",
+    "resolved_at": null
+  },
+  {
+    "id": 288,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/browser",
+    "line": null,
+    "description": "07.8-27: no \"sign-in pending for you\" flag on the row so Open live view is never primary; Browser tab polls every 10 s (no realtime); rows before the opened_host migration show the current host; \"Stopped on {host}\" copy differs from UI-SPEC (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:39:03.462Z",
     "resolved_at": null
   }
 ]
