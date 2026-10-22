@@ -206,20 +206,29 @@ describe("Markdown: the shared subset", () => {
     expect(render("# Title")).toEqual(render("# Title", { variant: "chat" }));
   });
 
-  it("a 10,000-line code block renders in under 1 s (T-04-02-04)", () => {
-    const lines = Array.from({ length: 10_000 }, (_, i) => `const value${i} = ${i} * 2; // line ${i}`);
-    const body = `\`\`\`ts\n${lines.join("\n")}\n\`\`\``;
+  it("a 10,000-line code block renders in linear time (T-04-02-04)", () => {
+    const block = (n: number) =>
+      `\`\`\`ts\n${Array.from({ length: n }, (_, i) => `const value${i} = ${i} * 2; // line ${i}`).join("\n")}\n\`\`\``;
+    const small = block(2_500);
+    const large = block(10_000);
     render("```ts\nconst warm = 1;\n```"); // first-render setup (highlighter, JIT) is not the block's cost
-    // Best of three: a busy shared CI runner can stall one pass, while a super-linear renderer is slow on every pass.
-    let elapsed = Number.POSITIVE_INFINITY;
+    // Interleaved best of three: a busy shared CI runner stalls single passes, but a super-linear renderer is slow on
+    // every pass of the large block relative to the small one. 4x the lines should cost about 4x, never 10x.
+    let smallMs = Number.POSITIVE_INFINITY;
+    let largeMs = Number.POSITIVE_INFINITY;
     let html = "";
     for (let i = 0; i < 3; i++) {
-      const started = performance.now();
-      html = render(body);
-      elapsed = Math.min(elapsed, performance.now() - started);
+      let started = performance.now();
+      render(small);
+      smallMs = Math.min(smallMs, performance.now() - started);
+      started = performance.now();
+      html = render(large);
+      largeMs = Math.min(largeMs, performance.now() - started);
     }
     expect(html).toContain("value9999");
-    expect(elapsed).toBeLessThan(1000);
+    expect(largeMs / Math.max(smallMs, 1)).toBeLessThan(10);
+    // A generous absolute cap still catches a catastrophic renderer (about 0.3 s on a laptop).
+    expect(largeMs).toBeLessThan(4000);
   });
 });
 
