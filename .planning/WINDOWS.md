@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 160
+open_count: 161
 waived_count: 4
 fixed_count: 114
-total_count: 278
-last_updated: 2026-10-22T04:13:28.997Z
+total_count: 279
+last_updated: 2026-10-22T05:12:46.799Z
 ---
 
 # Broken Windows Ledger
@@ -293,6 +293,7 @@ last_updated: 2026-10-22T04:13:28.997Z
 | 276 | 07.8 | deviation | infra/fake-model/server.test.mjs |  | MUST FIX: "serves the fake sandboxd behind its token ... exec round trip" gets 409 policy_missing since the fake requires a policy push (red since policyfix); runs in cell-smoke on Woodpecker and GitHub | open |  | 2026-10-22T04:13:28.849Z |  |
 | 277 | 07.8 | unrun-verify | .woodpecker/sandbox.yaml |  | 07.8-24: no real Woodpecker run of sandbox.yaml yet (steps run by hand in dind); record link and duration on first push; full gate:compose --with-sandbox (with Playwright, proxy, backup) not run | open |  | 2026-10-22T04:13:28.921Z |  |
 | 278 | 07.8 | deviation | apps/api/Dockerfile |  | 07.8-24: no retry for pnpm first-use binary download (timed out on Docker Desktop); CI dind keeps docker:dind (~500 MB) between gVisor runs (low) | open |  | 2026-10-22T04:13:28.997Z |  |
+| 279 | 07.8 | deviation | apps/sandboxd/src/egress-attach.ts |  | dnsfix: if the egress proxy restarts with a new IP, a running sandbox keeps the old /etc/hosts entry and has no egress until its next start/restart (fails closed; runc used to follow via Docker DNS) (low); packages smoke does not print its runtime | open |  | 2026-10-22T05:12:46.799Z |  |
 
 ````json
 [
@@ -3630,6 +3631,18 @@ last_updated: 2026-10-22T04:13:28.997Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-22T04:13:28.997Z",
+    "resolved_at": null
+  },
+  {
+    "id": 279,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/egress-attach.ts",
+    "line": null,
+    "description": "dnsfix: if the egress proxy restarts with a new IP, a running sandbox keeps the old /etc/hosts entry and has no egress until its next start/restart (fails closed; runc used to follow via Docker DNS) (low); packages smoke does not print its runtime",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:12:46.799Z",
     "resolved_at": null
   }
 ]
