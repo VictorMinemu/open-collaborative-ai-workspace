@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 165
+open_count: 168
 waived_count: 5
 fixed_count: 121
-total_count: 291
-last_updated: 2026-10-22T06:53:46.333Z
+total_count: 294
+last_updated: 2026-10-22T06:56:37.968Z
 ---
 
 # Broken Windows Ledger
@@ -306,6 +306,9 @@ last_updated: 2026-10-22T06:53:46.333Z
 | 289 | 07.8 | deviation | apps/web/components/browser |  | 07.8-26 (medium, with #280): IME composition on the phone's hidden input stays in the input until compositionend; the hidden input may also fix desktop IME | open |  | 2026-10-22T06:53:46.168Z |  |
 | 290 | 07.8 | deviation | apps/web/components/browser |  | 07.8-26: the live chip refreshes on turn.activity, focus and every 20 s, so a page closed for idleness can show up to 20 s; closing with no open page shows a "Blocked: a page" step (from 20); the AI chat has no chip (low) | open |  | 2026-10-22T06:53:46.251Z |  |
 | 291 | 07.8 | deviation | infra/sandbox/browser |  | 07.8-26: the phone viewport is proven only against the fake sandboxd; the real brw smoke for phone mode is not run | open |  | 2026-10-22T06:53:46.333Z |  |
+| 292 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | MUST FIX (07.8-25, coordinator decision for 28 + ADR-0029): member_data (P-11, D-13) holds only for the turn that loaded the session, but the bot's OpenClaw history in that conversation may still contain what it read. Decision: member_data is sticky per (bot, conversation) once a member session was loaded there, until the bot's history for that conversation is reset; every later turn there carries it (floors, routing, import refusal) | open |  | 2026-10-22T06:56:37.815Z |  |
+| 293 | 07.8 | deviation | apps/api/src/modules/sandbox |  | 07.8-25: a download that only arrives through the event feed (not in the act response) is not stored; audienceCovers checks person by person and refuses above 1,000 (low) | open |  | 2026-10-22T06:56:37.891Z |  |
+| 294 | 07.8 | deviation | apps/api/src/modules/tool-approval |  | 07.8-25: in a plain 07.5 exec approval the generic view does not mask --password=x style flags (only the D-13 view does) (low, 28) | open |  | 2026-10-22T06:56:37.968Z |  |
 
 ````json
 [
@@ -3799,6 +3802,42 @@ last_updated: 2026-10-22T06:53:46.333Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-22T06:53:46.333Z",
+    "resolved_at": null
+  },
+  {
+    "id": 292,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/agent-channel",
+    "line": null,
+    "description": "MUST FIX (07.8-25, coordinator decision for 28 + ADR-0029): member_data (P-11, D-13) holds only for the turn that loaded the session, but the bot's OpenClaw history in that conversation may still contain what it read. Decision: member_data is sticky per (bot, conversation) once a member session was loaded there, until the bot's history for that conversation is reset; every later turn there carries it (floors, routing, import refusal)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:56:37.815Z",
+    "resolved_at": null
+  },
+  {
+    "id": 293,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/sandbox",
+    "line": null,
+    "description": "07.8-25: a download that only arrives through the event feed (not in the act response) is not stored; audienceCovers checks person by person and refuses above 1,000 (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:56:37.891Z",
+    "resolved_at": null
+  },
+  {
+    "id": 294,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/tool-approval",
+    "line": null,
+    "description": "07.8-25: in a plain 07.5 exec approval the generic view does not mask --password=x style flags (only the D-13 view does) (low, 28)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:56:37.968Z",
     "resolved_at": null
   }
 ]
