@@ -351,7 +351,12 @@ export function MembersSection({ unit }: { unit: UnitNode }) {
         description={`Direct members of this ${KIND_META[unit.kind].label.toLowerCase()} and who leads it.`}
         action={
           staff ? (
-            <Button size="sm" onClick={() => setAdding(true)} data-testid="add-people">
+            <Button
+              size="sm"
+              className="max-md:h-11"
+              onClick={() => setAdding(true)}
+              data-testid="add-people"
+            >
               <UserPlus /> Add people
             </Button>
           ) : null
@@ -387,7 +392,7 @@ export function MembersSection({ unit }: { unit: UnitNode }) {
             everything inside it.
           </p>
           {staff ? (
-            <Button size="sm" variant="outline" className="mt-2" onClick={() => setAdding(true)}>
+            <Button size="sm" variant="outline" className="mt-2 max-md:h-11" onClick={() => setAdding(true)}>
               <UserPlus /> Add people
             </Button>
           ) : null}
@@ -441,6 +446,8 @@ function MemberRow({ unit, member: m, isMe }: { unit: UnitNode; member: UnitMemb
       onCheckedChange={toggle}
       aria-label={`${m.displayName} leads ${unit.name}`}
       data-testid="lead-switch"
+      // A 44 px hit area below 768 around the 20 px switch (touch rule), without moving it (as project-default-switch).
+      className="max-md:after:absolute max-md:after:-inset-3 max-md:after:content-['']"
     />
   );
 
@@ -489,7 +496,7 @@ function MemberRow({ unit, member: m, isMe }: { unit: UnitNode; member: UnitMemb
           variant="ghost"
           aria-label={`Remove ${m.displayName} from ${unit.name}`}
           data-testid="remove-member"
-          className="size-10 shrink-0 text-muted-foreground hover:text-destructive sm:size-8"
+          className="size-11 shrink-0 text-muted-foreground hover:text-destructive md:size-8"
           onClick={() => setConfirm(true)}
         >
           <UserMinus />

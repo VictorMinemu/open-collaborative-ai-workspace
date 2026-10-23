@@ -512,7 +512,9 @@ function SessionHeader({
         avatarUrl: directory.data?.members.find((x) => x.userId === uid)?.avatarUrl ?? null,
       }));
   }, [participants, viewers, me, directory.data]);
-  const sm = useMediaQuery("(min-width: 640px)", true);
+  // Below 768 (the 44 px touch rule) the header has two rows: the project and the controls, then the title on its
+  // own line, so the 44 px controls never squeeze the title (07.9 polish).
+  const md = useMediaQuery("(min-width: 768px)", true);
 
   useEffect(() => {
     document.title = `${session.title} · Work Zone`;
@@ -528,7 +530,10 @@ function SessionHeader({
         aria-pressed={wide ? panel === t : undefined}
         data-testid={wide ? `tab-${t}` : `open-${t}`}
         onClick={() => onPanel(t)}
-        className={cn("gap-1 px-2 text-muted-foreground", wide && panel === t && "bg-accent text-foreground")}
+        className={cn(
+          "gap-1 px-2 text-muted-foreground max-md:h-11 max-md:min-w-11",
+          wide && panel === t && "bg-accent text-foreground",
+        )}
       >
         {icon}
         {count > 0 ? <span className="text-[12px] tabular-nums">{count}</span> : null}
@@ -536,15 +541,25 @@ function SessionHeader({
     </Tooltip>
   );
 
+  const title = (
+    <span className="flex min-w-0 items-center gap-2">
+      <StatusDot status={session.status} className="md:hidden" />
+      <h1
+        className="truncate font-medium text-[15px] leading-snug tracking-tight md:text-[14.5px]"
+        data-testid="session-title"
+        title={session.title}
+      >
+        {session.title}
+      </h1>
+    </span>
+  );
+
   return (
-    <header className="shrink-0 px-3 pt-2.5 pb-2 sm:px-5 sm:pt-3" data-testid="session-header">
-      <div className="flex min-h-9 items-center gap-2">
-        {/* ref-4 breadcrumb: project / session title (stacked on a phone). */}
-        <nav
-          aria-label="Breadcrumb"
-          className="flex min-w-0 flex-1 flex-col sm:flex-row sm:items-center sm:gap-2.5"
-        >
-          <span className="flex min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground sm:max-w-[45%] sm:text-[14px]">
+    <header className="shrink-0 px-3 pt-1 pb-2 sm:px-5 md:pt-3" data-testid="session-header">
+      <div className="flex min-h-11 items-center gap-2 md:min-h-9">
+        {/* ref-4 breadcrumb: project / session title; below 768 the title has its own line under it. */}
+        <nav aria-label="Breadcrumb" className="flex min-w-24 flex-1 items-center md:min-w-0 md:gap-2.5">
+          <span className="flex min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground md:max-w-[45%] md:text-[14px]">
             <ProjectMark name={session.teamProject?.name ?? session.projectName} />
             {session.teamProject ? (
               // A team project's segment opens its page (07.9, UI-SPEC IA "Breadcrumb link").
@@ -563,24 +578,19 @@ function SessionHeader({
                 </span>
               </Tooltip>
             )}
-            {!sm && session.fullAccess ? <FullAccessBadge className="ml-1 h-5 px-1.5 text-[11px]" /> : null}
+            {!md && session.fullAccess ? <FullAccessBadge className="ml-1 h-5 px-1.5 text-[11px]" /> : null}
           </span>
-          <span aria-hidden className="hidden text-muted-foreground/50 sm:inline">
-            /
-          </span>
-          <span className="flex min-w-0 items-center gap-2">
-            <StatusDot status={session.status} className="sm:hidden" />
-            <h1
-              className="truncate font-medium text-[15px] leading-snug tracking-tight sm:text-[14.5px]"
-              data-testid="session-title"
-              title={session.title}
-            >
-              {session.title}
-            </h1>
-          </span>
+          {md ? (
+            <>
+              <span aria-hidden className="text-muted-foreground/50">
+                /
+              </span>
+              {title}
+            </>
+          ) : null}
         </nav>
-        <div className="flex shrink-0 items-center gap-1.5">
-          {sm && session.fullAccess ? <FullAccessBadge /> : null}
+        <div className="flex min-w-0 items-center gap-1.5 md:shrink-0">
+          {md && session.fullAccess ? <FullAccessBadge /> : null}
           <VisibilityChip session={session} viewerId={me} canChange={canChangeVisibility} />
           <div className="flex items-center" data-testid="session-viewers">
             <PresenceStack
@@ -610,13 +620,22 @@ function SessionHeader({
               </div>
             ) : null}
           </div>
-          <StatusChip status={session.status} className="hidden sm:inline-flex" />
+          <StatusChip status={session.status} className="hidden md:inline-flex" />
           <div className="flex items-center">
             {panelButton("queue", "Queue", <ListOrdered />, queued)}
             {panelButton("changes", "Changes", <FileDiff />, changesCount)}
           </div>
           <Menu.Root>
-            <Menu.Trigger render={<Button size="icon-sm" variant="ghost" aria-label="Session actions" />}>
+            <Menu.Trigger
+              render={
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  aria-label="Session actions"
+                  className="max-md:size-11"
+                />
+              }
+            >
               <MoreHorizontal />
             </Menu.Trigger>
             <DropdownMenuContent align="end">
@@ -638,6 +657,7 @@ function SessionHeader({
           </Menu.Root>
         </div>
       </div>
+      {md ? null : title}
       {session.lastError && (session.status === "failed" || session.status === "idle") ? (
         <p className="mt-1 line-clamp-2 text-destructive text-xs">{session.lastError}</p>
       ) : null}

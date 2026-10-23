@@ -17,6 +17,26 @@ const sideClass = {
     "inset-x-0 bottom-0 h-[85dvh] w-full rounded-t-2xl border-t data-ending-style:translate-y-full data-starting-style:translate-y-full",
 } as const;
 
+/**
+ * The sheet's close button: 32 px from 768 up; below 768 a 44 px target whose icon stays exactly where the 32 px one
+ * was (the box grows 6 px on each side and moves out by 6 px), so every sheet meets the touch rule (07.9 polish).
+ * `SheetContent` renders it unless `showClose={false}`; a sheet that places its own close renders this one.
+ */
+export function SheetCloseButton({ className, ...props }: ComponentProps<typeof Dialog.Close>) {
+  return (
+    <Dialog.Close
+      aria-label="Close"
+      className={cn(
+        "absolute top-3 right-3 inline-flex size-8 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 max-md:top-1.5 max-md:right-1.5 max-md:size-11",
+        className,
+      )}
+      {...props}
+    >
+      <X className="size-4" />
+    </Dialog.Close>
+  );
+}
+
 export function SheetContent({
   className,
   side = "left",
@@ -37,14 +57,7 @@ export function SheetContent({
         {...props}
       >
         {children}
-        {showClose ? (
-          <Dialog.Close
-            aria-label="Close"
-            className="absolute top-3 right-3 inline-flex size-8 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
-          >
-            <X className="size-4" />
-          </Dialog.Close>
-        ) : null}
+        {showClose ? <SheetCloseButton /> : null}
       </Dialog.Popup>
     </Dialog.Portal>
   );

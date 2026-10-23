@@ -1,10 +1,9 @@
 "use client";
 
 import type { SessionVisibilityKind, WorkSession } from "@ocw/contracts";
-import { X } from "lucide-react";
 import { useState } from "react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Sheet, SheetClose, SheetContent, SheetTrigger } from "@/components/ui/sheet";
+import { Sheet, SheetCloseButton, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { useSheetSurface } from "@/components/work-zone/control-surface";
 import { chipName, type LongLabelInput, longLabel, shortLabel } from "@/lib/session-visibility";
 import { cn } from "@/lib/utils";
@@ -110,13 +109,8 @@ export function VisibilityChip({
           showClose={false}
           className="h-auto max-h-[85dvh] gap-0 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
         >
-          {/* A 44 px close (§1.6); the primitive's own is 32. */}
-          <SheetClose
-            aria-label="Close"
-            className="absolute top-1.5 right-1.5 inline-flex size-11 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
-          >
-            <X className="size-4" />
-          </SheetClose>
+          {/* The primitive's close, first in the tab order; 44 px on a phone (§1.6). */}
+          <SheetCloseButton />
           <div className="mx-auto mt-2 h-1 w-9 shrink-0 rounded-full bg-muted-foreground/25" aria-hidden />
           <VisibilityPanel mode="edit" sessionId={session.id} surface="sheet" />
         </SheetContent>
