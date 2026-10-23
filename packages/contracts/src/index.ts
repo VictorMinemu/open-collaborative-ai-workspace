@@ -35,6 +35,7 @@ export * from "./session-settings";
 export * from "./session-title";
 export * from "./slash-commands";
 export * from "./tool-approvals";
+export * from "./work-projects";
 export * from "./work-session";
 export * from "./work-zone-policy";
 export * from "./work-zone-proposals";

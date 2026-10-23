@@ -143,6 +143,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "browser.use": true,
     "browser.watch": true,
     "browser.control": true,
+    "work_session.visibility": false,
+    "work_project.manage": false,
   },
   developer: {
     "org.read": true,
@@ -215,6 +217,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "browser.use": true,
     "browser.watch": true,
     "browser.control": true,
+    "work_session.visibility": false,
+    "work_project.manage": false,
   },
   lead: {
     "org.read": true,
@@ -287,6 +291,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "browser.use": true,
     "browser.watch": true,
     "browser.control": true,
+    "work_session.visibility": false,
+    "work_project.manage": false,
   },
   admin: {
     "org.read": true,
@@ -359,6 +365,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "browser.use": true,
     "browser.watch": true,
     "browser.control": true,
+    "work_session.visibility": true,
+    "work_project.manage": true,
   },
 };
 
@@ -607,6 +615,17 @@ describe("unit leads and explicit rules", () => {
     expect(allowed(lead, unitResource({ id: T, path: [D, T] }), "unit.members.manage")).toBe(true);
     expect(allowed(lead, unitResource({ id: P, path: [D, T, P] }), "unit.members.manage")).toBe(true);
     expect(allowed(lead, unitResource({ id: D, path: [D] }), "unit.members.manage")).toBe(false);
+  });
+
+  it("leading confers the team surface; a lead grain on another surface still needs the role's surface (07.9-01)", () => {
+    const unitP = unitResource({ id: P, path: [D, T, P] });
+    const standardLead = user("standard", { memberUnitPaths: [[D, T]], leadOfUnitIds: new Set([T]) });
+    const developerLead = user("developer", { memberUnitPaths: [[D, T]], leadOfUnitIds: new Set([T]) });
+    expect(allowed(standardLead, unitP, "work_project.manage")).toBe(true);
+    expect(allowed(standardLead, unitP, "work_session.visibility")).toBe(false);
+    expect(allowed(developerLead, unitP, "work_project.manage")).toBe(true);
+    expect(allowed(developerLead, unitP, "work_session.visibility")).toBe(true);
+    expect(allowed(developerLead, unitResource({ id: D, path: [D] }), "work_project.manage")).toBe(false);
   });
 
   it("a deny scoped to department D removes channel.create from a member of team T under D", () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { OrgRole, ROLE_LABELS } from "./common";
+import { MODULE_CATALOG, ModuleId } from "./module-access";
 import {
   AccessTokenClaims,
   AGENT_PERMISSIONS,
@@ -24,10 +25,54 @@ const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const now = 1_790_000_000;
 
 describe("permission vocabulary", () => {
-  it("has exactly the 70 agreed permissions", () => {
-    // 64 through 07.4; 07.5-01 appended `tool_approval.manage`; 07.8-30 appended the five sandbox and browser grains.
-    expect(Permission.options).toHaveLength(70);
-    expect(new Set(Permission.options).size).toBe(70);
+  it("has exactly the 72 agreed permissions", () => {
+    // 64 through 07.4; 07.5-01 appended `tool_approval.manage`; 07.8-30 appended the five sandbox and browser grains;
+    // 07.9-01 appended `work_session.visibility` and `work_project.manage`.
+    expect(Permission.options).toHaveLength(72);
+    expect(new Set(Permission.options).size).toBe(72);
+  });
+
+  it("Phase 07.9 session visibility and team project grains exist exactly as 07.9-01 defines them (D-04, D-10, D-13)", () => {
+    // Appended at the end, never renamed (positions 70–71).
+    expect(Permission.options.slice(70)).toEqual(["work_session.visibility", "work_project.manage"]);
+    expect(PERMISSION_SURFACE["work_session.visibility"]).toBe("workzone");
+    expect(PERMISSION_SURFACE["work_project.manage"]).toBe("team");
+    // Organization-wide only for admins; the session creator gets `work_session.visibility` as a relation (resolver).
+    for (const role of OrgRole.options) {
+      for (const p of ["work_session.visibility", "work_project.manage"] as const) {
+        if (role === "admin") expect(ROLE_PERMISSIONS[role], `${role}: ${p}`).toContain(p);
+        else expect(ROLE_PERMISSIONS[role], `${role}: ${p}`).not.toContain(p);
+      }
+    }
+    // Leads hold both on the subtree they lead (ADR-0024 as implemented); agents never decide who sees a session.
+    expect(LEAD_PERMISSIONS).toEqual(
+      expect.arrayContaining(["work_session.visibility", "work_project.manage"]),
+    );
+    for (const p of ["work_session.visibility", "work_project.manage"] as const) {
+      expect(AGENT_PERMISSIONS, p).not.toContain(p);
+      // Workzone and team surfaces stay delegable by explicit allow rules (like `unit.members.manage`).
+      expect(NON_DELEGABLE_PERMISSIONS, p).not.toContain(p);
+      expect(PermissionPattern.safeParse(p).success, p).toBe(true);
+    }
+    expect(PERMISSION_DESCRIPTIONS["work_session.visibility"]).toBe("Change who can see a Work Zone session");
+    expect(PERMISSION_DESCRIPTIONS["work_project.manage"]).toBe(
+      "Create team projects, assign their teams, link repositories and set their default",
+    );
+    // P-05 (C-05 not needed): the Work Zone module's `work_session.*` already covers the session grain, so an existing
+    // "Work Zone off" rule set denies it with no backfill; project governance belongs to no module.
+    const modulesOf = (p: Permission) =>
+      ModuleId.options.filter((m) =>
+        MODULE_CATALOG[m].patterns.some((pattern) => permissionMatches(pattern, p)),
+      );
+    expect(modulesOf("work_session.visibility")).toEqual(["work_zone"]);
+    expect(MODULE_CATALOG.work_zone.patterns).toContain("work_session.*");
+    expect(modulesOf("work_project.manage")).toEqual([]);
+    // D-13: a project sits under a team or department, never at the top level (unchanged).
+    expect(ALLOWED_PARENT_KINDS).toEqual({
+      department: [null, "department"],
+      team: ["department", "team"],
+      project: ["team", "department"],
+    });
   });
 
   it("Phase 07.8 sandbox and browser grains exist exactly as 07.8-30 defines them (D-09, D-12, P-05)", () => {
@@ -38,8 +83,8 @@ describe("permission vocabulary", () => {
       "browser.watch",
       "browser.control",
     ] as const;
-    // Appended at the end, never renamed.
-    expect(Permission.options.slice(65)).toEqual([...grains]);
+    // Appended at the end, never renamed (positions 65–69; 07.9-01 appended two grains after them).
+    expect(Permission.options.slice(65, 70)).toEqual([...grains]);
     for (const p of grains) {
       expect(PERMISSION_SURFACE[p], p).toBe("bots");
       // Every role that lets bots use tools holds them; module deny rules take them away (delegable).
@@ -220,6 +265,9 @@ describe("permission vocabulary", () => {
       "agent_template.manage",
       // 07.5-01: approval policies of the led subtree.
       "tool_approval.manage",
+      // 07.9-01: who sees a session in the subtree's projects, and the projects' settings.
+      "work_session.visibility",
+      "work_project.manage",
     ]);
     for (const p of ["ai_chat.manage", "bot.manage_unit", "agent_card.approve"] as const) {
       expect(NON_DELEGABLE_PERMISSIONS, p).not.toContain(p);

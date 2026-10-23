@@ -82,6 +82,15 @@ export const ClientFrame = z.discriminatedUnion("op", [
 ]);
 export type ClientFrame = z.infer<typeof ClientFrame>;
 
+/**
+ * Why a live subscription was revoked (Phase 07.9, D-04, D-13, UI-SPEC R7), so the client can say it in plain words:
+ * `visibility` (the session's audience no longer includes the caller, or they left its project), `role` (a role or
+ * permission rule change), `device` (the device was revoked or unshared), `module` (a module was turned off). Codes
+ * only, never a name.
+ */
+export const RevokeCause = z.enum(["visibility", "role", "device", "module"]);
+export type RevokeCause = z.infer<typeof RevokeCause>;
+
 // ---- server → client ----
 export const ServerFrame = z.discriminatedUnion("op", [
   /** Durable event: persisted in stream_events with a per-topic monotonic seq. */
@@ -114,8 +123,14 @@ export const ServerFrame = z.discriminatedUnion("op", [
   /**
    * The server dropped this subscription because access to the topic was lost (RT-01, 03-04 D-05): the resolver
    * re-decided it after a membership or permission change. The client forgets the topic and does not resubscribe.
+   * `reason` stays `forbidden`; Phase 07.9 adds the optional `cause` code (never a name).
    */
-  z.object({ op: z.literal("revoked"), topic: z.string(), reason: z.enum(["forbidden"]) }),
+  z.object({
+    op: z.literal("revoked"),
+    topic: z.string(),
+    reason: z.enum(["forbidden"]),
+    cause: RevokeCause.optional(),
+  }),
 ]);
 export type ServerFrame = z.infer<typeof ServerFrame>;
 export type DurableFrame = Extract<ServerFrame, { op: "ev" }>;
@@ -183,6 +198,13 @@ export const EventTypes = {
   memoryChanged: "memory.changed",
   /** An approval request changed status; on its deciders' and requester's streams (ApprovalRequestUpdatedEvent). */
   approvalRequestUpdated: "approval_request.updated",
+  // Phase 07.9 (D-04, D-08). Ids only; the per-user session list frame reuses `work_session.updated` on `user:<id>`.
+  /** Ephemeral on `user:<id>`: an audience change removed the caller from a session (WorkSessionRemovedEvent). */
+  workSessionRemoved: "work_session.removed",
+  /** Durable on `ws:<id>`: the session's audience changed; subscribers are re-decided (WorkSessionVisibilityChangedEvent). */
+  workSessionVisibilityChanged: "work_session.visibility_changed",
+  /** Durable on `org:<id>`: a team project's teams, repositories or default changed (WorkProjectUpdatedEvent). */
+  workProjectUpdated: "work_project.updated",
 } as const;
 
 export const MemberUpdatedPayload = z.object({ userId: z.uuid(), changed: z.array(z.string()) });

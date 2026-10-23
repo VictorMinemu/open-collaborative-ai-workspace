@@ -87,6 +87,9 @@ export const Permission = z.enum([
   "browser.use",
   "browser.watch",
   "browser.control",
+  // Phase 07.9 (07.9-01, D-04, D-10, D-13): who can see a Work Zone session, and team project governance.
+  "work_session.visibility",
+  "work_project.manage",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -165,6 +168,8 @@ export const PERMISSION_SURFACE: Record<Permission, PermissionSurface> = {
   "browser.use": "bots",
   "browser.watch": "bots",
   "browser.control": "bots",
+  "work_session.visibility": "workzone",
+  "work_project.manage": "team",
 };
 
 export const ROLE_SURFACES: Record<OrgRole, PermissionSurface[]> = {
@@ -246,6 +251,8 @@ const ADMIN: readonly Permission[] = [
   "vault.manage",
   "agent_template.manage",
   "tool_approval.manage",
+  "work_session.visibility",
+  "work_project.manage",
 ];
 
 /**
@@ -263,7 +270,8 @@ export const ROLE_PERMISSIONS: Record<OrgRole, readonly Permission[]> = {
 /**
  * Granted to a unit lead on the lead's unit subtree (Phase 6, P-04: also the bots of that subtree; Phase 07.3,
  * ADR-0024: module access for the subtree and its people; Phase 07.2: the subtree's shared memory; Phase 07.4: the
- * subtree's keychain keys and agent templates; Phase 07.5: the subtree's approval policies).
+ * subtree's keychain keys and agent templates; Phase 07.5: the subtree's approval policies; Phase 07.9: who sees a
+ * session in the subtree's projects and the projects' settings).
  */
 export const LEAD_PERMISSIONS: readonly Permission[] = [
   "unit.members.manage",
@@ -275,6 +283,8 @@ export const LEAD_PERMISSIONS: readonly Permission[] = [
   "vault.manage",
   "agent_template.manage",
   "tool_approval.manage",
+  "work_session.visibility",
+  "work_project.manage",
 ];
 /**
  * Upper bound for an agent principal (intersected with the triggering human). Agents never hold `memory.promote`:
@@ -457,6 +467,8 @@ export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
   "browser.use": "Let bots open web pages in their browser when they work for you",
   "browser.watch": "Watch a bot's browser in conversations you can read",
   "browser.control": "Take control of a bot's browser to sign in yourself",
+  "work_session.visibility": "Change who can see a Work Zone session",
+  "work_project.manage": "Create team projects, assign their teams, link repositories and set their default",
 };
 
 // ---------------------------------------------------------------- tokens (AUTH-06)
