@@ -54,3 +54,14 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   (a dock and sheet on phones) and take control to sign in; sign-ins are sealed per member, site and bot (Settings ›
   Keychain › Browser sessions) and never carried to another host without the member's approval (D-13); admins turn it
   on in Settings › Sandbox & Browser (isolation, limits, network, pinned sandbox packages, kill switch) (ADR-0029).
+- **07.9 Shared Work Zone projects and session visibility:** team projects (org units of kind project under a team or
+  department) with members, assigned teams and linked device repositories, a Projects index and project page (Sessions
+  and Settings) in the Work Zone and in Settings › Organization; one switch for whether new sessions are visible to the
+  whole project; every session has one audience (Only me, Project, chosen teams, chosen people) shown as a chip in its
+  header, changed from a popover (a bottom sheet on phones) by its creator, project leads and admins, and chosen in the
+  new-session dialog; the audience decides every reader (list, detail, stream, diff, attachments, approvals view,
+  proposals) through one SQL rule and the resolver, with an RLS backstop for user requests; the device owner always
+  sees, admins are an explicit, audited rule; session updates go only to their readers, never to the organization
+  stream; narrowing removes a live view within a second with the reason. On upgrade an existing session is seen only by
+  its creator, the device owner, the device's grantees and admins until its repository is linked to a team project
+  (deliberate narrowing) (ADR-0030).

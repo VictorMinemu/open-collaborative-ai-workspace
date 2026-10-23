@@ -93,6 +93,9 @@ export function readReviewToken(core: Pick<Core, "env">, organizationId: string,
   const [, payload = "", mac = ""] = parts;
   const want = createHmac("sha256", reviewKey(core)).update(`${TOKEN_PREFIX}.${payload}`).digest();
   const given = Buffer.from(mac, "base64url");
+  // Only the canonical spelling: base64url decoding ignores the last character's padding bits, so another spelling of
+  // the same bytes would otherwise verify (07.9-15 gate). The MAC is not secret, so comparing its text leaks nothing.
+  if (given.toString("base64url") !== mac) return null;
   if (given.length !== want.length || !timingSafeEqual(given, want)) return null;
   let fields: unknown;
   try {
