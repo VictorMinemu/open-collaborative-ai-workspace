@@ -273,8 +273,9 @@ and dark, axe and 44 px targets), and `pnpm gate:compose`; recorded in `07.9-VAL
 - The explicit system actor for the backstop (#322); one queue lane per organization, so a big sweep delays that
   organization's other deliveries (#330); the in-memory queue, so a crash loses pending sweeps, plus the
   cross-transaction window of one Redis round trip (#331).
-- The open 07.9 ledger entries at the gate, by id: #305 (recorded above as a decision), #312, #313, #315, #316, #317,
-  #319, #322, #324, #325 (recorded above as a decision), #329, #330, #331, #332 (`.planning/WINDOWS.md`). The ones that
+- The open 07.9 ledger entries at the gate, by id: #305 (recorded above as a decision), #312, #313, #315, #316, #319,
+  #322, #324, #325 (recorded above as a decision), #329, #330, #331, #332 (`.planning/WINDOWS.md`; #317, the
+  `WorkProjectSummary` comment, is fixed by this gate). The ones that
   change behaviour: a session appears to people who gain access only on the next list refetch (#312), an editor can
   remove themself through Teams without a warning (#315, #319), and the Project row of the panel shows no count after
   a narrowing (#319).
