@@ -5,7 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Check, FolderGit2, FolderKanban, FolderPlus, GitBranch, Laptop, Lock, Rocket } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -109,6 +109,11 @@ export function NewSessionDialog({
   const [worktree, setWorktree] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // The error line sits at the end of the scrolling body; a refusal after Start brings it into view (D-13 refusal).
+  const errorRef = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    if (error) errorRef.current?.scrollIntoView({ block: "nearest" });
+  }, [error]);
   /** Who the session will be visible to (Surface 3): the project's default until Change picks another (draft). */
   const [audience, setAudience] = useState<DraftAudience | null>(null);
 
@@ -527,7 +532,11 @@ export function NewSessionDialog({
             </section>
 
             {error ? (
-              <p role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-destructive text-sm">
+              <p
+                ref={errorRef}
+                role="alert"
+                className="rounded-md bg-destructive/10 px-3 py-2 text-destructive text-sm"
+              >
                 {error}
               </p>
             ) : null}
@@ -591,8 +600,8 @@ function RepoOption({
           {showDevice ? (
             <>
               <span className="min-w-0 truncate"> · {p.deviceName}</span>
-              <span aria-hidden className="inline-flex shrink-0">
-                <OnlineDot online={p.deviceOnline} className="ml-0.5 size-1.5" />
+              <span aria-hidden className="inline-flex shrink-0 px-0.5">
+                <OnlineDot online={p.deviceOnline} className="size-1.5" />
               </span>
               <span className="shrink-0">{p.deviceOnline ? "Online" : "Offline"}</span>
             </>

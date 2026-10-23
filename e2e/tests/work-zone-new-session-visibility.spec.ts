@@ -210,10 +210,8 @@ test("new session: grouped repositories, one 'Visible to' line, a draft choice a
     }
     expect(await unnamedControls(page)).toEqual([]);
     await axeBothThemes(page, '[data-testid="new-session-dialog"]');
-    if (mobile) {
-      await blur(page);
-      await captureReview(page, "new-session-dialog-390");
-    }
+    await blur(page);
+    await captureReview(page, `new-session-dialog-${tag}`);
 
     // ---- Change opens the panel in draft mode, with the preview count for the repository
     let surface = await openDraft(page, mobile);
@@ -234,7 +232,7 @@ test("new session: grouped repositories, one 'Visible to' line, a draft choice a
       await captureReview(page, "new-session-dialog-sheet-390");
     } else {
       await axeBothThemes(page, '[data-testid="visibility-popover"]');
-      await captureReview(page, "new-session-dialog-1440");
+      await captureReview(page, "new-session-dialog-draft-1440");
     }
 
     // Only me applies to the draft at once: the line reads Only you, and nothing was saved anywhere.
@@ -302,8 +300,9 @@ test("new session: grouped repositories, one 'Visible to' line, a draft choice a
     await expect(alert).toHaveText(`Leo Park isn't in ${portalName} anymore. Choose who can see it again.`);
     await expect(page).toHaveURL(/\/work-zone$/);
     await expect(again).toBeVisible();
+    // The error line is brought into view: the person sees why nothing started without scrolling.
+    await expect(alert).toBeInViewport();
     if (!mobile) {
-      await alert.scrollIntoViewIfNeeded();
       await blur(page);
       await captureReview(page, "new-session-dialog-refusal-1440");
     }
