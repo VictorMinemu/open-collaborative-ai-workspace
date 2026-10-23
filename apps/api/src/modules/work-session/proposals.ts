@@ -22,9 +22,11 @@ import {
   devices,
   messages,
   orgMembers,
+  orgUnits,
   projects,
   type Tx,
   tenantOf,
+  workProjectRepos,
   workZoneProposals,
 } from "@ocw/db";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
@@ -35,6 +37,7 @@ import { conflict } from "../../lib/errors";
 import type { ApplyResult, ApprovalKind, ApprovalService } from "../approval";
 import { deviceFacts, loadDeviceAccess } from "../device";
 import { orgResource, type PermissionService } from "../organization";
+import { projectFacts } from "./projects";
 import {
   isSessionCommand,
   type WorkSessionActor,
@@ -396,6 +399,8 @@ export async function proposeWorkZone(
   }
   const d = found.d;
   if (!(await mayUse(tx, perms, human, d))) return refuse("device_not_shared");
+  // D-13 (P-12): a repository of a team project the human is not in reads as missing.
+  if (!(await mayOpenRepoProject(tx, perms, human, found.p.id))) return refuse("project_not_found");
   if (d.status !== "online") return refuse("device_offline");
   const rt = runtimesOf(d).find((r) => r.id === runtime);
   if (!rt?.installed || !rt.loggedIn) return refuse("runtime_unavailable");
@@ -491,6 +496,24 @@ export async function proposeWorkZone(
   return { approvalId, created: true };
 }
 
+/** D-13: whether `userId` has access to the team project repository `projectId` is linked to (true when personal). */
+async function mayOpenRepoProject(
+  tx: Tx,
+  perms: PermissionService,
+  userId: string,
+  projectId: string,
+): Promise<boolean> {
+  const [link] = await tx
+    .select({ id: orgUnits.id, path: orgUnits.path })
+    .from(workProjectRepos)
+    .innerJoin(orgUnits, eq(orgUnits.id, workProjectRepos.unitId))
+    .where(eq(workProjectRepos.projectId, projectId))
+    .limit(1);
+  if (!link) return true;
+  const facts = await projectFacts(tx, userId, link);
+  return (await perms.decide(tx, { kind: "user", userId }, "work_session.read", facts)).allowed;
+}
+
 // ---------------------------------------------------------------- the project list
 
 /**
@@ -506,15 +529,18 @@ export async function listProposableProjects(
   const human = p.turn.userId;
   if (!(await mayCreate(tx, deps.perms, human))) return { projects: [] };
   const rows = await tx
-    .select({ p: projects, d: devices })
+    .select({ p: projects, d: devices, unitId: orgUnits.id, unitPath: orgUnits.path })
     .from(projects)
     .innerJoin(devices, eq(devices.id, projects.deviceId))
+    .leftJoin(workProjectRepos, eq(workProjectRepos.projectId, projects.id))
+    .leftJoin(orgUnits, eq(orgUnits.id, workProjectRepos.unitId))
     .where(and(isNull(projects.removedAt), isNull(devices.revokedAt)))
     .orderBy(asc(devices.name), asc(projects.name), asc(projects.id));
   const access = await loadDeviceAccess(tx, human);
   const usable = new Map<string, boolean>();
+  const inProject = new Map<string, boolean>();
   const out: AgentChannelWorkZoneProjectsResponse["projects"] = [];
-  for (const { p: project, d } of rows) {
+  for (const { p: project, d, unitId, unitPath } of rows) {
     if (out.length >= MAX_PROJECTS) break;
     let may = usable.get(d.id);
     if (may === undefined) {
@@ -529,6 +555,22 @@ export async function listProposableProjects(
       usable.set(d.id, may);
     }
     if (!may) continue;
+    // D-13 (P-12): a team project's repository only for a human with project access (the resolver decides).
+    if (unitId !== null && unitPath !== null) {
+      let open = inProject.get(unitId);
+      if (open === undefined) {
+        open = (
+          await deps.perms.decide(
+            tx,
+            { kind: "user", userId: human },
+            "work_session.read",
+            await projectFacts(tx, human, { id: unitId, path: unitPath }),
+          )
+        ).allowed;
+        inProject.set(unitId, open);
+      }
+      if (!open) continue;
+    }
     out.push({
       projectId: project.id,
       name: project.name.slice(0, 200),

@@ -60,7 +60,7 @@ import {
   type WorkSessionStartDeps,
   type WorkSessionStartFailure,
 } from "./start";
-import { registerVisibilityRoutes, viewerStateOf } from "./visibility";
+import { audienceError, registerVisibilityRoutes, viewerStateOf } from "./visibility";
 
 const SessionParams = z.object({ id: z.uuid() });
 const PromptParams = z.object({ id: z.uuid(), pid: z.uuid() });
@@ -802,7 +802,11 @@ function startError(r: WorkSessionStartFailure): HttpError {
     case "not_allowed":
       return new AuthzDeniedError(r.denial);
     case "device_not_shared":
+    case "not_in_project":
       return new AuthzDeniedError(r.denial, { message: r.message });
+    case "audience_outside_project":
+    case "team_not_assigned":
+      return audienceError(r);
     case "project_not_found":
       return r.reason === "other_device" ? conflict(r.message) : notFound(r.message);
     case "device_offline":

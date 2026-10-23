@@ -4,6 +4,7 @@ import {
   type CreateWorkSessionRequest,
   type RuntimeId,
   RuntimeInfo,
+  type SessionAudienceInput,
   type SessionSettingsPatch,
   slashDisposition,
   type WorkSession,
@@ -27,8 +28,10 @@ import { AuthzDeniedError, orgResource, type PermissionService } from "../organi
 import { loadControlsContext } from "./context";
 import { buildRuntimeControls, decideSettings, highestAvailableMode, storedSettings } from "./controls";
 import { checkImageBudget } from "./images";
+import { defaultVisibilityOf } from "./projects";
 import type { SessionRow, WorkSessionService } from "./service";
 import { heuristicTitle } from "./title";
+import { applyAudience, audienceTarget, checkAudience, projectAccessDenial } from "./visibility";
 
 /**
  * Phase 07.5-05 (D-03, D-04, APPROVE-03, APPROVE-04): the ONE way a Work Zone session is created. `POST
@@ -45,7 +48,10 @@ export type WorkSessionStartCode =
   | "device_offline"
   | "runtime_unavailable"
   | "settings_denied"
-  | "prompt_not_allowed";
+  | "prompt_not_allowed"
+  | "not_in_project"
+  | "audience_outside_project"
+  | "team_not_assigned";
 
 export type WorkSessionStartFailure =
   | {
@@ -61,6 +67,20 @@ export type WorkSessionStartFailure =
       message: string;
       /** The project exists but is on another device than the one asked for. */
       reason?: "other_device";
+    }
+  | {
+      ok: false;
+      /** D-13: the repository is in a team project the actor has no access to (the resolver's denial). */
+      code: "not_in_project";
+      message: string;
+      denial: AuthzDenial;
+    }
+  | {
+      ok: false;
+      /** D-04: the asked audience reaches beyond the project (the offending entry ids, never names). */
+      code: "audience_outside_project" | "team_not_assigned";
+      message: string;
+      ids: string[];
     }
   | { ok: false; code: "device_offline" | "runtime_unavailable" | "prompt_not_allowed"; message: string }
   | { ok: false; code: "settings_denied"; message: string; field: string; reason: ControlDenialReason };
@@ -151,6 +171,10 @@ export function isSessionCommand(prompt: string, runtime: RuntimeId): boolean {
 
 export const SLASH_COMMAND_MESSAGE = "Send slash commands from the composer";
 
+/** D-13: what a member is told when a repository's team project does not include them. */
+export const NOT_IN_PROJECT_MESSAGE =
+  "This repository belongs to a team project you are not in. Ask one of its leads to add you.";
+
 // ---------------------------------------------------------------- start
 
 export async function createWorkSession(
@@ -207,6 +231,13 @@ export async function createWorkSession(
       reason: "missing_permission" as const,
     };
     return { ok: false, code: "device_not_shared", message: deviceUnusableMessage(denial, d.name), denial };
+  }
+  // D-13 (P-12): a repository linked to a team project also needs project access.
+  const target = await audienceTarget(tx, p.id);
+  if (!target) return { ok: false, code: "project_not_found", message: "Project not found" };
+  if (target.unit) {
+    const denial = await projectAccessDenial(tx, perms, actor.userId, target.unit);
+    if (denial) return { ok: false, code: "not_in_project", message: NOT_IN_PROJECT_MESSAGE, denial };
   }
   if (d.status !== "online") {
     return { ok: false, code: "device_offline", message: `${d.name} is offline. Start the desktop app.` };
@@ -269,6 +300,15 @@ export async function createWorkSession(
   };
   const start = decideSettings(baseline, startPatch, runtimeId, ctx);
   if (!start.ok) return settingsFailure(start.field, start.reason);
+  // D-03, D-04: the asked audience, validated against the project's access, or the project's default (`project` when
+  // its switch is on, `owner` when off; a personal repository: `project`). A proposal never passes one.
+  const audience: SessionAudienceInput = input.visibility ?? {
+    kind: target.unit ? await defaultVisibilityOf(tx, target.unit.id) : "project",
+  };
+  if (input.visibility) {
+    const refused = await checkAudience(tx, target, input.visibility, actor.userId);
+    if (refused) return { ok: false, ...refused };
+  }
 
   // ---- no refusal past this line: every write happens below.
   const title = input.title ?? heuristicTitle(prompt) ?? `${p.name} · ${RUNTIME_LABEL[runtimeId]}`;
@@ -300,8 +340,14 @@ export async function createWorkSession(
       // D-19, P-14: a typed title is never replaced; otherwise the first prompt may get an automatic one.
       titleSource: input.title ? "user" : "heuristic",
       createdBy: actor.userId,
+      visibility: audience.kind,
     })
     .returning();
+  // The chosen teams or people as grants (the same writer as the visibility PUT).
+  if (audience.kind === "teams" || audience.kind === "people") {
+    await applyAudience(tx, s!.id, audience, actor.userId);
+  }
+  // Participation only, never the audience (ADR-0019).
   await joinConversation(tx, actor, s!);
   await hub.enqueue(tx, {
     deviceId: d.id,
@@ -321,6 +367,8 @@ export async function createWorkSession(
       runtime: s!.runtime,
       permissionMode: s!.permissionMode,
       worktree: s!.worktree,
+      // The audience kind only, never who is in it (D-04).
+      visibility: audience.kind,
       ...(opts.proposedByAgentId ? { proposedByAgentId: opts.proposedByAgentId } : {}),
       ...(opts.approvalId ? { approvalId: opts.approvalId } : {}),
     },

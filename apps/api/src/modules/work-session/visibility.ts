@@ -2,6 +2,7 @@ import {
   type AlwaysVisible,
   AudiencePeople,
   AudiencePreview,
+  type AuthzDenial,
   EventTypes,
   type Permission,
   SessionAudienceInput,
@@ -116,6 +117,26 @@ async function requireTarget(tx: Tx, projectId: string): Promise<AudienceTarget>
   // A session always has its repository (cascade); a missing one would be a broken tenant.
   if (!target) throw new Error("work session without its repository");
   return target;
+}
+
+/**
+ * D-13 (P-12): starting a session on a team-project repository needs project access, decided by the resolver as
+ * `work_session.read` on the project (its `not_in_project` precondition, ADR-0024 module rows on its path). Null = may.
+ */
+export async function projectAccessDenial(
+  tx: Tx,
+  perms: PermissionService,
+  userId: string,
+  unit: { id: string; path: readonly string[] },
+): Promise<AuthzDenial | null> {
+  const { allowed, denial } = await perms.decide(
+    tx,
+    { kind: "user", userId },
+    "work_session.read",
+    await projectFacts(tx, userId, unit),
+  );
+  if (allowed) return null;
+  return denial ?? { permission: "work_session.read", layer: "resource", reason: "not_in_project" };
 }
 
 // ---------------------------------------------------------------- stored audience

@@ -966,3 +966,102 @@ describe("tenant isolation (C-02): organization B never reaches organization A",
     expect(d.status).toBe(404);
   });
 });
+
+// ---------------------------------------------------------------- 07.9-06: team projects (D-03, D-13, P-12)
+
+describe("team projects: proposals only where the person may start, with the project's default (07.9-06, P-12)", () => {
+  let victorId: string;
+  let portalUnit: string;
+  let opsUnit: string;
+  let teamMac: { deviceId: string; portal: string; ops: string };
+
+  /** A unit of `kind` under `parentId`, made by the admin. */
+  const unit = async (kind: string, name: string, parentId: string | null) =>
+    (await ok(victor.request("POST", "/api/v1/units", { kind, name, parentId }))).id as string;
+
+  beforeAll(async () => {
+    victorId = (await ok(victor.request("GET", "/api/v1/me"))).user.id as string;
+    // A Mac shared with everyone, with two repositories: one in Portal (Sam is a member, new sessions start as
+    // "Only me"), one in Ops (Sam is not in it).
+    const seeded = await seedDevice({
+      owner: victorId,
+      name: "Team Mac",
+      shared: true,
+      project: "portal-app",
+    });
+    const ops = randomUUID();
+    await su.query(
+      "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, $4, 'ops-scripts')",
+      [ops, orgId, seeded.deviceId, `lp_${ops.slice(0, 8)}`],
+    );
+    teamMac = { deviceId: seeded.deviceId, portal: seeded.projectId, ops };
+    const dept = await unit("department", "Product", null);
+    portalUnit = await unit("project", "Portal", dept);
+    opsUnit = await unit("project", "Ops", dept);
+    await ok(
+      victor.request("POST", `/api/v1/units/${portalUnit}/members`, { userId: samId, role: "member" }),
+    );
+    await ok(victor.request("PATCH", `/api/v1/work-projects/${portalUnit}`, { defaultVisibility: "owner" }));
+    // Linked directly (the link route needs `device.use` on the Mac, which is not what is tested here).
+    for (const [project, unitId] of [
+      [teamMac.portal, portalUnit],
+      [teamMac.ops, opsUnit],
+    ]) {
+      await su.query(
+        "insert into app.work_project_repos (organization_id, project_id, device_id, unit_id, linked_by) values ($1, $2, $3, $4, $5)",
+        [orgId, project, teamMac.deviceId, unitId, victorId],
+      );
+    }
+  });
+  beforeEach(expirePending);
+
+  it("the list leaves out a repository of a team project the person is not in", async () => {
+    const eventId = await freshTurn();
+    const r = await cell("/work-zone/projects", { eventId, agentId: samBotId });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    const ids = (r.body.projects as Json[]).map((p) => p.projectId);
+    expect(ids).toContain(teamMac.portal);
+    expect(ids).not.toContain(teamMac.ops);
+  });
+
+  it("a proposal there is refused as a missing project, with nothing stored", async () => {
+    await refused(
+      await freshTurn(),
+      { projectId: teamMac.ops, deviceId: teamMac.deviceId },
+      "project_not_found",
+    );
+  });
+
+  it("Start takes the project's default (Only me) and the bot can name no audience", async () => {
+    const p = await proposed({ projectId: teamMac.portal, deviceId: teamMac.deviceId });
+    const r = await decide(sam, p.approvalId, { outcome: "approved", actionHash: p.actionHash });
+    expect(ApprovalSummary.parse(r.body)).toMatchObject({ status: "applied" });
+    const [s] = await rowOf("work_sessions", "project_id = $1", [teamMac.portal]);
+    expect(s).toMatchObject({ visibility: "owner", created_by: samId });
+    expect(await rowOf("work_session_grants", "work_session_id = $1", [s!.id])).toEqual([]);
+    // The proposal schema has no audience field: one is refused as an unknown key, nothing stored.
+    const before = await traces();
+    const extra = await propose(await freshTurn(), {
+      projectId: teamMac.portal,
+      deviceId: teamMac.deviceId,
+      visibility: { kind: "project" },
+    });
+    expect(extra.status).toBe(400);
+    expect(await traces()).toEqual(before);
+  });
+
+  it("Start fails with not_in_project when the person left the project since the proposal", async () => {
+    const p = await proposed({ projectId: teamMac.portal, deviceId: teamMac.deviceId });
+    await ok(victor.request("DELETE", `/api/v1/units/${portalUnit}/members/${samId}`));
+    try {
+      const before = await traces();
+      const r = await decide(sam, p.approvalId, { outcome: "approved", actionHash: p.actionHash });
+      expect(ApprovalSummary.parse(r.body)).toMatchObject({ status: "failed", resultCode: "not_in_project" });
+      expect((await traces()).sessions).toBe(before.sessions);
+    } finally {
+      await ok(
+        victor.request("POST", `/api/v1/units/${portalUnit}/members`, { userId: samId, role: "member" }),
+      );
+    }
+  });
+});
