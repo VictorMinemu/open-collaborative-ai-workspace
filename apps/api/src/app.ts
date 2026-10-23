@@ -25,7 +25,7 @@ import { HttpError } from "./lib/errors";
 import { RedisBus } from "./lib/redis";
 import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
 import { createAgentModule } from "./modules/agent";
-import { createAgentChannelModule, currentPhrase } from "./modules/agent-channel";
+import { type BrowserBudgets, createAgentChannelModule, currentPhrase } from "./modules/agent-channel";
 import { createAiChatModule } from "./modules/ai-chat";
 import { type ApprovalService, createApprovalModule } from "./modules/approval";
 import { createArtifactModule, type ObjectStorage } from "./modules/artifact";
@@ -85,6 +85,8 @@ export async function buildApp(
     secretStore?: SecretStore;
     /** Test hook: a lower Device Link frame limit (06.1-02); never read from the environment. */
     deviceFrameMaxBytes?: number;
+    /** Test hook: shorter bot browser call deadlines (CI p64/p66); never read from the environment. */
+    browserBudgetsMs?: BrowserBudgets;
   } = {},
 ): Promise<BuiltApp> {
   const app = Fastify({
@@ -345,6 +347,7 @@ export async function buildApp(
       workZone: workSession.proposals, // 07.5-08: Work Zone proposals (D-03)
       toolApproval: toolApproval.service, // 07.5-11: the approval decision of every agent action (D-04)
       sandbox, // 07.8-05: the sandboxd client of the bots' sandbox routes
+      ...(opts.browserBudgetsMs ? { browserBudgets: opts.browserBudgetsMs } : {}),
     }),
     deviceModule, // B3
     workSession, // B3 (built above)

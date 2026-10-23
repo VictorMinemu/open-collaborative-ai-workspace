@@ -15,6 +15,7 @@ import {
   AgentChannelBrowserWaitResponse,
   BROWSER_LIMITS,
   BROWSER_REFUSAL_STATUS,
+  BROWSER_TIMEOUTS_MS,
   type BrowserDownload,
   type BrowserRefusal,
   type BrowserSandboxMode,
@@ -71,6 +72,7 @@ import type { PermissionService } from "../organization";
 import {
   markState,
   pushPolicy,
+  type SandboxdCallOptions,
   type SandboxdClient,
   SandboxdRefusedError,
   sandboxAvailable,
@@ -140,10 +142,13 @@ const VIEWPORT = { width: BROWSER_LIMITS.expandedWidth, height: BROWSER_LIMITS.e
 /** The page is held this long while an approval waits (U-5), and the approval expires with it (R8). */
 const HOLD_MS = BROWSER_LIMITS.holdMinutes * 60_000;
 const PENDING_TTL_MS = TOOL_APPROVAL_LIMITS.browserPendingTtlMs;
-const ENSURE_TIMEOUT_MS = 60_000;
-const OP_TIMEOUT_MS = 30_000;
-/** How much longer than a wait the API waits for sandboxd's answer. */
-const WAIT_MARGIN_MS = 15_000;
+/**
+ * Budgets (contracts BROWSER_TIMEOUTS_MS, CI p64/p66). A browser start has none of its own: the call's deadline bounds it
+ * (`underDeadline`), and sandboxd's ready gate is the start's. One context op outwaits brw's own op cap (it answers
+ * `timeout` itself, a wait included) and sandboxd's link.
+ */
+const ENSURE_TIMEOUT_MS = BROWSER_TIMEOUTS_MS.apiOpen;
+const OP_TIMEOUT_MS = BROWSER_TIMEOUTS_MS.apiOp;
 const DEFAULT_WAIT_MS = 30_000;
 const SNAPSHOT_TEXT_MAX = 32_000;
 /** sandboxd's key names (`SandboxdContextAct.key`): checked before the decision, so a bad key is never counted. */
@@ -296,8 +301,10 @@ async function rawSnapshot(client: SandboxdClient, target: SandboxdTarget, conte
   let json: unknown;
   try {
     json = JSON.parse(await new Response(body).text());
-  } catch {
-    throw new LocalRefusal("service_unavailable");
+  } catch (err) {
+    // The op's budget or the call's deadline ended the read: the browser did not answer in time.
+    const aborted = err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
+    throw new LocalRefusal(aborted ? "timeout" : "service_unavailable");
   }
   const parsed = LooseSnapshot.safeParse(json);
   if (!parsed.success) throw new LocalRefusal("service_unavailable");
@@ -306,10 +313,58 @@ async function rawSnapshot(client: SandboxdClient, target: SandboxdTarget, conte
 
 // ---------------------------------------------------------------- the shared steps of one call
 
+/** Test hook: shorter call deadlines than contracts BROWSER_TIMEOUTS_MS (never read from the environment). */
+export interface BrowserBudgets {
+  apiOpen?: number;
+  apiCall?: number;
+}
+
 interface BrowserDeps {
   perms: Pick<PermissionService, "decide">;
   toolApproval: ToolApprovalGate;
   client: SandboxdClient | null;
+  budgets?: BrowserBudgets;
+}
+
+// ---------------------------------------------------------------- the call's deadline (CI p64/p66)
+
+/** The deadline of one browser call: an open holds a cold browser start under load, every other call one op. */
+export function browserCallBudgetMs(tool: BrowserToolName, budgets: BrowserBudgets = {}): number {
+  return tool === OPEN
+    ? (budgets.apiOpen ?? BROWSER_TIMEOUTS_MS.apiOpen)
+    : (budgets.apiCall ?? BROWSER_TIMEOUTS_MS.apiCall);
+}
+
+/**
+ * Every sandboxd call of one browser call under its deadline (CI p64/p66: the cell gave `ocw_browser_open` 20 s while
+ * the API kept waiting for a cold browser start, so the model read "the workspace could not be reached" and the page
+ * opened anyway). Each call keeps its own budget and also ends at the deadline; a call the deadline cut, or one asked
+ * after it, is the bot's `timeout`. The deadline is below the cell's budget (contracts), so the API's own answer always
+ * arrives first. sandboxd is not told: a browser start it is running finishes and is warm for the next call.
+ */
+export function underDeadline(client: SandboxdClient | null, ms: number): SandboxdClient | null {
+  if (!client) return null;
+  const expired = AbortSignal.timeout(ms);
+  const bounded = (o: SandboxdCallOptions = {}): SandboxdCallOptions => ({
+    ...o,
+    signal: o.signal ? AbortSignal.any([o.signal, expired]) : expired,
+  });
+  async function run<T>(go: (o: SandboxdCallOptions) => Promise<T>, o?: SandboxdCallOptions): Promise<T> {
+    if (expired.aborted) throw new LocalRefusal("timeout");
+    try {
+      return await go(bounded(o));
+    } catch (err) {
+      throw expired.aborted ? new LocalRefusal("timeout") : err;
+    }
+  }
+  return {
+    call(op, input, o) {
+      return run((b) => client.call(op, input, b), o);
+    },
+    stream(op, input, o) {
+      return run((b) => client.stream(op, input, b), o);
+    },
+  };
 }
 
 interface TurnBody {
@@ -967,7 +1022,12 @@ function downloadOf(r: RoutedDownload | null): BrowserDownload | null {
     : { name: r.name, size: r.size, stored: "workspace", path: r.path };
 }
 
-export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps): void {
+export function registerBrowserRoutes(scope: App, core: Core, rootDeps: BrowserDeps): void {
+  /** One call's deps: its sandboxd calls under the call's deadline (CI p64/p66). */
+  const callDeps = (tool: BrowserToolName): BrowserDeps => ({
+    ...rootDeps,
+    client: underDeadline(rootDeps.client, browserCallBudgetMs(tool, rootDeps.budgets)),
+  });
   // 07.8-25 (F-8): downloads under a member's session become attachments of the conversation (server credentials).
   const storage = createObjectStorage(core.env, core.secretStore);
   const attachmentMaxBytes = core.env.OCW_ATTACHMENT_MAX_BYTES;
@@ -982,6 +1042,7 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
     route(AgentChannelBrowserOpen, AgentChannelBrowserOpenResponse),
     async (req) => {
       const body = req.body;
+      const deps = callDeps(OPEN);
       const to = hostOf(body.url);
       if (!to)
         throw new HttpError(400, "validation_error", "url must be an http or https address with a host");
@@ -1145,6 +1206,7 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
     route(AgentChannelBrowserSnapshot, AgentChannelBrowserSnapshotResponse),
     async (req) => {
       const body = req.body;
+      const deps = callDeps(SNAPSHOT);
       const b = await begin(core, deps, cellOf(req), body, SNAPSHOT);
       await requireContext(core, b, SNAPSHOT);
       const d = await decide(core, deps, b, SNAPSHOT, async (tx, turn) => {
@@ -1212,6 +1274,7 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
   // ---------------------------------------------------------------- act
   scope.post("/browser/act", route(AgentChannelBrowserAct, AgentChannelBrowserActResponse), async (req) => {
     const body = req.body;
+    const deps = callDeps(ACT);
     if (body.key !== undefined && !KEY_RE.test(body.key)) {
       throw new HttpError(400, "validation_error", "key must be a key name such as Enter, Tab or a");
     }
@@ -1400,6 +1463,7 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
     route(AgentChannelBrowserScreenshot, AgentChannelBrowserScreenshotResponse),
     async (req) => {
       const body = req.body;
+      const deps = callDeps(SCREENSHOT);
       const b = await begin(core, deps, cellOf(req), body, SCREENSHOT);
       if (!b.images)
         await refuseEarly(core, b, SCREENSHOT, "screenshot_unavailable", { host: b.context?.host ?? null });
@@ -1461,6 +1525,7 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
     route(AgentChannelBrowserWait, AgentChannelBrowserWaitResponse),
     async (req) => {
       const body = req.body;
+      const deps = callDeps(WAIT);
       const b = await begin(core, deps, cellOf(req), body, WAIT);
       await requireContext(core, b, WAIT);
       const d = await decide(core, deps, b, WAIT, async (tx, turn) => {
@@ -1491,7 +1556,7 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
             ...(body.text !== undefined ? { text: body.text } : {}),
             ms,
           },
-          { timeoutMs: ms + WAIT_MARGIN_MS },
+          { timeoutMs: OP_TIMEOUT_MS },
         ),
       );
       const waited = await conclude(core, b, d, WAIT, run, {
@@ -1519,6 +1584,7 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
     route(AgentChannelBrowserSignIn, AgentChannelBrowserSignInResponse),
     async (req) => {
       const body = req.body;
+      const deps = callDeps(SIGNIN);
       const b = await begin(core, deps, cellOf(req), body, SIGNIN);
       const context0 = await requireContext(core, b, SIGNIN);
       // D-11: only where 07.4's member-account rule allows a member's own account (refused before the decision, so it
@@ -1583,6 +1649,7 @@ export function registerBrowserRoutes(scope: App, core: Core, deps: BrowserDeps)
     route(AgentChannelBrowserClose, AgentChannelBrowserCloseResponse),
     async (req) => {
       const body = req.body;
+      const deps = callDeps(CLOSE);
       const b = await begin(core, deps, cellOf(req), body, CLOSE);
       await requireContext(core, b, CLOSE);
       const d = await decide(core, deps, b, CLOSE, async (tx, turn) => {

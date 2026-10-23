@@ -657,3 +657,31 @@ describe("modelAcceptsImages (07.8-14, D-14)", () => {
     expect(modelAcceptsImages("openrouter", "meta-llama/llama-3.1-8b")).toBe(false);
   });
 });
+
+describe("browser timeouts (CI p64/p66): every hop waits longer than the hop it calls", () => {
+  const t = browser.BROWSER_TIMEOUTS_MS;
+  /** The API's transactions after its last sandboxd call and the HTTP answer, under CI load. */
+  const ANSWER_MARGIN_MS = 10_000;
+  /** OpenClaw 2026.9.7: a Codex-harness turn gives a plugin's dynamic tool 90 s (CODEX_DYNAMIC_TOOL_TIMEOUT_MS). */
+  const OPENCLAW_DYNAMIC_TOOL_MS = 90_000;
+
+  it("one op: the page load < brw's op cap < sandboxd's link < the API's op budget", () => {
+    expect(t.navigation).toBeLessThan(t.agentOp);
+    expect(t.agentOp).toBeLessThan(t.agentLink);
+    expect(t.agentLink).toBeLessThan(t.apiOp);
+  });
+
+  it("one call: the API's deadline holds its op budget and answers before the cell gives up, under OpenClaw's cap", () => {
+    expect(t.apiOp).toBeLessThanOrEqual(t.apiCall);
+    expect(t.apiCall + ANSWER_MARGIN_MS).toBeLessThanOrEqual(t.cellCall);
+    expect(t.apiOpen + ANSWER_MARGIN_MS).toBeLessThanOrEqual(t.cellOpen);
+    expect(t.cellCall).toBeLessThan(OPENCLAW_DYNAMIC_TOOL_MS);
+    expect(t.cellOpen).toBeLessThan(OPENCLAW_DYNAMIC_TOOL_MS);
+  });
+
+  it("a first open holds a cold start under load (CI ~22-35 s), the browser's own op and its page load", () => {
+    expect(t.launch).toBeLessThan(t.ready);
+    expect(t.apiOpen).toBeGreaterThanOrEqual(35_000 + t.navigation);
+    expect(t.apiOpen).toBeGreaterThan(t.apiCall);
+  });
+});

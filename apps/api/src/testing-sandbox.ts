@@ -8,6 +8,7 @@ import {
   type FakeSandboxd,
   type FakeSandboxdStats,
 } from "../../../infra/fake-model/fake-sandboxd.mjs";
+import type { BrowserBudgets } from "./modules/agent-channel";
 import { pushPolicy } from "./modules/sandbox";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "./testing";
 
@@ -102,7 +103,7 @@ export async function ok(res: Promise<Res> | Res, status = 200): Promise<Json> {
 export const codeOf = (r: Res): unknown => (r.body?.error as Json | undefined)?.code;
 
 export async function startSandboxStack(
-  opts: { env?: Record<string, string>; logLevel?: string } = {},
+  opts: { env?: Record<string, string>; logLevel?: string; browserBudgetsMs?: BrowserBudgets } = {},
 ): Promise<SandboxStack> {
   const sandboxd = await startFakeSandboxd();
   const logs: string[] = [];
@@ -118,6 +119,7 @@ export async function startSandboxStack(
         ...opts.env,
       },
       logStream: { write: (line: string) => void logs.push(line) },
+      ...(opts.browserBudgetsMs ? { browserBudgetsMs: opts.browserBudgetsMs } : {}),
     });
   } catch (err) {
     await sandboxd.stop();
