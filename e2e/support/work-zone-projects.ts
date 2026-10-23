@@ -4,6 +4,10 @@ import { DeviceGrant } from "../../packages/contracts/src/device.ts";
 import { OrgUnit, OrgUnitList, UnitMember } from "../../packages/contracts/src/organization.ts";
 import type { PermissionMode } from "../../packages/contracts/src/session-events.ts";
 import { WorkProjectDetail } from "../../packages/contracts/src/work-projects.ts";
+import {
+  type SessionAudienceInput,
+  UpdateWorkSessionVisibilityResult,
+} from "../../packages/contracts/src/work-session.ts";
 
 /**
  * Explicit access to someone else's Work Zone session for the e2e specs (Phase 07.9, D-06, P-07). Since the flip a
@@ -151,4 +155,18 @@ export async function shareDevice(
     await owner.put(`/api/v1/devices/${deviceId}/grants/user/${userId}`, { data: { maxMode } }),
     DeviceGrant,
   );
+}
+
+/**
+ * Sets who can see the session `sessionId` (`PUT /api/v1/work-sessions/:id/visibility`, 07.9-06) as `editor` (its
+ * creator, a project lead or an admin) and returns the API's answer: the new panel view and who lost access. Entries
+ * outside the project are refused by the API (422), never filtered here (07.9-10).
+ */
+export async function setAudience(
+  editor: APIRequestContext,
+  sessionId: string,
+  input: SessionAudienceInput,
+): Promise<UpdateWorkSessionVisibilityResult> {
+  const path = `/api/v1/work-sessions/${sessionId}/visibility`;
+  return parsed(`PUT ${path}`, await editor.put(path, { data: input }), UpdateWorkSessionVisibilityResult);
 }
