@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 173
+open_count: 174
 waived_count: 5
 fixed_count: 134
-total_count: 312
-last_updated: 2026-10-23T05:15:46.993Z
+total_count: 313
+last_updated: 2026-10-23T05:18:28.391Z
 ---
 
 # Broken Windows Ledger
@@ -327,6 +327,7 @@ last_updated: 2026-10-23T05:15:46.993Z
 | 310 | 07.9 | deviation | apps/web/app/(app)/work-zone/page.tsx |  | SHOULD FIX (07.9-09, pre-existing): the home "Ready" status chip contrast 2.6:1; at 390 the recent sessions' date truncates mid-word ("just nov") | open |  | 2026-10-23T04:56:08.606Z |  |
 | 311 | 07.9 | deviation | apps/api/src/modules/work-session/service.ts |  | 07.9-07 (low): a session frame computed just before a narrowing can arrive a few ms after it (the data was visible to that person until then); each device transaction and reauthorizeOrg waits for the post-commit fan-out — plan 12 measures it | open |  | 2026-10-23T05:15:46.912Z |  |
 | 312 | 07.9 | deviation | apps/web/lib/workzone-queries.ts |  | 07.9-07: gaining access by repo link or team assignment shows the session only on the next list refetch (P-08 by design); useWorkZoneOrgSync is mounted in 4 components — plan 11 may mount it once | open |  | 2026-10-23T05:15:46.993Z |  |
+| 313 | 07.9 | deviation | e2e |  | 07.9-08: e2e/ has no tsconfig, so pnpm typecheck never type-checks the specs (add one, gate); leftover sessions accumulate between specs (title, Mia's Gate) | open |  | 2026-10-23T05:18:28.391Z |  |
 
 ````json
 [
@@ -4072,6 +4073,18 @@ last_updated: 2026-10-23T05:15:46.993Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-23T05:15:46.993Z",
+    "resolved_at": null
+  },
+  {
+    "id": 313,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "e2e",
+    "line": null,
+    "description": "07.9-08: e2e/ has no tsconfig, so pnpm typecheck never type-checks the specs (add one, gate); leftover sessions accumulate between specs (title, Mia's Gate)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T05:18:28.391Z",
     "resolved_at": null
   }
 ]
