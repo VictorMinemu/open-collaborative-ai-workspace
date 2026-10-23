@@ -1,8 +1,17 @@
 import {
+  AssignableTeams,
+  AssignWorkProjectTeamRequest,
   CreateWorkProjectRequest,
+  EventTypes,
+  LinkableRepos,
+  LinkWorkProjectRepoRequest,
+  type Permission,
+  RepoUnlinkImpact,
+  UpdateWorkProjectRequest,
   WorkProjectDetail,
   type WorkProjectPerson,
   type WorkProjectRepo,
+  WorkProjectSearchQuery,
   type WorkProjectTeam,
 } from "@ocw/contracts";
 import {
@@ -17,13 +26,15 @@ import {
   workProjectSettings,
   workProjectTeams,
 } from "@ocw/db";
-import { asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../core";
-import { notFound } from "../../lib/errors";
+import { badRequest, conflict, notFound } from "../../lib/errors";
+import { deviceFacts, loadDeviceAccess } from "../device";
 import {
   createUnit,
+  orgTopic,
   type PermissionService,
   type ResourceFacts,
   requireUnit,
@@ -42,6 +53,43 @@ import {
  */
 
 const ProjectParams = z.object({ unitId: z.uuid() });
+const TeamParams = z.object({ unitId: z.uuid(), teamId: z.uuid() });
+const RepoParams = z.object({ unitId: z.uuid(), projectId: z.uuid() });
+
+/** Rows the assignable-teams search returns. */
+const ASSIGNABLE_MAX = 50;
+
+/** The Postgres error behind a driver or Drizzle error (`code`, constraint name). */
+function pgError(err: unknown): { code?: string; constraint?: string } {
+  const e = err as { code?: string; constraint?: string; cause?: { code?: string; constraint?: string } };
+  return e?.cause?.code ? e.cause : { code: e?.code, constraint: e?.constraint };
+}
+
+const invalidTeamKind = () =>
+  badRequest(
+    "Only teams and departments, never a project, can be assigned to a project",
+    "invalid_team_kind",
+  );
+
+/** The repository's link to this project (404 when it is linked elsewhere or not at all). */
+async function requireLink(tx: Tx, unitId: string, projectId: string) {
+  const [link] = await tx
+    .select({ projectId: workProjectRepos.projectId, deviceId: workProjectRepos.deviceId })
+    .from(workProjectRepos)
+    .where(and(eq(workProjectRepos.projectId, projectId), eq(workProjectRepos.unitId, unitId)))
+    .limit(1);
+  if (!link) throw notFound("This repository is not linked to the project", "repo_not_linked");
+  return link;
+}
+
+/**
+ * Non-archived sessions on a repository, whatever the caller can see (UI-SPEC U-7): a definer count, a number only
+ * (P-10).
+ */
+async function repoSessionCount(tx: Tx, projectId: string): Promise<number> {
+  const res = await tx.execute(sql`select app.work_project_repo_session_count(${projectId}::uuid) as n`);
+  return Number((res.rows[0] as { n: number | string }).n);
+}
 
 /** The project's people the detail shows as avatars (WORK_PROJECT_LIMITS.accessPeople). */
 const ACCESS_PEOPLE = 5;
@@ -94,6 +142,35 @@ export async function projectFacts(
 /** The parent unit of a project as a resource (create and team assignment are decided there). */
 const parentResource = (unit: ProjectUnit) =>
   unitResource({ id: unit.parentId ?? unit.id, path: unit.path.slice(0, -1) });
+
+/**
+ * The project for a write: 404 when it is not a team project of the tenant; a denied `permission` answers 404 too when
+ * the caller cannot open the project (its existence never leaks), else 403 with the denial.
+ */
+async function projectFor(
+  req: FastifyRequest,
+  tx: Tx,
+  perms: PermissionService,
+  unitId: string,
+  permission: Permission,
+  on: "project" | "parent",
+) {
+  const project = await loadProject(tx, authOf(req).userId, unitId);
+  if (!project) throw notFound();
+  const resource = on === "project" ? project.facts : parentResource(project.unit);
+  if (!(await perms.can(req, tx, permission, resource))) {
+    const opens = await perms.can(req, tx, "work_session.read", project.facts);
+    await perms.assertCan(req, tx, permission, resource, opens ? {} : { hideAs404: true });
+  }
+  return project;
+}
+
+/** Durable `work_project.updated` on `org:<id>`, ids only (D-08, T-07.9-04-06). */
+async function projectChanged(core: Core, tx: Tx, unitId: string): Promise<void> {
+  await core.realtime.appendEvent(tx, orgTopic(tenantOf(tx).organizationId), EventTypes.workProjectUpdated, {
+    unitId,
+  });
+}
 
 // ---------------------------------------------------------------- read models
 
@@ -272,6 +349,303 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
         // Unknown ids, other kinds and projects the caller cannot open answer the same 404 (T-07.9-04-03).
         if (!project) throw notFound();
         await perms.assertCan(req, tx, "work_session.read", project.facts, { hideAs404: true });
+        return projectDetail(req, tx, perms, project);
+      }),
+  );
+
+  app.patch(
+    "/work-projects/:unitId",
+    {
+      ...user,
+      schema: {
+        tags,
+        params: ProjectParams,
+        body: UpdateWorkProjectRequest,
+        response: { 200: WorkProjectDetail },
+      },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const { userId } = authOf(req);
+        // D-03: the project's leads, leads above it and admins.
+        const project = await projectFor(req, tx, perms, req.params.unitId, "work_project.manage", "project");
+        const to = req.body.defaultVisibility;
+        const from = await defaultVisibilityOf(tx, project.unit.id);
+        if (from !== to) {
+          await tx
+            .insert(workProjectSettings)
+            .values({
+              organizationId: tenantOf(tx).organizationId,
+              unitId: project.unit.id,
+              defaultVisibility: to,
+              updatedBy: userId,
+            })
+            .onConflictDoUpdate({
+              target: workProjectSettings.unitId,
+              set: { defaultVisibility: to, updatedBy: userId, updatedAt: sql`now()` },
+            });
+          await core.audit.record(tx, {
+            action: "work_project.default_changed",
+            resourceType: "org_unit",
+            resourceId: project.unit.id,
+            metadata: { from, to },
+          });
+          await projectChanged(core, tx, project.unit.id);
+        }
+        return projectDetail(req, tx, perms, project);
+      }),
+  );
+
+  // ---------------------------------------------------------------- assigned teams (D-01, D-10)
+
+  app.get(
+    "/work-projects/:unitId/assignable-teams",
+    {
+      ...user,
+      schema: {
+        tags,
+        params: ProjectParams,
+        querystring: WorkProjectSearchQuery,
+        response: { 200: AssignableTeams },
+      },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const project = await projectFor(req, tx, perms, req.params.unitId, "work_project.manage", "parent");
+        const q = req.query.q?.toLowerCase() ?? "";
+        const rows = await tx
+          .select({ id: orgUnits.id, name: orgUnits.name, kind: orgUnits.kind })
+          .from(orgUnits)
+          .where(
+            and(
+              inArray(orgUnits.kind, ["team", "department"]),
+              q === "" ? undefined : sql`position(${q} in lower(${orgUnits.name})) > 0`,
+              sql`not exists (select 1 from app.work_project_teams t where t.project_unit_id = ${project.unit.id}::uuid and t.team_unit_id = ${orgUnits.id})`,
+            ),
+          )
+          .orderBy(asc(sql`lower(${orgUnits.name})`), asc(orgUnits.id))
+          .limit(ASSIGNABLE_MAX);
+        const counts = await subtreeMemberCounts(
+          tx,
+          rows.map((r) => r.id),
+        );
+        return {
+          teams: rows.flatMap((r) =>
+            r.kind === "project"
+              ? []
+              : [{ id: r.id, name: r.name, kind: r.kind, memberCount: counts.get(r.id) ?? 0 }],
+          ),
+        };
+      }),
+  );
+
+  app.post(
+    "/work-projects/:unitId/teams",
+    {
+      ...user,
+      schema: {
+        tags,
+        params: ProjectParams,
+        body: AssignWorkProjectTeamRequest,
+        response: { 200: WorkProjectDetail },
+      },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const { userId } = authOf(req);
+        // D-10, P-11: admins and the leads of the parent's subtree, never a project lead alone.
+        const project = await projectFor(req, tx, perms, req.params.unitId, "work_project.manage", "parent");
+        // Loaded inside the tenant: a unit of another organization is simply not found (T-07.9-04-04).
+        const team = await requireUnit(tx, req.body.unitId);
+        if (team.kind === "project" || team.id === project.unit.id) throw invalidTeamKind();
+        try {
+          await tx.insert(workProjectTeams).values({
+            organizationId: tenantOf(tx).organizationId,
+            projectUnitId: project.unit.id,
+            teamUnitId: team.id,
+            assignedBy: userId,
+          });
+        } catch (err) {
+          const { code, constraint } = pgError(err);
+          if (code === "23505") throw conflict("This team is already assigned", "team_already_assigned");
+          if (constraint === "work_project_teams_not_self_ck") throw invalidTeamKind();
+          if (code === "23503") throw notFound("Unit not found", "unit_not_found");
+          throw err;
+        }
+        await core.audit.record(tx, {
+          action: "work_project.team_assigned",
+          resourceType: "org_unit",
+          resourceId: project.unit.id,
+          metadata: { teamId: team.id },
+        });
+        await projectChanged(core, tx, project.unit.id);
+        return projectDetail(req, tx, perms, project);
+      }),
+  );
+
+  app.delete(
+    "/work-projects/:unitId/teams/:teamId",
+    { ...user, schema: { tags, params: TeamParams, response: { 200: WorkProjectDetail } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const project = await projectFor(req, tx, perms, req.params.unitId, "work_project.manage", "parent");
+        const [removed] = await tx
+          .delete(workProjectTeams)
+          .where(
+            and(
+              eq(workProjectTeams.projectUnitId, project.unit.id),
+              eq(workProjectTeams.teamUnitId, req.params.teamId),
+            ),
+          )
+          .returning({ teamId: workProjectTeams.teamUnitId });
+        if (!removed) throw notFound("This team is not assigned to the project", "team_not_assigned");
+        await core.audit.record(tx, {
+          action: "work_project.team_removed",
+          resourceType: "org_unit",
+          resourceId: project.unit.id,
+          metadata: { teamId: removed.teamId },
+        });
+        await projectChanged(core, tx, project.unit.id);
+        return projectDetail(req, tx, perms, project);
+      }),
+  );
+
+  // ---------------------------------------------------------------- linked repositories (D-01, D-10)
+
+  app.get(
+    "/work-projects/:unitId/linkable-repos",
+    { ...user, schema: { tags, params: ProjectParams, response: { 200: LinkableRepos } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const { userId } = authOf(req);
+        await projectFor(req, tx, perms, req.params.unitId, "work_project.manage", "project");
+        const rows = await tx
+          .select({
+            p: projects,
+            d: devices,
+            linkedId: workProjectRepos.unitId,
+            linkedName: orgUnits.name,
+          })
+          .from(projects)
+          .innerJoin(devices, eq(devices.id, projects.deviceId))
+          .leftJoin(workProjectRepos, eq(workProjectRepos.projectId, projects.id))
+          .leftJoin(orgUnits, eq(orgUnits.id, workProjectRepos.unitId))
+          .where(and(isNull(devices.revokedAt), isNull(projects.removedAt)))
+          .orderBy(
+            asc(sql`lower(${devices.name})`),
+            asc(devices.id),
+            asc(sql`lower(${projects.name})`),
+            asc(projects.id),
+          );
+        // Repositories on devices the caller may use, as `GET /projects` decides them (D-10).
+        const access = await loadDeviceAccess(tx, userId);
+        const usable = await perms.filter(req, tx, rows, "device.use", ({ d }) =>
+          deviceFacts(d, userId, access),
+        );
+        const byDevice = new Map<string, LinkableRepos["devices"][number]>();
+        for (const { p, d, linkedId, linkedName } of usable) {
+          let entry = byDevice.get(d.id);
+          if (!entry) {
+            entry = { deviceId: d.id, deviceName: d.name, deviceOnline: d.status === "online", repos: [] };
+            byDevice.set(d.id, entry);
+          }
+          entry.repos.push({
+            projectId: p.id,
+            name: p.name,
+            linkedTo: linkedId && linkedName ? { id: linkedId, name: linkedName } : null,
+          });
+        }
+        return { devices: [...byDevice.values()] };
+      }),
+  );
+
+  app.post(
+    "/work-projects/:unitId/repos",
+    {
+      ...user,
+      schema: {
+        tags,
+        params: ProjectParams,
+        body: LinkWorkProjectRepoRequest,
+        response: { 200: WorkProjectDetail },
+      },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const { userId } = authOf(req);
+        const project = await projectFor(req, tx, perms, req.params.unitId, "work_project.manage", "project");
+        const [repo] = await tx
+          .select({ p: projects, d: devices })
+          .from(projects)
+          .innerJoin(devices, eq(devices.id, projects.deviceId))
+          .where(eq(projects.id, req.body.projectId))
+          .limit(1);
+        if (!repo) throw notFound("Repository not found", "project_not_found");
+        // D-10, T-07.9-04-02: linking someone's repository opens its sessions to the project; it needs using the device.
+        await perms.assertCan(
+          req,
+          tx,
+          "device.use",
+          deviceFacts(repo.d, userId, await loadDeviceAccess(tx, userId)),
+        );
+        try {
+          await tx.insert(workProjectRepos).values({
+            organizationId: tenantOf(tx).organizationId,
+            projectId: repo.p.id,
+            deviceId: repo.d.id,
+            unitId: project.unit.id,
+            linkedBy: userId,
+          });
+        } catch (err) {
+          const { code } = pgError(err);
+          if (code === "23505") {
+            throw conflict("This repository is already linked to a team project", "repo_already_linked");
+          }
+          if (code === "23503") throw notFound("Repository not found", "project_not_found");
+          throw err;
+        }
+        await core.audit.record(tx, {
+          action: "work_project.repo_linked",
+          resourceType: "org_unit",
+          resourceId: project.unit.id,
+          deviceId: repo.d.id,
+          metadata: { projectId: repo.p.id, deviceId: repo.d.id },
+        });
+        await projectChanged(core, tx, project.unit.id);
+        return projectDetail(req, tx, perms, project);
+      }),
+  );
+
+  app.get(
+    "/work-projects/:unitId/repos/:projectId/impact",
+    { ...user, schema: { tags, params: RepoParams, response: { 200: RepoUnlinkImpact } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const project = await projectFor(req, tx, perms, req.params.unitId, "work_project.manage", "project");
+        const link = await requireLink(tx, project.unit.id, req.params.projectId);
+        return { sessions: await repoSessionCount(tx, link.projectId) };
+      }),
+  );
+
+  app.delete(
+    "/work-projects/:unitId/repos/:projectId",
+    { ...user, schema: { tags, params: RepoParams, response: { 200: WorkProjectDetail } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        // The project's managers (must_haves: linking, not unlinking, needs the device): unlinking only narrows who
+        // sees the repository's sessions, and a repository on a device nobody may use any more must stay unlinkable.
+        const project = await projectFor(req, tx, perms, req.params.unitId, "work_project.manage", "project");
+        const link = await requireLink(tx, project.unit.id, req.params.projectId);
+        const sessions = await repoSessionCount(tx, link.projectId);
+        await tx.delete(workProjectRepos).where(eq(workProjectRepos.projectId, link.projectId));
+        await core.audit.record(tx, {
+          action: "work_project.repo_unlinked",
+          resourceType: "org_unit",
+          resourceId: project.unit.id,
+          deviceId: link.deviceId,
+          metadata: { projectId: link.projectId, deviceId: link.deviceId, sessions },
+        });
+        await projectChanged(core, tx, project.unit.id);
         return projectDetail(req, tx, perms, project);
       }),
   );

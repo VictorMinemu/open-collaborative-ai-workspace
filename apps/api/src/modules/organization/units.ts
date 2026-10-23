@@ -36,6 +36,8 @@ import {
   toolApprovalPolicies,
   unitMemberships,
   vaultItems,
+  workProjectRepos,
+  workProjectTeams,
 } from "@ocw/db";
 import { and, asc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
@@ -107,6 +109,12 @@ export const orgTopic = (organizationId: string) => `org:${organizationId}`;
 
 /** A Postgres `uuid[]` literal from validated ids (drizzle would expand a JS array into a value list). */
 export const uuidArray = (ids: readonly string[]) => sql`${`{${ids.join(",")}}`}::uuid[]`;
+
+/** The name of the constraint a Postgres error (direct or wrapped by Drizzle) reports. */
+function constraintOf(err: unknown): string | undefined {
+  const e = err as { constraint?: string; cause?: { constraint?: string } };
+  return e?.constraint ?? e?.cause?.constraint;
+}
 
 export function isUniqueViolation(err: unknown): boolean {
   const e = err as { code?: string; cause?: { code?: string } };
@@ -390,6 +398,14 @@ export function registerUnitRoutes(
           .where(eq(orgUnits.parentId, unit.id))
           .limit(1);
         if (child) throw conflict("Move or delete the units inside it first", "unit_has_children");
+        // Phase 07.9 (D-01, UI-SPEC U-7): a team project's repository links hold it (RESTRICT): unlinking turns their
+        // sessions personal and is decided and audited by its own route, never as a silent side effect of this one.
+        const [repo] = await tx
+          .select({ id: workProjectRepos.projectId })
+          .from(workProjectRepos)
+          .where(eq(workProjectRepos.unitId, unit.id))
+          .limit(1);
+        if (repo) throw conflict("Unlink this project's repositories first", "unit_has_repositories");
         // AGENT-01 (T-06-07-03): a unit persona never silently widens to the organization; it is moved or deleted
         // first. Checked before the RESTRICT foreign key would fire, so the caller gets a reason.
         const [bot] = await tx
@@ -476,6 +492,13 @@ export function registerUnitRoutes(
             .from(permissionRules)
             .where(eq(permissionRules.scopeUnitId, unit.id))
         ).map((r) => r.id);
+        // Phase 07.9: the team projects this team or department was assigned to lose it with the unit (cascade).
+        const unassignedFromProjectIds = (
+          await tx
+            .select({ id: workProjectTeams.projectUnitId })
+            .from(workProjectTeams)
+            .where(eq(workProjectTeams.teamUnitId, unit.id))
+        ).map((r) => r.id);
         // Archived templates of the unit: removed with it (versions cascade; agents.template_id is set null).
         const removedTemplateIds = (
           await tx
@@ -483,7 +506,15 @@ export function registerUnitRoutes(
             .where(eq(agentTemplates.unitId, unit.id))
             .returning({ id: agentTemplates.id })
         ).map((r) => r.id);
-        await tx.delete(orgUnits).where(eq(orgUnits.id, unit.id));
+        try {
+          await tx.delete(orgUnits).where(eq(orgUnits.id, unit.id));
+        } catch (err) {
+          // Defence in depth: the row lock above makes the check see every committed link.
+          if (constraintOf(err) === "work_project_repos_unit_fk") {
+            throw conflict("Unlink this project's repositories first", "unit_has_repositories");
+          }
+          throw err;
+        }
         await deps.approvals.closeGone(tx, { ids: goneApprovals });
         await core.audit.record(tx, {
           action: "unit.deleted",
@@ -496,9 +527,18 @@ export function registerUnitRoutes(
             removedMemberIds,
             removedRuleIds,
             ...(removedTemplateIds.length > 0 ? { removedTemplateIds } : {}),
+            ...(unassignedFromProjectIds.length > 0 ? { unassignedFromProjectIds } : {}),
           },
         });
         await unitsChanged(core, tx, unit.id, "deleted");
+        for (const projectUnitId of unassignedFromProjectIds) {
+          await core.realtime.appendEvent(
+            tx,
+            orgTopic(tenantOf(tx).organizationId),
+            EventTypes.workProjectUpdated,
+            { unitId: projectUnitId },
+          );
+        }
         for (const ruleId of removedRuleIds) {
           await core.realtime.appendEvent(
             tx,

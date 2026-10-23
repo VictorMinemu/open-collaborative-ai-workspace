@@ -626,3 +626,62 @@ describe("units: tool approval rules block a delete (07.5, WINDOWS #207)", () =>
     }
   });
 });
+
+describe("units: a team project with linked repositories (Phase 07.9, D-01, UI-SPEC U-7)", () => {
+  const create = async (kind: string, name: string, parentId: string | null) =>
+    (await ok(admin.request("POST", "/api/v1/units", { kind, name, parentId }))).id as string;
+
+  it("refuses unit_has_repositories while a repository is linked; unlinked, settings and teams go with it", async () => {
+    const dept = await create("department", "Repos Dept", null);
+    const team = await create("team", "Repos Team", dept);
+    const project = await create("project", "Repos Project", team);
+    const [admin_] = (await su.query("select user_id from app.org_members where role = 'admin' limit 1"))
+      .rows;
+    const adminId = admin_.user_id as string;
+    // A device repository linked to the project (as POST /work-projects/:id/repos stores it).
+    const device = (
+      await su.query(
+        `insert into app.devices (organization_id, owner_user_id, name, platform, token_hash)
+         values ($1, $2, 'Bench', 'darwin', $3) returning id`,
+        [orgId, devId, `hash-${Date.now()}`],
+      )
+    ).rows[0].id as string;
+    const repo = (
+      await su.query(
+        "insert into app.projects (organization_id, device_id, local_id, name) values ($1, $2, 'r1', 'repo') returning id",
+        [orgId, device],
+      )
+    ).rows[0].id as string;
+    await su.query(
+      "insert into app.work_project_repos (organization_id, project_id, device_id, unit_id, linked_by) values ($1, $2, $3, $4, $5)",
+      [orgId, repo, device, project, adminId],
+    );
+    await su.query(
+      "insert into app.work_project_settings (organization_id, unit_id, default_visibility, updated_by) values ($1, $2, 'owner', $3)",
+      [orgId, project, adminId],
+    );
+    await su.query(
+      "insert into app.work_project_teams (organization_id, project_unit_id, team_unit_id, assigned_by) values ($1, $2, $3, $4)",
+      [orgId, project, dept, adminId],
+    );
+    const deletedBefore = (await audit("unit.deleted")).length;
+
+    const refused = await fails(admin.request("DELETE", `/api/v1/units/${project}`), 409);
+    expect(refused.code).toBe("unit_has_repositories");
+    expect((await audit("unit.deleted")).length).toBe(deletedBefore);
+
+    await su.query("delete from app.work_project_repos where project_id = $1", [repo]);
+    await ok(admin.request("DELETE", `/api/v1/units/${project}`));
+    for (const [table, col] of [
+      ["work_project_settings", "unit_id"],
+      ["work_project_teams", "project_unit_id"],
+    ] as const) {
+      expect(
+        (await su.query(`select 1 from app.${table} where ${col} = $1`, [project])).rowCount,
+        table,
+      ).toBe(0);
+    }
+    // The repository row is the device's: it stays.
+    expect((await su.query("select 1 from app.projects where id = $1", [repo])).rowCount).toBe(1);
+  });
+});

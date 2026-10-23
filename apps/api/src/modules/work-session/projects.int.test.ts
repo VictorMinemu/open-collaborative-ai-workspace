@@ -3,7 +3,8 @@ import { WorkProjectDetail } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
-import { invite } from "../../testing-workzone";
+import { eventually, FakeDevice } from "../../testing-device";
+import { invite, pairDevice } from "../../testing-workzone";
 
 /**
  * Phase 07.9-04 (D-01, D-02, D-03, D-10, D-13; ADR-0024): team projects as Control Plane entities. Organization A:
@@ -21,9 +22,43 @@ let otto: TestClient;
 let eve: TestClient;
 let orgA = "";
 let lenaId = "";
+let ottoId = "";
 let engineering = "";
 let web = "";
 let mobile = "";
+let portal = "";
+let platform = "";
+let eveUnit = "";
+
+interface PairedDevice {
+  deviceId: string;
+  device: FakeDevice;
+  /** Repository ids by name. */
+  repo: Record<string, string>;
+}
+let lenaMac: PairedDevice;
+let danaPc: PairedDevice;
+let eveBox: PairedDevice;
+const devicesToClose: FakeDevice[] = [];
+
+/** Pair a device for `owner`, connect it and announce `repos` (names double as local ids). */
+async function deviceWith(owner: TestClient, name: string, repos: string[]): Promise<PairedDevice> {
+  const { deviceId, token } = await pairDevice(stack, owner, name);
+  const device = await FakeDevice.connect(stack.baseUrl, token);
+  devicesToClose.push(device);
+  device.send({
+    type: "projects.sync",
+    projects: repos.map((r) => ({ localId: r, name: r, gitRemote: null, defaultBranch: "main" })),
+  });
+  await device.next((f) => f.type === "projects.ack");
+  await eventually(
+    async () =>
+      (await su.query("select status from app.devices where id = $1", [deviceId])).rows[0]?.status ===
+      "online",
+  );
+  const rows = (await su.query("select id, name from app.projects where device_id = $1", [deviceId])).rows;
+  return { deviceId, device, repo: Object.fromEntries(rows.map((r) => [r.name as string, r.id as string])) };
+}
 
 type Res = { status: number; body: Record<string, unknown> | null };
 
@@ -106,7 +141,7 @@ beforeAll(async () => {
   );
   dana = danaClient;
   ({ client: oscar } = await invite(stack, victor, "oscar@example.test", "Oscar Out", "developer"));
-  const { client: ottoClient, userId: ottoId } = await invite(
+  const { client: ottoClient, userId: ottoUserId } = await invite(
     stack,
     victor,
     "otto@example.test",
@@ -114,6 +149,7 @@ beforeAll(async () => {
     "lead",
   );
   otto = ottoClient;
+  ottoId = ottoUserId;
   const { client: eveClient, userId: eveId } = await invite(
     stack,
     victor,
@@ -133,13 +169,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  for (const d of devicesToClose) await d.close();
   await su?.end();
   await stack?.stop();
 });
 
 describe("a parent lead creates a team project (D-01, D-10, D-13)", () => {
-  let portal = "";
-
   it("creates it under the team, becomes its lead, and both are audited with the unit event", async () => {
     const created = await ok(
       lena.request("POST", "/api/v1/work-projects", { name: "  Customer portal ", parentId: web }),
@@ -231,8 +266,304 @@ describe("a parent lead creates a team project (D-01, D-10, D-13)", () => {
       victor.request("POST", "/api/v1/work-projects", { name: "Platform", parentId: engineering }),
     );
     expect(created).toMatchObject({ parentId: engineering, trail: ["Engineering"], access: { count: 1 } });
+    platform = created.id;
     const roles = (await su.query("select role from app.unit_memberships where unit_id = $1", [created.id]))
       .rows;
     expect(roles).toEqual([{ role: "lead" }]);
+  });
+});
+
+describe("teams, repositories and the default (D-01, D-03, D-10, UI-SPEC U-7)", () => {
+  let billing = "";
+
+  beforeAll(async () => {
+    lenaMac = await deviceWith(lena, "Lena's Mac", ["web-app", "docs"]);
+    danaPc = await deviceWith(dana, "Dana's PC", ["api"]);
+    eveBox = await deviceWith(eve, "Eve's box", ["evil"]);
+    eveUnit = (
+      await ok(eve.request("POST", "/api/v1/units", { kind: "department", name: "Ops", parentId: null }))
+    ).id;
+    // Otto leads the project itself (not its parent): an admin appoints him.
+    await ok(victor.request("POST", `/api/v1/units/${portal}/members`, { userId: ottoId, role: "lead" }));
+  });
+
+  it("a parent lead assigns a team and a department; their members get access and the counts follow", async () => {
+    const before = (await audits("work_project.team_assigned")).length;
+    await ok(lena.request("POST", `/api/v1/work-projects/${portal}/teams`, { unitId: mobile }));
+    const detail = await ok(
+      lena.request("POST", `/api/v1/work-projects/${portal}/teams`, { unitId: engineering }),
+    );
+    expect(detail.teams).toEqual([
+      // Engineering's subtree: Lena and Dana (Web), Otto (Mobile, the portal) and Víctor (who leads Platform).
+      { id: engineering, name: "Engineering", kind: "department", memberCount: 4 },
+      { id: mobile, name: "Mobile", kind: "team", memberCount: 1 },
+    ]);
+    // Lena and Otto (leads), Dana and Víctor (through Engineering: Víctor by his membership, never by his role).
+    expect(detail.access.count).toBe(4);
+    expect(await audits("work_project.team_assigned", portal)).toHaveLength(before + 2);
+    expect((await audits("work_project.team_assigned", portal)).map((a) => a.metadata)).toEqual([
+      { teamId: mobile },
+      { teamId: engineering },
+    ]);
+    // Dana now opens the project through the department.
+    await ok(dana.request("GET", `/api/v1/work-projects/${portal}`));
+  });
+
+  it("refuses the project itself, another project, an assigned team, org B's unit and a project lead alone", async () => {
+    const assign = (as: TestClient, unitId: string) =>
+      as.request("POST", `/api/v1/work-projects/${portal}/teams`, { unitId });
+    expect((await fails(assign(lena, portal), 400)).code).toBe("invalid_team_kind");
+    expect((await fails(assign(victor, platform), 400)).code).toBe("invalid_team_kind");
+    expect((await fails(assign(lena, mobile), 409)).code).toBe("team_already_assigned");
+    expect((await fails(assign(lena, eveUnit), 404)).code).toBe("unit_not_found");
+    expect((await fails(assign(lena, randomUUID()), 404)).code).toBe("unit_not_found");
+    // Otto leads the project, not its parent: he opens it (403, not 404) but assigns nothing.
+    expect((await fails(assign(otto, web), 403)).code).toBe("forbidden");
+    expect(
+      (await fails(otto.request("DELETE", `/api/v1/work-projects/${portal}/teams/${mobile}`), 403)).code,
+    ).toBe("forbidden");
+    // Oscar cannot open it: the refusal is the unknown-id 404.
+    expect((await fails(assign(oscar, web), 404)).code).toBe("not_found");
+  });
+
+  it("lists assignable teams and departments, never projects or assigned units, filtered by name", async () => {
+    const all = await ok(lena.request("GET", `/api/v1/work-projects/${portal}/assignable-teams`));
+    expect(all.teams.map((t: { name: string }) => t.name)).toEqual(["Web"]);
+    const none = await ok(lena.request("GET", `/api/v1/work-projects/${portal}/assignable-teams?q=mob`));
+    expect(none.teams).toEqual([]);
+    const byName = await ok(lena.request("GET", `/api/v1/work-projects/${portal}/assignable-teams?q=WE`));
+    // Web's subtree: Lena, Dana, and Otto through the portal under it.
+    expect(byName.teams).toEqual([{ id: web, name: "Web", kind: "team", memberCount: 3 }]);
+    // Wildcards are plain text.
+    expect(
+      (await ok(lena.request("GET", `/api/v1/work-projects/${portal}/assignable-teams?q=%25`))).teams,
+    ).toEqual([]);
+    await fails(otto.request("GET", `/api/v1/work-projects/${portal}/assignable-teams`), 403);
+  });
+
+  it("removes an assigned team (audited) and refuses one that is not assigned", async () => {
+    const detail = await ok(lena.request("DELETE", `/api/v1/work-projects/${portal}/teams/${mobile}`));
+    expect(detail.teams.map((t: { id: string }) => t.id)).toEqual([engineering]);
+    expect((await audits("work_project.team_removed", portal)).map((a) => a.metadata)).toEqual([
+      { teamId: mobile },
+    ]);
+    expect(
+      (await fails(lena.request("DELETE", `/api/v1/work-projects/${portal}/teams/${mobile}`), 404)).code,
+    ).toBe("team_not_assigned");
+  });
+
+  it("a project lead who can use the device links its repository; without device.use the link is refused", async () => {
+    const linked = await ok(
+      lena.request("POST", `/api/v1/work-projects/${portal}/repos`, { projectId: lenaMac.repo["web-app"] }),
+    );
+    expect(linked.repos).toEqual([
+      {
+        projectId: lenaMac.repo["web-app"],
+        name: "web-app",
+        deviceId: lenaMac.deviceId,
+        deviceName: "Lena's Mac",
+        deviceOnline: true,
+        branch: "main",
+        available: true,
+      },
+    ]);
+    expect((await audits("work_project.repo_linked", portal)).map((a) => a.metadata)).toEqual([
+      { projectId: lenaMac.repo["web-app"], deviceId: lenaMac.deviceId },
+    ]);
+    const link = (repo: string, as: TestClient = lena, unitId = portal) =>
+      as.request("POST", `/api/v1/work-projects/${unitId}/repos`, { projectId: repo });
+    // Lena manages the project but cannot use Dana's PC; an admin cannot either (device.use is relation-only).
+    expect((await fails(link(danaPc.repo.api!), 403)).details).toMatchObject({ permission: "device.use" });
+    expect((await fails(link(danaPc.repo.api!, victor), 403)).details).toMatchObject({
+      permission: "device.use",
+    });
+    // One team project per repository.
+    billing = (await ok(lena.request("POST", "/api/v1/work-projects", { name: "Billing", parentId: web })))
+      .id;
+    expect((await fails(link(lenaMac.repo["web-app"]!, lena, billing), 409)).code).toBe(
+      "repo_already_linked",
+    );
+    expect((await fails(link(lenaMac.repo["web-app"]!), 409)).code).toBe("repo_already_linked");
+    // Org B's repository is not found; a plain member manages nothing.
+    expect((await fails(link(eveBox.repo.evil!), 404)).code).toBe("project_not_found");
+    expect((await fails(link(lenaMac.repo.docs!, dana), 403)).code).toBe("forbidden");
+  });
+
+  it("lists linkable repositories on the devices the caller can use, naming the project of a linked one", async () => {
+    const mine = await ok(lena.request("GET", `/api/v1/work-projects/${billing}/linkable-repos`));
+    expect(mine.devices).toEqual([
+      {
+        deviceId: lenaMac.deviceId,
+        deviceName: "Lena's Mac",
+        deviceOnline: true,
+        repos: [
+          { projectId: lenaMac.repo.docs, name: "docs", linkedTo: null },
+          {
+            projectId: lenaMac.repo["web-app"],
+            name: "web-app",
+            linkedTo: { id: portal, name: "Customer portal" },
+          },
+        ],
+      },
+    ]);
+    // Otto manages the portal but uses no device: nothing to link.
+    expect((await ok(otto.request("GET", `/api/v1/work-projects/${portal}/linkable-repos`))).devices).toEqual(
+      [],
+    );
+    await fails(dana.request("GET", `/api/v1/work-projects/${portal}/linkable-repos`), 403);
+  });
+
+  it("the unlink impact is the server's count of the repository's sessions; unlinking is audited with it", async () => {
+    const ws = await ok(
+      lena.request("POST", "/api/v1/work-sessions", { projectId: lenaMac.repo["web-app"] }),
+    );
+    expect(ws.id).toBeTruthy();
+    const path = `/api/v1/work-projects/${portal}/repos/${lenaMac.repo["web-app"]}`;
+    expect(await ok(lena.request("GET", `${path}/impact`))).toEqual({ sessions: 1 });
+    // A manager who uses no device gets the same count.
+    expect(await ok(otto.request("GET", `${path}/impact`))).toEqual({ sessions: 1 });
+    await fails(dana.request("GET", `${path}/impact`), 403);
+    await fails(dana.request("DELETE", path), 403);
+    expect(
+      (
+        await fails(
+          lena.request("GET", `/api/v1/work-projects/${billing}/repos/${lenaMac.repo["web-app"]}/impact`),
+          404,
+        )
+      ).code,
+    ).toBe("repo_not_linked");
+
+    // Otto unlinks without using the device: unlinking only narrows (the must-have names linking only).
+    const detail = await ok(otto.request("DELETE", path));
+    expect(detail.repos).toEqual([]);
+    expect((await audits("work_project.repo_unlinked", portal)).map((a) => a.metadata)).toEqual([
+      { projectId: lenaMac.repo["web-app"], deviceId: lenaMac.deviceId, sessions: 1 },
+    ]);
+    await fails(otto.request("DELETE", path), 404);
+    // Linked again for the rest of the suite.
+    await ok(
+      lena.request("POST", `/api/v1/work-projects/${portal}/repos`, { projectId: lenaMac.repo["web-app"] }),
+    );
+  });
+
+  it("project leads switch the default (audited once per change); a plain member cannot; absent row = project", async () => {
+    expect((await ok(dana.request("GET", `/api/v1/work-projects/${portal}`))).defaultVisibility).toBe(
+      "project",
+    );
+    const patch = (as: TestClient, v: string) =>
+      as.request("PATCH", `/api/v1/work-projects/${portal}`, { defaultVisibility: v });
+    expect((await ok(patch(otto, "owner"))).defaultVisibility).toBe("owner");
+    await ok(patch(otto, "owner"));
+    expect((await audits("work_project.default_changed", portal)).map((a) => a.metadata)).toEqual([
+      { from: "project", to: "owner" },
+    ]);
+    expect((await fails(patch(dana, "project"), 403)).code).toBe("forbidden");
+    expect((await fails(patch(oscar, "project"), 404)).code).toBe("not_found");
+    await fails(patch(otto, "teams"), 400);
+    expect((await ok(lena.request("GET", `/api/v1/work-projects/${portal}`))).defaultVisibility).toBe(
+      "owner",
+    );
+    // A lead above the project (Lena leads Web) changes it too.
+    expect((await ok(patch(lena, "project"))).defaultVisibility).toBe("project");
+  });
+
+  it("every write announces work_project.updated with the unit id only", async () => {
+    const events = await orgEvents("work_project.updated");
+    expect(events.length).toBeGreaterThanOrEqual(8);
+    for (const e of events) expect(Object.keys(e)).toEqual(["unitId"]);
+    expect(new Set(events.map((e) => e.unitId))).toEqual(new Set([portal]));
+  });
+
+  it("organization B reaches none of A's projects, teams or repositories, on every route (registry-derived)", async () => {
+    const eveProject = (
+      await ok(
+        eve.request("POST", "/api/v1/work-projects", {
+          name: "Evil plan",
+          parentId: eveUnit,
+        }),
+      )
+    ).id as string;
+    const repo = lenaMac.repo["web-app"]!;
+    const snapshot = async () =>
+      JSON.stringify(
+        (
+          await su.query(
+            `select (select json_agg(t order by t.project_unit_id, t.team_unit_id) from app.work_project_teams t where organization_id = $1) as teams,
+                    (select json_agg(r order by r.project_id) from app.work_project_repos r where organization_id = $1) as repos,
+                    (select json_agg(s order by s.unit_id) from app.work_project_settings s where organization_id = $1) as settings,
+                    (select count(*) from app.org_units where organization_id = $1) as units`,
+            [orgA],
+          )
+        ).rows[0],
+      );
+    const before = await snapshot();
+    const notFound = async (res: Promise<Res>) => (await fails(res, 404)).code;
+    const P = `/api/v1/work-projects/${portal}`;
+    const cases: Record<string, () => Promise<unknown>> = {
+      "POST /api/v1/work-projects": async () =>
+        expect(
+          await notFound(eve.request("POST", "/api/v1/work-projects", { name: "X", parentId: web })),
+        ).toBe("unit_not_found"),
+      "GET /api/v1/work-projects/:unitId": async () => notFound(eve.request("GET", P)),
+      "PATCH /api/v1/work-projects/:unitId": async () =>
+        notFound(eve.request("PATCH", P, { defaultVisibility: "owner" })),
+      "GET /api/v1/work-projects/:unitId/assignable-teams": async () =>
+        notFound(eve.request("GET", `${P}/assignable-teams`)),
+      "POST /api/v1/work-projects/:unitId/teams": async () => {
+        await notFound(eve.request("POST", `${P}/teams`, { unitId: eveUnit }));
+        // Her own project never takes A's team.
+        expect(
+          await notFound(eve.request("POST", `/api/v1/work-projects/${eveProject}/teams`, { unitId: web })),
+        ).toBe("unit_not_found");
+      },
+      "DELETE /api/v1/work-projects/:unitId/teams/:teamId": async () =>
+        notFound(eve.request("DELETE", `${P}/teams/${engineering}`)),
+      "GET /api/v1/work-projects/:unitId/linkable-repos": async () =>
+        notFound(eve.request("GET", `${P}/linkable-repos`)),
+      "POST /api/v1/work-projects/:unitId/repos": async () => {
+        await notFound(eve.request("POST", `${P}/repos`, { projectId: eveBox.repo.evil }));
+        expect(
+          await notFound(
+            eve.request("POST", `/api/v1/work-projects/${eveProject}/repos`, { projectId: repo }),
+          ),
+        ).toBe("project_not_found");
+      },
+      "GET /api/v1/work-projects/:unitId/repos/:projectId/impact": async () =>
+        notFound(eve.request("GET", `${P}/repos/${repo}/impact`)),
+      "DELETE /api/v1/work-projects/:unitId/repos/:projectId": async () =>
+        notFound(eve.request("DELETE", `${P}/repos/${repo}`)),
+    };
+    const routes = stack.built.authz.routes;
+    const registered = [...routes.keys()].filter((k) => / \/api\/v1\/work-projects/u.test(k)).sort();
+    expect(registered).toEqual(Object.keys(cases).sort());
+    for (const [key, run] of Object.entries(cases)) {
+      expect(routes.get(key), key).toBe("user");
+      await run();
+    }
+    expect(await snapshot()).toBe(before);
+  });
+
+  it("a project with a linked repository cannot be deleted; unlinked, it goes with its settings and teams", async () => {
+    expect((await fails(victor.request("DELETE", `/api/v1/units/${portal}`), 409)).code).toBe(
+      "unit_has_repositories",
+    );
+    await ok(lena.request("DELETE", `/api/v1/work-projects/${portal}/repos/${lenaMac.repo["web-app"]}`));
+    await ok(lena.request("PATCH", `/api/v1/work-projects/${portal}`, { defaultVisibility: "owner" }));
+    await ok(victor.request("DELETE", `/api/v1/units/${portal}`));
+    for (const table of ["work_project_settings", "work_project_teams"]) {
+      const col = table === "work_project_settings" ? "unit_id" : "project_unit_id";
+      expect((await su.query(`select 1 from app.${table} where ${col} = $1`, [portal])).rowCount, table).toBe(
+        0,
+      );
+    }
+  });
+
+  it("deleting a team assigned to a project records the unassignment and announces the project", async () => {
+    const temp = await unit("team", "Temp", engineering);
+    await ok(lena.request("POST", `/api/v1/work-projects/${billing}/teams`, { unitId: temp }));
+    await ok(victor.request("DELETE", `/api/v1/units/${temp}`));
+    const [deleted] = await audits("unit.deleted", temp);
+    expect(deleted?.metadata).toMatchObject({ unassignedFromProjectIds: [billing] });
+    expect(await orgEvents("work_project.updated")).toContainEqual({ unitId: billing });
   });
 });
