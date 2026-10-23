@@ -545,14 +545,17 @@ describe("narrowing a session: the people it removes get `revoked` and `work_ses
     await service().settled(orgId);
     try {
       // The delivery queued before the narrowing ran after it, read the narrowed audience and skipped Pia; the
-      // `removed` notice followed it. (Ana may also get a later device event's update.)
+      // `removed` notice followed it. (Ana may also get a later device event's update.) The queue has published by
+      // now, but the Redis taps receive asynchronously: wait for the notice, then assert exactly what arrived.
+      const removedFor = (frames: typeof taps.Pia.frames) =>
+        frames.filter(
+          (f) => f.op === "eph" && f.type === "work_session.removed" && (f.data as Json | null)?.id === id,
+        );
+      await eventually(async () => removedFor(taps.Pia.frames).length > 0, 5000);
+      await eventually(async () => sessionFrames(taps.Ana, id).length > 0, 5000);
       expect(sessionFrames(taps.Ana, id).length).toBeGreaterThan(0);
       expect(sessionFrames(taps.Pia, id)).toEqual([]);
-      expect(
-        taps.Pia.frames.filter(
-          (f) => f.op === "eph" && f.type === "work_session.removed" && (f.data as Json | null)?.id === id,
-        ),
-      ).toHaveLength(1);
+      expect(removedFor(taps.Pia.frames)).toHaveLength(1);
     } finally {
       for (const t of Object.values(taps)) await t.stop();
     }
