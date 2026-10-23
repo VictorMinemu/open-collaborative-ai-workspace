@@ -1,4 +1,4 @@
--- Phase 07.9 (D-01, D-03, D-04, D-06; ADR-0030): shared Work Zone projects and session audiences. Creates
+-- Phase 07.9 (D-01, D-03, D-04, D-06, D-13; ADR-0030): shared Work Zone projects and session audiences. Creates
 -- `work_project_settings` (a team project's default audience for new sessions; an absent row means "everyone in the
 -- project"), `work_project_teams` (teams or departments assigned to a team project), `work_project_repos` (a device repo
 -- linked to one team project; the project unit cannot be deleted while a repo is linked) and `work_session_grants` (the
@@ -11,9 +11,17 @@
 -- now on an existing session (audience `project` on a repo that no team project links yet) is seen by its creator, the
 -- device owner, the device's grantees and admins only. Linking its repo to a team project later opens it to that
 -- project. Existing sessions keep their creator and history. No audit row is written by this migration.
+--
+-- D-13, irreversible redaction of stored history: until now every session update was also stored on the organization
+-- stream (`org:<organization id>`, readable by every member) as a full session snapshot (title, branch, device name).
+-- Those stored `org:` `work_session.updated` payloads are blanked to `{}`; their sequence numbers are kept so replay
+-- stays continuous, and every other event (the sessions' own `ws:` streams included) is untouched. The redaction is
+-- one-way: the blanked snapshots cannot be restored. Run it only through `migrate` (as ocw_migrator, who alone may
+-- update `stream_events`), never by hand against a database whose history must be kept.
 -- Chained after 20261022213335_browser_takeover_abandoned (P-17: earlier migrations are never edited).
 -- Forward-only. Rollback (as ocw_migrator): DROP TABLE app.work_session_grants, app.work_project_repos,
--- app.work_project_teams, app.work_project_settings; ALTER TABLE app.work_sessions DROP COLUMN visibility.
+-- app.work_project_teams, app.work_project_settings; ALTER TABLE app.work_sessions DROP COLUMN visibility. The D-13
+-- redaction cannot be rolled back.
 CREATE TABLE "app"."work_project_repos" (
 	"organization_id" uuid NOT NULL,
 	"project_id" uuid PRIMARY KEY,
@@ -71,4 +79,7 @@ ALTER TABLE "app"."work_project_teams" ADD CONSTRAINT "work_project_teams_projec
 ALTER TABLE "app"."work_project_teams" ADD CONSTRAINT "work_project_teams_team_fk" FOREIGN KEY ("organization_id","team_unit_id") REFERENCES "app"."org_units"("organization_id","id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "app"."work_session_grants" ADD CONSTRAINT "work_session_grants_organization_id_organization_id_fkey" FOREIGN KEY ("organization_id") REFERENCES "auth"."organization"("id") ON DELETE CASCADE;--> statement-breakpoint
 ALTER TABLE "app"."work_session_grants" ADD CONSTRAINT "work_session_grants_session_fk" FOREIGN KEY ("organization_id","work_session_id") REFERENCES "app"."work_sessions"("organization_id","id") ON DELETE CASCADE;--> statement-breakpoint
-ALTER TABLE "app"."work_sessions" ADD CONSTRAINT "work_sessions_visibility_ck" CHECK ("visibility" in ('owner','project','teams','people'));
+ALTER TABLE "app"."work_sessions" ADD CONSTRAINT "work_sessions_visibility_ck" CHECK ("visibility" in ('owner','project','teams','people'));--> statement-breakpoint
+-- D-13 (hand-written, one-way): blank the session snapshots stored on organization streams; seq is kept.
+UPDATE "app"."stream_events" SET "payload" = '{}'::jsonb
+WHERE "stream_id" LIKE 'org:%' AND "type" = 'work_session.updated' AND "payload" <> '{}'::jsonb;
