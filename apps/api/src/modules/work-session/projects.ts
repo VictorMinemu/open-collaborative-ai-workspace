@@ -334,10 +334,25 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
           .from(orgUnits)
           .where(eq(orgUnits.kind, "project"))
           .orderBy(asc(sql`lower(${orgUnits.name})`), asc(orgUnits.id));
-        // Only the projects the caller can open (D-02): the others are absent, never named (T-07.9-04-03).
-        const open = await perms.filter(req, tx, rows, "work_session.read", (r) =>
-          workProjectResource(r, userId),
+        // Only the projects the caller can open (D-02) or manage (D-14: a lead of the parent opens its page): the
+        // others are absent, never named (T-07.9-04-03).
+        const readable = new Set(
+          (await perms.filter(req, tx, rows, "work_session.read", (r) => workProjectResource(r, userId))).map(
+            (r) => r.id,
+          ),
         );
+        const managed = new Set(
+          (
+            await perms.filter(
+              req,
+              tx,
+              rows.filter((r) => !readable.has(r.id)),
+              "work_project.manage",
+              (r) => workProjectResource(r, userId),
+            )
+          ).map((r) => r.id),
+        );
+        const open = rows.filter((r) => readable.has(r.id) || managed.has(r.id));
         const ids = open.map((r) => r.id);
         const people = new Map<string, number>();
         const repoCounts = new Map<string, number>();
@@ -475,9 +490,13 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const project = await loadProject(tx, authOf(req).userId, req.params.unitId);
-        // Unknown ids, other kinds and projects the caller cannot open answer the same 404 (T-07.9-04-03).
+        // Unknown ids, other kinds and projects the caller can neither open nor manage answer the same 404
+        // (T-07.9-04-03). D-14: whoever manages a project (its leads, leads above it, admins) opens its page; the
+        // sessions it lists still come from each viewer's own audience (`GET /work-sessions`).
         if (!project) throw notFound();
-        await perms.assertCan(req, tx, "work_session.read", project.facts, { hideAs404: true });
+        if (!(await perms.can(req, tx, "work_project.manage", project.facts))) {
+          await perms.assertCan(req, tx, "work_session.read", project.facts, { hideAs404: true });
+        }
         return projectDetail(req, tx, perms, project);
       }),
   );
