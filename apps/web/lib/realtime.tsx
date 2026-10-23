@@ -1,5 +1,6 @@
 "use client";
 
+import type { RevokedFrame } from "@ocw/contracts";
 import {
   aggregatePresence,
   type ConnectionState,
@@ -112,7 +113,7 @@ export function useTopic(
   listener: TopicListener,
   afterSeq?: number,
   onResync?: () => void,
-  opts?: { presence?: boolean; onRevoked?: () => void },
+  opts?: { presence?: boolean; onRevoked?: (frame: RevokedFrame) => void },
 ): void {
   const client = useRealtime();
   const listenerRef = useRef(listener);
@@ -128,7 +129,7 @@ export function useTopic(
     return client.subscribe(topic, (frame) => listenerRef.current(frame), {
       ...(afterSeq !== undefined ? { afterSeq } : {}),
       onResync: () => resyncRef.current?.(),
-      onRevoked: () => revokedRef.current?.(),
+      onRevoked: (frame) => revokedRef.current?.(frame),
       ...(presence ? { presence } : {}),
     });
   }, [client, topic, afterSeq, presence]);

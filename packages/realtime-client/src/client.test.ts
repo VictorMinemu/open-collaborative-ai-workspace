@@ -533,6 +533,33 @@ describe("RealtimeClient", () => {
     expect(revoked).toHaveBeenCalledTimes(1);
   });
 
+  it("onRevoked listeners receive the revoked frame, with its cause when the server gave one (07.9, D-13)", () => {
+    const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS, backoffBaseMs: 10 });
+    const WS = "ws:0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e70";
+    const withCause = vi.fn();
+    const withoutCause = vi.fn();
+    c.subscribe(WS, () => {}, { onRevoked: withCause });
+    c.subscribe(T, () => {}, { onRevoked: withoutCause });
+    c.connect();
+    const ws = FakeWS.last!;
+    ws.open();
+    ws.push({ op: "revoked", topic: WS, reason: "forbidden", cause: "visibility" });
+    expect(withCause).toHaveBeenCalledWith({
+      op: "revoked",
+      topic: WS,
+      reason: "forbidden",
+      cause: "visibility",
+    });
+    ws.push({ op: "revoked", topic: T, reason: "forbidden" });
+    expect(withoutCause).toHaveBeenCalledWith({ op: "revoked", topic: T, reason: "forbidden" });
+    // A code outside the fixed set is not a valid frame: nothing is dropped and nobody is told.
+    const other = vi.fn();
+    c.subscribe(T, () => {}, { onRevoked: other });
+    ws.push({ op: "revoked", topic: T, reason: "forbidden", cause: "Ana removed you" });
+    expect(other).not.toHaveBeenCalled();
+    c.close();
+  });
+
   it("setNetwork(false) drops the socket at once, shows closed and retries nothing; setNetwork(true) resumes from the cursors", () => {
     vi.useFakeTimers();
     const c = new RealtimeClient({ url: "ws://x/ws", WebSocket: FakeWS, backoffBaseMs: 10 });

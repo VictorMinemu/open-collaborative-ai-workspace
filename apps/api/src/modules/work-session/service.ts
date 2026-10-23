@@ -718,6 +718,14 @@ export class WorkSessionService implements DeviceSessionHandler {
         if (s && s.deviceId === device.deviceId) await this.reauthorize(tx, s, reason, policy);
       }
     });
+    // A device grant changed who may see the device's sessions (P-09): once committed, every live subscription of
+    // the organization is re-decided (`device.updated` also fires on online/offline, so it is not an invalidator).
+    try {
+      await this.deps.realtime.invalidateSubscriptions({ organizationId: device.organizationId });
+    } catch (err) {
+      // The gateway's periodic re-check is the backstop for a lost invalidation.
+      this.deps.log.warn({ err }, "subscription invalidation after a device access change failed");
+    }
   }
 
   /**

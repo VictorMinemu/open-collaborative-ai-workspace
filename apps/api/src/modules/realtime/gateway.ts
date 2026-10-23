@@ -212,12 +212,18 @@ export function registerGateway(
     const verdict = await deps.realtime.reauthorizeTopic(conn.auth, topic);
     // Replaced (a fresh `sub` was decided on its own) or removed meanwhile: nothing to do.
     if (conn.subs.get(topic) !== sub) return;
-    if (verdict === "denied") {
-      await conn.unsub(topic);
-      conn.send({ op: "revoked", topic, reason: "forbidden" });
-      app.log.info({ topic, userId: conn.auth.userId }, "live subscription revoked");
-    } else if (verdict === "error") {
+    if (verdict === "error") {
       app.log.warn({ topic, userId: conn.auth.userId }, "subscription re-decision failed; kept");
+    } else if (verdict !== "allowed") {
+      await conn.unsub(topic);
+      // The cause is a fixed code (07.9, D-13), never a name; absent when the authorizer gave none.
+      conn.send({
+        op: "revoked",
+        topic,
+        reason: "forbidden",
+        ...(verdict.cause ? { cause: verdict.cause } : {}),
+      });
+      app.log.info({ topic, userId: conn.auth.userId, cause: verdict.cause }, "live subscription revoked");
     }
   };
   // Coalesced per (connection, topic): a waiting job is never queued twice; a running one is marked to run once
