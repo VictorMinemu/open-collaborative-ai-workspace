@@ -1,4 +1,10 @@
-import type { PermissionMode, RuntimeCatalog, RuntimeModel } from "@ocw/contracts";
+import {
+  type PermissionMode,
+  type RuntimeCatalog,
+  type RuntimeModel,
+  type SessionAudienceInput,
+  UpdateWorkSessionVisibilityResult,
+} from "@ocw/contracts";
 import { workProjectRepos } from "@ocw/db";
 import { expect } from "vitest";
 import { TestClient, type TestStack } from "./testing";
@@ -199,4 +205,18 @@ export async function shareDevice(
 ): Promise<void> {
   const res = await owner.request("PUT", `/api/v1/devices/${deviceId}/grants/user/${userId}`, { maxMode });
   expect(res.status, JSON.stringify(res.body)).toBe(200);
+}
+
+/**
+ * D-04 "who can see this session" (07.9-06): `client` sets the session's audience through
+ * `PUT /work-sessions/:id/visibility` (the creator, a project lead or an admin) and gets the parsed result.
+ */
+export async function setAudience(
+  client: TestClient,
+  sessionId: string,
+  input: SessionAudienceInput,
+): Promise<UpdateWorkSessionVisibilityResult> {
+  const res = await client.request("PUT", `/api/v1/work-sessions/${sessionId}/visibility`, input);
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  return UpdateWorkSessionVisibilityResult.parse(res.body);
 }

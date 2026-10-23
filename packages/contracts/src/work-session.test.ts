@@ -304,6 +304,13 @@ describe("Project.teamProject (07.9-01, R5)", () => {
     createdAt: now,
   };
 
+  it("D-14: a repository in a project the caller cannot open carries no project, only the flag", () => {
+    const hidden = Project.parse({ ...project, teamProject: null, teamProjectHidden: true });
+    expect(hidden).toMatchObject({ teamProject: null, teamProjectHidden: true });
+    expect(Project.parse(project).teamProjectHidden).toBeUndefined();
+    expect(Project.safeParse({ ...project, teamProjectHidden: "yes" }).success).toBe(false);
+  });
+
   it("parses without teamProject, with null and with the team project and its default", () => {
     expect(Project.parse(project).teamProject).toBeUndefined();
     expect(Project.parse({ ...project, teamProject: null }).teamProject).toBeNull();

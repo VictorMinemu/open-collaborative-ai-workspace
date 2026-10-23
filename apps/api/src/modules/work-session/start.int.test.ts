@@ -7,8 +7,11 @@ import {
   CLAUDE_CATALOG,
   CODEX_CATALOG,
   connectWithProject,
+  createTeamProject,
   invite,
+  linkRepo,
   pairDevice,
+  shareDevice,
 } from "../../testing-workzone";
 import { createPermissionService } from "../organization";
 import { createWorkSessionModule } from "./index";
@@ -212,6 +215,8 @@ describe("tracer: a session is created by a function for a given member (APPROVE
       runtime: "claude-code",
       permissionMode: "default",
       worktree: false,
+      // 07.9-06: the audience kind it started with (a personal repository: `project`).
+      visibility: "project",
     });
   });
 });
@@ -226,6 +231,7 @@ const TRACE_TABLES = [
   "device_commands",
   "audit_events",
   "stream_events",
+  "work_session_grants",
 ] as const;
 
 async function traces(): Promise<Record<string, number>> {
@@ -614,5 +620,135 @@ describe("proposed by reaches every prompt view (UI-SPEC Surface 3)", () => {
     ]);
     expect(row.rows).toEqual([{ proposed_by_agent_id: null }]);
     expect((await prompts()).map((p) => p.proposedBy)).toEqual([null, null]);
+  });
+});
+
+// ---------------------------------------------------------------- 07.9-06: the audience a session starts with
+
+describe("a new session's audience and the D-13 start rule (07.9-06, D-03, D-13, P-12)", () => {
+  let teamRepo: string;
+  let portalUnit: string;
+  let pia: TestClient;
+  let piaId: string;
+  let leo: TestClient;
+  let leoId: string;
+  let max: TestClient;
+  let maxId: string;
+
+  const post = (as: TestClient, body: Record<string, unknown>) =>
+    as.request("POST", "/api/v1/work-sessions", body);
+  const created = async (as: TestClient, body: Record<string, unknown>) => {
+    const res = await post(as, body);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    return res.body as { id: string; visibility: { kind: string } };
+  };
+  const errorOf = (res: { status: number; body: Record<string, unknown> | null }) =>
+    [res.status, (res.body?.error as { code?: string } | undefined)?.code] as const;
+  const sessionCount = async () =>
+    (await su.query("select count(*)::int as n from app.work_sessions")).rows[0].n as number;
+
+  beforeAll(async () => {
+    ({ client: pia, userId: piaId } = await invite(
+      stack,
+      admin,
+      "pia.portal@example.test",
+      "Pia",
+      "developer",
+    ));
+    ({ client: leo, userId: leoId } = await invite(
+      stack,
+      admin,
+      "leo.portal@example.test",
+      "Leo",
+      "developer",
+    ));
+    ({ client: max, userId: maxId } = await invite(
+      stack,
+      admin,
+      "max.portal@example.test",
+      "Max",
+      "developer",
+    ));
+    // A second repository on Sam's Mac, linked to the team project Portal (Sam, Pia, Max).
+    teamRepo = randomUUID();
+    await su.query(
+      "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, 'lp_portal', 'portal-web')",
+      [teamRepo, orgId, deviceId],
+    );
+    ({ unitId: portalUnit } = await createTeamProject(stack, admin, {
+      name: "Portal",
+      members: [{ userId: samId }, { userId: piaId }, { userId: maxId }],
+    }));
+    await linkRepo(stack, {
+      organizationId: orgId,
+      unitId: portalUnit,
+      projectId: teamRepo,
+      deviceId,
+      linkedBy: samId,
+    });
+    await shareDevice(sam, deviceId, piaId);
+    await shareDevice(sam, deviceId, leoId);
+  });
+
+  it("no audience asked: the project's default (on: Project, off: Only me); a personal repository: Project", async () => {
+    expect((await created(sam, { projectId: teamRepo })).visibility.kind).toBe("project");
+    const off = await admin.request("PATCH", `/api/v1/work-projects/${portalUnit}`, {
+      defaultVisibility: "owner",
+    });
+    expect(off.status, JSON.stringify(off.body)).toBe(200);
+    try {
+      const s = await created(sam, { projectId: teamRepo });
+      expect(s.visibility.kind).toBe("owner");
+      expect(
+        (await su.query("select visibility from app.work_sessions where id = $1", [s.id])).rows[0],
+      ).toEqual({
+        visibility: "owner",
+      });
+    } finally {
+      await admin.request("PATCH", `/api/v1/work-projects/${portalUnit}`, { defaultVisibility: "project" });
+    }
+    expect((await created(sam, { projectId })).visibility.kind).toBe("project");
+  });
+
+  it("an audience asked is stored as asked, and the creation audit names its kind only", async () => {
+    const s = await created(sam, { projectId: teamRepo, visibility: { kind: "people", userIds: [piaId] } });
+    expect(s.visibility.kind).toBe("people");
+    const grants = await su.query(
+      "select subject_kind, subject_id, granted_by from app.work_session_grants where work_session_id = $1 and revoked_at is null",
+      [s.id],
+    );
+    expect(grants.rows).toEqual([{ subject_kind: "user", subject_id: piaId, granted_by: samId }]);
+    expect((await pia.request("GET", `/api/v1/work-sessions/${s.id}`)).status).toBe(200);
+    expect((await max.request("GET", `/api/v1/work-sessions/${s.id}`)).status).toBe(404);
+    const [audit] = await auditOf("work_session.created", s.id);
+    expect(audit!.metadata).toMatchObject({ visibility: "people" });
+    expect(JSON.stringify(audit!.metadata)).not.toContain(piaId);
+  });
+
+  it("someone outside the project is refused (422, ids only) and no session is created", async () => {
+    const before = await sessionCount();
+    const res = await post(sam, { projectId: teamRepo, visibility: { kind: "people", userIds: [leoId] } });
+    expect(errorOf(res)).toEqual([422, "audience_outside_project"]);
+    expect((res.body!.error as { details?: unknown }).details).toEqual({ ids: [leoId] });
+    expect(
+      errorOf(await post(sam, { projectId, visibility: { kind: "teams", teamIds: [portalUnit] } })),
+    ).toEqual([422, "team_not_assigned"]);
+    expect(await sessionCount()).toBe(before);
+    await refusedWith(
+      samId,
+      proposal({ projectId: teamRepo, visibility: { kind: "people", userIds: [leoId] } }),
+      "audience_outside_project",
+    );
+  });
+
+  it("starting on a team-project repository needs project access and device.use", async () => {
+    expect((await created(pia, { projectId: teamRepo })).visibility.kind).toBe("project");
+    const outsider = await post(leo, { projectId: teamRepo });
+    expect(errorOf(outsider)).toEqual([403, "not_in_project"]);
+    expect((outsider.body!.error as { details?: unknown }).details).toMatchObject({
+      reason: "not_in_project",
+    });
+    expect(errorOf(await post(max, { projectId: teamRepo }))).toEqual([403, "device_not_shared"]);
+    await refusedWith(leoId, proposal({ projectId: teamRepo }), "not_in_project");
   });
 });

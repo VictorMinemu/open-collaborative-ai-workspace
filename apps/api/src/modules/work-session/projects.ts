@@ -214,7 +214,7 @@ async function projectPeople(tx: Tx, unitId: string): Promise<WorkProjectPerson[
 }
 
 /** Active members of each unit's subtree (a department counts its teams' people too). */
-async function subtreeMemberCounts(tx: Tx, unitIds: readonly string[]): Promise<Map<string, number>> {
+export async function subtreeMemberCounts(tx: Tx, unitIds: readonly string[]): Promise<Map<string, number>> {
   if (unitIds.length === 0) return new Map();
   const res = await tx.execute(sql`
     select t.id, (
@@ -228,7 +228,8 @@ async function subtreeMemberCounts(tx: Tx, unitIds: readonly string[]): Promise<
   return new Map((res.rows as Array<{ id: string; n: number }>).map((r) => [r.id, Number(r.n)]));
 }
 
-async function assignedTeams(tx: Tx, unitId: string): Promise<WorkProjectTeam[]> {
+/** The teams and departments assigned to a team project, with their subtree member counts (never a project). */
+export async function assignedTeams(tx: Tx, unitId: string): Promise<WorkProjectTeam[]> {
   const rows = await tx
     .select({ id: orgUnits.id, name: orgUnits.name, kind: orgUnits.kind })
     .from(workProjectTeams)
@@ -266,7 +267,7 @@ async function linkedRepos(tx: Tx, unitId: string): Promise<WorkProjectRepo[]> {
 }
 
 /** `default_visibility`, or `project` when the project has no settings row (D-03: on by default). */
-async function defaultVisibilityOf(tx: Tx, unitId: string): Promise<"project" | "owner"> {
+export async function defaultVisibilityOf(tx: Tx, unitId: string): Promise<"project" | "owner"> {
   const [row] = await tx
     .select({ v: workProjectSettings.defaultVisibility })
     .from(workProjectSettings)
@@ -653,6 +654,9 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
             d: devices,
             linkedId: workProjectRepos.unitId,
             linkedName: orgUnits.name,
+            linkedPath: orgUnits.path,
+            linkedAccess: sql<string | null>`case when ${workProjectRepos.unitId} is null then null
+              else app.work_project_access(${workProjectRepos.unitId}, ${userId}::uuid) end`,
           })
           .from(projects)
           .innerJoin(devices, eq(devices.id, projects.deviceId))
@@ -670,6 +674,22 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
         const usable = await perms.filter(req, tx, rows, "device.use", ({ d }) =>
           deviceFacts(d, userId, access),
         );
+        // D-14: the team project a repository is in is named only to someone who can open it.
+        const openable = new Set(
+          (
+            await perms.filter(
+              req,
+              tx,
+              usable.filter((r) => r.linkedId !== null && r.linkedPath !== null),
+              "work_session.read",
+              (r) =>
+                workProjectResource(
+                  { id: r.linkedId ?? "", path: r.linkedPath ?? [], access: r.linkedAccess },
+                  userId,
+                ),
+            )
+          ).map((r) => r.p.id),
+        );
         const byDevice = new Map<string, LinkableRepos["devices"][number]>();
         for (const { p, d, linkedId, linkedName } of usable) {
           let entry = byDevice.get(d.id);
@@ -677,10 +697,12 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
             entry = { deviceId: d.id, deviceName: d.name, deviceOnline: d.status === "online", repos: [] };
             byDevice.set(d.id, entry);
           }
+          const hidden = linkedId !== null && !openable.has(p.id);
           entry.repos.push({
             projectId: p.id,
             name: p.name,
-            linkedTo: linkedId && linkedName ? { id: linkedId, name: linkedName } : null,
+            linkedTo: linkedId && linkedName && !hidden ? { id: linkedId, name: linkedName } : null,
+            ...(hidden ? { linkedToHidden: true } : {}),
           });
         }
         return { devices: [...byDevice.values()] };

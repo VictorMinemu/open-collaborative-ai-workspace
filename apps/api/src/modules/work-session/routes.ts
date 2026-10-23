@@ -60,6 +60,7 @@ import {
   type WorkSessionStartDeps,
   type WorkSessionStartFailure,
 } from "./start";
+import { audienceError, registerVisibilityRoutes, viewerStateOf } from "./visibility";
 
 const SessionParams = z.object({ id: z.uuid() });
 const PromptParams = z.object({ id: z.uuid(), pid: z.uuid() });
@@ -80,6 +81,8 @@ const SESSION_VIEWER_CAN = [
   "work_session.interrupt",
   "work_session.approve",
   "work_session.archive",
+  // Phase 07.9 (R2): may change who can see the session (the creator, a project lead, an admin).
+  "work_session.visibility",
 ] as const;
 
 export function registerWorkSessionRoutes(
@@ -382,6 +385,24 @@ export function registerWorkSessionRoutes(
         const facts = await sessionFacts(tx, authOf(req), found);
         await assertReadable(req, tx, facts);
         const viewerCan = await perms.viewerCan(req, tx, facts, SESSION_VIEWER_CAN);
+        const viewerState = await viewerStateOf(perms, tx, authOf(req).userId, facts);
+        // D-13, P-13: the read was allowed with none of the audience's relations, so only the admin rule let the
+        // caller in (the precondition admits no one else): one audit row per open, ids only. Lists, streams and the
+        // other readers never write it.
+        if (
+          !facts.relations.has("viewer") &&
+          !facts.relations.has("creator") &&
+          !facts.relations.has("device_owner")
+        ) {
+          await core.audit.record(tx, {
+            action: "work_session.viewed_as_admin",
+            resourceType: "work_session",
+            resourceId: found.id,
+            sessionId: found.id,
+            deviceId: found.deviceId,
+            clientKind: authOf(req).clientKind,
+          });
+        }
         const topic = wsTopic(found.id);
         // Snapshot cut: read lastSeq FIRST, then state and only events up to it. Each statement sees its own
         // snapshot, so an event committed in between would otherwise be both in `events` and replayed after
@@ -409,7 +430,7 @@ export function registerWorkSessionRoutes(
             return parsed.success ? { seq: r.seq, at: parsed.data.at, event: parsed.data.event } : null;
           })
           .filter((e) => e !== null);
-        return { session, prompts, approvals, events, lastSeq, viewerCan };
+        return { session, prompts, approvals, events, lastSeq, viewerCan, viewerState };
       }),
   );
 
@@ -762,6 +783,9 @@ export function registerWorkSessionRoutes(
         return { ok: true as const };
       }),
   );
+
+  // Phase 07.9-06 (D-04): who can see a session, its people search and the new-session draft preview.
+  registerVisibilityRoutes(app, core, { perms, svc });
 }
 
 /**
@@ -778,7 +802,11 @@ function startError(r: WorkSessionStartFailure): HttpError {
     case "not_allowed":
       return new AuthzDeniedError(r.denial);
     case "device_not_shared":
+    case "not_in_project":
       return new AuthzDeniedError(r.denial, { message: r.message });
+    case "audience_outside_project":
+    case "team_not_assigned":
+      return audienceError(r);
     case "project_not_found":
       return r.reason === "other_device" ? conflict(r.message) : notFound(r.message);
     case "device_offline":

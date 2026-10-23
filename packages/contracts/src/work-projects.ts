@@ -190,7 +190,8 @@ export type LinkWorkProjectRepoRequest = z.infer<typeof LinkWorkProjectRepoReque
 
 /**
  * `GET /api/v1/work-projects/:unitId/linkable-repos`: repositories on devices the caller can use, grouped by device;
- * `linkedTo` names the team project a repository already belongs to (shown, not linkable).
+ * `linkedTo` names the team project a repository already belongs to (shown, not linkable), only when the caller can
+ * open it; `linkedToHidden` marks a repository linked to a project the caller cannot open (D-14; absent = false).
  */
 export const LinkableRepos = z.object({
   devices: z.array(
@@ -198,7 +199,14 @@ export const LinkableRepos = z.object({
       deviceId: Id,
       deviceName: DeviceName,
       deviceOnline: z.boolean(),
-      repos: z.array(z.object({ projectId: Id, name: RepoName, linkedTo: TeamProjectRef.nullable() })),
+      repos: z.array(
+        z.object({
+          projectId: Id,
+          name: RepoName,
+          linkedTo: TeamProjectRef.nullable(),
+          linkedToHidden: z.boolean().optional(),
+        }),
+      ),
     }),
   ),
 });
