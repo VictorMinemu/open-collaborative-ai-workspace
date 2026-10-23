@@ -123,6 +123,19 @@ class Agent {
     this.exited = new Promise((r) => this.proc.on("exit", (code) => r(code)));
   }
 
+  /**
+   * Resolves once stderr matches `re`, failing after `ms`. stderr and stdout are separate pipes: a diagnostic line
+   * written before an event can arrive after it (CI saw `launched` ~250 ms after `ready`), so never match at once.
+   */
+  async errMatch(re, ms = 5_000) {
+    const until = Date.now() + ms;
+    while (!re.test(this.err)) {
+      if (Date.now() > until)
+        assert.fail(`stderr of ${this.name} never matched ${re} within ${ms} ms:\n${this.err}`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
   onData(chunk) {
     this.out.push(chunk);
     this.buf = Buffer.concat([this.buf, chunk]);
@@ -393,8 +406,8 @@ steps.open = async (agent) => {
     assert.equal(r.event, "ready");
     assert.equal(r.browserSandbox, "container-only");
     // The structured diagnostics sandboxd forwards (07.8 hardening): the fallback is said, never silent.
-    assert.match(runc.err, /\{"brw":1,"ev":"sandbox_fallback","t":\d+\}/);
-    assert.match(runc.err, /"ev":"launched","t":\d+,"ms":\d+,"posture":"container-only","runtime":"runc"/);
+    await runc.errMatch(/\{"brw":1,"ev":"sandbox_fallback","t":\d+\}/);
+    await runc.errMatch(/"ev":"launched","t":\d+,"ms":\d+,"posture":"container-only","runtime":"runc"/);
   } finally {
     await runc.stop();
   }
@@ -403,10 +416,7 @@ steps.open = async (agent) => {
     const r = await runsc.event((e) => e.event === "ready" || e.event === "fatal", 90_000);
     assert.equal(r.event, "fatal", "no silent fallback under gVisor");
     assert.equal(await runsc.exited, 1);
-    assert.match(
-      runsc.err,
-      /"ev":"launch_failed","t":\d+,"code":"launch_failed","reason":"no_usable_sandbox"/,
-    );
+    await runsc.errMatch(/"ev":"launch_failed","t":\d+,"code":"launch_failed","reason":"no_usable_sandbox"/);
   } finally {
     await runsc.stop();
   }
