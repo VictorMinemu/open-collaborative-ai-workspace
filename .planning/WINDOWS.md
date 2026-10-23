@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 185
+open_count: 179
 waived_count: 5
-fixed_count: 141
-total_count: 331
-last_updated: 2026-10-23T08:31:57.362Z
+fixed_count: 148
+total_count: 332
+last_updated: 2026-10-23T10:05:54.945Z
 ---
 
 # Broken Windows Ledger
@@ -323,8 +323,8 @@ last_updated: 2026-10-23T08:31:57.362Z
 | 306 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-02: who-can-see and project-member listings check every active member one by one; fine at expected size, plan 12's perf test must cover it | fixed |  | 2026-10-23T01:28:25.262Z | 2026-10-23T07:06:56.301Z |
 | 307 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | MUST (07.9-12, D-14): app.work_project_access's team branch must exclude descendants of kind project, so an assigned team never reaches members of projects nested under it; with a test | fixed |  | 2026-10-23T03:52:58.538Z | 2026-10-23T07:06:56.376Z |
 | 308 | 07.9 | deviation | apps/api/src/modules/work-session/facts.ts |  | 07.9-05: the list calls work_session_access once per session of the organization (Pitfall 8); plan 12's perf test must measure it | fixed |  | 2026-10-23T03:52:58.614Z | 2026-10-23T07:06:56.450Z |
-| 309 | 07.9 | deviation | apps/web/components/work-zone/session-sidebar.tsx |  | SHOULD FIX (07.9-09, pre-existing): active-row branch line contrast 3.5:1 (axe serious); Settled rows 32 px on mobile (< 44); the per-row "+" button 18 px on touch — fix in plan 10/14 or the gate | open |  | 2026-10-23T04:56:08.517Z |  |
-| 310 | 07.9 | deviation | apps/web/app/(app)/work-zone/page.tsx |  | SHOULD FIX (07.9-09, pre-existing): the home "Ready" status chip contrast 2.6:1; at 390 the recent sessions' date truncates mid-word ("just nov") | open |  | 2026-10-23T04:56:08.606Z |  |
+| 309 | 07.9 | deviation | apps/web/components/work-zone/session-sidebar.tsx |  | SHOULD FIX (07.9-09, pre-existing): active-row branch line contrast 3.5:1 (axe serious); Settled rows 32 px on mobile (< 44); the per-row "+" button 18 px on touch — fix in plan 10/14 or the gate | fixed |  | 2026-10-23T04:56:08.517Z | 2026-10-23T10:05:54.411Z |
+| 310 | 07.9 | deviation | apps/web/app/(app)/work-zone/page.tsx |  | SHOULD FIX (07.9-09, pre-existing): the home "Ready" status chip contrast 2.6:1; at 390 the recent sessions' date truncates mid-word ("just nov") | fixed |  | 2026-10-23T04:56:08.606Z | 2026-10-23T10:05:54.485Z |
 | 311 | 07.9 | deviation | apps/api/src/modules/work-session/service.ts |  | 07.9-07 (low): a session frame computed just before a narrowing can arrive a few ms after it (the data was visible to that person until then); each device transaction and reauthorizeOrg waits for the post-commit fan-out — plan 12 measures it | fixed |  | 2026-10-23T05:15:46.912Z | 2026-10-23T08:31:57.196Z |
 | 312 | 07.9 | deviation | apps/web/lib/workzone-queries.ts |  | 07.9-07: gaining access by repo link or team assignment shows the session only on the next list refetch (P-08 by design); useWorkZoneOrgSync is mounted in 4 components — plan 11 may mount it once | open |  | 2026-10-23T05:15:46.993Z |  |
 | 313 | 07.9 | deviation | e2e |  | 07.9-08: e2e/ has no tsconfig, so pnpm typecheck never type-checks the specs (add one, gate); leftover sessions accumulate between specs (title, Mia's Gate) | open |  | 2026-10-23T05:18:28.391Z |  |
@@ -332,20 +332,21 @@ last_updated: 2026-10-23T08:31:57.362Z
 | 315 | 07.9 | deviation | apps/web/components/work-zone |  | 07.9-06 (for 10/14): an editor can remove themself from the audience (warn before saving); plan 14 must use teamProjectHidden on repos; WorkZoneStartBlock has no not_in_project, so a proposal card does not show it before Start | open |  | 2026-10-23T05:35:07.350Z |  |
 | 316 | 07.9 | deviation | apps/web/components/work-zone |  | 07.9-11: the dimmed badge on Settled sidebar rows fails axe contrast; a long email in the rail's user block overflows into the sidebar column at 1440; ServerUnreachable says "not responding" on a 500 too; a manager outside the project sees "No sessions you can see" (13 may give a specific line) | open |  | 2026-10-23T06:32:15.504Z |  |
 | 317 | 07.9 | deviation | packages/contracts/src |  | 07.9-11: WorkProjectSummary's comment still says "can open"; with D-14 it is "open or manage" (fix in the gate) | open |  | 2026-10-23T06:32:15.594Z |  |
-| 318 | 07.9 | deviation | apps/web/components/work-zone/session-view.tsx |  | SHOULD FIX (07.9-10, pre-existing): header buttons Queue, Changes and the menu are 32 px at 390 (< 44); the shared bottom-sheet close button is 32 px for every sheet (fixed locally only for the visibility sheet) | open |  | 2026-10-23T07:06:02.594Z |  |
+| 318 | 07.9 | deviation | apps/web/components/work-zone/session-view.tsx |  | SHOULD FIX (07.9-10, pre-existing): header buttons Queue, Changes and the menu are 32 px at 390 (< 44); the shared bottom-sheet close button is 32 px for every sheet (fixed locally only for the visibility sheet) | fixed |  | 2026-10-23T07:06:02.594Z | 2026-10-23T10:05:54.563Z |
 | 319 | 07.9 | deviation | apps/api/src/modules/work-session/visibility.ts |  | 07.9-10: See all shows "Member" instead of "Through {team}" for a project member also in the chosen team (06's reason order); self-removal through Teams is not warned (the view does not say whether the editor is in the chosen team); the Project row shows no head count unless the session is on Project (needs projectCount in the contract) | open |  | 2026-10-23T07:06:02.669Z |  |
-| 320 | 07.9 | deviation | e2e |  | 07.9-10/11: e2e runs overwrite other plans' screenshots (09's restored by hand twice) — screenshot names per spec, or write only the spec's own files | open |  | 2026-10-23T07:06:02.746Z |  |
+| 320 | 07.9 | deviation | e2e |  | 07.9-10/11: e2e runs overwrite other plans' screenshots (09's restored by hand twice) — screenshot names per spec, or write only the spec's own files | fixed |  | 2026-10-23T07:06:02.746Z | 2026-10-23T10:05:54.637Z |
 | 321 | 07.9 | deviation | apps/api/src/modules/work-session/service.ts |  | MUST FIX (07.9-12): the post-commit fan-out still blocks the request; a device sweep of 250 sessions takes 6.3 s and a reauthorizeOrg over thousands of sessions could exceed a minute. Move fan-out and re-authorization to an ordered per-organization background queue; the request returns after commit; privacy (no frame to a removed viewer) must still hold | fixed |  | 2026-10-23T07:06:56.603Z | 2026-10-23T08:31:57.274Z |
 | 322 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-12 (follow-up): an explicit system actor so an empty user_id is denied by default in the audience backstop, instead of "no user passes" (D-13 limit, record in ADR-0030) | open |  | 2026-10-23T07:06:56.682Z |  |
 | 323 | 07.9 | deviation | apps/api/src/modules/work-session/revoke-cause.ts |  | 07.9-12 (minor): re-deciding a deactivated member's subscription gives cause visibility instead of role | fixed |  | 2026-10-23T07:06:56.756Z | 2026-10-23T08:31:57.362Z |
 | 324 | 07.9 | deviation | apps/web/components/settings |  | SHOULD FIX (07.9-13): the reused MembersSection buttons are under 44 px below 768 (project page and Settings › Organization); the disabled Switch in the off state is faint in dark mode (shared component) | open |  | 2026-10-23T07:53:31.404Z |  |
 | 325 | 07.9 | deviation | apps/api/src/modules/work-session/projects.ts |  | 07.9-13: a parent lead can remove a team an admin assigned (say so in ADR-0030); Settings › Organization gets live project updates only while a project unit is selected | open |  | 2026-10-23T07:53:31.501Z |  |
-| 326 | 07.9 | deviation | apps/web/components/work-zone/session-view.tsx |  | MUST FIX (07.9-14, regression from 10): e2e work-zone-title on mobile fails — the session header title measures 196 px against a 188 px limit since the visibility chip joined the header | open |  | 2026-10-23T08:12:29.374Z |  |
-| 327 | 07.9 | deviation | apps/web/components/work-zone/session-sidebar.tsx |  | SHOULD FIX (07.9-14): ended/failed status icon contrast in sidebar rows makes work-zone-visibility-marker fail axe when other specs leave such sessions behind | open |  | 2026-10-23T08:12:29.820Z |  |
-| 328 | 07.9 | deviation | packages/contracts/src |  | SHOULD FIX (07.9-14): WorkZoneStartBlock has no not_in_project, so a bot's proposal card cannot say it before Start (contract + agent-channel/proposals.ts + card copy) | open |  | 2026-10-23T08:12:29.947Z |  |
+| 326 | 07.9 | deviation | apps/web/components/work-zone/session-view.tsx |  | MUST FIX (07.9-14, regression from 10): e2e work-zone-title on mobile fails — the session header title measures 196 px against a 188 px limit since the visibility chip joined the header | fixed |  | 2026-10-23T08:12:29.374Z | 2026-10-23T10:05:54.713Z |
+| 327 | 07.9 | deviation | apps/web/components/work-zone/session-sidebar.tsx |  | SHOULD FIX (07.9-14): ended/failed status icon contrast in sidebar rows makes work-zone-visibility-marker fail axe when other specs leave such sessions behind | fixed |  | 2026-10-23T08:12:29.820Z | 2026-10-23T10:05:54.793Z |
+| 328 | 07.9 | deviation | packages/contracts/src |  | SHOULD FIX (07.9-14): WorkZoneStartBlock has no not_in_project, so a bot's proposal card cannot say it before Start (contract + agent-channel/proposals.ts + card copy) | fixed |  | 2026-10-23T08:12:29.947Z | 2026-10-23T10:05:54.869Z |
 | 329 | 07.9 | deviation | apps/web/components/ui/sheet.tsx |  | 07.9-14: a sheet opened over a dialog does not dim the dialog (nested backdrop); the e2e harness writes setup-*.png into whatever screenshot folder it is given | open |  | 2026-10-23T08:12:30.035Z |  |
 | 330 | 07.9 | deviation | apps/api/src/modules/work-session/service.ts |  | 07.9-fanout (medium-low, deferred): one queue lane per organization, so a big sweep delays that org's other deliveries (2,000 live sessions: deliveries complete after ~50 s); separate lanes for sweeps and deliveries or batch reader computation | open |  | 2026-10-23T08:31:50.390Z |  |
 | 331 | 07.9 | deviation | apps/api/src/modules/work-session/service.ts |  | 07.9-fanout (low, deferred): the queue is in memory, so a crash loses pending sweeps (revocation already decided at commit; lists refetch on reconnect) — sweep on boot or a durable outbox; a frame from another transaction published between commit and its invalidation reaching Redis is not held | open |  | 2026-10-23T08:31:50.471Z |  |
+| 332 | 07.9 | deviation | apps/web/components/work-zone/session-sidebar.tsx |  | 07.9-polish: the sidebar header + and the session search are under 44 px on mobile (shared components); the 640–767 px two-row header is not covered by any e2e | open |  | 2026-10-23T10:05:54.945Z |  |
 
 ````json
 [
@@ -4052,10 +4053,10 @@ last_updated: 2026-10-23T08:31:57.362Z
     "file": "apps/web/components/work-zone/session-sidebar.tsx",
     "line": null,
     "description": "SHOULD FIX (07.9-09, pre-existing): active-row branch line contrast 3.5:1 (axe serious); Settled rows 32 px on mobile (< 44); the per-row \"+\" button 18 px on touch — fix in plan 10/14 or the gate",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-23T04:56:08.517Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-23T10:05:54.411Z"
   },
   {
     "id": 310,
@@ -4064,10 +4065,10 @@ last_updated: 2026-10-23T08:31:57.362Z
     "file": "apps/web/app/(app)/work-zone/page.tsx",
     "line": null,
     "description": "SHOULD FIX (07.9-09, pre-existing): the home \"Ready\" status chip contrast 2.6:1; at 390 the recent sessions' date truncates mid-word (\"just nov\")",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-23T04:56:08.606Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-23T10:05:54.485Z"
   },
   {
     "id": 311,
@@ -4160,10 +4161,10 @@ last_updated: 2026-10-23T08:31:57.362Z
     "file": "apps/web/components/work-zone/session-view.tsx",
     "line": null,
     "description": "SHOULD FIX (07.9-10, pre-existing): header buttons Queue, Changes and the menu are 32 px at 390 (< 44); the shared bottom-sheet close button is 32 px for every sheet (fixed locally only for the visibility sheet)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-23T07:06:02.594Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-23T10:05:54.563Z"
   },
   {
     "id": 319,
@@ -4184,10 +4185,10 @@ last_updated: 2026-10-23T08:31:57.362Z
     "file": "e2e",
     "line": null,
     "description": "07.9-10/11: e2e runs overwrite other plans' screenshots (09's restored by hand twice) — screenshot names per spec, or write only the spec's own files",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-23T07:06:02.746Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-23T10:05:54.637Z"
   },
   {
     "id": 321,
@@ -4256,10 +4257,10 @@ last_updated: 2026-10-23T08:31:57.362Z
     "file": "apps/web/components/work-zone/session-view.tsx",
     "line": null,
     "description": "MUST FIX (07.9-14, regression from 10): e2e work-zone-title on mobile fails — the session header title measures 196 px against a 188 px limit since the visibility chip joined the header",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-23T08:12:29.374Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-23T10:05:54.713Z"
   },
   {
     "id": 327,
@@ -4268,10 +4269,10 @@ last_updated: 2026-10-23T08:31:57.362Z
     "file": "apps/web/components/work-zone/session-sidebar.tsx",
     "line": null,
     "description": "SHOULD FIX (07.9-14): ended/failed status icon contrast in sidebar rows makes work-zone-visibility-marker fail axe when other specs leave such sessions behind",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-23T08:12:29.820Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-23T10:05:54.793Z"
   },
   {
     "id": 328,
@@ -4280,10 +4281,10 @@ last_updated: 2026-10-23T08:31:57.362Z
     "file": "packages/contracts/src",
     "line": null,
     "description": "SHOULD FIX (07.9-14): WorkZoneStartBlock has no not_in_project, so a bot's proposal card cannot say it before Start (contract + agent-channel/proposals.ts + card copy)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-23T08:12:29.947Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-23T10:05:54.869Z"
   },
   {
     "id": 329,
@@ -4319,6 +4320,18 @@ last_updated: 2026-10-23T08:31:57.362Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-23T08:31:50.471Z",
+    "resolved_at": null
+  },
+  {
+    "id": 332,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/web/components/work-zone/session-sidebar.tsx",
+    "line": null,
+    "description": "07.9-polish: the sidebar header + and the session search are under 44 px on mobile (shared components); the 640–767 px two-row header is not covered by any e2e",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T10:05:54.945Z",
     "resolved_at": null
   }
 ]
