@@ -19,12 +19,10 @@ import {
 } from "@ocw/contracts";
 import {
   devices,
-  orgMembers,
   orgUnits,
   projects,
   type Tx,
   tenantOf,
-  unitMemberships,
   workProjectRepos,
   workProjectSettings,
   workProjectTeams,
@@ -37,7 +35,6 @@ import { badRequest, conflict, notFound } from "../../lib/errors";
 import { deviceFacts, loadDeviceAccess } from "../device";
 import {
   createUnit,
-  LEAD_ORG_ROLES,
   orgTopic,
   type PermissionService,
   type ResourceFacts,
@@ -460,29 +457,8 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
         // checked by `createUnit` once the caller may act there.
         const parent = await requireUnit(tx, parentId);
         await perms.assertCan(req, tx, "work_project.manage", unitResource(parent));
+        // D-13: `createUnit` makes the creator the project's lead (a member when their role cannot lead), audited.
         const unit = await createUnit(core, tx, { kind: "project", name, parentId, createdBy: userId });
-        // D-13: the creator becomes the project's lead. The documented auto-lead (no `unit.manage` check): the creator
-        // holds `work_project.manage` on the parent. A creator whose role cannot lead (a delegated allow rule) joins as
-        // a member, so the "only Lead or Admin roles lead" rule always holds.
-        const [me] = await tx
-          .select({ role: orgMembers.role })
-          .from(orgMembers)
-          .where(eq(orgMembers.userId, userId))
-          .limit(1);
-        const role = me && LEAD_ORG_ROLES.includes(me.role) ? ("lead" as const) : ("member" as const);
-        await tx.insert(unitMemberships).values({
-          organizationId: tenantOf(tx).organizationId,
-          unitId: unit.id,
-          userId,
-          role,
-          addedBy: userId,
-        });
-        await core.audit.record(tx, {
-          action: "unit_membership.added",
-          resourceType: "org_unit",
-          resourceId: unit.id,
-          metadata: { unitId: unit.id, userId, role },
-        });
         const project = await loadProject(tx, userId, unit.id);
         if (!project) throw new Error("created project not found");
         return projectDetail(req, tx, perms, project);

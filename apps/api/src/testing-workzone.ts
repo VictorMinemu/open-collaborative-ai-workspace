@@ -144,8 +144,26 @@ export async function startSession(
 // helpers state that access in a test's setup, so the test is valid under the organization-wide rule and the D-06 one.
 
 /**
+ * D-13 (07.9): a project created through the unit routes has its creator as lead. A fixture that builds a tree for
+ * other people removes that membership, so the creator stays outside the project as the test intends. Call it right
+ * after the project's creation, while the creator is its only member.
+ */
+export async function dropProjectCreator(creator: TestClient, unitId: string): Promise<void> {
+  const res = await creator.request("GET", `/api/v1/units/${unitId}/members`);
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  const members = res.body!.members as Array<{ userId: string }>;
+  expect(members, "only the creator is in a new project").toHaveLength(1);
+  for (const m of members) {
+    const del = await creator.request("DELETE", `/api/v1/units/${unitId}/members/${m.userId}`);
+    expect(del.status, JSON.stringify(del.body)).toBe(200);
+  }
+}
+
+/**
  * D-06 "same team project": the admin creates a department (unless `parentId`) and a project unit under it through the
  * unit routes, then adds the given members. Link the session's repo with `linkRepo` for the access to apply.
+ * The roster is exactly `members`: creating the project makes the admin its lead (D-13), so the helper sets the admin
+ * to the listed role, or removes them when they are not listed (a test's admin outside the project stays outside).
  */
 export async function createTeamProject(
   _stack: TestStack,
@@ -165,7 +183,20 @@ export async function createTeamProject(
   const unit = await admin.request("POST", "/api/v1/units", { kind: "project", name: opts.name, parentId });
   expect(unit.status, JSON.stringify(unit.body)).toBe(200);
   const unitId = unit.body!.id as string;
+  const auto = await admin.request("GET", `/api/v1/units/${unitId}/members`);
+  expect(auto.status, JSON.stringify(auto.body)).toBe(200);
+  const creators = new Set((auto.body!.members as Array<{ userId: string }>).map((m) => m.userId));
+  for (const creator of creators) {
+    const listed = opts.members.find((m) => m.userId === creator);
+    const res = listed
+      ? await admin.request("PATCH", `/api/v1/units/${unitId}/members/${creator}`, {
+          role: listed.role ?? "member",
+        })
+      : await admin.request("DELETE", `/api/v1/units/${unitId}/members/${creator}`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+  }
   for (const m of opts.members) {
+    if (creators.has(m.userId)) continue;
     const res = await admin.request("POST", `/api/v1/units/${unitId}/members`, {
       userId: m.userId,
       role: m.role ?? "member",

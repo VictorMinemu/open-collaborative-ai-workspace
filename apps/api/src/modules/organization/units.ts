@@ -189,8 +189,9 @@ export async function unitsChanged(core: Core, tx: Tx, unitId: string, action: s
 /**
  * The one unit-creation path (POST /units and, Phase 07.9, POST /work-projects): under the per-organization lock, the
  * parent is (re-)read inside the tenant, the kind rule is checked, the row gets a uuidv7 id and its materialised path,
- * and the `unit.created` audit and `units.updated` event go out in the same transaction. The caller decides who may
- * create first (`unit.manage`, or `work_project.manage` on the parent); this helper never decides.
+ * and the `unit.created` audit and `units.updated` event go out in the same transaction. A project also gets its
+ * creator (D-13, `addProjectCreator`), whichever route created it. The caller decides who may create first
+ * (`unit.manage`, or `work_project.manage` on the parent); this helper never decides.
  */
 export async function createUnit(
   core: Core,
@@ -233,8 +234,33 @@ export async function createUnit(
     resourceId: id,
     metadata: { name, kind, parentId: parent?.id ?? null },
   });
+  if (kind === "project" && createdBy) await addProjectCreator(core, tx, id, createdBy);
   await unitsChanged(core, tx, id, "created");
   return row;
+}
+
+/**
+ * D-13 (Phase 07.9): the creator of a project joins it, as its lead when their org role may lead (`LEAD_ORG_ROLES`),
+ * otherwise as a member (a delegated allow rule), so "only Lead or Admin roles lead" always holds. The documented
+ * auto-lead: no `unit.manage` check, because the caller already holds the right to create under the parent. Audited
+ * as `unit_membership.added` with ids only, in the creation's transaction.
+ */
+async function addProjectCreator(core: Core, tx: Tx, unitId: string, userId: string): Promise<void> {
+  const member = await memberRow(tx, userId);
+  const role = member && LEAD_ORG_ROLES.includes(member.role) ? UnitRole.enum.lead : UnitRole.enum.member;
+  await tx.insert(unitMemberships).values({
+    organizationId: tenantOf(tx).organizationId,
+    unitId,
+    userId,
+    role,
+    addedBy: userId,
+  });
+  await core.audit.record(tx, {
+    action: "unit_membership.added",
+    resourceType: "org_unit",
+    resourceId: unitId,
+    metadata: { unitId, userId, role },
+  });
 }
 
 // ---------------------------------------------------------------- routes
