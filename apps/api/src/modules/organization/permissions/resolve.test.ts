@@ -21,6 +21,7 @@ import {
   memoryResource,
   moduleTargetResource,
   orgResource,
+  precondition,
   unitResource,
   userResource,
   workProjectResource,
@@ -509,7 +510,13 @@ describe("relation grants", () => {
         reason: "device_not_shared",
       });
       const session = workSessionResource(
-        { createdBy: "u-1", deviceOwnerUserId: "u-1", deviceRevoked: true },
+        {
+          createdBy: "u-1",
+          deviceOwnerUserId: "u-1",
+          deviceRevoked: true,
+          access: ["creator", "device_owner"],
+          unitPath: [],
+        },
         "u-1",
       );
       expect(decide(user("admin"), session, [], "work_session.configure").denial).toMatchObject({
@@ -595,7 +602,8 @@ describe("relation grants", () => {
   });
 
   it("a work session creator or device owner approves; others do not", () => {
-    const s = { createdBy: "u-1", deviceOwnerUserId: "u-9", deviceRevoked: false };
+    // The creator and device-owner relations come from the ids (the audience facts are covered in the 07.9 block).
+    const s = { createdBy: "u-1", deviceOwnerUserId: "u-9", deviceRevoked: false, access: [], unitPath: [] };
     expect(allowed(user("developer"), workSessionResource(s, "u-1"), "work_session.approve")).toBe(true);
     expect(allowed(user("developer"), workSessionResource(s, "u-9"), "work_session.approve")).toBe(true);
     expect(allowed(user("developer"), workSessionResource(s, "u-5"), "work_session.approve")).toBe(false);
@@ -712,7 +720,17 @@ describe("unit leads and explicit rules", () => {
   it("a tool-scoped deny removes approve only for that tool", () => {
     const deny = rule({ id: "no-bash", permission: "work_session.approve", tool: "Bash", effect: "deny" });
     const session = (tool: string) =>
-      workSessionResource({ createdBy: "u-1", deviceOwnerUserId: null, deviceRevoked: false, tool }, "u-1");
+      workSessionResource(
+        {
+          createdBy: "u-1",
+          deviceOwnerUserId: null,
+          deviceRevoked: false,
+          access: ["creator"],
+          unitPath: [],
+          tool,
+        },
+        "u-1",
+      );
     expect(decide(user("developer"), session("Bash"), [deny], "work_session.approve").denial).toMatchObject({
       layer: "tool",
       ruleId: "no-bash",
@@ -1679,6 +1697,7 @@ const RELATIONS: Relation[] = [
   "full_access_grantee",
   "inviter",
   "project_member",
+  "viewer",
 ];
 const STATES: ResourceState[] = [
   "ai_chat",
@@ -1690,6 +1709,7 @@ const STATES: ResourceState[] = [
   "disabled",
   "dm",
   "unit_scoped",
+  "creator_left",
 ];
 const TYPES: ResourceType[] = [
   "organization",
@@ -2795,5 +2815,267 @@ describe("team projects: who opens one and who manages it (Phase 07.9, D-02, D-1
     const parentLead = user("lead", { memberUnitPaths: [[D, T]], leadOfUnitIds: new Set([T]) });
     const deny = rule({ id: "deny-pm", scopeUnitId: T, permission: "work_project.manage", effect: "deny" });
     expect(allowed(parentLead, project(null), "work_project.manage", [deny])).toBe(false);
+  });
+});
+
+describe("session audience: who sees a Work Zone session (Phase 07.9, D-04, D-05, D-11, D-12, D-13, P-04)", () => {
+  const D = "dept-D";
+  const T = "team-T";
+  const P = "proj-P";
+  /**
+   * A session as the resolver sees it for principal `u-1`: `access` is what `app.work_session_access` returned for
+   * them; relations `creator` / `device_owner` come from the ids, as `sessionFacts` builds them.
+   */
+  const session = (
+    access: string[],
+    o: { createdBy?: string; deviceOwner?: string | null; unitPath?: string[]; revoked?: boolean } = {},
+  ) =>
+    workSessionResource(
+      {
+        createdBy: o.createdBy ?? "u-creator",
+        deviceOwnerUserId: o.deviceOwner === undefined ? "u-owner" : o.deviceOwner,
+        deviceRevoked: o.revoked ?? false,
+        access,
+        unitPath: o.unitPath ?? [D, T, P],
+      },
+      "u-1",
+    );
+  const developer = user("developer");
+  /** Every work_session grain but `create`: the precondition judges each of them. */
+  const SESSION_GRAINS = Permission.options.filter(
+    (perm) => perm.startsWith("work_session.") && perm !== "work_session.create",
+  );
+  const CONTROL = [
+    "work_session.prompt",
+    "work_session.configure",
+    "work_session.interrupt",
+    "work_session.approve",
+  ] as const;
+  const rowsOfModule = (m: ModuleId, extra: Partial<RuleFact> = {}): RuleFact[] =>
+    MODULE_CATALOG[m].patterns.map((permission, i) =>
+      rule({ id: `${m}-${i}`, permission, effect: "deny", ...extra }),
+    );
+
+  it("the builder maps the SQL facts: viewer relation, creator_left state, the team project's path", () => {
+    const r = session(["viewer", "project_lead"]);
+    expect([...r.relations]).toEqual(["viewer"]);
+    expect(r.unitPath).toEqual([D, T, P]);
+    expect([...r.state]).toEqual([]);
+    const left = workSessionResource(
+      {
+        createdBy: "u-1",
+        deviceOwnerUserId: "u-9",
+        deviceRevoked: false,
+        access: ["creator_left"],
+        unitPath: [P],
+      },
+      "u-1",
+    );
+    expect([...left.relations]).toEqual(["creator"]);
+    expect([...left.state]).toEqual(["creator_left"]);
+    // The SQL `admin` fact never becomes a relation: the admin rule is the precondition's explicit role check.
+    expect(session(["admin"]).relations.size).toBe(0);
+    // A principal-less resource never carries a relation.
+    const anon = workSessionResource(
+      { createdBy: "u-1", deviceOwnerUserId: "u-1", deviceRevoked: false, access: ["viewer"], unitPath: [] },
+      null,
+    );
+    expect(anon.relations.size).toBe(0);
+  });
+
+  it("a developer in the audience (viewer) reads and prompts; seeing is not approving", () => {
+    expect(allowed(developer, session(["viewer"]), "work_session.read")).toBe(true);
+    expect(allowed(developer, session(["viewer"]), "work_session.prompt")).toBe(true);
+    // D-05: approve keeps today's rule (creator, device owner or admin).
+    expect(decide(developer, session(["viewer"]), [], "work_session.approve").denial).toMatchObject({
+      reason: "missing_permission",
+    });
+  });
+
+  it("outside the audience every work_session grain except create is denied not_in_audience", () => {
+    for (const access of [[], ["project_lead"]]) {
+      for (const perm of SESSION_GRAINS) {
+        const d = decide(user("lead"), session(access), [], perm);
+        expect(d.allowed, perm).toBe(false);
+        if (
+          perm !== "work_session.approve" &&
+          perm !== "work_session.archive" &&
+          perm !== "work_session.visibility"
+        ) {
+          expect(d.denial, perm).toMatchObject({ layer: "resource", reason: "not_in_audience" });
+        }
+      }
+    }
+    expect(decide(developer, session([]), [], "work_session.read").denial).toEqual({
+      permission: "work_session.read",
+      layer: "resource",
+      reason: "not_in_audience",
+    });
+    // Starting a session is decided on the organization and the device, never on a session's audience.
+    expect(allowed(developer, orgResource(), "work_session.create")).toBe(true);
+    expect(allowed(developer, session([]), "work_session.create")).toBe(true);
+  });
+
+  it("the admin rule is explicit: an admin with no relation reads, prompts, approves and changes visibility", () => {
+    for (const perm of [
+      "work_session.read",
+      "work_session.prompt",
+      "work_session.approve",
+      "work_session.visibility",
+    ] as const) {
+      expect(allowed(user("admin"), session(["admin"]), perm), perm).toBe(true);
+      expect(allowed(user("admin"), session([]), perm), perm).toBe(true);
+    }
+  });
+
+  it("the creator and the device owner always see (D-11), whatever the audience", () => {
+    const own = workSessionResource(
+      {
+        createdBy: "u-1",
+        deviceOwnerUserId: "u-9",
+        deviceRevoked: false,
+        access: ["creator"],
+        unitPath: [P],
+      },
+      "u-1",
+    );
+    for (const perm of [
+      "work_session.read",
+      "work_session.prompt",
+      "work_session.approve",
+      "work_session.visibility",
+    ] as const) {
+      expect(allowed(developer, own, perm), perm).toBe(true);
+    }
+    const host = workSessionResource(
+      {
+        createdBy: "u-9",
+        deviceOwnerUserId: "u-1",
+        deviceRevoked: false,
+        access: ["device_owner"],
+        unitPath: [P],
+      },
+      "u-1",
+    );
+    for (const perm of [
+      "work_session.read",
+      "work_session.prompt",
+      "work_session.approve",
+      "work_session.archive",
+    ] as const) {
+      expect(allowed(developer, host, perm), perm).toBe(true);
+    }
+    // The device owner is not the session's owner: changing who sees it stays with the creator, leads and admins.
+    expect(allowed(developer, host, "work_session.visibility")).toBe(false);
+  });
+
+  it("a creator who left keeps read and archive only (D-12): the rest is left_project", () => {
+    const left = workSessionResource(
+      {
+        createdBy: "u-1",
+        deviceOwnerUserId: "u-9",
+        deviceRevoked: false,
+        access: ["creator_left"],
+        unitPath: [D, P],
+      },
+      "u-1",
+    );
+    expect(allowed(developer, left, "work_session.read")).toBe(true);
+    expect(allowed(developer, left, "work_session.archive")).toBe(true);
+    for (const perm of [...CONTROL, "work_session.visibility"] as const) {
+      expect(decide(developer, left, [], perm).denial, perm).toMatchObject({
+        layer: "resource",
+        reason: "left_project",
+      });
+    }
+  });
+
+  it("creator_left with another relation or the admin rule keeps that relation's rights (Pitfall 4)", () => {
+    const leftOwner = workSessionResource(
+      {
+        createdBy: "u-1",
+        deviceOwnerUserId: "u-1",
+        deviceRevoked: false,
+        access: ["creator_left", "device_owner"],
+        unitPath: [D, P],
+      },
+      "u-1",
+    );
+    for (const perm of [...CONTROL, "work_session.read", "work_session.archive"] as const) {
+      expect(allowed(developer, leftOwner, perm), perm).toBe(true);
+    }
+    const leftViewer = workSessionResource(
+      {
+        createdBy: "u-1",
+        deviceOwnerUserId: "u-9",
+        deviceRevoked: false,
+        access: ["creator_left", "viewer"],
+        unitPath: [P],
+      },
+      "u-1",
+    );
+    expect(allowed(developer, leftViewer, "work_session.prompt")).toBe(true);
+    const leftAdmin = workSessionResource(
+      {
+        createdBy: "u-1",
+        deviceOwnerUserId: "u-9",
+        deviceRevoked: false,
+        access: ["creator_left", "admin"],
+        unitPath: [P],
+      },
+      "u-1",
+    );
+    expect(allowed(user("admin"), leftAdmin, "work_session.prompt")).toBe(true);
+  });
+
+  it("a unit deny or the Work Zone off on the session's project path removes it from members and admins (Pitfall 5)", () => {
+    const denyT = rule({ id: "deny-T", scopeUnitId: T, permission: "work_session.read", effect: "deny" });
+    expect(allowed(developer, session(["viewer"]), "work_session.read", [denyT])).toBe(false);
+    expect(decide(user("admin"), session([]), [denyT], "work_session.read").denial).toMatchObject({
+      layer: "unit",
+      ruleId: "deny-T",
+    });
+    const workZoneOff = rowsOfModule("work_zone", { scopeUnitId: D });
+    expect(allowed(developer, session(["viewer"]), "work_session.read", workZoneOff)).toBe(false);
+    expect(allowed(user("admin"), session([]), "work_session.read", workZoneOff)).toBe(false);
+    // A personal session carries no unit: the same unit rule does not reach it.
+    expect(allowed(user("admin"), session([], { unitPath: [] }), "work_session.read", [denyT])).toBe(true);
+  });
+
+  it("a lead on the project's path holds visibility only where they see the session", () => {
+    const parentLead = user("lead", { memberUnitPaths: [[D, T]], leadOfUnitIds: new Set([T]) });
+    expect(allowed(parentLead, session(["viewer"]), "work_session.visibility")).toBe(true);
+    expect(allowed(parentLead, session(["viewer"]), "work_session.read")).toBe(true);
+    // Outside the audience the lead grant is taken away with every other grain.
+    expect(decide(parentLead, session(["project_lead"]), [], "work_session.visibility").denial).toMatchObject(
+      {
+        reason: "not_in_audience",
+      },
+    );
+    // A plain viewer (no lead, not the creator) never changes who sees it.
+    expect(allowed(developer, session(["viewer"]), "work_session.visibility")).toBe(false);
+  });
+
+  it("work_session.visibility without work_session.read is denied not_session_viewer", () => {
+    const parentLead = user("lead", { memberUnitPaths: [[D, T]], leadOfUnitIds: new Set([T]) });
+    const noRead = rule({
+      id: "no-read",
+      subjectKind: "user",
+      subjectId: "u-1",
+      permission: "work_session.read",
+      effect: "deny",
+    });
+    expect(decide(parentLead, session(["viewer"]), [noRead], "work_session.visibility").denial).toEqual({
+      permission: "work_session.visibility",
+      layer: "resource",
+      reason: "not_session_viewer",
+    });
+    // Elsewhere (the organization) the grain is decided on its own.
+    expect(allowed(user("admin"), orgResource(), "work_session.visibility", [noRead])).toBe(true);
+  });
+
+  it("agents are judged as themselves; the audience gate is for people", () => {
+    const agent: PrincipalFacts = { ...user(null), kind: "agent", id: "agent-1" };
+    expect(precondition("work_session.read", agent, session([]))).toBeNull();
   });
 });

@@ -1,10 +1,11 @@
-import { devices, type Tx, workSessions } from "@ocw/db";
+import { type Tx, workSessions } from "@ocw/db";
 import { eq } from "drizzle-orm";
 import type { ApiModule, Core } from "../../core";
 import type { ApprovalService } from "../approval";
 import type { ObjectStorage } from "../artifact";
 import type { DeviceHub } from "../device";
-import { createPermissionService, workSessionResource } from "../organization";
+import { createPermissionService } from "../organization";
+import { sessionFacts } from "./facts";
 import { registerProjectRoutes } from "./projects";
 import {
   listProposableProjects,
@@ -22,6 +23,7 @@ import {
   type WorkSessionStartResult,
 } from "./start";
 
+export { sessionFacts, sessionFactsForUsers } from "./facts";
 export { createWorkSessionAttachmentScope } from "./images";
 export { loadWorkZonePolicy } from "./policy";
 export { projectFacts } from "./projects";
@@ -81,28 +83,20 @@ export function createWorkSessionModule(
   });
   hub.setSessionHandler(service);
 
-  // Following a session's stream is `work_session.read` on that session (RLS scopes the lookup to the org).
+  // Following a session's stream is `work_session.read` on that session, with the facts of `sessionFacts` (the session's
+  // audience, D-04/D-09; RLS scopes the lookup to the org). Nobody outside the audience subscribes `ws:<id>`.
   core.realtime.registerTopicAuthorizer("ws", async (auth, workSessionId) =>
     core.db.withTenant({ organizationId: auth.organizationId, userId: auth.userId }, async (tx) => {
       const [row] = await tx
-        .select({
-          createdBy: workSessions.createdBy,
-          owner: devices.ownerUserId,
-          revokedAt: devices.revokedAt,
-        })
+        .select({ id: workSessions.id, createdBy: workSessions.createdBy, deviceId: workSessions.deviceId })
         .from(workSessions)
-        .innerJoin(devices, eq(devices.id, workSessions.deviceId))
         .where(eq(workSessions.id, workSessionId));
       if (!row) return false;
-      const facts = workSessionResource(
-        { createdBy: row.createdBy, deviceOwnerUserId: row.owner, deviceRevoked: row.revokedAt !== null },
-        auth.userId,
-      );
       const { allowed } = await perms.decide(
         tx,
         { kind: "user", userId: auth.userId },
         "work_session.read",
-        facts,
+        await sessionFacts(tx, auth.userId, row),
       );
       return allowed;
     }),

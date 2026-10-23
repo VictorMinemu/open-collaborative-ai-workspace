@@ -10,6 +10,8 @@ import {
   onlyRelativePaths,
   type SessionEvent,
   SessionTitle,
+  type SessionVisibilityKind,
+  type TeamProjectRef,
   TITLE_PROMPT_MAX_CHARS,
   TitleFailureCode,
   type TitleResultFrame,
@@ -18,6 +20,7 @@ import {
   type WorkSession,
   type WorkSessionChanges,
   type WorkSessionStatus,
+  type WorkSessionVisibilitySummary,
   type WorkZonePolicy,
 } from "@ocw/contracts";
 import {
@@ -25,11 +28,13 @@ import {
   conversations,
   deviceCommands,
   devices,
+  orgUnits,
   projects,
   type TenantDb,
   type Tx,
   tenantOf,
   workApprovals,
+  workProjectRepos,
   workPrompts,
   workSessions,
 } from "@ocw/db";
@@ -38,7 +43,7 @@ import type { FastifyBaseLogger } from "fastify";
 import { attachmentRowsForWorkPrompt, attachmentsForWorkPrompts, type ObjectStorage } from "../artifact";
 import type { AuditService } from "../audit";
 import type { DeviceCommandRow, DeviceHub, DeviceRef, DeviceSessionHandler } from "../device";
-import { memberDirectory, type PermissionService } from "../organization";
+import { memberDirectory, type PermissionService, type ResourceFacts, uuidArray } from "../organization";
 import type { RealtimeService } from "../realtime";
 import { loadControlsContext } from "./context";
 import {
@@ -50,6 +55,7 @@ import {
   storedSettings,
   turnMode,
 } from "./controls";
+import { type SessionFactsRow, sessionAccessSql, sessionResourceOf } from "./facts";
 import {
   currentSessionModel,
   hydratePromptImages,
@@ -114,22 +120,63 @@ export class WorkSessionService implements DeviceSessionHandler {
   // ------------------------------------------------------------------ DTOs
 
   async sessions(tx: Tx, filter?: SQL): Promise<WorkSession[]> {
-    const rows = await tx
+    return (await this.load(tx, filter, null)).map((r) => r.dto);
+  }
+
+  async session(tx: Tx, id: string): Promise<WorkSession | null> {
+    return (await this.sessions(tx, eq(workSessions.id, id)))[0] ?? null;
+  }
+
+  /**
+   * The sessions `userId` has any audience fact on (Phase 07.9, D-09, Pitfall 8), each with its resolver facts built
+   * from the same row by the one builder (`sessionResourceOf`): the list route then decides `work_session.read` on
+   * those facts with `perms.filter`, exactly as the detail route decides one session. Rows outside every fact (no
+   * creator, device owner, viewer, admin or lead fact) are dropped before any count or directory work.
+   */
+  async readableSessions(
+    tx: Tx,
+    userId: string,
+    filter?: SQL,
+  ): Promise<Array<{ dto: WorkSession; facts: ResourceFacts }>> {
+    return (await this.load(tx, filter, userId)).map((r) => ({
+      dto: r.dto,
+      facts: sessionResourceOf(r.facts, userId),
+    }));
+  }
+
+  /**
+   * The DTO rows (+ the facts row when `userId` is given, narrowed to the sessions where the SQL rule names them).
+   * Every DTO carries its audience summary and team project (UI-SPEC R1), from one batched call of
+   * `app.work_session_visibility_summary`.
+   */
+  private async load(
+    tx: Tx,
+    filter: SQL | undefined,
+    userId: string | null,
+  ): Promise<Array<{ dto: WorkSession; facts: SessionFactsRow }>> {
+    const all = await tx
       .select({
         s: workSessions,
         projectName: projects.name,
         deviceName: devices.name,
         deviceStatus: devices.status,
         deviceRevoked: devices.revokedAt,
+        deviceOwner: devices.ownerUserId,
+        unitPath: orgUnits.path,
+        access: userId === null ? sql<string[]>`'{}'::text[]` : sessionAccessSql(userId),
       })
       .from(workSessions)
       .innerJoin(projects, eq(projects.id, workSessions.projectId))
       .innerJoin(devices, eq(devices.id, workSessions.deviceId))
+      .leftJoin(workProjectRepos, eq(workProjectRepos.projectId, workSessions.projectId))
+      .leftJoin(orgUnits, eq(orgUnits.id, workProjectRepos.unitId))
       .where(filter)
       .orderBy(desc(workSessions.updatedAt));
+    // Pre-narrowing (cardinality of the facts > 0): the resolver then decides on the facts of the kept rows.
+    const rows = userId === null ? all : all.filter((r) => (r.access ?? []).length > 0);
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.s.id);
-    const [queued, pending, running, dir] = await Promise.all([
+    const [queued, pending, running, dir, summaries] = await Promise.all([
       tx
         .select({ id: workPrompts.workSessionId, n: count() })
         .from(workPrompts)
@@ -146,52 +193,69 @@ export class WorkSessionService implements DeviceSessionHandler {
         .where(and(inArray(workPrompts.workSessionId, ids), inArray(workPrompts.status, IN_FLIGHT)))
         .groupBy(workPrompts.workSessionId),
       memberDirectory(tx),
+      visibilitySummaries(tx, ids),
     ]);
     const q = new Map(queued.map((r) => [r.id, Number(r.n)]));
     const p = new Map(pending.map((r) => [r.id, Number(r.n)]));
     const since = new Map(running.map((r) => [r.id, r.since]));
-    return rows.map(({ s, projectName, deviceName, deviceStatus, deviceRevoked }) => {
-      const effective = EffectiveSessionSettings.safeParse(s.effectiveSettings);
-      const diffStat = DiffStat.safeParse(s.diffStat);
-      return {
-        id: s.id,
-        conversationId: s.conversationId,
-        projectId: s.projectId,
-        projectName,
-        deviceId: s.deviceId,
-        deviceName,
-        deviceOnline: deviceStatus === "online" && !deviceRevoked,
-        runtime: s.runtime,
-        model: s.model,
-        permissionMode: s.permissionMode,
-        worktree: s.worktree,
-        branch: s.branch,
-        status: s.status,
-        title: s.title,
-        titleSource: s.titleSource,
-        createdBy: s.createdBy,
-        createdByName: dir.get(s.createdBy)?.displayName ?? null,
-        queuedCount: q.get(s.id) ?? 0,
-        pendingApprovals: p.get(s.id) ?? 0,
-        lastError: s.lastError,
-        settings: {
-          requested: requestedSettings(s),
-          effective: effective.success ? effective.data : null,
-          pending: s.settingsPending,
-        },
-        fullAccess:
-          s.permissionMode === "fullAccess" ||
-          (effective.success && isFullAccessReport(effective.data.permissionMode)),
-        runningSince: iso(since.get(s.id) ?? null),
-        diffStat: diffStat.success ? diffStat.data : null,
-        createdAt: new Date(s.createdAt).toISOString(),
-        updatedAt: new Date(s.updatedAt).toISOString(),
-      };
-    });
-  }
-
-  async session(tx: Tx, id: string): Promise<WorkSession | null> {
-    return (await this.sessions(tx, eq(workSessions.id, id)))[0] ?? null;
+    return rows.map(
+      ({ s, projectName, deviceName, deviceStatus, deviceRevoked, deviceOwner, unitPath, access }) => {
+        const effective = EffectiveSessionSettings.safeParse(s.effectiveSettings);
+        const diffStat = DiffStat.safeParse(s.diffStat);
+        const summary = summaries.get(s.id);
+        const dto: WorkSession = {
+          id: s.id,
+          conversationId: s.conversationId,
+          projectId: s.projectId,
+          projectName,
+          deviceId: s.deviceId,
+          deviceName,
+          deviceOnline: deviceStatus === "online" && !deviceRevoked,
+          runtime: s.runtime,
+          model: s.model,
+          permissionMode: s.permissionMode,
+          worktree: s.worktree,
+          branch: s.branch,
+          status: s.status,
+          title: s.title,
+          titleSource: s.titleSource,
+          createdBy: s.createdBy,
+          createdByName: dir.get(s.createdBy)?.displayName ?? null,
+          queuedCount: q.get(s.id) ?? 0,
+          pendingApprovals: p.get(s.id) ?? 0,
+          lastError: s.lastError,
+          settings: {
+            requested: requestedSettings(s),
+            effective: effective.success ? effective.data : null,
+            pending: s.settingsPending,
+          },
+          fullAccess:
+            s.permissionMode === "fullAccess" ||
+            (effective.success && isFullAccessReport(effective.data.permissionMode)),
+          runningSince: iso(since.get(s.id) ?? null),
+          diffStat: diffStat.success ? diffStat.data : null,
+          visibility: summary?.visibility ?? {
+            kind: s.visibility,
+            activeCount: 0,
+            differsFromDefault: false,
+            firstTeamName: null,
+          },
+          teamProject: summary?.teamProject ?? null,
+          createdAt: new Date(s.createdAt).toISOString(),
+          updatedAt: new Date(s.updatedAt).toISOString(),
+        };
+        return {
+          dto,
+          facts: {
+            createdBy: s.createdBy,
+            deviceOwnerUserId: deviceOwner,
+            deviceRevoked: deviceRevoked !== null,
+            unitPath: unitPath ?? [],
+            access: access ?? [],
+          },
+        };
+      },
+    );
   }
 
   async prompts(tx: Tx, sessionId: string): Promise<WorkPrompt[]> {
@@ -1333,6 +1397,48 @@ export function toPrompt(
     attachments,
     proposedBy,
   };
+}
+
+/**
+ * The audience summary and team project of each session (UI-SPEC R1), one batched call of the SQL summary function
+ * (Phase 07.9): never a person's name, only team names, counts and the project reference.
+ */
+async function visibilitySummaries(
+  tx: Tx,
+  ids: readonly string[],
+): Promise<Map<string, { visibility: WorkSessionVisibilitySummary; teamProject: TeamProjectRef | null }>> {
+  const res = await tx.execute(sql`
+    select s.id::text as id, v.kind, v.active_count, v.differs_from_default, v.first_team_name,
+           v.team_project_id::text as team_project_id, v.team_project_name
+      from unnest(${uuidArray(ids)}) as s(id)
+      cross join lateral app.work_session_visibility_summary(s.id) v`);
+  const out = new Map<
+    string,
+    { visibility: WorkSessionVisibilitySummary; teamProject: TeamProjectRef | null }
+  >();
+  for (const r of res.rows as Array<{
+    id: string;
+    kind: SessionVisibilityKind;
+    active_count: number;
+    differs_from_default: boolean;
+    first_team_name: string | null;
+    team_project_id: string | null;
+    team_project_name: string | null;
+  }>) {
+    out.set(r.id, {
+      visibility: {
+        kind: r.kind,
+        activeCount: r.active_count,
+        differsFromDefault: r.differs_from_default,
+        firstTeamName: r.first_team_name,
+      },
+      teamProject:
+        r.team_project_id && r.team_project_name
+          ? { id: r.team_project_id, name: r.team_project_name }
+          : null,
+    });
+  }
+  return out;
 }
 
 export function toApproval(r: ApprovalRow, decidedByName: string | null): WorkApproval {

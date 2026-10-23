@@ -4,7 +4,8 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_SETUP_TOKEN, TestClient } from "./testing";
 import { type AiStack, seedPlan, startAiStack } from "./testing-ai";
-import { invite } from "./testing-workzone";
+import { FakeDevice } from "./testing-device";
+import { createTeamProject, invite, linkRepo, pairDevice, startSession } from "./testing-workzone";
 
 /**
  * Phase 07.3 (ADR-0024, ACCESS-03): a module is turned off by ordinary catalog deny rows written through the existing
@@ -442,6 +443,79 @@ describe("Work Zone module off: direct calls refused, device hygiene kept", () =
       await deleteRules(ids);
     }
     await ok(riley.request("GET", "/api/v1/work-sessions"));
+  });
+});
+
+describe("Work Zone off on a team project's path hides its sessions from members and admins (07.9-05, Pitfall 5)", () => {
+  let device: FakeDevice | undefined;
+  let sessionId: string;
+  let salesId: string;
+
+  const sees = async (as: TestClient) => {
+    const listed = ((await ok(as.request("GET", "/api/v1/work-sessions"))).sessions as Json[]).map(
+      (x) => x.id,
+    );
+    const detail = (await as.request("GET", `/api/v1/work-sessions/${sessionId}`)).status;
+    return { listed: listed.includes(sessionId), detail };
+  };
+
+  beforeAll(async () => {
+    const units = (await ok(victor.request("GET", "/api/v1/units"))).units as Json[];
+    salesId = units.find((u) => u.name === "Sales")!.id as string;
+    const backendId = units.find((u) => u.name === "Backend")!.id as string;
+    const orgId = (await su.query("select organization_id from app.org_members where user_id = $1", [danaId]))
+      .rows[0].organization_id as string;
+    // Atlas sits under Sales; Dana is its member, Riley reaches it through the assigned Backend team (Engineering), so
+    // neither Riley nor the admins belong to Sales: only the session's own path carries the module rows.
+    const atlas = await createTeamProject(stack, victor, {
+      name: "Atlas",
+      members: [{ userId: danaId }],
+      parentId: salesId,
+    });
+    await ok(victor.request("POST", `/api/v1/work-projects/${atlas.unitId}/teams`, { unitId: backendId }));
+    const paired = await pairDevice(stack, dana, "Dana's laptop");
+    device = await FakeDevice.connect(stack.baseUrl, paired.token);
+    device.send({
+      type: "projects.sync",
+      projects: [{ localId: "lp_atlas", name: "atlas-api", gitRemote: null, defaultBranch: "main" }],
+    });
+    await device.next((f) => f.type === "projects.ack");
+    const repo = ((await ok(dana.request("GET", "/api/v1/projects"))).projects as Json[]).find(
+      (p) => p.name === "atlas-api",
+    )!.id as string;
+    await linkRepo(stack, {
+      organizationId: orgId,
+      unitId: atlas.unitId,
+      projectId: repo,
+      deviceId: paired.deviceId,
+      linkedBy: adaId,
+    });
+    sessionId = await startSession(dana, device, repo, { title: "Atlas session" });
+  }, 60_000);
+
+  afterAll(async () => {
+    await device?.close().catch(() => {});
+  });
+
+  it("positive control: Riley (assigned team) and Ada (admin) see the session", async () => {
+    expect(await sees(riley)).toEqual({ listed: true, detail: 200 });
+    expect(await sees(ada)).toEqual({ listed: true, detail: 200 });
+  });
+
+  it("Sales-wide Work Zone rows hide it from Riley and Ada (list and detail); deleting them restores it", async () => {
+    const ids = await denyModule("work_zone", "everyone", salesId);
+    try {
+      // Their own Work Zone stays on (no Sales membership): only this session is gone, like a missing one.
+      expect(await sees(riley)).toEqual({ listed: false, detail: 404 });
+      expect(await sees(ada)).toEqual({ listed: false, detail: 404 });
+      expect(await myPermissions(riley)).toContain("work_session.read");
+      // Dana, a member of Atlas (under Sales), has the Work Zone off altogether.
+      await fails(dana.request("GET", "/api/v1/work-sessions"), 403);
+    } finally {
+      await deleteRules(ids);
+    }
+    expect(await sees(riley)).toEqual({ listed: true, detail: 200 });
+    expect(await sees(ada)).toEqual({ listed: true, detail: 200 });
   });
 });
 

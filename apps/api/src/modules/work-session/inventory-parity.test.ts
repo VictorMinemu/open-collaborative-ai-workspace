@@ -1,3 +1,6 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   DEFAULT_WORK_ZONE_POLICY,
   DEFERRED_EFFORTS,
@@ -163,5 +166,39 @@ describe.each(RUNTIMES)("inventory parity for %s (WZC-06)", (runtime) => {
     const affected = after.filter((o) => o.uiKey === uiKey);
     expect(affected.length, uiKey).toBeGreaterThan(0);
     for (const o of affected) expect(o, o.label).toMatchObject({ available: false, reason: "not_confirmed" });
+  });
+});
+
+/**
+ * One builder (Phase 07.9-05, C-01, Pitfall 3): a session resource is built only by `facts.ts`, from the SQL audience
+ * facts, so no reader can decide on a session without its audience. A source scan of the API (tests excluded) finds
+ * `workSessionResource(` only where it is defined (policy.ts) and in `work-session/facts.ts`.
+ */
+describe("session facts parity: one builder for every reader (07.9-05)", () => {
+  const src = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+  const files = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? files(join(dir, e.name)) : e.name.endsWith(".ts") ? [join(dir, e.name)] : [],
+    );
+  const sources = files(src).filter((f) => !f.endsWith(".test.ts"));
+
+  it("only work-session/facts.ts builds a session resource", () => {
+    const callers = sources
+      .filter((f) => /\bworkSessionResource\(/.test(readFileSync(f, "utf8")))
+      .map((f) => relative(src, f))
+      .sort();
+    expect(callers).toEqual(["modules/organization/permissions/policy.ts", "modules/work-session/facts.ts"]);
+    expect(readFileSync(join(src, "modules/organization/permissions/policy.ts"), "utf8")).toMatch(
+      /export function workSessionResource\(/,
+    );
+  });
+
+  it("every work-session reader gets its facts from facts.ts (no module copies the audience rule)", () => {
+    const moduleFiles = sources.filter((f) => f.includes(join("modules", "work-session")));
+    expect(moduleFiles.length).toBeGreaterThan(5);
+    for (const f of moduleFiles) {
+      if (f.endsWith("facts.ts")) continue;
+      expect(readFileSync(f, "utf8"), relative(src, f)).not.toMatch(/work_session_access/);
+    }
   });
 });

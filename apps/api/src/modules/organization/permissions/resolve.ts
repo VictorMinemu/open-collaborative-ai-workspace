@@ -45,7 +45,12 @@ export type Relation =
    * Team projects (Phase 07.9, D-02): the principal has project access as a direct member, a lead or a member of an
    * assigned team. Decided by `app.work_project_access` (the one SQL rule, P-03) and never derived here.
    */
-  | "project_member";
+  | "project_member"
+  /**
+   * Work Zone sessions (Phase 07.9, D-04): the session's audience includes the principal within project access, as
+   * `app.work_session_access` decided it (the one SQL rule, P-03); never derived here.
+   */
+  | "viewer";
 export type ResourceState =
   | "private"
   | "archived"
@@ -68,7 +73,12 @@ export type ResourceState =
   | "memory_agent"
   | "memory_unit"
   /** Browser contexts (07.8-16, D-12 U-2): a member's sealed session is loaded in the page. */
-  | "member_session";
+  | "member_session"
+  /**
+   * Work Zone sessions (Phase 07.9, D-12): its creator no longer has access to the session's team project; they keep
+   * reading and archiving it, nothing else (unless another relation or the admin rule holds).
+   */
+  | "creator_left";
 export type ResourceType =
   | "organization"
   | "unit"
