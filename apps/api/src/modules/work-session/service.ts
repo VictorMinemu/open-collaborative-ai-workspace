@@ -28,6 +28,7 @@ import {
   conversations,
   deviceCommands,
   devices,
+  orgMembers,
   orgUnits,
   projects,
   type TenantDb,
@@ -55,7 +56,7 @@ import {
   storedSettings,
   turnMode,
 } from "./controls";
-import { type SessionFactsRow, sessionAccessSql, sessionResourceOf } from "./facts";
+import { type SessionFactsRow, sessionAccessSql, sessionFactsForUsers, sessionResourceOf } from "./facts";
 import {
   currentSessionModel,
   hydratePromptImages,
@@ -95,6 +96,9 @@ const IN_FLIGHT: PromptRow["status"][] = ["dispatched", "running"];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const wsTopic = (sessionId: string) => `ws:${sessionId}`;
+
+/** Sessions emitted in a transaction, by its tenant context (one per transaction or savepoint), awaiting delivery. */
+const pendingDeliveries = new WeakMap<object, Set<string>>();
 const iso = (v: string | null) => (v ? new Date(v).toISOString() : null);
 
 export interface WorkSessionDeps {
@@ -296,18 +300,85 @@ export class WorkSessionService implements DeviceSessionHandler {
 
   // ------------------------------------------------------------------ realtime emitters
 
-  /** Broadcast the session snapshot on its own stream and on the org stream (session lists). */
+  /**
+   * The session snapshot, durable on its own stream (`ws:<id>`, gated by the audience rule) and, for the session
+   * lists, unstored on the `user:` topic of each person who may read it, after commit (Phase 07.9, D-08, P-08). Nothing
+   * about a session is written on `org:`, which every member reads.
+   */
   async emitSession(tx: Tx, sessionId: string): Promise<WorkSession | null> {
     const dto = await this.session(tx, sessionId);
     if (!dto) return null;
     await this.deps.realtime.appendEvent(tx, wsTopic(sessionId), EventTypes.workSessionUpdated, dto);
-    await this.deps.realtime.appendEvent(
-      tx,
-      `org:${tenantOf(tx).organizationId}`,
-      EventTypes.workSessionUpdated,
-      dto,
-    );
+    this.deliverAfterCommit(tx, sessionId);
     return dto;
+  }
+
+  /**
+   * Coalesced per transaction (device paths and `reauthorizeOrg` emit one session several times): the first emit of a
+   * transaction registers one after-commit delivery of every session the transaction emitted. A rolled-back
+   * transaction (or savepoint) drops it with its other after-commit hooks.
+   */
+  private deliverAfterCommit(tx: Tx, sessionId: string): void {
+    const ctx = tenantOf(tx);
+    const pending = pendingDeliveries.get(ctx);
+    if (pending) {
+      pending.add(sessionId);
+      return;
+    }
+    const ids = new Set([sessionId]);
+    pendingDeliveries.set(ctx, ids);
+    ctx.afterCommit(() => this.deliverToReaders(ctx.organizationId, [...ids]));
+  }
+
+  /**
+   * After commit, in a fresh read: each session's current DTO goes to the people the resolver lets read it, decided
+   * exactly as the detail route decides one person (`work_session.read` on `sessionFactsForUsers`). Candidates are the
+   * people the SQL rule names (`app.work_session_viewers`) and the active admins (never enumerated by the rule); module
+   * and deny rules then remove anyone they reach. Unstored (no `user:` stream lock inside the domain transaction, the
+   * 07.5-16 lock-order hazard): a missed frame is covered by the list's refetch. Never throws into the request.
+   */
+  private async deliverToReaders(organizationId: string, sessionIds: readonly string[]): Promise<void> {
+    try {
+      const deliveries = await this.deps.db.withTenant({ organizationId, userId: null }, async (tx) => {
+        const dtos = await this.sessions(tx, inArray(workSessions.id, [...sessionIds]));
+        if (dtos.length === 0) return [];
+        const admins = await tx
+          .select({ userId: orgMembers.userId })
+          .from(orgMembers)
+          .where(and(eq(orgMembers.role, "admin"), isNull(orgMembers.deactivatedAt)));
+        const out: Array<{ dto: WorkSession; recipients: string[] }> = [];
+        for (const dto of dtos) {
+          const viewers = await tx.execute(
+            sql`select distinct user_id::text as user_id from app.work_session_viewers(${dto.id}::uuid)`,
+          );
+          const candidates = [
+            ...new Set([
+              ...(viewers.rows as Array<{ user_id: string }>).map((r) => r.user_id),
+              ...admins.map((a) => a.userId),
+            ]),
+          ];
+          const facts = await sessionFactsForUsers(tx, dto, candidates);
+          const recipients = await this.deps.perms.usersAllowed(tx, {
+            candidates: candidates.filter((id) => facts.has(id)),
+            permission: "work_session.read",
+            resourceFor: (userId) => {
+              const f = facts.get(userId);
+              if (!f) throw new Error("session facts missing for a candidate");
+              return f;
+            },
+          });
+          out.push({ dto, recipients });
+        }
+        return out;
+      });
+      for (const { dto, recipients } of deliveries) {
+        for (const userId of recipients) {
+          await this.deps.realtime.publishEphemeral(`user:${userId}`, EventTypes.workSessionUpdated, dto);
+        }
+      }
+    } catch (err) {
+      this.deps.log.warn({ err, sessions: sessionIds.length }, "work session delivery failed");
+    }
   }
 
   async emitPrompt(tx: Tx, row: PromptRow): Promise<void> {
