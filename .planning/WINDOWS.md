@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 176
+open_count: 178
 waived_count: 5
 fixed_count: 134
-total_count: 315
-last_updated: 2026-10-23T05:35:07.350Z
+total_count: 317
+last_updated: 2026-10-23T06:32:15.594Z
 ---
 
 # Broken Windows Ledger
@@ -330,6 +330,8 @@ last_updated: 2026-10-23T05:35:07.350Z
 | 313 | 07.9 | deviation | e2e |  | 07.9-08: e2e/ has no tsconfig, so pnpm typecheck never type-checks the specs (add one, gate); leftover sessions accumulate between specs (title, Mia's Gate) | open |  | 2026-10-23T05:18:28.391Z |  |
 | 314 | 07.9 | deviation | apps/api/src/modules/work-session/visibility.ts |  | 07.9-06: validation/preview/search for personal repos create a draft session in an always-rolled-back savepoint, and the who-can-see list calls the rule once per member — plan 12 measures it or adds a SQL function for drafts | open |  | 2026-10-23T05:35:07.263Z |  |
 | 315 | 07.9 | deviation | apps/web/components/work-zone |  | 07.9-06 (for 10/14): an editor can remove themself from the audience (warn before saving); plan 14 must use teamProjectHidden on repos; WorkZoneStartBlock has no not_in_project, so a proposal card does not show it before Start | open |  | 2026-10-23T05:35:07.350Z |  |
+| 316 | 07.9 | deviation | apps/web/components/work-zone |  | 07.9-11: the dimmed badge on Settled sidebar rows fails axe contrast; a long email in the rail's user block overflows into the sidebar column at 1440; ServerUnreachable says "not responding" on a 500 too; a manager outside the project sees "No sessions you can see" (13 may give a specific line) | open |  | 2026-10-23T06:32:15.504Z |  |
+| 317 | 07.9 | deviation | packages/contracts/src |  | 07.9-11: WorkProjectSummary's comment still says "can open"; with D-14 it is "open or manage" (fix in the gate) | open |  | 2026-10-23T06:32:15.594Z |  |
 
 ````json
 [
@@ -4111,6 +4113,30 @@ last_updated: 2026-10-23T05:35:07.350Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-23T05:35:07.350Z",
+    "resolved_at": null
+  },
+  {
+    "id": 316,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/web/components/work-zone",
+    "line": null,
+    "description": "07.9-11: the dimmed badge on Settled sidebar rows fails axe contrast; a long email in the rail's user block overflows into the sidebar column at 1440; ServerUnreachable says \"not responding\" on a 500 too; a manager outside the project sees \"No sessions you can see\" (13 may give a specific line)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T06:32:15.504Z",
+    "resolved_at": null
+  },
+  {
+    "id": 317,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "packages/contracts/src",
+    "line": null,
+    "description": "07.9-11: WorkProjectSummary's comment still says \"can open\"; with D-14 it is \"open or manage\" (fix in the gate)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T06:32:15.594Z",
     "resolved_at": null
   }
 ]
