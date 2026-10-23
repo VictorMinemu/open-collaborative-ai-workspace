@@ -1,9 +1,10 @@
-import type { ServerFrame } from "@ocw/contracts";
+import { type ServerFrame, WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
 import { sql } from "drizzle-orm";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import WebSocket from "ws";
 import { WorkSessionService } from "./modules/work-session";
-import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "./testing";
+import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "./testing";
 import { eventually, FakeDevice, sleep } from "./testing-device";
 import {
   CLAUDE_CATALOG,
@@ -44,7 +45,6 @@ let ana: TestClient;
 let anaId: string;
 let pia: TestClient;
 let piaId: string;
-let leo: TestClient;
 let leoId: string;
 let olga: TestClient;
 let olgaId: string;
@@ -108,7 +108,7 @@ beforeAll(async () => {
   ({ client: dora, userId: doraId } = await invite(stack, admin, "dora@example.test", "Dora", "lead"));
   ({ client: ana, userId: anaId } = await invite(stack, admin, "ana@example.test", "Ana", "developer"));
   ({ client: pia, userId: piaId } = await invite(stack, admin, "pia@example.test", "Pia", "developer"));
-  ({ client: leo, userId: leoId } = await invite(stack, admin, "leo@example.test", "Leo", "developer"));
+  ({ userId: leoId } = await invite(stack, admin, "leo@example.test", "Leo", "developer"));
   ({ client: olga, userId: olgaId } = await invite(stack, admin, "olga@example.test", "Olga", "developer"));
   ({ client: wes, userId: wesId } = await invite(stack, admin, "wes@example.test", "Wes", "developer"));
 
@@ -260,5 +260,191 @@ describe("a session update reaches only the people who may see it (D-08, P-08)",
       expect(JSON.stringify(taps[name]!.frames), name).not.toContain(team);
     }
     expect(await orgSessionEvents()).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: the sentinel
+
+/** An authenticated /ws socket that records every frame, raw, as the server sent it. */
+async function openSocket(as: TestClient) {
+  const socket = new WebSocket(
+    `${stack.baseUrl.replace("http", "ws")}/ws`,
+    [WS_PROTOCOL, `${WS_AUTH_PROTOCOL_PREFIX}${await as.token()}`],
+    { headers: { origin: WEB_ORIGIN } },
+  );
+  const raw: string[] = [];
+  const frames: Json[] = [];
+  socket.on("message", (m) => {
+    raw.push(String(m));
+    frames.push(JSON.parse(String(m)) as Json);
+  });
+  await new Promise((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  const send = (f: unknown) => socket.send(JSON.stringify(f));
+  const sub = async (topic: string, opts: { afterSeq?: number } = {}) => {
+    send({ op: "sub", topic, ...opts });
+    return eventually(async () =>
+      frames.find((f) => (f.op === "subscribed" || f.op === "err") && f.topic === topic),
+    );
+  };
+  return { socket, raw, frames, send, sub };
+}
+type Sock = Awaited<ReturnType<typeof openSocket>>;
+
+/** The device runs the next prompt of `sessionId` to completion. */
+async function runPrompt(sessionId: string) {
+  const prompt = await device.command("prompt", sessionId);
+  device.ack(prompt.id);
+  device.event(sessionId, { type: "prompt.started", promptId: prompt.payload.promptId });
+  device.event(sessionId, {
+    type: "prompt.completed",
+    promptId: prompt.payload.promptId,
+    usage: { inputTokens: 1, outputTokens: 1 },
+  });
+  device.event(sessionId, { type: "session.state", status: "idle" });
+  await eventually(async () => {
+    const d = await ok(ana.request("GET", `/api/v1/work-sessions/${sessionId}`));
+    return d.session.status === "idle" && d.session.queuedCount === 0 && d.session.runningSince === null;
+  });
+}
+
+describe("the sentinel: nothing about a session reaches an outsider or a member with Work Zone off (D-08, D-13)", () => {
+  const PROMPT = "Quokkafirst heuristic ledger rounding";
+  const TITLE = "Quokkatitle ledger rounding fix";
+  const BRANCH = "quokka/sentinel-branch";
+
+  it("created, prompted, retitled, re-scoped by link and unlink: Olga and Wes receive nothing, live or by replay", async () => {
+    // Olga (outside everything) and Wes (a device grantee whose Work Zone is off) follow the org stream from its
+    // first event and their own topic, for the whole life of the session.
+    const watchers: Record<string, Sock> = { Olga: await openSocket(olga), Wes: await openSocket(wes) };
+    for (const [name, s] of Object.entries(watchers)) {
+      const userId = name === "Olga" ? olgaId : wesId;
+      expect((await s.sub(`org:${orgId}`, { afterSeq: 0 })).op, name).toBe("subscribed");
+      expect((await s.sub(`user:${userId}`, { afterSeq: 0 })).op, name).toBe("subscribed");
+    }
+    // Control: Pia follows her own topic; she is in the audience once the repo is linked to her team project.
+    const control = await openSocket(pia);
+    expect((await control.sub(`user:${piaId}`, { afterSeq: 0 })).op).toBe("subscribed");
+
+    try {
+      // Created on the personal repo; its first prompt's first line becomes the (heuristic) title.
+      const id = await startSession(ana, device, notesRepo);
+      await ok(ana.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body: PROMPT }));
+      const titleCmd = await device.command("session.title", id);
+      await runPrompt(id);
+      // Retitled by the device.
+      device.titleResult(titleCmd.id, id, TITLE, "haiku");
+      device.ack(titleCmd.id);
+      await eventually(async () => {
+        const d = await ok(ana.request("GET", `/api/v1/work-sessions/${id}`));
+        return d.session.title === TITLE;
+      });
+      // The branch, reported by the device in its diff answers (the one asked after the turn and Ana's).
+      const diff = ana.request("GET", `/api/v1/work-sessions/${id}/diff`);
+      let answered = false;
+      void diff.finally(() => {
+        answered = true;
+      });
+      while (!answered) {
+        const cmd = await device.command("diff.request", id, 500).catch(() => null);
+        if (!cmd) continue;
+        device.ack(cmd.id);
+        device.send({
+          type: "diff.result",
+          requestId: cmd.id,
+          sessionId: id,
+          files: [{ path: "src/ledger.ts", status: "modified", additions: 2, deletions: 1 }],
+          patch: "",
+          branch: BRANCH,
+        });
+      }
+      expect((await diff).status).toBe(200);
+      await eventually(async () => {
+        const d = await ok(ana.request("GET", `/api/v1/work-sessions/${id}`));
+        return d.session.branch === BRANCH;
+      });
+      const detail = (await ok(ana.request("GET", `/api/v1/work-sessions/${id}`))).session as Json;
+      expect(detail).toMatchObject({ title: TITLE, branch: BRANCH, deviceName: DEVICE_NAME });
+
+      // Re-scoped: the repo joins Atlas (neither Olga nor Wes is in it); a prompt runs; the repo leaves; another runs.
+      await ok(dora.request("POST", `/api/v1/work-projects/${atlas}/repos`, { projectId: notesRepo }));
+      await ok(ana.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body: "Second quokka prompt" }));
+      await runPrompt(id);
+      await eventually(async () => control.raw.some((r) => r.includes(TITLE)), 3000);
+      await ok(dora.request("DELETE", `/api/v1/work-projects/${atlas}/repos/${notesRepo}`));
+      await ok(ana.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body: "Third quokka prompt" }));
+      await runPrompt(id);
+
+      await sleep(500);
+
+      const secrets = [id, PROMPT, TITLE, BRANCH, DEVICE_NAME];
+      for (const [name, s] of Object.entries(watchers)) {
+        // The whole serialized stream, not selected fields: a future field cannot slip through.
+        const everything = JSON.stringify(s.raw);
+        expect(s.raw.length, name).toBeGreaterThan(0);
+        for (const secret of secrets)
+          expect(everything, `${name} received "${secret}"`).not.toContain(secret);
+        expect(
+          s.frames.some((f) => f.op === "revoked"),
+          name,
+        ).toBe(false);
+      }
+
+      // Following the session itself is refused to both (on another socket: the refusal echoes the id they sent).
+      for (const [name, as] of [
+        ["Olga", olga],
+        ["Wes", wes],
+      ] as const) {
+        const probe = await openSocket(as);
+        try {
+          expect(await probe.sub(`ws:${id}`), name).toMatchObject({ op: "err", code: "forbidden" });
+        } finally {
+          probe.socket.close();
+        }
+      }
+
+      // A fresh replay of the org stream from its first event carries no session event at all.
+      const replay = await openSocket(olga);
+      try {
+        expect((await replay.sub(`org:${orgId}`, { afterSeq: 0 })).op).toBe("subscribed");
+        const events = replay.frames.filter((f) => f.op === "ev");
+        expect(events.length).toBeGreaterThan(0);
+        expect(events.filter((f) => String(f.type).startsWith("work_session."))).toEqual([]);
+        for (const secret of secrets) expect(JSON.stringify(replay.raw)).not.toContain(secret);
+      } finally {
+        replay.socket.close();
+      }
+      expect(await orgSessionEvents()).toEqual([]);
+
+      // REST: the list, the detail, the controls and the diff say nothing about it either.
+      for (const [name, as] of [
+        ["Olga", olga],
+        ["Wes", wes],
+      ] as const) {
+        for (const path of [
+          "/api/v1/work-sessions",
+          "/api/v1/work-sessions?archived=1",
+          `/api/v1/work-sessions/${id}`,
+          `/api/v1/work-sessions/${id}/controls`,
+          `/api/v1/work-sessions/${id}/diff`,
+        ]) {
+          const res = await as.request("GET", path);
+          expect([200, 403, 404], `${name} ${path}`).toContain(res.status);
+          if (!path.endsWith("/work-sessions") && !path.includes("archived")) {
+            expect(res.status, `${name} ${path}`).not.toBe(200);
+          }
+          const body = JSON.stringify(res.body);
+          for (const secret of secrets)
+            expect(body, `${name} ${path} carried "${secret}"`).not.toContain(secret);
+        }
+      }
+
+      // The sentinel is not vacuous: Pia, in the audience while the repo was in Atlas, saw the title on her topic.
+      expect(control.raw.some((r) => r.includes(TITLE) && r.includes(id))).toBe(true);
+    } finally {
+      for (const s of [...Object.values(watchers), control]) s.socket.close();
+    }
   });
 });
