@@ -10,6 +10,16 @@
       "dependsOn": [],
       "outputs": []
     },
+    "//#typecheck:e2e": {
+      "dependsOn": [],
+      "inputs": [
+        "e2e/**/*.ts",
+        "e2e/tsconfig.json",
+        "packages/config/*.json",
+        "packages/contracts/src/**/*.ts"
+      ],
+      "outputs": []
+    },
     "dev": {
       "cache": false,
       "persistent": true

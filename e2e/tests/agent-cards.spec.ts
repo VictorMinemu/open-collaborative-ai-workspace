@@ -332,12 +332,6 @@ test("@deploy's card appears in a channel and goes from Running to Succeeded in 
   }
 });
 
-declare global {
-  interface Window {
-    __notes?: Array<{ title: string; body: string; tag: string }>;
-  }
-}
-
 /** Records the OS pop-ups the app asks for (as notification-prefs.spec): `window.Notification` → `window.__notes`. */
 function installRecorder() {
   window.__notes = [];
