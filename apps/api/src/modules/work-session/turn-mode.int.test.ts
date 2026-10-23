@@ -8,7 +8,9 @@ import {
   CLAUDE_CATALOG,
   CODEX_CATALOG,
   connectWithProject,
+  createTeamProject,
   invite,
+  linkRepo,
   pairDevice,
   startSession,
 } from "../../testing-workzone";
@@ -159,6 +161,20 @@ beforeAll(async () => {
     localId: "lp_srv",
     name: "infra",
   }));
+  // Explicit access (07.9-03, D-06): Sam (a grantee, as each case sets it) and Dana (no relation to the device) prompt
+  // the owner's sessions on the Mac as fellow members of a team project its repo is linked to. The device grants stay
+  // exactly as each case writes them, so the turn's mode is still min(session mode, the author's cap).
+  const { unitId } = await createTeamProject(stack, admin, {
+    name: "OCW",
+    members: [{ userId: adminId }, { userId: samId }, { userId: danaId }],
+  });
+  await linkRepo(stack, {
+    organizationId: orgId,
+    unitId,
+    projectId: macProject,
+    deviceId: macId,
+    linkedBy: adminId,
+  });
   await optIn(mac, macId, true);
   await optIn(server, serverId, true);
   await putPolicy({ allowFullAccess: true });

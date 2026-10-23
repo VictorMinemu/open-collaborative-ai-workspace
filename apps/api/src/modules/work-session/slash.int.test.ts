@@ -8,8 +8,10 @@ import {
   CLAUDE_CATALOG,
   CODEX_CATALOG,
   connectWithProject,
+  createTeamProject,
   errorCode,
   invite,
+  linkRepo,
   pairDevice,
   startSession,
 } from "../../testing-workzone";
@@ -281,7 +283,23 @@ describe("refused and passthrough commands (Task 2, D-13)", () => {
   });
 
   it("a member without work_session.prompt cannot use refused commands to write audits", async () => {
-    const { client: stan } = await invite(stack, admin, "stan@example.test", "Stan", "standard");
+    const { client: stan, userId: stanId } = await invite(
+      stack,
+      admin,
+      "stan@example.test",
+      "Stan",
+      "standard",
+    );
+    // Explicit access (07.9-03, D-06): Stan sees the session as a fellow member of a team project its repo is linked
+    // to, so his role (no work_session.prompt), not a missing audience, is what refuses him. Sam (a grantee above)
+    // joins too and keeps his grant.
+    const adminId = (await su.query("select id from auth.user where email = $1", [ADMIN.email])).rows[0]
+      .id as string;
+    const { unitId } = await createTeamProject(stack, admin, {
+      name: "OCW",
+      members: [{ userId: adminId }, { userId: samId }, { userId: stanId }],
+    });
+    await linkRepo(stack, { organizationId: orgId, unitId, projectId, deviceId, linkedBy: adminId });
     const res = await command(stan, sessionId, "/config");
     expect(res.status).toBe(403);
   });

@@ -4,6 +4,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, FakeDevice, sleep } from "../../testing-device";
+import { createTeamProject, linkRepo } from "../../testing-workzone";
 
 /**
  * Work Zone session controls (Phase 03.2, D-07, D-08, D-14, P-04 … P-08) against a real PostgreSQL + Redis and
@@ -65,6 +66,8 @@ let stan: TestClient;
 let device: FakeDevice;
 let deviceId: string;
 let projectId: string;
+/** The team project the `ocw` repo is linked to (explicit session access, 07.9-03). */
+let teamUnitId: string;
 
 const errorCode = (res: { body: Record<string, unknown> | null }) =>
   (res.body?.error as { code?: string } | undefined)?.code;
@@ -151,6 +154,28 @@ beforeAll(async () => {
   await device.next((f) => f.type === "projects.ack");
   const projects = (await admin.request("GET", "/api/v1/projects")).body!.projects as Array<{ id: string }>;
   projectId = projects[0]!.id;
+
+  // Explicit access (07.9-03, D-06): Alex (developer, unlisted on the device) and Stan (standard) act on the admin's
+  // sessions as fellow members of a team project the repo is linked to; device grants and caps stay as each test sets
+  // them, so the device layer and the roles still decide what each may do.
+  const adminId = (setup.body!.user as { id: string }).id;
+  const memberId = async (email: string) =>
+    (await su.query("select id from auth.user where email = $1", [email])).rows[0].id as string;
+  ({ unitId: teamUnitId } = await createTeamProject(stack, admin, {
+    name: "OCW",
+    members: [
+      { userId: adminId },
+      { userId: await memberId("alex@example.test") },
+      { userId: await memberId("stan@example.test") },
+    ],
+  }));
+  await linkRepo(stack, {
+    organizationId: (setup.body!.organization as { id: string }).id,
+    unitId: teamUnitId,
+    projectId,
+    deviceId,
+    linkedBy: adminId,
+  });
 }, 180_000);
 
 afterAll(async () => {
@@ -447,6 +472,15 @@ describe("Full access and device caps (Plan 04 Task 2: policy ∩ opt-in ∩ cap
     rex = await invite("rex@example.test", "Rex", "developer");
     samId = await userId("sam@example.test");
     rexId = await userId("rex@example.test");
+    // Sam (a grantee) and Rex (a revoked, then current grantee) control the owner's session as members of the team
+    // project too (07.9-03): their device grants, not their audience, decide the caps below.
+    for (const id of [samId, rexId]) {
+      const joined = await admin.request("POST", `/api/v1/units/${teamUnitId}/members`, {
+        userId: id,
+        role: "member",
+      });
+      expect(joined.status, JSON.stringify(joined.body)).toBe(200);
+    }
     const put = await admin.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: true });
     expect(put.status, JSON.stringify(put.body)).toBe(200);
     await report(true);
