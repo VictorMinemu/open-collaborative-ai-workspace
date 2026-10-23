@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 169
+open_count: 171
 waived_count: 5
 fixed_count: 134
-total_count: 308
-last_updated: 2026-10-23T03:52:58.614Z
+total_count: 310
+last_updated: 2026-10-23T04:56:08.606Z
 ---
 
 # Broken Windows Ledger
@@ -323,6 +323,8 @@ last_updated: 2026-10-23T03:52:58.614Z
 | 306 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-02: who-can-see and project-member listings check every active member one by one; fine at expected size, plan 12's perf test must cover it | open |  | 2026-10-23T01:28:25.262Z |  |
 | 307 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | MUST (07.9-12, D-14): app.work_project_access's team branch must exclude descendants of kind project, so an assigned team never reaches members of projects nested under it; with a test | open |  | 2026-10-23T03:52:58.538Z |  |
 | 308 | 07.9 | deviation | apps/api/src/modules/work-session/facts.ts |  | 07.9-05: the list calls work_session_access once per session of the organization (Pitfall 8); plan 12's perf test must measure it | open |  | 2026-10-23T03:52:58.614Z |  |
+| 309 | 07.9 | deviation | apps/web/components/work-zone/session-sidebar.tsx |  | SHOULD FIX (07.9-09, pre-existing): active-row branch line contrast 3.5:1 (axe serious); Settled rows 32 px on mobile (< 44); the per-row "+" button 18 px on touch — fix in plan 10/14 or the gate | open |  | 2026-10-23T04:56:08.517Z |  |
+| 310 | 07.9 | deviation | apps/web/app/(app)/work-zone/page.tsx |  | SHOULD FIX (07.9-09, pre-existing): the home "Ready" status chip contrast 2.6:1; at 390 the recent sessions' date truncates mid-word ("just nov") | open |  | 2026-10-23T04:56:08.606Z |  |
 
 ````json
 [
@@ -4020,6 +4022,30 @@ last_updated: 2026-10-23T03:52:58.614Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-23T03:52:58.614Z",
+    "resolved_at": null
+  },
+  {
+    "id": 309,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/web/components/work-zone/session-sidebar.tsx",
+    "line": null,
+    "description": "SHOULD FIX (07.9-09, pre-existing): active-row branch line contrast 3.5:1 (axe serious); Settled rows 32 px on mobile (< 44); the per-row \"+\" button 18 px on touch — fix in plan 10/14 or the gate",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T04:56:08.517Z",
+    "resolved_at": null
+  },
+  {
+    "id": 310,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/web/app/(app)/work-zone/page.tsx",
+    "line": null,
+    "description": "SHOULD FIX (07.9-09, pre-existing): the home \"Ready\" status chip contrast 2.6:1; at 390 the recent sessions' date truncates mid-word (\"just nov\")",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T04:56:08.606Z",
     "resolved_at": null
   }
 ]
