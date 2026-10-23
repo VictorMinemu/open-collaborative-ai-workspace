@@ -58,6 +58,23 @@ const N1_PROMPT = "aaaaaaaa-0000-4000-8000-000000000906";
 const N1_TOOL_CALL = "aaaaaaaa-0000-4000-8000-000000000907";
 /** Phase 07.8: a bot turn delivered at N-1 (it must come out with no sandbox calls and no member data). */
 const N1_TURN = "aaaaaaaa-0000-4000-8000-000000000908";
+/**
+ * Phase 07.9 (D-08, D-13): before 07.9 every session update was also stored on the organization stream with the full
+ * session DTO (title, branch, device name). One such event, next to an org-stream event of another type and the
+ * session's own stream event, written at N-1.
+ */
+const N1_ORG_STREAM = `org:${ORG_A}`;
+const N1_WS_STREAM = `ws:${N1_SESSION}`;
+const N1_SESSION_DTO = {
+  id: N1_SESSION,
+  title: "Fix the build",
+  branch: "fix/build",
+  device: { id: N1_DEVICE, name: "laptop" },
+  status: "idle",
+};
+const N1_UNITS_EVENT = { unitIds: [] as string[] };
+/** Rows the N-1 seed adds to tables the dump already fills (their exact counts then include them). */
+const N1_ADDED: Record<string, number> = { "app.streams": 2, "app.stream_events": 3 };
 const BACKFILL_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
   "../../../packages/db/drizzle/20261014042429_bots_off_connector_vault_backfill/migration.sql",
@@ -87,6 +104,7 @@ const HEAD_ONLY = [
   "20261022061052_browser_context_opened_host",
   "20261022070138_agent_member_data",
   "20261022213335_browser_takeover_abandoned",
+  "20261023003251_work_zone_visibility",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -261,6 +279,22 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
         "insert into app.agent_turns (event_id, organization_id, agent_id, user_id, conversation_id, conversation_kind, message_id, tools, tool_calls, tainted) values ($1, $2, $3, $4, $5, 'channel', $6, '{web_search}', 2, true)",
         [N1_TURN, ORG_A, HELPER_BOT, MAX_MEMBER, N1_SESSION_CONV, "aaaaaaaa-0000-4000-8000-000000000909"],
       );
+      // Phase 07.9 (D-13): the session's DTO stored on the org stream and on its own stream, and a units event.
+      await seed.query(
+        "insert into app.streams (id, organization_id, last_seq) values ($1, $3, 2), ($2, $3, 1)",
+        [N1_ORG_STREAM, N1_WS_STREAM, ORG_A],
+      );
+      await seed.query(
+        "insert into app.stream_events (stream_id, seq, organization_id, type, payload, actor_user_id) values ($1, 1, $3, 'work_session.updated', $4, $5), ($1, 2, $3, 'units.updated', $6, $5), ($2, 1, $3, 'work_session.updated', $4, $5)",
+        [
+          N1_ORG_STREAM,
+          N1_WS_STREAM,
+          ORG_A,
+          JSON.stringify(N1_SESSION_DTO),
+          ADA_ADMIN,
+          JSON.stringify(N1_UNITS_EVENT),
+        ],
+      );
     } finally {
       await seed.end();
     }
@@ -271,8 +305,9 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
     await Promise.allSettled([pgc?.stop(), redis?.stop()]);
   });
 
-  it("restores the dump with every seeded row (row counts equal the dump's)", () => {
-    for (const t of SEEDED) expect(before.get(t), t).toBe(COPIES.get(t)?.rows.length);
+  it("restores the dump with every seeded row (row counts equal the dump's, plus the N-1 seed's own rows)", () => {
+    for (const t of SEEDED)
+      expect(before.get(t), t).toBe((COPIES.get(t)?.rows.length ?? 0) + (N1_ADDED[t] ?? 0));
   });
 
   it("is behind by exactly HEAD_ONLY's migrations before the upgrade", async () => {
@@ -529,6 +564,52 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
         ).toEqual([{ n: 1 }]);
       } finally {
         await c.end();
+      }
+    });
+
+    it("narrows existing sessions to their personal audience and blanks stored org-stream session snapshots (Phase 07.9, D-06, D-13)", async () => {
+      const c = new pg.Client({ connectionString: urls.migrator });
+      await c.connect();
+      try {
+        const sessions = await c.query("select id, visibility from app.work_sessions order by id");
+        expect(sessions.rows).toEqual([{ id: N1_SESSION, visibility: "project" }]);
+        // The org-stream session event keeps its seq and loses its payload; every other event is untouched.
+        const events = await c.query(
+          "select stream_id, seq::int as seq, type, payload from app.stream_events where stream_id = any($1) order by stream_id, seq",
+          [[N1_ORG_STREAM, N1_WS_STREAM]],
+        );
+        expect(events.rows).toEqual([
+          { stream_id: N1_ORG_STREAM, seq: 1, type: "work_session.updated", payload: {} },
+          { stream_id: N1_ORG_STREAM, seq: 2, type: "units.updated", payload: N1_UNITS_EVENT },
+          { stream_id: N1_WS_STREAM, seq: 1, type: "work_session.updated", payload: N1_SESSION_DTO },
+        ]);
+        const streams = await c.query(
+          "select id, last_seq::int as last_seq from app.streams where id = any($1) order by id",
+          [[N1_ORG_STREAM, N1_WS_STREAM]],
+        );
+        expect(streams.rows).toEqual([
+          { id: N1_ORG_STREAM, last_seq: 2 },
+          { id: N1_WS_STREAM, last_seq: 1 },
+        ]);
+        // No team project links the repo: the session is personal. Its creator, the device owner and admins (Ada is
+        // all three) see it; Max, a member with no relation to the device, no longer does (the deliberate narrowing).
+        expect((await c.query("select count(*)::int as n from app.work_project_repos")).rows[0].n).toBe(0);
+      } finally {
+        await c.end();
+      }
+      const db = createTenantDb(urls.app, { max: 1 });
+      try {
+        const access = (org: string, user: string) =>
+          db.withTenant({ organizationId: org }, async (tx) => {
+            const r = await tx.execute(`select app.work_session_access('${N1_SESSION}', '${user}') as f`);
+            return [...((r.rows[0] as { f: string[] }).f ?? [])].sort();
+          });
+        expect(await access(ORG_A, ADA_ADMIN)).toEqual(["admin", "creator", "device_owner", "viewer"]);
+        expect(await access(ORG_A, MAX_MEMBER)).toEqual([]);
+        expect(await access(ORG_B, BEA_ADMIN)).toEqual([]);
+        expect(await access(ORG_A, BEA_ADMIN)).toEqual([]);
+      } finally {
+        await db.close();
       }
     });
 
