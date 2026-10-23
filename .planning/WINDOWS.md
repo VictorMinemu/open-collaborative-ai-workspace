@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 180
+open_count: 182
 waived_count: 5
 fixed_count: 138
-total_count: 323
-last_updated: 2026-10-23T07:06:56.756Z
+total_count: 325
+last_updated: 2026-10-23T07:53:31.501Z
 ---
 
 # Broken Windows Ledger
@@ -338,6 +338,8 @@ last_updated: 2026-10-23T07:06:56.756Z
 | 321 | 07.9 | deviation | apps/api/src/modules/work-session/service.ts |  | MUST FIX (07.9-12): the post-commit fan-out still blocks the request; a device sweep of 250 sessions takes 6.3 s and a reauthorizeOrg over thousands of sessions could exceed a minute. Move fan-out and re-authorization to an ordered per-organization background queue; the request returns after commit; privacy (no frame to a removed viewer) must still hold | open |  | 2026-10-23T07:06:56.603Z |  |
 | 322 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-12 (follow-up): an explicit system actor so an empty user_id is denied by default in the audience backstop, instead of "no user passes" (D-13 limit, record in ADR-0030) | open |  | 2026-10-23T07:06:56.682Z |  |
 | 323 | 07.9 | deviation | apps/api/src/modules/work-session/revoke-cause.ts |  | 07.9-12 (minor): re-deciding a deactivated member's subscription gives cause visibility instead of role | open |  | 2026-10-23T07:06:56.756Z |  |
+| 324 | 07.9 | deviation | apps/web/components/settings |  | SHOULD FIX (07.9-13): the reused MembersSection buttons are under 44 px below 768 (project page and Settings › Organization); the disabled Switch in the off state is faint in dark mode (shared component) | open |  | 2026-10-23T07:53:31.404Z |  |
+| 325 | 07.9 | deviation | apps/api/src/modules/work-session/projects.ts |  | 07.9-13: a parent lead can remove a team an admin assigned (say so in ADR-0030); Settings › Organization gets live project updates only while a project unit is selected | open |  | 2026-10-23T07:53:31.501Z |  |
 
 ````json
 [
@@ -4215,6 +4217,30 @@ last_updated: 2026-10-23T07:06:56.756Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-23T07:06:56.756Z",
+    "resolved_at": null
+  },
+  {
+    "id": 324,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/web/components/settings",
+    "line": null,
+    "description": "SHOULD FIX (07.9-13): the reused MembersSection buttons are under 44 px below 768 (project page and Settings › Organization); the disabled Switch in the off state is faint in dark mode (shared component)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T07:53:31.404Z",
+    "resolved_at": null
+  },
+  {
+    "id": 325,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/api/src/modules/work-session/projects.ts",
+    "line": null,
+    "description": "07.9-13: a parent lead can remove a team an admin assigned (say so in ADR-0030); Settings › Organization gets live project updates only while a project unit is selected",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T07:53:31.501Z",
     "resolved_at": null
   }
 ]
