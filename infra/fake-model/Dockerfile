@@ -1,6 +1,6 @@
 # Deterministic fake LLM for e2e/CI. No dependencies. Never part of the default profile.
 # Build from the repo root: docker build -f infra/fake-model/Dockerfile -t ocw-fake-model:local .
-FROM node:24.21.0-bookworm-slim
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 WORKDIR /app
 COPY --chown=root:root infra/fake-model/server.mjs ./server.mjs
 COPY --chown=root:root infra/fake-model/fake-mcp.mjs ./fake-mcp.mjs

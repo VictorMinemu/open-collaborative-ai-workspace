@@ -17,7 +17,7 @@
 #     Host hardening, documented in ADR-0029: rootless Docker (or a Docker authorization plugin) behind the socket.
 
 # The base approved at the 07.8-04 image gate (C-04, P-15).
-FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS build
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS build
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 PNPM_HOME=/pnpm PATH=/pnpm:$PATH
 RUN corepack enable
 WORKDIR /repo
@@ -31,7 +31,7 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
  && pnpm --filter @ocw/sandboxd build \
  && node -e 'const s=require("fs").statSync("apps/sandboxd/dist/sandboxd.mjs"); if (!s.size) process.exit(1)'
 
-FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 WORKDIR /app
 COPY --from=build /repo/apps/sandboxd/dist/sandboxd.mjs /app/sandboxd.mjs
 # Docker's default seccomp profile + user-namespace clone/unshare/setns, sent inline for each `brw` (D-14).

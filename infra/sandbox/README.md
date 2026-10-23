@@ -12,7 +12,7 @@ Operators turn the feature on as described in [docs/self-hosting/sandbox.md](../
 | `browser/` | `ocw-sandbox-brw` | A bot's browser: `playwright-core@1.64.1` driving the Chrome for Testing headless shell of Chrome stable **156.0.8078.47**, sha256-pinned per arch, over a pipe (no port). `agent.mjs` is the only page view a caller gets: redacted snapshots, masked screenshots, the site lock |
 | `egress/` | `ocw-sandbox-egress` | The `sandbox-egress` proxy (`apps/sandboxd/src/egress`, plain Node, uid 10002): every bot network's only way out, with the API's own 07.4 rules (`@ocw/egress-policy`) |
 
-All four build `FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20`.
+All four build `FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205`.
 Compose builds them under the `sandbox` profile and never starts `sbx`, `brw` or `egress` itself (`scale: 0`): sandboxd
 creates those containers from its fixed spec.
 

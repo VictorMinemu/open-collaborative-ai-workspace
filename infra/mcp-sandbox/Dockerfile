@@ -6,8 +6,8 @@
 # Run it only with the compose hardening (read-only root, cap_drop ALL, no-new-privileges, pids/memory/CPU limits,
 # tmpfs /tmp, internal network): see compose.yaml service `mcp-sandbox`.
 
-# Same base as the cell image (node:24.21.0-bookworm-slim), so layers are shared.
-FROM node:24.21.0-bookworm-slim
+# Same base as the cell image (node:24.22.1-bookworm-slim), so layers are shared.
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 WORKDIR /app
 # Exact pins from the committed lockfile (sha512 integrity per tarball), no lifecycle scripts, no dev dependencies.
 # Network is used at build time only. Everything under /app stays root-owned and read-only for the `node` user.

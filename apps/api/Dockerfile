@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Build context: repository root.  docker build -f apps/api/Dockerfile .
-FROM node:24.21.0-bookworm-slim AS base
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS base
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 PNPM_HOME=/pnpm PATH=/pnpm:$PATH
 RUN corepack enable
 

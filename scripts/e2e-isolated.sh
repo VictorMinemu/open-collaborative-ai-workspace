@@ -297,7 +297,7 @@ if [ "$sandbox" -eq 1 ]; then
   # ocw.namespace=ocw-e2e, so the label cleanup removes them. Only the egress proxy joins that network
   # (e2e/support/sandbox.ts `useFakeSites`, as the stack smoke does): sandboxd's outbound network keeps
   # inter-container traffic off, so a site attached there would be unreachable.
-  fake_site_base="node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20"
+  fake_site_base="node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205"
   docker network create --internal --label "ocw.namespace=$SANDBOX_NS" "$SANDBOX_NS-sites" >/dev/null
   docker run -d --name "$SANDBOX_NS-fake-site" --label "ocw.namespace=$SANDBOX_NS" --network "$SANDBOX_NS-sites" \
     --network-alias panel.fake.test --network-alias idp.fake.test --network-alias evil.fake.test \

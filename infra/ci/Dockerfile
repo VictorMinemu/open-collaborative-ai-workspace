@@ -3,7 +3,7 @@
 # infra/ci/build-image.sh, which passes the repo's exact pins (.nvmrc, packageManager, @playwright/test).
 # Contents: Node + corepack/pnpm, git, curl, the docker CLI with compose/buildx, uv (for `uvx semgrep`) and Playwright's
 # Chromium with its system packages. Build context: infra/ci (nothing from the repo is copied in).
-ARG NODE_VERSION=24.21.0
+ARG NODE_VERSION=24.22.1
 FROM docker:29.8.2-cli AS docker-cli
 FROM ghcr.io/astral-sh/uv:0.12.23 AS uv
 
