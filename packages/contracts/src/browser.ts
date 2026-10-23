@@ -45,6 +45,38 @@ export const BROWSER_LIMITS = {
   typeMaxChars: 2000,
 } as const;
 
+/**
+ * The time budgets of one bot browser call, innermost first (CI p64/p66). Each hop waits longer than the hop it calls,
+ * so the answer always comes from the layer that knows why, with its code: never "the workspace could not be reached"
+ * while the page opens anyway. The API runs each call under a deadline (`apiCall`, `apiOpen`) that caps every sandboxd
+ * call it makes and answers `timeout` itself, before the cell gives up (`cellCall`, `cellOpen`). A browser start the
+ * open's deadline cut keeps going in sandboxd (its own `ready` gate), so the bot's next call finds the browser warm.
+ * Mirrored by brw (`infra/sandbox/browser/agent.mjs` LIMITS and its launch) and the cell (`agent-channel-protocol.ts`),
+ * both pinned by tests.
+ */
+export const BROWSER_TIMEOUTS_MS = {
+  /** brw: one page load. */
+  navigation: 30_000,
+  /** brw: any op, its page load included; past it the op answers `timeout`. */
+  agentOp: 45_000,
+  /** sandboxd → brw: one op over the attached stdio (reached only by a hung agent). */
+  agentLink: 50_000,
+  /** brw: one Chromium launch. */
+  launch: 60_000,
+  /** sandboxd: how long a fresh brw has to say `ready` (the container start, the launch and its container-only retry). */
+  ready: 75_000,
+  /** API → sandboxd: one context op. */
+  apiOp: 55_000,
+  /** API: one browser call end to end; every sandboxd call runs under it. */
+  apiCall: 55_000,
+  /** API: one `ocw_browser_open`, a cold browser start under load included (CI p64/p66: ~22-35 s). */
+  apiOpen: 75_000,
+  /** Cell → API: one browser call (its deadline, then the API's transactions and answer). */
+  cellCall: 65_000,
+  /** Cell → API: `ocw_browser_open`. Below the 90 s an OpenClaw Codex-harness turn gives a plugin's dynamic tool. */
+  cellOpen: 85_000,
+} as const;
+
 const TITLE_MAX = 200;
 const SNAPSHOT_TEXT_MAX = 32_000;
 const ACTIVITY_MAX = 80;
