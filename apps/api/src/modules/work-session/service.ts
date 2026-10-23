@@ -67,6 +67,22 @@ import { loadWorkZonePolicy } from "./policy";
 import { decideTitleRequest, heuristicTitle, loadTitleContext } from "./title";
 
 /** Why live sessions are re-checked (ADR-0012): a policy change, a member's access change, a device opt-out. */
+/** Frames published at once by the per-user delivery (one Redis round trip each, bounded concurrency). */
+const PUBLISH_BATCH = 200;
+
+/**
+ * Whether facts name a seeing relation of the SQL rule (creator, device owner, viewer, or the `creator_left` state):
+ * the same set `app.work_session_viewers` enumerates and the audience backstop admits (admins aside).
+ */
+function seesSession(f: ResourceFacts): boolean {
+  return (
+    f.relations.has("creator") ||
+    f.relations.has("device_owner") ||
+    f.relations.has("viewer") ||
+    f.state.has("creator_left")
+  );
+}
+
 export type ReauthorizeReason = "policy" | "access_changed" | "device_opt_out";
 
 const UNAUTHORIZED_MODE_ERROR =
@@ -357,33 +373,43 @@ export class WorkSessionService implements DeviceSessionHandler {
   /**
    * After commit, in a fresh read: each session's current DTO goes to the people the resolver lets read it, decided
    * exactly as the detail route decides one person (`work_session.read` on `sessionFactsForUsers`). Candidates are the
-   * people the SQL rule names (`app.work_session_viewers`) and the active admins (never enumerated by the rule); module
-   * and deny rules then remove anyone they reach. Unstored (no `user:` stream lock inside the domain transaction, the
-   * 07.5-16 lock-order hazard): a missed frame is covered by the list's refetch. Never throws into the request.
+   * people the SQL rule names with a seeing relation (creator, creator who left, device owner, viewer: the set
+   * `app.work_session_viewers` enumerates) and the active admins (never enumerated by the rule); module and deny rules
+   * then remove anyone they reach. Unstored (no `user:` stream lock inside the domain transaction, the 07.5-16
+   * lock-order hazard): a missed frame is covered by the list's refetch. Never throws into the request.
+   *
+   * 07.9-12 (WINDOWS #311, measured in list-perf.int.test.ts): the rule runs once per active member and session, through
+   * `sessionFactsForUsers` (the reasons `work_session_viewers` adds for the panel cost four times more and are not needed
+   * here), and the frames are published concurrently in bounded batches.
    */
   private async deliverToReaders(organizationId: string, sessionIds: readonly string[]): Promise<void> {
     try {
       const deliveries = await this.deps.db.withTenant({ organizationId, userId: null }, async (tx) => {
         const dtos = await this.sessions(tx, inArray(workSessions.id, [...sessionIds]));
         if (dtos.length === 0) return [];
-        const admins = await tx
-          .select({ userId: orgMembers.userId })
-          .from(orgMembers)
-          .where(and(eq(orgMembers.role, "admin"), isNull(orgMembers.deactivatedAt)));
+        const members = (
+          await tx
+            .select({ userId: orgMembers.userId })
+            .from(orgMembers)
+            .where(isNull(orgMembers.deactivatedAt))
+        ).map((m) => m.userId);
+        const admins = new Set(
+          (
+            await tx
+              .select({ userId: orgMembers.userId })
+              .from(orgMembers)
+              .where(and(eq(orgMembers.role, "admin"), isNull(orgMembers.deactivatedAt)))
+          ).map((a) => a.userId),
+        );
         const out: Array<{ dto: WorkSession; recipients: string[] }> = [];
         for (const dto of dtos) {
-          const viewers = await tx.execute(
-            sql`select distinct user_id::text as user_id from app.work_session_viewers(${dto.id}::uuid)`,
-          );
-          const candidates = [
-            ...new Set([
-              ...(viewers.rows as Array<{ user_id: string }>).map((r) => r.user_id),
-              ...admins.map((a) => a.userId),
-            ]),
-          ];
-          const facts = await sessionFactsForUsers(tx, dto, candidates);
+          const facts = await sessionFactsForUsers(tx, dto, members);
+          const candidates = members.filter((id) => {
+            const f = facts.get(id);
+            return f !== undefined && (admins.has(id) || seesSession(f));
+          });
           const recipients = await this.deps.perms.usersAllowed(tx, {
-            candidates: candidates.filter((id) => facts.has(id)),
+            candidates,
             permission: "work_session.read",
             resourceFor: (userId) => {
               const f = facts.get(userId);
@@ -395,10 +421,17 @@ export class WorkSessionService implements DeviceSessionHandler {
         }
         return out;
       });
-      for (const { dto, recipients } of deliveries) {
-        for (const userId of recipients) {
-          await this.deps.realtime.publishEphemeral(`user:${userId}`, EventTypes.workSessionUpdated, dto);
-        }
+      const frames = deliveries.flatMap(({ dto, recipients }) =>
+        recipients.map((userId) => ({ dto, userId })),
+      );
+      for (let i = 0; i < frames.length; i += PUBLISH_BATCH) {
+        await Promise.all(
+          frames
+            .slice(i, i + PUBLISH_BATCH)
+            .map(({ dto, userId }) =>
+              this.deps.realtime.publishEphemeral(`user:${userId}`, EventTypes.workSessionUpdated, dto),
+            ),
+        );
       }
     } catch (err) {
       this.deps.log.warn({ err, sessions: sessionIds.length }, "work session delivery failed");
