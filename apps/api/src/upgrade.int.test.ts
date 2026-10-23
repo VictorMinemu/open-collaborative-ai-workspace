@@ -87,6 +87,7 @@ const HEAD_ONLY = [
   "20261022061052_browser_context_opened_host",
   "20261022070138_agent_member_data",
   "20261022213335_browser_takeover_abandoned",
+  "20261023003251_work_zone_visibility",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
