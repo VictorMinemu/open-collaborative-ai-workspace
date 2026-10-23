@@ -42,6 +42,8 @@ export const REQUIRED_AREAS = [
   // Phase 07.9 (ADR-0030): the one builder of a session's audience facts and the path that changes an audience.
   { area: "session audience facts", file: "apps/api/src/modules/work-session/facts.ts" },
   { area: "session audience changes", file: "apps/api/src/modules/work-session/visibility.ts" },
+  // 07.9 verification (W1): the `ws:` authorizer decides who may subscribe to a session's live view.
+  { area: "session live-view authorizer (ws:)", file: "apps/api/src/modules/work-session/index.ts" },
 ];
 
 /** GitHub CODEOWNERS pattern (gitignore subset) → RegExp over repo-relative paths. */
