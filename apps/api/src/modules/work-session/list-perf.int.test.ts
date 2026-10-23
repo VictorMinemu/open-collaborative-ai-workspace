@@ -4,6 +4,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { invite } from "../../testing-workzone";
+import { WorkSessionService } from "./service";
 
 /**
  * Phase 07.9-12 (Pitfall 8, A6; WINDOWS #306, #308, #311, #314): the audience rule at a realistic organization size,
@@ -19,6 +20,8 @@ const DEVICES = 20;
 const PROJECTS = 10;
 const EXTRA_MEMBERS = 199;
 const DANA_SEES = 50;
+/** Live sessions a Work Zone policy change re-checks (07.9 fan-out, WINDOWS #311). */
+const ORG_SWEEP = 2_000;
 
 /**
  * Budgets in ms (the median of three on the testcontainer; `deviceSweep` is one run). About four times the local
@@ -34,13 +37,25 @@ const BUDGET = {
   projectDetail: 500,
   draftPreview: 1_000,
   draftPeoplePersonal: 1_000,
-  /** PUT visibility with its after-commit delivery to every reader (the request waits for it, WINDOWS #311). */
+  /** PUT visibility; its delivery to every reader is queued after commit (07.9 fan-out, WINDOWS #311). */
   audienceChange: 1_500,
   /**
-   * A device access change that stops 250 sessions, then delivers each to its readers after commit (#311): 32 s before
-   * 07.9-12's fan-out fix (the reasons enumerator per session, one publish at a time), about 8.5 s after it locally.
+   * 07.9 fan-out (#311): what the request that changed a device's access waits for after its commit (the invalidation
+   * and queueing the sweep): 1 ms locally. It waited for the whole sweep and its delivery before: 6.3 s (07.9-12),
+   * 7.9 s measured on the same run as this budget.
+   */
+  deviceSweepRequest: 500,
+  /**
+   * The background sweep that stops 250 sessions and delivers each to its readers (#311): 32 s before 07.9-12's fan-out
+   * fix (the reasons enumerator per session, one publish at a time), about 7 s now locally. One run.
    */
   deviceSweep: 20_000,
+  /** PUT /work-zone-policy with 2,000 live sessions: 8 ms locally after its commit (63 s when it swept inline). */
+  orgSweepRequest: 500,
+  /** Background: every one of the 2,000 sessions re-checked (stopped): 12.7 s locally. One run. */
+  orgSweep: 50_000,
+  /** Background: the sweep and the delivery of the 2,000 stopped sessions to their readers: 49.5 s locally. One run. */
+  orgSweepDelivered: 200_000,
 } as const;
 
 let stack: TestStack;
@@ -82,6 +97,13 @@ function report(name: keyof typeof BUDGET, ms: number) {
   measured[name] = ms;
   console.log(`[perf] ${name}: median ${ms} ms (budget ${BUDGET[name]} ms)`);
   expect(ms, `${name} median ${ms} ms over its ${BUDGET[name]} ms budget`).toBeLessThan(BUDGET[name]);
+}
+
+/** The stack's work-session service (its background queue). */
+function service(): WorkSessionService {
+  const handler = stack.built.deviceHub.sessionHandler;
+  if (!(handler instanceof WorkSessionService)) throw new Error("no work-session service");
+  return handler;
 }
 
 async function seed(): Promise<void> {
@@ -320,13 +342,15 @@ describe(`the audience rule at ${SESSIONS} sessions (Pitfall 8)`, () => {
     report("audienceChange", change.ms);
   });
 
-  it("a device transaction that stops every session on a device, with the after-commit fan-out, within budget (WINDOWS #311)", async () => {
+  it("a device access change returns at once; the background sweep stops every session on the device and delivers each (WINDOWS #311)", async () => {
     // Device 1's 250 sessions were started by members who may not use it: the re-check stops and emits every one, and
-    // the system transaction waits for the delivery of each to its readers. Run last: it fails those sessions.
+    // the delivery of each to its readers follows in the background queue. Run late: it fails those sessions.
     const handler = stack.built.deviceHub.sessionHandler;
     if (!handler) throw new Error("no session handler");
     const t0 = performance.now();
     await handler.onAccessChanged({ deviceId: devices[1]!, organizationId: org }, "access_changed");
+    report("deviceSweepRequest", Math.round(performance.now() - t0));
+    await service().settled(org);
     const ms = Math.round(performance.now() - t0);
     const failed = await migrator.query(
       "select count(*)::int as n from app.work_sessions where device_id = $1 and status = 'failed'",
@@ -335,4 +359,45 @@ describe(`the audience rule at ${SESSIONS} sessions (Pitfall 8)`, () => {
     expect(failed.rows[0].n).toBe(SESSIONS / DEVICES);
     report("deviceSweep", ms);
   });
+
+  it(`a Work Zone policy change returns at once; ${ORG_SWEEP} live sessions are re-checked and delivered in the background (WINDOWS #311)`, async () => {
+    // Exactly ORG_SWEEP live sessions, none on devices 0 (shared) and 1: every creator may not use the device, so the
+    // re-check stops each one. Run last: it fails them.
+    await migrator.query(
+      "update app.work_sessions set status = 'completed' where organization_id = $1 and status <> 'failed'",
+      [org],
+    );
+    const live = (
+      await migrator.query(
+        `update app.work_sessions set status = 'idle' where id in (
+           select id from app.work_sessions where organization_id = $1 and device_id <> all($2::uuid[]) order by id limit $3)
+         returning id`,
+        [org, [devices[0], devices[1]], ORG_SWEEP],
+      )
+    ).rows.map((r) => r.id as string);
+    expect(live).toHaveLength(ORG_SWEEP);
+    const stopped = async () =>
+      Number(
+        (
+          await migrator.query(
+            "select count(*)::int as n from app.work_sessions where id = any($1::uuid[]) and status = 'failed'",
+            [live],
+          )
+        ).rows[0].n,
+      );
+
+    const t0 = performance.now();
+    await ok(victor.request("PUT", "/api/v1/work-zone-policy", { allowFastMode: true }));
+    report("orgSweepRequest", Math.round(performance.now() - t0));
+    const delivered = service()
+      .settled(org)
+      .then(() => performance.now());
+    for (;;) {
+      if ((await stopped()) === ORG_SWEEP) break;
+      if (performance.now() - t0 > BUDGET.orgSweepDelivered) throw new Error("the sweep did not finish");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    report("orgSweep", Math.round(performance.now() - t0));
+    report("orgSweepDelivered", Math.round((await delivered) - t0));
+  }, 600_000);
 });

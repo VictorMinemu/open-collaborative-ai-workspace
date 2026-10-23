@@ -731,14 +731,8 @@ export function registerVisibilityRoutes(
             workSessionId: s.id,
           });
           await svc.emitSession(tx, s.id);
-          const gone = [...removed];
-          tenantOf(tx).afterCommit(async () => {
-            for (const uid of gone) {
-              await core.realtime.publishEphemeral(`user:${uid}`, EventTypes.workSessionRemoved, {
-                id: s.id,
-              });
-            }
-          });
+          // After commit, in order with the organization's deliveries (07.9 fan-out).
+          svc.notifyRemovedAfterCommit(tx, s.id, removed);
         }
         const dir = await memberDirectory(tx);
         const [fresh] = await tx.select().from(workSessions).where(eq(workSessions.id, s.id));

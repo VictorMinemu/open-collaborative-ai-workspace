@@ -465,7 +465,7 @@ describe("narrowing a session: the people it removes get `revoked` and `work_ses
       }
       expect((await piaSock.sub(`user:${piaId}`)).op).toBe("subscribed");
       // Every delivery of the start has landed before the mark: what follows is caused by the narrowing.
-      await sleep(500);
+      await service().settled(orgId);
       const mark = piaSock.frames.length;
       const anaMark = anaSock.frames.length;
 
@@ -499,6 +499,62 @@ describe("narrowing a session: the people it removes get `revoked` and `work_ses
     } finally {
       piaSock.socket.close();
       anaSock.socket.close();
+    }
+  });
+  it("the request returns while the background queue waits; Pia loses the live view at once and later gets only `removed`", async () => {
+    const id = await startSession(ana, device, apiRepo, { title: "Queued delivery check" });
+    // Hold the organization's background queue: whatever is queued from now on waits behind this task. Once it runs,
+    // everything queued before it is done, so the taps opened next see only what follows.
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let holding = false;
+    service().background.push(orgId, {
+      kind: "test-gate",
+      ids: () => [],
+      run: () => {
+        holding = true;
+        return gate;
+      },
+    });
+    await eventually(async () => holding);
+    const taps = { Ana: await tap(`user:${anaId}`), Pia: await tap(`user:${piaId}`) };
+    const piaSock = await openSocket(pia);
+    try {
+      expect((await piaSock.sub(`ws:${id}`)).op).toBe("subscribed");
+      // A delivery queued BEFORE the narrowing (any device event emits the session) ...
+      await stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, async (tx) => {
+        await service().emitSession(tx, id);
+      });
+      // ... then the narrowing. Its request does not wait for the queue.
+      const res = await ok(ana.request("PUT", `/api/v1/work-sessions/${id}/visibility`, { kind: "owner" }));
+      expect(res.removedCount).toBeGreaterThan(0);
+      // The live view is re-decided at commit, not by the queue: Pia loses it while every delivery still waits.
+      await eventually(
+        async () => piaSock.frames.some((f) => f.op === "revoked" && f.topic === `ws:${id}`),
+        2000,
+      );
+      await sleep(200);
+      expect(sessionFrames(taps.Ana, id), "nothing delivered while the queue is held").toEqual([]);
+      expect(taps.Pia.frames).toEqual([]);
+    } finally {
+      open();
+      piaSock.socket.close();
+    }
+    await service().settled(orgId);
+    try {
+      // The delivery queued before the narrowing ran after it, read the narrowed audience and skipped Pia; the
+      // `removed` notice followed it. (Ana may also get a later device event's update.)
+      expect(sessionFrames(taps.Ana, id).length).toBeGreaterThan(0);
+      expect(sessionFrames(taps.Pia, id)).toEqual([]);
+      expect(
+        taps.Pia.frames.filter(
+          (f) => f.op === "eph" && f.type === "work_session.removed" && (f.data as Json | null)?.id === id,
+        ),
+      ).toHaveLength(1);
+    } finally {
+      for (const t of Object.values(taps)) await t.stop();
     }
   });
 });

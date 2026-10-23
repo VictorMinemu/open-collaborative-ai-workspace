@@ -27,11 +27,18 @@ import {
 
 export { sessionFacts, sessionFactsForUsers } from "./facts";
 export { createWorkSessionAttachmentScope } from "./images";
+export type { OrgQueueOptions, OrgTask } from "./org-queue";
 export { loadWorkZonePolicy } from "./policy";
 export { projectFacts } from "./projects";
 export { WORK_ZONE_PROPOSAL_RESOURCE, type WorkZoneProposalService } from "./proposals";
 export { revokeCauseOf } from "./revoke-cause";
-export { ACTIVE_STATES, type ReauthorizeReason, WorkSessionService, wsTopic } from "./service";
+export {
+  ACTIVE_STATES,
+  BACKGROUND_DRAIN_MS,
+  type ReauthorizeReason,
+  WorkSessionService,
+  wsTopic,
+} from "./service";
 export type {
   WorkSessionActor,
   WorkSessionStartCode,
@@ -162,5 +169,7 @@ export function createWorkSessionModule(
     },
     start,
     proposals,
+    // Shutdown (07.9 fan-out): the background queue drains for a bounded time, then what still waits is dropped.
+    close: () => service.close(),
   };
 }
