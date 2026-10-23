@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 176
+open_count: 177
 waived_count: 7
 fixed_count: 149
-total_count: 332
-last_updated: 2026-10-23T12:16:44.791Z
+total_count: 333
+last_updated: 2026-10-23T17:55:55.748Z
 ---
 
 # Broken Windows Ledger
@@ -347,6 +347,7 @@ last_updated: 2026-10-23T12:16:44.791Z
 | 330 | 07.9 | deviation | apps/api/src/modules/work-session/service.ts |  | 07.9-fanout (medium-low, deferred): one queue lane per organization, so a big sweep delays that org's other deliveries (2,000 live sessions: deliveries complete after ~50 s); separate lanes for sweeps and deliveries or batch reader computation | open |  | 2026-10-23T08:31:50.390Z |  |
 | 331 | 07.9 | deviation | apps/api/src/modules/work-session/service.ts |  | 07.9-fanout (low, deferred): the queue is in memory, so a crash loses pending sweeps (revocation already decided at commit; lists refetch on reconnect) — sweep on boot or a durable outbox; a frame from another transaction published between commit and its invalidation reaching Redis is not held | open |  | 2026-10-23T08:31:50.471Z |  |
 | 332 | 07.9 | deviation | apps/web/components/work-zone/session-sidebar.tsx |  | 07.9-polish: the sidebar header + and the session search are under 44 px on mobile (shared components); the 640–767 px two-row header is not covered by any e2e | open |  | 2026-10-23T10:05:54.945Z |  |
+| 333 | 07.9 | deviation | apps/openclaw-channel/src/sandbox-tools.ts |  | SHOULD FIX (brwopen debug): ocw_sandbox_exec has the same inverted timeout chain as the browser had (cell waits 35 s; the API may take up to 60 s ensure + 40 s); only bites with a cold sandbox and a command reaching the 25 s yield — nest the budgets like BROWSER_TIMEOUTS_MS | open |  | 2026-10-23T17:55:55.748Z |  |
 
 ````json
 [
@@ -4332,6 +4333,18 @@ last_updated: 2026-10-23T12:16:44.791Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-23T10:05:54.945Z",
+    "resolved_at": null
+  },
+  {
+    "id": 333,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/openclaw-channel/src/sandbox-tools.ts",
+    "line": null,
+    "description": "SHOULD FIX (brwopen debug): ocw_sandbox_exec has the same inverted timeout chain as the browser had (cell waits 35 s; the API may take up to 60 s ensure + 40 s); only bites with a cold sandbox and a command reaching the 25 s yield — nest the budgets like BROWSER_TIMEOUTS_MS",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T17:55:55.748Z",
     "resolved_at": null
   }
 ]
