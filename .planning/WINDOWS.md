@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 182
+open_count: 186
 waived_count: 5
 fixed_count: 138
-total_count: 325
-last_updated: 2026-10-23T07:53:31.501Z
+total_count: 329
+last_updated: 2026-10-23T08:12:30.035Z
 ---
 
 # Broken Windows Ledger
@@ -340,6 +340,10 @@ last_updated: 2026-10-23T07:53:31.501Z
 | 323 | 07.9 | deviation | apps/api/src/modules/work-session/revoke-cause.ts |  | 07.9-12 (minor): re-deciding a deactivated member's subscription gives cause visibility instead of role | open |  | 2026-10-23T07:06:56.756Z |  |
 | 324 | 07.9 | deviation | apps/web/components/settings |  | SHOULD FIX (07.9-13): the reused MembersSection buttons are under 44 px below 768 (project page and Settings › Organization); the disabled Switch in the off state is faint in dark mode (shared component) | open |  | 2026-10-23T07:53:31.404Z |  |
 | 325 | 07.9 | deviation | apps/api/src/modules/work-session/projects.ts |  | 07.9-13: a parent lead can remove a team an admin assigned (say so in ADR-0030); Settings › Organization gets live project updates only while a project unit is selected | open |  | 2026-10-23T07:53:31.501Z |  |
+| 326 | 07.9 | deviation | apps/web/components/work-zone/session-view.tsx |  | MUST FIX (07.9-14, regression from 10): e2e work-zone-title on mobile fails — the session header title measures 196 px against a 188 px limit since the visibility chip joined the header | open |  | 2026-10-23T08:12:29.374Z |  |
+| 327 | 07.9 | deviation | apps/web/components/work-zone/session-sidebar.tsx |  | SHOULD FIX (07.9-14): ended/failed status icon contrast in sidebar rows makes work-zone-visibility-marker fail axe when other specs leave such sessions behind | open |  | 2026-10-23T08:12:29.820Z |  |
+| 328 | 07.9 | deviation | packages/contracts/src |  | SHOULD FIX (07.9-14): WorkZoneStartBlock has no not_in_project, so a bot's proposal card cannot say it before Start (contract + agent-channel/proposals.ts + card copy) | open |  | 2026-10-23T08:12:29.947Z |  |
+| 329 | 07.9 | deviation | apps/web/components/ui/sheet.tsx |  | 07.9-14: a sheet opened over a dialog does not dim the dialog (nested backdrop); the e2e harness writes setup-*.png into whatever screenshot folder it is given | open |  | 2026-10-23T08:12:30.035Z |  |
 
 ````json
 [
@@ -4241,6 +4245,54 @@ last_updated: 2026-10-23T07:53:31.501Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-23T07:53:31.501Z",
+    "resolved_at": null
+  },
+  {
+    "id": 326,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/web/components/work-zone/session-view.tsx",
+    "line": null,
+    "description": "MUST FIX (07.9-14, regression from 10): e2e work-zone-title on mobile fails — the session header title measures 196 px against a 188 px limit since the visibility chip joined the header",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T08:12:29.374Z",
+    "resolved_at": null
+  },
+  {
+    "id": 327,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/web/components/work-zone/session-sidebar.tsx",
+    "line": null,
+    "description": "SHOULD FIX (07.9-14): ended/failed status icon contrast in sidebar rows makes work-zone-visibility-marker fail axe when other specs leave such sessions behind",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T08:12:29.820Z",
+    "resolved_at": null
+  },
+  {
+    "id": 328,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "packages/contracts/src",
+    "line": null,
+    "description": "SHOULD FIX (07.9-14): WorkZoneStartBlock has no not_in_project, so a bot's proposal card cannot say it before Start (contract + agent-channel/proposals.ts + card copy)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T08:12:29.947Z",
+    "resolved_at": null
+  },
+  {
+    "id": 329,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/web/components/ui/sheet.tsx",
+    "line": null,
+    "description": "07.9-14: a sheet opened over a dialog does not dim the dialog (nested backdrop); the e2e harness writes setup-*.png into whatever screenshot folder it is given",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T08:12:30.035Z",
     "resolved_at": null
   }
 ]
