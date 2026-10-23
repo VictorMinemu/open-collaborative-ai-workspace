@@ -60,6 +60,7 @@ import {
   type WorkSessionStartDeps,
   type WorkSessionStartFailure,
 } from "./start";
+import { registerVisibilityRoutes } from "./visibility";
 
 const SessionParams = z.object({ id: z.uuid() });
 const PromptParams = z.object({ id: z.uuid(), pid: z.uuid() });
@@ -762,6 +763,9 @@ export function registerWorkSessionRoutes(
         return { ok: true as const };
       }),
   );
+
+  // Phase 07.9-06 (D-04): who can see a session, its people search and the new-session draft preview.
+  registerVisibilityRoutes(app, core, { perms, svc });
 }
 
 /**

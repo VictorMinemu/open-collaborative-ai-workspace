@@ -214,7 +214,7 @@ async function projectPeople(tx: Tx, unitId: string): Promise<WorkProjectPerson[
 }
 
 /** Active members of each unit's subtree (a department counts its teams' people too). */
-async function subtreeMemberCounts(tx: Tx, unitIds: readonly string[]): Promise<Map<string, number>> {
+export async function subtreeMemberCounts(tx: Tx, unitIds: readonly string[]): Promise<Map<string, number>> {
   if (unitIds.length === 0) return new Map();
   const res = await tx.execute(sql`
     select t.id, (
@@ -228,7 +228,8 @@ async function subtreeMemberCounts(tx: Tx, unitIds: readonly string[]): Promise<
   return new Map((res.rows as Array<{ id: string; n: number }>).map((r) => [r.id, Number(r.n)]));
 }
 
-async function assignedTeams(tx: Tx, unitId: string): Promise<WorkProjectTeam[]> {
+/** The teams and departments assigned to a team project, with their subtree member counts (never a project). */
+export async function assignedTeams(tx: Tx, unitId: string): Promise<WorkProjectTeam[]> {
   const rows = await tx
     .select({ id: orgUnits.id, name: orgUnits.name, kind: orgUnits.kind })
     .from(workProjectTeams)
@@ -266,7 +267,7 @@ async function linkedRepos(tx: Tx, unitId: string): Promise<WorkProjectRepo[]> {
 }
 
 /** `default_visibility`, or `project` when the project has no settings row (D-03: on by default). */
-async function defaultVisibilityOf(tx: Tx, unitId: string): Promise<"project" | "owner"> {
+export async function defaultVisibilityOf(tx: Tx, unitId: string): Promise<"project" | "owner"> {
   const [row] = await tx
     .select({ v: workProjectSettings.defaultVisibility })
     .from(workProjectSettings)
