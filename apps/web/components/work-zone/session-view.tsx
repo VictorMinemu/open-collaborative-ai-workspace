@@ -7,7 +7,18 @@ import {
   type WorkSession,
   type WorkSessionChanges,
 } from "@ocw/contracts";
-import { Archive, ArrowLeft, FileDiff, ListOrdered, Lock, MoreHorizontal, SearchX, X } from "lucide-react";
+import {
+  Archive,
+  ArrowLeft,
+  FileDiff,
+  Info,
+  ListOrdered,
+  Lock,
+  MoreHorizontal,
+  SearchX,
+  SquareArrowOutUpRight,
+  X,
+} from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -30,7 +41,7 @@ import { useAttachmentsConfig } from "@/lib/attachment-queries";
 import { useMe, useMembers } from "@/lib/queries";
 import { type LiveSession, useLiveSession } from "@/lib/use-live-session";
 import { cn } from "@/lib/utils";
-import { useArchiveSession, useDevices, useDiff } from "@/lib/workzone-queries";
+import { useArchiveSession, useDevices, useDiff, useWorkSessions } from "@/lib/workzone-queries";
 import { AgentBar } from "./agent-bar";
 import { ApprovalBanner } from "./approval-banner";
 import { ChangesCard } from "./changes-card";
@@ -42,30 +53,51 @@ import { RUNTIMES, StatusChip, StatusDot } from "./meta";
 import { QueuePanel } from "./queue-panel";
 import { SessionFooter } from "./session-footer";
 import { projectInitials } from "./session-sidebar";
+import { VisibilityChip } from "./visibility/visibility-chip";
 
 type PanelTab = "queue" | "changes";
 
-export function SessionView({ id }: { id: string }) {
-  const { state, query, revoked, lostTitle } = useLiveSession(id);
+/**
+ * The live view's words after access was lost: taken away by a change of who can see it (`visibility`, 07.9 R7), the
+ * owner to ask; any other cause (role, rule, device, module) keeps the words it always had.
+ */
+export function accessLostCopy(
+  cause: string | null,
+  ownerName: string | null,
+): { title: string; description: string } {
+  if (cause === "visibility") {
+    return {
+      title: "You can no longer see this session",
+      description: `Who can see it changed. Ask ${ownerName ?? "the owner"} if you need it back.`,
+    };
+  }
+  return {
+    title: "You no longer have access to this session",
+    description: "Your role or permissions changed. Ask an admin if you need it back.",
+  };
+}
 
-  // RT-01: the server dropped the live stream because access was lost (role, rule or device change).
+/** The composer's place for a creator who left the session's project (D-12). */
+export function leftProjectLine(projectName: string): string {
+  return `You left ${projectName}. You can still read and archive this session.`;
+}
+
+export function SessionView({ id }: { id: string }) {
+  // A session given back after it was taken away (Undo of a narrowing) is opened again on a fresh live view.
+  const [epoch, setEpoch] = useState(0);
+  return <LiveSessionView key={epoch} id={id} onReopen={() => setEpoch((n) => n + 1)} />;
+}
+
+function LiveSessionView({ id, onReopen }: { id: string; onReopen: () => void }) {
+  const { state, query, revoked, lostTitle, lostCause } = useLiveSession(id);
+  // The owner's name outlives the cached detail, for "Ask {owner} if you need it back" (07.9-10, R7).
+  const owner = useRef<string | null>(null);
+  if (state) owner.current = state.session.createdByName;
+
+  // RT-01: the server dropped the live stream because access was lost (role, rule, device or who can see it).
   if (revoked) {
     return (
-      <div className="flex min-w-0 flex-1 flex-col" data-testid="session-access-lost">
-        <PageHeader
-          title={<span className="text-muted-foreground">{lostTitle ?? "Session"}</span>}
-          icon={<Lock />}
-        />
-        <EmptyState
-          icon={Lock}
-          title="You no longer have access to this session"
-          description="Your role or permissions changed. Ask an admin if you need it back."
-        >
-          <Link href="/work-zone" className={buttonVariants()}>
-            <ArrowLeft /> Back to Work Zone
-          </Link>
-        </EmptyState>
-      </div>
+      <AccessLost id={id} title={lostTitle} cause={lostCause} ownerName={owner.current} onReopen={onReopen} />
     );
   }
 
@@ -90,7 +122,56 @@ export function SessionView({ id }: { id: string }) {
     );
   }
   if (!state) return <SessionSkeleton />;
-  return <LoadedSession state={state} viewerCan={query.data?.viewerCan ?? []} />;
+  return (
+    <LoadedSession
+      state={state}
+      viewerCan={query.data?.viewerCan ?? []}
+      leftProject={query.data?.viewerState === "left_project"}
+    />
+  );
+}
+
+/**
+ * The live view after access was lost. Taken away by a change of who can see it (`visibility`): its own words and the
+ * owner to ask (07.9, R7); any other cause keeps today's words. If the session comes back to the viewer's list (the
+ * owner pressed Undo), it offers to open it again.
+ */
+function AccessLost({
+  id,
+  title,
+  cause,
+  ownerName,
+  onReopen,
+}: {
+  id: string;
+  title: string | null;
+  cause: string | null;
+  ownerName: string | null;
+  onReopen: () => void;
+}) {
+  const copy = accessLostCopy(cause, ownerName);
+  const sessions = useWorkSessions();
+  const back = cause === "visibility" && (sessions.data?.some((s) => s.id === id) ?? false);
+  return (
+    <div className="flex min-w-0 flex-1 flex-col" data-testid="session-access-lost" data-cause={cause ?? ""}>
+      <PageHeader
+        title={<span className="text-muted-foreground">{title ?? "Session"}</span>}
+        icon={<Lock />}
+      />
+      <EmptyState icon={Lock} title={copy.title} description={copy.description}>
+        <div className="flex flex-wrap justify-center gap-2">
+          {back ? (
+            <Button variant="outline" data-testid="session-reopen" onClick={onReopen} className="max-md:h-11">
+              <SquareArrowOutUpRight /> Open session
+            </Button>
+          ) : null}
+          <Link href="/work-zone" className={cn(buttonVariants(), "max-md:h-11")}>
+            <ArrowLeft /> Back to Work Zone
+          </Link>
+        </div>
+      </EmptyState>
+    </div>
+  );
 }
 
 function SessionSkeleton() {
@@ -116,7 +197,16 @@ function readPanel(): PanelTab | null {
   return v === "queue" || v === "changes" ? v : null;
 }
 
-function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: readonly Permission[] }) {
+function LoadedSession({
+  state,
+  viewerCan,
+  leftProject,
+}: {
+  state: LiveSession;
+  viewerCan: readonly Permission[];
+  /** The viewer created this session and left its team project since (D-12): read and archive only. */
+  leftProject: boolean;
+}) {
   const session = state.session;
   const devices = useDevices();
   // ref-4: the stream owns the width; Queue / Changes open as a side panel on wide screens (remembered), as a
@@ -169,6 +259,19 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
       : null);
 
   const device = devices.data?.find((d) => d.id === session.deviceId);
+  const agentBar = (
+    <AgentBar
+      session={session}
+      canInterrupt={viewerCan.includes("work_session.interrupt")}
+      onView={() => {
+        const el = scroller.current;
+        const running = el?.querySelector("[data-turn-running]");
+        if (running) running.scrollIntoView({ block: "start", behavior: "smooth" });
+        else el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+        pinned.current = !running;
+      }}
+    />
+  );
   // Decided by the API resolver (creator, device owner or admin, minus Tool and Device layer denials).
   const canDecide = viewerCan.includes("work_session.approve");
   const deciderHint = `Waiting for ${session.createdByName ?? "the session owner"}${
@@ -194,6 +297,7 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
         queued={queued}
         changesCount={changesCount}
         canArchive={viewerCan.includes("work_session.archive")}
+        canChangeVisibility={viewerCan.includes("work_session.visibility")}
       />
       <div className="flex min-h-0 flex-1">
         <DropZone
@@ -235,27 +339,31 @@ function LoadedSession({ state, viewerCan }: { state: LiveSession; viewerCan: re
                 deciderHint={deciderHint}
               />
             ) : null}
-            <Composer
-              session={session}
-              queued={queued}
-              canConfigure={viewerCan.includes("work_session.configure")}
-              canPrompt={canPrompt}
-              apiRef={composer}
-              above={
-                <AgentBar
-                  session={session}
-                  canInterrupt={viewerCan.includes("work_session.interrupt")}
-                  onView={() => {
-                    const el = scroller.current;
-                    const running = el?.querySelector("[data-turn-running]");
-                    if (running) running.scrollIntoView({ block: "start", behavior: "smooth" });
-                    else el?.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-                    pinned.current = !running;
-                  }}
-                />
-              }
-              below={<SessionFooter session={session} />}
-            />
+            {leftProject ? (
+              // D-12: the creator who left keeps reading and archiving; prompts need project access. One line in
+              // the composer's place (no disabled input, no Send); the agent bar and the footer stay.
+              <div className="mx-auto w-full max-w-3xl px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6 sm:pb-4">
+                {agentBar}
+                <p
+                  data-testid="composer-left-project"
+                  className="flex min-h-11 items-center gap-2 rounded-lg border bg-muted/40 px-3 text-muted-foreground text-xs"
+                >
+                  <Info aria-hidden className="size-3.5 shrink-0" />
+                  <span>{leftProjectLine(session.teamProject?.name ?? session.projectName)}</span>
+                </p>
+                <SessionFooter session={session} />
+              </div>
+            ) : (
+              <Composer
+                session={session}
+                queued={queued}
+                canConfigure={viewerCan.includes("work_session.configure")}
+                canPrompt={canPrompt}
+                apiRef={composer}
+                above={agentBar}
+                below={<SessionFooter session={session} />}
+              />
+            )}
           </div>
         </DropZone>
         {wide && panel ? (
@@ -359,6 +467,7 @@ function SessionHeader({
   queued,
   changesCount,
   canArchive,
+  canChangeVisibility,
 }: {
   session: WorkSession;
   state: LiveSession;
@@ -369,6 +478,8 @@ function SessionHeader({
   queued: number;
   changesCount: number;
   canArchive: boolean;
+  /** The API's `work_session.visibility` on this session (the chip says "Change" rather than "See"). */
+  canChangeVisibility: boolean;
 }) {
   const router = useRouter();
   const archive = useArchiveSession(session.id);
@@ -434,8 +545,24 @@ function SessionHeader({
           className="flex min-w-0 flex-1 flex-col sm:flex-row sm:items-center sm:gap-2.5"
         >
           <span className="flex min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground sm:max-w-[45%] sm:text-[14px]">
-            <ProjectMark name={session.projectName} />
-            <span className="truncate">{session.projectName}</span>
+            <ProjectMark name={session.teamProject?.name ?? session.projectName} />
+            {session.teamProject ? (
+              // A team project's segment opens its page (07.9, UI-SPEC IA "Breadcrumb link").
+              <Link
+                href={`/work-zone/projects/${session.teamProject.id}`}
+                data-testid="session-project-link"
+                title={`${session.projectName} on ${session.deviceName}`}
+                className="truncate rounded-sm outline-none hover:text-foreground hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/40"
+              >
+                {session.teamProject.name}
+              </Link>
+            ) : (
+              <Tooltip content={`${session.projectName} on ${session.deviceName}`}>
+                <span className="truncate" data-testid="session-project">
+                  {session.projectName}
+                </span>
+              </Tooltip>
+            )}
             {!sm && session.fullAccess ? <FullAccessBadge className="ml-1 h-5 px-1.5 text-[11px]" /> : null}
           </span>
           <span aria-hidden className="hidden text-muted-foreground/50 sm:inline">
@@ -454,6 +581,7 @@ function SessionHeader({
         </nav>
         <div className="flex shrink-0 items-center gap-1.5">
           {sm && session.fullAccess ? <FullAccessBadge /> : null}
+          <VisibilityChip session={session} viewerId={me} canChange={canChangeVisibility} />
           <div className="flex items-center" data-testid="session-viewers">
             <PresenceStack
               people={viewers}

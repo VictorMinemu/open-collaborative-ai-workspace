@@ -1,9 +1,13 @@
-import type { WorkSession, WorkSessionVisibilitySummary } from "@ocw/contracts";
+import type { WorkSession, WorkSessionVisibilitySummary, WorkSessionVisibilityView } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
 import {
+  addPeopleLabel,
+  andMore,
   announcement,
   chipName,
   choiceLines,
+  draftInput,
+  draftLongLabel,
   firstName,
   footerAlwaysLine,
   footerCount,
@@ -12,12 +16,18 @@ import {
   markerKind,
   markerSrSuffix,
   markerTooltip,
+  memberCount,
   narrowToast,
+  noMatchLine,
+  ownerRowName,
   plural,
   readOnlyNote,
   reasonLabel,
   sessionLabels,
   shortLabel,
+  viewInput,
+  viewLongLabel,
+  viewPlace,
 } from "./session-visibility";
 
 /**
@@ -322,8 +332,86 @@ describe("plain words (N4)", () => {
       narrowToast(4, []),
       inactiveLine("person", "Customer portal"),
       inactiveLine("team", "Customer portal"),
+      addPeopleLabel(team),
+      addPeopleLabel(personal),
+      noMatchLine(team, "zed"),
+      draftLongLabel({ kind: "teams", teams: [{ id: "a", name: "Web" }] }, team),
     );
     expect(outputs.length).toBeGreaterThan(300);
     for (const text of outputs) expect(text).not.toMatch(banned);
+  });
+});
+
+const ANA = "01a11635-d6e7-7c87-9f17-0000000000a1";
+const LEO = "01a11635-d6e7-7c87-9f17-0000000000a2";
+const WEB = "01a11635-d6e7-7c87-9f17-0000000000d1";
+const OPS = "01a11635-d6e7-7c87-9f17-0000000000d2";
+
+const view = (over: Partial<WorkSessionVisibilityView> = {}): WorkSessionVisibilityView => ({
+  kind: "project",
+  projectDefault: "project",
+  project: { kind: "team", id: "01a11635-d6e7-7c87-9f17-0000000000e1", name: "Customer portal" },
+  owner: { userId: ANA, name: "Ana Ruiz" },
+  teams: [],
+  people: [],
+  viewers: { count: 1, people: [], more: 0 },
+  alwaysVisible: { admins: true, deviceOwner: null },
+  viewerCan: { change: true },
+  viewerState: null,
+  ...over,
+});
+
+describe("panel words (07.9-10)", () => {
+  it("words the people search for a team or a personal project", () => {
+    expect(addPeopleLabel(team)).toBe("Add people in Customer portal");
+    expect(addPeopleLabel(personal)).toBe("Add people who can use Ana's MacBook");
+    expect(noMatchLine(team, " zed ")).toBe("No one in Customer portal matches “zed”.");
+    expect(memberCount(1)).toBe("1 person");
+    expect(memberCount(8)).toBe("8 people");
+    expect(andMore(3)).toBe("and 3 more");
+    expect(ownerRowName(mine)).toBe("Víctor Ruiz (you)");
+    expect(ownerRowName(anas)).toBe("Ana Ruiz");
+  });
+
+  it("turns a draft into the request, holding nothing while a picker is empty", () => {
+    expect(draftInput({ kind: "owner" })).toEqual({ kind: "owner" });
+    expect(draftInput({ kind: "teams", teams: [] })).toBeNull();
+    expect(draftInput({ kind: "people", people: [{ userId: LEO, name: "Leo", avatarUrl: null }] })).toEqual({
+      kind: "people",
+      userIds: [LEO],
+    });
+    expect(
+      draftLongLabel(
+        {
+          kind: "teams",
+          teams: [
+            { id: WEB, name: "Web" },
+            { id: OPS, name: "Ops" },
+          ],
+        },
+        team,
+      ),
+    ).toBe("Web and Ops");
+    expect(draftLongLabel({ kind: "owner" }, team)).toBe("Only you");
+    expect(draftLongLabel({ kind: "project" }, personal)).toBe("Everyone who can use Ana's MacBook");
+  });
+
+  it("restores a view's active entries only (Undo), and words it", () => {
+    const v = view({
+      kind: "teams",
+      teams: [
+        { id: WEB, name: "Web", kind: "team", memberCount: 8, selected: true, active: true },
+        { id: OPS, name: "Ops", kind: "team", memberCount: 2, selected: true, active: false },
+      ],
+    });
+    expect(viewInput(v)).toEqual({ kind: "teams", teamIds: [WEB] });
+    expect(viewLongLabel(v, ANA)).toBe("Web");
+    expect(viewInput(view({ kind: "people", people: [] }))).toEqual({ kind: "owner" });
+    expect(viewLongLabel(view({ kind: "owner" }), LEO)).toBe("Only Ana Ruiz");
+    expect(viewPlace(view({ project: { kind: "personal", deviceName: "Ana's MacBook" } }))).toEqual({
+      projectName: "Ana's MacBook",
+      deviceName: "Ana's MacBook",
+      personal: true,
+    });
   });
 });

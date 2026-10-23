@@ -1,6 +1,12 @@
 import type { APIRequestContext } from "@playwright/test";
 import { describe, expect, it } from "vitest";
-import { createTeamProject, linkRepo, removeTeamProject, shareDevice } from "./work-zone-projects";
+import {
+  createTeamProject,
+  linkRepo,
+  removeTeamProject,
+  setAudience,
+  shareDevice,
+} from "./work-zone-projects";
 
 /**
  * 07.9-08: the e2e helpers that give a second person explicit access to a session (D-06, P-07) go through the public
@@ -328,5 +334,44 @@ describe("shareDevice()", () => {
     const { api } = stub(() => apiError(409, "device_opt_in"));
 
     await expect(shareDevice(api, ID(40), ID(10), "fullAccess")).rejects.toThrow(/409.*device_opt_in/u);
+  });
+});
+
+describe("setAudience()", () => {
+  const view = {
+    kind: "people",
+    projectDefault: "project",
+    project: { kind: "team", id: ID(7), name: "Atlas" },
+    owner: { userId: ID(1), name: "Ana Ruiz" },
+    teams: [],
+    people: [{ userId: ID(2), name: "Leo Park", avatarUrl: null, active: true }],
+    viewers: { count: 2, people: [], more: 0 },
+    alwaysVisible: { admins: true, deviceOwner: null },
+    viewerCan: { change: true },
+    viewerState: null,
+  };
+
+  it("puts the audience on the session and returns who lost access", async () => {
+    const { api, calls } = stub(() => ({
+      status: 200,
+      body: { visibility: view, removedCount: 1, removedNames: ["Sam Lee"] },
+    }));
+    const result = await setAudience(api, ID(9), { kind: "people", userIds: [ID(2)] });
+    expect(calls).toEqual([
+      {
+        method: "PUT",
+        url: `/api/v1/work-sessions/${ID(9)}/visibility`,
+        data: { kind: "people", userIds: [ID(2)] },
+      },
+    ]);
+    expect(result.removedCount).toBe(1);
+    expect(result.visibility.kind).toBe("people");
+  });
+
+  it("throws with the status and the error code on a refusal", async () => {
+    const { api } = stub(() => apiError(422, "audience_outside_project"));
+    await expect(setAudience(api, ID(9), { kind: "owner" })).rejects.toThrow(
+      `PUT /api/v1/work-sessions/${ID(9)}/visibility: HTTP 422 audience_outside_project`,
+    );
   });
 });

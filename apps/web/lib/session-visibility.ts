@@ -1,8 +1,10 @@
 import type {
+  SessionAudienceInput,
   SessionVisibilityKind,
   ViewerReason,
   WorkSession,
   WorkSessionVisibilitySummary,
+  WorkSessionVisibilityView,
 } from "@ocw/contracts";
 
 /**
@@ -257,4 +259,120 @@ export function choiceLines(
         : `Choose people in ${ctx.projectName}`,
     },
   };
+}
+
+// ---------------------------------------------------------------- the panel (07.9-10, UI-SPEC Surface 1)
+
+/** The panel's title and the one sentence under it (§1.2). */
+export const PANEL_TITLE = "Who can see this session";
+export const PANEL_SUBLINE = "People who can see it follow it live and, if their role allows, add prompts.";
+/** Load and change failures (§States, rule 6). */
+export const LOAD_FAILED = "Couldn't load who can see this session.";
+export const CHANGE_FAILED = "Couldn't change who can see this session. Try again.";
+/** The pickers' hints while nothing is picked (rule 2: nothing is saved yet). */
+export const PICK_TEAM_HINT = "Pick at least one team.";
+export const PICK_PERSON_HINT = "Pick at least one person.";
+
+/** The people search field: "Add people in {project}" · "Add people who can use {device}". */
+export function addPeopleLabel(place: PlaceContext): string {
+  return place.personal ? `Add people who can use ${place.deviceName}` : `Add people in ${place.projectName}`;
+}
+
+/** No search result: "No one in {project} matches “{q}”." */
+export function noMatchLine(place: PlaceContext, q: string): string {
+  const where = place.personal ? `who can use ${place.deviceName}` : `in ${place.projectName}`;
+  return `No one ${where} matches “${q.trim()}”.`;
+}
+
+/** A team's size in the picker: "1 person" · "8 people". */
+export function memberCount(n: number): string {
+  return people(n);
+}
+
+/** See all, beyond the listed rows: "and {n} more". */
+export function andMore(n: number): string {
+  return `and ${n} more`;
+}
+
+/** The owner's fixed row in the People picker: "{name} (you)" or "{name}"; the reason "Owner" sits beside it. */
+export function ownerRowName(o: OwnerContext): string {
+  return o.viewerIsOwner ? `${ownerFull(o)} (you)` : ownerFull(o);
+}
+
+/**
+ * Warned before an editor's change would take the session away from them too (07.9-06 broken-window 4): a lead who
+ * is not its owner narrowing it to Only {owner} or to people without themselves.
+ */
+export const SELF_REMOVAL_WARNING = "You won't see this session anymore after this change.";
+export const SELF_REMOVAL_CONFIRM = "Change anyway";
+
+/**
+ * A choice made in the new-session dialog before the session exists (draft mode, Surface 3). It keeps the names it
+ * shows ("Visible to: Web and Design"); `draftInput` turns it into the create request's audience.
+ */
+export type DraftAudience =
+  | { kind: "owner" }
+  | { kind: "project" }
+  | { kind: "teams"; teams: ReadonlyArray<{ id: string; name: string }> }
+  | { kind: "people"; people: ReadonlyArray<{ userId: string; name: string; avatarUrl: string | null }> };
+
+/** The audience a draft sends; null while Teams or People has nothing picked (the previous choice still holds). */
+export function draftInput(d: DraftAudience): SessionAudienceInput | null {
+  if (d.kind === "teams")
+    return d.teams.length > 0 ? { kind: "teams", teamIds: d.teams.map((t) => t.id) } : null;
+  if (d.kind === "people")
+    return d.people.length > 0 ? { kind: "people", userIds: d.people.map((p) => p.userId) } : null;
+  return { kind: d.kind };
+}
+
+/** The draft's long label ("Visible to: {long label}"); the starter is its owner. */
+export function draftLongLabel(d: DraftAudience, place: PlaceContext): string {
+  const count = d.kind === "teams" ? d.teams.length : d.kind === "people" ? d.people.length : 0;
+  return longLabel({
+    kind: d.kind,
+    activeCount: count,
+    teamNames: d.kind === "teams" ? d.teams.map((t) => t.name) : undefined,
+    ownerName: null,
+    viewerIsOwner: true,
+    ...place,
+  });
+}
+
+/** The active entries a view stores, as the request that restores it (Undo); stale entries are left out. */
+export function viewInput(v: WorkSessionVisibilityView): SessionAudienceInput {
+  if (v.kind === "teams") {
+    const teamIds = v.teams.filter((t) => t.selected && t.active).map((t) => t.id);
+    return teamIds.length > 0 ? { kind: "teams", teamIds } : { kind: "owner" };
+  }
+  if (v.kind === "people") {
+    const userIds = v.people.filter((p) => p.active).map((p) => p.userId);
+    return userIds.length > 0 ? { kind: "people", userIds } : { kind: "owner" };
+  }
+  return { kind: v.kind };
+}
+
+/** Where a view's session runs, for the labels. */
+export function viewPlace(v: WorkSessionVisibilityView): PlaceContext {
+  return v.project.kind === "team"
+    ? {
+        projectName: v.project.name,
+        deviceName: v.alwaysVisible.deviceOwner?.deviceName ?? "",
+        personal: false,
+      }
+    : { projectName: v.project.deviceName, deviceName: v.project.deviceName, personal: true };
+}
+
+/** A view's long label for its viewer (the announcement, the chip's name while the panel is open). */
+export function viewLongLabel(v: WorkSessionVisibilityView, viewerId: string | null | undefined): string {
+  const teamNames = v.teams.filter((t) => t.selected && t.active).map((t) => t.name);
+  const activeCount =
+    v.kind === "teams" ? teamNames.length : v.kind === "people" ? v.people.filter((p) => p.active).length : 0;
+  return longLabel({
+    kind: v.kind,
+    activeCount,
+    teamNames,
+    ownerName: v.owner.name,
+    viewerIsOwner: viewerId === v.owner.userId,
+    ...viewPlace(v),
+  });
 }
