@@ -289,6 +289,8 @@ async function projectDetail(
   const manage = await perms.can(req, tx, "work_project.manage", facts);
   const assignTeams = await perms.can(req, tx, "work_project.manage", parentResource(unit));
   const members = await perms.can(req, tx, "unit.members.manage", unitResource(unit));
+  // D-14: a manager may lack project access; the page then says why none of its sessions shows (07.9-13).
+  const open = await perms.can(req, tx, "work_session.read", facts);
   return WorkProjectDetail.parse({
     id: unit.id,
     name: unit.name,
@@ -298,7 +300,7 @@ async function projectDetail(
     access: { count: people.length, people: people.slice(0, WORK_PROJECT_LIMITS.accessPeople) },
     teams: await assignedTeams(tx, unit.id),
     repos: await linkedRepos(tx, unit.id),
-    viewerCan: { manage, assignTeams, members },
+    viewerCan: { manage, assignTeams, members, open },
   });
 }
 
@@ -561,8 +563,8 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
       core.db.withTenant(tenant(req), async (tx) => {
         const project = await projectFor(req, tx, perms, req.params.unitId, "work_project.manage", "parent");
         const q = req.query.q?.toLowerCase() ?? "";
-        const rows = await tx
-          .select({ id: orgUnits.id, name: orgUnits.name, kind: orgUnits.kind })
+        const candidates = await tx
+          .select({ id: orgUnits.id, name: orgUnits.name, kind: orgUnits.kind, path: orgUnits.path })
           .from(orgUnits)
           .where(
             and(
@@ -571,8 +573,12 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
               sql`not exists (select 1 from app.work_project_teams t where t.project_unit_id = ${project.unit.id}::uuid and t.team_unit_id = ${orgUnits.id})`,
             ),
           )
-          .orderBy(asc(sql`lower(${orgUnits.name})`), asc(orgUnits.id))
-          .limit(ASSIGNABLE_MAX);
+          .orderBy(asc(sql`lower(${orgUnits.name})`), asc(orgUnits.id));
+        // D-14: only the units the caller may assign, as the write decides them (`work_project.manage` on the unit):
+        // every team and department for admins, the subtree they lead for leads.
+        const rows = (
+          await perms.filter(req, tx, candidates, "work_project.manage", (u) => unitResource(u))
+        ).slice(0, ASSIGNABLE_MAX);
         const counts = await subtreeMemberCounts(
           tx,
           rows.map((r) => r.id),
@@ -606,6 +612,9 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
         // Loaded inside the tenant: a unit of another organization is simply not found (T-07.9-04-04).
         const team = await requireUnit(tx, req.body.unitId);
         if (team.kind === "project" || team.id === project.unit.id) throw invalidTeamKind();
+        // D-14: assigning a unit opens the project to its people, so the caller must manage that unit too (admins:
+        // any; leads: the subtree they lead). The list above offers exactly these.
+        await perms.assertCan(req, tx, "work_project.manage", unitResource(team));
         try {
           await tx.insert(workProjectTeams).values({
             organizationId: tenantOf(tx).organizationId,

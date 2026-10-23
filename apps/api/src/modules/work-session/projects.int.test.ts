@@ -215,10 +215,11 @@ describe("a parent lead creates a team project (D-01, D-10, D-13)", () => {
   it("only people with project access open it; everyone else gets the unknown-id 404", async () => {
     const mine = await ok(lena.request("GET", `/api/v1/work-projects/${portal}`));
     expect(mine.access.count).toBeGreaterThanOrEqual(1);
+    expect(mine.viewerCan.open).toBe(true);
     const admin = await ok(victor.request("GET", `/api/v1/work-projects/${portal}`));
     expect(admin).toMatchObject({
       id: portal,
-      viewerCan: { manage: true, assignTeams: true, members: true },
+      viewerCan: { manage: true, assignTeams: true, members: true, open: true },
     });
 
     const unknown = await fails(oscar.request("GET", `/api/v1/work-projects/${randomUUID()}`), 404);
@@ -316,11 +317,17 @@ describe("teams, repositories and the default (D-01, D-03, D-10, UI-SPEC U-7)", 
     await ok(victor.request("POST", `/api/v1/units/${portal}/members`, { userId: ottoId, role: "lead" }));
   });
 
-  it("a parent lead assigns a team and a department; their members get access and the counts follow", async () => {
+  it("an admin assigns a team and a department; their members get access and the counts follow", async () => {
     const before = (await audits("work_project.team_assigned")).length;
-    await ok(lena.request("POST", `/api/v1/work-projects/${portal}/teams`, { unitId: mobile }));
+    // D-14: Lena leads the portal's parent (Web), but neither Mobile nor Engineering: she may assign neither.
+    for (const unitId of [mobile, engineering]) {
+      expect(
+        (await fails(lena.request("POST", `/api/v1/work-projects/${portal}/teams`, { unitId }), 403)).code,
+      ).toBe("forbidden");
+    }
+    await ok(victor.request("POST", `/api/v1/work-projects/${portal}/teams`, { unitId: mobile }));
     const detail = await ok(
-      lena.request("POST", `/api/v1/work-projects/${portal}/teams`, { unitId: engineering }),
+      victor.request("POST", `/api/v1/work-projects/${portal}/teams`, { unitId: engineering }),
     );
     expect(detail.teams).toEqual([
       // Engineering's subtree: Lena and Dana (Web), Otto (Mobile, the portal) and Víctor (who leads Platform).
@@ -343,7 +350,7 @@ describe("teams, repositories and the default (D-01, D-03, D-10, UI-SPEC U-7)", 
       as.request("POST", `/api/v1/work-projects/${portal}/teams`, { unitId });
     expect((await fails(assign(lena, portal), 400)).code).toBe("invalid_team_kind");
     expect((await fails(assign(victor, platform), 400)).code).toBe("invalid_team_kind");
-    expect((await fails(assign(lena, mobile), 409)).code).toBe("team_already_assigned");
+    expect((await fails(assign(victor, mobile), 409)).code).toBe("team_already_assigned");
     expect((await fails(assign(lena, eveUnit), 404)).code).toBe("unit_not_found");
     expect((await fails(assign(lena, randomUUID()), 404)).code).toBe("unit_not_found");
     // Otto leads the project, not its parent: he opens it (403, not 404) but assigns nothing.
@@ -600,7 +607,8 @@ describe("teams, repositories and the default (D-01, D-03, D-10, UI-SPEC U-7)", 
   });
 
   it("deleting a team assigned to a project records the unassignment and announces the project", async () => {
-    const temp = await unit("team", "Temp", engineering);
+    // A team inside Web: Lena, who leads Web (Billing's parent), may assign it (D-14).
+    const temp = await unit("team", "Temp", web);
     await ok(lena.request("POST", `/api/v1/work-projects/${billing}/teams`, { unitId: temp }));
     await ok(victor.request("DELETE", `/api/v1/units/${temp}`));
     const [deleted] = await audits("unit.deleted", temp);
@@ -764,7 +772,8 @@ describe("D-14: managing a project opens its page", () => {
       expect(page).toMatchObject({
         id: ledger,
         access: { count: 0, people: [] },
-        viewerCan: { manage: true, assignTeams: true, members: true },
+        // `open` false: she manages it from outside, so the page can say why no session shows (07.9-13).
+        viewerCan: { manage: true, assignTeams: true, members: true, open: false },
       });
       const index = await ok(lena.request("GET", "/api/v1/work-projects"));
       expect(index.teamProjects.map((p: { id: string }) => p.id)).toContain(ledger);
@@ -778,6 +787,44 @@ describe("D-14: managing a project opens its page", () => {
       }
     } finally {
       await ok(victor.request("DELETE", `/api/v1/units/${ledger}`));
+    }
+  });
+});
+
+describe("D-14: assignable teams follow the resolver", () => {
+  it("an admin may assign every team and department; a lead only the subtree they lead, in the list and the write", async () => {
+    const design = await unit("team", "Design", engineering);
+    const webQa = await unit("team", "Web QA", web);
+    const docs = (
+      await ok(lena.request("POST", "/api/v1/work-projects", { name: "Docs site", parentId: web }))
+    ).id as string;
+    try {
+      const ids = async (as: TestClient) =>
+        (
+          (await ok(as.request("GET", `/api/v1/work-projects/${docs}/assignable-teams`))).teams as Array<{
+            id: string;
+          }>
+        ).map((t) => t.id);
+      const admins = await ids(victor);
+      for (const id of [engineering, web, mobile, design, webQa]) expect(admins).toContain(id);
+      // Lena leads Web: Web and the team inside it, never its department or a sibling team.
+      expect((await ids(lena)).sort()).toEqual([web, webQa].sort());
+
+      const assign = (as: TestClient, unitId: string) =>
+        as.request("POST", `/api/v1/work-projects/${docs}/teams`, { unitId });
+      const denied = await fails(assign(lena, design), 403);
+      expect(denied.code).toBe("forbidden");
+      expect(denied.details).toMatchObject({ permission: "work_project.manage" });
+      await ok(assign(lena, webQa));
+      await ok(assign(victor, design));
+      const detail = await ok(lena.request("GET", `/api/v1/work-projects/${docs}`));
+      expect(detail.teams.map((t: { id: string }) => t.id).sort()).toEqual([design, webQa].sort());
+      // Removing is decided on the parent only: Lena may take back what an admin assigned.
+      await ok(lena.request("DELETE", `/api/v1/work-projects/${docs}/teams/${design}`));
+    } finally {
+      await ok(victor.request("DELETE", `/api/v1/units/${docs}`));
+      await ok(victor.request("DELETE", `/api/v1/units/${webQa}`));
+      await ok(victor.request("DELETE", `/api/v1/units/${design}`));
     }
   });
 });

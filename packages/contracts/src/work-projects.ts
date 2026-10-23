@@ -166,9 +166,16 @@ export const WorkProjectDetail = z.object({
   repos: z.array(WorkProjectRepo),
   /**
    * Decided by the API resolver (UI gating only): `manage` = `work_project.manage` on the project (default switch,
-   * repositories); `assignTeams` = `work_project.manage` on its parent; `members` = `unit.members.manage` on it.
+   * repositories); `assignTeams` = `work_project.manage` on its parent; `members` = `unit.members.manage` on it;
+   * `open` = `work_session.read` on it (project access or the admin rule). `open: false` is a manager outside the
+   * project (D-14): they shape it but see none of its sessions (07.9-13, additive; absent on older payloads).
    */
-  viewerCan: z.object({ manage: z.boolean(), assignTeams: z.boolean(), members: z.boolean() }),
+  viewerCan: z.object({
+    manage: z.boolean(),
+    assignTeams: z.boolean(),
+    members: z.boolean(),
+    open: z.boolean().optional(),
+  }),
 });
 export type WorkProjectDetail = z.infer<typeof WorkProjectDetail>;
 
