@@ -136,6 +136,13 @@ describe("team project API contracts (07.9-01, D-01, D-10, D-13)", () => {
       };
       expect(LinkableRepos.parse(linkable).devices[0]?.repos[0]?.linkedTo).toEqual(linkedTo);
     }
+    // D-14: a repository linked to a project the caller cannot open: no project, the flag only.
+    const hiddenRepo = { projectId: uuid(9), name: "docs", linkedTo: null, linkedToHidden: true };
+    expect(
+      LinkableRepos.parse({
+        devices: [{ deviceId: uuid(4), deviceName: "Mac", deviceOnline: true, repos: [hiddenRepo] }],
+      }).devices[0]?.repos[0],
+    ).toEqual(hiddenRepo);
     expect(RepoUnlinkImpact.parse({ sessions: 3 })).toEqual({ sessions: 3 });
     expect(RepoUnlinkImpact.safeParse({ sessions: -1 }).success).toBe(false);
     expect(WorkProjectUpdatedEvent.parse({ unitId: uuid(1) })).toEqual({ unitId: uuid(1) });

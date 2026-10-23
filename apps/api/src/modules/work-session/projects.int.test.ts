@@ -668,6 +668,30 @@ describe("the projects index, the creatable parents and Project.teamProject (D-0
     ).not.toContain(billing);
   });
 
+  it("D-14: linkable repositories name a linked project only to someone who can open it", async () => {
+    // Otto creates a project under Mobile (he leads it) and may use Lena's shared Mac; docs is in Billing, which he
+    // cannot open.
+    const apps = (await ok(otto.request("POST", "/api/v1/work-projects", { name: "Apps", parentId: mobile })))
+      .id as string;
+    const otto_ = await ok(otto.request("GET", `/api/v1/work-projects/${apps}/linkable-repos`));
+    const mac = (otto_.devices as Array<{ deviceId: string; repos: unknown[] }>).find(
+      (d) => d.deviceId === lenaMac.deviceId,
+    );
+    expect(mac?.repos).toEqual([
+      { projectId: lenaMac.repo.docs, name: "docs", linkedTo: null, linkedToHidden: true },
+      { projectId: lenaMac.repo["web-app"], name: "web-app", linkedTo: null },
+    ]);
+    expect(JSON.stringify(otto_)).not.toContain("Billing");
+    await ok(victor.request("DELETE", `/api/v1/units/${apps}`));
+    // Lena leads Billing: she sees its name.
+    const lena_ = await ok(lena.request("GET", `/api/v1/work-projects/${billing}/linkable-repos`));
+    expect(
+      (lena_.devices as Array<{ repos: Array<{ name: string; linkedTo: unknown }> }>)
+        .flatMap((d) => d.repos)
+        .find((r) => r.name === "docs")?.linkedTo,
+    ).toEqual({ id: billing, name: "Billing" });
+  });
+
   it("lists the teams and departments where the caller may create a project, never a project", async () => {
     expect((await ok(lena.request("GET", "/api/v1/work-projects/parents"))).parents).toEqual([
       { id: web, name: "Web", kind: "team", trail: ["Engineering"] },
@@ -697,13 +721,27 @@ describe("the projects index, the creatable parents and Project.teamProject (D-0
     ]);
     // Oscar can use the shared Mac but cannot open Billing: docs is absent.
     expect((await list(oscar)).map((p) => [p.name, p.teamProject])).toEqual([["web-app", null]]);
-    // Dana uses her PC, but its repo is in a project she cannot open (D-13: project access and device.use).
-    expect((await list(dana)).map((p) => p.name)).toEqual(["web-app"]);
+    // Dana's PC: its repo is in a project she cannot open. As its device owner she still lists it (D-14), without the
+    // project's name; starting there needs project access (D-13), so the repo is marked, never offered as personal.
+    expect(
+      (await list(dana)).map((p) => [
+        p.name,
+        p.teamProject,
+        (p as { teamProjectHidden?: boolean }).teamProjectHidden,
+      ]),
+    ).toEqual([
+      ["api", null, true],
+      ["web-app", null, undefined],
+    ]);
+    expect(JSON.stringify(await list(dana))).not.toContain("Billing");
     // An admin opens every project but still only lists repos on devices they can use.
     expect((await list(victor)).map((p) => [p.name, p.teamProject])).toEqual([
       ["docs", billingRef],
       ["web-app", null],
     ]);
+
+    // Oscar is not the device owner of the shared Mac: a repo in a project he cannot open stays absent (no flag).
+    expect(JSON.stringify(await list(oscar))).not.toContain("teamProjectHidden");
 
     await ok(lena.request("PATCH", `/api/v1/work-projects/${billing}`, { defaultVisibility: "owner" }));
     expect((await list(lena)).find((p) => p.name === "docs")?.teamProject).toEqual({

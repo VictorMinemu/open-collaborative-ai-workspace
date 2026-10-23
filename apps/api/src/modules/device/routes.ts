@@ -404,16 +404,21 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
             )
           ).map((r) => r.p.id),
         );
+        // D-14: the device owner always lists their own repositories; one in a project they cannot open comes
+        // without the project (`teamProjectHidden`), and starting a session there is still refused (`not_in_project`).
         return usable
-          .filter((r) => r.unitId === null || openLinked.has(r.p.id))
-          .map((r) =>
-            toProject(
+          .filter((r) => r.unitId === null || openLinked.has(r.p.id) || r.d.ownerUserId === userId)
+          .map((r) => {
+            if (r.unitId !== null && !openLinked.has(r.p.id)) {
+              return { ...toProject(r, null), teamProjectHidden: true };
+            }
+            return toProject(
               r,
               r.unitId !== null && r.unitName !== null
                 ? { id: r.unitId, name: r.unitName, defaultVisibility: r.defaultVisibility ?? "project" }
                 : null,
-            ),
-          );
+            );
+          });
       }),
     }),
   );

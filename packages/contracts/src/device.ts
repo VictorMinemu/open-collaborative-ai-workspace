@@ -123,6 +123,12 @@ export const Project = z.object({
    * personal repository. Optional so older payloads parse.
    */
   teamProject: RepoTeamProject.nullable().optional(),
+  /**
+   * Phase 07.9 (D-14): true when the repository is linked to a team project the caller cannot open. Only its device
+   * owner lists it then, without the project (`teamProject` is null) and without a way to start a session on it
+   * ("Linked to a project you can't open"). Absent = false.
+   */
+  teamProjectHidden: z.boolean().optional(),
 });
 export type Project = z.infer<typeof Project>;
 

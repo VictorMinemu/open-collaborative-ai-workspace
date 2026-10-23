@@ -654,6 +654,9 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
             d: devices,
             linkedId: workProjectRepos.unitId,
             linkedName: orgUnits.name,
+            linkedPath: orgUnits.path,
+            linkedAccess: sql<string | null>`case when ${workProjectRepos.unitId} is null then null
+              else app.work_project_access(${workProjectRepos.unitId}, ${userId}::uuid) end`,
           })
           .from(projects)
           .innerJoin(devices, eq(devices.id, projects.deviceId))
@@ -671,6 +674,22 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
         const usable = await perms.filter(req, tx, rows, "device.use", ({ d }) =>
           deviceFacts(d, userId, access),
         );
+        // D-14: the team project a repository is in is named only to someone who can open it.
+        const openable = new Set(
+          (
+            await perms.filter(
+              req,
+              tx,
+              usable.filter((r) => r.linkedId !== null && r.linkedPath !== null),
+              "work_session.read",
+              (r) =>
+                workProjectResource(
+                  { id: r.linkedId ?? "", path: r.linkedPath ?? [], access: r.linkedAccess },
+                  userId,
+                ),
+            )
+          ).map((r) => r.p.id),
+        );
         const byDevice = new Map<string, LinkableRepos["devices"][number]>();
         for (const { p, d, linkedId, linkedName } of usable) {
           let entry = byDevice.get(d.id);
@@ -678,10 +697,12 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
             entry = { deviceId: d.id, deviceName: d.name, deviceOnline: d.status === "online", repos: [] };
             byDevice.set(d.id, entry);
           }
+          const hidden = linkedId !== null && !openable.has(p.id);
           entry.repos.push({
             projectId: p.id,
             name: p.name,
-            linkedTo: linkedId && linkedName ? { id: linkedId, name: linkedName } : null,
+            linkedTo: linkedId && linkedName && !hidden ? { id: linkedId, name: linkedName } : null,
+            ...(hidden ? { linkedToHidden: true } : {}),
           });
         }
         return { devices: [...byDevice.values()] };
