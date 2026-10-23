@@ -23,6 +23,7 @@ let eve: TestClient;
 let orgA = "";
 let lenaId = "";
 let ottoId = "";
+let danaId = "";
 let engineering = "";
 let web = "";
 let mobile = "";
@@ -132,7 +133,7 @@ beforeAll(async () => {
   );
   orgA = setup.organization.id;
   ({ client: lena, userId: lenaId } = await invite(stack, victor, "lena@example.test", "Lena Lead", "lead"));
-  const { client: danaClient, userId: danaId } = await invite(
+  const { client: danaClient, userId: danaUserId } = await invite(
     stack,
     victor,
     "dana@example.test",
@@ -140,6 +141,7 @@ beforeAll(async () => {
     "developer",
   );
   dana = danaClient;
+  danaId = danaUserId;
   ({ client: oscar } = await invite(stack, victor, "oscar@example.test", "Oscar Out", "developer"));
   const { client: ottoClient, userId: ottoUserId } = await invite(
     stack,
@@ -270,6 +272,33 @@ describe("a parent lead creates a team project (D-01, D-10, D-13)", () => {
     const roles = (await su.query("select role from app.unit_memberships where unit_id = $1", [created.id]))
       .rows;
     expect(roles).toEqual([{ role: "lead" }]);
+  });
+
+  it("a creator whose role cannot lead (a delegated allow rule) joins as a member, never as a lead", async () => {
+    const rule = await ok(
+      victor.request("POST", "/api/v1/permission-rules", {
+        scopeUnitId: web,
+        subjectKind: "user",
+        subjectId: danaId,
+        permission: "work_project.manage",
+        effect: "allow",
+      }),
+    );
+    try {
+      const created = await ok(
+        dana.request("POST", "/api/v1/work-projects", { name: "Sketch", parentId: web }),
+      );
+      const roles = (
+        await su.query("select user_id, role from app.unit_memberships where unit_id = $1", [created.id])
+      ).rows;
+      expect(roles).toEqual([{ user_id: danaId, role: "member" }]);
+      expect((await audits("unit_membership.added", created.id)).map((a) => a.metadata)).toEqual([
+        { unitId: created.id, userId: danaId, role: "member" },
+      ]);
+      await ok(victor.request("DELETE", `/api/v1/units/${created.id}`));
+    } finally {
+      await ok(victor.request("DELETE", `/api/v1/permission-rules/${rule.id}`));
+    }
   });
 });
 
@@ -500,6 +529,18 @@ describe("teams, repositories and the default (D-01, D-03, D-10, UI-SPEC U-7)", 
     const notFound = async (res: Promise<Res>) => (await fails(res, 404)).code;
     const P = `/api/v1/work-projects/${portal}`;
     const cases: Record<string, () => Promise<unknown>> = {
+      "GET /api/v1/work-projects": async () =>
+        expect(
+          (await ok(eve.request("GET", "/api/v1/work-projects"))).teamProjects.map(
+            (p: { id: string }) => p.id,
+          ),
+        ).toEqual([eveProject]),
+      "GET /api/v1/work-projects/parents": async () =>
+        expect(
+          (await ok(eve.request("GET", "/api/v1/work-projects/parents"))).parents.map(
+            (p: { id: string }) => p.id,
+          ),
+        ).toEqual([eveUnit]),
       "POST /api/v1/work-projects": async () =>
         expect(
           await notFound(eve.request("POST", "/api/v1/work-projects", { name: "X", parentId: web })),
@@ -565,5 +606,109 @@ describe("teams, repositories and the default (D-01, D-03, D-10, UI-SPEC U-7)", 
     const [deleted] = await audits("unit.deleted", temp);
     expect(deleted?.metadata).toMatchObject({ unassignedFromProjectIds: [billing] });
     expect(await orgEvents("work_project.updated")).toContainEqual({ unitId: billing });
+  });
+});
+
+describe("the projects index, the creatable parents and Project.teamProject (D-01, D-13 start rule, R5, R6)", () => {
+  let sam: TestClient;
+  let billing = "";
+
+  beforeAll(async () => {
+    ({ client: sam } = await invite(stack, victor, "sam@example.test", "Sam Standard", "standard"));
+    billing = (await su.query("select id from app.org_units where name = 'Billing'")).rows[0].id as string;
+    await ok(
+      lena.request("POST", `/api/v1/work-projects/${billing}/repos`, { projectId: lenaMac.repo.docs }),
+    );
+    // Dana's repository in Billing (a fixture: Lena cannot use Dana's PC, so no route would link it for her).
+    await su.query(
+      "insert into app.work_project_repos (organization_id, project_id, device_id, unit_id, linked_by) values ($1, $2, $3, $4, $5)",
+      [orgA, danaPc.repo.api, danaPc.deviceId, billing, lenaId],
+    );
+    // Everyone may use Lena's Mac.
+    await ok(lena.request("PATCH", `/api/v1/devices/${lenaMac.deviceId}`, { shared: true }));
+  });
+
+  const names = (list: Array<{ name: string }>) => list.map((x) => x.name);
+
+  it("lists the projects the caller can open with counts, their usable unlinked repos and whether they may create", async () => {
+    const mine = await ok(lena.request("GET", "/api/v1/work-projects"));
+    expect(mine).toEqual({
+      teamProjects: [
+        { id: billing, name: "Billing", trail: ["Engineering", "Web"], peopleCount: 1, repoCount: 2 },
+      ],
+      personalRepos: [
+        {
+          projectId: lenaMac.repo["web-app"],
+          name: "web-app",
+          deviceId: lenaMac.deviceId,
+          deviceName: "Lena's Mac",
+          deviceOnline: true,
+        },
+      ],
+      viewerCan: { create: true },
+    });
+    // Platform exists, but Lena has no access: absent, never named.
+    expect(JSON.stringify(mine)).not.toContain(platform);
+
+    const admin = await ok(victor.request("GET", "/api/v1/work-projects"));
+    expect(names(admin.teamProjects)).toEqual(["Billing", "Platform"]);
+    expect(names(admin.personalRepos)).toEqual(["web-app"]);
+    expect(admin.viewerCan).toEqual({ create: true });
+
+    const plain = await ok(dana.request("GET", "/api/v1/work-projects"));
+    expect(plain.teamProjects).toEqual([]);
+    expect(names(plain.personalRepos)).toEqual(["web-app"]);
+    expect(plain.viewerCan).toEqual({ create: false });
+
+    expect((await fails(sam.request("GET", "/api/v1/work-projects"), 403)).details).toMatchObject({
+      permission: "work_session.read",
+    });
+    expect(
+      (await ok(eve.request("GET", "/api/v1/work-projects"))).teamProjects.map((p: { id: string }) => p.id),
+    ).not.toContain(billing);
+  });
+
+  it("lists the teams and departments where the caller may create a project, never a project", async () => {
+    expect((await ok(lena.request("GET", "/api/v1/work-projects/parents"))).parents).toEqual([
+      { id: web, name: "Web", kind: "team", trail: ["Engineering"] },
+    ]);
+    expect((await ok(victor.request("GET", "/api/v1/work-projects/parents"))).parents).toEqual([
+      { id: engineering, name: "Engineering", kind: "department", trail: [] },
+      { id: mobile, name: "Mobile", kind: "team", trail: ["Engineering"] },
+      { id: web, name: "Web", kind: "team", trail: ["Engineering"] },
+    ]);
+    expect((await ok(dana.request("GET", "/api/v1/work-projects/parents"))).parents).toEqual([]);
+    expect((await ok(otto.request("GET", "/api/v1/work-projects/parents"))).parents).toEqual([
+      { id: mobile, name: "Mobile", kind: "team", trail: ["Engineering"] },
+    ]);
+    const eveParents = (await ok(eve.request("GET", "/api/v1/work-projects/parents"))).parents;
+    expect(eveParents.map((p: { id: string }) => p.id)).toEqual([eveUnit]);
+  });
+
+  it("GET /projects names each repo's team project, hides the ones the caller cannot open, keeps device.use", async () => {
+    type P = { id: string; name: string; teamProject?: unknown };
+    const list = async (as: TestClient) => (await ok(as.request("GET", "/api/v1/projects"))).projects as P[];
+    const billingRef = { id: billing, name: "Billing", defaultVisibility: "project" };
+
+    // Lena: docs in Billing, web-app personal; Dana's api is in her project but on a device she cannot use.
+    expect((await list(lena)).map((p) => [p.name, p.teamProject])).toEqual([
+      ["docs", billingRef],
+      ["web-app", null],
+    ]);
+    // Oscar can use the shared Mac but cannot open Billing: docs is absent.
+    expect((await list(oscar)).map((p) => [p.name, p.teamProject])).toEqual([["web-app", null]]);
+    // Dana uses her PC, but its repo is in a project she cannot open (D-13: project access and device.use).
+    expect((await list(dana)).map((p) => p.name)).toEqual(["web-app"]);
+    // An admin opens every project but still only lists repos on devices they can use.
+    expect((await list(victor)).map((p) => [p.name, p.teamProject])).toEqual([
+      ["docs", billingRef],
+      ["web-app", null],
+    ]);
+
+    await ok(lena.request("PATCH", `/api/v1/work-projects/${billing}`, { defaultVisibility: "owner" }));
+    expect((await list(lena)).find((p) => p.name === "docs")?.teamProject).toEqual({
+      ...billingRef,
+      defaultVisibility: "owner",
+    });
   });
 });

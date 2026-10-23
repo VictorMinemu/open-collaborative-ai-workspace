@@ -8,7 +8,10 @@ import {
   type Permission,
   RepoUnlinkImpact,
   UpdateWorkProjectRequest,
+  WORK_PROJECT_LIMITS,
   WorkProjectDetail,
+  WorkProjectIndex,
+  WorkProjectParents,
   type WorkProjectPerson,
   type WorkProjectRepo,
   WorkProjectSearchQuery,
@@ -34,6 +37,7 @@ import { badRequest, conflict, notFound } from "../../lib/errors";
 import { deviceFacts, loadDeviceAccess } from "../device";
 import {
   createUnit,
+  LEAD_ORG_ROLES,
   orgTopic,
   type PermissionService,
   type ResourceFacts,
@@ -90,12 +94,6 @@ async function repoSessionCount(tx: Tx, projectId: string): Promise<number> {
   const res = await tx.execute(sql`select app.work_project_repo_session_count(${projectId}::uuid) as n`);
   return Number((res.rows[0] as { n: number | string }).n);
 }
-
-/** The project's people the detail shows as avatars (WORK_PROJECT_LIMITS.accessPeople). */
-const ACCESS_PEOPLE = 5;
-
-/** Unit roles allowed to lead (the eligibility rule of `POST /units/:id/members`, D-06). */
-const LEAD_ORG_ROLES = new Set(["lead", "admin"]);
 
 type ProjectUnit = Pick<UnitRow, "id" | "name" | "path" | "parentId">;
 
@@ -173,6 +171,16 @@ async function projectChanged(core: Core, tx: Tx, unitId: string): Promise<void>
 }
 
 // ---------------------------------------------------------------- read models
+
+/** Ancestor names (root first, without the unit itself) from one read of the organization's units. */
+function trailFrom(units: ReadonlyArray<{ id: string; name: string }>) {
+  const names = new Map(units.map((u) => [u.id, u.name]));
+  return (path: readonly string[]) =>
+    path.slice(0, -1).flatMap((id) => {
+      const name = names.get(id);
+      return name === undefined ? [] : [name];
+    });
+}
 
 /** Names of the units on `path` minus its last entry, root first ("Engineering › Web"). */
 async function trailOf(tx: Tx, path: readonly string[]): Promise<string[]> {
@@ -286,7 +294,7 @@ async function projectDetail(
     parentId: unit.parentId,
     trail: await trailOf(tx, unit.path),
     defaultVisibility: await defaultVisibilityOf(tx, unit.id),
-    access: { count: people.length, people: people.slice(0, ACCESS_PEOPLE) },
+    access: { count: people.length, people: people.slice(0, WORK_PROJECT_LIMITS.accessPeople) },
     teams: await assignedTeams(tx, unit.id),
     repos: await linkedRepos(tx, unit.id),
     viewerCan: { manage, assignTeams, members },
@@ -299,6 +307,126 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
   const tags = ["work-session"];
   const requireUser = core.identity.requireUser;
   const user = { config: { authz: "user" as const }, preHandler: requireUser };
+
+  app.get(
+    "/work-projects",
+    {
+      config: { authz: "user" },
+      // The page gate: the Work Zone (a standard role, or the module off, gets 403 as on `GET /projects`).
+      preHandler: [requireUser, perms.requirePermission("work_session.read")],
+      schema: { tags, response: { 200: WorkProjectIndex } },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const { userId } = authOf(req);
+        const units = await tx
+          .select({ id: orgUnits.id, name: orgUnits.name, kind: orgUnits.kind, path: orgUnits.path })
+          .from(orgUnits);
+        const trail = trailFrom(units);
+        const rows = await tx
+          .select({
+            id: orgUnits.id,
+            name: orgUnits.name,
+            path: orgUnits.path,
+            access: sql<string | null>`app.work_project_access(${orgUnits.id}, ${userId}::uuid)`,
+          })
+          .from(orgUnits)
+          .where(eq(orgUnits.kind, "project"))
+          .orderBy(asc(sql`lower(${orgUnits.name})`), asc(orgUnits.id));
+        // Only the projects the caller can open (D-02): the others are absent, never named (T-07.9-04-03).
+        const open = await perms.filter(req, tx, rows, "work_session.read", (r) =>
+          workProjectResource(r, userId),
+        );
+        const ids = open.map((r) => r.id);
+        const people = new Map<string, number>();
+        const repoCounts = new Map<string, number>();
+        if (ids.length > 0) {
+          const res = await tx.execute(sql`
+            select t.id, (select count(*)::int from app.work_project_people(t.id)) as n
+              from unnest(${uuidArray(ids)}) as t(id)`);
+          for (const r of res.rows as Array<{ id: string; n: number }>) people.set(r.id, Number(r.n));
+          const repos = await tx
+            .select({ unitId: workProjectRepos.unitId, n: sql<number>`count(*)::int` })
+            .from(workProjectRepos)
+            .where(inArray(workProjectRepos.unitId, ids))
+            .groupBy(workProjectRepos.unitId);
+          for (const r of repos) repoCounts.set(r.unitId, Number(r.n));
+        }
+        // Usable repositories linked to no team project (`GET /projects`'s `device.use` filter).
+        const unlinked = await tx
+          .select({ p: projects, d: devices })
+          .from(projects)
+          .innerJoin(devices, eq(devices.id, projects.deviceId))
+          .leftJoin(workProjectRepos, eq(workProjectRepos.projectId, projects.id))
+          .where(
+            and(isNull(devices.revokedAt), isNull(projects.removedAt), isNull(workProjectRepos.projectId)),
+          )
+          .orderBy(asc(sql`lower(${projects.name})`), asc(projects.id));
+        const access = await loadDeviceAccess(tx, userId);
+        const personal = await perms.filter(req, tx, unlinked, "device.use", ({ d }) =>
+          deviceFacts(d, userId, access),
+        );
+        const parents = await perms.filter(
+          req,
+          tx,
+          units.filter((u) => u.kind !== "project"),
+          "work_project.manage",
+          (u) => unitResource(u),
+        );
+        return {
+          teamProjects: open.map((r) => ({
+            id: r.id,
+            name: r.name,
+            trail: trail(r.path),
+            peopleCount: people.get(r.id) ?? 0,
+            repoCount: repoCounts.get(r.id) ?? 0,
+          })),
+          personalRepos: personal.map(({ p, d }) => ({
+            projectId: p.id,
+            name: p.name,
+            deviceId: d.id,
+            deviceName: d.name,
+            deviceOnline: d.status === "online",
+          })),
+          viewerCan: { create: parents.length > 0 },
+        };
+      }),
+  );
+
+  app.get(
+    "/work-projects/parents",
+    { ...user, schema: { tags, response: { 200: WorkProjectParents } } },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const units = await tx
+          .select({ id: orgUnits.id, name: orgUnits.name, kind: orgUnits.kind, path: orgUnits.path })
+          .from(orgUnits);
+        const trail = trailFrom(units);
+        // D-10, D-13: the teams and departments where the caller may create (admins: all); never a project.
+        const parents = await perms.filter(
+          req,
+          tx,
+          units.filter((u) => u.kind !== "project"),
+          "work_project.manage",
+          (u) => unitResource(u),
+        );
+        // Sorted as the tree reads: by trail, then name (case-insensitive), then id.
+        const label = (u: { name: string; trail: readonly string[] }) =>
+          [...u.trail, u.name].join("\u0000").toLowerCase();
+        const order = (a: { id: string; name: string; trail: string[] }, b: typeof a) => {
+          const [la, lb] = [label(a), label(b)];
+          if (la !== lb) return la < lb ? -1 : 1;
+          return a.id < b.id ? -1 : 1;
+        };
+        return {
+          parents: parents
+            .flatMap((u) =>
+              u.kind === "project" ? [] : [{ id: u.id, name: u.name, kind: u.kind, trail: trail(u.path) }],
+            )
+            .sort(order),
+        };
+      }),
+  );
 
   app.post(
     "/work-projects",
@@ -320,7 +448,7 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
           .from(orgMembers)
           .where(eq(orgMembers.userId, userId))
           .limit(1);
-        const role = me && LEAD_ORG_ROLES.has(me.role) ? ("lead" as const) : ("member" as const);
+        const role = me && LEAD_ORG_ROLES.includes(me.role) ? ("lead" as const) : ("member" as const);
         await tx.insert(unitMemberships).values({
           organizationId: tenantOf(tx).organizationId,
           unitId: unit.id,

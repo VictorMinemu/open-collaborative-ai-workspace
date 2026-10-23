@@ -715,7 +715,7 @@ export function registerUnitRoutes(
 const isLeadMembership = (unitRole: UnitRole) => unitRole === UnitRole.enum.lead;
 
 /** Org roles that may lead a unit (D-06): an eligibility rule on the target, not on the caller. */
-const LEAD_ORG_ROLES: readonly OrgRole[] = ["lead", "admin"];
+export const LEAD_ORG_ROLES: readonly OrgRole[] = ["lead", "admin"];
 
 async function memberRow(tx: Tx, userId: string) {
   const [row] = await tx.select().from(orgMembers).where(eq(orgMembers.userId, userId)).limit(1);

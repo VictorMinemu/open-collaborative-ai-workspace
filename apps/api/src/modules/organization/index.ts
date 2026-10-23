@@ -65,7 +65,7 @@ export {
   principalTenant,
   recordAuthzDenial,
 } from "./permissions/service";
-export { createUnit, orgTopic, requireUnit, type UnitRow, uuidArray } from "./units";
+export { createUnit, LEAD_ORG_ROLES, orgTopic, requireUnit, type UnitRow, uuidArray } from "./units";
 
 /** `member.updated` fields that change what a member may read (the rest are profile fields). */
 const ACCESS_FIELDS = new Set(["role", "status"]);
