@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 186
+open_count: 188
 waived_count: 5
 fixed_count: 138
-total_count: 329
-last_updated: 2026-10-23T08:12:30.035Z
+total_count: 331
+last_updated: 2026-10-23T08:31:50.471Z
 ---
 
 # Broken Windows Ledger
@@ -344,6 +344,8 @@ last_updated: 2026-10-23T08:12:30.035Z
 | 327 | 07.9 | deviation | apps/web/components/work-zone/session-sidebar.tsx |  | SHOULD FIX (07.9-14): ended/failed status icon contrast in sidebar rows makes work-zone-visibility-marker fail axe when other specs leave such sessions behind | open |  | 2026-10-23T08:12:29.820Z |  |
 | 328 | 07.9 | deviation | packages/contracts/src |  | SHOULD FIX (07.9-14): WorkZoneStartBlock has no not_in_project, so a bot's proposal card cannot say it before Start (contract + agent-channel/proposals.ts + card copy) | open |  | 2026-10-23T08:12:29.947Z |  |
 | 329 | 07.9 | deviation | apps/web/components/ui/sheet.tsx |  | 07.9-14: a sheet opened over a dialog does not dim the dialog (nested backdrop); the e2e harness writes setup-*.png into whatever screenshot folder it is given | open |  | 2026-10-23T08:12:30.035Z |  |
+| 330 | 07.9 | deviation | apps/api/src/modules/work-session/service.ts |  | 07.9-fanout (medium-low, deferred): one queue lane per organization, so a big sweep delays that org's other deliveries (2,000 live sessions: deliveries complete after ~50 s); separate lanes for sweeps and deliveries or batch reader computation | open |  | 2026-10-23T08:31:50.390Z |  |
+| 331 | 07.9 | deviation | apps/api/src/modules/work-session/service.ts |  | 07.9-fanout (low, deferred): the queue is in memory, so a crash loses pending sweeps (revocation already decided at commit; lists refetch on reconnect) — sweep on boot or a durable outbox; a frame from another transaction published between commit and its invalidation reaching Redis is not held | open |  | 2026-10-23T08:31:50.471Z |  |
 
 ````json
 [
@@ -4293,6 +4295,30 @@ last_updated: 2026-10-23T08:12:30.035Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-23T08:12:30.035Z",
+    "resolved_at": null
+  },
+  {
+    "id": 330,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/api/src/modules/work-session/service.ts",
+    "line": null,
+    "description": "07.9-fanout (medium-low, deferred): one queue lane per organization, so a big sweep delays that org's other deliveries (2,000 live sessions: deliveries complete after ~50 s); separate lanes for sweeps and deliveries or batch reader computation",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T08:31:50.390Z",
+    "resolved_at": null
+  },
+  {
+    "id": 331,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/api/src/modules/work-session/service.ts",
+    "line": null,
+    "description": "07.9-fanout (low, deferred): the queue is in memory, so a crash loses pending sweeps (revocation already decided at commit; lists refetch on reconnect) — sweep on boot or a durable outbox; a frame from another transaction published between commit and its invalidation reaching Redis is not held",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T08:31:50.471Z",
     "resolved_at": null
   }
 ]
