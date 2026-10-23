@@ -40,7 +40,12 @@ export type Relation =
    */
   | "reader"
   /** Browser contexts (07.8-16, D-07): the member the bot browses for (the turn's human). */
-  | "requester";
+  | "requester"
+  /**
+   * Team projects (Phase 07.9, D-02): the principal has project access as a direct member, a lead or a member of an
+   * assigned team. Decided by `app.work_project_access` (the one SQL rule, P-03) and never derived here.
+   */
+  | "project_member";
 export type ResourceState =
   | "private"
   | "archived"
@@ -80,7 +85,9 @@ export type ResourceType =
   /** An agent template (Phase 07.4): `unitPath` ends with its unit; organization templates carry none. */
   | "agent_template"
   /** A bot's open browser page (Phase 07.8-16): who may watch it live and who may take control. */
-  | "browser_context";
+  | "browser_context"
+  /** A team project (Phase 07.9, D-01): an org unit of kind `project`; `unitPath` ends with it. */
+  | "work_project";
 
 export interface PrincipalFacts {
   kind: "user" | "agent" | "cell" | "device";

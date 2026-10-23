@@ -94,7 +94,7 @@ export function applyMove<T extends UnitNode>(
 
 // ---------------------------------------------------------------- data access
 
-type UnitRow = typeof orgUnits.$inferSelect;
+export type UnitRow = typeof orgUnits.$inferSelect;
 
 /** The permissions a unit row reports in `viewerCan` (the web renders these, never re-implements policy). */
 const UNIT_VIEWER_PERMISSIONS: readonly Permission[] = [
@@ -178,6 +178,57 @@ export async function unitsChanged(core: Core, tx: Tx, unitId: string, action: s
   });
 }
 
+/**
+ * The one unit-creation path (POST /units and, Phase 07.9, POST /work-projects): under the per-organization lock, the
+ * parent is (re-)read inside the tenant, the kind rule is checked, the row gets a uuidv7 id and its materialised path,
+ * and the `unit.created` audit and `units.updated` event go out in the same transaction. The caller decides who may
+ * create first (`unit.manage`, or `work_project.manage` on the parent); this helper never decides.
+ */
+export async function createUnit(
+  core: Core,
+  tx: Tx,
+  input: { kind: UnitKind; name: string; parentId: string | null; createdBy: string | null },
+): Promise<UnitRow> {
+  const { kind, name, parentId, createdBy } = input;
+  await lockUnits(tx);
+  const parent = parentId ? await requireUnit(tx, parentId) : null;
+  if (!validateParentKind(kind, parent?.kind ?? null)) {
+    throw badRequest(
+      parent ? `A ${kind} cannot be placed under a ${parent.kind}` : `A ${kind} cannot be top level`,
+      "invalid_parent_kind",
+    );
+  }
+  const idRes = await tx.execute(sql`select uuidv7() as id`);
+  const id = String((idRes.rows[0] as { id: string }).id);
+  let row: UnitRow | undefined;
+  try {
+    [row] = await tx
+      .insert(orgUnits)
+      .values({
+        id,
+        organizationId: tenantOf(tx).organizationId,
+        parentId: parent?.id ?? null,
+        kind,
+        name,
+        path: [...(parent?.path ?? []), id],
+        createdBy,
+      })
+      .returning();
+  } catch (err) {
+    if (isUniqueViolation(err)) throw nameTaken(name);
+    throw err;
+  }
+  if (!row) throw new Error("unit insert returned no row");
+  await core.audit.record(tx, {
+    action: "unit.created",
+    resourceType: "org_unit",
+    resourceId: id,
+    metadata: { name, kind, parentId: parent?.id ?? null },
+  });
+  await unitsChanged(core, tx, id, "created");
+  return row;
+}
+
 // ---------------------------------------------------------------- routes
 
 export function registerUnitRoutes(
@@ -224,40 +275,7 @@ export function registerUnitRoutes(
         await lockUnits(tx);
         const parent = parentId ? await requireUnit(tx, parentId) : null;
         await perms.assertCan(req, tx, "unit.manage", parent ? unitResource(parent) : orgResource());
-        if (!validateParentKind(kind, parent?.kind ?? null)) {
-          throw badRequest(
-            parent ? `A ${kind} cannot be placed under a ${parent.kind}` : `A ${kind} cannot be top level`,
-            "invalid_parent_kind",
-          );
-        }
-        const idRes = await tx.execute(sql`select uuidv7() as id`);
-        const id = String((idRes.rows[0] as { id: string }).id);
-        let row: UnitRow | undefined;
-        try {
-          [row] = await tx
-            .insert(orgUnits)
-            .values({
-              id,
-              organizationId: tenantOf(tx).organizationId,
-              parentId: parent?.id ?? null,
-              kind,
-              name,
-              path: [...(parent?.path ?? []), id],
-              createdBy: req.auth?.userId ?? null,
-            })
-            .returning();
-        } catch (err) {
-          if (isUniqueViolation(err)) throw nameTaken(name);
-          throw err;
-        }
-        if (!row) throw new Error("unit insert returned no row");
-        await core.audit.record(tx, {
-          action: "unit.created",
-          resourceType: "org_unit",
-          resourceId: id,
-          metadata: { name, kind, parentId: parent?.id ?? null },
-        });
-        await unitsChanged(core, tx, id, "created");
+        const row = await createUnit(core, tx, { kind, name, parentId, createdBy: req.auth?.userId ?? null });
         return unitView(req, tx, perms, row);
       }),
   );
