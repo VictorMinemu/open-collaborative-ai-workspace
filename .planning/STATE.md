@@ -92,6 +92,7 @@ Recent decisions affecting current work:
 |---|-------------|------|--------|-----------|
 | 261002-fns | Restructure roadmap: Phase 1 becomes MVP 0 multiplayer AI chat slice | 2026-10-02 | 5f2bda9 | [261002-fns-restructure-roadmap-phase-1-becomes-mvp-](./quick/261002-fns-restructure-roadmap-phase-1-becomes-mvp-/) |
 | 261022-cip | Woodpecker workflows in parallel slots on one dind; heavy workflows not on push to main | 2026-10-22 | 52b58541 | [261022-cip-ci-parallel](./quick/261022-cip-ci-parallel/) |
+| 261023-nsb | Node.js 24.22.1 security bump (Oct 2026 releases); every node base image pinned by digest | 2026-10-23 | 4f1f55a4 | [261023-nsb-node-24-22-1](./quick/261023-nsb-node-24-22-1/) |
 
 ### Roadmap Evolution
 
