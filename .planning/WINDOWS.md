@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 178
+open_count: 181
 waived_count: 5
 fixed_count: 134
-total_count: 317
-last_updated: 2026-10-23T06:32:15.594Z
+total_count: 320
+last_updated: 2026-10-23T07:06:02.746Z
 ---
 
 # Broken Windows Ledger
@@ -332,6 +332,9 @@ last_updated: 2026-10-23T06:32:15.594Z
 | 315 | 07.9 | deviation | apps/web/components/work-zone |  | 07.9-06 (for 10/14): an editor can remove themself from the audience (warn before saving); plan 14 must use teamProjectHidden on repos; WorkZoneStartBlock has no not_in_project, so a proposal card does not show it before Start | open |  | 2026-10-23T05:35:07.350Z |  |
 | 316 | 07.9 | deviation | apps/web/components/work-zone |  | 07.9-11: the dimmed badge on Settled sidebar rows fails axe contrast; a long email in the rail's user block overflows into the sidebar column at 1440; ServerUnreachable says "not responding" on a 500 too; a manager outside the project sees "No sessions you can see" (13 may give a specific line) | open |  | 2026-10-23T06:32:15.504Z |  |
 | 317 | 07.9 | deviation | packages/contracts/src |  | 07.9-11: WorkProjectSummary's comment still says "can open"; with D-14 it is "open or manage" (fix in the gate) | open |  | 2026-10-23T06:32:15.594Z |  |
+| 318 | 07.9 | deviation | apps/web/components/work-zone/session-view.tsx |  | SHOULD FIX (07.9-10, pre-existing): header buttons Queue, Changes and the menu are 32 px at 390 (< 44); the shared bottom-sheet close button is 32 px for every sheet (fixed locally only for the visibility sheet) | open |  | 2026-10-23T07:06:02.594Z |  |
+| 319 | 07.9 | deviation | apps/api/src/modules/work-session/visibility.ts |  | 07.9-10: See all shows "Member" instead of "Through {team}" for a project member also in the chosen team (06's reason order); self-removal through Teams is not warned (the view does not say whether the editor is in the chosen team); the Project row shows no head count unless the session is on Project (needs projectCount in the contract) | open |  | 2026-10-23T07:06:02.669Z |  |
+| 320 | 07.9 | deviation | e2e |  | 07.9-10/11: e2e runs overwrite other plans' screenshots (09's restored by hand twice) — screenshot names per spec, or write only the spec's own files | open |  | 2026-10-23T07:06:02.746Z |  |
 
 ````json
 [
@@ -4137,6 +4140,42 @@ last_updated: 2026-10-23T06:32:15.594Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-23T06:32:15.594Z",
+    "resolved_at": null
+  },
+  {
+    "id": 318,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/web/components/work-zone/session-view.tsx",
+    "line": null,
+    "description": "SHOULD FIX (07.9-10, pre-existing): header buttons Queue, Changes and the menu are 32 px at 390 (< 44); the shared bottom-sheet close button is 32 px for every sheet (fixed locally only for the visibility sheet)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T07:06:02.594Z",
+    "resolved_at": null
+  },
+  {
+    "id": 319,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/api/src/modules/work-session/visibility.ts",
+    "line": null,
+    "description": "07.9-10: See all shows \"Member\" instead of \"Through {team}\" for a project member also in the chosen team (06's reason order); self-removal through Teams is not warned (the view does not say whether the editor is in the chosen team); the Project row shows no head count unless the session is on Project (needs projectCount in the contract)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T07:06:02.669Z",
+    "resolved_at": null
+  },
+  {
+    "id": 320,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "e2e",
+    "line": null,
+    "description": "07.9-10/11: e2e runs overwrite other plans' screenshots (09's restored by hand twice) — screenshot names per spec, or write only the spec's own files",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T07:06:02.746Z",
     "resolved_at": null
   }
 ]
