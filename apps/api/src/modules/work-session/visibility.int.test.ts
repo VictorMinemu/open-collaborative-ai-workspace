@@ -3,6 +3,7 @@ import { WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
+import type { AuthContext } from "../../core";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "../../testing";
 import { eventually, FakeDevice } from "../../testing-device";
 import {
@@ -12,6 +13,7 @@ import {
   linkRepo,
   pairDevice,
   setAudience,
+  shareDevice,
   startSession,
 } from "../../testing-workzone";
 
@@ -281,5 +283,398 @@ describe("tracer: narrowing a session applies at once (D-04, ADR-0009, P-09)", (
     expect((await su.query("select visibility from app.work_sessions where id = $1", [id])).rows[0]).toEqual({
       visibility: "project",
     });
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: the panel, who changes it, search, drafts
+
+let gus: TestClient;
+let gusId: string;
+let lea: TestClient;
+let leaId: string;
+let ada: TestClient;
+let adaId: string;
+let tom: TestClient;
+let tomId: string;
+let max: TestClient;
+let maxId: string;
+let kim: TestClient;
+let kimId: string;
+let olgaId: string;
+let eve: TestClient;
+let eveId: string;
+let eveUnit: string;
+let portal: { unitId: string; parentId: string };
+let web: string;
+let mobile: string;
+let ops: string;
+/** Gus's session on `portal-web` (audience `project`), running on Ana's device. */
+let s1: string;
+/** Ana's session on her personal repo `notes`. */
+let notesSession: string;
+/** Kim's session on `portal-web`, before Kim leaves Portal. */
+let kimSession: string;
+
+const view = async (as: TestClient, id: string) =>
+  ok(as.request("GET", `/api/v1/work-sessions/${id}/visibility`));
+
+const put = (as: TestClient, id: string, body: unknown) =>
+  as.request("PUT", `/api/v1/work-sessions/${id}/visibility`, body);
+
+const names = (rows: Json[]) => rows.map((r) => r.name as string);
+
+/** Organization B: Eve leaves A and becomes the admin of her own organization (as the 07.5 matrix does). */
+async function moveToOrgB(userId: string) {
+  const orgB = randomUUID();
+  await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [
+    orgB,
+    `o-${orgB}`,
+  ]);
+  await su.query("delete from auth.member where user_id = $1", [userId]);
+  await su.query("delete from app.org_members where user_id = $1", [userId]);
+  await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+    orgB,
+    userId,
+  ]);
+  await su.query(
+    "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Eve', 'admin')",
+    [orgB, userId],
+  );
+  await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, userId]);
+}
+
+const unit = async (kind: string, name: string, parentId: string | null) =>
+  (await ok(admin.request("POST", "/api/v1/units", { kind, name, parentId }))).id as string;
+
+const join = (unitId: string, userId: string, role: "member" | "lead" = "member") =>
+  ok(admin.request("POST", `/api/v1/units/${unitId}/members`, { userId, role }));
+
+describe("the panel, who may change it, search and drafts (D-04, D-11, D-12, D-13; R2–R4, R12)", () => {
+  beforeAll(async () => {
+    ({ client: gus, userId: gusId } = await invite(
+      stack,
+      admin,
+      "gus@example.test",
+      "Gus Garcia",
+      "developer",
+    ));
+    ({ client: lea, userId: leaId } = await invite(stack, admin, "lea@example.test", "Lea Lund", "lead"));
+    ({ client: ada, userId: adaId } = await invite(stack, admin, "ada@example.test", "Ada Admin", "admin"));
+    ({ client: tom, userId: tomId } = await invite(
+      stack,
+      admin,
+      "tom@example.test",
+      "Tom Torres",
+      "developer",
+    ));
+    ({ client: max, userId: maxId } = await invite(
+      stack,
+      admin,
+      "max@example.test",
+      "Max Moreno",
+      "developer",
+    ));
+    ({ client: kim, userId: kimId } = await invite(
+      stack,
+      admin,
+      "kim@example.test",
+      "Kim Kowalski",
+      "developer",
+    ));
+    olgaId = (await ok(olga.request("GET", "/api/v1/me"))).user.id;
+    ({ client: eve, userId: eveId } = await invite(stack, admin, "eve@example.test", "Eve", "admin"));
+    await moveToOrgB(eveId);
+    eveUnit = (
+      await ok(eve.request("POST", "/api/v1/units", { kind: "department", name: "Eve team", parentId: null }))
+    ).id as string;
+
+    portal = await createTeamProject(stack, admin, {
+      name: "Portal",
+      members: [
+        { userId: anaId },
+        { userId: piaId },
+        { userId: leoId },
+        { userId: gusId },
+        { userId: kimId },
+        { userId: adaId },
+        { userId: leaId, role: "lead" },
+      ],
+    });
+    web = await unit("team", "Web", portal.parentId);
+    mobile = await unit("team", "Mobile", portal.parentId);
+    ops = await unit("team", "Ops", portal.parentId);
+    await join(web, tomId);
+    await join(mobile, maxId);
+    for (const t of [web, mobile]) {
+      await ok(admin.request("POST", `/api/v1/work-projects/${portal.unitId}/teams`, { unitId: t }));
+    }
+    await linkRepo(stack, {
+      organizationId: orgId,
+      unitId: portal.unitId,
+      projectId: repo["portal-web"]!,
+      deviceId,
+      linkedBy: adminId,
+    });
+    await shareDevice(ana, deviceId, gusId, "acceptEdits");
+    await shareDevice(ana, deviceId, kimId, "acceptEdits");
+
+    s1 = await startSession(gus, device, repo["portal-web"]!, { title: "Portal search" });
+    notesSession = await startSession(ana, device, repo.notes!, { title: "Notes" });
+    kimSession = await startSession(kim, device, repo["portal-web"]!, { title: "Kim's spike" });
+  }, 120_000);
+
+  it("a viewer who may not change it reads the whole panel: choices, teams, who sees it now and why (R2)", async () => {
+    const v = await view(pia, s1);
+    expect(v.kind).toBe("project");
+    expect(v.projectDefault).toBe("project");
+    expect(v.project).toEqual({ kind: "team", id: portal.unitId, name: "Portal" });
+    expect(v.owner).toEqual({ userId: gusId, name: "Gus Garcia" });
+    expect(v.viewerCan).toEqual({ change: false });
+    expect(v.viewerState).toBeNull();
+    expect(v.teams).toEqual([
+      { id: mobile, name: "Mobile", kind: "team", memberCount: 1, selected: false, active: true },
+      { id: web, name: "Web", kind: "team", memberCount: 1, selected: false, active: true },
+    ]);
+    expect(v.people).toEqual([]);
+    expect((v.viewers.people as Json[]).map((p) => [p.name, p.reason, p.via?.name ?? null])).toEqual([
+      ["Gus Garcia", "owner", null],
+      ["Ana Alvarez", "device_owner", null],
+      ["Ada Admin", "member", null],
+      ["Kim Kowalski", "member", null],
+      ["Lea Lund", "lead", null],
+      ["Leo Lopez", "member", null],
+      ["Max Moreno", "team", "Mobile"],
+      ["Pia Perez", "member", null],
+      ["Tom Torres", "team", "Web"],
+    ]);
+    expect(v.viewers.more).toBe(0);
+    // The count is the people the rule lets read it, minus admins who see it only for being admins (Víctor).
+    const everyone: Array<[TestClient, string]> = [
+      [admin, adminId],
+      [ana, anaId],
+      [pia, piaId],
+      [leo, leoId],
+      [olga, olgaId],
+      [gus, gusId],
+      [lea, leaId],
+      [ada, adaId],
+      [tom, tomId],
+      [max, maxId],
+      [kim, kimId],
+    ];
+    const reading: string[] = [];
+    for (const [as, id] of everyone) {
+      if ((await as.request("GET", `/api/v1/work-sessions/${s1}`)).status === 200) reading.push(id);
+    }
+    expect(reading.filter((id) => id !== adminId).sort()).toEqual(
+      (v.viewers.people as Json[]).map((p) => p.userId as string).sort(),
+    );
+    expect(v.viewers.count).toBe(reading.length - 1);
+    // The device owner (not the creator) always sees it (D-11); she is told it is her.
+    expect(v.alwaysVisible).toEqual({
+      admins: true,
+      deviceOwner: { userId: anaId, firstName: "Ana", deviceName: "Ana's MacBook", isViewer: false },
+    });
+    expect((await view(ana, s1)).alwaysVisible.deviceOwner.isViewer).toBe(true);
+  });
+
+  it("a personal session: no project default, the device as the project, no teams, the device's users", async () => {
+    const v = await view(ana, notesSession);
+    expect(v.projectDefault).toBeNull();
+    expect(v.project).toEqual({ kind: "personal", deviceName: "Ana's MacBook" });
+    expect(v.teams).toEqual([]);
+    expect(v.alwaysVisible.deviceOwner).toBeNull();
+    expect(v.viewerCan).toEqual({ change: true });
+    expect((v.viewers.people as Json[]).map((p) => [p.name, p.reason, p.via])).toEqual([
+      ["Ana Alvarez", "owner", null],
+      ["Gus Garcia", "device", { id: deviceId, name: "Ana's MacBook" }],
+      ["Kim Kowalski", "device", { id: deviceId, name: "Ana's MacBook" }],
+    ]);
+  });
+
+  it("the creator, a project lead who sees it and an admin change it; a member gets 403; an outsider 404", async () => {
+    await setAudience(gus, s1, { kind: "project" });
+    expect((await setAudience(lea, s1, { kind: "teams", teamIds: [web] })).visibility.kind).toBe("teams");
+    expect((await setAudience(admin, s1, { kind: "project" })).visibility.kind).toBe("project");
+    const denied = await fails(put(leo, s1, { kind: "owner" }), 403);
+    expect(denied.details).toMatchObject({ permission: "work_session.visibility" });
+    expect((await fails(put(olga, s1, { kind: "owner" }), 404)).code).toBe("not_found");
+    expect((await view(lea, s1)).viewerCan).toEqual({ change: true });
+    expect((await view(admin, s1)).viewerCan).toEqual({ change: true });
+    // The device owner always sees it but does not choose its audience.
+    expect((await view(ana, s1)).viewerCan).toEqual({ change: false });
+  });
+
+  it("refuses entries outside the project with their ids only, org B's ids included (never a 500)", async () => {
+    const outside = await fails(put(gus, s1, { kind: "people", userIds: [piaId, olgaId, adminId] }), 422);
+    expect(outside.code).toBe("audience_outside_project");
+    expect(outside.details).toEqual({ ids: [olgaId, adminId] });
+    expect(JSON.stringify(outside)).not.toMatch(/Olga|Víctor/);
+    const team = await fails(put(gus, s1, { kind: "teams", teamIds: [web, ops] }), 422);
+    expect(team).toMatchObject({ code: "team_not_assigned", details: { ids: [ops] } });
+    expect(await fails(put(ana, notesSession, { kind: "teams", teamIds: [web] }), 422)).toMatchObject({
+      code: "team_not_assigned",
+      details: { ids: [web] },
+    });
+    expect(await fails(put(gus, s1, { kind: "teams", teamIds: [eveUnit] }), 422)).toMatchObject({
+      code: "team_not_assigned",
+      details: { ids: [eveUnit] },
+    });
+    expect(await fails(put(gus, s1, { kind: "people", userIds: [eveId] }), 422)).toMatchObject({
+      code: "audience_outside_project",
+      details: { ids: [eveId] },
+    });
+    // Nothing changed.
+    expect((await view(gus, s1)).kind).toBe("project");
+    // A personal session takes the people who use the device.
+    expect(
+      (await setAudience(ana, notesSession, { kind: "people", userIds: [kimId] })).visibility.people,
+    ).toEqual([{ userId: kimId, name: "Kim Kowalski", avatarUrl: null, active: true }]);
+    await fails(put(ana, notesSession, { kind: "people", userIds: [piaId] }), 422);
+    await setAudience(ana, notesSession, { kind: "project" });
+  });
+
+  it("people search: editors only, project access only, never the owner or the device owner, at most 10", async () => {
+    const found = await ok(gus.request("GET", `/api/v1/work-sessions/${s1}/visibility/people?q=le`));
+    expect(names(found.people)).toEqual(["Lea Lund", "Leo Lopez"]);
+    const all = await ok(gus.request("GET", `/api/v1/work-sessions/${s1}/visibility/people`));
+    expect(names(all.people)).toEqual([
+      "Ada Admin",
+      "Kim Kowalski",
+      "Lea Lund",
+      "Leo Lopez",
+      "Max Moreno",
+      "Pia Perez",
+      "Tom Torres",
+    ]);
+    await fails(leo.request("GET", `/api/v1/work-sessions/${s1}/visibility/people?q=le`), 403);
+    await fails(olga.request("GET", `/api/v1/work-sessions/${s1}/visibility/people?q=le`), 404);
+    const personal = await ok(ana.request("GET", `/api/v1/work-sessions/${notesSession}/visibility/people`));
+    expect(names(personal.people)).toEqual(["Gus Garcia", "Kim Kowalski"]);
+  });
+
+  it("a draft: search and preview for whoever could start there; the preview equals the session it would make", async () => {
+    const P = `/api/v1/projects/${repo["portal-web"]}/audience`;
+    expect(names((await ok(gus.request("GET", `${P}/people?q=TO`))).people)).toEqual(["Tom Torres"]);
+    // A project member who cannot use the device, and an outsider, cannot start there: 404.
+    await fails(leo.request("GET", `${P}/people`), 404);
+    await fails(olga.request("GET", `${P}/people`), 404);
+    expect(
+      names((await ok(ana.request("GET", `/api/v1/projects/${repo.notes}/audience/people`))).people),
+    ).toEqual(["Gus Garcia", "Kim Kowalski"]);
+    await fails(pia.request("GET", `/api/v1/projects/${repo.notes}/audience/people`), 404);
+
+    const preview = await ok(gus.request("GET", `${P}/preview?kind=people&userIds=${piaId}`));
+    expect(preview.count).toBe(3);
+    expect(names(preview.people)).toEqual(["Gus Garcia", "Ana Alvarez", "Pia Perez"]);
+    expect(preview.alwaysVisible).toEqual({
+      admins: true,
+      deviceOwner: { userId: anaId, firstName: "Ana", deviceName: "Ana's MacBook", isViewer: false },
+    });
+    // The same audience on a real session gives the same people.
+    await setAudience(gus, s1, { kind: "people", userIds: [piaId] });
+    expect((await view(gus, s1)).viewers.count).toBe(preview.count);
+    await setAudience(gus, s1, { kind: "project" });
+    expect((await ok(gus.request("GET", `${P}/preview?kind=project`))).count).toBe(
+      (await view(gus, s1)).viewers.count,
+    );
+    const teams = await ok(gus.request("GET", `${P}/preview?kind=teams&teamIds=${web},${mobile}`));
+    expect(names(teams.people)).toEqual(["Gus Garcia", "Ana Alvarez", "Max Moreno", "Tom Torres"]);
+    expect((await ok(gus.request("GET", `${P}/preview?kind=owner`))).count).toBe(2);
+    expect(await fails(gus.request("GET", `${P}/preview?kind=people&userIds=${olgaId}`), 422)).toMatchObject({
+      code: "audience_outside_project",
+      details: { ids: [olgaId] },
+    });
+    expect((await fails(gus.request("GET", `${P}/preview?kind=teams`), 400)).code).toBe("invalid_audience");
+    await fails(leo.request("GET", `${P}/preview?kind=project`), 404);
+    // Nothing a draft wrote survives it.
+    expect(
+      (await su.query("select count(*)::int as n from app.work_sessions where title = 'Draft'")).rows[0].n,
+    ).toBe(0);
+  });
+
+  it("the detail: viewerCan carries work_session.visibility for an editor only", async () => {
+    const mine = await ok(gus.request("GET", `/api/v1/work-sessions/${s1}`));
+    expect(mine.viewerCan).toContain("work_session.visibility");
+    expect(mine.viewerState).toBeNull();
+    const member = await ok(leo.request("GET", `/api/v1/work-sessions/${s1}`));
+    expect(member.viewerCan).not.toContain("work_session.visibility");
+  });
+
+  it("an admin who sees it only as an admin leaves one audit row per detail open; lists, streams and members none", async () => {
+    const before = (await audits("work_session.viewed_as_admin", s1)).length;
+    await ok(admin.request("GET", `/api/v1/work-sessions/${s1}`));
+    await ok(admin.request("GET", `/api/v1/work-sessions/${s1}`));
+    const rows = await audits("work_session.viewed_as_admin", s1);
+    expect(rows.length - before).toBe(2);
+    expect(rows.at(-1)!.user_id).toBe(adminId);
+    expect(JSON.stringify(rows.at(-1)!.metadata ?? {})).not.toMatch(/Portal|search/);
+    await ok(admin.request("GET", "/api/v1/work-sessions"));
+    await view(admin, s1);
+    expect(
+      await stack.built.core.realtime.authorizeTopic(
+        { userId: adminId, organizationId: orgId } as AuthContext,
+        `ws:${s1}`,
+      ),
+    ).toBe(true);
+    // Ada is an admin and a project member: a viewer, never audited for it.
+    await ok(ada.request("GET", `/api/v1/work-sessions/${s1}`));
+    expect((await audits("work_session.viewed_as_admin", s1)).length - before).toBe(2);
+  });
+
+  it("selected teams no longer assigned and chosen people who left show inactive; a creator who left reads and archives only (D-12)", async () => {
+    await setAudience(gus, s1, { kind: "teams", teamIds: [mobile] });
+    const s4 = await startSession(gus, device, repo["portal-web"]!, { title: "Pairing" });
+    await setAudience(gus, s4, { kind: "people", userIds: [kimId, piaId] });
+
+    await ok(admin.request("DELETE", `/api/v1/work-projects/${portal.unitId}/teams/${mobile}`));
+    await ok(admin.request("DELETE", `/api/v1/units/${portal.unitId}/members/${kimId}`));
+    try {
+      const teams = (await view(gus, s1)).teams as Json[];
+      expect(teams.map((t) => [t.name, t.selected, t.active])).toEqual([
+        ["Web", false, true],
+        ["Mobile", true, false],
+      ]);
+      expect((await view(gus, s4)).people).toEqual([
+        { userId: kimId, name: "Kim Kowalski", avatarUrl: null, active: false },
+        { userId: piaId, name: "Pia Perez", avatarUrl: null, active: true },
+      ]);
+
+      // Kim created kimSession and left Portal: read and archive only.
+      const detail = await ok(kim.request("GET", `/api/v1/work-sessions/${kimSession}`));
+      expect(detail.viewerState).toBe("left_project");
+      expect(detail.viewerCan).toContain("work_session.archive");
+      expect(detail.viewerCan).not.toContain("work_session.prompt");
+      expect(detail.viewerCan).not.toContain("work_session.visibility");
+      const v = await view(kim, kimSession);
+      expect(v.viewerState).toBe("left_project");
+      expect(v.viewerCan).toEqual({ change: false });
+      expect((v.viewers.people as Json[])[0]).toMatchObject({ userId: kimId, reason: "owner_left" });
+      expect((await fails(put(kim, kimSession, { kind: "owner" }), 403)).code).toBe("left_project");
+    } finally {
+      await ok(admin.request("POST", `/api/v1/work-projects/${portal.unitId}/teams`, { unitId: mobile }));
+      await join(portal.unitId, kimId);
+    }
+  });
+
+  it("org B reaches none of it: every visibility and audience route answers 404 and changes nothing", async () => {
+    const S = `/api/v1/work-sessions/${s1}/visibility`;
+    const P = `/api/v1/projects/${repo["portal-web"]}/audience`;
+    const cases: Record<string, () => Promise<unknown>> = {
+      "GET /api/v1/work-sessions/:id/visibility": () => fails(eve.request("GET", S), 404),
+      "PUT /api/v1/work-sessions/:id/visibility": () => fails(eve.request("PUT", S, { kind: "owner" }), 404),
+      "GET /api/v1/work-sessions/:id/visibility/people": () => fails(eve.request("GET", `${S}/people`), 404),
+      "GET /api/v1/projects/:projectId/audience/people": () => fails(eve.request("GET", `${P}/people`), 404),
+      "GET /api/v1/projects/:projectId/audience/preview": () =>
+        fails(eve.request("GET", `${P}/preview?kind=project`), 404),
+    };
+    // Every route of the family is in the matrix (registry-derived, as 04's).
+    const family = [...stack.built.authz.routes.keys()]
+      .filter((k) => k.includes("/api/v1/work-sessions/:id/visibility") || k.includes("/audience/"))
+      .sort();
+    expect(family).toEqual(Object.keys(cases).sort());
+    const before = (await view(gus, s1)).kind;
+    for (const run of Object.values(cases)) await run();
+    expect((await view(gus, s1)).kind).toBe(before);
   });
 });
