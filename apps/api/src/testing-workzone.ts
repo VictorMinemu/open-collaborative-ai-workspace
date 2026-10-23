@@ -1,4 +1,5 @@
-import type { RuntimeCatalog, RuntimeModel } from "@ocw/contracts";
+import type { PermissionMode, RuntimeCatalog, RuntimeModel } from "@ocw/contracts";
+import { workProjectRepos } from "@ocw/db";
 import { expect } from "vitest";
 import { TestClient, type TestStack } from "./testing";
 import { eventually, FakeDevice } from "./testing-device";
@@ -127,4 +128,75 @@ export async function startSession(
     return (d.body?.session as { status?: string } | undefined)?.status === "idle";
   });
   return id;
+}
+
+// ---------------------------------------------------------------- explicit session access (07.9-03, P-07)
+//
+// From 07.9-05 on, a member sees another member's session only through the session's audience (D-06): a fellow
+// member of the team project its repo is linked to, or (for a personal repo) someone who may use the device. These
+// helpers state that access in a test's setup, so the test is valid under the organization-wide rule and the D-06 one.
+
+/**
+ * D-06 "same team project": the admin creates a department (unless `parentId`) and a project unit under it through the
+ * unit routes, then adds the given members. Link the session's repo with `linkRepo` for the access to apply.
+ */
+export async function createTeamProject(
+  _stack: TestStack,
+  admin: TestClient,
+  opts: { name: string; members: Array<{ userId: string; role?: "member" | "lead" }>; parentId?: string },
+): Promise<{ unitId: string; parentId: string }> {
+  let parentId = opts.parentId;
+  if (!parentId) {
+    const dept = await admin.request("POST", "/api/v1/units", {
+      kind: "department",
+      name: `${opts.name} department`,
+      parentId: null,
+    });
+    expect(dept.status, JSON.stringify(dept.body)).toBe(200);
+    parentId = dept.body!.id as string;
+  }
+  const unit = await admin.request("POST", "/api/v1/units", { kind: "project", name: opts.name, parentId });
+  expect(unit.status, JSON.stringify(unit.body)).toBe(200);
+  const unitId = unit.body!.id as string;
+  for (const m of opts.members) {
+    const res = await admin.request("POST", `/api/v1/units/${unitId}/members`, {
+      userId: m.userId,
+      role: m.role ?? "member",
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+  }
+  return { unitId, parentId };
+}
+
+/**
+ * D-06 "the repo belongs to this team project": one `work_project_repos` row, written in the tenant's system context
+ * (`userId: null`, as the Device Link writes) because the link route arrives in 07.9-04; new tests use that route.
+ */
+export async function linkRepo(
+  stack: TestStack,
+  opts: { organizationId: string; unitId: string; projectId: string; deviceId: string; linkedBy: string },
+): Promise<void> {
+  await stack.built.core.db.withTenant({ organizationId: opts.organizationId, userId: null }, async (tx) => {
+    await tx.insert(workProjectRepos).values({
+      organizationId: opts.organizationId,
+      projectId: opts.projectId,
+      deviceId: opts.deviceId,
+      unitId: opts.unitId,
+      linkedBy: opts.linkedBy,
+    });
+  });
+}
+
+/**
+ * D-06 "may use the device" (personal repos only): the owner grants `userId` the device through the grant route
+ * (ADR-0012). It also changes `device.use` and the person's mode cap, so use it only where the test is about sharing.
+ */
+export async function shareDevice(
+  owner: TestClient,
+  deviceId: string,
+  userId: string,
+  maxMode: PermissionMode = "default",
+): Promise<void> {
+  const res = await owner.request("PUT", `/api/v1/devices/${deviceId}/grants/user/${userId}`, { maxMode });
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
 }
