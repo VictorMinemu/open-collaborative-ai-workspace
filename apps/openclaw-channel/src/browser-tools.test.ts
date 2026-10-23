@@ -6,7 +6,12 @@ import {
   type BrowserToolName,
   type TurnContext,
 } from "./agent-channel-protocol.js";
-import { type AgentChannelClient, AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
+import {
+  type AgentChannelClient,
+  AgentChannelHttpError,
+  confinedTimeoutMs,
+  createAgentChannelClient,
+} from "./api-client.js";
 import {
   BROWSER_REFUSAL_SENTENCE,
   BROWSER_TOOL_ROUTES,
@@ -377,6 +382,34 @@ describe("browser refusal sentences: an exhaustive record over the contract enum
       expect(sentence.length).toBeGreaterThan(10);
       expect(sentence.length).toBeLessThan(220);
     }
+  });
+});
+
+describe("browser budgets (CI p64/p66): the cell waits longer than the API's deadline of each call", () => {
+  it("open waits for a cold start under load and every other tool for the API's own answer, all below OpenClaw's 90 s", async () => {
+    const contracts = (await import(
+      new URL("../../../packages/contracts/src/browser.ts", import.meta.url).href
+    )) as { BROWSER_TIMEOUTS_MS: { apiOpen: number; apiCall: number; cellOpen: number; cellCall: number } };
+    const t = contracts.BROWSER_TIMEOUTS_MS;
+    expect(confinedTimeoutMs("ocw_browser_open")).toBe(t.cellOpen);
+    expect(confinedTimeoutMs("ocw_browser_open")).toBeGreaterThan(t.apiOpen);
+    for (const tool of BROWSER_TOOL_NAMES.filter((n) => n !== "ocw_browser_open")) {
+      expect(confinedTimeoutMs(tool), tool).toBe(t.cellCall);
+      expect(confinedTimeoutMs(tool), tool).toBeGreaterThan(t.apiCall);
+    }
+    // A Codex-harness turn cuts a plugin's dynamic tool at 90 s (OpenClaw 2026.9.7 CODEX_DYNAMIC_TOOL_TIMEOUT_MS).
+    for (const tool of BROWSER_TOOL_NAMES) expect(confinedTimeoutMs(tool), tool).toBeLessThan(90_000);
+  });
+
+  it("the API's `timeout` answer reads as the browser's timeout sentence, never as an unreachable workspace", async () => {
+    const { tool, begin } = setup(async () => {
+      throw new AgentChannelHttpError(503, "/browser/open", CANARY, "timeout");
+    });
+    begin();
+    const res = await tool("ocw_browser_open").execute("tc-1", { url: "http://panel.fake.test:8080/app" });
+    expect(text(res)).toBe(BROWSER_REFUSAL_SENTENCE.timeout);
+    expect(res.details).toMatchObject({ ok: false, code: "timeout" });
+    expect(JSON.stringify(res)).not.toContain(CANARY);
   });
 });
 

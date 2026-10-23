@@ -1497,6 +1497,15 @@ export const BROWSER_LIMITS = {
   reasonMaxChars: 200,
 } as const;
 
+/**
+ * The cell's budgets of contracts `BROWSER_TIMEOUTS_MS` (CI p64/p66): longer than the API's deadline of each call, so
+ * the API's own answer (its `timeout` included) always arrives first; below OpenClaw's 90 s for a Codex-harness tool.
+ */
+export const BROWSER_TIMEOUTS_MS = {
+  cellCall: 65_000,
+  cellOpen: 85_000,
+} as const;
+
 /** The seven `ocw_browser_*` tools (contracts `BROWSER_TOOL_NAMES`). */
 export const BROWSER_TOOL_NAMES = [
   "ocw_browser_open",
