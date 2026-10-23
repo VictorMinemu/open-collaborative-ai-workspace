@@ -1,0 +1,94 @@
+import { EventTypes, type WorkSession, type WorkSessionList } from "@ocw/contracts";
+import { describe, expect, it } from "vitest";
+import { applySessionFrame } from "./workzone-queries";
+
+/**
+ * Phase 07.9-07 (D-08, P-08): the session list follows the member's own `user:` topic. The API delivers a session's
+ * DTO only to the people who may see it (`work_session.updated`) and tells the people an audience change removed
+ * (`work_session.removed { id }`); the browser applies what it was sent and never decides access itself.
+ */
+
+const session = (id: string, updatedAt: string, extra: Partial<WorkSession> = {}): WorkSession => ({
+  id,
+  conversationId: "0b9f6a52-8c1e-4d3a-9b2f-5c6d7e8f9a01",
+  projectId: "0b9f6a52-8c1e-4d3a-9b2f-5c6d7e8f9a02",
+  projectName: "ocw",
+  deviceId: "0b9f6a52-8c1e-4d3a-9b2f-5c6d7e8f9a03",
+  deviceName: "Ana's MacBook",
+  deviceOnline: true,
+  runtime: "claude-code",
+  model: null,
+  permissionMode: "default",
+  worktree: false,
+  branch: null,
+  status: "idle",
+  title: `Session ${id.slice(0, 4)}`,
+  titleSource: "user",
+  createdBy: "0b9f6a52-8c1e-4d3a-9b2f-5c6d7e8f9a04",
+  createdByName: "Ana",
+  queuedCount: 0,
+  pendingApprovals: 0,
+  lastError: null,
+  settings: { requested: {}, effective: null, pending: false },
+  fullAccess: false,
+  runningSince: null,
+  diffStat: null,
+  createdAt: "2026-10-20T10:00:00.000Z",
+  updatedAt,
+  ...extra,
+});
+
+const A = "1a1a1a1a-1111-4111-8111-111111111111";
+const B = "2b2b2b2b-2222-4222-8222-222222222222";
+const C = "3c3c3c3c-3333-4333-8333-333333333333";
+
+const list = (...sessions: WorkSession[]): WorkSessionList => ({ sessions });
+const ids = (l: WorkSessionList | undefined) => l?.sessions.map((s) => s.id);
+const updated = (s: unknown) => ({ type: EventTypes.workSessionUpdated, data: s });
+const removed = (id: string) => ({ type: EventTypes.workSessionRemoved, data: { id } });
+
+describe("applySessionFrame (D-08: the list from the member's own topic)", () => {
+  const old = list(session(A, "2026-10-22T10:00:00.000Z"), session(B, "2026-10-22T09:00:00.000Z"));
+
+  it("inserts a session it did not have, in recency order", () => {
+    const next = applySessionFrame(old, updated(session(C, "2026-10-22T09:30:00.000Z")));
+    expect(ids(next)).toEqual([A, C, B]);
+  });
+
+  it("replaces a session by id and moves it to its new place", () => {
+    const next = applySessionFrame(
+      old,
+      updated(session(B, "2026-10-22T11:00:00.000Z", { title: "Renamed" })),
+    );
+    expect(ids(next)).toEqual([B, A]);
+    expect(next?.sessions[0]?.title).toBe("Renamed");
+  });
+
+  it("keeps the newer copy when an older frame arrives late", () => {
+    const next = applySessionFrame(old, updated(session(A, "2026-10-22T08:00:00.000Z", { title: "Stale" })));
+    expect(next?.sessions.find((s) => s.id === A)?.title).toBe(`Session ${A.slice(0, 4)}`);
+  });
+
+  it("drops an archived session", () => {
+    const next = applySessionFrame(
+      old,
+      updated(session(A, "2026-10-22T12:00:00.000Z", { status: "archived" })),
+    );
+    expect(ids(next)).toEqual([B]);
+  });
+
+  it("drops a session on work_session.removed", () => {
+    expect(ids(applySessionFrame(old, removed(B)))).toEqual([A]);
+    expect(ids(applySessionFrame(old, removed(C)))).toEqual([A, B]);
+  });
+
+  it("ignores payloads that do not parse (a redacted `{}`) and other event types", () => {
+    expect(applySessionFrame(old, updated({}))).toBe(old);
+    expect(applySessionFrame(old, { type: EventTypes.workSessionRemoved, data: { id: "nope" } })).toBe(old);
+    expect(applySessionFrame(old, { type: EventTypes.deviceUpdated, data: { deviceId: A } })).toBe(old);
+  });
+
+  it("leaves an unloaded list alone (the first fetch brings it)", () => {
+    expect(applySessionFrame(undefined, updated(session(A, "2026-10-22T10:00:00.000Z")))).toBeUndefined();
+  });
+});

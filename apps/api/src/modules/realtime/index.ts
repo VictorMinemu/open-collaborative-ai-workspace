@@ -37,6 +37,7 @@ export {
   type SubscriptionInvalidation,
   type SubscriptionInvalidator,
   type TopicAuthorizer,
+  type TopicDecision,
   topicChannel,
 } from "./service";
 

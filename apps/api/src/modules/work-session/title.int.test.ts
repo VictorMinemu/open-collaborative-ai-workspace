@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { ServerFrame } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -18,6 +19,7 @@ const TITLE = "Fix login redirect bug settings";
 let stack: TestStack;
 let su: pg.Client;
 let admin: TestClient;
+let adminId: string;
 let device: FakeDevice;
 let deviceId: string;
 let projectId: string;
@@ -67,6 +69,7 @@ beforeAll(async () => {
     orgName: "Autofy Labs",
   });
   expect(setup.status).toBe(200);
+  adminId = (setup.body!.user as { id: string }).id;
   const paired = await pairDevice(stack, admin, "Víctor's MacBook");
   deviceId = paired.deviceId;
   device = await FakeDevice.connect(stack.baseUrl, paired.token, undefined, { codexLoggedIn: true });
@@ -111,6 +114,9 @@ describe("automatic title on the first prompt (D-18, D-20)", () => {
   });
 
   it("(b) the device's title.result renames the session and its conversation, live and audited", async () => {
+    // 07.9-07 (D-08): the session list learns the new title on its reader's own `user:` topic, never on `org:`.
+    const mine: ServerFrame[] = [];
+    const stopMine = await stack.built.core.realtime.listen(`user:${adminId}`, (f) => mine.push(f));
     device.titleResult(request.id, session.id, TITLE, "haiku");
     device.ack(request.id);
     const s = await eventually(async () => {
@@ -124,11 +130,26 @@ describe("automatic title on the first prompt (D-18, D-20)", () => {
       [`ws:${session.id}`],
     );
     expect(updated.rows[0].payload).toMatchObject({ title: TITLE, titleSource: "auto" });
+    const listed = await eventually(async () =>
+      mine.find(
+        (f) =>
+          f.op === "eph" &&
+          f.type === "work_session.updated" &&
+          (f.data as SessionDto).id === session.id &&
+          (f.data as SessionDto).title === TITLE,
+      ),
+    );
+    expect(listed).toMatchObject({
+      op: "eph",
+      topic: `user:${adminId}`,
+      data: { title: TITLE, titleSource: "auto" },
+    });
+    await stopMine();
     const org = await su.query(
-      "select payload from app.stream_events where stream_id like 'org:%' and type = 'work_session.updated' and payload->>'id' = $1 order by seq desc limit 1",
+      "select payload from app.stream_events where stream_id like 'org:%' and type = 'work_session.updated' and payload->>'id' = $1",
       [session.id],
     );
-    expect(org.rows[0].payload).toMatchObject({ title: TITLE });
+    expect(org.rows).toEqual([]);
     const generated = await audits("work_session.title_generated", session.id);
     expect(generated).toHaveLength(1);
     expect(generated[0]).toMatchObject({

@@ -3,6 +3,7 @@ import {
   type EphemeralFrame,
   parseTopic,
   REPLAY_LIMIT,
+  type RevokeCause,
   type ServerFrame,
   type TopicPrefix,
 } from "@ocw/contracts";
@@ -11,8 +12,14 @@ import { sql } from "drizzle-orm";
 import type { AuthContext } from "../../core";
 import type { RedisBus } from "../../lib/redis";
 
+/**
+ * A topic authorizer's answer: allowed (`true`), or refused, optionally with the reason as a fixed code (Phase 07.9,
+ * D-13) that a live re-decision passes to the client in its `revoked` frame. Never a name.
+ */
+export type TopicDecision = boolean | { allowed: false; cause?: RevokeCause };
+
 /** Decides whether `auth` may subscribe to `<prefix>:<id>`. Must check organization + membership. */
-export type TopicAuthorizer = (auth: AuthContext, id: string) => Promise<boolean> | boolean;
+export type TopicAuthorizer = (auth: AuthContext, id: string) => Promise<TopicDecision> | TopicDecision;
 
 /** Why sessions stopped being valid; consumers close sockets and refuse bearer tokens (02-07/08/09). */
 export type RevocationReason =
@@ -48,8 +55,11 @@ export type SubscriptionInvalidator = (
   payload: unknown,
 ) => { userIds?: string[]; topics?: string[] } | null;
 
-/** Outcome of re-deciding a live subscription: "error" (lookup failed) never revokes. */
-export type Reauthorization = "allowed" | "denied" | "error";
+/**
+ * Outcome of re-deciding a live subscription: "error" (lookup failed) never revokes; a denial carries the authorizer's
+ * `cause` when it gave one (07.9, D-13).
+ */
+export type Reauthorization = "allowed" | "error" | { denied: true; cause?: RevokeCause };
 
 export interface ReplayResult {
   events: DurableFrame[];
@@ -255,7 +265,7 @@ export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): Re
       const fn = authorizers.get(parsed.prefix);
       if (!fn) return false;
       try {
-        return await fn(auth, parsed.id);
+        return (await fn(auth, parsed.id)) === true;
       } catch {
         return false;
       }
@@ -263,14 +273,19 @@ export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): Re
 
     async reauthorizeTopic(auth, topic) {
       const parsed = parseTopic(topic);
-      if (!parsed) return "denied";
+      if (!parsed) return { denied: true };
       const fn = authorizers.get(parsed.prefix);
-      if (!fn) return "denied";
+      if (!fn) return { denied: true };
+      let decision: TopicDecision;
       try {
-        return (await fn(auth, parsed.id)) ? "allowed" : "denied";
+        decision = await fn(auth, parsed.id);
       } catch {
         return "error";
       }
+      if (decision === true) return "allowed";
+      return typeof decision === "object" && decision.cause
+        ? { denied: true, cause: decision.cause }
+        : { denied: true };
     },
 
     registerSubscriptionInvalidator(eventType, fn) {

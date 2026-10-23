@@ -1,4 +1,5 @@
-import { type Tx, workSessions } from "@ocw/db";
+import { EventTypes, WorkProjectUpdatedEvent } from "@ocw/contracts";
+import { permissionRules, type Tx, workSessions } from "@ocw/db";
 import { eq } from "drizzle-orm";
 import type { ApiModule, Core } from "../../core";
 import type { ApprovalService } from "../approval";
@@ -13,6 +14,7 @@ import {
   type WorkZoneProposalService,
   workZoneStartKind,
 } from "./proposals";
+import { revokeCauseOf } from "./revoke-cause";
 import { registerWorkSessionRoutes } from "./routes";
 import { WorkSessionService } from "./service";
 import {
@@ -28,6 +30,7 @@ export { createWorkSessionAttachmentScope } from "./images";
 export { loadWorkZonePolicy } from "./policy";
 export { projectFacts } from "./projects";
 export { WORK_ZONE_PROPOSAL_RESOURCE, type WorkZoneProposalService } from "./proposals";
+export { revokeCauseOf } from "./revoke-cause";
 export { ACTIVE_STATES, type ReauthorizeReason, WorkSessionService, wsTopic } from "./service";
 export type {
   WorkSessionActor,
@@ -84,7 +87,8 @@ export function createWorkSessionModule(
   hub.setSessionHandler(service);
 
   // Following a session's stream is `work_session.read` on that session, with the facts of `sessionFacts` (the session's
-  // audience, D-04/D-09; RLS scopes the lookup to the org). Nobody outside the audience subscribes `ws:<id>`.
+  // audience, D-04/D-09; RLS scopes the lookup to the org). Nobody outside the audience subscribes `ws:<id>`. A refusal
+  // carries why, as a code (D-13), for the `revoked` frame of a live re-decision.
   core.realtime.registerTopicAuthorizer("ws", async (auth, workSessionId) =>
     core.db.withTenant({ organizationId: auth.organizationId, userId: auth.userId }, async (tx) => {
       const [row] = await tx
@@ -92,14 +96,28 @@ export function createWorkSessionModule(
         .from(workSessions)
         .where(eq(workSessions.id, workSessionId));
       if (!row) return false;
-      const { allowed } = await perms.decide(
+      const { allowed, denial } = await perms.decide(
         tx,
         { kind: "user", userId: auth.userId },
         "work_session.read",
         await sessionFacts(tx, auth.userId, row),
       );
-      return allowed;
+      if (allowed) return true;
+      let rulePermission: string | null = null;
+      if (denial?.ruleId) {
+        const [rule] = await tx
+          .select({ permission: permissionRules.permission })
+          .from(permissionRules)
+          .where(eq(permissionRules.id, denial.ruleId));
+        rulePermission = rule?.permission ?? null;
+      }
+      return { allowed: false as const, cause: revokeCauseOf(denial, rulePermission) };
     }),
+  );
+  // A team project's teams or repositories changed (P-09): who may see its sessions changed for anyone in the
+  // organization, so every live subscription is re-decided (coalesced by the gateway queue), as for `units.updated`.
+  core.realtime.registerSubscriptionInvalidator(EventTypes.workProjectUpdated, (topic, payload) =>
+    topic.startsWith("org:") && WorkProjectUpdatedEvent.safeParse(payload).success ? {} : null,
   );
 
   const start: WorkSessionModule["start"] = (tx, actor, input, opts) =>
