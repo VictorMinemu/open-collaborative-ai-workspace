@@ -30,6 +30,7 @@ import {
   expectTouchTargets,
   unnamedControls,
 } from "../support/layout";
+import { apiRequests, finishedBodies } from "../support/responses";
 import { asSuperuser } from "../support/superuser";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
 import { ADMIN, API_URL } from "./env";
@@ -495,11 +496,8 @@ test("in a channel the card is a summary: a reader outside the audience never re
     // ---- Luis (an #ops member outside Sales) is reading the channel when the card arrives
     luis = await openAs(browser, LUIS, project);
     const frames: string[] = [];
-    const bodies: Promise<string>[] = [];
     luis.page.on("websocket", (ws) => ws.on("framereceived", (f) => frames.push(String(f.payload))));
-    luis.page.on("response", (r) => {
-      if (r.url().includes("/api/")) bodies.push(r.text().catch(() => ""));
-    });
+    const bodies = finishedBodies(luis.page, apiRequests("/api/"));
     await luis.page.goto(`${BASE_URL}/chat/${channel.id}`);
     await expect(luis.page.getByTestId("composer")).toBeVisible();
 
@@ -534,7 +532,7 @@ test("in a channel the card is a summary: a reader outside the audience never re
     expect(await luis.page.content()).not.toContain(SENTINEL);
     expect(frames.length, "Luis's page received realtime frames").toBeGreaterThan(0);
     expect(frames.filter((f) => f.includes(SENTINEL))).toEqual([]);
-    expect((await Promise.all(bodies)).filter((b) => b.includes(SENTINEL))).toEqual([]);
+    expect((await bodies()).filter((b) => b.includes(SENTINEL))).toEqual([]);
 
     await invariants(luis.page, `channel card ${w}`, card);
     await reveal(card);

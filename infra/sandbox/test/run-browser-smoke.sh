@@ -13,7 +13,8 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
-NS="ocw-smoke-$$"
+# The label namespace (CI sets OCW_SMOKE_NS_PREFIX to its slot's, infra/ci/slot-reset.sh; default ocw-smoke).
+NS="${OCW_SMOKE_NS_PREFIX:-ocw-smoke}-$$"
 SHA="$(git -C "$ROOT" rev-parse --short=12 HEAD)"
 IMAGE="ocw-sandbox-brw:smoke-$SHA"
 BASE="node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20"

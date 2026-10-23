@@ -24,11 +24,12 @@
 #   PROOF_BUILD=1          build ocw-openclaw:e2e and ocw-fake-model:e2e from this tree first (else they must exist)
 #   PROOF_OUT=<dir>        where state.json, cell.log, fake-model.log and audit.tsv are written (default: a temp dir)
 #   PROOF_SUBNET           proof network subnet (default 10.231.80.0/24)
+#   OCW_PROOF_NS           name prefix and label namespace of what it creates (default ocw-proof-sandbox)
 #   PROOF_CELL_MEMORY      optional hard memory cap for the cell (e.g. 2g)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-P=ocw-proof-sandbox
+P="${OCW_PROOF_NS:-ocw-proof-sandbox}"   # names and label namespace (CI: its slot's, infra/ci/slot-reset.sh)
 LABEL="ocw.namespace=$P"   # the ONLY label this script removes
 NET="${P}-net"
 VOL="${P}-state"

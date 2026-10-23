@@ -1,6 +1,8 @@
 #!/bin/sh
-# Removes what the CI smokes and proofs create when a run was killed before its own EXIT trap could. Safe when nothing
-# is left. Never a prune, never another namespace.
+# Removes what the smokes and proofs create with their DEFAULT names when a run was killed before its own EXIT trap
+# could (local runs; infra/sandbox/test/run-orphans-check.sh calls it). CI does not use it: its workflows run in
+# parallel, each removing only its own slot's objects with infra/ci/slot-reset.sh (ocw-ci-<slot>-*, which this never
+# matches). Safe when nothing is left. Never a prune, never another namespace.
 #   - infra/openclaw/test/run-container-smoke.sh: fixed names, prefix ocw-smoke.
 #   - Bot sandbox smokes and proofs (07.8-24): containers, volumes and networks labelled `ocw.namespace=` one of
 #     ocw-smoke-* (infra/sandbox/test/run-*.sh, their fixtures and every object their sandboxd creates, which also

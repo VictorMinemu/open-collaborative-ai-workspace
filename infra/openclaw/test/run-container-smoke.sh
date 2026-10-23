@@ -67,6 +67,7 @@
 #                            and sandbox (runs when it is listed, with SMOKE_BUILD=1, or when ocw-mcp-sandbox:local
 #                            exists; otherwise it prints "SKIP sandbox (image not built)")
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
+#   SMOKE_PREFIX=<name>      prefix of the smoke's container, network and volume names (default ocw-smoke)
 #   SMOKE_CELL_IMAGE / SMOKE_MODEL_IMAGE / SMOKE_SANDBOX_IMAGE  image tags to build and run (defaults
 #                            ocw-openclaw:local, ocw-fake-model:local, ocw-mcp-sandbox:local); a unique tag keeps a
 #                            smoke away from the images a running stack uses
@@ -83,7 +84,8 @@ want() { [[ -z "${SMOKE_ONLY:-}" || ",${SMOKE_ONLY}," == *",$1,"* ]]; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 KEEP="${1:-}"
-P=ocw-smoke
+# Name prefix of every container, network and volume (CI sets SMOKE_PREFIX to its slot's, infra/ci/slot-reset.sh).
+P="${SMOKE_PREFIX:-ocw-smoke}"
 NET="${P}-net"
 VOL="${P}-state"
 TOKEN="smoke-$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"

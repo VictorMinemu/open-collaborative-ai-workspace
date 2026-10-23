@@ -15,8 +15,11 @@ import type { FakeCellPlugin } from "./fake-cell-plugin";
 export const FAKE_URL = process.env.OCW_E2E_FAKE_URL ?? "";
 /** Bearer the fake MCP requires (FAKE_MCP_TOKEN of the fake server). */
 export const FAKE_MCP_TOKEN = process.env.OCW_E2E_FAKE_MCP_TOKEN ?? "e2e-mcp-token";
-/** The host an admin registers (a compose-style service name the API's URL policy accepts). */
-export const FAKE_MCP_HOST = "fake-mcp:4291";
+/**
+ * The host an admin registers (a compose-style service name the API's URL policy accepts), on the fake's port: CI runs
+ * each viewport's stack on its own ports (infra/ci/README.md), the isolated runner on 4291.
+ */
+export const FAKE_MCP_HOST = `fake-mcp:${FAKE_URL ? new URL(FAKE_URL).port : "4291"}`;
 
 export const NOTES = "@ocw-test/notes-plugin";
 export const ECHO = "@ocw-test/echo-plugin";

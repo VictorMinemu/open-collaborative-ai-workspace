@@ -91,6 +91,7 @@ Recent decisions affecting current work:
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 261002-fns | Restructure roadmap: Phase 1 becomes MVP 0 multiplayer AI chat slice | 2026-10-02 | 5f2bda9 | [261002-fns-restructure-roadmap-phase-1-becomes-mvp-](./quick/261002-fns-restructure-roadmap-phase-1-becomes-mvp-/) |
+| 261022-cip | Woodpecker workflows in parallel slots on one dind; heavy workflows not on push to main | 2026-10-22 | 52b58541 | [261022-cip-ci-parallel](./quick/261022-cip-ci-parallel/) |
 
 ### Roadmap Evolution
 

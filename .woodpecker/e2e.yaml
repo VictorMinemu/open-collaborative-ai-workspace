@@ -3,47 +3,56 @@
 # processes end with the step). Host networking puts that step in dind's network namespace, where the published
 # compose ports live. The checkout is copied under /home/ocw-ci so compose bind mounts (./infra/garage/...) resolve
 # on the dind daemon (see verify.yaml). Failure reports are kept in /home/ocw-ci/artifacts for 7 days.
-# Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event).
+# Both viewports run at once next to the other workflows (infra/ci/README.md): each is its own slot e2e-<viewport>,
+# with its own compose project, workspace and port block PORT_BLOCK (web NN00, API NN01, postgres NN02, redis NN03,
+# Garage NN04 from `pnpm setup:env --ports`, the fake on NN91), which infra/ci/slots.test.mjs keeps disjoint.
+# Pull requests and manual runs only: a push to main re-tests the tree its pull request already passed.
 when:
   - event: [pull_request, manual]
-  - event: push
-    branch: main
 
 matrix:
-  PROJECT: [desktop, mobile]
+  include:
+    - PROJECT: desktop
+      PORT_BLOCK: 21
+    - PROJECT: mobile
+      PORT_BLOCK: 22
 
 variables:
   - &docker_sock /var/run/docker.sock:/var/run/docker.sock
   - &shared /home/ocw-ci:/home/ocw-ci
   - &env
+    OCW_CI_SLOT: e2e-${PROJECT}
     W: /home/ocw-ci/ws/e2e-${PROJECT}
     PNPM_STORE: /home/ocw-ci/cache/pnpm-store
-    COMPOSE_PROJECT_NAME: ocw-e2e-${PROJECT}
+    COMPOSE_PROJECT_NAME: ocw-ci-e2e-${PROJECT}
+    # This stack's web and API (`pnpm setup:env --ports` writes the same URLs into .env).
+    OCW_E2E_BASE_URL: http://localhost:${PORT_BLOCK}00
+    OCW_E2E_API_URL: http://localhost:${PORT_BLOCK}01
     # Bots use the deterministic mock model; CI never receives a metered model key.
     OCW_MODEL_PROVIDER: mock
     # Specs sign many browsers in from one IP; production keeps the default 30/min.
     OCW_SIGNIN_RATE_LIMIT_PER_MINUTE: "600"
     # Marketplace / MCP specs: the API proxies the fake ClawHub, the simulated cell probes the fake MCP.
-    OCW_CLAWHUB_URL: http://127.0.0.1:4291
-    OCW_E2E_FAKE_URL: http://127.0.0.1:4291
+    OCW_CLAWHUB_URL: http://127.0.0.1:${PORT_BLOCK}91
+    OCW_E2E_FAKE_URL: http://127.0.0.1:${PORT_BLOCK}91
     OCW_E2E_FAKE_MCP_TOKEN: e2e-mcp-token
     # Per-member connectors (07.4): the API reaches the fake OAuth MCP server by the name an admin registers
-    # (http://fake-mcp:4291/mcp-oauth/mcp) through its egress guard, as scripts/e2e-isolated.sh. TEST-ONLY: the API
+    # (http://fake-mcp:<fake port>/mcp-oauth/mcp) through its egress guard, as scripts/e2e-isolated.sh. TEST-ONLY: the API
     # refuses this variable when NODE_ENV is production.
     OCW_EGRESS_TEST_HOSTS: fake-mcp=127.0.0.1
     # AI chats (Phase 5+, as scripts/e2e-isolated.sh): the ChatGPT plan (Responses API + SIWC), the mock backend and
     # AI web search all point at the fake; the test-only plan seed route exists only with these set.
-    OCW_CHATGPT_API_BASE_URL: http://127.0.0.1:4291/v1
-    OCW_CHATGPT_AUTH_BASE_URL: http://127.0.0.1:4291/siwc
-    OCW_AI_MOCK_BASE_URL: http://127.0.0.1:4291/v1
-    OCW_AI_SEARXNG_URL: http://127.0.0.1:4291
+    OCW_CHATGPT_API_BASE_URL: http://127.0.0.1:${PORT_BLOCK}91/v1
+    OCW_CHATGPT_AUTH_BASE_URL: http://127.0.0.1:${PORT_BLOCK}91/siwc
+    OCW_AI_MOCK_BASE_URL: http://127.0.0.1:${PORT_BLOCK}91/v1
+    OCW_AI_SEARXNG_URL: http://127.0.0.1:${PORT_BLOCK}91
     # One user types, searches and sends many times a minute; production keeps 30/min/user.
     OCW_SEARCH_RATE_LIMIT_PER_MINUTE: "600"
     OCW_AI_SEND_RATE_LIMIT_PER_MINUTE: "600"
     # Bot sandboxes (07.8-08, as scripts/e2e-isolated.sh): the API's broker is the fake sandboxd the fake server mounts
     # at /__sandboxd behind this fixed, loopback-only test token. The real broker runs in the sandbox jobs (07.8-24).
     # scripts/e2e-env-parity.test.mjs fails when a runner variable is missing here.
-    OCW_SANDBOX_URL: http://127.0.0.1:4291/__sandboxd
+    OCW_SANDBOX_URL: http://127.0.0.1:${PORT_BLOCK}91/__sandboxd
     OCW_SANDBOX_TOKEN: e2e-sandbox-token-0123456789abcdef0123456789
     OCW_E2E_SANDBOX: fake
 
@@ -52,14 +61,16 @@ steps:
     image: docker:29.8.2-cli
     volumes: [*docker_sock]
     commands:
-      - sh infra/ci/build-image.sh
+      - sh infra/ci/build-image.sh ocw-ci:${CI_COMMIT_SHA}
 
   - name: install
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
+      # The slot first: nothing of it (workspace, stack, ports) is touched while another pipeline's run holds it.
+      - sh infra/ci/slot-lease.sh acquire
       - rm -rf "$${W}" && mkdir -p "$${W}" && cp -a . "$${W}/"
       - cd "$${W}" && pnpm install --frozen-lockfile --store-dir "$${PNPM_STORE}"
       - pnpm --dir apps/web build
@@ -67,28 +78,29 @@ steps:
       - pnpm exec playwright install chromium
 
   - name: e2e
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     network_mode: host
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
       - cd "$${W}"
-      # A cancelled run skips its cleanup step: start from a fresh stack either way.
-      - sh infra/ci/e2e-reset.sh
-      # Garage (attachments, ADR-0015) uses the keys setup:env generated; the API reaches it on 127.0.0.1:3900.
-      - pnpm setup:env
+      # A cancelled run of this slot skips its cleanup step: remove what it left (only this slot's objects).
+      - sh infra/ci/slot-reset.sh
+      # This slot's port block and compose project; Garage (attachments, ADR-0015) uses the keys setup:env generated,
+      # and the API reaches it on 127.0.0.1:${PORT_BLOCK}04.
+      - pnpm setup:env --ports ${PORT_BLOCK} --project "$${COMPOSE_PROJECT_NAME}"
       - docker compose up -d --wait postgres redis garage
       - pnpm db:migrate
       # Fake model, MCP, ClawHub and sandboxd (loopback, no internet).
-      # The fake OAuth server pre-registers the e2e client with this stack's callback (the API listens on :4000 here,
-      # :4290 in scripts/e2e-isolated.sh).
-      - (PORT=4291 FAKE_MODEL_HOST=127.0.0.1 FAKE_MCP_TOKEN=e2e-mcp-token FAKE_SANDBOX_TOKEN=$${OCW_SANDBOX_TOKEN} FAKE_MCP_OAUTH_REDIRECTS=http://localhost:4000/api/v1/connectors/oauth/callback,http://127.0.0.1:4000/api/v1/connectors/oauth/callback nohup node infra/fake-model/server.mjs > fake.log 2>&1 &)
-      - for i in $$(seq 1 20); do curl -sf -o /dev/null localhost:4291/v1/models && break; sleep 1; done
-      - (cd apps/api && nohup node --env-file-if-exists=../../.env --import tsx src/main.ts > ../../api.log 2>&1 &)
-      - (cd apps/web && nohup node --env-file-if-exists=../../.env ./node_modules/next/dist/bin/next start -p 3000 > ../../web.log 2>&1 &)
-      - for i in $$(seq 1 60); do curl -sf localhost:4000/health && curl -sf -o /dev/null localhost:3000/login && break; sleep 2; done
-      - curl -sf -o /dev/null localhost:4000/health && curl -sf -o /dev/null localhost:3000/login
+      # The fake OAuth server pre-registers the e2e client with this stack's callback (the API listens on
+      # :${PORT_BLOCK}01 here, :4290 in scripts/e2e-isolated.sh).
+      - (PORT=${PORT_BLOCK}91 FAKE_MODEL_HOST=127.0.0.1 FAKE_MCP_TOKEN=e2e-mcp-token FAKE_SANDBOX_TOKEN=$${OCW_SANDBOX_TOKEN} FAKE_MCP_OAUTH_REDIRECTS=http://localhost:${PORT_BLOCK}01/api/v1/connectors/oauth/callback,http://127.0.0.1:${PORT_BLOCK}01/api/v1/connectors/oauth/callback nohup node infra/fake-model/server.mjs > fake.log 2>&1 &)
+      - for i in $$(seq 1 20); do curl -sf -o /dev/null localhost:${PORT_BLOCK}91/v1/models && break; sleep 1; done
+      - (cd apps/api && PORT=${PORT_BLOCK}01 nohup node --env-file-if-exists=../../.env --import tsx src/main.ts > ../../api.log 2>&1 &)
+      - (cd apps/web && nohup node --env-file-if-exists=../../.env ./node_modules/next/dist/bin/next start -p ${PORT_BLOCK}00 > ../../web.log 2>&1 &)
+      - for i in $$(seq 1 60); do curl -sf localhost:${PORT_BLOCK}01/health && curl -sf -o /dev/null localhost:${PORT_BLOCK}00/login && break; sleep 2; done
+      - curl -sf -o /dev/null localhost:${PORT_BLOCK}01/health && curl -sf -o /dev/null localhost:${PORT_BLOCK}00/login
       # e2e/playwright.config.ts caps a CI run at 15 minutes (sized for a 30-minute GitHub job); the serial suite now
       # needs ~30 minutes of test time on this agent (07.4/07.5 specs), so the cap is raised to 50 minutes here. It
       # still fails well inside the workflow's 120-minute timeout, with its report.
@@ -96,7 +108,7 @@ steps:
       - cat e2e/test-results/realtime-latency.json || true
 
   - name: failure-logs
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
@@ -111,12 +123,13 @@ steps:
       status: [failure]
 
   - name: cleanup
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
-      - sh infra/ci/e2e-reset.sh
+      - sh infra/ci/slot-reset.sh
       - rm -rf "$${W}"
+      - sh infra/ci/slot-lease.sh release
     when:
       status: [success, failure]

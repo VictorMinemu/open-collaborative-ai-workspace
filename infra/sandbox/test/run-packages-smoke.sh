@@ -52,7 +52,8 @@ esac
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
 
-NS="ocw-smoke-pkg-$$"
+# The label namespace (CI sets OCW_SMOKE_NS_PREFIX to its slot's, infra/ci/slot-reset.sh; default ocw-smoke).
+NS="${OCW_SMOKE_NS_PREFIX:-ocw-smoke}-pkg-$$"
 SHA="$(git rev-parse --short=12 HEAD)"
 SBX_IMAGE="ocw-sandbox-sbx:smoke-${SHA}"
 EGRESS_IMAGE="ocw-sandbox-egress:smoke-${SHA}"
