@@ -496,6 +496,29 @@ describe("fake sandboxd: browser ops", () => {
     assert.equal((await stats()).browser.contexts.find((c) => c.contextId === fresh).holdReason, "signin");
   });
 
+  it("the delay control holds the next call of one context op only, while the frame stream keeps running", async () => {
+    const ctx = await browser(A);
+    await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app" });
+    assert.equal((await control("delay", { op: "contextLock", ms: 600 })).status, 200);
+    assert.equal((await control("delay", { op: "ensure", ms: 600 })).status, 400);
+    assert.equal((await control("delay", { op: "contextLock", ms: 60_000 })).status, 400);
+    const member = randomUUID();
+    const started = Date.now();
+    const [held, frames] = await Promise.all([
+      ctxOp("lock", A, ctx, { memberId: member, siteLock: "panel.fake.test" }),
+      readFrames(A, ctx, 500),
+    ]);
+    assert.equal(held.status, 200);
+    assert.ok(Date.now() - started >= 550, "the lock answered after the delay");
+    assert.ok(frames.filter((f) => f.type === 0).length >= 2, "frames flowed meanwhile");
+    const again = Date.now();
+    assert.equal(
+      (await ctxOp("lock", A, ctx, { memberId: member, siteLock: "panel.fake.test" })).status,
+      200,
+    );
+    assert.ok(Date.now() - again < 400, "one call only");
+  });
+
   it("downloads: a download control emits the event; the token returns fixed bytes once", async () => {
     const ctx = await browser(A);
     await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app" });

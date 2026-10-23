@@ -204,6 +204,24 @@ take over to sign in themselves. The Control Plane must keep deciding, auditing,
   after the latest input (warning at 9), kept every 30 s while input flows, released on hand back, socket close, access
   loss, kill or page end; dead leases are swept one minute past expiry (#271). While a takeover is active the bot's ops
   answer `paused` and cost no budget. Input reaches the page through `Input.dispatch*` only.
+- **The hand back is atomic (proof pipeline 55).** The lease ends in the **same transaction** as what the hand back
+  decides: the seal of the member's sign-in (after `sandboxd` exported and locked the page, while the lease still held
+  it), the card waiting again, or nothing for a plain takeover. The row therefore goes from "a person controls it"
+  straight to "the member's session is loaded" (or to public when nothing was signed in): no instance, poll or refresh
+  can read the page as public in between. Every privacy transition fails closed in the live view as well: a viewer's
+  answer decided before a member session was loaded (or unloaded) lets no frame through until the resolver answered
+  for the current row, and the gate is asked per frame when it is handed to the socket, not only when it was queued.
+- **An abandoned takeover closes the page.** When a lease ends **without a hand back** (the socket closed, the
+  10-minute idle release, lost access, or a dead instance's lease cleared by a live view or the browser sweep) **after
+  the holder sent input in that lease** (typed, clicked, pasted, tapped; pointer moves and wheel scrolls do not count),
+  **or with a member's session loaded**, the page is **closed** with the end reason `takeover_abandoned`, in the
+  transaction that ends the lease, and closed in `sandboxd` after the commit: it never goes back to the bot and its
+  watchers with whatever the person left in it. The input is recorded on the row (`lease_input`, reset when a lease
+  starts or ends) **before** it is sent to the page, so the rule holds on whichever instance or sweep ends the lease; an
+  input that cannot be recorded is not sent. A sign-in card still waiting on the page stops with the same reason. The
+  close is audited `browser.closed` with ids and the fixed reasons only (`reason`, `leaseEnd`). Without input and
+  without a member session, the page stays and is public again, as before; a failed take (`upstream_failed`) is no
+  abandonment.
 
 ### Sealed member sessions (D-08, F-10, BRW-04)
 

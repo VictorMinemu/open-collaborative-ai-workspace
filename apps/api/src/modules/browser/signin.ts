@@ -16,12 +16,14 @@ import { announce } from "./takeover";
  * The platform-owned sign-in card (07.8-21; D-07, D-08, D-11 F-10, D-12 U-3 U-6, R1, R9, BRW-03). A bot that reaches a
  * page needing an account asks (`ocw_browser_signin`, reason only); the API composes the card from the context (the
  * page's host, never the bot's text), holds the page 15 minutes and waits for the turn's member. They take control in
- * the live view, sign in by typing in the page themselves and hand back. Then (`onHandBack`, called by the live view):
+ * the live view, sign in by typing in the page themselves and hand back. Then (`onHandBack`, called by the live view
+ * while their takeover lease is still held, so the page stays private to them throughout):
  *
  *   1. sandboxd exports the context's storage state (outside any transaction; P-09's filter in the agent);
  *   2. sandboxd site-locks that open page in place (`contextLock`, D-13): from now on it behaves as a page opened with
  *      the sealed session (other hosts blocked and turned into the requester's approval);
- *   3. one transaction AS the member: the API keeps only that host's state again (`keepForSite`), seals it
+ *   3. one transaction AS the member: the takeover lease ends (`browser.takeover_ended`), the API keeps only that
+ *      host's state again (`keepForSite`), seals it
  *      (`sealSession`, AAD per organization × member × bot × site), links the session to the page (frames go to the
  *      member alone, signed-in acts ask the member, `member_data` for the next calls), turns the card "Signed in",
  *      audits `browser.signin_decided` and `browser_session.sealed` (ids and the host only) and delivers a card-action
@@ -340,26 +342,40 @@ export async function captureSignInBaseline(
  * The member handed control back (the live view's `release`): when their sign-in waits on this page, the page's state
  * is exported, the page site-locked and the state sealed for them (see the file comment). Nothing to do otherwise.
  * A failed export leaves the card waiting (the member may try again); nothing is sealed.
+ *
+ * Proof pipeline 55 (F-5, U-2): `endLease` ends the member's takeover lease INSIDE the transaction that decides what
+ * the hand back did (the seal, the card waiting again, or nothing), never before it. The lease is still held in the
+ * row while sandboxd exports and locks the page, so the context row goes from "a person controls it" straight to "the member's
+ * session is loaded" (or to public when nothing was signed in) in one commit: no instance, poll or refresh can read the
+ * page as public in between while it holds what the member just typed. Every path that returns calls it once; a throw
+ * leaves the caller to end the lease itself.
  */
 export async function onHandBack(
   deps: { core: Core; client: SandboxdClient | null },
   p: { organizationId: string; contextId: string; userId: string },
+  endLease: (tx: Tx) => Promise<unknown> = async () => {},
 ): Promise<HandBack> {
   const { core, client } = deps;
   const tenant = { organizationId: p.organizationId, userId: p.userId };
   const found = await core.db.withTenant(tenant, async (tx) => {
     const r = await liveRequestOf(tx, p.contextId, p.userId);
-    if (!r) return null;
-    const [ctx] = await tx
-      .select({
-        id: browserContexts.id,
-        agentId: browserContexts.agentId,
-        closedAt: browserContexts.closedAt,
-      })
-      .from(browserContexts)
-      .where(eq(browserContexts.id, p.contextId))
-      .limit(1);
-    return ctx && ctx.closedAt === null ? { request: r, agentId: ctx.agentId } : null;
+    const [ctx] = r
+      ? await tx
+          .select({
+            id: browserContexts.id,
+            agentId: browserContexts.agentId,
+            closedAt: browserContexts.closedAt,
+          })
+          .from(browserContexts)
+          .where(eq(browserContexts.id, p.contextId))
+          .limit(1)
+      : [];
+    if (!r || !ctx || ctx.closedAt !== null) {
+      // No sign-in of this member waits on the page (a plain takeover): the lease simply ends here.
+      await endLease(tx);
+      return null;
+    }
+    return { request: r, agentId: ctx.agentId };
   });
   if (!found) return "none";
   const { request } = found;
@@ -392,7 +408,10 @@ export async function onHandBack(
   // Handed back without signing in (nothing of the site kept, or nothing changed): nothing is sealed and the card
   // waits again.
   if (!client || !kept || kept.items === 0 || unchanged) {
-    await core.db.withTenant(tenant, (tx) => backToWaiting(tx, core, p));
+    await core.db.withTenant(tenant, async (tx) => {
+      await endLease(tx);
+      await backToWaiting(tx, core, p);
+    });
     return "failed";
   }
   // D-13 before the seal is visible: the signed-in page may not leave its site. A page that cannot be locked is ended
@@ -415,6 +434,8 @@ export async function onHandBack(
     );
   }
   const sealed = await core.db.withTenant(tenant, async (tx, after) => {
+    // The lease ends in the seal's own transaction (see above): `browser.takeover_ended`, then the seal's rows.
+    await endLease(tx);
     const r = await liveRequestOf(tx, p.contextId, p.userId);
     if (!r || r.id !== request.id) return false;
     const session = await sealSession(tx, core, {

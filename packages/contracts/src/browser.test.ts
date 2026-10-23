@@ -142,6 +142,7 @@ describe("browser limits and refusals (07.8-30, D-05…D-08, D-11)", () => {
       "module_off",
       "crashed",
       "access_lost",
+      "takeover_abandoned",
     ]);
     expect(BrowserPrivateReason.options).toEqual(["takeover", "member_session"]);
     expect(BrowserSignInStatus.options).toEqual([

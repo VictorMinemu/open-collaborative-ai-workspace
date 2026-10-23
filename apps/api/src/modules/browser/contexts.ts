@@ -229,6 +229,7 @@ export async function closeContext(
       heldUntil: null,
       controllerUserId: null,
       leaseExpiresAt: null,
+      leaseInput: false,
     })
     .where(and(eq(browserContexts.id, id), isNull(browserContexts.closedAt)))
     .returning();
@@ -250,6 +251,7 @@ export async function closeOrganizationContexts(
       heldUntil: null,
       controllerUserId: null,
       leaseExpiresAt: null,
+      leaseInput: false,
     })
     .where(isNull(browserContexts.closedAt))
     .returning();
@@ -277,6 +279,33 @@ export async function auditClosed(
     resourceId: row.id,
     metadata: { contextId: row.id, host: row.host, reason, ...extra },
   });
+}
+
+/**
+ * ADR-0029: a takeover abandoned after input (or with a member's session loaded) ends its page, `takeover_abandoned`,
+ * in the transaction that ended the lease, so the row goes from "a person controls it" to "ended" in one commit and is
+ * never public in between. A sign-in still waiting on it stops with that reason. Audited `browser.closed` with ids and
+ * the fixed reasons only (`leaseEnd`: how the lease ended); no host, path or anything typed. Returns the row it ended.
+ */
+export async function closeAbandoned(
+  tx: Tx,
+  core: Pick<Core, "audit" | "realtime">,
+  p: { contextId: string; leaseEnd: string },
+): Promise<BrowserContextRecord | null> {
+  const row = await closeContext(tx, p.contextId, "takeover_abandoned");
+  if (!row) return null;
+  await stopSignIns(tx, core, { contextId: row.id, reason: "takeover_abandoned" });
+  await core.audit.record(tx, {
+    action: "browser.closed",
+    actorKind: "system",
+    actorId: null,
+    agentId: row.agentId,
+    userId: row.requestedForUserId,
+    resourceType: "browser_context",
+    resourceId: row.id,
+    metadata: { contextId: row.id, reason: "takeover_abandoned", leaseEnd: p.leaseEnd },
+  });
+  return row;
 }
 
 /**

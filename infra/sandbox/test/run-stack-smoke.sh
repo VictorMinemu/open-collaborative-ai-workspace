@@ -101,12 +101,18 @@ on_exit() {
   fi
   # STACK_KEEP_LOG=<file>: keep sandboxd's log (ids, ops, statuses, brw diagnostics) for a diagnosis.
   if [ -n "${STACK_KEEP_LOG:-}" ] && [ -f "$WORK/sandboxd.log" ]; then cp "$WORK/sandboxd.log" "$STACK_KEEP_LOG" || true; fi
-  cleanup_ns
+  # A removed container can hold its network and volumes for a moment after `rm -f` returns (CI dind, pipeline 52):
+  # retry the label cleanup briefly before counting what is left, as run-sandbox-smoke.sh does.
+  local left attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    cleanup_ns
+    left="$(docker ps -aq --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')"
+    left=$((left + $(docker network ls -q --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')))
+    left=$((left + $(docker volume ls -q --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')))
+    [ "$left" = "0" ] && break
+    sleep 1
+  done
   docker image rm -f "$SBX_IMAGE" "$BRW_IMAGE" "$EGRESS_IMAGE" >/dev/null 2>&1 || true
-  local left
-  left="$(docker ps -aq --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')"
-  left=$((left + $(docker network ls -q --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')))
-  left=$((left + $(docker volume ls -q --filter "label=ocw.namespace=${NS}" | wc -l | tr -d ' ')))
   if [ "$left" != "0" ]; then
     log "FAIL ${left} object(s) labelled ocw.namespace=${NS} left after cleanup"
     code=1

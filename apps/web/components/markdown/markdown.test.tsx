@@ -229,7 +229,8 @@ describe("Markdown: the shared subset", () => {
     expect(largeMs / Math.max(smallMs, 1)).toBeLessThan(10);
     // A generous absolute cap still catches a catastrophic renderer (about 0.3 s on a laptop).
     expect(largeMs).toBeLessThan(4000);
-  });
+    // Six renders on a shared CI runner outlast vitest's 5 s default; the budget is the assertions above, not this.
+  }, 30_000);
 });
 
 describe("Markdown: streaming (D-05)", () => {

@@ -35,6 +35,7 @@ import {
   LEASE_CHANNEL,
   type LeaseEndReason,
   leaseLive,
+  markInput,
   parseAnnouncement,
   release,
   TAKEOVER_MS,
@@ -58,7 +59,10 @@ import {
  * - **takeover (F-5):** while a person holds the lease, frames go only to the socket that took it; every other viewer
  *   (the same person's other devices included) gets `state: private` (`takeover`) and no binary frame;
  * - **member session (U-2):** while a member's sealed session is loaded, the resolver lets only that member watch; the
- *   bot's owner and other readers get `state: private` (`member_session`, with the member's name) and no frame.
+ *   bot's owner and other readers get `state: private` (`member_session`, with the member's name) and no frame;
+ * - **transitions fail closed (proof pipeline 55):** the hand back ends the lease in the same transaction as the seal,
+ *   so the row is never public in between; a viewer's answer made before the member session was loaded (or unloaded)
+ *   lets no frame through until the resolver answered again; and the gate is asked per frame when it is sent.
  *
  * Live re-authorization (ADR-0009): the gateway's invalidation bus (membership, rules, units, AI chat grants), the cell's
  * `cell.config.changed` events (the bot's switch, the organization's switch), the lease channel, a per-context poll of
@@ -79,6 +83,13 @@ const INPUT_BATCH_MAX = 64;
 const OP_TIMEOUT_MS = 15_000;
 const RECONNECT_MS = 1_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Input that may leave something in the page (ADR-0029: typed, clicked, pasted, tapped). Pointer moves and wheel scrolls
+ * enter nothing: a person who only looked hands nothing over when their control ends.
+ */
+const entersSomething = (e: LiveInputFrame) =>
+  !(e.type === "wheel" || (e.type === "mouse" && e.event === "move"));
 
 /** Close codes of the live-view socket (4xxx: application). */
 export const LIVE_CLOSE = { ended: 1000, noPermission: 4403, sessionExpired: 4401 } as const;
@@ -115,6 +126,10 @@ export interface LiveViewDeps {
  * The one-frame slot of a viewer (drop-on-slow, P-08): `offer` replaces the waiting frame; the next frame is written
  * only once the previous write completed. A slow socket therefore holds at most the frame being written plus the one
  * waiting, and receives the latest frame when it catches up.
+ *
+ * Proof pipeline 55 (F-5, U-2): the privacy gate (`allowed`) is asked again at the moment a frame is handed to the
+ * socket, not only when it was offered: a frame that waited behind a slow write while the page turned private is
+ * dropped, never written.
  */
 export class FrameSlot {
   private pending: Uint8Array | null = null;
@@ -126,6 +141,8 @@ export class FrameSlot {
     private readonly sink: {
       readonly bufferedAmount: number;
       open(): boolean;
+      /** The privacy filter's answer for this viewer now (absent: always). */
+      allowed?(): boolean;
       write(frame: Uint8Array, done: () => void): void;
     },
   ) {}
@@ -140,6 +157,10 @@ export class FrameSlot {
   }
   private pump(): void {
     if (this.writing || !this.pending || !this.sink.open()) return;
+    if (this.sink.allowed && !this.sink.allowed()) {
+      this.clear();
+      return;
+    }
     const frame = this.pending;
     this.pending = null;
     this.writing = true;
@@ -159,6 +180,12 @@ interface Decision {
   denial: string | null;
   /** The Browser module is off for this person (`browser.watch` refused at organization scope). */
   moduleOff: boolean;
+  /**
+   * The member-session fact this answer was decided on (U-2; null: no page was found, nothing is allowed anyway). It
+   * answers only for a row with the same fact: a session loaded (or unloaded) since then makes it stale, and a stale
+   * answer lets no frame through until the resolver answered again.
+   */
+  memberSession: boolean | null;
 }
 
 interface Viewer {
@@ -170,6 +197,8 @@ interface Viewer {
   slot: FrameSlot;
   /** May receive binary frames now (the privacy filter's answer). */
   frames: boolean;
+  /** Its decision is stale for the page's row: no frame until the resolver answered again (the upstream stays up). */
+  pending: boolean;
   last: { viewerCan?: string; state?: string };
   mode: "small" | "expanded" | "phone";
   phone: { width: number; height: number } | null;
@@ -195,6 +224,13 @@ interface LocalLease {
   expiresAtMs: number;
   lastKeepMs: number;
   warned: boolean;
+  /**
+   * The holder handed back (or lost the socket): the lease is ending. It stays held in the row until the hand back's
+   * own transaction ends it (F-5 holds meanwhile on every instance); no input, keep or second end is taken.
+   */
+  ending: boolean;
+  /** The row records that the holder sent input in this lease (`markInput`, before the first such input is sent). */
+  inputMarked: boolean;
 }
 
 interface Watched {
@@ -353,10 +389,16 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
             ended = closed;
           }
         } else if (ctx.controllerUserId && !leaseLive(ctx)) {
-          // The holder's instance is gone and nobody released it: cleared as idle (once, conditional).
-          await clearExpired(tx, core, { contextId: ctx.id });
-          row = { ...ctx, controllerUserId: null, leaseExpiresAt: null };
-          tenantOf(tx).afterCommit(() => takeoverOff(w));
+          // The holder's instance is gone and nobody released it: cleared as idle (once, conditional). Abandoned after
+          // input (or with a member's session loaded), the page closes with it and every viewer gets `ended` (ADR-0029).
+          const cleared = await clearExpired(tx, core, { contextId: ctx.id });
+          if (cleared?.closed) {
+            row = cleared.closed;
+            ended = cleared.closed;
+          } else {
+            row = { ...ctx, controllerUserId: null, leaseExpiresAt: null, leaseInput: false };
+            tenantOf(tx).afterCommit(() => takeoverOff(w));
+          }
         }
       }
       const activity = row.closedAt === null ? await activityOf(tx, row) : { phrase: null, route: null };
@@ -418,9 +460,12 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
         const before = w.view;
         const { view, ended } = await readView(w);
         w.view = view;
+        // A loaded session changes who may watch (U-2): every viewer is decided again, and one whose answer predates
+        // the row's session fact (its decision raced this read) too. Until each new answer lands, `stateOf` holds that
+        // viewer's frames (stale decision), so the push below never opens the page on the old answer.
+        const sessionChanged = !!before?.row.sessionId !== !!view?.row.sessionId;
+        for (const v of w.viewers) if (sessionChanged || stale(v)) redecide(v);
         if (ended) await afterEnded(w, ended);
-        // A loaded session changes who may watch (U-2): every viewer is decided again.
-        if (!!before?.row.sessionId !== !!view?.row.sessionId) for (const v of w.viewers) redecide(v);
         reconcileLease(w);
         for (const v of w.viewers) pushState(v);
       } catch (err) {
@@ -460,7 +505,7 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
   async function decide(v: Viewer): Promise<Decision> {
     const { auth } = v;
     return core.db.withTenant({ organizationId: auth.organizationId, userId: auth.userId }, async (tx) => {
-      const none = { watch: false, control: false, denial: "missing", moduleOff: false };
+      const none = { watch: false, control: false, denial: "missing", moduleOff: false, memberSession: null };
       // RLS: another organization's page does not exist here (ids resolved inside the tenant, 07.4 #169).
       const ctx = await contextById(tx, v.watched.contextId);
       if (!ctx) return none;
@@ -487,6 +532,7 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
         control: control.allowed,
         denial: watch.allowed ? null : (watch.denial?.reason ?? "missing_permission"),
         moduleOff,
+        memberSession: ctx.sessionId !== null,
       };
     });
   }
@@ -508,6 +554,9 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
           await endLease(v.watched, "access_lost");
         }
         pushState(v);
+        // The answer is newer than the page's row this instance holds: read the row again (it decides again if the
+        // two still disagree); frames stay held meanwhile.
+        if (stale(v)) refresh(v.watched);
       } catch (err) {
         // A failed decision is not a grant: the viewer keeps its last answer until the next one (fail closed for new).
         log.warn({ contextId: v.watched.contextId, error: name(err) }, "live view decision failed");
@@ -523,10 +572,25 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
 
   // ---------------------------------------------------------------- what each viewer sees (the privacy filter)
 
-  function stateOf(v: Viewer): { frame: LiveStateFrame; frames: boolean; close: number | null } {
+  /**
+   * The viewer's decision was made on another member-session fact than the page's row now has (a session was loaded or
+   * unloaded since): it is no answer for this row.
+   */
+  function stale(v: Viewer): boolean {
+    const row = v.watched.view?.row;
+    const fact = v.decision?.memberSession ?? null;
+    return fact !== null && !!row && fact !== (row.sessionId !== null);
+  }
+
+  /**
+   * What the viewer sees now. `frame: null` is "held": no state change is sent and no frame passes until the resolver
+   * answered for the page's current row (fail closed, proof pipeline 55).
+   */
+  function stateOf(v: Viewer): { frame: LiveStateFrame | null; frames: boolean; close: number | null } {
     const w = v.watched;
     const d = v.decision;
     const view = w.view;
+    if (stale(v)) return { frame: null, frames: false, close: null };
     const base = {
       type: "state" as const,
       pausedFor: null,
@@ -653,7 +717,12 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
     }
     const s = stateOf(v);
     v.frames = s.frames;
+    v.pending = s.frame === null;
     if (!s.frames) v.slot.clear();
+    if (s.frame === null) {
+      syncUpstream(v.watched);
+      return;
+    }
     const key = JSON.stringify(s.frame);
     if (v.last.state !== key) {
       v.last.state = key;
@@ -668,12 +737,22 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
 
   // ---------------------------------------------------------------- upstream (one per page, while someone may watch)
 
+  /**
+   * The privacy gate per frame, at the moment it is sent (F-5, U-2): the viewer's last pushed answer AND the answer for
+   * the page as this instance knows it right now (lease, member session, decision). A frame captured or waiting while
+   * either says no is dropped for that viewer.
+   */
+  function mayReceive(v: Viewer): boolean {
+    return !v.closed && v.frames && stateOf(v).frames;
+  }
+
   function wantsUpstream(w: Watched): boolean {
     return (
       !!deps.client &&
       !!w.view &&
       w.view.row.closedAt === null &&
-      [...w.viewers].some((v) => v.frames && !v.closed)
+      // A viewer whose answer is held stays subscribed: the page needs no new stream once the resolver answered.
+      [...w.viewers].some((v) => (v.frames || v.pending) && !v.closed)
     );
   }
 
@@ -758,7 +837,7 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
               w.reconnecting = false;
               for (const v of w.viewers) pushState(v);
             }
-            for (const v of w.viewers) if (v.frames && !v.closed) v.slot.offer(payload);
+            for (const v of w.viewers) if (mayReceive(v)) v.slot.offer(payload);
           } else if (onControl(w, payload)) {
             return true;
           }
@@ -784,7 +863,7 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
         return true;
       case "focus":
         for (const v of w.viewers) {
-          if (v.frames && !v.closed) sendJson(v, { type: "focus", sensitive: msg.sensitive });
+          if (mayReceive(v)) sendJson(v, { type: "focus", sensitive: msg.sensitive });
         }
         return false;
       case "navigated":
@@ -842,7 +921,7 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
 
   async function onTake(v: Viewer): Promise<void> {
     const w = v.watched;
-    if (w.lease?.viewer === v) {
+    if (w.lease?.viewer === v && !w.lease.ending) {
       sendJson(v, { type: "lease", expiresAt: new Date(w.lease.expiresAtMs).toISOString() });
       return;
     }
@@ -864,7 +943,14 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
       return;
     }
     const now = Date.now();
-    w.lease = { viewer: v, expiresAtMs: Date.parse(taken.lease.expiresAt), lastKeepMs: now, warned: false };
+    w.lease = {
+      viewer: v,
+      expiresAtMs: Date.parse(taken.lease.expiresAt),
+      lastKeepMs: now,
+      warned: false,
+      ending: false,
+      inputMarked: false,
+    };
     try {
       await takeoverIn(w, true);
     } catch (err) {
@@ -894,37 +980,56 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
     refresh(w);
   }
 
-  /** Ends this instance's lease of the page (the holder's socket is here) and tells sandboxd and every instance. */
+  /**
+   * Ends this instance's lease of the page (the holder's socket is here) and tells sandboxd and every instance.
+   *
+   * Proof pipeline 55 (F-5, U-2): the lease ends in the database in the SAME transaction as what the end decides: on a
+   * hand back, the seal of the member's sign-in (or the card waiting again, or nothing); otherwise, the card waiting
+   * again. The row therefore never reads "nobody controls it and no member session is loaded" while the page still
+   * holds what the member typed, so no refresh (this instance's poll, a `navigated`, another instance) can open it to
+   * anyone else in between. Until that commit the lease stays this socket's, marked `ending`: input is dropped. sandboxd
+   * stops taking input first, as before (the row's lease keeps the bot waiting and the page private meanwhile).
+   */
   async function endLease(w: Watched, reason: LeaseEndReason): Promise<void> {
     const lease = w.lease;
-    if (!lease) return;
-    w.lease = null;
+    if (!lease || lease.ending) return;
+    lease.ending = true;
     w.inputs = [];
     const { auth } = lease.viewer;
-    try {
-      await core.db.withTenant({ organizationId: auth.organizationId, userId: auth.userId }, (tx) =>
-        release(tx, core, { contextId: w.contextId, userId: auth.userId, reason }),
-      );
-    } catch (err) {
-      log.warn({ contextId: w.contextId, error: name(err) }, "live view lease release failed");
-    }
+    const tenant = { organizationId: auth.organizationId, userId: auth.userId };
+    const p = { organizationId: auth.organizationId, contextId: w.contextId, userId: auth.userId };
+    // ADR-0029: a lease abandoned after input (or with a member's session loaded) closes the page in the transaction
+    // that ends it (`release`); `closed` is that page, closed in sandboxd once it committed.
+    let closed: BrowserContextRecord | null = null;
+    const end = async (tx: Tx) => {
+      const ended = await release(tx, core, { contextId: w.contextId, userId: auth.userId, reason });
+      closed = ended?.closed ?? null;
+      return ended;
+    };
     await takeoverOff(w);
-    // 07.8-21: a hand back on a page with the member's waiting sign-in seals it (export, lock, seal, "Signed in");
-    // control that ended any other way leaves the card waiting again.
     try {
       if (reason === "released") {
-        await onHandBack(
-          { core, client: deps.client },
-          { organizationId: auth.organizationId, contextId: w.contextId, userId: auth.userId },
-        );
+        // 07.8-21: a hand back on a page with the member's waiting sign-in seals it (export, lock, seal, "Signed in").
+        await onHandBack({ core, client: deps.client }, p, end);
       } else {
-        await core.db.withTenant({ organizationId: auth.organizationId, userId: auth.userId }, (tx) =>
-          backToWaiting(tx, core, { contextId: w.contextId, userId: auth.userId }),
-        );
+        // Control that ended any other way leaves the card waiting again, unless the page closed with it.
+        await core.db.withTenant(tenant, async (tx) => {
+          if (!(await end(tx))?.closed) await backToWaiting(tx, core, p);
+        });
       }
     } catch (err) {
+      closed = null;
       log.warn({ contextId: w.contextId, error: name(err) }, "sign-in hand back failed");
+      // The lease ends whatever failed (idempotent: nothing is written when it already ended).
+      await core.db
+        .withTenant(tenant, (tx) => end(tx))
+        .catch((e: unknown) => {
+          closed = null;
+          log.warn({ contextId: w.contextId, error: name(e) }, "live view lease release failed");
+        });
     }
+    if (w.lease === lease) w.lease = null;
+    if (closed) await afterEnded(w, closed);
     await announce(core.bus, w.orgId, w.contextId);
     refresh(w);
   }
@@ -932,7 +1037,7 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
   async function onKeep(v: Viewer, nowMs = Date.now()): Promise<void> {
     const w = v.watched;
     const lease = w.lease;
-    if (!lease || lease.viewer !== v) return;
+    if (!lease || lease.viewer !== v || lease.ending) return;
     const { auth } = v;
     const kept = await core.db.withTenant(
       { organizationId: auth.organizationId, userId: auth.userId },
@@ -953,7 +1058,7 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
   function onInput(v: Viewer, event: LiveInputFrame): void {
     const w = v.watched;
     const lease = w.lease;
-    if (!lease || lease.viewer !== v || !w.view || !leaseLive(w.view.row)) return;
+    if (!lease || lease.viewer !== v || lease.ending || !w.view || !leaseLive(w.view.row)) return;
     if (w.inputs.length >= INPUT_QUEUE_MAX) return;
     w.inputs.push(event);
     const now = Date.now();
@@ -969,7 +1074,26 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
     w.flushing = true;
     try {
       while (w.inputs.length && deps.client && w.view && w.lease) {
+        const lease = w.lease;
         const events = w.inputs.splice(0, INPUT_BATCH_MAX);
+        if (!lease.inputMarked && events.some(entersSomething)) {
+          // ADR-0029: the row learns of the holder's input before the page does, so a lease abandoned from here on
+          // closes the page on any instance or sweep. Not recorded (the lease ended, the database failed): nothing of
+          // it is sent (fail closed).
+          const { auth } = lease.viewer;
+          const marked = await core.db
+            .withTenant({ organizationId: auth.organizationId, userId: auth.userId }, (tx) =>
+              markInput(tx, { contextId: w.contextId, userId: auth.userId }),
+            )
+            .catch(() => false);
+          if (!marked || w.lease !== lease || lease.ending) {
+            w.inputs = [];
+            if (!marked) log.warn({ contextId: w.contextId }, "live view input not recorded, dropped");
+            return;
+          }
+          lease.inputMarked = true;
+        }
+        if (!w.view) return;
         const target = { orgId: w.orgId, agentId: w.view.row.agentId };
         try {
           await deps.client.call(
@@ -992,7 +1116,7 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
   async function sweep(nowMs = Date.now()): Promise<void> {
     for (const w of watched.values()) {
       const lease = w.lease;
-      if (!lease) continue;
+      if (!lease || lease.ending) continue;
       if (nowMs >= lease.expiresAtMs) {
         await endLease(w, "idle");
       } else if (!lease.warned && nowMs >= lease.expiresAtMs - (TAKEOVER_MS - TAKEOVER_WARN_MS)) {
@@ -1141,9 +1265,12 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
             return socket.bufferedAmount;
           },
           open: () => socket.readyState === socket.OPEN,
+          // The gate again when the frame is handed to the socket (it may have waited behind a slow write).
+          allowed: () => mayReceive(v),
           write: (frame, done) => socket.send(frame, { binary: true }, () => done()),
         }),
         frames: false,
+        pending: false,
         last: {},
         mode: "small",
         phone: null,
@@ -1190,6 +1317,9 @@ export function registerLiveView(app: App, deps: LiveViewDeps): LiveViewHub {
             if (ended) await afterEnded(w, ended);
           }
           pushState(v);
+          // The first answer and the page's row disagree on the member session (it changed between the two reads):
+          // nothing passes until they agree (the refresh decides again).
+          if (stale(v)) refresh(w);
         } catch (err) {
           log.warn({ contextId: w.contextId, error: name(err) }, "live view open failed");
           v.closed = true;

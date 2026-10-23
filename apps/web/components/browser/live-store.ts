@@ -256,6 +256,8 @@ export function endedSentence(reason: BrowserEndReason | undefined, bot: string)
       return "Browser was turned off for you.";
     case "access_lost":
       return "You can no longer watch this browser.";
+    case "takeover_abandoned":
+      return `Control ended without a hand back, so the browser closed. ${bot} can open it again.`;
     default:
       return `The browser stopped unexpectedly. ${bot} can open it again.`;
   }
