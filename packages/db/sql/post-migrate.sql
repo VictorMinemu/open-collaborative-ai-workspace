@@ -432,8 +432,10 @@ GRANT EXECUTE ON FUNCTION app.sandbox_organizations(uuid, integer) TO ocw_app;
 -- or a person's name (team names only, units being visible to the whole organization).
 --
 -- - Project access (D-02), `work_project_access(unit, user)`: `lead` / `member` = a direct membership of the project
---   unit; `team` = an assigned team (or department) on the path of one of the user's memberships, so a department
---   assignment covers its teams; `admin` = an active admin (a fact for the backstop only: the resolver's admin rule is
+--   unit; `team` = an assigned team (or department) on the path of one of the user's memberships of a team or
+--   department, so a department assignment covers its teams, and never through a membership of a project nested under
+--   the assigned team (D-14: projects are leaves, `ALLOWED_PARENT_KINDS`, so excluding project memberships excludes
+--   every project descendant; the same holds for a `teams` audience); `admin` = an active admin (a fact for the backstop only: the resolver's admin rule is
 --   its own explicit, audited precondition, P-03). People who are not active members of the organization have none.
 -- - Personal projects (a repo no team project links): access is the use of the device, owner ∪ `shared` ∪ an active
 --   user grant ∪ an active unit grant on a membership path. This is the SQL twin of `deviceModeCap(...) !== null`
@@ -473,7 +475,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
     WHEN EXISTS (
       SELECT 1 FROM app.work_project_teams t
       JOIN app.unit_memberships um ON um.organization_id = t.organization_id AND um.user_id = p_user
-      JOIN app.org_units ou ON ou.organization_id = um.organization_id AND ou.id = um.unit_id
+      JOIN app.org_units ou ON ou.organization_id = um.organization_id AND ou.id = um.unit_id AND ou.kind <> 'project'
       WHERE t.organization_id = (SELECT id FROM org) AND t.project_unit_id = p_unit AND t.team_unit_id = ANY (ou.path)
     ) THEN 'team'
     WHEN (SELECT role FROM me) = 'admin' THEN 'admin'
@@ -496,7 +498,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
     JOIN app.org_members om ON om.organization_id = org.id AND om.user_id = p_user AND om.deactivated_at IS NULL
   ),
   paths AS (
-    SELECT ou.path FROM org
+    SELECT ou.path, ou.kind FROM org
     JOIN app.unit_memberships um ON um.organization_id = org.id AND um.user_id = p_user
     JOIN app.org_units ou ON ou.organization_id = um.organization_id AND ou.id = um.unit_id
   ),
@@ -527,7 +529,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
           JOIN app.work_project_teams t
             ON t.organization_id = g.organization_id AND t.project_unit_id = s.unit_id AND t.team_unit_id = g.subject_id
           WHERE g.organization_id = (SELECT id FROM org) AND g.work_session_id = s.id AND g.subject_kind = 'unit'
-            AND g.revoked_at IS NULL AND EXISTS (SELECT 1 FROM paths p WHERE g.subject_id = ANY (p.path))
+            AND g.revoked_at IS NULL
+            AND EXISTS (SELECT 1 FROM paths p WHERE p.kind <> 'project' AND g.subject_id = ANY (p.path))
         ))
         OR (s.visibility = 'people' AND EXISTS (
           SELECT 1 FROM app.work_session_grants g
@@ -552,7 +555,7 @@ RETURNS uuid
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
   SELECT t.team_unit_id FROM app.work_project_teams t
   JOIN app.unit_memberships um ON um.organization_id = t.organization_id AND um.user_id = p_user
-  JOIN app.org_units ou ON ou.organization_id = um.organization_id AND ou.id = um.unit_id
+  JOIN app.org_units ou ON ou.organization_id = um.organization_id AND ou.id = um.unit_id AND ou.kind <> 'project'
   WHERE t.organization_id = nullif(current_setting('app.organization_id', true), '')::uuid
     AND t.project_unit_id = p_unit AND t.team_unit_id = ANY (ou.path)
   ORDER BY (p_session IS NOT NULL AND EXISTS (
@@ -666,6 +669,34 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
     AND ws.project_id = p_project AND ws.status <> 'archived'
 $fn$;
 
+-- The resolver's session shape (07.9-12): the device's owner and revocation and the team project's unit path, whatever
+-- the caller can see. `sessionFactsForUsers` decides OTHER people on a session (who still reads it after an audience
+-- change, the live fan-out), so these facts must not depend on the caller's own audience under the backstop. Ids and
+-- one flag only (never a title, a path or a name).
+CREATE OR REPLACE FUNCTION app.work_session_shape(p_session uuid)
+RETURNS TABLE (owner uuid, revoked boolean, unit_path uuid[])
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT d.owner_user_id, d.revoked_at IS NOT NULL, ou.path
+  FROM app.work_sessions ws
+  JOIN app.devices d ON d.organization_id = ws.organization_id AND d.id = ws.device_id
+  LEFT JOIN app.work_project_repos r ON r.organization_id = ws.organization_id AND r.project_id = ws.project_id
+  LEFT JOIN app.org_units ou ON ou.organization_id = r.organization_id AND ou.id = r.unit_id
+  WHERE ws.organization_id = nullif(current_setting('app.organization_id', true), '')::uuid AND ws.id = p_session
+$fn$;
+
+-- Whether a session exists in the CALLER's organization, whatever the caller can see (07.9-12): the live `ws:`
+-- re-decision tells someone the audience just removed why they lost the view (`cause` = visibility), although the
+-- backstop now hides the row from them. A boolean only (never a title or a person); a subscription that never was
+-- allowed gets no cause, so an id is never confirmed to someone who had not seen it.
+CREATE OR REPLACE FUNCTION app.work_session_exists(p_session uuid)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT EXISTS (
+    SELECT 1 FROM app.work_sessions ws
+    WHERE ws.organization_id = nullif(current_setting('app.organization_id', true), '')::uuid AND ws.id = p_session
+  )
+$fn$;
+
 REVOKE ALL ON FUNCTION app.work_project_access(uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app.work_session_access(uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app.work_project_team_via(uuid, uuid, uuid) FROM PUBLIC;
@@ -673,9 +704,57 @@ REVOKE ALL ON FUNCTION app.work_project_people(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app.work_session_viewers(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app.work_session_visibility_summary(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app.work_project_repo_session_count(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app.work_session_exists(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app.work_session_shape(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.work_project_access(uuid, uuid) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.work_session_access(uuid, uuid) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.work_project_people(uuid) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.work_session_viewers(uuid) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.work_session_visibility_summary(uuid) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.work_project_repo_session_count(uuid) TO ocw_app;
+GRANT EXECUTE ON FUNCTION app.work_session_exists(uuid) TO ocw_app;
+GRANT EXECUTE ON FUNCTION app.work_session_shape(uuid) TO ocw_app;
+
+-- The audience backstop (Phase 07.9, D-09, D-13, P-10; ADR-0030): the database's second line of defence under the
+-- resolver, so a route that forgets the resolver still cannot read or change a session outside the user's relations.
+-- RESTRICTIVE, so it ANDs with tenant_isolation (which stays as it is) and never widens anything.
+-- - The rule's only copy is `app.work_session_access` above (C-01, P-03). A user request sees a session when the rule
+--   gives it a seeing relation: `creator`, `creator_left` (D-12), `device_owner` (D-11), `viewer`, or `admin` (the
+--   admin rule is the resolver's explicit, audited precondition; the database only lets the rows through). A
+--   `project_lead` fact alone sees nothing, as in `work_session_viewers` (the resolver denies it every grain).
+-- - Both clauses also pass the creator's own row by `created_by` first: the rule always gives an active creator
+--   `creator` or `creator_left`, but it cannot find a row that does not exist yet, and PostgreSQL judges a new row of
+--   `INSERT … RETURNING` by USING as well (a deactivated member's requests never reach the database). It is also the
+--   cheap test that spares the function call on the creator's own rows. On UPDATE the rule reads the row as it was before the statement, so a lead may narrow a session in one
+--   statement that leaves them outside it; USING then hides it from every later read.
+-- - The prompts, approvals and audience grants of a session are visible and writable while the session itself is
+--   (the `agent_vault_grants` EXISTS precedent). The function is SECURITY DEFINER (BYPASSRLS), so the policies never
+--   recurse through each other (Pitfall 1).
+-- - LIMIT (D-13): it judges user requests only. A transaction without a user (`app.user_id` = '', set by withTenant
+--   for Device Link, the re-authorization sweeps and cell routes) passes explicitly, because those paths write
+--   sessions; they stay under tenant isolation only. The follow-up is an explicit system actor (ADR-0030).
+-- - Not covered: `device_commands` (read and acked only by user-less device paths; user paths only enqueue) and
+--   `stream_events` (generic for every topic, hot append path; `ws:` topics are gated by the topic authorizer).
+-- - FK cascades are not subject to RLS (a deleted device or project still removes its sessions).
+DROP POLICY IF EXISTS audience_backstop ON app.work_sessions;
+CREATE POLICY audience_backstop ON app.work_sessions AS RESTRICTIVE FOR ALL
+  USING (nullif(current_setting('app.user_id', true), '') IS NULL
+         OR created_by = nullif(current_setting('app.user_id', true), '')::uuid
+         OR app.work_session_access(id, nullif(current_setting('app.user_id', true), '')::uuid)
+            && ARRAY['creator', 'creator_left', 'device_owner', 'viewer', 'admin']::text[])
+  WITH CHECK (nullif(current_setting('app.user_id', true), '') IS NULL
+         OR created_by = nullif(current_setting('app.user_id', true), '')::uuid
+         OR app.work_session_access(id, nullif(current_setting('app.user_id', true), '')::uuid)
+            && ARRAY['creator', 'creator_left', 'device_owner', 'viewer', 'admin']::text[]);
+DROP POLICY IF EXISTS audience_backstop ON app.work_prompts;
+CREATE POLICY audience_backstop ON app.work_prompts AS RESTRICTIVE FOR ALL
+  USING (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_prompts.work_session_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_prompts.work_session_id));
+DROP POLICY IF EXISTS audience_backstop ON app.work_approvals;
+CREATE POLICY audience_backstop ON app.work_approvals AS RESTRICTIVE FOR ALL
+  USING (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_approvals.work_session_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_approvals.work_session_id));
+DROP POLICY IF EXISTS audience_backstop ON app.work_session_grants;
+CREATE POLICY audience_backstop ON app.work_session_grants AS RESTRICTIVE FOR ALL
+  USING (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_session_grants.work_session_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_session_grants.work_session_id));

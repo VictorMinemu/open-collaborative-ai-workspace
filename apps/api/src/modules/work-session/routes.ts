@@ -45,6 +45,7 @@ import {
   storedSettings,
 } from "./controls";
 import { sessionFacts as sharedSessionFacts } from "./facts";
+import { sessionNotFound } from "./hidden";
 import { currentSessionModel, imagesNotSupported } from "./images";
 import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy } from "./policy";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
@@ -121,7 +122,7 @@ export function registerWorkSessionRoutes(
     id: string,
   ): Promise<{ s: SessionRow; facts: ResourceFacts }> {
     const s = await svc.lock(tx, id);
-    if (!s) throw notFound(SESSION_NOT_FOUND);
+    if (!s) return sessionNotFound(tx, id, SESSION_NOT_FOUND);
     const facts = await sessionFacts(tx, authOf(req), s);
     await assertInAudience(req, tx, facts);
     return { s, facts };
@@ -381,7 +382,7 @@ export function registerWorkSessionRoutes(
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const found = await svc.session(tx, req.params.id);
-        if (!found) throw notFound(SESSION_NOT_FOUND);
+        if (!found) return sessionNotFound(tx, req.params.id, SESSION_NOT_FOUND);
         const facts = await sessionFacts(tx, authOf(req), found);
         await assertReadable(req, tx, facts);
         const viewerCan = await perms.viewerCan(req, tx, facts, SESSION_VIEWER_CAN);
@@ -671,7 +672,7 @@ export function registerWorkSessionRoutes(
             .innerJoin(devices, eq(devices.id, workSessions.deviceId))
             .innerJoin(projects, eq(projects.id, workSessions.projectId))
             .where(eq(workSessions.id, req.params.id));
-          if (!row) throw notFound(SESSION_NOT_FOUND);
+          if (!row) return sessionNotFound(tx, req.params.id, SESSION_NOT_FOUND);
           await assertReadable(req, tx, await sessionFacts(tx, authOf(req), row.s));
           if (row.d.status !== "online" || row.d.revokedAt) {
             throw conflict(`${row.d.name} is offline`, "device_offline");
@@ -708,7 +709,7 @@ export function registerWorkSessionRoutes(
       core.db.withTenant(tenant(req), async (tx) => {
         const auth = authOf(req);
         const session = await svc.session(tx, req.params.id);
-        if (!session) throw notFound(SESSION_NOT_FOUND);
+        if (!session) return sessionNotFound(tx, req.params.id, SESSION_NOT_FOUND);
         await assertReadable(req, tx, await sessionFacts(tx, auth, session));
         return buildSessionControls(
           session,

@@ -2545,8 +2545,10 @@ describe("tenant isolation (RLS)", () => {
   it("Phase 07.9: the four team-project and audience tables are org-scoped, forced, seeded and invisible and unwritable across tenants", async () => {
     const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
     for (const tbl of WORK_ZONE_VISIBILITY_TABLES) {
-      // Tenant isolation only here; plan 12 adds the RESTRICTIVE audience backstop on work_session_grants.
-      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: 1 });
+      // Tenant isolation, plus (07.9-12) the RESTRICTIVE audience backstop on work_session_grants
+      // (work-session-audience.int.test.ts proves it).
+      const backstop = tbl === "app.work_session_grants";
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: backstop ? 2 : 1 });
       const seeded = await migrator.query(
         `select count(*)::int as n from ${tbl} where organization_id = $1`,
         [B],

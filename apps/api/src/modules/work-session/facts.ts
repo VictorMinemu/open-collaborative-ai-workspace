@@ -63,14 +63,14 @@ const fromShape = (
   access,
 });
 
-/** The device and team-project facts of a session, joined from its row (RLS scopes every table to the tenant). */
+/**
+ * The device and team-project facts of a session (`app.work_session_shape`, definer, scoped to the tenant). Not read
+ * through the caller's RLS: under the audience backstop (07.9-12) a caller outside the audience sees no row, and
+ * `sessionFactsForUsers` decides OTHER people (who still reads after a change, the fan-out), whose facts must not
+ * depend on the caller's own audience. Ids and the revoked flag only.
+ */
 const shapeSql = (sessionId: string) => sql`
-  select d.owner_user_id as owner, (d.revoked_at is not null) as revoked, ou.path::text[] as unit_path
-    from app.work_sessions ws
-    join app.devices d on d.id = ws.device_id
-    left join app.work_project_repos r on r.project_id = ws.project_id
-    left join app.org_units ou on ou.id = r.unit_id
-   where ws.id = ${sessionId}::uuid`;
+  select sh.owner, sh.revoked, sh.unit_path::text[] as unit_path from app.work_session_shape(${sessionId}::uuid) sh`;
 
 /**
  * Resolver facts for one person on one session: relations (creator, device owner, viewer), states (revoked device,

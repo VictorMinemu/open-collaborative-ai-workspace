@@ -323,12 +323,14 @@ describe("teams, repositories and the default (D-01, D-03, D-10, UI-SPEC U-7)", 
       lena.request("POST", `/api/v1/work-projects/${portal}/teams`, { unitId: engineering }),
     );
     expect(detail.teams).toEqual([
-      // Engineering's subtree: Lena and Dana (Web), Otto (Mobile, the portal) and Víctor (who leads Platform).
-      { id: engineering, name: "Engineering", kind: "department", memberCount: 4 },
+      // Engineering's teams: Lena and Dana (Web), Otto (Mobile). D-14 (07.9-12): never the members of a project nested
+      // under it, so neither Víctor (who leads the Platform project) nor anyone through the portal itself.
+      { id: engineering, name: "Engineering", kind: "department", memberCount: 3 },
       { id: mobile, name: "Mobile", kind: "team", memberCount: 1 },
     ]);
-    // Lena and Otto (leads), Dana and Víctor (through Engineering: Víctor by his membership, never by his role).
-    expect(detail.access.count).toBe(4);
+    // Lena and Otto (leads) and Dana (through Engineering's Web team). D-14 (07.9-12): Víctor's only membership under
+    // Engineering is the Platform project, and an assigned team never reaches a project nested under it (nor his role).
+    expect(detail.access.count).toBe(3);
     expect(await audits("work_project.team_assigned", portal)).toHaveLength(before + 2);
     expect((await audits("work_project.team_assigned", portal)).map((a) => a.metadata)).toEqual([
       { teamId: mobile },
@@ -361,8 +363,8 @@ describe("teams, repositories and the default (D-01, D-03, D-10, UI-SPEC U-7)", 
     const none = await ok(lena.request("GET", `/api/v1/work-projects/${portal}/assignable-teams?q=mob`));
     expect(none.teams).toEqual([]);
     const byName = await ok(lena.request("GET", `/api/v1/work-projects/${portal}/assignable-teams?q=WE`));
-    // Web's subtree: Lena, Dana, and Otto through the portal under it.
-    expect(byName.teams).toEqual([{ id: web, name: "Web", kind: "team", memberCount: 3 }]);
+    // Web's people: Lena and Dana. D-14 (07.9-12): not Otto, whose membership under Web is the portal project.
+    expect(byName.teams).toEqual([{ id: web, name: "Web", kind: "team", memberCount: 2 }]);
     // Wildcards are plain text.
     expect(
       (await ok(lena.request("GET", `/api/v1/work-projects/${portal}/assignable-teams?q=%25`))).teams,

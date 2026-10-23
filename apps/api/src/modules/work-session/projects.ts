@@ -213,14 +213,17 @@ async function projectPeople(tx: Tx, unitId: string): Promise<WorkProjectPerson[
   );
 }
 
-/** Active members of each unit's subtree (a department counts its teams' people too). */
+/**
+ * Active members of each unit's subtree, the people an assigned team brings (a department counts its teams' people
+ * too). D-14: never through a membership of a project nested under it, as `app.work_project_access`'s team branch.
+ */
 export async function subtreeMemberCounts(tx: Tx, unitIds: readonly string[]): Promise<Map<string, number>> {
   if (unitIds.length === 0) return new Map();
   const res = await tx.execute(sql`
     select t.id, (
       select count(distinct um.user_id)::int
         from app.unit_memberships um
-        join app.org_units ou on ou.id = um.unit_id
+        join app.org_units ou on ou.id = um.unit_id and ou.kind <> 'project'
         join app.org_members m on m.user_id = um.user_id and m.deactivated_at is null
        where t.id = any (ou.path)
     ) as n
