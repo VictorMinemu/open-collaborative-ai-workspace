@@ -18,6 +18,7 @@ import {
   expectTouchTargets,
   unnamedControls,
 } from "../support/layout";
+import { apiRequests, finishedBodies } from "../support/responses";
 import { enableBotSandbox, enableSandboxOrg, resume } from "../support/sandbox";
 import { ADMIN, API_URL } from "./env";
 
@@ -189,11 +190,8 @@ test("in a channel another reader sees the same activity; someone who cannot rea
   // Alex reads the channel (and never Sam's DM) while both turns run; every frame and API answer he gets is kept.
   const alex = await signIn(browser, ALEX, project);
   const frames: string[] = [];
-  const bodies: Promise<string>[] = [];
   alex.on("websocket", (ws) => ws.on("framereceived", (f) => frames.push(String(f.payload))));
-  alex.on("response", (r) => {
-    if (r.url().includes("/api/")) bodies.push(r.text().catch(() => ""));
-  });
+  const bodies = finishedBodies(alex, apiRequests("/api/"));
   await alex.goto(`${BASE_URL}/chat/${channel.id}`);
   await expect(alex.getByTestId("composer")).toBeVisible();
 
@@ -227,7 +225,7 @@ test("in a channel another reader sees the same activity; someone who cannot rea
   expect([403, 404]).toContain(dmRead.status());
   await alex.waitForTimeout(1500);
   expect(frames.length, "Alex's page received realtime frames").toBeGreaterThan(0);
-  const all = [...frames, ...(await Promise.all(bodies)), await alex.content()];
+  const all = [...frames, ...(await bodies()), await alex.content()];
   for (const secret of [dmTurn.eventId, dmReply.messageId, "Done privately."]) {
     expect(
       all.filter((s) => s.includes(secret)),

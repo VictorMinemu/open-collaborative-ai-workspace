@@ -16,6 +16,7 @@ import {
   pruneVentasToSeed,
   seedMemory,
 } from "../support/memory";
+import { finishedBodies } from "../support/responses";
 import { ADMIN, shot } from "./env";
 
 /**
@@ -673,11 +674,7 @@ async function appendLine(page: Page, path: string, text: string, opts: { paste?
 
 /** Every script body the page loads from now on (for the "reading never loads the editor" check). */
 function recordScripts(page: Page): () => Promise<string[]> {
-  const bodies: Promise<string>[] = [];
-  page.on("response", (r) => {
-    if (r.request().resourceType() === "script") bodies.push(r.text().catch(() => ""));
-  });
-  return () => Promise.all(bodies);
+  return finishedBodies(page, (r) => r.resourceType() === "script");
 }
 /** A literal only the CodeMirror view bundle carries (its scroller element's class). */
 const EDITOR_MARK = "cm-scroller";

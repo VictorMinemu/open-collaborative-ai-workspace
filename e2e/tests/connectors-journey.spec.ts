@@ -1,9 +1,10 @@
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { expectNoSeriousA11y } from "../support/a11y";
 import { apiAs, BASE_URL, createChannel, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
-import { FAKE_URL } from "../support/bot-tools";
+import { FAKE_MCP_HOST, FAKE_URL } from "../support/bot-tools";
 import { cellToken } from "../support/cell-token";
 import { FakeCellPlugin, type MentionPayload } from "../support/fake-cell-plugin";
+import { apiRequests, finishedBodies } from "../support/responses";
 import { asSuperuser } from "../support/superuser";
 import { ADMIN, API_URL, shot } from "./env";
 
@@ -27,7 +28,7 @@ import { ADMIN, API_URL, shot } from "./env";
 test.use({ launchOptions: { args: ["--host-resolver-rules=MAP fake-mcp 127.0.0.1"] } });
 test.describe.configure({ mode: "serial" });
 
-const FAKE_HOST = "fake-mcp:4291";
+const FAKE_HOST = FAKE_MCP_HOST;
 const OAUTH_MCP_URL = `http://${FAKE_HOST}/mcp-oauth/mcp`;
 const ISSUER = `http://${FAKE_HOST}/mcp-oauth`;
 /** The fake's pre-registered public client (redirect http://127.0.0.1:4290/api/v1/connectors/oauth/callback). */
@@ -422,10 +423,7 @@ test("a personal key used by handle: the provider gets it, the bot and the page 
   const me = await openAs(browser, ADMIN, info.project.name);
   try {
     const page = me.page;
-    const bodies: Array<Promise<string>> = [];
-    page.on("response", (r) => {
-      if (r.url().includes("/api/v1/")) bodies.push(r.text().catch(() => ""));
-    });
+    const bodies = finishedBodies(page, apiRequests());
     await page.goto(`${BASE_URL}/chat/dm/${dm}`);
     const reply = await askInBrowser(page, "Check my key against the pipeline.");
     // The provider authorized the call: it received the key, which the API injected server-side (SC3, CONN-05).
@@ -437,9 +435,8 @@ test("a personal key used by handle: the provider gets it, the bot and the page 
     expect(JSON.stringify(plugin.events)).not.toContain(KC_TOKEN);
     expect(JSON.stringify(plugin.connectorRequests)).not.toContain(KC_TOKEN);
 
-    // The chat page's bodies are read while that page is still loaded: a body still arriving when `goto` tears the
-    // document down never finishes, and its read would wait forever (07.5-15 full gate: a 180 s timeout here).
-    expect((await Promise.all(bodies.splice(0))).join("\n")).not.toContain(KC_TOKEN);
+    // The chat page's bodies (only finished ones are read: support/responses.ts, 07.5-15's 180 s hang).
+    expect((await bodies()).join("\n")).not.toContain(KC_TOKEN);
 
     // ---- Settings › Keychain: the row shows the use, never the value
     await page.goto(`${BASE_URL}/settings/keychain`);
@@ -452,7 +449,7 @@ test("a personal key used by handle: the provider gets it, the bot and the page 
     await bothThemes(page, `journey-keychain-${w}`);
     await expectNoSeriousA11y(page, '[data-testid="keychain-personal"]');
     expect(await page.content()).not.toContain(KC_TOKEN);
-    expect((await Promise.all(bodies)).join("\n")).not.toContain(KC_TOKEN);
+    expect((await bodies()).join("\n")).not.toContain(KC_TOKEN);
   } finally {
     await me.context.close();
   }

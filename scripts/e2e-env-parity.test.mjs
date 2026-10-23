@@ -2,8 +2,10 @@
 // CI env parity tripwire (07.8-08, C-03; the 07.4 lesson: a variable the local runner sets and CI does not hides a
 // failure until the next CI run). Every `OCW_*` variable `scripts/e2e-isolated.sh` exports in its default mode must be
 // set to the same value in the `&env` block of `.woodpecker/e2e.yaml`, or be listed in ALLOWED_DIFFERENCES with the
-// reason it differs (ports and URLs CI derives from its own stack). The checks run on text read from both files, so a
-// mutated copy proves the tripwire fires. The `--sandbox` mode's case (07.8-24) compares the `sandbox-proof` step of
+// reason it differs (ports and URLs CI derives from its own stack). CI runs one stack per viewport, each on its own port
+// block (infra/ci/README.md): every matrix entry is compared with the runner's exports for that entry's fake port, and
+// its fake, API and web must listen where its URLs point. The checks run on text read from both files, so a mutated
+// copy proves the tripwire fires. The `--sandbox` mode's case (07.8-24) compares the `sandbox-proof` step of
 // `.woodpecker/sandbox.yaml` with the canonical local command of the real-stack proof and the runner's `--sandbox` mode.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -17,15 +19,15 @@ const PROOF = readFileSync(new URL("./sandbox-proof.sh", import.meta.url), "utf8
 /** Runner variables CI sets differently or not at all, each with the reason. Every entry must still be exported. */
 const ALLOWED_DIFFERENCES = {
   OCW_PUBLIC_API_URL:
-    "CI's API listens on :4000 from the .env `pnpm setup:env` writes; the runner uses :4290",
-  OCW_PUBLIC_WEB_URL: "CI's web listens on :3000 from .env; the runner uses :3290",
-  OCW_E2E_BASE_URL: "derived from the web URL above (Playwright's default is CI's :3000)",
-  OCW_E2E_API_URL: "derived from the API URL above (the specs' default is CI's :4000)",
+    "CI's API listens on its slot's NN01 from the .env `pnpm setup:env --ports NN` writes; the runner uses :4290",
+  OCW_PUBLIC_WEB_URL: "CI's web listens on its slot's NN00 from .env; the runner uses :3290",
+  OCW_E2E_BASE_URL: "derived from the web URL above (CI: http://localhost:NN00)",
+  OCW_E2E_API_URL: "derived from the API URL above (CI: http://localhost:NN01)",
   OCW_API_URL: "derived from the API URL above",
   OCW_TRUSTED_ORIGINS: "the runner clears the demo's .env value; CI's fresh .env carries its own origins",
   OCW_PRESIDIO_URL: "the runner never inherits the demo's Presidio; CI's fresh .env has none",
   OCW_S3_PORT:
-    "CI uses its compose Garage (keys and port from `pnpm setup:env`); the runner its own on :4292",
+    "CI uses its compose Garage (keys and port NN04 from `pnpm setup:env --ports NN`); the runner its own on :4292",
   OCW_S3_ENDPOINT: "as OCW_S3_PORT",
   OCW_S3_PUBLIC_URL: "as OCW_S3_PORT",
   OCW_S3_BUCKET: "as OCW_S3_PORT",
@@ -36,12 +38,12 @@ const ALLOWED_DIFFERENCES = {
 
 // ---------------------------------------------------------------- the runner (bash)
 
-/** Top-level `NAME=value` assignments (the script's constants), for `$NAME` expansion. */
+/** Top-level `NAME=value` assignments (the script's constants, `${OCW_E2E_*:-default}` read as the default). */
 function constants(script) {
   const out = {};
   for (const line of script.split("\n")) {
     const m = /^([A-Z_][A-Z0-9_]*)=("[^"]*"|'[^']*'|[^\s#]*)/u.exec(line);
-    if (m && !m[2].includes("$(")) out[m[1]] = unquote(m[2]);
+    if (m && !m[2].includes("$(")) out[m[1]] = expand(unquote(m[2]), out);
   }
   return out;
 }
@@ -71,9 +73,12 @@ function defaultMode(script) {
   return script.slice(0, start) + (next === -1 ? "" : script.slice(next));
 }
 
-/** Every `OCW_*` the runner exports in its default mode, with its value (later exports win, as in bash). */
-function runnerExports(script, { sandbox = false } = {}) {
-  const vars = constants(script);
+/**
+ * Every `OCW_*` the runner exports in its default mode, with its value (later exports win, as in bash). `consts`
+ * overrides the script's constants (a CI stack's fake port).
+ */
+function runnerExports(script, { sandbox = false, consts = {} } = {}) {
+  const vars = { ...constants(script), ...consts };
   const out = {};
   for (const raw of (sandbox ? script : defaultMode(script)).split("\n")) {
     const line = raw.trim();
@@ -107,21 +112,54 @@ function ciEnv(yaml) {
   return out;
 }
 
-/** The parity problems: runner variables CI lacks or sets differently without an allowlist reason, and stale reasons. */
+/** `matrix: include:` entries of the workflow (flat `KEY: value` maps). */
+function matrixEntries(yaml) {
+  const lines = yaml.split("\n");
+  const at = lines.findIndex((l) => /^matrix:\s*$/u.test(l));
+  assert.notEqual(at, -1, "the e2e workflow has a matrix");
+  const entries = [];
+  for (const line of lines.slice(at + 1)) {
+    if (/^\S/u.test(line)) break;
+    const start = /^\s*-\s+([A-Z_][A-Z0-9_]*):\s*(.+?)\s*$/u.exec(line);
+    const more = /^\s+([A-Z_][A-Z0-9_]*):\s*(.+?)\s*$/u.exec(line);
+    if (start) entries.push({ [start[1]]: start[2] });
+    else if (more && entries.length > 0) entries.at(-1)[more[1]] = more[2];
+  }
+  assert.ok(entries.length > 0, "the matrix lists its entries under `include:`");
+  return entries;
+}
+
+/** The workflow text of one matrix entry, as Woodpecker substitutes it (`$${…}` stays for the shell). */
+function forEntry(yaml, entry) {
+  return yaml.replace(/(?<!\$)\$\{([A-Z_][A-Z0-9_]*)\}/gu, (whole, name) => entry[name] ?? whole);
+}
+
+const portOf = (url) => new URL(url).port;
+
+/**
+ * The parity problems of every matrix entry: runner variables CI lacks or sets differently without an allowlist
+ * reason (the runner's exports taken with that entry's fake port), and stale reasons.
+ */
 function parityProblems(script, yaml, allowed = ALLOWED_DIFFERENCES) {
-  const runner = runnerExports(script);
-  const ci = ciEnv(yaml);
   const problems = [];
-  for (const [key, value] of Object.entries(runner)) {
-    if (key in allowed) continue;
-    if (!(key in ci))
-      problems.push(`${key} is exported by scripts/e2e-isolated.sh but not set in .woodpecker/e2e.yaml`);
-    else if (ci[key] !== value) problems.push(`${key}: runner "${value}" vs CI "${ci[key]}"`);
+  for (const entry of matrixEntries(yaml)) {
+    const ci = ciEnv(forEntry(yaml, entry));
+    const fakePort = ci.OCW_E2E_FAKE_URL ? portOf(ci.OCW_E2E_FAKE_URL) : "";
+    const runner = runnerExports(script, { consts: fakePort ? { FAKE_PORT: fakePort } : {} });
+    const at = `[${Object.values(entry).join(" ")}] `;
+    for (const [key, value] of Object.entries(runner)) {
+      if (key in allowed) continue;
+      if (!(key in ci))
+        problems.push(
+          `${at}${key} is exported by scripts/e2e-isolated.sh but not set in .woodpecker/e2e.yaml`,
+        );
+      else if (ci[key] !== value) problems.push(`${at}${key}: runner "${value}" vs CI "${ci[key]}"`);
+    }
+    for (const key of Object.keys(allowed)) {
+      if (!(key in runner)) problems.push(`${key} is allowlisted but the runner no longer exports it`);
+    }
   }
-  for (const key of Object.keys(allowed)) {
-    if (!(key in runner)) problems.push(`${key} is allowlisted but the runner no longer exports it`);
-  }
-  return problems;
+  return [...new Set(problems)];
 }
 
 // ---------------------------------------------------------------- tests
@@ -181,6 +219,35 @@ describe("e2e env parity: scripts/e2e-isolated.sh (default mode) ↔ .woodpecker
         start.includes("FAKE_SANDBOX_TOKEN=$${OCW_SANDBOX_TOKEN}"),
       "the CI fake server gets FAKE_SANDBOX_TOKEN",
     );
+  });
+  it("each viewport's fake, API and web listen where its URLs point, all in its own port block", () => {
+    const entries = matrixEntries(CI);
+    assert.equal(entries.length, 2, "desktop and mobile");
+    const blocks = new Set();
+    for (const entry of entries) {
+      const text = forEntry(CI, entry);
+      const ci = ciEnv(text);
+      const fake = portOf(ci.OCW_E2E_FAKE_URL);
+      const api = portOf(ci.OCW_E2E_API_URL);
+      const web = portOf(ci.OCW_E2E_BASE_URL);
+      const block = /pnpm setup:env --ports (\d+)/u.exec(text)?.[1];
+      assert.ok(block, "setup:env writes the entry's port block");
+      blocks.add(block);
+      assert.deepEqual([web, api, fake], [`${block}00`, `${block}01`, `${block}91`]);
+      const start = text.split("\n").find((l) => l.includes("infra/fake-model/server.mjs")) ?? "";
+      assert.ok(start.includes(`(PORT=${fake} `), "the fake listens on the fake URL's port");
+      assert.ok(
+        start.includes(`FAKE_MCP_OAUTH_REDIRECTS=http://localhost:${api}/`),
+        "OAuth redirects to this API",
+      );
+      assert.match(
+        text,
+        new RegExp(`cd apps/api && PORT=${api} `, "u"),
+        "the API listens on the API URL's port",
+      );
+      assert.match(text, new RegExp(`next start -p ${web} `, "u"), "the web listens on the base URL's port");
+    }
+    assert.equal(blocks.size, entries.length, "one port block per viewport");
   });
 });
 

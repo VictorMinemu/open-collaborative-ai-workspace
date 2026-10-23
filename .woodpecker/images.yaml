@@ -1,6 +1,8 @@
 # Woodpecker port of the `images` job in .github/workflows/ci.yml: the shipped images build. The build context is
-# streamed to the dind daemon, so the regular Woodpecker workspace is enough here.
-# Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event).
+# streamed to the dind daemon, so the regular Woodpecker workspace is enough here. It publishes nothing: the `:ci` tags
+# stay on the dind (nothing reads them), so it is safe next to any other workflow and needs no slot.
+# Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event). On a push to main it and
+# housekeeping are the whole pipeline: a cheap, cached check that the merged tree's images still build.
 when:
   - event: [pull_request, manual]
   - event: push

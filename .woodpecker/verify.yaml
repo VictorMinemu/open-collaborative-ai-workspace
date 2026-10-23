@@ -4,16 +4,17 @@
 # on the daemon side (the Woodpecker workspace is a docker volume the daemon cannot bind by path). It sits under
 # /home like GitHub's /home/runner/work: the local-runtime path sanitiser (and its tests) treat /home/<name> as a home.
 # `$$` escapes shell variables from Woodpecker's own substitution.
-# Pull requests, pushes to main, and manual runs (an open PR runs once, not once per event).
+# It runs next to the other workflows as the slot `verify` (infra/ci/README.md): its own workspace; testcontainers
+# publish random ports (32768+, outside every slot's port block) and name nothing, and no other workflow uses them.
+# Pull requests and manual runs only: a push to main re-tests the tree its pull request already passed.
 when:
   - event: [pull_request, manual]
-  - event: push
-    branch: main
 
 variables:
   - &docker_sock /var/run/docker.sock:/var/run/docker.sock
   - &shared /home/ocw-ci:/home/ocw-ci
   - &env
+    OCW_CI_SLOT: verify
     W: /home/ocw-ci/ws/verify
     PNPM_STORE: /home/ocw-ci/cache/pnpm-store
     UV_CACHE_DIR: /home/ocw-ci/cache/uv
@@ -25,20 +26,21 @@ steps:
     image: docker:29.8.2-cli
     volumes: [*docker_sock]
     commands:
-      - sh infra/ci/build-image.sh
+      - sh infra/ci/build-image.sh ocw-ci:${CI_COMMIT_SHA}
 
   - name: install
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
+      - sh infra/ci/slot-lease.sh acquire
       - rm -rf "$${W}" && mkdir -p "$${W}" && cp -a . "$${W}/"
       - cd "$${W}" && pnpm install --frozen-lockfile --store-dir "$${PNPM_STORE}"
 
   # Integration tests start real PostgreSQL 18 / Redis 8 / Garage containers (testcontainers).
   - name: verify
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     network_mode: host
     volumes: [*docker_sock, *shared]
@@ -48,7 +50,7 @@ steps:
 
   # setup-env (Garage/S3 keys, --add-missing); infra/**/*.test.mjs (incl. infra/garage) run in cell-smoke.
   - name: script-tests
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*shared]
     environment: *env
@@ -56,7 +58,7 @@ steps:
       - cd "$${W}" && node --test 'scripts/**/*.test.mjs'
 
   - name: package-suites
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     network_mode: host
     volumes: [*docker_sock, *shared]
@@ -67,12 +69,14 @@ steps:
       - pnpm --filter @ocw/desktop test
 
   - name: cleanup
-    image: ocw-ci:local
+    image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
+      # Only verify starts testcontainers (apps/api integration tests), and the slot lease keeps one verify at a time.
       - docker ps -aq --filter label=org.testcontainers=true | xargs -r docker rm -fv
       - rm -rf "$${W}"
+      - sh infra/ci/slot-lease.sh release
     when:
       status: [success, failure]
