@@ -106,8 +106,8 @@ async function checkScreen(page: Page, testId: string, touch: readonly string[] 
   for (const id of touch) await expectTouchTargets(page, `[data-testid="${id}"]`);
 }
 
-/** The parts of the Settings tab this plan builds (the reused `MembersSection` keeps its own sizes, R9). */
-const OWN_SECTIONS = ["project-access", "project-default", "project-teams", "project-repos"];
+/** The parts of the Settings tab held to 44 px below 1024: this plan's, and the reused `MembersSection` (07.9 polish). */
+const OWN_SECTIONS = ["project-access", "project-default", "unit-members", "project-teams", "project-repos"];
 
 const open = (browser: Browser, who: Actor, project: string) => openAs(browser, who, project);
 
@@ -433,6 +433,8 @@ test("Settings › Organization shows Teams and Work Zone on the project unit; a
     // After People, before the modules card (Surface 5).
     const y = async (l: Locator) => (await l.boundingBox())?.y ?? -1;
     expect(await y(detail.getByTestId("unit-members"))).toBeLessThan(await y(teams));
+    // People keeps 44 px targets below 768 in Settings › Organization too (07.9 polish).
+    await expectTouchTargets(page, '[data-testid="unit-detail"] [data-testid="unit-members"]');
     expect(await y(teams)).toBeLessThan(await y(workzone));
 
     // The remove-member dialog says sessions go too (R9, U-8).

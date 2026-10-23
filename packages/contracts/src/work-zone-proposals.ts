@@ -16,6 +16,8 @@ export const WorkZoneStartBlock = z.enum([
   "device_not_shared",
   "project_not_found",
   "not_allowed",
+  /** 07.9 (D-13): the repository belongs to a team project the person is not in. */
+  "not_in_project",
 ]);
 export type WorkZoneStartBlock = z.infer<typeof WorkZoneStartBlock>;
 

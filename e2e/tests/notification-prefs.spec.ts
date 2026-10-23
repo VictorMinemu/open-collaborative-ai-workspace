@@ -28,14 +28,6 @@ interface Recorded {
   tag: string;
 }
 
-declare global {
-  interface Window {
-    __notes: Array<Recorded & { onclick: (() => void) | null }>;
-    __permissionRequests: number;
-    __badge: number[];
-  }
-}
-
 /**
  * The recorder: permission comes from localStorage (`e2e-notification-permission`, default "granted") so a test can
  * start at "default"; `requestPermission` is counted and grants.

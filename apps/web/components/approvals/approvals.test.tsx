@@ -241,6 +241,19 @@ describe("Work Zone proposal review", () => {
     expect(failedStartText("project_not_found", v)).toBe("This project was removed.");
     expect(failedStartText("something_new", v)).toBe("Couldn't start the session.");
   });
+
+  it("says before Start that the repository belongs to a project the person is not in (07.9 polish)", () => {
+    const v = view({ startBlocked: "not_in_project" });
+    // The server's order: after the device share, before the device's live state.
+    expect(liveStartBlock(v, "online", true)).toBe("not_in_project");
+    expect(liveStartBlock(v, "offline", true)).toBe("not_in_project");
+    expect(liveStartBlock(v, "not_shared", true)).toBe("device_not_shared");
+    expect(liveStartBlock(v, "online", false)).toBe("not_allowed");
+    expect(startBlockedText("not_in_project", v)).toBe(
+      "billing-api belongs to a project you're not in. Ask one of its leads to add you.",
+    );
+    expect(failedStartText("not_in_project", v)).toBe("billing-api belongs to a project you're not in.");
+  });
 });
 
 describe("waiting line", () => {

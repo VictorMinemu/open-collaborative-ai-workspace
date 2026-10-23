@@ -188,7 +188,8 @@ export const STATUS: Record<
   failed: {
     label: "Failed",
     icon: CircleAlert,
-    tone: "text-destructive bg-destructive/12",
+    // The Badge destructive pill (AA in both themes); the semantic token on its own tint measured 3.8:1 (07.9 polish).
+    tone: "bg-red-100 text-red-800 dark:bg-red-400/15 dark:text-red-300",
     dot: "bg-destructive",
   },
   archived: {

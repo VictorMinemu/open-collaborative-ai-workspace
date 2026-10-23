@@ -45,6 +45,7 @@ import {
   type WorkSessionStartOptions,
   type WorkSessionStartResult,
 } from "./start";
+import { audienceTarget, projectAccessDenial } from "./visibility";
 
 /**
  * Phase 07.5-08 (D-03, D-04, P-08, APPROVE-03, APPROVE-04): Work Zone proposals. A bot proposes a session (project,
@@ -124,6 +125,18 @@ async function mayUse(tx: Tx, perms: PermissionService, userId: string, d: Devic
     .allowed;
 }
 
+/** Project access for a repository linked to a team project (D-13), as `createWorkSession` decides it; true for others. */
+async function mayStartIn(
+  tx: Tx,
+  perms: PermissionService,
+  userId: string,
+  projectId: string,
+): Promise<boolean> {
+  const target = await audienceTarget(tx, projectId);
+  if (!target?.unit) return true;
+  return (await projectAccessDenial(tx, perms, userId, target.unit)) === null;
+}
+
 async function namesOf(tx: Tx, p: Pick<ProposalRow, "agentId" | "requestedForUserId">) {
   const [bot] = await tx
     .select({ name: agents.name, deletedAt: agents.deletedAt })
@@ -176,17 +189,21 @@ async function liveState(tx: Tx, perms: PermissionService, p: ProposalRow): Prom
   const available = rt?.installed === true && rt.loggedIn === true;
   const removed = !proj || proj.removedAt !== null || proj.deviceId !== p.deviceId;
   const online = dev?.status === "online";
+  // D-13 (P-12), in `createWorkSession`'s order: a repository of a team project also needs project access.
+  const inProject = removed ? true : await mayStartIn(tx, perms, p.requestedForUserId, p.projectId);
   const blocked: WorkZoneStartBlock | null = !allowed
     ? "not_allowed"
     : removed
       ? "project_not_found"
       : !usable
         ? "device_not_shared"
-        : !online
-          ? "device_offline"
-          : !available
-            ? "runtime_unavailable"
-            : null;
+        : !inProject
+          ? "not_in_project"
+          : !online
+            ? "device_offline"
+            : !available
+              ? "runtime_unavailable"
+              : null;
   return {
     project: { id: p.projectId, name: (proj?.name ?? "Removed project").slice(0, 200), removed },
     device: { id: p.deviceId, name: (dev?.name ?? "Removed device").slice(0, 120), online, usable },

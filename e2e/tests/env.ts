@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Page } from "@playwright/test";
+import { type Page, test } from "@playwright/test";
+import { writesScreenshots } from "../support/screenshots";
 
 function fromDotEnv(name: string): string | undefined {
   const file = join(import.meta.dirname, "..", "..", ".env");
@@ -20,10 +21,14 @@ export const ADMIN = {
   orgName: process.env.OCW_E2E_ORG ?? "Autofy Labs",
 };
 
-/** Save a review screenshot when OCW_E2E_SCREENSHOT_DIR is set (no-op otherwise). */
+/**
+ * Save a review screenshot when OCW_E2E_SCREENSHOT_DIR is set (no-op otherwise), only from a spec this run names
+ * (`writesScreenshots`): other specs matched by the same filter, and the setup project, never overwrite their files.
+ */
 export async function shot(page: Page, name: string) {
   const dir = process.env.OCW_E2E_SCREENSHOT_DIR;
   if (!dir) return;
+  if (!writesScreenshots(test.info().file, process.env.OCW_E2E_SCREENSHOT_SPECS)) return;
   await page.waitForTimeout(400);
   await page.screenshot({ path: join(dir, `${name}.png`), fullPage: false, animations: "disabled" });
 }

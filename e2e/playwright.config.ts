@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { screenshotSpecsFromArgv } from "./support/screenshots";
 
 /**
  * E2E against a running stack (compose or `pnpm dev`):
@@ -6,7 +7,14 @@ import { defineConfig, devices } from "@playwright/test";
  * Use a FRESH stack (`docker compose down -v` first): the `setup` project redeems the setup token.
  * Env: OCW_E2E_BASE_URL (default http://localhost:3000), OCW_E2E_API_URL (default http://localhost:4000),
  * OCW_SETUP_TOKEN (default: read from ../.env), OCW_E2E_SCREENSHOT_DIR (optional: save review screenshots).
+ * Screenshots are written only by the specs named on the command line (all of them on a run without spec filters);
+ * OCW_E2E_SCREENSHOT_SPECS overrides that list (support/screenshots.ts).
  */
+// The runner (not a worker) records the specs this run names; the workers inherit it and `shot()` reads it.
+if (process.env.OCW_E2E_SCREENSHOT_SPECS === undefined && !process.env.TEST_WORKER_INDEX) {
+  const specs = screenshotSpecsFromArgv(process.argv);
+  if (specs !== undefined) process.env.OCW_E2E_SCREENSHOT_SPECS = specs;
+}
 export default defineConfig({
   testDir: "./tests",
   outputDir: "./test-results",

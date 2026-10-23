@@ -219,7 +219,7 @@ export function SessionSidebar() {
               data-testid="settled-toggle"
               onClick={() => setSettledOpen((v) => !v)}
               aria-expanded={settledOpen}
-              className="flex items-center gap-2 px-2.5 pb-1 text-left text-[12.5px] text-muted-foreground hover:text-foreground"
+              className="flex items-center gap-2 px-2.5 pb-1 text-left text-[12.5px] text-muted-foreground hover:text-foreground max-md:min-h-11 max-md:pb-0"
             >
               Settled
               <span aria-hidden className="h-px flex-1 bg-border" />
@@ -241,7 +241,7 @@ export function SessionSidebar() {
                     type="button"
                     data-testid="settled-more"
                     onClick={() => setSettledAll((v) => !v)}
-                    className="flex h-8 items-center gap-2 rounded-md px-2.5 text-left text-[13px] text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+                    className="flex h-8 items-center gap-2 rounded-md px-2.5 text-left text-[13px] text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground max-md:h-11"
                   >
                     <Plus className={cn("size-3.5 transition-transform", settledAll && "rotate-45")} />
                     {settledAll ? "Show fewer" : `Show ${settled.length - SETTLED_PAGE} more`}
@@ -293,7 +293,8 @@ function ProjectBadge({ name, muted, className }: { name: string; muted?: boolea
       aria-hidden
       className={cn(
         "inline-flex size-4 shrink-0 items-center justify-center rounded-[4px] font-bold text-[8px] leading-none tracking-tight",
-        muted ? "bg-muted text-muted-foreground/70" : "bg-primary/12 text-primary",
+        // Settled rows: a quieter tile, but its letters keep AA contrast (WINDOWS #316, #327).
+        muted ? "bg-muted text-muted-foreground" : "bg-primary/12 text-primary",
         className,
       )}
     >
@@ -412,7 +413,7 @@ export function ActiveRow({
         ) : (
           title
         )}
-        <span className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted-foreground/80">
+        <span className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted-foreground">
           {s.worktree ? (
             <FolderGit2 aria-hidden className="size-3 shrink-0" />
           ) : (
@@ -425,13 +426,15 @@ export function ActiveRow({
           <RuntimeMark runtime={s.runtime} className="ml-auto size-3" />
         </span>
       </Link>
-      {/* Per-project new session (replaces the old project header "+"): over the badge on hover / focus. */}
+      {/* Per-project new session (replaces the old project header "+"): over the badge on hover / focus. A touch
+          screen has no hover, so there it would be an invisible target over the row: it is left out, and New session
+          and the project's page offer the same start (07.9 polish). */}
       <Tooltip content={`New session in ${s.projectName}`}>
         <button
           type="button"
           aria-label={`New session in ${s.projectName}`}
           onClick={onNew}
-          className="absolute top-2 left-2 inline-flex size-[18px] items-center justify-center rounded-[4px] bg-background text-muted-foreground opacity-0 shadow-sm ring-1 ring-border transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
+          className="absolute top-2 left-2 inline-flex size-[18px] items-center justify-center rounded-[4px] bg-background text-muted-foreground opacity-0 shadow-sm ring-1 ring-border transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100 pointer-coarse:hidden"
         >
           <Plus className="size-3" />
         </button>
@@ -460,7 +463,7 @@ export function SettledRow({
       data-status={s.status}
       aria-current={active ? "page" : undefined}
       title={`${project.name} · ${STATUS[s.status]?.label ?? s.status}`}
-      className={cn(sectionItemClass(active), "gap-2 text-muted-foreground")}
+      className={cn(sectionItemClass(active), "gap-2 text-muted-foreground max-md:h-11")}
     >
       <ProjectBadge name={project.name} muted />
       <span

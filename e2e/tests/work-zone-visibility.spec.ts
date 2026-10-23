@@ -594,6 +594,31 @@ test("the chip and its sheet keep the header calm at 390 and the icon readable i
     await page.emulateMedia({ colorScheme: "light" });
     await expectChipHitArea(page);
     await expectNoSidewaysScroll(page, "session header");
+
+    // 07.9 polish: Queue, Changes and the menu are 44 px on a phone, on the project's row; the title has its own
+    // line under them, the full width of the header.
+    const header = page.getByTestId("session-header");
+    for (const name of ["Queue", "Changes", "Session actions"]) {
+      const b = await header.getByRole("button", { name, exact: true }).boundingBox();
+      expect(b?.width ?? 0, `${name} width`).toBeGreaterThanOrEqual(44);
+      expect(b?.height ?? 0, `${name} height`).toBeGreaterThanOrEqual(44);
+    }
+    const titleBox = await page.getByTestId("session-title").boundingBox();
+    const chipBox = await chip(page).boundingBox();
+    expect(titleBox!.y, "the title sits under the controls").toBeGreaterThanOrEqual(
+      chipBox!.y + chipBox!.height,
+    );
+    // The primitive's sheet close (Queue here) is 44 px too, its icon where the 32 px one was.
+    await page.getByTestId("open-queue").click();
+    const close = page.getByRole("dialog").getByRole("button", { name: "Close" });
+    await expect(close).toBeVisible();
+    const closeBox = await close.boundingBox();
+    expect(closeBox?.width).toBeGreaterThanOrEqual(44);
+    expect(closeBox?.height).toBeGreaterThanOrEqual(44);
+    await close.click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await blur(page);
+    await captureReview(page, "session-header-390");
   } finally {
     await f.cleanup();
   }

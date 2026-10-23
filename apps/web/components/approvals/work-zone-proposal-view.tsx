@@ -52,6 +52,7 @@ export function liveStartBlock(
   if (!canDecide || view.startBlocked === "not_allowed") return "not_allowed";
   if (view.project.removed || view.startBlocked === "project_not_found") return "project_not_found";
   if (device === "not_shared" || view.startBlocked === "device_not_shared") return "device_not_shared";
+  if (view.startBlocked === "not_in_project") return "not_in_project";
   if (device === "offline") return "device_offline";
   if (device === "signed_out") return "runtime_unavailable";
   return null;
@@ -60,7 +61,7 @@ export function liveStartBlock(
 /** The visible reason next to a disabled Start (UI-SPEC Copywriting › Work Zone proposal "Start unavailable"). */
 export function startBlockedText(
   block: WorkZoneStartBlock,
-  view: Pick<WorkZoneProposal, "device" | "runtime">,
+  view: Pick<WorkZoneProposal, "device" | "runtime" | "project">,
 ): string {
   switch (block) {
     case "device_offline":
@@ -73,13 +74,15 @@ export function startBlockedText(
       return "This project was removed.";
     case "not_allowed":
       return "You can't start Work Zone sessions.";
+    case "not_in_project":
+      return `${view.project.name} belongs to a project you're not in. Ask one of its leads to add you.`;
   }
 }
 
 /** Why a Start failed, in words (UI-SPEC "Failed reasons"); never an API code. */
 export function failedStartText(
   code: string | null | undefined,
-  view: Pick<WorkZoneProposal, "device" | "runtime">,
+  view: Pick<WorkZoneProposal, "device" | "runtime" | "project">,
 ): string {
   switch (code) {
     case "device_offline":
@@ -92,6 +95,8 @@ export function failedStartText(
       return `You can no longer use ${view.device.name}.`;
     case "settings_denied":
       return "Your organization doesn't allow this session's settings.";
+    case "not_in_project":
+      return `${view.project.name} belongs to a project you're not in.`;
     default:
       return "Couldn't start the session.";
   }
