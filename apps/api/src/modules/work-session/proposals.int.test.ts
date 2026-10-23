@@ -1050,6 +1050,29 @@ describe("team projects: proposals only where the person may start, with the pro
     expect(await traces()).toEqual(before);
   });
 
+  it("the card and the review say not_in_project before Start once the person left the project (07.9 polish)", async () => {
+    const p = await proposed({ projectId: teamMac.portal, deviceId: teamMac.deviceId });
+    expect((await detail(sam, p.approvalId)).view).toMatchObject({ startBlocked: null });
+    expect((await cardFor(sam, p.cardMessageId)).approval).toMatchObject({ blocked: null });
+    await ok(victor.request("DELETE", `/api/v1/units/${portalUnit}/members/${samId}`));
+    try {
+      expect((await detail(sam, p.approvalId)).view).toMatchObject({
+        type: "work_zone_proposal",
+        startBlocked: "not_in_project",
+      });
+      expect((await cardFor(sam, p.cardMessageId)).approval).toMatchObject({
+        status: "pending",
+        blocked: "not_in_project",
+      });
+    } finally {
+      await ok(
+        victor.request("POST", `/api/v1/units/${portalUnit}/members`, { userId: samId, role: "member" }),
+      );
+    }
+    // Back in the project: Start is possible again.
+    expect((await detail(sam, p.approvalId)).view).toMatchObject({ startBlocked: null });
+  });
+
   it("Start fails with not_in_project when the person left the project since the proposal", async () => {
     const p = await proposed({ projectId: teamMac.portal, deviceId: teamMac.deviceId });
     await ok(victor.request("DELETE", `/api/v1/units/${portalUnit}/members/${samId}`));
