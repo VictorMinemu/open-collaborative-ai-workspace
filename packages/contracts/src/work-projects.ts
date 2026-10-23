@@ -102,7 +102,10 @@ export const WorkProjectRepo = z.object({
 });
 export type WorkProjectRepo = z.infer<typeof WorkProjectRepo>;
 
-/** A row of the Projects index: a team project the caller can open (or every one, for an admin). */
+/**
+ * A row of the Projects index: a team project the caller can open or manage (`work_project.manage`, e.g. a lead of its
+ * parent unit, D-14), or every one, for an admin. Its sessions are still listed per session audience.
+ */
 export const WorkProjectSummary = z.object({
   id: Id,
   name: UnitName,
