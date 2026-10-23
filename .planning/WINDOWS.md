@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 181
+open_count: 180
 waived_count: 5
-fixed_count: 134
-total_count: 320
-last_updated: 2026-10-23T07:06:02.746Z
+fixed_count: 138
+total_count: 323
+last_updated: 2026-10-23T07:06:56.756Z
 ---
 
 # Broken Windows Ledger
@@ -320,21 +320,24 @@ last_updated: 2026-10-23T07:06:02.746Z
 | 303 | 07.8 | deviation | apps/web |  | 07.8-29 (medium): useSignIn does not clear the previous session's query cache on sign-in | open |  | 2026-10-22T12:38:31.152Z |  |
 | 304 | 07.8 | deviation | apps/web |  | 07.8-29: other useTopic callers may multiply invalidations the same way /me/permissions did (low) | open |  | 2026-10-22T12:38:31.229Z |  |
 | 305 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-02 (coordinator decision, record in ADR-0030): a revoked personal device grant does not override the device's "shared with everyone"; the person keeps seeing its sessions through the share (same as deviceModeCap today); sessions on a revoked device stay visible to former grantees as history | open |  | 2026-10-23T01:28:25.186Z |  |
-| 306 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-02: who-can-see and project-member listings check every active member one by one; fine at expected size, plan 12's perf test must cover it | open |  | 2026-10-23T01:28:25.262Z |  |
-| 307 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | MUST (07.9-12, D-14): app.work_project_access's team branch must exclude descendants of kind project, so an assigned team never reaches members of projects nested under it; with a test | open |  | 2026-10-23T03:52:58.538Z |  |
-| 308 | 07.9 | deviation | apps/api/src/modules/work-session/facts.ts |  | 07.9-05: the list calls work_session_access once per session of the organization (Pitfall 8); plan 12's perf test must measure it | open |  | 2026-10-23T03:52:58.614Z |  |
+| 306 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-02: who-can-see and project-member listings check every active member one by one; fine at expected size, plan 12's perf test must cover it | fixed |  | 2026-10-23T01:28:25.262Z | 2026-10-23T07:06:56.301Z |
+| 307 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | MUST (07.9-12, D-14): app.work_project_access's team branch must exclude descendants of kind project, so an assigned team never reaches members of projects nested under it; with a test | fixed |  | 2026-10-23T03:52:58.538Z | 2026-10-23T07:06:56.376Z |
+| 308 | 07.9 | deviation | apps/api/src/modules/work-session/facts.ts |  | 07.9-05: the list calls work_session_access once per session of the organization (Pitfall 8); plan 12's perf test must measure it | fixed |  | 2026-10-23T03:52:58.614Z | 2026-10-23T07:06:56.450Z |
 | 309 | 07.9 | deviation | apps/web/components/work-zone/session-sidebar.tsx |  | SHOULD FIX (07.9-09, pre-existing): active-row branch line contrast 3.5:1 (axe serious); Settled rows 32 px on mobile (< 44); the per-row "+" button 18 px on touch — fix in plan 10/14 or the gate | open |  | 2026-10-23T04:56:08.517Z |  |
 | 310 | 07.9 | deviation | apps/web/app/(app)/work-zone/page.tsx |  | SHOULD FIX (07.9-09, pre-existing): the home "Ready" status chip contrast 2.6:1; at 390 the recent sessions' date truncates mid-word ("just nov") | open |  | 2026-10-23T04:56:08.606Z |  |
 | 311 | 07.9 | deviation | apps/api/src/modules/work-session/service.ts |  | 07.9-07 (low): a session frame computed just before a narrowing can arrive a few ms after it (the data was visible to that person until then); each device transaction and reauthorizeOrg waits for the post-commit fan-out — plan 12 measures it | open |  | 2026-10-23T05:15:46.912Z |  |
 | 312 | 07.9 | deviation | apps/web/lib/workzone-queries.ts |  | 07.9-07: gaining access by repo link or team assignment shows the session only on the next list refetch (P-08 by design); useWorkZoneOrgSync is mounted in 4 components — plan 11 may mount it once | open |  | 2026-10-23T05:15:46.993Z |  |
 | 313 | 07.9 | deviation | e2e |  | 07.9-08: e2e/ has no tsconfig, so pnpm typecheck never type-checks the specs (add one, gate); leftover sessions accumulate between specs (title, Mia's Gate) | open |  | 2026-10-23T05:18:28.391Z |  |
-| 314 | 07.9 | deviation | apps/api/src/modules/work-session/visibility.ts |  | 07.9-06: validation/preview/search for personal repos create a draft session in an always-rolled-back savepoint, and the who-can-see list calls the rule once per member — plan 12 measures it or adds a SQL function for drafts | open |  | 2026-10-23T05:35:07.263Z |  |
+| 314 | 07.9 | deviation | apps/api/src/modules/work-session/visibility.ts |  | 07.9-06: validation/preview/search for personal repos create a draft session in an always-rolled-back savepoint, and the who-can-see list calls the rule once per member — plan 12 measures it or adds a SQL function for drafts | fixed |  | 2026-10-23T05:35:07.263Z | 2026-10-23T07:06:56.522Z |
 | 315 | 07.9 | deviation | apps/web/components/work-zone |  | 07.9-06 (for 10/14): an editor can remove themself from the audience (warn before saving); plan 14 must use teamProjectHidden on repos; WorkZoneStartBlock has no not_in_project, so a proposal card does not show it before Start | open |  | 2026-10-23T05:35:07.350Z |  |
 | 316 | 07.9 | deviation | apps/web/components/work-zone |  | 07.9-11: the dimmed badge on Settled sidebar rows fails axe contrast; a long email in the rail's user block overflows into the sidebar column at 1440; ServerUnreachable says "not responding" on a 500 too; a manager outside the project sees "No sessions you can see" (13 may give a specific line) | open |  | 2026-10-23T06:32:15.504Z |  |
 | 317 | 07.9 | deviation | packages/contracts/src |  | 07.9-11: WorkProjectSummary's comment still says "can open"; with D-14 it is "open or manage" (fix in the gate) | open |  | 2026-10-23T06:32:15.594Z |  |
 | 318 | 07.9 | deviation | apps/web/components/work-zone/session-view.tsx |  | SHOULD FIX (07.9-10, pre-existing): header buttons Queue, Changes and the menu are 32 px at 390 (< 44); the shared bottom-sheet close button is 32 px for every sheet (fixed locally only for the visibility sheet) | open |  | 2026-10-23T07:06:02.594Z |  |
 | 319 | 07.9 | deviation | apps/api/src/modules/work-session/visibility.ts |  | 07.9-10: See all shows "Member" instead of "Through {team}" for a project member also in the chosen team (06's reason order); self-removal through Teams is not warned (the view does not say whether the editor is in the chosen team); the Project row shows no head count unless the session is on Project (needs projectCount in the contract) | open |  | 2026-10-23T07:06:02.669Z |  |
 | 320 | 07.9 | deviation | e2e |  | 07.9-10/11: e2e runs overwrite other plans' screenshots (09's restored by hand twice) — screenshot names per spec, or write only the spec's own files | open |  | 2026-10-23T07:06:02.746Z |  |
+| 321 | 07.9 | deviation | apps/api/src/modules/work-session/service.ts |  | MUST FIX (07.9-12): the post-commit fan-out still blocks the request; a device sweep of 250 sessions takes 6.3 s and a reauthorizeOrg over thousands of sessions could exceed a minute. Move fan-out and re-authorization to an ordered per-organization background queue; the request returns after commit; privacy (no frame to a removed viewer) must still hold | open |  | 2026-10-23T07:06:56.603Z |  |
+| 322 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-12 (follow-up): an explicit system actor so an empty user_id is denied by default in the audience backstop, instead of "no user passes" (D-13 limit, record in ADR-0030) | open |  | 2026-10-23T07:06:56.682Z |  |
+| 323 | 07.9 | deviation | apps/api/src/modules/work-session/revoke-cause.ts |  | 07.9-12 (minor): re-deciding a deactivated member's subscription gives cause visibility instead of role | open |  | 2026-10-23T07:06:56.756Z |  |
 
 ````json
 [
@@ -4005,10 +4008,10 @@ last_updated: 2026-10-23T07:06:02.746Z
     "file": "packages/db/sql/post-migrate.sql",
     "line": null,
     "description": "07.9-02: who-can-see and project-member listings check every active member one by one; fine at expected size, plan 12's perf test must cover it",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-23T01:28:25.262Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-23T07:06:56.301Z"
   },
   {
     "id": 307,
@@ -4017,10 +4020,10 @@ last_updated: 2026-10-23T07:06:02.746Z
     "file": "packages/db/sql/post-migrate.sql",
     "line": null,
     "description": "MUST (07.9-12, D-14): app.work_project_access's team branch must exclude descendants of kind project, so an assigned team never reaches members of projects nested under it; with a test",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-23T03:52:58.538Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-23T07:06:56.376Z"
   },
   {
     "id": 308,
@@ -4029,10 +4032,10 @@ last_updated: 2026-10-23T07:06:02.746Z
     "file": "apps/api/src/modules/work-session/facts.ts",
     "line": null,
     "description": "07.9-05: the list calls work_session_access once per session of the organization (Pitfall 8); plan 12's perf test must measure it",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-23T03:52:58.614Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-23T07:06:56.450Z"
   },
   {
     "id": 309,
@@ -4101,10 +4104,10 @@ last_updated: 2026-10-23T07:06:02.746Z
     "file": "apps/api/src/modules/work-session/visibility.ts",
     "line": null,
     "description": "07.9-06: validation/preview/search for personal repos create a draft session in an always-rolled-back savepoint, and the who-can-see list calls the rule once per member — plan 12 measures it or adds a SQL function for drafts",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-23T05:35:07.263Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-23T07:06:56.522Z"
   },
   {
     "id": 315,
@@ -4176,6 +4179,42 @@ last_updated: 2026-10-23T07:06:02.746Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-23T07:06:02.746Z",
+    "resolved_at": null
+  },
+  {
+    "id": 321,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/api/src/modules/work-session/service.ts",
+    "line": null,
+    "description": "MUST FIX (07.9-12): the post-commit fan-out still blocks the request; a device sweep of 250 sessions takes 6.3 s and a reauthorizeOrg over thousands of sessions could exceed a minute. Move fan-out and re-authorization to an ordered per-organization background queue; the request returns after commit; privacy (no frame to a removed viewer) must still hold",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T07:06:56.603Z",
+    "resolved_at": null
+  },
+  {
+    "id": 322,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "packages/db/sql/post-migrate.sql",
+    "line": null,
+    "description": "07.9-12 (follow-up): an explicit system actor so an empty user_id is denied by default in the audience backstop, instead of \"no user passes\" (D-13 limit, record in ADR-0030)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T07:06:56.682Z",
+    "resolved_at": null
+  },
+  {
+    "id": 323,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/api/src/modules/work-session/revoke-cause.ts",
+    "line": null,
+    "description": "07.9-12 (minor): re-deciding a deactivated member's subscription gives cause visibility instead of role",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T07:06:56.756Z",
     "resolved_at": null
   }
 ]
