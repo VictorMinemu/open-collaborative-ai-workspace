@@ -5,6 +5,12 @@ import { useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Bookmark, Pin, RotateCw, Trash2 } from "lucide-react";
 import { Fragment, memo, type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import {
+  BotActivity,
+  BotActivityLive,
+  type LiveActivityRow,
+  stepViewerOf,
+} from "@/components/browser/bot-activity";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
@@ -520,6 +526,18 @@ const MessageRow = memo(function MessageRow({
             </Tooltip>
           </div>
         )}
+        {/* 07.8-20 (R2): what the bot did in its sandbox and browser this turn, above its reply, for every reader. */}
+        {!deleted && message.activity ? (
+          <BotActivity
+            activity={message.activity}
+            viewer={stepViewerOf(message.activity, meId || null)}
+            bot={
+              isBot && author.id
+                ? { id: author.id, name: author.displayName, avatarUrl: author.avatarUrl }
+                : undefined
+            }
+          />
+        ) : null}
         {deleted ? (
           <p
             data-testid="message-tombstone"
@@ -534,6 +552,9 @@ const MessageRow = memo(function MessageRow({
             card={message.card}
             summary={message.body}
             authorName={author.displayName}
+            {...(isBot && author.id
+              ? { author: { id: author.id, name: author.displayName, avatarUrl: author.avatarUrl } }
+              : {})}
           />
         ) : editing ? (
           <MessageEditor message={message} onDone={() => setEditing(false)} />
@@ -581,6 +602,45 @@ const MessageRow = memo(function MessageRow({
     </div>
   );
 });
+
+/**
+ * A bot turn that is still running (07.8-20, UI-SPEC Surface 5 "While the turn runs"): the bot's author block with the
+ * live label, under the last message. Replaced by the reply (and its collapsed activity) when the reply arrives.
+ */
+function LiveActivityRowView({ row }: { row: LiveActivityRow }) {
+  return (
+    <div
+      data-testid="bot-activity-row"
+      data-agent-id={row.agentId}
+      className="mt-2 flex gap-3 px-4 py-1 pt-1.5 sm:px-5"
+    >
+      <div className="w-9 shrink-0">
+        <PrincipalAvatar
+          kind="agent"
+          name={row.name}
+          avatarUrl={row.avatarUrl}
+          seed={row.agentId}
+          className="mt-0.5 size-9"
+        />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-1.5">
+          <span data-testid="message-author-live" className="truncate font-semibold text-[14.5px] leading-6">
+            {row.name}
+          </span>
+          <BotBadge className="relative -top-px self-center" />
+          <time
+            dateTime={new Date(row.startedAt).toISOString()}
+            className="shrink-0 text-muted-foreground text-xs tabular-nums"
+          >
+            {formatTime(new Date(row.startedAt).toISOString())}
+          </time>
+        </div>
+        <BotActivityLive bot={row.name} phrase={row.phrase} step={row.step} />
+      </div>
+    </div>
+  );
+}
 
 function PendingRow({
   pending,
@@ -672,6 +732,7 @@ export function MessageList({
   onMarkUnread,
   onEdit,
   editorFor,
+  live = [],
 }: {
   messages: Message[];
   pending: PendingMessage[];
@@ -720,6 +781,8 @@ export function MessageList({
    * stable callbacks.
    */
   editorFor?: (m: Message) => EditOverride | null | undefined;
+  /** Bot turns still running here (07.8-20): each shows its live label under the last message. */
+  live?: readonly LiveActivityRow[];
 }) {
   // null (not offered) must win over the list default, so `??` would be wrong here.
   const editorOf = (m: Message) => {
@@ -793,6 +856,7 @@ export function MessageList({
     prev = { key: m.replyCount > 0 ? `${key}:thread` : key, at, day };
   }
   useHiddenAnchor(hiddenAnchor ? (anchorId ?? null) : null, neighbour, onAnchorHidden);
+  for (const row of live) rows.push(<LiveActivityRowView key={`live-${row.eventId}`} row={row} />);
   const meKey = `user:${me.id}`;
   for (const p of pending) {
     const at = new Date(p.createdAt).getTime();

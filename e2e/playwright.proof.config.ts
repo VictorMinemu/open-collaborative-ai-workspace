@@ -29,5 +29,14 @@ export default defineConfig({
       dependencies: ["setup"],
       use: desktop,
     },
+    {
+      // Phase 07.8 tracer (scripts/sandbox-proof.sh through scripts/e2e-isolated.sh --sandbox): real cell, real API,
+      // real sandboxd. API only; its own project so neither proof script runs the other's steps.
+      name: "sandbox-proof",
+      testDir: "./proof",
+      testMatch: /\.sandbox-proof\.ts$/,
+      dependencies: ["setup"],
+      use: desktop,
+    },
   ],
 });

@@ -23,11 +23,13 @@ import {
 } from "@ocw/db";
 import { and, asc, desc, eq, gt, inArray, isNull, lt, type SQL, sql } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
+import type { PlatformCardInput } from "../../lib/chat-agent-bridge";
 import { badRequest, notFound } from "../../lib/errors";
 import { attachmentsForMessages, linkAttachments } from "../artifact";
 import type { AuditService } from "../audit";
 import type { ChannelFacts } from "../organization";
 import type { RealtimeService } from "../realtime";
+import { withActivity } from "./activity";
 import { cardOf, insertCard, withCards } from "./card-actions";
 import { authorOf, type Directory } from "./directory";
 import { pinnedFor } from "./pins";
@@ -675,8 +677,9 @@ export async function hydrateViewer(tx: Tx, list: Message[], viewerId: string): 
       ? { ...m, reactions: [], pinned: false, saved: false }
       : { ...m, reactions: reactions.get(m.id) ?? [], pinned: pinned.has(m.id), saved: saved.has(m.id) },
   );
-  // Agent Cards (P-11) with the viewer's fields (following, viewerCan).
-  return withCards(tx, hydrated, viewerId);
+  // Agent Cards (P-11) with the viewer's fields (following, viewerCan); a bot reply's turn activity (07.8-10, R2),
+  // the same for every viewer.
+  return withActivity(tx, await withCards(tx, hydrated, viewerId));
 }
 
 /** Top-level messages of a channel, newest page first in the DB, returned oldest → newest. */
@@ -844,9 +847,15 @@ export interface PostInput {
    * An Agent Card (P-11, agents only): inserted with the message before `message.created` is appended, so the event
    * carries it; `body` is its plain-text summary.
    */
-  card?: AgentCardInput | undefined;
+  card?: AgentCardInput | PlatformCardInput | undefined;
   /** Phase 07.2: the card is server-composed (an approval mirror); agents can never patch it. */
   cardPlatformOwned?: boolean | undefined;
+  /**
+   * Phase 07.8 (07.8-10, agents only): runs in this transaction right after the new row is inserted and before
+   * `message.created` is appended (the Agent Channel attaches the turn's activity and links the files the bot shared in
+   * that turn), so the event carries both. Not called on an idempotent retry.
+   */
+  onInserted?: ((tx: Tx, messageId: string) => Promise<void>) | undefined;
 }
 
 export interface PostResult {
@@ -922,6 +931,13 @@ export async function postMessage(
     .returning();
   if (!row) throw new Error("message insert returned no row");
   let message = toMessage(row, dir, root ? undefined : []);
+  if (input.onInserted) {
+    if (author.kind !== "agent") throw new Error("only agent posts run onInserted");
+    await input.onInserted(tx, row.id);
+    const [hydrated] = await withAttachments(tx, [message]);
+    if (!hydrated) throw new Error("message DTO missing");
+    message = hydrated;
+  }
   if (input.attachmentIds?.length) {
     await linkAttachments(tx, {
       conversationId: conv.id,
@@ -945,6 +961,8 @@ export async function postMessage(
       }),
     };
   }
+  // A bot reply carries its turn's activity (07.8-10, R2): viewer-agnostic, so it may ride the event.
+  if (author.kind === "agent") [message] = (await withActivity(tx, [message])) as [Message];
   const seq = await deps.realtime.appendEvent(tx, topic, EventTypes.messageCreated, { message });
   if (seq !== nextSeq) throw new Error(`stream seq drift on ${topic}: expected ${nextSeq}, got ${seq}`);
 

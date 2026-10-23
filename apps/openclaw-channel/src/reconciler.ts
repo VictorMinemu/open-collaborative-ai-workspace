@@ -216,13 +216,21 @@ export function desiredAgentEntry(
   };
 }
 
+/** What a model that accepts images declares (07.8 D-14, spike ii); every other model stays text only (no `input`). */
+export const IMAGE_MODEL_INPUT = ["text", "image"] as const;
+
 export function desiredProviderEntry(provider: CellProvider, extraModels: string[] = []): ProviderEntry {
   const ids = [...new Set([...provider.models, ...extraModels])];
+  // 07.8 (D-14): OpenClaw passes a tool's image to the model only when the model declares image input; our custom
+  // providers have no catalog discovery, so the API's per-model flag is the only source.
+  const images = new Set(provider.imageModels ?? []);
   return {
     baseUrl: provider.baseUrl,
     api: provider.api,
     apiKey: provider.apiKey ? envRef(providerKeyEnvName(provider.id)) : "none",
-    models: ids.map((id) => ({ id, name: id })),
+    models: ids.map((id) =>
+      images.has(id) ? { id, name: id, input: [...IMAGE_MODEL_INPUT] } : { id, name: id },
+    ),
   };
 }
 
@@ -254,9 +262,21 @@ function modelIds(value: unknown): string[] {
     .sort();
 }
 
+/** The ids of the models that declare image input (an enriched runtime view fills `input: ["text"]` for the rest). */
+function imageModelIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((m) => m && typeof m === "object" && Array.isArray((m as { input?: unknown }).input))
+    .filter((m) => ((m as { input: unknown[] }).input as unknown[]).includes("image"))
+    .map((m) => (m as { id?: unknown }).id)
+    .filter((id): id is string => typeof id === "string")
+    .sort();
+}
+
 /**
  * Semantic provider comparison. OpenClaw's runtime view enriches model entries and shows `${ENV}`
- * refs already resolved, so compare baseUrl, api, key (ref or resolved secret) and model id sets.
+ * refs already resolved, so compare baseUrl, api, key (ref or resolved secret), model id sets and (07.8) the ids of the
+ * image models.
  */
 function sameProvider(
   before: ProviderEntry | undefined,
@@ -269,7 +289,8 @@ function sameProvider(
     keyMatches &&
     before.baseUrl === desired.baseUrl &&
     before.api === desired.api &&
-    stableStringify(modelIds(before.models)) === stableStringify(modelIds(desired.models))
+    stableStringify(modelIds(before.models)) === stableStringify(modelIds(desired.models)) &&
+    stableStringify(imageModelIds(before.models)) === stableStringify(imageModelIds(desired.models))
   );
 }
 

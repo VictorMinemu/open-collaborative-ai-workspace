@@ -56,6 +56,8 @@ const N1_SESSION_CONV = "aaaaaaaa-0000-4000-8000-000000000201";
 const N1_SESSION = "aaaaaaaa-0000-4000-8000-000000000905";
 const N1_PROMPT = "aaaaaaaa-0000-4000-8000-000000000906";
 const N1_TOOL_CALL = "aaaaaaaa-0000-4000-8000-000000000907";
+/** Phase 07.8: a bot turn delivered at N-1 (it must come out with no sandbox calls and no member data). */
+const N1_TURN = "aaaaaaaa-0000-4000-8000-000000000908";
 const BACKFILL_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
   "../../../packages/db/drizzle/20261014042429_bots_off_connector_vault_backfill/migration.sql",
@@ -77,6 +79,14 @@ const HEAD_ONLY = [
   "20261014020321_connector_oauth_use_cimd",
   "20261014042429_bots_off_connector_vault_backfill",
   "20261014125609_tool_approvals",
+  "20261015141842_bot_sandboxes_browser",
+  "20261015173538_share_attachment_turn",
+  "20261015235124_sandbox_package_pins_immutable",
+  "20261021200025_tool_call_requester_decides",
+  "20261022040054_signin_card_kind",
+  "20261022061052_browser_context_opened_host",
+  "20261022070138_agent_member_data",
+  "20261022213335_browser_takeover_abandoned",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -245,6 +255,11 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       await seed.query(
         "insert into app.agent_tool_calls (id, organization_id, event_id, agent_id, user_id, tool, source_kind, target, decision, status) values ($1, $2, $3, $4, $5, 'web_search', 'builtin', 'example.test', 'allowed', 'ok')",
         [N1_TOOL_CALL, ORG_A, "aaaaaaaa-0000-4000-8000-000000000903", HELPER_BOT, MAX_MEMBER],
+      );
+      // Phase 07.8 (P-06, P-11): the N-1 dump has no bot turns; one delivered at N-1 with two tool calls.
+      await seed.query(
+        "insert into app.agent_turns (event_id, organization_id, agent_id, user_id, conversation_id, conversation_kind, message_id, tools, tool_calls, tainted) values ($1, $2, $3, $4, $5, 'channel', $6, '{web_search}', 2, true)",
+        [N1_TURN, ORG_A, HELPER_BOT, MAX_MEMBER, N1_SESSION_CONV, "aaaaaaaa-0000-4000-8000-000000000909"],
       );
     } finally {
       await seed.end();
@@ -460,6 +475,58 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
                   (select count(*)::int from app.work_zone_proposals) as proposals`,
         );
         expect(empty.rows).toEqual([{ policies: 0, approvals: 0, proposals: 0 }]);
+      } finally {
+        await c.end();
+      }
+    });
+
+    it("keeps bot turns with no sandbox calls and no member data, adds no sandbox or browser data, and every secret passes the kind check (Phase 07.8)", async () => {
+      const c = new pg.Client({ connectionString: urls.migrator });
+      await c.connect();
+      try {
+        const turns = await c.query(
+          "select event_id, tool_calls, tainted, sandbox_calls, member_data from app.agent_turns order by event_id",
+        );
+        expect(turns.rows).toEqual([
+          { event_id: N1_TURN, tool_calls: 2, tainted: true, sandbox_calls: 0, member_data: false },
+        ]);
+        // No deny rule seeded and no backfill (D-12): every new table starts empty.
+        const empty = await c.query(
+          `select (select count(*)::int from app.sandbox_policies) as policies,
+                  (select count(*)::int from app.bot_sandboxes) as sandboxes,
+                  (select count(*)::int from app.sandbox_usage_daily) as usage,
+                  (select count(*)::int from app.sandbox_event_cursor) as cursors,
+                  (select count(*)::int from app.browser_contexts) as contexts,
+                  (select count(*)::int from app.browser_sessions) as sessions,
+                  (select count(*)::int from app.browser_signin_requests) as signins,
+                  (select count(*)::int from app.bot_turn_activity) as activity,
+                  (select count(*)::int from app.sandbox_packages) as packages,
+                  (select count(*)::int from app.sandbox_package_installs) as installs,
+                  (select count(*)::int from app.permission_rules where permission like 'sandbox.%' or permission like 'browser.%') as rules`,
+        );
+        expect(empty.rows).toEqual([
+          {
+            policies: 0,
+            sandboxes: 0,
+            usage: 0,
+            cursors: 0,
+            contexts: 0,
+            sessions: 0,
+            signins: 0,
+            activity: 0,
+            packages: 0,
+            installs: 0,
+            rules: 0,
+          },
+        ]);
+        // The new kind check was validated against the restored secrets (it would have failed the migration otherwise).
+        const kinds = await c.query(
+          "select c.convalidated from pg_constraint c where c.conrelid = 'app.secrets'::regclass and c.conname = 'secrets_kind_check'",
+        );
+        expect(kinds.rows).toEqual([{ convalidated: true }]);
+        expect(
+          (await c.query("select count(*)::int as n from app.secrets where id = $1", [SECRET_ID])).rows,
+        ).toEqual([{ n: 1 }]);
       } finally {
         await c.end();
       }

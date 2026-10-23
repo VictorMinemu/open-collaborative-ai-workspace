@@ -55,7 +55,7 @@ import {
 import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { useDevices } from "@/lib/workzone-queries";
-import { shortToolName, ToolCallView, waitingFor } from "./tool-call-view";
+import { browserNotUsedText, shortToolName, ToolCallView, waitingFor } from "./tool-call-view";
 import {
   deviceStateOf,
   failedStartText,
@@ -1183,7 +1183,11 @@ function ToolCallReview({
           />
         }
       >
-        <ToolCallView view={view} meId={me} />
+        <ToolCallView
+          view={view}
+          meId={me}
+          expiresAt={detail.status === "pending" ? detail.expiresAt : null}
+        />
       </ReviewFrame>
       <ConfirmAction
         outcome={asking}
@@ -1262,7 +1266,9 @@ function ToolCallFooter({
         {useBy ? (
           <p data-testid="approval-use-by" className="text-muted-foreground text-xs">
             {late
-              ? `Approved, but ${bot} didn't run it before ${timeOf(useBy)}. Ask again if you still need it.`
+              ? view.browser
+                ? browserNotUsedText(bot)
+                : `Approved, but ${bot} didn't run it before ${timeOf(useBy)}. Ask again if you still need it.`
               : `${bot} runs it once, before ${timeOf(useBy)}.`}
           </p>
         ) : null}

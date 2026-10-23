@@ -25,14 +25,18 @@ import { type ApiModule, type App, authOf, type Core, tenant } from "../../core"
 import { randomToken, sha256Hex } from "../../lib/crypto";
 import { HttpError, notFound } from "../../lib/errors";
 import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgent } from "../agent";
+import { linkTurnAttachments } from "../artifact";
 import { cellAgentCapabilities, loadPolicy } from "../bot-capabilities";
 import { cellMcpServers } from "../mcp";
 import type { MemoryService } from "../memory";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
 import { cellApprovedPlugins } from "../plugins";
+import type { SandboxdClient } from "../sandbox";
 import type { WorkZoneProposalService } from "../work-session";
+import { finishActivity } from "./activity";
 import { cellOf, createCellAuth } from "./auth";
 import { registerBoardAgentRoutes } from "./board";
+import { registerBrowserRoutes } from "./browser";
 import { noTrigger, registerCardActionHandler, registerCardRoutes, resolveReplyTarget } from "./cards";
 import { registerConnectorRoutes } from "./connectors";
 import { registerCellGateway } from "./gateway";
@@ -44,9 +48,11 @@ import { registerMentionHandler } from "./mentions";
 import { registerPluginCellRoutes } from "./plugins";
 import { createCellPresence } from "./presence";
 import { createProviderAuth } from "./provider-auth";
+import { registerSandboxRoutes } from "./sandbox";
 import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerWorkZoneRoutes } from "./work-zone";
 
+export { currentPhrase } from "./activity";
 export { emitCardAction } from "./cards";
 export { conversationAudience } from "./memory-files";
 export { buildMentionEvents } from "./mentions";
@@ -119,6 +125,11 @@ export function createAgentChannelModule(
      * (`/tool-calls`, `/connectors/call`, `/http-requests`) inside its claim transaction.
      */
     toolApproval: ToolApprovalGate;
+    /**
+     * Bot sandboxes (07.8-05, D-02 (b)): the sandboxd client of the sandbox module, null when `OCW_SANDBOX_URL` is not
+     * configured (every sandbox call then answers `service_unavailable` after its decision).
+     */
+    sandbox?: { client: SandboxdClient | null } | null;
   },
 ): ApiModule {
   const auth = createCellAuth(core);
@@ -363,6 +374,8 @@ export function createAgentChannelModule(
                 }),
               );
               if (!check) throw noTrigger();
+              // The turn the post answers, as resolved above (its agent and conversation were checked).
+              const turnEventId = body.eventId ?? null;
 
               let result: { messageId: string; created: boolean };
               try {
@@ -380,6 +393,21 @@ export function createAgentChannelModule(
                     idempotencyKey: body.idempotencyKey,
                     inReplyToMessageId: body.inReplyToMessageId,
                     onBehalfOfUserId: check.onBehalfOf,
+                    // 07.8-10 (R2): the reply to a turn carries what the bot did in its sandbox (the activity, attached
+                    // to the turn's first reply) and the files it shared in that turn, before `message.created`.
+                    ...(turnEventId
+                      ? {
+                          onInserted: async (tx: Tx, messageId: string) => {
+                            await finishActivity(tx, { eventId: turnEventId, replyMessageId: messageId });
+                            await linkTurnAttachments(tx, {
+                              eventId: turnEventId,
+                              conversationId: body.conversationId,
+                              uploaderAgentId: body.agentId,
+                              messageId,
+                            });
+                          },
+                        }
+                      : {}),
                   },
                 );
               } catch (err) {
@@ -480,6 +508,20 @@ export function createAgentChannelModule(
           registerMemoryFileRoutes(scope, { core, perms, memory: opts.memory });
           // Work Zone proposals (07.5-08, D-03): the projects a turn's human may use, and a session proposed as a card.
           if (opts.workZone) registerWorkZoneRoutes(scope, core, opts.workZone);
+          // Bot sandboxes (07.8-05, D-02 (b), D-09): every `ocw_sandbox_*` call decided, approved, counted, capped and
+          // audited by the API before sandboxd runs it.
+          registerSandboxRoutes(scope, core, {
+            perms,
+            toolApproval: opts.toolApproval,
+            client: opts.sandbox?.client ?? null,
+          });
+          // Bot browsers (07.8-14, D-05, D-11, D-13): every `ocw_browser_*` call decided like a sandbox call (kind
+          // `browser`), the signed-in approval floor, the D-13 cross-site approvals and the API's snapshot second pass.
+          registerBrowserRoutes(scope, core, {
+            perms,
+            toolApproval: opts.toolApproval,
+            client: opts.sandbox?.client ?? null,
+          });
           // The cell's MCP tool discovery (D-13): probe reports → the tool catalog.
           registerMcpCellRoutes(scope, core);
           // The cell's marketplace executor and install gate (D-14).

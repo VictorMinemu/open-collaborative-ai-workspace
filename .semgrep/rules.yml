@@ -104,7 +104,8 @@ rules:
     message: >-
       Outbound calls go through lib/egress.ts (ADR-0025): the connectors and keychain modules and the Agent Channel
       proxy routes call admin-, authorization-server- and model-chosen URLs, so a raw fetch, undici, http(s), tls or
-      socket call would skip the public-only, IP-pinned egress guard (D-07, CONN-05). Use egressFor(env).
+      socket call would skip the public-only, IP-pinned egress guard (D-07, CONN-05). Use egressFor(env). In the
+      sandbox egress entrypoint (07.8 D-11) only proxy.ts opens sockets, after deciding with @ocw/egress-policy.
     pattern-either:
       - pattern: fetch(...)
       - pattern: globalThis.fetch(...)
@@ -123,5 +124,75 @@ rules:
         - /apps/api/src/modules/keychain/
         - /apps/api/src/modules/agent-channel/connectors.ts
         - /apps/api/src/modules/agent-channel/http-requests.ts
+        - /apps/sandboxd/src/egress/
       exclude:
         - "*.test.ts"
+        # ADR-0029 (07.8-12): the sandbox-egress proxy is the one place that connects for a bot, to the address it
+        # pinned after deciding every answer with the shared 07.4 rules.
+        - /apps/sandboxd/src/egress/proxy.ts
+
+  - id: ocw.live-input-logging
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      What a person types while controlling a bot's browser is never logged (07.8 D-07, P-10, ADR-0029): a live input
+      frame, a live client frame, a sandboxd input batch, their `text`, `key`, `events` or `inputs` fields, or the web's
+      DOM input (`data`, `value`, `clipboardData`) must not reach a logger. Log the context id and an error name only.
+    patterns:
+      - pattern-either:
+          - patterns:
+              - pattern-inside: $LOG.$LEVEL(...)
+              - metavariable-regex:
+                  metavariable: $LEVEL
+                  regex: ^(trace|debug|info|warn|error|fatal|log)$
+          # 07.8 hardening: sandboxd's own log writers (its `log` option, the browser broker's brw lifecycle and agent
+          # diagnostics lines).
+          - patterns:
+              - pattern-inside: $FN(...)
+              - metavariable-regex:
+                  metavariable: $FN
+                  regex: ^(log|writeLog|brwLog)$
+      - pattern-either:
+          # A value declared as a live input frame, a client frame or an input batch (parameter or binding). Typed
+          # metavariables (`($F: LiveInputFrame)`) are avoided: they break the SQL fixture's rule test (semgrep 1.178).
+          - patterns:
+              - pattern-either:
+                  - pattern-inside: "function $FN(..., $F: $T, ...) { ... }"
+                  - pattern-inside: "($F: $T, ...) => { ... }"
+                  - pattern-inside: "(..., $F: $T) => { ... }"
+                  - pattern-inside: |
+                      const $F: $T = $E;
+                      ...
+                  - pattern-inside: |
+                      let $F: $T = $E;
+                      ...
+              - metavariable-regex:
+                  metavariable: $T
+                  regex: ^(LiveInputFrame|LiveClientFrame|SandboxdContextInput)(\[\])?$
+              - pattern: $F
+          - pattern: "{..., text, ...}"
+          - pattern: "{..., key, ...}"
+          - pattern: "{..., events, ...}"
+          - pattern: $X.text
+          - pattern: $X.key
+          - pattern: $X.events
+          - pattern: $X.inputs
+          # 07.8-26: the web's DOM input itself (an InputEvent's or CompositionEvent's `data`, the phone keyboard
+          # input's `value`, a paste's `clipboardData`), before it becomes a frame.
+          - pattern: $X.data
+          - pattern: $X.value
+          - pattern: $X.clipboardData
+    paths:
+      # Where live input is handled: the API's live view and takeover, the bots' browser routes, sandboxd's browser
+      # broker, its agent link and its HTTP server. Fixture: .semgrep/tests/live-input-logging.ts.
+      include:
+        - /apps/api/src/modules/browser/
+        - /apps/api/src/modules/agent-channel/browser.ts
+        - /apps/sandboxd/src/browser.ts
+        - /apps/sandboxd/src/agent-link.ts
+        - /apps/sandboxd/src/server.ts
+        # 07.8-22: the web live view (the input mappers, the socket and the frame that captures the keyboard).
+        - /apps/web/components/browser/
+      exclude:
+        - "*.test.ts"
+        - "*.test.tsx"

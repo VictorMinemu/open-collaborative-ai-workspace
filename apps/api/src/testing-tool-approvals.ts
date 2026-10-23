@@ -295,7 +295,7 @@ export function callFor(
   f: Fixture,
   turn: SeededTurn,
   args: Record<string, unknown> | null,
-  opts: { toolCallId?: string | null; tool?: string; organizationId?: string } = {},
+  opts: { toolCallId?: string | null; tool?: string; organizationId?: string; floor?: "always" } = {},
 ): Promise<ApprovalOutcome> {
   return f.stack.built.core.db.withTenant(
     { organizationId: opts.organizationId ?? f.orgA, userId: turn.userId },
@@ -306,6 +306,7 @@ export function callFor(
         args,
         toolCallId: opts.toolCallId === undefined ? randomUUID() : opts.toolCallId,
         source: f.source,
+        ...(opts.floor ? { floor: opts.floor } : {}),
       }),
   );
 }

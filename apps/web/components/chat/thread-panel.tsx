@@ -5,6 +5,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { MessagesSquare, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { useLiveActivity } from "@/components/browser/bot-activity";
+import { LiveChip } from "@/components/browser/live-chip";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useIsDesktop } from "@/hooks/use-media-query";
@@ -64,6 +66,8 @@ function ThreadBody({
   const composerApi = useRef<ComposerApi | null>(null);
   const filesConfig = useAttachmentsConfig();
   const replies = thread.data?.replies ?? [];
+  // 07.8-20: a bot turn running in this thread shows its live label under the last reply.
+  const live = useLiveActivity(channel.id, rootId, replies);
   const myPending = pending.filter((p) => p.threadRootId === rootId);
   const threadTypers = typers.filter((t) => t.threadRootId === rootId);
   const scroll = useStickToBottom(`${replies.length}:${myPending.length}:${threadTypers.length}`, rootId);
@@ -139,6 +143,8 @@ function ThreadBody({
             ))}
           </div>
         ) : null}
+        {/* 07.8-26 (UI-SPEC Surface 1b): a bot's browser opened in this thread. */}
+        <LiveChip conversationId={channel.id} threadRootId={rootId} />
         <button
           type="button"
           aria-label="Close thread"
@@ -229,6 +235,7 @@ function ThreadBody({
                 anchorId={highlightId}
                 linkFor={linkFor}
                 onAnchorHidden={onReplyHidden}
+                live={live}
               />
             </>
           ) : null}

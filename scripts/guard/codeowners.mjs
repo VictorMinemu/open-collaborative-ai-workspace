@@ -27,6 +27,18 @@ export const REQUIRED_AREAS = [
   { area: "approve-and-apply primitive", file: "apps/api/src/modules/approval/service.ts" },
   { area: "Work Zone proposals", file: "apps/api/src/modules/work-session/proposals.ts" },
   { area: "cell tool gate and params pin", file: "apps/openclaw-channel/src/tool-guard.ts" },
+  // Phase 07.8 (ADR-0029, WINDOWS #236, #242): the only Docker socket holder, the single shared egress hop, the browser
+  // agent that redacts every page view, sealed member sessions and the live view that decides who sees a frame.
+  { area: "sandbox broker (Docker socket holder)", file: "apps/sandboxd/src/sandboxes.ts" },
+  { area: "sandbox egress proxy", file: "apps/sandboxd/src/egress/proxy.ts" },
+  { area: "egress policy rules", file: "packages/egress-policy/src/index.ts" },
+  { area: "browser agent (redaction, site lock)", file: "infra/sandbox/browser/agent.mjs" },
+  { area: "browser live view and takeover", file: "apps/api/src/modules/browser/live-view.ts" },
+  { area: "sealed browser sessions", file: "apps/api/src/modules/browser/sessions.ts" },
+  { area: "confined sandbox and browser calls", file: "apps/api/src/modules/agent-channel/sandbox.ts" },
+  // 07.8 verification: the refused-tool table and confined flags (D-13 exec floor), and the Docker socket mount.
+  { area: "bot tool refusals and confined flags", file: "packages/contracts/src/bot-capabilities.ts" },
+  { area: "compose (Docker socket mount)", file: "compose.yaml" },
 ];
 
 /** GitHub CODEOWNERS pattern (gitignore subset) → RegExp over repo-relative paths. */

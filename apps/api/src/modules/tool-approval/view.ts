@@ -8,6 +8,7 @@ import {
   revealInvisible,
   TOOL_APPROVAL_LIMITS,
   type ToolApproverKind,
+  type ToolCallBrowserAction,
   type ToolCallPreviewField,
 } from "@ocw/contracts";
 
@@ -73,6 +74,43 @@ export function maskForDisplay(text: string): { text: string; masked: boolean } 
   return { text: out, masked: true };
 }
 
+/**
+ * `--password=…`, `--api-key=…`: a flag whose value a person never needs in full. The 07.2 detector (`maskForDisplay`)
+ * finds tokens, keys and `NAME_PASSWORD=` assignments, not lowercase command-line flags; display only.
+ */
+const SECRET_FLAG =
+  /^(--?[A-Za-z0-9_-]*(?:pass(?:word|wd|phrase)?|secret|token|api[-_]?key|auth)[A-Za-z0-9_-]*=)(.+)$/i;
+
+/**
+ * 07.8-28 (WINDOWS #294): every string value of an approval's arguments that is exactly a secret flag
+ * (`--password=x`, an argv entry) keeps its flag and loses its value, in the generic preview and in All arguments, as
+ * the D-13 exec view does. A string that only mentions a flag in prose is left as it is. Display only; the stored
+ * arguments and their hash are unchanged.
+ */
+export function maskSecretFlags(value: unknown, depth = 0): { value: unknown; masked: boolean } {
+  if (typeof value === "string") {
+    const flag = SECRET_FLAG.exec(value);
+    return flag ? { value: `${flag[1]}${MASK}`, masked: true } : { value, masked: false };
+  }
+  if (depth > 32 || value === null || typeof value !== "object") return { value, masked: false };
+  let masked = false;
+  if (Array.isArray(value)) {
+    const out = value.map((v) => {
+      const m = maskSecretFlags(v, depth + 1);
+      masked ||= m.masked;
+      return m.value;
+    });
+    return { value: masked ? out : value, masked };
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    const m = maskSecretFlags(v, depth + 1);
+    masked ||= m.masked;
+    out[k] = m.value;
+  }
+  return { value: masked ? out : value, masked };
+}
+
 /** A text as a person sees it: masked, then every invisible character revealed as `⟨U+XXXX⟩`. */
 export function displayText(raw: string): { text: string; masked: boolean; hidden: boolean } {
   const masked = maskForDisplay(raw);
@@ -122,11 +160,13 @@ function rawText(value: unknown): string {
 }
 
 /** The preview of the arguments: ordered, labelled, masked, revealed and cut at 500 characters (UI-SPEC R7). */
-export function orderPreview(args: Record<string, unknown>): PreviewResult {
+export function orderPreview(raw: Record<string, unknown>): PreviewResult {
+  const flags = maskSecretFlags(raw);
+  const args = flags.value as Record<string, unknown>;
   const keys = orderKeys(Object.keys(args));
   let truncated = keys.length > TOOL_APPROVAL_LIMITS.previewFields;
   let hiddenCharacters = false;
-  let maskedSecret = false;
+  let maskedSecret = flags.masked;
   const fields = keys.slice(0, TOOL_APPROVAL_LIMITS.previewFields).map((key) => {
     const shown = displayText(rawText(args[key]));
     if (shown.hidden || hasInvisible(key)) hiddenCharacters = true;
@@ -147,20 +187,24 @@ const ARGUMENTS_JSON_MAX = 65_536;
  * "All arguments" for the review: the pretty canonical JSON, masked and revealed. When that does not fit the view's
  * bound, the compact canonical form; when even that does not, the compact form cut (and `cut` is set).
  */
-export function argumentsDisplay(args: unknown): {
+export function argumentsDisplay(raw: unknown): {
   json: string;
   masked: boolean;
   hidden: boolean;
   cut: boolean;
 } {
+  const secretFlags = maskSecretFlags(raw);
+  const args = secretFlags.value;
+  const flags = (d: { masked: boolean; hidden: boolean }) => ({
+    masked: d.masked || secretFlags.masked,
+    hidden: d.hidden,
+  });
   const pretty = displayText(prettyCanonicalJson(args));
   if (pretty.text.length <= ARGUMENTS_JSON_MAX) return { json: pretty.text, ...flags(pretty), cut: false };
   const compact = displayText(canonicalJson(args));
   if (compact.text.length <= ARGUMENTS_JSON_MAX) return { json: compact.text, ...flags(compact), cut: false };
   return { json: cut(compact.text, ARGUMENTS_JSON_MAX), ...flags(compact), cut: true };
 }
-
-const flags = (d: { masked: boolean; hidden: boolean }) => ({ masked: d.masked, hidden: d.hidden });
 
 const METHOD = /^[A-Za-z]{1,10}$/;
 
@@ -177,6 +221,10 @@ export function toolCallTitle(p: {
     case "mcp":
     case "connector":
       return cut(`Run ${tool} on ${revealInvisible(p.sourceName)}`, 200);
+    case "sandbox":
+      return cut(`Run ${tool} in the sandbox`, 200);
+    case "browser":
+      return cut(`Run ${tool} in the browser`, 200);
     case "http": {
       const method = p.method && METHOD.test(p.method) ? p.method.toUpperCase() : null;
       const host = p.host ? revealInvisible(p.host) : null;
@@ -222,4 +270,229 @@ export function approverText(p: {
       return cut(`Waiting for ${a} or ${p.names.length - 1} others`, 200);
     }
   }
+}
+
+// ---------------------------------------------------------------- 07.8-14: browser actions (UI-SPEC Surface 6, R8, D-13)
+
+const BROWSER_TOOLS: ReadonlySet<string> = new Set(["ocw_browser_open", "ocw_browser_act"]);
+
+/** The browser tools whose approval shows the R8 view (Action, Element, Page, Session). */
+export function isBrowserActionTool(tool: string): boolean {
+  return BROWSER_TOOLS.has(tool);
+}
+
+const ACTION_LABEL: Record<ToolCallBrowserAction["action"], string> = {
+  click: "Click",
+  type: "Type",
+  select: "Choose",
+  press: "Press",
+  scroll: "Scroll",
+  open: "Open",
+};
+
+const HOST_RE = /^[a-z0-9.\-[\]:]{1,260}$/;
+const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+const hostText = (v: unknown): string | null => {
+  const h = str(v)?.toLowerCase() ?? null;
+  return h && HOST_RE.test(h) ? h : null;
+};
+/** Page text or model output as a person sees it: masked, invisible characters revealed, one line, cut. */
+const plain = (v: string, max: number): string => cut(displayText(v.replace(/\s+/g, " ").trim()).text, max);
+
+export interface BrowserActionDisplay {
+  title: string;
+  browser: ToolCallBrowserAction;
+  /** The card and review fields in order: Action, Element, Page, Session, then Value or Option. */
+  fields: { label: string; value: string }[];
+}
+
+/**
+ * The browser action a person approves, from the stored canonical arguments only (`contextId`, `action`, `ref`, the
+ * element's role and name captured when the bot asked, `host`, `value`, `option`, `key`, the session flag and site, and
+ * for D-13 the host the bot would reach, `navigateTo` or an `open`'s own host). Pure; every string masked and revealed.
+ * `summary`: the card every reader of a shared conversation sees, which names the requester instead of "you" and never
+ * shows a value.
+ */
+export function browserActionView(
+  args: Record<string, unknown>,
+  opts: { requesterName?: string; summary?: boolean } = {},
+): BrowserActionDisplay {
+  const navigateTo = hostText(args.navigateTo);
+  const rawAction = str(args.action);
+  const action: ToolCallBrowserAction["action"] =
+    navigateTo || rawAction === "open"
+      ? "open"
+      : rawAction && rawAction in ACTION_LABEL
+        ? (rawAction as ToolCallBrowserAction["action"])
+        : "click";
+  const host = navigateTo ?? hostText(args.host) ?? "unknown";
+  const sessionSite = hostText(args.sessionSite);
+  const signedIn = args.signedIn === true || (action === "open" && sessionSite !== null);
+  const el =
+    args.element && typeof args.element === "object" && !Array.isArray(args.element)
+      ? (args.element as Record<string, unknown>)
+      : null;
+  const element =
+    el && (str(el.role) || str(el.name))
+      ? { role: plain(str(el.role) ?? "element", 60), name: plain(str(el.name) ?? "", 200) }
+      : null;
+  const value =
+    !opts.summary && action === "type" && str(args.value) !== null ? plain(String(args.value), 500) : null;
+  const option =
+    !opts.summary && action === "select" && str(args.option) ? plain(String(args.option), 200) : null;
+  const key = str(args.key) ? plain(String(args.key), 32) : null;
+  const named = element?.name ? `“${element.name}”` : null;
+
+  let title: string;
+  switch (action) {
+    case "open":
+      title = `Open ${host}`;
+      break;
+    case "type":
+      title = named ? `Type into ${named} on ${host}` : `Type on ${host}`;
+      break;
+    case "select":
+      title =
+        option && named
+          ? `Choose “${option}” in ${named} on ${host}`
+          : named
+            ? `Choose in ${named} on ${host}`
+            : `Choose on ${host}`;
+      break;
+    case "press":
+      title = key ? `Press ${key} on ${host}` : `Press a key on ${host}`;
+      break;
+    case "scroll":
+      title = `Scroll on ${host}`;
+      break;
+    default:
+      title = named ? `Click ${named} on ${host}` : `Click on ${host}`;
+  }
+
+  const who = opts.summary ? (opts.requesterName ?? "the person who asked") : "you";
+  const session = !signedIn
+    ? "Not signed in"
+    : action === "open" && sessionSite && sessionSite !== host
+      ? `Signed in as ${who} on ${sessionSite}`
+      : `Signed in as ${who}`;
+  const fields: { label: string; value: string }[] = [{ label: "Action", value: ACTION_LABEL[action] }];
+  if (element && !opts.summary)
+    fields.push({ label: "Element", value: `${element.role} ${named ?? ""}`.trim() });
+  fields.push({ label: "Page", value: host });
+  fields.push({ label: "Session", value: session });
+  if (value !== null) fields.push({ label: "Value", value: value || "(empty)" });
+  if (option !== null) fields.push({ label: "Option", value: option });
+
+  return {
+    title: cut(title, 200),
+    browser: {
+      action,
+      element: opts.summary ? null : element,
+      host,
+      secure: args.secure !== false,
+      signedIn,
+      sessionSite,
+      value,
+      option,
+    },
+    fields,
+  };
+}
+
+/** "{bot} wants to click on {host} for {requester}" (UI-SPEC Surface 6 summary card): no element, no value. */
+export function browserSummaryTitle(p: {
+  botName: string;
+  requesterName: string;
+  args: Record<string, unknown>;
+}): string {
+  const v = browserActionView(p.args, { summary: true, requesterName: p.requesterName });
+  if (v.browser.action === "open") {
+    return cut(`${p.botName} wants to open ${v.browser.host} for ${p.requesterName}`, 200);
+  }
+  const verb = v.browser.action === "select" ? "choose" : v.browser.action;
+  return cut(`${p.botName} wants to ${verb} on ${v.browser.host} for ${p.requesterName}`, 200);
+}
+
+/**
+ * 07.8-20 (R8, T-07.8-20-03): what a browser action's card link carries for every reader of the card: the action, the
+ * host, its scheme and whether a member's session is loaded. Never the element, a typed value or an option (those stay
+ * in the requester's exact card fields and the review).
+ */
+export function cardBrowserOf(args: Record<string, unknown>): {
+  action: ToolCallBrowserAction["action"];
+  host: string;
+  secure: boolean;
+  signedIn: boolean;
+} {
+  const b = browserActionView(args, { summary: true }).browser;
+  return { action: b.action, host: b.host, secure: b.secure, signedIn: b.signedIn };
+}
+
+// ---------------------------------------------------------------- 07.8-25: D-13 exec after a member's sign-in (P-18)
+
+/** The internet access a D-13 command would have, as people read it (the organization's sandbox egress mode). */
+const EGRESS_LABEL = { allowlist: "Allowed hosts only", public: "Any public host" } as const;
+const COMMAND_SHOWN = 200;
+
+/**
+ * The stored arguments of an `ocw_sandbox_exec` that D-13 sent for the requester's approval: the API adds the
+ * organization's egress mode (`egress`) to the canonical action only then (`decideSandboxCall`).
+ */
+export function isSandboxExecAfterSignIn(tool: string, args: Record<string, unknown>): boolean {
+  return tool === "ocw_sandbox_exec" && (args.egress === "allowlist" || args.egress === "public");
+}
+
+export interface SandboxExecDisplay {
+  title: string;
+  /** Command (masked, at most 200 characters), then Internet access. */
+  fields: { label: string; value: string }[];
+  /** The command was cut at 200 characters, a value in it was masked, it holds invisible characters. */
+  truncated: boolean;
+  masked: boolean;
+  hidden: boolean;
+}
+
+/** One argv entry as a shell would read it back (quoted where needed). */
+function shellWord(a: string): string {
+  return a === "" || /[\s'"\\$`;&|<>(){}*?!#~]/.test(a) ? `'${a.replace(/'/g, `'\\''`)}'` : a;
+}
+
+/**
+ * The D-13 exec a person approves (07.8-25, D-13, P-18): "Run a command with internet access after using {member}'s
+ * sign-in", the command (secret-looking values and secret flags masked, invisible characters revealed, first 200
+ * characters) and the internet access it would have. From the stored canonical arguments only. Pure.
+ */
+export function sandboxExecView(
+  args: Record<string, unknown>,
+  opts: { requesterName?: string } = {},
+): SandboxExecDisplay {
+  const argv = Array.isArray(args.argv) ? args.argv.filter((a): a is string => typeof a === "string") : [];
+  const words = argv.map((a) => {
+    const flag = SECRET_FLAG.exec(a);
+    return shellWord(flag ? `${flag[1]}${MASK}` : a);
+  });
+  const shown = displayText(words.join(" "));
+  const command = cut(shown.text, COMMAND_SHOWN);
+  const egress = args.egress === "public" ? "public" : "allowlist";
+  const who = opts.requesterName ? revealInvisible(opts.requesterName) : "the requester";
+  return {
+    title: cut(`Run a command with internet access after using ${who}'s sign-in`, 200),
+    fields: [
+      { label: "Command", value: command || "(empty)" },
+      { label: "Internet access", value: EGRESS_LABEL[egress] },
+    ],
+    truncated: shown.text.length > COMMAND_SHOWN,
+    masked: shown.masked || words.some((w, i) => w !== shellWord(argv[i] ?? "")),
+    hidden: shown.hidden,
+  };
+}
+
+/** The D-13 exec's fields as the card's and the review's preview (what a person checks before approving). */
+export function sandboxExecPreview(args: Record<string, unknown>): PreviewResult {
+  const v = sandboxExecView(args);
+  return {
+    fields: v.fields.map((f) => ({ key: f.label.toLowerCase(), label: f.label, value: f.value })),
+    truncated: v.truncated,
+    notices: { hiddenCharacters: v.hidden, maskedSecret: v.masked },
+  };
 }

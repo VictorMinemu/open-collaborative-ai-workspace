@@ -28,6 +28,8 @@ export const TOOL_APPROVAL_LIMITS = {
   approverUsersMax: 20,
   /** Change-history rows per page. */
   historyPage: 30,
+  /** Phase 07.8 (D-12, R8): a browser-action approval expires with the held page after 15 min. */
+  browserPendingTtlMs: 15 * 60 * 1000,
 } as const;
 
 /** The `tool.call` approval kind (mode `grant`): one later use of exactly the approved call. */
@@ -56,18 +58,26 @@ const SERVER_PATTERN = /^m[0-9a-f]{8}__\*$/;
 const WEB_TOOLS: ReadonlySet<string> = new Set(["web_search", "web_fetch"]);
 /** The one built-in whose calls a person may approve: a keychain HTTP request. */
 const APPROVABLE_BUILTIN = "ocw_http_request";
+/**
+ * Phase 07.8 (SBX-04, D-12): the confined sandbox and browser tools, by name pattern (no import of 07.8-01's tool
+ * tuples). Sign-in and close are never approvable: one asks a person already, the other only ends the page.
+ */
+const CONFINED_TOOL = /^ocw_(sandbox|browser)_[a-z0-9_]+$/;
+const NEVER_APPROVABLE_CONFINED: ReadonlySet<string> = new Set(["ocw_browser_signin", "ocw_browser_close"]);
 
 /**
  * True for a tool a policy may name (P-04): MCP and per-member connector tools (`<safe>__<tool>`), approved plugin
- * tools and `ocw_http_request`. The web tools and every other `ocw_` built-in are never approvable (they have their
- * own gates, or a flow of their own like `ocw_start_work_zone`). Case-insensitive on the `ocw_` prefix, so a
- * look-alike never slips in.
+ * tools, `ocw_http_request` and the confined `ocw_sandbox_*` / `ocw_browser_*` tools except sign-in and close
+ * (Phase 07.8). The web tools and every other `ocw_` built-in are never approvable (they have their own gates, or a
+ * flow of their own like `ocw_start_work_zone`). Case-insensitive on the `ocw_` prefix, so a look-alike never slips in.
  */
 export function isApprovableTool(name: string): boolean {
   if (!TOOL_NAME.test(name)) return false;
   const lower = name.toLowerCase();
   if (WEB_TOOLS.has(lower)) return false;
-  if (lower.startsWith("ocw_")) return name === APPROVABLE_BUILTIN;
+  if (lower.startsWith("ocw_")) {
+    return name === APPROVABLE_BUILTIN || (CONFINED_TOOL.test(name) && !NEVER_APPROVABLE_CONFINED.has(name));
+  }
   return true;
 }
 
@@ -212,8 +222,11 @@ export function hasInvisible(text: string): boolean {
 
 const Person = z.object({ id: Id, displayName: z.string().max(200) });
 
-/** Where the tool comes from: an MCP server, a per-member connector, an approved plugin or a keychain HTTP request. */
-export const ApprovalToolSourceKind = z.enum(["mcp", "connector", "plugin", "http"]);
+/**
+ * Where the tool comes from: an MCP server, a per-member connector, an approved plugin or a keychain HTTP request; 07.8
+ * (additive): the bot's own sandbox (`ocw_sandbox_*`) or browser (`ocw_browser_*`).
+ */
+export const ApprovalToolSourceKind = z.enum(["mcp", "connector", "plugin", "http", "sandbox", "browser"]);
 export type ApprovalToolSourceKind = z.infer<typeof ApprovalToolSourceKind>;
 
 /** Where the request was asked (the review's "Asked in"). */
@@ -230,6 +243,34 @@ export const ToolCallPreviewField = z.object({
   value: z.string().max(TOOL_APPROVAL_LIMITS.previewValueChars),
 });
 export type ToolCallPreviewField = z.infer<typeof ToolCallPreviewField>;
+
+/**
+ * Phase 07.8 (UI-SPEC R8, Surface 6, D-13): what a browser action approval shows: the Action, Element, Page and
+ * Session fields. `open` is D-13's navigation to a host other than the loaded session's site (`sessionSite`). Every
+ * string is page text or model output, revealed and masked by the server; hosts only, never a page address.
+ */
+/** A host as `URL.host` reports it (same rule as `BrowserHost`; this file imports no browser contract). */
+const ApprovalHost = z
+  .string()
+  .min(1)
+  .max(260)
+  .regex(/^[a-z0-9.\-[\]:]+$/);
+
+export const ToolCallBrowserAction = z.strictObject({
+  action: z.enum(["click", "type", "select", "press", "scroll", "open"]),
+  element: z.strictObject({ role: z.string().max(60), name: z.string().max(200) }).nullable(),
+  host: ApprovalHost,
+  secure: z.boolean(),
+  /** A member's sealed session is loaded for the page ("Signed in as you"). */
+  signedIn: z.boolean(),
+  /** The loaded session's site, when one is loaded (D-13 compares it with `host`). */
+  sessionSite: ApprovalHost.nullable(),
+  /** What the bot will type (type actions only). */
+  value: z.string().max(TOOL_APPROVAL_LIMITS.previewValueChars).nullable(),
+  /** The option it will choose (select actions only). */
+  option: z.string().max(200).nullable(),
+});
+export type ToolCallBrowserAction = z.infer<typeof ToolCallBrowserAction>;
 
 /**
  * `GET /api/v1/approvals/:id` view of a `tool.call` request (P-07, P-09, UI-SPEC Surface 2, R7): only the deciders and
@@ -283,6 +324,8 @@ export const ToolCallApprovalView = z.object({
   }),
   useBy: IsoDateTime.nullable(),
   usedAt: IsoDateTime.nullable(),
+  /** Phase 07.8: the browser action being approved; absent on every other tool's view. */
+  browser: ToolCallBrowserAction.nullable().optional(),
 });
 export type ToolCallApprovalView = z.infer<typeof ToolCallApprovalView>;
 

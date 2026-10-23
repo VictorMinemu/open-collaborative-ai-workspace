@@ -54,6 +54,7 @@ import {
   SessionTitlePayload,
   StatusEmoji,
   StatusText,
+  TurnActivityEvent,
   UnitMemberParams,
   UpdateMemberRoleRequest,
   UpdateProfileRequest,
@@ -618,6 +619,17 @@ describe("Phase 5 realtime event types (05-01)", () => {
       messageUpdated: "message.updated",
       notificationPrefsUpdated: "notification_prefs.updated",
     });
+    for (const values of [Object.values(EventTypes), Object.values(EphemeralTypes)]) {
+      expect(new Set(values).size).toBe(values.length);
+    }
+  });
+});
+
+describe("Phase 07.8 turn activity event type (07.8-10)", () => {
+  it("registers turn.activity as an ephemeral type, matching TurnActivityEvent, and keeps every value unique", () => {
+    expect(EphemeralTypes.turnActivity).toBe("turn.activity");
+    expect(TurnActivityEvent.shape.type.value).toBe(EphemeralTypes.turnActivity);
+    expect(Object.values(EventTypes)).not.toContain("turn.activity");
     for (const values of [Object.values(EventTypes), Object.values(EphemeralTypes)]) {
       expect(new Set(values).size).toBe(values.length);
     }

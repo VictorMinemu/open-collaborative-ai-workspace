@@ -19,7 +19,8 @@ import { and, count, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { sha256Hex } from "../../lib/crypto";
 import { type ApprovalService, actionHash } from "../approval";
 import { loadPrincipalFacts } from "../organization";
-import { currentRule, memberName, waitingForOf } from "./kind";
+import { currentRule, memberName, parseArgs, toolCallHashTuple, waitingForOf } from "./kind";
+import type { ResolvedApproval } from "./resolve";
 
 /**
  * `approvalForCall` (07.5-07, D-01, D-02, D-04, P-05, APPROVE-02, APPROVE-04): the one decision of an agent action that
@@ -70,9 +71,44 @@ export interface ApprovalForCallInput {
   /** The cell's id of this call: a client retry with the same id returns the same request. */
   toolCallId: string | null;
   source: ToolCallSource;
+  /**
+   * 07.8 (D-11, D-13, P-06, P-18; ADR-0029): the member-session floor, for a call that runs with the requester's own
+   * signed-in session (a signed-in browser act; a D-13 navigation or exec once member data is in the turn). The call
+   * always needs a person, and that person is the requester alone: see `withFloor`. Additive: absent, 07.5 behaves
+   * exactly as before.
+   */
+  floor?: "always";
+  /** 07.8-14 (D-12 U-5, R8): the new request expires after this (shorter than the kind's 24 h only). */
+  pendingTtlMs?: number;
 }
 
 const refused = (reason: ToolApprovalRefusal): ApprovalOutcome => ({ kind: "refused", reason });
+
+/** The rule a call is decided by: a policy's, or the member-session floor's. */
+type EffectiveRule = Omit<ResolvedApproval, "policyId"> & { policyId: string | null };
+
+/**
+ * The member-session floor (07.8, D-11 "acting with a signed-in session requires the member's approval at minimum; an
+ * admin can't relax it", D-13; ADR-0029; 07.8-14 broken window 7). Chosen semantics: the requesting member is the ONLY
+ * decider of such a call, whatever 07.5 rule applies. A rule that applies still counts (its id is stored, its mode can
+ * only be as strict as `always`), but its approvers (admins, unit leads, named people) never decide in the member's
+ * place: the call acts with the member's own account, and ADR-0023's "the decision right decides" gives that right to
+ * the member here. A stricter rule cannot remove the member, and no admin or lead can relax this. A second, additional
+ * approver on top of the member is not built: the 07.2 primitive has one decision per request (an ADR-0029 note).
+ * The flag is stored on the action (`requester_decides`) and is part of its hash, so a grant decided without the floor
+ * never serves a call under it.
+ */
+function withFloor(rule: ResolvedApproval | null, floor: "always" | undefined): EffectiveRule | null {
+  if (floor !== "always") return rule;
+  return {
+    mode: "always",
+    approverKind: "requester",
+    approverUserIds: [],
+    policyId: rule?.policyId ?? null,
+    scopeUnitId: null,
+    pattern: rule?.pattern ?? "",
+  };
+}
 
 const GRANT_USE_SECS = TOOL_APPROVAL_LIMITS.grantUseMs / 1000;
 const DENIED_SUPPRESS_SECS = TOOL_APPROVAL_LIMITS.deniedSuppressMs / 1000;
@@ -110,11 +146,12 @@ export async function approvalForCall(
 
   // 2. The rule that applies now (agent ∩ human, strictest wins). No rule, `never`, or `when_tainted` on a clean turn:
   //    no approval, and the arguments are never read.
-  const rule = await currentRule(tx, {
+  const policyRule = await currentRule(tx, {
     agentId: turn.agentId,
     requestedForUserId: turn.userId,
     tool: c.tool,
   });
+  const rule = withFloor(policyRule, c.floor);
   if (!rule) return { kind: "none" };
   if (rule.mode === "when_tainted" && !turn.tainted) return { kind: "none" };
 
@@ -139,13 +176,18 @@ export async function approvalForCall(
     return refused("arguments_too_large");
   }
   const argumentsSha256 = sha256Hex(canonical);
-  const hash = actionHash(TOOL_CALL_KIND, [
-    turn.agentId,
-    turn.userId,
-    turn.conversationId,
-    c.tool,
-    argumentsSha256,
-  ]);
+  const requesterDecides = c.floor === "always";
+  const hash = actionHash(
+    TOOL_CALL_KIND,
+    toolCallHashTuple({
+      agentId: turn.agentId,
+      requestedForUserId: turn.userId,
+      conversationId: turn.conversationId,
+      tool: c.tool,
+      argumentsSha256,
+      requesterDecides,
+    }),
+  );
   const toolCallId =
     c.toolCallId && c.toolCallId.length >= 1 && c.toolCallId.length <= 200 ? c.toolCallId : null;
 
@@ -322,7 +364,8 @@ export async function approvalForCall(
       argumentsSha256,
       actionHash: hash,
       tainted: turn.tainted,
-      policyId: rule.policyId,
+      policyId: rule.policyId ?? null,
+      requesterDecides,
     })
     .returning({ id: toolCallApprovals.id });
   if (!stored) throw new Error("tool call approval insert returned no row");
@@ -332,6 +375,7 @@ export async function approvalForCall(
     requestedByAgentId: turn.agentId,
     requestedForUserId: turn.userId,
     eventId: turn.eventId,
+    ...(c.pendingTtlMs !== undefined ? { ttlMs: c.pendingTtlMs } : {}),
     card: {
       agentId: turn.agentId,
       conversationId: turn.conversationId,
@@ -341,4 +385,38 @@ export async function approvalForCall(
   });
   if (request.actionHash !== hash) throw new Error("tool call approval hash mismatch");
   return required(request.id, true);
+}
+
+/**
+ * 07.8-14 (D-13, P-18): the stored arguments of every approved, unused grant of `tool` for this bot, requester and
+ * conversation that is still inside its use window. A browser action whose navigation the site lock stopped is approved
+ * with its arguments plus the host it may reach (`navigateTo`); the bot's re-run repeats the action alone, so its route
+ * finds that grant here and asks `approvalForCall` with exactly the stored arguments (the hash decides; nothing is
+ * consumed here). Read in the caller's tenant transaction (RLS).
+ */
+export async function usableGrantArgs(
+  tx: Tx,
+  p: { agentId: string; requestedForUserId: string; conversationId: string; tool: string },
+): Promise<Record<string, unknown>[]> {
+  const rows = await tx
+    .select({ argumentsCanonical: toolCallApprovals.argumentsCanonical })
+    .from(approvalRequests)
+    .innerJoin(toolCallApprovals, eq(toolCallApprovals.id, approvalRequests.resourceId))
+    .where(
+      and(
+        eq(approvalRequests.kind, TOOL_CALL_KIND),
+        eq(approvalRequests.actionHash, toolCallApprovals.actionHash),
+        eq(approvalRequests.status, "approved"),
+        isNull(approvalRequests.consumedAt),
+        sql`${approvalRequests.decidedAt} + make_interval(secs => ${GRANT_USE_SECS}) > now()`,
+        sql`${approvalRequests.expiresAt} > now()`,
+        eq(toolCallApprovals.agentId, p.agentId),
+        eq(toolCallApprovals.requestedForUserId, p.requestedForUserId),
+        eq(toolCallApprovals.conversationId, p.conversationId),
+        eq(toolCallApprovals.tool, p.tool),
+      ),
+    )
+    .orderBy(desc(approvalRequests.decidedAt))
+    .limit(20);
+  return rows.map((r) => parseArgs(r));
 }

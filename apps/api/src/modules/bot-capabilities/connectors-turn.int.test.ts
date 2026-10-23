@@ -410,6 +410,8 @@ describe("flags and the cell-wide view", () => {
           webCalls: turn.web_calls,
           tainted: turn.tainted,
           createdAt: turn.created_at,
+          sandboxCalls: turn.sandbox_calls,
+          memberData: turn.member_data,
         },
         tool: "ocw_connector_list",
         flags: ev.turn.toolFlags.ocw_connector_list,

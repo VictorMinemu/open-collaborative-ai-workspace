@@ -640,8 +640,35 @@ function dumpDiagnostics(ctx) {
   process.stderr.write(`${(logs.stdout ?? "").slice(-20000)}\n`);
 }
 
+/**
+ * Bot sandbox objects of this stack (07.8-24): sandboxd creates each bot's containers, networks and volumes, and the
+ * namespace's egress proxy, outside compose, labelled `ocw.namespace=<project>` (compose.yaml's default namespace).
+ * `compose down` never sees them; they are removed by that label only, never a prune and never another namespace.
+ * Returns how many objects were left after removal (0 = clean).
+ */
+export function removeSandboxObjects(ctx) {
+  const label = `label=ocw.namespace=${ctx.project}`;
+  const list = (args) =>
+    (ctx.docker(args).stdout ?? "")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+  const containers = () => list(["ps", "-aq", "--filter", label]);
+  const volumes = () => list(["volume", "ls", "-q", "--filter", label]);
+  const networks = () => list(["network", "ls", "-q", "--filter", label]);
+  const c = containers();
+  if (c.length) ctx.docker(["rm", "-fv", ...c], { timeoutMs: 5 * 60_000 });
+  const n = networks();
+  if (n.length) ctx.docker(["network", "rm", ...n]);
+  const v = volumes();
+  if (v.length) ctx.docker(["volume", "rm", "-f", ...v]);
+  return containers().length + volumes().length + networks().length;
+}
+
 function teardown(ctx, runId, steps, { removeDir = true } = {}) {
   const t0 = Date.now();
+  // Sandboxes first: an egress proxy or a bot container holds no compose network, but its own networks must go.
+  const sandboxLeft = removeSandboxObjects(ctx);
   const down = ctx.compose(["down", "-v", "--remove-orphans", "--timeout", "30"], { timeoutMs: 10 * 60_000 });
   const images = runImages(ctx, runId);
   const failed = [];
@@ -650,12 +677,16 @@ function teardown(ctx, runId, steps, { removeDir = true } = {}) {
     if (r.status !== 0) failed.push(ref);
   }
   if (removeDir) rmSync(ctx.dir, { recursive: true, force: true });
-  const ok = down.status === 0 && failed.length === 0;
+  const ok = down.status === 0 && failed.length === 0 && sandboxLeft === 0;
   steps.push({
     name: "teardown",
     ok,
     ms: Date.now() - t0,
-    details: { removedImages: images.length - failed.length, ...(failed.length ? { failed } : {}) },
+    details: {
+      removedImages: images.length - failed.length,
+      ...(failed.length ? { failed } : {}),
+      ...(sandboxLeft ? { sandboxObjectsLeft: sandboxLeft } : {}),
+    },
   });
   return ok;
 }
@@ -693,6 +724,7 @@ export async function withGateStack(
   {
     runId = newRunId(),
     profiles = [],
+    extra = {},
     keep = false,
     attachEnvFile,
     build = true,
@@ -742,7 +774,7 @@ export async function withGateStack(
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
   try {
-    const envFile = createGateEnv({ dir, runId, block, imageTag, profiles });
+    const envFile = createGateEnv({ dir, runId, block, imageTag, profiles, extra });
     ctx = gateContext(envFile, { steps });
     log(`project ${ctx.project}, tag ${ctx.imageTag}, web ${ctx.urls.web}, api ${ctx.urls.api}`);
     await timed(steps, "ports-free", async () => {

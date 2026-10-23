@@ -64,6 +64,21 @@
  *                                          when that is the refusal, like the real API. Both: 400 for any key beyond the
  *                                          contract's (a mode, a model, a user id). POST /__test/work-zone
  *                                          {refused?, projects?} sets the knobs ({} resets them)
+ *   POST /agent-channel/v1/sandbox/{exec,process,read,write,list,delete,share,import}  (07.8) records every body
+ *                                          (`sandbox.calls`, refused ones included) and answers a canned result per
+ *                                          route (exec `exited 0` with stdout `hi`); 400 for any key beyond the contract's
+ *                                          (never a user id, a command string or a token). POST /__test/sandbox
+ *                                          {exec?, results?, refusal?} replaces the knobs ({} resets them): `exec` the
+ *                                          exec answer, `results` per route, `refusal` a `SandboxRefusal` code every
+ *                                          sandbox route answers with its contract status (the body carries
+ *                                          FAKE_ERROR_CANARY, which must never reach the model)
+ *   POST /agent-channel/v1/browser/{open,snapshot,act,screenshot,wait,signin,close}  (07.8) records every body
+ *                                          (`browser.calls`) and answers a canned result per route: open/snapshot on
+ *                                          panel.example.test, whose snapshot reads the password `[redacted]` and also
+ *                                          carries FAKE_PASSWORD_SENTINEL in `unredactedValue`, a field outside the
+ *                                          contract the plugin must never render; screenshot a masked 8×8 JPEG. 400 for
+ *                                          any key beyond the contract's (a selector, a script, a cookie). POST
+ *                                          /__test/browser {results?, refusal?} replaces the knobs ({} resets them)
  *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
  *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
  *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
@@ -192,6 +207,171 @@ const WORK_ZONE_BODY_KEYS = {
   projects: ["eventId", "agentId"],
   proposals: ["eventId", "agentId", "projectId", "deviceId", "prompt", "runtime"],
 } as const;
+/** 07.8: the sandbox routes' records and knobs (`POST /__test/sandbox` replaces the knobs). */
+export type FakeSandbox = {
+  /** Every POST /sandbox/* body, in order (refused ones included). */
+  calls: Array<{ route: string; body: Record<string, unknown> }>;
+  /** What POST /sandbox/exec answers (default: exited 0, stdout `hi`). */
+  exec?: Record<string, unknown>;
+  /** Per route (`exec`, `read`, …): what it answers instead of the default. */
+  results: Record<string, unknown>;
+  /** When set, every sandbox route refuses with this code and its contract status. */
+  refusal?: string;
+};
+/** The keys each sandbox body may carry (contracts `AgentChannelSandbox*`, strict objects). */
+const SANDBOX_BODY_KEYS: Record<string, readonly string[]> = {
+  exec: ["eventId", "agentId", "argv", "cwd", "timeoutSeconds", "background"],
+  process: ["eventId", "agentId", "processId", "action"],
+  read: ["eventId", "agentId", "path", "offset", "limit"],
+  write: ["eventId", "agentId", "path", "content", "mode"],
+  list: ["eventId", "agentId", "path"],
+  delete: ["eventId", "agentId", "path", "recursive"],
+  share: ["eventId", "agentId", "path"],
+  import: ["eventId", "agentId", "attachmentId", "path"],
+};
+/** Contracts `SANDBOX_REFUSAL_STATUS` / `BROWSER_REFUSAL_STATUS` (403 for every other code). */
+function confinedRefusalStatus(code: string): number {
+  if (code === "not_found" || code === "no_context" || code === "screenshot_unavailable") return 404;
+  if (code === "too_large") return 413;
+  if (code === "invalid_path") return 422;
+  if (code === "service_unavailable" || code === "timeout") return 503;
+  if (
+    code.startsWith("approval_") ||
+    [
+      "too_many_pending",
+      "policy_changed",
+      "disk_full",
+      "busy",
+      "paused",
+      "signin_pending",
+      "element_gone",
+    ].includes(code)
+  ) {
+    return 409;
+  }
+  return 403;
+}
+const FAKE_FILE_TIME = "2026-10-15T09:00:00.000Z";
+/** The default answer of each sandbox route for a valid body. */
+function fakeSandboxResult(route: string, body: Record<string, unknown>): unknown {
+  const path = typeof body.path === "string" ? body.path : "";
+  switch (route) {
+    case "exec":
+      return { status: "exited", exitCode: 0, stdout: "hi\n", stderr: "", truncated: false, durationMs: 4 };
+    case "process":
+      return {
+        status: "exited",
+        exitCode: 0,
+        stdout: "done\n",
+        stderr: "",
+        truncated: false,
+        durationMs: 30_000,
+      };
+    case "read":
+      return { path, content: "hello from the sandbox\n", encoding: "utf8", size: 23, truncated: false };
+    case "write":
+      return { path, size: new TextEncoder().encode(String(body.content ?? "")).length };
+    case "list":
+      return {
+        path,
+        entries: [
+          {
+            path: path ? `${path}/notes.txt` : "notes.txt",
+            name: "notes.txt",
+            kind: "file",
+            size: 23,
+            modifiedAt: FAKE_FILE_TIME,
+            hidden: false,
+          },
+          {
+            path: path ? `${path}/app` : "app",
+            name: "app",
+            kind: "dir",
+            size: null,
+            modifiedAt: FAKE_FILE_TIME,
+            hidden: false,
+          },
+        ],
+        more: 0,
+      };
+    case "delete":
+      return { path, deleted: 1 };
+    case "share":
+      return { attachmentId: randomUUID(), name: path.split("/").at(-1) ?? path, size: 23 };
+    default:
+      return { path: path || "downloads/report.pdf", size: 1024 };
+  }
+}
+/** 07.8: the browser routes' records and knobs (`POST /__test/browser` replaces the knobs). */
+export type FakeBrowser = {
+  /** Every POST /browser/* body, in order (refused ones included). */
+  calls: Array<{ route: string; body: Record<string, unknown> }>;
+  /** Per route (`open`, `snapshot`, …): what it answers instead of the default. */
+  results: Record<string, unknown>;
+  /** When set, every browser route refuses with this code and its contract status. */
+  refusal?: string;
+};
+/** A password the fake browser "saw": only in a field outside the contract, so it must never reach the model (P-10). */
+export const FAKE_PASSWORD_SENTINEL = "OCW-SENTINEL-PW-5521";
+/** An 8×8 grey JPEG: what the fake browser's masked screenshot answers. */
+export const FAKE_SCREENSHOT_JPEG =
+  "/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAACKADAAQAAAABAAAACAAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgACAAIAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMABgYGBgYGCgYGCg4KCgoOEg4ODg4SFxISEhISFxwXFxcXFxccHBwcHBwcHCIiIiIiIicnJycnLCwsLCwsLCwsLP/bAEMBBwcHCwoLEwoKEy4fGh8uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLi4uLv/dAAQAAf/aAAwDAQACEQMRAD8AKKKKAP/Z";
+const FAKE_BROWSER_CONTEXT = "0199a6f0-0000-7000-8000-0000000b5001";
+const FAKE_BROWSER_HOST = "panel.example.test";
+/** The keys each browser body may carry (contracts `AgentChannelBrowser*`, strict objects). */
+const BROWSER_BODY_KEYS: Record<string, readonly string[]> = {
+  open: ["eventId", "agentId", "url"],
+  snapshot: ["eventId", "agentId"],
+  act: ["eventId", "agentId", "action", "ref", "text", "key", "option", "direction"],
+  screenshot: ["eventId", "agentId"],
+  wait: ["eventId", "agentId", "for", "text", "ms"],
+  signin: ["eventId", "agentId", "reason"],
+  close: ["eventId", "agentId"],
+};
+/** The default answer of each browser route for a valid body. */
+function fakeBrowserResult(route: string, body: Record<string, unknown>): unknown {
+  const context = { contextId: FAKE_BROWSER_CONTEXT, host: FAKE_BROWSER_HOST };
+  switch (route) {
+    case "open": {
+      let url: URL | undefined;
+      try {
+        url = new URL(String(body.url));
+      } catch {
+        /* the plugin checks URLs before posting */
+      }
+      return {
+        ...context,
+        host: url?.host ?? FAKE_BROWSER_HOST,
+        secure: url?.protocol === "https:",
+        title: "Panel Autofy — Sign in",
+        signedIn: false,
+      };
+    }
+    case "snapshot":
+      return {
+        ...context,
+        title: "Panel Autofy — Sign in",
+        text: '[r1] textbox "Email" value=""\n[r2] textbox "Password" value="[redacted]"\n[r3] button "Sign in"',
+        truncated: false,
+        signedIn: false,
+        // Outside the contract: a careless renderer would leak it.
+        unredactedValue: FAKE_PASSWORD_SENTINEL,
+      };
+    case "act":
+      return { ...context, signedIn: false, navigated: body.action === "click", download: null };
+    case "screenshot":
+      return {
+        ...context,
+        image: { mimeType: "image/jpeg", data: FAKE_SCREENSHOT_JPEG, width: 8, height: 8, masked: 1 },
+      };
+    case "wait":
+      return { ...context, ok: true };
+    case "signin":
+      return { posted: true, host: FAKE_BROWSER_HOST };
+    default:
+      return { closed: true };
+  }
+}
 /** In every refusal body of the connector routes: a plugin must never relay it to the model. */
 export const FAKE_ERROR_CANARY = "fake-api-error-body-canary";
 export type VerifyCall = {
@@ -263,6 +443,10 @@ export type FakeAgentChannelApi = {
   connectorControl: ConnectorControl;
   /** The Work Zone proposal routes' records and knobs (07.5-10). */
   workZone: FakeWorkZone;
+  /** The sandbox routes' records and knobs (07.8). */
+  sandbox: FakeSandbox;
+  /** The browser routes' records and knobs (07.8). */
+  browser: FakeBrowser;
   /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
   mcpServers: CellMcpServer[];
   /** Every POST /mcp/probe-results, in order. */
@@ -491,6 +675,8 @@ export async function startFakeAgentChannelApi(
     httpRequests: [] as Array<Record<string, unknown>>,
     connectorControl: {} as ConnectorControl,
     workZone: { projectLists: [], proposals: [], projects: fakeWorkZoneProjects() } as FakeWorkZone,
+    sandbox: { calls: [], results: {} } as FakeSandbox,
+    browser: { calls: [], results: {} } as FakeBrowser,
     // Never serialized: not in /cell, not in an answer, not in the state dump.
     connectorToken: opts.connectorToken ?? "fake-connector-token",
     mcpServers: opts.mcpServers ?? ([] as CellMcpServer[]),
@@ -573,6 +759,26 @@ export async function startFakeAgentChannelApi(
           else delete state.workZone.refused;
           return json(res, 200, { ok: true });
         }
+        if (req.method === "POST" && url.pathname === "/__test/sandbox") {
+          // Replace the sandbox knobs ({} resets them; the records stay).
+          const body = ((await readJson(req)) ?? {}) as Partial<FakeSandbox>;
+          const sb = state.sandbox;
+          if (body.exec && typeof body.exec === "object") sb.exec = body.exec;
+          else delete sb.exec;
+          sb.results = body.results && typeof body.results === "object" ? body.results : {};
+          if (typeof body.refusal === "string") sb.refusal = body.refusal;
+          else delete sb.refusal;
+          return json(res, 200, { ok: true });
+        }
+        if (req.method === "POST" && url.pathname === "/__test/browser") {
+          // Replace the browser knobs ({} resets them; the records stay).
+          const body = ((await readJson(req)) ?? {}) as Partial<FakeBrowser>;
+          const br = state.browser;
+          br.results = body.results && typeof body.results === "object" ? body.results : {};
+          if (typeof body.refusal === "string") br.refusal = body.refusal;
+          else delete br.refusal;
+          return json(res, 200, { ok: true });
+        }
         if (req.method === "POST" && url.pathname === "/__test/tool-approval") {
           // One tool's approval reply; no reply clears it.
           const body = ((await readJson(req)) ?? {}) as Partial<ToolApprovalControl> & { tool?: string };
@@ -621,6 +827,8 @@ export async function startFakeAgentChannelApi(
             connectorLists: state.connectorLists,
             httpRequests: state.httpRequests,
             workZone: state.workZone,
+            sandbox: state.sandbox,
+            browser: state.browser,
             mcpProbes: state.mcpProbes,
             cellReads: state.cellReads,
             plugins: state.plugins,
@@ -876,6 +1084,49 @@ export async function startFakeAgentChannelApi(
           truncated: false,
           redirectHost: null,
         });
+      }
+      const sandboxRoute = /^\/sandbox\/(exec|process|read|write|list|delete|share|import)$/u.exec(
+        route,
+      )?.[1];
+      if (req.method === "POST" && sandboxRoute) {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        const sb = state.sandbox;
+        sb.calls.push({ route: sandboxRoute, body: { ...body } });
+        const allowed = SANDBOX_BODY_KEYS[sandboxRoute] ?? [];
+        if (
+          typeof body.eventId !== "string" ||
+          typeof body.agentId !== "string" ||
+          Object.keys(body).some((k) => !allowed.includes(k))
+        ) {
+          return json(res, 400, { error: { code: "bad_request", message: `bad body ${FAKE_ERROR_CANARY}` } });
+        }
+        if (sb.refusal) {
+          return json(res, confinedRefusalStatus(sb.refusal), {
+            error: { code: sb.refusal, message: `refused by test ${FAKE_ERROR_CANARY}` },
+          });
+        }
+        const canned = sandboxRoute === "exec" && sb.exec ? sb.exec : sb.results[sandboxRoute];
+        return json(res, 200, canned ?? fakeSandboxResult(sandboxRoute, body));
+      }
+      const browserRoute = /^\/browser\/(open|snapshot|act|screenshot|wait|signin|close)$/u.exec(route)?.[1];
+      if (req.method === "POST" && browserRoute) {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        const br = state.browser;
+        br.calls.push({ route: browserRoute, body: { ...body } });
+        const allowed = BROWSER_BODY_KEYS[browserRoute] ?? [];
+        if (
+          typeof body.eventId !== "string" ||
+          typeof body.agentId !== "string" ||
+          Object.keys(body).some((k) => !allowed.includes(k))
+        ) {
+          return json(res, 400, { error: { code: "bad_request", message: `bad body ${FAKE_ERROR_CANARY}` } });
+        }
+        if (br.refusal) {
+          return json(res, confinedRefusalStatus(br.refusal), {
+            error: { code: br.refusal, message: `refused by test ${FAKE_ERROR_CANARY}` },
+          });
+        }
+        return json(res, 200, br.results[browserRoute] ?? fakeBrowserResult(browserRoute, body));
       }
       const workZoneRoute =
         route === "/work-zone/projects"
@@ -1329,6 +1580,12 @@ export async function startFakeAgentChannelApi(
     },
     get workZone() {
       return state.workZone;
+    },
+    get sandbox() {
+      return state.sandbox;
+    },
+    get browser() {
+      return state.browser;
     },
     get mcpServers() {
       return state.mcpServers;

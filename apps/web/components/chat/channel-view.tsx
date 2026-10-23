@@ -13,6 +13,7 @@ import {
   type PinUpdatedEvent,
   type ReactionUpdatedEvent,
   type ThreadUpdatedEvent,
+  type TurnActivityEvent,
   type UserTypingEvent,
 } from "@ocw/contracts";
 import type { TopicFrame } from "@ocw/realtime-client";
@@ -33,6 +34,8 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { useLiveActivity } from "@/components/browser/bot-activity";
+import { LiveChip } from "@/components/browser/live-chip";
 import { EmptyState } from "@/components/common/empty-state";
 import { PresenceStack, usePresentPeople } from "@/components/presence/presence-stack";
 import { PageHeader } from "@/components/shell/page-header";
@@ -59,6 +62,7 @@ import {
   applyPinUpdate,
   applyReactionUpdate,
   applyThreadUpdate,
+  applyTurnActivity,
   bumpLatest,
   chatKeys,
   markConversationUnread,
@@ -210,6 +214,8 @@ export function ChannelView({ channelId }: { channelId: string }) {
     linkedTop: threadId ?? permalinkId,
   });
   const { detached, shown } = win;
+  // 07.8-20: what a bot is doing in its sandbox or browser right now (the live label under the last message).
+  const live = useLiveActivity(channelId, null, messages.data?.messages ?? []);
 
   // Mentionable: channel members (incl. bots even before the bots API exists) ∪ org directory.
   const candidates = useMemo<MentionCandidate[]>(() => {
@@ -269,6 +275,11 @@ export function ChannelView({ channelId }: { channelId: string }) {
     // Board frames patch the board cache; card-root deletes and reply counts also go on to the message handlers.
     if (isBoard && applyBoardFrame(qc, channelId, frame)) return;
     if (frame.op === "eph") {
+      // 07.8-20 (R2): a bot turn's sandbox and browser activity while it runs (readers of this conversation only).
+      if (frame.type === EphemeralTypes.turnActivity) {
+        applyTurnActivity(qc, frame.data as TurnActivityEvent);
+        return;
+      }
       if (frame.type === EphemeralTypes.agentTyping) {
         const d = frame.data as AgentTypingEvent;
         touch({ kind: "agent", id: d.agentId, name: d.displayName, threadRootId: d.threadRootId });
@@ -665,6 +676,9 @@ export function ChannelView({ channelId }: { channelId: string }) {
             description={channel.topic ?? undefined}
             actions={
               <>
+                {/* 07.8-26 (UI-SPEC Surface 1b): a bot's open browser here or in a thread, first in the cluster;
+                    "Live" only while a thread panel narrows the column, so the channel's name keeps its room. */}
+                <LiveChip conversationId={channel.id} compact={!!threadId} />
                 <PresenceStack people={present} />
                 <PinnedButton count={pins.data?.pins.length ?? 0} onClick={() => setPinsOpen(true)} />
                 {channel.isMember ? (
@@ -909,6 +923,7 @@ export function ChannelView({ channelId }: { channelId: string }) {
                         dividerAfterSeq={reading.dividerAfterSeq}
                         onMarkUnread={channel.isMember ? markUnreadFrom : undefined}
                         {...(editorFor ? { editorFor } : {})}
+                        live={detached ? [] : live}
                       />
                       {loadingNewer ? (
                         <div className="flex justify-center py-3 text-muted-foreground">

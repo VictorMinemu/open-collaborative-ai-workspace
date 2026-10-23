@@ -117,6 +117,8 @@ export function createBridge(opts: BridgeOptions) {
   const dispatchAttempts = Math.max(1, opts.dispatchAttempts ?? 3);
   const retryDelayMs = opts.retryDelayMs ?? 1_500;
   let refreshing: Promise<CellSnapshot> | null = null;
+  /** The one refresh queued behind the flight (see `refreshCell`). */
+  let queued: Promise<CellSnapshot> | null = null;
   let lastSnapshot: CellSnapshot | undefined;
 
   async function reportStatuses(results: AgentProvisioningResult[]): Promise<void> {
@@ -160,14 +162,26 @@ export function createBridge(opts: BridgeOptions) {
     return cell;
   }
 
-  /** Coalesces concurrent refreshes (startup + cell.config.changed + unknown-agent lookups). */
+  /**
+   * Coalesces concurrent refreshes (startup + cell.config.changed + unknown-agent lookups) without losing a change: a
+   * caller during a flight gets a refresh that starts after it, because the flight's `GET /cell` may predate the change
+   * the caller was told about (07.8-08: a bot created during another bot's refresh stayed `provisioning`). Every caller
+   * during one flight shares that single follow-up.
+   */
   function refreshCell(): Promise<CellSnapshot> {
     if (!refreshing) {
       refreshing = doRefresh().finally(() => {
         refreshing = null;
       });
+      return refreshing;
     }
-    return refreshing;
+    queued ??= refreshing
+      .catch(() => undefined)
+      .then(() => {
+        queued = null;
+        return refreshCell();
+      });
+    return queued;
   }
 
   function startTyping(m: MappedMention): () => Promise<void> {

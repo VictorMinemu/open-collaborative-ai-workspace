@@ -243,8 +243,13 @@ export async function emitCardAction(
     messageId: message.id,
     agentIds: [card.agentId],
     author: { kind: "user", id: turnUserId, displayName: authorName },
-    // A decision note is human-authored text: quoted after the server sentence, never reworded (UI-SPEC R4).
-    body: `${name} ${a.outcome} “${card.title}”${a.note ? `: “${a.note}”` : ""}`,
+    // A decision note is human-authored text: quoted after the server sentence, never reworded (UI-SPEC R4). A sign-in
+    // card's outcome is said in words (07.8-21): the host only.
+    body: a.signIn
+      ? a.signIn.status === "signed_in"
+        ? `${name} signed in to ${a.signIn.host}.`
+        : `${name} chose not to sign in to ${a.signIn.host}.`
+      : `${name} ${a.outcome} “${card.title}”${a.note ? `: “${a.note}”` : ""}`,
     createdAt: new Date().toISOString(),
     delivery: flat ? "dm" : "thread",
   };
@@ -257,10 +262,14 @@ export async function emitCardAction(
   });
   // Taint never escapes through a re-run (T-07.5-06-07): the turn rows written for these events start tainted, in this
   // transaction, before any event is appended, so the cell can never act on an untainted re-run.
-  if (a.tainted && events.length > 0) {
+  // D-13 (07.8-25): a re-run of a turn that used a member's sign-in has member data from its start, likewise.
+  if ((a.tainted || a.memberData) && events.length > 0) {
     await tx
       .update(agentTurns)
-      .set({ tainted: true })
+      .set({
+        ...(a.tainted ? { tainted: true } : {}),
+        ...(a.memberData ? { memberData: true } : {}),
+      })
       .where(
         inArray(
           agentTurns.eventId,
@@ -282,6 +291,7 @@ export async function emitCardAction(
         // 07.5-11: the note as a field (the sentence still quotes it) and a failed apply's code.
         ...(a.note ? { note: a.note } : {}),
         ...(a.resultCode && a.outcome === "approved" ? { resultCode: a.resultCode.slice(0, 64) } : {}),
+        ...(a.signIn && card.kind === "browser" ? { signIn: a.signIn } : {}),
       },
     };
     await core.realtime.appendEvent(

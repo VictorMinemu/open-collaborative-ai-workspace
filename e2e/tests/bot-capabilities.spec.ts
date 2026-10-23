@@ -151,8 +151,13 @@ test("owner: Bot settings in the DM header toggles internet; the next turn carri
     await expect(sheet.getByTestId("usage-meter")).toContainText("0 of 30 replies today");
     // Reply mode is a channel setting: a personal bot only lives in its owner's DM.
     await expect(sheet.getByTestId("capability-replyMode")).toHaveCount(0);
-    // No reason lines while nothing is denied.
-    await expect(sheet.locator('[data-testid^="capability-reason-"]')).toHaveCount(0);
+    // No reason lines while nothing is denied. The 07.8 Sandbox and Browser rows say why they are off while the
+    // organization has Sandbox & Browser off (its default), so they are not counted here (sandbox-tab.spec covers them).
+    await expect(
+      sheet.locator(
+        '[data-testid^="capability-reason-"]:not([data-testid="capability-reason-sandbox"]):not([data-testid="capability-reason-browser"])',
+      ),
+    ).toHaveCount(0);
     await bothThemes(sam.page, `bot-settings-${tag}`);
 
     // ---- switch internet on (persisted)

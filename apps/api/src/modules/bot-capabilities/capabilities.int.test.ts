@@ -191,6 +191,14 @@ describe("GET /agents/:id/capabilities", () => {
     expect((denied.body as Json).error.details).toMatchObject({ permission: "bot.configure" });
   });
 
+  it("without sandboxd configured, the Sandbox and Browser rows are unavailable: service_down (07.8-11, R11)", async () => {
+    const v = await ok(admin.request("GET", `/api/v1/agents/${teamBotId}/capabilities`));
+    expect(v.confined).toEqual({
+      sandbox: { enabled: false, available: false, reason: "service_down" },
+      browser: { enabled: false, available: false, reason: "service_down" },
+    });
+  });
+
   it("usage counts today's turns from agent_usage_daily", async () => {
     await su.query(
       "insert into app.agent_usage_daily (organization_id, agent_id, day, turns) values ($1, $2, (now() at time zone 'utc')::date, 7)",

@@ -1,13 +1,29 @@
 "use client";
 
-import type { BotCapabilityView, CapabilityDenialReason, ReplyMode } from "@ocw/contracts";
-import { Clock, Gauge, Globe, Lock, type LucideIcon, Megaphone, NotebookPen } from "lucide-react";
-import { type ReactNode, useId, useState } from "react";
+import type {
+  BotCapabilityView,
+  CapabilityDenialReason,
+  ConfinedCapabilityState,
+  ReplyMode,
+} from "@ocw/contracts";
+import {
+  Clock,
+  Container,
+  Gauge,
+  Globe,
+  Lock,
+  type LucideIcon,
+  Megaphone,
+  MonitorPlay,
+  NotebookPen,
+} from "lucide-react";
+import { type ReactNode, useEffect, useId, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { errorMessage } from "@/lib/api";
 import { useBotCapabilities, useUpdateBotCapabilities } from "@/lib/capability-queries";
@@ -34,14 +50,45 @@ const TOGGLES: Array<{ name: Toggle; label: string; description: string; icon: L
   { name: "dateTime", label: "Date & time", description: "Knows your local date and time", icon: Clock },
 ];
 
+type Confined = "sandbox" | "browser";
+
+/** The per-bot confined switches (07.8 D-12, UI-SPEC R11), after Date & time, with the Internet row's look. */
+const CONFINED: Array<{ name: Confined; label: string; description: string; icon: LucideIcon }> = [
+  {
+    name: "sandbox",
+    label: "Sandbox",
+    description: "Keeps files and runs commands in its own sandbox",
+    icon: Container,
+  },
+  { name: "browser", label: "Browser", description: "Opens web pages in a real browser", icon: MonitorPlay },
+];
+
+/** Why a confined switch can't be used (the API's `confined.*.reason`; `module_off` hides the row instead). */
+const CONFINED_REASON: Record<
+  Exclude<NonNullable<ConfinedCapabilityState["reason"]>, "module_off">,
+  string
+> = {
+  org_off: "Turned off by your organization",
+  killed: "An admin stopped all sandboxes",
+  service_down: "The sandbox service isn't reachable",
+};
+
+/**
+ * How long a switch that was just turned on reads "Applying": the bot's runtime picks the change up from its next
+ * configuration refresh, about a second or two later, so a message sent at once may not get the tool yet (WINDOWS #248).
+ */
+export const APPLYING_MS = 6000;
+
 const REPLY_MODES: Array<{ value: ReplyMode; label: string }> = [
   { value: "mentions", label: "Only when mentioned" },
   { value: "all", label: "Every message in its channels" },
 ];
 
 /**
- * A bot's capabilities (D-06, D-11, D-16; BOT-04/05/07/10): internet, memory, date & time, reply mode (team
- * bots), the daily limit, MCP and plugin tools (`ToolsSection`) and today's usage. Renders only the API's decision: a capability with a `reason` is disabled
+ * A bot's capabilities (D-06, D-11, D-16; BOT-04/05/07/10): internet, memory, date & time, the per-bot Sandbox and
+ * Browser switches (07.8 D-12, R11: hidden while the module is off for the viewer, disabled with the API's reason while
+ * the organization switch is off, the kill switch is on or the service is down), reply mode (team bots), the daily
+ * limit, MCP and plugin tools (`ToolsSection`) and today's usage. Renders only the API's decision: a capability with a `reason` is disabled
  * and explained, never hidden; everything is read-only without `bot.configure` on this bot. `readOnly` forces it for
  * everyone, owners included (the agent page, 07.2-14: settings change only in the bot's sheet), and titles the tools
  * "Tools and skills". `headingLevel` is the tools title's level under the host's own headings (h4 in the bot sheet;
@@ -60,6 +107,12 @@ export function CapabilitiesPanel({
 }) {
   const q = useBotCapabilities(agentId);
   const update = useUpdateBotCapabilities(agentId);
+  const [applying, setApplying] = useState<Confined | null>(null);
+  useEffect(() => {
+    if (!applying) return;
+    const timer = setTimeout(() => setApplying(null), APPLYING_MS);
+    return () => clearTimeout(timer);
+  }, [applying]);
 
   if (q.isPending) {
     return (
@@ -124,6 +177,54 @@ export function CapabilitiesPanel({
           );
         })}
 
+        {CONFINED.map((c) => {
+          const state = view.confined?.[c.name];
+          // Hidden while the module is off for the viewer (the Sandbox or Browser module), and on an older API.
+          if (!state || state.reason === "module_off") return null;
+          const why = state.reason ? CONFINED_REASON[state.reason] : null;
+          return (
+            <Row
+              key={c.name}
+              icon={c.icon}
+              label={c.label}
+              description={c.description}
+              reasonLabel={why}
+              reasonFor={c.name}
+              htmlFor={`cap-${agentId}-${c.name}`}
+              status={
+                applying === c.name && state.enabled && !why ? (
+                  <span
+                    role="status"
+                    data-testid={`capability-applying-${c.name}`}
+                    className="mt-1.5 flex items-center gap-1.5 text-muted-foreground text-xs"
+                  >
+                    <Spinner className="size-3 motion-reduce:animate-none" />
+                    Applying. Ready in a few seconds.
+                  </span>
+                ) : null
+              }
+            >
+              <Switch
+                id={`cap-${agentId}-${c.name}`}
+                checked={state.available && state.enabled}
+                onCheckedChange={(v) =>
+                  update.mutate(
+                    { [c.name]: v },
+                    {
+                      onSuccess: () => setApplying(v ? c.name : null),
+                      onError: (err) =>
+                        toast.error("Could not update the bot", { description: errorMessage(err) }),
+                    },
+                  )
+                }
+                disabled={readOnly || !state.available}
+                aria-label={c.label}
+                data-testid={`capability-${c.name}`}
+              />
+            </Row>
+          );
+        })}
+
         {view.scope === "team" ? (
           <ReplyModeRow view={view} readOnly={readOnly} onChange={(replyMode) => save({ replyMode })} />
         ) : null}
@@ -164,25 +265,32 @@ function Row({
   label,
   description,
   reason,
+  reasonLabel,
   reasonFor,
   htmlFor,
+  status,
   children,
 }: {
   icon: LucideIcon;
   label: string;
   description: ReactNode;
   reason?: CapabilityDenialReason | null;
+  /** A reason sentence of its own (the confined switches), instead of `reason`. */
+  reasonLabel?: string | null;
   reasonFor?: string;
   htmlFor?: string;
+  /** A transient line under the description (a confined switch still applying). */
+  status?: ReactNode;
   children: ReactNode;
 }) {
+  const why = reasonLabel ?? (reason ? reasonText(reason) : null);
   return (
     <div className="flex items-start gap-3 p-3">
       <span
         aria-hidden
         className={cn(
           "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border bg-background text-muted-foreground",
-          reason && "opacity-60",
+          why && "opacity-60",
         )}
       >
         <Icon className="size-4" />
@@ -192,15 +300,16 @@ function Row({
           {label}
         </label>
         <span className="block text-muted-foreground text-xs leading-snug">{description}</span>
-        {reason ? (
+        {why ? (
           <span
             className="mt-1.5 inline-flex max-w-full items-start gap-1.5 rounded-md bg-warning/12 px-2 py-1 text-foreground/85 text-xs leading-snug"
             data-testid={`capability-reason-${reasonFor}`}
           >
             <Lock className="mt-px size-3 shrink-0 text-warning" aria-hidden />
-            <span>{reasonText(reason)}</span>
+            <span>{why}</span>
           </span>
         ) : null}
+        {status}
       </div>
       <div className="flex shrink-0 items-center self-center">{children}</div>
     </div>

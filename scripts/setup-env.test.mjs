@@ -77,6 +77,35 @@ describe("setup-env", () => {
     assert.equal(readFileSync(envFile(), "utf8"), after);
   });
 
+  it("generates the sandbox broker token (07.8-24): 32 random bytes, kept on --add-missing, never printed", () => {
+    const res = run();
+    assert.equal(res.status, 0, res.stderr);
+    const text = readFileSync(envFile(), "utf8");
+    const m = /^OCW_SANDBOX_TOKEN=ocw_sbx_([A-Za-z0-9_-]{43})$/m.exec(text);
+    assert.ok(m, "OCW_SANDBOX_TOKEN=ocw_sbx_<base64url of 32 bytes>");
+    assert.equal(Buffer.from(m[1], "base64url").length, 32);
+    assert.ok(!`${res.stdout}${res.stderr}`.includes(m[1]), "the token is never printed");
+    assert.match(res.stdout, /\bOCW_SANDBOX_TOKEN\b/);
+    // The broker URL stays empty: sandboxes are off until the operator enables the `sandbox` profile (D-12).
+    assert.match(text, /^OCW_SANDBOX_URL=$/m);
+    // A second install never shares it.
+    rmSync(envFile());
+    assert.equal(run().status, 0);
+    assert.notEqual(/^OCW_SANDBOX_TOKEN=(.*)$/m.exec(readFileSync(envFile(), "utf8"))[1], `ocw_sbx_${m[1]}`);
+
+    // --add-missing appends it to an install that predates it, and keeps an existing one byte for byte.
+    writeFileSync(envFile(), "POSTGRES_PASSWORD=keep-me\n");
+    assert.equal(run("--add-missing").status, 0);
+    assert.match(readFileSync(envFile(), "utf8"), /^OCW_SANDBOX_TOKEN=ocw_sbx_[A-Za-z0-9_-]{43}$/m);
+    const mine = `POSTGRES_PASSWORD=keep-me\nOCW_SANDBOX_TOKEN=${"k".repeat(40)}\n`;
+    writeFileSync(envFile(), mine);
+    const again = run("--add-missing");
+    assert.equal(again.status, 0, again.stderr);
+    const after = readFileSync(envFile(), "utf8");
+    assert.ok(after.startsWith(mine));
+    assert.equal(lines(after, "OCW_SANDBOX_TOKEN").length, 1);
+  });
+
   it("--add-missing without a .env asks for a fresh run", () => {
     const res = run("--add-missing");
     assert.equal(res.status, 1);

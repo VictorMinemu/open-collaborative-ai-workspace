@@ -46,3 +46,11 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   `/approvals` inbox with its own badge; one approval allows exactly that call once, re-run as the asker's turn with the
   approved values pinned in the cell; bots propose Work Zone sessions (project, device, prompt) that only the asker
   starts, in Supervised mode, credited "proposed by" the bot (ADR-0026).
+- **07.8 Bot sandboxes, sandbox packages and the live browser:** each bot gets its own sandbox (files, a shell,
+  approved packages) and its own Chromium, created only by the `sandboxd` broker (the one Docker socket holder, optional
+  `sandbox` compose profile) under gVisor or hardened runc, on private networks whose only way out is the
+  `sandbox-egress` proxy with the 07.4 rules; 15 `ocw_sandbox_*` / `ocw_browser_*` tools decided, budgeted (40 per turn)
+  and audited by the API; people browse a bot's files from its Sandbox tab, watch its browser live in a floating window
+  (a dock and sheet on phones) and take control to sign in; sign-ins are sealed per member, site and bot (Settings ›
+  Keychain › Browser sessions) and never carried to another host without the member's approval (D-13); admins turn it
+  on in Settings › Sandbox & Browser (isolation, limits, network, pinned sandbox packages, kill switch) (ADR-0029).

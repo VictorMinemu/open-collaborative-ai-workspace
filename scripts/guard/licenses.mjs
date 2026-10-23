@@ -2,7 +2,8 @@
 //   evaluate(spdxExpr, policy)        → "allow" | "deny"   (OR: any operand allowed; AND: all; unparseable: deny)
 //   checkGraph(entries, policy, notes) → failures[]         (entries: { name, version, license, source })
 //   checkFields(packages)             → failures[]         (packages: { dir, json, hasLicenseFile })
-//   collectGraph(root)                → entries            (full pnpm graph + infra/mcp-sandbox/package-lock.json)
+//   collectGraph(root)                → entries            (full pnpm graph + every NPM_LOCKFILES lockfile)
+//   collectLockfile(root, rel)        → entries            (one npm package-lock.json outside the pnpm graph)
 //   collectPackages(root)             → packages           (root, apps/*, packages/*, infra/* package.json)
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -170,15 +171,29 @@ export function collectGraph(root) {
       for (const version of pkg.versions) entries.push({ name: pkg.name, version, license, source: "pnpm" });
     }
   }
-  const lockPath = join(root, "infra", "mcp-sandbox", "package-lock.json");
-  if (existsSync(lockPath)) {
-    const lock = JSON.parse(readFileSync(lockPath, "utf8"));
-    for (const [path, pkg] of Object.entries(lock.packages ?? {})) {
-      if (path === "" || pkg.link) continue;
-      const license = typeof pkg.license === "string" ? pkg.license : (pkg.license?.type ?? "Unknown");
-      const name = pkg.name ?? path.slice(path.lastIndexOf("node_modules/") + "node_modules/".length);
-      entries.push({ name, version: pkg.version, license, source: "infra/mcp-sandbox/package-lock.json" });
-    }
+  for (const rel of NPM_LOCKFILES) entries.push(...collectLockfile(root, rel));
+  return entries;
+}
+
+/**
+ * Runtime npm lockfiles outside the pnpm workspace (installed with `npm ci` into their images), checked against the
+ * same policy as the pnpm graph: the stdio MCP sandbox (03.1-14) and the bot browser agent (07.8-07, C-04).
+ */
+export const NPM_LOCKFILES = [
+  "infra/mcp-sandbox/package-lock.json",
+  "infra/sandbox/browser/package-lock.json",
+];
+
+export function collectLockfile(root, rel) {
+  const lockPath = join(root, ...rel.split("/"));
+  if (!existsSync(lockPath)) return [];
+  const lock = JSON.parse(readFileSync(lockPath, "utf8"));
+  const entries = [];
+  for (const [path, pkg] of Object.entries(lock.packages ?? {})) {
+    if (path === "" || pkg.link) continue;
+    const license = typeof pkg.license === "string" ? pkg.license : (pkg.license?.type ?? "Unknown");
+    const name = pkg.name ?? path.slice(path.lastIndexOf("node_modules/") + "node_modules/".length);
+    entries.push({ name, version: pkg.version, license, source: rel });
   }
   return entries;
 }

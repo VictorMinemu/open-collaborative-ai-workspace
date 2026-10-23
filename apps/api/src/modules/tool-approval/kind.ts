@@ -11,6 +11,8 @@ import {
 } from "@ocw/contracts";
 import {
   agents,
+  agentTurns,
+  approvalRequests,
   cellPlugins,
   conversationMembers,
   conversations,
@@ -38,7 +40,18 @@ import {
 import { cardDisplayOf, composeToolCallCard } from "./card";
 import { ORGANIZATION_LABEL, resolveFor } from "./policies";
 import type { ResolvedApproval } from "./resolve";
-import { approverText, argumentsDisplay, orderPreview, toolCallTitle } from "./view";
+import {
+  approverText,
+  argumentsDisplay,
+  browserActionView,
+  cardBrowserOf,
+  isBrowserActionTool,
+  isSandboxExecAfterSignIn,
+  orderPreview,
+  sandboxExecPreview,
+  sandboxExecView,
+  toolCallTitle,
+} from "./view";
 
 /**
  * The `tool.call` approval kind (07.5-07, D-02, D-04, APPROVE-02, ADR-0023): one later use of exactly one call a bot
@@ -51,6 +64,9 @@ import { approverText, argumentsDisplay, orderPreview, toolCallTitle } from "./v
  * a lead of the rule's unit or of an ancestor (`unit_leads`), or a current organization admin (`admins`). The decision
  * right decides, not who asked (ADR-0023 decision 15 as amended): a requester who holds it decides their own request
  * and the primitive audits `selfApproved`.
+ *
+ * 07.8 (D-11, D-13, ADR-0029): a stored action under the member-session floor (`requester_decides`, it acts with the
+ * requester's own signed-in session) is decided by the requester alone, whatever rule applies now (`decidingRule`).
  */
 
 export const TOOL_CALL_RESOURCE = "tool_call";
@@ -62,7 +78,39 @@ export interface ToolCallKindDeps {
   perms: PermissionService;
 }
 
+/** The action hash's tuple element added for a call under the member-session floor (absent otherwise: 07.5 hashes). */
+export const REQUESTER_DECIDES_ATOM = "requester_decides";
+
+/** The `tool.call` action hash tuple of a stored or asked call (`kind.hashInput` recomputes it from the stored row). */
+export function toolCallHashTuple(t: {
+  agentId: string;
+  requestedForUserId: string;
+  conversationId: string;
+  tool: string;
+  argumentsSha256: string;
+  requesterDecides: boolean;
+}): string[] {
+  return [
+    t.agentId,
+    t.requestedForUserId,
+    t.conversationId,
+    t.tool,
+    t.argumentsSha256,
+    ...(t.requesterDecides ? [REQUESTER_DECIDES_ATOM] : []),
+  ];
+}
+
 /** The stored action of a request (null when it is gone or belongs to another organization). */
+/** Whether the turn that asked had used a member's sign-in (`agent_turns.member_data`, D-13). */
+async function sourceMemberData(tx: Tx, eventId: string): Promise<boolean> {
+  const [turn] = await tx
+    .select({ memberData: agentTurns.memberData })
+    .from(agentTurns)
+    .where(eq(agentTurns.eventId, eventId))
+    .limit(1);
+  return turn?.memberData === true;
+}
+
 export async function loadToolCall(
   tx: Tx,
   row: Pick<ApprovalRow, "resourceId">,
@@ -99,7 +147,17 @@ export interface SourceInfo {
 }
 
 /** Where the stored call's tool comes from, for people (names only, never a secret or a full URL). */
-export async function sourceOf(tx: Tx, t: Pick<ToolCallRow, "sourceKind" | "sourceId">): Promise<SourceInfo> {
+export async function sourceOf(
+  tx: Tx,
+  t: Pick<ToolCallRow, "sourceKind" | "sourceId"> & Partial<Pick<ToolCallRow, "tool">>,
+): Promise<SourceInfo> {
+  // 07.8-14 (WINDOWS #234): the bot's own sandbox and browser are their own sources, never "Web request".
+  if (t.sourceKind === "builtin" && t.tool?.startsWith("ocw_sandbox_")) {
+    return { kind: "sandbox", name: "Sandbox", account: null, keyName: null };
+  }
+  if (t.sourceKind === "builtin" && t.tool?.startsWith("ocw_browser_")) {
+    return { kind: "browser", name: "Browser", account: null, keyName: null };
+  }
   if (t.sourceKind === "mcp" && t.sourceId) {
     const [s] = await tx
       .select({ name: mcpServers.name, authMode: mcpServers.authMode })
@@ -150,13 +208,27 @@ export async function currentRule(
   return r && r.mode !== "never" ? r : null;
 }
 
+/**
+ * The rule that names who decides the stored call now: the live rule, except under the member-session floor, where the
+ * requester alone decides (null reads as the requester everywhere below; see `withFloor` in `request.ts`).
+ */
+export async function decidingRule(
+  tx: Tx,
+  t: Pick<ToolCallRow, "agentId" | "requestedForUserId" | "tool" | "requesterDecides">,
+): Promise<ResolvedApproval | null> {
+  return t.requesterDecides ? null : currentRule(tx, t);
+}
+
 interface RuleUnit {
   id: string;
   name: string;
   path: string[];
 }
 
-async function ruleUnit(tx: Tx, rule: ResolvedApproval | null): Promise<RuleUnit | null> {
+/** What deciding and labelling need of a rule (a policy's, or 07.8-14's floor, which has no policy). */
+type RuleLike = Pick<ResolvedApproval, "approverKind" | "approverUserIds" | "scopeUnitId">;
+
+async function ruleUnit(tx: Tx, rule: RuleLike | null): Promise<RuleUnit | null> {
   if (!rule?.scopeUnitId) return null;
   const [u] = await tx
     .select({ id: orgUnits.id, name: orgUnits.name, path: orgUnits.path })
@@ -223,7 +295,7 @@ export async function decidersOf(
 export async function waitingForOf(
   tx: Tx,
   t: Pick<ToolCallRow, "requestedForUserId">,
-  rule: ResolvedApproval | null,
+  rule: RuleLike | null,
 ): Promise<string> {
   const requesterName = (await memberName(tx, t.requestedForUserId)) ?? "Former member";
   let names: string[] = [];
@@ -290,6 +362,14 @@ export function httpParts(t: Pick<ToolCallRow, "argumentsCanonical" | "target">)
 
 /** The exact title of the stored call (the review, the inbox row and an exact card). */
 export async function titleOf(tx: Tx, t: ToolCallRow, source?: SourceInfo): Promise<string> {
+  // 07.8-14 (R8): a browser action reads as what it does ("Click “Place order” on shop.example.com").
+  if (isBrowserActionTool(t.tool)) return browserActionView(parseArgs(t)).title;
+  // 07.8-25 (D-13): a command with internet access after the requester's sign-in reads as what it risks.
+  const args = parseArgs(t);
+  if (isSandboxExecAfterSignIn(t.tool, args)) {
+    const requesterName = (await memberName(tx, t.requestedForUserId)) ?? "Former member";
+    return sandboxExecView(args, { requesterName }).title;
+  }
   const s = source ?? (await sourceOf(tx, t));
   return toolCallTitle({ tool: t.tool, sourceKind: s.kind, sourceName: s.name, ...httpParts(t) });
 }
@@ -399,7 +479,14 @@ export async function humanMembersOf(tx: Tx, conversationId: string): Promise<st
   ).map((r) => r.id);
 }
 
-const SOURCE_ICON = { mcp: "plug", connector: "plug", http: "globe", plugin: "package" } as const;
+const SOURCE_ICON = {
+  mcp: "plug",
+  connector: "plug",
+  http: "globe",
+  plugin: "package",
+  sandbox: "package",
+  browser: "globe",
+} as const satisfies Record<ApprovalToolSourceKind, string>;
 
 export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
   const access = createConversationAccess(deps.core);
@@ -426,14 +513,15 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
     async hashInput(tx, row) {
       const t = await loadToolCall(tx, row);
       if (!t) throw new Error("tool call approval without its stored action");
-      // From the stored row only, the arguments' hash recomputed from the canonical text itself (P-05).
-      return [t.agentId, t.requestedForUserId, t.conversationId, t.tool, sha256Hex(t.argumentsCanonical)];
+      // From the stored row only, the arguments' hash recomputed from the canonical text itself (P-05); the
+      // member-session floor is bound into it (07.8, ADR-0029).
+      return toolCallHashTuple({ ...t, argumentsSha256: sha256Hex(t.argumentsCanonical) });
     },
 
     async canDecide(tx, deciderUserId, row) {
       const t = await loadToolCall(tx, row);
       if (!t) return false;
-      const rule = await currentRule(tx, t);
+      const rule = await decidingRule(tx, t);
       const facts = await loadPrincipalFacts(tx, { kind: "user", userId: deciderUserId });
       return holdsRight(facts, rule, await ruleUnit(tx, rule), t.requestedForUserId);
     },
@@ -441,7 +529,7 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
     async audience(tx, row) {
       const t = await loadToolCall(tx, row);
       if (!t) return [];
-      const rule = await currentRule(tx, t);
+      const rule = await decidingRule(tx, t);
       const deciders = await decidersOf(tx, t, rule, await ruleUnit(tx, rule));
       return [...new Set([t.requestedForUserId, ...deciders])];
     },
@@ -463,11 +551,13 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
       if (!t) return { type: "fields", title: "This action no longer exists.", fields: [] };
       const source = await sourceOf(tx, t);
       const args = parseArgs(t);
-      const preview = orderPreview(args);
+      const preview = isSandboxExecAfterSignIn(t.tool, args) ? sandboxExecPreview(args) : orderPreview(args);
       const all = argumentsDisplay(args);
+      // The rule that applies (shown as the policy) and the one that names the deciders differ only under the floor.
       const rule = await currentRule(tx, t);
       const unit = await ruleUnit(tx, rule);
-      const deciders = await decidersOf(tx, t, rule, unit);
+      const deciding = await decidingRule(tx, t);
+      const deciders = await decidersOf(tx, t, deciding, await ruleUnit(tx, deciding));
       const a = await askedIn(tx, t);
       const canManage = rule
         ? (
@@ -500,7 +590,7 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
           id: t.requestedForUserId,
           displayName: (await memberName(tx, t.requestedForUserId)) ?? "Former member",
         },
-        approverLabel: await waitingForOf(tx, t, rule),
+        approverLabel: await waitingForOf(tx, t, deciding),
         policy: rule
           ? {
               scopeUnitId: rule.scopeUnitId,
@@ -518,6 +608,9 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
         },
         useBy: useByOf(row),
         usedAt: row.consumedAt ? new Date(row.consumedAt).toISOString() : null,
+        // 07.8-14 (R8): the Action, Element, Page and Session of a browser action (only the requester and deciders read
+        // this view, so the value a type action will type is shown, masked).
+        ...(isBrowserActionTool(t.tool) ? { browser: browserActionView(args).browser } : {}),
       };
       return view;
     },
@@ -548,7 +641,7 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
     async card(tx, row) {
       const t = await loadToolCall(tx, row);
       if (!t) throw new Error("tool call approval without its stored action");
-      return composeToolCallCard(tx, row, t, await waitingForOf(tx, t, await currentRule(tx, t)));
+      return composeToolCallCard(tx, row, t, await waitingForOf(tx, t, await decidingRule(tx, t)));
     },
 
     async link(tx, row) {
@@ -558,8 +651,10 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
       return {
         display: d.display,
         useBy: useByOf(row),
-        waitingFor: await waitingForOf(tx, t, await currentRule(tx, t)),
+        waitingFor: await waitingForOf(tx, t, await decidingRule(tx, t)),
         actionFields: d.actionFields,
+        // 07.8-20 (R8, T-07.8-20-03): the page's host and scheme for the card's Page field, never an element or value.
+        ...(isBrowserActionTool(t.tool) ? { browser: cardBrowserOf(parseArgs(t)) } : {}),
       };
     },
 
@@ -579,8 +674,27 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
           : {}),
         // The request turn's taint, stored under its lock: the re-run starts tainted (D-04, APPROVE-04).
         sourceTainted: t.tainted,
+        // 07.8-25 (D-13): the re-run continues a turn that used the requester's sign-in, so it has member data too.
+        ...((await sourceMemberData(tx, t.eventId)) ? { sourceMemberData: true } : {}),
       };
     },
   };
   return kind;
+}
+
+/**
+ * 07.8-14 (WINDOWS #245): the chat permalink of an approval's card (the turn activity's "Needs approval →"), or null
+ * when the request has no card or its conversation is gone. Read in the caller's tenant transaction.
+ */
+export async function approvalMessageRouteOf(tx: Tx, approvalId: string): Promise<AgentCardRoute | null> {
+  const [row] = await tx
+    .select({ resourceId: approvalRequests.resourceId, cardMessageId: approvalRequests.cardMessageId })
+    .from(approvalRequests)
+    .where(eq(approvalRequests.id, approvalId))
+    .limit(1);
+  if (!row?.cardMessageId) return null;
+  const t = await loadToolCall(tx, row);
+  if (!t) return null;
+  const a = await askedIn(tx, t);
+  return a ? messageRouteOf(a, t, row.cardMessageId) : null;
 }

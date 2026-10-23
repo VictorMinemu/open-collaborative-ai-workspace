@@ -1,8 +1,11 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/channel-core";
 import {
   type AgentChannelToolCallRequest,
+  CONFINED_TOOL_FLAGS,
   CONNECTOR_SAFE_NAME,
   CONNECTOR_TOOL_LIMITS,
+  isConfinedTool,
+  SANDBOX_LIMITS,
   TOOL_APPROVAL_LIMITS,
   TOOL_APPROVAL_REFUSALS,
   type ToolApprovalRefusal,
@@ -10,6 +13,8 @@ import {
   type TurnToolFlags,
 } from "./agent-channel-protocol.js";
 import type { AgentChannelClient } from "./api-client.js";
+// connector-tools.ts imports from this module too; its sentences are only read while a call runs.
+import { REFUSAL_SENTENCE } from "./connector-tools.js";
 import { openClawAgentIdFor } from "./mention-mapper.js";
 // work-zone-tools.ts imports from this module too; the sentence is only called while a call runs (see the note there).
 import { workZoneTaintedSentence } from "./work-zone-tools.js";
@@ -30,6 +35,9 @@ import { workZoneTaintedSentence } from "./work-zone-tools.js";
  * request also carries the call's full `arguments` (≤ 32 KB, else refused locally), the local taint block is skipped
  * (the API decides: approval, a grant or a denial), and every approval refusal is a fixed sentence returned at once
  * (`APPROVAL_SENTENCES`). Nothing here ever waits for a person: the approved call re-runs in a new turn.
+ * Confined tools (07.8, D-11 F-7): the fifteen `ocw_sandbox_*` / `ocw_browser_*` tools are self-validated by their own
+ * routes, take their static flags (`CONFINED_TOOL_FLAGS`; a turn's flags only ever add restrictions or an approval
+ * mode), and count against their own per-turn budget (`turn.maxSandboxCalls`, 40), never the cap of 8.
  * Logs never include params, arguments or results.
  */
 
@@ -55,6 +63,8 @@ export interface ActiveTurn {
   requesterName?: string;
   calls: number;
   webCalls: number;
+  /** 07.8: confined (sandbox and browser) calls this turn, against `turn.maxSandboxCalls`. */
+  sandboxCalls: number;
   tainted: boolean;
 }
 
@@ -198,6 +208,16 @@ function callFlags(
       return block(`Tool ${tool} blocked: that connector tool is not allowed on this turn.`);
     }
     return t.turn.toolFlags[named.logical] ?? UNKNOWN_FLAGS;
+  }
+  if (isConfinedTool(tool)) {
+    // 07.8 (D-11 F-7): the static flags, made stricter (never looser) by the turn's; its approval mode passes through.
+    const base = CONFINED_TOOL_FLAGS[tool];
+    const delivered = t.turn.toolFlags[tool];
+    return {
+      untrustedOutput: base.untrustedOutput || delivered?.untrustedOutput === true,
+      sideEffecting: base.sideEffecting || delivered?.sideEffecting === true,
+      ...(delivered?.approval ? { approval: delivered.approval } : {}),
+    };
   }
   if (tool === "ocw_http_request") {
     const method = typeof params?.method === "string" ? params.method.trim().toUpperCase() : "";
@@ -399,6 +419,7 @@ export function createToolGuard(
         connectorTools: t.connectorTools ?? [],
         calls: 0,
         webCalls: 0,
+        sandboxCalls: 0,
         tainted: false,
       });
       signal?.addEventListener(
@@ -461,7 +482,15 @@ export function createToolGuard(
       if ("block" in delivered) return delivered;
       const flags = ALWAYS_SIDE_EFFECTING.has(tool) ? { ...delivered, sideEffecting: true } : delivered;
       const web = WEB_TOOLS.has(tool);
-      if (t.calls >= t.turn.maxToolCalls) {
+      // 07.8: the confined tools have their own budget (D-11 F-7); the API counts and refuses `budget_exhausted` too.
+      const confined = isConfinedTool(tool);
+      const maxConfined = t.turn.maxSandboxCalls ?? SANDBOX_LIMITS.callsPerTurn;
+      if (confined && t.sandboxCalls >= maxConfined) {
+        return block(
+          `Tool ${tool} blocked: this turn reached its limit of ${maxConfined} sandbox and browser calls.`,
+        );
+      }
+      if (!confined && t.calls >= t.turn.maxToolCalls) {
         return block(
           `Tool ${tool} blocked: the turn reached its limit of ${t.turn.maxToolCalls} tool calls.`,
         );
@@ -475,11 +504,13 @@ export function createToolGuard(
       if (t.tainted && flags.sideEffecting && !approval) {
         // 07.5-10: the proposal's refusal is the UI-SPEC sentence the model relays (R10).
         if (tool === "ocw_start_work_zone") return block(workZoneTaintedSentence(t.requesterName));
+        // 07.8: `ocw_sandbox_share` (and an act the API flags) reads the 07.4 sentence its route would answer.
+        if (confined) return block(REFUSAL_SENTENCE.tainted);
         return block(
           `Tool ${tool} blocked: this turn is read-only after untrusted content (web or tool output) was read.`,
         );
       }
-      const selfValidated = SELF_VALIDATED_TOOLS.has(tool);
+      const selfValidated = confined || SELF_VALIDATED_TOOLS.has(tool);
       // The arguments a flagged call is decided on (the API canonicalizes them; the connector tools send their own).
       const sentence = { tool, requesterName: t.requesterName };
       const approvalArgs = approval && !selfValidated ? (event.params ?? {}) : undefined;
@@ -493,7 +524,8 @@ export function createToolGuard(
         if (!callId) return block(APPROVAL_SENTENCES.no_call_id(sentence));
       }
       // Count before awaiting the API so concurrent calls of one turn can never exceed the caps.
-      t.calls++;
+      if (confined) t.sandboxCalls++;
+      else t.calls++;
       if (web) t.webCalls++;
 
       if (!selfValidated) {

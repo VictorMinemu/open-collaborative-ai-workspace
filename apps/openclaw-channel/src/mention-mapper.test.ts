@@ -254,6 +254,20 @@ describe("AI chats (06-10, D-07, P-10)", () => {
     expect(m.allowedTools).toEqual([]);
   });
 
+  it("07.8-14: a sandbox or browser withheld by the organization's switch or kill says why", () => {
+    const withheld = [
+      { tool: "ocw_sandbox_*", reason: "killed" },
+      { tool: "ocw_browser_*", reason: "sandbox_off" },
+    ];
+    const m = mapMention(mention({ turn: { ...turn, withheld } } as never), BOT);
+    const block = m.contextBlocks.find((b) => b.type === "withheld_tools");
+    expect(block?.payload.withheld).toEqual([
+      "ocw_sandbox_* — an admin stopped every sandbox and browser of this organization",
+      "ocw_browser_* — Sandbox & Browser is turned off for this organization",
+    ]);
+    expect(m.allowedTools).not.toContain("ocw_sandbox_exec");
+  });
+
   it("an invalid withheld list is dropped without dropping the turn (informational only)", () => {
     const parsed = AgentMentionEvent.parse({
       ...aiChat(),
@@ -551,6 +565,44 @@ describe("mapCardAction (06-14, P-11): a decision on the agent's card becomes a 
         outcome: "approved",
       },
     });
+  });
+
+  it("07.8-21: a sign-in card's outcome reads as the UI-SPEC sentences, the host only", () => {
+    const signedIn = mapCardAction(
+      cardAction({
+        conversation: { id: "c-dm", kind: "dm", name: null },
+        thread: { rootMessageId: "msg-card" },
+        cardAction: {
+          messageId: "msg-card",
+          kind: "browser",
+          title: "Sign in to panel.fake.test",
+          outcome: "approved",
+          signIn: { status: "signed_in", host: "panel.fake.test" },
+        },
+      }),
+      BOT,
+    );
+    const block = signedIn.contextBlocks.find((b) => b.type === "card_action");
+    expect(block?.label).toBe("Sign-in");
+    expect(block?.payload.signIn).toEqual({ status: "signed_in", host: "panel.fake.test" });
+    expect(block?.payload.instruction).toBe(
+      "Sam Lee signed in to panel.fake.test and handed the page back. Continue the task: take a new ocw_browser_snapshot first. Never type or reveal a password.",
+    );
+    const skipped = mapCardAction(
+      cardAction({
+        cardAction: {
+          messageId: "msg-card",
+          kind: "browser",
+          title: "Sign in to panel.fake.test",
+          outcome: "denied",
+          signIn: { status: "skipped", host: "https://evil.example/x" },
+        },
+      }),
+      BOT,
+    );
+    expect(skipped.contextBlocks.find((b) => b.type === "card_action")?.payload.instruction).toBe(
+      "Sam Lee chose not to sign in to that site. Don't ask again in this turn; tell them what you can do without it.",
+    );
   });
 
   it("is flat in a DM or an AI chat (no thread), threaded in a channel", () => {

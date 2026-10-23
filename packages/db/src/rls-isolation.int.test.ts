@@ -509,7 +509,82 @@ async function seedOrg(c: pg.Client, org: string) {
     "insert into app.agent_tool_calls (organization_id, event_id, agent_id, user_id, tool, source_kind, source_id, target, decision, approval_id) values ($1, $2, $3, $4, $5, 'mcp', $6, $7, 'allowed', $8)",
     [org, randomUUID(), personal, user, `${crmSafe}__create_invoice`, crm, crmSafe, toolApproval],
   );
+
+  // Phase 07.8 (bot sandboxes, packages and the live browser): one row per new table, and the two new turn columns
+  // set. The organization's sandbox policy and event cursor; the personal bot's shell and browser sandboxes with
+  // today's usage; a browser context in the DM on the member's sealed session for the site (the state itself is only
+  // the `browser_session` secret) and the sign-in request that produced it; the turn's activity; an approved npm
+  // package installed for the bot.
+  await q(
+    "insert into app.sandbox_policies (organization_id, enabled, egress_allow_hosts, updated_by) values ($1, true, '{registry.npmjs.org}', $2)",
+    [org, user],
+  );
+  await q("insert into app.sandbox_event_cursor (organization_id, boot_id, seq) values ($1, $2, 7)", [
+    org,
+    randomUUID(),
+  ]);
+  await q(
+    "insert into app.bot_sandboxes (organization_id, agent_id, kind, state, runtime, disk_bytes, last_active_at) values ($1, $2, 'sbx', 'running', 'gvisor', 4096, now()), ($1, $2, 'brw', 'stopped', 'gvisor', 0, null)",
+    [org, personal],
+  );
+  await q(
+    "insert into app.sandbox_usage_daily (organization_id, agent_id, day, cpu_ms) values ($1, $2, current_date, 1200)",
+    [org, personal],
+  );
+  const browserSecret = randomUUID();
+  const browserSession = randomUUID();
+  const browserContext = randomUUID();
+  await q(
+    "insert into app.secrets (id, organization_id, name, kind, ciphertext, iv, tag) values ($1, $2, 'browser session', 'browser_session', 'c', 'i', 't')",
+    [browserSecret, org],
+  );
+  await q(
+    "insert into app.browser_sessions (id, organization_id, user_id, agent_id, site_key, secret_id, expires_at) values ($1, $2, $3, $4, 'panel.example.test', $5, now() + interval '30 days')",
+    [browserSession, org, user, personal, browserSecret],
+  );
+  await q(
+    "insert into app.browser_contexts (id, organization_id, agent_id, conversation_id, requested_for_user_id, event_id, host, secure, state, session_id) values ($1, $2, $3, $4, $5, $6, 'panel.example.test', true, 'live', $7)",
+    [browserContext, org, personal, dm, user, eventId, browserSession],
+  );
+  await q(
+    "insert into app.browser_signin_requests (organization_id, agent_id, context_id, requester_user_id, conversation_id, event_id, host, reason, status, session_id, expires_at, decided_at) values ($1, $2, $3, $4, $5, $6, 'panel.example.test', 'Read the open invoices', 'signed_in', $7, now() + interval '15 minutes', now())",
+    [org, personal, browserContext, user, dm, eventId, browserSession],
+  );
+  await q(
+    `insert into app.bot_turn_activity (event_id, organization_id, agent_id, conversation_id, steps, running) values ($1, $2, $3, $4, '[{"id":"s1","tool":"ocw_sandbox_exec","verb":"ran"}]', false)`,
+    [eventId, org, personal, dm],
+  );
+  const sandboxPackage = randomUUID();
+  await q(
+    `insert into app.sandbox_packages (id, organization_id, source, name, version, sha256, size_bytes, has_install_script, risk, review_token, tree_sha256, dependency_count, lockfile, status, approved_by, approved_at)
+     values ($1, $2, 'npm', 'left-pad', '1.3.0', $3, 1024, false, 'low', 'review-token', $4, 0, '{"lockfileVersion":3}', 'approved', $5, now())`,
+    [sandboxPackage, org, "d".repeat(64), "e".repeat(64), user],
+  );
+  await q(
+    "insert into app.sandbox_package_installs (organization_id, agent_id, package_id, status) values ($1, $2, $3, 'installed')",
+    [org, personal, sandboxPackage],
+  );
+  await q("update app.agent_turns set sandbox_calls = 3, member_data = true where event_id = $1", [eventId]);
+  // 07.8-28 (WINDOWS #292): the bot's member data in this DM is sticky.
+  await q(
+    "insert into app.agent_member_data (organization_id, agent_id, conversation_id, sites, first_event_id) values ($1, $2, $3, '{panel.example.test}', $4)",
+    [org, personal, dm, eventId],
+  );
 }
+
+const SANDBOX_TABLES = [
+  "app.sandbox_policies",
+  "app.bot_sandboxes",
+  "app.sandbox_usage_daily",
+  "app.sandbox_event_cursor",
+  "app.browser_contexts",
+  "app.browser_sessions",
+  "app.browser_signin_requests",
+  "app.bot_turn_activity",
+  "app.sandbox_packages",
+  "app.sandbox_package_installs",
+  "app.agent_member_data",
+] as const;
 
 const TOOL_APPROVAL_TABLES = [
   "app.tool_approval_policies",
@@ -688,8 +763,8 @@ describe("tenant isolation (RLS)", () => {
       );
       expect(seeded.rows[0].n, `${tbl} has no fixture row: add one to seedOrg()`).toBeGreaterThan(0);
 
-      // Same tenant sees its rows (sanity), minus the personal keys (07.4-07) and the member connector connections
-      // (07.4-10) only their owner's session sees …
+      // Same tenant sees its rows (sanity), minus the personal keys (07.4-07), the member connector connections
+      // (07.4-10) and the sealed browser sessions (07.8-02) only their owner's session sees …
       const ownerOnly =
         tbl === "app.vault_items"
           ? (
@@ -698,7 +773,7 @@ describe("tenant isolation (RLS)", () => {
                 [A],
               )
             ).rows[0].n
-          : tbl === "app.connector_connections"
+          : tbl === "app.connector_connections" || tbl === "app.browser_sessions"
             ? seeded.rows[0].n
             : tbl === "app.agent_vault_grants"
               ? (
@@ -1602,13 +1677,15 @@ describe("tenant isolation (RLS)", () => {
       ).rejects.toThrow(/row-level security/);
     }
     // The four memory tables (and, since 07.4-07, the keychain's personal keys, their grants since 07.4-14 and member
-    // connections since 07.4-10) carry the restrictive owner-only policy on top of the tenant policy.
+    // connections since 07.4-10, sealed browser sessions since 07.8-02) carry the restrictive owner-only policy on top
+    // of the tenant policy.
     const restrictive = await migrator.query(
       "select tablename, cmd, permissive from pg_policies where schemaname = 'app' and policyname = 'personal_owner_only' order by tablename",
     );
     expect(restrictive.rows).toEqual(
       [
         "agent_vault_grants",
+        "browser_sessions",
         "connector_connections",
         "memory_file_revisions",
         "memory_files",
@@ -2169,6 +2246,264 @@ describe("tenant isolation (RLS)", () => {
     } finally {
       await migrator.query("rollback");
     }
+  });
+
+  it("Phase 07.8: the eleven sandbox and browser tables (agent_member_data since 07.8-28) are org-scoped, forced, seeded and invisible and unwritable across tenants", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    const sessionOwner = async (org: string) =>
+      (
+        await migrator.query("select user_id from app.browser_sessions where organization_id = $1 limit 1", [
+          org,
+        ])
+      ).rows[0].user_id as string;
+    const ownerA = await sessionOwner(A);
+    for (const tbl of SANDBOX_TABLES) {
+      // browser_sessions also carries the restrictive owner-only policy (D-08, F-10): it is read here as its owner.
+      const ownerOnly = tbl === "app.browser_sessions";
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: ownerOnly ? 2 : 1 });
+      const asA = <T>(fn: () => Promise<T>) => inTenant(A, fn, ownerOnly ? ownerA : null);
+      const seeded = await migrator.query(
+        `select count(*)::int as n from ${tbl} where organization_id = $1`,
+        [B],
+      );
+      expect(seeded.rows[0].n, `${tbl} has B rows`).toBeGreaterThan(0);
+      const own = await asA(() => app.query(`select count(*)::int as n from ${tbl}`));
+      expect(own.rows[0].n, `${tbl} seeded for A`).toBeGreaterThan(0);
+      const cross = await asA(() =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [B]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant select`).toBe(0);
+      for (const stmt of [
+        `update ${tbl} set organization_id = organization_id where organization_id = $1`,
+        `delete from ${tbl} where organization_id = $1`,
+      ]) {
+        const n = await asA(() => app.query(stmt, [B]).then((res) => res.rowCount));
+        expect(n, `${tbl}: ${stmt}`).toBe(0);
+      }
+      // Moving one of A's own rows into B is refused by the tenant policy (or first by a composite foreign key, which
+      // carries the organization and so finds no parent in B).
+      await expect(
+        asA(() => app.query(`update ${tbl} set organization_id = $1 where organization_id = $2`, [B, A])),
+        `${tbl} cross-tenant move`,
+      ).rejects.toThrow(/row-level security|violates foreign key constraint/);
+      const row = await migrator.query(
+        `select row_to_json(t) as j from ${tbl} t where organization_id = $1 limit 1`,
+        [B],
+      );
+      const cols = (
+        await migrator.query(
+          `select a.attname from pg_attribute a where a.attrelid = $1::regclass and a.attnum > 0
+             and not a.attisdropped and a.attgenerated = '' order by a.attnum`,
+          [tbl],
+        )
+      ).rows.map((r) => `"${r.attname}"`);
+      await expect(
+        asA(() =>
+          app.query(
+            `insert into ${tbl} (${cols.join(", ")}) select ${cols.join(", ")} from json_populate_record(null::${tbl}, $1::json)`,
+            [JSON.stringify(row.rows[0].j)],
+          ),
+        ),
+        `${tbl} cross-tenant insert`,
+      ).rejects.toThrow(/row-level security/);
+      const still = await migrator.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [
+        B,
+      ]);
+      expect(still.rows[0].n, `${tbl} B rows intact`).toBe(seeded.rows[0].n);
+    }
+
+    // Foreign keys bypass RLS, so every reference carries the organization (composite keys): a row of A naming B's bot,
+    // conversation, secret, session, context or package is refused even though the app role cannot read any of them.
+    const ids = async (org: string) =>
+      (
+        await migrator.query(
+          `select (select id from app.agents where organization_id = $1 and scope = 'personal' limit 1) as agent,
+                  (select conversation_id from app.browser_contexts where organization_id = $1 limit 1) as conv,
+                  (select secret_id from app.browser_sessions where organization_id = $1 limit 1) as secret,
+                  (select id from app.browser_sessions where organization_id = $1 limit 1) as session,
+                  (select user_id from app.browser_sessions where organization_id = $1 limit 1) as user,
+                  (select id from app.browser_contexts where organization_id = $1 limit 1) as context,
+                  (select id from app.sandbox_packages where organization_id = $1 limit 1) as package`,
+          [org],
+        )
+      ).rows[0];
+    const a = await ids(A);
+    const b = await ids(B);
+    const fk = /violates foreign key constraint/;
+    const refusals: Array<[string, unknown[]]> = [
+      [
+        "insert into app.bot_sandboxes (organization_id, agent_id, kind, state) values ($1, $2, 'sbx', 'starting')",
+        [A, b.agent],
+      ],
+      [
+        "insert into app.sandbox_usage_daily (organization_id, agent_id, day) values ($1, $2, '2026-01-01')",
+        [A, b.agent],
+      ],
+      [
+        "insert into app.browser_contexts (organization_id, agent_id, conversation_id, requested_for_user_id, event_id, host, secure, state) values ($1, $2, $3, $4, $4, 'a.example.test', true, 'live')",
+        [A, a.agent, b.conv, a.user],
+      ],
+      [
+        "insert into app.browser_contexts (organization_id, agent_id, conversation_id, requested_for_user_id, event_id, host, secure, state, session_id) values ($1, $2, $3, $4, $4, 'a.example.test', true, 'live', $5)",
+        [A, a.agent, a.conv, a.user, b.session],
+      ],
+      [
+        "insert into app.browser_sessions (organization_id, user_id, agent_id, site_key, secret_id, expires_at) values ($1, $2, $3, 'b.example.test', $4, now() + interval '1 day')",
+        [A, a.user, a.agent, b.secret],
+      ],
+      [
+        "insert into app.browser_signin_requests (organization_id, agent_id, context_id, requester_user_id, conversation_id, event_id, host, reason, expires_at) values ($1, $2, $3, $4, $5, $4, 'a.example.test', 'x', now())",
+        [A, a.agent, b.context, a.user, a.conv],
+      ],
+      [
+        "insert into app.bot_turn_activity (event_id, organization_id, agent_id, conversation_id) values ($1, $2, $3, $4)",
+        [randomUUID(), A, b.agent, a.conv],
+      ],
+      [
+        "insert into app.sandbox_package_installs (organization_id, agent_id, package_id, status) values ($1, $2, $3, 'pending')",
+        [A, a.agent, b.package],
+      ],
+    ];
+    for (const [stmt, values] of refusals) {
+      await expect(
+        inTenant(A, () => app.query(stmt, values), a.user),
+        stmt,
+      ).rejects.toThrow(fk);
+    }
+  });
+
+  it("Phase 07.8: a member's sealed browser session is hers alone; another member, an admin and a session without a user read, change and write none (D-08, F-10)", async () => {
+    const ana = randomUUID();
+    const sam = randomUUID();
+    for (const [u, name] of [
+      [ana, "Ana"],
+      [sam, "Sam"],
+    ] as const) {
+      await migrator.query("insert into auth.user (id, name, email) values ($1, $2, $3)", [
+        u,
+        name,
+        `${u}@example.test`,
+      ]);
+      await migrator.query(
+        "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, $3, 'standard')",
+        [A, u, name],
+      );
+    }
+    const admin = (
+      await migrator.query(
+        "select user_id from app.org_members where organization_id = $1 and role = 'admin' limit 1",
+        [A],
+      )
+    ).rows[0].user_id as string;
+    const agent = (
+      await migrator.query("select id from app.agents where organization_id = $1 and scope = 'personal'", [A])
+    ).rows[0].id as string;
+    const seal = async () => {
+      const secret = randomUUID();
+      await migrator.query(
+        "insert into app.secrets (id, organization_id, name, kind, ciphertext, iv, tag) values ($1, $2, 'browser session', 'browser_session', 'c', 'i', 't')",
+        [secret, A],
+      );
+      return secret;
+    };
+    const session = randomUUID();
+    await migrator.query(
+      "insert into app.browser_sessions (id, organization_id, user_id, agent_id, site_key, secret_id, expires_at) values ($1, $2, $3, $4, 'panel.autofy.app', $5, now() + interval '30 days')",
+      [session, A, ana, agent, await seal()],
+    );
+
+    const sees = (user: string | null) =>
+      inTenant(
+        A,
+        async () =>
+          (await app.query("select id from app.browser_sessions where id = $1", [session])).rowCount,
+        user,
+      );
+    expect(await sees(ana), "Ana reads her own session").toBe(1);
+    for (const [who, user] of [
+      ["another member", sam],
+      ["an admin of the organization", admin],
+      ["a session without a user", null],
+    ] as const) {
+      expect(await sees(user), `${who} reads it`).toBe(0);
+      const changed = await inTenant(
+        A,
+        async () =>
+          (await app.query("update app.browser_sessions set last_used_at = now() where id = $1", [session]))
+            .rowCount,
+        user,
+      );
+      expect(changed, `${who} updates it`).toBe(0);
+      const deleted = await inTenant(
+        A,
+        async () => (await app.query("delete from app.browser_sessions where id = $1", [session])).rowCount,
+        user,
+      );
+      expect(deleted, `${who} deletes it`).toBe(0);
+    }
+    // Writing a row for Ana while the session is Sam's fails the policy check; Ana may write her own.
+    const secret = await seal();
+    const insertFor = (owner: string, site: string) =>
+      app.query(
+        "insert into app.browser_sessions (organization_id, user_id, agent_id, site_key, secret_id, expires_at) values ($1, $2, $3, $4, $5, now() + interval '1 day')",
+        [A, owner, agent, site, secret],
+      );
+    await expect(inTenant(A, () => insertFor(ana, "mail.autofy.app"), sam)).rejects.toThrow(
+      /row-level security/,
+    );
+    await expect(inTenant(A, () => insertFor(ana, "mail.autofy.app"), admin)).rejects.toThrow(
+      /row-level security/,
+    );
+    await expect(inTenant(A, () => insertFor(ana, "mail.autofy.app"))).rejects.toThrow(/row-level security/);
+    expect(await inTenant(A, async () => (await insertFor(ana, "mail.autofy.app")).rowCount, ana)).toBe(1);
+    // Ana cannot hand her session to Sam either (WITH CHECK on update).
+    await expect(
+      inTenant(
+        A,
+        () => app.query("update app.browser_sessions set user_id = $2 where id = $1", [session, sam]),
+        ana,
+      ),
+    ).rejects.toThrow(/row-level security/);
+    const still = await migrator.query(
+      "select user_id, last_used_at from app.browser_sessions where id = $1",
+      [session],
+    );
+    expect(still.rows).toEqual([{ user_id: ana, last_used_at: null }]);
+    // The policy is the restrictive owner-only one (ANDed with tenant isolation), never a permissive widening.
+    const policy = await migrator.query(
+      `select polname, polpermissive, pg_get_expr(polqual, polrelid) as using, pg_get_expr(polwithcheck, polrelid) as check
+         from pg_policy where polrelid = 'app.browser_sessions'::regclass and polname = 'personal_owner_only'`,
+    );
+    expect(policy.rows).toHaveLength(1);
+    expect(policy.rows[0].polpermissive).toBe(false);
+    expect(policy.rows[0].using).toMatch(/user_id = \(NULLIF\(current_setting\('app\.user_id'/);
+    expect(policy.rows[0].check).toMatch(/user_id = \(NULLIF\(current_setting\('app\.user_id'/);
+  });
+
+  it("Phase 07.8: turns count sandbox calls and mark member data, and secrets accept the browser_session kind", async () => {
+    const t = (
+      await migrator.query(
+        "select organization_id, agent_id, user_id, conversation_id from app.agent_turns where organization_id = $1 limit 1",
+        [A],
+      )
+    ).rows[0];
+    const fresh = randomUUID();
+    await migrator.query(
+      "insert into app.agent_turns (event_id, organization_id, agent_id, user_id, conversation_id, conversation_kind, message_id) values ($1, $2, $3, $4, $5, 'dm', $6)",
+      [fresh, A, t.agent_id, t.user_id, t.conversation_id, randomUUID()],
+    );
+    const row = await migrator.query(
+      "select sandbox_calls, member_data from app.agent_turns where event_id = $1",
+      [fresh],
+    );
+    expect(row.rows).toEqual([{ sandbox_calls: 0, member_data: false }]);
+    const kind = async (k: string) =>
+      migrator.query(
+        "insert into app.secrets (organization_id, name, kind, ciphertext, iv, tag) values ($1, 'k', $2, 'c', 'i', 't')",
+        [A, k],
+      );
+    await expect(kind("browser_session")).resolves.toBeDefined();
+    await expect(kind("cookie_jar")).rejects.toMatchObject({ constraint: "secrets_kind_check" });
   });
 
   it("Phase 4: accent-insensitive Spanish search, a stored tsvector and the search indexes", async () => {

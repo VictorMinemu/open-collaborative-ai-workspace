@@ -93,13 +93,18 @@ export interface ApprovalCardContent {
 /** The kind-composed fields of a card's approval link (`ApprovalKind.link`). */
 export type ApprovalCardLink = Pick<
   AgentCardApprovalLink,
-  "display" | "useBy" | "waitingFor" | "actionFields" | "deviceId" | "resultRoute" | "blocked"
+  "display" | "useBy" | "waitingFor" | "actionFields" | "deviceId" | "resultRoute" | "blocked" | "browser"
 >;
 
 /** What a grant kind adds to the re-run turn of a decision (`ApprovalKind.cardTurn`). */
 export interface ApprovalCardTurn {
   grant?: { tool: string; arguments: string; useBy: string };
   sourceTainted?: boolean;
+  /**
+   * 07.8-25 (D-13, P-18): the requesting turn had used a member's sign-in (`agent_turns.member_data`), so the re-run
+   * turn has member data from its start and D-13's approvals keep applying to it.
+   */
+  sourceMemberData?: boolean;
 }
 
 export interface ApprovalRegistry {

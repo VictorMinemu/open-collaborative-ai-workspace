@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 124
-waived_count: 4
-fixed_count: 101
-total_count: 229
-last_updated: 2026-10-15T12:01:49.197Z
+open_count: 165
+waived_count: 5
+fixed_count: 134
+total_count: 304
+last_updated: 2026-10-22T12:38:31.229Z
 ---
 
 # Broken Windows Ledger
@@ -244,6 +244,81 @@ last_updated: 2026-10-15T12:01:49.197Z
 | 227 | 07.5 | deviation | apps/web/components/chat/composer.tsx |  | Composer hint text is under AA contrast; e2e specs share one DB so fixture names collide across phases; e2e specs reading response bodies across a navigation can hang | open |  | 2026-10-15T12:01:49.057Z |  |
 | 228 | 07.5 | deviation | apps/openclaw-channel/src/tool-guard.ts |  | Pin limits (ADR-0026): a plugin registered below -10000 or one answering OpenClaw's own approval first can still beat TOOL_PIN_PRIORITY | open |  | 2026-10-15T12:01:49.128Z |  |
 | 229 | 07.5 | deviation | apps/api/src/modules/approval |  | After #204 the bot does not hear decisions made from /approvals by someone outside the conversation; Work Zone Start has no applyTopics; cards still parse requester and runtime from server text | open |  | 2026-10-15T12:01:49.197Z |  |
+| 230 | 07.8 | deviation | packages/db/src/schema/app.ts |  | Hard-deleting a bot removes its browser_sessions rows but leaves their browser_session secrets; revoke/purge/sweeper in 07.8-21/27 must delete them; nothing cleans browser_sessions when a member leaves the org | fixed |  | 2026-10-15T15:08:27.289Z | 2026-10-22T05:37:51.070Z |
+| 231 | 07.8 | deviation | packages/db/src/schema/app.ts |  | DECIDE in 07.8-18: the app role can change an approved sandbox package's pinned fields (sha256, tree_sha256, lockfile, dependency_count, review_token); add an immutability trigger after approval. Every new secret kind now needs a migration (secrets_kind_check), note in ADR-0029 | fixed |  | 2026-10-15T15:08:27.379Z | 2026-10-21T20:12:08.062Z |
+| 232 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | Wiring left for later plans: turn.activity not registered in realtime EventTypes (07.8-10); SandboxdContextInput.events is loose until tightened to LiveInputFrame (07.8-16); PATCH /agents/:id/capabilities ignores sandbox/browser until 07.8-15 | fixed |  | 2026-10-15T15:10:12.850Z | 2026-10-22T03:47:11.925Z |
+| 233 | 07.8 | deviation | packages/contracts/src/sandbox.ts |  | File upload/download/import travel as base64 JSON up to 50 MiB (~67 MiB on the wire): check the body limit or stream (07.8-09/11); cap_reached/tainted answer 403 here vs 409 on 07.4 connector routes, unify in 05/10/14; npm lockfiles with sha1-only integrity fail PackageTreeEntry, refuse with a reason in 17/18 | fixed |  | 2026-10-15T15:10:12.922Z | 2026-10-21T20:12:08.140Z |
+| 234 | 07.8 | deviation | packages/db/src/schema/app.ts |  | MUST (07.8-21): app.message_cards kind check and Drizzle enum accept only the 8 old kinds; a sign-in ('browser') card cannot be stored until a new migration (chained after 07.8-02) adds it. ApprovalToolSourceKind lacks a sandbox/browser source (07.8-14; update SOURCE_ICON) | fixed |  | 2026-10-15T15:23:46.137Z | 2026-10-22T05:37:50.996Z |
+| 235 | 07.8 | deviation | apps/sandboxd/src |  | sandboxd: running processes tracked in memory only (unpollable after a restart, still end at timeout); /tmp/ocw-proc group files not removed; runtime_unavailable and docker_too_old share docker_unavailable; diskBytes 0 until 07.8-09 | open |  | 2026-10-15T16:42:21.790Z |  |
+| 236 | 07.8 | deviation | infra/sandbox |  | sbx apt versions approved but not pinned in the Dockerfile (later builds pick newer security versions); gVisor path proven by unit tests only until the 07.8-24 CI job; CODEOWNERS lacks apps/sandboxd (07.8-29) | open |  | 2026-10-15T16:42:21.880Z |  |
+| 237 | 07.8 | deviation | infra/sandbox/brw |  | brw: iframes are outside the snapshot (screenshot masks them whole after human input); a page that rebuilds an input after typing loses the human-typed marker (password type fields stay redacted); live frames to other viewers are unmasked, F-5/U-2 must hold in the API (07.8-16) | fixed |  | 2026-10-15T16:43:10.209Z | 2026-10-22T03:47:11.846Z |
+| 238 | 07.8 | deviation | infra/sandbox/brw |  | sandboxd (07.8-13) must strip the context-id tag from type-0 frames and map the new brw codes (paused, internal, maskRects, resize mode); brw proven on arm64 Docker Desktop only, amd64 runc and the gVisor CI job remain (07.8-24); apt not pinned to a snapshot | open |  | 2026-10-15T16:43:10.294Z |  |
+| 239 | 07.8 | deviation | apps/openclaw-channel/src |  | API does not send CellProvider.imageModels or turn.maxSandboxCalls yet (07.8-05/14): screenshot reaches no model and the gate uses default 40; sign-in skipped/expired sentences unwired (07.8-21); OpenClaw image rescaling (imageMaxDimensionPx) untested (8x8 fake JPEG, 07.8-13/28) | fixed |  | 2026-10-15T16:49:17.151Z | 2026-10-22T09:00:45.076Z |
+| 240 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | 6 offered sandbox tools have no API route until 07.8-10 (404); confirm GET /cell alsoAllow carries ocw_sandbox_*/ocw_browser_* (plugin withTurnScopedTools); 403 (sandbox/board) vs 409 (07.4 connectors) refusal split: align or record in ADR-0029 | fixed |  | 2026-10-15T17:21:21.782Z | 2026-10-15T22:12:53.756Z |
+| 241 | 07.8 | deviation | apps/api/src/modules/sandbox |  | Orphan 'starting' reservation rows (API dies between reserve and ensure) hold a cap slot until cleaned (07.8-11); kill does not push policy {killed:true} to sandboxd nor bump settings version (07.8-11); sandbox approval cards read 'Web request' (07.8-14); OCW_SANDBOX_URL/TOKEN missing in e2e-isolated.sh, .woodpecker, compose, .env.example (07.8-08/24) | fixed |  | 2026-10-15T17:21:21.854Z | 2026-10-15T21:29:54.137Z |
+| 242 | 07.8 | deviation | scripts/guard/guard.test.mjs |  | guard.test.mjs (Semgrep rule tests) runs neither in CI nor pnpm verify; ocw.raw-egress covers only apps/sandboxd/src/egress; CODEOWNERS lacks packages/egress-policy and apps/sandboxd/src/egress | open |  | 2026-10-15T18:33:30.173Z |  |
+| 243 | 07.8 | deviation | apps/sandboxd/src/egress/proxy.ts |  | Egress proxy: public mode proven by unit tests only (real egress in 07.8-13/24); no per-network tunnel limit; platform names refused by name (not resolved) | open |  | 2026-10-15T18:33:30.267Z |  |
+| 244 | 07.8 | deviation | apps/api/src/modules/sandbox |  | Pending purges and policy re-push after a sandboxd restart reach only orgs with events or a failed purge in this process (needs a SECURITY DEFINER org list or a sandboxd boot event); no 'crashed' stop reason in contract/DB; egress audit hourly dedupe queries audit_events metadata without an index; the event consumer holds a pool connection; fake sandboxd stores files as UTF-8 text (breaks binaries) | open |  | 2026-10-15T21:29:49.204Z |  |
+| 245 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | Sandbox activity steps never carry approvalMessageRoute (07.8-14/20); bot_turn_activity.running stays true for a turn that never replies, web live label needs a timeout (07.8-20); a write body over Fastify's 2 MiB limit returns Fastify's 413 not too_large; shared images show as downloads, no preview (07.8-25); fake sandboxd codes (404 read folder, 409 busy delete) to check against the real one (07.8-08/09) | open |  | 2026-10-15T22:12:53.836Z |  |
+| 246 | 07.8 | deviation | apps/sandboxd/src |  | MUST FIX (fail-open): sandboxd keeps policy, kill state and disk_full in memory; after a sandboxd restart the defaults apply (2 GiB, 15 min idle, NOT killed) until the API re-pushes, and the API only re-pushes for orgs with events. Fix: sandboxd refuses ensure/restart for an org with no policy (409 policy_missing) and the API pushes policy then retries; plus a boot event | fixed |  | 2026-10-15T22:14:34.757Z | 2026-10-21T20:35:29.061Z |
+| 247 | 07.8 | deviation | apps/sandboxd/src |  | Soft quota counts apparent size (sparse files in full) and may overshoot up to one 60 s sweep (document XFS hard quota at the gate); transfers hold ~67 MiB JSON + 50 MiB decoded in memory, two at once; after a sandboxd restart a running background process no longer prevents idling; a container death during the watcher's 2 s reconnect is not reported; OCW_SANDBOXD_SWEEP_MS needs compose and env parity (07.8-24) | fixed |  | 2026-10-15T22:14:34.840Z | 2026-10-22T04:13:28.623Z |
+| 248 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | When the org is killed or switched off the bot is not offered the sandbox tool and cannot say why (add a withheld reason killed/sandbox_off, 07.8-10/14/19); a message 1-2 s after a member turns Sandbox on can still get 'not offered' (UI should show applying, 07.8-15); cell-proof.sh PROOF_BUILD=1 still builds the demo's :local tags; e2e-reset.sh label cleanup untested locally | open |  | 2026-10-15T22:38:49.256Z |  |
+| 249 | 07.8 | deviation | apps/api/src/modules/browser |  | MUST FIX (D-11 floor): when an admins/unit_leads 07.5 policy applies to ocw_browser_act, those approvers decide a member's signed-in action instead of the member; signed-in acts must always need the requesting member's approval | fixed |  | 2026-10-21T19:53:39.333Z | 2026-10-21T20:35:28.921Z |
+| 250 | 07.8 | deviation | apps/api/src/modules/browser |  | act answers download:null until 07.8-25; a session counts as loaded by session_id but stored state is not passed to sandboxd until 07.8-21; kill does not close browser contexts in its own tx (rows stay open if sandboxd is down); image-capable model list is hand-kept; approval chip icons reuse package/globe | open |  | 2026-10-21T19:53:39.439Z |  |
+| 251 | 07.8 | deviation | e2e/tests/memory-files.spec.ts |  | FIX IN GATE: memory-files.spec.ts:548 (keyboard and ARIA on desktop) fails intermittently on the phase branch (2 of 3 runs alongside other specs; race between the tab stop and deep-link expansion); passes alone | fixed |  | 2026-10-21T20:05:41.977Z | 2026-10-22T12:38:30.998Z |
+| 252 | 07.8 | deviation | apps/web/components/bots |  | Sandbox file list route has no offset/cursor beyond 500 entries ('{n} more not listed'); Capabilities switches are 20x36 (<44 px, same as the existing Internet row); sandbox state events carry no runtime so a sandbox started outside the API ensure shows 'hardened' until restart; upload dialog does not intercept in-app navigation | open |  | 2026-10-21T20:05:42.084Z |  |
+| 253 | 07.8 | deviation | infra/sandbox/sbx |  | sbx has no HTTP(S)_PROXY env, so curl/pip/npm in the shell ignore the egress proxy unless given -x (allowlisted egress unusable by default); set the proxy env in the sbx spec (07.8-17/24) | fixed |  | 2026-10-21T20:09:53.837Z | 2026-10-22T02:53:29.247Z |
+| 254 | 07.8 | deviation | apps/sandboxd/src/egress/proxy.ts |  | The proxy passes an upstream X-OCW-Egress header through (a site can make its own http page look refused): strip it; a failed policy write to the proxy answers 503 after sandboxd stored it (proxy lags until retry); a recreated proxy restores each bot's egress only on its next ensure | fixed |  | 2026-10-21T20:09:53.930Z | 2026-10-22T12:38:31.073Z |
+| 255 | 07.8 | deviation | apps/sandboxd/src |  | A sandboxd restart forgets its context map (agent answers no_context until it closes after 5 idle min, API must reopen); browserLimits idleStopMs/diskQuotaBytes unused (fixed 5 min); API owes resize mode, browserSandbox and http navigation_refused handling (07.8-16); 24 owes OCW_SANDBOX_BRW_IMAGE/EGRESS_IMAGE/BRW_SECCOMP env and gVisor/amd64 runs | fixed |  | 2026-10-21T20:09:54.014Z | 2026-10-22T04:13:28.548Z |
+| 256 | 07.8 | deviation | apps/api/src/modules/sandbox |  | Package installs run synchronously on the first call of a stopped sandbox (up to 600 s per package, can outlast the plugin deadline); a package reaches a running sandbox only at its next start (UI copy in 07.8-23); newerVersion always null; failed installs notify no admin beyond audit; package audit metadata includes registry name/version/digests | open |  | 2026-10-21T20:12:08.217Z |  |
+| 257 | 07.8 | deviation | apps/web/components/sandbox/settings/limits-form.tsx |  | 07.8-19: the container limits line copies the API CONTAINER_LIMITS because the settings view does not expose them (low) | open |  | 2026-10-22T02:52:51.781Z |  |
+| 258 | 07.8 | deviation | infra/fake-model/fake-sandboxd.mjs |  | 07.8-19: the fake sandboxd always reports gVisor; no switch to fake hardened, Docker too old or container-only runtimes (low) | open |  | 2026-10-22T02:52:51.861Z |  |
+| 259 | 07.8 | deviation | apps/api/src/modules/sandbox |  | SHOULD FIX (07.8-17): the API's sandboxd client uses plain fetch (undici 300 s default); a package install taking 300-540 s fails at the API while sandboxd completes it. Give package install/review an explicit 600 s timeout (07.8-24/28) | fixed |  | 2026-10-22T02:53:29.323Z | 2026-10-22T04:13:28.698Z |
+| 260 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: a sandboxd crash mid review/install leaves its ocw-pnet-* network behind (container and temp volume self-remove); add to 28's orphan sweep | fixed |  | 2026-10-22T02:53:29.401Z | 2026-10-22T09:00:44.780Z |
+| 261 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: the per-bot packages volume has no disk quota of its own (only the sandbox quota policy); record in ADR-0029 soft-quota note (29) | open |  | 2026-10-22T02:53:29.477Z |  |
+| 262 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: when two packages provide the same bin or module name the first on PATH/NODE_PATH wins silently; surface a conflict at review (low) | open |  | 2026-10-22T02:53:29.552Z |  |
+| 263 | 07.8 | deviation | infra/compose |  | MUST (07.8-24): add OCW_SANDBOX_NPM_REGISTRY, OCW_SANDBOX_PYPI_INDEX, OCW_CLAWHUB_URL (must equal the API's) and OCW_SANDBOX_REGISTRIES to sandboxd in compose and Woodpecker | fixed |  | 2026-10-22T02:53:29.628Z | 2026-10-22T04:13:28.471Z |
+| 264 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-17: npm 11.19 warns about allowScripts but still runs install scripts; a future npm enforcing it needs an allow-list (low); Debian packages only unit-tested (VALIDATION manual row) | open |  | 2026-10-22T02:53:29.706Z |  |
+| 265 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-20 (for 21): ActivityStep has no requester, so sign-in and paused rows cannot name the person ("Asked you / Asked Sam" is built and tested, waiting for data) | fixed |  | 2026-10-22T03:14:25.296Z | 2026-10-22T05:37:51.148Z |
+| 266 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-20: activity steps carry no http/https flag, so step hosts show no lock or Not secure (only the card and review do) (low) | open |  | 2026-10-22T03:14:25.387Z |  |
+| 267 | 07.8 | deviation | apps/web/components/browser/bot-activity.tsx |  | 07.8-20: for a top-level channel mention the live label shows in the main list while the reply lands in the thread; a tab opened mid-turn shows no label until the next step (low) | open |  | 2026-10-22T03:14:25.479Z |  |
+| 268 | 07.8 | deviation | apps/sandboxd/src/packages.ts |  | 07.8-23 (medium): no package version listing in sandboxd or the API, so the web version picker is a typed field and "Update to {version}" never appears | open |  | 2026-10-22T03:43:44.118Z |  |
+| 269 | 07.8 | deviation | apps/api/src/modules/sandbox |  | 07.8-23: the package list carries no install failure code (17's timeout cannot show) and no removing count; an approved package with no started sandbox reads Installing and polls every 5 s (low) | open |  | 2026-10-22T03:43:44.197Z |  |
+| 270 | 07.8 | deviation | apps/web/components/ui/sheet.tsx |  | 07.8-23: the shared sheet close button is 32 px on phones (marketplace plugin review sheet too); the packages review sheet has its own 44 px close (low) | open |  | 2026-10-22T03:43:44.276Z |  |
+| 271 | 07.8 | deviation | apps/api/src/modules/browser/takeover.ts |  | 07.8-16 (medium): a takeover lease held by an API instance that died stays until expiry; only a live view reading the row clears it (same cross-organization lister gap as #244) — 28's sweep | fixed |  | 2026-10-22T03:47:12.000Z | 2026-10-22T09:00:44.702Z |
+| 272 | 07.8 | deviation | apps/api/src/modules/browser/live-view.ts |  | 07.8-16: watching resizes the bot's page from 1280x800 to 960x600 (UI-SPEC default); 22/28 decide whether the small default stays (low) | fixed |  | 2026-10-22T03:47:12.076Z | 2026-10-22T05:12:57.096Z |
+| 273 | 07.8 | deviation | packages/contracts/src/browser.ts |  | 07.8-16: the live-view state frame has no browserSandbox, so the floating window cannot show isolation per page (low, 22/26) | waived | 07.8-22: the UI-SPEC never shows isolation in the live window, only on the Browser tab and in Settings | 2026-10-22T03:47:12.153Z | 2026-10-22T05:12:57.169Z |
+| 274 | 07.8 | deviation | infra/fake-model/fake-sandboxd.mjs |  | 07.8-16: a crashed event in the fake sandboxd does not end the frame stream (the real broker does) (low); the live-input Semgrep rule covers only declared types and field names in listed paths (low) | open |  | 2026-10-22T03:47:12.229Z |  |
+| 275 | 07.8 | deviation | apps/sandboxd/src/egress-attach.ts |  | MUST FIX (07.8-24): under gVisor (runsc) Docker's embedded DNS 127.0.0.11 does not answer on bot networks, so sbx/brw cannot resolve sandbox-egress and have no egress at all (fails closed; breaks every gVisor install). Give each sandbox the proxy IP (ExtraHosts or pinned address); then drop failure: ignore on gvisor-browser in .woodpecker/sandbox.yaml | fixed |  | 2026-10-22T04:13:28.773Z | 2026-10-22T05:12:56.931Z |
+| 276 | 07.8 | deviation | infra/fake-model/server.test.mjs |  | MUST FIX: "serves the fake sandboxd behind its token ... exec round trip" gets 409 policy_missing since the fake requires a policy push (red since policyfix); runs in cell-smoke on Woodpecker and GitHub | fixed |  | 2026-10-22T04:13:28.849Z | 2026-10-22T05:12:57.014Z |
+| 277 | 07.8 | unrun-verify | .woodpecker/sandbox.yaml |  | 07.8-24: no real Woodpecker run of sandbox.yaml yet (steps run by hand in dind); record link and duration on first push; full gate:compose --with-sandbox (with Playwright, proxy, backup) not run | open |  | 2026-10-22T04:13:28.921Z |  |
+| 278 | 07.8 | deviation | apps/api/Dockerfile |  | 07.8-24: no retry for pnpm first-use binary download (timed out on Docker Desktop); CI dind keeps docker:dind (~500 MB) between gVisor runs (low) | open |  | 2026-10-22T04:13:28.997Z |  |
+| 279 | 07.8 | deviation | apps/sandboxd/src/egress-attach.ts |  | dnsfix: if the egress proxy restarts with a new IP, a running sandbox keeps the old /etc/hosts entry and has no egress until its next start/restart (fails closed; runc used to follow via Docker DNS) (low); packages smoke does not print its runtime | open |  | 2026-10-22T05:12:46.799Z |  |
+| 280 | 07.8 | deviation | apps/web/components/browser |  | 07.8-22 (medium): non-Latin IME input does not work on the desktop live-view frame during a takeover (paste works); an editable frame would leak composed text into our DOM | open |  | 2026-10-22T05:12:57.253Z |  |
+| 281 | 07.8 | deviation | apps/web/components/browser |  | 07.8-22: a reply on screen keeps its Watch link after the page closes until the list refetches (shows Ended) (low); at 320 px the host truncates early (low) | open |  | 2026-10-22T05:12:57.333Z |  |
+| 282 | 07.8 | deviation | apps/local-runtime |  | 07.8-22: a local-runtime test fails when the repo is checked out outside the home folder (low) | open |  | 2026-10-22T05:12:57.408Z |  |
+| 283 | 07.8 | unrun-verify | infra/sandbox/browser |  | 07.8-21: the brw smoke for the new sandboxd op contextLock (site lock on a member-signed-in page) was not run against the real brw image | open |  | 2026-10-22T05:37:51.226Z |  |
+| 284 | 07.8 | deviation | apps/api/src/modules/browser |  | 07.8-21 (medium): a site that sets a cookie before any login is sealed as signed in; re-seal runs only after each call; a lock failure ends the page as crashed | fixed |  | 2026-10-22T05:37:51.300Z | 2026-10-22T09:00:44.853Z |
+| 285 | 07.8 | deviation | apps/api/src/modules/browser |  | 07.8-21: the 15-minute sign-in expiry can hit a member still in control; a page holding a departed member's cookies lives until the 5-minute idle stop; an expired sign-in delivers no turn to the bot (expired sentence unused) | open |  | 2026-10-22T05:37:51.379Z |  |
+| 286 | 07.8 | deviation | apps/api/src/modules/browser |  | 07.8-21: the Browser tab activity shows the page's current host (low) | fixed |  | 2026-10-22T05:37:51.461Z | 2026-10-22T06:39:03.293Z |
+| 287 | 07.8 | deviation | apps/api/src/modules/browser |  | SHOULD FIX (07.8-27, medium): deleting a bot is a soft delete and the #230 secret clean-up trigger fires only on hard delete, so a deleted bot's sealed sessions stay until expiry or the 7-day purge (listed and revocable, never loaded) — 28 | fixed |  | 2026-10-22T06:39:03.378Z | 2026-10-22T09:00:44.623Z |
+| 288 | 07.8 | deviation | apps/web/components/browser |  | 07.8-27: no "sign-in pending for you" flag on the row so Open live view is never primary; Browser tab polls every 10 s (no realtime); rows before the opened_host migration show the current host; "Stopped on {host}" copy differs from UI-SPEC (low) | open |  | 2026-10-22T06:39:03.462Z |  |
+| 289 | 07.8 | deviation | apps/web/components/browser |  | 07.8-26 (medium, with #280): IME composition on the phone's hidden input stays in the input until compositionend; the hidden input may also fix desktop IME | open |  | 2026-10-22T06:53:46.168Z |  |
+| 290 | 07.8 | deviation | apps/web/components/browser |  | 07.8-26: the live chip refreshes on turn.activity, focus and every 20 s, so a page closed for idleness can show up to 20 s; closing with no open page shows a "Blocked: a page" step (from 20); the AI chat has no chip (low) | open |  | 2026-10-22T06:53:46.251Z |  |
+| 291 | 07.8 | deviation | infra/sandbox/browser |  | 07.8-26: the phone viewport is proven only against the fake sandboxd; the real brw smoke for phone mode is not run | fixed |  | 2026-10-22T06:53:46.333Z | 2026-10-22T09:00:44.997Z |
+| 292 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | MUST FIX (07.8-25, coordinator decision for 28 + ADR-0029): member_data (P-11, D-13) holds only for the turn that loaded the session, but the bot's OpenClaw history in that conversation may still contain what it read. Decision: member_data is sticky per (bot, conversation) once a member session was loaded there, until the bot's history for that conversation is reset; every later turn there carries it (floors, routing, import refusal) | fixed |  | 2026-10-22T06:56:37.815Z | 2026-10-22T09:00:44.543Z |
+| 293 | 07.8 | deviation | apps/api/src/modules/sandbox |  | 07.8-25: a download that only arrives through the event feed (not in the act response) is not stored; audienceCovers checks person by person and refuses above 1,000 (low) | open |  | 2026-10-22T06:56:37.891Z |  |
+| 294 | 07.8 | deviation | apps/api/src/modules/tool-approval |  | 07.8-25: in a plain 07.5 exec approval the generic view does not mask --password=x style flags (only the D-13 view does) (low, 28) | fixed |  | 2026-10-22T06:56:37.968Z | 2026-10-22T09:00:44.925Z |
+| 295 | 07.8 | deviation | infra/sandbox/browser |  | MUST FIX before 29 (07.8-28): pinned Chromium 153.0.8010.12 is an August beta; stable 156.0.8078.47 and several stable security releases are missing. Bump playwright-core (1.64.x ships Chromium 156) or the current stable CfT build, re-pin digests, re-run browser/stack smokes | fixed |  | 2026-10-22T09:00:45.152Z | 2026-10-22T09:40:57.707Z |
+| 296 | 07.8 | deviation | infra/sandbox/browser |  | SHOULD FIX (07.8-28, medium): the first contextOpen on a freshly started brw sometimes does not answer (2 of ~9 starts on Docker Desktop) and the API answers service_unavailable after 15 s; a retry works; brw keeps no logs so it cannot be diagnosed | fixed |  | 2026-10-22T09:00:45.226Z | 2026-10-22T09:40:57.779Z |
+| 297 | 07.8 | deviation | apps/api/src/modules/keychain |  | SHOULD FIX (07.8-28, medium): PUT /keychain/private-hosts does not re-push the sandbox policy to sandboxd; it keeps the old allowlist until the next settings change, kill/resume or restart | fixed |  | 2026-10-22T09:00:45.302Z | 2026-10-22T09:40:57.851Z |
+| 298 | 07.8 | deviation | apps/api/src/modules/agent-channel |  | 07.8-28: confirm a DM can never gain human participants (else another person would decide D-13 approvals over Sam's data); member_data marking (#292) has no reset, so in a DM where a session was loaded every other site asks for approval forever; a page opened unsigned in a marked turn is locked to its host (too strict) (low) | open |  | 2026-10-22T09:00:45.383Z |  |
+| 299 | 07.8 | deviation | infra |  | 07.8-28: bump CI Docker 29.8.2 -> 29.9.2 and local Docker Desktop 29.6.2 (CVE not reachable from a bot) (low) | open |  | 2026-10-22T09:00:45.461Z |  |
+| 300 | 07.8 | deviation | infra/sandbox/browser |  | hardening: nothing watches new stable Chrome releases for brw; each one needs the same bump (CfT stable build, sha256 pinned) — add a scheduled check (low) | open |  | 2026-10-22T09:40:57.925Z |  |
+| 301 | 07.8 | deviation | .woodpecker |  | hardening: rebuild the ocw-ci image for Playwright 1.64.1 browsers; gVisor with Chromium 156 unverified until the first push (gvisor-browser job) | open |  | 2026-10-22T09:40:58.007Z |  |
+| 302 | 07.8 | deviation | apps/api/src/modules/chat |  | hardening: "a DM never gains humans" is enforced only in the API; a DB trigger would be defence in depth (low) | open |  | 2026-10-22T09:40:58.083Z |  |
+| 303 | 07.8 | deviation | apps/web |  | 07.8-29 (medium): useSignIn does not clear the previous session's query cache on sign-in | open |  | 2026-10-22T12:38:31.152Z |  |
+| 304 | 07.8 | deviation | apps/web |  | 07.8-29: other useTopic callers may multiply invalidations the same way /me/permissions did (low) | open |  | 2026-10-22T12:38:31.229Z |  |
 
 ````json
 [
@@ -2993,6 +3068,906 @@ last_updated: 2026-10-15T12:01:49.197Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-15T12:01:49.197Z",
+    "resolved_at": null
+  },
+  {
+    "id": 230,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/db/src/schema/app.ts",
+    "line": null,
+    "description": "Hard-deleting a bot removes its browser_sessions rows but leaves their browser_session secrets; revoke/purge/sweeper in 07.8-21/27 must delete them; nothing cleans browser_sessions when a member leaves the org",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-15T15:08:27.289Z",
+    "resolved_at": "2026-10-22T05:37:51.070Z"
+  },
+  {
+    "id": 231,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/db/src/schema/app.ts",
+    "line": null,
+    "description": "DECIDE in 07.8-18: the app role can change an approved sandbox package's pinned fields (sha256, tree_sha256, lockfile, dependency_count, review_token); add an immutability trigger after approval. Every new secret kind now needs a migration (secrets_kind_check), note in ADR-0029",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-15T15:08:27.379Z",
+    "resolved_at": "2026-10-21T20:12:08.062Z"
+  },
+  {
+    "id": 232,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/contracts/src/sandbox.ts",
+    "line": null,
+    "description": "Wiring left for later plans: turn.activity not registered in realtime EventTypes (07.8-10); SandboxdContextInput.events is loose until tightened to LiveInputFrame (07.8-16); PATCH /agents/:id/capabilities ignores sandbox/browser until 07.8-15",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-15T15:10:12.850Z",
+    "resolved_at": "2026-10-22T03:47:11.925Z"
+  },
+  {
+    "id": 233,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/contracts/src/sandbox.ts",
+    "line": null,
+    "description": "File upload/download/import travel as base64 JSON up to 50 MiB (~67 MiB on the wire): check the body limit or stream (07.8-09/11); cap_reached/tainted answer 403 here vs 409 on 07.4 connector routes, unify in 05/10/14; npm lockfiles with sha1-only integrity fail PackageTreeEntry, refuse with a reason in 17/18",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-15T15:10:12.922Z",
+    "resolved_at": "2026-10-21T20:12:08.140Z"
+  },
+  {
+    "id": 234,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/db/src/schema/app.ts",
+    "line": null,
+    "description": "MUST (07.8-21): app.message_cards kind check and Drizzle enum accept only the 8 old kinds; a sign-in ('browser') card cannot be stored until a new migration (chained after 07.8-02) adds it. ApprovalToolSourceKind lacks a sandbox/browser source (07.8-14; update SOURCE_ICON)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-15T15:23:46.137Z",
+    "resolved_at": "2026-10-22T05:37:50.996Z"
+  },
+  {
+    "id": 235,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src",
+    "line": null,
+    "description": "sandboxd: running processes tracked in memory only (unpollable after a restart, still end at timeout); /tmp/ocw-proc group files not removed; runtime_unavailable and docker_too_old share docker_unavailable; diskBytes 0 until 07.8-09",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T16:42:21.790Z",
+    "resolved_at": null
+  },
+  {
+    "id": 236,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/sandbox",
+    "line": null,
+    "description": "sbx apt versions approved but not pinned in the Dockerfile (later builds pick newer security versions); gVisor path proven by unit tests only until the 07.8-24 CI job; CODEOWNERS lacks apps/sandboxd (07.8-29)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T16:42:21.880Z",
+    "resolved_at": null
+  },
+  {
+    "id": 237,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/sandbox/brw",
+    "line": null,
+    "description": "brw: iframes are outside the snapshot (screenshot masks them whole after human input); a page that rebuilds an input after typing loses the human-typed marker (password type fields stay redacted); live frames to other viewers are unmasked, F-5/U-2 must hold in the API (07.8-16)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-15T16:43:10.209Z",
+    "resolved_at": "2026-10-22T03:47:11.846Z"
+  },
+  {
+    "id": 238,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/sandbox/brw",
+    "line": null,
+    "description": "sandboxd (07.8-13) must strip the context-id tag from type-0 frames and map the new brw codes (paused, internal, maskRects, resize mode); brw proven on arm64 Docker Desktop only, amd64 runc and the gVisor CI job remain (07.8-24); apt not pinned to a snapshot",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T16:43:10.294Z",
+    "resolved_at": null
+  },
+  {
+    "id": 239,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/openclaw-channel/src",
+    "line": null,
+    "description": "API does not send CellProvider.imageModels or turn.maxSandboxCalls yet (07.8-05/14): screenshot reaches no model and the gate uses default 40; sign-in skipped/expired sentences unwired (07.8-21); OpenClaw image rescaling (imageMaxDimensionPx) untested (8x8 fake JPEG, 07.8-13/28)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-15T16:49:17.151Z",
+    "resolved_at": "2026-10-22T09:00:45.076Z"
+  },
+  {
+    "id": 240,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/agent-channel",
+    "line": null,
+    "description": "6 offered sandbox tools have no API route until 07.8-10 (404); confirm GET /cell alsoAllow carries ocw_sandbox_*/ocw_browser_* (plugin withTurnScopedTools); 403 (sandbox/board) vs 409 (07.4 connectors) refusal split: align or record in ADR-0029",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-15T17:21:21.782Z",
+    "resolved_at": "2026-10-15T22:12:53.756Z"
+  },
+  {
+    "id": 241,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/sandbox",
+    "line": null,
+    "description": "Orphan 'starting' reservation rows (API dies between reserve and ensure) hold a cap slot until cleaned (07.8-11); kill does not push policy {killed:true} to sandboxd nor bump settings version (07.8-11); sandbox approval cards read 'Web request' (07.8-14); OCW_SANDBOX_URL/TOKEN missing in e2e-isolated.sh, .woodpecker, compose, .env.example (07.8-08/24)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-15T17:21:21.854Z",
+    "resolved_at": "2026-10-15T21:29:54.137Z"
+  },
+  {
+    "id": 242,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "scripts/guard/guard.test.mjs",
+    "line": null,
+    "description": "guard.test.mjs (Semgrep rule tests) runs neither in CI nor pnpm verify; ocw.raw-egress covers only apps/sandboxd/src/egress; CODEOWNERS lacks packages/egress-policy and apps/sandboxd/src/egress",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T18:33:30.173Z",
+    "resolved_at": null
+  },
+  {
+    "id": 243,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/egress/proxy.ts",
+    "line": null,
+    "description": "Egress proxy: public mode proven by unit tests only (real egress in 07.8-13/24); no per-network tunnel limit; platform names refused by name (not resolved)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T18:33:30.267Z",
+    "resolved_at": null
+  },
+  {
+    "id": 244,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/sandbox",
+    "line": null,
+    "description": "Pending purges and policy re-push after a sandboxd restart reach only orgs with events or a failed purge in this process (needs a SECURITY DEFINER org list or a sandboxd boot event); no 'crashed' stop reason in contract/DB; egress audit hourly dedupe queries audit_events metadata without an index; the event consumer holds a pool connection; fake sandboxd stores files as UTF-8 text (breaks binaries)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T21:29:49.204Z",
+    "resolved_at": null
+  },
+  {
+    "id": 245,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/agent-channel",
+    "line": null,
+    "description": "Sandbox activity steps never carry approvalMessageRoute (07.8-14/20); bot_turn_activity.running stays true for a turn that never replies, web live label needs a timeout (07.8-20); a write body over Fastify's 2 MiB limit returns Fastify's 413 not too_large; shared images show as downloads, no preview (07.8-25); fake sandboxd codes (404 read folder, 409 busy delete) to check against the real one (07.8-08/09)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T22:12:53.836Z",
+    "resolved_at": null
+  },
+  {
+    "id": 246,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src",
+    "line": null,
+    "description": "MUST FIX (fail-open): sandboxd keeps policy, kill state and disk_full in memory; after a sandboxd restart the defaults apply (2 GiB, 15 min idle, NOT killed) until the API re-pushes, and the API only re-pushes for orgs with events. Fix: sandboxd refuses ensure/restart for an org with no policy (409 policy_missing) and the API pushes policy then retries; plus a boot event",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-15T22:14:34.757Z",
+    "resolved_at": "2026-10-21T20:35:29.061Z"
+  },
+  {
+    "id": 247,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src",
+    "line": null,
+    "description": "Soft quota counts apparent size (sparse files in full) and may overshoot up to one 60 s sweep (document XFS hard quota at the gate); transfers hold ~67 MiB JSON + 50 MiB decoded in memory, two at once; after a sandboxd restart a running background process no longer prevents idling; a container death during the watcher's 2 s reconnect is not reported; OCW_SANDBOXD_SWEEP_MS needs compose and env parity (07.8-24)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-15T22:14:34.840Z",
+    "resolved_at": "2026-10-22T04:13:28.623Z"
+  },
+  {
+    "id": 248,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/agent-channel",
+    "line": null,
+    "description": "When the org is killed or switched off the bot is not offered the sandbox tool and cannot say why (add a withheld reason killed/sandbox_off, 07.8-10/14/19); a message 1-2 s after a member turns Sandbox on can still get 'not offered' (UI should show applying, 07.8-15); cell-proof.sh PROOF_BUILD=1 still builds the demo's :local tags; e2e-reset.sh label cleanup untested locally",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-15T22:38:49.256Z",
+    "resolved_at": null
+  },
+  {
+    "id": 249,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser",
+    "line": null,
+    "description": "MUST FIX (D-11 floor): when an admins/unit_leads 07.5 policy applies to ocw_browser_act, those approvers decide a member's signed-in action instead of the member; signed-in acts must always need the requesting member's approval",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-21T19:53:39.333Z",
+    "resolved_at": "2026-10-21T20:35:28.921Z"
+  },
+  {
+    "id": 250,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser",
+    "line": null,
+    "description": "act answers download:null until 07.8-25; a session counts as loaded by session_id but stored state is not passed to sandboxd until 07.8-21; kill does not close browser contexts in its own tx (rows stay open if sandboxd is down); image-capable model list is hand-kept; approval chip icons reuse package/globe",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-21T19:53:39.439Z",
+    "resolved_at": null
+  },
+  {
+    "id": 251,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "e2e/tests/memory-files.spec.ts",
+    "line": null,
+    "description": "FIX IN GATE: memory-files.spec.ts:548 (keyboard and ARIA on desktop) fails intermittently on the phase branch (2 of 3 runs alongside other specs; race between the tab stop and deep-link expansion); passes alone",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-21T20:05:41.977Z",
+    "resolved_at": "2026-10-22T12:38:30.998Z"
+  },
+  {
+    "id": 252,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/bots",
+    "line": null,
+    "description": "Sandbox file list route has no offset/cursor beyond 500 entries ('{n} more not listed'); Capabilities switches are 20x36 (<44 px, same as the existing Internet row); sandbox state events carry no runtime so a sandbox started outside the API ensure shows 'hardened' until restart; upload dialog does not intercept in-app navigation",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-21T20:05:42.084Z",
+    "resolved_at": null
+  },
+  {
+    "id": 253,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/sandbox/sbx",
+    "line": null,
+    "description": "sbx has no HTTP(S)_PROXY env, so curl/pip/npm in the shell ignore the egress proxy unless given -x (allowlisted egress unusable by default); set the proxy env in the sbx spec (07.8-17/24)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-21T20:09:53.837Z",
+    "resolved_at": "2026-10-22T02:53:29.247Z"
+  },
+  {
+    "id": 254,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/egress/proxy.ts",
+    "line": null,
+    "description": "The proxy passes an upstream X-OCW-Egress header through (a site can make its own http page look refused): strip it; a failed policy write to the proxy answers 503 after sandboxd stored it (proxy lags until retry); a recreated proxy restores each bot's egress only on its next ensure",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-21T20:09:53.930Z",
+    "resolved_at": "2026-10-22T12:38:31.073Z"
+  },
+  {
+    "id": 255,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src",
+    "line": null,
+    "description": "A sandboxd restart forgets its context map (agent answers no_context until it closes after 5 idle min, API must reopen); browserLimits idleStopMs/diskQuotaBytes unused (fixed 5 min); API owes resize mode, browserSandbox and http navigation_refused handling (07.8-16); 24 owes OCW_SANDBOX_BRW_IMAGE/EGRESS_IMAGE/BRW_SECCOMP env and gVisor/amd64 runs",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-21T20:09:54.014Z",
+    "resolved_at": "2026-10-22T04:13:28.548Z"
+  },
+  {
+    "id": 256,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/sandbox",
+    "line": null,
+    "description": "Package installs run synchronously on the first call of a stopped sandbox (up to 600 s per package, can outlast the plugin deadline); a package reaches a running sandbox only at its next start (UI copy in 07.8-23); newerVersion always null; failed installs notify no admin beyond audit; package audit metadata includes registry name/version/digests",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-21T20:12:08.217Z",
+    "resolved_at": null
+  },
+  {
+    "id": 257,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/sandbox/settings/limits-form.tsx",
+    "line": null,
+    "description": "07.8-19: the container limits line copies the API CONTAINER_LIMITS because the settings view does not expose them (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:52:51.781Z",
+    "resolved_at": null
+  },
+  {
+    "id": 258,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/fake-model/fake-sandboxd.mjs",
+    "line": null,
+    "description": "07.8-19: the fake sandboxd always reports gVisor; no switch to fake hardened, Docker too old or container-only runtimes (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:52:51.861Z",
+    "resolved_at": null
+  },
+  {
+    "id": 259,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/sandbox",
+    "line": null,
+    "description": "SHOULD FIX (07.8-17): the API's sandboxd client uses plain fetch (undici 300 s default); a package install taking 300-540 s fails at the API while sandboxd completes it. Give package install/review an explicit 600 s timeout (07.8-24/28)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:53:29.323Z",
+    "resolved_at": "2026-10-22T04:13:28.698Z"
+  },
+  {
+    "id": 260,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/packages.ts",
+    "line": null,
+    "description": "07.8-17: a sandboxd crash mid review/install leaves its ocw-pnet-* network behind (container and temp volume self-remove); add to 28's orphan sweep",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:53:29.401Z",
+    "resolved_at": "2026-10-22T09:00:44.780Z"
+  },
+  {
+    "id": 261,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/packages.ts",
+    "line": null,
+    "description": "07.8-17: the per-bot packages volume has no disk quota of its own (only the sandbox quota policy); record in ADR-0029 soft-quota note (29)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:53:29.477Z",
+    "resolved_at": null
+  },
+  {
+    "id": 262,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/packages.ts",
+    "line": null,
+    "description": "07.8-17: when two packages provide the same bin or module name the first on PATH/NODE_PATH wins silently; surface a conflict at review (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:53:29.552Z",
+    "resolved_at": null
+  },
+  {
+    "id": 263,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/compose",
+    "line": null,
+    "description": "MUST (07.8-24): add OCW_SANDBOX_NPM_REGISTRY, OCW_SANDBOX_PYPI_INDEX, OCW_CLAWHUB_URL (must equal the API's) and OCW_SANDBOX_REGISTRIES to sandboxd in compose and Woodpecker",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:53:29.628Z",
+    "resolved_at": "2026-10-22T04:13:28.471Z"
+  },
+  {
+    "id": 264,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/packages.ts",
+    "line": null,
+    "description": "07.8-17: npm 11.19 warns about allowScripts but still runs install scripts; a future npm enforcing it needs an allow-list (low); Debian packages only unit-tested (VALIDATION manual row)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T02:53:29.706Z",
+    "resolved_at": null
+  },
+  {
+    "id": 265,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/contracts/src/browser.ts",
+    "line": null,
+    "description": "07.8-20 (for 21): ActivityStep has no requester, so sign-in and paused rows cannot name the person (\"Asked you / Asked Sam\" is built and tested, waiting for data)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:14:25.296Z",
+    "resolved_at": "2026-10-22T05:37:51.148Z"
+  },
+  {
+    "id": 266,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/contracts/src/browser.ts",
+    "line": null,
+    "description": "07.8-20: activity steps carry no http/https flag, so step hosts show no lock or Not secure (only the card and review do) (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:14:25.387Z",
+    "resolved_at": null
+  },
+  {
+    "id": 267,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/browser/bot-activity.tsx",
+    "line": null,
+    "description": "07.8-20: for a top-level channel mention the live label shows in the main list while the reply lands in the thread; a tab opened mid-turn shows no label until the next step (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:14:25.479Z",
+    "resolved_at": null
+  },
+  {
+    "id": 268,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/packages.ts",
+    "line": null,
+    "description": "07.8-23 (medium): no package version listing in sandboxd or the API, so the web version picker is a typed field and \"Update to {version}\" never appears",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:43:44.118Z",
+    "resolved_at": null
+  },
+  {
+    "id": 269,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/sandbox",
+    "line": null,
+    "description": "07.8-23: the package list carries no install failure code (17's timeout cannot show) and no removing count; an approved package with no started sandbox reads Installing and polls every 5 s (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:43:44.197Z",
+    "resolved_at": null
+  },
+  {
+    "id": 270,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/ui/sheet.tsx",
+    "line": null,
+    "description": "07.8-23: the shared sheet close button is 32 px on phones (marketplace plugin review sheet too); the packages review sheet has its own 44 px close (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:43:44.276Z",
+    "resolved_at": null
+  },
+  {
+    "id": 271,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser/takeover.ts",
+    "line": null,
+    "description": "07.8-16 (medium): a takeover lease held by an API instance that died stays until expiry; only a live view reading the row clears it (same cross-organization lister gap as #244) — 28's sweep",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:47:12.000Z",
+    "resolved_at": "2026-10-22T09:00:44.702Z"
+  },
+  {
+    "id": 272,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser/live-view.ts",
+    "line": null,
+    "description": "07.8-16: watching resizes the bot's page from 1280x800 to 960x600 (UI-SPEC default); 22/28 decide whether the small default stays (low)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:47:12.076Z",
+    "resolved_at": "2026-10-22T05:12:57.096Z"
+  },
+  {
+    "id": 273,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "packages/contracts/src/browser.ts",
+    "line": null,
+    "description": "07.8-16: the live-view state frame has no browserSandbox, so the floating window cannot show isolation per page (low, 22/26)",
+    "status": "waived",
+    "reason": "07.8-22: the UI-SPEC never shows isolation in the live window, only on the Browser tab and in Settings",
+    "recorded_at": "2026-10-22T03:47:12.153Z",
+    "resolved_at": "2026-10-22T05:12:57.169Z"
+  },
+  {
+    "id": 274,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/fake-model/fake-sandboxd.mjs",
+    "line": null,
+    "description": "07.8-16: a crashed event in the fake sandboxd does not end the frame stream (the real broker does) (low); the live-input Semgrep rule covers only declared types and field names in listed paths (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T03:47:12.229Z",
+    "resolved_at": null
+  },
+  {
+    "id": 275,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/egress-attach.ts",
+    "line": null,
+    "description": "MUST FIX (07.8-24): under gVisor (runsc) Docker's embedded DNS 127.0.0.11 does not answer on bot networks, so sbx/brw cannot resolve sandbox-egress and have no egress at all (fails closed; breaks every gVisor install). Give each sandbox the proxy IP (ExtraHosts or pinned address); then drop failure: ignore on gvisor-browser in .woodpecker/sandbox.yaml",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T04:13:28.773Z",
+    "resolved_at": "2026-10-22T05:12:56.931Z"
+  },
+  {
+    "id": 276,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/fake-model/server.test.mjs",
+    "line": null,
+    "description": "MUST FIX: \"serves the fake sandboxd behind its token ... exec round trip\" gets 409 policy_missing since the fake requires a policy push (red since policyfix); runs in cell-smoke on Woodpecker and GitHub",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T04:13:28.849Z",
+    "resolved_at": "2026-10-22T05:12:57.014Z"
+  },
+  {
+    "id": 277,
+    "kind": "unrun-verify",
+    "phase": "07.8",
+    "file": ".woodpecker/sandbox.yaml",
+    "line": null,
+    "description": "07.8-24: no real Woodpecker run of sandbox.yaml yet (steps run by hand in dind); record link and duration on first push; full gate:compose --with-sandbox (with Playwright, proxy, backup) not run",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T04:13:28.921Z",
+    "resolved_at": null
+  },
+  {
+    "id": 278,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/Dockerfile",
+    "line": null,
+    "description": "07.8-24: no retry for pnpm first-use binary download (timed out on Docker Desktop); CI dind keeps docker:dind (~500 MB) between gVisor runs (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T04:13:28.997Z",
+    "resolved_at": null
+  },
+  {
+    "id": 279,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/sandboxd/src/egress-attach.ts",
+    "line": null,
+    "description": "dnsfix: if the egress proxy restarts with a new IP, a running sandbox keeps the old /etc/hosts entry and has no egress until its next start/restart (fails closed; runc used to follow via Docker DNS) (low); packages smoke does not print its runtime",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:12:46.799Z",
+    "resolved_at": null
+  },
+  {
+    "id": 280,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/browser",
+    "line": null,
+    "description": "07.8-22 (medium): non-Latin IME input does not work on the desktop live-view frame during a takeover (paste works); an editable frame would leak composed text into our DOM",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:12:57.253Z",
+    "resolved_at": null
+  },
+  {
+    "id": 281,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/browser",
+    "line": null,
+    "description": "07.8-22: a reply on screen keeps its Watch link after the page closes until the list refetches (shows Ended) (low); at 320 px the host truncates early (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:12:57.333Z",
+    "resolved_at": null
+  },
+  {
+    "id": 282,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/local-runtime",
+    "line": null,
+    "description": "07.8-22: a local-runtime test fails when the repo is checked out outside the home folder (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:12:57.408Z",
+    "resolved_at": null
+  },
+  {
+    "id": 283,
+    "kind": "unrun-verify",
+    "phase": "07.8",
+    "file": "infra/sandbox/browser",
+    "line": null,
+    "description": "07.8-21: the brw smoke for the new sandboxd op contextLock (site lock on a member-signed-in page) was not run against the real brw image",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:37:51.226Z",
+    "resolved_at": null
+  },
+  {
+    "id": 284,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser",
+    "line": null,
+    "description": "07.8-21 (medium): a site that sets a cookie before any login is sealed as signed in; re-seal runs only after each call; a lock failure ends the page as crashed",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:37:51.300Z",
+    "resolved_at": "2026-10-22T09:00:44.853Z"
+  },
+  {
+    "id": 285,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser",
+    "line": null,
+    "description": "07.8-21: the 15-minute sign-in expiry can hit a member still in control; a page holding a departed member's cookies lives until the 5-minute idle stop; an expired sign-in delivers no turn to the bot (expired sentence unused)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:37:51.379Z",
+    "resolved_at": null
+  },
+  {
+    "id": 286,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser",
+    "line": null,
+    "description": "07.8-21: the Browser tab activity shows the page's current host (low)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T05:37:51.461Z",
+    "resolved_at": "2026-10-22T06:39:03.293Z"
+  },
+  {
+    "id": 287,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/browser",
+    "line": null,
+    "description": "SHOULD FIX (07.8-27, medium): deleting a bot is a soft delete and the #230 secret clean-up trigger fires only on hard delete, so a deleted bot's sealed sessions stay until expiry or the 7-day purge (listed and revocable, never loaded) — 28",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:39:03.378Z",
+    "resolved_at": "2026-10-22T09:00:44.623Z"
+  },
+  {
+    "id": 288,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/browser",
+    "line": null,
+    "description": "07.8-27: no \"sign-in pending for you\" flag on the row so Open live view is never primary; Browser tab polls every 10 s (no realtime); rows before the opened_host migration show the current host; \"Stopped on {host}\" copy differs from UI-SPEC (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:39:03.462Z",
+    "resolved_at": null
+  },
+  {
+    "id": 289,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/browser",
+    "line": null,
+    "description": "07.8-26 (medium, with #280): IME composition on the phone's hidden input stays in the input until compositionend; the hidden input may also fix desktop IME",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:53:46.168Z",
+    "resolved_at": null
+  },
+  {
+    "id": 290,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web/components/browser",
+    "line": null,
+    "description": "07.8-26: the live chip refreshes on turn.activity, focus and every 20 s, so a page closed for idleness can show up to 20 s; closing with no open page shows a \"Blocked: a page\" step (from 20); the AI chat has no chip (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:53:46.251Z",
+    "resolved_at": null
+  },
+  {
+    "id": 291,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/sandbox/browser",
+    "line": null,
+    "description": "07.8-26: the phone viewport is proven only against the fake sandboxd; the real brw smoke for phone mode is not run",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:53:46.333Z",
+    "resolved_at": "2026-10-22T09:00:44.997Z"
+  },
+  {
+    "id": 292,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/agent-channel",
+    "line": null,
+    "description": "MUST FIX (07.8-25, coordinator decision for 28 + ADR-0029): member_data (P-11, D-13) holds only for the turn that loaded the session, but the bot's OpenClaw history in that conversation may still contain what it read. Decision: member_data is sticky per (bot, conversation) once a member session was loaded there, until the bot's history for that conversation is reset; every later turn there carries it (floors, routing, import refusal)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:56:37.815Z",
+    "resolved_at": "2026-10-22T09:00:44.543Z"
+  },
+  {
+    "id": 293,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/sandbox",
+    "line": null,
+    "description": "07.8-25: a download that only arrives through the event feed (not in the act response) is not stored; audienceCovers checks person by person and refuses above 1,000 (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:56:37.891Z",
+    "resolved_at": null
+  },
+  {
+    "id": 294,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/tool-approval",
+    "line": null,
+    "description": "07.8-25: in a plain 07.5 exec approval the generic view does not mask --password=x style flags (only the D-13 view does) (low, 28)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T06:56:37.968Z",
+    "resolved_at": "2026-10-22T09:00:44.925Z"
+  },
+  {
+    "id": 295,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/sandbox/browser",
+    "line": null,
+    "description": "MUST FIX before 29 (07.8-28): pinned Chromium 153.0.8010.12 is an August beta; stable 156.0.8078.47 and several stable security releases are missing. Bump playwright-core (1.64.x ships Chromium 156) or the current stable CfT build, re-pin digests, re-run browser/stack smokes",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T09:00:45.152Z",
+    "resolved_at": "2026-10-22T09:40:57.707Z"
+  },
+  {
+    "id": 296,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/sandbox/browser",
+    "line": null,
+    "description": "SHOULD FIX (07.8-28, medium): the first contextOpen on a freshly started brw sometimes does not answer (2 of ~9 starts on Docker Desktop) and the API answers service_unavailable after 15 s; a retry works; brw keeps no logs so it cannot be diagnosed",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T09:00:45.226Z",
+    "resolved_at": "2026-10-22T09:40:57.779Z"
+  },
+  {
+    "id": 297,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/keychain",
+    "line": null,
+    "description": "SHOULD FIX (07.8-28, medium): PUT /keychain/private-hosts does not re-push the sandbox policy to sandboxd; it keeps the old allowlist until the next settings change, kill/resume or restart",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-10-22T09:00:45.302Z",
+    "resolved_at": "2026-10-22T09:40:57.851Z"
+  },
+  {
+    "id": 298,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/agent-channel",
+    "line": null,
+    "description": "07.8-28: confirm a DM can never gain human participants (else another person would decide D-13 approvals over Sam's data); member_data marking (#292) has no reset, so in a DM where a session was loaded every other site asks for approval forever; a page opened unsigned in a marked turn is locked to its host (too strict) (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T09:00:45.383Z",
+    "resolved_at": null
+  },
+  {
+    "id": 299,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra",
+    "line": null,
+    "description": "07.8-28: bump CI Docker 29.8.2 -> 29.9.2 and local Docker Desktop 29.6.2 (CVE not reachable from a bot) (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T09:00:45.461Z",
+    "resolved_at": null
+  },
+  {
+    "id": 300,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "infra/sandbox/browser",
+    "line": null,
+    "description": "hardening: nothing watches new stable Chrome releases for brw; each one needs the same bump (CfT stable build, sha256 pinned) — add a scheduled check (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T09:40:57.925Z",
+    "resolved_at": null
+  },
+  {
+    "id": 301,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": ".woodpecker",
+    "line": null,
+    "description": "hardening: rebuild the ocw-ci image for Playwright 1.64.1 browsers; gVisor with Chromium 156 unverified until the first push (gvisor-browser job)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T09:40:58.007Z",
+    "resolved_at": null
+  },
+  {
+    "id": 302,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/api/src/modules/chat",
+    "line": null,
+    "description": "hardening: \"a DM never gains humans\" is enforced only in the API; a DB trigger would be defence in depth (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T09:40:58.083Z",
+    "resolved_at": null
+  },
+  {
+    "id": 303,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web",
+    "line": null,
+    "description": "07.8-29 (medium): useSignIn does not clear the previous session's query cache on sign-in",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T12:38:31.152Z",
+    "resolved_at": null
+  },
+  {
+    "id": 304,
+    "kind": "deviation",
+    "phase": "07.8",
+    "file": "apps/web",
+    "line": null,
+    "description": "07.8-29: other useTopic callers may multiply invalidations the same way /me/permissions did (low)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-22T12:38:31.229Z",
     "resolved_at": null
   }
 ]

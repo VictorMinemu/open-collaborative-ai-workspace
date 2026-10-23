@@ -25,12 +25,13 @@ import { HttpError } from "./lib/errors";
 import { RedisBus } from "./lib/redis";
 import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
 import { createAgentModule } from "./modules/agent";
-import { createAgentChannelModule } from "./modules/agent-channel";
+import { createAgentChannelModule, currentPhrase } from "./modules/agent-channel";
 import { createAiChatModule } from "./modules/ai-chat";
 import { type ApprovalService, createApprovalModule } from "./modules/approval";
 import { createArtifactModule, type ObjectStorage } from "./modules/artifact";
 import { createAuditService } from "./modules/audit";
 import { createBotCapabilitiesModule, loadCatalog } from "./modules/bot-capabilities";
+import { type BrowserModule, createBrowserModule } from "./modules/browser";
 import { createChatModule, createConversationAccess } from "./modules/chat";
 import { createConnectorsModule } from "./modules/connectors";
 import { createDeviceModule, type DeviceHub } from "./modules/device";
@@ -43,6 +44,7 @@ import { createNotificationModule } from "./modules/notification";
 import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
 import { createPluginsModule } from "./modules/plugins";
 import { createOnlineSet, createRealtimeModule, createRealtimeService } from "./modules/realtime";
+import { createSandboxModule, pushPolicy, type SandboxModule } from "./modules/sandbox";
 import { createSearchModule } from "./modules/search";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createToolApprovalModule, type ToolApprovalService } from "./modules/tool-approval";
@@ -67,6 +69,10 @@ export interface BuiltApp {
   memory: MemoryService;
   /** Per-tool approval policies (07.5-03): the gate (07.5-07) and turn assembly (07.5-11) resolve through it. */
   toolApprovals: ToolApprovalService;
+  /** Bot sandboxes (07.8-05): the domain service and the sandboxd client (null when not configured). */
+  sandbox: SandboxModule;
+  /** Bot browsers (07.8-14): the context module and its `browser` events handler (tests drive their own consumers). */
+  browser: BrowserModule;
   close(): Promise<void>;
 }
 
@@ -291,6 +297,17 @@ export async function buildApp(
     storage: artifactModule.storage,
     approvals: approvals.service,
   });
+  // Phase 07.8: bot sandboxes (D-02 (b), D-09, D-11); built before the Agent Channel, which serves the bots' sandbox
+  // routes with its sandboxd client.
+  const sandbox = createSandboxModule(core);
+  // 07.8-14: the bots' browser contexts; sandboxd's `browser` events update them (host, crash, close).
+  // 07.8-16: and serves the people's live view (frames from sandboxd, the gateway's origins, the activity phrase).
+  const browser = createBrowserModule(core, {
+    events: sandbox.events,
+    client: sandbox.client,
+    allowedOrigins,
+    activityPhrase: currentPhrase,
+  });
   const modules: ApiModule[] = [
     createIdentityModule({
       identity,
@@ -309,11 +326,17 @@ export async function buildApp(
     createSearchModule(core, { modelLabel: (ref) => modelGateway.labelOf(ref) }), // Phase 4: full-text search (CHAT-11, D-04); AI chats of their owner (05-10)
     createModelGatewayModule(core, modelGateway), // Phase 5: AI chat models and ChatGPT plan status
     createAiChatModule(core, { gateway: modelGateway, storage: artifactModule.storage }), // Phase 5: direct AI chat (AICHAT-02/03/07/08)
-    createAgentModule(core, { approvals: approvals.service }), // B2; 07.2: a bot deletion closes its pending approvals
-    createBotCapabilitiesModule(core, { memory }), // Phase 3.1: capabilities, bot policy, governance; 07.2-11: notes on files
+    // B2; 07.2: a bot deletion closes its pending approvals; 07.8-11: and purges its sandbox; 07.8-28: its sessions
+    createAgentModule(core, { approvals: approvals.service, sandbox: sandbox.service, browser }),
+    // Phase 3.1: capabilities, bot policy, governance; 07.2-11: notes on files; 07.8-11: the Sandbox and Browser rows
+    createBotCapabilitiesModule(core, { memory, sandbox: sandbox.service }),
     createMcpModule(core), // Phase 3.1: MCP server registry (D-13)
     createConnectorsModule(core), // Phase 07.4: members' own connector accounts (D-01 … D-03, CONN-01 … CONN-03)
-    createKeychainModule(core), // Phase 07.4: keys bots use by handle (D-04, CONN-05)
+    // Phase 07.4: keys bots use by handle (D-04, CONN-05); 07.8 hardening: a private-host change re-pushes the sandbox
+    // policy, as a settings change does.
+    createKeychainModule(core, {
+      onPrivateHostsChanged: (organizationId) => pushPolicy(core, sandbox.client, organizationId),
+    }),
     createPluginsModule(core), // Phase 3.1: OpenClaw Marketplace (D-14)
     // B2; 06-10: model labels in persona history; 07.2-11: memory tools and memory files in the turn
     createAgentChannelModule(core, {
@@ -321,12 +344,15 @@ export async function buildApp(
       memory,
       workZone: workSession.proposals, // 07.5-08: Work Zone proposals (D-03)
       toolApproval: toolApproval.service, // 07.5-11: the approval decision of every agent action (D-04)
+      sandbox, // 07.8-05: the sandboxd client of the bots' sandbox routes
     }),
     deviceModule, // B3
     workSession, // B3 (built above)
     approvals.module, // Phase 07.2: approvals inbox and decisions (MEM-06)
     createMemoryModule(core, memory), // Phase 07.2: memory scopes, files and history (MEM-01, MEM-02, MEM-07)
     toolApproval.module, // Phase 07.5: approval policies per tool (APPROVE-01)
+    sandbox.module, // Phase 07.8: kill switch, settings, files, the events consumer (05, 11); packages from 18
+    browser.module, // Phase 07.8-14: browser contexts (the bots' routes are the Agent Channel's)
   ];
   for (const m of modules) {
     await app.register(async (scope) => m.register(scope as unknown as App), {
@@ -343,6 +369,8 @@ export async function buildApp(
     approvals: approvals.service,
     memory,
     toolApprovals: toolApproval.service,
+    sandbox,
+    browser,
     async close() {
       await app.close();
       for (const m of modules) await m.close?.();

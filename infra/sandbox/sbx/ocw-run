@@ -1,0 +1,58 @@
+#!/bin/sh
+# ocw-run: the only way sandboxd runs a bot's argv inside `sbx` (07.8-04, D-02). POSIX sh, root-owned, read-only.
+#
+#   ocw-run <id> <timeoutSeconds> -- <argv...>   record this process group as <id>, then run argv under
+#                                                `timeout -s KILL`, which leads its own process group
+#   ocw-run --kill <id>                          SIGKILL the process group recorded as <id>
+#
+# Records live under /tmp/ocw-proc (the container's tmpfs). <id> is sandboxd's opaque process id ([A-Za-z0-9_-]).
+set -eu
+
+DIR=/tmp/ocw-proc
+
+valid_id() {
+  case "$1" in
+    "" | *[!A-Za-z0-9_-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ]
+}
+
+if [ "${1:-}" = "--kill" ]; then
+  id="${2:-}"
+  valid_id "$id" || exit 2
+  pgid="$(cat "$DIR/$id" 2>/dev/null)" || exit 3
+  case "$pgid" in
+    "" | *[!0-9]*) exit 3 ;;
+  esac
+  kill -s KILL -- "-$pgid" 2>/dev/null || true
+  exit 0
+fi
+
+id="${1:-}"
+seconds="${2:-}"
+valid_id "$id" || exit 2
+case "$seconds" in
+  "" | *[!0-9]*) exit 2 ;;
+esac
+shift 2
+if [ "${1:-}" = "--" ]; then shift; fi
+[ "$#" -ge 1 ] || exit 2
+
+umask 077
+mkdir -p "$DIR"
+# Forget the records of process groups that are gone, so /tmp/ocw-proc does not grow with every exec. A group is gone
+# when no process is left in it (`kill -0 -<pgid>`); sandboxd only ever sends --kill for a live record.
+for f in "$DIR"/*; do
+  [ -f "$f" ] || continue
+  pg="$(cat "$f" 2>/dev/null)" || continue
+  case "$pg" in
+    "" | *[!0-9]*)
+      rm -f -- "$f"
+      continue
+      ;;
+  esac
+  kill -0 -- "-$pg" 2>/dev/null || rm -f -- "$f"
+done
+# `exec` keeps this pid; GNU timeout calls setpgid(0, 0), so the group id is this pid and covers argv's children.
+echo "$$" >"$DIR/$id"
+exec timeout -s KILL "$seconds" "$@"

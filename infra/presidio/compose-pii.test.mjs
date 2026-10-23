@@ -126,7 +126,12 @@ describe("pii profile (infra/presidio)", () => {
     () => {
       for (const args of [[], ["--profile", "pii"]]) {
         const cfg = config(REQUIRED, args);
-        assert.deepEqual(Object.keys(cfg.services.api.networks).sort(), ["default", "pii"]);
+        // `sandbox-control` (07.8-24) is the sandbox profile's own internal network, asserted in infra/compose.test.mjs.
+        assert.deepEqual(Object.keys(cfg.services.api.networks).sort(), [
+          "default",
+          "pii",
+          "sandbox-control",
+        ]);
         for (const k of PRESIDIO_VARS) assert.equal(cfg.services.api.environment[k], "", k);
       }
       const on = config(

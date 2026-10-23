@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type {
-  AgentChannelToolCallDecision,
-  AgentChannelToolCallRequest,
-  AgentChannelToolCallResult,
-  TurnContext,
+import {
+  type AgentChannelToolCallDecision,
+  type AgentChannelToolCallRequest,
+  type AgentChannelToolCallResult,
+  CONFINED_TOOL_FLAGS,
+  CONFINED_TOOL_NAMES,
+  SANDBOX_LIMITS,
+  type TurnContext,
 } from "./agent-channel-protocol.js";
 import type { AgentChannelClient } from "./api-client.js";
 import { createToolGuard, registerToolGate, TOOL_GATE_PRIORITY, TOOL_PIN_PRIORITY } from "./tool-guard.js";
@@ -1160,5 +1163,185 @@ describe("the param pin (07.5-04, D-04, Pitfall 3): what the API checked is what
         expect(h?.blockReason).toContain("read-only after untrusted content");
       }
     }
+  });
+});
+
+describe("confined sandbox and browser tools (07.8 D-11 F-7, P-06, P-07)", () => {
+  const confinedTurn = (over: Partial<TurnContext> = {}) =>
+    turn({
+      tools: ["web_search", ...CONFINED_TOOL_NAMES],
+      toolFlags: { web_search: WEB },
+      maxSandboxCalls: 40,
+      ...over,
+    });
+  const begin = (g: ReturnType<typeof createToolGuard>, t: TurnContext = confinedTurn()) =>
+    g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: t, requesterName: "Ana Pérez" });
+
+  it("the fifteen are self-validated: never sent to /tool-calls and never counted against the cap of 8", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    for (const name of CONFINED_TOOL_NAMES) {
+      if (name === "ocw_sandbox_share") continue; // side-effecting: blocked once tainted (below)
+      expect(await g.beforeToolCall(call(name, {}), ctx()), name).toBeUndefined();
+    }
+    expect(fake.requests).toHaveLength(0);
+    expect(g.activeTurn(SESSION)?.calls).toBe(0);
+    expect(g.activeTurn(SESSION)?.sandboxCalls).toBe(14);
+    // The cap of 8 is still whole for everything else.
+    expect(await g.beforeToolCall(call("web_search", { query: "x" }), ctx())).toBeUndefined();
+    expect(g.activeTurn(SESSION)?.calls).toBe(1);
+  });
+
+  it.each([
+    ["ocw_sandbox_exec", true],
+    ["ocw_sandbox_process", true],
+    ["ocw_sandbox_read", true],
+    ["ocw_sandbox_list", true],
+    ["ocw_browser_open", true],
+    ["ocw_browser_snapshot", true],
+    ["ocw_browser_screenshot", true],
+    ["ocw_browser_wait", true],
+    ["ocw_browser_act", true],
+    ["ocw_sandbox_write", false],
+    ["ocw_sandbox_delete", false],
+    ["ocw_sandbox_import", false],
+    ["ocw_sandbox_share", false],
+    ["ocw_browser_signin", false],
+    ["ocw_browser_close", false],
+  ] as const)("%s taints the turn locally: %s", async (name, tainted) => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    expect(await g.beforeToolCall(call(name, {}), ctx())).toBeUndefined();
+    expect(g.activeTurn(SESSION)?.tainted).toBe(tainted);
+  });
+
+  it("the local flags are the contracts' CONFINED_TOOL_FLAGS (parity)", async () => {
+    const contracts = (await import(
+      new URL("../../../packages/contracts/src/bot-capabilities.ts", import.meta.url).href
+    )) as {
+      CONFINED_TOOL_FLAGS: Record<string, { untrustedOutput: boolean; sideEffecting: boolean }>;
+      SANDBOX_TOOL_NAMES: readonly string[];
+      BROWSER_TOOL_NAMES: readonly string[];
+      MAX_SANDBOX_CALLS_PER_TURN: number;
+    };
+    expect([...CONFINED_TOOL_NAMES]).toEqual([
+      ...contracts.SANDBOX_TOOL_NAMES,
+      ...contracts.BROWSER_TOOL_NAMES,
+    ]);
+    for (const name of CONFINED_TOOL_NAMES) {
+      const { untrustedOutput, sideEffecting } = contracts.CONFINED_TOOL_FLAGS[name] ?? {};
+      expect(CONFINED_TOOL_FLAGS[name], name).toEqual({ untrustedOutput, sideEffecting });
+    }
+    expect(SANDBOX_LIMITS.callsPerTurn).toBe(contracts.MAX_SANDBOX_CALLS_PER_TURN);
+  });
+
+  it("ocw_sandbox_share is side-effecting: after taint it is refused with the 07.4 tainted sentence", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    expect(await g.beforeToolCall(call("ocw_sandbox_share", { path: "a" }), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call("ocw_sandbox_read", { path: "a" }), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call("ocw_sandbox_share", { path: "a" }), ctx())).toEqual({
+      block: true,
+      blockReason: "This turn read web or tool content, so it can no longer run tools that change things.",
+    });
+    // Reads and confined writes stay allowed on a tainted turn (nothing leaves the sandbox).
+    expect(await g.beforeToolCall(call("ocw_sandbox_write", { path: "a" }), ctx())).toBeUndefined();
+    expect(
+      await g.beforeToolCall(call("ocw_browser_act", { action: "click", ref: "r1" }), ctx()),
+    ).toBeUndefined();
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("a turn's approval mode lets a tainted share through to its route (the API decides, 07.5)", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(
+      g,
+      confinedTurn({
+        toolFlags: {
+          web_search: WEB,
+          ocw_sandbox_share: { untrustedOutput: false, sideEffecting: true, approval: "when_tainted" },
+        },
+      }),
+    );
+    expect(await g.beforeToolCall(call("ocw_sandbox_exec", { argv: ["id"] }), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call("ocw_sandbox_share", { path: "a" }), ctx())).toBeUndefined();
+    // Self-validated even with an approval policy: the arguments go to /sandbox/share, never /tool-calls.
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("the turn's flags only ever add restrictions: a side-effecting act from the API is blocked after taint", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(
+      g,
+      confinedTurn({
+        toolFlags: {
+          web_search: WEB,
+          ocw_browser_act: { untrustedOutput: false, sideEffecting: true },
+          ocw_sandbox_read: { untrustedOutput: false, sideEffecting: false },
+        },
+      }),
+    );
+    // A turn flag cannot make a confined read trusted.
+    expect(await g.beforeToolCall(call("ocw_sandbox_read", { path: "a" }), ctx())).toBeUndefined();
+    expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+    expect(
+      await g.beforeToolCall(call("ocw_browser_act", { action: "click", ref: "r1" }), ctx()),
+    ).toMatchObject({
+      block: true,
+    });
+  });
+
+  it("a local counter refuses the 41st confined call with the budget sentence (T-07.8-06-04)", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    for (let i = 0; i < 40; i++) {
+      expect(await g.beforeToolCall(call("ocw_sandbox_list", {}), ctx()), `call ${i + 1}`).toBeUndefined();
+    }
+    expect(await g.beforeToolCall(call("ocw_browser_snapshot", {}), ctx())).toEqual({
+      block: true,
+      blockReason:
+        "Tool ocw_browser_snapshot blocked: this turn reached its limit of 40 sandbox and browser calls.",
+    });
+    expect(g.activeTurn(SESSION)?.sandboxCalls).toBe(40);
+    expect(g.activeTurn(SESSION)?.calls).toBe(0);
+  });
+
+  it("the turn's own budget applies when the API sends one; an older API's turn falls back to 40", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g, confinedTurn({ maxSandboxCalls: 2 }));
+    expect(await g.beforeToolCall(call("ocw_sandbox_list", {}), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call("ocw_sandbox_list", {}), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call("ocw_sandbox_list", {}), ctx())).toMatchObject({ block: true });
+    const legacy = confinedTurn();
+    delete legacy.maxSandboxCalls;
+    begin(g, legacy);
+    for (let i = 0; i < 40; i++)
+      expect(await g.beforeToolCall(call("ocw_sandbox_list", {}), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(call("ocw_sandbox_list", {}), ctx())).toMatchObject({ block: true });
+  });
+
+  it("a confined tool outside turn.tools is blocked, and OpenClaw's own exec, read, write, process and browser too", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g, turn());
+    for (const name of [
+      "ocw_sandbox_exec",
+      "ocw_browser_open",
+      "exec",
+      "read",
+      "write",
+      "process",
+      "browser",
+    ]) {
+      expect(await g.beforeToolCall(call(name, {}), ctx()), name).toMatchObject({ block: true });
+    }
+    expect(fake.requests).toHaveLength(0);
   });
 });

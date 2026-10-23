@@ -1,3 +1,9 @@
+// The confined tools' names and refusal codes come from the contracts' source (07.8-08: shared markers, never copied
+// strings). A relative import keeps this file free of package dependencies, so Playwright specs can load it too.
+import { BROWSER_TOOL_NAMES, SANDBOX_TOOL_NAMES } from "../../packages/contracts/src/bot-capabilities";
+import { BrowserRefusal } from "../../packages/contracts/src/browser";
+import { SandboxRefusal } from "../../packages/contracts/src/sandbox";
+
 /**
  * Fake OpenClaw cell plugin — a test double that speaks the Agent Channel API v1 exactly like
  * `apps/openclaw-channel` does (see 01-AGENT-CHANNEL-API.md), without OpenClaw or a model.
@@ -202,6 +208,68 @@ type WorkZoneTool = keyof typeof WORK_ZONE_TOOLS;
 const isWorkZoneTool = (name: string): name is WorkZoneTool => Object.hasOwn(WORK_ZONE_TOOLS, name);
 /** The only fields a proposal carries besides the turn (07.5-10): never a user, a mode, a model or full access. */
 const PROPOSAL_FIELDS = ["projectId", "deviceId", "prompt", "runtime"] as const;
+
+/**
+ * The confined tools (07.8-06): each is a thin caller of its own Agent Channel route, `/sandbox/<verb>` for
+ * `ocw_sandbox_<verb>` and `/browser/<verb>` for `ocw_browser_<verb>` (apps/openclaw-channel's SANDBOX_TOOL_ROUTES and
+ * BROWSER_TOOL_ROUTES), with the turn's ids and the model's arguments only. Never `/tool-calls`.
+ */
+type SandboxTool = (typeof SANDBOX_TOOL_NAMES)[number];
+type BrowserTool = (typeof BROWSER_TOOL_NAMES)[number];
+const isSandboxTool = (name: string): name is SandboxTool =>
+  (SANDBOX_TOOL_NAMES as readonly string[]).includes(name);
+const isBrowserTool = (name: string): name is BrowserTool =>
+  (BROWSER_TOOL_NAMES as readonly string[]).includes(name);
+export const confinedRoute = (tool: SandboxTool | BrowserTool): string =>
+  isSandboxTool(tool)
+    ? `/sandbox/${tool.slice("ocw_sandbox_".length)}`
+    : `/browser/${tool.slice("ocw_browser_".length)}`;
+
+// biome-ignore lint/suspicious/noExplicitAny: loose JSON of the confined routes' answers, rendered field by field
+type Loose = Record<string, any>;
+
+/** One line per confined result, deterministic for specs (outputs trimmed, never an image's bytes). */
+function renderSandbox(tool: SandboxTool, b: Loose): string {
+  switch (tool) {
+    case "ocw_sandbox_exec":
+    case "ocw_sandbox_process":
+      return b.status === "running"
+        ? `running ${b.processId}`
+        : `exit ${b.exitCode}: ${String(b.stdout ?? "").trim()}${b.stderr ? ` | ${String(b.stderr).trim()}` : ""}`;
+    case "ocw_sandbox_read":
+      return `read ${b.path}: ${b.content}`;
+    case "ocw_sandbox_write":
+      return `wrote ${b.path} (${b.size} bytes)`;
+    case "ocw_sandbox_list":
+      return `listed ${(b.entries ?? []).map((e: Loose) => e.name).join(", ") || "(empty)"}`;
+    case "ocw_sandbox_delete":
+      return `deleted ${b.deleted}`;
+    case "ocw_sandbox_share":
+      return `shared ${b.name}`;
+    case "ocw_sandbox_import":
+      return `imported ${b.path}`;
+  }
+}
+
+function renderBrowser(tool: BrowserTool, b: Loose): string {
+  const signed = b.signedIn ? " (signed in)" : "";
+  switch (tool) {
+    case "ocw_browser_open":
+      return `opened ${b.host}${signed}`;
+    case "ocw_browser_snapshot":
+      return `snapshot ${b.host}${signed}: ${b.text}`;
+    case "ocw_browser_act":
+      return `${b.navigated ? "navigated" : "acted"} on ${b.host}${b.download ? ` download ${b.download.name}` : ""}`;
+    case "ocw_browser_screenshot":
+      return `screenshot ${b.host}`;
+    case "ocw_browser_wait":
+      return `waited ${b.ok ? "ok" : "not found"} on ${b.host}`;
+    case "ocw_browser_signin":
+      return `sign-in requested for ${b.host}`;
+    case "ocw_browser_close":
+      return "closed";
+  }
+}
 
 /** The three static connector and keychain tools (07.4-09): self-validated by their own routes, never `/tool-calls`. */
 const CONNECTOR_TOOLS = ["ocw_connector_list", "ocw_connector_call", "ocw_http_request"] as const;
@@ -502,7 +570,8 @@ export class FakeCellPlugin {
    * `/agent-channel/v1/memory/<list|read|write|propose>` (`memoryCall`, 07.2-17); `ocw_connector_list|call` and
    * `ocw_http_request` call `/agent-channel/v1/connectors/list|call` and `/http-requests` (`connectorCall`, 07.4-14);
    * `ocw_work_zone_projects` / `ocw_start_work_zone` call `/agent-channel/v1/work-zone/projects|proposals`
-   * (`workZoneCall`, 07.5-12); any other tool asks `/agent-channel/v1/tool-calls` (with the call's `arguments` only when
+   * (`workZoneCall`, 07.5-12); `ocw_sandbox_*` / `ocw_browser_*` call `/agent-channel/v1/sandbox|browser/<verb>`
+   * (`sandbox` / `browser`, 07.8-08); any other tool asks `/agent-channel/v1/tool-calls` (with the call's `arguments` only when
    * its delivered flags carry `approval`, 07.5 D-01) and, when allowed, reports a result. One line per call:
    * `Tool <offered name>: allowed | denied (<reason>) | approval_required | approval_pending | approval_denied |
    * approval_used`, `Tool <name>: saved | created | moved | waiting set | read | listed | written | proposed |
@@ -537,6 +606,14 @@ export class FakeCellPlugin {
             ? `Tool ${call.tool}: not available for ${m.message.author.displayName} (${withheld.reason})`
             : `Tool ${call.tool}: not offered`,
         );
+        continue;
+      }
+      if (isSandboxTool(name)) {
+        lines.push(`Tool ${call.tool}: ${await this.sandbox(m, name, call.args)}`);
+        continue;
+      }
+      if (isBrowserTool(name)) {
+        lines.push(`Tool ${call.tool}: ${await this.browser(m, name, call.args)}`);
         continue;
       }
       if (name === "ocw_memory_save") {
@@ -603,6 +680,42 @@ export class FakeCellPlugin {
       lines.push(`Tool ${name}: allowed`);
     }
     return lines;
+  }
+
+  /** Every confined route call (07.8-08): the route, the keys sent (never values) and the status it got. */
+  readonly confinedRequests: Array<{ eventId: string; route: string; keys: string[]; status: number }> = [];
+
+  private async confined(m: MentionPayload, tool: SandboxTool | BrowserTool, args: Record<string, unknown>) {
+    const route = confinedRoute(tool);
+    const body = { ...args, eventId: m.eventId, agentId: m.agent.id };
+    const res = await this.request<Loose | null>("POST", route, body);
+    this.confinedRequests.push({
+      eventId: m.eventId,
+      route,
+      keys: Object.keys(body).sort(),
+      status: res.status,
+    });
+    return res;
+  }
+
+  /**
+   * `ocw_sandbox_*` the way apps/openclaw-channel's sandbox-tools.ts sends it (07.8-06): `POST /agent-channel/v1/
+   * sandbox/<verb>` with the mention's `eventId` and `agentId` beside the model's arguments. Answers the rendered result,
+   * `refused (<code>)` when the API refused with a `SandboxRefusal` code, else `failed (<HTTP status>)`.
+   */
+  async sandbox(m: MentionPayload, tool: SandboxTool, args: Record<string, unknown>): Promise<string> {
+    const res = await this.confined(m, tool, args);
+    if (res.status === 200 && res.body) return renderSandbox(tool, res.body);
+    const code = SandboxRefusal.safeParse(res.body?.error?.code);
+    return code.success ? `refused (${code.data})` : `failed (${res.status})`;
+  }
+
+  /** `ocw_browser_*` likewise (`/browser/<verb>`), refusals parsed with `BrowserRefusal`. */
+  async browser(m: MentionPayload, tool: BrowserTool, args: Record<string, unknown>): Promise<string> {
+    const res = await this.confined(m, tool, args);
+    if (res.status === 200 && res.body) return renderBrowser(tool, res.body);
+    const code = BrowserRefusal.safeParse(res.body?.error?.code);
+    return code.success ? `refused (${code.data})` : `failed (${res.status})`;
   }
 
   /** Every connector or keychain route call the simulated tools made, with the status it got (07.4-14). */

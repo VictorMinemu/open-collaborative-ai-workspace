@@ -613,6 +613,46 @@ in ADR-0026 › Validation). On your own stack, with a real connector or MCP ser
 4. From a **phone**, ask your bot to propose a Work Zone session on one of your devices and **Start** it from the card:
    the session must start in Supervised mode, on that device, with the bot's prompt.
 
+## Sandboxes and live browser (Phase 07.8)
+
+Phase 07.8 (ADR-0029, [self-hosting/sandbox.md](self-hosting/sandbox.md)). Each bot gets its own sandbox (files, a
+shell, approved packages) and its own browser that people watch live and take over to sign in. It needs the `sandbox`
+compose profile (INSTALL.md › Bot sandboxes and browser); without it Settings reads *The sandbox service isn't
+reachable*.
+
+1. **Turn it on (Víctor).** Settings › **Sandbox & Browser**: the Isolation card says what the server gives (*Isolated
+   with gVisor* or *Hardened container · weaker isolation*). Turn on *Sandbox & Browser for the organization* and read
+   the dialog's sentence before **Turn on**. Then Bots › a team bot › **Capabilities**: Sandbox and Browser on
+   (*Applying. Ready in a few seconds.*).
+2. **Files (Marta).** DM the bot: "write a CSV with three rows to reports/q3.csv and show it". The reply shows *Used its
+   sandbox · 2 steps*; expand it to see the masked command and its output. Bots › the bot › **Sandbox**: the file is
+   there; preview, download, upload one of yours, delete it. Stop and Restart keep the files.
+3. **The browser (Marta).** Ask the bot to open a public page and summarise it. While it works the chat says *{bot} is
+   reading the page on {host}*; **Watch** opens the small live window (drag it, F6 reaches it). **Expand** shows the
+   large view; only the person who asked gets **Take control**.
+4. **Network rules (Víctor).** Settings › Sandbox & Browser › Network: Shell **Allowlist** with no hosts, then ask the
+   bot to `curl` a site: refused, and the activity says so. Add the host and ask again.
+5. **A package (Víctor).** Sandbox packages › **Add package** › npm, `left-pad`, `1.3.0` › Review: the sheet shows the
+   digest, *No dependencies* and the risk. **Approve**; the row reads *Installing* until the bot's sandbox next starts
+   (Stop and Restart it), then *Installed in 1 bot*.
+6. **Stop everything (Víctor).** Stop everything › confirm: the red banner names you; the bot answers that an admin
+   stopped all sandboxes. **Resume**.
+
+**Owner check** (never run by an agent: it needs a real site and your own account; record the result in
+`.planning/phases/07.8-bot-sandboxes-plugins-and-live-browser/07.8-VALIDATION.md` › Manual-Only Verifications and in
+ADR-0029 › Validation). On your own stack with the `sandbox` profile and a real model:
+
+1. In your DM with a bot that has Browser on, ask it to open a page of a site of your choice that needs your account
+   and do something there (e.g. "open my invoices on {site} and tell me the latest one").
+2. The bot posts **Sign in needed** with the site's host. **Open and sign in**: the large view opens in control
+   (*{bot} is paused*). Sign in yourself, including any one-time code, then **Hand back**.
+3. The card reads *Signed in until {date}* and the bot continues signed in and answers.
+4. Check: a second person who can read that conversation sees *Private browsing for {you}* and no page; your password
+   appears nowhere in the bot's reply or its activity; Settings › **Keychain** › *Browser sessions* lists the site with
+   that bot; ask the bot to open another site: it asks you first. **Revoke** the sign-in and ask again: the bot is
+   signed out.
+5. Repeat steps 2–3 from a **phone** (the full-screen sheet, the keyboard button, the system Back).
+
 ## Troubleshooting
 
 | Symptom | Fix |

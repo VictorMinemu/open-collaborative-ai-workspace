@@ -4,6 +4,7 @@ import { Id, IsoDateTime } from "./common";
 import { MemberAccountResourceKind } from "./connectors";
 import { MEMORY_LIMITS, MemoryPath, MemoryScopeKind } from "./memory";
 import { Permission } from "./permissions";
+import { SANDBOX_LIMITS } from "./sandbox";
 
 /**
  * Bot capabilities (Phase 3.1, D-06 … D-08; BOT-04, BOT-05, BOT-10). Defined ONCE here; the API computes
@@ -40,13 +41,35 @@ export const BotCapabilities = z.object({
   replyMode: ReplyMode,
   /** Turns per UTC day (D-11). */
   dailyLimit: z.number().int().min(1).max(MAX_DAILY_LIMIT),
+  /**
+   * Phase 07.8 (D-12): the per-bot switches of the confined tools, off by default. A stored object without them parses
+   * as off. Effective only with the organization switch, no kill, the module allowed for the human and agent ∩ human.
+   */
+  sandbox: z.boolean().default(false),
+  browser: z.boolean().default(false),
 });
 export type BotCapabilities = z.infer<typeof BotCapabilities>;
 
-/** D-06 defaults per bot scope. */
+/** D-06 defaults per bot scope (07.8 D-12: Sandbox and Browser off for every bot). */
 export const DEFAULT_CAPABILITIES: Record<AgentScope, BotCapabilities> = {
-  team: { internet: false, memory: false, dateTime: true, replyMode: "mentions", dailyLimit: 100 },
-  personal: { internet: false, memory: true, dateTime: true, replyMode: "mentions", dailyLimit: 30 },
+  team: {
+    internet: false,
+    memory: false,
+    dateTime: true,
+    replyMode: "mentions",
+    dailyLimit: 100,
+    sandbox: false,
+    browser: false,
+  },
+  personal: {
+    internet: false,
+    memory: true,
+    dateTime: true,
+    replyMode: "mentions",
+    dailyLimit: 30,
+    sandbox: false,
+    browser: false,
+  },
 };
 
 // ---------------------------------------------------------------- organization policy
@@ -179,6 +202,18 @@ export const BotUsage = z.object({
 });
 export type BotUsage = z.infer<typeof BotUsage>;
 
+/**
+ * Phase 07.8 (R11): one per-bot confined switch as the bot page shows it. `available` is false while something above
+ * the bot stands in the way: the organization switch (`org_off`), the kill switch, the module for this viewer or
+ * sandboxd being down.
+ */
+export const ConfinedCapabilityState = z.object({
+  enabled: z.boolean(),
+  available: z.boolean(),
+  reason: z.enum(["org_off", "killed", "module_off", "service_down"]).nullable(),
+});
+export type ConfinedCapabilityState = z.infer<typeof ConfinedCapabilityState>;
+
 /** `GET /api/v1/agents/:id/capabilities` — toggles, the effective result for the caller, tools and usage. */
 export const BotCapabilityView = z.object({
   agentId: Id,
@@ -195,11 +230,18 @@ export const BotCapabilityView = z.object({
   /** Highest `dailyLimit` this bot accepts: the org's personal maximum for personal bots. */
   dailyLimitMax: z.number().int().positive(),
   viewerCan: z.array(Permission),
+  /** Phase 07.8 (R11): the Sandbox and Browser rows; absent on older payloads. */
+  confined: z.object({ sandbox: ConfinedCapabilityState, browser: ConfinedCapabilityState }).optional(),
 });
 export type BotCapabilityView = z.infer<typeof BotCapabilityView>;
 
-/** `PATCH /api/v1/agents/:id/capabilities`. `tools`, when present, REPLACES the bot's grant set. */
+/**
+ * `PATCH /api/v1/agents/:id/capabilities`. `tools`, when present, REPLACES the bot's grant set. The 07.8 switches are
+ * plain optionals here: a patch that does not name them never resets them to their default.
+ */
 export const UpdateBotCapabilitiesRequest = BotCapabilities.partial().extend({
+  sandbox: z.boolean().optional(),
+  browser: z.boolean().optional(),
   tools: z.array(ToolGrant).max(200).optional(),
 });
 export type UpdateBotCapabilitiesRequest = z.infer<typeof UpdateBotCapabilitiesRequest>;
@@ -273,6 +315,10 @@ export const TurnWithheldReason = z.enum([
   "shared_with_group",
   "denied_for_you",
   "member_account",
+  // 07.8-14 (additive): the bot's sandbox or browser is switched on, but the organization's Sandbox & Browser switch is
+  // off (`sandbox_off`) or an admin stopped every sandbox and browser (`killed`), so the bot can say why.
+  "sandbox_off",
+  "killed",
 ]);
 export type TurnWithheldReason = z.infer<typeof TurnWithheldReason>;
 
@@ -324,6 +370,8 @@ export const TurnContext = z.object({
   withheld: z.array(TurnWithheld).max(64).optional(),
   /** Phase 07.2: memory files for this turn; optional so older payloads parse (`memory` stays for compatibility). */
   memoryFiles: z.array(TurnMemoryFile).max(2).optional(),
+  /** Phase 07.8 (D-11 F-7): sandbox and browser calls this turn may make; absent on older payloads. */
+  maxSandboxCalls: z.number().int().optional(),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -363,10 +411,99 @@ export const BUILTIN_TOOLS = {
    */
   workZoneProjects: "ocw_work_zone_projects",
   startWorkZone: "ocw_start_work_zone",
+  /**
+   * Phase 07.8 (D-02, P-07): the confined tools. Each posts to the Agent Channel API, which decides and audits the call
+   * and runs it in the bot's own sandbox (`sandboxd`). Listed here so `isDangerousToolName` never refuses them although
+   * their names hold `exec`, `process` or `browser` (Pitfall 2). There is no page-script, DOM, cookie, storage, HAR or
+   * network-log tool, and no tool takes a selector or a script.
+   */
+  sandboxExec: "ocw_sandbox_exec",
+  sandboxProcess: "ocw_sandbox_process",
+  sandboxRead: "ocw_sandbox_read",
+  sandboxWrite: "ocw_sandbox_write",
+  sandboxList: "ocw_sandbox_list",
+  sandboxDelete: "ocw_sandbox_delete",
+  sandboxShare: "ocw_sandbox_share",
+  sandboxImport: "ocw_sandbox_import",
+  browserOpen: "ocw_browser_open",
+  browserSnapshot: "ocw_browser_snapshot",
+  browserAct: "ocw_browser_act",
+  browserScreenshot: "ocw_browser_screenshot",
+  browserWait: "ocw_browser_wait",
+  browserSignIn: "ocw_browser_signin",
+  browserClose: "ocw_browser_close",
 } as const;
 
 export const MAX_TOOL_CALLS_PER_TURN = 8;
 export const MAX_WEB_CALLS_PER_TURN = 5;
+
+// ---------------------------------------------------------------- confined tools (Phase 07.8)
+
+export const SANDBOX_TOOL_NAMES = [
+  BUILTIN_TOOLS.sandboxExec,
+  BUILTIN_TOOLS.sandboxProcess,
+  BUILTIN_TOOLS.sandboxRead,
+  BUILTIN_TOOLS.sandboxWrite,
+  BUILTIN_TOOLS.sandboxList,
+  BUILTIN_TOOLS.sandboxDelete,
+  BUILTIN_TOOLS.sandboxShare,
+  BUILTIN_TOOLS.sandboxImport,
+] as const;
+export type SandboxToolName = (typeof SANDBOX_TOOL_NAMES)[number];
+
+export const BROWSER_TOOL_NAMES = [
+  BUILTIN_TOOLS.browserOpen,
+  BUILTIN_TOOLS.browserSnapshot,
+  BUILTIN_TOOLS.browserAct,
+  BUILTIN_TOOLS.browserScreenshot,
+  BUILTIN_TOOLS.browserWait,
+  BUILTIN_TOOLS.browserSignIn,
+  BUILTIN_TOOLS.browserClose,
+] as const;
+export type BrowserToolName = (typeof BROWSER_TOOL_NAMES)[number];
+
+export type ConfinedToolName = SandboxToolName | BrowserToolName;
+
+/**
+ * What a confined tool needs once a member's sealed browser session was loaded in the turn (D-13, P-18;
+ * `agent_turns.member_data` is true): `cross_site` = the requester's approval before reaching a host other than the
+ * session's site (an `ocw_browser_open` there, or an `ocw_browser_act` the site lock reports as a blocked navigation);
+ * `egress_exec` = the requester's approval before every call while the sandbox shell's egress mode is not `off`;
+ * `none` = no extra rule. Personal and team bots alike. The approval is 07.5's card with floor `always`, approver =
+ * the requester, a 15-minute expiry.
+ */
+export const MemberDataRule = z.enum(["none", "cross_site", "egress_exec"]);
+export type MemberDataRule = z.infer<typeof MemberDataRule>;
+
+export const ConfinedToolFlags = TurnToolFlags.extend({ memberData: MemberDataRule });
+export type ConfinedToolFlags = z.infer<typeof ConfinedToolFlags>;
+
+/**
+ * Static taint flags of the confined tools (D-11 F-7, Pattern 4) and their D-13 rule. Confined writes are not
+ * side-effecting (nothing leaves the sandbox); `ocw_sandbox_share` is (a file becomes a conversation attachment).
+ * `ocw_browser_act` is side-effecting only while a member session is loaded for the current origin: the API decides
+ * that per call (07.8-14), so the static flag stays false. 07.5 approval policies apply on top (strictest wins).
+ */
+export const CONFINED_TOOL_FLAGS: Record<ConfinedToolName, ConfinedToolFlags> = {
+  ocw_sandbox_exec: { untrustedOutput: true, sideEffecting: false, memberData: "egress_exec" },
+  ocw_sandbox_process: { untrustedOutput: true, sideEffecting: false, memberData: "none" },
+  ocw_sandbox_read: { untrustedOutput: true, sideEffecting: false, memberData: "none" },
+  ocw_sandbox_write: { untrustedOutput: false, sideEffecting: false, memberData: "none" },
+  ocw_sandbox_list: { untrustedOutput: true, sideEffecting: false, memberData: "none" },
+  ocw_sandbox_delete: { untrustedOutput: false, sideEffecting: false, memberData: "none" },
+  ocw_sandbox_share: { untrustedOutput: false, sideEffecting: true, memberData: "none" },
+  ocw_sandbox_import: { untrustedOutput: false, sideEffecting: false, memberData: "none" },
+  ocw_browser_open: { untrustedOutput: true, sideEffecting: false, memberData: "cross_site" },
+  ocw_browser_snapshot: { untrustedOutput: true, sideEffecting: false, memberData: "none" },
+  ocw_browser_act: { untrustedOutput: true, sideEffecting: false, memberData: "cross_site" },
+  ocw_browser_screenshot: { untrustedOutput: true, sideEffecting: false, memberData: "none" },
+  ocw_browser_wait: { untrustedOutput: true, sideEffecting: false, memberData: "none" },
+  ocw_browser_signin: { untrustedOutput: false, sideEffecting: false, memberData: "none" },
+  ocw_browser_close: { untrustedOutput: false, sideEffecting: false, memberData: "none" },
+};
+
+/** Sandbox and browser calls per turn, separate from the cap of 8 (D-11 F-7). */
+export const MAX_SANDBOX_CALLS_PER_TURN = SANDBOX_LIMITS.callsPerTurn;
 
 // ---------------------------------------------------------------- dangerous tools (D-08, Pitfall 3)
 
@@ -403,7 +540,22 @@ export const DANGEROUS_TOOL_NAMES: readonly string[] = [
   "group:media",
 ];
 
+/**
+ * Phase 07.8 (D-03, D-11): names refused even for a tool hosted in a bot's sandbox: platform administration
+ * (`openclaw`, `gateway`, `nodes`, `presence`, `session(s)_*`), meta-tools that reach any tool, messaging outside the
+ * Agent Channel API, the hosted paid `code_execution` / `x_search` and the node `canvas`, plus every `group:*`. This is
+ * `DANGEROUS_TOOL_NAMES` without the shell, file and browser names the sandbox confines.
+ */
+export const SANDBOX_REFUSED_TOOL_NAMES: readonly string[] = DANGEROUS_TOOL_NAMES.filter(
+  (n) => !["apply_patch", "edit", "exec", "ls", "process", "read", "write", "browser"].includes(n),
+);
+
+/** Where a tool runs: the OpenClaw cell (default) or a bot's sandbox (07.8 sandbox packages). */
+export const ToolHost = z.enum(["cell", "sandbox"]);
+export type ToolHost = z.infer<typeof ToolHost>;
+
 const DANGEROUS_EXACT = new Set(DANGEROUS_TOOL_NAMES.map((n) => n.toLowerCase()));
+const SANDBOX_REFUSED_EXACT = new Set(SANDBOX_REFUSED_TOOL_NAMES.map((n) => n.toLowerCase()));
 const BUILTIN_NAMES = new Set<string>(Object.values(BUILTIN_TOOLS));
 
 /** Shell / process execution. */
@@ -471,16 +623,23 @@ function words(name: string): string[] {
  * every `group:*`, and word patterns for shell/exec/spawn/process/terminal, filesystem write/edit/delete/move,
  * browser/computer/canvas/screen control, gateway/node/config administration and outbound messaging. Never
  * true for the `BUILTIN_TOOLS`.
+ *
+ * Phase 07.8 (D-03): `host: "sandbox"` is for tools that run only inside a bot's sandbox. It skips the shell, file and
+ * browser-control word sets and uses `SANDBOX_REFUSED_TOOL_NAMES` as the exact list; administration, messaging,
+ * `session(s)_*`, `group:*` and config mutation stay refused. The default host (`cell`) is unchanged.
  */
-export function isDangerousToolName(name: string): boolean {
+export function isDangerousToolName(name: string, host: ToolHost = "cell"): boolean {
   const lower = name.trim().toLowerCase();
   if (BUILTIN_NAMES.has(lower)) return false;
-  if (DANGEROUS_EXACT.has(lower) || lower.startsWith("group:")) return true;
+  const confined = host === "sandbox";
+  if ((confined ? SANDBOX_REFUSED_EXACT : DANGEROUS_EXACT).has(lower) || lower.startsWith("group:"))
+    return true;
   if (lower.startsWith("session_") || lower.startsWith("sessions_")) return true;
   const w = words(name);
   const has = (set: Set<string>) => w.some((x) => set.has(x));
-  if (has(SHELL_WORDS) || has(CONTROL_WORDS) || has(ADMIN_WORDS) || has(MESSAGING_WORDS)) return true;
-  if (has(FS_WORDS) && has(FS_MUTATIONS)) return true;
+  if (has(ADMIN_WORDS) || has(MESSAGING_WORDS)) return true;
+  if (!confined && (has(SHELL_WORDS) || has(CONTROL_WORDS))) return true;
+  if (!confined && has(FS_WORDS) && has(FS_MUTATIONS)) return true;
   if (has(CONFIG_WORDS) && has(CONFIG_MUTATIONS)) return true;
   return false;
 }

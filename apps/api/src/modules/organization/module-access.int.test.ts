@@ -297,6 +297,9 @@ describe("the read model and inheritance through the API (admin)", () => {
       ["ai_chats", "on", null],
       ["bots", "on", null],
       ["memory", "on", null],
+      // 07.8-30: Sandbox and Browser (no seeded rows, P-05).
+      ["sandbox", "on", null],
+      ["browser", "on", null],
     ]);
     expect((v.people as Json[]).map((p) => [p.displayName, p.canEdit])).toEqual([
       ["Ada Admin", true],
@@ -365,6 +368,8 @@ describe("the read model and inheritance through the API (admin)", () => {
             { module: "ai_chats", state: "on", inherited: null },
             { module: "bots", state: "on", inherited: null },
             { module: "memory", state: "on", inherited: null },
+            { module: "sandbox", state: "on", inherited: null },
+            { module: "browser", state: "on", inherited: null },
           ],
         },
       ]);
@@ -427,6 +432,20 @@ describe("the read model and inheritance through the API (admin)", () => {
     expect(stateOf(await ok(put(victor, "memory", backendId, everyone, true)), "memory").state).toBe("on");
     expect((await rowsAt(backendId, everyone)).map((r) => r.id)).toEqual([folder]);
     await su.query("delete from app.permission_rules where id = $1", [folder]);
+  });
+
+  it("Sandbox and Browser turn off and on like every module: one deny row per pattern (Phase 07.8, P-05)", async () => {
+    for (const [module, pattern] of [
+      ["sandbox", "sandbox.*"],
+      ["browser", "browser.*"],
+    ] as const) {
+      expect(stateOf(await ok(view(victor, backendId)), module).state).toBe("on");
+      expect(stateOf(await ok(put(victor, module, backendId, everyone, false)), module).state).toBe("off");
+      const rows = await rowsAt(backendId, everyone);
+      expect(rows.map((r) => r.permission)).toEqual([pattern]);
+      expect(stateOf(await ok(put(victor, module, backendId, everyone, true)), module).state).toBe("on");
+      expect(await rowsAt(backendId, everyone)).toEqual([]);
+    }
   });
 });
 

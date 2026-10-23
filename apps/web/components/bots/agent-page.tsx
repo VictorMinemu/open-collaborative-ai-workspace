@@ -5,17 +5,21 @@ import { ArrowUpRight, Bot, NotebookText, RotateCcw } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { BrowserTab } from "@/components/browser/browser-tab";
 import { EmptyState } from "@/components/common/empty-state";
 import { UNIT_KIND_LABEL } from "@/components/members/unit-chip";
 import { FileSkeleton, focusHeadingNext, MemoryFile } from "@/components/memory/memory-file";
 import { MEMORY_SPLIT_QUERY } from "@/components/memory/memory-shell";
 import { MemoryTree, type OpenVia, useMemoryTreeState } from "@/components/memory/memory-tree";
+import { SandboxTab, sandboxTabVisible } from "@/components/sandbox/sandbox-tab";
 import { ModuleOff, useModule } from "@/components/shell/module-gate";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useMediaQuery } from "@/hooks/use-media-query";
+import { isApiError } from "@/lib/api";
 import { useAgents, useBotsRealtime } from "@/lib/bots-queries";
+import { useBotCapabilities } from "@/lib/capability-queries";
 import {
   useEnsureMemoryScope,
   useMemoryFilesByScope,
@@ -24,6 +28,7 @@ import {
 } from "@/lib/memory-queries";
 import { folderNodeId, type MemoryNode, memoryAncestorIds, memoryHref, scopeNodeId } from "@/lib/memory-tree";
 import { useMe, useMembers } from "@/lib/queries";
+import { useSandboxStatus } from "@/lib/sandbox-queries";
 import { cn } from "@/lib/utils";
 import { BotAvatar, ScopeBadge } from "./bot-bits";
 import { canMessage, MessageBotButton, PersonalBadge } from "./bot-card";
@@ -37,11 +42,18 @@ import { CapabilitiesPanel } from "./capabilities-panel";
  *   has private memory with it). From 1024 px the tree sits next to a read-only file pane with "Open in Memory"; below,
  *   the page is the tree and a file opens the viewer.
  * - Capabilities: the capabilities panel forced read-only, owners included (settings change in the bot's sheet).
+ * - Sandbox (07.8-15, SBX-05, UI-SPEC Surface 3): status, limits, Stop / Restart and the file browser, only for people
+ *   the API lets manage this bot's sandbox (its status answers; a 404 means the tab is absent) with the Sandbox module
+ *   on for them, and not while the organization has Sandbox & Browser off for a bot that never had one.
+ *   `?tab=sandbox` falls back to Memory when the tab is absent.
+ * - Browser (07.8-27, BRW-02, D-06, UI-SPEC § 3.6): the pages the bot has open that the viewer may watch and the
+ *   host-level activity in conversations they read, after Sandbox, while the Browser module is on for the viewer (the
+ *   API filters every row). `?tab=browser` falls back to Memory when the tab is absent.
  * A bot the viewer may not see (someone else's personal bot, admins included; ADR-0010) is the not-found state: the
  * bots list the API returns is the authority, and an unknown id never reaches the memory API.
  */
 
-type AgentTab = "memory" | "capabilities";
+type AgentTab = "memory" | "capabilities" | "sandbox" | "browser";
 
 export function AgentPage({ agentId }: { agentId: string }) {
   useBotsRealtime();
@@ -89,8 +101,37 @@ function LoadedAgentPage({ agent }: { agent: Agent }) {
   const pathname = usePathname();
   const search = useSearchParams();
   const split = useMediaQuery(MEMORY_SPLIT_QUERY, true);
-  const tab: AgentTab = search.get("tab") === "capabilities" ? "capabilities" : "memory";
   const memoryModule = useModule("memory");
+  const sandboxModule = useModule("sandbox");
+  const browserModule = useModule("browser");
+  const asked = search.get("tab");
+  // The status decides the tab: the API answers only people who may manage this bot's sandbox (404 otherwise).
+  const sandboxStatus = useSandboxStatus(agent.id, {
+    enabled: sandboxModule !== "off",
+    poll: asked === "sandbox",
+  });
+  const caps = useBotCapabilities(agent.id);
+  const showSandbox =
+    sandboxModule !== "off" &&
+    sandboxTabVisible({
+      asked: asked === "sandbox",
+      status: sandboxStatus,
+      refused: sandboxStatus.isError && isApiError(sandboxStatus.error, 404),
+      orgOff: caps.data?.confined?.sandbox.reason === "org_off",
+      capsSettled: !caps.isPending,
+    });
+  const showBrowser = browserModule !== "off";
+  const tab: AgentTab =
+    asked === "capabilities"
+      ? "capabilities"
+      : asked === "sandbox" && showSandbox
+        ? "sandbox"
+        : asked === "browser" && showBrowser
+          ? "browser"
+          : "memory";
+  const tabCount = 2 + (showSandbox ? 1 : 0) + (showBrowser ? 1 : 0);
+  // Two tabs keep the 07.2 halves below 1024; more use the underline row, spread over the width (UI-SPEC IA).
+  const triggerClass = split ? "lg:min-h-10" : tabCount > 2 ? "flex-1 justify-center" : "justify-center";
 
   return (
     <div data-testid="agent-page" className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -99,22 +140,30 @@ function LoadedAgentPage({ agent }: { agent: Agent }) {
         variant="underline"
         value={tab}
         onValueChange={(next) =>
-          router.replace(next === "capabilities" ? `${pathname}?tab=capabilities` : pathname, {
-            scroll: false,
-          })
+          router.replace(next === "memory" ? pathname : `${pathname}?tab=${next}`, { scroll: false })
         }
         className="min-h-0 flex-1"
       >
         <TabsList
           aria-label={`${agent.name} sections`}
-          className={cn("shrink-0", split ? "px-4" : "grid grid-cols-2")}
+          className={cn("shrink-0", split ? "px-4" : tabCount > 2 ? null : "grid grid-cols-2")}
         >
-          <TabsTrigger value="memory" className={split ? "lg:min-h-10" : "justify-center"}>
+          <TabsTrigger value="memory" className={triggerClass}>
             Memory
           </TabsTrigger>
-          <TabsTrigger value="capabilities" className={split ? "lg:min-h-10" : "justify-center"}>
+          <TabsTrigger value="capabilities" className={triggerClass}>
             Capabilities
           </TabsTrigger>
+          {showSandbox ? (
+            <TabsTrigger value="sandbox" className={triggerClass} data-testid="agent-tab-sandbox">
+              Sandbox
+            </TabsTrigger>
+          ) : null}
+          {showBrowser ? (
+            <TabsTrigger value="browser" className={triggerClass} data-testid="agent-tab-browser">
+              Browser
+            </TabsTrigger>
+          ) : null}
         </TabsList>
         <TabsContent value="memory" className="flex min-h-0 flex-col">
           {memoryModule === "off" ? (
@@ -123,6 +172,16 @@ function LoadedAgentPage({ agent }: { agent: Agent }) {
             <AgentMemory agent={agent} split={split} />
           )}
         </TabsContent>
+        {showSandbox ? (
+          <TabsContent value="sandbox" className="flex min-h-0 flex-col">
+            <SandboxTab agent={agent} status={sandboxStatus} />
+          </TabsContent>
+        ) : null}
+        {showBrowser ? (
+          <TabsContent value="browser" className="flex min-h-0 flex-col">
+            <BrowserTab agent={agent} />
+          </TabsContent>
+        ) : null}
         <TabsContent value="capabilities" className="scrollbar-thin overflow-y-auto">
           <div className="mx-auto w-full max-w-[760px] px-4 py-6 sm:px-6">
             <p className="mb-3 text-muted-foreground text-sm" data-testid="agent-capabilities-note">

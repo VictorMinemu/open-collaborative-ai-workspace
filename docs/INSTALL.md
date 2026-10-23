@@ -70,9 +70,9 @@ The minimal stack in `compose.yaml`:
 | `web` | Next.js app | `3000` |
 | `openclaw` | The OpenClaw cell for server-side agents | none |
 
-Four optional profiles stay off until they are named in `COMPOSE_PROFILES` in `.env`: `proxy`, `observability`,
-`vault` and `pii`. The `pnpm ocw enable …` commands below turn on the first three without a reinstall; `pii` is two
-lines in `.env` (see below). Telemetry is off unless an OTLP endpoint is configured.
+Five optional profiles stay off until they are named in `COMPOSE_PROFILES` in `.env`: `proxy`, `observability`,
+`vault`, `pii` and `sandbox`. The `pnpm ocw enable …` commands below turn on the first three without a reinstall;
+`pii` and `sandbox` are two lines in `.env` each (see below). Telemetry is off unless an OTLP endpoint is configured.
 
 ## Expose it (HTTPS through Caddy)
 
@@ -148,6 +148,61 @@ Then run `docker compose up -d --build --wait`.
 Check it with `docker compose ps presidio` (healthy) and `docker compose logs presidio`. Developers can run
 `bash infra/presidio/smoke.sh`, which builds the image and tests Spanish and English under its own project, then
 removes everything it created.
+
+## Bot sandboxes and browser (optional `sandbox` profile)
+
+Each bot can get its own isolated sandbox (files, shell, approved packages) and its own Chromium, which people watch
+live and take over to sign in (ADR-0029). Nothing of this runs until you turn on the profile **and** an admin
+turns on Sandbox & Browser in Settings (off by default), and then each bot's switch.
+
+To turn it on, add these two lines to `.env`. If `COMPOSE_PROFILES` already exists, append `sandbox` to it.
+`OCW_SANDBOX_TOKEN` is already there: `pnpm ocw setup` writes it, and `pnpm ocw setup --add-missing` adds it to an
+install that predates it.
+
+```dotenv
+COMPOSE_PROFILES=sandbox
+OCW_SANDBOX_URL=http://sandboxd:8090
+```
+
+Then run `docker compose up -d --build --wait` and open Settings › Sandbox & Browser, which shows the isolation in use.
+
+- **What it runs.** `sandboxd` (`infra/sandbox/sandboxd`), the broker, is the only service that holds the Docker
+  socket. It creates each bot's containers from a fixed spec: a `sbx` shell, a `brw` browser, and one
+  `sandbox-egress` proxy, which is every sandbox's only way out. Compose builds those three images but never starts
+  them (`scale: 0`).
+- **Isolation.** sandboxd publishes no port and sits on the internal `sandbox-control` network, shared only with the
+  api. The openclaw cell can never reach it. The broker runs as root only because the socket needs it. It has a
+  read-only root, no capabilities and `no-new-privileges`. Every bot container runs as uid 10001 with a read-only root,
+  no capabilities, limits, no host mounts and its own internal network.
+- **gVisor.** With `OCW_SANDBOX_RUNTIME=auto` (the default), sandboxes run under gVisor `runsc` when the Docker daemon
+  has it registered, and otherwise on hardened runc. Settings says which. Under runc on hosts that restrict
+  unprivileged user namespaces (Ubuntu 23.10 and later), Chromium runs without its own sandbox, and Settings shows
+  **container-only**. To install gVisor, use the GitHub release `google/gvisor` `release-20261005.0`, check its SHA512,
+  and install the whole tarball (`runsc` plus `gvisor-bin/`); `runsc` alone does not start. Then register it in
+  `/etc/docker/daemon.json` with `--platform=systrap`. `OCW_SANDBOX_RUNTIME=runsc` refuses to start without it.
+  gVisor does not answer Docker's internal DNS on the sandbox networks, so sandboxd writes the egress proxy's address
+  into each sandbox's `/etc/hosts` when it creates it. If the proxy restarts, a stopped sandbox is recreated with the
+  new address on its next start (its workspace is kept), and a running one at its next restart or start.
+- **Host hardening.** Anyone who controls sandboxd controls the host's Docker. Consider rootless Docker or a Docker
+  authorization plugin behind the socket, and an XFS project quota for hard disk limits. Docker 26 or later is
+  required: older internal networks forward DNS.
+- **Resources.** About 2 GB of images, of which the browser is 1.2 GB. Each running browser needs up to 2 GB of RAM
+  and each shell up to its configured limit.
+- **Options.** `.env.example` lists them with their defaults: `OCW_SANDBOX_RUNTIME`, `OCW_SANDBOX_NAMESPACE` (default:
+  the compose project), `OCW_SANDBOXD_SWEEP_MS`, the package registries (`OCW_SANDBOX_NPM_REGISTRY`,
+  `OCW_SANDBOX_PYPI_INDEX`, `OCW_SANDBOX_REGISTRIES`) and `OCW_CLAWHUB_URL`, which the api, the cell and sandboxd
+  share.
+- **Removing it.** `docker compose down` does not remove the bots' sandboxes, because sandboxd created them, not
+  compose. List them with `docker ps -a --filter label=ocw.namespace=<project>`. They are removed when a bot is deleted.
+  To remove them all, use `docker rm -f` on that list, then the same filter with `docker network ls` and
+  `docker volume ls`.
+
+Developers run the real-Docker smokes with `bash infra/sandbox/test/run-sandbox-smoke.sh` (and `run-egress-`,
+`run-browser-`, `run-stack-` and `run-packages-smoke.sh`). Each one removes everything it created, by label.
+
+Settings, limits, network modes, sandbox packages and sign-ins are explained in
+[self-hosting/sandbox.md](self-hosting/sandbox.md); the gVisor install, rootless Docker, a Docker authorization plugin
+and XFS project quotas in [infra/sandbox/README.md](../infra/sandbox/README.md).
 
 ## Back up, restore and upgrade
 

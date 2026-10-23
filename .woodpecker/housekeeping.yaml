@@ -6,7 +6,7 @@ when:
   - event: push
     branch: main
 
-depends_on: [verify, e2e, images, cell-smoke]
+depends_on: [verify, e2e, images, cell-smoke, sandbox]
 runs_on: [success, failure]
 
 steps:

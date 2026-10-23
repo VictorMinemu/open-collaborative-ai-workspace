@@ -1,0 +1,145 @@
+{
+  "steps": [
+    {
+      "name": "pre-clean",
+      "killed": [],
+      "removedContainers": [],
+      "removedNetworks": [],
+      "removedVolumes": []
+    },
+    {
+      "name": "created",
+      "ipA": "172.18.0.2",
+      "ipB": "172.19.0.2",
+      "networkInternal": true,
+      "hostConfigA": {
+        "ReadonlyRootfs": true,
+        "CapDrop": [
+          "ALL"
+        ],
+        "SecurityOpt": [
+          "no-new-privileges:true"
+        ],
+        "Init": true,
+        "PidsLimit": 256,
+        "Memory": 1073741824,
+        "NanoCpus": 1000000000,
+        "Tmpfs": {
+          "/tmp": "rw,noexec,nosuid,nodev,size=256m"
+        },
+        "Binds": null,
+        "Runtime": "runc",
+        "User": "10001:10001"
+      }
+    },
+    {
+      "name": "cleanup",
+      "killed": [
+        "/ocw-spike-078-bot-b",
+        "/ocw-spike-078-bot-a"
+      ],
+      "removedContainers": [
+        "/ocw-spike-078-bot-b",
+        "/ocw-spike-078-bot-a"
+      ],
+      "removedNetworks": [
+        "ocw-spike-078-net-a",
+        "ocw-spike-078-net-b"
+      ],
+      "removedVolumes": [
+        "ocw-spike-078-vol-a",
+        "ocw-spike-078-vol-b"
+      ]
+    }
+  ],
+  "checks": {
+    "dockerAtLeast26": true,
+    "runscRegistered": false,
+    "execUid": {
+      "uid": 10001,
+      "gid": 10001,
+      "exitCode": 0
+    },
+    "writeReadInA": {
+      "ok": true,
+      "read": "bot-a",
+      "uid": 10001,
+      "exitCode": 0
+    },
+    "fileAbsentInB": {
+      "ok": true,
+      "exists": false,
+      "exitCode": 0
+    },
+    "hardeningInside": {
+      "ok": true,
+      "CapEff": "0000000000000000",
+      "NoNewPrivs": "1",
+      "Seccomp": "2",
+      "rootWrite": "EROFS",
+      "tmpExec": "EACCES",
+      "pidOne": "/sbin/docker-init",
+      "exitCode": 0
+    },
+    "aReachesItself": {
+      "ok": true,
+      "exitCode": 0
+    },
+    "bReachesA": {
+      "ok": false,
+      "error": "ENETUNREACH",
+      "exitCode": 0
+    },
+    "bExternalRoute": {
+      "ok": false,
+      "error": "ENETUNREACH",
+      "exitCode": 0
+    },
+    "bExternalDns": {
+      "ok": false,
+      "error": "EAI_AGAIN",
+      "exitCode": 0
+    },
+    "bResolvesA": {
+      "ok": false,
+      "error": "ENOTFOUND",
+      "exitCode": 0
+    },
+    "aResolvesItselfByName": {
+      "ok": true,
+      "address": "172.18.0.2",
+      "exitCode": 0
+    },
+    "stdioRoundTrip": {
+      "ok": true,
+      "sent": "{\"id\":1,\"method\":\"ping\",\"params\":{\"from\":\"sandboxd\"}}",
+      "received": "{\"id\":1,\"method\":\"ping\",\"params\":{\"from\":\"sandboxd\"}}"
+    },
+    "leftovers": {
+      "containers": 0,
+      "networks": 0,
+      "volumes": 0
+    }
+  },
+  "errors": [],
+  "daemon": {
+    "ServerVersion": "29.8.2",
+    "ApiVersion": "1.56",
+    "MinAPIVersion": "1.40",
+    "Runtimes": [
+      "io.containerd.runc.v2",
+      "runc"
+    ],
+    "DefaultRuntime": "runc",
+    "KernelVersion": "6.8.0-106-generic",
+    "OperatingSystem": "Alpine Linux v3.24 (containerized)",
+    "CgroupVersion": "2",
+    "CgroupDriver": "cgroupfs",
+    "SecurityOptions": [
+      "name=apparmor,profile=default",
+      "name=seccomp,profile=builtin",
+      "name=cgroupns"
+    ],
+    "Driver": "overlayfs"
+  }
+}

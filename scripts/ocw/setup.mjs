@@ -47,6 +47,9 @@ function generateSecrets() {
     GARAGE_RPC_SECRET: gen.hex(32),
     OCW_S3_ACCESS_KEY_ID: `GK${gen.hex(12)}`,
     OCW_S3_SECRET_ACCESS_KEY: gen.hex(32),
+    // Bot sandboxes (07.8-24, D-11): the bearer token the API and sandboxd share (sandboxd refuses < 32 characters).
+    // Written for every install; it is used only once the `sandbox` profile and OCW_SANDBOX_URL are enabled.
+    OCW_SANDBOX_TOKEN: `ocw_sbx_${gen.base64url(32)}`,
   };
 }
 

@@ -188,6 +188,9 @@ function PersonaTurn({ message, text }: { message: Message; text: string }) {
             card={message.card}
             summary={message.body}
             authorName={name}
+            {...(message.authorId
+              ? { author: { id: message.authorId, name, avatarUrl: message.author?.avatarUrl ?? null } }
+              : {})}
           />
         ) : text ? (
           <Markdown text={text} variant="chat" className="min-w-0 break-words" />

@@ -6,6 +6,7 @@ import { Attachment, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments";
 import { ChannelLayout } from "./board";
 import { ClientKind, Id, IsoDateTime, isReservedHandle, MemberKind, PrincipalKind } from "./common";
 import { Permission, UnitKind } from "./permissions";
+import { BotTurnActivity } from "./sandbox";
 
 export { isReservedHandle, RESERVED_HANDLES } from "./common";
 
@@ -126,6 +127,8 @@ export const Message = z.object({
   aiAddressing: AiAddressing.optional(),
   /** Agent Card messages (Phase 6, P-11): the typed card; `body` stays its plain-text summary. */
   card: AgentCard.optional(),
+  /** Bot replies (Phase 07.8, R2): what the bot did in its sandbox and browser this turn, composed by the API. */
+  activity: BotTurnActivity.optional(),
 });
 export type Message = z.infer<typeof Message>;
 

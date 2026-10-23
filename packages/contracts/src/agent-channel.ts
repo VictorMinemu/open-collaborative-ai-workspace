@@ -6,7 +6,7 @@ import {
   ProviderAuthErrorCode,
   SubscriptionProviderKind,
 } from "./agent";
-import { AgentCardInput, AgentCardKind, AgentCardPatch } from "./agent-cards";
+import { AgentCardInput, AgentCardKind, AgentCardPatch, BrowserHost } from "./agent-cards";
 import { APPROVAL_NOTE_MAX, ApprovalNote } from "./approvals";
 import {
   BOARD_CARD_DESCRIPTION_MAX,
@@ -180,6 +180,17 @@ export const AgentCardActionEvent = AgentMentionEvent.omit({ type: true }).exten
      * Work Zone Start: `device_offline`, `runtime_unavailable`, …), so the bot can tell its person what went wrong.
      */
     resultCode: z.string().max(64).optional(),
+    /**
+     * Phase 07.8 (07.8-21, D-07, UI-SPEC model-facing sentences): the outcome of a platform-owned sign-in card. The turn
+     * is the requester's: `signed_in` (they signed in to `host` by hand and handed back; the page is ready) or `skipped`
+     * (they chose "Not now"). The host only, never a cookie, a username or anything typed.
+     */
+    signIn: z
+      .object({
+        status: z.enum(["signed_in", "skipped"]),
+        host: BrowserHost,
+      })
+      .optional(),
   }),
 });
 export type AgentCardActionEvent = z.infer<typeof AgentCardActionEvent>;
@@ -452,6 +463,12 @@ export const CellProvider = z.object({
   baseUrl: z.string(),
   apiKey: z.string().nullable(),
   models: z.array(z.string()),
+  /**
+   * Additive (Phase 07.8, D-14): the ids of `models` that accept image input. The cell declares them
+   * `input: ["text", "image"]`, so `ocw_browser_screenshot` is useful only to bots on these models (07.8-14 offers it
+   * only there). Absent = every model is text only.
+   */
+  imageModels: z.array(z.string()).optional(),
 });
 export type CellProvider = z.infer<typeof CellProvider>;
 

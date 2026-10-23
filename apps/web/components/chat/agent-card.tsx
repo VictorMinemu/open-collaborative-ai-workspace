@@ -29,6 +29,8 @@ import {
   Laptop,
   LayoutGrid,
   Lock,
+  LockKeyhole,
+  LogIn,
   type LucideIcon,
   Package,
   Play,
@@ -36,6 +38,7 @@ import {
   Rocket,
   ShieldCheck,
   SquareTerminal,
+  Timer,
   TriangleAlert,
   Users,
   X,
@@ -62,6 +65,9 @@ import {
   PROPOSAL_MODE,
   startBlockedText,
 } from "@/components/approvals/work-zone-proposal-view";
+import { HostChip } from "@/components/browser/host-chip";
+import type { LiveBot } from "@/components/browser/live-store";
+import { SignInCardBody, SignInPill, signInStatusOf } from "@/components/browser/sign-in-card-body";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -100,6 +106,8 @@ const KIND: Record<AgentCardKind, { label: string; icon: ComponentType<{ classNa
   deployment: { label: "Deployment", icon: Rocket },
   pr: { label: "Pull request", icon: GitPullRequest },
   generic: { label: "Card", icon: LayoutGrid },
+  // Phase 07.8 (UI-SPEC R1, Surface 2): the platform-owned sign-in card (body: `SignInCardBody`, 07.8-26).
+  browser: { label: "Sign-in", icon: LogIn },
 };
 
 /** Status pill colours: text at AA contrast on its tint in light and dark. */
@@ -835,11 +843,14 @@ function ToolFieldList({
   fields,
   section,
   inline = false,
+  browser = null,
 }: {
   fields: AgentCard["fields"];
   section: "action" | "value";
   /** The summary card's two fields side by side from 26rem (UI-SPEC Surface 1 "Summary view"). */
   inline?: boolean;
+  /** 07.8 (Surface 6): a browser action's page, so Page reads as the host chip and Session carries the lock. */
+  browser?: NonNullable<AgentCardApprovalLink["browser"]> | null;
 }) {
   return (
     <dl
@@ -851,6 +862,8 @@ function ToolFieldList({
       {fields.map((f, i) => {
         const block = isBlock(f.value);
         const mono = section === "action" && (f.label === "Tool" || f.label === "Target");
+        const page = !!browser && section === "action" && f.label === "Page";
+        const session = !!browser && section === "action" && f.label === "Session" && browser.signedIn;
         return (
           <div
             // biome-ignore lint/suspicious/noArrayIndexKey: fields have no id and are replaced as a whole
@@ -868,13 +881,19 @@ function ToolFieldList({
               className={cn(
                 "min-w-0 text-sm leading-5",
                 mono && "break-all font-mono text-[13px]",
-                section === "action" && f.label === "Source" && "flex items-start gap-1.5",
+                ((section === "action" && f.label === "Source") || session) && "flex items-start gap-1.5",
               )}
             >
               {section === "action" && f.label === "Source" ? (
                 <Plug className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
               ) : null}
-              {block ? (
+              {session ? (
+                <LockKeyhole className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+              ) : null}
+              {page && browser ? (
+                // The host from the server's stored call (never bot text), with its scheme: T-07.8-20-03.
+                <HostChip host={browser.host} secure={browser.secure} className="text-[13px]" />
+              ) : block ? (
                 <div
                   data-testid="agent-card-block-value"
                   className="min-w-0 rounded-lg bg-muted/50 px-3 py-2 dark:bg-white/[0.03]"
@@ -899,6 +918,11 @@ const MASKED_NOTICE = "A value looks like a secret and is masked.";
 
 /** The requester's name in a summary title the server composed ("{bot} wants to run {tool} for {person}"). */
 function summaryRequester(card: AgentCard): string | null {
+  // 07.8 (Surface 6): "{bot} wants to click on {host} for {requester}" (the server's browser summary title).
+  if (approvalLinkOf(card)?.browser) {
+    const at = card.title.lastIndexOf(" for ");
+    return at >= 0 ? card.title.slice(at + 5).trim() || null : null;
+  }
   const tool = fieldOf(card, "Tool");
   if (!tool) return null;
   const marker = ` wants to run ${tool} for `;
@@ -1131,6 +1155,16 @@ function useFocusAfterDecision(decided: boolean) {
  * a decider. Review-only: the truncation notice, Review (primary) and Deny. Summary: who wants what for whom, Tool and
  * Source, the waiting and privacy lines, Review only for the requester and the deciders.
  */
+/** What did not happen when a browser approval expires ("Nothing was clicked."). */
+const BROWSER_DONE: Record<NonNullable<AgentCardApprovalLink["browser"]>["action"], string> = {
+  click: "clicked",
+  type: "typed",
+  select: "chosen",
+  press: "pressed",
+  scroll: "done",
+  open: "opened",
+};
+
 function ToolCallCard({
   messageId,
   card,
@@ -1160,10 +1194,21 @@ function ToolCallCard({
   const warnings = notices.filter((w) => w !== HIDDEN_NOTICE && w !== MASKED_NOTICE);
   const masked = notices.includes(MASKED_NOTICE);
 
+  // 07.8 (UI-SPEC Surface 6, R8): a browser action's card is Action, Element, Page and Session, then what it types.
+  const browser = link.browser ?? null;
+  const browserVerb = browser ? BROWSER_DONE[browser.action] : null;
   const actionCount =
     display === "summary" ? card.fields.length : Math.min(link.actionFields ?? 2, card.fields.length);
-  const actionFields = card.fields.slice(0, actionCount);
-  const valueFields = card.fields.slice(actionCount);
+  const actionFields = browser
+    ? display === "summary"
+      ? card.fields
+      : card.fields.filter((f) => f.label !== "Value")
+    : card.fields.slice(0, actionCount);
+  const valueFields = browser
+    ? display === "summary"
+      ? []
+      : card.fields.filter((f) => f.label === "Value")
+    : card.fields.slice(actionCount);
   const expires = link.expiresAt ? (
     <time dateTime={link.expiresAt} title={fullFmt.format(new Date(link.expiresAt))}>
       {cardExpiresIn(link.expiresAt, now)}
@@ -1179,7 +1224,9 @@ function ToolCallCard({
         if (!link.useBy) return null;
         return useByPassed ? (
           <CardLine testId="agent-card-state-line" icon={Hourglass}>
-            Approved, but {bot} didn't run it before {clockOf(link.useBy)}. Ask again if you still need it.
+            {browser
+              ? `The page closed or changed before ${bot} could do it. Ask again if you still need it.`
+              : `Approved, but ${bot} didn't run it before ${clockOf(link.useBy)}. Ask again if you still need it.`}
           </CardLine>
         ) : (
           <CardLine testId="agent-card-state-line" icon={Clock}>
@@ -1195,7 +1242,9 @@ function ToolCallCard({
       case "expired":
         return (
           <CardLine testId="agent-card-state-line" icon={Hourglass}>
-            No one decided within 24 hours. Nothing was run.
+            {browserVerb
+              ? `No one decided within 15 minutes. Nothing was ${browserVerb}.`
+              : "No one decided within 24 hours. Nothing was run."}
           </CardLine>
         );
       default:
@@ -1218,11 +1267,11 @@ function ToolCallCard({
           <>
             <div className="grid gap-2">
               <SectionLabel>Action</SectionLabel>
-              <ToolFieldList fields={actionFields} section="action" />
+              <ToolFieldList fields={actionFields} section="action" browser={browser} />
             </div>
             {valueFields.length > 0 ? (
               <div className="grid gap-2 border-t pt-3">
-                <SectionLabel>What {bot} will send</SectionLabel>
+                <SectionLabel>{browser ? `What ${bot} will type` : `What ${bot} will send`}</SectionLabel>
                 <ToolFieldList fields={valueFields} section="value" />
               </div>
             ) : null}
@@ -1237,9 +1286,18 @@ function ToolCallCard({
             {MASKED_NOTICE}
           </CardLine>
         ) : null}
+        {browser?.signedIn && display !== "summary" ? (
+          <CardLine testId="agent-card-browser-why" icon={LockKeyhole}>
+            {bot} is signed in to {browser.host} with your account, so it asks before acting.
+          </CardLine>
+        ) : null}
         {pending && display !== "summary" && (mayDecide || !known) ? (
-          <CardLine testId="agent-card-timer" icon={Clock}>
-            {display === "review_only" ? "Runs once" : "Runs once, with exactly these values"}
+          <CardLine testId="agent-card-timer" icon={browser ? Timer : Clock}>
+            {browser
+              ? "Runs once, while the page is open"
+              : display === "review_only"
+                ? "Runs once"
+                : "Runs once, with exactly these values"}
             {expires ? <> · {expires}</> : null}
           </CardLine>
         ) : null}
@@ -1296,7 +1354,9 @@ function ToolCallCard({
                 copy={{
                   approved: {
                     title: "Approve this action?",
-                    body: `${bot} can run ${tool} once, with exactly these values, within 15 minutes. ${runsWith(card)}`,
+                    body: browser
+                      ? `${bot} does it once, while the page is open${browser.signedIn ? `, signed in to ${browser.host} as you` : ""}.`
+                      : `${bot} can run ${tool} once, with exactly these values, within 15 minutes. ${runsWith(card)}`,
                     confirm: "Approve",
                     note: true,
                   },
@@ -1607,12 +1667,15 @@ export function AgentCardView({
   card: listed,
   summary,
   authorName,
+  author,
 }: {
   messageId: string;
   card: AgentCard;
   summary: string;
   /** The posting agent's name, for copy that names the bot (a failed proposal's reason). */
   authorName?: string | undefined;
+  /** 07.8-26: the posting bot (id and avatar), so a sign-in card opens its live view. */
+  author?: LiveBot | undefined;
 }) {
   const qc = useQueryClient();
   const card = useAgentCard(messageId, listed);
@@ -1634,6 +1697,9 @@ export function AgentCardView({
   // 07.5 kinds (an action, a Work Zone proposal) render their own body and footer; every other card is unchanged.
   const linkedKind = linkedKindOf(link);
   const bot = authorName ?? "the bot";
+  // 07.8-26 (UI-SPEC Surface 2): the platform's sign-in card renders its own body and footer under the kind row.
+  const signIn = card.platformOwned === true && card.kind === "browser" ? (card.browserSignIn ?? null) : null;
+  const badge = !!link || !!signIn;
 
   return (
     <article
@@ -1648,23 +1714,39 @@ export function AgentCardView({
       <p id={summaryId} className="sr-only">
         {summary}
       </p>
-      <div className={linkedKind ? "grid gap-2.5 px-3.5 pt-3 pb-3" : "grid gap-2.5 px-3.5 pt-3 pb-3.5"}>
-        <div className="flex min-w-0 items-center justify-between gap-2">
+      <div
+        className={
+          signIn
+            ? "grid gap-2.5 px-3.5 pt-3"
+            : linkedKind
+              ? "grid gap-2.5 px-3.5 pt-3 pb-3"
+              : "grid gap-2.5 px-3.5 pt-3 pb-3.5"
+        }
+      >
+        <div
+          className={cn(
+            "flex min-w-0 items-center justify-between gap-2",
+            // The sign-in pill is long ("Sign-in needed"): on a narrow card it drops under the kind and badge.
+            signIn && "flex-wrap gap-y-1.5",
+          )}
+        >
           <span
             className={cn(
               "flex min-w-0 items-center gap-1.5 font-medium text-[11.5px] text-muted-foreground uppercase tracking-wider",
               // A linked card's badge wraps under the kind on narrow cards instead of hiding it.
-              link && "flex-wrap gap-y-1",
+              badge && "flex-wrap gap-y-1",
             )}
           >
             <KindIcon className="size-3.5 shrink-0" aria-hidden />
-            <span className={cn("truncate", link && "shrink-0")} data-testid="agent-card-kind">
+            <span className={cn("truncate", badge && "shrink-0")} data-testid="agent-card-kind">
               {kind.label}
             </span>
-            {link ? <WorkspaceBadge id={`${summaryId}-workspace`} /> : null}
+            {badge ? <WorkspaceBadge id={`${summaryId}-workspace`} /> : null}
           </span>
           {/* Keyed by status: a change re-mounts the pill only, which fades it in (nothing else moves). */}
-          {link && linkedKind ? (
+          {signIn ? (
+            <SignInPillNow key={signIn.status} link={signIn} />
+          ) : link && linkedKind ? (
             <LinkedApprovalPillNow key={link.status} link={link} />
           ) : link ? (
             <ApprovalStatusPill key={link.status} status={link.status} />
@@ -1690,7 +1772,7 @@ export function AgentCardView({
             </span>
           </p>
         ) : null}
-        {card.fields.length > 0 && !linkedKind ? (
+        {card.fields.length > 0 && !linkedKind && !signIn ? (
           <dl
             data-testid="agent-card-fields"
             className="grid grid-cols-1 gap-x-4 gap-y-2 @[26rem]:grid-cols-2"
@@ -1710,7 +1792,14 @@ export function AgentCardView({
         ) : null}
         {linkedKind ? null : link?.warnings.map((w) => <WarningLine key={w} text={w} />)}
       </div>
-      {link && linkedKind === "tool" ? (
+      {signIn ? (
+        <SignInCardBody
+          messageId={messageId}
+          card={card}
+          link={signIn}
+          bot={author ?? { id: messageId, name: bot, avatarUrl: null }}
+        />
+      ) : link && linkedKind === "tool" ? (
         <ToolCallCard messageId={messageId} card={card} link={link} bot={bot} />
       ) : link && linkedKind === "work_zone" ? (
         <WorkZoneProposalCard messageId={messageId} card={card} link={link} bot={bot} />
@@ -1763,4 +1852,18 @@ export function AgentCardView({
       ) : null}
     </article>
   );
+}
+
+/** The sign-in card's pill, moving to Expired on its own when the countdown runs out (07.8-26). */
+function SignInPillNow({ link }: { link: NonNullable<AgentCard["browserSignIn"]> }) {
+  const [now, setNow] = useState(() => Date.now());
+  const waiting = link.status === "waiting" || link.status === "signing_in";
+  useEffect(() => {
+    if (!waiting) return;
+    const left = Date.parse(link.expiresAt) - Date.now();
+    if (left < 0 || left > 24 * 3_600_000) return;
+    const t = window.setTimeout(() => setNow(Date.now()), left + 250);
+    return () => window.clearTimeout(t);
+  }, [waiting, link.expiresAt]);
+  return <SignInPill status={signInStatusOf(link, now)} />;
 }

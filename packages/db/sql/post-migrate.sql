@@ -257,6 +257,73 @@ REVOKE ALL ON FUNCTION app.clear_connector_connections(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.connector_connection_counts(uuid) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.clear_connector_connections(uuid) TO ocw_app;
 
+-- Sealed browser sessions (Phase 07.8, D-08, F-10, P-09): a member's sign-in to a site with a bot (the id of its sealed
+-- `browser_session` secret, the site, the expiry) is its owner's alone, as a member connector connection is. Same
+-- RESTRICTIVE shape, ANDed with tenant_isolation, on the row's own `user_id`: an admin of the same organization, a
+-- session without a user (cell routes) and any other member read 0 rows and cannot insert, update or delete one. The
+-- API answers 404 to anyone else. FK cascades (a deleted bot or secret) are not subject to it.
+DROP POLICY IF EXISTS personal_owner_only ON app.browser_sessions;
+CREATE POLICY personal_owner_only ON app.browser_sessions AS RESTRICTIVE FOR ALL
+  USING (user_id = nullif(current_setting('app.user_id', true), '')::uuid)
+  WITH CHECK (user_id = nullif(current_setting('app.user_id', true), '')::uuid);
+
+-- The browser sweep (07.8-21; D-08, R7, R9): sign-in cards that waited 15 minutes expire, and sessions expired for 7
+-- days are removed; since 07.8-28 (WINDOWS #271) takeover leases left by a dead API instance are cleared. The sweep runs without a user, across organizations:
+-- - `browser_sweep_organizations` lists the organizations that have such work (ids only, keyset-paged by id); the API
+--   then works inside each organization's own withTenant() transaction;
+-- - `purge_browser_sessions` deletes, in the CALLER's organization only (`app.organization_id` of the tenant
+--   transaction, never an argument), the sessions that expired before `p_before`, past the owner-only policy no
+--   user-less session could cross. Their sealed secrets go with them (`browser_session_secret_cleanup`). It returns the
+--   ids, the owner, the bot and the site for the audit only: never a secret id or any sealed value.
+CREATE OR REPLACE FUNCTION app.browser_sweep_organizations(
+  p_now timestamptz, p_before timestamptz, p_after uuid, p_limit integer)
+RETURNS TABLE (organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT o.organization_id FROM (
+    SELECT r.organization_id FROM app.browser_signin_requests r
+    WHERE r.status IN ('waiting', 'signing_in') AND r.expires_at <= p_now
+    UNION
+    SELECT b.organization_id FROM app.browser_sessions b WHERE b.expires_at < p_before
+    UNION
+    -- 07.8-28 (WINDOWS #271, #244): a takeover lease whose holding API instance died (nobody released it).
+    SELECT c.organization_id FROM app.browser_contexts c
+    WHERE c.controller_user_id IS NOT NULL AND c.closed_at IS NULL AND c.lease_expires_at <= p_now
+  ) o
+  WHERE p_after IS NULL OR o.organization_id > p_after
+  ORDER BY o.organization_id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+CREATE OR REPLACE FUNCTION app.purge_browser_sessions(p_before timestamptz)
+RETURNS TABLE (id uuid, user_id uuid, agent_id uuid, site_key text)
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  DELETE FROM app.browser_sessions b
+  WHERE b.organization_id = nullif(current_setting('app.organization_id', true), '')::uuid
+    AND b.expires_at < p_before
+  RETURNING b.id, b.user_id, b.agent_id, b.site_key
+$fn$;
+-- 07.8-28 (WINDOWS #287): a bot's deletion is a soft delete (`agents.deleted_at`), so the FK cascade that takes its
+-- sessions on a hard delete never fires. `purge_deleted_bot_browser_sessions` deletes, in the CALLER's organization
+-- only, every member's sealed session with that bot, past the owner-only policy (the person deleting the bot, an admin
+-- or its owner, reads none of the other members' rows), and only once the bot is deleted: a live bot's sessions are
+-- never touched. Their secrets go with them (`browser_session_secret_cleanup`). Returns ids, owner, bot and site for the
+-- audit only.
+CREATE OR REPLACE FUNCTION app.purge_deleted_bot_browser_sessions(p_agent uuid)
+RETURNS TABLE (id uuid, user_id uuid, agent_id uuid, site_key text)
+LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  DELETE FROM app.browser_sessions b
+  WHERE b.organization_id = nullif(current_setting('app.organization_id', true), '')::uuid
+    AND b.agent_id = p_agent
+    AND EXISTS (SELECT 1 FROM app.agents a
+                 WHERE a.organization_id = b.organization_id AND a.id = p_agent AND a.deleted_at IS NOT NULL)
+  RETURNING b.id, b.user_id, b.agent_id, b.site_key
+$fn$;
+REVOKE ALL ON FUNCTION app.purge_deleted_bot_browser_sessions(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.purge_deleted_bot_browser_sessions(uuid) TO ocw_app;
+REVOKE ALL ON FUNCTION app.browser_sweep_organizations(timestamptz, timestamptz, uuid, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app.purge_browser_sessions(timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.browser_sweep_organizations(timestamptz, timestamptz, uuid, integer) TO ocw_app;
+GRANT EXECUTE ON FUNCTION app.purge_browser_sessions(timestamptz) TO ocw_app;
+
 -- Pre-tenant lookups (bearer tokens / pairing codes arrive before the organization is known).
 -- SECURITY DEFINER as ocw_migrator (BYPASSRLS); each returns only the ids needed to open withTenant().
 CREATE OR REPLACE FUNCTION app.lookup_device_token(p_token_hash text)
@@ -339,3 +406,18 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
 $fn$;
 REVOKE ALL ON FUNCTION app.pending_ai_queues(integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.pending_ai_queues(integer) TO ocw_app;
+
+-- Sandbox policy re-push (07.8 policy fix; D-09, the kill switch): sandboxd keeps every organization's policy in memory
+-- only and refuses to start anything without one, so after it restarts the API's events consumer pushes the policy of
+-- every organization that has a sandbox row. Organization ids only, keyset-paged by id; the consumer then reads each
+-- policy inside that organization's own withTenant() transaction.
+CREATE OR REPLACE FUNCTION app.sandbox_organizations(p_after uuid, p_limit integer)
+RETURNS TABLE (organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT DISTINCT b.organization_id FROM app.bot_sandboxes b
+  WHERE p_after IS NULL OR b.organization_id > p_after
+  ORDER BY b.organization_id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.sandbox_organizations(uuid, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.sandbox_organizations(uuid, integer) TO ocw_app;

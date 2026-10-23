@@ -142,6 +142,24 @@ export const EnvSchema = z
      * Admins can also mint a token in Settings › Bots runtime (stored as SHA-256 only).
      */
     OCW_CELL_TOKEN: z.string().min(32, "must be at least 32 characters").optional(),
+    /**
+     * Phase 07.8 (D-11, P-03): the sandbox broker as seen from the API (e.g. http://sandboxd:8090 on the internal
+     * `sandbox-control` network). Empty = not configured: no bot is offered sandbox tools and every sandbox call answers
+     * `service_unavailable`. The API never holds the Docker socket; it only calls this URL.
+     */
+    OCW_SANDBOX_URL: optionalUrl,
+    /**
+     * Bearer token of every sandboxd call (shared with sandboxd; `NAME` or `NAME_FILE`). Required with the URL; without
+     * it the token is unused (the `sandbox` profile is off).
+     */
+    OCW_SANDBOX_TOKEN: z.preprocess(
+      (v) => (v === "" ? undefined : v),
+      z
+        .string()
+        .min(32, "must be at least 32 characters")
+        .optional()
+        .transform((v) => v ?? null),
+    ),
     /** `mock` offers the deterministic fake model (`fake/mock-1`) for E2E/CI; never metered. */
     OCW_MODEL_PROVIDER: z
       .enum(["", "mock"])
@@ -298,6 +316,15 @@ export const EnvSchema = z
     ),
   })
   .superRefine((v, ctx) => {
+    // The URL configures the sandbox broker and needs its token (07.8-05). A token alone configures nothing: `pnpm ocw
+    // setup` writes it for every install, and the URL is set only with the `sandbox` compose profile (07.8-24).
+    if (v.OCW_SANDBOX_URL && !v.OCW_SANDBOX_TOKEN) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["OCW_SANDBOX_TOKEN"],
+        message: "is required when OCW_SANDBOX_URL is set",
+      });
+    }
     if (v.OCW_SMTP_URL === "memory:" && v.NODE_ENV !== "test") {
       ctx.addIssue({
         code: "custom",
@@ -343,6 +370,7 @@ const SECRET_VARS = [
   "OCW_ENCRYPTION_KEY",
   "OCW_CELL_TOKEN",
   "OCW_SMTP_URL",
+  "OCW_SANDBOX_TOKEN",
 ] as const;
 
 export function decodeKey(v: string): Buffer | null {

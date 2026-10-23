@@ -44,6 +44,9 @@ export interface RiskVerdict {
 
 const RANK: Record<RiskLevel, number> = { low: 0, medium: 1, high: 2, refuse: 3 };
 
+/** R12 (07.8-18): why a native plugin with shell, file or browser tools is refused, and where the safe path is. */
+export const SANDBOX_INSTEAD = "Runs inside the bot runtime, not a sandbox. Use a sandbox package instead.";
+
 type Rule = { level: Exclude<RiskLevel, "low">; code: string; message: string };
 
 /** `other` families that bypass our controls. */
@@ -221,9 +224,18 @@ export function scorePluginRisk(input: RiskInput): RiskVerdict {
       `Declares messaging channels (${list(d.channels)}): a second message path around the Agent Channel API`,
     );
   }
+  // Native plugins run in the gateway (host "cell"). Shell, file and browser tools are refused here too, but they have a
+  // safe home: a sandbox package (07.8-18, D-11 F-3, R12). Administration and messaging tools are refused everywhere.
   const dangerous = d.tools.filter((t) => isDangerousToolName(t));
   if (dangerous.length > 0) {
-    add("refuse", "dangerous_tool", `Declares tools that are never allowed for bots: ${list(dangerous)}`);
+    const sandboxable = dangerous.every((t) => !isDangerousToolName(t, "sandbox"));
+    add(
+      "refuse",
+      "dangerous_tool",
+      sandboxable
+        ? `${SANDBOX_INSTEAD} (${list(dangerous)})`
+        : `Declares tools that are never allowed for bots: ${list(dangerous)}`,
+    );
   }
   if (d.mcpServers.length > 0) {
     add(
@@ -437,4 +449,274 @@ export function reviewTokenOf(r: {
 /** Plugin ids bundled in the cell image (`OCW_BUNDLED_PLUGINS`, shared with the cell; `none` → []). */
 export function bundledPluginIds(env: Pick<Env, "OCW_BUNDLED_PLUGINS">): string[] {
   return [...env.OCW_BUNDLED_PLUGINS];
+}
+
+// ---------------------------------------------------------------- sandbox packages (07.8-18; D-03, D-11 F-3, P-12)
+
+/**
+ * What the risk of a sandbox package is decided from: sandboxd's review facts (untrusted registry metadata, read only
+ * by sandboxd's containers) and the resolved tree.
+ */
+export interface SandboxPackageRiskInput {
+  source: "npm" | "pypi" | "debian" | "clawhub";
+  name: string;
+  publisher: string | null;
+  license: string | null;
+  hasInstallScript: boolean;
+  entries: readonly { name: string; version: string; integrity: string }[];
+}
+
+/**
+ * The dependency-license policy of `pnpm guard` (scripts/guard/license-policy.json), restated: the API image does not
+ * ship `scripts/`. A unit test keeps the two lists equal. OR: any operand allowed; AND: every operand; WITH: the base
+ * license decides; anything unparseable is denied.
+ */
+export const SANDBOX_LICENSE_POLICY = {
+  allow: [
+    "MIT",
+    "MIT-0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "Apache-2.0",
+    "Unlicense",
+    "CC0-1.0",
+    "BlueOak-1.0.0",
+    "Python-2.0",
+    "Zlib",
+    "MPL-2.0",
+    "LGPL-2.1-or-later",
+    "LGPL-3.0-or-later",
+    "GPL-3.0-or-later",
+    "AGPL-3.0-only",
+    "AGPL-3.0-or-later",
+    "CC-BY-4.0",
+    "WTFPL",
+  ],
+  deny: ["GPL-2.0-only", "SSPL-*", "BUSL-*", "Elastic-2.0", "CC-BY-NC-*", "UNLICENSED", "Unknown"],
+} as const;
+
+type LicenseNode = { id: string } | { and: LicenseNode[] } | { or: LicenseNode[] };
+
+function parseLicense(expr: string): LicenseNode | null {
+  const tokens: (string | { id: string })[] = [];
+  for (const raw of expr.replace(/[()]/g, " $& ").trim().split(/\s+/)) {
+    if (raw === "") continue;
+    if (["(", ")", "AND", "OR", "WITH"].includes(raw)) tokens.push(raw);
+    else if (/^[A-Za-z0-9.+-]+$/.test(raw)) tokens.push({ id: raw });
+    else return null;
+  }
+  if (tokens.length === 0) return null;
+  let i = 0;
+  const atom = (): LicenseNode => {
+    const t = tokens[i++];
+    if (t === "(") {
+      const node = or();
+      if (tokens[i++] !== ")") throw new Error("unbalanced");
+      return node;
+    }
+    if (typeof t !== "object") throw new Error("expected a license id");
+    if (tokens[i] === "WITH") {
+      i += 1;
+      if (typeof tokens[i++] !== "object") throw new Error("expected an exception id");
+    }
+    return t;
+  };
+  const and = (): LicenseNode => {
+    const nodes = [atom()];
+    while (tokens[i] === "AND") {
+      i += 1;
+      nodes.push(atom());
+    }
+    return nodes.length === 1 ? (nodes[0] as LicenseNode) : { and: nodes };
+  };
+  const or = (): LicenseNode => {
+    const nodes = [and()];
+    while (tokens[i] === "OR") {
+      i += 1;
+      nodes.push(and());
+    }
+    return nodes.length === 1 ? (nodes[0] as LicenseNode) : { or: nodes };
+  };
+  try {
+    const tree = or();
+    return i === tokens.length ? tree : null;
+  } catch {
+    return null;
+  }
+}
+
+const LICENSE_ALLOWED = new Set<string>(SANDBOX_LICENSE_POLICY.allow);
+const LICENSE_DENIED = SANDBOX_LICENSE_POLICY.deny.map(
+  (g) => new RegExp(`^${g.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`),
+);
+
+/** Whether an SPDX expression is one the guard allows. */
+export function licenseAllowed(expr: string): boolean {
+  const ok = (n: LicenseNode): boolean =>
+    "or" in n
+      ? n.or.some(ok)
+      : "and" in n
+        ? n.and.every(ok)
+        : LICENSE_ALLOWED.has(n.id) && !LICENSE_DENIED.some((re) => re.test(n.id));
+  const tree = parseLicense(expr);
+  return tree !== null && ok(tree);
+}
+
+/**
+ * Widely used packages and, where known, their publishers: a name one typo away (optimal string alignment distance 1)
+ * from one of them, published by someone else, is a likely typo-squat. Debian names are curated by the archive and
+ * ClawHub skills have no such list, so only npm and PyPI are checked.
+ */
+const TOP_PACKAGES: Record<"npm" | "pypi", Record<string, readonly string[]>> = {
+  npm: {
+    lodash: ["jdalton"],
+    chalk: ["sindresorhus"],
+    express: [],
+    react: [],
+    axios: [],
+    moment: [],
+    commander: [],
+    request: [],
+    debug: [],
+    webpack: [],
+    typescript: [],
+    eslint: [],
+    prettier: [],
+    jquery: [],
+    underscore: [],
+    async: [],
+    bluebird: [],
+    uuid: [],
+    dotenv: [],
+    yargs: [],
+    minimist: [],
+    semver: [],
+    colors: [],
+    mkdirp: [],
+    rimraf: [],
+    puppeteer: [],
+    playwright: [],
+    electron: [],
+    nodemon: [],
+    mongoose: [],
+    "cross-env": [],
+    "body-parser": [],
+    "crypto-js": [],
+    "node-fetch": [],
+  },
+  pypi: {
+    requests: [],
+    numpy: [],
+    pandas: [],
+    urllib3: [],
+    setuptools: [],
+    boto3: [],
+    django: [],
+    flask: [],
+    pyyaml: [],
+    cryptography: [],
+    pillow: [],
+    scipy: [],
+    matplotlib: [],
+    selenium: [],
+    beautifulsoup4: [],
+    playwright: [],
+    openai: [],
+    pytest: [],
+  },
+};
+
+/** Optimal string alignment distance (insert, delete, substitute, swap two neighbours), capped at `max + 1`. */
+function typoDistance(a: string, b: string, max = 1): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  const d: number[][] = Array.from({ length: a.length + 1 }, (_, i) =>
+    Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)),
+  );
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const row = d[i] as number[];
+      const prev = d[i - 1] as number[];
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      let v = Math.min((prev[j] as number) + 1, (row[j - 1] as number) + 1, (prev[j - 1] as number) + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        v = Math.min(v, ((d[i - 2] as number[])[j - 2] as number) + 1);
+      }
+      row[j] = v;
+    }
+  }
+  return (d[a.length] as number[])[b.length] as number;
+}
+
+const normalName = (source: string, name: string) =>
+  source === "pypi" ? name.toLowerCase().replace(/[-_.]+/g, "-") : name.toLowerCase();
+
+/**
+ * Sandbox package risk (07.8-18; D-03, D-11 F-3; P-12). PURE: no I/O. A sandbox package runs only inside a bot's own
+ * sandbox (gVisor, its own network through the egress proxy, a read-only mount), so shell, file and browser
+ * capabilities are what it is for and never refuse it (the host-aware `isDangerousToolName(name, "sandbox")` rule).
+ * Refused: the OpenClaw platform itself (administration stays refused everywhere) and a tree whose integrity cannot pin
+ * it (sha1). High: a license the dependency guard denies or none, and a likely typo-squat. Medium: an install script.
+ */
+export function scoreSandboxPackageRisk(input: SandboxPackageRiskInput): RiskVerdict {
+  const rules: Rule[] = [];
+  const add = (level: Rule["level"], code: string, message: string) =>
+    rules.push({ level, code, message: cap(message) });
+  const lower = input.name.toLowerCase();
+  const base = lower.replace(/^@[^/]+\//, "");
+
+  if (lower.startsWith("@openclaw/") || base === "openclaw") {
+    add(
+      "refuse",
+      "platform_admin",
+      "This is the OpenClaw platform itself; platform administration tools stay refused everywhere",
+    );
+  }
+  const weak = input.entries.filter((e) => e.integrity.startsWith("sha1-"));
+  if (weak.length > 0) {
+    add(
+      "refuse",
+      "weak_integrity",
+      `${weak.length === 1 ? "One dependency is" : `${weak.length} dependencies are`} pinned only by sha1, which cannot pin it safely; this version cannot be installed`,
+    );
+  }
+
+  const license = input.license?.trim() ?? "";
+  if (license === "") {
+    add("high", "license_unknown", "The registry states no license for this version");
+  } else if (!licenseAllowed(license)) {
+    add("high", "license_denied", `Its license (${license}) is not one the workspace allows`);
+  }
+
+  if (input.source === "npm" || input.source === "pypi") {
+    const name = normalName(input.source, input.name);
+    const publisher = input.publisher?.trim().toLowerCase() ?? null;
+    for (const [top, publishers] of Object.entries(TOP_PACKAGES[input.source])) {
+      if (top.length < 4 || name === top) continue;
+      if (typoDistance(name, top) !== 1) continue;
+      if (publisher !== null && publishers.includes(publisher)) continue;
+      add(
+        "high",
+        "typosquat",
+        `Its name is one typo away from ${top}, and it is not published by ${top}'s publisher`,
+      );
+      break;
+    }
+  }
+
+  if (input.hasInstallScript) {
+    add(
+      "medium",
+      "install_script",
+      "Runs an install script (only inside the installer container, never in the API or the cell)",
+    );
+  }
+
+  const sorted = rules
+    .map((r, i) => ({ r, i }))
+    .sort((a, b) => RANK[b.r.level] - RANK[a.r.level] || a.i - b.i)
+    .map(({ r }) => r);
+  const risk = sorted.reduce<RiskLevel>((worst, r) => (RANK[r.level] > RANK[worst] ? r.level : worst), "low");
+  return { risk, reasons: sorted.map(({ code, message }) => ({ code, message })) };
 }

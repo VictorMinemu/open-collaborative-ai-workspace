@@ -7,16 +7,20 @@ import {
   ApprovalNote,
   ApprovalRequestStatus,
 } from "./approvals";
+import { BrowserEndReason, BrowserHost, BrowserSignInStatus } from "./browser";
 import { Id, IsoDateTime, PrincipalKind } from "./common";
 import { WorkZoneStartBlock } from "./work-zone-proposals";
 
 // The route primitives live in a leaf module (Phase 07.5: `tool-approvals.ts` needs `AgentCardRoute` and
 // `approvals.ts` imports it); re-exported here so every existing import keeps working.
 export { AGENT_CARD_ROUTE_PREFIXES, AgentCardRoute, isAgentCardRoute } from "./agent-card-route";
+// Phase 07.8 (07.8-30): the browser and live-view contracts are published through this file so that
+// `packages/contracts/src/index.ts` stays 07.8-01's alone while both contract plans run in the same wave.
+export * from "./browser";
 
 /**
  * Phase 6 Agent Cards (AGENT-04, D-07, P-11): a typed card an agent posts with a message and updates in place.
- * Imports `common`, `approvals`, `agent-card-route` and `work-zone-proposals` only: `chat.ts` imports this file for `Message.card`, so importing `chat.ts` here
+ * Imports `common`, `approvals`, `agent-card-route`, `work-zone-proposals` and `browser` only: `chat.ts` imports this file for `Message.card`, so importing `chat.ts` here
  * would be a cycle (`approvals` never imports `chat.ts` or this file).
  * Actions are server-decided; an Open action can only point to an internal app route (`AgentCardRoute`).
  */
@@ -35,6 +39,8 @@ export const AgentCardKind = z.enum([
   "deployment",
   "pr",
   "generic",
+  // Phase 07.8 (UI-SPEC R1): the platform-owned "Sign in needed" card.
+  "browser",
 ]);
 export type AgentCardKind = z.infer<typeof AgentCardKind>;
 
@@ -78,6 +84,21 @@ export const AgentCardDecision = z.object({
 });
 export type AgentCardDecision = z.infer<typeof AgentCardDecision>;
 
+/**
+ * Phase 07.8 (UI-SPEC Surface 6, R8; T-07.8-20-03): the page a browser-action approval acts on, composed by the server
+ * from the stored call: the action, the host (never a path or a query), its scheme (`secure`: the card says "Not
+ * secure" for http) and whether a member's saved session is loaded. Never the element or a value: those reach only the
+ * requester's exact card fields and the review. Every reader of the card may read it (the summary title names the
+ * action and the host already).
+ */
+export const AgentCardBrowserAction = z.object({
+  action: z.enum(["click", "type", "select", "press", "scroll", "open"]),
+  host: BrowserHost,
+  secure: z.boolean(),
+  signedIn: z.boolean(),
+});
+export type AgentCardBrowserAction = z.infer<typeof AgentCardBrowserAction>;
+
 /** A platform-owned card's link to its approval request (Phase 07.2, D-05, UI-SPEC R6). */
 export const AgentCardApprovalLink = z.object({
   id: Id,
@@ -116,8 +137,37 @@ export const AgentCardApprovalLink = z.object({
   resultRoute: AgentCardRoute.nullable().optional(),
   /** Why Start is not possible right now (Work Zone proposals). */
   blocked: WorkZoneStartBlock.nullable().optional(),
+  /** Phase 07.8: a browser action's page (`ocw_browser_act` / D-13 `ocw_browser_open`); absent on every other card. */
+  browser: AgentCardBrowserAction.nullable().optional(),
 });
 export type AgentCardApprovalLink = z.infer<typeof AgentCardApprovalLink>;
+
+/**
+ * A platform-owned sign-in card's link to its browser context (Phase 07.8, D-08, UI-SPEC R1, Surface 2). Composed by the
+ * server from the context; the bot supplied only the reason. Updated in place as the sign-in moves on.
+ */
+export const AgentCardBrowserSignInLink = z.object({
+  contextId: Id,
+  host: BrowserHost,
+  secure: z.boolean(),
+  /** The member who may sign in (the turn's requester). */
+  requesterId: Id,
+  status: BrowserSignInStatus,
+  /** When a waiting card expires (the context is held until then, R9). */
+  expiresAt: IsoDateTime,
+  /** Until when the sealed session lasts, once signed in. */
+  sessionExpiresAt: IsoDateTime.nullable(),
+  /** Why a `stopped` card stopped (the live view's ended reasons). */
+  stopReason: BrowserEndReason.nullable(),
+  /**
+   * 07.8-26 (additive): the requester's display name, so every reader's card says "Only {person} can sign in here." and
+   * "{person} signed in." (the same for every reader, no viewer field).
+   */
+  requesterName: z.string().max(200).optional(),
+  /** 07.8-26 (additive): when the sign-in was decided (signed in, skipped, expired, stopped): "Signed in by … · {time}". */
+  decidedAt: IsoDateTime.nullable().optional(),
+});
+export type AgentCardBrowserSignInLink = z.infer<typeof AgentCardBrowserSignInLink>;
 
 export const AgentCard = z.object({
   kind: AgentCardKind,
@@ -131,8 +181,11 @@ export const AgentCard = z.object({
   updatedAt: IsoDateTime,
   /** Viewer-specific (REST snapshots only, never on realtime events). */
   following: z.boolean().optional(),
-  /** Viewer-specific: what the viewer may do on this card. */
-  viewerCan: z.array(z.enum(["follow", "decide"])).optional(),
+  /**
+   * Viewer-specific: what the viewer may do on this card. `sign_in` (Phase 07.8): the viewer is the requester of a
+   * `browser` card and may open the live view to sign in.
+   */
+  viewerCan: z.array(z.enum(["follow", "decide", "sign_in"])).optional(),
   /**
    * Phase 07.2 (D-08): composed by the server, never by an agent (an agent PATCH is refused), so a model cannot
    * rewrite findings or reader counts. Absent on older cards.
@@ -140,17 +193,25 @@ export const AgentCard = z.object({
   platformOwned: z.boolean().optional(),
   /** The approval this card mirrors; deciding the card decides the approval (D-05). */
   approval: AgentCardApprovalLink.nullable().optional(),
+  /** Phase 07.8: the sign-in this `browser` card mirrors. Absent on every other card. */
+  browserSignIn: AgentCardBrowserSignInLink.nullable().optional(),
 });
 export type AgentCard = z.infer<typeof AgentCard>;
 
-/** What an agent posts; `summary` becomes the plain-text message body (search and notifications keep working). */
+/**
+ * What an agent posts; `summary` becomes the plain-text message body (search and notifications keep working). A
+ * `browser` (sign-in) card is platform-owned (Phase 07.8, UI-SPEC R1): never an agent's, so it is not a postable kind.
+ */
 export const AgentCardInput = AgentCard.pick({
   kind: true,
   title: true,
   fields: true,
   status: true,
   actions: true,
-}).extend({ summary: z.string().trim().min(1).max(AGENT_CARD_SUMMARY_MAX) });
+}).extend({
+  kind: AgentCardKind.exclude(["browser"]),
+  summary: z.string().trim().min(1).max(AGENT_CARD_SUMMARY_MAX),
+});
 export type AgentCardInput = z.infer<typeof AgentCardInput>;
 
 export const AgentCardPatch = z

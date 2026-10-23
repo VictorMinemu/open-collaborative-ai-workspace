@@ -16,6 +16,7 @@ import { registerUnitRoutes } from "./units";
 
 export { listMembers, memberDirectory } from "./members";
 
+export { audienceCoverFacts } from "./permissions/audience";
 export { AuthzDeniedError } from "./permissions/errors";
 export {
   loadPrincipalFacts,
@@ -25,8 +26,13 @@ export {
 } from "./permissions/facts";
 export {
   type AgentFacts,
+  AUDIENCE_COVER_MAX,
+  type AudienceCoverFacts,
   agentResource,
   agentTemplateResource,
+  audienceCovers,
+  type BrowserContextFacts,
+  browserContextResource,
   type ChannelFacts,
   channelMemberResource,
   channelResource,

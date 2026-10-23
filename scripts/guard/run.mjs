@@ -96,7 +96,8 @@ function runSemgrep() {
 function runRuleTests() {
   const runner = semgrepRunner(REPO, []);
   if (!runner) return [INSTALL_HINT];
-  const fixtures = readdirSync(FIXTURES).filter((f) => f.startsWith("rules."));
+  // `rules.<lang>` holds most rules' fixtures; a rule may keep its own file (07.8-16: live-input-logging.ts).
+  const fixtures = readdirSync(FIXTURES).filter((f) => /\.(ts|sql)$/.test(f));
   if (fixtures.length === 0) return ["no rule fixtures under .semgrep/tests/"];
   const failures = [];
   // Semgrep's --test accepts one target at a time; each fixture holds annotated lines for one language.

@@ -1,8 +1,16 @@
 import {
+  type BotCapabilities,
   type BotCapabilityView,
+  BROWSER_TOOL_NAMES,
+  type BrowserToolName,
   BUILTIN_TOOLS,
+  CONFINED_TOOL_FLAGS,
+  type ConfinedToolName,
+  MAX_SANDBOX_CALLS_PER_TURN,
   MAX_TOOL_CALLS_PER_TURN,
   MAX_WEB_CALLS_PER_TURN,
+  modelAcceptsImages,
+  SANDBOX_TOOL_NAMES,
   type TurnContext,
   type TurnMemoryFile,
   type TurnNow,
@@ -20,14 +28,17 @@ import {
   tenantOf,
 } from "@ocw/db";
 import { and, eq, isNull, ne, sql } from "drizzle-orm";
+import type { Env } from "../../config/env";
 import type { Core } from "../../core";
 // Types only: the memory service is injected by the caller (a value import would be a module cycle).
 import { type EffectiveVaultItem, effectiveVaultItems, unitAudienceAllows } from "../keychain";
 import type { MemoryAudience, MemoryService } from "../memory";
 import { agentResource, orgResource, type PermissionService, type PrincipalRef } from "../organization";
+import { sandboxAvailable } from "../sandbox";
 import { approvalModesFor } from "../tool-approval";
 import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
 import { loadAllGrants, loadCatalog, loadGrants } from "./catalog";
+import { stickyMemberData } from "./member-data";
 import { loadTurnMemory } from "./memory";
 import { internetConfigured, loadPolicy, type SearchEnv } from "./policy";
 import { findBot, loadBotFacts } from "./routes";
@@ -119,6 +130,47 @@ const WORK_ZONE_PROJECTS_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEf
  * content can never propose a session (the proposal route claims it as side-effecting whatever the turn says).
  */
 const START_WORK_ZONE_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
+
+/**
+ * The sandbox tools a turn is offered (07.8-05, D-12, P-05, P-06): every `ocw_sandbox_*` tool, `ocw_sandbox_import`
+ * included since 07.8-25 (its route copies an attachment only when the conversation's audience covers the workspace's,
+ * `audienceCovers`). Their static flags come from `CONFINED_TOOL_FLAGS` (the D-13 member-data rule and P-11's team-bot
+ * rule stay server-side). Browser tools are offered from 07.8-14.
+ */
+const OFFERED_SANDBOX_TOOLS = SANDBOX_TOOL_NAMES;
+
+/**
+ * The browser tools a turn is offered (07.8-14, D-05, D-14, P-14): open, snapshot, act, wait and close, and the
+ * screenshot only when the bot's model reads images (spike ii: an image from a tool reaches only a model declared
+ * `input: ["text", "image"]`; any other model would read "(tool image omitted)"). `ocw_browser_signin` (07.8-21, D-11)
+ * only where the member-account audience rule allows a member's own sign-in (`signIn`).
+ */
+function offeredBrowserTools(
+  bot: { modelProvider: string; modelId: string },
+  signIn: boolean,
+): BrowserToolName[] {
+  return BROWSER_TOOL_NAMES.filter(
+    (name) =>
+      (name !== BUILTIN_TOOLS.browserSignIn || signIn) &&
+      (name !== BUILTIN_TOOLS.browserScreenshot || modelAcceptsImages(bot.modelProvider, bot.modelId)),
+  );
+}
+
+/**
+ * The confined tools a bot's cell entry allows (`alsoAllow`, 07.8-08; WINDOWS #240): every `ocw_sandbox_*` tool while
+ * the bot's Sandbox switch is on and every `ocw_browser_*` tool while its Browser switch is on, only while sandboxd is
+ * configured. OpenClaw runs a plugin tool only when the agent entry allows it, and the cell-wide snapshot is computed
+ * for no human, so the bot's own switch is the only fact it can use here. The organization switch, the kill state,
+ * the resolver (modules, agent ∩ human) and the delivered tool list stay per-turn decisions (`turnPolicy`, every
+ * confined route), so this list never widens what a turn may do: each turn narrows it (`toolsAllow`).
+ */
+export function confinedCellTools(
+  caps: Pick<BotCapabilities, "sandbox" | "browser">,
+  sandboxdConfigured: boolean,
+): string[] {
+  if (!sandboxdConfigured) return [];
+  return [...(caps.sandbox ? SANDBOX_TOOL_NAMES : []), ...(caps.browser ? BROWSER_TOOL_NAMES : [])];
+}
 
 /**
  * Whether a catalog source acts with the asking member's own account (07.4 D-01): a per-member MCP connector. Its tools
@@ -245,6 +297,8 @@ interface ComputedTurn extends TurnTools {
   dailyLimit: number;
   /** With an audience only: the tools this turn does not offer, and why (06-10). */
   withheld: Withheld;
+  /** The sandbox tools are offered (07.8-05): the turn carries `maxSandboxCalls`. */
+  sandboxOffered: boolean;
 }
 
 /**
@@ -263,6 +317,12 @@ async function computeTurn(
     /** The turn's conversation: needed for the member-account rule (07.4-11); without it that rule fails closed. */
     conversationId?: string | null;
     board?: boolean;
+    /**
+     * Offer the sandbox tools when `sandboxAvailable` allows them (07.8-05): delivery only, and only while sandboxd is
+     * configured. The call-time re-decisions of the other routes never compute them; the sandbox routes decide each
+     * call themselves.
+     */
+    sandbox?: boolean;
   },
   env: SearchEnv,
   audience?: TurnAudience | null,
@@ -421,6 +481,59 @@ async function computeTurn(
     usable.length > 0,
     workZone,
   );
+  // Bot sandboxes (07.8-05, D-09, D-12, P-05) and browsers (07.8-14): offered only when the resolver grants
+  // `sandbox.use` / `browser.use` to the bot acting for this human (07.3 module denies included), the organization
+  // switch is on, the organization is not killed and the bot's own switch is on: the one decision `sandboxAvailable`
+  // makes, asked again at every call. When only the organization's switch or its kill stands in the way of a bot whose
+  // own switch is on, the turn says so (`withheld`), so the bot can tell people why (WINDOWS #248).
+  let sandboxOffered = false;
+  if (p.sandbox) {
+    const families = [
+      {
+        kind: "sandbox" as const,
+        tools: OFFERED_SANDBOX_TOOLS as readonly ConfinedToolName[],
+        on: caps.sandbox,
+      },
+      {
+        kind: "browser" as const,
+        // D-11: a member's own sign-in follows 07.4's member-account rule (their private chat with the bot); a
+        // browser session has no share, so a shared conversation never offers it.
+        tools: offeredBrowserTools(
+          row,
+          member !== null &&
+            memberAccountAllowed({
+              scopeKind: member.scopeKind,
+              aiChatShared: member.aiChatShared,
+              hasShare: false,
+            }),
+        ) as readonly ConfinedToolName[],
+        on: caps.browser,
+      },
+    ];
+    for (const family of families) {
+      const available = await sandboxAvailable(
+        tx,
+        perms,
+        { agentId: row.id, userId: p.humanUserId },
+        family.kind,
+      );
+      if (!available.ok) {
+        if (family.on && (available.reason === "killed" || available.reason === "sandbox_off")) {
+          withhold(`ocw_${family.kind}_*`, available.reason);
+        }
+        continue;
+      }
+      for (const name of family.tools) {
+        if (assembled.toolFlags[name] || assembled.tools.length >= MAX_TURN_TOOLS) continue;
+        const { untrustedOutput, sideEffecting } = CONFINED_TOOL_FLAGS[name];
+        assembled.tools.push(name);
+        assembled.toolFlags[name] = { untrustedOutput, sideEffecting };
+      }
+    }
+    sandboxOffered =
+      assembled.tools.includes(BUILTIN_TOOLS.sandboxExec) ||
+      assembled.tools.includes(BUILTIN_TOOLS.browserOpen);
+  }
   // Per-tool approvals (07.5-11, D-01, D-04, APPROVE-01): every offered tool with an effective `always` or
   // `when_tainted` rule for (bot, human) is flagged, so the gate sends exactly those calls' arguments. One policy load
   // per turn computation; delivery and the call-time re-decision share it. The cell-wide view never calls this.
@@ -435,6 +548,7 @@ async function computeTurn(
     dailyLimit: effectiveDailyLimit(row.scope, caps, policy),
     withheld,
     keys: { usable, memberAccount, unitAudience },
+    sandboxOffered,
     ...assembled,
   };
 }
@@ -519,6 +633,20 @@ async function isBoardChannel(tx: Tx, conversationId: string, conversationKind: 
     .where(eq(conversations.id, conversationId))
     .limit(1);
   return row?.layout === "board";
+}
+
+/**
+ * The member-account rule's facts for a delivered turn (07.8-21): what `memberAccountAllowed` decides a member's own
+ * browser sign-in and sealed session with (D-11), at call time. An AI chat is judged with its readers now
+ * (`audienceOf`, passed by the caller); without them it counts as shared (fail closed).
+ */
+export async function memberAccountFacts(
+  tx: Tx,
+  p: { conversationId: string; conversationKind: string; agentId: string; humanUserId: string },
+  audience: TurnAudience | null,
+): Promise<{ scopeKind: string; aiChatShared: boolean | null }> {
+  const facts = await memberAccountContext(tx, { ...p, audience });
+  return { scopeKind: facts.scopeKind, aiChatShared: facts.aiChatShared };
 }
 
 /**
@@ -682,7 +810,8 @@ export async function turnPolicy(
   const computed = await computeTurn(
     tx,
     perms,
-    { ...p, conversationKind: scopeKind, board },
+    // Sandbox tools only while sandboxd is configured (07.8-05): without it nothing could run them.
+    { ...p, conversationKind: scopeKind, board, sandbox: core.env.OCW_SANDBOX_URL !== null },
     core.env,
     opts.audience,
   );
@@ -723,11 +852,16 @@ export async function turnPolicy(
     now: computed.effective.dateTime.effective ? turnNow(p.clientTimeZone) : null,
     maxToolCalls: MAX_TOOL_CALLS_PER_TURN,
     maxWebCalls: MAX_WEB_CALLS_PER_TURN,
+    // The separate budget of the sandbox calls (P-06), counted by the sandbox routes in `agent_turns.sandbox_calls`.
+    ...(computed.sandboxOffered ? { maxSandboxCalls: MAX_SANDBOX_CALLS_PER_TURN } : {}),
     // The persona can tell people what it could not use here and why (06-10); never a reason to enable anything.
     // Member-account entries (07.4-11, R7) travel on every delivery, so the persona can offer the share link.
     ...(opts.audience || computed.withheld.length > 0 ? { withheld: computed.withheld } : {}),
     ...(memoryFiles.length > 0 ? { memoryFiles } : {}),
   };
+  // 07.8-28 (WINDOWS #292, ADR-0029): a member's session loaded earlier by this bot in this conversation keeps its
+  // member data for every later turn here (the bot's history may hold what it read signed in).
+  const sticky = await stickyMemberData(tx, { agentId: p.agentId, conversationId: p.conversationId });
   await tx.insert(agentTurns).values({
     eventId: p.eventId,
     organizationId: tenantOf(tx).organizationId,
@@ -738,6 +872,7 @@ export async function turnPolicy(
     messageId: p.messageId,
     tools: turn.tools,
     toolFlags: turn.toolFlags,
+    ...(sticky ? { memberData: true } : {}),
   });
   return { deliver: true, turn };
 }
@@ -784,7 +919,7 @@ export async function recordLimitReached(
  */
 export async function cellAgentCapabilities(
   tx: Tx,
-  env: SearchEnv,
+  env: SearchEnv & Pick<Env, "OCW_SANDBOX_URL">,
 ): Promise<Map<string, { tools: string[] }>> {
   const rows = await tx.select().from(agents).where(isNull(agents.deletedAt));
   const policy = await loadPolicy(tx);
@@ -821,7 +956,10 @@ export async function cellAgentCapabilities(
       tools:
         row.status === "disabled"
           ? []
-          : assemble(effective, null, catalog, names, false, keyHolders.has(row.id)).tools,
+          : [
+              ...assemble(effective, null, catalog, names, false, keyHolders.has(row.id)).tools,
+              ...confinedCellTools(caps, env.OCW_SANDBOX_URL !== null),
+            ],
     });
   }
   return out;

@@ -81,6 +81,12 @@ export const Permission = z.enum([
   "agent_template.manage",
   // Phase 07.5 (07.5-01, D-04, P-03): which bot actions need a person's approval.
   "tool_approval.manage",
+  // Phase 07.8 (07.8-30, D-09, D-12): bot sandboxes and browsers (the `sandbox` and `browser` modules).
+  "sandbox.use",
+  "sandbox.files",
+  "browser.use",
+  "browser.watch",
+  "browser.control",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -154,6 +160,11 @@ export const PERMISSION_SURFACE: Record<Permission, PermissionSurface> = {
   "vault.manage": "team",
   "agent_template.manage": "team",
   "tool_approval.manage": "team",
+  "sandbox.use": "bots",
+  "sandbox.files": "bots",
+  "browser.use": "bots",
+  "browser.watch": "bots",
+  "browser.control": "bots",
 };
 
 export const ROLE_SURFACES: Record<OrgRole, PermissionSurface[]> = {
@@ -187,6 +198,13 @@ const STANDARD: readonly Permission[] = [
   "memory.read",
   "connector.connect",
   "vault.use",
+  // Phase 07.8: like `bot.tool.use`; the resolver adds the relation preconditions (files: a bot you configure; watch:
+  // a conversation you read; control: the context's requester) and the module rows can take them away.
+  "sandbox.use",
+  "sandbox.files",
+  "browser.use",
+  "browser.watch",
+  "browser.control",
 ];
 const DEVELOPER: readonly Permission[] = [
   ...STANDARD,
@@ -261,7 +279,8 @@ export const LEAD_PERMISSIONS: readonly Permission[] = [
 /**
  * Upper bound for an agent principal (intersected with the triggering human). Agents never hold `memory.promote`:
  * they propose into shared memory and a person approves (Phase 07.2). They use a keychain key only as `vault.use`
- * decided for the agent acting for the turn's human (Phase 07.4, D-04); they never manage keys or templates.
+ * decided for the agent acting for the turn's human (Phase 07.4, D-04); they never manage keys or templates. They use
+ * their sandbox and browser for the human (Phase 07.8) but never watch, take control of a browser or manage files.
  */
 export const AGENT_PERMISSIONS: readonly Permission[] = [
   "channel.read",
@@ -271,6 +290,8 @@ export const AGENT_PERMISSIONS: readonly Permission[] = [
   "memory.read",
   "memory.write",
   "vault.use",
+  "sandbox.use",
+  "browser.use",
 ];
 /** The OpenClaw cell principal. */
 export const CELL_PERMISSIONS: readonly Permission[] = ["cell.sync"];
@@ -431,6 +452,11 @@ export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
   "vault.manage": "Manage a unit's keychain keys",
   "agent_template.manage": "Manage a unit's agent templates",
   "tool_approval.manage": "Decide which bot actions need a person's approval (for the units you lead)",
+  "sandbox.use": "Let bots run commands and keep files in their sandbox when they work for you",
+  "sandbox.files": "Browse, upload and delete files in the sandboxes of bots you configure",
+  "browser.use": "Let bots open web pages in their browser when they work for you",
+  "browser.watch": "Watch a bot's browser in conversations you can read",
+  "browser.control": "Take control of a bot's browser to sign in yourself",
 };
 
 // ---------------------------------------------------------------- tokens (AUTH-06)

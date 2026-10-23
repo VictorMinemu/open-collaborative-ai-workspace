@@ -4,8 +4,13 @@
 # built into apps/web/.next-e2e, the fake model/MCP/ClawHub server (infra/fake-model) on 127.0.0.1:4291, its own
 # Garage (attachments, ADR-0015) in the separate compose project `ocw-e2e-storage` on 127.0.0.1:4292, and a
 # machine-wide lock so concurrent runs queue. CI uses it only for the real-cell proof (.github/workflows/cell-proof.yml).
-#   bash scripts/e2e-isolated.sh [--keep-db] [--rebuild-web] [playwright args...]
-#   bash scripts/e2e-isolated.sh [--keep-db] --cmd "<shell command run against the stack>"
+#   bash scripts/e2e-isolated.sh [--keep-db] [--rebuild-web] [--sandbox] [playwright args...]
+#   bash scripts/e2e-isolated.sh [--keep-db] [--sandbox] --cmd "<shell command run against the stack>"
+# Bot sandboxes (07.8-08, P-13): by default the API's sandboxd is the in-memory fake the fake server mounts at
+# http://127.0.0.1:4291/__sandboxd (no Docker). `--sandbox` runs the REAL broker instead: it builds the `sbx` image as
+# ocw-sandbox-sbx:e2e (and every other sandbox image the broker reads, once its Dockerfile and its env var exist), starts
+# apps/sandboxd as a host process on 127.0.0.1:4293 with namespace `ocw-e2e` and a generated token, and removes every
+# `ocw.namespace=ocw-e2e` container, volume and network (and the :e2e images) before the run and on exit.
 # Optional env (scripts/cell-proof.sh): OCW_E2E_API_HOST (API bind address, default 127.0.0.1; 0.0.0.0 only where a
 # container must reach the API and the host is disposable, e.g. CI), OCW_E2E_CLAWHUB_URL (ClawHub the API proxies,
 # default the fake); OCW_BUNDLED_PLUGINS and OCW_MOCK_MODEL_BASE_URL are kept over .env when the caller sets them.
@@ -24,12 +29,17 @@ STORAGE_PORT=4292       # Garage S3 API of the harness's own compose project
 STORAGE_PROJECT=ocw-e2e-storage   # the ONLY compose project this script runs lifecycle commands on
 WEB_DIST=.next-e2e
 LOCK=/tmp/ocw-e2e.lock
+SANDBOX_PORT=4293       # --sandbox: the real sandboxd broker (host process, loopback)
+SANDBOX_NS=ocw-e2e      # --sandbox: the ONLY label namespace this script removes (ocw.namespace=ocw-e2e)
+# Default mode: the fake sandboxd behind this fixed, loopback-only test token (never a real broker's token).
+FAKE_SANDBOX_TOKEN=e2e-sandbox-token-0123456789abcdef0123456789
 
-keep_db=0; rebuild_web=0; cmd=""; args=()
+keep_db=0; rebuild_web=0; sandbox=0; cmd=""; args=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep-db) keep_db=1 ;;
     --rebuild-web) rebuild_web=1 ;;
+    --sandbox) sandbox=1 ;;
     --cmd) cmd="${2:?--cmd needs a command}"; shift ;;
     *) args+=("$1") ;;
   esac
@@ -80,14 +90,58 @@ stop_pid() {
   kill -TERM "$pid" 2>/dev/null || true
 }
 storage() { docker compose -p "$STORAGE_PROJECT" -f compose.yaml "$@"; }
+# --sandbox: images this script builds (tag :e2e, label ocw.namespace=ocw-e2e). Each row: Dockerfile, build context, tag,
+# and the broker variable that reads it; a row is built only when its Dockerfile exists and apps/sandboxd reads its
+# variable, so the browser and egress images join once their broker plans (07.8-12/13) wire them.
+SANDBOX_IMAGES=(
+  "infra/sandbox/sbx/Dockerfile infra/sandbox/sbx ocw-sandbox-sbx:e2e OCW_SANDBOX_SBX_IMAGE"
+  "infra/sandbox/browser/Dockerfile infra/sandbox/browser ocw-sandbox-brw:e2e OCW_SANDBOX_BRW_IMAGE"
+  "infra/sandbox/egress/Dockerfile . ocw-sandbox-egress:e2e OCW_SANDBOX_EGRESS_IMAGE"
+)
+sandbox_objects() {
+  { docker ps -aq --filter "label=ocw.namespace=$SANDBOX_NS"
+    docker volume ls -q --filter "label=ocw.namespace=$SANDBOX_NS"
+    docker network ls -q --filter "label=ocw.namespace=$SANDBOX_NS"; } 2>/dev/null | wc -l | tr -d ' '
+}
+# Removes every object of the e2e namespace by label (never a prune, never another namespace).
+sandbox_clean() {
+  local ids
+  ids="$(docker ps -aq --filter "label=ocw.namespace=$SANDBOX_NS")"
+  if [ -n "$ids" ]; then docker rm -f $ids >/dev/null 2>&1 || true; fi
+  ids="$(docker volume ls -q --filter "label=ocw.namespace=$SANDBOX_NS")"
+  if [ -n "$ids" ]; then docker volume rm -f $ids >/dev/null 2>&1 || true; fi
+  ids="$(docker network ls -q --filter "label=ocw.namespace=$SANDBOX_NS")"
+  if [ -n "$ids" ]; then docker network rm $ids >/dev/null 2>&1 || true; fi
+}
+sandbox_images_rm() {
+  local row tag
+  for row in "${SANDBOX_IMAGES[@]}"; do
+    set -- $row; tag="$3"
+    docker image rm -f "$tag" >/dev/null 2>&1 || true
+  done
+}
 cleanup() {
+  local code=$?
   stop_pid "$RUN_DIR/web.pid"; stop_pid "$RUN_DIR/api.pid"; stop_pid "$RUN_DIR/fake.pid"
+  if [ "$sandbox" -eq 1 ]; then
+    stop_pid "$RUN_DIR/sandboxd.pid"
+    sandbox_clean
+    sandbox_images_rm
+    left="$(sandbox_objects)"
+    if [ "$left" != "0" ]; then
+      echo "e2e-isolated: FAIL $left object(s) labelled ocw.namespace=$SANDBOX_NS left after cleanup"; code=1
+    else
+      echo "e2e-isolated: no ocw.namespace=$SANDBOX_NS object left; :e2e sandbox images removed"
+    fi
+  fi
   storage stop garage >/dev/null 2>&1 || true
   release_lock
   report_sleeps
   echo "e2e-isolated: logs in $RUN_DIR"
+  exit "$code"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 # ---------------------------------------------------------------- environment (demo values → e2e values)
 # The caller's values of these win over .env (the real-cell proof sets them).
@@ -136,10 +190,17 @@ export OCW_S3_BUCKET=ocw-attachments OCW_S3_REGION=garage
 export GARAGE_RPC_SECRET="e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0e2e0"
 export OCW_S3_ACCESS_KEY_ID="GKe2e0e2e0e2e0e2e0e2e0e2e0"
 export OCW_S3_SECRET_ACCESS_KEY="e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5e2e5"
+# Bot sandboxes (07.8-05/08): the API's broker is the fake sandboxd the fake server mounts at /__sandboxd, behind a fixed
+# loopback-only test token. --sandbox replaces both with the real broker below. Never .env's values.
+export OCW_SANDBOX_URL="http://127.0.0.1:$FAKE_PORT/__sandboxd" OCW_SANDBOX_TOKEN="$FAKE_SANDBOX_TOKEN"
+# Which broker the specs run against (e2e/support/sandbox.ts): `fake` (seed, stats, down/up controls) or `real`.
+export OCW_E2E_SANDBOX=fake
 
 # A Garage left running by an interrupted earlier run of this script is ours to stop (never another project's).
 storage stop garage >/dev/null 2>&1 || true
-for p in "$API_PORT" "$WEB_PORT" "$FAKE_PORT" "$STORAGE_PORT"; do
+ports=("$API_PORT" "$WEB_PORT" "$FAKE_PORT" "$STORAGE_PORT")
+if [ "$sandbox" -eq 1 ]; then ports+=("$SANDBOX_PORT"); fi
+for p in "${ports[@]}"; do
   if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
     echo "e2e-isolated: port $p is busy (not started by this run); stop that process and retry"; exit 1
   fi
@@ -193,8 +254,61 @@ if [ "$need_build" -eq 1 ]; then
   (cd apps/web && OCW_NEXT_DIST_DIR="$WEB_DIST" pnpm build) >"$RUN_DIR/web-build.log" 2>&1 || { tail -60 "$RUN_DIR/web-build.log"; exit 1; }
 fi
 
+# ---------------------------------------------------------------- real sandboxd (--sandbox only)
+if [ "$sandbox" -eq 1 ]; then
+  server_version="$(docker version --format '{{.Server.Version}}')"
+  if [ "${server_version%%.*}" -lt 26 ]; then
+    echo "e2e-isolated: Docker $server_version < 26 (internal networks forward DNS before 26): refusing --sandbox"; exit 1
+  fi
+  if [ -z "${DOCKER_SOCKET:-}" ]; then
+    host="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)"
+    case "$host" in unix://*) DOCKER_SOCKET="${host#unix://}" ;; *) DOCKER_SOCKET=/var/run/docker.sock ;; esac
+  fi
+  sandbox_clean
+  broker_env=()
+  for row in "${SANDBOX_IMAGES[@]}"; do
+    set -- $row
+    [ -f "$1" ] || continue
+    grep -q "$4" apps/sandboxd/src/main.ts || continue
+    echo "e2e-isolated: building $3 from $1"
+    docker build -q --label "ocw.namespace=$SANDBOX_NS" -t "$3" -f "$1" "$2" >"$RUN_DIR/sandbox-build.log" 2>&1 ||
+      { tail -40 "$RUN_DIR/sandbox-build.log"; exit 1; }
+    broker_env+=("$4=$3")
+  done
+  sandbox_token="$(node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("hex"))')"
+  (env ${broker_env[@]+"${broker_env[@]}"} OCW_SANDBOX_TOKEN="$sandbox_token" OCW_SANDBOX_NAMESPACE="$SANDBOX_NS" \
+    OCW_SANDBOXD_HOST=127.0.0.1 OCW_SANDBOXD_PORT="$SANDBOX_PORT" OCW_SANDBOX_RUNTIME="${OCW_SANDBOX_RUNTIME:-auto}" \
+    DOCKER_SOCKET="$DOCKER_SOCKET" nohup node --import tsx apps/sandboxd/src/main.ts >"$RUN_DIR/sandboxd.log" 2>&1 &
+    echo $! >"$RUN_DIR/sandboxd.pid")
+  listening=0
+  for _ in $(seq 1 60); do
+    if grep -q '"msg":"listening"' "$RUN_DIR/sandboxd.log" 2>/dev/null; then listening=1; break; fi
+    kill -0 "$(cat "$RUN_DIR/sandboxd.pid")" 2>/dev/null || break
+    sleep 1
+  done
+  [ "$listening" -eq 1 ] || { echo "e2e-isolated: sandboxd did not start"; tail -20 "$RUN_DIR/sandboxd.log"; exit 1; }
+  export OCW_SANDBOX_URL="http://127.0.0.1:$SANDBOX_PORT" OCW_SANDBOX_TOKEN="$sandbox_token"
+  export OCW_E2E_SANDBOX=real OCW_E2E_SANDBOX_NAMESPACE="$SANDBOX_NS"
+  # 07.8-28: the fake sites of the browser journey (infra/sandbox/test/fake-site.mjs on the pinned node base, no image
+  # built): panel.fake.test, idp.fake.test and evil.fake.test on :8080, on their own internal network. Both carry
+  # ocw.namespace=ocw-e2e, so the label cleanup removes them. Only the egress proxy joins that network
+  # (e2e/support/sandbox.ts `useFakeSites`, as the stack smoke does): sandboxd's outbound network keeps
+  # inter-container traffic off, so a site attached there would be unreachable.
+  fake_site_base="node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20"
+  docker network create --internal --label "ocw.namespace=$SANDBOX_NS" "$SANDBOX_NS-sites" >/dev/null
+  docker run -d --name "$SANDBOX_NS-fake-site" --label "ocw.namespace=$SANDBOX_NS" --network "$SANDBOX_NS-sites" \
+    --network-alias panel.fake.test --network-alias idp.fake.test --network-alias evil.fake.test \
+    --user 1000:1000 --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+    -v "$PWD/infra/sandbox/test/fake-site.mjs:/site/fake-site.mjs:ro" "$fake_site_base" node /site/fake-site.mjs >/dev/null
+  export OCW_E2E_FAKE_SITES_NET="$SANDBOX_NS-sites" OCW_E2E_FAKE_SITE="$SANDBOX_NS-fake-site"
+  # The logs a full-stack sweep reads (the API's and sandboxd's), by path only.
+  export OCW_E2E_RUN_DIR="$RUN_DIR"
+  echo "e2e-isolated: real sandboxd on $OCW_SANDBOX_URL (namespace $SANDBOX_NS)"
+fi
+
 # ---------------------------------------------------------------- fake server + API + web
-(PORT="$FAKE_PORT" FAKE_MODEL_HOST=127.0.0.1 FAKE_MCP_TOKEN="$OCW_E2E_FAKE_MCP_TOKEN" nohup node infra/fake-model/server.mjs >"$RUN_DIR/fake.log" 2>&1 & echo $! >"$RUN_DIR/fake.pid")
+(PORT="$FAKE_PORT" FAKE_MODEL_HOST=127.0.0.1 FAKE_MCP_TOKEN="$OCW_E2E_FAKE_MCP_TOKEN" FAKE_SANDBOX_TOKEN="$FAKE_SANDBOX_TOKEN" \
+  nohup node infra/fake-model/server.mjs >"$RUN_DIR/fake.log" 2>&1 & echo $! >"$RUN_DIR/fake.pid")
 (cd apps/api && nohup node --env-file-if-exists=../../.env --import tsx src/main.ts >"$RUN_DIR/api.log" 2>&1 & echo $! >"$RUN_DIR/api.pid")
 (cd apps/web && OCW_NEXT_DIST_DIR="$WEB_DIST" nohup node --env-file-if-exists=../../.env ./node_modules/next/dist/bin/next start -p "$WEB_PORT" -H 127.0.0.1 >"$RUN_DIR/web.log" 2>&1 & echo $! >"$RUN_DIR/web.pid")
 ready=0

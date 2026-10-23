@@ -7,7 +7,8 @@
 // The demo's `:local` images, its project and ports 3000/4000 are fingerprinted before and after; any difference
 // fails the run.
 //
-//   pnpm gate:compose [--steps a,b] [--with-observability] [--with-vault] [--block NN] [--run-id ID] [--keep]
+//   pnpm gate:compose [--steps a,b] [--with-observability] [--with-vault] [--with-sandbox] [--block NN] [--run-id ID]
+//                     [--keep]
 //   pnpm gate:compose --attach <envFile> [--steps …]   checks against a stack left by --keep (no build/up/teardown)
 //   pnpm gate:compose --down <envFile>                 tears down a stack left by --keep
 //
@@ -15,6 +16,9 @@
 //   compose         migrate exited 0, api /health, web /login, cell healthy, admin setup/sign-in (loopback)
 //   playwright      e2e/playwright.compose.config.ts from the host through Caddy: setup, Scenario B at 1440 and 390,
 //                   the attachments API flow; fails if any test is skipped, failed or flaky, or if none ran
+//   sandbox         --with-sandbox (the stack runs the `sandbox` profile): scripts/gate/sandbox-check.mjs (sandboxd
+//                   healthy, no published port, only `sandbox-control`; the API's isolation view; kill and resume
+//                   through the API, proven at the broker; no sandbox object left)
 //   proxy           scripts/gate/proxy-check.mjs (WebSocket, presigned URLs, forwarded headers, cookies)
 //   schema-refusal  scripts/gate/schema-refusal.mjs (unknown applied migration keeps the api down, then recovers)
 //   backup          scripts/gate/backup-roundtrip.mjs (backup → restore, fresh volumes, --consistent, --force-recreate)
@@ -46,12 +50,14 @@ import {
 } from "./lib.mjs";
 import * as observabilityStep from "./observability-smoke.mjs";
 import * as proxyStep from "./proxy-check.mjs";
+import * as sandboxStep from "./sandbox-check.mjs";
 import * as schemaRefusalStep from "./schema-refusal.mjs";
 import * as vaultStep from "./vault-check.mjs";
 
 export const STAGES = [
   "compose",
   "playwright",
+  "sandbox",
   "proxy",
   "schema-refusal",
   "backup",
@@ -63,8 +69,17 @@ export const DEFAULT_STAGES = ["compose", "playwright", "proxy", "schema-refusal
 const PLAYWRIGHT_CONFIG = "e2e/playwright.compose.config.ts";
 const PLAYWRIGHT_CLI = path.join(REPO_ROOT, "node_modules", "@playwright", "test", "cli.js");
 
-/** The stages to run, in canonical order, from --steps and the profile flags. */
-export function selectStages({ steps, withObservability = false, withVault = false } = {}) {
+/**
+ * The stages to run, in canonical order, from --steps and the profile flags. `sandbox` runs after Playwright, whose
+ * setup project must find the instance fresh (the sandbox check signs the admin in, redeeming the setup token when
+ * Playwright is not part of the run).
+ */
+export function selectStages({
+  steps,
+  withObservability = false,
+  withVault = false,
+  withSandbox = false,
+} = {}) {
   const wanted = new Set(
     steps
       ? steps
@@ -78,10 +93,20 @@ export function selectStages({ steps, withObservability = false, withVault = fal
     wanted.add("vault");
     wanted.add("vault-backup");
   }
+  if (withSandbox) wanted.add("sandbox");
   const unknown = [...wanted].filter((s) => !STAGES.includes(s));
   if (unknown.length)
     throw new Error(`unknown stage(s): ${unknown.join(", ")} (known: ${STAGES.join(", ")})`);
+  if (wanted.has("sandbox") && !withSandbox)
+    throw new Error("the sandbox stage needs the sandbox profile: add --with-sandbox");
   return STAGES.filter((s) => wanted.has(s));
+}
+
+/** What the gate stack runs beyond the default: the `sandbox` profile and the API's broker URL (07.8-24). */
+export function stackOptions({ withSandbox = false } = {}) {
+  return withSandbox
+    ? { profiles: ["sandbox"], extra: { OCW_SANDBOX_URL: "http://sandboxd:8090" } }
+    : { profiles: [], extra: {} };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -266,6 +291,7 @@ async function runStages(ctx, stages, summary, log) {
     try {
       if (name === "compose") res = await run(ctx, { admin: !stages.includes("playwright") });
       else if (name === "playwright") res = await runPlaywright(ctx, summary);
+      else if (name === "sandbox") res = await sandboxStep.run(ctx);
       else if (name === "proxy") res = await proxyStep.run(ctx);
       else if (name === "schema-refusal") res = await schemaRefusalStep.run(ctx);
       else if (name === "backup") res = await backupStep.run(ctx);
@@ -295,6 +321,7 @@ async function main() {
       block: { type: "string", default: "34" },
       "with-observability": { type: "boolean", default: false },
       "with-vault": { type: "boolean", default: false },
+      "with-sandbox": { type: "boolean", default: false },
     },
   });
   const log = (m) => process.stderr.write(`[gate] ${m}\n`);
@@ -309,6 +336,7 @@ async function main() {
     steps: values.steps,
     withObservability: values["with-observability"],
     withVault: values["with-vault"],
+    withSandbox: values["with-sandbox"],
   });
   const runId = values["run-id"] ?? newRunId();
   const steps = [];
@@ -320,7 +348,14 @@ async function main() {
   let stageResults = [];
   try {
     await withGateStack(
-      { runId, keep: values.keep, attachEnvFile: values.attach, block: Number(values.block), steps },
+      {
+        runId,
+        keep: values.keep,
+        attachEnvFile: values.attach,
+        block: Number(values.block),
+        steps,
+        ...stackOptions({ withSandbox: values["with-sandbox"] }),
+      },
       async (ctx) => {
         target = { project: ctx.project, imageTag: ctx.imageTag, urls: ctx.urls };
         log(`stages: ${stages.join(", ")}`);

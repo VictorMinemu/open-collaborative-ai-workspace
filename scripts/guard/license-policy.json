@@ -1,5 +1,5 @@
 {
-  "$comment": "Dependency-license policy for `pnpm guard` (scripts/guard/licenses.mjs; D-08, SELF-06). Every package in the full pnpm graph and in infra/mcp-sandbox/package-lock.json must evaluate to an allowed SPDX expression (OR: any operand allowed; AND: every operand allowed). Anything else, including unknown or unparseable strings, is denied. CC-BY-4.0 is allowed for data-only packages (caniuse-lite). A clarification pins name@version to the license its upstream text states when the package field is only a pointer; a version bump re-opens the review. An exception admits a denied package and is printed on every run.",
+  "$comment": "Dependency-license policy for `pnpm guard` (scripts/guard/licenses.mjs; D-08, SELF-06). Every package in the full pnpm graph and in the npm lockfiles of infra/mcp-sandbox and infra/sandbox/browser (NPM_LOCKFILES in licenses.mjs) must evaluate to an allowed SPDX expression (OR: any operand allowed; AND: every operand allowed). Anything else, including unknown or unparseable strings, is denied. CC-BY-4.0 is allowed for data-only packages (caniuse-lite). A clarification pins name@version to the license its upstream text states when the package field is only a pointer; a version bump re-opens the review. An exception admits a denied package and is printed on every run.",
   "allow": [
     "MIT",
     "MIT-0",

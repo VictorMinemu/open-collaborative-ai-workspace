@@ -1,0 +1,9 @@
+{
+  "extends": "@ocw/config/tsconfig.node.json",
+  // The egress entrypoint runs on plain Node (native type stripping, no tsx in its image), so its relative imports
+  // name the .ts file.
+  "compilerOptions": {
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src"]
+}
