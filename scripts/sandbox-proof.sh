@@ -22,7 +22,9 @@
 #   one-time   735190
 #   revealed   Visible-Secret-99   (typed after the show-password toggle)
 #   PROOF_BUILD=1          build ocw-openclaw:e2e and ocw-fake-model:e2e from this tree first (else they must exist)
-#   PROOF_OUT=<dir>        where state.json, cell.log, fake-model.log and audit.tsv are written (default: a temp dir)
+#   PROOF_OUT=<dir>        where state.json, cell.log, fake-model.log and audit.tsv are written (default: a temp dir);
+#                          on a failure also the isolated API's and sandboxd's logs (ids, ops, statuses and durations;
+#                          the four E1 strings masked should one ever reach them)
 #   PROOF_SUBNET           proof network subnet (default 10.231.80.0/24)
 #   OCW_PROOF_NS           name prefix and label namespace of what it creates (default ocw-proof-sandbox)
 #   PROOF_CELL_MEMORY      optional hard memory cap for the cell (e.g. 2g)
@@ -100,6 +102,15 @@ cleanup() {
   fi
   docker logs "$CELL" 2>&1 | tail -400 >"$OUT/cell.log"
   docker logs "$MODEL" 2>&1 | tail -100 >"$OUT/fake-model.log"
+  if [[ $status -ne 0 && -n "${OCW_E2E_RUN_DIR:-}" ]]; then
+    # Where a failed step's time went (CI p64/p66 had none of these): the API's and sandboxd's own logs.
+    local f
+    for f in api.log sandboxd.log; do
+      [[ -f "$OCW_E2E_RUN_DIR/$f" ]] || continue
+      sed -e 's/ana@example\.test/[E1]/g' -e 's/S3cr3t-Hunter2-OCW/[E1]/g' -e 's/735190/[E1]/g' \
+        -e 's/Visible-Secret-99/[E1]/g' "$OCW_E2E_RUN_DIR/$f" >"$OUT/$f"
+    done
+  fi
   remove_by_label
   if [[ "$built" == "1" ]]; then docker image rm -f "$CELL_IMAGE" "$MODEL_IMAGE" >/dev/null 2>&1; fi
   local left
@@ -195,17 +206,17 @@ step 8 "PASS 8. D-13: open of evil.fake.test and the Export click answered appro
 step 9 "PASS 9. reused without a card, revoked, never Ana's; Ana (owner) and Sam's other device got 0 frames during the takeover and the signed-in page; frames again afterwards"
 step 10 "PASS 10. E1 sweep: none of the four strings in any column, audit row, stream event, API, sandboxd or cell log, or model request; brw and egress keep no log (driver none)"
 if [[ -f "$OUT/state.json" ]]; then
-  node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`== timings: first exec (cold sbx start, through the cell) ${s.coldStartMs} ms after ${s.firstExecAttempts} ask(s); kill switch to no running container ${s.killLatencyMs} ms`);if(s.journey)console.log(`== journey: take to signed in ${s.journey.signInMs} ms; controller frames ${s.journey.controllerFrames}; Ana frames while private ${s.journey.anaFrames.length}; other device ${s.journey.otherDeviceFrames.length}; /collect hits ${s.journey.collectHits}; pending approvals ${s.journey.pendingApprovals}`)' "$OUT/state.json"
+  node -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(`== timings: first exec (cold sbx start, through the cell) ${s.coldStartMs} ms after ${s.firstExecAttempts} ask(s); kill switch to no running container ${s.killLatencyMs} ms`);const j=s.journey;if(j?.opens?.length){const f=j.firstOpen;console.log(`== browser opens (through the cell): ${j.opens.map((o)=>`step ${o.step} ${o.ms} ms`).join(", ")}; the first (cold brw start): API ${f.api} ms = ensure ${f.ensure} ms (brw started ${f.brwStarted} ms, ready ${f.brwReady} ms) + contextOpen ${f.contextOpen} ms + navigate ${f.navigate} ms`)}if(j)console.log(`== journey: take to signed in ${j.signInMs} ms; controller frames ${j.controllerFrames}; Ana frames while private ${j.anaFrames.length}; other device ${j.otherDeviceFrames.length}; /collect hits ${j.collectHits}; pending approvals ${j.pendingApprovals}`)' "$OUT/state.json"
 fi
 
 # ---------------------------------------------------------------- audit rows (read-only)
-echo "== audit rows (app.audit_events: sandbox.*)"
+echo "== audit rows (app.audit_events: sandbox.*, browser.*)"
 (cd packages/db && OCW_PROOF_DB_URL="$MIGRATE_SUPERUSER_URL" node --input-type=module -e '
 import pg from "pg";
 const c = new pg.Client({ connectionString: process.env.OCW_PROOF_DB_URL });
 await c.connect();
 const { rows } = await c.query(`select occurred_at::text as at, action, actor_kind, result, metadata::text as metadata
-  from app.audit_events where action like $$sandbox.%$$ order by occurred_at, id`);
+  from app.audit_events where action like $$sandbox.%$$ or action like $$browser.%$$ order by occurred_at, id`);
 await c.end();
 console.log(["at\taction\tactor\tresult\tmetadata", ...rows.map((r) => [r.at, r.action, r.actor_kind, r.result, r.metadata].join("\t"))].join("\n"));
 ') | tee "$OUT/audit.tsv" | sed 's/^/   /'

