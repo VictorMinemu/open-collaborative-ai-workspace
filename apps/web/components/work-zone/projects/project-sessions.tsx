@@ -1,7 +1,7 @@
 "use client";
 
 import type { Project, WorkProjectDetail, WorkSession } from "@ocw/contracts";
-import { FolderGit2, Plus, SquareTerminal } from "lucide-react";
+import { FolderGit2, Plus, Settings2, SquareTerminal } from "lucide-react";
 import { useId, useState } from "react";
 import { EmptyState } from "@/components/common/empty-state";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,11 @@ export const SESSIONS_COPY = {
   noReposOther: "Ask a project lead to link one.",
   noSessionsTitle: "No sessions you can see",
   noSessionsBody: "Start one. Sessions people keep to themselves don't appear here.",
+  // D-14: a manager outside the project shapes it but sees none of its sessions (07.9-13).
+  managerOutside: "You manage this project but aren't in it, so its sessions don't show here.",
+  managerOutsideJoin:
+    "You manage this project but aren't in it. Add yourself under People in Settings to see its sessions.",
+  openSettings: "Open Settings",
   offline: (project: string) => `No repository of ${project} is online right now.`,
 } as const;
 
@@ -104,7 +109,13 @@ export function NewSessionAction({
 }
 
 /** The Sessions tab, wired to the live session list and the shared new-session dialog. */
-export function ProjectSessions({ project }: { project: WorkProjectDetail }) {
+export function ProjectSessions({
+  project,
+  onOpenSettings,
+}: {
+  project: WorkProjectDetail;
+  onOpenSettings?: () => void;
+}) {
   const sessions = useWorkSessions();
   const repos = useProjects();
   const viewerId = useMe().data?.user.id ?? null;
@@ -116,6 +127,7 @@ export function ProjectSessions({ project }: { project: WorkProjectDetail }) {
       viewerId={viewerId}
       target={newSessionTarget(project, repos.data)}
       onStart={openNewSession}
+      onOpenSettings={onOpenSettings}
     />
   );
 }
@@ -127,12 +139,14 @@ export function ProjectSessionsBody({
   viewerId,
   target,
   onStart,
+  onOpenSettings,
 }: {
   project: WorkProjectDetail;
   sessions: readonly WorkSession[] | undefined;
   viewerId: string | null;
   target: NewSessionTarget;
   onStart: (projectId: string) => void;
+  onOpenSettings?: () => void;
 }) {
   const [shown, setShown] = useState(SESSIONS_PAGE);
   if (!sessions) {
@@ -153,6 +167,24 @@ export function ProjectSessionsBody({
         description={project.viewerCan.manage ? SESSIONS_COPY.noReposEditor : SESSIONS_COPY.noReposOther}
         className="rounded-xl border border-dashed py-10"
       />
+    );
+  }
+  if (rows.length === 0 && project.viewerCan.open === false) {
+    // D-14: the API answers this page to a manager outside the project; say why nothing is listed.
+    const join = project.viewerCan.members;
+    return (
+      <EmptyState
+        icon={SquareTerminal}
+        title={SESSIONS_COPY.noSessionsTitle}
+        description={join ? SESSIONS_COPY.managerOutsideJoin : SESSIONS_COPY.managerOutside}
+        className="rounded-xl border border-dashed py-10"
+      >
+        {join && onOpenSettings ? (
+          <Button variant="outline" size="sm" className="max-md:h-11" onClick={onOpenSettings}>
+            <Settings2 /> {SESSIONS_COPY.openSettings}
+          </Button>
+        ) : null}
+      </EmptyState>
     );
   }
   if (rows.length === 0) {

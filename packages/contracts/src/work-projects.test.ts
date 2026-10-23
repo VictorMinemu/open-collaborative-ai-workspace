@@ -95,6 +95,16 @@ describe("team project API contracts (07.9-01, D-01, D-10, D-13)", () => {
     expect(WorkProjectDetail.safeParse({ ...detail, defaultVisibility: "teams" }).success).toBe(false);
   });
 
+  it("WorkProjectDetail.viewerCan.open is optional and boolean (07.9-13: a manager outside the project)", () => {
+    // An old payload without `open` still parses (additive).
+    expect(WorkProjectDetail.parse(detail).viewerCan.open).toBeUndefined();
+    const outside = { ...detail, viewerCan: { ...detail.viewerCan, open: false } };
+    expect(WorkProjectDetail.parse(outside).viewerCan.open).toBe(false);
+    expect(
+      WorkProjectDetail.safeParse({ ...detail, viewerCan: { ...detail.viewerCan, open: "yes" } }).success,
+    ).toBe(false);
+  });
+
   it("a team is a team or department, never a project", () => {
     expect(
       WorkProjectTeam.safeParse({ id: uuid(3), name: "P", kind: "project", memberCount: 1 }).success,

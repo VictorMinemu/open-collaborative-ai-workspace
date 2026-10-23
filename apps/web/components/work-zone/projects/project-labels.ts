@@ -23,3 +23,19 @@ export function teamCounts(p: Pick<WorkProjectSummary, "peopleCount" | "repoCoun
 export function teamCaption(p: Pick<WorkProjectSummary, "trail" | "peopleCount" | "repoCount">): string {
   return [trailText(p.trail), teamCounts(p)].filter(Boolean).join(" · ");
 }
+
+// ---------------------------------------------------------------- Settings tab (07.9-13, UI-SPEC § Copy)
+
+/** "8 people" · "1 person". */
+export const peopleCount = (n: number) => plural(n, "person", "people");
+
+/** The Access line's title: "{n} people can open this project" (singular for 1; admins only when nobody is in it). */
+export function accessTitle(n: number): string {
+  if (n === 0) return "Only admins can open this project";
+  return `${peopleCount(n)} can open this project`;
+}
+
+/** A team row's caption: "Team · 8 people" · "Department · 1 person". */
+export function teamRowCaption(team: { kind: "team" | "department"; memberCount: number }): string {
+  return `${team.kind === "team" ? "Team" : "Department"} · ${peopleCount(team.memberCount)}`;
+}
