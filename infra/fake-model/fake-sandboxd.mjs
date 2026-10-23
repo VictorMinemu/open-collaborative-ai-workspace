@@ -23,7 +23,8 @@
 // bot), /__control/browser/event {target, contextId, event: crashed|closed|focus_sensitive|download}
 // (focus_sensitive also writes the control `{kind: "focus", sensitive: true}` on the context's open frame streams),
 // /__control/browser/delay {op, ms} (the next call of that context op answers only after `ms`, ≤ 10 s, while the page's
-// frame streams keep running: it holds a privacy transition open, e.g. the hand back's `contextLock`).
+// frame streams keep running: it holds a privacy transition open, e.g. the hand back's `contextLock`; `browserEnsure` is a
+// slow cold start, which completes even when the caller stopped waiting, like sandboxd's).
 //
 // Like sandboxd, it holds no default policy: until the API pushes an organization's policy, `ensure`, `restart`,
 // `exec`, the browser context ops and the package ops (they would start or run a container) and `filesWrite`,
@@ -1399,7 +1400,12 @@ export function createFakeSandboxd(opts = {}) {
         const body = await readJson(req);
         const op = typeof body?.op === "string" ? body.op : "";
         const ms = Number(body?.ms);
-        if (!op.startsWith("context") || !Number.isInteger(ms) || ms < 0 || ms > 10_000)
+        if (
+          !(op.startsWith("context") || op === "browserEnsure") ||
+          !Number.isInteger(ms) ||
+          ms < 0 ||
+          ms > 10_000
+        )
           return send(res, 400, { error: "delay" });
         delayNext.set(op, ms);
         return send(res, 200, { ok: true });
