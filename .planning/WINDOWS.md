@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 165
+open_count: 167
 waived_count: 5
 fixed_count: 134
-total_count: 304
-last_updated: 2026-10-22T12:38:31.229Z
+total_count: 306
+last_updated: 2026-10-23T01:28:25.262Z
 ---
 
 # Broken Windows Ledger
@@ -319,6 +319,8 @@ last_updated: 2026-10-22T12:38:31.229Z
 | 302 | 07.8 | deviation | apps/api/src/modules/chat |  | hardening: "a DM never gains humans" is enforced only in the API; a DB trigger would be defence in depth (low) | open |  | 2026-10-22T09:40:58.083Z |  |
 | 303 | 07.8 | deviation | apps/web |  | 07.8-29 (medium): useSignIn does not clear the previous session's query cache on sign-in | open |  | 2026-10-22T12:38:31.152Z |  |
 | 304 | 07.8 | deviation | apps/web |  | 07.8-29: other useTopic callers may multiply invalidations the same way /me/permissions did (low) | open |  | 2026-10-22T12:38:31.229Z |  |
+| 305 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-02 (coordinator decision, record in ADR-0030): a revoked personal device grant does not override the device's "shared with everyone"; the person keeps seeing its sessions through the share (same as deviceModeCap today); sessions on a revoked device stay visible to former grantees as history | open |  | 2026-10-23T01:28:25.186Z |  |
+| 306 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-02: who-can-see and project-member listings check every active member one by one; fine at expected size, plan 12's perf test must cover it | open |  | 2026-10-23T01:28:25.262Z |  |
 
 ````json
 [
@@ -3968,6 +3970,30 @@ last_updated: 2026-10-22T12:38:31.229Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-22T12:38:31.229Z",
+    "resolved_at": null
+  },
+  {
+    "id": 305,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "packages/db/sql/post-migrate.sql",
+    "line": null,
+    "description": "07.9-02 (coordinator decision, record in ADR-0030): a revoked personal device grant does not override the device's \"shared with everyone\"; the person keeps seeing its sessions through the share (same as deviceModeCap today); sessions on a revoked device stay visible to former grantees as history",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T01:28:25.186Z",
+    "resolved_at": null
+  },
+  {
+    "id": 306,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "packages/db/sql/post-migrate.sql",
+    "line": null,
+    "description": "07.9-02: who-can-see and project-member listings check every active member one by one; fine at expected size, plan 12's perf test must cover it",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T01:28:25.262Z",
     "resolved_at": null
   }
 ]
