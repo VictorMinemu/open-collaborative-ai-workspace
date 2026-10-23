@@ -108,7 +108,8 @@ export interface RealtimeService {
   isSessionRevoked(sessionId: string): Promise<boolean>;
   /**
    * Durable events of `eventType` may change who can read which topics: `appendEvent` computes the invalidator's
-   * scope in the transaction and publishes it after commit, right after the event itself. Last one wins.
+   * scope in the transaction and publishes it after commit, before any frame of that transaction (07.9 fan-out).
+   * Last one wins.
    */
   registerSubscriptionInvalidator(eventType: string, fn: SubscriptionInvalidator): void;
   /** Publish an invalidation now (non-transactional callers, tests). */
@@ -200,6 +201,21 @@ export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): Re
   const publish = (topic: string, frame: ServerFrame) =>
     deps.bus.publish(topicChannel(topic), JSON.stringify(frame));
 
+  /**
+   * Invalidations of a transaction (its savepoints included) not yet published, by its root. Privacy first (07.9
+   * fan-out): every access invalidation a transaction caused is published BEFORE any of its frames, whatever the order
+   * of the appends, so every gateway holds the affected subscriptions before a frame of that commit reaches them (one
+   * publisher and one subscriber connection per process keep the Redis order). The invalidation of a savepoint rolled
+   * back later is still published: it can only cause a re-decision, never grant access.
+   */
+  const unpublished = new WeakMap<object, SubscriptionInvalidation[]>();
+  const publishInvalidations = async (root: object) => {
+    const list = unpublished.get(root);
+    if (!list) return;
+    unpublished.delete(root);
+    for (const e of list) await deps.bus.publish(AUTHZ_INVALIDATION_CHANNEL, JSON.stringify(e));
+  };
+
   return {
     async appendEvent(tx, topic, type, payload, opts) {
       if (!parseTopic(topic)) throw new Error(`invalid topic ${topic}`);
@@ -213,22 +229,23 @@ export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): Re
         insert into app.stream_events (stream_id, seq, organization_id, type, payload, actor_user_id)
         values (${topic}, ${seq}, ${ctx.organizationId}, ${type}, ${JSON.stringify(payload ?? null)}::jsonb, ${opts?.actorUserId ?? ctx.userId ?? null})`);
       const frame: DurableFrame = { op: "ev", topic, seq, type, data: payload ?? null };
-      let scope: ReturnType<SubscriptionInvalidator> = null;
       const invalidator = invalidators.get(type);
       if (invalidator) {
         try {
-          scope = invalidator(topic, payload);
+          const scope = invalidator(topic, payload);
+          if (scope) {
+            const list = unpublished.get(ctx.root) ?? [];
+            list.push({ organizationId: ctx.organizationId, ...scope });
+            unpublished.set(ctx.root, list);
+          }
         } catch (err) {
           // Never fail the domain write: the periodic backstop re-decides anything missed.
           console.error("subscription invalidator failed", { type, topic, err });
         }
       }
       ctx.afterCommit(async () => {
+        await publishInvalidations(ctx.root);
         await publish(topic, frame);
-        if (scope) {
-          const e: SubscriptionInvalidation = { organizationId: ctx.organizationId, ...scope };
-          await deps.bus.publish(AUTHZ_INVALIDATION_CHANNEL, JSON.stringify(e));
-        }
       });
       return seq;
     },

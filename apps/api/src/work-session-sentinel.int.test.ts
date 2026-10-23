@@ -448,3 +448,57 @@ describe("the sentinel: nothing about a session reaches an outsider or a member 
     }
   });
 });
+
+// ---------------------------------------------------------------- 07.9 fan-out: privacy first when a session narrows
+
+describe("narrowing a session: the people it removes get `revoked` and `work_session.removed`, nothing else (07.9 fan-out)", () => {
+  it("the narrowing's own snapshot and every later frame of the session stay away from Pia; Ana still gets them", async () => {
+    const id = await startSession(ana, device, apiRepo, { title: "Narrowing check" });
+    const piaSock = await openSocket(pia);
+    const anaSock = await openSocket(ana);
+    try {
+      for (const [name, s] of [
+        ["Pia", piaSock],
+        ["Ana", anaSock],
+      ] as const) {
+        expect((await s.sub(`ws:${id}`)).op, name).toBe("subscribed");
+      }
+      expect((await piaSock.sub(`user:${piaId}`)).op).toBe("subscribed");
+      // Every delivery of the start has landed before the mark: what follows is caused by the narrowing.
+      await sleep(500);
+      const mark = piaSock.frames.length;
+      const anaMark = anaSock.frames.length;
+
+      const res = await ok(ana.request("PUT", `/api/v1/work-sessions/${id}/visibility`, { kind: "owner" }));
+      expect(res.removedCount).toBeGreaterThan(0);
+      // Right after the commit, the device reports a durable event and a delta for the session.
+      device.event(id, { type: "assistant.message", messageId: "after-narrowing", text: "Narrowed answer" });
+      device.event(id, { type: "assistant.delta", messageId: "after-narrowing", text: "Narrowed delta" });
+
+      // Ana keeps the session: the snapshot, the event and the delta reach her.
+      await eventually(async () => {
+        const seen = JSON.stringify(anaSock.frames.slice(anaMark));
+        return seen.includes("Narrowed answer") && seen.includes("Narrowed delta");
+      }, 3000);
+      await eventually(
+        async () => piaSock.frames.slice(mark).some((f) => f.op === "revoked" && f.topic === `ws:${id}`),
+        2000,
+      );
+      await sleep(400);
+
+      const after = piaSock.frames.slice(mark);
+      expect(
+        after.filter((f) => f.topic === `ws:${id}` && (f.op === "ev" || f.op === "eph")),
+        "no frame of the session after the narrowing",
+      ).toEqual([]);
+      expect(after.find((f) => f.op === "revoked")).toMatchObject({ topic: `ws:${id}`, cause: "visibility" });
+      const mine = after.filter((f) => f.topic === `user:${piaId}`);
+      expect(mine.filter((f) => f.type === "work_session.updated" && f.data?.id === id)).toEqual([]);
+      expect(mine.filter((f) => f.type === "work_session.removed" && f.data?.id === id)).toHaveLength(1);
+      expect(JSON.stringify(after)).not.toContain("Narrowed");
+    } finally {
+      piaSock.socket.close();
+      anaSock.socket.close();
+    }
+  });
+});

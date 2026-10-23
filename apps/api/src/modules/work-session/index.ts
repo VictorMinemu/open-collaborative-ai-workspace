@@ -1,5 +1,5 @@
 import { EventTypes, WorkProjectUpdatedEvent } from "@ocw/contracts";
-import { permissionRules, type Tx, workSessions } from "@ocw/db";
+import { orgMembers, permissionRules, type Tx, workSessions } from "@ocw/db";
 import { eq, sql } from "drizzle-orm";
 import type { ApiModule, Core } from "../../core";
 import type { ApprovalService } from "../approval";
@@ -100,12 +100,20 @@ export function createWorkSessionModule(
         // resolver's `not_in_audience`. A live subscription the audience just removed is told so (`visibility`); a
         // first subscribe never shows the cause (`authorizeTopic` is a boolean), so no id is confirmed to anyone.
         const exists = await tx.execute(sql`select app.work_session_exists(${workSessionId}::uuid) as e`);
-        return (exists.rows[0] as { e: boolean } | undefined)?.e === true
-          ? {
-              allowed: false as const,
-              cause: revokeCauseOf({ layer: "resource", reason: "not_in_audience" }),
-            }
-          : false;
+        if ((exists.rows[0] as { e: boolean } | undefined)?.e !== true) return false;
+        // The backstop also hides every session from a member who is no longer active; the resolver would refuse them
+        // as a principal before any audience check, so the cause is theirs (`role`), not the session's (07.9 ledger).
+        const [member] = await tx
+          .select({ deactivatedAt: orgMembers.deactivatedAt })
+          .from(orgMembers)
+          .where(eq(orgMembers.userId, auth.userId));
+        return {
+          allowed: false as const,
+          cause:
+            !member || member.deactivatedAt !== null
+              ? revokeCauseOf({ layer: "user", reason: "deactivated" })
+              : revokeCauseOf({ layer: "resource", reason: "not_in_audience" }),
+        };
       }
       const { allowed, denial } = await perms.decide(
         tx,
