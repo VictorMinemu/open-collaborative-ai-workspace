@@ -39,6 +39,9 @@ export const REQUIRED_AREAS = [
   // 07.8 verification: the refused-tool table and confined flags (D-13 exec floor), and the Docker socket mount.
   { area: "bot tool refusals and confined flags", file: "packages/contracts/src/bot-capabilities.ts" },
   { area: "compose (Docker socket mount)", file: "compose.yaml" },
+  // Phase 07.9 (ADR-0030): the one builder of a session's audience facts and the path that changes an audience.
+  { area: "session audience facts", file: "apps/api/src/modules/work-session/facts.ts" },
+  { area: "session audience changes", file: "apps/api/src/modules/work-session/visibility.ts" },
 ];
 
 /** GitHub CODEOWNERS pattern (gitignore subset) → RegExp over repo-relative paths. */

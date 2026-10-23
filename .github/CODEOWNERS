@@ -74,6 +74,15 @@
 /infra/openclaw/render-config.mjs                  @VictorMinemu
 /apps/openclaw-channel/src/reconciler.ts           @VictorMinemu
 
+# Phase 07.9 (ADR-0030): who sees a Work Zone session. The one builder of session facts, audience changes, team
+# projects and their contracts, the backstop's hidden-row path, and the gateway that holds frames while re-deciding.
+/apps/api/src/modules/work-session/facts.ts        @VictorMinemu
+/apps/api/src/modules/work-session/visibility.ts   @VictorMinemu
+/apps/api/src/modules/work-session/projects.ts     @VictorMinemu
+/apps/api/src/modules/work-session/hidden.ts       @VictorMinemu
+/apps/api/src/modules/realtime/gateway.ts          @VictorMinemu
+/packages/contracts/src/work-projects.ts           @VictorMinemu
+
 # Runtime adapters (ADR-0012 path) and the OpenClaw plugin install gate.
 /apps/local-runtime/src/claude/                    @VictorMinemu
 /apps/local-runtime/src/codex/                     @VictorMinemu
