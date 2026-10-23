@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 179
-waived_count: 5
-fixed_count: 148
+open_count: 176
+waived_count: 7
+fixed_count: 149
 total_count: 332
-last_updated: 2026-10-23T10:05:54.945Z
+last_updated: 2026-10-23T12:16:44.791Z
 ---
 
 # Broken Windows Ledger
@@ -319,7 +319,7 @@ last_updated: 2026-10-23T10:05:54.945Z
 | 302 | 07.8 | deviation | apps/api/src/modules/chat |  | hardening: "a DM never gains humans" is enforced only in the API; a DB trigger would be defence in depth (low) | open |  | 2026-10-22T09:40:58.083Z |  |
 | 303 | 07.8 | deviation | apps/web |  | 07.8-29 (medium): useSignIn does not clear the previous session's query cache on sign-in | open |  | 2026-10-22T12:38:31.152Z |  |
 | 304 | 07.8 | deviation | apps/web |  | 07.8-29: other useTopic callers may multiply invalidations the same way /me/permissions did (low) | open |  | 2026-10-22T12:38:31.229Z |  |
-| 305 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-02 (coordinator decision, record in ADR-0030): a revoked personal device grant does not override the device's "shared with everyone"; the person keeps seeing its sessions through the share (same as deviceModeCap today); sessions on a revoked device stay visible to former grantees as history | open |  | 2026-10-23T01:28:25.186Z |  |
+| 305 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-02 (coordinator decision, record in ADR-0030): a revoked personal device grant does not override the device's "shared with everyone"; the person keeps seeing its sessions through the share (same as deviceModeCap today); sessions on a revoked device stay visible to former grantees as history | waived | Recorded as a decision in ADR-0030 (D-14: revoked personal grant vs shared with everyone) | 2026-10-23T01:28:25.186Z | 2026-10-23T12:16:44.715Z |
 | 306 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-02: who-can-see and project-member listings check every active member one by one; fine at expected size, plan 12's perf test must cover it | fixed |  | 2026-10-23T01:28:25.262Z | 2026-10-23T07:06:56.301Z |
 | 307 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | MUST (07.9-12, D-14): app.work_project_access's team branch must exclude descendants of kind project, so an assigned team never reaches members of projects nested under it; with a test | fixed |  | 2026-10-23T03:52:58.538Z | 2026-10-23T07:06:56.376Z |
 | 308 | 07.9 | deviation | apps/api/src/modules/work-session/facts.ts |  | 07.9-05: the list calls work_session_access once per session of the organization (Pitfall 8); plan 12's perf test must measure it | fixed |  | 2026-10-23T03:52:58.614Z | 2026-10-23T07:06:56.450Z |
@@ -331,7 +331,7 @@ last_updated: 2026-10-23T10:05:54.945Z
 | 314 | 07.9 | deviation | apps/api/src/modules/work-session/visibility.ts |  | 07.9-06: validation/preview/search for personal repos create a draft session in an always-rolled-back savepoint, and the who-can-see list calls the rule once per member — plan 12 measures it or adds a SQL function for drafts | fixed |  | 2026-10-23T05:35:07.263Z | 2026-10-23T07:06:56.522Z |
 | 315 | 07.9 | deviation | apps/web/components/work-zone |  | 07.9-06 (for 10/14): an editor can remove themself from the audience (warn before saving); plan 14 must use teamProjectHidden on repos; WorkZoneStartBlock has no not_in_project, so a proposal card does not show it before Start | open |  | 2026-10-23T05:35:07.350Z |  |
 | 316 | 07.9 | deviation | apps/web/components/work-zone |  | 07.9-11: the dimmed badge on Settled sidebar rows fails axe contrast; a long email in the rail's user block overflows into the sidebar column at 1440; ServerUnreachable says "not responding" on a 500 too; a manager outside the project sees "No sessions you can see" (13 may give a specific line) | open |  | 2026-10-23T06:32:15.504Z |  |
-| 317 | 07.9 | deviation | packages/contracts/src |  | 07.9-11: WorkProjectSummary's comment still says "can open"; with D-14 it is "open or manage" (fix in the gate) | open |  | 2026-10-23T06:32:15.594Z |  |
+| 317 | 07.9 | deviation | packages/contracts/src |  | 07.9-11: WorkProjectSummary's comment still says "can open"; with D-14 it is "open or manage" (fix in the gate) | fixed |  | 2026-10-23T06:32:15.594Z | 2026-10-23T12:16:44.640Z |
 | 318 | 07.9 | deviation | apps/web/components/work-zone/session-view.tsx |  | SHOULD FIX (07.9-10, pre-existing): header buttons Queue, Changes and the menu are 32 px at 390 (< 44); the shared bottom-sheet close button is 32 px for every sheet (fixed locally only for the visibility sheet) | fixed |  | 2026-10-23T07:06:02.594Z | 2026-10-23T10:05:54.563Z |
 | 319 | 07.9 | deviation | apps/api/src/modules/work-session/visibility.ts |  | 07.9-10: See all shows "Member" instead of "Through {team}" for a project member also in the chosen team (06's reason order); self-removal through Teams is not warned (the view does not say whether the editor is in the chosen team); the Project row shows no head count unless the session is on Project (needs projectCount in the contract) | open |  | 2026-10-23T07:06:02.669Z |  |
 | 320 | 07.9 | deviation | e2e |  | 07.9-10/11: e2e runs overwrite other plans' screenshots (09's restored by hand twice) — screenshot names per spec, or write only the spec's own files | fixed |  | 2026-10-23T07:06:02.746Z | 2026-10-23T10:05:54.637Z |
@@ -339,7 +339,7 @@ last_updated: 2026-10-23T10:05:54.945Z
 | 322 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-12 (follow-up): an explicit system actor so an empty user_id is denied by default in the audience backstop, instead of "no user passes" (D-13 limit, record in ADR-0030) | open |  | 2026-10-23T07:06:56.682Z |  |
 | 323 | 07.9 | deviation | apps/api/src/modules/work-session/revoke-cause.ts |  | 07.9-12 (minor): re-deciding a deactivated member's subscription gives cause visibility instead of role | fixed |  | 2026-10-23T07:06:56.756Z | 2026-10-23T08:31:57.362Z |
 | 324 | 07.9 | deviation | apps/web/components/settings |  | SHOULD FIX (07.9-13): the reused MembersSection buttons are under 44 px below 768 (project page and Settings › Organization); the disabled Switch in the off state is faint in dark mode (shared component) | open |  | 2026-10-23T07:53:31.404Z |  |
-| 325 | 07.9 | deviation | apps/api/src/modules/work-session/projects.ts |  | 07.9-13: a parent lead can remove a team an admin assigned (say so in ADR-0030); Settings › Organization gets live project updates only while a project unit is selected | open |  | 2026-10-23T07:53:31.501Z |  |
+| 325 | 07.9 | deviation | apps/api/src/modules/work-session/projects.ts |  | 07.9-13: a parent lead can remove a team an admin assigned (say so in ADR-0030); Settings › Organization gets live project updates only while a project unit is selected | waived | Recorded as a decision in ADR-0030 (a parent lead can remove a team an admin assigned) | 2026-10-23T07:53:31.501Z | 2026-10-23T12:16:44.791Z |
 | 326 | 07.9 | deviation | apps/web/components/work-zone/session-view.tsx |  | MUST FIX (07.9-14, regression from 10): e2e work-zone-title on mobile fails — the session header title measures 196 px against a 188 px limit since the visibility chip joined the header | fixed |  | 2026-10-23T08:12:29.374Z | 2026-10-23T10:05:54.713Z |
 | 327 | 07.9 | deviation | apps/web/components/work-zone/session-sidebar.tsx |  | SHOULD FIX (07.9-14): ended/failed status icon contrast in sidebar rows makes work-zone-visibility-marker fail axe when other specs leave such sessions behind | fixed |  | 2026-10-23T08:12:29.820Z | 2026-10-23T10:05:54.793Z |
 | 328 | 07.9 | deviation | packages/contracts/src |  | SHOULD FIX (07.9-14): WorkZoneStartBlock has no not_in_project, so a bot's proposal card cannot say it before Start (contract + agent-channel/proposals.ts + card copy) | fixed |  | 2026-10-23T08:12:29.947Z | 2026-10-23T10:05:54.869Z |
@@ -4005,10 +4005,10 @@ last_updated: 2026-10-23T10:05:54.945Z
     "file": "packages/db/sql/post-migrate.sql",
     "line": null,
     "description": "07.9-02 (coordinator decision, record in ADR-0030): a revoked personal device grant does not override the device's \"shared with everyone\"; the person keeps seeing its sessions through the share (same as deviceModeCap today); sessions on a revoked device stay visible to former grantees as history",
-    "status": "open",
-    "reason": "",
+    "status": "waived",
+    "reason": "Recorded as a decision in ADR-0030 (D-14: revoked personal grant vs shared with everyone)",
     "recorded_at": "2026-10-23T01:28:25.186Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-23T12:16:44.715Z"
   },
   {
     "id": 306,
@@ -4149,10 +4149,10 @@ last_updated: 2026-10-23T10:05:54.945Z
     "file": "packages/contracts/src",
     "line": null,
     "description": "07.9-11: WorkProjectSummary's comment still says \"can open\"; with D-14 it is \"open or manage\" (fix in the gate)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-10-23T06:32:15.594Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-23T12:16:44.640Z"
   },
   {
     "id": 318,
@@ -4245,10 +4245,10 @@ last_updated: 2026-10-23T10:05:54.945Z
     "file": "apps/api/src/modules/work-session/projects.ts",
     "line": null,
     "description": "07.9-13: a parent lead can remove a team an admin assigned (say so in ADR-0030); Settings › Organization gets live project updates only while a project unit is selected",
-    "status": "open",
-    "reason": "",
+    "status": "waived",
+    "reason": "Recorded as a decision in ADR-0030 (a parent lead can remove a team an admin assigned)",
     "recorded_at": "2026-10-23T07:53:31.501Z",
-    "resolved_at": null
+    "resolved_at": "2026-10-23T12:16:44.791Z"
   },
   {
     "id": 326,
