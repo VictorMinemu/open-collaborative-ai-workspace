@@ -1,5 +1,6 @@
 import {
   BROWSER_LIMITS,
+  BROWSER_TIMEOUTS_MS,
   type BrowserSandboxMode,
   encodeFrame,
   FRAME_MAX_PAYLOAD_BYTES,
@@ -57,8 +58,12 @@ import {
 export const BROWSER_IDLE_MS = BROWSER_LIMITS.idleStopMinutes * 60_000;
 export const BROWSER_HOLD_MS = BROWSER_LIMITS.holdMinutes * 60_000;
 export const BROWSER_SWEEP_MS = 30_000;
-/** How long a fresh `brw` has to say `ready` (Chromium launch; the agent's own launch timeout is 60 s). */
-export const BROWSER_READY_MS = 75_000;
+/**
+ * How long a fresh `brw` has to say `ready` (contracts BROWSER_TIMEOUTS_MS.ready: the container start, Chromium's launch
+ * and its container-only retry). It may outlive the API call that asked for the start: a start the call's deadline cut
+ * keeps going here, so the bot's next call finds its browser warm.
+ */
+export const BROWSER_READY_MS: number = BROWSER_TIMEOUTS_MS.ready;
 /** Control messages a slow subscriber may have queued before it is cut off. */
 const MAX_QUEUED_CONTROLS = 32;
 
