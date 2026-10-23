@@ -1,9 +1,15 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
-import { contrastOf } from "../support/a11y";
+import { contrastOf, expectNoSeriousA11y } from "../support/a11y";
 import { apiAs } from "../support/actors";
-import { captureReview, expectNoSidewaysScroll, unnamedControls } from "../support/layout";
+import {
+  captureReview,
+  expectNoSidewaysScroll,
+  expectTouchTargets,
+  unnamedControls,
+} from "../support/layout";
 import { asSuperuser } from "../support/superuser";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
+import { removeTeamProject } from "../support/work-zone-projects";
 import { ADMIN, API_URL } from "./env";
 
 /**
@@ -14,7 +20,8 @@ import { ADMIN, API_URL } from "./env";
  * - sessions on two repositories linked to one team project sort together under its name; an unlinked one keeps its
  *   repository; the home page's recent sessions show the same marker.
  * The audience is set with the guarded superuser (the visibility API and its UI come in 06 and 10); the API computes
- * `differsFromDefault`, the web only words it.
+ * `differsFromDefault`, the web only words it. Ended and failed sessions sit under Settled with readable badges (07.9
+ * polish: axe runs on the whole sidebar and home, with no exclusion), and every sidebar control is 44 px on a phone.
  */
 
 test.describe.configure({ mode: "serial" });
@@ -41,23 +48,8 @@ async function setAudience(sessionId: string, kind: "owner" | "teams", teamId?: 
   }
 }
 
-/**
- * axe on a region minus pre-existing findings this plan must not restyle (logged as broken-window candidates in
- * 07.9-09-SUMMARY): the active rows' branch line (`text-muted-foreground/80` at 11.5 px, 3.5:1) and the home rows'
- * green status chip (2.6:1). Everything this plan adds is inside the checked regions.
- */
-async function axeWithout(page: Page, include: string, exclude: readonly string[]) {
-  const AxeBuilder = (await import("@axe-core/playwright")).default;
-  let builder = new AxeBuilder({ page }).include(include);
-  for (const e of exclude) builder = builder.exclude(e);
-  const result = await builder.analyze();
-  const serious = result.violations
-    .filter((v) => v.impact === "serious" || v.impact === "critical")
-    .map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`);
-  expect(serious, `serious or critical axe violations in ${include}`).toEqual([]);
-}
-const sidebarAxe = (page: Page) =>
-  axeWithout(page, '[data-testid="session-list"]', ['[data-testid="row-branch"]']);
+/** axe on the whole sidebar (07.9 polish removed the exclusions 09 needed for the branch line and the home chip). */
+const sidebarAxe = (page: Page) => expectNoSeriousA11y(page, '[data-testid="session-list"]');
 
 test("Work Zone sidebar: a quiet marker only where the audience differs, rows grouped by team project", async ({
   page,
@@ -69,6 +61,9 @@ test("Work Zone sidebar: a quiet marker only where the audience differs, rows gr
   const adminApi = await apiAs(ADMIN);
   const devices: FakeDeviceHandle[] = [];
   const sessionIds: string[] = [];
+  /** Units this test made, children first (removed at the end, so a later spec's organization tree starts clean). */
+  const units: string[] = [];
+  let portalUnit: string | null = null;
 
   const post = async <T>(path: string, data: unknown): Promise<T> => {
     const r = await adminApi.post(path, { data });
@@ -97,21 +92,25 @@ test("Work Zone sidebar: a quiet marker only where the audience differs, rows gr
       name: `Engineering ${run}`,
       parentId: null,
     });
+    units.unshift(eng.id);
     const web = await post<{ id: string }>("/api/v1/units", {
       kind: "team",
       name: `Web ${run}`,
       parentId: eng.id,
     });
+    units.unshift(web.id);
     const design = await post<{ id: string }>("/api/v1/units", {
       kind: "team",
       name: `Design ${run}`,
       parentId: eng.id,
     });
+    units.unshift(design.id);
     const portalName = `Portal ${run}`;
     const portal = await post<{ id: string }>("/api/v1/work-projects", {
       name: portalName,
       parentId: web.id,
     });
+    portalUnit = portal.id;
     await post(`/api/v1/work-projects/${portal.id}/teams`, { unitId: design.id });
     const repoA = await startFakeDevice(adminApi, {
       name: `E2E Marker A ${tag}`,
@@ -146,6 +145,12 @@ test("Work Zone sidebar: a quiet marker only where the audience differs, rows gr
     await setAudience(mine, "owner");
     await setAudience(team, "teams", design.id);
     await setAudience(scratch, "owner");
+    // Two settled sessions (ended, failed): their rows sit under Settled with the quiet badge.
+    const S = { ended: `Ended ${run}`, failed: `Failed ${run}` };
+    const ended = await startSession(repoC.projectId, S.ended);
+    const failed = await startSession(repoC.projectId, S.failed);
+    await asSuperuser("update app.work_sessions set status = $2 where id = $1", [ended, "completed"]);
+    await asSuperuser("update app.work_sessions set status = $2 where id = $1", [failed, "failed"]);
 
     // The API decides "differs" (default on: project shows nothing; personal: project is the default).
     const listed = (await (await adminApi.get(`${API_URL}/api/v1/work-sessions`)).json()) as {
@@ -216,6 +221,18 @@ test("Work Zone sidebar: a quiet marker only where the audience differs, rows gr
         expect(r?.height ?? 0).toBeGreaterThanOrEqual(44);
       }
     }
+    // Settled: the ended and failed rows, 44 px on a phone like every other sidebar control (the hover-only "+"
+    // is not offered to a touch screen).
+    const settledGroup = list.getByTestId("settled-group");
+    await expect(rowOf(settledGroup, S.ended)).toHaveAttribute("data-status", "completed");
+    await expect(rowOf(settledGroup, S.failed)).toHaveAttribute("data-status", "failed");
+    if (mobile) {
+      for (const title of [S.ended, S.failed]) {
+        const r = await rowOf(settledGroup, title).boundingBox();
+        expect(r?.height ?? 0).toBeGreaterThanOrEqual(44);
+      }
+      await expectTouchTargets(page, '[data-testid="session-list"]');
+    }
 
     expect(await unnamedControls(page)).toEqual([]);
     await expectNoSidewaysScroll(page, "sidebar");
@@ -227,6 +244,9 @@ test("Work Zone sidebar: a quiet marker only where the audience differs, rows gr
     expect(await contrastOf(icon)).toBeGreaterThanOrEqual(3);
     await page.emulateMedia({ colorScheme: "light" });
     await captureReview(page, `09-sidebar-markers-${tag}`);
+    // The Settled heading at the top of the list, so the review shows the group from its start.
+    await settledGroup.evaluate((el) => el.scrollIntoView({ block: "start" }));
+    await captureReview(page, `polish-sidebar-settled-${tag}`);
 
     // ---- the home page's recent sessions follow the same rule
     if (mobile) {
@@ -243,7 +263,24 @@ test("Work Zone sidebar: a quiet marker only where the audience differs, rows gr
       home.getByRole("link").filter({ hasText: T.plain }).getByTestId("visibility-marker"),
     ).toHaveCount(0);
     await recent.scrollIntoViewIfNeeded();
-    await axeWithout(page, "main section", ['[data-testid="session-status"]']);
+    // The time is never cut: the names truncate before it ("just nov" at 390 before 07.9 polish).
+    const times = home.getByTestId("recent-session-time");
+    expect(await times.count()).toBeGreaterThan(0);
+    for (const fit of await times.evaluateAll((els) =>
+      els.map((el) => ({
+        text: el.textContent ?? "",
+        right: el.getBoundingClientRect().right,
+        captionRight: (el.parentElement as HTMLElement).getBoundingClientRect().right,
+        overflow: el.scrollWidth > el.clientWidth,
+      })),
+    )) {
+      expect(fit.overflow, `"${fit.text}" overflows`).toBe(false);
+      expect(fit.right, `"${fit.text}" is cut by its caption`).toBeLessThanOrEqual(fit.captionRight + 0.5);
+    }
+    await expectNoSeriousA11y(page, "main section");
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expectNoSeriousA11y(page, "main section");
+    await page.emulateMedia({ colorScheme: "light" });
     await expectNoSidewaysScroll(page, "home");
     await captureReview(page, `09-home-markers-${tag}`);
   } finally {
@@ -251,6 +288,12 @@ test("Work Zone sidebar: a quiet marker only where the audience differs, rows gr
       await adminApi
         .post(`${API_URL}/api/v1/work-sessions/${id}/archive`, { data: {} })
         .catch(() => undefined);
+    }
+    // The team project with its links, then its parents (07.9 polish: admin-org's mobile run clears the tree).
+    if (portalUnit) await removeTeamProject(adminApi, { unitId: portalUnit, parentId: "", ownParent: false });
+    for (const id of units) {
+      const res = await adminApi.delete(`${API_URL}/api/v1/units/${id}`);
+      expect(res.ok(), `delete unit ${id}: ${await res.text()}`).toBe(true);
     }
     for (const d of devices) await d.stop();
     await adminApi.dispose();

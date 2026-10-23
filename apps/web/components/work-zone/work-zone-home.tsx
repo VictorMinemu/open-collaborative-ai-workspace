@@ -147,12 +147,16 @@ export function RecentSessionRow({ s, viewerId }: { s: WorkSession; viewerId: st
         ) : (
           title
         )}
-        <span className="flex items-center gap-1.5 truncate text-muted-foreground text-xs">
-          {s.projectName}
+        {/* The names truncate; the time never does (it read "just nov" at 390). */}
+        <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
+          <span className="min-w-0 truncate">{s.projectName}</span>
           <span aria-hidden>·</span>
-          <OnlineDot online={s.deviceOnline} className="size-1.5" /> {s.deviceName}
+          <OnlineDot online={s.deviceOnline} className="size-1.5 shrink-0" />
+          <span className="min-w-0 truncate">{s.deviceName}</span>
           <span aria-hidden>·</span>
-          {relativeTime(s.updatedAt)}
+          <span data-testid="recent-session-time" className="shrink-0 whitespace-nowrap">
+            {relativeTime(s.updatedAt)}
+          </span>
         </span>
       </span>
       <StatusChip status={s.status} className="hidden sm:inline-flex" />
