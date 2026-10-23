@@ -2,6 +2,12 @@ import { expect, type Page, test } from "@playwright/test";
 import { contrastOf } from "../support/a11y";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
+import {
+  createTeamProject,
+  linkRepo,
+  removeTeamProject,
+  type TeamProject,
+} from "../support/work-zone-projects";
 import { ADMIN, shot } from "./env";
 
 /**
@@ -35,6 +41,7 @@ test("Full access: an opted-in device runs the owner's session without prompts; 
   let deviceA: FakeDeviceHandle | null = null;
   let deviceB: FakeDeviceHandle | null = null;
   let sessionId: string | null = null;
+  let team: TeamProject | null = null;
 
   try {
     // ---- the organization allows Full access (default: off)
@@ -116,7 +123,10 @@ test("Full access: an opted-in device runs the owner's session without prompts; 
     await expect(page.getByTestId("session-header")).toContainText("Full access");
     // D-04, D-17: the persistent header badge (ref-4 header), for this controller and for a second one.
     await expect(page.getByTestId("session-header").getByTestId("full-access-badge")).toBeVisible();
-    await ensureMember(adminApi, SAM, "developer");
+    const samId = await ensureMember(adminApi, SAM, "developer");
+    // D-06 (07.9): Sam, a second controller, sees the owner's session through its team project (repository linked).
+    team = await createTeamProject(adminApi, { name: `Full access ${tag}`, members: [{ userId: samId }] });
+    await linkRepo(adminApi, team.unitId, deviceA.projectId);
     const sam = await openAs(browser, SAM, info.project.name);
     try {
       await sam.page.goto(`${BASE_URL}/work-zone/${sessionId}`);
@@ -150,6 +160,7 @@ test("Full access: an opted-in device runs the owner's session without prompts; 
     await page.emulateMedia({ colorScheme: "light" });
   } finally {
     if (sessionId) await adminApi.post(`/api/v1/work-sessions/${sessionId}/archive`, { data: {} });
+    if (team) await removeTeamProject(adminApi, team);
     await deviceA?.stop();
     await deviceB?.stop();
     await adminApi.put("/api/v1/work-zone-policy", { data: { allowFullAccess: false } });

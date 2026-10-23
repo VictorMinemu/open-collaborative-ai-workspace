@@ -1,6 +1,5 @@
 import type { APIRequestContext, APIResponse } from "@playwright/test";
-import type { z } from "zod";
-import { ApiError } from "../../packages/contracts/src/common.ts";
+import { ApiError, Ok } from "../../packages/contracts/src/common.ts";
 import { DeviceGrant } from "../../packages/contracts/src/device.ts";
 import { OrgUnit, OrgUnitList, UnitMember } from "../../packages/contracts/src/organization.ts";
 import type { PermissionMode } from "../../packages/contracts/src/session-events.ts";
@@ -15,6 +14,8 @@ import { WorkProjectDetail } from "../../packages/contracts/src/work-projects.ts
  *     default; it leaves device access unchanged);
  *   - `shareDevice`: a device grant (ADR-0012), only where the spec is about device sharing (it also changes
  *     `device.use` and the person's mode cap).
+ * `removeTeamProject` undoes `createTeamProject` in the spec's `finally`: a project with linked repositories cannot be
+ * deleted (`unit_has_repositories`), so one left behind would break the next spec that clears every unit (admin-org).
  * Every response is parsed with its contract schema; a refusal throws with the route, the status and the error code.
  * 07.9-10 adds `setAudience`; keep these exports stable.
  */
@@ -32,9 +33,21 @@ async function errorCode(res: APIResponse): Promise<string> {
 const refused = (what: string, res: APIResponse, code: string) =>
   new Error(`${what}: HTTP ${res.status()} ${code}`);
 
-async function parsed<S extends z.ZodType>(what: string, res: APIResponse, schema: S): Promise<z.infer<S>> {
+/** A contract schema (zod): only `parse` is used, so this file needs no zod import of its own. */
+interface Schema<T> {
+  parse(data: unknown): T;
+}
+
+async function parsed<T>(what: string, res: APIResponse, schema: Schema<T>): Promise<T> {
   if (!res.ok()) throw refused(what, res, await errorCode(res));
   return schema.parse(await res.json());
+}
+
+/** A team project `createTeamProject` made; `ownParent`: its parent is the department the helper named for it. */
+export interface TeamProject {
+  unitId: string;
+  parentId: string;
+  ownParent: boolean;
 }
 
 /**
@@ -46,7 +59,7 @@ async function parsed<S extends z.ZodType>(what: string, res: APIResponse, schem
 export async function createTeamProject(
   admin: APIRequestContext,
   opts: { name: string; parentName?: string; members: Array<{ userId: string; role?: "member" | "lead" }> },
-): Promise<{ unitId: string; parentId: string }> {
+): Promise<TeamProject> {
   const { units } = await parsed("GET /api/v1/units", await admin.get("/api/v1/units"), OrgUnitList);
   const parentName = opts.parentName ?? `${opts.name} department`;
   let parent: OrgUnit | undefined = units.find(
@@ -81,7 +94,33 @@ export async function createTeamProject(
     if (res.status() === 409 && code === "already_member") continue;
     throw refused(`POST /api/v1/units/${unitId}/members`, res, code);
   }
-  return { unitId, parentId };
+  return { unitId, parentId, ownParent: opts.parentName === undefined };
+}
+
+/**
+ * Removes a team project made by `createTeamProject`: unlinks its repositories (`DELETE …/repos/:projectId`, which needs
+ * only `work_project.manage`, so a revoked device's repository unlinks too), deletes the project unit, then the
+ * department the helper named for it unless other units still sit there. A project already gone is a no-op.
+ */
+export async function removeTeamProject(admin: APIRequestContext, project: TeamProject): Promise<void> {
+  const res = await admin.get(`/api/v1/work-projects/${project.unitId}`);
+  if (res.status() === 404) return;
+  const detail = await parsed(`GET /api/v1/work-projects/${project.unitId}`, res, WorkProjectDetail);
+  for (const repo of detail.repos) {
+    const path = `/api/v1/work-projects/${project.unitId}/repos/${repo.projectId}`;
+    await parsed(`DELETE ${path}`, await admin.delete(path), WorkProjectDetail);
+  }
+  await parsed(
+    `DELETE /api/v1/units/${project.unitId}`,
+    await admin.delete(`/api/v1/units/${project.unitId}`),
+    Ok,
+  );
+  if (!project.ownParent) return;
+  const parent = await admin.delete(`/api/v1/units/${project.parentId}`);
+  if (parent.ok()) return;
+  const code = await errorCode(parent);
+  if (parent.status() === 409 && code === "unit_has_children") return;
+  throw refused(`DELETE /api/v1/units/${project.parentId}`, parent, code);
 }
 
 /**

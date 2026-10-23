@@ -1,6 +1,6 @@
 import type { APIRequestContext } from "@playwright/test";
 import { describe, expect, it } from "vitest";
-import { createTeamProject, linkRepo, shareDevice } from "./work-zone-projects";
+import { createTeamProject, linkRepo, removeTeamProject, shareDevice } from "./work-zone-projects";
 
 /**
  * 07.9-08: the e2e helpers that give a second person explicit access to a session (D-06, P-07) go through the public
@@ -11,7 +11,7 @@ import { createTeamProject, linkRepo, shareDevice } from "./work-zone-projects";
 const ID = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
 const NOW = "2026-10-23T10:00:00.000Z";
 
-type Call = { method: "GET" | "POST" | "PUT"; url: string; data?: unknown };
+type Call = { method: "GET" | "POST" | "PUT" | "DELETE"; url: string; data?: unknown };
 type Reply = { status: number; body: unknown };
 
 function stub(route: (call: Call) => Reply): { api: APIRequestContext; calls: Call[] } {
@@ -30,6 +30,7 @@ function stub(route: (call: Call) => Reply): { api: APIRequestContext; calls: Ca
     get: (url: string) => respond({ method: "GET", url }),
     post: (url: string, opts?: { data?: unknown }) => respond({ method: "POST", url, data: opts?.data }),
     put: (url: string, opts?: { data?: unknown }) => respond({ method: "PUT", url, data: opts?.data }),
+    delete: (url: string) => respond({ method: "DELETE", url }),
   };
   return { api: api as unknown as APIRequestContext, calls };
 }
@@ -102,7 +103,7 @@ describe("createTeamProject()", () => {
       members: [{ userId: ID(10) }, { userId: ID(11), role: "lead" }],
     });
 
-    expect(result).toEqual({ unitId: ID(2), parentId: ID(1) });
+    expect(result).toEqual({ unitId: ID(2), parentId: ID(1), ownParent: true });
     expect(calls).toEqual([
       { method: "GET", url: "/api/v1/units" },
       {
@@ -129,7 +130,7 @@ describe("createTeamProject()", () => {
 
     const result = await createTeamProject(api, { name: "Billing", parentName: "Backend", members: [] });
 
-    expect(result).toEqual({ unitId: ID(6), parentId: ID(5) });
+    expect(result).toEqual({ unitId: ID(6), parentId: ID(5), ownParent: false });
     expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
       "GET /api/v1/units",
       "POST /api/v1/work-projects",
@@ -148,6 +149,7 @@ describe("createTeamProject()", () => {
     await expect(createTeamProject(api, { name: "X", members: [{ userId: ID(10) }] })).resolves.toEqual({
       unitId: ID(2),
       parentId: ID(1),
+      ownParent: true,
     });
   });
 
@@ -170,7 +172,7 @@ describe("createTeamProject()", () => {
 
     const result = await createTeamProject(api, { name: "Atlas", members: [{ userId: ID(10) }] });
 
-    expect(result).toEqual({ unitId: ID(2), parentId: ID(1) });
+    expect(result).toEqual({ unitId: ID(2), parentId: ID(1), ownParent: true });
     expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
       "GET /api/v1/units",
       `POST /api/v1/units/${ID(2)}/members`,
@@ -220,6 +222,78 @@ describe("linkRepo()", () => {
     const { api } = stub(() => apiError(409, "repo_already_linked"));
 
     await expect(linkRepo(api, ID(2), ID(30))).rejects.toThrow(/409.*repo_already_linked/u);
+  });
+});
+
+describe("removeTeamProject()", () => {
+  const repo = (projectId: string) => ({
+    projectId,
+    name: "acme",
+    deviceId: ID(40),
+    deviceName: "E2E Mac",
+    deviceOnline: false,
+    branch: null,
+    available: false,
+  });
+
+  it("unlinks every repository, deletes the project, then the department the helper named", async () => {
+    const { api, calls } = stub((c) => {
+      if (c.method === "GET") {
+        return {
+          status: 200,
+          body: { ...detail(ID(2), "Atlas", ID(1)), repos: [repo(ID(30)), repo(ID(31))] },
+        };
+      }
+      if (c.method === "DELETE" && c.url.includes("/repos/"))
+        return { status: 200, body: detail(ID(2), "Atlas", ID(1)) };
+      return { status: 200, body: { ok: true } };
+    });
+
+    await removeTeamProject(api, { unitId: ID(2), parentId: ID(1), ownParent: true });
+
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      `GET /api/v1/work-projects/${ID(2)}`,
+      `DELETE /api/v1/work-projects/${ID(2)}/repos/${ID(30)}`,
+      `DELETE /api/v1/work-projects/${ID(2)}/repos/${ID(31)}`,
+      `DELETE /api/v1/units/${ID(2)}`,
+      `DELETE /api/v1/units/${ID(1)}`,
+    ]);
+  });
+
+  it("never deletes a parent it did not name, and keeps a department that still holds other units", async () => {
+    const reply = (c: Call): Reply => {
+      if (c.method === "GET") return { status: 200, body: detail(ID(2), "Atlas", ID(1)) };
+      if (c.url === `/api/v1/units/${ID(1)}`) return apiError(409, "unit_has_children");
+      return { status: 200, body: { ok: true } };
+    };
+    const kept = stub(reply);
+    await removeTeamProject(kept.api, { unitId: ID(2), parentId: ID(1), ownParent: false });
+    expect(kept.calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      `GET /api/v1/work-projects/${ID(2)}`,
+      `DELETE /api/v1/units/${ID(2)}`,
+    ]);
+
+    const busy = stub(reply);
+    await expect(
+      removeTeamProject(busy.api, { unitId: ID(2), parentId: ID(1), ownParent: true }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("is a no-op for a project that is already gone, and throws on any other refusal", async () => {
+    const gone = stub(() => apiError(404, "not_found"));
+    await expect(
+      removeTeamProject(gone.api, { unitId: ID(2), parentId: ID(1), ownParent: true }),
+    ).resolves.toBeUndefined();
+    expect(gone.calls).toHaveLength(1);
+
+    const refusedDelete = stub((c) =>
+      c.method === "GET"
+        ? { status: 200, body: detail(ID(2), "Atlas", ID(1)) }
+        : apiError(409, "unit_has_bots"),
+    );
+    await expect(
+      removeTeamProject(refusedDelete.api, { unitId: ID(2), parentId: ID(1), ownParent: true }),
+    ).rejects.toThrow(/DELETE \/api\/v1\/units\/.*409.*unit_has_bots/u);
   });
 });
 
