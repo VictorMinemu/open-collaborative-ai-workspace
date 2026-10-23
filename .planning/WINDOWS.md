@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 167
+open_count: 169
 waived_count: 5
 fixed_count: 134
-total_count: 306
-last_updated: 2026-10-23T01:28:25.262Z
+total_count: 308
+last_updated: 2026-10-23T03:52:58.614Z
 ---
 
 # Broken Windows Ledger
@@ -321,6 +321,8 @@ last_updated: 2026-10-23T01:28:25.262Z
 | 304 | 07.8 | deviation | apps/web |  | 07.8-29: other useTopic callers may multiply invalidations the same way /me/permissions did (low) | open |  | 2026-10-22T12:38:31.229Z |  |
 | 305 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-02 (coordinator decision, record in ADR-0030): a revoked personal device grant does not override the device's "shared with everyone"; the person keeps seeing its sessions through the share (same as deviceModeCap today); sessions on a revoked device stay visible to former grantees as history | open |  | 2026-10-23T01:28:25.186Z |  |
 | 306 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | 07.9-02: who-can-see and project-member listings check every active member one by one; fine at expected size, plan 12's perf test must cover it | open |  | 2026-10-23T01:28:25.262Z |  |
+| 307 | 07.9 | deviation | packages/db/sql/post-migrate.sql |  | MUST (07.9-12, D-14): app.work_project_access's team branch must exclude descendants of kind project, so an assigned team never reaches members of projects nested under it; with a test | open |  | 2026-10-23T03:52:58.538Z |  |
+| 308 | 07.9 | deviation | apps/api/src/modules/work-session/facts.ts |  | 07.9-05: the list calls work_session_access once per session of the organization (Pitfall 8); plan 12's perf test must measure it | open |  | 2026-10-23T03:52:58.614Z |  |
 
 ````json
 [
@@ -3994,6 +3996,30 @@ last_updated: 2026-10-23T01:28:25.262Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-23T01:28:25.262Z",
+    "resolved_at": null
+  },
+  {
+    "id": 307,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "packages/db/sql/post-migrate.sql",
+    "line": null,
+    "description": "MUST (07.9-12, D-14): app.work_project_access's team branch must exclude descendants of kind project, so an assigned team never reaches members of projects nested under it; with a test",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T03:52:58.538Z",
+    "resolved_at": null
+  },
+  {
+    "id": 308,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/api/src/modules/work-session/facts.ts",
+    "line": null,
+    "description": "07.9-05: the list calls work_session_access once per session of the organization (Pitfall 8); plan 12's perf test must measure it",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T03:52:58.614Z",
     "resolved_at": null
   }
 ]
