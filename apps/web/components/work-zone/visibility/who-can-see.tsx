@@ -42,15 +42,19 @@ export function WhoCanSee({
     >
       <div className={cn("flex items-center gap-2", sheet ? "min-h-14" : "h-12")}>
         {faces.length > 0 ? (
-          <div role="group" aria-label={countText} className="flex shrink-0 items-center -space-x-1.5">
+          <div role="group" aria-label={countText} className="flex shrink-0 items-center -space-x-0.5">
             {faces.map((p, i) => (
-              // The first face sits on top, so each one keeps its initials readable.
+              // The first face sits on top on an opaque base (the tones are translucent), and the overlap plus its
+              // ring stays clear of the next face's initials (07.9 verification W5: "VR .P").
               <span key={p.userId} className="relative inline-flex" style={{ zIndex: faces.length - i }}>
                 <UserAvatar
                   name={p.name}
                   src={p.avatarUrl}
                   seed={p.userId}
-                  className={cn("size-6 text-[10px] ring-2", sheet ? "ring-background" : "ring-popover")}
+                  className={cn(
+                    "size-6 text-[10px] ring-2",
+                    sheet ? "bg-background ring-background" : "bg-popover ring-popover",
+                  )}
                 />
               </span>
             ))}

@@ -1,6 +1,6 @@
 import { EventTypes, type WorkSession, type WorkSessionList } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
-import { applySessionFrame } from "./workzone-queries";
+import { applySessionFrame, sessionListStale } from "./workzone-queries";
 
 /**
  * Phase 07.9-07 (D-08, P-08): the session list follows the member's own `user:` topic. The API delivers a session's
@@ -90,5 +90,37 @@ describe("applySessionFrame (D-08: the list from the member's own topic)", () =>
 
   it("leaves an unloaded list alone (the first fetch brings it)", () => {
     expect(applySessionFrame(undefined, updated(session(A, "2026-10-22T10:00:00.000Z")))).toBeUndefined();
+  });
+});
+
+describe("sessionListStale (D-08, P-08: when an org event may have changed which sessions I can read)", () => {
+  const me = "4d4d4d4d-4444-4444-8444-444444444444";
+  const other = "5e5e5e5e-5555-4555-8555-555555555555";
+
+  it("refetches on my own role or status change (an ex-admin's list drops the rows they no longer read)", () => {
+    expect(
+      sessionListStale({ type: EventTypes.memberUpdated, data: { userId: me, changed: ["role"] } }, me),
+    ).toBe(true);
+  });
+
+  it("ignores another member's change and a malformed payload", () => {
+    expect(
+      sessionListStale({ type: EventTypes.memberUpdated, data: { userId: other, changed: ["role"] } }, me),
+    ).toBe(false);
+    expect(sessionListStale({ type: EventTypes.memberUpdated, data: null }, me)).toBe(false);
+    expect(sessionListStale({ type: EventTypes.memberUpdated, data: { userId: me } }, null)).toBe(false);
+  });
+
+  it("still refetches on every structural access change and nothing else", () => {
+    for (const type of [
+      EventTypes.deviceUpdated,
+      EventTypes.unitsUpdated,
+      EventTypes.permissionRulesUpdated,
+      EventTypes.workProjectUpdated,
+    ]) {
+      expect(sessionListStale({ type, data: {} }, me), type).toBe(true);
+    }
+    expect(sessionListStale({ type: EventTypes.messageCreated, data: {} }, me)).toBe(false);
+    expect(sessionListStale({ type: EventTypes.projectUpdated, data: {} }, me)).toBe(false);
   });
 });

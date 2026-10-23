@@ -23,7 +23,7 @@ export function ProjectAccessLine({ project }: { project: Pick<WorkProjectDetail
       className="flex min-h-14 items-center gap-3 rounded-xl border bg-card px-4 py-3 shadow-xs"
     >
       {faces.length > 0 ? (
-        <div aria-hidden className="flex shrink-0 items-center -space-x-1.5">
+        <div aria-hidden className="flex shrink-0 items-center -space-x-1">
           {faces.map((p, i) => (
             // The first face sits on top, so each one keeps its initials readable (as in the visibility footer).
             <span key={p.userId} className="relative inline-flex" style={{ zIndex: faces.length - i }}>
@@ -31,7 +31,7 @@ export function ProjectAccessLine({ project }: { project: Pick<WorkProjectDetail
                 name={p.name}
                 src={p.avatarUrl}
                 seed={p.userId}
-                className="size-7 text-[10px] ring-2 ring-card"
+                className="size-7 bg-card text-[10px] ring-2 ring-card"
               />
             </span>
           ))}

@@ -562,15 +562,17 @@ function CurrentNames({ model }: { model: PanelModel }) {
     if (people.length === 0) return null;
     return (
       <span className="flex min-w-0 items-center gap-2">
-        <span className="flex shrink-0 -space-x-1.5">
-          {people.slice(0, 5).map((p) => (
-            <UserAvatar
-              key={p.userId}
-              name={p.name}
-              src={p.avatarUrl}
-              seed={p.userId}
-              className="size-6 text-[10px] ring-2 ring-popover"
-            />
+        <span className="flex shrink-0 -space-x-0.5">
+          {people.slice(0, 5).map((p, i, shown) => (
+            // As in the footer: the first face on top, opaque, never over the next face's initials.
+            <span key={p.userId} className="relative inline-flex" style={{ zIndex: shown.length - i }}>
+              <UserAvatar
+                name={p.name}
+                src={p.avatarUrl}
+                seed={p.userId}
+                className="size-6 bg-popover text-[10px] ring-2 ring-popover"
+              />
+            </span>
           ))}
         </span>
         <span className="min-w-0 truncate text-sm" title={people.map((p) => p.name).join(", ")}>
