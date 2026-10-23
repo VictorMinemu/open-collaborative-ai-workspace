@@ -5,6 +5,7 @@ import {
   ChevronDown,
   CloudOff,
   FolderGit2,
+  FolderKanban,
   GitPullRequestArrow,
   Hand,
   Laptop,
@@ -258,12 +259,28 @@ export function SessionSidebar() {
           <p className="px-2.5 text-[13px] text-muted-foreground">No sessions match “{query.trim()}”.</p>
         ) : null}
 
-        <Link
-          href="/settings/devices"
-          className={cn(sectionItemClass(pathname === "/settings/devices"), "mt-auto text-muted-foreground")}
-        >
-          <Laptop className="size-4" /> Devices
-        </Link>
+        <div className="mt-auto grid gap-0.5">
+          <Link
+            href="/work-zone/projects"
+            data-testid="sidebar-projects"
+            aria-current={pathname.startsWith("/work-zone/projects") ? "page" : undefined}
+            className={cn(
+              sectionItemClass(pathname.startsWith("/work-zone/projects")),
+              "text-muted-foreground max-md:h-11",
+            )}
+          >
+            <FolderKanban className="size-4" /> Projects
+          </Link>
+          <Link
+            href="/settings/devices"
+            className={cn(
+              sectionItemClass(pathname === "/settings/devices"),
+              "text-muted-foreground max-md:h-11",
+            )}
+          >
+            <Laptop className="size-4" /> Devices
+          </Link>
+        </div>
       </nav>
     </SectionSidebar>
   );

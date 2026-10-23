@@ -750,3 +750,34 @@ describe("the projects index, the creatable parents and Project.teamProject (D-0
     });
   });
 });
+
+describe("D-14: managing a project opens its page", () => {
+  it("a lead of the parent who is not in the project opens it and finds it in the index; others still get the 404", async () => {
+    const ledger = (
+      await ok(lena.request("POST", "/api/v1/work-projects", { name: "Ledger", parentId: web }))
+    ).id as string;
+    try {
+      // Lena leaves the project but still leads Web, its parent: she manages it (D-10) without project access.
+      await ok(victor.request("DELETE", `/api/v1/units/${ledger}/members/${lenaId}`));
+      const page = await ok(lena.request("GET", `/api/v1/work-projects/${ledger}`));
+      expect(WorkProjectDetail.safeParse(page).success).toBe(true);
+      expect(page).toMatchObject({
+        id: ledger,
+        access: { count: 0, people: [] },
+        viewerCan: { manage: true, assignTeams: true, members: true },
+      });
+      const index = await ok(lena.request("GET", "/api/v1/work-projects"));
+      expect(index.teamProjects.map((p: { id: string }) => p.id)).toContain(ledger);
+
+      // A plain member of Web, another team's lead and org B still get the unknown-id 404 and no index row.
+      const unknown = await fails(oscar.request("GET", `/api/v1/work-projects/${randomUUID()}`), 404);
+      for (const outsider of [dana, otto, eve]) {
+        expect(await fails(outsider.request("GET", `/api/v1/work-projects/${ledger}`), 404)).toEqual(unknown);
+        const theirs = await outsider.request("GET", "/api/v1/work-projects");
+        expect(JSON.stringify(theirs.body)).not.toContain(ledger);
+      }
+    } finally {
+      await ok(victor.request("DELETE", `/api/v1/units/${ledger}`));
+    }
+  });
+});
