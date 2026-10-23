@@ -332,6 +332,12 @@ test("Leo, a team lead, creates a project inside the team he leads and opens the
     const project = page.getByTestId("project-page");
     await expect(project.getByRole("heading", { level: 1 })).toHaveText(name);
     await expect(page.getByText(`${name} created`)).toBeVisible();
+    // It opens on its Settings tab (07.9-13), where a new project's editor links a repository first.
+    await expect(page.getByTestId("project-tab-settings")).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByTestId("project-repos")).toContainText(
+      "No repositories linked. Link one from a device you can use.",
+    );
+    await page.getByTestId("project-tab-sessions").click();
     // A new project has no repositories: its editor reads how to start (UI-SPEC § Copy).
     await expect(project).toContainText("No repositories yet");
     await expect(project).toContainText("Link a repository so the team can start sessions here.");
@@ -345,6 +351,8 @@ test("Leo, a team lead, creates a project inside the team he leads and opens the
     const other = page.getByTestId("project-page");
     await expect(other.getByRole("heading", { level: 1 })).toHaveText(portalName);
     await expect(other).toContainText("No sessions you can see");
+    // 07.9-13: a manager outside the project reads why, not the member's "Start one".
+    await expect(other).toContainText("You manage this project but aren't in it.");
     await expect(page.getByTestId("project-session-row")).toHaveCount(0);
     await expect(page.getByTestId("project-new-session")).toHaveCount(0);
   } finally {
