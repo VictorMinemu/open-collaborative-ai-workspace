@@ -43,6 +43,8 @@ export const RELATION_PERMISSIONS: Record<ResourceType, Partial<Record<Relation,
   // 07.8-16: watching and controlling come from the role (`browser.watch`, `browser.control`); the browser-context
   // preconditions below decide who among the holders may (reader, owner, requester, member session).
   browser_context: {},
+  // Phase 07.9: grants come from the role, unit leads and allow rules; `project_member` only feeds the precondition.
+  work_project: {},
 };
 
 /** Reason reported when a permission is simply not granted (default `missing_permission`). */
@@ -190,6 +192,20 @@ function browserContextPrecondition(p: PrincipalFacts, r: ResourceFacts, perm: P
   return null;
 }
 
+/**
+ * Opening a team project (Phase 07.9, D-02, P-04, P-11), judged on a `work_project` resource for people only: every
+ * grain except `work_project.manage` needs project access (`project_member`: a direct member, a lead or a member of an
+ * assigned team, decided by `app.work_project_access`) or the admin role, the explicit admin rule. Managing comes from
+ * the role and the lead grants on the project's path (ADR-0024 as implemented), so a lead above the project manages it
+ * without opening it. Grants still come from the role and rules and a deny still wins, admins included. This is the
+ * only copy of the project-access gate: routes ask the resolver, never re-implement it.
+ */
+function workProjectPrecondition(p: PrincipalFacts, r: ResourceFacts): Denial | null {
+  if (r.type !== "work_project" || p.kind !== "user") return null;
+  if (p.orgRole === "admin" || r.relations.has("project_member")) return null;
+  return { layer: "resource", reason: "not_in_project" };
+}
+
 export const PRECONDITIONS: readonly Precondition[] = [
   {
     // Private channels (and, for agents, every channel) are readable by members only.
@@ -290,6 +306,10 @@ export const PRECONDITIONS: readonly Precondition[] = [
   {
     applies: (perm) => UNIT_OWNED[perm] !== undefined,
     check: unitOwnedPrecondition,
+  },
+  {
+    applies: (perm) => perm !== "work_project.manage",
+    check: workProjectPrecondition,
   },
   {
     // Direct conversations (D-03): two fixed members; nobody adds, removes or archives.
@@ -393,6 +413,20 @@ export function orgResource(): ResourceFacts {
 
 export function unitResource(u: { id: string; path: readonly string[] }): ResourceFacts {
   return facts("unit", [], [], u.path);
+}
+
+/**
+ * A team project as a resource (Phase 07.9, D-02): its unit path (so unit rules, module rows and lead grants reach it)
+ * and the `project_member` relation when `access` (`app.work_project_access`) is a membership: lead, member or team.
+ * `admin` is the role's explicit rule in the precondition, never a relation. Built by `projectFacts`.
+ */
+export function workProjectResource(
+  p: { id: string; path: readonly string[]; access: string | null },
+  principalUserId: string | null,
+): ResourceFacts {
+  const member =
+    principalUserId !== null && (p.access === "lead" || p.access === "member" || p.access === "team");
+  return facts("work_project", when(member, "project_member" as const), [], p.path);
 }
 
 /**

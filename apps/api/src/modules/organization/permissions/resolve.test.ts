@@ -23,6 +23,7 @@ import {
   orgResource,
   unitResource,
   userResource,
+  workProjectResource,
   workSessionResource,
 } from "./policy";
 import {
@@ -1677,6 +1678,7 @@ const RELATIONS: Relation[] = [
   "grantee",
   "full_access_grantee",
   "inviter",
+  "project_member",
 ];
 const STATES: ResourceState[] = [
   "ai_chat",
@@ -1700,6 +1702,7 @@ const TYPES: ResourceType[] = [
   "work_session",
   "invitation",
   "agent",
+  "work_project",
 ];
 const PATTERNS = [...Permission.options, "channel.*", "device.*", "work_session.*", "unit.*", "invitation.*"];
 const IDS = ["p1", "p2"];
@@ -2726,5 +2729,71 @@ describe("sandbox.files needs bot.configure on the same bot (Phase 07.8, D-04, P
 
   it("the organization-scope answer stays the role's (the module gate reads it)", () => {
     expect(allowed(user("standard"), orgResource(), "sandbox.files")).toBe(true);
+  });
+});
+
+describe("team projects: who opens one and who manages it (Phase 07.9, D-02, D-10, D-13, ADR-0024)", () => {
+  const D = "dept-D";
+  const T = "team-T";
+  const P = "proj-P";
+  const OTHER = "team-X";
+  const project = (access: "lead" | "member" | "team" | "admin" | null, principal: string | null = "u-1") =>
+    workProjectResource({ id: P, path: [D, T, P], access }, principal);
+  const developer = user("developer");
+  /** The Work Zone module turned off for everyone on a unit, as the module-access API writes it. */
+  const rowsOfModule = (m: ModuleId, extra: Partial<RuleFact> = {}): RuleFact[] =>
+    MODULE_CATALOG[m].patterns.map((permission, i) =>
+      rule({ id: `${m}-${i}`, permission, effect: "deny", ...extra }),
+    );
+
+  it("project access (member, lead, team) opens it for a developer; no access is not_in_project", () => {
+    for (const access of ["member", "lead", "team"] as const) {
+      expect(allowed(developer, project(access), "work_session.read"), access).toBe(true);
+    }
+    expect(decide(developer, project(null), [], "work_session.read")).toEqual({
+      allowed: false,
+      denial: { permission: "work_session.read", layer: "resource", reason: "not_in_project" },
+    });
+    // The admin rule is the explicit role check, never an `admin` access value or a relation.
+    expect(allowed(developer, project("admin"), "work_session.read")).toBe(false);
+    expect(allowed(user("admin"), project(null), "work_session.read")).toBe(true);
+    // A principal-less resource never carries the relation.
+    expect(project("member", null).relations.has("project_member")).toBe(false);
+  });
+
+  it("a unit deny on the project's parent, or the Work Zone off on its path, hides it from members and admins", () => {
+    const denyT = rule({ id: "deny-T", scopeUnitId: T, permission: "work_session.*", effect: "deny" });
+    expect(allowed(developer, project("member"), "work_session.read", [denyT])).toBe(false);
+    expect(allowed(user("admin"), project(null), "work_session.read", [denyT])).toBe(false);
+    const workZoneOff = rowsOfModule("work_zone", { scopeUnitId: D });
+    expect(allowed(developer, project("member"), "work_session.read", workZoneOff)).toBe(false);
+    expect(allowed(user("admin"), project(null), "work_session.read", workZoneOff)).toBe(false);
+    // Elsewhere the rule changes nothing.
+    const elsewhere = workProjectResource({ id: "proj-Q", path: [OTHER, "proj-Q"], access: "member" }, "u-1");
+    expect(allowed(developer, elsewhere, "work_session.read", [denyT])).toBe(true);
+  });
+
+  it("a lead of the parent manages the project and creates under the parent; a plain member does neither", () => {
+    const parentLead = user("lead", { memberUnitPaths: [[D, T]], leadOfUnitIds: new Set([T]) });
+    expect(allowed(parentLead, unitResource({ id: T, path: [D, T] }), "work_project.manage")).toBe(true);
+    // Managing is not opening: the lead above has no project access, the precondition leaves the grain alone.
+    expect(allowed(parentLead, project(null), "work_project.manage")).toBe(true);
+    expect(allowed(parentLead, project(null), "work_session.read")).toBe(false);
+    const projectLead = user("lead", { memberUnitPaths: [[D, T, P]], leadOfUnitIds: new Set([P]) });
+    expect(allowed(projectLead, project("lead"), "work_project.manage")).toBe(true);
+    expect(allowed(projectLead, unitResource({ id: T, path: [D, T] }), "work_project.manage")).toBe(false);
+    const member = user("developer", { memberUnitPaths: [[D, T]] });
+    expect(allowed(member, unitResource({ id: T, path: [D, T] }), "work_project.manage")).toBe(false);
+    expect(allowed(member, project("member"), "work_project.manage")).toBe(false);
+    const otherLead = user("lead", { memberUnitPaths: [[OTHER]], leadOfUnitIds: new Set([OTHER]) });
+    expect(allowed(otherLead, unitResource({ id: T, path: [D, T] }), "work_project.manage")).toBe(false);
+    expect(allowed(user("admin"), unitResource({ id: T, path: [D, T] }), "work_project.manage")).toBe(true);
+    expect(allowed(user("admin"), project(null), "work_project.manage")).toBe(true);
+  });
+
+  it("an explicit deny of work_project.manage on the parent beats the lead grant", () => {
+    const parentLead = user("lead", { memberUnitPaths: [[D, T]], leadOfUnitIds: new Set([T]) });
+    const deny = rule({ id: "deny-pm", scopeUnitId: T, permission: "work_project.manage", effect: "deny" });
+    expect(allowed(parentLead, project(null), "work_project.manage", [deny])).toBe(false);
   });
 });

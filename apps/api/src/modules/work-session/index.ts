@@ -5,6 +5,7 @@ import type { ApprovalService } from "../approval";
 import type { ObjectStorage } from "../artifact";
 import type { DeviceHub } from "../device";
 import { createPermissionService, workSessionResource } from "../organization";
+import { registerProjectRoutes } from "./projects";
 import {
   listProposableProjects,
   proposeWorkZone,
@@ -23,6 +24,7 @@ import {
 
 export { createWorkSessionAttachmentScope } from "./images";
 export { loadWorkZonePolicy } from "./policy";
+export { projectFacts } from "./projects";
 export { WORK_ZONE_PROPOSAL_RESOURCE, type WorkZoneProposalService } from "./proposals";
 export { ACTIVE_STATES, type ReauthorizeReason, WorkSessionService, wsTopic } from "./service";
 export type {
@@ -125,6 +127,7 @@ export function createWorkSessionModule(
     name: "work-session",
     register(app) {
       registerWorkSessionRoutes(app, core, hub, service);
+      registerProjectRoutes(app, core, perms);
     },
     start,
     proposals,
