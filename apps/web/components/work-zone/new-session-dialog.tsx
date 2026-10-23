@@ -2,7 +2,7 @@
 
 import { EFFORT_LABELS, type PermissionMode, type Project, type RuntimeId } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, FolderGit2, FolderPlus, GitBranch, Laptop, Rocket } from "lucide-react";
+import { Check, FolderGit2, FolderKanban, FolderPlus, GitBranch, Laptop, Lock, Rocket } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useEffect, useMemo, useState } from "react";
@@ -22,8 +22,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/u
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { errorMessage } from "@/lib/api";
+import { errorMessage, isApiError } from "@/lib/api";
 import { useDesktop } from "@/lib/desktop";
+import { defaultAudience, groupRepos, isStartable } from "@/lib/new-session-groups";
+import { type DraftAudience, draftInput } from "@/lib/session-visibility";
 import { cn } from "@/lib/utils";
 import {
   useCreateWorkSession,
@@ -33,9 +35,54 @@ import {
   wzKeys,
 } from "@/lib/workzone-queries";
 import { controlReasonText, isShown, OnlineDot, PERMISSION_MODES, RUNTIMES, RuntimeLogo } from "./meta";
+import { NewSessionVisibilityLine } from "./visibility/new-session-visibility-line";
 
 /** Before the device's controls load (or for a device with no catalog): the modes every runtime always had. */
 const LEGACY_MODES: PermissionMode[] = ["default", "acceptEdits", "plan"];
+
+/** D-14: a repository of the caller's device linked to a team project they can't open (the API names no project). */
+const HIDDEN_PROJECT = "Linked to a project you can't open";
+
+/** "Leo Park" · "Leo Park and Pia Gómez" · "Leo Park, Pia Gómez and 2 more". */
+function namesOf(names: readonly string[]): string {
+  const [a, b] = names;
+  if (names.length === 1 || !b) return a ?? "";
+  return names.length === 2 ? `${a} and ${b}` : `${a}, ${b} and ${names.length - 2} more`;
+}
+
+/**
+ * The create request's audience was refused (07.9-06: 422 `audience_outside_project` / `team_not_assigned`, entry ids
+ * only): the dialog words it with the names it showed in the draft (UI-SPEC Copy "Refusal (inline)", D-04, D-13), e.g.
+ * "Leo Park isn't in Customer portal anymore. Choose who can see it again." Null when it is another error, or when no
+ * refused id is one the draft named (the API's own message is shown then).
+ */
+export function audienceRefusal(
+  err: unknown,
+  draft: DraftAudience | null,
+  project: Pick<Project, "deviceName" | "teamProject"> | null,
+): string | null {
+  if (!isApiError(err, 422) || !draft || !project) return null;
+  const details = err.details as { ids?: unknown } | null | undefined;
+  const ids = Array.isArray(details?.ids)
+    ? details.ids.filter((x): x is string => typeof x === "string")
+    : [];
+  const again = "Choose who can see it again.";
+  const tp = project.teamProject;
+  if (err.code === "audience_outside_project" && draft.kind === "people") {
+    const names = draft.people.filter((p) => ids.includes(p.userId)).map((p) => p.name);
+    if (names.length === 0) return null;
+    const one = names.length === 1;
+    return tp
+      ? `${namesOf(names)} ${one ? "isn't" : "aren't"} in ${tp.name} anymore. ${again}`
+      : `${namesOf(names)} can't use ${project.deviceName} anymore. ${again}`;
+  }
+  if (err.code === "team_not_assigned" && draft.kind === "teams" && tp) {
+    const names = draft.teams.filter((t) => ids.includes(t.id)).map((t) => t.name);
+    if (names.length === 0) return null;
+    return `${namesOf(names)} ${names.length === 1 ? "isn't" : "aren't"} assigned to ${tp.name} anymore. ${again}`;
+  }
+  return null;
+}
 
 export function NewSessionDialog({
   open,
@@ -62,19 +109,31 @@ export function NewSessionDialog({
   const [worktree, setWorktree] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [error, setError] = useState<string | null>(null);
+  /** Who the session will be visible to (Surface 3): the project's default until Change picks another (draft). */
+  const [audience, setAudience] = useState<DraftAudience | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setError(null);
+    // A repository nobody can start on from here (D-14: its project is hidden from the caller) is never preselected.
+    const startable = available.filter((p) => !p.teamProjectHidden);
     const preferred =
-      available.find((p) => p.id === initialProjectId) ??
-      available.find((p) => p.deviceOnline) ??
-      available[0] ??
+      startable.find((p) => p.id === initialProjectId) ??
+      startable.find((p) => p.deviceOnline) ??
+      startable[0] ??
       null;
     setProjectId(preferred?.id ?? null);
   }, [open, initialProjectId, available]);
 
   const project = available.find((p) => p.id === projectId) ?? null;
+  // Choosing another repository (or reopening the dialog) resets the line to that repository's default (D-03): the
+  // team project's (Project or Only me) or Project on a personal one. A list refresh of the same repository keeps it.
+  const teamProjectId = project?.teamProject?.id ?? null;
+  const placeKey = open && project ? `${project.id}|${teamProjectId ?? ""}` : null;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the place changes, not on each list refresh
+  useEffect(() => {
+    setAudience(defaultAudience(project));
+  }, [placeKey]);
   const device = devices.data?.find((d) => d.id === project?.deviceId) ?? null;
   const runtimeInfo = (id: RuntimeId) => device?.runtimes.find((r) => r.id === id);
 
@@ -143,15 +202,8 @@ export function NewSessionDialog({
     }
   }, [device, runtime]);
 
-  const byDevice = useMemo(() => {
-    const m = new Map<string, { name: string; online: boolean; projects: Project[] }>();
-    for (const p of available) {
-      const g = m.get(p.deviceId) ?? { name: p.deviceName, online: p.deviceOnline, projects: [] };
-      g.projects.push(p);
-      m.set(p.deviceId, g);
-    }
-    return [...m.values()];
-  }, [available]);
+  // Team projects first, then Personal by device (D-01, R5); `GET /projects` is already the caller's list.
+  const groups = useMemo(() => groupRepos(available), [available]);
 
   async function addFromDesktop() {
     if (!desktop) return;
@@ -166,12 +218,14 @@ export function NewSessionDialog({
     e.preventDefault();
     if (!project) return setError("Choose a project");
     setError(null);
+    const visibility = audience ? draftInput(audience) : null;
     try {
       const s = await create.mutateAsync({
         projectId: project.id,
         runtime,
         permissionMode: mode,
         worktree,
+        ...(visibility ? { visibility } : {}),
         ...(model !== "default" ? { model } : {}),
         ...(effort !== "default" ? { effort } : {}),
         ...(prompt.trim() ? { prompt: prompt.trim() } : {}),
@@ -180,13 +234,13 @@ export function NewSessionDialog({
       setPrompt("");
       router.push(`/work-zone/${s.id}`);
     } catch (err) {
-      setError(errorMessage(err));
+      setError(audienceRefusal(err, audience, project) ?? errorMessage(err));
     }
   }
 
   const rt = runtimeInfo(runtime);
   const runtimeReady = !!rt?.installed && rt.loggedIn;
-  const canSubmit = !!project && project.deviceOnline && runtimeReady && !create.isPending;
+  const canSubmit = !!project && isStartable(project) && runtimeReady && !create.isPending;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -195,8 +249,8 @@ export function NewSessionDialog({
           <DialogHeader>
             <DialogTitle>New session</DialogTitle>
             <DialogDescription>
-              Runs on a teammate's computer, controlled by everyone here. Prompts queue up and run one at a
-              time.
+              Runs on a computer in your team. People who can see the session follow it and queue prompts;
+              they run one at a time.
             </DialogDescription>
           </DialogHeader>
           <DialogBody className="grid gap-5">
@@ -223,49 +277,74 @@ export function NewSessionDialog({
                 </div>
               ) : (
                 <div className="grid gap-3" role="radiogroup" aria-label="Project">
-                  {byDevice.map((g) => (
-                    <div key={g.name} className="grid gap-1.5">
-                      <p className="flex items-center gap-1.5 text-muted-foreground text-xs">
-                        <Laptop className="size-3.5" /> {g.name}
-                        <OnlineDot online={g.online} className="ml-0.5 size-1.5" />
-                        <span>{g.online ? "Online" : "Offline"}</span>
+                  {groups.teams.map((g) => (
+                    <div
+                      key={g.project.id}
+                      className="grid gap-1.5"
+                      data-testid={`project-group-${g.project.id}`}
+                    >
+                      <p className="flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
+                        <FolderKanban aria-hidden className="size-3.5 shrink-0" />
+                        <span className="min-w-0 truncate" title={g.project.name}>
+                          <span className="font-semibold">{g.project.name}</span> · Team project
+                        </span>
                       </p>
-                      {g.projects.map((p) => {
-                        const selected = p.id === projectId;
-                        return (
-                          <button
-                            key={p.id}
-                            type="button"
-                            role="radio"
-                            aria-checked={selected}
-                            data-testid="project-option"
-                            disabled={!p.deviceOnline}
-                            onClick={() => setProjectId(p.id)}
-                            className={cn(
-                              "flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-[border-color,background-color,box-shadow] disabled:cursor-not-allowed disabled:opacity-55",
-                              selected
-                                ? "border-primary/60 bg-primary/5 ring-[3px] ring-primary/15"
-                                : "hover:border-foreground/20 hover:bg-accent/40",
-                            )}
-                          >
-                            <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-                              <FolderGit2 className="size-4" />
-                            </span>
-                            <span className="grid min-w-0 flex-1">
-                              <span className="truncate font-medium text-sm">{p.name}</span>
-                              <span className="flex items-center gap-1 truncate text-muted-foreground text-xs">
-                                <GitBranch className="size-3" /> {p.defaultBranch ?? "no branch"}
-                                {p.gitRemote ? <span className="truncate"> · {p.gitRemote}</span> : null}
-                              </span>
-                            </span>
-                            {selected ? <Check className="size-4 text-primary" /> : null}
-                          </button>
-                        );
-                      })}
+                      {g.repos.map((p) => (
+                        <RepoOption
+                          key={p.id}
+                          project={p}
+                          selected={p.id === projectId}
+                          onSelect={setProjectId}
+                          showDevice
+                        />
+                      ))}
+                    </div>
+                  ))}
+                  {groups.hidden.length > 0 ? (
+                    <div className="grid gap-1.5" data-testid="project-group-hidden">
+                      <p className="flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
+                        <Lock aria-hidden className="size-3.5 shrink-0" />
+                        <span className="min-w-0 truncate">{HIDDEN_PROJECT}</span>
+                      </p>
+                      {groups.hidden.map((p) => (
+                        <RepoOption
+                          key={p.id}
+                          project={p}
+                          selected={false}
+                          onSelect={setProjectId}
+                          showDevice
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                  {groups.personal.length > 0 && (groups.teams.length > 0 || groups.hidden.length > 0) ? (
+                    <p
+                      className="-mb-1.5 font-semibold text-muted-foreground text-xs"
+                      data-testid="project-group-personal"
+                    >
+                      Personal
+                    </p>
+                  ) : null}
+                  {groups.personal.map((g) => (
+                    <div key={g.deviceId} className="grid gap-1.5">
+                      <p className="flex items-center gap-1.5 text-muted-foreground text-xs">
+                        <Laptop className="size-3.5" /> {g.deviceName}
+                        <OnlineDot online={g.deviceOnline} className="ml-0.5 size-1.5" />
+                        <span>{g.deviceOnline ? "Online" : "Offline"}</span>
+                      </p>
+                      {g.repos.map((p) => (
+                        <RepoOption
+                          key={p.id}
+                          project={p}
+                          selected={p.id === projectId}
+                          onSelect={setProjectId}
+                        />
+                      ))}
                     </div>
                   ))}
                 </div>
               )}
+              <NewSessionVisibilityLine project={project} value={audience} onChange={setAudience} />
             </section>
 
             {/* Runtime */}
@@ -465,5 +544,63 @@ export function NewSessionDialog({
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * One repository of the Project radio group (the existing radio card). Under a team project its caption also names the
+ * device that runs it, with its status, since the group is no longer a device (UI-SPEC Surface 3). A repository linked
+ * to a project the caller can't open (D-14) is shown, disabled, with the reason; it never reads as personal.
+ */
+function RepoOption({
+  project: p,
+  selected,
+  onSelect,
+  showDevice = false,
+}: {
+  project: Project;
+  selected: boolean;
+  onSelect: (id: string) => void;
+  showDevice?: boolean;
+}) {
+  const hidden = p.teamProjectHidden === true;
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      data-testid={hidden ? "project-option-hidden" : "project-option"}
+      disabled={!isStartable(p)}
+      title={hidden ? `${HIDDEN_PROJECT}. Ask one of its leads to add you.` : undefined}
+      onClick={() => onSelect(p.id)}
+      className={cn(
+        "flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-[border-color,background-color,box-shadow] disabled:cursor-not-allowed disabled:opacity-55",
+        selected
+          ? "border-primary/60 bg-primary/5 ring-[3px] ring-primary/15"
+          : "hover:border-foreground/20 hover:bg-accent/40",
+      )}
+    >
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+        {hidden ? <Lock className="size-4" /> : <FolderGit2 className="size-4" />}
+      </span>
+      <span className="grid min-w-0 flex-1">
+        <span className="truncate font-medium text-sm">{p.name}</span>
+        <span className="flex min-w-0 items-center gap-1 text-muted-foreground text-xs">
+          <GitBranch className="size-3 shrink-0" />
+          <span className="shrink-0">{p.defaultBranch ?? "no branch"}</span>
+          {showDevice ? (
+            <>
+              <span className="min-w-0 truncate"> · {p.deviceName}</span>
+              <span aria-hidden className="inline-flex shrink-0">
+                <OnlineDot online={p.deviceOnline} className="ml-0.5 size-1.5" />
+              </span>
+              <span className="shrink-0">{p.deviceOnline ? "Online" : "Offline"}</span>
+            </>
+          ) : null}
+          {p.gitRemote ? <span className="min-w-0 truncate"> · {p.gitRemote}</span> : null}
+        </span>
+      </span>
+      {selected ? <Check className="size-4 text-primary" /> : null}
+    </button>
   );
 }
