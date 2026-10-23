@@ -388,7 +388,14 @@ section_core() {
     fail "A: env leaks ($(printf '%s' "$envs" | grep -c 'OCW_' || true) OCW_ lines)"
   fi
 
-  run_in "$ORG" "$A" '["python3","-c","import subprocess\nps=[];fail=0\nfor i in range(300):\n  try: ps.append(subprocess.Popen([\"sleep\",\"30\"]))\n  except OSError: fail+=1\nprint(len(ps), fail)\nfor p in ps: p.kill()\nfor p in ps: p.wait()"]' 60000 >/dev/null
+  run_in "$ORG" "$A" '["python3","-c","import subprocess\nps=[];fail=0\nfor i in range(300):\n  try: ps.append(subprocess.Popen([\"sleep\",\"30\"]))\n  except OSError: fail+=1\nprint(len(ps), fail)\nfor p in ps: p.kill()\nfor p in ps: p.wait()"]' 120000 >/dev/null
+  # Under gVisor on a loaded runner, 300 spawns can outlast the 25 s yield: poll the process until it exits.
+  pids_proc="$(jfield "$WORK/body.json" processId)"
+  for _ in $(seq 1 120); do
+    [ "$(jfield "$WORK/body.json" status)" = running ] || break
+    sleep 1
+    api POST /v1/sandboxes/process "$(printf '{"target":%s,"processId":"%s","action":"poll"}' "$(target "$ORG" "$A")" "$pids_proc")" >/dev/null
+  done
   pids_line="$(jfield "$WORK/body.json" stdout | tr -d '\n')"
   pids_failed="${pids_line##* }"
   if exited_with 0 && [ -n "$pids_failed" ] && [ "$pids_failed" -gt 0 ]; then
