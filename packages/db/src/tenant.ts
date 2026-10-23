@@ -20,6 +20,12 @@ export type AfterCommit = (cb: () => Promise<void> | void) => void;
 
 interface TxContext extends TenantCtx {
   afterCommit: AfterCommit;
+  /**
+   * Identity of the outermost transaction, shared by its savepoints (they copy the parent context). Lets a helper keep
+   * per-transaction state that savepoints join, e.g. realtime publishing every access invalidation of a transaction
+   * before any of its frames (07.9 fan-out).
+   */
+  root: object;
 }
 const txContexts = new WeakMap<object, TxContext>();
 
@@ -128,6 +134,7 @@ export function createTenantDb(
         sessionId: ctx.sessionId ?? null,
         clientKind: ctx.clientKind ?? null,
         afterCommit,
+        root: {},
       });
       return fn(tx, afterCommit);
     });

@@ -7,6 +7,7 @@ import {
 } from "@ocw/contracts";
 import { workProjectRepos } from "@ocw/db";
 import { expect } from "vitest";
+import { WorkSessionService } from "./modules/work-session";
 import { TestClient, type TestStack } from "./testing";
 import { eventually, FakeDevice } from "./testing-device";
 
@@ -219,4 +220,15 @@ export async function setAudience(
   const res = await client.request("PUT", `/api/v1/work-sessions/${sessionId}/visibility`, input);
   expect(res.status, JSON.stringify(res.body)).toBe(200);
   return UpdateWorkSessionVisibilityResult.parse(res.body);
+}
+
+/**
+ * Waits until the work-session background queue (session deliveries, `removed` notices, re-authorization sweeps) of
+ * the organization, or of every organization, has run (Phase 07.9 fan-out): a request now returns right after its
+ * commit, before that work.
+ */
+export async function settled(stack: TestStack, organizationId?: string): Promise<void> {
+  const handler = stack.built.deviceHub.sessionHandler;
+  if (!(handler instanceof WorkSessionService)) throw new Error("no work-session service");
+  await handler.settled(organizationId);
 }

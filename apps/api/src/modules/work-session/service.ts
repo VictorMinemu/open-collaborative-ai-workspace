@@ -63,12 +63,18 @@ import {
   type PromptImagesPlan,
   preparePromptImages,
 } from "./images";
+import { OrgQueue, type OrgQueueOptions, type OrgTask } from "./org-queue";
 import { loadWorkZonePolicy } from "./policy";
 import { decideTitleRequest, heuristicTitle, loadTitleContext } from "./title";
 
-/** Why live sessions are re-checked (ADR-0012): a policy change, a member's access change, a device opt-out. */
 /** Frames published at once by the per-user delivery (one Redis round trip each, bounded concurrency). */
 const PUBLISH_BATCH = 200;
+/** Sessions decided per read of a delivery (one short system transaction each, never a snapshot of thousands). */
+const DELIVER_BATCH = 50;
+/** Sessions re-checked per transaction of a sweep: short row locks, so the device's own events interleave. */
+const SWEEP_CHUNK = 50;
+/** Shutdown: how long the background queue may drain before what still waits is dropped (07.9 fan-out). */
+export const BACKGROUND_DRAIN_MS = 5_000;
 
 /**
  * Whether facts name a seeing relation of the SQL rule (creator, device owner, viewer, or the `creator_left` state):
@@ -83,7 +89,16 @@ function seesSession(f: ResourceFacts): boolean {
   );
 }
 
+/** Why live sessions are re-checked (ADR-0012): a policy change, a member's access change, a device opt-out. */
 export type ReauthorizeReason = "policy" | "access_changed" | "device_opt_out";
+
+/** What a sweep re-checks: every active session of the organization, or of one device (07.9 fan-out). */
+interface SweepScope {
+  reason: ReauthorizeReason;
+  deviceId: string | null;
+  /** The person whose change caused it (the admin who saved the policy): the actor of its audit rows. */
+  actorUserId: string | null;
+}
 
 const UNAUTHORIZED_MODE_ERROR =
   "The device reported Full access without authorization; the session was stopped";
@@ -127,6 +142,8 @@ export interface WorkSessionDeps {
   perms: PermissionService;
   /** Attachment storage (06.1): a prompt's image bytes are read from it at dispatch; null = not configured. */
   storage?: ObjectStorage | null;
+  /** The background queue's bounds (07.9 fan-out); tests shorten the retries. */
+  background?: Omit<OrgQueueOptions, "log">;
 }
 
 /**
@@ -135,7 +152,26 @@ export interface WorkSessionDeps {
  * the session row (`SELECT … FOR UPDATE`) first, so the arbiter, REST mutations and device events serialize.
  */
 export class WorkSessionService implements DeviceSessionHandler {
-  constructor(private readonly deps: WorkSessionDeps) {}
+  /**
+   * Phase 07.9 fan-out (WINDOWS #311): the work that follows a commit (per-user delivery, the `removed` notices, the
+   * re-authorization sweeps) runs here, ordered per organization, so the request returns right after its commit.
+   */
+  readonly background: OrgQueue;
+
+  constructor(private readonly deps: WorkSessionDeps) {
+    this.background = new OrgQueue({ log: deps.log, ...deps.background });
+  }
+
+  /** Resolves once the background work of the organization (or of every organization) is done (tests, perf). */
+  settled(organizationId?: string): Promise<void> {
+    return this.background.whenIdle(organizationId);
+  }
+
+  /** Shutdown: drains the background queue for at most BACKGROUND_DRAIN_MS (see `OrgQueue.close`). */
+  async close(): Promise<void> {
+    const { drained, abandoned } = await this.background.close(BACKGROUND_DRAIN_MS);
+    if (!drained) this.deps.log.warn({ abandoned }, "work session background queue abandoned at shutdown");
+  }
 
   // ------------------------------------------------------------------ DTOs
 
@@ -336,27 +372,38 @@ export class WorkSessionService implements DeviceSessionHandler {
     return dto;
   }
 
-  /** The `ws:` snapshot of a session the caller just lost, appended by the system after commit, then delivered. */
+  /**
+   * The `ws:` snapshot of a session the caller just lost, appended by the system after commit, then delivered; queued
+   * in order with the organization's other background work.
+   */
   private emitAfterCommitAsSystem(tx: Tx, sessionId: string): void {
     const { organizationId } = tenantOf(tx);
-    tenantOf(tx).afterCommit(async () => {
-      try {
-        await this.deps.db.withTenant({ organizationId, userId: null }, async (sys) => {
-          const dto = await this.session(sys, sessionId);
-          if (dto)
-            await this.deps.realtime.appendEvent(sys, wsTopic(sessionId), EventTypes.workSessionUpdated, dto);
-        });
-      } catch (err) {
-        this.deps.log.warn({ err }, "work session snapshot after an own audience change failed");
-      }
-      await this.deliverToReaders(organizationId, [sessionId]);
-    });
+    tenantOf(tx).afterCommit(() =>
+      this.background.push(organizationId, {
+        kind: "snapshot",
+        ids: () => [sessionId],
+        run: async () => {
+          await this.deps.db.withTenant({ organizationId, userId: null }, async (sys) => {
+            const dto = await this.session(sys, sessionId);
+            if (dto)
+              await this.deps.realtime.appendEvent(
+                sys,
+                wsTopic(sessionId),
+                EventTypes.workSessionUpdated,
+                dto,
+              );
+          });
+          await this.deliverNow(organizationId, [sessionId]);
+        },
+      }),
+    );
   }
 
   /**
-   * Coalesced per transaction (device paths and `reauthorizeOrg` emit one session several times): the first emit of a
-   * transaction registers one after-commit delivery of every session the transaction emitted. A rolled-back
-   * transaction (or savepoint) drops it with its other after-commit hooks.
+   * Coalesced per transaction (device paths and sweeps emit one session several times): the first emit of a transaction
+   * registers one after-commit hook that queues the delivery of every session the transaction emitted. A rolled-back
+   * transaction (or savepoint) drops it with its other after-commit hooks. The queue coalesces it further with a
+   * delivery still waiting at its tail (07.9 fan-out); the delivery reads the session and its readers when it runs.
    */
   private deliverAfterCommit(tx: Tx, sessionId: string): void {
     const ctx = tenantOf(tx);
@@ -367,74 +414,117 @@ export class WorkSessionService implements DeviceSessionHandler {
     }
     const ids = new Set([sessionId]);
     pendingDeliveries.set(ctx, ids);
-    ctx.afterCommit(() => this.deliverToReaders(ctx.organizationId, [...ids]));
+    ctx.afterCommit(() =>
+      this.background.push(ctx.organizationId, this.deliveryTask(ctx.organizationId, ids)),
+    );
+  }
+
+  /** A queued delivery of these sessions; absorbs a later delivery queued right behind it (tail coalescing). */
+  private deliveryTask(organizationId: string, sessionIds: ReadonlySet<string>): OrgTask {
+    const ids = new Set(sessionIds);
+    return {
+      kind: "deliver",
+      ids: () => [...ids],
+      run: () => this.deliverNow(organizationId, [...ids]),
+      absorb: (next) => {
+        if (next.kind !== "deliver") return false;
+        for (const id of next.ids()) ids.add(id);
+        return true;
+      },
+    };
   }
 
   /**
-   * After commit, in a fresh read: each session's current DTO goes to the people the resolver lets read it, decided
-   * exactly as the detail route decides one person (`work_session.read` on `sessionFactsForUsers`). Candidates are the
-   * people the SQL rule names with a seeing relation (creator, creator who left, device owner, viewer: the set
+   * Tells the people an audience change removed (`work_session.removed` on their `user:` topic), after commit and in
+   * order with the organization's deliveries: an update delivered before it is never followed by one for them, because
+   * every later delivery reads the narrowed audience (07.9 fan-out).
+   */
+  notifyRemovedAfterCommit(tx: Tx, sessionId: string, userIds: readonly string[]): void {
+    if (userIds.length === 0) return;
+    const { organizationId } = tenantOf(tx);
+    const gone = [...userIds];
+    tenantOf(tx).afterCommit(() =>
+      this.background.push(organizationId, {
+        kind: "removed",
+        ids: () => [sessionId],
+        run: async () => {
+          for (const uid of gone) {
+            await this.deps.realtime.publishEphemeral(`user:${uid}`, EventTypes.workSessionRemoved, {
+              id: sessionId,
+            });
+          }
+        },
+      }),
+    );
+  }
+
+  /**
+   * In the background queue, in a fresh read: each session's current DTO goes to the people the resolver lets read it,
+   * decided exactly as the detail route decides one person (`work_session.read` on `sessionFactsForUsers`). Candidates
+   * are the people the SQL rule names with a seeing relation (creator, creator who left, device owner, viewer: the set
    * `app.work_session_viewers` enumerates) and the active admins (never enumerated by the rule); module and deny rules
    * then remove anyone they reach. Unstored (no `user:` stream lock inside the domain transaction, the 07.5-16
-   * lock-order hazard): a missed frame is covered by the list's refetch. Never throws into the request.
+   * lock-order hazard): a missed frame is covered by the list's refetch. The DTO is read before its readers, so a
+   * narrowing that commits in between can only remove recipients, never show the new DTO to someone it removed. Throws:
+   * the queue retries (07.9 fan-out). Sessions are decided DELIVER_BATCH at a time, each batch in its own read.
    *
    * 07.9-12 (WINDOWS #311, measured in list-perf.int.test.ts): the rule runs once per active member and session, through
    * `sessionFactsForUsers` (the reasons `work_session_viewers` adds for the panel cost four times more and are not needed
    * here), and the frames are published concurrently in bounded batches.
    */
-  private async deliverToReaders(organizationId: string, sessionIds: readonly string[]): Promise<void> {
-    try {
-      const deliveries = await this.deps.db.withTenant({ organizationId, userId: null }, async (tx) => {
-        const dtos = await this.sessions(tx, inArray(workSessions.id, [...sessionIds]));
-        if (dtos.length === 0) return [];
-        const members = (
+  private async deliverNow(organizationId: string, sessionIds: readonly string[]): Promise<void> {
+    for (let i = 0; i < sessionIds.length; i += DELIVER_BATCH) {
+      await this.deliverBatch(organizationId, sessionIds.slice(i, i + DELIVER_BATCH));
+    }
+  }
+
+  private async deliverBatch(organizationId: string, sessionIds: readonly string[]): Promise<void> {
+    const deliveries = await this.deps.db.withTenant({ organizationId, userId: null }, async (tx) => {
+      const dtos = await this.sessions(tx, inArray(workSessions.id, [...sessionIds]));
+      if (dtos.length === 0) return [];
+      const members = (
+        await tx
+          .select({ userId: orgMembers.userId })
+          .from(orgMembers)
+          .where(isNull(orgMembers.deactivatedAt))
+      ).map((m) => m.userId);
+      const admins = new Set(
+        (
           await tx
             .select({ userId: orgMembers.userId })
             .from(orgMembers)
-            .where(isNull(orgMembers.deactivatedAt))
-        ).map((m) => m.userId);
-        const admins = new Set(
-          (
-            await tx
-              .select({ userId: orgMembers.userId })
-              .from(orgMembers)
-              .where(and(eq(orgMembers.role, "admin"), isNull(orgMembers.deactivatedAt)))
-          ).map((a) => a.userId),
-        );
-        const out: Array<{ dto: WorkSession; recipients: string[] }> = [];
-        for (const dto of dtos) {
-          const facts = await sessionFactsForUsers(tx, dto, members);
-          const candidates = members.filter((id) => {
-            const f = facts.get(id);
-            return f !== undefined && (admins.has(id) || seesSession(f));
-          });
-          const recipients = await this.deps.perms.usersAllowed(tx, {
-            candidates,
-            permission: "work_session.read",
-            resourceFor: (userId) => {
-              const f = facts.get(userId);
-              if (!f) throw new Error("session facts missing for a candidate");
-              return f;
-            },
-          });
-          out.push({ dto, recipients });
-        }
-        return out;
-      });
-      const frames = deliveries.flatMap(({ dto, recipients }) =>
-        recipients.map((userId) => ({ dto, userId })),
+            .where(and(eq(orgMembers.role, "admin"), isNull(orgMembers.deactivatedAt)))
+        ).map((a) => a.userId),
       );
-      for (let i = 0; i < frames.length; i += PUBLISH_BATCH) {
-        await Promise.all(
-          frames
-            .slice(i, i + PUBLISH_BATCH)
-            .map(({ dto, userId }) =>
-              this.deps.realtime.publishEphemeral(`user:${userId}`, EventTypes.workSessionUpdated, dto),
-            ),
-        );
+      const out: Array<{ dto: WorkSession; recipients: string[] }> = [];
+      for (const dto of dtos) {
+        const facts = await sessionFactsForUsers(tx, dto, members);
+        const candidates = members.filter((id) => {
+          const f = facts.get(id);
+          return f !== undefined && (admins.has(id) || seesSession(f));
+        });
+        const recipients = await this.deps.perms.usersAllowed(tx, {
+          candidates,
+          permission: "work_session.read",
+          resourceFor: (userId) => {
+            const f = facts.get(userId);
+            if (!f) throw new Error("session facts missing for a candidate");
+            return f;
+          },
+        });
+        out.push({ dto, recipients });
       }
-    } catch (err) {
-      this.deps.log.warn({ err, sessions: sessionIds.length }, "work session delivery failed");
+      return out;
+    });
+    const frames = deliveries.flatMap(({ dto, recipients }) => recipients.map((userId) => ({ dto, userId })));
+    for (let i = 0; i < frames.length; i += PUBLISH_BATCH) {
+      await Promise.all(
+        frames
+          .slice(i, i + PUBLISH_BATCH)
+          .map(({ dto, userId }) =>
+            this.deps.realtime.publishEphemeral(`user:${userId}`, EventTypes.workSessionUpdated, dto),
+          ),
+      );
     }
   }
 
@@ -642,14 +732,17 @@ export class WorkSessionService implements DeviceSessionHandler {
    * Re-check one LOCKED active session against its creator's current access (ADR-0012): a creator with no access
    * of their own to the device any more has the session stopped; otherwise the requested settings are lowered to
    * what the creator may pick now (policy ∩ opt-in ∩ cap ∩ grain ∩ catalog ∩ inventory) and the device is told
-   * (`session.configure`); a Full access turn in flight is interrupted when Full access is left.
+   * (`session.configure`); a Full access turn in flight is interrupted when Full access is left. `actorUserId` is the
+   * person whose change caused the re-check (the audit actor; the transaction's own user otherwise).
    */
   async reauthorize(
     tx: Tx,
     s: SessionRow,
     reason: ReauthorizeReason,
     policy?: WorkZonePolicy,
+    actorUserId: string | null = null,
   ): Promise<void> {
+    const actor = actorUserId ? { userId: actorUserId } : {};
     if (!ACTIVE_STATES.includes(s.status)) return;
     const creator = await loadControlsContext(tx, this.deps.perms, {
       deviceId: s.deviceId,
@@ -670,6 +763,7 @@ export class WorkSessionService implements DeviceSessionHandler {
       });
       await this.failInFlight(tx, s, message);
       await this.deps.audit.record(tx, {
+        ...actor,
         action: "work_session.access_revoked",
         resourceType: "work_session",
         resourceId: s.id,
@@ -705,6 +799,7 @@ export class WorkSessionService implements DeviceSessionHandler {
       payload: { settings: pickSettings(next, changed), reason },
     });
     await this.deps.audit.record(tx, {
+      ...actor,
       action: "work_session.settings_downgraded",
       resourceType: "work_session",
       resourceId: s.id,
@@ -714,6 +809,7 @@ export class WorkSessionService implements DeviceSessionHandler {
     });
     if (from === "fullAccess" && to !== "fullAccess") {
       await this.deps.audit.record(tx, {
+        ...actor,
         action: "work_session.full_access_left",
         resourceType: "work_session",
         resourceId: s.id,
@@ -744,45 +840,83 @@ export class WorkSessionService implements DeviceSessionHandler {
     await this.emitSession(tx, s.id);
   }
 
-  /** Every active session of the transaction's organization (RLS), e.g. after a Work Zone policy change. */
+  /**
+   * Every active session of the transaction's organization, e.g. after a Work Zone policy change: queued once the
+   * transaction commits (07.9 fan-out), so the admin's request returns at once. The transaction's user is the audit actor
+   * of every downgrade. Until the sweep reaches a session, its next turn is still capped by the new policy (P-07).
+   */
   async reauthorizeOrg(tx: Tx, reason: ReauthorizeReason): Promise<void> {
-    const policy = await loadWorkZonePolicy(tx);
-    const rows = await tx
-      .select({ id: workSessions.id })
-      .from(workSessions)
-      .where(inArray(workSessions.status, ACTIVE_STATES))
-      .orderBy(asc(workSessions.id));
-    for (const { id } of rows) {
-      const s = await this.lock(tx, id);
-      if (s) await this.reauthorize(tx, s, reason, policy);
-    }
+    const ctx = tenantOf(tx);
+    const scope: SweepScope = { reason, deviceId: null, actorUserId: ctx.userId ?? null };
+    ctx.afterCommit(() =>
+      this.background.push(ctx.organizationId, this.sweepTask(ctx.organizationId, scope)),
+    );
   }
 
-  /** `DeviceSessionHandler`: a member's access to the device or its opt-in changed. */
+  /**
+   * `DeviceSessionHandler`: a member's access to the device or its opt-in changed (the change is committed). Privacy
+   * first: every live subscription of the organization is re-decided now, before the sweep emits anything; the sweep of
+   * the device's live sessions (stop or downgrade, ADR-0012 §2) is queued (07.9 fan-out).
+   */
   async onAccessChanged(
     device: { deviceId: string; organizationId: string },
     reason: ReauthorizeReason,
   ): Promise<void> {
-    await this.deps.db.withTenant({ organizationId: device.organizationId, userId: null }, async (tx) => {
-      const policy = await loadWorkZonePolicy(tx);
-      const rows = await tx
-        .select({ id: workSessions.id })
-        .from(workSessions)
-        .where(and(eq(workSessions.deviceId, device.deviceId), inArray(workSessions.status, ACTIVE_STATES)))
-        .orderBy(asc(workSessions.id));
-      for (const { id } of rows) {
-        const s = await this.lock(tx, id);
-        if (s && s.deviceId === device.deviceId) await this.reauthorize(tx, s, reason, policy);
-      }
-    });
-    // A device grant changed who may see the device's sessions (P-09): once committed, every live subscription of
-    // the organization is re-decided (`device.updated` also fires on online/offline, so it is not an invalidator).
+    // A device grant changed who may see the device's sessions (P-09): every live subscription of the organization is
+    // re-decided (`device.updated` also fires on online/offline, so it is not an invalidator).
     try {
       await this.deps.realtime.invalidateSubscriptions({ organizationId: device.organizationId });
     } catch (err) {
       // The gateway's periodic re-check is the backstop for a lost invalidation.
       this.deps.log.warn({ err }, "subscription invalidation after a device access change failed");
     }
+    this.background.push(
+      device.organizationId,
+      this.sweepTask(device.organizationId, { reason, deviceId: device.deviceId, actorUserId: null }),
+    );
+  }
+
+  /**
+   * A re-authorization sweep (ADR-0012) as a background task: the active sessions are listed when it runs, then
+   * re-checked SWEEP_CHUNK at a time, each chunk in its own system transaction (short row locks; the policy is read
+   * fresh per chunk). Idempotent, so a retry re-runs it whole. Coalesced: the same sweep already waiting covers this one.
+   */
+  private sweepTask(organizationId: string, scope: SweepScope): OrgTask {
+    const sys = { organizationId, userId: null };
+    let listed: string[] = [];
+    return {
+      kind: "sweep",
+      key: `sweep:${scope.deviceId ?? "org"}:${scope.reason}:${scope.actorUserId ?? ""}`,
+      ids: () => (scope.deviceId ? [scope.deviceId, ...listed] : listed),
+      run: async () => {
+        listed = await this.deps.db.withTenant(sys, async (tx) =>
+          (
+            await tx
+              .select({ id: workSessions.id })
+              .from(workSessions)
+              .where(
+                and(
+                  inArray(workSessions.status, ACTIVE_STATES),
+                  scope.deviceId ? eq(workSessions.deviceId, scope.deviceId) : undefined,
+                ),
+              )
+              .orderBy(asc(workSessions.id))
+          ).map((r) => r.id),
+        );
+        for (let i = 0; i < listed.length; i += SWEEP_CHUNK) {
+          const chunk = listed.slice(i, i + SWEEP_CHUNK);
+          await this.deps.db.withTenant(sys, async (tx) => {
+            const policy = await loadWorkZonePolicy(tx);
+            for (const id of chunk) {
+              const s = await this.lock(tx, id);
+              if (s && (scope.deviceId === null || s.deviceId === scope.deviceId)) {
+                await this.reauthorize(tx, s, scope.reason, policy, scope.actorUserId);
+              }
+            }
+          });
+        }
+      },
+    };
   }
 
   /**

@@ -328,6 +328,71 @@ describe("re-decisions are race-free and fail safe (RT-01, D-05)", () => {
     }
   });
 
+  it("held: frames after an invalidation wait for the re-decision; allowed delivers them, denied drops them (07.9 fan-out)", async () => {
+    const gw = await controlledGateway();
+    const s = await openSocket(gw.base, await sam.token());
+    const ephs = (n: number) =>
+      s.frames.filter(
+        (f) => f.op === "eph" && f.topic === topic && (f as Frame & { data?: { n?: number } }).data?.n === n,
+      );
+    const topic = `conv:${randomUUID()}`;
+    try {
+      s.send({ op: "sub", topic });
+      await waitFor(() => subscribedTo(s, topic));
+
+      let allow!: (v: boolean) => void;
+      gw.setDecide(() => new Promise<boolean>((r) => (allow = r)));
+      const before = gw.calls.length;
+      await gw.realtime.invalidateSubscriptions({ organizationId: orgId, userIds: [samId] });
+      await waitFor(() => gw.calls.length > before);
+      await gw.realtime.publishEphemeral(topic, "user.typing", { userId: adminId, n: 1 });
+      await sleep(200);
+      expect(ephs(1), "held while the re-decision runs").toEqual([]);
+      allow(true);
+      await waitFor(() => ephs(1).length === 1, 1000);
+
+      let deny!: (v: boolean) => void;
+      gw.setDecide(() => new Promise<boolean>((r) => (deny = r)));
+      const again = gw.calls.length;
+      await gw.realtime.invalidateSubscriptions({ organizationId: orgId, userIds: [samId] });
+      await waitFor(() => gw.calls.length > again);
+      await gw.realtime.publishEphemeral(topic, "user.typing", { userId: adminId, n: 2 });
+      await sleep(200);
+      deny(false);
+      await waitFor(() => revokedFor(s, topic), 1000);
+      await sleep(200);
+      expect(ephs(2), "a frame held for a denied subscription is never sent").toEqual([]);
+    } finally {
+      s.socket.close();
+      await gw.close();
+    }
+  });
+
+  it("one transaction: a frame and the access change that removes its reader; only `revoked` reaches them (07.9 fan-out)", async () => {
+    const gw = await controlledGateway();
+    const s = await openSocket(gw.base, await sam.token());
+    const topic = `conv:${randomUUID()}`;
+    gw.realtime.registerSubscriptionInvalidator("test.access_removed", (t) =>
+      t.startsWith("org:") ? { topics: [topic] } : null,
+    );
+    try {
+      s.send({ op: "sub", topic });
+      await waitFor(() => subscribedTo(s, topic));
+      gw.setDecide(() => false);
+      // The frame is appended BEFORE the event that takes the access away, in the same transaction.
+      await stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, async (tx) => {
+        await gw.realtime.appendEvent(tx, topic, "message.created", { body: "written with the removal" });
+        await gw.realtime.appendEvent(tx, `org:${orgId}`, "test.access_removed", {});
+      });
+      await waitFor(() => revokedFor(s, topic), 1000);
+      await sleep(200);
+      expect(s.frames.filter((f) => f.topic === topic && (f.op === "ev" || f.op === "eph"))).toEqual([]);
+    } finally {
+      s.socket.close();
+      await gw.close();
+    }
+  });
+
   it("scope: another organization or another user never re-decides this connection", async () => {
     const gw = await controlledGateway();
     const s = await openSocket(gw.base, await sam.token());
@@ -637,6 +702,7 @@ describe("narrowing a Work Zone session re-decides its live subscribers, with a 
       ["Rae", "developer"],
       ["Kim", "developer"],
       ["Gus", "developer"],
+      ["Zed", "developer"],
     ] as const) {
       people[name] = await invite(stack, admin, `${name.toLowerCase()}@example.test`, name, role);
     }
@@ -676,7 +742,7 @@ describe("narrowing a Work Zone session re-decides its live subscribers, with a 
         name: "Orion",
         members: [
           { userId: who("Dora").userId, role: "lead" },
-          ...["Ana", "Pia", "Leo", "Wes", "Rae"].map((n) => ({ userId: who(n).userId })),
+          ...["Ana", "Pia", "Leo", "Wes", "Rae", "Zed"].map((n) => ({ userId: who(n).userId })),
         ],
       })
     ).unitId;
@@ -766,6 +832,26 @@ describe("narrowing a Work Zone session re-decides its live subscribers, with a 
     await ok(admin.request("PATCH", `/api/v1/members/${who("Rae").userId}/role`, { role: "standard" }));
     await lostWithin("Rae", team, "role", t0);
     await sleep(300);
+    for (const name of ["Dora", "Ana", "Pia"]) keeps(name, team);
+  });
+
+  it("a deactivated member's live view is re-decided as `role`, not `visibility` (07.9 ledger)", async () => {
+    await subscribeWs("Zed", team);
+    await ok(admin.request("POST", `/api/v1/members/${who("Zed").userId}/deactivate`, {}));
+    // Deactivation closes the member's sockets; the re-decision of a subscription still open elsewhere (another
+    // instance, before its revocation lands) is what the cause is about.
+    const verdict = await stack.built.core.realtime.reauthorizeTopic(
+      {
+        userId: who("Zed").userId,
+        organizationId: orgId,
+        sessionId: randomUUID(),
+        name: "Zed",
+        email: "zed@example.test",
+        clientKind: "web",
+      },
+      `ws:${team}`,
+    );
+    expect(verdict).toEqual({ denied: true, cause: "role" });
     for (const name of ["Dora", "Ana", "Pia"]) keeps(name, team);
   });
 
