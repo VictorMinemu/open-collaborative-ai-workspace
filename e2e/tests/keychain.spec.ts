@@ -3,6 +3,7 @@ import { expectNoSeriousA11y } from "../support/a11y";
 import { type Actor, apiAs, BASE_URL, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
 import { freshPersonalBot } from "../support/bot-tools";
 import { bothThemes } from "../support/files";
+import { apiRequests, finishedBodies } from "../support/responses";
 import { ADMIN, shot } from "./env";
 
 /**
@@ -104,11 +105,8 @@ async function noToasts(page: Page) {
 }
 
 function captureResponses(page: Page): () => Promise<string> {
-  const bodies: Array<Promise<string>> = [];
-  page.on("response", (r) => {
-    if (r.url().includes("/api/v1/")) bodies.push(r.text().catch(() => ""));
-  });
-  return async () => (await Promise.all(bodies)).join("\n");
+  const bodies = finishedBodies(page, apiRequests());
+  return async () => (await bodies()).join("\n");
 }
 
 async function addHost(dialog: Locator, host: string) {

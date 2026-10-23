@@ -3,6 +3,7 @@ import { expectNoSeriousA11y } from "../support/a11y";
 import { apiAs, BASE_URL, createChannel, ensureMember, openAs, SAM } from "../support/actors";
 import { FAKE_MCP_HOST, FAKE_URL } from "../support/bot-tools";
 import { bothThemes } from "../support/files";
+import { apiRequests, finishedBodies } from "../support/responses";
 import { asSuperuser } from "../support/superuser";
 import { ADMIN } from "./env";
 
@@ -210,11 +211,8 @@ async function connectInBrowser(page: Page, id: string, name: string, testId = `
 
 /** Every API response body the page receives, to prove a secret never comes back (T-07.4-13-01). */
 function captureResponses(page: Page): () => Promise<string> {
-  const bodies: Array<Promise<string>> = [];
-  page.on("response", (r) => {
-    if (r.url().includes("/api/v1/")) bodies.push(r.text().catch(() => ""));
-  });
-  return async () => (await Promise.all(bodies)).join("\n");
+  const bodies = finishedBodies(page, apiRequests());
+  return async () => (await bodies()).join("\n");
 }
 
 /** Finds a channel by name (the isolated database is shared by both projects of a run) or creates it. */
