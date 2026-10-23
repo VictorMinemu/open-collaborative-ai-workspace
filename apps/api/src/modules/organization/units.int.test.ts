@@ -8,6 +8,7 @@ let admin: TestClient;
 let dev: TestClient;
 let orgId: string;
 let devId: string;
+let adminId: string;
 
 type Res = { status: number; body: Record<string, unknown> | null };
 
@@ -63,6 +64,7 @@ beforeAll(async () => {
     }),
   );
   orgId = setup.organization.id;
+  adminId = setup.user.id;
   ({ client: dev, id: devId } = await invite("dev@example.test", "developer", "Dana Dev"));
 });
 
@@ -100,7 +102,14 @@ describe("units: build and rearrange the hierarchy", () => {
 
     const list = await ok(admin.request("GET", "/api/v1/units"));
     expect(list.units.map((u: { name: string }) => u.name)).toEqual(["IT", "Backend", "Alpha"]);
-    for (const u of list.units) expect(u).toMatchObject({ memberCount: 0, leadCount: 0 });
+    // D-13 (Phase 07.9): only the project gets its creator, as its lead; departments and teams start empty.
+    const counts = Object.fromEntries(
+      list.units.map((u: { name: string; memberCount: number; leadCount: number }) => [
+        u.name,
+        [u.memberCount, u.leadCount],
+      ]),
+    );
+    expect(counts).toEqual({ IT: [0, 0], Backend: [0, 0], Alpha: [1, 1] });
     expect(list.lastSeq).toBeGreaterThanOrEqual(3);
   });
 
@@ -252,7 +261,9 @@ describe("units: rename, delete, concurrency and memberships with leads", () => 
     expect((await su.query("select 1 from app.permission_rules where id = $1", [ruleId])).rowCount).toBe(0);
     const [row] = await audit("unit.deleted");
     expect(row).toMatchObject({ resource_id: tmp, result: "success" });
-    expect(row.metadata).toMatchObject({ name: "Temp", removedMemberIds: [devId], removedRuleIds: [ruleId] });
+    // The creator (auto-lead, D-13) and the added developer both go with it.
+    expect(row.metadata).toMatchObject({ name: "Temp", removedRuleIds: [ruleId] });
+    expect([...row.metadata.removedMemberIds].sort()).toEqual([adminId, devId].sort());
     expect((await fails(admin.request("DELETE", `/api/v1/units/${tmp}`), 404)).code).toBe("unit_not_found");
   });
 
@@ -386,7 +397,10 @@ describe("units: rename, delete, concurrency and memberships with leads", () => 
     const events = (await orgEvents()).filter(
       (e) => e.type === "units.updated" && e.payload.action === "members",
     );
-    expect(events.length).toBe(addedRows.length + changed.length + removed.length);
+    // A project creator's auto-lead (D-13) rides its unit's "created" event; every member route emits "members".
+    const routeAdded = addedRows.filter((r) => r.metadata.userId !== adminId);
+    expect(addedRows.length - routeAdded.length).toBe(2); // Alpha and Temp, both created by the admin
+    expect(events.length).toBe(routeAdded.length + changed.length + removed.length);
   });
 });
 
@@ -683,5 +697,65 @@ describe("units: a team project with linked repositories (Phase 07.9, D-01, UI-S
     }
     // The repository row is the device's: it stays.
     expect((await su.query("select 1 from app.projects where id = $1", [repo])).rowCount).toBe(1);
+  });
+});
+
+describe("units: a project created in Settings › Organization auto-leads its creator (Phase 07.9, D-13)", () => {
+  const create = async (kind: string, name: string, parentId: string | null) =>
+    (await ok(admin.request("POST", "/api/v1/units", { kind, name, parentId }))).id as string;
+  const memberships = async (unitId: string) =>
+    (await su.query("select user_id, role from app.unit_memberships where unit_id = $1", [unitId])).rows;
+  const memberAudits = async (unitId: string) =>
+    (await audit("unit_membership.added")).filter((r) => r.resource_id === unitId);
+
+  let dept: string;
+  let team: string;
+
+  beforeAll(async () => {
+    dept = await create("department", "Auto Lead Dept", null);
+    team = await create("team", "Auto Lead Team", dept);
+  });
+
+  it("POST /units kind=project makes the creator its lead, audited with ids only, like POST /work-projects", async () => {
+    const created = await ok(
+      admin.request("POST", "/api/v1/units", { kind: "project", name: "Lead Portal", parentId: team }),
+    );
+    expect(created).toMatchObject({ kind: "project", memberCount: 1, leadCount: 1 });
+    expect(await memberships(created.id)).toEqual([{ user_id: adminId, role: "lead" }]);
+    const added = await memberAudits(created.id);
+    expect(added.map((r) => [r.user_id, r.result, r.metadata])).toEqual([
+      [adminId, "success", { unitId: created.id, userId: adminId, role: "lead" }],
+    ]);
+    // The creator is inside the project, not only above it: the Work Zone page lists them in its access.
+    const page = await ok(admin.request("GET", `/api/v1/work-projects/${created.id}`));
+    expect(page.access.people.map((p: { userId: string }) => p.userId)).toContain(adminId);
+  });
+
+  it("a project under a department auto-leads its creator too", async () => {
+    const project = await create("project", "Dept Portal", dept);
+    expect(await memberships(project)).toEqual([{ user_id: adminId, role: "lead" }]);
+  });
+
+  it("departments and teams are unchanged: no membership and no membership audit", async () => {
+    const otherDept = await create("department", "No Auto Dept", null);
+    const otherTeam = await create("team", "No Auto Team", otherDept);
+    for (const unit of [otherDept, otherTeam]) {
+      expect(await memberships(unit)).toEqual([]);
+      expect(await memberAudits(unit)).toEqual([]);
+    }
+  });
+
+  it("a refused creation leaves neither a unit nor a membership", async () => {
+    const before = (await audit("unit_membership.added")).length;
+    await fails(
+      dev.request("POST", "/api/v1/units", { kind: "project", name: "Sneaky", parentId: team }),
+      403,
+    );
+    await fails(
+      admin.request("POST", "/api/v1/units", { kind: "project", name: "Lead Portal", parentId: team }),
+      409,
+    );
+    expect((await audit("unit_membership.added")).length).toBe(before);
+    expect((await su.query("select 1 from app.org_units where name = 'Sneaky'")).rowCount).toBe(0);
   });
 });

@@ -262,6 +262,19 @@ const SESSION_ACCESS_EVENTS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * True when an org event may have changed which sessions this user reads, so the list is fetched again: a structural
+ * access change for anyone, or a change to this user's own membership (`member.updated`: a role downgrade or a
+ * deactivation; the server revokes live views with `cause: role`, the refetch drops the rows from the list). Another
+ * member's change never touches this user's audience.
+ */
+export function sessionListStale(frame: { type: string; data: unknown }, userId: string | null): boolean {
+  if (SESSION_ACCESS_EVENTS.has(frame.type)) return true;
+  if (frame.type !== EventTypes.memberUpdated || userId === null) return false;
+  const data = frame.data as { userId?: unknown } | null;
+  return data?.userId === userId;
+}
+
+/**
  * Keep device, project and session lists live. The org stream carries ids only (devices, projects, units, rules,
  * team projects), so it only says when to refetch; the sessions themselves arrive on the member's own `user:` topic
  * (D-08). Ephemeral frames are not replayed, so a reconnect refetches the list.
@@ -280,7 +293,7 @@ export function useWorkZoneOrgSync() {
       void qc.invalidateQueries({ queryKey: wzKeys.devices });
       void qc.invalidateQueries({ queryKey: wzKeys.projects });
     }
-    if (SESSION_ACCESS_EVENTS.has(frame.type)) void qc.invalidateQueries({ queryKey: wzKeys.sessions });
+    if (sessionListStale(frame, userId)) void qc.invalidateQueries({ queryKey: wzKeys.sessions });
   });
   useTopic(userId ? topic("user", userId) : null, (frame) => {
     if (frame.type !== EventTypes.workSessionUpdated && frame.type !== EventTypes.workSessionRemoved) return;

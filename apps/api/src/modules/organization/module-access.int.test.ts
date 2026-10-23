@@ -12,7 +12,13 @@ import {
   subscribeTopic,
 } from "../../testing-ai";
 import { sleep } from "../../testing-device";
-import { connectWithProject, invite, pairDevice, startSession } from "../../testing-workzone";
+import {
+  connectWithProject,
+  dropProjectCreator,
+  invite,
+  pairDevice,
+  startSession,
+} from "../../testing-workzone";
 
 /**
  * Phase 07.3 (ADR-0024, ACCESS-02, ACCESS-03): `GET/PUT /api/v1/module-access`. A module is turned off or on for the
@@ -178,6 +184,8 @@ beforeAll(async () => {
   engineeringId = await unit("department", "Engineering", null);
   backendId = await unit("team", "Backend", engineeringId);
   paymentsId = await unit("project", "Payments", backendId);
+  // The admin builds the tree for others: outside Payments, so Backend's switches never reach him (D-13 auto-lead).
+  await dropProjectCreator(victor, paymentsId);
   frontendId = await unit("team", "Frontend", engineeringId);
   salesId = await unit("department", "Sales", null);
   await ok(victor.request("POST", `/api/v1/units/${backendId}/members`, { userId: danaId }));

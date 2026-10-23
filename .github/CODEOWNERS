@@ -82,6 +82,13 @@
 /apps/api/src/modules/work-session/hidden.ts       @VictorMinemu
 /apps/api/src/modules/realtime/gateway.ts          @VictorMinemu
 /packages/contracts/src/work-projects.ts           @VictorMinemu
+# 07.9 verification (W1): the `ws:` subscription authorizer, the per-user delivery fan-out, the per-organization
+# delivery queue, the admin-only-view audit, and the realtime service that publishes invalidations before frames.
+/apps/api/src/modules/work-session/index.ts        @VictorMinemu
+/apps/api/src/modules/work-session/service.ts      @VictorMinemu
+/apps/api/src/modules/work-session/org-queue.ts    @VictorMinemu
+/apps/api/src/modules/work-session/routes.ts       @VictorMinemu
+/apps/api/src/modules/realtime/service.ts          @VictorMinemu
 
 # Runtime adapters (ADR-0012 path) and the OpenClaw plugin install gate.
 /apps/local-runtime/src/claude/                    @VictorMinemu
