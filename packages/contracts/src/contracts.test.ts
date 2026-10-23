@@ -47,6 +47,7 @@ import {
   RenameUnitRequest,
   RequestPasswordResetRequest,
   ResetPasswordRequest,
+  RevokeCause,
   ServerFrame,
   SessionEvent,
   SessionInfo,
@@ -373,6 +374,32 @@ describe("revoked frame (03-04)", () => {
   });
 });
 
+describe("revoked frame cause (07.9-01, D-04, D-13, R7)", () => {
+  const topic = "ws:0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
+
+  it("carries an optional cause from a fixed set of codes, never a name", () => {
+    expect(RevokeCause.options).toEqual(["visibility", "role", "device", "module"]);
+    for (const cause of RevokeCause.options) {
+      expect(ServerFrame.parse({ op: "revoked", topic, reason: "forbidden", cause }), cause).toEqual({
+        op: "revoked",
+        topic,
+        reason: "forbidden",
+        cause,
+      });
+    }
+    expect(ServerFrame.parse({ op: "revoked", topic, reason: "forbidden" })).toEqual({
+      op: "revoked",
+      topic,
+      reason: "forbidden",
+    });
+    expect(ServerFrame.safeParse({ op: "revoked", topic, reason: "forbidden", cause: "Ana" }).success).toBe(
+      false,
+    );
+    // The reason enum is not widened: the cause travels in its own field.
+    expect(ServerFrame.safeParse({ op: "revoked", topic, reason: "visibility" }).success).toBe(false);
+  });
+});
+
 describe("personal bots and direct conversations (03.1-01)", () => {
   const now = "2026-10-04T10:00:00.000Z";
   const agent = {
@@ -618,6 +645,25 @@ describe("Phase 5 realtime event types (05-01)", () => {
       messageCreated: "message.created",
       messageUpdated: "message.updated",
       notificationPrefsUpdated: "notification_prefs.updated",
+    });
+    for (const values of [Object.values(EventTypes), Object.values(EphemeralTypes)]) {
+      expect(new Set(values).size).toBe(values.length);
+    }
+  });
+});
+
+describe("Phase 07.9 realtime event types (07.9-01, D-04, D-08)", () => {
+  it("adds work_session.removed, work_session.visibility_changed and work_project.updated; values stay unique", () => {
+    expect(EventTypes.workSessionRemoved).toBe("work_session.removed");
+    expect(EventTypes.workSessionVisibilityChanged).toBe("work_session.visibility_changed");
+    expect(EventTypes.workProjectUpdated).toBe("work_project.updated");
+    // The per-user list frame reuses `work_session.updated`.
+    expect(EventTypes.workSessionUpdated).toBe("work_session.updated");
+    expect(EventTypes).toMatchObject({
+      unitsUpdated: "units.updated",
+      permissionRulesUpdated: "permission_rules.updated",
+      deviceUpdated: "device.updated",
+      projectUpdated: "project.updated",
     });
     for (const values of [Object.values(EventTypes), Object.values(EphemeralTypes)]) {
       expect(new Set(values).size).toBe(values.length);

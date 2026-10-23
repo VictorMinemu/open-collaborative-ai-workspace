@@ -63,3 +63,151 @@ export const WorkProjectPerson = z.object({
   avatarUrl: z.string().max(2048).nullable(),
 });
 export type WorkProjectPerson = z.infer<typeof WorkProjectPerson>;
+
+/** A repository's display name as its device announced it (never a path). */
+const RepoName = z.string().max(200);
+/** A device's display name. */
+const DeviceName = z.string().max(200);
+/** Ancestor unit names, root first ("Engineering › Web"). */
+const Trail = z.array(UnitName);
+
+// ---------------------------------------------------------------- team project API (Phase 07.9, D-01, D-10, D-13)
+
+/** `?q=` of the people and team searches (`…/assignable-teams`, `…/visibility/people`, `…/audience/people`). */
+export const WorkProjectSearchQuery = z.object({
+  q: z.string().trim().max(WORK_PROJECT_LIMITS.searchQueryMax).optional(),
+});
+export type WorkProjectSearchQuery = z.infer<typeof WorkProjectSearchQuery>;
+
+/** A unit assigned (or assignable) to a team project: teams and departments only, never a project (D-13). */
+export const WorkProjectTeam = z.object({
+  id: Id,
+  name: UnitName,
+  kind: z.enum(["team", "department"]),
+  memberCount: z.number().int().nonnegative(),
+});
+export type WorkProjectTeam = z.infer<typeof WorkProjectTeam>;
+
+/** A repository linked to a team project, on the device that registered it. */
+export const WorkProjectRepo = z.object({
+  /** The repository (`app.projects` row), never its host path. */
+  projectId: Id,
+  name: RepoName,
+  deviceId: Id,
+  deviceName: DeviceName,
+  deviceOnline: z.boolean(),
+  branch: z.string().max(255).nullable(),
+  /** False once the device stopped announcing it. */
+  available: z.boolean(),
+});
+export type WorkProjectRepo = z.infer<typeof WorkProjectRepo>;
+
+/** A row of the Projects index: a team project the caller can open (or every one, for an admin). */
+export const WorkProjectSummary = z.object({
+  id: Id,
+  name: UnitName,
+  trail: Trail,
+  peopleCount: z.number().int().nonnegative(),
+  repoCount: z.number().int().nonnegative(),
+});
+export type WorkProjectSummary = z.infer<typeof WorkProjectSummary>;
+
+/** A repository the caller can use that is linked to no team project. */
+export const PersonalRepo = z.object({
+  projectId: Id,
+  name: RepoName,
+  deviceId: Id,
+  deviceName: DeviceName,
+  deviceOnline: z.boolean(),
+});
+export type PersonalRepo = z.infer<typeof PersonalRepo>;
+
+/** `GET /api/v1/work-projects`. `viewerCan.create`: `work_project.manage` on some team or department (resolver). */
+export const WorkProjectIndex = z.object({
+  teamProjects: z.array(WorkProjectSummary),
+  personalRepos: z.array(PersonalRepo),
+  viewerCan: z.object({ create: z.boolean() }),
+});
+export type WorkProjectIndex = z.infer<typeof WorkProjectIndex>;
+
+/** A unit a new team project may sit under: a team or department the caller manages (no top level, D-13). */
+export const WorkProjectParent = z.object({
+  id: Id,
+  name: UnitName,
+  kind: z.enum(["team", "department"]),
+  trail: Trail,
+});
+export type WorkProjectParent = z.infer<typeof WorkProjectParent>;
+
+/** `GET /api/v1/work-projects/parents`. */
+export const WorkProjectParents = z.object({ parents: z.array(WorkProjectParent) });
+export type WorkProjectParents = z.infer<typeof WorkProjectParents>;
+
+/** `POST /api/v1/work-projects`: a unit of kind `project`; the creator becomes its lead (D-13). */
+export const CreateWorkProjectRequest = z.strictObject({
+  name: z.string().trim().min(1).max(WORK_PROJECT_LIMITS.nameMax),
+  parentId: Id,
+});
+export type CreateWorkProjectRequest = z.infer<typeof CreateWorkProjectRequest>;
+
+/** `GET /api/v1/work-projects/:unitId` (404 without project access, never an existence leak). */
+export const WorkProjectDetail = z.object({
+  id: Id,
+  name: UnitName,
+  parentId: Id,
+  trail: Trail,
+  defaultVisibility: ProjectDefaultVisibility,
+  /** Who can open the project: members ∪ members of its teams (admins are a role, never counted). */
+  access: z.object({
+    count: z.number().int().nonnegative(),
+    people: z.array(WorkProjectPerson).max(WORK_PROJECT_LIMITS.accessPeople),
+  }),
+  teams: z.array(WorkProjectTeam),
+  repos: z.array(WorkProjectRepo),
+  /**
+   * Decided by the API resolver (UI gating only): `manage` = `work_project.manage` on the project (default switch,
+   * repositories); `assignTeams` = `work_project.manage` on its parent; `members` = `unit.members.manage` on it.
+   */
+  viewerCan: z.object({ manage: z.boolean(), assignTeams: z.boolean(), members: z.boolean() }),
+});
+export type WorkProjectDetail = z.infer<typeof WorkProjectDetail>;
+
+/** `PATCH /api/v1/work-projects/:unitId`: the default audience of new sessions (existing sessions never change). */
+export const UpdateWorkProjectRequest = z.strictObject({ defaultVisibility: ProjectDefaultVisibility });
+export type UpdateWorkProjectRequest = z.infer<typeof UpdateWorkProjectRequest>;
+
+/** `POST /api/v1/work-projects/:unitId/teams`. */
+export const AssignWorkProjectTeamRequest = z.strictObject({ unitId: Id });
+export type AssignWorkProjectTeamRequest = z.infer<typeof AssignWorkProjectTeamRequest>;
+
+/** `GET /api/v1/work-projects/:unitId/assignable-teams?q=`: teams and departments not assigned yet. */
+export const AssignableTeams = z.object({ teams: z.array(WorkProjectTeam) });
+export type AssignableTeams = z.infer<typeof AssignableTeams>;
+
+/** `POST /api/v1/work-projects/:unitId/repos`: link a repository (one team project per repository). */
+export const LinkWorkProjectRepoRequest = z.strictObject({ projectId: Id });
+export type LinkWorkProjectRepoRequest = z.infer<typeof LinkWorkProjectRepoRequest>;
+
+/**
+ * `GET /api/v1/work-projects/:unitId/linkable-repos`: repositories on devices the caller can use, grouped by device;
+ * `linkedTo` names the team project a repository already belongs to (shown, not linkable).
+ */
+export const LinkableRepos = z.object({
+  devices: z.array(
+    z.object({
+      deviceId: Id,
+      deviceName: DeviceName,
+      deviceOnline: z.boolean(),
+      repos: z.array(z.object({ projectId: Id, name: RepoName, linkedTo: TeamProjectRef.nullable() })),
+    }),
+  ),
+});
+export type LinkableRepos = z.infer<typeof LinkableRepos>;
+
+/** `GET /api/v1/work-projects/:unitId/repos/:projectId/impact`: sessions that become personal if it is unlinked. */
+export const RepoUnlinkImpact = z.object({ sessions: z.number().int().nonnegative() });
+export type RepoUnlinkImpact = z.infer<typeof RepoUnlinkImpact>;
+
+/** Durable `work_project.updated` on `org:<id>`: a team project's teams, repositories or default changed (ids only). */
+export const WorkProjectUpdatedEvent = z.object({ unitId: Id });
+export type WorkProjectUpdatedEvent = z.infer<typeof WorkProjectUpdatedEvent>;

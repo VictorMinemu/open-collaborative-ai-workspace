@@ -186,6 +186,16 @@ function relationGrants(p: PrincipalFacts, r: ResourceFacts, base: readonly Perm
   return out;
 }
 
+/**
+ * Leading a unit confers the `team` surface on the led subtree, whatever the role; a lead grain on another surface
+ * still needs the role to unlock that surface (like relation grants). Phase 07.9: a lead whose role has no Work Zone
+ * (standard) never gains `work_session.visibility` by leading.
+ */
+function leadConfers(p: PrincipalFacts, perm: Permission): boolean {
+  const surface = PERMISSION_SURFACE[perm];
+  return surface === "team" || (p.orgRole !== null && ROLE_SURFACES[p.orgRole].includes(surface));
+}
+
 function subjectMatches(rule: RuleFact, p: PrincipalFacts): boolean {
   switch (rule.subjectKind) {
     case "everyone":
@@ -269,7 +279,7 @@ export function resolveEffectivePermissions(
   const base = basePermissions(p);
   const grants = new Set<Permission>([...base, ...relationGrants(p, r, base)]);
   if (p.kind === "user" && r.unitPath.some((unitId) => p.leadOfUnitIds.has(unitId))) {
-    for (const perm of LEAD_PERMISSIONS) grants.add(perm);
+    for (const perm of LEAD_PERMISSIONS) if (leadConfers(p, perm)) grants.add(perm);
   }
 
   const denies: ApplicableDeny[] = [];
