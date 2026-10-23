@@ -307,10 +307,34 @@ export class WorkSessionService implements DeviceSessionHandler {
    */
   async emitSession(tx: Tx, sessionId: string): Promise<WorkSession | null> {
     const dto = await this.session(tx, sessionId);
-    if (!dto) return null;
+    if (!dto) {
+      // 07.9-12: the request's own, authorized change took the session out of the caller's audience (a project lead who
+      // narrowed it past themself), so the audience backstop hides it from the rest of the caller's transaction. The
+      // people who still read it get the snapshot from a system transaction once this one commits; the caller never
+      // reads it. A session that is not there (or not in this tenant) emits nothing either way.
+      if (tenantOf(tx).userId) this.emitAfterCommitAsSystem(tx, sessionId);
+      return null;
+    }
     await this.deps.realtime.appendEvent(tx, wsTopic(sessionId), EventTypes.workSessionUpdated, dto);
     this.deliverAfterCommit(tx, sessionId);
     return dto;
+  }
+
+  /** The `ws:` snapshot of a session the caller just lost, appended by the system after commit, then delivered. */
+  private emitAfterCommitAsSystem(tx: Tx, sessionId: string): void {
+    const { organizationId } = tenantOf(tx);
+    tenantOf(tx).afterCommit(async () => {
+      try {
+        await this.deps.db.withTenant({ organizationId, userId: null }, async (sys) => {
+          const dto = await this.session(sys, sessionId);
+          if (dto)
+            await this.deps.realtime.appendEvent(sys, wsTopic(sessionId), EventTypes.workSessionUpdated, dto);
+        });
+      } catch (err) {
+        this.deps.log.warn({ err }, "work session snapshot after an own audience change failed");
+      }
+      await this.deliverToReaders(organizationId, [sessionId]);
+    });
   }
 
   /**

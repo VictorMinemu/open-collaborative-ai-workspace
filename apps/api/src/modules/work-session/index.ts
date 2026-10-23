@@ -1,6 +1,6 @@
 import { EventTypes, WorkProjectUpdatedEvent } from "@ocw/contracts";
 import { permissionRules, type Tx, workSessions } from "@ocw/db";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { ApiModule, Core } from "../../core";
 import type { ApprovalService } from "../approval";
 import type { ObjectStorage } from "../artifact";
@@ -95,7 +95,18 @@ export function createWorkSessionModule(
         .select({ id: workSessions.id, createdBy: workSessions.createdBy, deviceId: workSessions.deviceId })
         .from(workSessions)
         .where(eq(workSessions.id, workSessionId));
-      if (!row) return false;
+      if (!row) {
+        // 07.9-12: the audience backstop hides a session outside the person's relations, which is exactly the
+        // resolver's `not_in_audience`. A live subscription the audience just removed is told so (`visibility`); a
+        // first subscribe never shows the cause (`authorizeTopic` is a boolean), so no id is confirmed to anyone.
+        const exists = await tx.execute(sql`select app.work_session_exists(${workSessionId}::uuid) as e`);
+        return (exists.rows[0] as { e: boolean } | undefined)?.e === true
+          ? {
+              allowed: false as const,
+              cause: revokeCauseOf({ layer: "resource", reason: "not_in_audience" }),
+            }
+          : false;
+      }
       const { allowed, denial } = await perms.decide(
         tx,
         { kind: "user", userId: auth.userId },

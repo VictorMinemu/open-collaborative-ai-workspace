@@ -44,6 +44,7 @@ import {
   type ResourceFacts,
 } from "../organization";
 import { sessionFacts, sessionFactsForUsers } from "./facts";
+import { sessionNotFound } from "./hidden";
 import { assignedTeams, defaultVisibilityOf, projectFacts, subtreeMemberCounts } from "./projects";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 
@@ -448,21 +449,28 @@ export async function viewerStateOf(
   return denial?.reason === "left_project" ? "left_project" : null;
 }
 
-/** The visibility panel (UI-SPEC Surface 1, R2, R12) of session `s` for the request's caller. */
+/**
+ * The visibility panel (UI-SPEC Surface 1, R2, R12) of session `s` for the request's caller. `stored` = the session's
+ * active grants when the caller already knows them (an audience change that took the session out of the caller's own
+ * audience: the backstop hides the grant rows from them from then on, 07.9-12); otherwise they are read.
+ */
 export async function visibilityView(
   req: FastifyRequest,
   tx: Tx,
   perms: PermissionService,
   s: SessionRow,
+  stored?: readonly GrantSubject[],
 ): Promise<WorkSessionVisibilityView> {
   const { userId } = authOf(req);
   const target = await requireTarget(tx, s.projectId);
   const facts = await sessionFacts(tx, userId, s);
   const dir = await memberDirectory(tx);
-  const grants = await tx
-    .select({ subjectKind: workSessionGrants.subjectKind, subjectId: workSessionGrants.subjectId })
-    .from(workSessionGrants)
-    .where(and(eq(workSessionGrants.workSessionId, s.id), isNull(workSessionGrants.revokedAt)));
+  const grants =
+    stored ??
+    (await tx
+      .select({ subjectKind: workSessionGrants.subjectKind, subjectId: workSessionGrants.subjectId })
+      .from(workSessionGrants)
+      .where(and(eq(workSessionGrants.workSessionId, s.id), isNull(workSessionGrants.revokedAt))));
 
   // Teams: every assigned team, plus selected teams no longer assigned (shown inactive, UI-SPEC §1.5).
   const teams: WorkSessionVisibilityView["teams"] = [];
@@ -639,7 +647,7 @@ export function registerVisibilityRoutes(
     const s = lock
       ? await svc.lock(tx, id)
       : ((await tx.select().from(workSessions).where(eq(workSessions.id, id)))[0] ?? null);
-    if (!s) throw notFound(SESSION_NOT_FOUND);
+    if (!s) return sessionNotFound(tx, id, SESSION_NOT_FOUND);
     const facts = await sessionFacts(tx, authOf(req).userId, s);
     await assertHidden(req, tx, "work_session.read", facts, SESSION_NOT_FOUND);
     return { s, facts };
@@ -734,8 +742,19 @@ export function registerVisibilityRoutes(
         }
         const dir = await memberDirectory(tx);
         const [fresh] = await tx.select().from(workSessions).where(eq(workSessions.id, s.id));
+        // 07.9-12: a project lead may narrow a session past themself (the UI warns first). The backstop then hides the
+        // row and its grants from the rest of this transaction, so the answer is built from what this request just
+        // stored (the kind and exactly `grantsFor(input)` as the active grants, `applyAudience`'s contract); who sees it
+        // now still comes from the rule's definer functions. Never a read beyond what the caller just wrote.
+        const after = fresh ?? { ...s, visibility: input.kind };
         return {
-          visibility: await visibilityView(req, tx, perms, fresh ?? s),
+          visibility: await visibilityView(
+            req,
+            tx,
+            perms,
+            after,
+            fresh ? undefined : grantsFor(input, s.createdBy),
+          ),
           removedCount: removed.length,
           // Names go only to the editor, in this response (never in the audit or an event).
           removedNames: removed
