@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 171
+open_count: 173
 waived_count: 5
 fixed_count: 134
-total_count: 310
-last_updated: 2026-10-23T04:56:08.606Z
+total_count: 312
+last_updated: 2026-10-23T05:15:46.993Z
 ---
 
 # Broken Windows Ledger
@@ -325,6 +325,8 @@ last_updated: 2026-10-23T04:56:08.606Z
 | 308 | 07.9 | deviation | apps/api/src/modules/work-session/facts.ts |  | 07.9-05: the list calls work_session_access once per session of the organization (Pitfall 8); plan 12's perf test must measure it | open |  | 2026-10-23T03:52:58.614Z |  |
 | 309 | 07.9 | deviation | apps/web/components/work-zone/session-sidebar.tsx |  | SHOULD FIX (07.9-09, pre-existing): active-row branch line contrast 3.5:1 (axe serious); Settled rows 32 px on mobile (< 44); the per-row "+" button 18 px on touch — fix in plan 10/14 or the gate | open |  | 2026-10-23T04:56:08.517Z |  |
 | 310 | 07.9 | deviation | apps/web/app/(app)/work-zone/page.tsx |  | SHOULD FIX (07.9-09, pre-existing): the home "Ready" status chip contrast 2.6:1; at 390 the recent sessions' date truncates mid-word ("just nov") | open |  | 2026-10-23T04:56:08.606Z |  |
+| 311 | 07.9 | deviation | apps/api/src/modules/work-session/service.ts |  | 07.9-07 (low): a session frame computed just before a narrowing can arrive a few ms after it (the data was visible to that person until then); each device transaction and reauthorizeOrg waits for the post-commit fan-out — plan 12 measures it | open |  | 2026-10-23T05:15:46.912Z |  |
+| 312 | 07.9 | deviation | apps/web/lib/workzone-queries.ts |  | 07.9-07: gaining access by repo link or team assignment shows the session only on the next list refetch (P-08 by design); useWorkZoneOrgSync is mounted in 4 components — plan 11 may mount it once | open |  | 2026-10-23T05:15:46.993Z |  |
 
 ````json
 [
@@ -4046,6 +4048,30 @@ last_updated: 2026-10-23T04:56:08.606Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-23T04:56:08.606Z",
+    "resolved_at": null
+  },
+  {
+    "id": 311,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/api/src/modules/work-session/service.ts",
+    "line": null,
+    "description": "07.9-07 (low): a session frame computed just before a narrowing can arrive a few ms after it (the data was visible to that person until then); each device transaction and reauthorizeOrg waits for the post-commit fan-out — plan 12 measures it",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T05:15:46.912Z",
+    "resolved_at": null
+  },
+  {
+    "id": 312,
+    "kind": "deviation",
+    "phase": "07.9",
+    "file": "apps/web/lib/workzone-queries.ts",
+    "line": null,
+    "description": "07.9-07: gaining access by repo link or team assignment shows the session only on the next list refetch (P-08 by design); useWorkZoneOrgSync is mounted in 4 components — plan 11 may mount it once",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-10-23T05:15:46.993Z",
     "resolved_at": null
   }
 ]
