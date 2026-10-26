@@ -4,6 +4,7 @@ import { RedisContainer, type StartedRedisContainer } from "@testcontainers/redi
 import { type BuiltApp, buildApp } from "./app";
 import { type Env, loadEnv } from "./config/env";
 import { createEnvFileSecretStore } from "./lib/secret-store";
+import type { BrowserBudgets } from "./modules/agent-channel";
 
 export const TEST_SETUP_TOKEN = "test-setup-token-0123456789";
 export const WEB_ORIGIN = "http://localhost:3999";
@@ -24,6 +25,8 @@ export interface TestStackOptions {
   logStream?: { write(msg: string): void };
   /** A lower Device Link frame limit for this stack (06.1-02 frame guard tests). */
   deviceFrameMaxBytes?: number;
+  /** Shorter bot browser call deadlines for this stack (CI p64/p66 deadline tests). */
+  browserBudgetsMs?: BrowserBudgets;
 }
 
 /** Real PostgreSQL 18 + Redis 8 (testcontainers) and the full API listening on a random port. */
@@ -65,6 +68,7 @@ async function buildStack(
     ...(opts.logStream ? { logger: true, logStream: opts.logStream } : { logger: false }),
     secretStore,
     ...(opts.deviceFrameMaxBytes ? { deviceFrameMaxBytes: opts.deviceFrameMaxBytes } : {}),
+    ...(opts.browserBudgetsMs ? { browserBudgetsMs: opts.browserBudgetsMs } : {}),
   });
   try {
     await built.app.listen({ host: "127.0.0.1", port: 0 });

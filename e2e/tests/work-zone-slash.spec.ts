@@ -1,6 +1,12 @@
 import { expect, type Page, test } from "@playwright/test";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
+import {
+  createTeamProject,
+  linkRepo,
+  removeTeamProject,
+  type TeamProject,
+} from "../support/work-zone-projects";
 import { ADMIN, shot } from "./env";
 
 /**
@@ -41,13 +47,17 @@ test("Work Zone slash commands: /model changes the chip for both controllers; /c
   const mobile = info.project.name === "mobile";
   const tag = mobile ? "390" : "1440";
   const adminApi = await apiAs(ADMIN);
-  await ensureMember(adminApi, SAM, "developer");
+  const samId = await ensureMember(adminApi, SAM, "developer");
   let device: FakeDeviceHandle | null = null;
   let sessionId: string | null = null;
   let sam: Awaited<ReturnType<typeof openAs>> | null = null;
+  let team: TeamProject | null = null;
 
   try {
     device = await startFakeDevice(adminApi, { name: `E2E Slash ${tag}`, projectName: `slash-${tag}` });
+    // D-06 (07.9): Sam, the second controller, sees the admin's session through its team project.
+    team = await createTeamProject(adminApi, { name: `Slash ${tag}`, members: [{ userId: samId }] });
+    await linkRepo(adminApi, team.unitId, device.projectId);
     const created = await adminApi.post("/api/v1/work-sessions", {
       data: {
         projectId: device.projectId,
@@ -109,6 +119,7 @@ test("Work Zone slash commands: /model changes the chip for both controllers; /c
   } finally {
     await sam?.context.close();
     if (sessionId) await adminApi.post(`/api/v1/work-sessions/${sessionId}/archive`, { data: {} });
+    if (team) await removeTeamProject(adminApi, team);
     await device?.stop();
     await adminApi.dispose();
   }

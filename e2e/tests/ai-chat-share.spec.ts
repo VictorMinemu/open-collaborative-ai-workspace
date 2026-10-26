@@ -281,7 +281,11 @@ test("Alex sees the shared image through the share and opens it in the lightbox"
     attachment: { id: string };
     upload: { url: string; headers: Record<string, string> };
   };
-  const put = await fetch(p.upload.url, { method: "PUT", headers: p.upload.headers, body: bytes });
+  const put = await fetch(p.upload.url, {
+    method: "PUT",
+    headers: p.upload.headers,
+    body: new Uint8Array(bytes),
+  });
   expect(put.status).toBe(200);
   expect((await sam.post(`/api/v1/attachments/${p.attachment.id}/complete`)).ok()).toBe(true);
   await sendAs(chatId, "Which room fits twelve people?", [p.attachment.id]);

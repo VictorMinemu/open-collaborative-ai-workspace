@@ -130,6 +130,7 @@ describe("Work Zone proposal contracts (D-03, P-08)", () => {
       "device_not_shared",
       "project_not_found",
       "not_allowed",
+      "not_in_project",
     ]);
   });
 

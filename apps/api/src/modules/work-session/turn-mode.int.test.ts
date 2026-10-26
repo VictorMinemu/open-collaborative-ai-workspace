@@ -8,8 +8,11 @@ import {
   CLAUDE_CATALOG,
   CODEX_CATALOG,
   connectWithProject,
+  createTeamProject,
   invite,
+  linkRepo,
   pairDevice,
+  settled,
   startSession,
 } from "../../testing-workzone";
 import { loadDeviceAccess } from "../device";
@@ -159,6 +162,20 @@ beforeAll(async () => {
     localId: "lp_srv",
     name: "infra",
   }));
+  // Explicit access (07.9-03, D-06): Sam (a grantee, as each case sets it) and Dana (no relation to the device) prompt
+  // the owner's sessions on the Mac as fellow members of a team project its repo is linked to. The device grants stay
+  // exactly as each case writes them, so the turn's mode is still min(session mode, the author's cap).
+  const { unitId } = await createTeamProject(stack, admin, {
+    name: "OCW",
+    members: [{ userId: adminId }, { userId: samId }, { userId: danaId }],
+  });
+  await linkRepo(stack, {
+    organizationId: orgId,
+    unitId,
+    projectId: macProject,
+    deviceId: macId,
+    linkedBy: adminId,
+  });
   await optIn(mac, macId, true);
   await optIn(server, serverId, true);
   await putPolicy({ allowFullAccess: true });
@@ -308,6 +325,8 @@ describe("downgrades (ADR-0012)", () => {
         from: { permissionMode: "fullAccess" },
         to: { permissionMode: OWNER_TOP },
       });
+      // 07.9 fan-out: the sweep runs in the background queue, still attributed to the admin who saved the policy.
+      expect(down!.user_id).toBe(adminId);
       expect(await auditOf("work_session.full_access_left", { sessionId: id })).toHaveLength(1);
       const emitted = await su.query(
         "select payload from app.stream_events where stream_id = $1 and type = 'work_session.updated' order by seq desc limit 1",
@@ -319,8 +338,8 @@ describe("downgrades (ADR-0012)", () => {
         settings: { pending: true, requested: { permissionMode: OWNER_TOP } },
       });
     }
-    // s2 (acceptEdits) was within the new policy: untouched.
-    await sleep(200);
+    // s2 (acceptEdits) was within the new policy: untouched (the whole sweep has run, 07.9 fan-out).
+    await settled(stack, orgId);
     expect(mac.pending("session.configure").filter((f) => f.sessionId === s2)).toHaveLength(0);
     await putPolicy({ allowFullAccess: true });
     for (const [device, id] of [
@@ -500,7 +519,8 @@ describe("tenant isolation", () => {
       { deviceId: serverId, organizationId: orgB },
       "access_changed",
     );
-    await sleep(300);
+    // Both sweeps run in the background queue (07.9 fan-out): wait for them, so the checks below are not vacuous.
+    await settled(stack);
     expect((await sessionRow(s3)).permission_mode).toBe("fullAccess");
     expect((await sessionRow(s3)).status).toBe("idle");
     expect(server.pending("session.configure")).toHaveLength(0);

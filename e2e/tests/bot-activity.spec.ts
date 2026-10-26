@@ -105,8 +105,8 @@ async function writeAndRun(m: MentionPayload) {
 }
 
 /** The bot's reply row whose text contains `text`. */
-function replyRow(page: Page, text: string): Locator {
-  return page.locator('[data-testid="message"][data-author-kind="agent"]').filter({ hasText: text }).last();
+function replyRow(scope: Page | Locator, text: string): Locator {
+  return scope.locator('[data-testid="message"][data-author-kind="agent"]').filter({ hasText: text }).last();
 }
 
 /** axe (light and dark), named controls, no sideways scroll, 44 px targets below 1024. */

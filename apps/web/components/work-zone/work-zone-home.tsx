@@ -1,14 +1,17 @@
 "use client";
 
+import type { WorkSession } from "@ocw/contracts";
 import { ArrowRight, FolderGit2, Laptop, Plus, ShieldCheck, SquareTerminal, Users } from "lucide-react";
 import Link from "next/link";
 import { EmptyState } from "@/components/common/empty-state";
 import { PageHeader } from "@/components/shell/page-header";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useMe } from "@/lib/queries";
 import { cn, relativeTime } from "@/lib/utils";
 import { useDevices, useProjects, useWorkSessions } from "@/lib/workzone-queries";
 import { OnlineDot, RuntimeLogo, StatusChip } from "./meta";
+import { VisibilityMarker, VisibilitySrSuffix } from "./visibility/visibility-marker";
 import { useWorkZone } from "./work-zone-context";
 
 export function WorkZoneHome() {
@@ -16,6 +19,7 @@ export function WorkZoneHome() {
   const projects = useProjects();
   const sessions = useWorkSessions();
   const { openNewSession } = useWorkZone();
+  const viewerId = useMe().data?.user.id ?? null;
 
   const loading = devices.isLoading || projects.isLoading || sessions.isLoading;
   const hasDevice = (devices.data?.length ?? 0) > 0;
@@ -74,7 +78,7 @@ export function WorkZoneHome() {
           <EmptyState
             icon={SquareTerminal}
             title="Start your first session"
-            description="Pick a project, an agent and how much it may do on its own. Everyone in the workspace can queue prompts and approve changes."
+            description="Pick a project, an agent and who can see it. People who can see a session queue prompts together."
           >
             <Button onClick={() => openNewSession()} data-testid="new-session-empty">
               <Plus /> New session
@@ -113,29 +117,7 @@ export function WorkZoneHome() {
               <h2 className="font-semibold text-[15px] tracking-tight">Recent sessions</h2>
               <div className="grid gap-2">
                 {list.slice(0, 12).map((s) => (
-                  <Link
-                    key={s.id}
-                    href={`/work-zone/${s.id}`}
-                    className="group flex items-center gap-3 rounded-xl border bg-card px-4 py-3 transition-colors hover:border-foreground/15 hover:bg-accent/30"
-                  >
-                    <RuntimeLogo runtime={s.runtime} className="size-8 rounded-lg" />
-                    <span className="grid min-w-0 flex-1">
-                      <span className="truncate font-medium text-sm">{s.title}</span>
-                      <span className="flex items-center gap-1.5 truncate text-muted-foreground text-xs">
-                        {s.projectName}
-                        <span aria-hidden>·</span>
-                        <OnlineDot online={s.deviceOnline} className="size-1.5" /> {s.deviceName}
-                        <span aria-hidden>·</span>
-                        {relativeTime(s.updatedAt)}
-                      </span>
-                    </span>
-                    <StatusChip status={s.status} className="hidden sm:inline-flex" />
-                    <ArrowRight
-                      className={cn(
-                        "size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5",
-                      )}
-                    />
-                  </Link>
+                  <RecentSessionRow key={s.id} s={s} viewerId={viewerId} />
                 ))}
               </div>
             </section>
@@ -143,5 +125,44 @@ export function WorkZoneHome() {
         )}
       </div>
     </>
+  );
+}
+
+/** A "Recent sessions" row; the visibility marker follows the sidebar's rule (UI-SPEC Surface 2, "Elsewhere"). */
+export function RecentSessionRow({ s, viewerId }: { s: WorkSession; viewerId: string | null }) {
+  const title = <span className="truncate font-medium text-sm">{s.title}</span>;
+  return (
+    <Link
+      href={`/work-zone/${s.id}`}
+      className="group flex items-center gap-3 rounded-xl border bg-card px-4 py-3 transition-colors hover:border-foreground/15 hover:bg-accent/30"
+    >
+      <RuntimeLogo runtime={s.runtime} className="size-8 rounded-lg" />
+      <span className="grid min-w-0 flex-1">
+        {s.visibility?.differsFromDefault ? (
+          <span className="flex min-w-0 items-center gap-1.5">
+            {title}
+            <VisibilityMarker session={s} viewerId={viewerId} />
+            <VisibilitySrSuffix session={s} viewerId={viewerId} />
+          </span>
+        ) : (
+          title
+        )}
+        {/* The names truncate; the time never does (it read "just nov" at 390). */}
+        <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
+          <span className="min-w-0 truncate">{s.projectName}</span>
+          <span aria-hidden>·</span>
+          <OnlineDot online={s.deviceOnline} className="size-1.5 shrink-0" />
+          <span className="min-w-0 truncate">{s.deviceName}</span>
+          <span aria-hidden>·</span>
+          <span data-testid="recent-session-time" className="shrink-0 whitespace-nowrap">
+            {relativeTime(s.updatedAt)}
+          </span>
+        </span>
+      </span>
+      <StatusChip status={s.status} className="hidden sm:inline-flex" />
+      <ArrowRight
+        className={cn("size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5")}
+      />
+    </Link>
   );
 }

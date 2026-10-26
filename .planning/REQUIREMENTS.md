@@ -340,6 +340,19 @@ Deferred to later milestones. Tracked but not in the current roadmap.
 - [ ] **BRW-03**: When a page needs a login the bot posts a platform-owned card; a person with the right takes control, signs in and hands control back; password fields never reach the bot, the model, logs or audit
 - [ ] **BRW-04**: The signed-in session is sealed per member and site in the keychain, reused only for that member's turns, expires and is revocable; Browser is a module an admin turns on
 
+### Shared Work Zone Projects (WZP) — added 2026-10-22 by the owner
+
+- [ ] **WZP-01**: A team project is an `org_units` unit of kind `project` with direct members (member/lead) and assigned teams (teams or departments); admins and leads of the parent unit create it and assign teams; project leads and admins add members and link device repositories they can use (`device.use`); a repo links to at most one team project; every change is audited
+- [ ] **WZP-02**: Project access is decided only by the resolver: team project = direct members ∪ members of assigned teams (unit subtree) ∪ admins; personal project = device owner ∪ device grantees (ADR-0012); unit-scoped and module rules (ADR-0024) apply
+- [ ] **WZP-03**: A team project has one setting, "New sessions are visible to everyone in the project" (on by default; off ⇒ new sessions start as Only me); project leads and admins change it; audited
+- [ ] **WZP-04**: Every session has exactly one audience — owner, project, selected assigned teams, or specific people with project access — stored like `ai_chat_grants` (one active grant per subject, soft-revoked); entries outside project access grant nothing; the creator, project leads and admins change it; the device owner and admins (explicit, audited rule) always see; a creator who left keeps read and archive; every change is audited
+- [ ] **WZP-05**: Seeing is not controlling: every `work_session.*` grain on a concrete session (read, prompt, interrupt, configure, approve, archive, visibility) additionally requires the audience; control keeps today's role and device rules; no new control levels
+- [ ] **WZP-06**: No session data reaches anyone outside its audience over any socket: `emitSession` no longer writes `WorkSession` DTOs on `org:<orgId>`, historical `org:` session payloads are redacted, list updates go per user; a sentinel test proves a non-audience member (including one with Work Zone off) receives no title, branch, device name or id of the session
+- [ ] **WZP-07**: One rule, every reader: the list, detail, diff, controls, settings, prompts, approvals, archive, attachments, the `ws:` topic authorizer, Work Zone proposals and every count use the one SQL access function through the resolver; a restrictive RLS policy on `work_sessions`, `work_prompts`, `work_approvals` and `work_session_grants` backs it up for user requests; narrowing (audience, membership, team assignment, repo unlink, device grant) re-decides live `ws:` subscriptions within a second and removes the session from lists live
+- [ ] **WZP-08**: One forward-only migration adds the tables/columns and applies D-06: existing sessions get audience `project`, which for their (still unlinked) repos means creator ∪ device owner ∪ device grantees ∪ admins; the narrowing is stated in the migration header, ADR-0030 and DEMO.md
+- [ ] **WZP-09**: Session UI: one visibility chip + popover (bottom sheet below 640) with four choices, inline team/people pickers, a "who can see it now" footer, a read-only panel and inactive entries; a sidebar marker only when the audience differs from the project default; the new-session dialog groups repos under team projects and shows "Visible to: … · Change"; 1440/390, light/dark, axe, 44 px
+- [ ] **WZP-10**: Project UI: `/work-zone/projects` index and `/work-zone/projects/<unitId>` (Sessions · Settings: access line, default switch, people, teams, repositories with link/unlink dialogs), and the Teams + Work Zone sections on a project unit in Settings › Organization; the Work Zone layout no longer treats `/work-zone/projects` as a session
+
 ### Operations backlog (from the 2026-10-08 research, not yet scheduled)
 
 - **OPS-BL-01**: Organization groups — several organizations per user with a switcher, and consolidated aggregate reporting computed per organization under its own tenant context (needs an identity/tenancy ADR)
@@ -528,6 +541,16 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | BRW-02 | Phase 07.8 | Pending | New (owner, 2026-10-14) |
 | BRW-03 | Phase 07.8 | Pending | New (owner, 2026-10-14) |
 | BRW-04 | Phase 07.8 | Pending | New (owner, 2026-10-14) |
+| WZP-01 | Phase 07.9 | Pending | New (owner, 2026-10-22; plans 07.9-01, 02, 04, 13) |
+| WZP-02 | Phase 07.9 | Pending | New (owner, 2026-10-22; plans 07.9-02, 04, 05, 12) |
+| WZP-03 | Phase 07.9 | Pending | New (owner, 2026-10-22; plans 07.9-02, 04, 06, 13) |
+| WZP-04 | Phase 07.9 | Pending | New (owner, 2026-10-22; plans 07.9-01, 02, 05, 06, 10) |
+| WZP-05 | Phase 07.9 | Pending | New (owner, 2026-10-22; plans 07.9-01, 05, 06) |
+| WZP-06 | Phase 07.9 | Pending | New (owner, 2026-10-22; plans 07.9-01, 02, 07, 12) |
+| WZP-07 | Phase 07.9 | Pending | New (owner, 2026-10-22; plans 07.9-03, 05, 06, 07, 12) |
+| WZP-08 | Phase 07.9 | Pending | New (owner, 2026-10-22; plans 07.9-02, 03, 05, 08, 15) |
+| WZP-09 | Phase 07.9 | Pending | New (owner, 2026-10-22; plans 07.9-09, 10, 14) |
+| WZP-10 | Phase 07.9 | Pending | New (owner, 2026-10-22; plans 07.9-11, 13) |
 | DEV-01 | Phase 8 | Partial | Session events + Device Link frames in `packages/contracts`; no `packages/protocol`; capability flags only inside the daemon |
 | DEV-02 | Phase 8 | Partial | One-time code + hashed bearer token (SLICE-13); no Ed25519 signed challenge or RFC 8628 |
 | DEV-03 | Phase 8 | Partial | Device list + immediate revocation (SLICE-13); no active sessions, no admin view |
@@ -609,4 +632,4 @@ today; every later phase still audits the sensitive actions it introduces.
 
 ---
 *Requirements defined: 2026-09-10*
-*Last updated: 2026-10-08 after Phase 7 (FOUND-05…07, SELF-01…07 complete; FOUND-06 says Garage, not MinIO; owner clean-machine check human_needed). Previously: 2026-10-07 after Phase 6 (MULTI-01…08, AGENT-01/02/04 delivered; MULTI-07's metered run deferred to the owner). Previously: 2026-10-07 after Phase 5 (AICHAT-01…09 delivered); before that: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered); before that: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*
+*Last updated: 2026-10-22 when Phase 07.9 was planned (WZP-01…10 added, owner request). Previously: 2026-10-08 after Phase 7 (FOUND-05…07, SELF-01…07 complete; FOUND-06 says Garage, not MinIO; owner clean-machine check human_needed). Previously: 2026-10-07 after Phase 6 (MULTI-01…08, AGENT-01/02/04 delivered; MULTI-07's metered run deferred to the owner). Previously: 2026-10-07 after Phase 5 (AICHAT-01…09 delivered); before that: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered); before that: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*

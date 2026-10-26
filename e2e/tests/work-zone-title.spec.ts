@@ -1,6 +1,12 @@
 import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
+import {
+  createTeamProject,
+  linkRepo,
+  removeTeamProject,
+  type TeamProject,
+} from "../support/work-zone-projects";
 import { ADMIN, shot } from "./env";
 
 /**
@@ -159,9 +165,10 @@ test("automatic title: the first prompt comes back as a short title, live for ev
   const mobile = info.project.name === "mobile";
   const tag = mobile ? "390" : "1440";
   const adminApi = await apiAs(ADMIN);
-  await ensureMember(adminApi, SAM, "developer");
+  const samId = await ensureMember(adminApi, SAM, "developer");
   let device: FakeDeviceHandle | null = null;
   let sam: Awaited<ReturnType<typeof openAs>> | null = null;
+  let team: TeamProject | null = null;
 
   try {
     device = await startFakeDevice(adminApi, {
@@ -169,6 +176,9 @@ test("automatic title: the first prompt comes back as a short title, live for ev
       projectName: `title-${tag}`,
       env: { OCW_RUNTIME_FAKE_DELAY_MS: "600" },
     });
+    // D-06 (07.9): Sam, the second controller, sees the admin's sessions through their team project.
+    team = await createTeamProject(adminApi, { name: `Title ${tag}`, members: [{ userId: samId }] });
+    await linkRepo(adminApi, team.unitId, device.projectId);
 
     // ---- both controllers are on /work-zone BEFORE the session exists; a window marker proves no reload
     await signIn(page);
@@ -230,6 +240,7 @@ test("automatic title: the first prompt comes back as a short title, live for ev
     await expect(page).toHaveTitle(tabTitle(`Typed ${tag}`));
   } finally {
     await sam?.context.close();
+    if (team) await removeTeamProject(adminApi, team);
     await device?.stop();
   }
 });
@@ -242,9 +253,10 @@ test("a session created without a prompt takes its title from the first prompt s
   const mobile = info.project.name === "mobile";
   const tag = mobile ? "390" : "1440";
   const adminApi = await apiAs(ADMIN);
-  await ensureMember(adminApi, SAM, "developer");
+  const samId = await ensureMember(adminApi, SAM, "developer");
   let device: FakeDeviceHandle | null = null;
   let sam: Awaited<ReturnType<typeof openAs>> | null = null;
+  let team: TeamProject | null = null;
   const FIRST = "Add a dark mode toggle to the account settings page";
   const AUTO_DARK = "Add dark mode toggle account";
 
@@ -255,6 +267,9 @@ test("a session created without a prompt takes its title from the first prompt s
       projectName: `title-empty-${tag}`,
       env: { OCW_RUNTIME_FAKE_DELAY_MS: "1000" },
     });
+    // D-06 (07.9): Sam, the second controller, sees the admin's session through its team project.
+    team = await createTeamProject(adminApi, { name: `Title empty ${tag}`, members: [{ userId: samId }] });
+    await linkRepo(adminApi, team.unitId, device.projectId);
     const id = await createSession(adminApi, { projectId: device.projectId, permissionMode: "plan" });
     const placeholder = `title-empty-${tag} · Claude Code`;
     expect((await detail(adminApi, id)).session).toMatchObject({
@@ -283,6 +298,7 @@ test("a session created without a prompt takes its title from the first prompt s
     expect((await detail(adminApi, id)).session).toMatchObject({ title: AUTO_DARK, titleSource: "auto" });
   } finally {
     await sam?.context.close();
+    if (team) await removeTeamProject(adminApi, team);
     await device?.stop();
   }
 });

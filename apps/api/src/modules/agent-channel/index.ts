@@ -36,7 +36,7 @@ import type { WorkZoneProposalService } from "../work-session";
 import { finishActivity } from "./activity";
 import { cellOf, createCellAuth } from "./auth";
 import { registerBoardAgentRoutes } from "./board";
-import { registerBrowserRoutes } from "./browser";
+import { type BrowserBudgets, registerBrowserRoutes } from "./browser";
 import { noTrigger, registerCardActionHandler, registerCardRoutes, resolveReplyTarget } from "./cards";
 import { registerConnectorRoutes } from "./connectors";
 import { registerCellGateway } from "./gateway";
@@ -53,6 +53,7 @@ import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerWorkZoneRoutes } from "./work-zone";
 
 export { currentPhrase } from "./activity";
+export type { BrowserBudgets } from "./browser";
 export { emitCardAction } from "./cards";
 export { conversationAudience } from "./memory-files";
 export { buildMentionEvents } from "./mentions";
@@ -130,6 +131,8 @@ export function createAgentChannelModule(
      * configured (every sandbox call then answers `service_unavailable` after its decision).
      */
     sandbox?: { client: SandboxdClient | null } | null;
+    /** Test hook: shorter browser call deadlines (contracts BROWSER_TIMEOUTS_MS otherwise); never read from the environment. */
+    browserBudgets?: BrowserBudgets;
   },
 ): ApiModule {
   const auth = createCellAuth(core);
@@ -521,6 +524,7 @@ export function createAgentChannelModule(
             perms,
             toolApproval: opts.toolApproval,
             client: opts.sandbox?.client ?? null,
+            ...(opts.browserBudgets ? { budgets: opts.browserBudgets } : {}),
           });
           // The cell's MCP tool discovery (D-13): probe reports → the tool catalog.
           registerMcpCellRoutes(scope, core);

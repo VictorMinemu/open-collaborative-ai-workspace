@@ -43,6 +43,8 @@ import {
   AgentChannelWorkZoneProjectsResponse,
   type AgentChannelWorkZonePropose,
   AgentChannelWorkZoneProposeResponse,
+  BROWSER_TIMEOUTS_MS,
+  BROWSER_TOOL_NAMES,
   BROWSER_TOOL_RESPONSES,
   BROWSER_TOOL_ROUTES,
   type BrowserToolBodies,
@@ -153,19 +155,20 @@ export const CONNECTOR_REQUEST_TIMEOUT_MS = 35_000;
 export const WORK_ZONE_REQUEST_TIMEOUT_MS = 10_000;
 
 /**
- * 07.8: per-call budgets of the confined tools. Exec and process yield after 25 s server side (a process id), and a
- * browser wait lasts up to 30 s, so they get 35 s; every other sandbox or browser call 20 s. One attempt each: the
- * route counts the call against the turn's budget.
+ * 07.8: per-call budgets of the confined tools. Exec and process yield after 25 s server side (a process id), so they
+ * get 35 s; every other sandbox call 20 s. A browser call waits longer than the API's deadline for it (contracts
+ * `BROWSER_TIMEOUTS_MS`, CI p64/p66): 85 s for an open, which may start the bot's browser cold, 65 s otherwise, so the
+ * model reads what the API answered, never "the workspace could not be reached" while the page opens anyway. One attempt
+ * each: the route counts the call against the turn's budget, and an open is not idempotent (it may create the page).
  */
 export const CONFINED_LONG_TIMEOUT_MS = 35_000;
 export const CONFINED_TIMEOUT_MS = 20_000;
-const LONG_CONFINED_TOOLS: ReadonlySet<string> = new Set([
-  "ocw_sandbox_exec",
-  "ocw_sandbox_process",
-  "ocw_browser_wait",
-]);
-/** The budget of one confined call (35 s for exec, process and wait; 20 s otherwise). */
+const LONG_CONFINED_TOOLS: ReadonlySet<string> = new Set(["ocw_sandbox_exec", "ocw_sandbox_process"]);
+const BROWSER_TOOLS: ReadonlySet<string> = new Set(BROWSER_TOOL_NAMES);
+/** The budget of one confined call. */
 export function confinedTimeoutMs(tool: string): number {
+  if (tool === "ocw_browser_open") return BROWSER_TIMEOUTS_MS.cellOpen;
+  if (BROWSER_TOOLS.has(tool)) return BROWSER_TIMEOUTS_MS.cellCall;
   return LONG_CONFINED_TOOLS.has(tool) ? CONFINED_LONG_TIMEOUT_MS : CONFINED_TIMEOUT_MS;
 }
 
@@ -480,8 +483,8 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
     },
     /**
      * `ocw_browser_*` (07.8, D-05): one call to the tool's own route with the turn's ids and the tool's contract body
-     * only. One attempt, 35 s (wait) or 20 s budget. A refusal throws AgentChannelHttpError with its `BrowserRefusal`
-     * code. Never logs URLs, page text, typed text or images.
+     * only. One attempt, 85 s (open) or 65 s budget, above the API's deadline of the call. A refusal throws
+     * AgentChannelHttpError with its `BrowserRefusal` code. Never logs URLs, page text, typed text or images.
      */
     async browserCall<T extends BrowserToolName>(
       tool: T,

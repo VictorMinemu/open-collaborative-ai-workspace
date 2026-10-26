@@ -6,8 +6,22 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import type { App, AuthContext } from "./core";
-import { createRealtimeModule, createRealtimeService, type RealtimeService } from "./modules/realtime";
+import {
+  createRealtimeModule,
+  createRealtimeService,
+  type RealtimeService,
+  type Reauthorization,
+} from "./modules/realtime";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "./testing";
+import { eventually, FakeDevice } from "./testing-device";
+import {
+  CLAUDE_CATALOG,
+  createTeamProject,
+  invite,
+  pairDevice,
+  shareDevice,
+  startSession,
+} from "./testing-workzone";
 
 /**
  * RT-01 live re-authorisation (03-04, D-05/D-06) against the real stack: a membership change re-decides the
@@ -42,6 +56,7 @@ interface Frame {
   full?: boolean;
   code?: string;
   reason?: string;
+  cause?: string;
   type?: string;
   entries?: Array<{ conn: string; userId: string; state: string }>;
 }
@@ -143,6 +158,8 @@ describe("live re-authorisation of channel subscriptions (RT-01, D-05/D-06)", ()
       await ok(admin.request("DELETE", `/api/v1/channels/${privateId}/members/user/${samId}`));
       const revoked = await waitFor(() => revokedFor(s, priv), 1000);
       expect(revoked).toMatchObject({ op: "revoked", topic: priv, reason: "forbidden" });
+      // A channel's authorizer gives no reason code: the frame has no `cause` (07.9-07, D-13 is additive).
+      expect(revoked).not.toHaveProperty("cause");
       const offline = await waitFor(
         () =>
           a.frames.find(
@@ -311,6 +328,71 @@ describe("re-decisions are race-free and fail safe (RT-01, D-05)", () => {
     }
   });
 
+  it("held: frames after an invalidation wait for the re-decision; allowed delivers them, denied drops them (07.9 fan-out)", async () => {
+    const gw = await controlledGateway();
+    const s = await openSocket(gw.base, await sam.token());
+    const ephs = (n: number) =>
+      s.frames.filter(
+        (f) => f.op === "eph" && f.topic === topic && (f as Frame & { data?: { n?: number } }).data?.n === n,
+      );
+    const topic = `conv:${randomUUID()}`;
+    try {
+      s.send({ op: "sub", topic });
+      await waitFor(() => subscribedTo(s, topic));
+
+      let allow!: (v: boolean) => void;
+      gw.setDecide(() => new Promise<boolean>((r) => (allow = r)));
+      const before = gw.calls.length;
+      await gw.realtime.invalidateSubscriptions({ organizationId: orgId, userIds: [samId] });
+      await waitFor(() => gw.calls.length > before);
+      await gw.realtime.publishEphemeral(topic, "user.typing", { userId: adminId, n: 1 });
+      await sleep(200);
+      expect(ephs(1), "held while the re-decision runs").toEqual([]);
+      allow(true);
+      await waitFor(() => ephs(1).length === 1, 1000);
+
+      let deny!: (v: boolean) => void;
+      gw.setDecide(() => new Promise<boolean>((r) => (deny = r)));
+      const again = gw.calls.length;
+      await gw.realtime.invalidateSubscriptions({ organizationId: orgId, userIds: [samId] });
+      await waitFor(() => gw.calls.length > again);
+      await gw.realtime.publishEphemeral(topic, "user.typing", { userId: adminId, n: 2 });
+      await sleep(200);
+      deny(false);
+      await waitFor(() => revokedFor(s, topic), 1000);
+      await sleep(200);
+      expect(ephs(2), "a frame held for a denied subscription is never sent").toEqual([]);
+    } finally {
+      s.socket.close();
+      await gw.close();
+    }
+  });
+
+  it("one transaction: a frame and the access change that removes its reader; only `revoked` reaches them (07.9 fan-out)", async () => {
+    const gw = await controlledGateway();
+    const s = await openSocket(gw.base, await sam.token());
+    const topic = `conv:${randomUUID()}`;
+    gw.realtime.registerSubscriptionInvalidator("test.access_removed", (t) =>
+      t.startsWith("org:") ? { topics: [topic] } : null,
+    );
+    try {
+      s.send({ op: "sub", topic });
+      await waitFor(() => subscribedTo(s, topic));
+      gw.setDecide(() => false);
+      // The frame is appended BEFORE the event that takes the access away, in the same transaction.
+      await stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, async (tx) => {
+        await gw.realtime.appendEvent(tx, topic, "message.created", { body: "written with the removal" });
+        await gw.realtime.appendEvent(tx, `org:${orgId}`, "test.access_removed", {});
+      });
+      await waitFor(() => revokedFor(s, topic), 1000);
+      await sleep(200);
+      expect(s.frames.filter((f) => f.topic === topic && (f.op === "ev" || f.op === "eph"))).toEqual([]);
+    } finally {
+      s.socket.close();
+      await gw.close();
+    }
+  });
+
   it("scope: another organization or another user never re-decides this connection", async () => {
     const gw = await controlledGateway();
     const s = await openSocket(gw.base, await sam.token());
@@ -398,7 +480,7 @@ describe("overlapping subscribes (latest wins)", () => {
 function watchReauth() {
   const rt = stack.built.core.realtime;
   const original = rt.reauthorizeTopic;
-  const calls: Array<{ userId: string; topic: string; verdict: string }> = [];
+  const calls: Array<{ userId: string; topic: string; verdict: Reauthorization }> = [];
   rt.reauthorizeTopic = async (auth, topic) => {
     const verdict = await original(auth, topic);
     calls.push({ userId: auth.userId, topic, verdict });
@@ -564,5 +646,221 @@ describe("periodic backstop (RT-01, T-03-06-03)", () => {
       await su.end();
       await mini.close();
     }
+  });
+});
+
+// ---------------------------------------------------------------- Phase 07.9-07: Work Zone sessions (D-04, D-13)
+
+/**
+ * Narrowing who may see a session takes the live view away within a second, with the reason as a code (ADR-0009, D-04,
+ * D-13, P-09): `visibility` when the audience or the project changed, `module` when Work Zone was turned off, `role`
+ * otherwise. People still allowed keep their subscription.
+ *
+ * Cast (this file's organization): Dora (lead, owns the device with `reauth-api` linked to the team project Orion and
+ * the personal repo `reauth-notes`), Ana (developer, Orion member and a grant on the device: creates the sessions), Pia,
+ * Leo, Wes and Rae (developers, Orion members), Kim (developer, in the team Platform assigned to Orion), Gus (developer,
+ * a grant on the device, not in Orion).
+ */
+describe("narrowing a Work Zone session re-decides its live subscribers, with a cause (07.9-07, D-04, D-13)", () => {
+  const people: Record<string, { client: TestClient; userId: string }> = {};
+  let device: FakeDevice;
+  let deviceId: string;
+  let orion: string;
+  let platform: string;
+  let apiRepo: string;
+  /** A session on the repo linked to Orion (audience `project`). */
+  let team: string;
+  /** A session on the personal repo (audience: the device owner, its grantees, admins). */
+  let personal: string;
+  const sockets: Record<string, Sock> = {};
+
+  const who = (name: string) => people[name]!;
+  const subscribeWs = async (name: string, sessionId: string) => {
+    const s = sockets[name]!;
+    s.send({ op: "sub", topic: `ws:${sessionId}` });
+    const answer = await waitFor(() =>
+      s.frames.find((f) => (f.op === "subscribed" || f.op === "err") && f.topic === `ws:${sessionId}`),
+    );
+    expect(answer.op, `${name} follows ws:${sessionId}`).toBe("subscribed");
+  };
+  /** `name` loses `ws:<sessionId>` within a second of `t0`, with `cause`. */
+  const lostWithin = async (name: string, sessionId: string, cause: string, t0: number) => {
+    const revoked = await waitFor(() => revokedFor(sockets[name]!, `ws:${sessionId}`), 1000);
+    expect(revoked, name).toMatchObject({ op: "revoked", reason: "forbidden", cause });
+    console.info(`work session revocation latency (ms): ${name} ${cause}=${revoked.at - t0}`);
+  };
+  const keeps = (name: string, sessionId: string) =>
+    expect(revokedFor(sockets[name]!, `ws:${sessionId}`), `${name} keeps ws:${sessionId}`).toBeUndefined();
+
+  beforeAll(async () => {
+    for (const [name, role] of [
+      ["Dora", "lead"],
+      ["Ana", "developer"],
+      ["Pia", "developer"],
+      ["Leo", "developer"],
+      ["Wes", "developer"],
+      ["Rae", "developer"],
+      ["Kim", "developer"],
+      ["Gus", "developer"],
+      ["Zed", "developer"],
+    ] as const) {
+      people[name] = await invite(stack, admin, `${name.toLowerCase()}@example.test`, name, role);
+    }
+    const paired = await pairDevice(stack, who("Dora").client, "Dora's Orion Laptop");
+    deviceId = paired.deviceId;
+    device = await FakeDevice.connect(stack.baseUrl, paired.token);
+    device.send({
+      type: "projects.sync",
+      projects: [
+        { localId: "lp_api", name: "reauth-api", gitRemote: null, defaultBranch: "main" },
+        { localId: "lp_notes", name: "reauth-notes", gitRemote: null, defaultBranch: "main" },
+      ],
+    });
+    await device.next((f) => f.type === "projects.ack");
+    device.capabilities([CLAUDE_CATALOG], false);
+    const su = new pg.Client({ connectionString: stack.db.superuserUrl });
+    await su.connect();
+    try {
+      await eventually(async () => {
+        const r = await su.query("select runtime_catalog from app.devices where id = $1", [deviceId]);
+        return (r.rows[0].runtime_catalog as unknown[]).length === 1;
+      });
+    } finally {
+      await su.end();
+    }
+    const repos = (await ok(who("Dora").client.request("GET", "/api/v1/projects"))).projects as Array<{
+      id: string;
+      name: string;
+    }>;
+    apiRepo = repos.find((p) => p.name === "reauth-api")!.id;
+    const notesRepo = repos.find((p) => p.name === "reauth-notes")!.id;
+    await shareDevice(who("Dora").client, deviceId, who("Ana").userId, "acceptEdits");
+    await shareDevice(who("Dora").client, deviceId, who("Gus").userId);
+
+    orion = (
+      await createTeamProject(stack, admin, {
+        name: "Orion",
+        members: [
+          { userId: who("Dora").userId, role: "lead" },
+          ...["Ana", "Pia", "Leo", "Wes", "Rae", "Zed"].map((n) => ({ userId: who(n).userId })),
+        ],
+      })
+    ).unitId;
+    const eng = await ok(
+      admin.request("POST", "/api/v1/units", {
+        kind: "department",
+        name: "Orion engineering",
+        parentId: null,
+      }),
+    );
+    platform = (
+      await ok(admin.request("POST", "/api/v1/units", { kind: "team", name: "Platform", parentId: eng.id }))
+    ).id as string;
+    await ok(admin.request("POST", `/api/v1/units/${platform}/members`, { userId: who("Kim").userId }));
+    await ok(admin.request("POST", `/api/v1/work-projects/${orion}/teams`, { unitId: platform }));
+    await ok(
+      who("Dora").client.request("POST", `/api/v1/work-projects/${orion}/repos`, { projectId: apiRepo }),
+    );
+
+    team = await startSession(who("Ana").client, device, apiRepo, { title: "Orion live view" });
+    personal = await startSession(who("Ana").client, device, notesRepo, { title: "Personal live view" });
+    for (const name of Object.keys(people)) {
+      sockets[name] = await openSocket(stack.baseUrl, await who(name).client.token());
+    }
+  }, 240_000);
+
+  afterAll(async () => {
+    for (const s of Object.values(sockets)) s.socket.close();
+    await device?.close().catch(() => {});
+  });
+
+  it("everyone the audience names follows the session; Gus follows the personal one", async () => {
+    for (const name of ["Dora", "Ana", "Pia", "Leo", "Wes", "Rae", "Kim"]) await subscribeWs(name, team);
+    for (const name of ["Dora", "Ana", "Gus"]) await subscribeWs(name, personal);
+  });
+
+  it("removing Leo from the project unit revokes him (visibility); the others keep it", async () => {
+    const t0 = Date.now();
+    await ok(admin.request("DELETE", `/api/v1/units/${orion}/members/${who("Leo").userId}`));
+    await lostWithin("Leo", team, "visibility", t0);
+    await sleep(300);
+    for (const name of ["Dora", "Ana", "Pia", "Wes", "Rae", "Kim"]) keeps(name, team);
+  });
+
+  it("unassigning the team that gave Kim access revokes Kim (visibility)", async () => {
+    const t0 = Date.now();
+    await ok(admin.request("DELETE", `/api/v1/work-projects/${orion}/teams/${platform}`));
+    await lostWithin("Kim", team, "visibility", t0);
+    await sleep(300);
+    for (const name of ["Dora", "Ana", "Pia", "Wes", "Rae"]) keeps(name, team);
+  });
+
+  it("revoking Gus's device grant revokes his view of the personal session (visibility)", async () => {
+    const t0 = Date.now();
+    await ok(
+      who("Dora").client.request("DELETE", `/api/v1/devices/${deviceId}/grants/user/${who("Gus").userId}`),
+    );
+    await lostWithin("Gus", personal, "visibility", t0);
+    await sleep(300);
+    for (const name of ["Dora", "Ana"]) keeps(name, personal);
+    for (const name of ["Dora", "Ana", "Pia", "Wes", "Rae"]) keeps(name, team);
+  });
+
+  it("turning Work Zone off for Wes's unit revokes him (module)", async () => {
+    const ops = await ok(
+      admin.request("POST", "/api/v1/units", { kind: "department", name: "Orion support", parentId: null }),
+    );
+    await ok(admin.request("POST", `/api/v1/units/${ops.id}/members`, { userId: who("Wes").userId }));
+    await sleep(300);
+    keeps("Wes", team);
+    const t0 = Date.now();
+    await ok(
+      admin.request("PUT", "/api/v1/module-access", {
+        module: "work_zone",
+        scopeUnitId: ops.id,
+        subject: { kind: "everyone" },
+        enabled: false,
+      }),
+    );
+    await lostWithin("Wes", team, "module", t0);
+    await sleep(300);
+    for (const name of ["Dora", "Ana", "Pia", "Rae"]) keeps(name, team);
+  });
+
+  it("downgrading Rae to standard revokes her (role)", async () => {
+    const t0 = Date.now();
+    await ok(admin.request("PATCH", `/api/v1/members/${who("Rae").userId}/role`, { role: "standard" }));
+    await lostWithin("Rae", team, "role", t0);
+    await sleep(300);
+    for (const name of ["Dora", "Ana", "Pia"]) keeps(name, team);
+  });
+
+  it("a deactivated member's live view is re-decided as `role`, not `visibility` (07.9 ledger)", async () => {
+    await subscribeWs("Zed", team);
+    await ok(admin.request("POST", `/api/v1/members/${who("Zed").userId}/deactivate`, {}));
+    // Deactivation closes the member's sockets; the re-decision of a subscription still open elsewhere (another
+    // instance, before its revocation lands) is what the cause is about.
+    const verdict = await stack.built.core.realtime.reauthorizeTopic(
+      {
+        userId: who("Zed").userId,
+        organizationId: orgId,
+        sessionId: randomUUID(),
+        name: "Zed",
+        email: "zed@example.test",
+        clientKind: "web",
+      },
+      `ws:${team}`,
+    );
+    expect(verdict).toEqual({ denied: true, cause: "role" });
+    for (const name of ["Dora", "Ana", "Pia"]) keeps(name, team);
+  });
+
+  it("unlinking the repo revokes project members without device use (visibility); the owner and grantees keep it", async () => {
+    const t0 = Date.now();
+    await ok(admin.request("DELETE", `/api/v1/work-projects/${orion}/repos/${apiRepo}`));
+    await lostWithin("Pia", team, "visibility", t0);
+    await sleep(300);
+    for (const name of ["Dora", "Ana"]) keeps(name, team);
+    for (const name of ["Dora", "Ana"]) keeps(name, personal);
   });
 });

@@ -1,16 +1,20 @@
-import { devices, type Tx, workSessions } from "@ocw/db";
-import { eq } from "drizzle-orm";
+import { EventTypes, WorkProjectUpdatedEvent } from "@ocw/contracts";
+import { orgMembers, permissionRules, type Tx, workSessions } from "@ocw/db";
+import { eq, sql } from "drizzle-orm";
 import type { ApiModule, Core } from "../../core";
 import type { ApprovalService } from "../approval";
 import type { ObjectStorage } from "../artifact";
 import type { DeviceHub } from "../device";
-import { createPermissionService, workSessionResource } from "../organization";
+import { createPermissionService } from "../organization";
+import { sessionFacts } from "./facts";
+import { registerProjectRoutes } from "./projects";
 import {
   listProposableProjects,
   proposeWorkZone,
   type WorkZoneProposalService,
   workZoneStartKind,
 } from "./proposals";
+import { revokeCauseOf } from "./revoke-cause";
 import { registerWorkSessionRoutes } from "./routes";
 import { WorkSessionService } from "./service";
 import {
@@ -21,10 +25,20 @@ import {
   type WorkSessionStartResult,
 } from "./start";
 
+export { sessionFacts, sessionFactsForUsers } from "./facts";
 export { createWorkSessionAttachmentScope } from "./images";
+export type { OrgQueueOptions, OrgTask } from "./org-queue";
 export { loadWorkZonePolicy } from "./policy";
+export { projectFacts } from "./projects";
 export { WORK_ZONE_PROPOSAL_RESOURCE, type WorkZoneProposalService } from "./proposals";
-export { ACTIVE_STATES, type ReauthorizeReason, WorkSessionService, wsTopic } from "./service";
+export { revokeCauseOf } from "./revoke-cause";
+export {
+  ACTIVE_STATES,
+  BACKGROUND_DRAIN_MS,
+  type ReauthorizeReason,
+  WorkSessionService,
+  wsTopic,
+} from "./service";
 export type {
   WorkSessionActor,
   WorkSessionStartCode,
@@ -79,31 +93,57 @@ export function createWorkSessionModule(
   });
   hub.setSessionHandler(service);
 
-  // Following a session's stream is `work_session.read` on that session (RLS scopes the lookup to the org).
+  // Following a session's stream is `work_session.read` on that session, with the facts of `sessionFacts` (the session's
+  // audience, D-04/D-09; RLS scopes the lookup to the org). Nobody outside the audience subscribes `ws:<id>`. A refusal
+  // carries why, as a code (D-13), for the `revoked` frame of a live re-decision.
   core.realtime.registerTopicAuthorizer("ws", async (auth, workSessionId) =>
     core.db.withTenant({ organizationId: auth.organizationId, userId: auth.userId }, async (tx) => {
       const [row] = await tx
-        .select({
-          createdBy: workSessions.createdBy,
-          owner: devices.ownerUserId,
-          revokedAt: devices.revokedAt,
-        })
+        .select({ id: workSessions.id, createdBy: workSessions.createdBy, deviceId: workSessions.deviceId })
         .from(workSessions)
-        .innerJoin(devices, eq(devices.id, workSessions.deviceId))
         .where(eq(workSessions.id, workSessionId));
-      if (!row) return false;
-      const facts = workSessionResource(
-        { createdBy: row.createdBy, deviceOwnerUserId: row.owner, deviceRevoked: row.revokedAt !== null },
-        auth.userId,
-      );
-      const { allowed } = await perms.decide(
+      if (!row) {
+        // 07.9-12: the audience backstop hides a session outside the person's relations, which is exactly the
+        // resolver's `not_in_audience`. A live subscription the audience just removed is told so (`visibility`); a
+        // first subscribe never shows the cause (`authorizeTopic` is a boolean), so no id is confirmed to anyone.
+        const exists = await tx.execute(sql`select app.work_session_exists(${workSessionId}::uuid) as e`);
+        if ((exists.rows[0] as { e: boolean } | undefined)?.e !== true) return false;
+        // The backstop also hides every session from a member who is no longer active; the resolver would refuse them
+        // as a principal before any audience check, so the cause is theirs (`role`), not the session's (07.9 ledger).
+        const [member] = await tx
+          .select({ deactivatedAt: orgMembers.deactivatedAt })
+          .from(orgMembers)
+          .where(eq(orgMembers.userId, auth.userId));
+        return {
+          allowed: false as const,
+          cause:
+            !member || member.deactivatedAt !== null
+              ? revokeCauseOf({ layer: "user", reason: "deactivated" })
+              : revokeCauseOf({ layer: "resource", reason: "not_in_audience" }),
+        };
+      }
+      const { allowed, denial } = await perms.decide(
         tx,
         { kind: "user", userId: auth.userId },
         "work_session.read",
-        facts,
+        await sessionFacts(tx, auth.userId, row),
       );
-      return allowed;
+      if (allowed) return true;
+      let rulePermission: string | null = null;
+      if (denial?.ruleId) {
+        const [rule] = await tx
+          .select({ permission: permissionRules.permission })
+          .from(permissionRules)
+          .where(eq(permissionRules.id, denial.ruleId));
+        rulePermission = rule?.permission ?? null;
+      }
+      return { allowed: false as const, cause: revokeCauseOf(denial, rulePermission) };
     }),
+  );
+  // A team project's teams or repositories changed (P-09): who may see its sessions changed for anyone in the
+  // organization, so every live subscription is re-decided (coalesced by the gateway queue), as for `units.updated`.
+  core.realtime.registerSubscriptionInvalidator(EventTypes.workProjectUpdated, (topic, payload) =>
+    topic.startsWith("org:") && WorkProjectUpdatedEvent.safeParse(payload).success ? {} : null,
   );
 
   const start: WorkSessionModule["start"] = (tx, actor, input, opts) =>
@@ -125,8 +165,11 @@ export function createWorkSessionModule(
     name: "work-session",
     register(app) {
       registerWorkSessionRoutes(app, core, hub, service);
+      registerProjectRoutes(app, core, perms);
     },
     start,
     proposals,
+    // Shutdown (07.9 fan-out): the background queue drains for a bounded time, then what still waits is dropped.
+    close: () => service.close(),
   };
 }

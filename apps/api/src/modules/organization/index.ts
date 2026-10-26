@@ -15,7 +15,6 @@ import { registerRuleRoutes } from "./rules";
 import { registerUnitRoutes } from "./units";
 
 export { listMembers, memberDirectory } from "./members";
-
 export { audienceCoverFacts } from "./permissions/audience";
 export { AuthzDeniedError } from "./permissions/errors";
 export {
@@ -45,6 +44,7 @@ export {
   orgResource,
   unitResource,
   userResource,
+  workProjectResource,
   workSessionResource,
 } from "./permissions/policy";
 export type {
@@ -65,6 +65,7 @@ export {
   principalTenant,
   recordAuthzDenial,
 } from "./permissions/service";
+export { createUnit, orgTopic, requireUnit, type UnitRow, uuidArray } from "./units";
 
 /** `member.updated` fields that change what a member may read (the rest are profile fields). */
 const ACCESS_FIELDS = new Set(["role", "status"]);

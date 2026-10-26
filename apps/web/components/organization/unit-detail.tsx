@@ -1,12 +1,22 @@
 "use client";
 
 import { ROLE_LABELS, ROLE_RANK, type UnitMember, UnitRole } from "@ocw/contracts";
-import { ChevronDown, ChevronRight, Crown, Plus, UserMinus, UserPlus, Users } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Crown,
+  Plus,
+  SquareTerminal,
+  UserMinus,
+  UserPlus,
+  Users,
+} from "lucide-react";
+import Link from "next/link";
 import { type ElementType, type ReactNode, useState } from "react";
 import { toast } from "sonner";
 import { UserAvatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -25,10 +35,17 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip } from "@/components/ui/tooltip";
-import { errorMessage } from "@/lib/api";
+import { ProjectDefaultSwitch } from "@/components/work-zone/projects/project-default-switch";
+import { ProjectReposSection } from "@/components/work-zone/projects/project-repos-section";
+import { ProjectTeamsSection } from "@/components/work-zone/projects/project-teams-section";
+import { ListError, ListSkeleton } from "@/components/work-zone/projects/settings-list";
+import { errorMessage, isApiError } from "@/lib/api";
 import { useRemoveUnitMember, useUnitMembers, useUpdateUnitMember } from "@/lib/org-queries";
 import { useCan } from "@/lib/permissions";
 import { useMe } from "@/lib/queries";
+import { cn } from "@/lib/utils";
+import { useWorkProject, useWorkProjectsLive } from "@/lib/work-project-queries";
+import { projectHref } from "@/lib/work-zone-routes";
 import { AddPeopleDialog } from "./add-people-dialog";
 import { UnitModulesCard } from "./module-access-card";
 import { RecordTemplatesCard } from "./record-templates-card";
@@ -50,6 +67,10 @@ import { childKinds } from "./unit-tree";
 const leadsUnit = (m: UnitMember) => m.role === UnitRole.enum.lead;
 
 export const LEAD_INELIGIBLE_HINT = "Only Team Leads or Organization Admins can lead a unit";
+
+/** Removing someone from a project also hides its sessions from them (07.9 R9, U-8). */
+export const removeFromProjectSentence = (project: string) =>
+  `They also stop seeing ${project}'s sessions unless a team still gives them access.`;
 
 /**
  * The selected unit: where it sits, what it holds, its people and (for admins) the access rules scoped to
@@ -130,11 +151,66 @@ export function UnitDetail({
       ) : null}
 
       <MembersSection unit={unit} />
+      {unit.kind === "project" ? <ProjectUnitSections unit={unit} /> : null}
       <UnitModulesCard unit={unit} />
       <RecordTemplatesCard unit={unit} />
 
       {canReadRules ? <UnitRulesCard unit={unit} /> : null}
     </div>
+  );
+}
+
+/**
+ * A project unit's Teams and Work Zone sections (07.9 Surface 5): the same components as the Work Zone project page's
+ * Settings tab, fed by the same `GET /work-projects/:unitId`, so a change in one place is the change in the other.
+ * Whoever the API does not answer (no access and no management, or the Work Zone off) gets nothing here, never an error.
+ */
+function ProjectUnitSections({ unit }: { unit: UnitNode }) {
+  const project = useWorkProject(unit.id);
+  useWorkProjectsLive();
+  if (project.data) {
+    const p = project.data;
+    return (
+      <>
+        <ProjectTeamsSection project={p} />
+        <section className="grid gap-5" data-testid="org-unit-workzone" aria-label="Work Zone">
+          <div className="grid gap-3">
+            <SectionHeader
+              title="Work Zone"
+              action={
+                <Link
+                  href={projectHref(p.id)}
+                  className={cn(buttonVariants({ variant: "outline", size: "sm" }), "max-md:h-11")}
+                >
+                  <SquareTerminal /> Open in Work Zone
+                </Link>
+              }
+            />
+            <ProjectDefaultSwitch project={p} />
+          </div>
+          <ProjectReposSection project={p} />
+        </section>
+      </>
+    );
+  }
+  if (project.isError) {
+    if ([400, 403, 404].some((status) => isApiError(project.error, status))) return null;
+    return (
+      <section className="grid gap-3" aria-label="Work Zone">
+        <SectionHeader title="Work Zone" />
+        <ListError
+          message="Couldn't load this project's Work Zone settings."
+          onRetry={() => project.refetch()}
+          retrying={project.isFetching}
+        />
+      </section>
+    );
+  }
+  return (
+    <section className="grid gap-3" aria-label="Teams">
+      <SectionHeader title="Teams" />
+      <ListSkeleton />
+    </section>
   );
 }
 
@@ -147,7 +223,7 @@ function Stat({ label, value }: { label: string; value: number }) {
   );
 }
 
-function SectionHeader({
+export function SectionHeader({
   title,
   description,
   count,
@@ -258,7 +334,7 @@ function AddChildMenu({ unit, kinds }: { unit: UnitNode; kinds: ReturnType<typeo
   );
 }
 
-function MembersSection({ unit }: { unit: UnitNode }) {
+export function MembersSection({ unit }: { unit: UnitNode }) {
   const members = useUnitMembers(unit.id);
   const me = useMe({ enabled: false });
   const [adding, setAdding] = useState(false);
@@ -275,7 +351,12 @@ function MembersSection({ unit }: { unit: UnitNode }) {
         description={`Direct members of this ${KIND_META[unit.kind].label.toLowerCase()} and who leads it.`}
         action={
           staff ? (
-            <Button size="sm" onClick={() => setAdding(true)} data-testid="add-people">
+            <Button
+              size="sm"
+              className="max-md:h-11"
+              onClick={() => setAdding(true)}
+              data-testid="add-people"
+            >
               <UserPlus /> Add people
             </Button>
           ) : null
@@ -311,7 +392,7 @@ function MembersSection({ unit }: { unit: UnitNode }) {
             everything inside it.
           </p>
           {staff ? (
-            <Button size="sm" variant="outline" className="mt-2" onClick={() => setAdding(true)}>
+            <Button size="sm" variant="outline" className="mt-2 max-md:h-11" onClick={() => setAdding(true)}>
               <UserPlus /> Add people
             </Button>
           ) : null}
@@ -365,6 +446,8 @@ function MemberRow({ unit, member: m, isMe }: { unit: UnitNode; member: UnitMemb
       onCheckedChange={toggle}
       aria-label={`${m.displayName} leads ${unit.name}`}
       data-testid="lead-switch"
+      // A 44 px hit area below 768 around the 20 px switch (touch rule), without moving it (as project-default-switch).
+      className="max-md:after:absolute max-md:after:-inset-3 max-md:after:content-['']"
     />
   );
 
@@ -413,7 +496,7 @@ function MemberRow({ unit, member: m, isMe }: { unit: UnitNode; member: UnitMemb
           variant="ghost"
           aria-label={`Remove ${m.displayName} from ${unit.name}`}
           data-testid="remove-member"
-          className="size-10 shrink-0 text-muted-foreground hover:text-destructive sm:size-8"
+          className="size-11 shrink-0 text-muted-foreground hover:text-destructive md:size-8"
           onClick={() => setConfirm(true)}
         >
           <UserMinus />
@@ -428,6 +511,7 @@ function MemberRow({ unit, member: m, isMe }: { unit: UnitNode; member: UnitMemb
             <DialogDescription>
               They lose the access they get through this {KIND_META[unit.kind].label.toLowerCase()}. Their
               account and other memberships are not affected.
+              {unit.kind === "project" ? ` ${removeFromProjectSentence(unit.name)}` : null}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

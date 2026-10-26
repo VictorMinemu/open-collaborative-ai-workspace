@@ -1282,6 +1282,14 @@ export const workSessions = appSchema.table(
     settingsPending: boolean("settings_pending").notNull().default(false),
     /** `DiffStat` of the last `diff.result`. */
     diffStat: jsonb("diff_stat").$type<{ files: number; additions: number; deletions: number }>(),
+    /**
+     * Phase 07.9 (D-04): who sees and follows the session, always within project access. `owner` = its creator only;
+     * `project` = everyone with access to its project; `teams` / `people` = the active `work_session_grants` rows (plus
+     * the creator). The rule lives only in `app.work_session_access` (post-migrate.sql), never in a copy.
+     */
+    visibility: text("visibility", { enum: ["owner", "project", "teams", "people"] })
+      .notNull()
+      .default("project"),
     createdAt: createdAt(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
@@ -1291,8 +1299,136 @@ export const workSessions = appSchema.table(
     index("work_sessions_conversation_idx").on(t.organizationId, t.conversationId),
     modeCheck("work_sessions_permission_mode_ck", t.permissionMode),
     check("work_sessions_title_source_ck", sql`${t.titleSource} in ('user','heuristic','auto')`),
+    check("work_sessions_visibility_ck", sql`${t.visibility} in ('owner','project','teams','people')`),
     /** Phase 07.5: target of composite foreign keys that carry the organization (FKs bypass RLS). */
     unique("work_sessions_org_id_uq").on(t.organizationId, t.id),
+  ],
+);
+
+// ---------------------------------------------------------------- team projects and session audiences (Phase 07.9)
+//
+// A team project is an `org_units` row of kind `project` (D-01): its direct members are `unit_memberships`, its
+// assigned teams are `work_project_teams`, and device repos (`projects`) link to it through `work_project_repos`. A repo
+// with no link stays a personal project of its device. Every reference is composite with the organization (FKs bypass
+// RLS, 07.4 #169); tenant isolation comes from post-migrate. Who may see what is decided only by the SQL functions in
+// post-migrate.sql (`app.work_project_access`, `app.work_session_access`, …), never by reading these rows directly.
+
+/** D-03: the project's default audience for new sessions. An absent row means `project` (on). */
+export const workProjectSettings = appSchema.table(
+  "work_project_settings",
+  {
+    organizationId: orgId(),
+    unitId: uuid("unit_id").primaryKey(),
+    defaultVisibility: text("default_visibility", { enum: ["project", "owner"] })
+      .notNull()
+      .default("project"),
+    updatedBy: uuid("updated_by").notNull(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      name: "work_project_settings_unit_fk",
+      columns: [t.organizationId, t.unitId],
+      foreignColumns: [orgUnits.organizationId, orgUnits.id],
+    }).onDelete("cascade"),
+    check("work_project_settings_default_ck", sql`${t.defaultVisibility} in ('project','owner')`),
+  ],
+);
+
+/**
+ * D-01, D-02: the teams (or departments, and so their subtrees) assigned to a team project; their members have project
+ * access. Unassigning deletes the row (audited by the API); `teams` grants of a team no longer assigned grant nothing.
+ */
+export const workProjectTeams = appSchema.table(
+  "work_project_teams",
+  {
+    organizationId: orgId(),
+    projectUnitId: uuid("project_unit_id").notNull(),
+    teamUnitId: uuid("team_unit_id").notNull(),
+    assignedBy: uuid("assigned_by").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.projectUnitId, t.teamUnitId] }),
+    foreignKey({
+      name: "work_project_teams_project_fk",
+      columns: [t.organizationId, t.projectUnitId],
+      foreignColumns: [orgUnits.organizationId, orgUnits.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "work_project_teams_team_fk",
+      columns: [t.organizationId, t.teamUnitId],
+      foreignColumns: [orgUnits.organizationId, orgUnits.id],
+    }).onDelete("cascade"),
+    index("work_project_teams_team_idx").on(t.organizationId, t.teamUnitId),
+    check("work_project_teams_not_self_ck", sql`${t.projectUnitId} <> ${t.teamUnitId}`),
+  ],
+);
+
+/**
+ * D-01: a device repo linked to a team project (one team project per repo). The link is the Control Plane's, the repo
+ * row stays the device's (`syncProjects`): a removed device or repo takes its link with it, while a project unit with a
+ * linked repo cannot be deleted (RESTRICT; the API answers `unit_has_repositories`).
+ */
+export const workProjectRepos = appSchema.table(
+  "work_project_repos",
+  {
+    organizationId: orgId(),
+    projectId: uuid("project_id").primaryKey(),
+    deviceId: uuid("device_id").notNull(),
+    unitId: uuid("unit_id").notNull(),
+    linkedBy: uuid("linked_by").notNull(),
+    linkedAt: ts("linked_at").notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      name: "work_project_repos_project_fk",
+      columns: [t.organizationId, t.projectId, t.deviceId],
+      foreignColumns: [projects.organizationId, projects.id, projects.deviceId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "work_project_repos_unit_fk",
+      columns: [t.organizationId, t.unitId],
+      foreignColumns: [orgUnits.organizationId, orgUnits.id],
+    }).onDelete("restrict"),
+    index("work_project_repos_unit_idx").on(t.organizationId, t.unitId),
+  ],
+);
+
+/**
+ * D-04: the selected teams (`unit`) or people (`user`) of a `teams` / `people` audience, stored like `ai_chat_grants`:
+ * at most one active row per (session, subject); a revoked row keeps the history and frees the slot. Rows grant
+ * nothing outside project access (a person who left, a team no longer assigned), although they stay.
+ */
+export const workSessionGrants = appSchema.table(
+  "work_session_grants",
+  {
+    id: id(),
+    organizationId: orgId(),
+    workSessionId: uuid("work_session_id").notNull(),
+    subjectKind: text("subject_kind", { enum: ["user", "unit"] }).notNull(),
+    subjectId: uuid("subject_id").notNull(),
+    grantedBy: uuid("granted_by").notNull(),
+    createdAt: createdAt(),
+    revokedAt: ts("revoked_at"),
+    revokedBy: uuid("revoked_by"),
+  },
+  (t) => [
+    foreignKey({
+      name: "work_session_grants_session_fk",
+      columns: [t.organizationId, t.workSessionId],
+      foreignColumns: [workSessions.organizationId, workSessions.id],
+    }).onDelete("cascade"),
+    uniqueIndex("work_session_grants_active_uq")
+      .on(t.workSessionId, t.subjectKind, t.subjectId)
+      .where(sql`revoked_at is null`),
+    index("work_session_grants_session_idx")
+      .on(t.organizationId, t.workSessionId)
+      .where(sql`revoked_at is null`),
+    index("work_session_grants_subject_idx")
+      .on(t.organizationId, t.subjectKind, t.subjectId)
+      .where(sql`revoked_at is null`),
+    check("work_session_grants_subject_kind_ck", sql`${t.subjectKind} in ('user','unit')`),
   ],
 );
 

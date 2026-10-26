@@ -1,4 +1,5 @@
 import type { Duplex } from "node:stream";
+import { BROWSER_TIMEOUTS_MS } from "@ocw/contracts";
 import { z } from "zod";
 import { Demuxer, type Docker, DockerUnavailableError } from "./docker";
 
@@ -25,7 +26,11 @@ export const AGENT_JSON_MAX_BYTES = 80 * 1024 * 1024;
 /** A screencast JPEG at 1280x800 is ~100 KiB; anything near this is not a frame. */
 export const AGENT_JPEG_MAX_BYTES = 4 * 1024 * 1024;
 const AGENT_FRAME_HEADER = 5;
-export const AGENT_REQUEST_TIMEOUT_MS = 60_000;
+/**
+ * One op over the link (contracts BROWSER_TIMEOUTS_MS.agentLink): longer than the agent's own op cap, which answers
+ * `timeout` first, and shorter than the API's op budget; only a hung agent reaches it.
+ */
+export const AGENT_REQUEST_TIMEOUT_MS: number = BROWSER_TIMEOUTS_MS.agentLink;
 
 /** A refusal the agent answered (`{ ok: false, error: { code, message } }`), or a link failure (`link_closed`, …). */
 export class AgentError extends Error {

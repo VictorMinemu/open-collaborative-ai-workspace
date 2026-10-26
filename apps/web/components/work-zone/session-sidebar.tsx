@@ -5,6 +5,7 @@ import {
   ChevronDown,
   CloudOff,
   FolderGit2,
+  FolderKanban,
   GitPullRequestArrow,
   Hand,
   Laptop,
@@ -20,9 +21,11 @@ import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sid
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import { useWorkSessions } from "@/lib/workzone-queries";
 import { RuntimeMark, STATUS } from "./meta";
+import { VisibilityMarker, VisibilitySrSuffix } from "./visibility/visibility-marker";
 import { useWorkZone } from "./work-zone-context";
 
 /** Idle sessions touched within this window stay in the active list (D-17); older ones settle. */
@@ -69,6 +72,36 @@ export function elapsedLabel(sinceIso: string, now: number): string {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+/**
+ * The group a row sorts under and the name its label and badge show (UI-SPEC R10): the team project when the repository
+ * is linked to one (two repositories of one project sort together), the repository otherwise.
+ */
+export function rowProject(s: Pick<WorkSession, "projectId" | "projectName" | "teamProject">): {
+  key: string;
+  name: string;
+} {
+  return s.teamProject
+    ? { key: s.teamProject.id, name: s.teamProject.name }
+    : { key: s.projectId, name: s.projectName };
+}
+
+/** Active rows: by project group (the group with the latest activity first), then by recency. */
+export function orderActiveSessions(live: readonly WorkSession[]): WorkSession[] {
+  const recency = (s: WorkSession) => new Date(s.updatedAt).getTime();
+  const groupRank = new Map<string, number>();
+  for (const s of live) {
+    const key = rowProject(s).key;
+    groupRank.set(key, Math.max(groupRank.get(key) ?? 0, recency(s)));
+  }
+  return [...live].sort((a, b) => {
+    const ka = rowProject(a).key;
+    const kb = rowProject(b).key;
+    return (
+      (groupRank.get(kb) ?? 0) - (groupRank.get(ka) ?? 0) || ka.localeCompare(kb) || recency(b) - recency(a)
+    );
+  });
+}
+
 /** Re-render on a clock: every second while `isFast(now)` (a turn under a minute old), otherwise every 30 s. */
 function useNow(isFast: (now: number) => boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -84,6 +117,7 @@ export function SessionSidebar() {
   const sessions = useWorkSessions();
   const pathname = usePathname();
   const { openNewSession } = useWorkZone();
+  const viewerId = useMe().data?.user.id ?? null;
   const list = sessions.data ?? [];
   const [query, setQuery] = useState("");
   const [settledOpen, setSettledOpen] = useState(true);
@@ -98,20 +132,15 @@ export function SessionSidebar() {
   const { active, settled } = useMemo(() => {
     const q = query.trim().toLowerCase();
     const shown = q
-      ? list.filter((s) => s.title.toLowerCase().includes(q) || s.projectName.toLowerCase().includes(q))
+      ? list.filter(
+          (s) =>
+            s.title.toLowerCase().includes(q) ||
+            s.projectName.toLowerCase().includes(q) ||
+            (s.teamProject?.name.toLowerCase().includes(q) ?? false),
+        )
       : list;
     const recency = (s: WorkSession) => new Date(s.updatedAt).getTime();
-    const live = shown.filter((s) => isActiveSession(s, now));
-    // Active rows: by project (the project with the latest activity first), then by recency.
-    const projectRank = new Map<string, number>();
-    for (const s of live)
-      projectRank.set(s.projectId, Math.max(projectRank.get(s.projectId) ?? 0, recency(s)));
-    live.sort(
-      (a, b) =>
-        (projectRank.get(b.projectId) ?? 0) - (projectRank.get(a.projectId) ?? 0) ||
-        a.projectId.localeCompare(b.projectId) ||
-        recency(b) - recency(a),
-    );
+    const live = orderActiveSessions(shown.filter((s) => isActiveSession(s, now)));
     const rest = shown.filter((s) => !isActiveSession(s, now)).sort((a, b) => recency(b) - recency(a));
     return { active: live, settled: rest };
   }, [list, query, now]);
@@ -176,6 +205,7 @@ export function SessionSidebar() {
                 s={s}
                 now={now}
                 active={pathname === `/work-zone/${s.id}`}
+                viewerId={viewerId}
                 onNew={() => openNewSession(s.projectId)}
               />
             ))}
@@ -189,7 +219,7 @@ export function SessionSidebar() {
               data-testid="settled-toggle"
               onClick={() => setSettledOpen((v) => !v)}
               aria-expanded={settledOpen}
-              className="flex items-center gap-2 px-2.5 pb-1 text-left text-[12.5px] text-muted-foreground hover:text-foreground"
+              className="flex items-center gap-2 px-2.5 pb-1 text-left text-[12.5px] text-muted-foreground hover:text-foreground max-md:min-h-11 max-md:pb-0"
             >
               Settled
               <span aria-hidden className="h-px flex-1 bg-border" />
@@ -198,14 +228,20 @@ export function SessionSidebar() {
             {settledOpen ? (
               <>
                 {settledShown.map((s) => (
-                  <SettledRow key={s.id} s={s} now={now} active={pathname === `/work-zone/${s.id}`} />
+                  <SettledRow
+                    key={s.id}
+                    s={s}
+                    now={now}
+                    active={pathname === `/work-zone/${s.id}`}
+                    viewerId={viewerId}
+                  />
                 ))}
                 {settled.length > SETTLED_PAGE ? (
                   <button
                     type="button"
                     data-testid="settled-more"
                     onClick={() => setSettledAll((v) => !v)}
-                    className="flex h-8 items-center gap-2 rounded-md px-2.5 text-left text-[13px] text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground"
+                    className="flex h-8 items-center gap-2 rounded-md px-2.5 text-left text-[13px] text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground max-md:h-11"
                   >
                     <Plus className={cn("size-3.5 transition-transform", settledAll && "rotate-45")} />
                     {settledAll ? "Show fewer" : `Show ${settled.length - SETTLED_PAGE} more`}
@@ -223,12 +259,28 @@ export function SessionSidebar() {
           <p className="px-2.5 text-[13px] text-muted-foreground">No sessions match “{query.trim()}”.</p>
         ) : null}
 
-        <Link
-          href="/settings/devices"
-          className={cn(sectionItemClass(pathname === "/settings/devices"), "mt-auto text-muted-foreground")}
-        >
-          <Laptop className="size-4" /> Devices
-        </Link>
+        <div className="mt-auto grid gap-0.5">
+          <Link
+            href="/work-zone/projects"
+            data-testid="sidebar-projects"
+            aria-current={pathname.startsWith("/work-zone/projects") ? "page" : undefined}
+            className={cn(
+              sectionItemClass(pathname.startsWith("/work-zone/projects")),
+              "text-muted-foreground max-md:h-11",
+            )}
+          >
+            <FolderKanban className="size-4" /> Projects
+          </Link>
+          <Link
+            href="/settings/devices"
+            className={cn(
+              sectionItemClass(pathname === "/settings/devices"),
+              "text-muted-foreground max-md:h-11",
+            )}
+          >
+            <Laptop className="size-4" /> Devices
+          </Link>
+        </div>
       </nav>
     </SectionSidebar>
   );
@@ -241,7 +293,8 @@ function ProjectBadge({ name, muted, className }: { name: string; muted?: boolea
       aria-hidden
       className={cn(
         "inline-flex size-4 shrink-0 items-center justify-center rounded-[4px] font-bold text-[8px] leading-none tracking-tight",
-        muted ? "bg-muted text-muted-foreground/70" : "bg-primary/12 text-primary",
+        // Settled rows: a quieter tile, but its letters keep AA contrast (WINDOWS #316, #327).
+        muted ? "bg-muted text-muted-foreground" : "bg-primary/12 text-primary",
         className,
       )}
     >
@@ -304,18 +357,31 @@ function RowStatus({ s, now }: { s: WorkSession; now: number }) {
   );
 }
 
-function ActiveRow({
+export function ActiveRow({
   s,
   now,
   active,
+  viewerId,
   onNew,
 }: {
   s: WorkSession;
   now: number;
   active: boolean;
+  viewerId: string | null;
   onNew: () => void;
 }) {
   const where = s.branch ?? (s.worktree ? "Worktree" : s.deviceName);
+  const project = rowProject(s);
+  const marker = <VisibilityMarker session={s} viewerId={viewerId} />;
+  const title = (
+    <span
+      data-testid="row-title"
+      title={s.title}
+      className="truncate text-[14px] text-foreground leading-snug"
+    >
+      {s.title}
+    </span>
+  );
   return (
     <div className="group/row relative">
       <Link
@@ -331,20 +397,23 @@ function ActiveRow({
         )}
       >
         <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-muted-foreground">
-          <ProjectBadge name={s.projectName} />
+          <ProjectBadge name={project.name} />
           <span data-testid="row-project" className="min-w-0 truncate">
-            {s.projectName}
+            {project.name}
           </span>
           <RowStatus s={s} now={now} />
         </span>
-        <span
-          data-testid="row-title"
-          title={s.title}
-          className="truncate text-[14px] text-foreground leading-snug"
-        >
-          {s.title}
-        </span>
-        <span className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted-foreground/80">
+        {/* Silence on the default (N2): the title stays as it was unless the session is different. */}
+        {s.visibility?.differsFromDefault ? (
+          <span className="flex min-w-0 items-center gap-1.5">
+            {title}
+            {marker}
+            <VisibilitySrSuffix session={s} viewerId={viewerId} />
+          </span>
+        ) : (
+          title
+        )}
+        <span className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted-foreground">
           {s.worktree ? (
             <FolderGit2 aria-hidden className="size-3 shrink-0" />
           ) : (
@@ -357,13 +426,15 @@ function ActiveRow({
           <RuntimeMark runtime={s.runtime} className="ml-auto size-3" />
         </span>
       </Link>
-      {/* Per-project new session (replaces the old project header "+"): over the badge on hover / focus. */}
+      {/* Per-project new session (replaces the old project header "+"): over the badge on hover / focus. A touch
+          screen has no hover, so there it would be an invisible target over the row: it is left out, and New session
+          and the project's page offer the same start (07.9 polish). */}
       <Tooltip content={`New session in ${s.projectName}`}>
         <button
           type="button"
           aria-label={`New session in ${s.projectName}`}
           onClick={onNew}
-          className="absolute top-2 left-2 inline-flex size-[18px] items-center justify-center rounded-[4px] bg-background text-muted-foreground opacity-0 shadow-sm ring-1 ring-border transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100"
+          className="absolute top-2 left-2 inline-flex size-[18px] items-center justify-center rounded-[4px] bg-background text-muted-foreground opacity-0 shadow-sm ring-1 ring-border transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/row:opacity-100 pointer-coarse:hidden"
         >
           <Plus className="size-3" />
         </button>
@@ -372,18 +443,29 @@ function ActiveRow({
   );
 }
 
-function SettledRow({ s, now, active }: { s: WorkSession; now: number; active: boolean }) {
+export function SettledRow({
+  s,
+  now,
+  active,
+  viewerId,
+}: {
+  s: WorkSession;
+  now: number;
+  active: boolean;
+  viewerId: string | null;
+}) {
   const failed = s.status === "failed";
+  const project = rowProject(s);
   return (
     <Link
       href={`/work-zone/${s.id}`}
       data-testid="session-row"
       data-status={s.status}
       aria-current={active ? "page" : undefined}
-      title={`${s.projectName} · ${STATUS[s.status]?.label ?? s.status}`}
-      className={cn(sectionItemClass(active), "gap-2 text-muted-foreground")}
+      title={`${project.name} · ${STATUS[s.status]?.label ?? s.status}`}
+      className={cn(sectionItemClass(active), "gap-2 text-muted-foreground max-md:h-11")}
     >
-      <ProjectBadge name={s.projectName} muted />
+      <ProjectBadge name={project.name} muted />
       <span
         data-testid="row-title"
         title={s.title}
@@ -391,6 +473,8 @@ function SettledRow({ s, now, active }: { s: WorkSession; now: number; active: b
       >
         {s.title}
       </span>
+      <VisibilitySrSuffix session={s} viewerId={viewerId} />
+      <VisibilityMarker session={s} viewerId={viewerId} />
       <RowDiffStat s={s} className="text-[12px]" />
       <span className={cn("w-8 shrink-0 text-right text-[12px] tabular-nums", failed && "text-destructive")}>
         {shortAgo(s.updatedAt, now)}

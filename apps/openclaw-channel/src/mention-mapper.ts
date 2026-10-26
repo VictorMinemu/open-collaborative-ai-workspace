@@ -426,6 +426,7 @@ const FAILED_REASONS: Record<string, string> = {
   settings_denied: "the organization doesn't allow this session's settings",
   not_allowed: "they may no longer start Work Zone sessions",
   prompt_not_allowed: "that prompt can't start a session",
+  not_in_project: "they are not in the project that repository belongs to",
 };
 
 function resultCodeOf(raw: string | undefined): string | undefined {

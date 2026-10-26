@@ -2,6 +2,8 @@
 
 import {
   EventTypes,
+  type RevokeCause,
+  type RevokedFrame,
   WorkApproval,
   WorkPrompt,
   WorkSession,
@@ -109,11 +111,14 @@ function reduce(state: LiveSession | null, action: Action): LiveSession | null {
  *
  * RT-01: when the server drops the stream because the viewer lost access (role, rule or device change), `revoked`
  * turns true for this id: the cached detail is removed and not refetched, and the stream stays closed. It resets
- * when the id changes. `lostTitle` keeps the title the viewer was already looking at.
+ * when the id changes. `lostTitle` keeps the title the viewer was already looking at; `lostCause` is the frame's
+ * reason code (07.9, D-13), null when the server gave none.
  */
 export function useLiveSession(id: string) {
   const qc = useQueryClient();
-  const [lost, setLost] = useState<{ id: string; title: string | null } | null>(null);
+  const [lost, setLost] = useState<{ id: string; title: string | null; cause: RevokeCause | null } | null>(
+    null,
+  );
   const revoked = lost?.id === id;
   const query = useWorkSession(id, { enabled: !revoked });
   const [state, dispatch] = useReducer(reduce, null);
@@ -134,15 +139,18 @@ export function useLiveSession(id: string) {
   );
   const ready = state !== null && state.session.id === id;
   const title = ready ? state.session.title : null;
-  const onRevoked = useCallback(() => {
-    setLost({ id, title });
-    qc.removeQueries({ queryKey: wzKeys.session(id) });
-    // Drop the row at once: a refetch may now be refused (403) and would otherwise keep the stale list.
-    qc.setQueryData<WorkSessionList>(wzKeys.sessions, (old) =>
-      old ? { ...old, sessions: old.sessions.filter((s) => s.id !== id) } : old,
-    );
-    void qc.invalidateQueries({ queryKey: wzKeys.sessions });
-  }, [qc, id, title]);
+  const onRevoked = useCallback(
+    (frame: RevokedFrame) => {
+      setLost({ id, title, cause: frame.cause ?? null });
+      qc.removeQueries({ queryKey: wzKeys.session(id) });
+      // Drop the row at once: a refetch may now be refused (403) and would otherwise keep the stale list.
+      qc.setQueryData<WorkSessionList>(wzKeys.sessions, (old) =>
+        old ? { ...old, sessions: old.sessions.filter((s) => s.id !== id) } : old,
+      );
+      void qc.invalidateQueries({ queryKey: wzKeys.sessions });
+    },
+    [qc, id, title],
+  );
   // This is the view that shows the session, so the viewer counts as watching it (presence opt-in, RT-04).
   useTopic(ready && !revoked ? `ws:${id}` : null, onFrame, query.data?.lastSeq, () => void query.refetch(), {
     presence: true,
@@ -154,5 +162,7 @@ export function useLiveSession(id: string) {
     query,
     revoked,
     lostTitle: revoked ? (lost?.title ?? null) : null,
+    /** Why the live view was taken away (D-13: `visibility`, `role`, `device`, `module`); null when not said. */
+    lostCause: revoked ? (lost?.cause ?? null) : null,
   };
 }

@@ -12,8 +12,10 @@ import {
   CLAUDE_CATALOG,
   CODEX_CATALOG,
   connectWithProject,
+  createTeamProject,
   errorCode,
   invite,
+  linkRepo,
   model,
   pairDevice,
   startSession,
@@ -436,9 +438,24 @@ describe("access: only the session's controllers upload, only its readers see (D
   beforeAll(async () => {
     // Riley: a standard member (no Work Zone access at all). Pat: a developer who reads sessions but is denied
     // `work_session.prompt` by a user rule. Eve: the admin of another organization.
-    ({ client: riley } = await invite(stack, admin, "riley@example.test", "Riley Park", "standard"));
+    let rileyId: string;
+    ({ client: riley, userId: rileyId } = await invite(
+      stack,
+      admin,
+      "riley@example.test",
+      "Riley Park",
+      "standard",
+    ));
     let patId: string;
     ({ client: pat, userId: patId } = await invite(stack, admin, "pat@example.test", "Pat Doe", "developer"));
+    // Explicit access (07.9-03, D-06): Pat reads the admin's session, and Riley's role (not a missing audience) is
+    // what refuses her, as fellow members of a team project the `ocw` repo is linked to. Dana keeps her device grant
+    // and joins the project too, so linking the repo leaves her a reader.
+    const { unitId } = await createTeamProject(stack, admin, {
+      name: "OCW",
+      members: [{ userId: adminId }, { userId: danaId }, { userId: patId }, { userId: rileyId }],
+    });
+    await linkRepo(stack, { organizationId: orgId, unitId, projectId, deviceId, linkedBy: adminId });
     await ok(
       admin.request("POST", "/api/v1/permission-rules", {
         subjectKind: "user",

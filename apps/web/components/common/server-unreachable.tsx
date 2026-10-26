@@ -9,10 +9,13 @@ export function ServerUnreachable({
   onRetry,
   retrying,
   className,
+  title = "Can't reach the server",
 }: {
   onRetry: () => void;
   retrying?: boolean;
   className?: string;
+  /** The heading; a page may name what failed ("Couldn't load projects."). */
+  title?: string;
 }) {
   const { apiUrl } = useRuntimeConfig();
   return (
@@ -24,7 +27,7 @@ export function ServerUnreachable({
       <div className="mb-4 flex size-12 items-center justify-center rounded-xl border bg-muted/50">
         <ServerOff className="size-5 text-muted-foreground" />
       </div>
-      <h2 className="font-semibold text-base">Can't reach the server</h2>
+      <h2 className="font-semibold text-base">{title}</h2>
       <p className="mt-1.5 max-w-sm text-balance text-muted-foreground text-sm">
         The workspace API at <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{apiUrl}</code>{" "}
         is not responding. Make sure it is running, then try again.

@@ -786,6 +786,14 @@ describe("the approved re-run (07.5-04, D-02, P-06, Pitfall 1): the card-action 
         instruction: `Marta Gil approved “${TITLE}”, but it failed: the device went offline before the session started. Don't retry on your own; tell Ana Pérez what went wrong.`,
       },
     });
+    // 07.9 (D-13): the person left the team project the repository belongs to.
+    const left = mapCardAction(
+      grantAction({ outcome: "approved", decidedBy: MARTA, resultCode: "not_in_project" }, "x"),
+      BOT,
+    );
+    expect(instructionOf(left)).toBe(
+      `Marta Gil approved “${TITLE}”, but it failed: they are not in the project that repository belongs to. Don't retry on your own; tell Ana Pérez what went wrong.`,
+    );
     const unknown = mapCardAction(
       grantAction({ outcome: "approved", decidedBy: MARTA, resultCode: "stale_base" }, "x"),
       BOT,

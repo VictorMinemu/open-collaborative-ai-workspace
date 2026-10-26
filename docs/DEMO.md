@@ -653,6 +653,55 @@ ADR-0029 › Validation). On your own stack with the `sandbox` profile and a rea
    signed out.
 5. Repeat steps 2–3 from a **phone** (the full-screen sheet, the keyboard button, the system Back).
 
+## Shared Work Zone projects and session visibility (Phase 07.9)
+
+After this upgrade, an existing Work Zone session is seen only by its creator, the owner of the device it runs on,
+people the device is shared with, and admins. Before, every Work Zone user saw every session. Link a repository to a
+team project to share its sessions with the project.
+
+This narrowing is deliberate (ADR-0030, D-06). The same upgrade blanks the session snapshots the organization stream
+used to store (titles, branches and device names readable by every member); that cannot be undone. From then on a
+session's updates go only to the people who can see it.
+
+Phase 07.9 (ADR-0030). A team project is a unit of kind *project* under a team or department (the demo has **Workspace
+App** under Team Alpha). Its people are its members plus the members of its assigned teams, and admins. Repositories
+your devices announce link to it from any device; an unlinked repository stays a personal project of its device.
+
+1. **A team project (Víctor).** Work Zone › **Projects** (above Devices in the sidebar) › Workspace App › **Settings**:
+   *Access* says how many people can open it. **Assign teams** › Team Alpha (Marta's team). **Link a repository** ›
+   one of your Mac's repositories.
+2. **The default switch (Víctor or Alex, who leads Backend above it).** *New sessions* › **Visible to everyone in the
+   project**, on by default. Turn it off: the toast reads *New sessions in Workspace App start as Only me*. Turn it
+   back on.
+3. **The chip and the panel.** Open a session on the linked repository: next to the presence avatars a chip reads
+   **Project**. Click it: four choices (Only me, Everyone in Workspace App, Teams, People), each with one line, and a
+   footer with who can see it now and the line that admins and the device owner always can.
+4. **The new-session line.** **New session**: repositories are grouped under their team project, then *Personal* by
+   device. Under the picker, *Visible to: Everyone in Workspace App · Change* opens the same panel; what you pick is
+   what the session starts with.
+5. **Narrowing live (two browsers).** Marta opens the session. Víctor picks **Only me** in the chip: Marta's page turns
+   into *You can no longer see this session* within a second, without a reload, and the row leaves her sidebar. Víctor's
+   toast offers **Undo**; after Undo, Marta's page offers **Open session**.
+
+**Owner check** (never run by an agent: it needs your upgraded data; record each result in
+`.planning/phases/07.9-shared-work-zone-projects-and-session-visibility/07.9-VALIDATION.md` › Manual-Only
+Verifications). On a stack upgraded from the current release with the demo data and a session Víctor ran before the
+upgrade on his Mac:
+
+1. As Marta (a developer who is not the creator, the device owner, a device grantee or an admin), the old session no
+   longer appears in the sidebar and its URL shows *Session not found*. As Víctor, link its repository to Workspace App
+   and assign Team Alpha (step 1 above): the session appears in Marta's list.
+2. In two browsers, Víctor turns a Workspace App session to **Only me** from the chip; Marta's open session switches to
+   *You can no longer see this session* with no reload. **Undo** brings it back.
+3. On a phone (390 px), the chip is a single icon on the default and the panel opens as a bottom sheet; every control
+   is easy to hit.
+4. As a project lead (Alex) or Víctor, turn **Visible to everyone in the project** off; the next new session starts as
+   *Only me* (its chip reads Only me). The sidebar shows no lock for it, because Only me is now the project's default:
+   the lock appears only on sessions that differ from the default, such as an Only me session in a project whose
+   switch is on.
+5. Workspace App › Settings › Repositories › **Unlink** a repository: the dialog says how many sessions become personal
+   and who will still see them.
+
 ## Troubleshooting
 
 | Symptom | Fix |

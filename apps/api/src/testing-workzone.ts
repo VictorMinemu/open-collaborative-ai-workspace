@@ -1,5 +1,13 @@
-import type { RuntimeCatalog, RuntimeModel } from "@ocw/contracts";
+import {
+  type PermissionMode,
+  type RuntimeCatalog,
+  type RuntimeModel,
+  type SessionAudienceInput,
+  UpdateWorkSessionVisibilityResult,
+} from "@ocw/contracts";
+import { workProjectRepos } from "@ocw/db";
 import { expect } from "vitest";
+import { WorkSessionService } from "./modules/work-session";
 import { TestClient, type TestStack } from "./testing";
 import { eventually, FakeDevice } from "./testing-device";
 
@@ -127,4 +135,131 @@ export async function startSession(
     return (d.body?.session as { status?: string } | undefined)?.status === "idle";
   });
   return id;
+}
+
+// ---------------------------------------------------------------- explicit session access (07.9-03, P-07)
+//
+// From 07.9-05 on, a member sees another member's session only through the session's audience (D-06): a fellow
+// member of the team project its repo is linked to, or (for a personal repo) someone who may use the device. These
+// helpers state that access in a test's setup, so the test is valid under the organization-wide rule and the D-06 one.
+
+/**
+ * D-13 (07.9): a project created through the unit routes has its creator as lead. A fixture that builds a tree for
+ * other people removes that membership, so the creator stays outside the project as the test intends. Call it right
+ * after the project's creation, while the creator is its only member.
+ */
+export async function dropProjectCreator(creator: TestClient, unitId: string): Promise<void> {
+  const res = await creator.request("GET", `/api/v1/units/${unitId}/members`);
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  const members = res.body!.members as Array<{ userId: string }>;
+  expect(members, "only the creator is in a new project").toHaveLength(1);
+  for (const m of members) {
+    const del = await creator.request("DELETE", `/api/v1/units/${unitId}/members/${m.userId}`);
+    expect(del.status, JSON.stringify(del.body)).toBe(200);
+  }
+}
+
+/**
+ * D-06 "same team project": the admin creates a department (unless `parentId`) and a project unit under it through the
+ * unit routes, then adds the given members. Link the session's repo with `linkRepo` for the access to apply.
+ * The roster is exactly `members`: creating the project makes the admin its lead (D-13), so the helper sets the admin
+ * to the listed role, or removes them when they are not listed (a test's admin outside the project stays outside).
+ */
+export async function createTeamProject(
+  _stack: TestStack,
+  admin: TestClient,
+  opts: { name: string; members: Array<{ userId: string; role?: "member" | "lead" }>; parentId?: string },
+): Promise<{ unitId: string; parentId: string }> {
+  let parentId = opts.parentId;
+  if (!parentId) {
+    const dept = await admin.request("POST", "/api/v1/units", {
+      kind: "department",
+      name: `${opts.name} department`,
+      parentId: null,
+    });
+    expect(dept.status, JSON.stringify(dept.body)).toBe(200);
+    parentId = dept.body!.id as string;
+  }
+  const unit = await admin.request("POST", "/api/v1/units", { kind: "project", name: opts.name, parentId });
+  expect(unit.status, JSON.stringify(unit.body)).toBe(200);
+  const unitId = unit.body!.id as string;
+  const auto = await admin.request("GET", `/api/v1/units/${unitId}/members`);
+  expect(auto.status, JSON.stringify(auto.body)).toBe(200);
+  const creators = new Set((auto.body!.members as Array<{ userId: string }>).map((m) => m.userId));
+  for (const creator of creators) {
+    const listed = opts.members.find((m) => m.userId === creator);
+    const res = listed
+      ? await admin.request("PATCH", `/api/v1/units/${unitId}/members/${creator}`, {
+          role: listed.role ?? "member",
+        })
+      : await admin.request("DELETE", `/api/v1/units/${unitId}/members/${creator}`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+  }
+  for (const m of opts.members) {
+    if (creators.has(m.userId)) continue;
+    const res = await admin.request("POST", `/api/v1/units/${unitId}/members`, {
+      userId: m.userId,
+      role: m.role ?? "member",
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+  }
+  return { unitId, parentId };
+}
+
+/**
+ * D-06 "the repo belongs to this team project": one `work_project_repos` row, written in the tenant's system context
+ * (`userId: null`, as the Device Link writes) because the link route arrives in 07.9-04; new tests use that route.
+ */
+export async function linkRepo(
+  stack: TestStack,
+  opts: { organizationId: string; unitId: string; projectId: string; deviceId: string; linkedBy: string },
+): Promise<void> {
+  await stack.built.core.db.withTenant({ organizationId: opts.organizationId, userId: null }, async (tx) => {
+    await tx.insert(workProjectRepos).values({
+      organizationId: opts.organizationId,
+      projectId: opts.projectId,
+      deviceId: opts.deviceId,
+      unitId: opts.unitId,
+      linkedBy: opts.linkedBy,
+    });
+  });
+}
+
+/**
+ * D-06 "may use the device" (personal repos only): the owner grants `userId` the device through the grant route
+ * (ADR-0012). It also changes `device.use` and the person's mode cap, so use it only where the test is about sharing.
+ */
+export async function shareDevice(
+  owner: TestClient,
+  deviceId: string,
+  userId: string,
+  maxMode: PermissionMode = "default",
+): Promise<void> {
+  const res = await owner.request("PUT", `/api/v1/devices/${deviceId}/grants/user/${userId}`, { maxMode });
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+}
+
+/**
+ * D-04 "who can see this session" (07.9-06): `client` sets the session's audience through
+ * `PUT /work-sessions/:id/visibility` (the creator, a project lead or an admin) and gets the parsed result.
+ */
+export async function setAudience(
+  client: TestClient,
+  sessionId: string,
+  input: SessionAudienceInput,
+): Promise<UpdateWorkSessionVisibilityResult> {
+  const res = await client.request("PUT", `/api/v1/work-sessions/${sessionId}/visibility`, input);
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  return UpdateWorkSessionVisibilityResult.parse(res.body);
+}
+
+/**
+ * Waits until the work-session background queue (session deliveries, `removed` notices, re-authorization sweeps) of
+ * the organization, or of every organization, has run (Phase 07.9 fan-out): a request now returns right after its
+ * commit, before that work.
+ */
+export async function settled(stack: TestStack, organizationId?: string): Promise<void> {
+  const handler = stack.built.deviceHub.sessionHandler;
+  if (!(handler instanceof WorkSessionService)) throw new Error("no work-session service");
+  await handler.settled(organizationId);
 }

@@ -40,7 +40,17 @@ export type Relation =
    */
   | "reader"
   /** Browser contexts (07.8-16, D-07): the member the bot browses for (the turn's human). */
-  | "requester";
+  | "requester"
+  /**
+   * Team projects (Phase 07.9, D-02): the principal has project access as a direct member, a lead or a member of an
+   * assigned team. Decided by `app.work_project_access` (the one SQL rule, P-03) and never derived here.
+   */
+  | "project_member"
+  /**
+   * Work Zone sessions (Phase 07.9, D-04): the session's audience includes the principal within project access, as
+   * `app.work_session_access` decided it (the one SQL rule, P-03); never derived here.
+   */
+  | "viewer";
 export type ResourceState =
   | "private"
   | "archived"
@@ -63,7 +73,12 @@ export type ResourceState =
   | "memory_agent"
   | "memory_unit"
   /** Browser contexts (07.8-16, D-12 U-2): a member's sealed session is loaded in the page. */
-  | "member_session";
+  | "member_session"
+  /**
+   * Work Zone sessions (Phase 07.9, D-12): its creator no longer has access to the session's team project; they keep
+   * reading and archiving it, nothing else (unless another relation or the admin rule holds).
+   */
+  | "creator_left";
 export type ResourceType =
   | "organization"
   | "unit"
@@ -80,7 +95,9 @@ export type ResourceType =
   /** An agent template (Phase 07.4): `unitPath` ends with its unit; organization templates carry none. */
   | "agent_template"
   /** A bot's open browser page (Phase 07.8-16): who may watch it live and who may take control. */
-  | "browser_context";
+  | "browser_context"
+  /** A team project (Phase 07.9, D-01): an org unit of kind `project`; `unitPath` ends with it. */
+  | "work_project";
 
 export interface PrincipalFacts {
   kind: "user" | "agent" | "cell" | "device";
@@ -186,6 +203,16 @@ function relationGrants(p: PrincipalFacts, r: ResourceFacts, base: readonly Perm
   return out;
 }
 
+/**
+ * Leading a unit confers the `team` surface on the led subtree, whatever the role; a lead grain on another surface
+ * still needs the role to unlock that surface (like relation grants). Phase 07.9: a lead whose role has no Work Zone
+ * (standard) never gains `work_session.visibility` by leading.
+ */
+function leadConfers(p: PrincipalFacts, perm: Permission): boolean {
+  const surface = PERMISSION_SURFACE[perm];
+  return surface === "team" || (p.orgRole !== null && ROLE_SURFACES[p.orgRole].includes(surface));
+}
+
 function subjectMatches(rule: RuleFact, p: PrincipalFacts): boolean {
   switch (rule.subjectKind) {
     case "everyone":
@@ -269,7 +296,7 @@ export function resolveEffectivePermissions(
   const base = basePermissions(p);
   const grants = new Set<Permission>([...base, ...relationGrants(p, r, base)]);
   if (p.kind === "user" && r.unitPath.some((unitId) => p.leadOfUnitIds.has(unitId))) {
-    for (const perm of LEAD_PERMISSIONS) grants.add(perm);
+    for (const perm of LEAD_PERMISSIONS) if (leadConfers(p, perm)) grants.add(perm);
   }
 
   const denies: ApplicableDeny[] = [];

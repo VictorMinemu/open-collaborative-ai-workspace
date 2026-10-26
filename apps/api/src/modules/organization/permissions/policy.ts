@@ -28,8 +28,10 @@ export const RELATION_PERMISSIONS: Record<ResourceType, Partial<Record<Relation,
     grantee: ["device.use"],
     full_access_grantee: ["device.use", "device.full_access"],
   },
+  // Phase 07.9 (D-04): the creator also chooses who sees the session; the device owner always sees it (D-11) but does
+  // not choose its audience. `viewer` grants nothing: seeing comes from the role, the precondition only takes away.
   work_session: {
-    creator: ["work_session.approve", "work_session.archive"],
+    creator: ["work_session.approve", "work_session.archive", "work_session.visibility"],
     device_owner: ["work_session.approve", "work_session.archive"],
   },
   invitation: { inviter: ["invitation.revoke"] },
@@ -43,6 +45,8 @@ export const RELATION_PERMISSIONS: Record<ResourceType, Partial<Record<Relation,
   // 07.8-16: watching and controlling come from the role (`browser.watch`, `browser.control`); the browser-context
   // preconditions below decide who among the holders may (reader, owner, requester, member session).
   browser_context: {},
+  // Phase 07.9: grants come from the role, unit leads and allow rules; `project_member` only feeds the precondition.
+  work_project: {},
 };
 
 /** Reason reported when a permission is simply not granted (default `missing_permission`). */
@@ -190,7 +194,58 @@ function browserContextPrecondition(p: PrincipalFacts, r: ResourceFacts, perm: P
   return null;
 }
 
+/**
+ * Opening a team project (Phase 07.9, D-02, P-04, P-11), judged on a `work_project` resource for people only: every
+ * grain except `work_project.manage` needs project access (`project_member`: a direct member, a lead or a member of an
+ * assigned team, decided by `app.work_project_access`) or the admin role, the explicit admin rule. Managing comes from
+ * the role and the lead grants on the project's path (ADR-0024 as implemented), so a lead above the project manages it
+ * without opening it. Grants still come from the role and rules and a deny still wins, admins included. This is the
+ * only copy of the project-access gate: routes ask the resolver, never re-implement it.
+ */
+function workProjectPrecondition(p: PrincipalFacts, r: ResourceFacts): Denial | null {
+  if (r.type !== "work_project" || p.kind !== "user") return null;
+  if (p.orgRole === "admin" || r.relations.has("project_member")) return null;
+  return { layer: "resource", reason: "not_in_project" };
+}
+
+/** What a creator who left the team project still does with their session (D-12). */
+const CREATOR_LEFT_KEEPS = new Set<Permission>(["work_session.read", "work_session.archive"]);
+
+/**
+ * The audience of a Work Zone session (Phase 07.9, D-04, D-05, D-11, D-12, D-13; P-03, P-04), judged on a
+ * `work_session` resource for people, for every `work_session.*` grain except `work_session.create` (starting is decided
+ * on the organization and the device). Who is in the audience is decided once, in SQL (`app.work_session_access`, the
+ * only copy of the rule), and arrives here as facts (`sessionFacts`, the only builder):
+ * - the audience (`viewer`), the creator and the device owner (D-11) pass;
+ * - an admin passes by the explicit admin rule, never by a relation (an admin viewing only this way is audited by the
+ *   routes, D-13); a unit deny rule or the Work Zone module off on the session's project path still wins (ADR-0024);
+ * - a creator who left the team project (`creator_left`, with no other relation) keeps read and archive (`left_project`);
+ * - everyone else is `not_in_audience`, which the routes serve as the 404 of a missing session.
+ * Seeing is not controlling (D-05): grants still come from the role, the relations and the rules; this only takes away.
+ * This is the only copy of the session-audience gate: readers ask the resolver, never re-implement it.
+ */
+function workSessionAudiencePrecondition(
+  p: PrincipalFacts,
+  r: ResourceFacts,
+  perm: Permission,
+): Denial | null {
+  if (r.type !== "work_session" || p.kind !== "user") return null;
+  if (r.relations.has("viewer") || r.relations.has("device_owner")) return null;
+  const left = r.state.has("creator_left");
+  if (r.relations.has("creator") && !left) return null;
+  if (p.orgRole === "admin") return null;
+  if (r.relations.has("creator") && left) {
+    return CREATOR_LEFT_KEEPS.has(perm) ? null : { layer: "resource", reason: "left_project" };
+  }
+  return { layer: "resource", reason: "not_in_audience" };
+}
+
 export const PRECONDITIONS: readonly Precondition[] = [
+  {
+    // First, so a person outside a session's audience is told exactly that (the routes hide it as missing).
+    applies: (perm) => perm.startsWith("work_session.") && perm !== "work_session.create",
+    check: workSessionAudiencePrecondition,
+  },
   {
     // Private channels (and, for agents, every channel) are readable by members only.
     applies: (perm) => perm === "channel.read",
@@ -292,6 +347,10 @@ export const PRECONDITIONS: readonly Precondition[] = [
     check: unitOwnedPrecondition,
   },
   {
+    applies: (perm) => perm !== "work_project.manage",
+    check: workProjectPrecondition,
+  },
+  {
     // Direct conversations (D-03): two fixed members; nobody adds, removes or archives.
     applies: (perm) => DM_FIXED.has(perm),
     check: (_p, r) =>
@@ -349,6 +408,13 @@ export const PREREQUISITES: readonly Prerequisite[] = [
     on: "browser_context",
     reason: "not_browser_watcher",
   },
+  // Phase 07.9 (D-04, P-04): choosing who sees a session needs seeing it (the audience, the module, deny rules).
+  {
+    permission: "work_session.visibility",
+    requires: "work_session.read",
+    on: "work_session",
+    reason: "not_session_viewer",
+  },
 ];
 
 /** The first prerequisite of `permission` that `held` does not satisfy on `r`, or null. */
@@ -393,6 +459,20 @@ export function orgResource(): ResourceFacts {
 
 export function unitResource(u: { id: string; path: readonly string[] }): ResourceFacts {
   return facts("unit", [], [], u.path);
+}
+
+/**
+ * A team project as a resource (Phase 07.9, D-02): its unit path (so unit rules, module rows and lead grants reach it)
+ * and the `project_member` relation when `access` (`app.work_project_access`) is a membership: lead, member or team.
+ * `admin` is the role's explicit rule in the precondition, never a relation. Built by `projectFacts`.
+ */
+export function workProjectResource(
+  p: { id: string; path: readonly string[]; access: string | null },
+  principalUserId: string | null,
+): ResourceFacts {
+  const member =
+    principalUserId !== null && (p.access === "lead" || p.access === "member" || p.access === "team");
+  return facts("work_project", when(member, "project_member" as const), [], p.path);
 }
 
 /**
@@ -510,20 +590,43 @@ export function deviceResource(
   );
 }
 
+/**
+ * A Work Zone session as a resource (Phase 07.9, D-04, D-11, D-12), built only by `sessionFacts` (work-session/facts.ts)
+ * from one row:
+ * - relations `creator` (the session's `created_by`) and `device_owner` (the owner of the device it runs on), as before;
+ *   `viewer` when `access` (`app.work_session_access` for this principal, the one SQL rule) holds it;
+ * - states `device_revoked` and `creator_left` (from `access`: the creator lost the team project's access);
+ * - `unitPath` = the team project's path (`[]` for a personal project), so unit deny rules, the module rows and the
+ *   lead grants on that path reach the session. The SQL `admin` fact is never a relation (the admin rule is explicit).
+ * `access` and `unitPath` are required, so no reader can build a session without the audience facts.
+ */
 export function workSessionResource(
-  s: { createdBy: string; deviceOwnerUserId: string | null; deviceRevoked: boolean; tool?: string | null },
+  s: {
+    createdBy: string;
+    deviceOwnerUserId: string | null;
+    deviceRevoked: boolean;
+    access: readonly string[];
+    unitPath: readonly string[];
+    tool?: string | null;
+  },
   principalUserId: string | null,
 ): ResourceFacts {
+  const me = principalUserId !== null;
   const r = facts(
     "work_session",
     [
-      ...when(principalUserId !== null && s.createdBy === principalUserId, "creator" as const),
+      ...when(me && s.createdBy === principalUserId, "creator" as const),
       ...when(
-        principalUserId !== null && s.deviceOwnerUserId !== null && s.deviceOwnerUserId === principalUserId,
+        me && s.deviceOwnerUserId !== null && s.deviceOwnerUserId === principalUserId,
         "device_owner" as const,
       ),
+      ...when(me && s.access.includes("viewer"), "viewer" as const),
     ],
-    when(s.deviceRevoked, "device_revoked" as const),
+    [
+      ...when(s.deviceRevoked, "device_revoked" as const),
+      ...when(me && s.access.includes("creator_left"), "creator_left" as const),
+    ],
+    s.unitPath,
   );
   return s.tool ? { ...r, tool: s.tool } : r;
 }

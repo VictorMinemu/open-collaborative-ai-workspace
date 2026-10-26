@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "./testing";
 import { eventually, FakeDevice, sleep } from "./testing-device";
+import { createTeamProject, linkRepo } from "./testing-workzone";
 
 /**
  * Work Zone integration: pairing, Device Link auth, command queue (ack + at-least-once redelivery), event
@@ -324,6 +325,32 @@ describe("device pairing", () => {
 });
 
 describe("work sessions", () => {
+  // Explicit access (07.9-03, D-06): Alex (developer) and Stan (standard) read, follow and act on the admin's
+  // sessions as fellow members of a team project the `ocw` repo is linked to; the admin is the sessions' creator and
+  // device owner. Device access is unchanged (the device is not shared with them), so roles, rules and device caps
+  // still decide what each may do.
+  beforeAll(async () => {
+    const me = (await admin.request("GET", "/api/v1/me")).body!;
+    const adminId = (me.user as { id: string }).id;
+    const members = (await admin.request("GET", "/api/v1/members")).body!.members as Array<{
+      userId: string;
+      email: string | null;
+    }>;
+    const idOf = (email: string) => members.find((m) => m.email === email)!.userId;
+    const { unitId } = await createTeamProject(stack, admin, {
+      name: "OCW",
+      members: [adminId, idOf("alex@example.test"), idOf("stan@example.test")].map((userId) => ({ userId })),
+    });
+    const [host] = (await admin.request("GET", "/api/v1/devices")).body!.devices as Array<{ id: string }>;
+    await linkRepo(stack, {
+      organizationId: (me.organization as { id: string }).id,
+      unitId,
+      projectId,
+      deviceId: host!.id,
+      linkedBy: adminId,
+    });
+  });
+
   it("rejects runtimes that are not signed in on the device", async () => {
     const res = await admin.request("POST", "/api/v1/work-sessions", { projectId, runtime: "codex" });
     expect(res.status).toBe(409);

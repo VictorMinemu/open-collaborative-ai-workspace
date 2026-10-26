@@ -25,19 +25,14 @@ import {
   WorkZonePolicyView,
 } from "@ocw/contracts";
 import { devices, projects, streamEvents, type Tx, workApprovals, workPrompts, workSessions } from "@ocw/db";
-import { and, asc, desc, eq, inArray, lte, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, lte, ne, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { markDecided } from "../../authz";
 import { type App, type AuthContext, authOf, type Core, tenant } from "../../core";
 import { conflict, HttpError, notFound } from "../../lib/errors";
 import { type DeviceAccess, type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
-import {
-  AuthzDeniedError,
-  createPermissionService,
-  type ResourceFacts,
-  workSessionResource,
-} from "../organization";
+import { AuthzDeniedError, createPermissionService, type ResourceFacts } from "../organization";
 import { loadControlsContext } from "./context";
 import {
   buildRuntimeControls,
@@ -50,6 +45,7 @@ import {
   storedSettings,
 } from "./controls";
 import { sessionFacts as sharedSessionFacts } from "./facts";
+import { sessionNotFound } from "./hidden";
 import { currentSessionModel, imagesNotSupported } from "./images";
 import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy } from "./policy";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
@@ -65,6 +61,7 @@ import {
   type WorkSessionStartDeps,
   type WorkSessionStartFailure,
 } from "./start";
+import { audienceError, registerVisibilityRoutes, viewerStateOf } from "./visibility";
 
 const SessionParams = z.object({ id: z.uuid() });
 const PromptParams = z.object({ id: z.uuid(), pid: z.uuid() });
@@ -75,6 +72,9 @@ const WorkZoneControlsQuery = z.object({ deviceId: z.uuid(), runtime: RuntimeId 
 const EVENT_WINDOW = 1500;
 const DIFF_TIMEOUT_MS = 20_000;
 
+/** A session the caller may not know about reads exactly like a missing one (same status, code and message). */
+const SESSION_NOT_FOUND = "Work session not found";
+
 /** Permissions a session view renders controls for (`WorkSessionDetail.viewerCan`). */
 const SESSION_VIEWER_CAN = [
   "work_session.prompt",
@@ -82,6 +82,8 @@ const SESSION_VIEWER_CAN = [
   "work_session.interrupt",
   "work_session.approve",
   "work_session.archive",
+  // Phase 07.9 (R2): may change who can see the session (the creator, a project lead, an admin).
+  "work_session.visibility",
 ] as const;
 
 export function registerWorkSessionRoutes(
@@ -97,33 +99,66 @@ export function registerWorkSessionRoutes(
   /** Session creation (07.5-05): the route and Work Zone proposals start sessions through `createWorkSession`. */
   const startDeps: WorkSessionStartDeps = { core, perms, svc, hub };
 
-  /** Lock + load a session and assert `permission` on it (404 when it is not in the caller's org). */
+  /** Lock + load a session the caller may know about and assert `permission` on it (403 with the denial, else). */
   async function lockedFor(
     req: FastifyRequest,
     tx: Tx,
     id: string,
     permission: "work_session.prompt" | "work_session.interrupt" | "work_session.configure",
   ): Promise<SessionRow> {
-    const s = await locked(tx, id);
-    await perms.assertCan(req, tx, permission, await sessionFacts(tx, authOf(req), s));
-    return s;
-  }
-
-  /** Lock + load a session visible in the caller's org (RLS), or 404. */
-  async function locked(tx: Tx, id: string): Promise<SessionRow> {
-    const s = await svc.lock(tx, id);
-    if (!s) throw notFound("Work session not found");
+    const { s, facts } = await visible(req, tx, id);
+    await perms.assertCan(req, tx, permission, facts);
     return s;
   }
 
   /**
-   * Resolver facts for a session: the caller's relations (creator, device owner), the Device layer
-   * (revoked device) and, for approvals, the tool the request would run (Tool layer).
+   * Lock + load a session the caller may know about, or 404: missing in the caller's org (RLS), or outside the
+   * session's audience (D-04, D-09: the resolver's `not_in_audience`, served as the same 404 as a missing session).
+   * Other read denials (the role, deny rules) keep each route's own answer.
+   */
+  async function visible(
+    req: FastifyRequest,
+    tx: Tx,
+    id: string,
+  ): Promise<{ s: SessionRow; facts: ResourceFacts }> {
+    const s = await svc.lock(tx, id);
+    if (!s) return sessionNotFound(tx, id, SESSION_NOT_FOUND);
+    const facts = await sessionFacts(tx, authOf(req), s);
+    await assertInAudience(req, tx, facts);
+    return { s, facts };
+  }
+
+  async function assertInAudience(req: FastifyRequest, tx: Tx, facts: ResourceFacts): Promise<void> {
+    if (await perms.can(req, tx, "work_session.read", facts)) return;
+    const { denial } = await perms.decide(
+      tx,
+      { kind: "user", userId: authOf(req).userId },
+      "work_session.read",
+      facts,
+    );
+    if (denial?.reason === "not_in_audience") {
+      throw new AuthzDeniedError(denial, { hideAs404: true, message: SESSION_NOT_FOUND });
+    }
+  }
+
+  /** `work_session.read` on a session, hidden as the 404 of a missing session (detail, controls, diff). */
+  async function assertReadable(req: FastifyRequest, tx: Tx, facts: ResourceFacts): Promise<void> {
+    await perms.assertCan(req, tx, "work_session.read", facts, { hideAs404: true }).catch((err) => {
+      if (err instanceof AuthzDeniedError && err.hidden) {
+        throw new AuthzDeniedError(err.denial, { hideAs404: true, message: SESSION_NOT_FOUND });
+      }
+      throw err;
+    });
+  }
+
+  /**
+   * Resolver facts for a session, from `facts.ts` (the one builder): the caller's relations (creator, device owner,
+   * viewer), the audience states, the team project's path, the Device layer and, for approvals, the tool (Tool layer).
    */
   function sessionFacts(
     tx: Tx,
     auth: AuthContext,
-    s: Pick<SessionRow, "createdBy" | "deviceId">,
+    s: Pick<SessionRow, "id" | "createdBy" | "deviceId">,
     tool?: string,
   ): Promise<ResourceFacts> {
     return sharedSessionFacts(tx, auth.userId, s, tool);
@@ -215,33 +250,14 @@ export function registerWorkSessionRoutes(
     },
     async (req) => ({
       sessions: await core.db.withTenant(tenant(req), async (tx) => {
-        const rows = await svc.sessions(
+        // D-09: the same facts and the same decision as GET /work-sessions/:id, per session: the audience, a unit or
+        // device deny rule, the Work Zone module on the project's path or a revoked host hide it from the list.
+        const rows = await svc.readableSessions(
           tx,
+          authOf(req).userId,
           req.query.archived === "1" ? undefined : ne(workSessions.status, "archived"),
         );
-        // Per-session decision (same facts as GET /work-sessions/:id): a unit/device deny rule or a revoked
-        // host must hide a session from the list exactly as it does from the detail route.
-        const deviceIds = [...new Set(rows.map((r) => r.deviceId))];
-        const hosts = deviceIds.length
-          ? await tx
-              .select({ id: devices.id, owner: devices.ownerUserId, revokedAt: devices.revokedAt })
-              .from(devices)
-              .where(inArray(devices.id, deviceIds))
-          : [];
-        const byId = new Map(hosts.map((h) => [h.id, h]));
-        const userId = authOf(req).userId;
-        return perms.filter(req, tx, rows, "work_session.read", (r) => {
-          const host = byId.get(r.deviceId);
-          return workSessionResource(
-            {
-              createdBy: r.createdBy,
-              deviceOwnerUserId: host?.owner ?? null,
-              deviceRevoked: !host || host.revokedAt !== null,
-              tool: null,
-            },
-            userId,
-          );
-        });
+        return (await perms.filter(req, tx, rows, "work_session.read", (r) => r.facts)).map((r) => r.dto);
       }),
     }),
   );
@@ -366,10 +382,28 @@ export function registerWorkSessionRoutes(
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const found = await svc.session(tx, req.params.id);
-        if (!found) throw notFound("Work session not found");
+        if (!found) return sessionNotFound(tx, req.params.id, SESSION_NOT_FOUND);
         const facts = await sessionFacts(tx, authOf(req), found);
-        await perms.assertCan(req, tx, "work_session.read", facts, { hideAs404: true });
+        await assertReadable(req, tx, facts);
         const viewerCan = await perms.viewerCan(req, tx, facts, SESSION_VIEWER_CAN);
+        const viewerState = await viewerStateOf(perms, tx, authOf(req).userId, facts);
+        // D-13, P-13: the read was allowed with none of the audience's relations, so only the admin rule let the
+        // caller in (the precondition admits no one else): one audit row per open, ids only. Lists, streams and the
+        // other readers never write it.
+        if (
+          !facts.relations.has("viewer") &&
+          !facts.relations.has("creator") &&
+          !facts.relations.has("device_owner")
+        ) {
+          await core.audit.record(tx, {
+            action: "work_session.viewed_as_admin",
+            resourceType: "work_session",
+            resourceId: found.id,
+            sessionId: found.id,
+            deviceId: found.deviceId,
+            clientKind: authOf(req).clientKind,
+          });
+        }
         const topic = wsTopic(found.id);
         // Snapshot cut: read lastSeq FIRST, then state and only events up to it. Each statement sees its own
         // snapshot, so an event committed in between would otherwise be both in `events` and replayed after
@@ -397,7 +431,7 @@ export function registerWorkSessionRoutes(
             return parsed.success ? { seq: r.seq, at: parsed.data.at, event: parsed.data.event } : null;
           })
           .filter((e) => e !== null);
-        return { session, prompts, approvals, events, lastSeq, viewerCan };
+        return { session, prompts, approvals, events, lastSeq, viewerCan, viewerState };
       }),
   );
 
@@ -430,7 +464,13 @@ export function registerWorkSessionRoutes(
         runSessionCommand(
           req,
           tx,
-          { core, locked, lockedFor, applySettingsChange, submitPrompt },
+          {
+            core,
+            locked: async (t, id) => (await visible(req, t, id)).s,
+            lockedFor,
+            applySettingsChange,
+            submitPrompt,
+          },
           req.params.id,
           req.body.text,
         ),
@@ -556,7 +596,7 @@ export function registerWorkSessionRoutes(
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const auth = authOf(req);
-        const s = await locked(tx, req.params.id);
+        const { s } = await visible(req, tx, req.params.id);
         const [approval] = await tx
           .select({ request: workApprovals.request })
           .from(workApprovals)
@@ -632,21 +672,8 @@ export function registerWorkSessionRoutes(
             .innerJoin(devices, eq(devices.id, workSessions.deviceId))
             .innerJoin(projects, eq(projects.id, workSessions.projectId))
             .where(eq(workSessions.id, req.params.id));
-          if (!row) throw notFound("Work session not found");
-          await perms.assertCan(
-            req,
-            tx,
-            "work_session.read",
-            workSessionResource(
-              {
-                createdBy: row.s.createdBy,
-                deviceOwnerUserId: row.d.ownerUserId,
-                deviceRevoked: row.d.revokedAt !== null,
-              },
-              authOf(req).userId,
-            ),
-            { hideAs404: true },
-          );
+          if (!row) return sessionNotFound(tx, req.params.id, SESSION_NOT_FOUND);
+          await assertReadable(req, tx, await sessionFacts(tx, authOf(req), row.s));
           if (row.d.status !== "online" || row.d.revokedAt) {
             throw conflict(`${row.d.name} is offline`, "device_offline");
           }
@@ -682,10 +709,8 @@ export function registerWorkSessionRoutes(
       core.db.withTenant(tenant(req), async (tx) => {
         const auth = authOf(req);
         const session = await svc.session(tx, req.params.id);
-        if (!session) throw notFound("Work session not found");
-        await perms.assertCan(req, tx, "work_session.read", await sessionFacts(tx, auth, session), {
-          hideAs404: true,
-        });
+        if (!session) return sessionNotFound(tx, req.params.id, SESSION_NOT_FOUND);
+        await assertReadable(req, tx, await sessionFacts(tx, auth, session));
         return buildSessionControls(
           session,
           await controlsFor(tx, auth, session.deviceId, session.runtime, true),
@@ -733,9 +758,8 @@ export function registerWorkSessionRoutes(
     { ...user, schema: { tags, params: SessionParams, response: { 200: Ok } } },
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
-        const auth = authOf(req);
-        const s = await locked(tx, req.params.id);
-        await perms.assertCan(req, tx, "work_session.archive", await sessionFacts(tx, auth, s));
+        const { s, facts } = await visible(req, tx, req.params.id);
+        await perms.assertCan(req, tx, "work_session.archive", facts);
         if (s.status === "archived") return { ok: true as const };
         const cancelled = await tx
           .update(workPrompts)
@@ -760,6 +784,9 @@ export function registerWorkSessionRoutes(
         return { ok: true as const };
       }),
   );
+
+  // Phase 07.9-06 (D-04): who can see a session, its people search and the new-session draft preview.
+  registerVisibilityRoutes(app, core, { perms, svc });
 }
 
 /**
@@ -776,7 +803,11 @@ function startError(r: WorkSessionStartFailure): HttpError {
     case "not_allowed":
       return new AuthzDeniedError(r.denial);
     case "device_not_shared":
+    case "not_in_project":
       return new AuthzDeniedError(r.denial, { message: r.message });
+    case "audience_outside_project":
+    case "team_not_assigned":
+      return audienceError(r);
     case "project_not_found":
       return r.reason === "other_device" ? conflict(r.message) : notFound(r.message);
     case "device_offline":

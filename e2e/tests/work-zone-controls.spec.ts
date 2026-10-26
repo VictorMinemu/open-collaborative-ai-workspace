@@ -3,6 +3,12 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 import { isExposed } from "../../packages/contracts/src/runtime-controls/index.ts";
 import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
+import {
+  createTeamProject,
+  linkRepo,
+  removeTeamProject,
+  type TeamProject,
+} from "../support/work-zone-projects";
 import { ADMIN, shot } from "./env";
 
 /**
@@ -65,16 +71,20 @@ test("Work Zone model picker (ref): search, favorites, provider rail, shortcuts 
   const mobile = info.project.name === "mobile";
   const tag = mobile ? "390" : "1440";
   const adminApi = await apiAs(ADMIN);
-  await ensureMember(adminApi, SAM, "developer");
+  const samId = await ensureMember(adminApi, SAM, "developer");
   let device: FakeDeviceHandle | null = null;
   let sessionId: string | null = null;
   let sam: Awaited<ReturnType<typeof openAs>> | null = null;
+  let team: TeamProject | null = null;
 
   try {
     device = await startFakeDevice(adminApi, {
       name: `E2E Controls ${tag}`,
       projectName: `controls-${tag}`,
     });
+    // D-06 (07.9): Sam, the second controller, sees the admin's session through its team project.
+    team = await createTeamProject(adminApi, { name: `Controls ${tag}`, members: [{ userId: samId }] });
+    await linkRepo(adminApi, team.unitId, device.projectId);
     // Plan mode: the fake never asks for approval, so the turn runs straight through.
     const created = await adminApi.post("/api/v1/work-sessions", {
       data: {
@@ -198,6 +208,7 @@ test("Work Zone model picker (ref): search, favorites, provider rail, shortcuts 
   } finally {
     await sam?.context.close();
     if (sessionId) await adminApi.post(`/api/v1/work-sessions/${sessionId}/archive`, { data: {} });
+    if (team) await removeTeamProject(adminApi, team);
     await device?.stop();
     await adminApi.dispose();
   }
@@ -211,15 +222,19 @@ test("Work Zone reasoning and permission menus (ref): only real options, reasons
   const mobile = info.project.name === "mobile";
   const tag = mobile ? "390" : "1440";
   const adminApi = await apiAs(ADMIN);
-  await ensureMember(adminApi, SAM, "developer");
+  const samId = await ensureMember(adminApi, SAM, "developer");
   let device: FakeDeviceHandle | null = null;
   let sessionId: string | null = null;
   let sam: Awaited<ReturnType<typeof openAs>> | null = null;
+  let team: TeamProject | null = null;
   const claudeEffort = isExposed("claude-code", "effort");
   const claudeAuto = isExposed("claude-code", "mode.auto");
 
   try {
     device = await startFakeDevice(adminApi, { name: `E2E Menus ${tag}`, projectName: `menus-${tag}` });
+    // D-06 (07.9): Sam, the second controller, sees the admin's session through its team project.
+    team = await createTeamProject(adminApi, { name: `Menus ${tag}`, members: [{ userId: samId }] });
+    await linkRepo(adminApi, team.unitId, device.projectId);
     const created = await adminApi.post("/api/v1/work-sessions", {
       data: {
         projectId: device.projectId,
@@ -336,6 +351,7 @@ test("Work Zone reasoning and permission menus (ref): only real options, reasons
   } finally {
     await sam?.context.close();
     if (sessionId) await adminApi.post(`/api/v1/work-sessions/${sessionId}/archive`, { data: {} });
+    if (team) await removeTeamProject(adminApi, team);
     await device?.stop();
     await adminApi.dispose();
   }

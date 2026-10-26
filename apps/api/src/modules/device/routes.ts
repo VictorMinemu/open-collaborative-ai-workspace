@@ -11,10 +11,19 @@ import {
   PERMISSION_MODE_RANK,
   type Project,
   ProjectList,
+  type RepoTeamProject,
   RuntimeInfo,
   UpdateDeviceRequest,
 } from "@ocw/contracts";
-import { deviceEnrollments, devices, projects, type Tx } from "@ocw/db";
+import {
+  deviceEnrollments,
+  devices,
+  orgUnits,
+  projects,
+  type Tx,
+  workProjectRepos,
+  workProjectSettings,
+} from "@ocw/db";
 import { and, asc, count, eq, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -26,6 +35,7 @@ import {
   deviceResource,
   memberDirectory,
   type PermissionService,
+  workProjectResource,
 } from "../organization";
 import { type DeviceAccess, loadDeviceAccess } from "./access";
 import { FULL_ACCESS_OPT_IN_MESSAGE, loadGrants, registerDeviceGrantRoutes } from "./grants";
@@ -128,7 +138,10 @@ export function toDevice(r: DeviceRow, ownerName: string | null, projectCount: n
   };
 }
 
-function toProject({ p, d }: { p: typeof projects.$inferSelect; d: DeviceRow }): Project {
+function toProject(
+  { p, d }: { p: typeof projects.$inferSelect; d: DeviceRow },
+  teamProject: RepoTeamProject | null = null,
+): Project {
   return {
     id: p.id,
     deviceId: d.id,
@@ -139,6 +152,7 @@ function toProject({ p, d }: { p: typeof projects.$inferSelect; d: DeviceRow }):
     defaultBranch: p.defaultBranch,
     available: p.removedAt === null,
     createdAt: new Date(p.createdAt).toISOString(),
+    teamProject,
   };
 }
 
@@ -358,9 +372,22 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
       projects: await core.db.withTenant(tenant(req), async (tx) => {
         const userId = authOf(req).userId;
         const rows = await tx
-          .select({ p: projects, d: devices })
+          .select({
+            p: projects,
+            d: devices,
+            // Phase 07.9 (R5): the team project the repository is linked to, its default and the caller's access.
+            unitId: workProjectRepos.unitId,
+            unitName: orgUnits.name,
+            unitPath: orgUnits.path,
+            defaultVisibility: workProjectSettings.defaultVisibility,
+            access: sql<string | null>`case when ${workProjectRepos.unitId} is null then null
+              else app.work_project_access(${workProjectRepos.unitId}, ${userId}::uuid) end`,
+          })
           .from(projects)
           .innerJoin(devices, eq(devices.id, projects.deviceId))
+          .leftJoin(workProjectRepos, eq(workProjectRepos.projectId, projects.id))
+          .leftJoin(orgUnits, eq(orgUnits.id, workProjectRepos.unitId))
+          .leftJoin(workProjectSettings, eq(workProjectSettings.unitId, workProjectRepos.unitId))
           .where(isNull(devices.revokedAt))
           .orderBy(asc(projects.name));
         // Projects on devices the caller may use: their own, shared with everyone, or granted (device.use).
@@ -368,7 +395,30 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
         const usable = await perms.filter(req, tx, rows, "device.use", ({ d }) =>
           deviceFacts(d, userId, access),
         );
-        return usable.map(toProject);
+        // D-13: a repository in a team project also needs project access (the resolver's `work_project` rule).
+        const linked = usable.filter((r) => r.unitId !== null && r.unitPath !== null);
+        const openLinked = new Set(
+          (
+            await perms.filter(req, tx, linked, "work_session.read", (r) =>
+              workProjectResource({ id: r.unitId ?? "", path: r.unitPath ?? [], access: r.access }, userId),
+            )
+          ).map((r) => r.p.id),
+        );
+        // D-14: the device owner always lists their own repositories; one in a project they cannot open comes
+        // without the project (`teamProjectHidden`), and starting a session there is still refused (`not_in_project`).
+        return usable
+          .filter((r) => r.unitId === null || openLinked.has(r.p.id) || r.d.ownerUserId === userId)
+          .map((r) => {
+            if (r.unitId !== null && !openLinked.has(r.p.id)) {
+              return { ...toProject(r, null), teamProjectHidden: true };
+            }
+            return toProject(
+              r,
+              r.unitId !== null && r.unitName !== null
+                ? { id: r.unitId, name: r.unitName, defaultVisibility: r.defaultVisibility ?? "project" }
+                : null,
+            );
+          });
       }),
     }),
   );

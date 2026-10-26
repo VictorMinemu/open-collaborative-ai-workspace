@@ -8,8 +8,10 @@ import {
   CLAUDE_CATALOG,
   CODEX_CATALOG,
   connectWithProject,
+  createTeamProject,
   errorCode,
   invite,
+  linkRepo,
   pairDevice,
   startSession,
 } from "../../testing-workzone";
@@ -246,7 +248,36 @@ describe("units, caps, Full access and revocation (Task 2, ADR-0012 §2)", () =>
     const sales = await unit("department", "Sales", null);
     await join(backend, rexId);
     await join(sales, liaId);
-    ownerSession = await startSession(admin, mac, macProject, {
+    // Explicit access (07.9-03, D-06): the owner's session runs on a second repo of the device, linked to a team
+    // project with Sam and Dana, so they keep acting on it as controllers whatever their device grants are; the
+    // device's grants, caps and floor (this file's subject) still decide their turns. `ocw` stays a personal repo for
+    // the device-sharing cases.
+    mac.send({
+      type: "projects.sync",
+      projects: [
+        { localId: "lp_srv", name: "ocw", gitRemote: null, defaultBranch: "main" },
+        { localId: "lp_team", name: "ocw-team", gitRemote: null, defaultBranch: "main" },
+      ],
+    });
+    await mac.next((f) => f.type === "projects.ack");
+    const teamRepo = (
+      (await admin.request("GET", "/api/v1/projects")).body!.projects as Array<{
+        id: string;
+        name: string;
+      }>
+    ).find((p) => p.name === "ocw-team")!.id;
+    const team = await createTeamProject(stack, admin, {
+      name: "OCW",
+      members: [{ userId: adminId }, { userId: samId }, { userId: danaId }],
+    });
+    await linkRepo(stack, {
+      organizationId: orgId,
+      unitId: team.unitId,
+      projectId: teamRepo,
+      deviceId: macId,
+      linkedBy: adminId,
+    });
+    ownerSession = await startSession(admin, mac, teamRepo, {
       title: "Owner's",
       permissionMode: "acceptEdits",
     });

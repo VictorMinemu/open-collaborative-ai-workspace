@@ -36,6 +36,8 @@ import {
   toolApprovalPolicies,
   unitMemberships,
   vaultItems,
+  workProjectRepos,
+  workProjectTeams,
 } from "@ocw/db";
 import { and, asc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
@@ -94,7 +96,7 @@ export function applyMove<T extends UnitNode>(
 
 // ---------------------------------------------------------------- data access
 
-type UnitRow = typeof orgUnits.$inferSelect;
+export type UnitRow = typeof orgUnits.$inferSelect;
 
 /** The permissions a unit row reports in `viewerCan` (the web renders these, never re-implements policy). */
 const UNIT_VIEWER_PERMISSIONS: readonly Permission[] = [
@@ -107,6 +109,12 @@ export const orgTopic = (organizationId: string) => `org:${organizationId}`;
 
 /** A Postgres `uuid[]` literal from validated ids (drizzle would expand a JS array into a value list). */
 export const uuidArray = (ids: readonly string[]) => sql`${`{${ids.join(",")}}`}::uuid[]`;
+
+/** The name of the constraint a Postgres error (direct or wrapped by Drizzle) reports. */
+function constraintOf(err: unknown): string | undefined {
+  const e = err as { constraint?: string; cause?: { constraint?: string } };
+  return e?.constraint ?? e?.cause?.constraint;
+}
 
 export function isUniqueViolation(err: unknown): boolean {
   const e = err as { code?: string; cause?: { code?: string } };
@@ -178,6 +186,83 @@ export async function unitsChanged(core: Core, tx: Tx, unitId: string, action: s
   });
 }
 
+/**
+ * The one unit-creation path (POST /units and, Phase 07.9, POST /work-projects): under the per-organization lock, the
+ * parent is (re-)read inside the tenant, the kind rule is checked, the row gets a uuidv7 id and its materialised path,
+ * and the `unit.created` audit and `units.updated` event go out in the same transaction. A project also gets its
+ * creator (D-13, `addProjectCreator`), whichever route created it. The caller decides who may create first
+ * (`unit.manage`, or `work_project.manage` on the parent); this helper never decides.
+ */
+export async function createUnit(
+  core: Core,
+  tx: Tx,
+  input: { kind: UnitKind; name: string; parentId: string | null; createdBy: string | null },
+): Promise<UnitRow> {
+  const { kind, name, parentId, createdBy } = input;
+  await lockUnits(tx);
+  const parent = parentId ? await requireUnit(tx, parentId) : null;
+  if (!validateParentKind(kind, parent?.kind ?? null)) {
+    throw badRequest(
+      parent ? `A ${kind} cannot be placed under a ${parent.kind}` : `A ${kind} cannot be top level`,
+      "invalid_parent_kind",
+    );
+  }
+  const idRes = await tx.execute(sql`select uuidv7() as id`);
+  const id = String((idRes.rows[0] as { id: string }).id);
+  let row: UnitRow | undefined;
+  try {
+    [row] = await tx
+      .insert(orgUnits)
+      .values({
+        id,
+        organizationId: tenantOf(tx).organizationId,
+        parentId: parent?.id ?? null,
+        kind,
+        name,
+        path: [...(parent?.path ?? []), id],
+        createdBy,
+      })
+      .returning();
+  } catch (err) {
+    if (isUniqueViolation(err)) throw nameTaken(name);
+    throw err;
+  }
+  if (!row) throw new Error("unit insert returned no row");
+  await core.audit.record(tx, {
+    action: "unit.created",
+    resourceType: "org_unit",
+    resourceId: id,
+    metadata: { name, kind, parentId: parent?.id ?? null },
+  });
+  if (kind === "project" && createdBy) await addProjectCreator(core, tx, id, createdBy);
+  await unitsChanged(core, tx, id, "created");
+  return row;
+}
+
+/**
+ * D-13 (Phase 07.9): the creator of a project joins it, as its lead when their org role may lead (`LEAD_ORG_ROLES`),
+ * otherwise as a member (a delegated allow rule), so "only Lead or Admin roles lead" always holds. The documented
+ * auto-lead: no `unit.manage` check, because the caller already holds the right to create under the parent. Audited
+ * as `unit_membership.added` with ids only, in the creation's transaction.
+ */
+async function addProjectCreator(core: Core, tx: Tx, unitId: string, userId: string): Promise<void> {
+  const member = await memberRow(tx, userId);
+  const role = member && LEAD_ORG_ROLES.includes(member.role) ? UnitRole.enum.lead : UnitRole.enum.member;
+  await tx.insert(unitMemberships).values({
+    organizationId: tenantOf(tx).organizationId,
+    unitId,
+    userId,
+    role,
+    addedBy: userId,
+  });
+  await core.audit.record(tx, {
+    action: "unit_membership.added",
+    resourceType: "org_unit",
+    resourceId: unitId,
+    metadata: { unitId, userId, role },
+  });
+}
+
 // ---------------------------------------------------------------- routes
 
 export function registerUnitRoutes(
@@ -224,40 +309,7 @@ export function registerUnitRoutes(
         await lockUnits(tx);
         const parent = parentId ? await requireUnit(tx, parentId) : null;
         await perms.assertCan(req, tx, "unit.manage", parent ? unitResource(parent) : orgResource());
-        if (!validateParentKind(kind, parent?.kind ?? null)) {
-          throw badRequest(
-            parent ? `A ${kind} cannot be placed under a ${parent.kind}` : `A ${kind} cannot be top level`,
-            "invalid_parent_kind",
-          );
-        }
-        const idRes = await tx.execute(sql`select uuidv7() as id`);
-        const id = String((idRes.rows[0] as { id: string }).id);
-        let row: UnitRow | undefined;
-        try {
-          [row] = await tx
-            .insert(orgUnits)
-            .values({
-              id,
-              organizationId: tenantOf(tx).organizationId,
-              parentId: parent?.id ?? null,
-              kind,
-              name,
-              path: [...(parent?.path ?? []), id],
-              createdBy: req.auth?.userId ?? null,
-            })
-            .returning();
-        } catch (err) {
-          if (isUniqueViolation(err)) throw nameTaken(name);
-          throw err;
-        }
-        if (!row) throw new Error("unit insert returned no row");
-        await core.audit.record(tx, {
-          action: "unit.created",
-          resourceType: "org_unit",
-          resourceId: id,
-          metadata: { name, kind, parentId: parent?.id ?? null },
-        });
-        await unitsChanged(core, tx, id, "created");
+        const row = await createUnit(core, tx, { kind, name, parentId, createdBy: req.auth?.userId ?? null });
         return unitView(req, tx, perms, row);
       }),
   );
@@ -372,6 +424,14 @@ export function registerUnitRoutes(
           .where(eq(orgUnits.parentId, unit.id))
           .limit(1);
         if (child) throw conflict("Move or delete the units inside it first", "unit_has_children");
+        // Phase 07.9 (D-01, UI-SPEC U-7): a team project's repository links hold it (RESTRICT): unlinking turns their
+        // sessions personal and is decided and audited by its own route, never as a silent side effect of this one.
+        const [repo] = await tx
+          .select({ id: workProjectRepos.projectId })
+          .from(workProjectRepos)
+          .where(eq(workProjectRepos.unitId, unit.id))
+          .limit(1);
+        if (repo) throw conflict("Unlink this project's repositories first", "unit_has_repositories");
         // AGENT-01 (T-06-07-03): a unit persona never silently widens to the organization; it is moved or deleted
         // first. Checked before the RESTRICT foreign key would fire, so the caller gets a reason.
         const [bot] = await tx
@@ -458,6 +518,13 @@ export function registerUnitRoutes(
             .from(permissionRules)
             .where(eq(permissionRules.scopeUnitId, unit.id))
         ).map((r) => r.id);
+        // Phase 07.9: the team projects this team or department was assigned to lose it with the unit (cascade).
+        const unassignedFromProjectIds = (
+          await tx
+            .select({ id: workProjectTeams.projectUnitId })
+            .from(workProjectTeams)
+            .where(eq(workProjectTeams.teamUnitId, unit.id))
+        ).map((r) => r.id);
         // Archived templates of the unit: removed with it (versions cascade; agents.template_id is set null).
         const removedTemplateIds = (
           await tx
@@ -465,7 +532,15 @@ export function registerUnitRoutes(
             .where(eq(agentTemplates.unitId, unit.id))
             .returning({ id: agentTemplates.id })
         ).map((r) => r.id);
-        await tx.delete(orgUnits).where(eq(orgUnits.id, unit.id));
+        try {
+          await tx.delete(orgUnits).where(eq(orgUnits.id, unit.id));
+        } catch (err) {
+          // Defence in depth: the row lock above makes the check see every committed link.
+          if (constraintOf(err) === "work_project_repos_unit_fk") {
+            throw conflict("Unlink this project's repositories first", "unit_has_repositories");
+          }
+          throw err;
+        }
         await deps.approvals.closeGone(tx, { ids: goneApprovals });
         await core.audit.record(tx, {
           action: "unit.deleted",
@@ -478,9 +553,18 @@ export function registerUnitRoutes(
             removedMemberIds,
             removedRuleIds,
             ...(removedTemplateIds.length > 0 ? { removedTemplateIds } : {}),
+            ...(unassignedFromProjectIds.length > 0 ? { unassignedFromProjectIds } : {}),
           },
         });
         await unitsChanged(core, tx, unit.id, "deleted");
+        for (const projectUnitId of unassignedFromProjectIds) {
+          await core.realtime.appendEvent(
+            tx,
+            orgTopic(tenantOf(tx).organizationId),
+            EventTypes.workProjectUpdated,
+            { unitId: projectUnitId },
+          );
+        }
         for (const ruleId of removedRuleIds) {
           await core.realtime.appendEvent(
             tx,
@@ -657,7 +741,7 @@ export function registerUnitRoutes(
 const isLeadMembership = (unitRole: UnitRole) => unitRole === UnitRole.enum.lead;
 
 /** Org roles that may lead a unit (D-06): an eligibility rule on the target, not on the caller. */
-const LEAD_ORG_ROLES: readonly OrgRole[] = ["lead", "admin"];
+export const LEAD_ORG_ROLES: readonly OrgRole[] = ["lead", "admin"];
 
 async function memberRow(tx: Tx, userId: string) {
   const [row] = await tx.select().from(orgMembers).where(eq(orgMembers.userId, userId)).limit(1);

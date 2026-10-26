@@ -14,6 +14,14 @@
 when:
   - event: [pull_request, manual]
 
+# After the e2e workflows, never beside them (pipelines 64-69): this workflow's per-bot networks made the e2e Chromium
+# fail with net::ERR_NETWORK_CHANGED, and its CPU and Docker load pushed the kill switch and the first browser open past
+# their budgets. It still runs beside verify, cell-smoke and images, and whatever the e2e result.
+depends_on:
+  - name: e2e
+    optional: true
+runs_on: [success, failure]
+
 variables:
   - &docker_sock /var/run/docker.sock:/var/run/docker.sock
   - &shared /home/ocw-ci:/home/ocw-ci

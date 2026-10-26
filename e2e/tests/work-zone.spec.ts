@@ -4,6 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { apiAs, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
+import {
+  createTeamProject,
+  linkRepo,
+  removeTeamProject,
+  type TeamProject,
+} from "../support/work-zone-projects";
 import { ADMIN, API_URL, shot } from "./env";
 
 /**
@@ -57,6 +63,7 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
   let daemon: ChildProcess | null = null;
   let adminApi: APIRequestContext | null = null;
   let samToRestore: string | null = null;
+  let team: TeamProject | null = null;
   // Cleanup never throws from `finally` (that would replace the body's error: a stuck click was once reported as a
   // hung cleanup request); its failures fail the test after a passing body.
   const cleanupErrors: unknown[] = [];
@@ -140,6 +147,19 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
     const samId = await ensureMember(adminApi, SAM, "developer");
     samToRestore = samId;
     const adminId = await userIdOf(adminApi);
+    // D-06 (07.9): a session on a personal repository is the device owner's; Sam follows it as a member of the team
+    // project the repository is linked to (the admin creates the project and links the repository from their device).
+    const { devices } = (await (await adminApi.get("/api/v1/devices")).json()) as {
+      devices: Array<{ id: string; name: string; status: string }>;
+    };
+    const deviceId = devices.find((d) => d.name === deviceName && d.status === "online")?.id;
+    const { projects } = (await (await adminApi.get("/api/v1/projects")).json()) as {
+      projects: Array<{ id: string; deviceId: string; name: string }>;
+    };
+    const repoId = projects.find((p) => p.deviceId === deviceId && p.name === projectName)?.id;
+    expect(repoId, `${projectName} is registered on ${deviceName}`).toBeTruthy();
+    team = await createTeamProject(adminApi, { name: `Acme Web ${tag}`, members: [{ userId: samId }] });
+    await linkRepo(adminApi, team.unitId, repoId as string);
     const viewers = (p: Page) => p.getByTestId("session-header").getByTestId("session-viewers");
     const samOnAdmin = viewers(page).locator(`[data-testid="presence-avatar"][data-user-id="${samId}"]`);
     const sam = await openAs(browser, SAM, info.project.name);
@@ -225,6 +245,10 @@ test("Work Zone: pair a device, run a session, approve, review changes", async (
           });
           expect(res.ok(), "restore Sam to developer").toBe(true);
         });
+      }
+      if (team) {
+        const project = team;
+        await tidy(() => removeTeamProject(api, project));
       }
       await tidy(() => api.dispose());
     }

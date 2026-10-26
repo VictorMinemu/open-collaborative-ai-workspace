@@ -570,6 +570,35 @@ async function seedOrg(c: pg.Client, org: string) {
     "insert into app.agent_member_data (organization_id, agent_id, conversation_id, sites, first_event_id) values ($1, $2, $3, '{panel.example.test}', $4)",
     [org, personal, dm, eventId],
   );
+
+  // Phase 07.9 (D-01, D-03, D-04): a team project under a team of the department, with its default, the team assigned,
+  // the seeded repo linked, and a person and a team in the seeded session's audience.
+  const team = randomUUID();
+  const projectUnit = randomUUID();
+  await q(
+    "insert into app.org_units (id, organization_id, parent_id, kind, name, path) values ($1, $2, $3, 'team', 'Platform', ARRAY[$3, $1]::uuid[])",
+    [team, org, unit],
+  );
+  await q(
+    "insert into app.org_units (id, organization_id, parent_id, kind, name, path) values ($1, $2, $3, 'project', 'Atlas', ARRAY[$4, $3, $1]::uuid[])",
+    [projectUnit, org, team, unit],
+  );
+  await q(
+    "insert into app.work_project_settings (organization_id, unit_id, default_visibility, updated_by) values ($1, $2, 'owner', $3)",
+    [org, projectUnit, user],
+  );
+  await q(
+    "insert into app.work_project_teams (organization_id, project_unit_id, team_unit_id, assigned_by) values ($1, $2, $3, $4)",
+    [org, projectUnit, team, user],
+  );
+  await q(
+    "insert into app.work_project_repos (organization_id, project_id, device_id, unit_id, linked_by) values ($1, $2, $3, $4, $5)",
+    [org, project, device, projectUnit, user],
+  );
+  await q(
+    "insert into app.work_session_grants (organization_id, work_session_id, subject_kind, subject_id, granted_by) values ($1, $2, 'user', $3, $3), ($1, $2, 'unit', $4, $3)",
+    [org, ws, user, team],
+  );
 }
 
 const SANDBOX_TABLES = [
@@ -600,6 +629,13 @@ const CONNECTOR_TABLES = [
   "app.agent_vault_grants",
   "app.agent_templates",
   "app.agent_template_versions",
+] as const;
+
+const WORK_ZONE_VISIBILITY_TABLES = [
+  "app.work_project_settings",
+  "app.work_project_teams",
+  "app.work_project_repos",
+  "app.work_session_grants",
 ] as const;
 
 const AI_CHAT_TABLES = [
@@ -1721,7 +1757,7 @@ describe("tenant isolation (RLS)", () => {
   it("Phase 07.2: memory scope shapes, approval and card columns, and memory-only folder rules", async () => {
     const { unit, agent, user, card } = (
       await migrator.query(
-        `select (select id from app.org_units where organization_id = $1 limit 1) as unit,
+        `select (select id from app.org_units where organization_id = $1 and kind = 'department' limit 1) as unit,
                 (select id from app.agents where organization_id = $1 and scope = 'team' limit 1) as agent,
                 (select user_id from app.org_members where organization_id = $1 limit 1) as user,
                 (select message_id from app.message_cards where organization_id = $1 limit 1) as card`,
@@ -2504,6 +2540,263 @@ describe("tenant isolation (RLS)", () => {
       );
     await expect(kind("browser_session")).resolves.toBeDefined();
     await expect(kind("cookie_jar")).rejects.toMatchObject({ constraint: "secrets_kind_check" });
+  });
+
+  it("Phase 07.9: the four team-project and audience tables are org-scoped, forced, seeded and invisible and unwritable across tenants", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    for (const tbl of WORK_ZONE_VISIBILITY_TABLES) {
+      // Tenant isolation, plus (07.9-12) the RESTRICTIVE audience backstop on work_session_grants
+      // (work-session-audience.int.test.ts proves it).
+      const backstop = tbl === "app.work_session_grants";
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: backstop ? 2 : 1 });
+      const seeded = await migrator.query(
+        `select count(*)::int as n from ${tbl} where organization_id = $1`,
+        [B],
+      );
+      expect(seeded.rows[0].n, `${tbl} has B rows`).toBeGreaterThan(0);
+      const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
+      expect(own.rows[0].n, `${tbl} seeded for A`).toBeGreaterThan(0);
+      const cross = await inTenant(A, () =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [B]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant select`).toBe(0);
+      for (const stmt of [
+        `update ${tbl} set organization_id = organization_id where organization_id = $1`,
+        `delete from ${tbl} where organization_id = $1`,
+      ]) {
+        const n = await inTenant(A, () => app.query(stmt, [B]).then((res) => res.rowCount));
+        expect(n, `${tbl}: ${stmt}`).toBe(0);
+      }
+      // Moving one of A's own rows into B is refused by the tenant policy (or first by a composite foreign key, which
+      // carries the organization and so finds no parent in B).
+      await expect(
+        inTenant(A, () =>
+          app.query(`update ${tbl} set organization_id = $1 where organization_id = $2`, [B, A]),
+        ),
+        `${tbl} cross-tenant move`,
+      ).rejects.toThrow(/row-level security|violates foreign key constraint/);
+      const still = await migrator.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [
+        B,
+      ]);
+      expect(still.rows[0].n, `${tbl} B rows intact`).toBe(seeded.rows[0].n);
+    }
+  });
+
+  it("Phase 07.9: audiences, defaults, team assignments, repo links and their references are checked by the database (D-01, D-03, D-04)", async () => {
+    const ids = async (org: string) =>
+      (
+        await migrator.query(
+          `select g.subject_id as user, r.device_id as device, r.project_id as project, s.id as session,
+                  s.conversation_id as conv, r.unit_id as unit, t.team_unit_id as team
+           from app.work_session_grants g
+           join app.work_sessions s on s.id = g.work_session_id
+           join app.work_project_repos r on r.project_id = s.project_id
+           join app.work_project_teams t on t.project_unit_id = r.unit_id
+           where g.organization_id = $1 and g.subject_kind = 'user'`,
+          [org],
+        )
+      ).rows[0];
+    const a = await ids(A);
+    const b = await ids(B);
+    /** Each check runs in its own migrator transaction that is rolled back, so the seeds stay as they are. */
+    const rolledBack = async <T>(fn: () => Promise<T>): Promise<T> => {
+      await migrator.query("begin");
+      try {
+        return await fn();
+      } finally {
+        await migrator.query("rollback");
+      }
+    };
+    const m = (text: string, values: unknown[]) => migrator.query(text, values);
+
+    // A session created without an audience reads `project` (the D-06 default); other audiences are refused.
+    const fresh = await rolledBack(async () => {
+      const r = await m(
+        "insert into app.work_sessions (organization_id, conversation_id, project_id, device_id, title, created_by) values ($1, $2, $3, $4, 'New', $5) returning visibility",
+        [A, a.conv, a.project, a.device, a.user],
+      );
+      return r.rows[0].visibility;
+    });
+    expect(fresh).toBe("project");
+    for (const ok of ["owner", "project", "teams", "people"]) {
+      const n = await rolledBack(() =>
+        m("update app.work_sessions set visibility = $2 where id = $1", [a.session, ok]).then(
+          (r) => r.rowCount,
+        ),
+      );
+      expect(n, ok).toBe(1);
+    }
+    await expect(
+      rolledBack(() => m("update app.work_sessions set visibility = 'public' where id = $1", [a.session])),
+    ).rejects.toThrow(/work_sessions_visibility_ck/);
+    await expect(
+      rolledBack(() =>
+        m("update app.work_project_settings set default_visibility = 'teams' where unit_id = $1", [a.unit]),
+      ),
+    ).rejects.toThrow(/work_project_settings_default_ck/);
+    await expect(
+      rolledBack(() =>
+        m(
+          "insert into app.work_project_teams (organization_id, project_unit_id, team_unit_id, assigned_by) values ($1, $2, $2, $3)",
+          [A, a.unit, a.user],
+        ),
+      ),
+    ).rejects.toThrow(/work_project_teams_not_self_ck/);
+
+    // Grants: a user or a unit; one active grant per subject; a revoke frees the slot and keeps the row.
+    const grant = (kind: string, subject: string) =>
+      m(
+        "insert into app.work_session_grants (organization_id, work_session_id, subject_kind, subject_id, granted_by) values ($1, $2, $3, $4, $5)",
+        [A, a.session, kind, subject, a.user],
+      );
+    await expect(rolledBack(() => grant("role", randomUUID()))).rejects.toThrow(
+      /work_session_grants_subject_kind_ck/,
+    );
+    await expect(rolledBack(() => grant("user", a.user))).rejects.toThrow(/work_session_grants_active_uq/);
+    await expect(rolledBack(() => grant("unit", a.team))).rejects.toThrow(/work_session_grants_active_uq/);
+    const regranted = await rolledBack(async () => {
+      const revoked = await m(
+        "update app.work_session_grants set revoked_at = now(), revoked_by = $3 where work_session_id = $1 and subject_kind = 'user' and subject_id = $2 and revoked_at is null",
+        [a.session, a.user, a.user],
+      );
+      expect(revoked.rowCount).toBe(1);
+      const r = await grant("user", a.user);
+      const n = await m(
+        "select count(*)::int as n from app.work_session_grants where work_session_id = $1 and subject_id = $2",
+        [a.session, a.user],
+      );
+      return { inserted: r.rowCount, rows: n.rows[0].n };
+    });
+    expect(regranted).toEqual({ inserted: 1, rows: 2 });
+
+    // One team project per repo; a project unit with a linked repo cannot be deleted.
+    await expect(
+      rolledBack(async () => {
+        const other = randomUUID();
+        await m(
+          "insert into app.org_units (id, organization_id, parent_id, kind, name, path) values ($1, $2, $3, 'project', 'Other', ARRAY[$3, $1]::uuid[])",
+          [other, A, a.team],
+        );
+        return m(
+          "insert into app.work_project_repos (organization_id, project_id, device_id, unit_id, linked_by) values ($1, $2, $3, $4, $5)",
+          [A, a.project, a.device, other, a.user],
+        );
+      }),
+    ).rejects.toThrow(/work_project_repos_pkey/);
+    await expect(rolledBack(() => m("delete from app.org_units where id = $1", [a.unit]))).rejects.toThrow(
+      /work_project_repos_unit_fk/,
+    );
+
+    // Every reference carries the organization (FKs bypass RLS): org B's team, repo, unit or session named from org A
+    // is refused even for the migrator.
+    const fk = /violates foreign key constraint/;
+    const refusals: Array<[string, unknown[]]> = [
+      [
+        "insert into app.work_project_teams (organization_id, project_unit_id, team_unit_id, assigned_by) values ($1, $2, $3, $4)",
+        [A, a.unit, b.team, a.user],
+      ],
+      [
+        "insert into app.work_project_teams (organization_id, project_unit_id, team_unit_id, assigned_by) values ($1, $2, $3, $4)",
+        [A, b.unit, a.team, a.user],
+      ],
+      [
+        "insert into app.work_session_grants (organization_id, work_session_id, subject_kind, subject_id, granted_by) values ($1, $2, 'user', $3, $3)",
+        [A, b.session, a.user],
+      ],
+    ];
+    for (const [stmt, values] of refusals) {
+      await expect(
+        rolledBack(() => m(stmt, values)),
+        stmt,
+      ).rejects.toThrow(fk);
+    }
+    // Settings of A naming a project unit of B (one with no settings yet, so the primary key cannot refuse it first).
+    await expect(
+      rolledBack(async () => {
+        const other = randomUUID();
+        await m(
+          "insert into app.org_units (id, organization_id, parent_id, kind, name, path) values ($1, $2, $3, 'project', 'Other', ARRAY[$3, $1]::uuid[])",
+          [other, B, b.team],
+        );
+        return m(
+          "insert into app.work_project_settings (organization_id, unit_id, default_visibility, updated_by) values ($1, $2, 'project', $3)",
+          [A, other, a.user],
+        );
+      }),
+    ).rejects.toThrow(/work_project_settings_unit_fk/);
+    // A link in A naming a repo of B (an unlinked one, so the primary key cannot refuse it first).
+    await expect(
+      rolledBack(async () => {
+        const repo = randomUUID();
+        await m(
+          "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, 'p2', 'other')",
+          [repo, B, b.device],
+        );
+        return m(
+          "insert into app.work_project_repos (organization_id, project_id, device_id, unit_id, linked_by) values ($1, $2, $3, $4, $5)",
+          [A, repo, b.device, a.unit, a.user],
+        );
+      }),
+    ).rejects.toThrow(/work_project_repos_project_fk/);
+    // Org A's own repo linked to org B's project unit.
+    await expect(
+      rolledBack(async () => {
+        await m("delete from app.work_project_repos where project_id = $1", [a.project]);
+        return m(
+          "insert into app.work_project_repos (organization_id, project_id, device_id, unit_id, linked_by) values ($1, $2, $3, $4, $5)",
+          [A, a.project, a.device, b.unit, a.user],
+        );
+      }),
+    ).rejects.toThrow(/work_project_repos_unit_fk/);
+    // The repo link names the repo's own device: a link pairing the repo with another device is refused.
+    await expect(
+      rolledBack(async () => {
+        const otherDevice = randomUUID();
+        await m(
+          "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash) values ($1, $2, $3, 'other', 'linux', $4)",
+          [otherDevice, A, a.user, `dev-${otherDevice}`],
+        );
+        await m("delete from app.work_project_repos where project_id = $1", [a.project]);
+        return m(
+          "insert into app.work_project_repos (organization_id, project_id, device_id, unit_id, linked_by) values ($1, $2, $3, $4, $5)",
+          [A, a.project, otherDevice, a.unit, a.user],
+        );
+      }),
+    ).rejects.toThrow(fk);
+
+    // Cascades: a removed device takes its repo links; a deleted session takes its grants; a deleted project unit with
+    // no linked repo takes its settings and team assignments.
+    const cascades = await rolledBack(async () => {
+      const count = async (sql: string, v: unknown[]) => (await m(sql, v)).rows[0].n as number;
+      const links = "select count(*)::int as n from app.work_project_repos where organization_id = $1";
+      const grants = "select count(*)::int as n from app.work_session_grants where work_session_id = $1";
+      const settings =
+        "select (select count(*)::int from app.work_project_settings where unit_id = $1) + (select count(*)::int from app.work_project_teams where project_unit_id = $1) as n";
+      const before = {
+        links: await count(links, [A]),
+        grants: await count(grants, [a.session]),
+        settings: await count(settings, [a.unit]),
+      };
+      await m("delete from app.work_sessions where id = $1", [a.session]);
+      const grantsAfter = await count(grants, [a.session]);
+      await m("delete from app.devices where id = $1", [a.device]);
+      const linksAfter = await count(links, [A]);
+      await m("delete from app.org_units where id = $1", [a.unit]);
+      const settingsAfter = await count(settings, [a.unit]);
+      return { before, after: { links: linksAfter, grants: grantsAfter, settings: settingsAfter } };
+    });
+    expect(cascades).toEqual({
+      before: { links: 1, grants: 2, settings: 2 },
+      after: { links: 0, grants: 0, settings: 0 },
+    });
+    // The RESTRICT guards a unit's deletion only: deleting the whole organization still removes everything.
+    const orgGone = await rolledBack(async () => {
+      await m("delete from auth.organization where id = $1", [A]);
+      return (
+        await m("select count(*)::int as n from app.work_project_repos where organization_id = $1", [A])
+      ).rows[0].n;
+    });
+    expect(orgGone).toBe(0);
   });
 
   it("Phase 4: accent-insensitive Spanish search, a stored tsvector and the search indexes", async () => {

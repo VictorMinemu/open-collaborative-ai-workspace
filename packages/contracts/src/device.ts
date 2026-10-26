@@ -2,6 +2,7 @@ import { z } from "zod";
 import { Id, IsoDateTime } from "./common";
 import { Permission } from "./permissions";
 import { PermissionMode, RuntimeId } from "./session-events";
+import { RepoTeamProject } from "./work-projects";
 
 export const DevicePlatform = z.enum(["darwin", "linux", "win32"]);
 export type DevicePlatform = z.infer<typeof DevicePlatform>;
@@ -117,6 +118,17 @@ export const Project = z.object({
   /** False once the device stopped announcing it (removed locally). */
   available: z.boolean(),
   createdAt: IsoDateTime,
+  /**
+   * Phase 07.9 (R5): the team project the repository is linked to and the default its new sessions take; null = a
+   * personal repository. Optional so older payloads parse.
+   */
+  teamProject: RepoTeamProject.nullable().optional(),
+  /**
+   * Phase 07.9 (D-14): true when the repository is linked to a team project the caller cannot open. Only its device
+   * owner lists it then, without the project (`teamProject` is null) and without a way to start a session on it
+   * ("Linked to a project you can't open"). Absent = false.
+   */
+  teamProjectHidden: z.boolean().optional(),
 });
 export type Project = z.infer<typeof Project>;
 

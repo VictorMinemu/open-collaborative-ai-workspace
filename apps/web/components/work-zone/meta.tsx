@@ -152,7 +152,13 @@ export const STATUS: Record<
     dot: "bg-muted-foreground",
     spin: true,
   },
-  idle: { label: "Ready", icon: CircleCheck, tone: "text-success bg-success/12", dot: "bg-success" },
+  idle: {
+    label: "Ready",
+    icon: CircleCheck,
+    // The Badge success pill (AA in both themes); the semantic token on its own tint measured 2.5:1 (07.9-11, as #197).
+    tone: "bg-emerald-100 text-emerald-800 dark:bg-emerald-400/15 dark:text-emerald-300",
+    dot: "bg-success",
+  },
   running: {
     label: "Working",
     icon: Loader,
@@ -182,7 +188,8 @@ export const STATUS: Record<
   failed: {
     label: "Failed",
     icon: CircleAlert,
-    tone: "text-destructive bg-destructive/12",
+    // The Badge destructive pill (AA in both themes); the semantic token on its own tint measured 3.8:1 (07.9 polish).
+    tone: "bg-red-100 text-red-800 dark:bg-red-400/15 dark:text-red-300",
     dot: "bg-destructive",
   },
   archived: {

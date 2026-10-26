@@ -26,6 +26,16 @@ interface Subscription {
   presenceLive: boolean;
   /** Presence deltas received between listen() and the snapshot, flushed in order after it (Research note 4). */
   presenceBuffer: PresenceFrame[];
+  /**
+   * Privacy first (07.9 fan-out): an invalidation matched this subscription and its re-decision has not answered yet.
+   * Every frame for it waits here (at most HOLD_LIMIT); a denial drops them with the subscription, an allow delivers
+   * them. Null while nothing is pending.
+   */
+  held: ServerFrame[] | null;
+  /** More than HOLD_LIMIT frames waited: they are dropped and the client is told to `resync` once allowed. */
+  heldOverflow: boolean;
+  /** Hands one bus frame to this subscription (replay buffer, presence buffer or the socket). */
+  deliver: (frame: ServerFrame) => void;
 }
 
 /** One open socket of this API instance. `id` is the presence `conn`: random, never the session id (D-03). */
@@ -56,6 +66,9 @@ export const PRESENCE_RATE_LIMIT = { max: 30, windowMs: 10_000 } as const;
 
 /** Re-decisions of live subscriptions running at once per API instance (RT-01, T-03-04-04). */
 export const REAUTH_CONCURRENCY = 4;
+
+/** Frames one subscription may hold while its re-decision runs (07.9 fan-out); beyond it the client resyncs. */
+export const HOLD_LIMIT = 1_000;
 
 /**
  * Backstop for revocations and invalidations that never reached this instance (Redis down, expiry): Pitfall 5. Each
@@ -206,20 +219,60 @@ export function registerGateway(
    * presence) and tells the client with `revoked`; "error" keeps it for the next check. At most
    * REAUTH_CONCURRENCY re-decisions run at once on this instance.
    */
-  const reauthorize = async (conn: Connection, topic: string) => {
+  const reauthorize = async (conn: Connection, topic: string, job: ReauthJob) => {
     const sub = conn.subs.get(topic);
     if (!sub) return;
     const verdict = await deps.realtime.reauthorizeTopic(conn.auth, topic);
     // Replaced (a fresh `sub` was decided on its own) or removed meanwhile: nothing to do.
     if (conn.subs.get(topic) !== sub) return;
-    if (verdict === "denied") {
-      await conn.unsub(topic);
-      conn.send({ op: "revoked", topic, reason: "forbidden" });
-      app.log.info({ topic, userId: conn.auth.userId }, "live subscription revoked");
-    } else if (verdict === "error") {
+    if (verdict === "error") {
       app.log.warn({ topic, userId: conn.auth.userId }, "subscription re-decision failed; kept");
+      // Kept (D-05), but what waited for this answer is never sent undecided: dropped, and the client re-reads.
+      if (!job.again) release(conn, topic, sub, false);
+    } else if (verdict === "allowed") {
+      // Another invalidation arrived while this ran: the subscription stays held until the next run answers.
+      if (!job.again) release(conn, topic, sub, true);
+    } else {
+      await conn.unsub(topic);
+      // The cause is a fixed code (07.9, D-13), never a name; absent when the authorizer gave none.
+      conn.send({
+        op: "revoked",
+        topic,
+        reason: "forbidden",
+        ...(verdict.cause ? { cause: verdict.cause } : {}),
+      });
+      app.log.info({ topic, userId: conn.auth.userId, cause: verdict.cause }, "live subscription revoked");
     }
   };
+  /**
+   * Ends a hold (07.9 fan-out). Allowed: the held frames go out in order (durable ones by seq), or a `resync` when more
+   * than HOLD_LIMIT waited. Not decided (an authorizer error): they are dropped and the client re-reads (`resync`)
+   * through the routes, which decide again.
+   */
+  const release = (conn: Connection, topic: string, sub: Subscription, allowed: boolean) => {
+    const held = sub.held;
+    if (!held) return;
+    const overflow = sub.heldOverflow;
+    sub.held = null;
+    sub.heldOverflow = false;
+    if (!allowed || overflow) {
+      if (overflow || held.some((f) => f.op === "ev")) conn.send({ op: "resync", topic });
+      return;
+    }
+    const durable = held.filter((f): f is DurableFrame => f.op === "ev").sort((a, b) => a.seq - b.seq);
+    for (const f of held) if (f.op !== "ev") sub.deliver(f);
+    for (const f of durable) sub.deliver(f);
+  };
+  /** Starts (or keeps) holding a live subscription whose re-decision is pending (07.9 fan-out). */
+  const hold = (sub: Subscription) => {
+    sub.held ??= [];
+  };
+  const holdFrame = (sub: Subscription, frame: ServerFrame) => {
+    const held = sub.held as ServerFrame[];
+    if (held.length < HOLD_LIMIT) held.push(frame);
+    else sub.heldOverflow = true;
+  };
+
   // Coalesced per (connection, topic): a waiting job is never queued twice; a running one is marked to run once
   // more when it finishes (its answer may predate the latest change). Bursts cost at most two decisions.
   interface ReauthJob {
@@ -237,7 +290,7 @@ export function registerGateway(
       const job = reauthQueue.shift() as ReauthJob;
       job.running = true;
       reauthRunning++;
-      reauthorize(job.conn, job.topic)
+      reauthorize(job.conn, job.topic, job)
         .catch((err: unknown) => app.log.warn({ err, topic: job.topic }, "subscription re-decision failed"))
         .finally(() => {
           reauthRunning--;
@@ -272,8 +325,11 @@ export function registerGateway(
         if (conn.auth.organizationId !== e.organizationId) continue;
         if (e.userIds && !e.userIds.includes(conn.auth.userId)) continue;
         conn.authzEpoch++;
-        for (const topic of conn.subs.keys()) {
-          if (!e.topics || e.topics.includes(topic)) scheduleReauth(conn, topic);
+        for (const [topic, sub] of conn.subs) {
+          if (e.topics && !e.topics.includes(topic)) continue;
+          // Privacy first (07.9 fan-out): nothing more reaches this subscription until it is decided again.
+          hold(sub);
+          scheduleReauth(conn, topic);
         }
       }
     });
@@ -452,6 +508,9 @@ export function registerGateway(
           send({ op: "err", code: "forbidden", topic, message: "Not allowed to subscribe to this topic" });
           return;
         }
+        // Only a subscriber that shows the conversation joins its presence and receives it (background unread
+        // watchers do not count as "here").
+        const withPresence = wantsPresence && isPresenceTopic(topic);
         const sub: Subscription = {
           phase: "replaying",
           buffer: [],
@@ -460,26 +519,32 @@ export function registerGateway(
           presenceJoined: false,
           presenceLive: false,
           presenceBuffer: [],
+          held: null,
+          heldOverflow: false,
+          deliver: (frame) => {
+            if (frame.op === "eph") return send(frame);
+            if (frame.op === "presence") {
+              if (!withPresence) return;
+              if (sub.presenceLive) send(frame);
+              else sub.presenceBuffer.push(frame);
+              return;
+            }
+            if (frame.op !== "ev") return;
+            if (sub.phase === "replaying") sub.buffer.push(frame);
+            else if (frame.seq > sub.lastSent) {
+              sub.lastSent = frame.seq;
+              send(frame);
+            }
+          },
         };
         subs.set(topic, sub);
-        // Only a subscriber that shows the conversation joins its presence and receives it (background unread
-        // watchers do not count as "here").
-        const withPresence = wantsPresence && isPresenceTopic(topic);
+        // An invalidation arrived while this was being decided: hold it now, decide it again once it is live.
+        const raced = conn.authzEpoch !== epoch;
+        if (raced) hold(sub);
         sub.stop = await deps.realtime.listen(topic, (frame) => {
           if (subs.get(topic) !== sub) return;
-          if (frame.op === "eph") return send(frame);
-          if (frame.op === "presence") {
-            if (!withPresence) return;
-            if (sub.presenceLive) send(frame);
-            else sub.presenceBuffer.push(frame);
-            return;
-          }
-          if (frame.op !== "ev") return;
-          if (sub.phase === "replaying") sub.buffer.push(frame);
-          else if (frame.seq > sub.lastSent) {
-            sub.lastSent = frame.seq;
-            send(frame);
-          }
+          if (sub.held) return holdFrame(sub, frame);
+          sub.deliver(frame);
         });
         if (subs.get(topic) !== sub) return sub.stop();
 
@@ -489,28 +554,31 @@ export function registerGateway(
           afterSeq,
         );
         if (subs.get(topic) !== sub) return;
-        if (replay.truncated) {
-          sub.lastSent = replay.lastSeq;
-          send({ op: "resync", topic });
-        } else {
-          for (const ev of replay.events) {
-            sub.lastSent = ev.seq;
-            send(ev);
-          }
-        }
-        for (const ev of sub.buffer.sort((a, b) => a.seq - b.seq)) {
+        // A held subscription (07.9 fan-out) sends nothing of its history until it is decided again.
+        const out = (ev: DurableFrame) => {
+          if (sub.held) return holdFrame(sub, ev);
           if (ev.seq > sub.lastSent) {
             sub.lastSent = ev.seq;
             send(ev);
           }
+        };
+        if (replay.truncated) {
+          sub.lastSent = replay.lastSeq;
+          send({ op: "resync", topic });
+        } else {
+          for (const ev of replay.events) out(ev);
         }
+        for (const ev of sub.buffer.sort((a, b) => a.seq - b.seq)) out(ev);
         sub.buffer = [];
         sub.phase = "live";
         send({ op: "subscribed", topic, lastSeq: Math.max(sub.lastSent, replay.lastSeq) });
         // Presence only after the resolver allowed the subscription and `subscribed` was sent (T-03-01-01).
         if (withPresence) await joinPresence(topic, sub);
-        // An invalidation arrived while this was being decided: decide it again now that it is live.
-        if (conn.authzEpoch !== epoch && subs.get(topic) === sub) scheduleReauth(conn, topic);
+        // An invalidation arrived while this was being decided: decide it again now that it is live (held meanwhile).
+        if ((raced || conn.authzEpoch !== epoch) && subs.get(topic) === sub) {
+          hold(sub);
+          scheduleReauth(conn, topic);
+        }
       };
 
       // Attach synchronously so early frames are never dropped (Pitfall 8).

@@ -4,6 +4,7 @@ import {
   type EphemeralFrame,
   PRESENCE_CLIENT_THROTTLE_MS,
   type PresenceState,
+  type RevokedFrame,
   ServerFrame,
   WS_AUTH_PROTOCOL_PREFIX,
   WS_PROTOCOL,
@@ -57,8 +58,8 @@ interface TopicState {
   lastSeq: number;
   subscribed: boolean;
   onResync: Set<() => void>;
-  /** Called once when the server drops the topic because access was lost (`revoked`). */
-  onRevoked: Set<() => void>;
+  /** Called once when the server drops the topic because access was lost (`revoked`), with that frame (its `cause`). */
+  onRevoked: Set<(frame: RevokedFrame) => void>;
   /** A replay is in flight because we observed a gap. */
   replaying: boolean;
   /**
@@ -194,7 +195,12 @@ export class RealtimeClient {
   subscribe(
     topic: string,
     listener: TopicListener,
-    opts: { afterSeq?: number; onResync?: () => void; presence?: boolean; onRevoked?: () => void } = {},
+    opts: {
+      afterSeq?: number;
+      onResync?: () => void;
+      presence?: boolean;
+      onRevoked?: (frame: RevokedFrame) => void;
+    } = {},
   ): () => void {
     let state = this.topics.get(topic);
     if (!state) {
@@ -482,7 +488,7 @@ export class RealtimeClient {
         if (!s) return;
         this.topics.delete(parsed.topic);
         this.dropPresence(parsed.topic);
-        for (const cb of s.onRevoked) cb();
+        for (const cb of s.onRevoked) cb(parsed);
         return;
       }
       case "pong":
