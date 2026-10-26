@@ -296,7 +296,7 @@ describe("linear time on adversarial runs", () => {
     fn(large);
     let a = Number.POSITIVE_INFINITY;
     let b = Number.POSITIVE_INFINITY;
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 5; i++) {
       let t0 = performance.now();
       fn(small);
       a = Math.min(a, performance.now() - t0);
@@ -316,7 +316,9 @@ describe("linear time on adversarial runs", () => {
         expect(large / Math.max(small, 2)).toBeLessThan(12);
         expect(large).toBeLessThan(4000);
       }
-    });
+      // Two functions × (warm-up + 5 interleaved rounds) of 1 + 4 MiB: about 9 s on a laptop and more on a shared CI
+      // runner (pipeline 75 hit the 15 s default). The budget is the assertions above, not this timeout.
+    }, 60_000);
   }
 });
 
