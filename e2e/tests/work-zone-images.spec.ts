@@ -140,9 +140,22 @@ test("Work Zone images: a pasted screenshot reaches the device and every control
     await expect(image).toHaveCount(1, { timeout: 15_000 });
     await expectLoaded(image);
     await expect(image).toHaveAttribute("src", /\/api\/v1\/attachments\/[0-9a-f-]{36}\/preview$/);
-    const imageBox = (await image.boundingBox())!;
-    const bodyBox = (await bubble.getByText("what is wrong here?").boundingBox())!;
-    expect(imageBox.y + imageBox.height).toBeLessThanOrEqual(bodyBox.y);
+    // Both boxes in one frame: the list keeps scrolling while the turn streams, so two separate boundingBox() calls
+    // can straddle a scroll (pipeline 74 measured the image 51 px "below" the text on mobile).
+    await expect
+      .poll(
+        () =>
+          bubble.evaluate((el) => {
+            const img = el.querySelector('[data-testid="attachment-image"]');
+            const body = [...el.querySelectorAll("*")].find(
+              (n) => n.children.length === 0 && n.textContent?.includes("what is wrong here?"),
+            );
+            if (!img || !body) return Number.NaN;
+            return body.getBoundingClientRect().top - img.getBoundingClientRect().bottom;
+          }),
+        { timeout: 5_000 },
+      )
+      .toBeGreaterThanOrEqual(0);
 
     // ---- the device got it: the fake runtime lists the image it received (a small PNG goes as is, P-02)
     await expect(page.getByTestId("assistant-message").last()).toContainText("Images: 1 (image/png)", {
