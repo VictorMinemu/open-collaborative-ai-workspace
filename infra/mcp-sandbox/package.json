@@ -6,7 +6,7 @@
   "description": "Hardened sidecar exposing vetted, pinned stdio MCP servers over streamable HTTP (03.1-14, D-13). Not a pnpm workspace package: installed with `npm ci` from package-lock.json (exact pins, sha512 integrity, no lifecycle scripts, every version at least 7 days old when locked).",
   "license": "AGPL-3.0-only",
   "engines": {
-    "node": ">=24.21.0 <25"
+    "node": ">=24.22.1 <25"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

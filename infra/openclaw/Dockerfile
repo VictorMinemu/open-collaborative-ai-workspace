@@ -8,7 +8,7 @@
 ARG OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.9.7-slim@sha256:0da12cd49983fcb5e4915fd3135ce7a33d82f93649b1df6964946d2c1d1dbcfc
 
 # Same base as the OpenClaw image (node:24-bookworm-slim), so layers are shared.
-FROM node:24.21.0-bookworm-slim AS build
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS build
 WORKDIR /src
 COPY apps/openclaw-channel/package.json ./
 # Exact versions in package.json; lifecycle scripts blocked; peers (openclaw) never installed.

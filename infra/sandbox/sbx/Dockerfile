@@ -7,7 +7,7 @@
 
 # Base and packages approved at the 07.8-04 image gate (C-04, P-15): the digest-pinned Docker Official Image, the
 # same base as the cell and the spikes, and Debian bookworm / bookworm-security packages only (DFSG-free).
-FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \

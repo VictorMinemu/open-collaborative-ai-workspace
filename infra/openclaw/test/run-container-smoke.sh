@@ -275,7 +275,7 @@ docker run -d --name "${P}-api" "${OOM[@]}" --network "$NET" --network-alias api
   -e FAKE_MCP_SERVERS="$(mcp_servers_json '["echo"]')" \
   -e FAKE_CONNECTOR_TOKEN="$CONN_TOKEN" \
   -e FAKE_WEB_SEARCH_PROVIDER=searxng \
-  node:24.21.0-bookworm-slim node /plugin/src/testing/run-fake-api.ts >/dev/null
+  node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 node /plugin/src/testing/run-fake-api.ts >/dev/null
 
 # A freshly built image (SMOKE_BUILD=1, e.g. CI) already contains this tree's plugin, entrypoint and bundled
 # plugins owned by root. Bind-mounting the checkout over them would hand OpenClaw directories owned by the

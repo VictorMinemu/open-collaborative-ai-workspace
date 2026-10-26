@@ -16,7 +16,7 @@
 #     The build asserts that the agent's playwright-core targets this milestone and branch (156.0.8078.x).
 #   - Debian packages: playwright-core's `install-deps chromium` list without `xvfb` (headless shell needs no X server),
 #     refused unless apt resolves every package from Debian 12 (bookworm / bookworm-security).
-ARG BASE=node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+ARG BASE=node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 ARG TARGETARCH
 
 FROM ${BASE} AS base
