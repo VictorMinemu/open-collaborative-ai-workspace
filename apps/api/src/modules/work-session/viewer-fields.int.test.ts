@@ -567,4 +567,43 @@ describe("the visibility panel and the write answers never name a project the vi
       }
     }
   });
+
+  it("a stored ws: snapshot written before 07.10 (it names the project) replays from seq 0 without its per-viewer fields (LO-02)", async () => {
+    // A pre-07.10 `work_session.updated` payload: the session as its creator reads it, project named.
+    const named = (await detail(leo, probe)).session as Json;
+    expect(named.teamProject).toEqual({ id: payroll, name: PAYROLL });
+    const stored = await stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+      stack.built.core.realtime.appendEvent(tx, `ws:${probe}`, "work_session.updated", named),
+    );
+    const row = await su.query("select payload from app.stream_events where stream_id = $1 and seq = $2", [
+      `ws:${probe}`,
+      stored,
+    ]);
+    expect(row.rows[0]?.payload.teamProject, "the stored frame names the project").toEqual({
+      id: payroll,
+      name: PAYROLL,
+    });
+
+    for (const [name, as] of [
+      ["Dana (device owner)", dana],
+      ["Leo (creator)", leo],
+    ] as const) {
+      const s = await openSocket(as);
+      try {
+        expect((await s.sub(`ws:${probe}`)).op, name).toBe("subscribed");
+        const replayed = s.frames.filter(
+          (f) => f.topic === `ws:${probe}` && f.type === "work_session.updated" && f.seq === stored,
+        );
+        expect(replayed, `${name}: the stored frame is replayed`).toHaveLength(1);
+        for (const k of PER_VIEWER) expect(Object.keys(replayed[0]!.data), `${name}: ${k}`).not.toContain(k);
+        // The rest of the snapshot is replayed as stored.
+        expect(replayed[0]!.data).toMatchObject({ id: probe, title: "Quarter audit" });
+        for (const secret of [PAYROLL, payroll]) {
+          expect(JSON.stringify(s.frames), `${name}'s replay carried "${secret}"`).not.toContain(secret);
+        }
+      } finally {
+        s.socket.close();
+      }
+    }
+  });
 });

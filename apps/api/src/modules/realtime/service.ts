@@ -56,6 +56,13 @@ export type SubscriptionInvalidator = (
 ) => { userIds?: string[]; topics?: string[] } | null;
 
 /**
+ * Rewrites a stored event's payload when it is replayed (Phase 07.10-07, LO-02): a module that narrowed what its
+ * durable stream carries strips, on read, the fields that events stored before the change still hold. It may only
+ * remove data, never add any; the live path is unchanged (the module already appends the narrowed payload).
+ */
+export type ReplayMapper = (type: string, payload: unknown) => unknown;
+
+/**
  * Outcome of re-deciding a live subscription: "error" (lookup failed) never revokes; a denial carries the authorizer's
  * `cause` when it gave one (07.9, D-13).
  */
@@ -95,6 +102,8 @@ export interface RealtimeService {
   registerTopicAuthorizer(prefix: TopicPrefix, authorizer: TopicAuthorizer): void;
   authorizeTopic(auth: AuthContext, topic: string): Promise<boolean>;
   replay(ctx: TenantCtx, topic: string, afterSeq: number): Promise<ReplayResult>;
+  /** Register the payload rewrite of replayed events on topics with this prefix (07.10-07, LO-02). Last one wins. */
+  registerReplayMapper(prefix: TopicPrefix, mapper: ReplayMapper): void;
   /** Low-level fan-out subscription (used by the /ws gateway and server-side consumers). */
   listen(topic: string, listener: (frame: ServerFrame) => void): Promise<() => Promise<void>>;
   /**
@@ -197,6 +206,7 @@ export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): Re
   // organization module's resolver); a prefix nobody registered stays denied.
   const authorizers = new Map<TopicPrefix, TopicAuthorizer>();
   const invalidators = new Map<string, SubscriptionInvalidator>();
+  const replayMappers = new Map<TopicPrefix, ReplayMapper>();
 
   const publish = (topic: string, frame: ServerFrame) =>
     deps.bus.publish(topicChannel(topic), JSON.stringify(frame));
@@ -309,6 +319,10 @@ export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): Re
       invalidators.set(eventType, fn);
     },
 
+    registerReplayMapper(prefix, mapper) {
+      replayMappers.set(prefix, mapper);
+    },
+
     async invalidateSubscriptions(e) {
       const event: SubscriptionInvalidation = {
         organizationId: e.organizationId,
@@ -334,9 +348,17 @@ export function createRealtimeService(deps: { db: TenantDb; bus: RedisBus }): Re
         const last = await tx.execute(sql`select last_seq from app.streams where id = ${topic}`);
         const lastSeq = Number((last.rows[0] as { last_seq: number | string } | undefined)?.last_seq ?? 0);
         const truncated = rows.rows.length > REPLAY_LIMIT;
+        const prefix = parseTopic(topic)?.prefix;
+        const mapper = prefix ? replayMappers.get(prefix) : undefined;
         const events = (rows.rows as Array<{ seq: number | string; type: string; payload: unknown }>)
           .slice(0, REPLAY_LIMIT)
-          .map((r) => ({ op: "ev" as const, topic, seq: Number(r.seq), type: r.type, data: r.payload }));
+          .map((r) => ({
+            op: "ev" as const,
+            topic,
+            seq: Number(r.seq),
+            type: r.type,
+            data: mapper ? mapper(r.type, r.payload) : r.payload,
+          }));
         return { events, lastSeq, truncated };
       });
     },
