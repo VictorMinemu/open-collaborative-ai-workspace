@@ -52,16 +52,18 @@ and the sentinel's new device-owner watcher (`user:` frame named Payroll), then 
 - **Where they travel.** Only on the viewer's own surfaces: `GET /work-sessions` and `GET /work-sessions/:id` (shaped
   for the requester) and each per-user `user:<uid>` frame (one DTO per recipient, shaped for that recipient; the
   recipient decision of ADR-0030 is unchanged).
-- **Fail closed everywhere else.** The shared, durable `ws:<id>` stream (live and replay) and the public
-  `WorkSessionService.session()` / `sessions()` return the viewer-neutral DTO (`withoutViewerFields`), with none of the
-  three fields. A route that forgets the shaping answers less, never more. So `POST /work-sessions`, the settings PATCH
+- **Fail closed everywhere else.** The shared, durable `ws:<id>` stream (live, and replay: stored snapshots are
+  stripped on read, 07.10-07) and the public `WorkSessionService.session()` / `sessions()` return the viewer-neutral
+  DTO (`withoutViewerFields`), with none of the three fields. A route that forgets the shaping answers less, never more. So `POST /work-sessions`, the settings PATCH
   and `/controls` now answer without `teamProject`; the web only invalidates on those answers. The session view keeps
   the per-viewer values of its REST snapshot across `ws:` snapshots (`mergeSessionSnapshot`).
 - **One place decides.** `apps/api/src/modules/work-session/viewer-fields.ts` (`loadViewerFields`,
-  `loadViewerFieldsForRecipients`, `withViewerFields`, `withoutViewerFields`). It reads `app.work_project_access` once
-  per list or delivery batch, takes every decision through the resolver in memory, and reads the last turns with one
-  `DISTINCT ON` query per list or batch; never one query per row. It is in `.github/CODEOWNERS` with the 07.9 Work Zone
-  security paths.
+  `loadViewerFieldsForRecipients`, `projectNamedFor`, which the visibility panel also uses since 07.10-07,
+  `withViewerFields`, `withoutViewerFields`). It reads `app.work_project_access` once per list or delivery batch and the
+  last turns with one `DISTINCT ON` query per list or batch. The list and the detail decide in memory through the
+  request's resolver; the `user:` delivery asks the resolver once per distinct project and once per session with a
+  pending approval (`usersAllowed`, capped by the delivery batch; review ME-02, open). It is in `.github/CODEOWNERS`
+  with the 07.9 Work Zone security paths.
 - No SQL function, migration, RLS policy, realtime topic or endpoint was added; the audience rule stays in `facts.ts`
   (the one-builder source scan still passes).
 
@@ -122,15 +124,21 @@ hover) and in its accessible name. `work-zone-title.spec.ts` checks that contrac
 
 ## Consequences
 
-- A project the viewer cannot open is never named to them on any session surface: list, detail, `user:` frames,
-  sidebar text, tooltips, search and accessible names. Proven by `viewer-fields.int.test.ts`, the D-08 sentinel's
-  device-owner watcher, the cross-tenant case for the index's new fields, and the secrecy e2e of
+- A project the viewer cannot open is never named to them on any session surface: list, detail, `user:` frames, the
+  `ws:` stream live and replayed, the visibility panel (`GET /work-sessions/:id/visibility` and the `PUT` answer),
+  sidebar text, tooltips, search and accessible names. The panel decides with the list's rule (`projectNamedFor` in
+  `viewer-fields.ts`) and gives anyone else its hidden form: `project: { kind: "hidden" }`, no default, no teams, no
+  stored people, no team named on a viewer row (gap closure 07.10-07, HI-01). Proven by `viewer-fields.int.test.ts`,
+  the D-08 sentinel's device-owner watcher, the cross-tenant case for the index's new fields, and the secrecy e2e of
   `work-zone-sidebar.spec.ts` and `work-zone-sidebar-attention.spec.ts`.
-- **Accepted residual: stored `ws:` history.** `ws:` snapshots stored before this phase still carry `teamProject`. The
-  readers of a session's stream are its audience, its creator, its device owner and admins; of these only the D-11
-  device owner cannot open the project. Unit names are organization data already shown in Settings › Organization;
-  the app never replays behind its REST snapshot's cursor; and a sidebar phase carries no data migration. Risk: low.
-  A redaction of stored `ws:` payloads, if wanted, is its own migration.
+- **Stored `ws:` history (closed in 07.10-07, LO-02).** `ws:` snapshots stored before this phase still carry
+  `teamProject` in `app.stream_events`, but no subscriber receives it: a replay strips `teamProject`,
+  `teamProjectHidden` and `attention` from every `work_session.updated` payload on read, whatever cursor the client
+  asks for (the work-session module's replay mapper on `ws:`, `withoutViewerFields`; the realtime service's
+  `registerReplayMapper` may only remove data). No data migration: the stored rows are read only through the replay.
+  Proven by `viewer-fields.int.test.ts` (a stored pre-07.10 snapshot naming the project, replayed from seq 0).
+- **Team names stay organization data.** The session's visibility summary (`firstTeamName`) may name a team, never a
+  project, to every reader of the session, as in 07.9: unit names are already shown in Settings › Organization.
 - **Deferred: a server read cursor.** "Your turn" is per browser: on another browser or device a turn already seen
   elsewhere shows once until it is opened there. A server read cursor is deferred with the unread markers for session
   activity (CONTEXT deferred, with pinning and per-project mute).
