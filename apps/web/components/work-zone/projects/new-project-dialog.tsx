@@ -40,6 +40,24 @@ export const parentLabel = (p: Pick<WorkProjectParent, "name" | "trail">) =>
   p.trail.length > 0 ? `${trailText(p.trail)} › ${p.name}` : p.name;
 
 /**
+ * The unit the dialog creates under: the person's own choice, else `defaultParentId` when it is one of the units the API
+ * says they may create in (07.10-05, R6: a section "+" preselects its unit; anything else is ignored, never forced),
+ * else the first of them.
+ */
+export function chosenParent<P extends { id: string }>(
+  parents: readonly P[],
+  parentId: string | null,
+  defaultParentId?: string,
+): P | null {
+  return (
+    parents.find((p) => p.id === parentId) ??
+    parents.find((p) => p.id === defaultParentId) ??
+    parents[0] ??
+    null
+  );
+}
+
+/**
  * `NewProjectDialog` (UI-SPEC § 4.4, D-10, D-13): a name and the team or department it sits under, from the units the
  * API says the viewer may create in. There is no option at the root: a team project always has a team or department above it.
  * The created project opens on its Settings tab.
@@ -47,9 +65,12 @@ export const parentLabel = (p: Pick<WorkProjectParent, "name" | "trail">) =>
 export function NewProjectDialog({
   open,
   onOpenChange,
+  defaultParentId,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
+  /** The unit to preselect (the Work Zone sidebar's section "+", 07.10-05); ignored unless the viewer may create there. */
+  defaultParentId?: string | undefined;
 }) {
   const router = useRouter();
   const parents = useWorkProjectParents(open);
@@ -60,7 +81,7 @@ export function NewProjectDialog({
   const [formError, setFormError] = useState<string | undefined>();
 
   const list = parents.data ?? [];
-  const chosen = list.find((p) => p.id === parentId) ?? list[0] ?? null;
+  const chosen = chosenParent(list, parentId, defaultParentId);
 
   const reset = () => {
     setName("");
