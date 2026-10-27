@@ -103,8 +103,25 @@ export const WorkProjectRepo = z.object({
 export type WorkProjectRepo = z.infer<typeof WorkProjectRepo>;
 
 /**
+ * How the viewer belongs to a project in the index (Phase 07.10, D-02): `member` = a direct member of the project,
+ * `team` = a member of a team or department assigned to it, `lead` = a lead of the project, `manager` = opens it as an
+ * admin or manages it without belonging to it (a lead of its parent unit, D-14). A label for grouping only: the API
+ * still decides every session per audience, so it never grants anything (C-01).
+ */
+export const WorkProjectMembership = z.enum(["member", "team", "lead", "manager"]);
+export type WorkProjectMembership = z.infer<typeof WorkProjectMembership>;
+
+/** A team or department a project sits under (a project's parent is never a project, D-13). */
+export const WorkProjectUnitRef = z.object({ id: Id, name: UnitName, kind: z.enum(["team", "department"]) });
+export type WorkProjectUnitRef = z.infer<typeof WorkProjectUnitRef>;
+
+/**
  * A row of the Projects index: a team project the caller can open or manage (`work_project.manage`, e.g. a lead of its
  * parent unit, D-14), or every one, for an admin. Its sessions are still listed per session audience.
+ *
+ * Phase 07.10 (D-01, D-10, UI-SPEC R1): `parent` is the unit the project sits under, `top` the top-level unit of its
+ * path (the sidebar's section), with `viewerIsMember` when one of the viewer's unit memberships lies under it, and
+ * `membership` how the viewer belongs to the project. Only on rows the index already returns (C-01).
  */
 export const WorkProjectSummary = z.object({
   id: Id,
@@ -112,6 +129,9 @@ export const WorkProjectSummary = z.object({
   trail: Trail,
   peopleCount: z.number().int().nonnegative(),
   repoCount: z.number().int().nonnegative(),
+  parent: WorkProjectUnitRef,
+  top: WorkProjectUnitRef.extend({ viewerIsMember: z.boolean() }),
+  membership: WorkProjectMembership,
 });
 export type WorkProjectSummary = z.infer<typeof WorkProjectSummary>;
 
@@ -133,12 +153,17 @@ export const WorkProjectIndex = z.object({
 });
 export type WorkProjectIndex = z.infer<typeof WorkProjectIndex>;
 
-/** A unit a new team project may sit under: a team or department the caller manages (no top level, D-13). */
+/**
+ * A unit a new team project may sit under: a team or department the caller manages (no top level, D-13). `topId` is
+ * the top-level unit of its path (a department's is its own id), so the sidebar knows in which section the caller may
+ * create (07.10, D-07, UI-SPEC R3).
+ */
 export const WorkProjectParent = z.object({
   id: Id,
   name: UnitName,
   kind: z.enum(["team", "department"]),
   trail: Trail,
+  topId: Id,
 });
 export type WorkProjectParent = z.infer<typeof WorkProjectParent>;
 

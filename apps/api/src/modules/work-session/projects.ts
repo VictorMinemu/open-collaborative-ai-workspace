@@ -11,11 +11,13 @@ import {
   WORK_PROJECT_LIMITS,
   WorkProjectDetail,
   WorkProjectIndex,
+  type WorkProjectMembership,
   WorkProjectParents,
   type WorkProjectPerson,
   type WorkProjectRepo,
   WorkProjectSearchQuery,
   type WorkProjectTeam,
+  type WorkProjectUnitRef,
 } from "@ocw/contracts";
 import {
   devices,
@@ -23,6 +25,7 @@ import {
   projects,
   type Tx,
   tenantOf,
+  unitMemberships,
   workProjectRepos,
   workProjectSettings,
   workProjectTeams,
@@ -194,6 +197,42 @@ async function trailOf(tx: Tx, path: readonly string[]): Promise<string[]> {
   });
 }
 
+/**
+ * A team or department as the index names it (07.10, R1); `undefined` for a missing id or a project (a project's
+ * parent and top unit are never projects, D-13).
+ */
+function unitRefFrom(units: ReadonlyArray<{ id: string; name: string; kind: string }>) {
+  const byId = new Map(units.map((u) => [u.id, u]));
+  return (id: string | undefined): WorkProjectUnitRef | undefined => {
+    const u = id === undefined ? undefined : byId.get(id);
+    return u && (u.kind === "team" || u.kind === "department")
+      ? { id: u.id, name: u.name, kind: u.kind }
+      : undefined;
+  };
+}
+
+/**
+ * Every unit on the paths of the caller's unit memberships (root → self), read once per request: the chat sidebar's
+ * member-unit rule (`memberUnitIdsOf`, semantics only), so `top.viewerIsMember` reads like a chat section's.
+ */
+async function memberUnitIds(tx: Tx, userId: string): Promise<Set<string>> {
+  const rows = await tx
+    .select({ path: orgUnits.path })
+    .from(unitMemberships)
+    .innerJoin(orgUnits, eq(orgUnits.id, unitMemberships.unitId))
+    .where(eq(unitMemberships.userId, userId));
+  return new Set(rows.flatMap((r) => r.path));
+}
+
+/**
+ * How the caller belongs to an index row (07.10, PD-06), from the `app.work_project_access` level the index already
+ * read: `lead`, `member` and `team` as they are; `admin`, or no level on a row the `managed` filter kept (D-14), is
+ * `manager`. A label only: the row was already decided by the resolver (C-01).
+ */
+function membershipOf(access: string | null): WorkProjectMembership {
+  return access === "lead" || access === "member" || access === "team" ? access : "manager";
+}
+
 /** Active people with access to the project (`app.work_project_people`: members ∪ team members, never admins). */
 async function projectPeople(tx: Tx, unitId: string): Promise<WorkProjectPerson[]> {
   const res = await tx.execute(sql`
@@ -356,6 +395,21 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
         );
         const open = rows.filter((r) => readable.has(r.id) || managed.has(r.id));
         const ids = open.map((r) => r.id);
+        // 07.10 (R1): where each listed project sits and how the caller belongs, from the units already read and one
+        // read of the caller's membership paths (never one query per project, D-09).
+        const unitRef = unitRefFrom(units);
+        const mine = open.length > 0 ? await memberUnitIds(tx, userId) : new Set<string>();
+        const placed = (r: (typeof open)[number]) => {
+          const parent = unitRef(r.path.at(-2));
+          const top = unitRef(r.path[0]);
+          if (!parent || !top)
+            throw new Error("a team project always sits under a team or department (D-13)");
+          return {
+            parent,
+            top: { ...top, viewerIsMember: mine.has(top.id) },
+            membership: membershipOf(r.access),
+          };
+        };
         const people = new Map<string, number>();
         const repoCounts = new Map<string, number>();
         if (ids.length > 0) {
@@ -398,6 +452,7 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
             trail: trail(r.path),
             peopleCount: people.get(r.id) ?? 0,
             repoCount: repoCounts.get(r.id) ?? 0,
+            ...placed(r),
           })),
           personalRepos: personal.map(({ p, d }) => ({
             projectId: p.id,
@@ -439,7 +494,10 @@ export function registerProjectRoutes(app: App, core: Core, perms: PermissionSer
         return {
           parents: parents
             .flatMap((u) =>
-              u.kind === "project" ? [] : [{ id: u.id, name: u.name, kind: u.kind, trail: trail(u.path) }],
+              u.kind === "project"
+                ? []
+                : // 07.10 (R3): the section a parent belongs to is the top-level unit of its path.
+                  [{ id: u.id, name: u.name, kind: u.kind, trail: trail(u.path), topId: u.path[0] ?? u.id }],
             )
             .sort(order),
         };
