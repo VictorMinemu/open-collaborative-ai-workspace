@@ -667,7 +667,7 @@ Phase 07.9 (ADR-0030). A team project is a unit of kind *project* under a team o
 App** under Team Alpha). Its people are its members plus the members of its assigned teams, and admins. Repositories
 your devices announce link to it from any device; an unlinked repository stays a personal project of its device.
 
-1. **A team project (Víctor).** Work Zone › **Projects** (above Devices in the sidebar) › Workspace App › **Settings**:
+1. **A team project (Víctor).** Work Zone › **Browse projects** (above Devices in the sidebar) › Workspace App › **Settings**:
    *Access* says how many people can open it. **Assign teams** › Team Alpha (Marta's team). **Link a repository** ›
    one of your Mac's repositories.
 2. **The default switch (Víctor or Alex, who leads Backend above it).** *New sessions* › **Visible to everyone in the
@@ -701,6 +701,52 @@ upgrade on his Mac:
    switch is on.
 5. Workspace App › Settings › Repositories › **Unlink** a repository: the dialog says how many sessions become personal
    and who will still see them.
+
+## Work Zone sidebar by team (Phase 07.10)
+
+Phase 07.10 (ADR-0031). The Work Zone sidebar is organised like the chat sidebar, by team, on the desktop and in the
+phone drawer:
+
+- **Needs you** (on top, only when something waits on you): sessions with an approval you can decide ("Needs
+  approval") and your own finished turns you haven't opened yet ("Your turn", for 24 hours).
+- **One section per department** with the team projects you belong to (your departments first). A project under a
+  team shows the team as a pill and "● n" while sessions run. Clicking the project opens its page. Under it, at most 3
+  active sessions, then "+N more" (the project page). Sections collapse and stay collapsed in this browser.
+- **Personal**: your repositories that are not in a team project, and sessions from a project you can't open, by
+  repository, with no project name.
+- **Settled** (collapsed): finished sessions, 10 at a time. Searching replaces the tree with Projects, Sessions and
+  Repositories.
+- **Browse projects** and **Devices** at the foot. Projects you only manage (admins, leads above a project) are there
+  and in search, not in the sidebar.
+- **"+"**: on a department (hover, always on touch) creates a team project there; on a project or a repository
+  (hover) starts a session there; the header "+" still opens New session. With no team project yet, one line reads
+  *Share sessions with your team → Create project*.
+
+Session titles under a project are cut with an ellipsis when long; the full title shows on hover, in the session
+header and in the browser tab (a deliberate change of phase 03.2's D-20, see check 5).
+
+**Owner check** (never run by an agent: it needs the demo data and real devices; record each result in
+`.planning/phases/07.10-work-zone-sidebar-by-team/07.10-VALIDATION.md` › Manual-Only Verifications). On the demo data
+with Workspace App set up as in the 07.9 steps above (Team Alpha assigned, a repository of Víctor's Mac linked):
+
+1. As Marta, her department's section (IT) lists **Workspace App** with Team Alpha's pill and its active sessions: at
+   most 3, then "+N more", which opens the project page.
+2. As Víctor (admin), the sidebar lists only the projects he belongs to. Workspace App is not one of them (he reaches
+   it as an admin, not as a member), so it is not in his sidebar; **Browse projects** lists it with the rest.
+3. Add Víctor to Workspace App (its Settings › People) so it is one of his projects. With his Mac shared with Marta
+   (Settings › Devices), Marta starts a Supervised session on it in Workspace App and it asks for an approval: the
+   session appears at the top of Víctor's sidebar under **Needs you** ("Needs approval") and leaves, without a reload,
+   once he decides it. Before he is added, the approval is not in his Needs you: an admin's Needs you only gathers the
+   projects he belongs to and his Personal, even when the session runs on his Mac (ADR-0031 consequences). Confirm
+   this is acceptable.
+4. On a phone (390 px), the drawer shows the same tree, and every row, section header and "+" is easy to hit.
+5. **The D-20 change.** A long session title under a project is cut with an ellipsis; the full title shows on hover and
+   in the session header. Confirm this is acceptable.
+6. **A project you can't open, under Personal.** Admins open every project, so this needs a device owned by someone
+   who is not an admin. If Marta pairs a device and one of its repositories is linked to a project she is not in, her
+   sessions there show under **Personal** by repository with "Linked to a project you can't open", and the project's
+   name appears nowhere in her sidebar, its tooltips or search. If the demo has no such device, record "not
+   applicable" (the e2e `work-zone-sidebar.spec.ts` proves it on fixtures).
 
 ## Troubleshooting
 

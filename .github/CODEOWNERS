@@ -89,6 +89,8 @@
 /apps/api/src/modules/work-session/org-queue.ts    @VictorMinemu
 /apps/api/src/modules/work-session/routes.ts       @VictorMinemu
 /apps/api/src/modules/realtime/service.ts          @VictorMinemu
+# Phase 07.10 (ADR-0031): what each viewer is told about a session's team project and what waits on them.
+/apps/api/src/modules/work-session/viewer-fields.ts @VictorMinemu
 
 # Runtime adapters (ADR-0012 path) and the OpenClaw plugin install gate.
 /apps/local-runtime/src/claude/                    @VictorMinemu

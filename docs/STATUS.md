@@ -65,3 +65,11 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   stream; narrowing removes a live view within a second with the reason. On upgrade an existing session is seen only by
   its creator, the device owner, the device's grantees and admins until its repository is linked to a team project
   (deliberate narrowing) (ADR-0030).
+- **07.10 Work Zone sidebar by team:** the Work Zone sidebar (desktop column and phone drawer) is grouped like the chat
+  sidebar: Needs you on top (approvals you can decide, your finished turns not yet opened), one collapsible section per
+  department with the team projects you belong to (team pill, live count, at most 3 active sessions then "+N more"),
+  Personal for your own repositories and for sessions of projects you can't open (never named), a collapsed Settled,
+  grouped search, Browse projects for the rest, "+" to create a project in a department or start a session in a project
+  or repository, arrow-key navigation; two list requests at any size; a session's team project and its "needs you"
+  facts are decided per viewer and sent only on that viewer's list, detail and `user:` frames, never on `ws:`, which
+  closes a 07.9 leak of a hidden project's name to the device owner (ADR-0031).
