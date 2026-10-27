@@ -79,10 +79,18 @@ export const WorkSession = z.object({
   /** Who can see the session (Phase 07.9). Always sent by the API from 07.9; optional so replayed DTOs parse. */
   visibility: WorkSessionVisibilitySummary.optional(),
   /**
-   * The team project the session's repository is linked to; null = a personal repository (Phase 07.9). Always sent
-   * by the API from 07.9; optional so replayed DTOs parse.
+   * The team project the session's repository is linked to; null = a personal repository, or a project this viewer
+   * may not see named (then `teamProjectHidden` is true) (Phase 07.9; per viewer from 07.10, PD-03, PD-04). Sent on
+   * the viewer's own surfaces (the list, the detail, their `user:` frames); absent on the shared `ws:` stream, so
+   * optional (replayed and `ws:` DTOs parse).
    */
   teamProject: TeamProjectRef.nullable().optional(),
+  /**
+   * Per viewer (Phase 07.10, PD-04; 07.9 D-14): present and true only when the session's repository is linked to a
+   * team project this viewer may not see named (they cannot open it and did not create the session, e.g. the device
+   * owner outside the project, D-11). `teamProject` is then null. Absent = false; absent on `ws:`.
+   */
+  teamProjectHidden: z.boolean().optional(),
 });
 export type WorkSession = z.infer<typeof WorkSession>;
 

@@ -66,6 +66,7 @@ import {
 import { OrgQueue, type OrgQueueOptions, type OrgTask } from "./org-queue";
 import { loadWorkZonePolicy } from "./policy";
 import { decideTitleRequest, heuristicTitle, loadTitleContext } from "./title";
+import type { SessionProject, ShapeSource } from "./viewer-fields";
 
 /** Frames published at once by the per-user delivery (one Redis round trip each, bounded concurrency). */
 const PUBLISH_BATCH = 200;
@@ -184,18 +185,29 @@ export class WorkSessionService implements DeviceSessionHandler {
   }
 
   /**
+   * One session with its team project (id, name, unit path) for the per-viewer shaping of the detail (Phase 07.10,
+   * PD-04): the project travels beside the DTO, never inside it, until `withViewerFields` decides it for a viewer.
+   */
+  async sessionSource(tx: Tx, id: string): Promise<ShapeSource | null> {
+    const [r] = await this.load(tx, eq(workSessions.id, id), null);
+    return r ? { dto: r.dto, project: r.project } : null;
+  }
+
+  /**
    * The sessions `userId` has any audience fact on (Phase 07.9, D-09, Pitfall 8), each with its resolver facts built
    * from the same row by the one builder (`sessionResourceOf`): the list route then decides `work_session.read` on
    * those facts with `perms.filter`, exactly as the detail route decides one session. Rows outside every fact (no
-   * creator, device owner, viewer, admin or lead fact) are dropped before any count or directory work.
+   * creator, device owner, viewer, admin or lead fact) are dropped before any count or directory work. Each row also
+   * carries its team project beside the DTO, for the route's per-viewer shaping (Phase 07.10, PD-04).
    */
   async readableSessions(
     tx: Tx,
     userId: string,
     filter?: SQL,
-  ): Promise<Array<{ dto: WorkSession; facts: ResourceFacts }>> {
+  ): Promise<Array<ShapeSource & { facts: ResourceFacts }>> {
     return (await this.load(tx, filter, userId)).map((r) => ({
       dto: r.dto,
+      project: r.project,
       facts: sessionResourceOf(r.facts, userId),
     }));
   }
@@ -209,7 +221,7 @@ export class WorkSessionService implements DeviceSessionHandler {
     tx: Tx,
     filter: SQL | undefined,
     userId: string | null,
-  ): Promise<Array<{ dto: WorkSession; facts: SessionFactsRow }>> {
+  ): Promise<Array<{ dto: WorkSession; facts: SessionFactsRow; project: SessionProject | null }>> {
     const all = await tx
       .select({
         s: workSessions,
@@ -302,6 +314,7 @@ export class WorkSessionService implements DeviceSessionHandler {
         };
         return {
           dto,
+          project: summary?.teamProject ? { ...summary.teamProject, path: unitPath ?? [] } : null,
           facts: {
             createdBy: s.createdBy,
             deviceOwnerUserId: deviceOwner,

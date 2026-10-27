@@ -196,6 +196,15 @@ describe("work session list DTO summary (07.9-01, R1)", () => {
   });
 });
 
+describe("work session per-viewer fields (07.10-02, PD-03, PD-04)", () => {
+  it("teamProjectHidden: true parses with teamProject null; a DTO without it (replayed, ws:) parses; a non-boolean is refused", () => {
+    const hidden = WorkSession.parse({ ...oldSession, teamProject: null, teamProjectHidden: true });
+    expect(hidden).toMatchObject({ teamProject: null, teamProjectHidden: true });
+    expect(WorkSession.parse(oldSession).teamProjectHidden).toBeUndefined();
+    expect(WorkSession.safeParse({ ...oldSession, teamProjectHidden: "yes" }).success).toBe(false);
+  });
+});
+
 describe("visibility panel view (07.9-01, D-04, D-11, D-12, R2, R12)", () => {
   it("parses a team-project view and a personal view", () => {
     expect(WorkSessionVisibilityView.parse(teamView).viewers.people).toHaveLength(12);
