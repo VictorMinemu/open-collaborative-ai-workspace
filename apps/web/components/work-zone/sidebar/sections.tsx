@@ -2,12 +2,22 @@
 
 import type { WorkProjectIndex, WorkSession } from "@ocw/contracts";
 import type { UseQueryResult } from "@tanstack/react-query";
-import { Plus } from "lucide-react";
+import { FolderGit2, FolderKanban, Plus } from "lucide-react";
 import type { ReactNode } from "react";
 import { SidebarSectionHeader } from "@/components/shell/sidebar-section-header";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useWorkZone } from "../work-zone-context";
-import type { PersonalModel, SidebarModel, UnitSectionModel } from "./model";
+import {
+  isActiveSession,
+  orderActiveSessions,
+  type PersonalModel,
+  rowProject,
+  type SidebarModel,
+  type UnitSectionModel,
+} from "./model";
+import { OnboardingLine } from "./onboarding-line";
 import { ExpandRow, MoreRow, ProjectRow, RepoRow, SessionSubRow } from "./rows";
 import { useCreatableUnits } from "./use-creatable-units";
 
@@ -28,10 +38,14 @@ export interface RowContext {
   onExpand: (key: string) => void;
 }
 
+/** What a session sub-row needs: the clock, the viewer and the open session. */
+type SubRowContext = Pick<RowContext, "now" | "viewerId" | "openSessionId">;
+
 export interface SectionsProps extends RowContext {
   model: SidebarModel;
-  /** The projects request; 07.10-05 adds its loading and error states and the onboarding line here (PD-11). */
-  projects: Pick<UseQueryResult<WorkProjectIndex>, "status" | "error" | "refetch" | "data">;
+  /** The projects request: its loading and error states and the onboarding line live here (07.10-05, PD-11). */
+  projects: Pick<UseQueryResult<WorkProjectIndex>, "status" | "error" | "refetch" | "data"> &
+    Partial<Pick<UseQueryResult<WorkProjectIndex>, "isFetching">>;
   sessions: readonly WorkSession[];
 }
 
@@ -45,7 +59,7 @@ function SessionList({
 }: {
   label: string;
   sessions: readonly WorkSession[];
-  ctx: RowContext;
+  ctx: SubRowContext;
   more?: ReactNode;
 }) {
   if (sessions.length === 0 && !more) return null;
@@ -240,16 +254,132 @@ export function PersonalSection({
   );
 }
 
-/** Every department section of the viewer, in the model's order. */
-export function DepartmentSections({
-  model,
-  projects: _projects,
-  sessions: _sessions,
-  ...ctx
-}: SectionsProps) {
+/** While the projects request loads (UI-SPEC States): one header bar and three rows, where the sections will be. */
+export function ProjectsLoading() {
+  return (
+    <div data-testid="projects-loading" aria-hidden className="grid grid-cols-1 gap-px">
+      <div className="flex h-7 items-center px-1 max-md:h-11">
+        <Skeleton className="h-4 w-24" />
+      </div>
+      {["w-[72%]", "w-[56%]", "w-[64%]"].map((width) => (
+        <Skeleton key={width} className={`h-8 ${width} max-md:h-11`} />
+      ))}
+    </div>
+  );
+}
+
+/** A fallback group: the sessions of one team project or repository, under its plain name. */
+export interface FallbackGroup {
+  key: string;
+  name: string;
+  team: boolean;
+  sessions: WorkSession[];
+}
+
+/**
+ * The fallback of a failed projects request (UI-SPEC States): the active sessions (and the open one) not already under
+ * Personal (`scope`), grouped by `rowProject` as before 07.10, so no session the viewer had disappears and none shows
+ * twice. A project the viewer may not see named is never named: its sessions group under their repository.
+ */
+export function fallbackGroups(
+  sessions: readonly WorkSession[],
+  scope: ReadonlySet<string>,
+  ctx: SubRowContext,
+): FallbackGroup[] {
+  const shown = sessions.filter(
+    (s) => !scope.has(s.id) && (isActiveSession(s, ctx.now) || s.id === ctx.openSessionId),
+  );
+  const groups = new Map<string, FallbackGroup>();
+  for (const s of orderActiveSessions(shown)) {
+    const { key, name } = rowProject(s);
+    const group = groups.get(key) ?? { key, name, team: s.teamProject != null, sessions: [] };
+    group.sessions.push(s);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
+
+/** A failed projects request: the error line with Try again, then the fallback rows. */
+export function ProjectsFallback({
+  sessions,
+  scope,
+  ctx,
+  retrying,
+  onRetry,
+}: {
+  sessions: readonly WorkSession[];
+  scope: ReadonlySet<string>;
+  ctx: SubRowContext;
+  retrying: boolean;
+  onRetry: () => void;
+}) {
+  const groups = fallbackGroups(sessions, scope, ctx);
+  return (
+    <div data-testid="projects-error" className="grid grid-cols-1 gap-px">
+      <p className="flex flex-wrap items-center gap-x-1.5 px-2.5 py-1 text-[12px] text-muted-foreground leading-4">
+        Couldn't load projects.
+        <Button
+          type="button"
+          variant="link"
+          size="sm"
+          data-testid="projects-retry"
+          disabled={retrying}
+          onClick={onRetry}
+          className="h-auto p-0 text-[12px] max-md:min-h-11"
+        >
+          Try again
+        </Button>
+      </p>
+      {groups.length > 0 ? (
+        // biome-ignore lint/a11y/noRedundantRoles: Safari drops list semantics under `list-style: none` (UI-SPEC).
+        <ul role="list" className="grid grid-cols-1 gap-px">
+          {groups.map((g) => (
+            <li key={g.key} className="grid grid-cols-1 gap-px">
+              <div
+                data-testid="fallback-group"
+                className="flex h-8 w-full items-center gap-2 px-2.5 text-[13.5px] text-sidebar-foreground max-md:h-11"
+              >
+                {g.team ? (
+                  <FolderKanban aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+                ) : (
+                  <FolderGit2 aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+                )}
+                <span title={g.name} className="min-w-0 flex-1 truncate">
+                  {g.name}
+                </span>
+              </div>
+              <SessionList label={`Active sessions in ${g.name}`} sessions={g.sessions} ctx={ctx} />
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Every department section of the viewer, in the model's order; in their place, the projects request's loading and
+ * error states, or the onboarding line when the viewer belongs to no team project (07.10-05, D-08, UI-SPEC States).
+ */
+export function DepartmentSections({ model, projects, sessions, ...ctx }: SectionsProps) {
   const creatable = useCreatableUnits();
   const { openNewProject, openNewSession } = useWorkZone();
-  if (model.sections.length === 0) return null;
+  // Data already loaded (a later refetch failed) keeps drawing the sections; the states apply only without it.
+  if (!projects.data) {
+    if (projects.status === "error")
+      return (
+        <ProjectsFallback
+          sessions={sessions}
+          scope={model.scope}
+          ctx={ctx}
+          retrying={projects.isFetching === true}
+          onRetry={() => void projects.refetch()}
+        />
+      );
+    return <ProjectsLoading />;
+  }
+  if (model.sections.length === 0)
+    return <OnboardingLine canCreate={projects.data.viewerCan.create} onCreate={() => openNewProject()} />;
   return (
     <div className="grid grid-cols-1 gap-3">
       {model.sections.map((section) => (

@@ -1,9 +1,16 @@
-import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
+import { type APIRequestContext, expect, type Locator, type Page, type Route, test } from "@playwright/test";
+import { expectNoSeriousA11y } from "../support/a11y";
 import { type Actor, apiAs, ensureMember, openAs } from "../support/actors";
+import {
+  captureReview,
+  expectNoSidewaysScroll,
+  expectTouchTargets,
+  unnamedControls,
+} from "../support/layout";
 import { asSuperuser } from "../support/superuser";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
 import { shareDevice } from "../support/work-zone-projects";
-import { ADMIN } from "./env";
+import { ADMIN, shot } from "./env";
 
 /**
  * The Work Zone sidebar's actions (Phase 07.10-05, D-07, D-08, UI-SPEC § 2, § 5, § 7, § 9, States, R3, R5, R6) on the
@@ -12,6 +19,11 @@ import { ADMIN } from "./env";
  *   ENGINEERING's "+", preselected on Web, and finds it in that section; OPERATIONS has no "+".
  * - the project "+" (pointer only, in the live count's slot) and the repository "+" (visible on touch, 44 px) open the
  *   new-session dialog on that project's or repository's repository; the header "+" opens it as before.
+ * - onboarding (D-08): with no team project, one quiet line, with "Create project" for someone who may create and a
+ *   plain line for anyone else; it goes away once a project exists.
+ * - a failing projects request shows "Couldn't load projects." with Try again and its active sessions grouped below,
+ *   none lost and none twice; Try again brings the sections back.
+ * Every screen: axe clean on the nav in light and dark, every control named, no sideways scroll, 44 px targets at 390.
  * Every unit, device and session the spec makes is removed in `afterAll`.
  */
 
@@ -33,6 +45,10 @@ const N = { eng: "", web: "", portal: "", ops: "", billing: "", mobileApp: "" };
 const T = { live: "", scratch: "" };
 let portalRepo: FakeDeviceHandle;
 let piaScratch: FakeDeviceHandle;
+/** Fresh people with no team project, one per screen width (each run's onboarding starts from nothing). */
+let NOVA: Actor;
+let DEV: Actor;
+let novaDept = "";
 
 async function post<R>(api: APIRequestContext, path: string, data: unknown): Promise<R> {
   const r = await api.post(path, { data });
@@ -87,6 +103,27 @@ async function expectTarget44(locator: Locator) {
   expect(box?.height ?? 0).toBeGreaterThanOrEqual(43.5);
 }
 
+/** axe on the nav in light and dark, named controls, no sideways scroll, and 44 px targets at 390 (C-02). */
+async function checkSidebar(page: Page) {
+  const nav = '[data-testid="session-list"]';
+  await expectNoSeriousA11y(page, nav);
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expectNoSeriousA11y(page, nav);
+  await page.emulateMedia({ colorScheme: "light" });
+  expect(await unnamedControls(page)).toEqual([]);
+  await expectNoSidewaysScroll(page, "work zone sidebar");
+  await expectTouchTargets(page, nav);
+}
+
+/** `GET /api/v1/work-projects` itself (not `/parents` nor a project): the projects request of the sidebar. */
+const isProjectsIndex = (url: URL) => url.pathname === "/api/v1/work-projects";
+const failIndex = (route: Route) =>
+  route.fulfill({
+    status: 500,
+    contentType: "application/json",
+    body: JSON.stringify({ error: { code: "internal", message: "Internal error" } }),
+  });
+
 test.beforeAll(async () => {
   test.setTimeout(300_000);
   tag = test.info().project.name === "mobile" ? "390" : "1440";
@@ -129,6 +166,15 @@ test.beforeAll(async () => {
   devices.push(piaScratch);
   T.scratch = `Try the new linter ${run}`;
   await startSession(pia, piaScratch.projectId, T.scratch);
+
+  // Onboarding: Nova leads a team that holds no project (she may create); Dev belongs to nothing.
+  NOVA = { name: `Nova ${tag}`, email: `nova-wza-${tag}@ocw.test`, password: "nova-e2e-password-123" };
+  DEV = { name: `Dev ${tag}`, email: `dev-wza-${tag}@ocw.test`, password: "dev-e2e-password-123" };
+  const novaId = await ensureMember(admin, NOVA, "lead");
+  await ensureMember(admin, DEV, "developer");
+  novaDept = await unit("department", `Nova ${run}`, null);
+  const novaTeam = await unit("team", `Nova team ${run}`, novaDept);
+  await post(admin, `/api/v1/units/${novaTeam}/members`, { userId: novaId, role: "lead" });
 });
 
 test.afterAll(async () => {
@@ -173,6 +219,7 @@ test("section +: Leo creates a project from his department, preselected on his t
       await eng.getByTestId("section-toggle").hover();
       await expect(create).toHaveCSS("opacity", "1");
     }
+    await checkSidebar(page);
 
     // It opens New project, never navigates; Web is preselected (Engineering itself is not his to create in).
     await create.click();
@@ -275,6 +322,7 @@ test("project + and repository +: a session starts where the row is; the header 
       await repo.hover();
       await expect(repoPlus).toHaveCSS("opacity", "1");
     }
+    await checkSidebar(page);
     await repoPlus.click();
     {
       const { chosen } = await sessionDialog(page);
@@ -287,6 +335,131 @@ test("project + and repository +: a session starts where the row is; the header 
     await page.getByTestId("sidebar-new-session").click();
     await sessionDialog(page);
     await closeDialog(page);
+  } finally {
+    await context.close();
+  }
+});
+
+test("hover: the section + on focus and the project + in place of the count (review capture)", async ({
+  browser,
+}, info) => {
+  test.skip(info.project.name === "mobile", "hover is a pointer state; touch shows the section + always");
+  test.setTimeout(120_000);
+  const { context, page } = await openAs(browser, LEO, info.project.name);
+  try {
+    await page.goto("/work-zone");
+    const list = await openSidebar(page, false);
+    const eng = sectionOf(list, U.eng);
+    const row = eng.getByTestId(`project-row-${U.portal}`);
+    await expect(row.getByTestId("project-live-count")).toHaveText("1", { timeout: 30_000 });
+    // Keyboard focus reveals the section "+" (Tab from its toggle); the pointer rests on Customer portal.
+    await eng.getByTestId("section-toggle").focus();
+    await page.keyboard.press("Tab");
+    const create = eng.getByTestId("section-create");
+    await expect(create).toBeFocused();
+    await expect(create).toHaveCSS("opacity", "1");
+    await row.hover();
+    await expect(eng.getByTestId("project-new-session")).toHaveCSS("opacity", "1");
+    await expect(row.getByTestId("project-live-count")).toHaveCSS("visibility", "hidden");
+    await shot(page, "sidebar-hover-plus-1440");
+    await page.emulateMedia({ colorScheme: "dark" });
+    await shot(page, "sidebar-hover-plus-1440-dark");
+    await page.emulateMedia({ colorScheme: "light" });
+  } finally {
+    await context.close();
+  }
+});
+
+test("onboarding: one quiet line, Create project for someone who may create; it leaves once a project exists", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const mobile = info.project.name === "mobile";
+
+  // Anyone who may not create: the plain line, no link, no section.
+  {
+    const { context, page } = await openAs(browser, DEV, info.project.name);
+    try {
+      await page.goto("/work-zone");
+      const list = await openSidebar(page, mobile);
+      const line = list.getByTestId("onboarding-line");
+      await expect(line).toHaveText("Team projects you're added to appear here.", { timeout: 30_000 });
+      await expect(line.getByRole("button")).toHaveCount(0);
+      await expect(list.getByTestId("sidebar-section")).toHaveCount(0);
+      await checkSidebar(page);
+    } finally {
+      await context.close();
+    }
+  }
+
+  // Nova may create (she leads a team): the line offers it, and goes away once her project exists.
+  const { context, page } = await openAs(browser, NOVA, info.project.name);
+  try {
+    await page.goto("/work-zone");
+    let list = await openSidebar(page, mobile);
+    const line = list.getByTestId("onboarding-line");
+    await expect(line).toHaveText("Share sessions with your team → Create project", { timeout: 30_000 });
+    await expect(list.getByText("No sessions yet.")).toBeVisible();
+    await expect(list.getByTestId("sidebar-section")).toHaveCount(0);
+    await checkSidebar(page);
+    await captureReview(page, `sidebar-onboarding-${tag}`);
+
+    await line.getByRole("button", { name: "Create project" }).click();
+    const dialog = page.getByTestId("new-project-dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByTestId("new-project-parent")).toContainText(`Nova team ${run}`);
+    await dialog.getByLabel("Name").fill(`Nova app ${run}`);
+    await dialog.getByTestId("new-project-submit").click();
+    await expect(page).toHaveURL(/\/work-zone\/projects\/[0-9a-f-]{36}\?tab=settings$/, { timeout: 30_000 });
+    const created = new URL(page.url()).pathname.split("/").at(-1) ?? "";
+    units.unshift(created);
+    await drawerClosed(page, mobile);
+    list = await openSidebar(page, mobile);
+    await expect(sectionOf(list, novaDept).getByTestId(`project-row-${created}`)).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(list.getByTestId("onboarding-line")).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a failing projects request: the error line, Try again and every active session; Try again brings the sections back", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const mobile = info.project.name === "mobile";
+  const { context, page } = await openAs(browser, PIA, info.project.name);
+  try {
+    await page.route(isProjectsIndex, failIndex);
+    await page.goto("/work-zone");
+    const list = await openSidebar(page, mobile);
+    const error = list.getByTestId("projects-error");
+    await expect(error).toContainText("Couldn't load projects.", { timeout: 30_000 });
+    const retry = error.getByRole("button", { name: "Try again" });
+    await expect(retry).toBeVisible();
+    await expect(list.getByTestId("sidebar-section")).toHaveCount(0);
+
+    // Nothing she had disappears, nothing shows twice: Customer portal's live session under its name in the
+    // fallback, her own session under Personal.
+    const fallback = error
+      .getByRole("list", { name: `Active sessions in ${N.portal}`, exact: true })
+      .getByTestId("session-row");
+    await expect(fallback.filter({ hasText: T.live })).toHaveCount(1);
+    await expect(list.getByTestId("session-row").filter({ hasText: T.live })).toHaveCount(1);
+    const personal = list.getByTestId("personal-section");
+    await expect(personal.getByTestId("session-row").filter({ hasText: T.scratch })).toHaveCount(1);
+    await expect(list.getByTestId("session-row").filter({ hasText: T.scratch })).toHaveCount(1);
+    await checkSidebar(page);
+    if (!mobile) await captureReview(page, "sidebar-error-1440");
+
+    // The request works again: Try again brings the sections back.
+    await page.unroute(isProjectsIndex, failIndex);
+    await retry.click();
+    await expect(sectionOf(list, U.eng).getByTestId(`project-row-${U.portal}`)).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(list.getByTestId("projects-error")).toHaveCount(0);
   } finally {
     await context.close();
   }

@@ -2,7 +2,9 @@ import type { WorkSession, WorkSessionVisibilitySummary } from "@ocw/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { ProjectRowModel, RepoRowModel } from "./model";
+import { OnboardingLine } from "./onboarding-line";
 import { HIDDEN_PROJECT_HINT, MoreRow, ProjectRow, RepoRow, SessionSubRow, subRowDetail } from "./rows";
+import { fallbackGroups, ProjectsFallback, ProjectsLoading } from "./sections";
 
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: unknown } & Record<string, unknown>) => (
@@ -229,5 +231,108 @@ describe("MoreRow", () => {
     expect(html(<MoreRow projectId={PORTAL} projectName="Customer portal" n={1} />)).toContain(
       'aria-label="1 more active session in Customer portal"',
     );
+  });
+});
+
+/** Visible words only (tags stripped, the copy's entities decoded). */
+const words = (markup: string) =>
+  markup
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&#x27;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+
+describe("OnboardingLine (07.10-05, D-08, § 9)", () => {
+  it("a person who may create reads one line with the Create project link button", () => {
+    const out = html(<OnboardingLine canCreate onCreate={() => {}} />);
+    expect(out).toContain('data-testid="onboarding-line"');
+    expect(words(out)).toBe("Share sessions with your team → Create project");
+    expect(out).toMatch(/<button[^>]*>Create project<\/button>/);
+    expect(out).toContain("max-md:min-h-11");
+    // One quiet line: no card, border or icon.
+    const lineClass = out.match(/^<p[^>]*class="([^"]*)"/)?.[1] ?? "";
+    expect(lineClass.split(" ").sort()).toEqual(
+      ["leading-4", "px-2.5", "py-1", "text-[12px]", "text-muted-foreground"].sort(),
+    );
+    expect(out).not.toContain("<svg");
+  });
+
+  it("anyone else reads the plain line, with no link", () => {
+    const out = html(<OnboardingLine canCreate={false} onCreate={() => {}} />);
+    expect(words(out)).toBe("Team projects you're added to appear here.");
+    expect(out).not.toContain("<button");
+    expect(out).not.toContain("<a");
+  });
+});
+
+describe("the projects request's states (07.10-05, UI-SPEC States)", () => {
+  const ctx = { now: NOW, viewerId: ANA, openSessionId: null };
+  const portal = { id: PORTAL, name: "Customer portal" };
+  const id = (n: number) => `01a11635-d6e7-7c87-9f17-00000000c${String(n).padStart(3, "0")}`;
+  const live = session({ id: id(1), title: "Fix the login redirect", teamProject: portal });
+  const idle = session({
+    id: id(2),
+    title: "Tidy the settings page",
+    status: "idle",
+    runningSince: null,
+    updatedAt: "2026-10-27T10:00:00Z",
+    teamProject: portal,
+  });
+  const settled = session({ id: id(3), title: "Old work", status: "completed", teamProject: portal });
+  const scratch = session({
+    id: id(4),
+    title: "Try the new linter",
+    projectId: "01a11635-d6e7-7c87-9f17-0000000000b9",
+    projectName: "scratch",
+    teamProject: null,
+  });
+  const hidden = session({
+    id: id(5),
+    title: "Rotate the keys",
+    projectId: "01a11635-d6e7-7c87-9f17-0000000000b8",
+    projectName: "linked-repo",
+    status: "idle",
+    runningSince: null,
+    updatedAt: "2026-10-27T09:00:00Z",
+    teamProject: null,
+    teamProjectHidden: true,
+  });
+
+  it("loading: one header bar and three row skeletons", () => {
+    const out = html(<ProjectsLoading />);
+    expect(out).toContain('data-testid="projects-loading"');
+    expect(out.match(/data-slot="skeleton"/g)).toHaveLength(4);
+    expect(out).toContain("h-4 w-24");
+    for (const w of ["w-[72%]", "w-[56%]", "w-[64%]"]) expect(out).toContain(w);
+  });
+
+  it("the fallback groups the active sessions not already under Personal, by project or repository", () => {
+    // `scratch` is under Personal (in the model's scope): it is never drawn twice.
+    const groups = fallbackGroups([settled, scratch, idle, live, hidden], new Set([scratch.id]), ctx);
+    expect(groups.map((g) => [g.name, g.sessions.map((s) => s.title)])).toEqual([
+      ["Customer portal", ["Fix the login redirect", "Tidy the settings page"]],
+      ["linked-repo", ["Rotate the keys"]],
+    ]);
+    // The open session always shows, even settled.
+    const open = fallbackGroups([settled], new Set(), { ...ctx, openSessionId: settled.id });
+    expect(open[0]?.sessions.map((s) => s.id)).toEqual([settled.id]);
+  });
+
+  it("failed: the error line with Try again, then the fallback rows; a hidden project is never named", () => {
+    const out = html(
+      <ProjectsFallback
+        sessions={[live, idle, scratch, hidden]}
+        scope={new Set([scratch.id])}
+        ctx={ctx}
+        retrying={false}
+        onRetry={() => {}}
+      />,
+    );
+    expect(words(out)).toContain("Couldn't load projects. Try again");
+    expect(out).toMatch(/<button[^>]*>Try again<\/button>/);
+    expect(out).toContain('aria-label="Active sessions in Customer portal"');
+    expect(out.match(/data-testid="session-row"/g)).toHaveLength(3);
+    expect(out).not.toContain("Try the new linter");
+    expect(out).toContain('aria-label="Active sessions in linked-repo"');
   });
 });
