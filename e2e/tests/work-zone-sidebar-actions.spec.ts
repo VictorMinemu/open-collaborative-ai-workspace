@@ -156,6 +156,16 @@ test.beforeAll(async () => {
   for (const id of [piaId, leoId]) await shareDevice(admin, portalRepo.deviceId, id);
   T.live = `Fix the login redirect ${run}`;
   const live = await startSession(admin, portalRepo.projectId, T.live);
+  // One live session ("● 1"): once the fake device has settled it (idle), so its own answer never overwrites "running".
+  await expect
+    .poll(
+      async () => {
+        const r = await admin.get(`/api/v1/work-sessions/${live}`);
+        return r.ok() ? ((await r.json()) as { session: { status: string } }).session.status : undefined;
+      },
+      { timeout: 30_000, message: "the live session is idle before it is marked running" },
+    )
+    .toBe("idle");
   await asSuperuser("update app.work_sessions set status = $2 where id = $1", [live, "running"]);
 
   // Pia's own unlinked repository, with her session: her Personal section.
@@ -255,9 +265,11 @@ async function sessionDialog(page: Page): Promise<{ dialog: Locator; chosen: Loc
   return { dialog, chosen };
 }
 
+/** Cancel, as a person on a phone would (an early Escape can reach the drawer before focus enters the dialog). */
 async function closeDialog(page: Page) {
-  await page.keyboard.press("Escape");
-  await expect(page.getByTestId("new-session-dialog")).toHaveCount(0);
+  const dialog = page.getByTestId("new-session-dialog");
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
 }
 
 test("project + and repository +: a session starts where the row is; the header + is unchanged", async ({
@@ -352,10 +364,13 @@ test("hover: the section + on focus and the project + in place of the count (rev
     const eng = sectionOf(list, U.eng);
     const row = eng.getByTestId(`project-row-${U.portal}`);
     await expect(row.getByTestId("project-live-count")).toHaveText("1", { timeout: 30_000 });
+    // Both "+" come from their own lists (the parents, the dialog's repositories): wait until they are drawn.
+    const create = eng.getByTestId("section-create");
+    await expect(create).toHaveCount(1);
+    await expect(eng.getByTestId("project-new-session")).toHaveCount(1);
     // Keyboard focus reveals the section "+" (Tab from its toggle); the pointer rests on Customer portal.
     await eng.getByTestId("section-toggle").focus();
     await page.keyboard.press("Tab");
-    const create = eng.getByTestId("section-create");
     await expect(create).toBeFocused();
     await expect(create).toHaveCSS("opacity", "1");
     await row.hover();

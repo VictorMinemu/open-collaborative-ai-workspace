@@ -1,13 +1,14 @@
 "use client";
 
-import type { WorkProjectIndex, WorkSession } from "@ocw/contracts";
+import type { Project, WorkProjectIndex, WorkSession } from "@ocw/contracts";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { FolderGit2, FolderKanban, Plus } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useMemo } from "react";
 import { SidebarSectionHeader } from "@/components/shell/sidebar-section-header";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useProjects } from "@/lib/workzone-queries";
 import { useWorkZone } from "../work-zone-context";
 import {
   isActiveSession,
@@ -50,6 +51,35 @@ export interface SectionsProps extends RowContext {
 }
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/** Where a row "+" can start a session: the team projects and repositories of the viewer's own repository list. */
+export interface StartableTargets {
+  teamProjects: ReadonlySet<string>;
+  repos: ReadonlySet<string>;
+}
+
+/**
+ * From `GET /projects` (the repositories the viewer may use, as the new-session dialog lists them): a project or a
+ * repository gets its "+" only when the dialog would open on one of its repositories (07.10-05, R5, U-8). A member who
+ * can't use the project's devices sees no "+" (the project page shows them no New session either, 07.9 D-13); the
+ * API decides the start. Fail closed while the list loads.
+ */
+export function startableTargets(repos: readonly Project[] | undefined): StartableTargets {
+  const teamProjects = new Set<string>();
+  const ids = new Set<string>();
+  for (const r of repos ?? []) {
+    if (!r.available || r.teamProjectHidden) continue;
+    ids.add(r.id);
+    if (r.teamProject) teamProjects.add(r.teamProject.id);
+  }
+  return { teamProjects, repos: ids };
+}
+
+/** The dialog's own repository list (already requested by the shell's dialog: no new request, D-09). */
+function useStartableTargets(): StartableTargets {
+  const repos = useProjects();
+  return useMemo(() => startableTargets(repos.data), [repos.data]);
+}
 
 function SessionList({
   label,
@@ -152,6 +182,7 @@ export function UnitSection({
   ctx,
   onNewProject,
   onNewSession,
+  canStartIn,
 }: {
   section: UnitSectionModel;
   ctx: RowContext;
@@ -159,6 +190,8 @@ export function UnitSection({
   onNewProject?: (() => void) | undefined;
   /** A project row's "+" (07.10-05, R5): start a session in that team project. */
   onNewSession?: ((teamProjectId: string) => void) | undefined;
+  /** Which projects get that "+": those with a repository the viewer can start on (`startableTargets`). */
+  canStartIn?: ((teamProjectId: string) => boolean) | undefined;
 }) {
   const { key, title, collapsed, hidden, projects, moreProjects, expanded } = section;
   return (
@@ -172,7 +205,10 @@ export function UnitSection({
     >
       {projects.map((p) => (
         <li key={p.id} className="grid grid-cols-1 gap-px">
-          <ProjectRow project={p} onNewSession={onNewSession ? () => onNewSession(p.id) : undefined} />
+          <ProjectRow
+            project={p}
+            onNewSession={onNewSession && (canStartIn?.(p.id) ?? true) ? () => onNewSession(p.id) : undefined}
+          />
           <SessionList
             label={`Active sessions in ${p.name}`}
             sessions={p.sessions}
@@ -209,6 +245,7 @@ export function PersonalSection({
 }) {
   const { openNewSession } = useWorkZone();
   const start = onNewSession ?? openNewSession;
+  const startable = useStartableTargets();
   const { collapsed, hidden, repos, moreRepos, expanded } = personal;
   return (
     <SectionFrame
@@ -221,7 +258,10 @@ export function PersonalSection({
     >
       {repos.map((r) => (
         <li key={r.projectId} className="grid grid-cols-1 gap-px">
-          <RepoRow repo={r} onNewSession={() => start(r.projectId)} />
+          <RepoRow
+            repo={r}
+            onNewSession={startable.repos.has(r.projectId) ? () => start(r.projectId) : undefined}
+          />
           <SessionList
             label={`Active sessions in ${r.name}`}
             sessions={r.sessions}
@@ -363,6 +403,7 @@ export function ProjectsFallback({
  */
 export function DepartmentSections({ model, projects, sessions, ...ctx }: SectionsProps) {
   const creatable = useCreatableUnits();
+  const startable = useStartableTargets();
   const { openNewProject, openNewSession } = useWorkZone();
   // Data already loaded (a later refetch failed) keeps drawing the sections; the states apply only without it.
   if (!projects.data) {
@@ -393,6 +434,7 @@ export function DepartmentSections({ model, projects, sessions, ...ctx }: Sectio
               : undefined
           }
           onNewSession={(teamProjectId) => openNewSession({ teamProjectId })}
+          canStartIn={(teamProjectId) => startable.teamProjects.has(teamProjectId)}
         />
       ))}
     </div>

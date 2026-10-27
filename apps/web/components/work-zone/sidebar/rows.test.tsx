@@ -1,10 +1,10 @@
-import type { WorkSession, WorkSessionVisibilitySummary } from "@ocw/contracts";
+import type { Project, WorkSession, WorkSessionVisibilitySummary } from "@ocw/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { ProjectRowModel, RepoRowModel } from "./model";
 import { OnboardingLine } from "./onboarding-line";
 import { HIDDEN_PROJECT_HINT, MoreRow, ProjectRow, RepoRow, SessionSubRow, subRowDetail } from "./rows";
-import { fallbackGroups, ProjectsFallback, ProjectsLoading } from "./sections";
+import { fallbackGroups, ProjectsFallback, ProjectsLoading, startableTargets } from "./sections";
 
 vi.mock("next/link", () => ({
   default: ({ href, children, ...rest }: { href: string; children: unknown } & Record<string, unknown>) => (
@@ -219,6 +219,43 @@ describe('the row "+" (07.10-05, R5, § 5, § 7)', () => {
   it('a repository linked to a project the viewer can\'t open has no "+" (no start is possible there, D-14)', () => {
     const out = html(<RepoRow repo={repoRow({ hiddenProject: true })} onNewSession={noop} />);
     expect(out).not.toContain("repo-new-session");
+  });
+});
+
+describe('startableTargets (07.10-05: a row "+" only where the viewer can start)', () => {
+  const repo = (id: string, over: Partial<Project> = {}): Project => ({
+    id: `01a11635-d6e7-7c87-9f17-0000000000${id}`,
+    deviceId: "01a11635-d6e7-7c87-9f17-0000000000c1",
+    deviceName: "Ana's MacBook",
+    deviceOnline: true,
+    name: `repo-${id}`,
+    gitRemote: null,
+    defaultBranch: "main",
+    available: true,
+    createdAt: "2026-10-22T10:00:00Z",
+    teamProject: null,
+    ...over,
+  });
+  const portal = { id: PORTAL, name: "Customer portal", defaultVisibility: "project" as const };
+
+  it("names the team projects and repositories the viewer's repository list lets them start on", () => {
+    const linked = repo("b1", { teamProject: portal, deviceOnline: false });
+    const scratch = repo("b2");
+    const t = startableTargets([linked, scratch]);
+    // An offline device still counts (the dialog opens on it and says why it can't start yet).
+    expect(t.teamProjects.has(PORTAL)).toBe(true);
+    expect(t.repos.has(linked.id)).toBe(true);
+    expect(t.repos.has(scratch.id)).toBe(true);
+  });
+
+  it("leaves out what the viewer can't use: a removed repository, a hidden project's, and anything not listed", () => {
+    const removed = repo("b3", { teamProject: portal, available: false });
+    const hidden = repo("b4", { teamProjectHidden: true });
+    const t = startableTargets([removed, hidden]);
+    expect(t.teamProjects.size).toBe(0);
+    expect(t.repos.size).toBe(0);
+    // Still loading: no "+" at all (fail closed).
+    expect(startableTargets(undefined).teamProjects.size).toBe(0);
   });
 });
 

@@ -227,7 +227,9 @@ test("Pia reaches her team project from the sidebar and sees exactly the session
     await expect(page.getByTestId("project-sessions-footnote")).toHaveText(
       "Sessions people keep to themselves don't appear here.",
     );
-    // Pia cannot use the project's devices: she follows its sessions but has no New session here (D-13).
+    // Pia cannot use the project's devices: she follows its sessions but has no New session here (D-13). Scoped to the
+    // page: since 07.10-05 the sidebar's project "+" carries the same test id (and is absent for her too).
+    await expect(project.getByTestId("project-new-session")).toHaveCount(0);
     await expect(page.getByTestId("project-new-session")).toHaveCount(0);
     await checkScreen(page, "project-page");
     await captureReview(page, `project-sessions-${tag}`);
@@ -254,7 +256,8 @@ test("the admin's New session opens the dialog on the project's first online rep
     await expect(page.getByTestId("project-session-row").filter({ hasText: T.spike })).toHaveCount(1, {
       timeout: 30_000,
     });
-    await page.getByTestId("project-new-session").click();
+    // The page's New session (the sidebar's project "+" shares the test id since 07.10-05).
+    await page.getByTestId("project-page").getByTestId("project-new-session").click();
     const dialog = page.getByTestId("new-session-dialog");
     await expect(dialog).toBeVisible();
     const selected = dialog.locator('[data-testid="project-option"][aria-checked="true"]');
@@ -351,7 +354,7 @@ test("Leo, a team lead, creates a project inside the team he leads and opens the
     // A new project has no repositories: its editor reads how to start (UI-SPEC § Copy).
     await expect(project).toContainText("No repositories yet");
     await expect(project).toContainText("Link a repository so the team can start sessions here.");
-    await expect(page.getByTestId("project-new-session")).toHaveCount(0);
+    await expect(project.getByTestId("project-new-session")).toHaveCount(0);
     await checkScreen(page, "project-page");
     await captureReview(page, `project-empty-${tag}`);
 
@@ -364,7 +367,7 @@ test("Leo, a team lead, creates a project inside the team he leads and opens the
     // 07.9-13: a manager outside the project reads why, not the member's "Start one".
     await expect(other).toContainText("You manage this project but aren't in it.");
     await expect(page.getByTestId("project-session-row")).toHaveCount(0);
-    await expect(page.getByTestId("project-new-session")).toHaveCount(0);
+    await expect(other.getByTestId("project-new-session")).toHaveCount(0);
   } finally {
     if (created) {
       await del(admin, `/api/v1/units/${created}`);
