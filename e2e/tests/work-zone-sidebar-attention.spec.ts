@@ -338,7 +338,9 @@ test("tracer: an approval waiting on Leo reaches the top of his sidebar and leav
     // The row: badge, title, the warning reason; the project only to screen readers and in the hover title.
     await expect(row.getByTestId("row-project-badge")).toHaveText("CP");
     await expect(row.getByTestId("row-title")).toHaveText(title);
-    await expect(row.getByTestId("row-status")).toHaveText("Needs approval");
+    // 07.10-07 (UI review fix 2): the icon and "Approval" show; the full words are the tooltip and the name.
+    await expect(row.getByTestId("row-status")).toHaveText("Approval");
+    await expect(row.getByTestId("row-status")).toHaveAttribute("title", "Needs approval");
     await expect(row.getByTestId("row-status")).toHaveAttribute("data-tone", "warning");
     await expect(row.getByTestId("row-project")).toHaveClass(/sr-only/);
     await expect(row.getByTestId("row-project")).toHaveText(N.portal);
@@ -456,7 +458,7 @@ test("the whole sidebar: Needs you, departments with one collapsed, Personal, Se
     // An approval first, then his turn (the tracer's, never opened in this browser).
     await expect(rows).toHaveCount(2, { timeout: 30_000 });
     await expect(rows.nth(0)).toContainText(T.invoices);
-    await expect(rows.nth(0).getByTestId("row-status")).toHaveText("Needs approval");
+    await expect(rows.nth(0).getByTestId("row-status")).toHaveText("Approval");
     await expect(rows.nth(1)).toContainText(T.approval);
     await expect(rows.nth(1).getByTestId("row-status")).toHaveText("Your turn");
 

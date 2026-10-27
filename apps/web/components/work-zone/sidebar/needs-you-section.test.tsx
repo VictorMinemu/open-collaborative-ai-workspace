@@ -91,7 +91,11 @@ describe("NeedsYouRow", () => {
     expect(out).toMatch(/data-testid="row-project-badge"[^>]*>CP</);
     expect(out).toMatch(/data-testid="row-title"[^>]*>Fix the login redirect</);
     expect(out).toMatch(/data-testid="row-status" data-tone="warning"[^>]*class="[^"]*text-amber-700/);
-    expect(out).toContain("Needs approval");
+    // 07.10-07 (UI review fix 2): the icon and "Approval" show, so the title keeps its width; the full words stay in
+    // the link's name and the reason's tooltip.
+    const status = out.match(/<span data-testid="row-status"[^>]*>[\s\S]*?<\/span>/)?.[0] ?? "";
+    expect(status).toContain('title="Needs approval"');
+    expect(status.replace(/<[^>]+>/g, "")).toBe("Approval");
     expect(out).toContain("lucide-hand");
     expect(out).toMatch(/<span data-testid="row-project" class="sr-only">Customer portal<\/span>/);
     expect(out).toContain('title="Fix the login redirect · Customer portal"');

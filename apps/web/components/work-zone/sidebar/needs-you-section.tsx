@@ -22,6 +22,8 @@ import { ProjectBadge } from "./session-rows";
 /** The right slot of a one-line row with a badge: the text, its tone and an optional 12 px icon. */
 export interface RowRight {
   text: string;
+  /** The full words when `text` is a short form: the link's name and the reason's tooltip read them (07.10-07). */
+  label?: string;
   tone: "primary" | "warning" | "muted" | "foreground";
   icon?: ReactNode;
 }
@@ -60,7 +62,7 @@ export function BadgeSessionRow({
       data-testid={testId}
       data-status={s.status}
       aria-current={active ? "page" : undefined}
-      aria-label={`${s.title}, ${right.text}, in ${place}${srSuffix}`}
+      aria-label={`${s.title}, ${right.label ?? right.text}, in ${place}${srSuffix}`}
       title={`${s.title} · ${place}`}
       className={cn(sectionItemClass(active), "gap-2 max-md:h-11")}
     >
@@ -76,6 +78,7 @@ export function BadgeSessionRow({
       <span
         data-testid="row-status"
         data-tone={right.tone}
+        title={right.label}
         className={cn(
           "inline-flex shrink-0 items-center gap-1 font-normal text-[12px] tabular-nums",
           TONE[right.tone],
@@ -89,8 +92,11 @@ export function BadgeSessionRow({
 }
 
 const REASON: Record<NeedsReason, RowRight> = {
+  // The icon and "Approval" fit beside the title at 240 px; "Needs approval" stays in the name and the tooltip
+  // (07.10-07, UI review fix 2; UI-SPEC § 3 and the Copywriting Contract).
   approval: {
-    text: "Needs approval",
+    text: "Approval",
+    label: "Needs approval",
     tone: "warning",
     icon: <Hand aria-hidden className="size-3" />,
   },
