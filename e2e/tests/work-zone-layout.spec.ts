@@ -8,8 +8,8 @@ import { ADMIN, API_URL, shot } from "./env";
  * The Work Zone session screen follows the owner's reference layout (`reference/ref-4-layout.png`, D-17), built
  * from today's data only, with the REAL daemon in fake-runtime mode:
  * - sidebar (07.10): the session as a one-line row under its repository in Personal ("Working Ns" / "Needs
- *   approval", title; branch and diff stat in its hover detail), a collapsible "Settled" group with "Show N more",
- *   and a search box;
+ *   approval", title; branch and diff stat in its hover detail), a "Settled" section, collapsed by default, with
+ *   "Show N more", and a search box with grouped results (Sessions 10 then "Show all N", Repositories);
  * - stream: completed turns collapse behind "Worked for …" (items stay in the DOM), grouped tool calls, the final
  *   message with its time and a copy button, and a "N changed files +a −b · Open diff" card;
  * - the "1 agent working · View · Stop" bar above the composer and the worktree / diff stat / branch strip below.
@@ -180,23 +180,42 @@ test("Work Zone layout (ref-4): sidebar rows and groups, collapsible turns, chan
     );
     await expect(row.getByTestId("row-status")).not.toContainText("Working");
 
-    // ---- Settled: collapsible, 10 rows then "Show N more"; the search filters by title or project
+    // ---- Settled (07.10-04): a section at the end, collapsed by default (open it first), 10 rows then
+    // "Show N more" (the viewer's whole scope, so N is not ours alone), then every one of the 12 and "Show fewer"
     const settled = page.getByTestId("settled-group");
     await expect(settled).toBeVisible();
-    const search = page.getByTestId("session-search");
-    await search.fill(`Settled ${tag}`);
-    await expect(page.getByTestId("session-row").filter({ hasText: `Layout ${tag}` })).toHaveCount(0);
+    await expect(settled.getByTestId("settled-toggle")).toHaveAttribute("aria-expanded", "false");
+    await expect(settled.getByTestId("session-row")).toHaveCount(0);
+    await settled.getByTestId("settled-toggle").click();
     await expect(settled.getByTestId("session-row")).toHaveCount(10);
-    await expect(settled.getByTestId("settled-more")).toHaveText("Show 2 more");
-    await bothThemes(page, `wz-session-sidebar-${tag}`);
+    await expect(settled.getByTestId("settled-more")).toHaveText(/^Show \d+ more$/);
     await settled.getByTestId("settled-more").click();
-    await expect(settled.getByTestId("session-row")).toHaveCount(12);
+    for (let i = 1; i <= 12; i++)
+      await expect(
+        settled.getByTestId("row-title").getByText(`Settled ${tag} #${i}`, { exact: true }),
+      ).toHaveCount(1);
+    await expect(settled.getByTestId("settled-more")).toHaveText("Show fewer");
     await settled.getByTestId("settled-toggle").click();
     await expect(settled.getByTestId("session-row")).toHaveCount(0);
     await settled.getByTestId("settled-toggle").click();
+    await expect(settled.getByTestId("session-row").first()).toBeVisible();
+
+    // ---- search (07.10-04): grouped results replace the tree; the 12 settled sessions page in the Sessions group as
+    // 10 then "Show all 12"; the repository's name finds the repository row and its session
+    const search = page.getByTestId("session-search");
+    await search.fill(`Settled ${tag}`);
+    const results = page.getByTestId("sidebar-search-results");
+    const found = results.getByTestId("search-group-sessions");
+    await expect(results.getByTestId("session-row").filter({ hasText: `Layout ${tag}` })).toHaveCount(0);
+    await expect(found.getByTestId("session-row")).toHaveCount(10);
+    await expect(found.getByTestId("search-more-sessions")).toHaveText("Show all 12");
+    await bothThemes(page, `wz-session-sidebar-${tag}`);
+    await found.getByTestId("search-more-sessions").click();
+    await expect(found.getByTestId("session-row")).toHaveCount(12);
     await search.fill(`layout-${tag}`);
-    await expect(page.getByTestId("session-row")).toHaveCount(1);
-    await expect(page.getByTestId("session-row")).toContainText(`Layout ${tag}`);
+    await expect(results.getByTestId(`repo-row-${device.projectId}`)).toContainText(`layout-${tag}`);
+    await expect(results.getByTestId("session-row")).toHaveCount(1);
+    await expect(results.getByTestId("session-row")).toContainText(`Layout ${tag}`);
     await search.fill("");
     if (!mobile) await bothThemes(page, `wz-session-sidebar-active-${tag}`);
     await closeSidebar();

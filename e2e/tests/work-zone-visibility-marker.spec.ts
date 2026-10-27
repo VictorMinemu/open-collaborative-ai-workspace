@@ -244,8 +244,10 @@ test("Work Zone sidebar: a quiet marker only where the audience differs, rows gr
       }
     }
     // Settled: the ended and failed rows, 44 px on a phone like every other sidebar control (the hover-only "+"
-    // is not offered to a touch screen).
+    // is not offered to a touch screen). 07.10-04: Settled is a section, collapsed by default: open it first.
     const settledGroup = list.getByTestId("settled-group");
+    await settledGroup.getByTestId("settled-toggle").click();
+    await expect(settledGroup.getByTestId("settled-toggle")).toHaveAttribute("aria-expanded", "true");
     await expect(rowOf(settledGroup, S.ended)).toHaveAttribute("data-status", "completed");
     await expect(rowOf(settledGroup, S.failed)).toHaveAttribute("data-status", "failed");
     if (mobile) {

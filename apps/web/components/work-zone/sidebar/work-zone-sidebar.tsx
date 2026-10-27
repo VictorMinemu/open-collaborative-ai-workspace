@@ -4,7 +4,7 @@ import type { WorkSession } from "@ocw/contracts";
 import { Compass, Laptop, Plus, Search, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sidebar";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -21,6 +21,7 @@ import { DepartmentSections, PersonalSection, ProjectsLoading } from "./sections
 import { SettledSection } from "./settled-section";
 import { useSeenSessions } from "./use-seen-sessions";
 import { useSidebarCollapse } from "./use-sidebar-collapse";
+import { useSidebarKeys } from "./use-sidebar-keys";
 
 const PROJECT_PAGE = /^\/work-zone\/projects\/([^/]+)$/u;
 
@@ -76,6 +77,11 @@ export function WorkZoneSidebar() {
         : prev,
     );
   }, []);
+  const navRef = useRef<HTMLElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const clearSearch = useCallback(() => changeQuery(""), [changeQuery]);
+  // ↑/↓/Home/End between rows, ←/→ on a section toggle, ArrowDown and Escape in the search field (UI-SPEC § Keyboard).
+  const onKeyDown = useSidebarKeys(navRef, searchRef, clearSearch);
   const now = useNow((t) =>
     list.some(
       (s) =>
@@ -139,10 +145,17 @@ export function WorkZoneSidebar() {
         </Tooltip>
       }
     >
-      <nav aria-label="Work Zone" data-testid="session-list" className="flex min-h-full flex-col gap-3">
+      <nav
+        ref={navRef}
+        aria-label="Work Zone"
+        data-testid="session-list"
+        onKeyDown={onKeyDown}
+        className="flex min-h-full flex-col gap-3"
+      >
         <div className="relative px-0.5">
           <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
           <input
+            ref={searchRef}
             data-testid="session-search"
             type="search"
             value={query}

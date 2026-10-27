@@ -1,7 +1,9 @@
 import type { WorkSession, WorkSessionVisibilitySummary } from "@ocw/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { ActiveRow, orderActiveSessions, rowProject, SettledRow } from "../session-sidebar";
+import { orderActiveSessions, rowProject, SettledRow } from "../session-sidebar";
+import { NeedsYouRow } from "../sidebar/needs-you-section";
+import { SessionSubRow } from "../sidebar/rows";
 import { RecentSessionRow } from "../work-zone-home";
 import { VisibilityMarker, VisibilitySrSuffix } from "./visibility-marker";
 
@@ -136,16 +138,25 @@ describe("VisibilityMarker", () => {
 describe("sidebar rows", () => {
   const marked = session({ visibility: vis({ kind: "owner", differsFromDefault: true }) });
 
+  // 07.10-04: the three-line active row is retired; its cases run on the one-line rows that replaced it (the sub-row
+  // under a project and the needs-you row). The branch line is gone (UI-SPEC § 6, X4): the marker now comes before
+  // the right slot (`row-status`), where it came before `row-branch`.
+  const activeRows = (s: WorkSession) => [
+    html(<SessionSubRow s={s} now={NOW} active={false} viewerId={ANA} />),
+    html(<NeedsYouRow s={s} reason="approval" place={rowProject(s).name} active={false} viewerId={ANA} />),
+  ];
+
   it("an active row of a marked session carries the marker after the title and the suffix in its link", () => {
-    const out = html(<ActiveRow s={marked} now={NOW} active={false} viewerId={ANA} onNew={() => {}} />);
-    expect(markers(out)).toBe(1);
-    expect(out).toContain('<span class="sr-only">, only visible to you</span>');
-    expect(out.indexOf('data-testid="row-title"')).toBeLessThan(
-      out.indexOf('data-testid="visibility-marker"'),
-    );
-    expect(out.indexOf('data-testid="visibility-marker"')).toBeLessThan(
-      out.indexOf('data-testid="row-branch"'),
-    );
+    for (const out of activeRows(marked)) {
+      expect(markers(out)).toBe(1);
+      expect(out).toContain('<span class="sr-only">, only visible to you</span>');
+      expect(out.indexOf('data-testid="row-title"')).toBeLessThan(
+        out.indexOf('data-testid="visibility-marker"'),
+      );
+      expect(out.indexOf('data-testid="visibility-marker"')).toBeLessThan(
+        out.indexOf('data-testid="row-status"'),
+      );
+    }
   });
 
   it("a settled row carries it before the diff stat", () => {
@@ -163,16 +174,20 @@ describe("sidebar rows", () => {
   });
 
   it("rows on the default render exactly as before: no marker, no suffix, no new element", () => {
-    const active = html(<ActiveRow s={session()} now={NOW} active={false} viewerId={ANA} onNew={() => {}} />);
+    const [sub = "", needs = ""] = activeRows(session());
     const settled = html(
       <SettledRow s={session({ status: "completed" })} now={NOW} active={false} viewerId={ANA} />,
     );
-    for (const out of [active, settled]) {
+    for (const out of [sub, settled]) {
       expect(markers(out)).toBe(0);
       expect(out).not.toContain("sr-only");
     }
-    // The title is still the direct child of the link's grid (no wrapper on the default).
-    expect(active).toMatch(/<\/span><span data-testid="row-title"/);
+    // The needs-you row's only sr-only text is its project (UI-SPEC § 3): no visibility suffix on the default.
+    expect(markers(needs)).toBe(0);
+    expect(needs.match(/class="sr-only"/g)).toHaveLength(1);
+    expect(needs).toMatch(/<span data-testid="row-project" class="sr-only">Customer portal<\/span>/);
+    // The title is still a direct child of the link (no wrapper on the default).
+    for (const out of [sub, needs]) expect(out).toMatch(/<\/span><span data-testid="row-title"/);
   });
 
   it("labels and badges a linked session with its team project, an unlinked one with its repository", () => {
@@ -182,9 +197,12 @@ describe("sidebar rows", () => {
     });
     const personal = session({ teamProject: null, projectName: "scratch" });
     expect(rowProject(personal)).toEqual({ key: personal.projectId, name: "scratch" });
-    const out = html(<ActiveRow s={session()} now={NOW} active={false} viewerId={ANA} onNew={() => {}} />);
+    const [, out = ""] = activeRows(session());
     expect(out).toMatch(/data-testid="row-project-badge"[^>]*>CP</);
     expect(out).toMatch(/data-testid="row-project"[^>]*>Customer portal</);
+    const [, mine = ""] = activeRows(personal);
+    expect(mine).toMatch(/data-testid="row-project-badge"[^>]*>SC</);
+    expect(mine).toMatch(/data-testid="row-project"[^>]*>scratch</);
   });
 
   it("two repositories of one team project sort together; an unlinked repository keeps its own group", () => {
