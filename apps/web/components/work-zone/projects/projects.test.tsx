@@ -46,9 +46,28 @@ const REPO2 = "01a11635-d6e7-7c87-9f17-0000000000b2";
 const DEVICE = "01a11635-d6e7-7c87-9f17-0000000000c1";
 const ANA = "01a11635-d6e7-7c87-9f17-0000000000a1";
 
+/** 07.10 (R1): where a project sits and how the viewer belongs; the index page itself does not read them. */
+const where = {
+  parent: { id: "01a11635-d6e7-7c87-9f17-0000000000e2", name: "Web", kind: "team" },
+  top: {
+    id: "01a11635-d6e7-7c87-9f17-0000000000e1",
+    name: "Engineering",
+    kind: "department",
+    viewerIsMember: true,
+  },
+  membership: "member",
+} as const;
+
 const index = (over: Partial<WorkProjectIndex> = {}): WorkProjectIndex => ({
   teamProjects: [
-    { id: PORTAL, name: "Customer portal", trail: ["Engineering", "Web"], peopleCount: 3, repoCount: 2 },
+    {
+      id: PORTAL,
+      name: "Customer portal",
+      trail: ["Engineering", "Web"],
+      peopleCount: 3,
+      repoCount: 2,
+      ...where,
+    },
   ],
   personalRepos: [
     {
@@ -201,8 +220,8 @@ describe("ProjectsIndexBody", () => {
       <ProjectsIndexBody
         data={index({
           teamProjects: [
-            { id: PORTAL, name: "Solo", trail: ["Web"], peopleCount: 1, repoCount: 1 },
-            { id: OTHER, name: "Empty", trail: ["Web"], peopleCount: 3, repoCount: 0 },
+            { id: PORTAL, name: "Solo", trail: ["Web"], peopleCount: 1, repoCount: 1, ...where },
+            { id: OTHER, name: "Empty", trail: ["Web"], peopleCount: 3, repoCount: 0, ...where },
           ],
         })}
         onNewSession={noop}

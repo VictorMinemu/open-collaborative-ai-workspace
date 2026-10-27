@@ -644,7 +644,17 @@ describe("the projects index, the creatable parents and Project.teamProject (D-0
     const mine = await ok(lena.request("GET", "/api/v1/work-projects"));
     expect(mine).toEqual({
       teamProjects: [
-        { id: billing, name: "Billing", trail: ["Engineering", "Web"], peopleCount: 1, repoCount: 2 },
+        {
+          id: billing,
+          name: "Billing",
+          trail: ["Engineering", "Web"],
+          peopleCount: 1,
+          repoCount: 2,
+          // 07.10: where it sits and how Lena belongs (she created it, so she leads it).
+          parent: { id: web, name: "Web", kind: "team" },
+          top: { id: engineering, name: "Engineering", kind: "department", viewerIsMember: true },
+          membership: "lead",
+        },
       ],
       personalRepos: [
         {
@@ -703,17 +713,18 @@ describe("the projects index, the creatable parents and Project.teamProject (D-0
   });
 
   it("lists the teams and departments where the caller may create a project, never a project", async () => {
+    // 07.10 (R3): `topId` is the parent's top-level unit, a department's own id.
     expect((await ok(lena.request("GET", "/api/v1/work-projects/parents"))).parents).toEqual([
-      { id: web, name: "Web", kind: "team", trail: ["Engineering"] },
+      { id: web, name: "Web", kind: "team", trail: ["Engineering"], topId: engineering },
     ]);
     expect((await ok(victor.request("GET", "/api/v1/work-projects/parents"))).parents).toEqual([
-      { id: engineering, name: "Engineering", kind: "department", trail: [] },
-      { id: mobile, name: "Mobile", kind: "team", trail: ["Engineering"] },
-      { id: web, name: "Web", kind: "team", trail: ["Engineering"] },
+      { id: engineering, name: "Engineering", kind: "department", trail: [], topId: engineering },
+      { id: mobile, name: "Mobile", kind: "team", trail: ["Engineering"], topId: engineering },
+      { id: web, name: "Web", kind: "team", trail: ["Engineering"], topId: engineering },
     ]);
     expect((await ok(dana.request("GET", "/api/v1/work-projects/parents"))).parents).toEqual([]);
     expect((await ok(otto.request("GET", "/api/v1/work-projects/parents"))).parents).toEqual([
-      { id: mobile, name: "Mobile", kind: "team", trail: ["Engineering"] },
+      { id: mobile, name: "Mobile", kind: "team", trail: ["Engineering"], topId: engineering },
     ]);
     const eveParents = (await ok(eve.request("GET", "/api/v1/work-projects/parents"))).parents;
     expect(eveParents.map((p: { id: string }) => p.id)).toEqual([eveUnit]);
@@ -828,5 +839,159 @@ describe("D-14: assignable teams follow the resolver", () => {
       await ok(victor.request("DELETE", `/api/v1/units/${webQa}`));
       await ok(victor.request("DELETE", `/api/v1/units/${design}`));
     }
+  });
+});
+
+describe("07.10: the index says where each project sits and how the viewer belongs (D-01, D-02, D-07, D-10, R1, R3)", () => {
+  // Engineering › Web › Customer portal (Pia a direct member, Leo its lead); Operations › Billing ops (directly under
+  // the department, Web assigned to it). Ivy leads Operations and is in no project; Víctor (admin) is in neither.
+  let pia: TestClient;
+  let leo: TestClient;
+  let ivy: TestClient;
+  let operations = "";
+  let customerPortal = "";
+  let billingOps = "";
+
+  type Row = {
+    id: string;
+    name: string;
+    parent: { id: string; name: string; kind: string };
+    top: { id: string; name: string; kind: string; viewerIsMember: boolean };
+    membership: string;
+  };
+  const index = async (as: TestClient) =>
+    (await ok(as.request("GET", "/api/v1/work-projects"))).teamProjects as Row[];
+  const row = (rows: Row[], id: string) => {
+    const found = rows.find((r) => r.id === id);
+    if (!found) throw new Error(`no index row ${id}`);
+    return found;
+  };
+
+  beforeAll(async () => {
+    const victorId = (
+      await su.query("select user_id from app.org_members where display_name = 'Víctor Ruiz'")
+    ).rows[0].user_id as string;
+    const { client: piaClient, userId: piaId } = await invite(
+      stack,
+      victor,
+      "pia@example.test",
+      "Pia",
+      "developer",
+    );
+    const { client: leoClient, userId: leoId } = await invite(
+      stack,
+      victor,
+      "leo@example.test",
+      "Leo",
+      "lead",
+    );
+    const { client: ivyClient, userId: ivyId } = await invite(
+      stack,
+      victor,
+      "ivy@example.test",
+      "Ivy",
+      "lead",
+    );
+    [pia, leo, ivy] = [piaClient, leoClient, ivyClient];
+
+    operations = await unit("department", "Operations", null);
+    await ok(victor.request("POST", `/api/v1/units/${operations}/members`, { userId: ivyId, role: "lead" }));
+    await ok(victor.request("POST", `/api/v1/units/${web}/members`, { userId: piaId }));
+
+    // The admin creates both projects (becoming their lead) and then leaves them: an admin outside the project.
+    const create = async (name: string, parentId: string) => {
+      const id = (await ok(victor.request("POST", "/api/v1/work-projects", { name, parentId }))).id as string;
+      await ok(victor.request("DELETE", `/api/v1/units/${id}/members/${victorId}`));
+      return id;
+    };
+    customerPortal = await create("Customer portal", web);
+    billingOps = await create("Billing ops", operations);
+    await ok(victor.request("POST", `/api/v1/units/${customerPortal}/members`, { userId: piaId }));
+    await ok(
+      victor.request("POST", `/api/v1/units/${customerPortal}/members`, { userId: leoId, role: "lead" }),
+    );
+    await ok(victor.request("POST", `/api/v1/work-projects/${billingOps}/teams`, { unitId: web }));
+  });
+
+  it("a direct member and a member through an assigned team read their membership, parent and top unit", async () => {
+    const rows = await index(pia);
+    // Exactly the projects Pia can open, as before this phase: membership labels rows, never adds or removes one.
+    expect(rows.map((r) => r.id)).toEqual([billingOps, customerPortal]);
+    expect(row(rows, customerPortal)).toMatchObject({
+      name: "Customer portal",
+      membership: "member",
+      parent: { id: web, name: "Web", kind: "team" },
+      top: { id: engineering, name: "Engineering", kind: "department", viewerIsMember: true },
+    });
+    expect(row(rows, billingOps)).toMatchObject({
+      name: "Billing ops",
+      membership: "team",
+      parent: { id: operations, name: "Operations", kind: "department" },
+      top: { id: operations, name: "Operations", kind: "department", viewerIsMember: false },
+    });
+  });
+
+  it("the project lead reads lead; the admin outside both and the parent's lead read manager", async () => {
+    const leos = await index(leo);
+    expect(leos.map((r) => r.id)).toEqual([customerPortal]);
+    // Leo's only membership is the project itself, on Engineering's path (the chat sidebar's member-unit rule).
+    expect(row(leos, customerPortal)).toMatchObject({
+      membership: "lead",
+      top: { id: engineering, viewerIsMember: true },
+    });
+
+    const admins = await index(victor);
+    expect(row(admins, customerPortal).membership).toBe("manager");
+    expect(row(admins, billingOps).membership).toBe("manager");
+    // The admin belongs to no unit under Operations; Platform (which the admin leads) still reads lead.
+    expect(row(admins, billingOps).top.viewerIsMember).toBe(false);
+    expect(row(admins, platform).membership).toBe("lead");
+
+    // Ivy leads Operations (D-14: she manages Billing ops without belonging to it) and never sees Customer portal.
+    const ivys = await index(ivy);
+    expect(ivys.map((r) => r.id)).toEqual([billingOps]);
+    expect(row(ivys, billingOps)).toMatchObject({
+      membership: "manager",
+      top: { id: operations, viewerIsMember: true },
+    });
+    expect(JSON.stringify(ivys)).not.toContain(customerPortal);
+  });
+
+  it("every row's parent and top are units on the project's own path, never another project", async () => {
+    const units = new Map(
+      (await su.query("select id, kind, path from app.org_units")).rows.map((u) => [
+        u.id as string,
+        u as { kind: string; path: string[] },
+      ]),
+    );
+    for (const as of [victor, lena, dana, pia, leo, ivy]) {
+      for (const r of await index(as)) {
+        const path = units.get(r.id)?.path ?? [];
+        expect(r.parent.id).toBe(path.at(-2));
+        expect(r.top.id).toBe(path[0]);
+        expect(units.get(r.parent.id)?.kind).not.toBe("project");
+        expect(units.get(r.top.id)?.kind).not.toBe("project");
+      }
+    }
+  });
+
+  it("each creatable parent says its top-level unit (R3)", async () => {
+    expect((await ok(ivy.request("GET", "/api/v1/work-projects/parents"))).parents).toEqual([
+      { id: operations, name: "Operations", kind: "department", trail: [], topId: operations },
+    ]);
+    const admin = (await ok(victor.request("GET", "/api/v1/work-projects/parents"))).parents as Array<{
+      id: string;
+      topId: string;
+    }>;
+    const topOf = (id: string) => admin.find((p) => p.id === id)?.topId;
+    expect(topOf(operations)).toBe(operations);
+    expect(topOf(engineering)).toBe(engineering);
+    expect(topOf(web)).toBe(engineering);
+    // Lena leads Web: its section is Engineering.
+    expect((await ok(lena.request("GET", "/api/v1/work-projects/parents"))).parents).toEqual([
+      { id: web, name: "Web", kind: "team", trail: ["Engineering"], topId: engineering },
+    ]);
+    // A project lead alone creates nowhere.
+    expect((await ok(leo.request("GET", "/api/v1/work-projects/parents"))).parents).toEqual([]);
   });
 });

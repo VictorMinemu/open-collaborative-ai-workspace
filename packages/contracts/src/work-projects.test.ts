@@ -12,9 +12,13 @@ import {
   WORK_PROJECT_LIMITS,
   WorkProjectDetail,
   WorkProjectIndex,
+  WorkProjectMembership,
+  WorkProjectParent,
   WorkProjectParents,
   WorkProjectSearchQuery,
+  WorkProjectSummary,
   WorkProjectTeam,
+  WorkProjectUnitRef,
   WorkProjectUpdatedEvent,
 } from "./work-projects";
 
@@ -116,7 +120,16 @@ describe("team project API contracts (07.9-01, D-01, D-10, D-13)", () => {
     expect(
       WorkProjectIndex.parse({
         teamProjects: [
-          { id: uuid(1), name: "Customer portal", trail: ["Engineering"], peopleCount: 12, repoCount: 2 },
+          {
+            id: uuid(1),
+            name: "Customer portal",
+            trail: ["Engineering"],
+            peopleCount: 12,
+            repoCount: 2,
+            parent: { id: uuid(2), name: "Engineering", kind: "department" },
+            top: { id: uuid(2), name: "Engineering", kind: "department", viewerIsMember: true },
+            membership: "lead",
+          },
         ],
         personalRepos: [
           { projectId: uuid(7), name: "scratch", deviceId: uuid(6), deviceName: "Mac", deviceOnline: false },
@@ -126,12 +139,13 @@ describe("team project API contracts (07.9-01, D-01, D-10, D-13)", () => {
     ).toHaveLength(1);
     expect(
       WorkProjectParents.parse({
-        parents: [{ id: uuid(2), name: "Web", kind: "team", trail: ["Engineering"] }],
+        parents: [{ id: uuid(2), name: "Web", kind: "team", trail: ["Engineering"], topId: uuid(3) }],
       }).parents,
     ).toHaveLength(1);
     expect(
-      WorkProjectParents.safeParse({ parents: [{ id: uuid(2), name: "P", kind: "project", trail: [] }] })
-        .success,
+      WorkProjectParents.safeParse({
+        parents: [{ id: uuid(2), name: "P", kind: "project", trail: [], topId: uuid(2) }],
+      }).success,
     ).toBe(false);
     for (const linkedTo of [null, { id: uuid(1), name: "Customer portal" }]) {
       const linkable = {
@@ -198,5 +212,61 @@ describe("team project API contracts (07.9-01, D-01, D-10, D-13)", () => {
     expect(objects).toBeGreaterThanOrEqual(15);
     expect(keys).toEqual(expect.arrayContaining(["linkedTo", "deviceOnline", "avatarUrl"]));
     expect(keys.filter((k) => forbidden.has(k))).toEqual([]);
+  });
+});
+
+describe("the sidebar's project data (07.10-01, D-01, D-02, D-07, D-10, UI-SPEC R1, R3)", () => {
+  const summary = {
+    id: uuid(1),
+    name: "Customer portal",
+    trail: ["Engineering", "Web"],
+    peopleCount: 3,
+    repoCount: 1,
+    parent: { id: uuid(3), name: "Web", kind: "team" },
+    top: { id: uuid(2), name: "Engineering", kind: "department", viewerIsMember: true },
+    membership: "member",
+  };
+
+  it("WorkProjectMembership is member, team, lead or manager; never admin", () => {
+    for (const m of ["member", "team", "lead", "manager"]) expect(WorkProjectMembership.parse(m)).toBe(m);
+    for (const m of ["admin", "owner", "", null])
+      expect(WorkProjectMembership.safeParse(m).success).toBe(false);
+  });
+
+  it("a unit reference is a team or department, never a project", () => {
+    expect(WorkProjectUnitRef.parse({ id: uuid(3), name: "Web", kind: "team" })).toEqual({
+      id: uuid(3),
+      name: "Web",
+      kind: "team",
+    });
+    expect(WorkProjectUnitRef.safeParse({ id: uuid(3), name: "P", kind: "project" }).success).toBe(false);
+    expect(WorkProjectUnitRef.safeParse({ id: uuid(3), name: "", kind: "team" }).success).toBe(false);
+  });
+
+  it("an index row carries its parent, its top unit (with viewerIsMember) and the viewer's membership", () => {
+    expect(WorkProjectSummary.parse(summary)).toEqual(summary);
+    for (const key of ["parent", "top", "membership"] as const) {
+      const { [key]: _drop, ...rest } = summary;
+      expect(WorkProjectSummary.safeParse(rest).success, key).toBe(false);
+    }
+    const { viewerIsMember: _v, ...topWithout } = summary.top;
+    expect(WorkProjectSummary.safeParse({ ...summary, top: topWithout }).success).toBe(false);
+    expect(
+      WorkProjectSummary.safeParse({ ...summary, parent: { ...summary.parent, kind: "project" } }).success,
+    ).toBe(false);
+    expect(
+      WorkProjectSummary.safeParse({ ...summary, top: { ...summary.top, kind: "project" } }).success,
+    ).toBe(false);
+    expect(WorkProjectSummary.safeParse({ ...summary, membership: "admin" }).success).toBe(false);
+  });
+
+  it("a creatable parent says its top-level unit; one without topId is refused", () => {
+    const web = { id: uuid(3), name: "Web", kind: "team", trail: ["Engineering"], topId: uuid(2) };
+    expect(WorkProjectParent.parse(web)).toEqual(web);
+    const { topId: _t, ...without } = web;
+    expect(WorkProjectParent.safeParse(without).success).toBe(false);
+    // A department is its own top-level unit.
+    const eng = { id: uuid(2), name: "Engineering", kind: "department", trail: [], topId: uuid(2) };
+    expect(WorkProjectParent.parse(eng).topId).toBe(eng.id);
   });
 });

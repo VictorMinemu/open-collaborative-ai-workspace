@@ -22,8 +22,9 @@ let device: FakeDevice | null = null;
 
 /** Organization A's objects every case names. */
 const a = { org: "", dept: "", team: "", project: "", repo: "", session: "", deviceId: "" };
-/** Organization B's own team project (to mix B's ids with A's). */
+/** Organization B's own team project (to mix B's ids with A's) and the department it sits under. */
 let bProject = "";
+let bDept = "";
 
 type Res = { status: number; body: Record<string, unknown> | null };
 
@@ -112,7 +113,7 @@ beforeAll(async () => {
   );
 
   // Organization B's own team project.
-  const bDept = (
+  bDept = (
     await ok(eve.request("POST", "/api/v1/units", { kind: "department", name: "B dept", parentId: null }))
   ).id;
   bProject = (await ok(eve.request("POST", "/api/v1/work-projects", { name: "B project", parentId: bDept })))
@@ -297,6 +298,48 @@ describe("the phase's cross-tenant matrix, derived from the authz registry (C-02
       await run(key);
     }
     expect(await snapshotOfA()).toEqual(before);
+  });
+
+  it("07.10: the index's parent, top, membership and the parents' topId never carry the other organization's units, both directions", async () => {
+    type Index = {
+      teamProjects: Array<{
+        id: string;
+        parent: { id: string; name: string };
+        top: { id: string; name: string; viewerIsMember: boolean };
+        membership: string;
+      }>;
+    };
+    type Parents = { parents: Array<{ id: string; topId: string }> };
+    const aUnits = [a.dept, a.team, a.project, "Engineering", "Platform", "Atlas"];
+    const bUnits = [bDept, bProject, "B dept", "B project"];
+    const scan = (text: string, forbidden: string[], who: string) => {
+      for (const s of forbidden) expect(text, `${who} names ${s}`).not.toContain(s);
+    };
+
+    // Organization B's admin: B's project sits under B's own department; nothing of A, in either response.
+    const bIndex = (await ok(eve.request("GET", "/api/v1/work-projects"))) as Index;
+    expect(bIndex.teamProjects).toEqual([
+      expect.objectContaining({
+        id: bProject,
+        parent: { id: bDept, name: "B dept", kind: "department" },
+        top: { id: bDept, name: "B dept", kind: "department", viewerIsMember: true },
+        membership: "lead",
+      }),
+    ]);
+    const bParents = (await ok(eve.request("GET", "/api/v1/work-projects/parents"))) as Parents;
+    expect(bParents.parents.map((p) => [p.id, p.topId])).toEqual([[bDept, bDept]]);
+    scan(JSON.stringify(bIndex), aUnits, "B's index");
+    scan(JSON.stringify(bParents), aUnits, "B's parents");
+
+    // Organization A's admin: A's project under A's department; nothing of B.
+    const aIndex = (await ok(victor.request("GET", "/api/v1/work-projects"))) as Index;
+    expect(aIndex.teamProjects.map((p) => [p.id, p.parent.id, p.top.id, p.membership])).toEqual([
+      [a.project, a.dept, a.dept, "lead"],
+    ]);
+    const aParents = (await ok(victor.request("GET", "/api/v1/work-projects/parents"))) as Parents;
+    for (const p of aParents.parents) expect(p.topId).toBe(a.dept);
+    scan(JSON.stringify(aIndex), bUnits, "A's index");
+    scan(JSON.stringify(aParents), bUnits, "A's parents");
   });
 
   it("organization A still reads its own objects through the same routes (the cases above prove isolation, not breakage)", async () => {
