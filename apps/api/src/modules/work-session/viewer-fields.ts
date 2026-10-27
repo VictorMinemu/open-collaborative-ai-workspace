@@ -1,4 +1,10 @@
-import type { Permission, TeamProjectRef, WorkSession, WorkSessionAttention } from "@ocw/contracts";
+import {
+  type Permission,
+  type TeamProjectRef,
+  WORK_SESSION_TURN_WINDOW_MS,
+  type WorkSession,
+  type WorkSessionAttention,
+} from "@ocw/contracts";
 import { type Tx, workPrompts } from "@ocw/db";
 import { and, desc, inArray, isNotNull, sql } from "drizzle-orm";
 import { type PermissionService, type ResourceFacts, uuidArray, workProjectResource } from "../organization";
@@ -99,6 +105,9 @@ function distinctProjects(sources: readonly ShapeSource[]): SessionProject[] {
   return [...out.values()];
 }
 
+/** The "Your turn" window in seconds, for SQL. */
+const TURN_WINDOW_SECONDS = WORK_SESSION_TURN_WINDOW_MS / 1000;
+
 /** A session's last finished turn: who wrote its prompt and when it ended. */
 interface LastTurn {
   authorUserId: string;
@@ -108,6 +117,8 @@ interface LastTurn {
 /**
  * The last finished turn of each session (PD-05), in one query for the batch: per session, the most recent prompt
  * that was dispatched and then completed or failed. Queued, dispatched, running and cancelled prompts never count.
+ * Only turns that ended within `WORK_SESSION_TURN_WINDOW_MS` are read (07.10-07, LO-01): the client acts on no older
+ * one, and the bound keeps the sort to recent prompts on every list and delivery (an admin's archived history too).
  */
 async function lastTurns(tx: Tx, sessionIds: readonly string[]): Promise<Map<string, LastTurn>> {
   const out = new Map<string, LastTurn>();
@@ -125,6 +136,7 @@ async function lastTurns(tx: Tx, sessionIds: readonly string[]): Promise<Map<str
         inArray(workPrompts.status, ["completed", "failed"]),
         isNotNull(workPrompts.dispatchedAt),
         isNotNull(workPrompts.completedAt),
+        sql`${workPrompts.completedAt} > now() - make_interval(secs => ${TURN_WINDOW_SECONDS})`,
       ),
     )
     .orderBy(workPrompts.workSessionId, desc(workPrompts.completedAt), desc(workPrompts.position));

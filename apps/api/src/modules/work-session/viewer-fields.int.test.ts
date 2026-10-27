@@ -550,6 +550,35 @@ describe("the visibility panel and the write answers never name a project the vi
     expect((await admin.request("GET", `/api/v1/work-sessions/${eveSession}/visibility`)).status).toBe(404);
   });
 
+  it("the last turn counts only within the client's 24 h window; an older one is not read (LO-01)", async () => {
+    await ok(leo.request("POST", `/api/v1/work-sessions/${probe}/prompts`, { body: "Audit the quarter" }));
+    const cmd = await device.command("prompt", probe);
+    device.ack(cmd.id);
+    device.event(probe, { type: "prompt.started", promptId: cmd.payload.promptId });
+    device.event(probe, {
+      type: "prompt.completed",
+      promptId: cmd.payload.promptId,
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    device.event(probe, { type: "session.state", status: "idle" });
+    await eventually(async () => {
+      const d = await detail(leo, probe);
+      return d.session.status === "idle" && d.session.queuedCount === 0 && d.session.runningSince === null;
+    });
+    const ended = ((await detail(leo, probe)).prompts as Json[]).find((p) => p.body === "Audit the quarter")
+      ?.completedAt as string;
+    expect(ended).toEqual(expect.any(String));
+    expect((await row(leo, probe))?.attention).toEqual({ approval: false, lastTurnEndedAt: ended });
+
+    // The same turn, ended 25 h ago: outside the window the client acts on, so it is no longer read at all.
+    await su.query(
+      "update app.work_prompts set completed_at = now() - interval '25 hours' where work_session_id = $1",
+      [probe],
+    );
+    expect((await row(leo, probe))?.attention).toEqual({ approval: false, lastTurnEndedAt: null });
+    expect((await detail(leo, probe)).session.attention).toEqual({ approval: false, lastTurnEndedAt: null });
+  });
+
   it("POST /work-sessions, the settings PATCH and /controls answer with no per-viewer field and no project name", async () => {
     const patched = await ok(
       leo.request("PATCH", `/api/v1/work-sessions/${probe}/settings`, { model: "sonnet" }),

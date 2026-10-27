@@ -1,4 +1,9 @@
-import type { WorkProjectIndex, WorkProjectMembership, WorkSession } from "@ocw/contracts";
+import {
+  WORK_SESSION_TURN_WINDOW_MS,
+  type WorkProjectIndex,
+  type WorkProjectMembership,
+  type WorkSession,
+} from "@ocw/contracts";
 
 /**
  * The Work Zone sidebar model (Phase 07.10, UI-SPEC § 4-§ 7, PD-07): a pure function from what `GET /work-sessions` and
@@ -15,8 +20,8 @@ export const SECTION_PROJECT_CAP = 15;
 export const PERSONAL_REPO_CAP = 5;
 /** Rows Needs you shows before "Show {n} more" (D-05, UI-SPEC § 3). */
 export const NEEDS_YOU_CAP = 5;
-/** "Your turn" lasts this long after the viewer's turn ended (UI-SPEC § 3). */
-export const YOUR_TURN_MS = 24 * 60 * 60 * 1000;
+/** "Your turn" lasts this long after the viewer's turn ended (UI-SPEC § 3); the API reads no older turn. */
+export const YOUR_TURN_MS = WORK_SESSION_TURN_WINDOW_MS;
 /** Settled rows shown before "Show {n} more" (UI-SPEC § 8, ref-4). */
 export const SETTLED_PAGE = 10;
 /** Search results per group before "Show all {n}" (UI-SPEC § 11). */

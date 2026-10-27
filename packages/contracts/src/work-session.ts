@@ -43,6 +43,12 @@ export const WorkSessionVisibilitySummary = z.object({
 export type WorkSessionVisibilitySummary = z.infer<typeof WorkSessionVisibilitySummary>;
 
 /**
+ * How long a finished turn waits on its author as "Your turn" (Phase 07.10, UI-SPEC § 3). The API reads only turns
+ * that ended within it (`attention.lastTurnEndedAt`, 07.10-07 LO-01); the sidebar drops a reason older than it.
+ */
+export const WORK_SESSION_TURN_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
  * What in one session waits on one viewer (Phase 07.10, PD-05, D-05; UI-SPEC R2, § 3 Needs you), decided by the API
  * for that viewer only and never sent to anyone else.
  */
