@@ -28,7 +28,8 @@ import { ADMIN } from "./env";
  *   system, directly under Engineering, one quiet line), then Operations (Billing ops, reached through her team);
  *   projects she is not in are absent, and the admin's sidebar lists only the projects he belongs to;
  * - Personal: her unlinked repository with its session, and the admin's session on her device in a project she is not
- *   in, under that repository, the project named nowhere in the page, its titles or its accessible names (C-01);
+ *   in, under that repository, the project named nowhere in the page, its titles or its accessible names (C-01); that
+ *   session's chip and panel read "a project you can't open" (07.10-07, HI-01, ME-01);
  * - collapse is remembered across a reload, with a count pill, and keeps the open (settled) session visible.
  * Every unit, device and session the spec makes is removed in `afterAll`.
  */
@@ -54,7 +55,7 @@ const N = { eng: "", web: "", portal: "", design: "", vault: "", lab: "", ops: "
 /** The hidden project's own words: none may reach Pia's page (the run tag is shared with every other name). */
 const VAULT_WORDS = ["Quillback", "Zephyrine"];
 const T = { one: "", two: "", three: "", four: "", settled: "", scratch: "", onDevice: "" };
-const S = { settled: "" };
+const S = { settled: "", onDevice: "" };
 let piaScratch: FakeDeviceHandle;
 let piaLinked: FakeDeviceHandle;
 
@@ -192,7 +193,7 @@ test.beforeAll(async () => {
   await shareDevice(pia, piaLinked.deviceId, adminId);
   await link(U.vault, piaLinked.projectId);
   T.onDevice = `Rotate the signing keys ${run}`;
-  await startSession(admin, piaLinked.projectId, T.onDevice);
+  S.onDevice = await startSession(admin, piaLinked.projectId, T.onDevice);
 });
 
 test.afterAll(async () => {
@@ -335,7 +336,9 @@ test("Personal: her repository and a project she can't open, never named on her 
     expect(await scratch.evaluate((el) => el.tagName)).toBe("DIV");
 
     const linkedRow = personal.getByTestId(`repo-row-${piaLinked.projectId}`);
-    await expect(linkedRow).toHaveText(`pia-linked-${tag}`);
+    // The repository's name, then the hint for screen readers (07.10-07, LO-04), and the same hint as its tooltip.
+    await expect(linkedRow).toHaveText(`pia-linked-${tag}, Linked to a project you can't open`);
+    await expect(linkedRow.locator(".sr-only")).toHaveText(", Linked to a project you can't open");
     await expect(linkedRow).toHaveAttribute("title", "Linked to a project you can't open");
     await expect(subRows(personal, `pia-linked-${tag}`).filter({ hasText: T.onDevice })).toHaveCount(1, {
       timeout: 30_000,
@@ -374,6 +377,27 @@ test("Personal: her repository and a project she can't open, never named on her 
       await captureReview(page, "sidebar-hidden-project-1440");
     }
     await checkSidebar(page);
+
+    // 07.10-07 (HI-01, ME-01): the session on her device, in a project she can't open. Its header chip says so (never
+    // "everyone who can use" her device) and its panel is the read-only hidden form, naming no project.
+    await page.goto(`/work-zone/${S.onDevice}`);
+    const chip = page.getByTestId("session-header").getByTestId("visibility-chip");
+    await expect(chip).toHaveAccessibleName(
+      "Visible to Everyone in a project you can't open. See who can see this session",
+      { timeout: 30_000 },
+    );
+    await chip.click();
+    const panel = page.getByTestId("visibility-panel");
+    await expect(panel).toBeVisible();
+    await expect(panel).not.toHaveAttribute("data-loading", "true");
+    await expect(panel).toHaveAttribute("data-editable", "false");
+    await expect(panel.getByTestId("visibility-readonly-note")).toHaveText(
+      "Linked to a project you can't open.",
+    );
+    await expect(panel.getByRole("radio")).toHaveCount(0);
+    const html = await page.evaluate(() => document.documentElement.outerHTML);
+    for (const word of VAULT_WORDS)
+      expect(html, `"${word}" with the panel open`).not.toMatch(new RegExp(word, "i"));
   } finally {
     await context.close();
   }
