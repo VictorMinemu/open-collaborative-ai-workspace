@@ -407,7 +407,7 @@ of the thin Work Zone that Phase 1 already ships.
 **Operations features (inserted 2026-10-08, owner).** Phases 07.1–07.7 turn the 2026-10-06 operations meeting into
 generic capabilities for any organization (research: `.planning/research/OPS-FEATURES.md`). Each feature is owned by the
 Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits → Agent Card when a human approves);
-OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.6 → 07.7 (07.8 added 2026-10-14 and 07.9 added 2026-10-22 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
+OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.6 → 07.7 (07.8 added 2026-10-14 and 07.9 added 2026-10-22 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
 (F17), ERP-driven board columns beyond watched records.
 
 ### Phase 07.1: Board channels and record templates (INSERTED)
@@ -782,6 +782,28 @@ Plans:
 - [ ] 07.9-13-PLAN.md — Wave 6: Web project Settings tab and dialogs, Settings › Organization project sections
 - [ ] 07.9-14-PLAN.md — Wave 6: Web new-session dialog: repos grouped under team projects and "Visible to: … · Change"
 - [ ] 07.9-15-PLAN.md — Wave 7: Phase gate: full local gate and CI, ADR-0030, DEMO owner checks, STATUS, AGENTS row, CODEOWNERS, signed VALIDATION
+
+### Phase 07.10: Work Zone sidebar by team (INSERTED)
+
+**Goal**: The Work Zone sidebar is organised like the chat sidebar, by team. It scales to many people and many
+projects:
+- **Sections:** one collapsible section per department, remembered per person. Your own units come first.
+- **Projects:** each section lists only the team projects the viewer belongs to (directly or through a team). Each one
+  shows a live-session count, and clicking it opens the project page, as clicking a channel opens the channel.
+- **Sessions:** only active sessions appear under their project (at most 3, then "+N more").
+- **"Needs you":** a section on top gathers the sessions waiting on the viewer's approval or turn, from any project.
+- **Personal:** a section at the end holds the viewer's unlinked repositories.
+- **"+" buttons:** one per section creates a project there; one per project starts a session in it.
+- **Other projects** are reached through "Browse projects".
+
+The sidebar is the same on desktop and in the mobile drawer, and adds very little visual noise.
+**Requirements**: TBD (planning)
+**Depends on:** Phase 07.9
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.10 to break down)
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
