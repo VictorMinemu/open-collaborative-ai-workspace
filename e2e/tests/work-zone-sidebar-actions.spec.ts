@@ -10,6 +10,8 @@ import { ADMIN } from "./env";
  * real stack with the real local-runtime daemon in fake mode, at 1440 and 390, light and dark:
  * - the section "+": Leo, lead of Web (in Engineering) and of nothing in Operations, creates a project from
  *   ENGINEERING's "+", preselected on Web, and finds it in that section; OPERATIONS has no "+".
+ * - the project "+" (pointer only, in the live count's slot) and the repository "+" (visible on touch, 44 px) open the
+ *   new-session dialog on that project's or repository's repository; the header "+" opens it as before.
  * Every unit, device and session the spec makes is removed in `afterAll`.
  */
 
@@ -28,8 +30,9 @@ const sessionIds: string[] = [];
 const linked: Array<{ unit: string; repo: string }> = [];
 const U = { eng: "", web: "", portal: "", ops: "", billing: "" };
 const N = { eng: "", web: "", portal: "", ops: "", billing: "", mobileApp: "" };
-const T = { live: "" };
+const T = { live: "", scratch: "" };
 let portalRepo: FakeDeviceHandle;
+let piaScratch: FakeDeviceHandle;
 
 async function post<R>(api: APIRequestContext, path: string, data: unknown): Promise<R> {
   const r = await api.post(path, { data });
@@ -117,6 +120,15 @@ test.beforeAll(async () => {
   T.live = `Fix the login redirect ${run}`;
   const live = await startSession(admin, portalRepo.projectId, T.live);
   await asSuperuser("update app.work_sessions set status = $2 where id = $1", [live, "running"]);
+
+  // Pia's own unlinked repository, with her session: her Personal section.
+  piaScratch = await startFakeDevice(pia, {
+    name: `E2E Pia actions ${tag}`,
+    projectName: `wza-scratch-${tag}`,
+  });
+  devices.push(piaScratch);
+  T.scratch = `Try the new linter ${run}`;
+  await startSession(pia, piaScratch.projectId, T.scratch);
 });
 
 test.afterAll(async () => {
@@ -182,6 +194,99 @@ test("section +: Leo creates a project from his department, preselected on his t
     await expect(row).toContainText(N.mobileApp, { timeout: 30_000 });
     await expect(row.getByTestId("project-pill")).toHaveText(N.web);
     await expect(row).toHaveAttribute("aria-current", "page");
+  } finally {
+    await context.close();
+  }
+});
+
+/** The new-session dialog, and the one repository it has chosen. */
+async function sessionDialog(page: Page): Promise<{ dialog: Locator; chosen: Locator }> {
+  const dialog = page.getByTestId("new-session-dialog");
+  await expect(dialog).toBeVisible();
+  const chosen = dialog.locator('[data-testid="project-option"][aria-checked="true"]');
+  await expect(chosen).toHaveCount(1, { timeout: 30_000 });
+  return { dialog, chosen };
+}
+
+async function closeDialog(page: Page) {
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("new-session-dialog")).toHaveCount(0);
+}
+
+test("project + and repository +: a session starts where the row is; the header + is unchanged", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const mobile = info.project.name === "mobile";
+  const { context, page } = await openAs(browser, PIA, info.project.name);
+  try {
+    await page.goto("/work-zone");
+    let list = await openSidebar(page, mobile);
+    const eng = sectionOf(list, U.eng);
+    const row = eng.getByTestId(`project-row-${U.portal}`);
+    const count = row.getByTestId("project-live-count");
+    await expect(count).toHaveText("1", { timeout: 30_000 });
+    const plus = eng.getByTestId("project-new-session");
+
+    if (mobile) {
+      // U-8: no project "+" on touch (an invisible target over the row is worse than none); the count stays.
+      await expect(plus).toBeHidden();
+      await expect(count).toBeVisible();
+    } else {
+      await expect(plus).toHaveAccessibleName(`New session in ${N.portal}`);
+      await expect(plus).toHaveCSS("opacity", "0");
+      const countBox = await count.boundingBox();
+      const nameBox = await row.locator("span[title]").first().boundingBox();
+      await row.hover();
+      await expect(plus).toHaveCSS("opacity", "1");
+      // The "+" takes the count's place: same right edge, the count only hidden, nothing else moves.
+      await expect(count).toHaveCSS("visibility", "hidden");
+      const plusBox = await plus.boundingBox();
+      expect(countBox && plusBox).toBeTruthy();
+      if (countBox && plusBox) {
+        expect(Math.abs(plusBox.x + plusBox.width - (countBox.x + countBox.width))).toBeLessThanOrEqual(1);
+      }
+      expect(await row.locator("span[title]").first().boundingBox()).toEqual(nameBox);
+
+      // It opens the dialog, never navigates, on Customer portal's repository, with the project's default audience.
+      await plus.click();
+      await expect(page).toHaveURL(/\/work-zone$/);
+      const { dialog, chosen } = await sessionDialog(page);
+      await expect(chosen).toContainText(`wza-web-${tag}`);
+      await expect(
+        dialog.getByTestId(`project-group-${U.portal}`).locator('[aria-checked="true"]'),
+      ).toHaveCount(1);
+      await expect(page.getByTestId("new-session-visibility")).toContainText(
+        `Visible to: Everyone in ${N.portal}`,
+      );
+      await closeDialog(page);
+    }
+
+    // The repository "+": hover-revealed with a pointer, visible and 44 px on touch; the dialog opens on it.
+    list = await openSidebar(page, mobile);
+    const repo = list.getByTestId("personal-section").getByTestId(`repo-row-${piaScratch.projectId}`);
+    const repoPlus = repo.getByTestId("repo-new-session");
+    await expect(repoPlus).toHaveAccessibleName(`New session in wza-scratch-${tag}`);
+    if (mobile) {
+      await expect(repoPlus).toHaveCSS("opacity", "1");
+      await expectTarget44(repoPlus);
+    } else {
+      await expect(repoPlus).toHaveCSS("opacity", "0");
+      await repo.hover();
+      await expect(repoPlus).toHaveCSS("opacity", "1");
+    }
+    await repoPlus.click();
+    {
+      const { chosen } = await sessionDialog(page);
+      await expect(chosen).toContainText(`wza-scratch-${tag}`);
+      await closeDialog(page);
+    }
+
+    // The header "+": the dialog as before, on the default repository (no preselection).
+    await openSidebar(page, mobile);
+    await page.getByTestId("sidebar-new-session").click();
+    await sessionDialog(page);
+    await closeDialog(page);
   } finally {
     await context.close();
   }

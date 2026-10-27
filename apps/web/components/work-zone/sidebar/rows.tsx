@@ -1,10 +1,11 @@
 "use client";
 
 import type { WorkSession } from "@ocw/contracts";
-import { CloudOff, FolderGit2, FolderKanban, Hand } from "lucide-react";
+import { CloudOff, FolderGit2, FolderKanban, Hand, Plus } from "lucide-react";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { sectionItemClass } from "@/components/shell/section-sidebar";
+import { Tooltip } from "@/components/ui/tooltip";
 import { sessionLabels } from "@/lib/session-visibility";
 import { cn } from "@/lib/utils";
 import { projectHref } from "@/lib/work-zone-routes";
@@ -23,13 +24,16 @@ const PILL =
   "max-w-[40%] shrink-0 truncate rounded-[4px] bg-muted/80 px-1 py-px font-medium text-[10.5px] text-muted-foreground leading-tight";
 
 /** "● n": live sessions the viewer can see. The visual part is hidden from assistive tech (the link says it). */
-export function LiveCount({ n, testId }: { n: number; testId: string }) {
+export function LiveCount({ n, testId, className }: { n: number; testId: string; className?: string }) {
   if (n <= 0) return null;
   return (
     <span
       data-testid={testId}
       aria-hidden
-      className="ml-auto inline-flex shrink-0 items-center gap-1 text-[12px] text-muted-foreground tabular-nums"
+      className={cn(
+        "ml-auto inline-flex shrink-0 items-center gap-1 text-[12px] text-muted-foreground tabular-nums",
+        className,
+      )}
     >
       <span className="size-1.5 rounded-full bg-primary" />
       {n}
@@ -37,9 +41,28 @@ export function LiveCount({ n, testId }: { n: number; testId: string }) {
   );
 }
 
-export function ProjectRow({ project, muted = false }: { project: ProjectRowModel; muted?: boolean }) {
+/** The classes every row "+" shares (the chat section "+" look): 24 px, quiet until hovered. */
+const PLUS =
+  "inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground outline-none transition-opacity hover:bg-sidebar-accent hover:text-foreground focus-visible:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/40";
+
+/**
+ * A team project's row (D-03, UI-SPEC § 5). With `onNewSession` and at least one repository, a "+" ("New session in
+ * {project}") sits beside the link (never inside it) in the live count's slot: with a pointer it shows on the row's
+ * hover or keyboard focus and the count steps aside (visibility only, no width change); on touch it is not rendered
+ * (U-8: the project page's New session is one tap away). It opens the dialog, never navigates.
+ */
+export function ProjectRow({
+  project,
+  muted = false,
+  onNewSession,
+}: {
+  project: ProjectRowModel;
+  muted?: boolean;
+  onNewSession?: (() => void) | undefined;
+}) {
   const { id, name, pill, live, active } = project;
-  return (
+  const plus = onNewSession !== undefined && project.repoCount > 0;
+  const link = (
     <Link
       href={projectHref(id)}
       data-testid={`project-row-${id}`}
@@ -61,8 +84,41 @@ export function ProjectRow({ project, muted = false }: { project: ProjectRowMode
           {pill}
         </span>
       ) : null}
-      <LiveCount n={live} testId="project-live-count" />
+      {plus && live <= 0 ? (
+        // The "+" slot with a pointer when there is no count: the button never covers the name or the pill.
+        <span aria-hidden className="hidden w-6 shrink-0 pointer-fine:block" />
+      ) : null}
+      <LiveCount
+        n={live}
+        testId="project-live-count"
+        className={
+          plus
+            ? "justify-end pointer-fine:min-w-6 pointer-fine:group-hover/project:invisible pointer-fine:group-has-[:focus-visible]/project:invisible"
+            : undefined
+        }
+      />
     </Link>
+  );
+  if (!plus) return link;
+  const label = `New session in ${name}`;
+  return (
+    <div className="group/project relative">
+      {link}
+      <Tooltip content={label}>
+        <button
+          type="button"
+          aria-label={label}
+          data-testid="project-new-session"
+          onClick={onNewSession}
+          className={cn(
+            PLUS,
+            "absolute top-1/2 right-2.5 -translate-y-1/2 opacity-0 group-hover/project:opacity-100 group-has-[:focus-visible]/project:opacity-100 pointer-coarse:hidden",
+          )}
+        >
+          <Plus aria-hidden className="size-3.5" />
+        </button>
+      </Tooltip>
+    </div>
   );
 }
 
@@ -206,7 +262,21 @@ export const HIDDEN_PROJECT_HINT = "Linked to a project you can't open";
  * A personal repository (UI-SPEC § 7): plain text, not a link (a repository has no page), with its live count. A
  * repository linked to a project the viewer may not see named carries only `HIDDEN_PROJECT_HINT` in its `title`.
  */
-export function RepoRow({ repo, muted = false }: { repo: RepoRowModel; muted?: boolean }) {
+export function RepoRow({
+  repo,
+  muted = false,
+  onNewSession,
+}: {
+  repo: RepoRowModel;
+  muted?: boolean;
+  /**
+   * The repository's "+" ("New session in {repo}", UI-SPEC § 7): hover-revealed with a pointer, visible on touch with
+   * a 44 px target. Never on a repository whose project the viewer can't open: nobody can start there (D-14).
+   */
+  onNewSession?: (() => void) | undefined;
+}) {
+  const plus = onNewSession !== undefined && !repo.hiddenProject;
+  const label = `New session in ${repo.name}`;
   return (
     <div
       data-testid={`repo-row-${repo.projectId}`}
@@ -214,6 +284,7 @@ export function RepoRow({ repo, muted = false }: { repo: RepoRowModel; muted?: b
       className={cn(
         "flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-left text-[13.5px] text-sidebar-foreground max-md:h-11",
         muted && "text-muted-foreground",
+        plus && "group/repo",
       )}
     >
       <FolderGit2 aria-hidden className="size-4 shrink-0 text-muted-foreground" />
@@ -222,6 +293,22 @@ export function RepoRow({ repo, muted = false }: { repo: RepoRowModel; muted?: b
         {repo.live > 0 ? <span className="sr-only">, {repo.live} running</span> : null}
       </span>
       <LiveCount n={repo.live} testId="repo-live-count" />
+      {plus ? (
+        <Tooltip content={label}>
+          <button
+            type="button"
+            aria-label={label}
+            data-testid="repo-new-session"
+            onClick={onNewSession}
+            className={cn(
+              PLUS,
+              "-mr-1.5 opacity-0 group-hover/repo:opacity-100 max-md:size-11 [@media(hover:none)]:opacity-100",
+            )}
+          >
+            <Plus aria-hidden className="size-3.5" />
+          </button>
+        </Tooltip>
+      ) : null}
     </div>
   );
 }

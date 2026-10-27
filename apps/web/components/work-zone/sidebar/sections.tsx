@@ -137,11 +137,14 @@ export function UnitSection({
   section,
   ctx,
   onNewProject,
+  onNewSession,
 }: {
   section: UnitSectionModel;
   ctx: RowContext;
   /** Shown only where the viewer may create a project in this department (07.10-05, `useCreatableUnits`). */
   onNewProject?: (() => void) | undefined;
+  /** A project row's "+" (07.10-05, R5): start a session in that team project. */
+  onNewSession?: ((teamProjectId: string) => void) | undefined;
 }) {
   const { key, title, collapsed, hidden, projects, moreProjects, expanded } = section;
   return (
@@ -155,7 +158,7 @@ export function UnitSection({
     >
       {projects.map((p) => (
         <li key={p.id} className="grid grid-cols-1 gap-px">
-          <ProjectRow project={p} />
+          <ProjectRow project={p} onNewSession={onNewSession ? () => onNewSession(p.id) : undefined} />
           <SessionList
             label={`Active sessions in ${p.name}`}
             sessions={p.sessions}
@@ -180,7 +183,18 @@ export function UnitSection({
 }
 
 /** Personal (D-06, UI-SPEC § 7): the viewer's repositories outside the team projects, with their active sessions. */
-export function PersonalSection({ personal, ctx }: { personal: PersonalModel; ctx: RowContext }) {
+export function PersonalSection({
+  personal,
+  ctx,
+  onNewSession,
+}: {
+  personal: PersonalModel;
+  ctx: RowContext;
+  /** A repository row's "+" (07.10-05, § 7); defaults to the Work Zone's new-session dialog on that repository. */
+  onNewSession?: ((repoId: string) => void) | undefined;
+}) {
+  const { openNewSession } = useWorkZone();
+  const start = onNewSession ?? openNewSession;
   const { collapsed, hidden, repos, moreRepos, expanded } = personal;
   return (
     <SectionFrame
@@ -193,7 +207,7 @@ export function PersonalSection({ personal, ctx }: { personal: PersonalModel; ct
     >
       {repos.map((r) => (
         <li key={r.projectId} className="grid grid-cols-1 gap-px">
-          <RepoRow repo={r} />
+          <RepoRow repo={r} onNewSession={() => start(r.projectId)} />
           <SessionList
             label={`Active sessions in ${r.name}`}
             sessions={r.sessions}
@@ -234,7 +248,7 @@ export function DepartmentSections({
   ...ctx
 }: SectionsProps) {
   const creatable = useCreatableUnits();
-  const { openNewProject } = useWorkZone();
+  const { openNewProject, openNewSession } = useWorkZone();
   if (model.sections.length === 0) return null;
   return (
     <div className="grid grid-cols-1 gap-3">
@@ -248,6 +262,7 @@ export function DepartmentSections({
               ? () => openNewProject(creatable.defaultParentFor(section.key))
               : undefined
           }
+          onNewSession={(teamProjectId) => openNewSession({ teamProjectId })}
         />
       ))}
     </div>

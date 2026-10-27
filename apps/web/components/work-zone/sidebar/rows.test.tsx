@@ -179,6 +179,47 @@ describe("RepoRow", () => {
   });
 });
 
+describe('the row "+" (07.10-05, R5, § 5, § 7)', () => {
+  const noop = () => {};
+
+  it('a project row has no "+" without onNewSession or without a repository; the row markup is unchanged then', () => {
+    const plain = html(<ProjectRow project={projectRow({ live: 2 })} />);
+    expect(plain).not.toContain("project-new-session");
+    expect(html(<ProjectRow project={projectRow({ live: 2, repoCount: 0 })} onNewSession={noop} />)).toBe(
+      plain,
+    );
+  });
+
+  it('a project "+" is a named button beside the link (never inside it), in the count\'s slot, mouse only', () => {
+    const out = html(<ProjectRow project={projectRow({ live: 2 })} onNewSession={noop} />);
+    const plus = out.match(/<button[^>]*data-testid="project-new-session"[^>]*>/)?.[0] ?? "";
+    expect(plus).toContain('aria-label="New session in Customer portal"');
+    expect(plus).toContain('type="button"');
+    expect(plus).toContain("pointer-coarse:hidden");
+    expect(plus).toContain("absolute");
+    // Not nested in the link: the link closes before the button opens.
+    expect(out.indexOf("</a>")).toBeLessThan(out.indexOf('data-testid="project-new-session"'));
+    // The count gives its place to the "+" with a pointer (no width change: visibility only).
+    expect(out).toMatch(
+      /data-testid="project-live-count"[^>]*class="[^"]*pointer-fine:group-hover\/project:invisible/,
+    );
+  });
+
+  it('a repository "+" is named with the repository, visible on touch with a 44 px target', () => {
+    const out = html(<RepoRow repo={repoRow({ live: 1 })} onNewSession={noop} />);
+    const plus = out.match(/<button[^>]*data-testid="repo-new-session"[^>]*>/)?.[0] ?? "";
+    expect(plus).toContain('aria-label="New session in scratch"');
+    expect(plus).toContain("max-md:size-11");
+    expect(plus).toContain("[@media(hover:none)]:opacity-100");
+    expect(html(<RepoRow repo={repoRow()} />)).not.toContain("repo-new-session");
+  });
+
+  it('a repository linked to a project the viewer can\'t open has no "+" (no start is possible there, D-14)', () => {
+    const out = html(<RepoRow repo={repoRow({ hiddenProject: true })} onNewSession={noop} />);
+    expect(out).not.toContain("repo-new-session");
+  });
+});
+
 describe("MoreRow", () => {
   it("links to the project page with a named target", () => {
     const out = html(<MoreRow projectId={PORTAL} projectName="Customer portal" n={2} />);

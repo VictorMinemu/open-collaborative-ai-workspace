@@ -5,7 +5,7 @@ import { useWorkZoneOrgSync } from "@/lib/workzone-queries";
 import { NewSessionDialog } from "./new-session-dialog";
 import { NewProjectDialog } from "./projects/new-project-dialog";
 import { SessionSidebar } from "./session-sidebar";
-import { WorkZoneContext } from "./work-zone-context";
+import { type NewSessionPreselect, WorkZoneContext } from "./work-zone-context";
 
 /**
  * Work Zone chrome: session sidebar + content, the shared "New session" and "New project" dialogs (the sidebar's "+"
@@ -13,14 +13,14 @@ import { WorkZoneContext } from "./work-zone-context";
  */
 export function WorkZoneShell({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
-  const [projectId, setProjectId] = useState<string | undefined>();
+  const [target, setTarget] = useState<NewSessionPreselect | undefined>();
   const [projectOpen, setProjectOpen] = useState(false);
   const [defaultParentId, setDefaultParentId] = useState<string | undefined>();
   useWorkZoneOrgSync();
   const ctx = useMemo(
     () => ({
-      openNewSession(id?: string) {
-        setProjectId(id);
+      openNewSession(next?: NewSessionPreselect) {
+        setTarget(next);
         setOpen(true);
       },
       openNewProject(parentId?: string) {
@@ -34,7 +34,7 @@ export function WorkZoneShell({ children }: { children: ReactNode }) {
     <WorkZoneContext.Provider value={ctx}>
       <SessionSidebar />
       <div className="flex min-w-0 flex-1 flex-col">{children}</div>
-      <NewSessionDialog open={open} onOpenChange={setOpen} initialProjectId={projectId} />
+      <NewSessionDialog open={open} onOpenChange={setOpen} initialTarget={target} />
       <NewProjectDialog open={projectOpen} onOpenChange={setProjectOpen} defaultParentId={defaultParentId} />
     </WorkZoneContext.Provider>
   );
