@@ -21,6 +21,7 @@ export function SidebarSectionHeader({
   announceHidden = false,
   action,
   testId,
+  countAtEnd = false,
 }: {
   /** The toggle's id (the section's `aria-labelledby`). */
   id: string;
@@ -38,6 +39,11 @@ export function SidebarSectionHeader({
   action?: ReactNode;
   /** The toggle's test id when it is not `section-toggle` (the Work Zone's Settled keeps `settled-toggle`). */
   testId?: string | undefined;
+  /**
+   * The count pill at the toggle's end whatever the title's length (the Work Zone, 07.10-07 UI review: Personal like
+   * the departments). Absent, the pill follows the title as in chat (markup unchanged).
+   */
+  countAtEnd?: boolean;
 }) {
   const showCount = !expanded && hidden > 0;
   return (
@@ -67,7 +73,10 @@ export function SidebarSectionHeader({
         {showCount ? (
           <span
             data-testid="section-count"
-            className="ml-1 rounded-full bg-muted px-1.5 text-[10.5px] text-muted-foreground tabular-nums"
+            className={cn(
+              countAtEnd ? "ml-auto" : "ml-1",
+              "rounded-full bg-muted px-1.5 text-[10.5px] text-muted-foreground tabular-nums",
+            )}
           >
             {hidden}
           </span>

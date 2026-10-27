@@ -200,6 +200,7 @@ export function SectionShell({
         controls={listId}
         touch
         announceHidden
+        countAtEnd
         testId={toggleTestId}
       />
       {/* biome-ignore lint/a11y/noRedundantRoles: Safari drops list semantics under `list-style: none` (UI-SPEC). */}

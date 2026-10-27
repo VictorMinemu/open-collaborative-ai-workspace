@@ -1,9 +1,7 @@
 "use client";
 
-import { Plus } from "lucide-react";
-import { cn } from "@/lib/utils";
 import type { SettledModel } from "./model";
-import { SectionShell } from "./needs-you-section";
+import { InlineMore, SectionShell } from "./needs-you-section";
 import type { RowContext } from "./sections";
 import { SettledRow } from "./session-rows";
 
@@ -11,7 +9,8 @@ import { SettledRow } from "./session-rows";
  * Settled (Phase 07.10-04, D-04, UI-SPEC § 8): the history of the viewer's sidebar scope as a section at the end,
  * collapsed by default and remembered with the others. Its header is the shared section header with the existing
  * `settled-group` / `settled-toggle` ids; its rows are the existing `SettledRow`, 10 then "Show {n} more" /
- * "Show fewer" (`settled-more`). No count pill: history is not news (§ 2).
+ * "Show fewer" (`settled-more`, the same `InlineMore` row as Needs you and search: h-7, 12 px; 07.10-07 UI review fix
+ * 3). No count pill: history is not news (§ 2).
  */
 export function SettledSection({
   model,
@@ -39,20 +38,13 @@ export function SettledSection({
       ))}
       {model.more > 0 || model.expanded ? (
         <li>
-          <button
-            type="button"
-            data-testid="settled-more"
-            aria-expanded={model.expanded}
-            aria-controls="wz-list-settled"
-            onClick={() => onExpand("settled")}
-            className="flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-left text-[13px] text-muted-foreground outline-none hover:bg-sidebar-accent/60 hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 max-md:h-11"
-          >
-            <Plus
-              aria-hidden
-              className={cn("size-3.5 transition-transform", model.expanded && "rotate-45")}
-            />
-            {model.expanded ? "Show fewer" : `Show ${model.more} more`}
-          </button>
+          <InlineMore
+            testId="settled-more"
+            expanded={model.expanded}
+            label={`Show ${model.more} more`}
+            controls="wz-list-settled"
+            onToggle={() => onExpand("settled")}
+          />
         </li>
       ) : null}
     </SectionShell>

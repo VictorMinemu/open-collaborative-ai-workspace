@@ -5,7 +5,6 @@ import type { UseQueryResult } from "@tanstack/react-query";
 import { FolderGit2, FolderKanban, Plus } from "lucide-react";
 import { type ReactNode, useMemo } from "react";
 import { SidebarSectionHeader } from "@/components/shell/sidebar-section-header";
-import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useProjects } from "@/lib/workzone-queries";
@@ -20,6 +19,7 @@ import {
 } from "./model";
 import { OnboardingLine } from "./onboarding-line";
 import { ExpandRow, MoreRow, ProjectRow, RepoRow, SessionSubRow } from "./rows";
+import { RetryButton } from "./states";
 import { useCreatableUnits } from "./use-creatable-units";
 
 /**
@@ -146,6 +146,7 @@ function SectionFrame({
         controls={listId}
         touch
         announceHidden
+        countAtEnd
         action={action}
       />
       {/* biome-ignore lint/a11y/noRedundantRoles: Safari drops list semantics under `list-style: none` (UI-SPEC). */}
@@ -358,17 +359,7 @@ export function ProjectsFallback({
     <div data-testid="projects-error" className="grid grid-cols-1 gap-px">
       <p className="flex flex-wrap items-center gap-x-1.5 px-2.5 py-1 text-[12px] text-muted-foreground leading-4">
         Couldn't load projects.
-        <Button
-          type="button"
-          variant="link"
-          size="sm"
-          data-testid="projects-retry"
-          disabled={retrying}
-          onClick={onRetry}
-          className="h-auto p-0 text-[12px] max-md:min-h-11"
-        >
-          Try again
-        </Button>
+        <RetryButton testId="projects-retry" disabled={retrying} onClick={onRetry} />
       </p>
       {groups.length > 0 ? (
         // biome-ignore lint/a11y/noRedundantRoles: Safari drops list semantics under `list-style: none` (UI-SPEC).

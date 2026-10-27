@@ -19,6 +19,7 @@ import { NeedsYouSection } from "./needs-you-section";
 import { SidebarSearchResults } from "./search-results";
 import { DepartmentSections, PersonalSection, ProjectsLoading } from "./sections";
 import { SettledSection } from "./settled-section";
+import { NoSessionsLine, RetryButton } from "./states";
 import { useSeenSessions } from "./use-seen-sessions";
 import { useSidebarCollapse } from "./use-sidebar-collapse";
 import { useSidebarKeys } from "./use-sidebar-keys";
@@ -187,17 +188,11 @@ export function WorkZoneSidebar() {
                 className="flex flex-wrap items-center gap-x-1.5 px-2.5 py-1 text-[12px] text-muted-foreground leading-4"
               >
                 Couldn't load sessions.
-                <Button
-                  type="button"
-                  variant="link"
-                  size="sm"
-                  data-testid="sessions-retry"
+                <RetryButton
+                  testId="sessions-retry"
                   disabled={sessions.isFetching}
                   onClick={() => void sessions.refetch()}
-                  className="h-auto p-0 text-[12px] max-md:min-h-11"
-                >
-                  Try again
-                </Button>
+                />
               </p>
             ) : null}
             {loading ? (
@@ -208,7 +203,7 @@ export function WorkZoneSidebar() {
             )}
             {!loading && model.personal ? <PersonalSection personal={model.personal} ctx={ctx} /> : null}
             <SettledSection model={model.settled} {...ctx} />
-            {nothing ? <p className="px-2.5 text-[13px] text-muted-foreground">No sessions yet.</p> : null}
+            {nothing ? <NoSessionsLine /> : null}
           </>
         )}
 
