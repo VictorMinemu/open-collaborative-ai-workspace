@@ -223,31 +223,81 @@ function subRows(
   return { sessions: shown, more: active.filter((s) => !shown.includes(s)).length };
 }
 
+/**
+ * A collapsed section keeps only what concerns the viewer now (UI-SPEC § 4): the open session, the sessions in `needs`
+ * (07.10-04), and the open project's row even with no session under it. Returns null when the row is not kept.
+ */
+function keptWhenCollapsed<R extends { sessions: WorkSession[]; more: number }>(
+  row: R,
+  all: readonly WorkSession[],
+  input: SidebarInput,
+  open: boolean,
+): R | null {
+  const keep = all.filter((s) => s.id === input.openSessionId || (input.needs?.has(s.id) ?? false));
+  if (keep.length === 0 && !open) return null;
+  return { ...row, sessions: keep, more: 0 };
+}
+
+/** Over the cap: every row with an active session, the open one, then name order up to the cap (UI-SPEC § 4). */
+function capped<R>(rows: readonly R[], cap: number, required: (row: R) => boolean): R[] {
+  if (rows.length <= cap) return [...rows];
+  const must = new Set(rows.filter(required));
+  let room = cap - must.size;
+  return rows.filter((r) => {
+    if (must.has(r)) return true;
+    if (room <= 0) return false;
+    room -= 1;
+    return true;
+  });
+}
+
 export function buildWorkZoneSidebar(input: SidebarInput): SidebarModel {
   const scope = new Set<string>();
   const members = (input.index?.teamProjects ?? []).filter((p) => SIDEBAR_MEMBERSHIPS.has(p.membership));
   const memberIds = new Set(members.map((p) => p.id));
+  const personalRepos = input.index?.personalRepos ?? [];
+  const personalIds = new Set(personalRepos.map((r) => r.projectId));
 
-  // PD-07 (a): a session sits under its project when the project is one of the viewer's.
+  // PD-07: (a) under its project when the project is one of the viewer's; (b) under its repository in Personal when
+  // the project is hidden from the viewer, the repository is personal to them, or they created the session; (c)
+  // nowhere otherwise (admin- or manager-only sessions: search, the project page and Browse projects reach them).
   const byProject = new Map<string, WorkSession[]>();
+  const byRepo = new Map<string, WorkSession[]>();
+  const push = (map: Map<string, WorkSession[]>, key: string, s: WorkSession) => {
+    const list = map.get(key) ?? [];
+    list.push(s);
+    map.set(key, list);
+  };
   for (const s of input.sessions) {
     const id = s.teamProject?.id;
-    if (!id || !memberIds.has(id)) continue;
-    scope.add(s.id);
-    const list = byProject.get(id) ?? [];
-    list.push(s);
-    byProject.set(id, list);
+    if (id && memberIds.has(id)) {
+      scope.add(s.id);
+      push(byProject, id, s);
+    } else if (
+      s.teamProjectHidden === true ||
+      (!s.teamProject && personalIds.has(s.projectId)) ||
+      (input.viewerId !== null && s.createdBy === input.viewerId)
+    ) {
+      scope.add(s.id);
+      push(byRepo, s.projectId, s);
+    }
   }
+  const holdsOpen = (sessions: readonly WorkSession[]) => sessions.some((s) => s.id === input.openSessionId);
+  const hasActive = (sessions: readonly WorkSession[]) => sessions.some((s) => isActiveSession(s, input.now));
 
-  const groups = new Map<string, { title: string; viewerIsMember: boolean; rows: ProjectRowModel[] }>();
+  // ---- department sections
+  const groups = new Map<
+    string,
+    { title: string; viewerIsMember: boolean; rows: Array<{ row: ProjectRowModel; all: WorkSession[] }> }
+  >();
   for (const p of members) {
-    const sessions = byProject.get(p.id) ?? [];
-    const rows = subRows(sessions, input, SUB_ROW_CAP);
+    const all = byProject.get(p.id) ?? [];
+    const rows = subRows(all, input, SUB_ROW_CAP);
     const row: ProjectRowModel = {
       id: p.id,
       name: p.name,
       pill: p.parent.id !== p.top.id ? p.parent.name : null,
-      live: liveCount(sessions),
+      live: liveCount(all),
       sessions: rows.sessions,
       more: rows.more,
       active: p.id === input.openProjectId,
@@ -258,24 +308,90 @@ export function buildWorkZoneSidebar(input: SidebarInput): SidebarModel {
       viewerIsMember: p.top.viewerIsMember,
       rows: [],
     };
-    group.rows.push(row);
+    group.rows.push({ row, all });
     groups.set(p.top.id, group);
   }
 
   const sections: UnitSectionModel[] = [...groups.entries()].map(([key, g]) => {
-    const projects = g.rows.sort((a, b) => byName(a.name, b.name));
+    const rows = g.rows.sort((a, b) => byName(a.row.name, b.row.name));
+    const collapsed = input.collapsed.has(key);
+    const base = { key, title: g.title, viewerIsMember: g.viewerIsMember, collapsed };
+    if (collapsed) {
+      const kept = rows.flatMap(({ row, all }) => keptWhenCollapsed(row, all, input, row.active) ?? []);
+      return { ...base, projects: kept, hidden: rows.length - kept.length, moreProjects: 0, expanded: false };
+    }
+    const expanded = input.expanded.has(`section:${key}`) && rows.length > SECTION_PROJECT_CAP;
+    const shown = expanded
+      ? rows
+      : capped(rows, SECTION_PROJECT_CAP, ({ row, all }) => row.active || hasActive(all) || holdsOpen(all));
     return {
-      key,
-      title: g.title,
-      viewerIsMember: g.viewerIsMember,
-      collapsed: false,
-      projects,
+      ...base,
+      projects: shown.map(({ row }) => row),
       hidden: 0,
-      moreProjects: 0,
-      expanded: false,
+      moreProjects: rows.length - shown.length,
+      expanded,
     };
   });
   sections.sort((a, b) => Number(b.viewerIsMember) - Number(a.viewerIsMember) || byName(a.title, b.title));
 
-  return { sections, personal: null, scope };
+  // ---- Personal: the index's personal repositories plus the repositories of the sessions placed by (b)
+  const repoNames = new Map<string, { name: string; hiddenProject: boolean }>();
+  for (const r of personalRepos) repoNames.set(r.projectId, { name: r.name, hiddenProject: false });
+  for (const [projectId, sessions] of byRepo) {
+    if (repoNames.has(projectId)) continue;
+    const first = sessions[0] as WorkSession;
+    repoNames.set(projectId, {
+      name: first.projectName,
+      hiddenProject: sessions.some((s) => s.teamProjectHidden === true),
+    });
+  }
+  const latestActive = (sessions: readonly WorkSession[]) =>
+    Math.max(0, ...sessions.filter((s) => isActiveSession(s, input.now)).map((s) => time(s.updatedAt)));
+  const repos = [...repoNames.entries()]
+    .map(([projectId, meta]) => {
+      const all = byRepo.get(projectId) ?? [];
+      const overCap = all.filter((s) => isActiveSession(s, input.now)).length > SUB_ROW_CAP;
+      const expanded = input.expanded.has(`repo:${projectId}`) && overCap;
+      const rows = subRows(all, input, expanded ? Number.POSITIVE_INFINITY : SUB_ROW_CAP);
+      const row: RepoRowModel = {
+        projectId,
+        name: meta.name,
+        hiddenProject: meta.hiddenProject,
+        live: liveCount(all),
+        sessions: rows.sessions,
+        more: rows.more,
+        expanded,
+      };
+      return { row, all, recent: latestActive(all) };
+    })
+    .sort((a, b) => b.recent - a.recent || byName(a.row.name, b.row.name));
+
+  let personal: PersonalModel | null = null;
+  if (repos.length > 0) {
+    const collapsed = input.collapsed.has("personal");
+    if (collapsed) {
+      const kept = repos.flatMap(({ row, all }) => keptWhenCollapsed(row, all, input, false) ?? []);
+      personal = {
+        key: "personal",
+        collapsed,
+        repos: kept,
+        hidden: repos.length - kept.length,
+        moreRepos: 0,
+        expanded: false,
+      };
+    } else {
+      const expanded = input.expanded.has("personal") && repos.length > PERSONAL_REPO_CAP;
+      const shown = expanded ? repos : capped(repos, PERSONAL_REPO_CAP, ({ all }) => holdsOpen(all));
+      personal = {
+        key: "personal",
+        collapsed,
+        repos: shown.map(({ row }) => row),
+        hidden: 0,
+        moreRepos: repos.length - shown.length,
+        expanded,
+      };
+    }
+  }
+
+  return { sections, personal, scope };
 }

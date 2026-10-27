@@ -16,8 +16,9 @@ import { isSessionPath } from "@/lib/work-zone-routes";
 import { useWorkSessions } from "@/lib/workzone-queries";
 import { useWorkZone } from "../work-zone-context";
 import { buildWorkZoneSidebar, isActiveSession, orderActiveSessions } from "./model";
-import { DepartmentSections } from "./sections";
+import { DepartmentSections, PersonalSection } from "./sections";
 import { ActiveRow, SettledRow } from "./session-rows";
+import { useSidebarCollapse } from "./use-sidebar-collapse";
 
 /** Settled rows shown before "Show N more" (ref-4). */
 const SETTLED_PAGE = 10;
@@ -53,9 +54,11 @@ export function WorkZoneSidebar() {
   const [query, setQuery] = useState("");
   const [settledOpen, setSettledOpen] = useState(true);
   const [settledAll, setSettledAll] = useState(false);
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
-  const toggle = useCallback((key: string) => {
-    setCollapsed((prev) => {
+  const { collapsed, toggle } = useSidebarCollapse();
+  // Inline expansions ("{n} more projects", "{n} more repositories", a repository's "+N more") last for this page.
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const expand = useCallback((key: string) => {
+    setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -82,10 +85,11 @@ export function WorkZoneSidebar() {
         openSessionId,
         openProjectId,
         collapsed,
-        expanded: new Set(),
+        expanded,
       }),
-    [list, projects.data, viewerId, now, openSessionId, openProjectId, collapsed],
+    [list, projects.data, viewerId, now, openSessionId, openProjectId, collapsed, expanded],
   );
+  const ctx = { now, viewerId, openSessionId, onToggle: toggle, onExpand: expand };
 
   const q = query.trim().toLowerCase();
   const { active, settled } = useMemo(() => {
@@ -172,16 +176,9 @@ export function WorkZoneSidebar() {
             </div>
           ) : null
         ) : (
-          <DepartmentSections
-            model={model}
-            projects={projects}
-            sessions={list}
-            now={now}
-            viewerId={viewerId}
-            openSessionId={openSessionId}
-            onToggle={toggle}
-          />
+          <DepartmentSections model={model} projects={projects} sessions={list} {...ctx} />
         )}
+        {!q && model.personal ? <PersonalSection personal={model.personal} ctx={ctx} /> : null}
 
         {settled.length > 0 ? (
           <div className="grid grid-cols-1 gap-0.5 pt-2" data-testid="settled-group">

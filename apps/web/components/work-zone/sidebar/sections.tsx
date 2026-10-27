@@ -2,48 +2,87 @@
 
 import type { WorkProjectIndex, WorkSession } from "@ocw/contracts";
 import type { UseQueryResult } from "@tanstack/react-query";
+import type { ReactNode } from "react";
 import { SidebarSectionHeader } from "@/components/shell/sidebar-section-header";
-import type { SidebarModel, UnitSectionModel } from "./model";
-import { MoreRow, ProjectRow, SessionSubRow } from "./rows";
+import type { PersonalModel, SidebarModel, UnitSectionModel } from "./model";
+import { ExpandRow, MoreRow, ProjectRow, RepoRow, SessionSubRow } from "./rows";
 
 /**
- * The department sections of the Work Zone sidebar (Phase 07.10, UI-SPEC § 4, Accessibility Contract): nested lists
- * inside the nav landmark, never `role="tree"`. Each section is `<section aria-labelledby>` with the shared header and
- * one list of projects; each project holds its sub-rows in a nested, labelled list.
+ * The sections of the Work Zone sidebar (Phase 07.10, UI-SPEC § 4, § 7, Accessibility Contract): nested lists inside
+ * the nav landmark, never `role="tree"`. Each section is `<section aria-labelledby>` with the shared header (its toggle
+ * controls the section's list) and one list of rows; each project or repository holds its sessions in a nested,
+ * labelled list.
  */
 
-export interface SectionsProps {
-  model: SidebarModel;
-  /** The projects request; 07.10-05 adds its loading and error states here (PD-11). */
-  projects: Pick<UseQueryResult<WorkProjectIndex>, "status" | "error" | "refetch" | "data">;
-  sessions: readonly WorkSession[];
+/** What every section needs to draw its rows. */
+export interface RowContext {
   now: number;
   viewerId: string | null;
   openSessionId: string | null;
   onToggle: (key: string) => void;
+  /** Flips an inline expansion: `section:<key>`, `personal`, `repo:<projectId>`. */
+  onExpand: (key: string) => void;
 }
 
-export function UnitSection({
-  section,
-  now,
-  viewerId,
-  openSessionId,
-  onToggle,
+export interface SectionsProps extends RowContext {
+  model: SidebarModel;
+  /** The projects request; 07.10-05 adds its loading and error states and the onboarding line here (PD-11). */
+  projects: Pick<UseQueryResult<WorkProjectIndex>, "status" | "error" | "refetch" | "data">;
+  sessions: readonly WorkSession[];
+}
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+function SessionList({
+  label,
+  sessions,
+  ctx,
+  more,
 }: {
-  section: UnitSectionModel;
-  now: number;
-  viewerId: string | null;
-  openSessionId: string | null;
-  onToggle: (key: string) => void;
+  label: string;
+  sessions: readonly WorkSession[];
+  ctx: RowContext;
+  more?: ReactNode;
 }) {
-  const { key, title, collapsed, hidden, projects } = section;
-  const headingId = `wz-section-${key}`;
-  const listId = `wz-list-${key}`;
+  if (sessions.length === 0 && !more) return null;
+  return (
+    // biome-ignore lint/a11y/noRedundantRoles: Safari drops list semantics under `list-style: none` (UI-SPEC).
+    <ul role="list" aria-label={label} className="grid grid-cols-1 gap-px">
+      {sessions.map((s) => (
+        <li key={s.id}>
+          <SessionSubRow s={s} now={ctx.now} active={s.id === ctx.openSessionId} viewerId={ctx.viewerId} />
+        </li>
+      ))}
+      {more ? <li>{more}</li> : null}
+    </ul>
+  );
+}
+
+/** The `<section>` frame every sidebar section shares: header toggle, then the list it controls. */
+function SectionFrame({
+  sectionKey,
+  title,
+  collapsed,
+  hidden,
+  onToggle,
+  testId = "sidebar-section",
+  children,
+}: {
+  sectionKey: string;
+  title: string;
+  collapsed: boolean;
+  hidden: number;
+  onToggle: (key: string) => void;
+  testId?: string;
+  children: ReactNode;
+}) {
+  const headingId = `wz-section-${sectionKey}`;
+  const listId = `wz-list-${sectionKey}`;
   return (
     <section
       aria-labelledby={headingId}
-      data-testid="sidebar-section"
-      data-section={key}
+      data-testid={testId}
+      data-section={sectionKey}
       data-collapsed={collapsed ? "true" : undefined}
       className="grid grid-cols-1 gap-px"
     >
@@ -52,52 +91,114 @@ export function UnitSection({
         title={title}
         expanded={!collapsed}
         hidden={hidden}
-        onToggle={() => onToggle(key)}
+        onToggle={() => onToggle(sectionKey)}
         controls={listId}
         touch
         announceHidden
       />
       {/* biome-ignore lint/a11y/noRedundantRoles: Safari drops list semantics under `list-style: none` (UI-SPEC). */}
       <ul id={listId} role="list" className="grid grid-cols-1 gap-px">
-        {projects.map((p) => (
-          <li key={p.id} className="grid grid-cols-1 gap-px">
-            <ProjectRow project={p} />
-            {p.sessions.length > 0 || p.more > 0 ? (
-              // biome-ignore lint/a11y/noRedundantRoles: Safari drops list semantics under `list-style: none`.
-              <ul role="list" aria-label={`Active sessions in ${p.name}`} className="grid grid-cols-1 gap-px">
-                {p.sessions.map((s) => (
-                  <li key={s.id}>
-                    <SessionSubRow s={s} now={now} active={s.id === openSessionId} viewerId={viewerId} />
-                  </li>
-                ))}
-                {p.more > 0 ? (
-                  <li>
-                    <MoreRow projectId={p.id} projectName={p.name} n={p.more} />
-                  </li>
-                ) : null}
-              </ul>
-            ) : null}
-          </li>
-        ))}
+        {children}
       </ul>
     </section>
   );
 }
 
+export function UnitSection({ section, ctx }: { section: UnitSectionModel; ctx: RowContext }) {
+  const { key, title, collapsed, hidden, projects, moreProjects, expanded } = section;
+  return (
+    <SectionFrame
+      sectionKey={key}
+      title={title}
+      collapsed={collapsed}
+      hidden={hidden}
+      onToggle={ctx.onToggle}
+    >
+      {projects.map((p) => (
+        <li key={p.id} className="grid grid-cols-1 gap-px">
+          <ProjectRow project={p} />
+          <SessionList
+            label={`Active sessions in ${p.name}`}
+            sessions={p.sessions}
+            ctx={ctx}
+            more={p.more > 0 ? <MoreRow projectId={p.id} projectName={p.name} n={p.more} /> : null}
+          />
+        </li>
+      ))}
+      {moreProjects > 0 || expanded ? (
+        <li>
+          <ExpandRow
+            testId="section-more"
+            expanded={expanded}
+            label={plural(moreProjects, "more project", "more projects")}
+            controls={`wz-list-${key}`}
+            onToggle={() => ctx.onExpand(`section:${key}`)}
+          />
+        </li>
+      ) : null}
+    </SectionFrame>
+  );
+}
+
+/** Personal (D-06, UI-SPEC § 7): the viewer's repositories outside the team projects, with their active sessions. */
+export function PersonalSection({ personal, ctx }: { personal: PersonalModel; ctx: RowContext }) {
+  const { collapsed, hidden, repos, moreRepos, expanded } = personal;
+  return (
+    <SectionFrame
+      sectionKey="personal"
+      title="Personal"
+      collapsed={collapsed}
+      hidden={hidden}
+      onToggle={ctx.onToggle}
+      testId="personal-section"
+    >
+      {repos.map((r) => (
+        <li key={r.projectId} className="grid grid-cols-1 gap-px">
+          <RepoRow repo={r} />
+          <SessionList
+            label={`Active sessions in ${r.name}`}
+            sessions={r.sessions}
+            ctx={ctx}
+            more={
+              r.more > 0 || r.expanded ? (
+                <ExpandRow
+                  testId="repo-more"
+                  expanded={r.expanded}
+                  label={`+${r.more} more`}
+                  onToggle={() => ctx.onExpand(`repo:${r.projectId}`)}
+                />
+              ) : null
+            }
+          />
+        </li>
+      ))}
+      {moreRepos > 0 || expanded ? (
+        <li>
+          <ExpandRow
+            testId="personal-more"
+            expanded={expanded}
+            label={plural(moreRepos, "more repository", "more repositories")}
+            controls="wz-list-personal"
+            onToggle={() => ctx.onExpand("personal")}
+          />
+        </li>
+      ) : null}
+    </SectionFrame>
+  );
+}
+
 /** Every department section of the viewer, in the model's order. */
-export function DepartmentSections({ model, now, viewerId, openSessionId, onToggle }: SectionsProps) {
+export function DepartmentSections({
+  model,
+  projects: _projects,
+  sessions: _sessions,
+  ...ctx
+}: SectionsProps) {
   if (model.sections.length === 0) return null;
   return (
     <div className="grid grid-cols-1 gap-3">
       {model.sections.map((section) => (
-        <UnitSection
-          key={section.key}
-          section={section}
-          now={now}
-          viewerId={viewerId}
-          openSessionId={openSessionId}
-          onToggle={onToggle}
-        />
+        <UnitSection key={section.key} section={section} ctx={ctx} />
       ))}
     </div>
   );

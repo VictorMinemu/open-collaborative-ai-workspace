@@ -7,13 +7,16 @@ import {
   isActiveSession,
   liveCount,
   orderActiveSessions,
+  PERSONAL_REPO_CAP,
   projectInitials,
   rowProject,
   rowStatusText,
+  SECTION_PROJECT_CAP,
   type SidebarInput,
   SUB_ROW_CAP,
   shortAgo,
 } from "./model";
+import { collapsedKeys, parseCollapseMap, SIDEBAR_STORAGE_KEY, toggledMap } from "./use-sidebar-collapse";
 
 /**
  * The Work Zone sidebar model (07.10-03, UI-SPEC § 4-§ 7, PD-07): a pure grouping of what `/work-sessions` and
@@ -284,5 +287,265 @@ describe("moved helpers", () => {
     expect(shortAgo("2026-10-27T11:58:00Z", NOW)).toBe("2m");
     expect(elapsedLabel("2026-10-27T10:55:00Z", NOW)).toBe("1h 5m");
     expect(isActiveSession(session({ status: "idle", updatedAt: "2026-10-25T11:00:00Z" }), NOW)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------- 07.10-03 Task 2: Personal, collapse, caps
+
+const REPO_A = "01a11635-d6e7-7c87-9f17-0000000000b1";
+const REPO_B = "01a11635-d6e7-7c87-9f17-0000000000b2";
+const REPO_C = "01a11635-d6e7-7c87-9f17-0000000000b3";
+const DEVICE = "01a11635-d6e7-7c87-9f17-0000000000c1";
+const personalRepo = (projectId: string, name: string) => ({
+  projectId,
+  name,
+  deviceId: DEVICE,
+  deviceName: "Pia's Mac",
+  deviceOnline: true,
+});
+
+describe("Personal (D-06, UI-SPEC § 7, PD-07 (b))", () => {
+  it("is null when the viewer has no unlinked repository and no session under one", () => {
+    expect(build({}).personal).toBeNull();
+  });
+
+  it("lists the index's personal repositories with their active sessions; active ones first, then by name", () => {
+    const scratch = session({ projectId: REPO_B, projectName: "scratch", title: "on scratch" });
+    const model = build({
+      index: index([], {
+        personalRepos: [
+          personalRepo(REPO_A, "zeta-tools"),
+          personalRepo(REPO_B, "scratch"),
+          personalRepo(REPO_C, "alpha"),
+        ],
+      }),
+      sessions: [scratch],
+    });
+    expect(model.personal?.repos.map((r) => [r.name, r.sessions.map((s) => s.title)])).toEqual([
+      ["scratch", ["on scratch"]],
+      ["alpha", []],
+      ["zeta-tools", []],
+    ]);
+    expect(model.scope.has(scratch.id)).toBe(true);
+    expect(model.personal?.repos[0]).toMatchObject({ hiddenProject: false, live: 0 });
+  });
+
+  it("orders repositories with an active session by their latest activity", () => {
+    const older = session({ projectId: REPO_A, projectName: "older", updatedAt: "2026-10-27T10:00:00Z" });
+    const newer = session({ projectId: REPO_B, projectName: "newer", updatedAt: "2026-10-27T11:30:00Z" });
+    const model = build({
+      index: index([], { personalRepos: [personalRepo(REPO_A, "older"), personalRepo(REPO_B, "newer")] }),
+      sessions: [older, newer],
+    });
+    expect(model.personal?.repos.map((r) => r.name)).toEqual(["newer", "older"]);
+  });
+
+  it("puts a hidden-project session under its repository, flagged, and never names the project", () => {
+    const hidden = session({
+      projectId: REPO_A,
+      projectName: "payroll-api",
+      teamProject: null,
+      teamProjectHidden: true,
+      status: "running",
+    });
+    const model = build({ index: index([]), sessions: [hidden] });
+    expect(model.personal?.repos).toHaveLength(1);
+    expect(model.personal?.repos[0]).toMatchObject({
+      projectId: REPO_A,
+      name: "payroll-api",
+      hiddenProject: true,
+      live: 1,
+    });
+    expect(model.personal?.repos[0]?.sessions.map((s) => s.id)).toEqual([hidden.id]);
+    expect(model.scope.has(hidden.id)).toBe(true);
+  });
+
+  it("a session the viewer created in a project they left lands under its repository, without the hint (X1)", () => {
+    const left = project("Left project", { membership: "manager" });
+    const mine = session({
+      projectId: REPO_A,
+      projectName: "web-app",
+      teamProject: at(left),
+      createdBy: VIEWER,
+    });
+    const model = build({ index: index([left]), sessions: [mine] });
+    expect(model.sections).toEqual([]);
+    expect(model.personal?.repos[0]).toMatchObject({
+      projectId: REPO_A,
+      name: "web-app",
+      hiddenProject: false,
+    });
+    expect(model.scope.has(mine.id)).toBe(true);
+  });
+
+  it("an admin-only session (named, not the viewer's project, not theirs, repository not personal) is nowhere", () => {
+    const managed = project("Payroll", { membership: "manager" });
+    const theirs = session({ projectId: REPO_A, teamProject: at(managed), createdBy: OTHER });
+    const elsewhere = session({ projectId: REPO_B, teamProject: null, createdBy: OTHER });
+    const model = build({ index: index([managed]), sessions: [theirs, elsewhere] });
+    expect(model.sections).toEqual([]);
+    expect(model.personal).toBeNull();
+    expect(model.scope.size).toBe(0);
+  });
+
+  it("someone else's session on a repository personal to the viewer (a shared device) is under that repository", () => {
+    const shared = session({ projectId: REPO_A, projectName: "scratch", createdBy: OTHER });
+    const model = build({
+      index: index([], { personalRepos: [personalRepo(REPO_A, "scratch")] }),
+      sessions: [shared],
+    });
+    expect(model.personal?.repos[0]?.sessions.map((s) => s.id)).toEqual([shared.id]);
+  });
+
+  it("shows 3 sessions per repository, then +N more that expands inline", () => {
+    const five = [1, 2, 3, 4, 5].map((i) =>
+      session({
+        projectId: REPO_A,
+        projectName: "scratch",
+        createdBy: VIEWER,
+        updatedAt: `2026-10-27T11:0${i}:00Z`,
+      }),
+    );
+    let repo = build({ index: index([]), sessions: five }).personal?.repos[0];
+    expect(repo).toMatchObject({ more: 2, expanded: false });
+    expect(repo?.sessions).toHaveLength(SUB_ROW_CAP);
+    repo = build({ index: index([]), sessions: five, expanded: new Set([`repo:${REPO_A}`]) }).personal
+      ?.repos[0];
+    expect(repo).toMatchObject({ more: 0, expanded: true });
+    expect(repo?.sessions).toHaveLength(5);
+  });
+
+  it("shows 5 repositories, then {n} more that expands inline; the open session's repository always shows", () => {
+    expect(PERSONAL_REPO_CAP).toBe(5);
+    const repos = Array.from({ length: 8 }, (_, i) =>
+      personalRepo(`01a11635-d6e7-7c87-9f17-0000000001${String(i).padStart(2, "0")}`, `repo ${i + 1}`),
+    );
+    const last = repos[7] as (typeof repos)[number];
+    const settled = session({ projectId: last.projectId, projectName: last.name, status: "completed" });
+    let personal = build({ index: index([], { personalRepos: repos }) }).personal;
+    expect(personal?.repos.map((r) => r.name)).toEqual(["repo 1", "repo 2", "repo 3", "repo 4", "repo 5"]);
+    expect(personal).toMatchObject({ moreRepos: 3, expanded: false });
+    personal = build({
+      index: index([], { personalRepos: repos }),
+      sessions: [settled],
+      openSessionId: settled.id,
+    }).personal;
+    // The cap counts the kept repository: 4 by name, then the open one.
+    expect(personal?.repos.map((r) => r.name)).toEqual(["repo 1", "repo 2", "repo 3", "repo 4", "repo 8"]);
+    expect(personal?.repos.at(-1)?.sessions.map((s) => s.id)).toEqual([settled.id]);
+    expect(personal?.moreRepos).toBe(3);
+    personal = build({
+      index: index([], { personalRepos: repos }),
+      expanded: new Set(["personal"]),
+    }).personal;
+    expect(personal?.repos).toHaveLength(8);
+    expect(personal).toMatchObject({ moreRepos: 0, expanded: true });
+  });
+
+  it("collapsed, keeps only the repository of the open session (and needs), and counts the rest", () => {
+    const open = session({ projectId: REPO_A, projectName: "scratch", createdBy: VIEWER });
+    const other = session({ projectId: REPO_A, projectName: "scratch", createdBy: VIEWER });
+    const model = build({
+      index: index([], { personalRepos: [personalRepo(REPO_A, "scratch"), personalRepo(REPO_B, "tools")] }),
+      sessions: [open, other],
+      openSessionId: open.id,
+      collapsed: new Set(["personal"]),
+    });
+    expect(model.personal).toMatchObject({ collapsed: true, hidden: 1, moreRepos: 0 });
+    expect(model.personal?.repos.map((r) => [r.name, r.sessions.map((s) => s.id), r.more])).toEqual([
+      ["scratch", [open.id], 0],
+    ]);
+  });
+});
+
+describe("collapsed department sections (D-01, UI-SPEC § 4)", () => {
+  it("keep the open project, the project of the open session and those with a session that needs the viewer", () => {
+    const a = project("A");
+    const b = project("B");
+    const c = project("C");
+    const d = project("D");
+    const openSession = session({ teamProject: at(b), status: "completed" });
+    const bOther = session({ teamProject: at(b) });
+    const needed = session({ teamProject: at(c), pendingApprovals: 1 });
+    const cOther = session({ teamProject: at(c), status: "running" });
+    const model = build({
+      index: index([a, b, c, d]),
+      sessions: [openSession, bOther, needed, cOther, session({ teamProject: at(d) })],
+      openSessionId: openSession.id,
+      openProjectId: a.id,
+      collapsed: new Set([ENG.id]),
+      needs: new Set([needed.id]),
+    });
+    const section = model.sections[0];
+    expect(section).toMatchObject({ collapsed: true, hidden: 1, moreProjects: 0 });
+    expect(section?.projects.map((p) => [p.name, p.sessions.map((s) => s.id), p.more])).toEqual([
+      ["A", [], 0],
+      ["B", [openSession.id], 0],
+      ["C", [needed.id], 0],
+    ]);
+    // The live count still reads every live session of the project.
+    expect(section?.projects[2]?.live).toBe(1);
+  });
+
+  it("with nothing to keep, show no project and count them all", () => {
+    const model = build({ index: index([project("A"), project("B")]), collapsed: new Set([ENG.id]) });
+    expect(model.sections[0]).toMatchObject({ collapsed: true, hidden: 2, projects: [] });
+  });
+});
+
+describe("the project cap of a section (D-09, UI-SPEC § 4)", () => {
+  const names = Array.from({ length: 20 }, (_, i) => `P${String(i + 1).padStart(2, "0")}`);
+
+  it("over 15: every active project, the open one, then alphabetical fill to 15, in name order; then {n} more", () => {
+    expect(SECTION_PROJECT_CAP).toBe(15);
+    const projects = names.map((name) => project(name));
+    const p19 = projects[18] as WorkProjectSummary;
+    const p20 = projects[19] as WorkProjectSummary;
+    const p17 = projects[16] as WorkProjectSummary;
+    const model = build({
+      index: index(projects),
+      sessions: [session({ teamProject: at(p19) }), session({ teamProject: at(p20), status: "running" })],
+      openProjectId: p17.id,
+    });
+    const section = model.sections[0];
+    expect(section?.projects.map((p) => p.name)).toEqual([...names.slice(0, 12), "P17", "P19", "P20"]);
+    expect(section).toMatchObject({ moreProjects: 5, expanded: false, collapsed: false, hidden: 0 });
+  });
+
+  it("expanded inline, shows all of them", () => {
+    const projects = names.map((name) => project(name));
+    const section = build({ index: index(projects), expanded: new Set([`section:${ENG.id}`]) }).sections[0];
+    expect(section?.projects).toHaveLength(20);
+    expect(section).toMatchObject({ moreProjects: 0, expanded: true });
+  });
+
+  it("at 15 or fewer, shows every project with no more row", () => {
+    const projects = names.slice(0, 15).map((name) => project(name));
+    expect(build({ index: index(projects) }).sections[0]).toMatchObject({ moreProjects: 0, expanded: false });
+  });
+});
+
+describe("collapse state (useSidebarCollapse, UI-SPEC § 2)", () => {
+  it("lives in one versioned localStorage key", () => {
+    expect(SIDEBAR_STORAGE_KEY).toBe("ocw.workzone.sidebar.v1");
+  });
+
+  it("reads a map of booleans; corrupt or foreign values mean defaults", () => {
+    expect(parseCollapseMap(null)).toEqual({});
+    expect(parseCollapseMap("{not json")).toEqual({});
+    expect(parseCollapseMap("[1,2]")).toEqual({});
+    expect(parseCollapseMap('"x"')).toEqual({});
+    expect(parseCollapseMap('{"a":true,"b":false,"c":"yes","d":1}')).toEqual({ a: true, b: false });
+  });
+
+  it("defaults every section to expanded except Settled", () => {
+    expect([...collapsedKeys({})]).toEqual(["settled"]);
+    expect([...collapsedKeys({ settled: false, [ENG.id]: true, [OPS.id]: false })]).toEqual([ENG.id]);
+  });
+
+  it("a toggle flips the effective state of one key", () => {
+    expect(toggledMap({}, ENG.id)).toEqual({ [ENG.id]: true });
+    expect(toggledMap({ [ENG.id]: true }, ENG.id)).toEqual({ [ENG.id]: false });
+    expect(toggledMap({}, "settled")).toEqual({ settled: false });
   });
 });

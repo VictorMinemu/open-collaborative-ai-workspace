@@ -1,7 +1,7 @@
 "use client";
 
 import type { WorkSession } from "@ocw/contracts";
-import { CloudOff, FolderKanban, Hand } from "lucide-react";
+import { CloudOff, FolderGit2, FolderKanban, Hand } from "lucide-react";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { sectionItemClass } from "@/components/shell/section-sidebar";
@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 import { projectHref } from "@/lib/work-zone-routes";
 import { RUNTIMES } from "../meta";
 import { VisibilityMarker, VisibilitySrSuffix } from "../visibility/visibility-marker";
-import { needsApproval, type ProjectRowModel, rowStatusText } from "./model";
+import { needsApproval, type ProjectRowModel, type RepoRowModel, rowStatusText } from "./model";
 
 /**
  * The rows of the Work Zone sidebar tree (Phase 07.10, UI-SPEC § 5-§ 7): project rows that open the project page,
@@ -167,5 +167,61 @@ export function MoreRow({
     >
       +{n} more
     </Link>
+  );
+}
+
+/** An inline "more" (Personal, a repository's sessions, a section's projects): a button, never a navigation. */
+export function ExpandRow({
+  expanded,
+  label,
+  controls,
+  onToggle,
+  testId,
+}: {
+  expanded: boolean;
+  /** The collapsed label ("+2 more", "3 more repositories"); expanded reads "Show fewer". */
+  label: string;
+  controls?: string;
+  onToggle: () => void;
+  testId: string;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      aria-expanded={expanded}
+      aria-controls={controls}
+      onClick={onToggle}
+      className={MORE_CLASS}
+    >
+      {expanded ? "Show fewer" : label}
+    </button>
+  );
+}
+
+/** The one hint a repository row gives about a project the viewer may not see named (07.9 D-14 wording). */
+export const HIDDEN_PROJECT_HINT = "Linked to a project you can't open";
+
+/**
+ * A personal repository (UI-SPEC § 7): plain text, not a link (a repository has no page), with its live count. A
+ * repository linked to a project the viewer may not see named carries only `HIDDEN_PROJECT_HINT` in its `title`.
+ */
+export function RepoRow({ repo, muted = false }: { repo: RepoRowModel; muted?: boolean }) {
+  return (
+    <div
+      data-testid={`repo-row-${repo.projectId}`}
+      title={repo.hiddenProject ? HIDDEN_PROJECT_HINT : undefined}
+      className={cn(
+        "flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-left text-[13.5px] text-sidebar-foreground max-md:h-11",
+        muted && "text-muted-foreground",
+      )}
+    >
+      <FolderGit2 aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+      <span title={repo.hiddenProject ? undefined : repo.name} className="min-w-0 flex-1 truncate">
+        {repo.name}
+        {repo.live > 0 ? <span className="sr-only">, {repo.live} running</span> : null}
+      </span>
+      <LiveCount n={repo.live} testId="repo-live-count" />
+    </div>
   );
 }
