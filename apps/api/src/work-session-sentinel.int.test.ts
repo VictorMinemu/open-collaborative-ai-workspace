@@ -11,6 +11,7 @@ import {
   CODEX_CATALOG,
   createTeamProject,
   invite,
+  linkRepo,
   pairDevice,
   shareDevice,
   startSession,
@@ -24,7 +25,8 @@ import {
  * Cast: Víctor (admin), Dora (lead, owns "Dora's Quokka Laptop" with the repo `sentinel-api` linked to the team project
  * Atlas and the personal repo `sentinel-notes`), Ana (developer, Atlas member, a grant on Dora's device, creates the
  * sessions), Pia and Leo (developers, Atlas members), Olga (developer, nothing), Wes (developer, a grant on Dora's
- * device, Work Zone off by a rule on his department).
+ * device, Work Zone off by a rule on his department). Phase 07.10 adds Dana (developer, owns "Dana's Ledger Box" with
+ * the repository `wages-api` linked to the team project Payroll, which only Leo is in).
  */
 
 const ADMIN = { name: "Víctor Ruiz", email: "victor@example.test", password: "correct-horse-battery" };
@@ -45,6 +47,7 @@ let ana: TestClient;
 let anaId: string;
 let pia: TestClient;
 let piaId: string;
+let leo: TestClient;
 let leoId: string;
 let olga: TestClient;
 let olgaId: string;
@@ -108,7 +111,7 @@ beforeAll(async () => {
   ({ client: dora, userId: doraId } = await invite(stack, admin, "dora@example.test", "Dora", "lead"));
   ({ client: ana, userId: anaId } = await invite(stack, admin, "ana@example.test", "Ana", "developer"));
   ({ client: pia, userId: piaId } = await invite(stack, admin, "pia@example.test", "Pia", "developer"));
-  ({ userId: leoId } = await invite(stack, admin, "leo@example.test", "Leo", "developer"));
+  ({ client: leo, userId: leoId } = await invite(stack, admin, "leo@example.test", "Leo", "developer"));
   ({ client: olga, userId: olgaId } = await invite(stack, admin, "olga@example.test", "Olga", "developer"));
   ({ client: wes, userId: wesId } = await invite(stack, admin, "wes@example.test", "Wes", "developer"));
 
@@ -558,6 +561,140 @@ describe("narrowing a session: the people it removes get `revoked` and `work_ses
       expect(removedFor(taps.Pia.frames)).toHaveLength(1);
     } finally {
       for (const t of Object.values(taps)) await t.stop();
+    }
+  });
+});
+
+// ---------------------------------------------------------------- 07.10-02: per-viewer fields on the live surfaces
+
+describe("the device owner outside a project: no frame names it, live or replayed (07.10, PD-03, PD-04)", () => {
+  const PAYROLL = "Payroll";
+  const PER_VIEWER = ["teamProject", "teamProjectHidden", "attention"];
+  let dana: TestClient;
+  let danaId: string;
+  let box: FakeDevice;
+  let payrollRepo: string;
+  let payroll: string;
+
+  beforeAll(async () => {
+    ({ client: dana, userId: danaId } = await invite(stack, admin, "dana@example.test", "Dana", "developer"));
+    const paired = await pairDevice(stack, dana, "Dana's Ledger Box");
+    box = await FakeDevice.connect(stack.baseUrl, paired.token);
+    box.send({
+      type: "projects.sync",
+      projects: [{ localId: "lp_wages", name: "wages-api", gitRemote: null, defaultBranch: "main" }],
+    });
+    await box.next((f) => f.type === "projects.ack");
+    box.capabilities([CLAUDE_CATALOG]);
+    await eventually(async () => {
+      const r = await su.query("select runtime_catalog from app.devices where id = $1", [paired.deviceId]);
+      return (r.rows[0].runtime_catalog as unknown[]).length === 1;
+    });
+    payrollRepo = ((await ok(dana.request("GET", "/api/v1/projects"))).projects as Json[]).find(
+      (p) => p.name === "wages-api",
+    )!.id;
+    await shareDevice(dana, paired.deviceId, leoId, "acceptEdits");
+    // Payroll (Leo only) under a department whose name does not contain the project's.
+    const finance = await ok(
+      admin.request("POST", "/api/v1/units", { kind: "department", name: "Finance", parentId: null }),
+    );
+    payroll = (
+      await createTeamProject(stack, admin, {
+        name: PAYROLL,
+        parentId: finance.id,
+        members: [{ userId: leoId }],
+      })
+    ).unitId;
+    await linkRepo(stack, {
+      organizationId: orgId,
+      unitId: payroll,
+      projectId: payrollRepo,
+      deviceId: paired.deviceId,
+      linkedBy: adminId,
+    });
+  });
+
+  afterAll(async () => {
+    await box?.close().catch(() => {});
+  });
+
+  /** Leo's next prompt of `sessionId` runs to completion on Dana's box. */
+  async function runOnBox(sessionId: string) {
+    const prompt = await box.command("prompt", sessionId);
+    box.ack(prompt.id);
+    box.event(sessionId, { type: "prompt.started", promptId: prompt.payload.promptId });
+    box.event(sessionId, {
+      type: "prompt.completed",
+      promptId: prompt.payload.promptId,
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    box.event(sessionId, { type: "session.state", status: "idle" });
+    await eventually(async () => {
+      const d = await ok(leo.request("GET", `/api/v1/work-sessions/${sessionId}`));
+      return d.session.status === "idle" && d.session.queuedCount === 0 && d.session.runningSince === null;
+    });
+  }
+
+  const updates = (s: Sock, topic: string, id: string) =>
+    s.frames.filter((f) => f.topic === topic && f.type === "work_session.updated" && f.data?.id === id);
+
+  it("Dana's user: frames hide Payroll, the shared ws: stream carries no per-viewer field, Leo's frames name it", async () => {
+    const danaSock = await openSocket(dana);
+    const leoSock = await openSocket(leo);
+    try {
+      expect((await danaSock.sub(`user:${danaId}`)).op).toBe("subscribed");
+      expect((await leoSock.sub(`user:${leoId}`)).op).toBe("subscribed");
+
+      const id = await startSession(leo, box, payrollRepo, { title: "Payslip rounding" });
+      // Dana follows the session itself (the device owner reads it, D-11), then it changes: two prompts run.
+      expect((await danaSock.sub(`ws:${id}`)).op).toBe("subscribed");
+      expect((await leoSock.sub(`ws:${id}`)).op).toBe("subscribed");
+      await ok(leo.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body: "Round the payslips" }));
+      await runOnBox(id);
+      await ok(leo.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body: "And the bonuses" }));
+      await runOnBox(id);
+      await service().settled(orgId);
+      await eventually(async () => updates(danaSock, `user:${danaId}`, id).length >= 2, 3000);
+      await eventually(async () => updates(leoSock, `user:${leoId}`, id).length >= 2, 3000);
+      await sleep(300);
+
+      // Dana: every frame of her own topic is shaped for her (hidden), and nothing she received names Payroll.
+      for (const f of updates(danaSock, `user:${danaId}`, id)) {
+        expect(f.data.teamProject).toBeNull();
+        expect(f.data.teamProjectHidden).toBe(true);
+      }
+      const ws = updates(danaSock, `ws:${id}`, id);
+      expect(ws.length, "the ws: stream is not vacuous").toBeGreaterThan(0);
+      for (const secret of [PAYROLL, payroll]) {
+        expect(JSON.stringify(danaSock.raw), `Dana received "${secret}"`).not.toContain(secret);
+      }
+      // The shared stream is viewer-neutral for everyone who follows it (Leo's copy too).
+      for (const f of [...ws, ...updates(leoSock, `ws:${id}`, id)]) {
+        for (const k of PER_VIEWER) expect(Object.keys(f.data), `ws: carried ${k}`).not.toContain(k);
+      }
+      // Leo: his own frames name the project.
+      for (const f of updates(leoSock, `user:${leoId}`, id)) {
+        expect(f.data.teamProject).toEqual({ id: payroll, name: PAYROLL });
+        expect("teamProjectHidden" in f.data).toBe(false);
+      }
+
+      // Replayed from seq 0 on a fresh socket: the stored stream names nothing either.
+      const replay = await openSocket(dana);
+      try {
+        expect((await replay.sub(`ws:${id}`, { afterSeq: 0 })).op).toBe("subscribed");
+        await eventually(async () => updates(replay, `ws:${id}`, id).length > 0, 3000);
+        for (const secret of [PAYROLL, payroll]) {
+          expect(JSON.stringify(replay.raw), `the replay carried "${secret}"`).not.toContain(secret);
+        }
+        for (const f of updates(replay, `ws:${id}`, id)) {
+          for (const k of PER_VIEWER) expect(Object.keys(f.data), `replay carried ${k}`).not.toContain(k);
+        }
+      } finally {
+        replay.socket.close();
+      }
+    } finally {
+      danaSock.socket.close();
+      leoSock.socket.close();
     }
   });
 });

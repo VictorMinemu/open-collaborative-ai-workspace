@@ -66,6 +66,14 @@ import {
 import { OrgQueue, type OrgQueueOptions, type OrgTask } from "./org-queue";
 import { loadWorkZonePolicy } from "./policy";
 import { decideTitleRequest, heuristicTitle, loadTitleContext } from "./title";
+import {
+  type DeliverySource,
+  loadViewerFieldsForRecipients,
+  type SessionProject,
+  type ShapeSource,
+  withoutViewerFields,
+  withViewerFields,
+} from "./viewer-fields";
 
 /** Frames published at once by the per-user delivery (one Redis round trip each, bounded concurrency). */
 const PUBLISH_BATCH = 200;
@@ -175,8 +183,12 @@ export class WorkSessionService implements DeviceSessionHandler {
 
   // ------------------------------------------------------------------ DTOs
 
+  /**
+   * The viewer-neutral DTOs (Phase 07.10, PD-03): no team project, no per-viewer field. A route that does not shape
+   * its answer for its viewer (`withViewerFields`) answers less, never more (fail closed).
+   */
   async sessions(tx: Tx, filter?: SQL): Promise<WorkSession[]> {
-    return (await this.load(tx, filter, null)).map((r) => r.dto);
+    return (await this.load(tx, filter, null)).map((r) => withoutViewerFields(r.dto));
   }
 
   async session(tx: Tx, id: string): Promise<WorkSession | null> {
@@ -184,32 +196,44 @@ export class WorkSessionService implements DeviceSessionHandler {
   }
 
   /**
+   * One session with its team project (id, name, unit path) for the per-viewer shaping of the detail (Phase 07.10,
+   * PD-04): the project travels beside the DTO, never inside it, until `withViewerFields` decides it for a viewer.
+   */
+  async sessionSource(tx: Tx, id: string): Promise<ShapeSource | null> {
+    const [r] = await this.load(tx, eq(workSessions.id, id), null);
+    return r ? { dto: r.dto, project: r.project } : null;
+  }
+
+  /**
    * The sessions `userId` has any audience fact on (Phase 07.9, D-09, Pitfall 8), each with its resolver facts built
    * from the same row by the one builder (`sessionResourceOf`): the list route then decides `work_session.read` on
    * those facts with `perms.filter`, exactly as the detail route decides one session. Rows outside every fact (no
-   * creator, device owner, viewer, admin or lead fact) are dropped before any count or directory work.
+   * creator, device owner, viewer, admin or lead fact) are dropped before any count or directory work. Each row also
+   * carries its team project beside the DTO, for the route's per-viewer shaping (Phase 07.10, PD-04).
    */
   async readableSessions(
     tx: Tx,
     userId: string,
     filter?: SQL,
-  ): Promise<Array<{ dto: WorkSession; facts: ResourceFacts }>> {
+  ): Promise<Array<ShapeSource & { facts: ResourceFacts }>> {
     return (await this.load(tx, filter, userId)).map((r) => ({
       dto: r.dto,
+      project: r.project,
       facts: sessionResourceOf(r.facts, userId),
     }));
   }
 
   /**
    * The DTO rows (+ the facts row when `userId` is given, narrowed to the sessions where the SQL rule names them).
-   * Every DTO carries its audience summary and team project (UI-SPEC R1), from one batched call of
+   * Every DTO carries its audience summary (UI-SPEC R1); its team project travels beside it (`project`, with the unit
+   * path) until a viewer's shaping decides whether to name it (Phase 07.10, PD-04). One batched call of
    * `app.work_session_visibility_summary`.
    */
   private async load(
     tx: Tx,
     filter: SQL | undefined,
     userId: string | null,
-  ): Promise<Array<{ dto: WorkSession; facts: SessionFactsRow }>> {
+  ): Promise<Array<{ dto: WorkSession; facts: SessionFactsRow; project: SessionProject | null }>> {
     const all = await tx
       .select({
         s: workSessions,
@@ -296,12 +320,12 @@ export class WorkSessionService implements DeviceSessionHandler {
             differsFromDefault: false,
             firstTeamName: null,
           },
-          teamProject: summary?.teamProject ?? null,
           createdAt: new Date(s.createdAt).toISOString(),
           updatedAt: new Date(s.updatedAt).toISOString(),
         };
         return {
           dto,
+          project: summary?.teamProject ? { ...summary.teamProject, path: unitPath ?? [] } : null,
           facts: {
             createdBy: s.createdBy,
             deviceOwnerUserId: deviceOwner,
@@ -367,7 +391,13 @@ export class WorkSessionService implements DeviceSessionHandler {
       if (tenantOf(tx).userId) this.emitAfterCommitAsSystem(tx, sessionId);
       return null;
     }
-    await this.deps.realtime.appendEvent(tx, wsTopic(sessionId), EventTypes.workSessionUpdated, dto);
+    // The shared, durable stream carries the viewer-neutral DTO (Phase 07.10, PD-03).
+    await this.deps.realtime.appendEvent(
+      tx,
+      wsTopic(sessionId),
+      EventTypes.workSessionUpdated,
+      withoutViewerFields(dto),
+    );
     this.deliverAfterCommit(tx, sessionId);
     return dto;
   }
@@ -390,7 +420,7 @@ export class WorkSessionService implements DeviceSessionHandler {
                 sys,
                 wsTopic(sessionId),
                 EventTypes.workSessionUpdated,
-                dto,
+                withoutViewerFields(dto),
               );
           });
           await this.deliverNow(organizationId, [sessionId]);
@@ -460,13 +490,15 @@ export class WorkSessionService implements DeviceSessionHandler {
 
   /**
    * In the background queue, in a fresh read: each session's current DTO goes to the people the resolver lets read it,
-   * decided exactly as the detail route decides one person (`work_session.read` on `sessionFactsForUsers`). Candidates
-   * are the people the SQL rule names with a seeing relation (creator, creator who left, device owner, viewer: the set
-   * `app.work_session_viewers` enumerates) and the active admins (never enumerated by the rule); module and deny rules
-   * then remove anyone they reach. Unstored (no `user:` stream lock inside the domain transaction, the 07.5-16
-   * lock-order hazard): a missed frame is covered by the list's refetch. The DTO is read before its readers, so a
-   * narrowing that commits in between can only remove recipients, never show the new DTO to someone it removed. Throws:
-   * the queue retries (07.9 fan-out). Sessions are decided DELIVER_BATCH at a time, each batch in its own read.
+   * decided exactly as the detail route decides one person (`work_session.read` on `sessionFactsForUsers`), each frame
+   * shaped for its recipient (Phase 07.10, PD-03, PD-04: never one shared DTO naming a project to someone who may not
+   * see it named). Candidates are the people the SQL rule names with a seeing relation (creator, creator who left,
+   * device owner, viewer: the set `app.work_session_viewers` enumerates) and the active admins (never enumerated by the
+   * rule); module and deny rules then remove anyone they reach. Unstored (no `user:` stream lock inside the domain
+   * transaction, the 07.5-16 lock-order hazard): a missed frame is covered by the list's refetch. The DTO is read before
+   * its readers, so a narrowing that commits in between can only remove recipients, never show the new DTO to someone
+   * it removed. Throws: the queue retries (07.9 fan-out). Sessions are decided DELIVER_BATCH at a time, each batch in
+   * its own read.
    *
    * 07.9-12 (WINDOWS #311, measured in list-perf.int.test.ts): the rule runs once per active member and session, through
    * `sessionFactsForUsers` (the reasons `work_session_viewers` adds for the panel cost four times more and are not needed
@@ -480,8 +512,8 @@ export class WorkSessionService implements DeviceSessionHandler {
 
   private async deliverBatch(organizationId: string, sessionIds: readonly string[]): Promise<void> {
     const deliveries = await this.deps.db.withTenant({ organizationId, userId: null }, async (tx) => {
-      const dtos = await this.sessions(tx, inArray(workSessions.id, [...sessionIds]));
-      if (dtos.length === 0) return [];
+      const sources = await this.load(tx, inArray(workSessions.id, [...sessionIds]), null);
+      if (sources.length === 0) return [];
       const members = (
         await tx
           .select({ userId: orgMembers.userId })
@@ -496,8 +528,8 @@ export class WorkSessionService implements DeviceSessionHandler {
             .where(and(eq(orgMembers.role, "admin"), isNull(orgMembers.deactivatedAt)))
         ).map((a) => a.userId),
       );
-      const out: Array<{ dto: WorkSession; recipients: string[] }> = [];
-      for (const dto of dtos) {
+      const out: DeliverySource[] = [];
+      for (const { dto, project } of sources) {
         const facts = await sessionFactsForUsers(tx, dto, members);
         const candidates = members.filter((id) => {
           const f = facts.get(id);
@@ -512,11 +544,19 @@ export class WorkSessionService implements DeviceSessionHandler {
             return f;
           },
         });
-        out.push({ dto, recipients });
+        out.push({ dto, project, recipients, facts });
       }
-      return out;
+      // Phase 07.10 (PD-03, PD-04, PD-05): each recipient gets the session as they read it (its project named or
+      // hidden, what in it waits on them), decided for the whole batch.
+      const fields = await loadViewerFieldsForRecipients(tx, this.deps.perms, out);
+      return out.map(({ dto, recipients }) => ({
+        frames: recipients.map((userId) => ({
+          userId,
+          dto: withViewerFields(dto, fields.get(dto.id)!.get(userId)!),
+        })),
+      }));
     });
-    const frames = deliveries.flatMap(({ dto, recipients }) => recipients.map((userId) => ({ dto, userId })));
+    const frames = deliveries.flatMap((d) => d.frames);
     for (let i = 0; i < frames.length; i += PUBLISH_BATCH) {
       await Promise.all(
         frames
