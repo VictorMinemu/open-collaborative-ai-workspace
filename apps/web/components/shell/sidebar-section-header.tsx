@@ -20,6 +20,7 @@ export function SidebarSectionHeader({
   touch = false,
   announceHidden = false,
   action,
+  testId,
 }: {
   /** The toggle's id (the section's `aria-labelledby`). */
   id: string;
@@ -35,6 +36,8 @@ export function SidebarSectionHeader({
   /** Adds ", {n} hidden" to the toggle's name when collapsed (screen readers). */
   announceHidden?: boolean;
   action?: ReactNode;
+  /** The toggle's test id when it is not `section-toggle` (the Work Zone's Settled keeps `settled-toggle`). */
+  testId?: string | undefined;
 }) {
   const showCount = !expanded && hidden > 0;
   return (
@@ -42,7 +45,7 @@ export function SidebarSectionHeader({
       <button
         type="button"
         id={id}
-        data-testid="section-toggle"
+        data-testid={testId ?? "section-toggle"}
         aria-expanded={expanded}
         aria-controls={controls}
         onClick={onToggle}

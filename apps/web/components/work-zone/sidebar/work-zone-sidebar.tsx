@@ -16,6 +16,7 @@ import { isSessionPath } from "@/lib/work-zone-routes";
 import { useWorkSessions } from "@/lib/workzone-queries";
 import { useWorkZone } from "../work-zone-context";
 import { buildWorkZoneSidebar, isActiveSession, orderActiveSessions } from "./model";
+import { NeedsYouSection } from "./needs-you-section";
 import { DepartmentSections, PersonalSection } from "./sections";
 import { ActiveRow, SettledRow } from "./session-rows";
 import { useSidebarCollapse } from "./use-sidebar-collapse";
@@ -158,6 +159,8 @@ export function WorkZoneSidebar() {
             ))}
           </div>
         ) : null}
+
+        {!q ? <NeedsYouSection model={model.needsYou} {...ctx} /> : null}
 
         {q ? (
           // Today's search (07.10-04 replaces it with grouped results): flat active rows, then Settled below.

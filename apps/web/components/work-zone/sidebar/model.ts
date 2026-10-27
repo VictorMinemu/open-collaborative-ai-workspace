@@ -13,6 +13,10 @@ export const SUB_ROW_CAP = 3;
 export const SECTION_PROJECT_CAP = 15;
 /** Repositories Personal shows before "{n} more repositories" (UI-SPEC § 7). */
 export const PERSONAL_REPO_CAP = 5;
+/** Rows Needs you shows before "Show {n} more" (D-05, UI-SPEC § 3). */
+export const NEEDS_YOU_CAP = 5;
+/** "Your turn" lasts this long after the viewer's turn ended (UI-SPEC § 3). */
+export const YOUR_TURN_MS = 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------- helpers (moved from session-sidebar.tsx)
 
@@ -130,6 +134,41 @@ function bySubRowOrder(a: WorkSession, b: WorkSession): number {
 const collator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
 const byName = (a: string, b: string) => collator.compare(a, b);
 
+// ---------------------------------------------------------------- Needs you
+
+/** Why a session waits on the viewer (UI-SPEC § 3): an approval they may decide, or their turn to answer. */
+export type NeedsReason = "approval" | "turn";
+
+/**
+ * When this browser last opened each session (`ocw.workzone.seen.v1`, `useSeenSessions`): session ids and ISO times
+ * only, never a title, never sent anywhere (R10, PD-09).
+ */
+export type SeenMap = Readonly<Record<string, string>>;
+
+/**
+ * Whether a session waits on the viewer (D-05, UI-SPEC § 3), from the per-viewer `attention` the API decided (07.10-02):
+ * - `approval`: a pending approval the resolver lets the viewer decide (even while the session is open);
+ * - `turn`: the session is idle with an empty queue, its last finished turn ran the viewer's prompt within 24 h, after
+ *   the viewer last opened it in this browser, and it is not the open one.
+ * No attention (a `ws:` snapshot, an older API) means nothing: the browser never infers it.
+ */
+export function needsViewer(
+  s: WorkSession,
+  seen: SeenMap,
+  now: number,
+  openSessionId: string | null,
+): NeedsReason | null {
+  const attention = s.attention;
+  if (!attention) return null;
+  if (attention.approval) return "approval";
+  const ended = attention.lastTurnEndedAt;
+  if (!ended || s.id === openSessionId || s.status !== "idle" || s.queuedCount > 0) return null;
+  const endedAt = time(ended);
+  if (!(now - endedAt < YOUR_TURN_MS)) return null;
+  const last = seen[s.id];
+  return last !== undefined && time(last) >= endedAt ? null : "turn";
+}
+
 // ---------------------------------------------------------------- the model
 
 /** Index rows that are sidebar rows: projects the viewer belongs to (D-02). `manager` rows are Browse only. */
@@ -147,8 +186,10 @@ export interface SidebarInput {
   collapsed: ReadonlySet<string>;
   /** Inline expansions: `section:<key>` (more projects), `personal` (more repositories), `repo:<projectId>`. */
   expanded: ReadonlySet<string>;
-  /** Sessions waiting on the viewer (07.10-04): a collapsed section keeps them. */
+  /** Sessions a collapsed section keeps besides the ones Needs you lists (the model adds those itself). */
   needs?: ReadonlySet<string>;
+  /** When this browser last opened each session ("Your turn"); empty means never. */
+  seen?: SeenMap;
 }
 
 export interface ProjectRowModel {
@@ -203,7 +244,29 @@ export interface PersonalModel {
   expanded: boolean;
 }
 
+export interface NeedsYouItem {
+  session: WorkSession;
+  reason: NeedsReason;
+  /** The session's project, or its repository when personal or hidden (never a hidden project's name). */
+  place: string;
+}
+
+export interface NeedsYouModel {
+  key: "needs";
+  collapsed: boolean;
+  /** The rows to draw: approvals first, then turns, each most recent first; capped unless expanded. */
+  rows: NeedsYouItem[];
+  /** Rows behind "Show {n} more". */
+  more: number;
+  /** "Show fewer" is showing. */
+  expanded: boolean;
+  /** Collapsed: rows not shown (the header's count pill). */
+  hidden: number;
+}
+
 export interface SidebarModel {
+  /** Sessions in the viewer's scope that wait on them (D-05); null when none (the section is absent). */
+  needsYou: NeedsYouModel | null;
   sections: UnitSectionModel[];
   personal: PersonalModel | null;
   /** Session ids placed in the tree (PD-07 (a) ∪ (b)): Needs you and Settled draw only from these (07.10-04). */
@@ -251,7 +314,8 @@ function capped<R>(rows: readonly R[], cap: number, required: (row: R) => boolea
   });
 }
 
-export function buildWorkZoneSidebar(input: SidebarInput): SidebarModel {
+export function buildWorkZoneSidebar(given: SidebarInput): SidebarModel {
+  let input = given;
   const scope = new Set<string>();
   const members = (input.index?.teamProjects ?? []).filter((p) => SIDEBAR_MEMBERSHIPS.has(p.membership));
   const memberIds = new Set(members.map((p) => p.id));
@@ -282,6 +346,35 @@ export function buildWorkZoneSidebar(input: SidebarInput): SidebarModel {
       push(byRepo, s.projectId, s);
     }
   }
+  // ---- Needs you: only from the viewer's scope (PD-07), so an admin's sidebar never fills with the organisation's
+  // approvals; a collapsed section keeps every session listed here (D-01).
+  const reasonRank: Record<NeedsReason, number> = { approval: 0, turn: 1 };
+  const waiting = input.sessions
+    .filter((s) => scope.has(s.id))
+    .flatMap((s) => {
+      const reason = needsViewer(s, input.seen ?? {}, input.now, input.openSessionId);
+      return reason ? [{ session: s, reason, place: rowProject(s).name }] : [];
+    })
+    .sort(
+      (a, b) =>
+        reasonRank[a.reason] - reasonRank[b.reason] || time(b.session.updatedAt) - time(a.session.updatedAt),
+    );
+  let needsYou: NeedsYouModel | null = null;
+  if (waiting.length > 0) {
+    const collapsed = input.collapsed.has("needs");
+    const expanded = !collapsed && input.expanded.has("needs") && waiting.length > NEEDS_YOU_CAP;
+    const rows = collapsed ? [] : expanded ? waiting : waiting.slice(0, NEEDS_YOU_CAP);
+    needsYou = {
+      key: "needs",
+      collapsed,
+      rows,
+      more: collapsed ? 0 : waiting.length - rows.length,
+      expanded,
+      hidden: collapsed ? waiting.length : 0,
+    };
+  }
+  input = { ...input, needs: new Set([...(input.needs ?? []), ...waiting.map((w) => w.session.id)]) };
+
   const holdsOpen = (sessions: readonly WorkSession[]) => sessions.some((s) => s.id === input.openSessionId);
   const hasActive = (sessions: readonly WorkSession[]) => sessions.some((s) => isActiveSession(s, input.now));
 
@@ -393,5 +486,5 @@ export function buildWorkZoneSidebar(input: SidebarInput): SidebarModel {
     }
   }
 
-  return { sections, personal, scope };
+  return { needsYou, sections, personal, scope };
 }

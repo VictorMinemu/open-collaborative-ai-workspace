@@ -6,6 +6,8 @@ import {
   elapsedLabel,
   isActiveSession,
   liveCount,
+  NEEDS_YOU_CAP,
+  needsViewer,
   orderActiveSessions,
   PERSONAL_REPO_CAP,
   projectInitials,
@@ -547,5 +549,142 @@ describe("collapse state (useSidebarCollapse, UI-SPEC § 2)", () => {
     expect(toggledMap({}, ENG.id)).toEqual({ [ENG.id]: true });
     expect(toggledMap({ [ENG.id]: true }, ENG.id)).toEqual({ [ENG.id]: false });
     expect(toggledMap({}, "settled")).toEqual({ settled: false });
+  });
+});
+
+describe("Needs you (D-05, UI-SPEC § 3, PD-05, PD-07)", () => {
+  const portal = project("Customer portal", { parent: WEB });
+  const ref = at(portal);
+  const attention = (approval: boolean, lastTurnEndedAt: string | null = null) => ({
+    approval,
+    lastTurnEndedAt,
+  });
+  const approval = (over: Partial<WorkSession> = {}) =>
+    session({ status: "waiting_approval", pendingApprovals: 1, attention: attention(true), ...over });
+
+  describe("needsViewer", () => {
+    it("is an approval when the API says the viewer may decide a pending one, even while it is open", () => {
+      const s = approval();
+      expect(needsViewer(s, {}, NOW, null)).toBe("approval");
+      expect(needsViewer(s, {}, NOW, s.id)).toBe("approval");
+    });
+
+    it("is nothing without attention (a ws: snapshot) or when the viewer can't decide", () => {
+      expect(
+        needsViewer(session({ status: "waiting_approval", pendingApprovals: 1 }), {}, NOW, null),
+      ).toBeNull();
+      expect(needsViewer(approval({ attention: attention(false) }), {}, NOW, null)).toBeNull();
+    });
+
+    it("is the viewer's turn when their last turn ended within 24 h, unseen, idle with an empty queue, not open", () => {
+      const ended = "2026-10-27T11:30:00Z";
+      const s = session({ status: "idle", attention: attention(false, ended) });
+      expect(needsViewer(s, {}, NOW, null)).toBe("turn");
+      expect(needsViewer(s, { [s.id]: "2026-10-27T11:00:00Z" }, NOW, null)).toBe("turn");
+      // Seen at or after the turn ended: nothing.
+      expect(needsViewer(s, { [s.id]: ended }, NOW, null)).toBeNull();
+      expect(needsViewer(s, { [s.id]: "2026-10-27T11:45:00Z" }, NOW, null)).toBeNull();
+      // Open now, running again, queued or settled: nothing.
+      expect(needsViewer(s, {}, NOW, s.id)).toBeNull();
+      expect(needsViewer({ ...s, status: "running" }, {}, NOW, null)).toBeNull();
+      expect(needsViewer({ ...s, queuedCount: 1 }, {}, NOW, null)).toBeNull();
+      expect(needsViewer({ ...s, status: "completed" }, {}, NOW, null)).toBeNull();
+      // Someone else's turn (the API sends null) and a turn over 24 h old: nothing.
+      expect(needsViewer({ ...s, attention: attention(false) }, {}, NOW, null)).toBeNull();
+      expect(
+        needsViewer({ ...s, attention: attention(false, "2026-10-26T11:59:59Z") }, {}, NOW, null),
+      ).toBeNull();
+      expect(needsViewer({ ...s, attention: attention(false, "2026-10-26T12:00:01Z") }, {}, NOW, null)).toBe(
+        "turn",
+      );
+    });
+  });
+
+  it("lists approvals first, then turns, each most recent first, from the viewer's scope only", () => {
+    const managed = project("Payroll", { membership: "manager" });
+    const oldApproval = approval({
+      teamProject: ref,
+      title: "old approval",
+      updatedAt: "2026-10-27T10:00:00Z",
+    });
+    const newApproval = approval({
+      teamProject: ref,
+      title: "new approval",
+      updatedAt: "2026-10-27T11:50:00Z",
+    });
+    const turn = session({
+      teamProject: ref,
+      title: "turn",
+      attention: attention(false, "2026-10-27T11:55:00Z"),
+      updatedAt: "2026-10-27T11:55:00Z",
+    });
+    // An admin-only session: a pending approval the admin may decide, in a project they only manage (PD-07 (c)).
+    const adminOnly = approval({ teamProject: at(managed), title: "admin only" });
+    const quiet = session({ teamProject: ref, title: "quiet" });
+    const model = build({
+      index: index([portal, managed]),
+      sessions: [turn, oldApproval, adminOnly, quiet, newApproval],
+    });
+    expect(model.needsYou?.rows.map((r) => [r.session.title, r.reason, r.place])).toEqual([
+      ["new approval", "approval", "Customer portal"],
+      ["old approval", "approval", "Customer portal"],
+      ["turn", "turn", "Customer portal"],
+    ]);
+    expect(model.needsYou?.more).toBe(0);
+  });
+
+  it("is null when nothing waits on the viewer", () => {
+    expect(build({ index: index([portal]), sessions: [session({ teamProject: ref })] }).needsYou).toBeNull();
+  });
+
+  it("names a hidden project's session by its repository, never by the project", () => {
+    const hidden = approval({ teamProject: null, teamProjectHidden: true, projectName: "pia-linked" });
+    expect(build({ sessions: [hidden] }).needsYou?.rows.map((r) => r.place)).toEqual(["pia-linked"]);
+  });
+
+  it("shows 5, then the rest behind Show {n} more, all of them when expanded", () => {
+    const many = Array.from({ length: 7 }, (_, i) =>
+      approval({ teamProject: ref, title: `a${i}`, updatedAt: `2026-10-27T11:0${i}:00Z` }),
+    );
+    expect(NEEDS_YOU_CAP).toBe(5);
+    const model = build({ index: index([portal]), sessions: many });
+    expect(model.needsYou?.rows.map((r) => r.session.title)).toEqual(["a6", "a5", "a4", "a3", "a2"]);
+    expect(model.needsYou?.more).toBe(2);
+    expect(model.needsYou?.expanded).toBe(false);
+    const open = build({ index: index([portal]), sessions: many, expanded: new Set(["needs"]) });
+    expect(open.needsYou?.rows).toHaveLength(7);
+    expect(open.needsYou?.more).toBe(0);
+    expect(open.needsYou?.expanded).toBe(true);
+  });
+
+  it("collapsed, shows no row and counts them all", () => {
+    const model = build({
+      index: index([portal]),
+      sessions: [approval({ teamProject: ref })],
+      collapsed: new Set(["needs"]),
+    });
+    expect(model.needsYou).toMatchObject({ collapsed: true, rows: [], hidden: 1 });
+  });
+
+  it("a collapsed department keeps the project and only the session that needs the viewer (D-01)", () => {
+    const other = project("Design system");
+    const waiting = approval({ teamProject: ref, title: "waiting" });
+    const running = session({ teamProject: ref, title: "running", status: "running" });
+    const model = build({
+      index: index([portal, other]),
+      sessions: [waiting, running],
+      collapsed: new Set([ENG.id]),
+    });
+    const eng = model.sections[0];
+    expect(eng?.projects.map((p) => p.name)).toEqual(["Customer portal"]);
+    expect(eng?.projects[0]?.sessions.map((s) => s.title)).toEqual(["waiting"]);
+    expect(eng?.hidden).toBe(1);
+  });
+
+  it("a turn the viewer already saw is not in it", () => {
+    const turn = session({ teamProject: ref, attention: attention(false, "2026-10-27T11:30:00Z") });
+    expect(build({ index: index([portal]), sessions: [turn] }).needsYou?.rows).toHaveLength(1);
+    const seen = { [turn.id]: "2026-10-27T11:31:00Z" };
+    expect(build({ index: index([portal]), sessions: [turn], seen }).needsYou).toBeNull();
   });
 });
