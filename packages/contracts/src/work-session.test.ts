@@ -9,6 +9,7 @@ import {
   UpdateWorkSessionVisibilityRequest,
   UpdateWorkSessionVisibilityResult,
   WorkSession,
+  WorkSessionAttention,
   WorkSessionDetail,
   WorkSessionRemovedEvent,
   WorkSessionVisibilityChangedEvent,
@@ -202,6 +203,25 @@ describe("work session per-viewer fields (07.10-02, PD-03, PD-04)", () => {
     expect(hidden).toMatchObject({ teamProject: null, teamProjectHidden: true });
     expect(WorkSession.parse(oldSession).teamProjectHidden).toBeUndefined();
     expect(WorkSession.safeParse({ ...oldSession, teamProjectHidden: "yes" }).success).toBe(false);
+  });
+
+  it("WorkSessionAttention: approval with a null or ISO lastTurnEndedAt parses; a missing approval is refused", () => {
+    expect(WorkSessionAttention.parse({ approval: true, lastTurnEndedAt: null })).toEqual({
+      approval: true,
+      lastTurnEndedAt: null,
+    });
+    expect(WorkSessionAttention.parse({ approval: false, lastTurnEndedAt: now }).lastTurnEndedAt).toBe(now);
+    expect(WorkSessionAttention.safeParse({ lastTurnEndedAt: null }).success).toBe(false);
+    expect(WorkSessionAttention.safeParse({ approval: true, lastTurnEndedAt: "yesterday" }).success).toBe(
+      false,
+    );
+  });
+
+  it("a WorkSession parses with attention (list, detail, user:) and without it (ws:, replayed)", () => {
+    const attention = { approval: true, lastTurnEndedAt: now };
+    expect(WorkSession.parse({ ...oldSession, attention }).attention).toEqual(attention);
+    expect(WorkSession.parse(oldSession).attention).toBeUndefined();
+    expect(WorkSession.safeParse({ ...oldSession, attention: { approval: "yes" } }).success).toBe(false);
   });
 });
 

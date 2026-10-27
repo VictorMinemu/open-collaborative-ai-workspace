@@ -67,6 +67,7 @@ import { OrgQueue, type OrgQueueOptions, type OrgTask } from "./org-queue";
 import { loadWorkZonePolicy } from "./policy";
 import { decideTitleRequest, heuristicTitle, loadTitleContext } from "./title";
 import {
+  type DeliverySource,
   loadViewerFieldsForRecipients,
   type SessionProject,
   type ShapeSource,
@@ -527,7 +528,7 @@ export class WorkSessionService implements DeviceSessionHandler {
             .where(and(eq(orgMembers.role, "admin"), isNull(orgMembers.deactivatedAt)))
         ).map((a) => a.userId),
       );
-      const out: Array<ShapeSource & { recipients: string[] }> = [];
+      const out: DeliverySource[] = [];
       for (const { dto, project } of sources) {
         const facts = await sessionFactsForUsers(tx, dto, members);
         const candidates = members.filter((id) => {
@@ -543,9 +544,10 @@ export class WorkSessionService implements DeviceSessionHandler {
             return f;
           },
         });
-        out.push({ dto, project, recipients });
+        out.push({ dto, project, recipients, facts });
       }
-      // Phase 07.10 (PD-03, PD-04): each recipient gets the session as they read it, decided for the whole batch.
+      // Phase 07.10 (PD-03, PD-04, PD-05): each recipient gets the session as they read it (its project named or
+      // hidden, what in it waits on them), decided for the whole batch.
       const fields = await loadViewerFieldsForRecipients(tx, this.deps.perms, out);
       return out.map(({ dto, recipients }) => ({
         frames: recipients.map((userId) => ({

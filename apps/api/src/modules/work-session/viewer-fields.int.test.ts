@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { WS_AUTH_PROTOCOL_PREFIX, WS_PROTOCOL } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
-import { eventually, FakeDevice } from "../../testing-device";
+import WebSocket from "ws";
+import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "../../testing";
+import { eventually, FakeDevice, sleep } from "../../testing-device";
 import {
   CLAUDE_CATALOG,
   createTeamProject,
@@ -265,5 +267,194 @@ describe("the team project is named per viewer on the list and the detail (PD-02
       expect(JSON.stringify(a), `A's list carried "${secret}"`).not.toContain(secret);
     }
     expect((await admin.request("GET", `/api/v1/work-sessions/${eveSession}`)).status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: what waits on the viewer (PD-05, D-05)
+
+/** A socket on the API's realtime endpoint, as `as`, recording every frame. */
+async function openSocket(as: TestClient) {
+  const socket = new WebSocket(
+    `${stack.baseUrl.replace("http", "ws")}/ws`,
+    [WS_PROTOCOL, `${WS_AUTH_PROTOCOL_PREFIX}${await as.token()}`],
+    { headers: { origin: WEB_ORIGIN } },
+  );
+  const frames: Json[] = [];
+  socket.on("message", (m) => frames.push(JSON.parse(String(m)) as Json));
+  await new Promise((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  const sub = async (topic: string) => {
+    socket.send(JSON.stringify({ op: "sub", topic }));
+    return eventually(async () =>
+      frames.find((f) => (f.op === "subscribed" || f.op === "err") && f.topic === topic),
+    );
+  };
+  return { socket, frames, sub };
+}
+
+describe("attention is decided per viewer on the list, the detail and each user: frame (PD-05, D-05)", () => {
+  const NOTHING = { approval: false, lastTurnEndedAt: null };
+  /** Leo's session on `api` (Payroll) for the attention cases; Pia, Dana and the admin also read it. */
+  let attn: string;
+
+  const attentionOf = async (as: TestClient, id: string) => {
+    const r = await row(as, id);
+    const d = await detail(as, id);
+    expect(r?.attention, "the list and the detail agree").toEqual(d.session.attention);
+    return d.session.attention as Json;
+  };
+  /** The completion time of the prompt whose body is `body`, as the detail reports it. */
+  const endedAt = async (body: string) =>
+    ((await detail(leo, attn)).prompts as Json[]).find((p) => p.body === body)?.completedAt as string;
+  const idle = async (as: TestClient, id: string) =>
+    eventually(async () => {
+      const d = await detail(as, id);
+      return d.session.status === "idle" && d.session.queuedCount === 0 && d.session.runningSince === null;
+    });
+
+  beforeAll(async () => {
+    attn = await startSession(leo, device, apiRepo, { title: "Bonus run" });
+  });
+
+  it("with nothing pending and no finished turn, nothing waits on anyone", async () => {
+    for (const [name, as] of [
+      ["Leo", leo],
+      ["Pia", pia],
+      ["Dana", dana],
+      ["Víctor", admin],
+    ] as const) {
+      expect(await attentionOf(as, attn), name).toEqual(NOTHING);
+    }
+  });
+
+  it("a pending approval waits on the creator, the device owner and the admin, not on a fellow member; each user: frame carries its recipient's own", async () => {
+    const leoSock = await openSocket(leo);
+    const piaSock = await openSocket(pia);
+    try {
+      expect((await leoSock.sub(`user:${leoId}`)).op).toBe("subscribed");
+      expect((await piaSock.sub(`user:${piaId}`)).op).toBe("subscribed");
+
+      await ok(leo.request("POST", `/api/v1/work-sessions/${attn}/prompts`, { body: "Pay the bonuses" }));
+      const cmd = await device.command("prompt", attn);
+      device.ack(cmd.id);
+      device.event(attn, { type: "prompt.started", promptId: cmd.payload.promptId });
+      const approvalId = randomUUID();
+      device.event(attn, {
+        type: "approval.requested",
+        approvalId,
+        tool: "Edit",
+        summary: "Edit src/bonus.ts",
+        paths: ["src/bonus.ts"],
+      });
+      device.event(attn, { type: "session.state", status: "waiting_approval" });
+      await eventually(async () =>
+        ((await detail(leo, attn)).approvals as Json[]).some((a) => a.id === approvalId),
+      );
+
+      for (const [name, as] of [
+        ["Leo (creator)", leo],
+        ["Dana (device owner)", dana],
+        ["Víctor (admin)", admin],
+      ] as const) {
+        // The turn is still running: it is not a finished turn.
+        expect(await attentionOf(as, attn), name).toEqual({ approval: true, lastTurnEndedAt: null });
+      }
+      expect(await attentionOf(pia, attn), "Pia (a member who may not decide)").toEqual(NOTHING);
+
+      // One delivery, two recipients, two different answers.
+      const pendingFrames = (s: Awaited<ReturnType<typeof openSocket>>, topic: string) =>
+        s.frames.filter(
+          (f) =>
+            f.topic === topic &&
+            f.type === "work_session.updated" &&
+            f.data?.id === attn &&
+            f.data?.pendingApprovals > 0,
+        );
+      await eventually(async () => pendingFrames(leoSock, `user:${leoId}`).length > 0, 3000);
+      await eventually(async () => pendingFrames(piaSock, `user:${piaId}`).length > 0, 3000);
+      await sleep(200);
+      for (const f of pendingFrames(leoSock, `user:${leoId}`)) expect(f.data.attention?.approval).toBe(true);
+      for (const f of pendingFrames(piaSock, `user:${piaId}`)) expect(f.data.attention).toEqual(NOTHING);
+
+      // Decided: nothing pending waits on anyone any more.
+      await ok(
+        leo.request("POST", `/api/v1/work-sessions/${attn}/approvals/${approvalId}`, { decision: "once" }),
+      );
+      for (const as of [leo, dana, admin, pia]) expect((await attentionOf(as, attn)).approval).toBe(false);
+
+      // The turn ends: it ran Leo's prompt, so it waits on Leo only.
+      device.event(attn, {
+        type: "prompt.completed",
+        promptId: cmd.payload.promptId,
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+      device.event(attn, { type: "session.state", status: "idle" });
+      await idle(leo, attn);
+    } finally {
+      leoSock.socket.close();
+      piaSock.socket.close();
+    }
+  });
+
+  it("the last finished turn waits only on the author of its prompt; a queued or running prompt changes nothing", async () => {
+    const leoEnded = await endedAt("Pay the bonuses");
+    expect(leoEnded, "Leo's turn has a completion time").toEqual(expect.any(String));
+    expect(await attentionOf(leo, attn)).toEqual({ approval: false, lastTurnEndedAt: leoEnded });
+    for (const as of [pia, dana, admin]) expect(await attentionOf(as, attn)).toEqual(NOTHING);
+
+    // Pia's prompt is dispatched, then running: still Leo's turn.
+    await ok(pia.request("POST", `/api/v1/work-sessions/${attn}/prompts`, { body: "Check the totals" }));
+    const cmd = await device.command("prompt", attn);
+    device.ack(cmd.id);
+    expect((await attentionOf(leo, attn)).lastTurnEndedAt).toBe(leoEnded);
+    expect((await attentionOf(pia, attn)).lastTurnEndedAt).toBeNull();
+    device.event(attn, { type: "prompt.started", promptId: cmd.payload.promptId });
+    await eventually(async () => (await detail(pia, attn)).session.runningSince !== null);
+    expect((await attentionOf(leo, attn)).lastTurnEndedAt).toBe(leoEnded);
+    expect((await attentionOf(pia, attn)).lastTurnEndedAt).toBeNull();
+
+    // It ends: now it waits on Pia and no longer on Leo.
+    device.event(attn, {
+      type: "prompt.completed",
+      promptId: cmd.payload.promptId,
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    device.event(attn, { type: "session.state", status: "idle" });
+    await idle(pia, attn);
+    const piaEnded = await endedAt("Check the totals");
+    expect(piaEnded).toEqual(expect.any(String));
+    expect(await attentionOf(pia, attn)).toEqual({ approval: false, lastTurnEndedAt: piaEnded });
+    for (const as of [leo, dana, admin]) expect(await attentionOf(as, attn)).toEqual(NOTHING);
+  });
+
+  it("organization B reads attention on its own sessions only, and nothing of A's turns", async () => {
+    const aTimes = ((await detail(leo, attn)).prompts as Json[]).map((p) => p.completedAt as string);
+    await ok(
+      eve.request("POST", `/api/v1/work-sessions/${eveSession}/prompts`, { body: "Close the ledger" }),
+    );
+    const cmd = await eveDevice.command("prompt", eveSession);
+    eveDevice.ack(cmd.id);
+    eveDevice.event(eveSession, { type: "prompt.started", promptId: cmd.payload.promptId });
+    eveDevice.event(eveSession, {
+      type: "prompt.completed",
+      promptId: cmd.payload.promptId,
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    eveDevice.event(eveSession, { type: "session.state", status: "idle" });
+    await idle(eve, eveSession);
+    const d = await detail(eve, eveSession);
+    const eveEnded = (d.prompts as Json[]).find((p) => p.body === "Close the ledger")?.completedAt as string;
+    const b = await list(eve);
+    expect((b.sessions as Json[]).map((s) => s.id)).toEqual([eveSession]);
+    expect((b.sessions as Json[])[0]?.attention).toEqual({ approval: false, lastTurnEndedAt: eveEnded });
+    for (const secret of [leoId, piaId, attn, ...aTimes]) {
+      expect(JSON.stringify(b), `B's list carried "${secret}"`).not.toContain(secret);
+    }
+    const a = await list(admin);
+    for (const secret of [eveSession, eveEnded]) {
+      expect(JSON.stringify(a), `A's list carried "${secret}"`).not.toContain(secret);
+    }
   });
 });

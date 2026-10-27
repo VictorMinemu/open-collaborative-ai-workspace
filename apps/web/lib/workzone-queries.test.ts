@@ -160,5 +160,19 @@ describe("mergeSessionSnapshot (07.10, PD-03: the session view keeps its per-vie
     const merged = mergeSessionSnapshot(bare, session(A, "2026-10-22T10:05:00.000Z"));
     expect("teamProject" in merged).toBe(false);
     expect("teamProjectHidden" in merged).toBe(false);
+    expect("attention" in merged).toBe(false);
+  });
+
+  it("keeps the viewer's attention across a ws: snapshot; a snapshot that carries attention wins", () => {
+    const waiting = { approval: true, lastTurnEndedAt: "2026-10-22T09:59:00.000Z" };
+    const withAttention = session(A, prev.updatedAt, { teamProject: PROJECT, attention: waiting });
+    const kept = mergeSessionSnapshot(withAttention, session(A, "2026-10-22T10:05:00.000Z"));
+    expect(kept.attention).toEqual(waiting);
+    expect(kept.teamProject).toEqual(PROJECT);
+    const cleared = { approval: false, lastTurnEndedAt: null };
+    const replaced = mergeSessionSnapshot(withAttention, session(A, prev.updatedAt, { attention: cleared }));
+    expect(replaced.attention).toEqual(cleared);
+    // The project pair is kept independently of attention.
+    expect(replaced.teamProject).toEqual(PROJECT);
   });
 });

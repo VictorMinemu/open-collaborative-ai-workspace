@@ -426,11 +426,11 @@ export function registerWorkSessionRoutes(
         // `lastSeq` (rendered twice); anything newer than the cut arrives through the topic replay instead.
         const lastSeq = await core.realtime.lastSeq(tx, topic);
         const source = (await svc.sessionSource(tx, found.id)) ?? first;
-        // Phase 07.10 (PD-04): the session as this viewer reads it.
+        // Phase 07.10 (PD-04, PD-05): the session as this viewer reads it (its project, what waits on them).
         const viewerId = authOf(req).userId;
         const fields = await loadViewerFields(tx, {
           viewerId,
-          sessions: [source],
+          sessions: [{ ...source, facts }],
           filter: filterFor(req, tx),
         });
         const session = withViewerFields(source.dto, fields.get(source.dto.id)!);

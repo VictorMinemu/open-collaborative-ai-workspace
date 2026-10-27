@@ -42,6 +42,24 @@ export const WorkSessionVisibilitySummary = z.object({
 });
 export type WorkSessionVisibilitySummary = z.infer<typeof WorkSessionVisibilitySummary>;
 
+/**
+ * What in one session waits on one viewer (Phase 07.10, PD-05, D-05; UI-SPEC R2, § 3 Needs you), decided by the API
+ * for that viewer only and never sent to anyone else.
+ */
+export const WorkSessionAttention = z.object({
+  /**
+   * The session has a pending approval and the resolver lets this viewer decide it (`work_session.approve` on the
+   * session: the creator, the device owner, an admin). A Tool-layer rule still decides when the approval is answered.
+   */
+  approval: z.boolean(),
+  /**
+   * When the session's last finished turn (its most recent prompt that was dispatched and then completed or failed)
+   * ended, only when that turn ran this viewer's prompt; null otherwise. Queued and running prompts never count.
+   */
+  lastTurnEndedAt: IsoDateTime.nullable(),
+});
+export type WorkSessionAttention = z.infer<typeof WorkSessionAttention>;
+
 export const WorkSession = z.object({
   id: Id,
   conversationId: Id,
@@ -91,6 +109,11 @@ export const WorkSession = z.object({
    * owner outside the project, D-11). `teamProject` is then null. Absent = false; absent on `ws:`.
    */
   teamProjectHidden: z.boolean().optional(),
+  /**
+   * What in the session waits on this viewer (Phase 07.10, PD-05; UI-SPEC R2). Per viewer: sent on the viewer's own
+   * surfaces (the list, the detail, their `user:` frames); absent on the shared `ws:` stream, so optional.
+   */
+  attention: WorkSessionAttention.optional(),
 });
 export type WorkSession = z.infer<typeof WorkSession>;
 

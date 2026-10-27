@@ -256,10 +256,10 @@ export function applySessionFrame(
 /**
  * Merges a `ws:` `work_session.updated` snapshot into the session view's state (Phase 07.10, PD-03). The shared `ws:`
  * stream carries the viewer-neutral DTO, without the fields the API decides per viewer (the team project, whether it
- * is hidden), so those keep the values of the view's REST snapshot (or of a later shaped DTO): the
- * breadcrumb's project link and the "You left {project}" line survive every live update. A snapshot that carries one
- * of them wins: the team project and its `teamProjectHidden` flag travel as a pair (a shaped DTO omits the flag when
- * the project is named). Every other field always comes from `next`. Pure.
+ * is hidden, the viewer's attention), so those keep the values of the view's REST snapshot (or of a later shaped DTO):
+ * the breadcrumb's project link and the "You left {project}" line survive every live update. A snapshot that carries
+ * one of them wins: the team project and its `teamProjectHidden` flag travel as a pair (a shaped DTO omits the flag
+ * when the project is named); `attention` on its own. Every other field always comes from `next`. Pure.
  */
 export function mergeSessionSnapshot(prev: WorkSession, next: WorkSession): WorkSession {
   const out: WorkSession = { ...next };
@@ -267,6 +267,7 @@ export function mergeSessionSnapshot(prev: WorkSession, next: WorkSession): Work
     if ("teamProject" in prev) out.teamProject = prev.teamProject;
     if ("teamProjectHidden" in prev) out.teamProjectHidden = prev.teamProjectHidden;
   }
+  if (!("attention" in next) && "attention" in prev) out.attention = prev.attention;
   return out;
 }
 

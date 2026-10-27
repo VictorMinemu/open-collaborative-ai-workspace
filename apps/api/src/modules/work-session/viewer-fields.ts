@@ -1,14 +1,19 @@
-import type { Permission, TeamProjectRef, WorkSession } from "@ocw/contracts";
-import type { Tx } from "@ocw/db";
-import { sql } from "drizzle-orm";
+import type { Permission, TeamProjectRef, WorkSession, WorkSessionAttention } from "@ocw/contracts";
+import { type Tx, workPrompts } from "@ocw/db";
+import { and, desc, inArray, isNotNull, sql } from "drizzle-orm";
 import { type PermissionService, type ResourceFacts, uuidArray, workProjectResource } from "../organization";
 
 /**
- * Per-viewer session fields (Phase 07.10, PD-03, PD-04; UI-SPEC R2). A session's team project is named to a person
- * only when the resolver lets them open that project (`work_session.read` on its `work_project` resource, built from
- * `app.work_project_access`: the decision `GET /projects` makes for 07.9 D-14) or when they created the session (D-12:
- * a creator who left keeps the name). Anyone else who reads the session (the device owner outside the project, D-11; a
- * person granted the session alone) gets `teamProject: null` and `teamProjectHidden: true`.
+ * Per-viewer session fields (Phase 07.10, PD-03, PD-04, PD-05; UI-SPEC R2).
+ *
+ * - The team project (PD-04): named to a person only when the resolver lets them open that project
+ *   (`work_session.read` on its `work_project` resource, built from `app.work_project_access`: the decision
+ *   `GET /projects` makes for 07.9 D-14) or when they created the session (D-12: a creator who left keeps the name).
+ *   Anyone else who reads the session (the device owner outside the project, D-11; a person granted the session alone)
+ *   gets `teamProject: null` and `teamProjectHidden: true`.
+ * - Attention (PD-05): `approval` when the session has a pending approval and the resolver lets this person decide it
+ *   (`work_session.approve` on their session facts, built by `facts.ts`: the detail's `viewerCan` decision);
+ *   `lastTurnEndedAt` when the session's last finished turn ran this person's prompt.
  *
  * These fields travel only on a viewer's own surfaces: the list and the detail (shaped for the requester) and each
  * `user:` frame (shaped for its recipient). The shared `ws:` stream and the public `WorkSessionService.session` /
@@ -29,11 +34,23 @@ export interface ShapeSource {
   project: SessionProject | null;
 }
 
+/** One session shaped for one viewer: with that viewer's resolver facts on it (`facts.ts`). */
+export interface ViewerSource extends ShapeSource {
+  facts: ResourceFacts;
+}
+
+/** One delivered session: its recipients and each recipient's resolver facts on it (`sessionFactsForUsers`). */
+export interface DeliverySource extends ShapeSource {
+  recipients: readonly string[];
+  facts: ReadonlyMap<string, ResourceFacts>;
+}
+
 /** What one viewer reads of one session beyond the neutral DTO. */
 export interface ViewerFields {
   teamProject: TeamProjectRef | null;
   /** True only when the session has a team project this viewer may not see named. */
   teamProjectHidden: boolean;
+  attention: WorkSessionAttention;
 }
 
 /** The request's own decision for its viewer (`perms.filter(req, tx, …)`: principal facts memoized per request). */
@@ -43,7 +60,7 @@ export type ViewerFilter = <T>(
   toResource: (item: T) => ResourceFacts,
 ) => Promise<T[]>;
 
-const PER_VIEWER_KEYS = ["teamProject", "teamProjectHidden"] as const;
+const PER_VIEWER_KEYS = ["teamProject", "teamProjectHidden", "attention"] as const;
 
 /** The viewer-neutral DTO: none of the per-viewer fields (the `ws:` snapshot, the public session readers). */
 export function withoutViewerFields(dto: WorkSession): WorkSession {
@@ -58,16 +75,19 @@ export function withViewerFields(dto: WorkSession, fields: ViewerFields): WorkSe
     ...withoutViewerFields(dto),
     teamProject: fields.teamProject,
     ...(fields.teamProjectHidden ? { teamProjectHidden: true } : {}),
+    attention: fields.attention,
   };
 }
 
-const NO_PROJECT: ViewerFields = { teamProject: null, teamProjectHidden: false };
-
-function fieldsOf(project: SessionProject | null, named: boolean): ViewerFields {
-  if (!project) return NO_PROJECT;
+function fieldsOf(
+  project: SessionProject | null,
+  named: boolean,
+  attention: WorkSessionAttention,
+): ViewerFields {
+  if (!project) return { teamProject: null, teamProjectHidden: false, attention };
   return named
-    ? { teamProject: { id: project.id, name: project.name }, teamProjectHidden: false }
-    : { teamProject: null, teamProjectHidden: true };
+    ? { teamProject: { id: project.id, name: project.name }, teamProjectHidden: false, attention }
+    : { teamProject: null, teamProjectHidden: true, attention };
 }
 
 /** Distinct team projects of `sources` (by unit id). */
@@ -77,46 +97,110 @@ function distinctProjects(sources: readonly ShapeSource[]): SessionProject[] {
   return [...out.values()];
 }
 
+/** A session's last finished turn: who wrote its prompt and when it ended. */
+interface LastTurn {
+  authorUserId: string;
+  endedAt: string;
+}
+
+/**
+ * The last finished turn of each session (PD-05), in one query for the batch: per session, the most recent prompt
+ * that was dispatched and then completed or failed. Queued, dispatched, running and cancelled prompts never count.
+ */
+async function lastTurns(tx: Tx, sessionIds: readonly string[]): Promise<Map<string, LastTurn>> {
+  const out = new Map<string, LastTurn>();
+  if (sessionIds.length === 0) return out;
+  const rows = await tx
+    .selectDistinctOn([workPrompts.workSessionId], {
+      sessionId: workPrompts.workSessionId,
+      authorUserId: workPrompts.authorUserId,
+      completedAt: workPrompts.completedAt,
+    })
+    .from(workPrompts)
+    .where(
+      and(
+        inArray(workPrompts.workSessionId, [...sessionIds]),
+        inArray(workPrompts.status, ["completed", "failed"]),
+        isNotNull(workPrompts.dispatchedAt),
+        isNotNull(workPrompts.completedAt),
+      ),
+    )
+    .orderBy(workPrompts.workSessionId, desc(workPrompts.completedAt), desc(workPrompts.position));
+  for (const r of rows) {
+    if (r.completedAt === null) continue;
+    out.set(r.sessionId, { authorUserId: r.authorUserId, endedAt: new Date(r.completedAt).toISOString() });
+  }
+  return out;
+}
+
+const lastTurnFor = (turn: LastTurn | undefined, userId: string): string | null =>
+  turn && turn.authorUserId === userId ? turn.endedAt : null;
+
 /**
  * The per-viewer fields of `sessions` for ONE viewer (the list and the detail), by session id. One project-access
- * query over the distinct team projects the viewer did not create a session in, then one in-memory resolver decision
- * per project through the request's `filter`.
+ * query over the distinct team projects the viewer did not create a session in and one last-turn query over the
+ * sessions, then in-memory resolver decisions through the request's `filter` (one per project, one per session with a
+ * pending approval).
  */
 export async function loadViewerFields(
   tx: Tx,
-  a: { viewerId: string; sessions: readonly ShapeSource[]; filter: ViewerFilter },
+  a: { viewerId: string; sessions: readonly ViewerSource[]; filter: ViewerFilter },
 ): Promise<Map<string, ViewerFields>> {
   const toDecide = distinctProjects(a.sessions.filter((s) => s.dto.createdBy !== a.viewerId));
   const open = new Set<string>();
-  if (toDecide.length > 0) {
-    const res = await tx.execute(sql`
-      select u.id::text as unit_id, app.work_project_access(u.id, ${a.viewerId}::uuid) as access
-        from unnest(${uuidArray(toDecide.map((p) => p.id))}) as u(id)`);
-    const access = new Map(
-      (res.rows as Array<{ unit_id: string; access: string | null }>).map((r) => [r.unit_id, r.access]),
-    );
-    const allowed = await a.filter(toDecide, "work_session.read", (p) =>
-      workProjectResource({ id: p.id, path: p.path, access: access.get(p.id) ?? null }, a.viewerId),
-    );
-    for (const p of allowed) open.add(p.id);
-  }
+  const [turns] = await Promise.all([
+    lastTurns(
+      tx,
+      a.sessions.map((s) => s.dto.id),
+    ),
+    (async () => {
+      if (toDecide.length === 0) return;
+      const res = await tx.execute(sql`
+        select u.id::text as unit_id, app.work_project_access(u.id, ${a.viewerId}::uuid) as access
+          from unnest(${uuidArray(toDecide.map((p) => p.id))}) as u(id)`);
+      const access = new Map(
+        (res.rows as Array<{ unit_id: string; access: string | null }>).map((r) => [r.unit_id, r.access]),
+      );
+      const allowed = await a.filter(toDecide, "work_session.read", (p) =>
+        workProjectResource({ id: p.id, path: p.path, access: access.get(p.id) ?? null }, a.viewerId),
+      );
+      for (const p of allowed) open.add(p.id);
+    })(),
+  ]);
+  // PD-05: the session-level approve decision on the viewer's own facts, only where something is pending.
+  const approves = new Set(
+    (
+      await a.filter(
+        a.sessions.filter((s) => s.dto.pendingApprovals > 0),
+        "work_session.approve",
+        (s) => s.facts,
+      )
+    ).map((s) => s.dto.id),
+  );
   const out = new Map<string, ViewerFields>();
   for (const s of a.sessions) {
     const named = s.dto.createdBy === a.viewerId || (s.project !== null && open.has(s.project.id));
-    out.set(s.dto.id, fieldsOf(s.project, named));
+    out.set(
+      s.dto.id,
+      fieldsOf(s.project, named, {
+        approval: approves.has(s.dto.id),
+        lastTurnEndedAt: lastTurnFor(turns.get(s.dto.id), a.viewerId),
+      }),
+    );
   }
   return out;
 }
 
 /**
  * The per-viewer fields of each delivered session for EACH of its recipients (the `user:` fan-out), by session id then
- * user id. One project-access query over every (project, recipient) pair of the batch, then one resolver decision per
- * distinct project over its recipients (`usersAllowed`, rules loaded once per call).
+ * user id. One project-access query over every (project, recipient) pair of the batch and one last-turn query over its
+ * sessions; then one resolver decision per distinct project over its recipients and one per session with a pending
+ * approval over its recipients (`usersAllowed`, on the facts the delivery already built).
  */
 export async function loadViewerFieldsForRecipients(
   tx: Tx,
   perms: Pick<PermissionService, "usersAllowed">,
-  deliveries: ReadonlyArray<ShapeSource & { recipients: readonly string[] }>,
+  deliveries: readonly DeliverySource[],
 ): Promise<Map<string, Map<string, ViewerFields>>> {
   // Recipients to decide per project: the session's creator is named without a decision (D-12).
   const byProject = new Map<string, { project: SessionProject; users: Set<string> }>();
@@ -134,8 +218,12 @@ export async function loadViewerFieldsForRecipients(
       users.push(uid);
     }
   }
-  const key = (unitId: string, userId: string) => `${unitId}:${userId}`;
+  const key = (a: string, b: string) => `${a}:${b}`;
   const open = new Set<string>();
+  const turns = await lastTurns(
+    tx,
+    deliveries.map((d) => d.dto.id),
+  );
   if (units.length > 0) {
     const res = await tx.execute(sql`
       select x.unit_id::text as unit_id, x.user_id::text as user_id,
@@ -161,12 +249,33 @@ export async function loadViewerFieldsForRecipients(
       for (const uid of allowed) open.add(key(project.id, uid));
     }
   }
+  // PD-05: who among each session's recipients may decide its pending approvals, on the facts the delivery built.
+  const approves = new Set<string>();
+  for (const d of deliveries) {
+    if (d.dto.pendingApprovals === 0 || d.recipients.length === 0) continue;
+    const allowed = await perms.usersAllowed(tx, {
+      candidates: [...d.recipients],
+      permission: "work_session.approve",
+      resourceFor: (uid) => {
+        const f = d.facts.get(uid);
+        if (!f) throw new Error("session facts missing for a recipient");
+        return f;
+      },
+    });
+    for (const uid of allowed) approves.add(key(d.dto.id, uid));
+  }
   const out = new Map<string, Map<string, ViewerFields>>();
   for (const d of deliveries) {
     const perUser = new Map<string, ViewerFields>();
     for (const uid of d.recipients) {
       const named = uid === d.dto.createdBy || (d.project !== null && open.has(key(d.project.id, uid)));
-      perUser.set(uid, fieldsOf(d.project, named));
+      perUser.set(
+        uid,
+        fieldsOf(d.project, named, {
+          approval: approves.has(key(d.dto.id, uid)),
+          lastTurnEndedAt: lastTurnFor(turns.get(d.dto.id), uid),
+        }),
+      );
     }
     out.set(d.dto.id, perUser);
   }
