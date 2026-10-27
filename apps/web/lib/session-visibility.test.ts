@@ -24,6 +24,7 @@ import {
   readOnlyNote,
   reasonLabel,
   sessionLabels,
+  sessionPlace,
   shortLabel,
   viewInput,
   viewLongLabel,
@@ -205,6 +206,33 @@ describe("sessionLabels (a list row's context)", () => {
       visibility: summary({ kind: "project", differsFromDefault: true }),
     });
     expect(sessionLabels(unlinked, "u-ana").tooltip).toBe("Visible to everyone who can use Ana's MacBook");
+  });
+
+  it("never reads a project the viewer can't open as a personal repository (07.10-07, ME-01)", () => {
+    const hidden = session({
+      teamProject: null,
+      teamProjectHidden: true,
+      visibility: summary({ kind: "project", differsFromDefault: true }),
+    });
+    expect(sessionPlace(hidden)).toEqual({
+      projectName: "",
+      deviceName: "Ana's MacBook",
+      personal: false,
+      hidden: true,
+    });
+    expect(sessionLabels(hidden, "u-leo")).toEqual({
+      marker: "project",
+      tooltip: "Visible to everyone in a project you can't open",
+      srSuffix: ", visible to everyone in a project you can't open",
+    });
+    // Its repository's name is never offered as the project's.
+    expect(JSON.stringify(sessionLabels(hidden, "u-leo"))).not.toContain("web-app");
+    // The other kinds keep their words (they name no project).
+    const owner = { ...hidden, visibility: summary({ kind: "owner", differsFromDefault: true }) };
+    expect(sessionLabels(owner, "u-leo").tooltip).toBe("Only visible to Ana Ruiz");
+    // A personal repository and a named project are unchanged.
+    expect(sessionPlace(session({ teamProject: null }))).toMatchObject({ personal: true, hidden: false });
+    expect(sessionPlace(session({}))).toMatchObject({ projectName: "Customer portal", personal: false });
   });
 
   it("is silent on the default and for replayed rows without a summary", () => {

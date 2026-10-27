@@ -5,14 +5,21 @@ import { useState } from "react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Sheet, SheetCloseButton, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { useSheetSurface } from "@/components/work-zone/control-surface";
-import { chipName, type LongLabelInput, longLabel, shortLabel } from "@/lib/session-visibility";
+import { chipName, type LongLabelInput, longLabel, sessionPlace, shortLabel } from "@/lib/session-visibility";
 import { cn } from "@/lib/utils";
 import { CHOICE_ICON } from "./audience-rows";
 import { VisibilityPanel } from "./visibility-panel";
 
 type ChipSession = Pick<
   WorkSession,
-  "id" | "visibility" | "teamProject" | "projectName" | "deviceName" | "createdBy" | "createdByName"
+  | "id"
+  | "visibility"
+  | "teamProject"
+  | "teamProjectHidden"
+  | "projectName"
+  | "deviceName"
+  | "createdBy"
+  | "createdByName"
 >;
 
 /** The panel's checked radio (editable) or its title (read-only) gets the focus when it opens (§Focus). */
@@ -63,9 +70,8 @@ export function VisibilityChip({
     firstTeamName: v.firstTeamName,
     ownerName: session.createdByName,
     viewerIsOwner: viewerId === session.createdBy,
-    projectName: session.teamProject?.name ?? session.projectName,
-    deviceName: session.deviceName,
-    personal: !session.teamProject,
+    // 07.10-07 (ME-01): a project the viewer can't open is "a project you can't open", never the device's users.
+    ...sessionPlace(session),
   };
   const label = shortLabel(ctx);
   const name = chipName(longLabel(ctx), canChange);

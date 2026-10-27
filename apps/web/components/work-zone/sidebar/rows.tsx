@@ -290,6 +290,8 @@ export function RepoRow({
       <FolderGit2 aria-hidden className="size-4 shrink-0 text-muted-foreground" />
       <span title={repo.hiddenProject ? undefined : repo.name} className="min-w-0 flex-1 truncate">
         {repo.name}
+        {/* 07.10-07 (LO-04): the hint reaches screen readers and touch, not only a pointer's tooltip. */}
+        {repo.hiddenProject ? <span className="sr-only">, {HIDDEN_PROJECT_HINT}</span> : null}
         {repo.live > 0 ? <span className="sr-only">, {repo.live} running</span> : null}
       </span>
       <LiveCount n={repo.live} testId="repo-live-count" />

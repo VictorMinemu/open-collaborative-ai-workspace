@@ -178,6 +178,9 @@ describe("RepoRow", () => {
     expect(HIDDEN_PROJECT_HINT).toBe("Linked to a project you can't open");
     const out = html(<RepoRow repo={repoRow({ hiddenProject: true })} />);
     expect(out).toContain('title="Linked to a project you can&#x27;t open"');
+    // 07.10-07 (LO-04): screen-reader and touch users get the hint too, not only a pointer's tooltip.
+    expect(out).toContain('<span class="sr-only">, Linked to a project you can&#x27;t open</span>');
+    expect(html(<RepoRow repo={repoRow()} />)).not.toContain('sr-only">, Linked');
   });
 });
 

@@ -133,6 +133,20 @@ describe("VisibilityMarker", () => {
     );
     expect(html(<VisibilitySrSuffix session={session()} viewerId={ANA} />)).toBe("");
   });
+
+  it("words a project the viewer can't open as such, never as the device's users (07.10-07, ME-01)", () => {
+    const hidden = session({
+      teamProject: null,
+      teamProjectHidden: true,
+      visibility: vis({ kind: "project", differsFromDefault: true }),
+    });
+    expect(html(<VisibilitySrSuffix session={hidden} viewerId={LEO} />)).toBe(
+      '<span class="sr-only">, visible to everyone in a project you can&#x27;t open</span>',
+    );
+    const row = html(<SessionSubRow s={hidden} now={NOW} active={false} viewerId={LEO} />);
+    expect(row).toContain("visible to everyone in a project you can&#x27;t open");
+    expect(row).not.toContain("who can use");
+  });
 });
 
 describe("sidebar rows", () => {

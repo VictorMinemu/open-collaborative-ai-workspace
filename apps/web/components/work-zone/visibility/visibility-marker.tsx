@@ -1,14 +1,10 @@
 "use client";
 
-import type { WorkSession } from "@ocw/contracts";
 import { FolderKanban, Lock, type LucideIcon, Users } from "lucide-react";
 import { Tooltip } from "@/components/ui/tooltip";
-import { type MarkerKind, sessionLabels } from "@/lib/session-visibility";
+import { type LabelledSession, type MarkerKind, sessionLabels } from "@/lib/session-visibility";
 
-type MarkedSession = Pick<
-  WorkSession,
-  "visibility" | "teamProject" | "projectName" | "deviceName" | "createdBy" | "createdByName"
->;
+type MarkedSession = LabelledSession;
 
 const ICON: Record<Exclude<MarkerKind, "none">, LucideIcon> = {
   lock: Lock,

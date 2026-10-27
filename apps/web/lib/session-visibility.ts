@@ -144,12 +144,34 @@ export function markerSrSuffix(s: LongLabelInput): string {
   return `, ${tooltip.charAt(0).toLowerCase()}${tooltip.slice(1)}`;
 }
 
+/** The session fields its audience labels read (the sidebar rows, the marker, the header chip). */
+export type LabelledSession = Pick<
+  WorkSession,
+  | "visibility"
+  | "teamProject"
+  | "teamProjectHidden"
+  | "projectName"
+  | "deviceName"
+  | "createdBy"
+  | "createdByName"
+>;
+
+/**
+ * Where a session runs, as its DTO says it to this viewer: its team project named, a project the viewer can't open
+ * (`teamProjectHidden`, 07.10-07 ME-01: never read as a personal repository), or a personal repository on its device.
+ */
+export function sessionPlace(
+  s: Pick<LabelledSession, "teamProject" | "teamProjectHidden" | "projectName" | "deviceName">,
+): PlaceContext {
+  if (s.teamProject) return { projectName: s.teamProject.name, deviceName: s.deviceName, personal: false };
+  if (s.teamProjectHidden === true)
+    return { projectName: "", deviceName: s.deviceName, personal: false, hidden: true };
+  return { projectName: s.projectName, deviceName: s.deviceName, personal: true, hidden: false };
+}
+
 /** A list row's labels for its viewer, from the session DTO alone (the marker never waits for a request). */
 export function sessionLabels(
-  s: Pick<
-    WorkSession,
-    "visibility" | "teamProject" | "projectName" | "deviceName" | "createdBy" | "createdByName"
-  >,
+  s: LabelledSession,
   viewerId: string | null | undefined,
 ): { marker: MarkerKind; tooltip: string | null; srSuffix: string } {
   const marker = markerKind(s.visibility);
@@ -160,9 +182,7 @@ export function sessionLabels(
     firstTeamName: s.visibility.firstTeamName,
     ownerName: s.createdByName,
     viewerIsOwner: viewerId === s.createdBy,
-    projectName: s.teamProject?.name ?? s.projectName,
-    deviceName: s.deviceName,
-    personal: !s.teamProject,
+    ...sessionPlace(s),
   };
   return { marker, tooltip: markerTooltip(input), srSuffix: markerSrSuffix(input) };
 }
