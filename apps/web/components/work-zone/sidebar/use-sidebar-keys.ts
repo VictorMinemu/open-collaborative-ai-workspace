@@ -58,6 +58,14 @@ export function nextAfterRemoval(at: {
   return at.hasToggle ? { kind: "toggle" } : { kind: "global" };
 }
 
+/**
+ * Focus left the sidebar (a click on the main pane, a Tab out) while the remembered row is still there (07.10-07,
+ * LO-03): forget it, so a later live removal of that row never pulls focus back into the sidebar.
+ */
+export function leftSidebar(at: { rowConnected: boolean; focusInside: boolean }): boolean {
+  return at.rowConnected && !at.focusInside;
+}
+
 /** The rows of a section other than its toggle. */
 const rowsOf = (section: Element) => targetsIn(section).filter((el) => !isToggle(el));
 
@@ -119,11 +127,26 @@ export function useSidebarKeys(
       last = null;
       next?.focus();
     });
+    // Decided once the focus move has settled: a row removed with focus may blur too, and must keep focus survival.
+    const onFocusOut = () => {
+      queueMicrotask(() => {
+        if (
+          last &&
+          leftSidebar({
+            rowConnected: last.el.isConnected,
+            focusInside: nav.contains(document.activeElement),
+          })
+        )
+          last = null;
+      });
+    };
     nav.addEventListener("focusin", onFocusIn);
+    nav.addEventListener("focusout", onFocusOut);
     observer.observe(nav, { childList: true, subtree: true });
     return () => {
       observer.disconnect();
       nav.removeEventListener("focusin", onFocusIn);
+      nav.removeEventListener("focusout", onFocusOut);
     };
   }, [navRef]);
 

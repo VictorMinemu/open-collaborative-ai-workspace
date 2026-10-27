@@ -36,7 +36,8 @@ import { ADMIN } from "./env";
  *   never finds the project she can't open by its name (C-01).
  * - a failing sessions request keeps the project rows with "Couldn't load sessions." and Try again.
  * - keys (desktop): ArrowDown from search into the results and the rows, ↑/↓/Home/End, ←/→ on a toggle, Escape clears
- *   the query; focus stays in Needs you when the focused row leaves because its approval was decided elsewhere.
+ *   the query; focus stays in Needs you when the focused row leaves because its approval was decided elsewhere,
+ *   and is never pulled back into the sidebar once it left it (07.10-07, LO-03).
  * Every unit, device and session the spec makes is removed in `afterAll`.
  */
 
@@ -689,6 +690,17 @@ test("keys: arrows through the sidebar and the results, toggles, Escape, focus k
         { timeout: 30_000, message: "focus moves to the next row of Needs you" },
       )
       .toBe(true);
+
+    // 07.10-07 (LO-03): once focus has left the sidebar, a row leaving never pulls it back. Focus rests on the turn's
+    // row, then leaves it for the page (as a click on the main pane does); a new turn takes the row away.
+    await needsRow(list, T.approval).focus();
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    const onBody = () => page.evaluate(() => document.activeElement === document.body);
+    expect(await onBody()).toBe(true);
+    await post(leo, `/api/v1/work-sessions/${S.approval}/prompts`, { body: "One more pass" });
+    await expect(needsRow(list, T.approval)).toHaveCount(0, { timeout: 30_000 });
+    await page.waitForTimeout(300);
+    expect(await onBody(), "focus stays where the person left it").toBe(true);
   } finally {
     await context.close();
   }

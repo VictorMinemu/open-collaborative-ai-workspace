@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { moveFocus, nextAfterRemoval, toggleKey } from "./use-sidebar-keys";
+import { leftSidebar, moveFocus, nextAfterRemoval, toggleKey } from "./use-sidebar-keys";
 
 /**
  * The sidebar's arrow keys (07.10-04, UI-SPEC § Keyboard): ↑/↓ step through the row-level targets in DOM order, Home
@@ -58,5 +58,16 @@ describe("nextAfterRemoval", () => {
 
   it("falls back to the same place in the whole sidebar when the section itself is gone", () => {
     expect(nextAfterRemoval({ sectionRows: 0, index: 0, hasToggle: false })).toEqual({ kind: "global" });
+  });
+});
+
+describe("leftSidebar (07.10-07, LO-03)", () => {
+  it("is true when focus went outside the sidebar while the row is still there: never pull focus back later", () => {
+    expect(leftSidebar({ rowConnected: true, focusInside: false })).toBe(true);
+  });
+
+  it("is false while focus stays in the sidebar, or when the row itself left (focus survival then applies)", () => {
+    expect(leftSidebar({ rowConnected: true, focusInside: true })).toBe(false);
+    expect(leftSidebar({ rowConnected: false, focusInside: false })).toBe(false);
   });
 });
