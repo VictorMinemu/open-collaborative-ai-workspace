@@ -797,13 +797,34 @@ projects:
 - **Other projects** are reached through "Browse projects".
 
 The sidebar is the same on desktop and in the mobile drawer, and adds very little visual noise.
-**Requirements**: TBD (planning)
+**Requirements**: WZS-01, WZS-02, WZS-03, WZS-04, WZS-05, WZS-06, WZS-07, WZS-08, WZS-09, WZS-10, WZS-11
 **Depends on:** Phase 07.9
-**Plans:** 0 plans
+**UI hint**: yes (`07.10-UI-SPEC.md` approved)
+**Success Criteria** (what must be TRUE):
+
+  1. One collapsible section per department holding the team projects the viewer belongs to (member, through a team,
+     or lead), own departments first; collapse is remembered, and a collapsed section keeps what needs the viewer and
+     the open session
+  2. Project rows open the project page and show a team pill and a live count; at most 3 active sessions under each,
+     then "+N more"; settled history stays one click away (a collapsed Settled section, the project page, search)
+  3. "Needs you" gathers approvals the viewer can decide and the viewer's finished turns; Personal holds unlinked
+     repositories; "+" creates a project where the viewer may and starts a session in a project or repository; every
+     other project is reached through Browse projects and search
+  4. Two list requests serve the sidebar at any organization size; a project the viewer cannot open is never named on
+     any surface (sidebar, tooltips, search, accessible names, the session list, detail and live frames), with
+     cross-tenant tests
+  5. One component on desktop and in the mobile drawer: 1440 and 390, light and dark, axe-clean, 44 px touch targets,
+     arrow-key navigation; existing search, Settled, live status texts and the 07.9 visibility marker keep working
+**Plans:** 6 plans in 4 waves (UI-SPEC/VALIDATION in the phase folder; 01 is the hub, 03 the end-to-end tracer, 06 the gate)
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 07.10 to break down)
+- [ ] 07.10-01-PLAN.md — Wave 1: Projects index data (parent, top unit, membership; parents' top unit) and the phase hub (plan map, shared files, PD-01…PD-14)
+- [ ] 07.10-02-PLAN.md — Wave 1: Session rows per viewer: the 07.9 D-14 leak proven and closed on list, detail, `user:` and `ws:`; `attention`
+- [ ] 07.10-03-PLAN.md — Wave 2: Web tracer: the sidebar by department (sections, project rows, sub-rows, Personal, collapse, shared header), existing specs moved
+- [ ] 07.10-04-PLAN.md — Wave 3: Needs you and the seen map, Settled in scope, grouped search, sessions-request states, arrow keys
+- [ ] 07.10-05-PLAN.md — Wave 3: "+" actions (section, project, repository), onboarding line, projects-request states
+- [ ] 07.10-06-PLAN.md — Wave 4: Phase gate: full local gate, full isolated e2e, `gate:compose`, ADR-0031, DEMO owner checks, STATUS, AGENTS, CODEOWNERS, signed VALIDATION
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
