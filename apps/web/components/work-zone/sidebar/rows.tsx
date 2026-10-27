@@ -19,9 +19,16 @@ import { needsApproval, type ProjectRowModel, type RepoRowModel, rowStatusText }
  * the full text in `title`. 07.10-05 adds optional "+" props; 07.10-04 reuses the rows in search results.
  */
 
-/** The team pill (the chat sub-label classes), never more than 40 % of the row. */
+/**
+ * The team pill (the chat sub-label classes): secondary to the name, so it shrinks first and never takes more than
+ * 35 % of the row (07.10-07, UI review fix 1); its full text stays in `title` and in the link's name.
+ */
 const PILL =
-  "max-w-[40%] shrink-0 truncate rounded-[4px] bg-muted/80 px-1 py-px font-medium text-[10.5px] text-muted-foreground leading-tight";
+  "min-w-0 max-w-[35%] shrink truncate rounded-[4px] bg-muted/80 px-1 py-px font-medium text-[10.5px] text-muted-foreground leading-tight";
+
+/** With a pointer, the "+" shows on the row's hover or keyboard focus; what sits in its slot steps aside. */
+const STEP_ASIDE =
+  "pointer-fine:group-hover/project:invisible pointer-fine:group-has-[:focus-visible]/project:invisible";
 
 /** "● n": live sessions the viewer can see. The visual part is hidden from assistive tech (the link says it). */
 export function LiveCount({ n, testId, className }: { n: number; testId: string; className?: string }) {
@@ -62,6 +69,10 @@ export function ProjectRow({
 }) {
   const { id, name, pill, live, active } = project;
   const plus = onNewSession !== undefined && project.repoCount > 0;
+  // The "+" slot (07.10-07, UI review fix 1): the count when there is one, else the pill; with neither, the name's
+  // text stops short of the "+" while it shows (its box never moves). No fixed gutter takes width from the name.
+  const plusOverPill = plus && live <= 0 && pill !== null;
+  const plusOverName = plus && live <= 0 && pill === null;
   const link = (
     <Link
       href={projectHref(id)}
@@ -74,28 +85,32 @@ export function ProjectRow({
         aria-hidden
         className={cn("size-4 shrink-0", active ? "text-sidebar-accent-foreground" : "text-muted-foreground")}
       />
-      <span title={name} className="min-w-0 flex-1 truncate">
+      <span
+        title={name}
+        className={cn(
+          "min-w-[55%] flex-1 truncate",
+          plusOverName &&
+            "pointer-fine:group-hover/project:pr-7 pointer-fine:group-has-[:focus-visible]/project:pr-7",
+        )}
+      >
         {name}
         {pill ? <span className="sr-only">, {pill}</span> : null}
         {live > 0 ? <span className="sr-only">, {live} running</span> : null}
       </span>
       {pill ? (
-        <span data-testid="project-pill" aria-hidden title={pill} className={PILL}>
+        <span
+          data-testid="project-pill"
+          aria-hidden
+          title={pill}
+          className={cn(PILL, plusOverPill && cn("pointer-fine:min-w-6", STEP_ASIDE))}
+        >
           {pill}
         </span>
-      ) : null}
-      {plus && live <= 0 ? (
-        // The "+" slot with a pointer when there is no count: the button never covers the name or the pill.
-        <span aria-hidden className="hidden w-6 shrink-0 pointer-fine:block" />
       ) : null}
       <LiveCount
         n={live}
         testId="project-live-count"
-        className={
-          plus
-            ? "justify-end pointer-fine:min-w-6 pointer-fine:group-hover/project:invisible pointer-fine:group-has-[:focus-visible]/project:invisible"
-            : undefined
-        }
+        className={plus ? cn("justify-end pointer-fine:min-w-6", STEP_ASIDE) : undefined}
       />
     </Link>
   );

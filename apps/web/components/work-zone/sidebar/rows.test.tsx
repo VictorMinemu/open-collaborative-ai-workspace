@@ -149,8 +149,16 @@ describe("ProjectRow", () => {
     expect(spoken(out)).toContain("Customer portal, Web, 2 running");
     expect(out).toMatch(/data-testid="project-pill" aria-hidden="true"[^>]*>Web</);
     expect(out).toMatch(/data-testid="project-live-count" aria-hidden="true"/);
-    expect(out).toContain("max-w-[40%]");
     expect(out).toContain("lucide-folder-kanban");
+  });
+
+  it("gives the name the width before the team pill: the pill shrinks (≤ 35 %), the name keeps a minimum (07.10-07)", () => {
+    const out = html(<ProjectRow project={projectRow({ pill: "Web", live: 2 })} />);
+    const pill = out.match(/<span data-testid="project-pill"[^>]*class="([^"]*)"/)?.[1] ?? "";
+    expect(pill.split(" ")).toEqual(expect.arrayContaining(["max-w-[35%]", "min-w-0", "shrink", "truncate"]));
+    expect(pill).not.toContain("shrink-0");
+    const name = out.match(/<span title="Customer portal" class="([^"]*)"/)?.[1] ?? "";
+    expect(name.split(" ")).toEqual(expect.arrayContaining(["min-w-[55%]", "flex-1", "truncate"]));
   });
 
   it("is one quiet line with no pill and no count when neither applies; active when its page is open", () => {
@@ -208,6 +216,24 @@ describe('the row "+" (07.10-05, R5, § 5, § 7)', () => {
     expect(out).toMatch(
       /data-testid="project-live-count"[^>]*class="[^"]*pointer-fine:group-hover\/project:invisible/,
     );
+  });
+
+  it("with no count, the \"+\" takes the pill's place on hover; no fixed 24 px gutter steals the name's width (07.10-07)", () => {
+    const withPill = html(<ProjectRow project={projectRow({ pill: "Web", live: 0 })} onNewSession={noop} />);
+    // No reserved spacer beside the link's content.
+    expect(withPill).not.toMatch(/<span aria-hidden="true" class="[^"]*\bw-6\b/);
+    const pill = withPill.match(/<span data-testid="project-pill"[^>]*class="([^"]*)"/)?.[1] ?? "";
+    expect(pill).toContain("pointer-fine:group-hover/project:invisible");
+    expect(pill).toContain("pointer-fine:group-has-[:focus-visible]/project:invisible");
+    expect(pill).toContain("pointer-fine:min-w-6");
+    // No pill and no count: the name keeps its box and only its text stops short of the "+" while it shows.
+    const bare = html(<ProjectRow project={projectRow({ live: 0 })} onNewSession={noop} />);
+    expect(bare).not.toMatch(/<span aria-hidden="true" class="[^"]*\bw-6\b/);
+    const name = bare.match(/<span title="Customer portal" class="([^"]*)"/)?.[1] ?? "";
+    expect(name).toContain("pointer-fine:group-hover/project:pr-7");
+    // Without a "+" nothing of this applies.
+    const plain = html(<ProjectRow project={projectRow({ pill: "Web", live: 0 })} />);
+    expect(plain).not.toContain("group-hover/project:invisible");
   });
 
   it('a repository "+" is named with the repository, visible on touch with a 44 px target', () => {
