@@ -17,7 +17,7 @@ import type { TopicFrame } from "@ocw/realtime-client";
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useReducer, useState } from "react";
 import { useTopic } from "./realtime";
-import { useWorkSession, wzKeys } from "./workzone-queries";
+import { mergeSessionSnapshot, useWorkSession, wzKeys } from "./workzone-queries";
 
 export interface LiveSession {
   session: WorkSession;
@@ -85,8 +85,9 @@ function reduce(state: LiveSession | null, action: Action): LiveSession | null {
       return next;
     }
     case EventTypes.workSessionUpdated: {
+      // The `ws:` snapshot is viewer-neutral: the per-viewer fields keep the REST snapshot's values (07.10, PD-03).
       const p = WorkSession.safeParse(f.data);
-      return p.success ? { ...next, session: p.data } : next;
+      return p.success ? { ...next, session: mergeSessionSnapshot(state.session, p.data) } : next;
     }
     case EventTypes.promptUpdated: {
       const p = WorkPrompt.safeParse(f.data);

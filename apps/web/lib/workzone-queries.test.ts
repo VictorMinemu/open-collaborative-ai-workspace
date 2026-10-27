@@ -1,6 +1,6 @@
 import { EventTypes, type WorkSession, type WorkSessionList } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
-import { applySessionFrame, sessionListStale } from "./workzone-queries";
+import { applySessionFrame, mergeSessionSnapshot, sessionListStale } from "./workzone-queries";
 
 /**
  * Phase 07.9-07 (D-08, P-08): the session list follows the member's own `user:` topic. The API delivers a session's
@@ -122,5 +122,43 @@ describe("sessionListStale (D-08, P-08: when an org event may have changed which
     }
     expect(sessionListStale({ type: EventTypes.messageCreated, data: {} }, me)).toBe(false);
     expect(sessionListStale({ type: EventTypes.projectUpdated, data: {} }, me)).toBe(false);
+  });
+});
+
+describe("mergeSessionSnapshot (07.10, PD-03: the session view keeps its per-viewer fields)", () => {
+  const PROJECT = { id: "4d4d4d4d-4444-4444-8444-444444444444", name: "Payroll" };
+  const prev = session(A, "2026-10-22T10:00:00.000Z", { teamProject: PROJECT, title: "Before" });
+
+  it("a ws: snapshot without the team project keeps the previous one; every other field comes from it", () => {
+    const next = session(A, "2026-10-22T10:05:00.000Z", { title: "After", queuedCount: 2 });
+    const merged = mergeSessionSnapshot(prev, next);
+    expect(merged.teamProject).toEqual(PROJECT);
+    expect(merged.title).toBe("After");
+    expect(merged.queuedCount).toBe(2);
+    expect(merged.updatedAt).toBe("2026-10-22T10:05:00.000Z");
+  });
+
+  it("keeps a hidden project as hidden", () => {
+    const hidden = session(A, "2026-10-22T10:00:00.000Z", { teamProject: null, teamProjectHidden: true });
+    const merged = mergeSessionSnapshot(hidden, session(A, "2026-10-22T10:05:00.000Z"));
+    expect(merged.teamProject).toBeNull();
+    expect(merged.teamProjectHidden).toBe(true);
+  });
+
+  it("a snapshot that carries the team project wins, null included, and its pair flag with it", () => {
+    expect(
+      mergeSessionSnapshot(prev, session(A, prev.updatedAt, { teamProject: null })).teamProject,
+    ).toBeNull();
+    const hidden = session(A, prev.updatedAt, { teamProject: null, teamProjectHidden: true });
+    const named = mergeSessionSnapshot(hidden, session(A, prev.updatedAt, { teamProject: PROJECT }));
+    expect(named.teamProject).toEqual(PROJECT);
+    expect("teamProjectHidden" in named).toBe(false);
+  });
+
+  it("a session without the fields stays without them", () => {
+    const bare = session(A, prev.updatedAt);
+    const merged = mergeSessionSnapshot(bare, session(A, "2026-10-22T10:05:00.000Z"));
+    expect("teamProject" in merged).toBe(false);
+    expect("teamProjectHidden" in merged).toBe(false);
   });
 });
