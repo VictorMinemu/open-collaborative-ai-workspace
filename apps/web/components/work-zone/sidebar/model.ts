@@ -17,6 +17,10 @@ export const PERSONAL_REPO_CAP = 5;
 export const NEEDS_YOU_CAP = 5;
 /** "Your turn" lasts this long after the viewer's turn ended (UI-SPEC § 3). */
 export const YOUR_TURN_MS = 24 * 60 * 60 * 1000;
+/** Settled rows shown before "Show {n} more" (UI-SPEC § 8, ref-4). */
+export const SETTLED_PAGE = 10;
+/** Search results per group before "Show all {n}" (UI-SPEC § 11). */
+export const SEARCH_CAPS = { projects: 5, sessions: 10, repos: 5 } as const;
 
 // ---------------------------------------------------------------- helpers (moved from session-sidebar.tsx)
 
@@ -264,9 +268,24 @@ export interface NeedsYouModel {
   hidden: number;
 }
 
+export interface SettledModel {
+  key: "settled";
+  /** Collapsed by default (`useSidebarCollapse`): no row is drawn and no count shows (history is not news). */
+  collapsed: boolean;
+  /** The rows to draw, most recent first: 10 unless expanded. */
+  rows: WorkSession[];
+  /** Settled sessions in the viewer's scope. */
+  total: number;
+  /** Rows behind "Show {n} more". */
+  more: number;
+  expanded: boolean;
+}
+
 export interface SidebarModel {
   /** Sessions in the viewer's scope that wait on them (D-05); null when none (the section is absent). */
   needsYou: NeedsYouModel | null;
+  /** The settled sessions of the viewer's scope (D-04); null when none. */
+  settled: SettledModel | null;
   sections: UnitSectionModel[];
   personal: PersonalModel | null;
   /** Session ids placed in the tree (PD-07 (a) ∪ (b)): Needs you and Settled draw only from these (07.10-04). */
@@ -486,5 +505,135 @@ export function buildWorkZoneSidebar(given: SidebarInput): SidebarModel {
     }
   }
 
-  return { needsYou, sections, personal, scope };
+  // ---- Settled: the viewer's scope only (an admin's history lives on each project page and in search)
+  const ended = input.sessions
+    .filter((s) => scope.has(s.id) && !isActiveSession(s, input.now))
+    .sort((a, b) => time(b.updatedAt) - time(a.updatedAt));
+  let settled: SettledModel | null = null;
+  if (ended.length > 0) {
+    const collapsed = input.collapsed.has("settled");
+    const expanded = !collapsed && input.expanded.has("settled") && ended.length > SETTLED_PAGE;
+    const rows = collapsed ? [] : expanded ? ended : ended.slice(0, SETTLED_PAGE);
+    settled = {
+      key: "settled",
+      collapsed,
+      rows,
+      total: ended.length,
+      more: collapsed ? 0 : ended.length - rows.length,
+      expanded,
+    };
+  }
+
+  return { needsYou, settled, sections, personal, scope };
+}
+
+// ---------------------------------------------------------------- search
+
+/** Case- and accent-blind text for matching ("Éclair" → "eclair"). */
+function fold(text: string): string {
+  return text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+}
+
+export interface SearchGroup<T> {
+  /** The rows to draw: capped unless expanded. */
+  rows: T[];
+  /** Every match ("Show all {n}"). */
+  total: number;
+  expanded: boolean;
+}
+
+export interface SearchModel {
+  /** Team projects of the index by name, members' and managed ones (a managed one is `muted`). */
+  projects: SearchGroup<{ row: ProjectRowModel; muted: boolean }>;
+  /** Every listed session, active or settled, by title, repository or a project the viewer can see named. */
+  sessions: SearchGroup<WorkSession>;
+  /** Personal repositories by name. */
+  repos: SearchGroup<RepoRowModel>;
+  /** Matches over every group (the live region's "{n} results"). */
+  count: number;
+}
+
+export interface SearchInput {
+  sessions: readonly WorkSession[];
+  index: WorkProjectIndex | null | undefined;
+  now: number;
+  openProjectId: string | null;
+  /** `search:projects`, `search:sessions`, `search:repos`: "Show all {n}" is open. */
+  expanded: ReadonlySet<string>;
+}
+
+function capGroup<T>(all: T[], cap: number, expanded: boolean): SearchGroup<T> {
+  const open = expanded && all.length > cap;
+  return { rows: open ? all : all.slice(0, cap), total: all.length, expanded: open };
+}
+
+/**
+ * The grouped search of the sidebar (D-08, UI-SPEC § 11): a case-insensitive, accent-folded substring over the names
+ * the two list responses carry, exact prefixes first, then names in order (projects, repositories) or the most recent
+ * (sessions). It only reads what the API sent (C-01): a session whose project the viewer may not see named never
+ * matches on a project name (`teamProjectHidden`), and a project outside the index can't match at all.
+ */
+export function searchSidebar(query: string, input: SearchInput): SearchModel {
+  const q = fold(query.trim());
+  const starts = (text: string) => fold(text).startsWith(q);
+  const has = (text: string) => fold(text).includes(q);
+  const prefixFirst = <T>(a: T, b: T, isPrefix: (x: T) => boolean) =>
+    Number(isPrefix(b)) - Number(isPrefix(a));
+
+  const live = (match: (s: WorkSession) => boolean) => liveCount(input.sessions.filter(match));
+  const projects = (input.index?.teamProjects ?? [])
+    .filter((p) => has(p.name))
+    .sort((a, b) => prefixFirst(a, b, (p) => starts(p.name)) || byName(a.name, b.name))
+    .map((p) => ({
+      row: {
+        id: p.id,
+        name: p.name,
+        pill: p.parent.id !== p.top.id ? p.parent.name : null,
+        live: live((s) => s.teamProject?.id === p.id),
+        sessions: [],
+        more: 0,
+        active: p.id === input.openProjectId,
+        repoCount: p.repoCount,
+      },
+      muted: !SIDEBAR_MEMBERSHIPS.has(p.membership),
+    }));
+
+  const fields = (s: WorkSession) =>
+    s.teamProject && s.teamProjectHidden !== true
+      ? [s.title, s.projectName, s.teamProject.name]
+      : [s.title, s.projectName];
+  const sessions = input.sessions
+    .filter((s) => fields(s).some(has))
+    .sort(
+      (a, b) => prefixFirst(a, b, (s) => fields(s).some(starts)) || time(b.updatedAt) - time(a.updatedAt),
+    );
+
+  const repoMeta = new Map<string, { name: string; hiddenProject: boolean }>();
+  for (const r of input.index?.personalRepos ?? [])
+    repoMeta.set(r.projectId, { name: r.name, hiddenProject: false });
+  for (const s of input.sessions) {
+    if (s.teamProjectHidden === true && !repoMeta.has(s.projectId))
+      repoMeta.set(s.projectId, { name: s.projectName, hiddenProject: true });
+  }
+  const repos = [...repoMeta.entries()]
+    .filter(([, meta]) => has(meta.name))
+    .sort(([, a], [, b]) => prefixFirst(a, b, (m) => starts(m.name)) || byName(a.name, b.name))
+    .map(
+      ([projectId, meta]): RepoRowModel => ({
+        projectId,
+        name: meta.name,
+        hiddenProject: meta.hiddenProject,
+        live: live((s) => s.projectId === projectId),
+        sessions: [],
+        more: 0,
+        expanded: false,
+      }),
+    );
+
+  return {
+    projects: capGroup(projects, SEARCH_CAPS.projects, input.expanded.has("search:projects")),
+    sessions: capGroup(sessions, SEARCH_CAPS.sessions, input.expanded.has("search:sessions")),
+    repos: capGroup(repos, SEARCH_CAPS.repos, input.expanded.has("search:repos")),
+    count: projects.length + sessions.length + repos.length,
+  };
 }

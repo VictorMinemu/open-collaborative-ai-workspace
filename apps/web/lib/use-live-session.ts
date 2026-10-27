@@ -16,6 +16,7 @@ import {
 import type { TopicFrame } from "@ocw/realtime-client";
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useReducer, useState } from "react";
+import { markSeen } from "@/components/work-zone/sidebar/use-seen-sessions";
 import { useTopic } from "./realtime";
 import { mergeSessionSnapshot, useWorkSession, wzKeys } from "./workzone-queries";
 
@@ -107,6 +108,37 @@ function reduce(state: LiveSession | null, action: Action): LiveSession | null {
 }
 
 /**
+ * When a stream frame ends a turn the open view just watched (07.10-04, R10): a prompt that completed or failed, or the
+ * session turning idle. Returns the server's time of that end, so the seen map is never behind the API's
+ * `lastTurnEndedAt` when the browser's clock is; null for any other frame.
+ */
+/** What a session frame must carry to end a turn (the rest of the snapshot is the reducer's business). */
+const TurnState = WorkSession.pick({ status: true, updatedAt: true });
+
+export function turnEndedAt(frame: TopicFrame): number | null {
+  if (frame.op === "eph") return null;
+  if (frame.type === EventTypes.promptUpdated) {
+    const p = WorkPrompt.safeParse(frame.data);
+    if (!p.success || (p.data.status !== "completed" && p.data.status !== "failed")) return null;
+    return p.data.completedAt ? Date.parse(p.data.completedAt) : 0;
+  }
+  if (frame.type === EventTypes.workSessionUpdated) {
+    const p = TurnState.safeParse(frame.data);
+    return p.success && p.data.status === "idle" ? Date.parse(p.data.updatedAt) : null;
+  }
+  return null;
+}
+
+/** The latest turn end a freshly loaded view knows (the viewer's own last turn, every finished prompt); 0 if none. */
+export function lastTurnEndOf(detail: { session: WorkSession; prompts: readonly WorkPrompt[] }): number {
+  const times = [detail.session.attention?.lastTurnEndedAt, ...detail.prompts.map((p) => p.completedAt)]
+    .filter((t): t is string => typeof t === "string")
+    .map((t) => Date.parse(t))
+    .filter(Number.isFinite);
+  return Math.max(0, ...times);
+}
+
+/**
  * REST snapshot + `ws:<id>` stream (durable events with seq replay, ephemeral deltas) → live session state. The
  * subscription opts into presence: whoever has the session open is shown as watching it.
  *
@@ -125,12 +157,18 @@ export function useLiveSession(id: string) {
   const [state, dispatch] = useReducer(reduce, null);
 
   useEffect(() => {
-    if (query.data) dispatch({ kind: "reset", detail: query.data });
+    if (!query.data) return;
+    dispatch({ kind: "reset", detail: query.data });
+    // The viewer opened the session: its finished turns are seen in this browser ("Your turn" leaves, 07.10-04).
+    markSeen(query.data.session.id, Math.max(Date.now(), lastTurnEndOf(query.data)));
   }, [query.data]);
 
   const onFrame = useCallback(
     (frame: TopicFrame) => {
       dispatch({ kind: "frame", frame });
+      // A turn ended while the view is open: the viewer saw it (local only, never sent; 07.10-04, R10).
+      const ended = turnEndedAt(frame);
+      if (ended !== null) markSeen(id, Math.max(Date.now(), ended));
       // Settings and what the caller may pick follow the session (D-07): refresh the controls with it.
       if (frame.op !== "eph" && frame.type === EventTypes.workSessionUpdated) {
         void qc.invalidateQueries({ queryKey: wzKeys.controls(id) });

@@ -1,13 +1,12 @@
 "use client";
 
 import type { WorkSession } from "@ocw/contracts";
-import { ChevronDown, Compass, Laptop, Plus, Search, X } from "lucide-react";
+import { Compass, Laptop, Plus, Search, X } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { SectionSidebar, sectionItemClass } from "@/components/shell/section-sidebar";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
@@ -15,16 +14,18 @@ import { useWorkProjects, useWorkProjectsLive } from "@/lib/work-project-queries
 import { isSessionPath } from "@/lib/work-zone-routes";
 import { useWorkSessions } from "@/lib/workzone-queries";
 import { useWorkZone } from "../work-zone-context";
-import { buildWorkZoneSidebar, isActiveSession, orderActiveSessions } from "./model";
+import { buildWorkZoneSidebar, searchSidebar } from "./model";
 import { NeedsYouSection } from "./needs-you-section";
-import { DepartmentSections, PersonalSection } from "./sections";
-import { ActiveRow, SettledRow } from "./session-rows";
+import { SidebarSearchResults } from "./search-results";
+import { DepartmentSections, PersonalSection, ProjectsLoading } from "./sections";
+import { SettledSection } from "./settled-section";
+import { useSeenSessions } from "./use-seen-sessions";
 import { useSidebarCollapse } from "./use-sidebar-collapse";
 
-/** Settled rows shown before "Show N more" (ref-4). */
-const SETTLED_PAGE = 10;
-
 const PROJECT_PAGE = /^\/work-zone\/projects\/([^/]+)$/u;
+
+/** A stable empty list while the sessions request has no data (keeps the model's memo). */
+const NO_SESSIONS: readonly WorkSession[] = [];
 
 /** Re-render on a clock: every second while `isFast(now)` (a turn under a minute old), otherwise every 30 s. */
 export function useNow(isFast: (now: number) => boolean): number {
@@ -39,8 +40,9 @@ export function useNow(isFast: (now: number) => boolean): number {
 
 /**
  * The Work Zone sidebar (Phase 07.10, UI-SPEC § Information Architecture): the header with New session, the search
- * field, one section per department holding the team projects the viewer belongs to (each with its active sessions),
- * the Settled list, and Browse projects · Devices at the foot. The same component is the desktop column and the
+ * field, Needs you, one section per department holding the team projects the viewer belongs to (each with its active
+ * sessions), Personal, Settled, and Browse projects · Devices at the foot. While a query is typed, the grouped search
+ * results replace everything between the search field and the foot. The same component is the desktop column and the
  * mobile drawer (`SectionSidebar`). It reads the two list requests only (`/work-sessions`, `/work-projects`) and
  * groups what they returned (PD-07): it never decides who can see what.
  */
@@ -51,12 +53,11 @@ export function WorkZoneSidebar() {
   const pathname = usePathname();
   const { openNewSession } = useWorkZone();
   const viewerId = useMe().data?.user.id ?? null;
-  const list = sessions.data ?? [];
+  const list = sessions.data ?? NO_SESSIONS;
+  const seen = useSeenSessions();
   const [query, setQuery] = useState("");
-  const [settledOpen, setSettledOpen] = useState(true);
-  const [settledAll, setSettledAll] = useState(false);
   const { collapsed, toggle } = useSidebarCollapse();
-  // Inline expansions ("{n} more projects", "{n} more repositories", a repository's "+N more") last for this page.
+  // Inline expansions ("{n} more projects", "Show {n} more", "Show all {n}", …) last for this page.
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const expand = useCallback((key: string) => {
     setExpanded((prev) => {
@@ -65,6 +66,15 @@ export function WorkZoneSidebar() {
       else next.add(key);
       return next;
     });
+  }, []);
+  // A new query starts with every result group capped again.
+  const changeQuery = useCallback((value: string) => {
+    setQuery(value);
+    setExpanded((prev) =>
+      [...prev].some((k) => k.startsWith("search:"))
+        ? new Set([...prev].filter((k) => !k.startsWith("search:")))
+        : prev,
+    );
   }, []);
   const now = useNow((t) =>
     list.some(
@@ -87,28 +97,28 @@ export function WorkZoneSidebar() {
         openProjectId,
         collapsed,
         expanded,
+        seen,
       }),
-    [list, projects.data, viewerId, now, openSessionId, openProjectId, collapsed, expanded],
+    [list, projects.data, viewerId, now, openSessionId, openProjectId, collapsed, expanded, seen],
   );
   const ctx = { now, viewerId, openSessionId, onToggle: toggle, onExpand: expand };
 
-  const q = query.trim().toLowerCase();
-  const { active, settled } = useMemo(() => {
-    const shown = q
-      ? list.filter(
-          (s) =>
-            s.title.toLowerCase().includes(q) ||
-            s.projectName.toLowerCase().includes(q) ||
-            (s.teamProject?.name.toLowerCase().includes(q) ?? false),
-        )
-      : list;
-    const recency = (s: WorkSession) => new Date(s.updatedAt).getTime();
-    const live = orderActiveSessions(shown.filter((s) => isActiveSession(s, now)));
-    const rest = shown.filter((s) => !isActiveSession(s, now)).sort((a, b) => recency(b) - recency(a));
-    return { active: live, settled: rest };
-  }, [list, q, now]);
+  const q = query.trim();
+  const result = useMemo(
+    () =>
+      q ? searchSidebar(q, { sessions: list, index: projects.data, now, openProjectId, expanded }) : null,
+    [q, list, projects.data, now, openProjectId, expanded],
+  );
 
-  const settledShown = settledAll ? settled : settled.slice(0, SETTLED_PAGE);
+  // The sessions request: first load, or failed with nothing to show (a refetch that fails keeps the list drawn).
+  const loading = sessions.isPending && !sessions.isError;
+  const failed = sessions.isError && !sessions.data;
+  const nothing =
+    sessions.data !== undefined &&
+    projects.data !== undefined &&
+    list.length === 0 &&
+    model.sections.length === 0 &&
+    model.personal === null;
   const browsing = pathname === "/work-zone/projects";
 
   return (
@@ -122,6 +132,7 @@ export function WorkZoneSidebar() {
             aria-label="New session"
             data-testid="sidebar-new-session"
             onClick={() => openNewSession()}
+            className="max-md:size-11"
           >
             <Plus />
           </Button>
@@ -135,100 +146,58 @@ export function WorkZoneSidebar() {
             data-testid="session-search"
             type="search"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => changeQuery(e.target.value)}
             placeholder="Search"
             aria-label="Search sessions"
-            className="h-8 w-full rounded-md border border-transparent bg-transparent pr-7 pl-8 text-[13.5px] outline-none transition-colors placeholder:text-muted-foreground hover:bg-sidebar-accent/60 focus:border-border focus:bg-background [&::-webkit-search-cancel-button]:hidden"
+            className="h-8 w-full rounded-md border border-transparent bg-transparent pr-7 pl-8 text-[13.5px] outline-none transition-colors placeholder:text-muted-foreground hover:bg-sidebar-accent/60 focus:border-border focus:bg-background max-md:h-11 max-md:text-base [&::-webkit-search-cancel-button]:hidden"
           />
           {query ? (
             <button
               type="button"
               aria-label="Clear search"
-              onClick={() => setQuery("")}
-              className="absolute top-1/2 right-2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+              onClick={() => changeQuery("")}
+              className="absolute top-1/2 right-2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground max-md:right-0 max-md:inline-flex max-md:size-11 max-md:items-center max-md:justify-center max-md:p-0"
             >
               <X className="size-3.5" />
             </button>
           ) : null}
         </div>
 
-        {sessions.isLoading ? (
-          <div className="grid gap-2 px-1">
-            {[0, 1, 2].map((i) => (
-              <Skeleton key={i} className="h-14 w-full" />
-            ))}
-          </div>
-        ) : null}
-
-        {!q ? <NeedsYouSection model={model.needsYou} {...ctx} /> : null}
-
-        {q ? (
-          // Today's search (07.10-04 replaces it with grouped results): flat active rows, then Settled below.
-          active.length > 0 ? (
-            <div className="grid grid-cols-1 gap-0.5">
-              {active.map((s) => (
-                <ActiveRow
-                  key={s.id}
-                  s={s}
-                  now={now}
-                  active={s.id === openSessionId}
-                  viewerId={viewerId}
-                  onNew={() => openNewSession(s.projectId)}
-                />
-              ))}
-            </div>
-          ) : null
+        {result ? (
+          <SidebarSearchResults query={q} result={result} {...ctx} />
         ) : (
-          <DepartmentSections model={model} projects={projects} sessions={list} {...ctx} />
-        )}
-        {!q && model.personal ? <PersonalSection personal={model.personal} ctx={ctx} /> : null}
-
-        {settled.length > 0 ? (
-          <div className="grid grid-cols-1 gap-0.5 pt-2" data-testid="settled-group">
-            <button
-              type="button"
-              data-testid="settled-toggle"
-              onClick={() => setSettledOpen((v) => !v)}
-              aria-expanded={settledOpen}
-              className="flex items-center gap-2 px-2.5 pb-1 text-left text-[12.5px] text-muted-foreground hover:text-foreground max-md:min-h-11 max-md:pb-0"
-            >
-              Settled
-              <span aria-hidden className="h-px flex-1 bg-border" />
-              <ChevronDown className={cn("size-3.5 transition-transform", settledOpen && "rotate-180")} />
-            </button>
-            {settledOpen ? (
-              <>
-                {settledShown.map((s) => (
-                  <SettledRow
-                    key={s.id}
-                    s={s}
-                    now={now}
-                    active={s.id === openSessionId}
-                    viewerId={viewerId}
-                  />
-                ))}
-                {settled.length > SETTLED_PAGE ? (
-                  <button
-                    type="button"
-                    data-testid="settled-more"
-                    onClick={() => setSettledAll((v) => !v)}
-                    className="flex h-8 items-center gap-2 rounded-md px-2.5 text-left text-[13px] text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground max-md:h-11"
-                  >
-                    <Plus className={cn("size-3.5 transition-transform", settledAll && "rotate-45")} />
-                    {settledAll ? "Show fewer" : `Show ${settled.length - SETTLED_PAGE} more`}
-                  </button>
-                ) : null}
-              </>
+          <>
+            <NeedsYouSection model={model.needsYou} {...ctx} />
+            {failed ? (
+              <p
+                data-testid="sessions-error"
+                className="flex flex-wrap items-center gap-x-1.5 px-2.5 py-1 text-[12px] text-muted-foreground leading-4"
+              >
+                Couldn't load sessions.
+                <Button
+                  type="button"
+                  variant="link"
+                  size="sm"
+                  data-testid="sessions-retry"
+                  disabled={sessions.isFetching}
+                  onClick={() => void sessions.refetch()}
+                  className="h-auto p-0 text-[12px] max-md:min-h-11"
+                >
+                  Try again
+                </Button>
+              </p>
             ) : null}
-          </div>
-        ) : null}
-
-        {!sessions.isLoading && list.length === 0 ? (
-          <p className="px-2.5 text-[13px] text-muted-foreground">No sessions yet.</p>
-        ) : null}
-        {q && list.length > 0 && active.length === 0 && settled.length === 0 ? (
-          <p className="px-2.5 text-[13px] text-muted-foreground">No sessions match “{query.trim()}”.</p>
-        ) : null}
+            {loading ? (
+              // One skeleton for the first load (a header bar and three rows), whichever request is still pending.
+              <ProjectsLoading />
+            ) : (
+              <DepartmentSections model={model} projects={projects} sessions={list} {...ctx} />
+            )}
+            {!loading && model.personal ? <PersonalSection personal={model.personal} ctx={ctx} /> : null}
+            <SettledSection model={model.settled} {...ctx} />
+            {nothing ? <p className="px-2.5 text-[13px] text-muted-foreground">No sessions yet.</p> : null}
+          </>
+        )}
 
         <div className="mt-auto grid gap-0.5">
           <Link

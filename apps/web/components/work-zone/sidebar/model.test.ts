@@ -14,8 +14,10 @@ import {
   rowProject,
   rowStatusText,
   SECTION_PROJECT_CAP,
+  SETTLED_PAGE,
   type SidebarInput,
   SUB_ROW_CAP,
+  searchSidebar,
   shortAgo,
 } from "./model";
 import { collapsedKeys, parseCollapseMap, SIDEBAR_STORAGE_KEY, toggledMap } from "./use-sidebar-collapse";
@@ -686,5 +688,171 @@ describe("Needs you (D-05, UI-SPEC § 3, PD-05, PD-07)", () => {
     expect(build({ index: index([portal]), sessions: [turn] }).needsYou?.rows).toHaveLength(1);
     const seen = { [turn.id]: "2026-10-27T11:31:00Z" };
     expect(build({ index: index([portal]), sessions: [turn], seen }).needsYou).toBeNull();
+  });
+});
+
+describe("Settled (D-04, UI-SPEC § 8, scope rule)", () => {
+  const portal = project("Customer portal");
+  const managed = project("Payroll", { membership: "manager" });
+  const done = (title: string, updatedAt: string, over: Partial<WorkSession> = {}) =>
+    session({ teamProject: at(portal), title, status: "completed", updatedAt, ...over });
+
+  it("lists the settled sessions of the viewer's scope only, most recent first; never an admin-only one", () => {
+    const a = done("a", "2026-10-20T10:00:00Z");
+    const b = done("b", "2026-10-21T10:00:00Z", { status: "failed" });
+    const adminOnly = done("admin only", "2026-10-22T10:00:00Z", { teamProject: at(managed) });
+    const mine = session({
+      title: "mine",
+      status: "completed",
+      createdBy: VIEWER,
+      updatedAt: "2026-10-19T00:00:00Z",
+    });
+    const active = session({ teamProject: at(portal), title: "active", status: "running" });
+    const model = build({
+      index: index([portal, managed]),
+      sessions: [a, adminOnly, b, active, mine],
+      collapsed: new Set(),
+    });
+    expect(model.settled?.rows.map((s) => s.title)).toEqual(["b", "a", "mine"]);
+    expect(model.settled?.total).toBe(3);
+  });
+
+  it("is collapsed by default (no rows drawn, no count) and absent when nothing settled", () => {
+    const model = build({
+      index: index([portal]),
+      sessions: [done("a", "2026-10-20T10:00:00Z")],
+      collapsed: collapsedKeys(parseCollapseMap(null)),
+    });
+    expect(model.settled).toMatchObject({ collapsed: true, rows: [], total: 1, more: 0 });
+    expect(build({ index: index([portal]), sessions: [] }).settled).toBeNull();
+  });
+
+  it("shows 10, then Show {n} more; expanded shows all of them", () => {
+    const many = Array.from({ length: 12 }, (_, i) =>
+      done(`s${i}`, `2026-10-2${Math.floor(i / 10)}T1${i % 10}:00:00Z`),
+    );
+    expect(SETTLED_PAGE).toBe(10);
+    const model = build({ index: index([portal]), sessions: many });
+    expect(model.settled?.rows).toHaveLength(10);
+    expect(model.settled?.more).toBe(2);
+    const open = build({ index: index([portal]), sessions: many, expanded: new Set(["settled"]) });
+    expect(open.settled?.rows).toHaveLength(12);
+    expect(open.settled).toMatchObject({ more: 0, expanded: true });
+  });
+});
+
+describe("searchSidebar (D-08, UI-SPEC § 11, C-01)", () => {
+  const portal = project("Customer portal", { parent: WEB });
+  const payroll = project("Payroll", { membership: "manager" });
+  const ref = at(portal);
+  const search = (query: string, over: Partial<Parameters<typeof searchSidebar>[1]> = {}) =>
+    searchSidebar(query, {
+      sessions: [],
+      index: index([portal, payroll]),
+      now: NOW,
+      openProjectId: null,
+      expanded: new Set(),
+      ...over,
+    });
+
+  it("finds projects of any membership by name, case- and accent-blind; non-member rows are muted", () => {
+    const eclair = project("Éclair app");
+    const r = search("ECLAIR", { index: index([portal, payroll, eclair]) });
+    expect(r.projects.rows.map((p) => p.row.name)).toEqual(["Éclair app"]);
+    const pay = search("pay");
+    expect(pay.projects.rows.map((p) => [p.row.name, p.muted])).toEqual([["Payroll", true]]);
+    const cust = search("portal");
+    expect(cust.projects.rows.map((p) => [p.row.name, p.muted, p.row.pill])).toEqual([
+      ["Customer portal", false, "Web"],
+    ]);
+  });
+
+  it("puts exact prefixes first, then names in order, 5 then Show all {n}", () => {
+    const names = ["Ops beta", "Alpha ops", "ops alpha", "Zed ops", "Big ops", "Ops 9", "Ops 10"];
+    const projects = names.map((n) => project(n));
+    const r = search("ops", { index: index(projects) });
+    expect(r.projects.total).toBe(7);
+    expect(r.projects.rows.map((p) => p.row.name)).toEqual([
+      "Ops 9",
+      "Ops 10",
+      "ops alpha",
+      "Ops beta",
+      "Alpha ops",
+    ]);
+    const all = search("ops", { index: index(projects), expanded: new Set(["search:projects"]) });
+    expect(all.projects.rows).toHaveLength(7);
+    expect(all.projects.expanded).toBe(true);
+  });
+
+  it("finds sessions by title, repository or a project the viewer can see named; active and settled", () => {
+    const byTitle = session({ title: "Fix the login", updatedAt: "2026-10-27T11:00:00Z" });
+    const byRepo = session({
+      projectName: "login-service",
+      title: "Other",
+      updatedAt: "2026-10-27T11:30:00Z",
+    });
+    const byProject = session({ teamProject: ref, title: "Third", status: "completed" });
+    const none = session({ title: "Unrelated" });
+    const r = search("login", { sessions: [none, byTitle, byRepo, byProject] });
+    // Prefix ("login-service") first, then by recency.
+    expect(r.sessions.rows.map((s) => s.title)).toEqual(["Other", "Fix the login"]);
+    expect(search("customer", { sessions: [byProject] }).sessions.rows.map((s) => s.title)).toEqual([
+      "Third",
+    ]);
+  });
+
+  it("a session whose project the viewer can't open never matches on a project name (C-01)", () => {
+    const hidden = session({
+      title: "Rotate keys",
+      projectName: "pia-linked",
+      teamProject: { id: uid("d1"), name: "Quillback vault" },
+      teamProjectHidden: true,
+    });
+    const r = search("quillback", { sessions: [hidden], index: index([portal]) });
+    expect(r.projects.total + r.sessions.total + r.repos.total).toBe(0);
+    expect(r.count).toBe(0);
+    expect(search("pia-linked", { sessions: [hidden] }).sessions.rows).toHaveLength(1);
+  });
+
+  it("caps sessions at 10, then Show all {n}", () => {
+    const many = Array.from({ length: 12 }, (_, i) =>
+      session({
+        title: `Settled #${i}`,
+        status: "completed",
+        updatedAt: `2026-10-27T10:${String(i).padStart(2, "0")}:00Z`,
+      }),
+    );
+    const r = search("settled", { sessions: many });
+    expect(r.sessions.total).toBe(12);
+    expect(r.sessions.rows).toHaveLength(10);
+    expect(r.sessions.rows[0]?.title).toBe("Settled #11");
+    expect(
+      search("settled", { sessions: many, expanded: new Set(["search:sessions"]) }).sessions.rows,
+    ).toHaveLength(12);
+  });
+
+  it("finds personal repositories by name, with their live count, 5 then Show all {n}", () => {
+    const repos = Array.from({ length: 6 }, (_, i) => personalRepo(uid("b1"), `scratch-${i}`));
+    const live = session({ projectId: repos[0]?.projectId, projectName: "scratch-0", status: "running" });
+    const r = search("scratch", { sessions: [live], index: index([], { personalRepos: repos }) });
+    expect(r.repos.total).toBe(6);
+    expect(r.repos.rows.map((x) => x.name)).toEqual([
+      "scratch-0",
+      "scratch-1",
+      "scratch-2",
+      "scratch-3",
+      "scratch-4",
+    ]);
+    expect(r.repos.rows[0]?.live).toBe(1);
+  });
+
+  it("counts every match and omits empty groups' rows", () => {
+    const r = search("zzz");
+    expect(r).toMatchObject({
+      count: 0,
+      projects: { total: 0 },
+      sessions: { total: 0 },
+      repos: { total: 0 },
+    });
   });
 });
