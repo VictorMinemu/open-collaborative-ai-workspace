@@ -7,8 +7,9 @@ import { ADMIN, API_URL, shot } from "./env";
 /**
  * The Work Zone session screen follows the owner's reference layout (`reference/ref-4-layout.png`, D-17), built
  * from today's data only, with the REAL daemon in fake-runtime mode:
- * - sidebar: active rows (project badge + name, "Working Ns" / "Needs approval", title, branch, diff stat),
- *   a collapsible "Settled" group with "Show N more", and a search box;
+ * - sidebar (07.10): the session as a one-line row under its repository in Personal ("Working Ns" / "Needs
+ *   approval", title; branch and diff stat in its hover detail), a collapsible "Settled" group with "Show N more",
+ *   and a search box;
  * - stream: completed turns collapse behind "Worked for …" (items stay in the DOM), grouped tool calls, the final
  *   message with its time and a copy button, and a "N changed files +a −b · Open diff" card;
  * - the "1 agent working · View · Stop" bar above the composer and the worktree / diff stat / branch strip below.
@@ -125,12 +126,16 @@ test("Work Zone layout (ref-4): sidebar rows and groups, collapsible turns, chan
     const view = page.getByTestId("session-view");
     await expect(view).toBeVisible();
 
-    // ---- sidebar row while the device works: badge, project, "Working Ns", title
+    // ---- sidebar row while the device works (07.10): the admin's own repository under Personal names the project
+    // (the old row's badge and project line), the one-line sub-row under it says "Working Ns" and the title
     await openSidebar();
-    const row = page.getByTestId("session-row").filter({ hasText: `Layout ${tag}` });
+    const repo = page.getByTestId(`repo-row-${device.projectId}`);
+    await expect(repo).toContainText(`layout-${tag}`, { timeout: 30_000 });
+    const row = page
+      .getByRole("list", { name: `Active sessions in layout-${tag}`, exact: true })
+      .getByTestId("session-row")
+      .filter({ hasText: `Layout ${tag}` });
     await expect(row).toBeVisible();
-    await expect(row.getByTestId("row-project")).toContainText(`layout-${tag}`);
-    await expect(row.getByTestId("row-project-badge")).toHaveText("LA");
     await expect(row.getByTestId("row-status")).toHaveText(/^Working \d+[sm]$/, { timeout: 30_000 });
     await expect(row.getByTestId("row-title")).toHaveText(`Layout ${tag}`);
     await closeSidebar();
@@ -164,10 +169,15 @@ test("Work Zone layout (ref-4): sidebar rows and groups, collapsible turns, chan
     await expect(view).toHaveAttribute("data-status", "idle", { timeout: 60_000 });
     await expect(bar).toHaveCount(0);
 
-    // ---- after the turn: branch and diff stat on the row and in the footer strip
+    // ---- after the turn: branch and diff stat in the row's hover detail (07.10 X4) and in the footer strip
     await openSidebar();
-    await expect(row.getByTestId("row-diffstat")).toHaveText(/^\+\d+/, { timeout: 20_000 });
-    await expect(row.getByTestId("row-branch")).toHaveText("main");
+    await expect(row).toHaveAttribute(
+      "title",
+      new RegExp(`^Layout ${tag} · Claude Code · main · \\+\\d+ −\\d+$`),
+      {
+        timeout: 20_000,
+      },
+    );
     await expect(row.getByTestId("row-status")).not.toContainText("Working");
 
     // ---- Settled: collapsible, 10 rows then "Show N more"; the search filters by title or project

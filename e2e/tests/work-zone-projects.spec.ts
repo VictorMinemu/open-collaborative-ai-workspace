@@ -177,20 +177,24 @@ test("Pia reaches her team project from the sidebar and sees exactly the session
     await page.goto("/work-zone");
     await openSidebar(page, mobile);
     const list = page.getByTestId("session-list");
-    // Sidebar grouping (R10): the two sessions on the two linked repositories sit under the project's name.
+    // Sidebar grouping (07.10): the two sessions on the two linked repositories are sub-rows of the project's row.
+    await expect(list.getByTestId(`project-row-${portal}`)).toContainText(portalName, { timeout: 30_000 });
     for (const title of [T.login, T.sdk]) {
       const row = list
+        .getByRole("list", { name: `Active sessions in ${portalName}`, exact: true })
         .getByTestId("session-row")
         .filter({ has: page.getByTestId("row-title").getByText(title, { exact: true }) });
-      await expect(row.getByTestId("row-project")).toHaveText(portalName, { timeout: 30_000 });
+      await expect(row).toHaveCount(1, { timeout: 30_000 });
     }
     await expect(list.getByText(T.spike)).toHaveCount(0);
 
+    await expect(page.getByTestId("sidebar-projects")).toHaveText("Browse projects");
     await page.getByTestId("sidebar-projects").click();
     await expect(page).toHaveURL(/\/work-zone\/projects$/);
     const index = page.getByTestId("projects-index");
     await expect(index).toBeVisible();
-    const row = page.getByTestId(`project-row-${portal}`);
+    // The index's row (the sidebar has a project row of the same id since 07.10).
+    const row = index.getByTestId(`project-row-${portal}`);
     await expect(row).toContainText(portalName);
     await expect(row).toContainText(`Engineering ${run} › Web ${run} · 2 people · 2 repositories`);
     await expect(row).toHaveAttribute("title", portalName);
@@ -209,6 +213,12 @@ test("Pia reaches her team project from the sidebar and sees exactly the session
     await expect(project).toBeVisible();
     await expect(project.getByRole("heading", { level: 1 })).toHaveText(portalName);
     await expect(project).toContainText(`Engineering ${run} › Web ${run}`);
+    // 07.10: the sidebar highlights the open project's row; Browse projects is current only on the index.
+    if (!mobile) {
+      const sidebar = page.getByTestId("session-list");
+      await expect(sidebar.getByTestId(`project-row-${portal}`)).toHaveAttribute("aria-current", "page");
+      await expect(sidebar.getByTestId("sidebar-projects")).not.toHaveAttribute("aria-current", "page");
+    }
     const rows = page.getByTestId("project-session-row");
     await expect(rows.filter({ hasText: T.login })).toHaveCount(1, { timeout: 30_000 });
     await expect(rows.filter({ hasText: T.sdk })).toHaveCount(1);
@@ -393,7 +403,9 @@ test("with Work Zone off, the projects pages show the off state at once, never k
   const rules: string[] = [];
   try {
     await page.goto("/work-zone/projects");
-    await expect(page.getByTestId(`project-row-${portal}`)).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId("projects-index").getByTestId(`project-row-${portal}`)).toBeVisible({
+      timeout: 30_000,
+    });
     for (const permission of MODULE_CATALOG.work_zone.patterns) {
       const rule = await post<{ id: string }>(admin, "/api/v1/permission-rules", {
         scopeUnitId: null,
