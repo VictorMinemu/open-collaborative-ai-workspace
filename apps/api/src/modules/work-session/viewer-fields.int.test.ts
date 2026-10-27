@@ -11,6 +11,7 @@ import {
   invite,
   linkRepo,
   pairDevice,
+  setAudience,
   shareDevice,
   startSession,
 } from "../../testing-workzone";
@@ -25,7 +26,8 @@ import {
  * Cast: Víctor (admin of A, outside Payroll's roster), Dana (developer, owns "Dana's Laptop" with the repository `api`
  * linked to the team project Payroll and the personal repository `scratch`; not in Payroll), Leo and Pia (developers,
  * Payroll members, grants on Dana's device), Max (developer, a Payroll member who creates a session and then leaves
- * the project, D-12), Eve (the admin of organization B, with her own device and team project).
+ * the project, D-12), Eve (the admin of organization B, with her own device and team project), Tom (07.10-07: a member
+ * of the team Ledgerline, assigned to Payroll; not a direct member).
  */
 
 const ADMIN = { name: "Víctor Ruiz", email: "victor@example.test", password: "correct-horse-battery" };
@@ -56,6 +58,8 @@ let deviceId: string;
 let apiRepo: string;
 let scratchRepo: string;
 let payroll: string;
+/** Payroll's department. */
+let financeId: string;
 /** Leo's session on `api` (Payroll), running on Dana's device. */
 let leoSession: string;
 /** Max's session on `api`; Max then leaves Payroll (D-12). */
@@ -144,6 +148,7 @@ beforeAll(async () => {
   const finance = await ok(
     admin.request("POST", "/api/v1/units", { kind: "department", name: "Finance", parentId: null }),
   );
+  financeId = finance.id as string;
   payroll = (
     await createTeamProject(stack, admin, {
       name: PAYROLL,
@@ -455,6 +460,111 @@ describe("attention is decided per viewer on the list, the detail and each user:
     const a = await list(admin);
     for (const secret of [eveSession, eveEnded]) {
       expect(JSON.stringify(a), `A's list carried "${secret}"`).not.toContain(secret);
+    }
+  });
+});
+
+// ---------------------------------------------------------------- 07.10-07: every other session surface (HI-01)
+
+/** The per-viewer keys no write answer carries (they are shaped only on the list, the detail and `user:`). */
+const PER_VIEWER = ["teamProject", "teamProjectHidden", "attention"] as const;
+
+describe("the visibility panel and the write answers never name a project the viewer can't open (HI-01, T-07.10-02-05)", () => {
+  /** A team assigned to Payroll, whose only member is Tom (not a direct Payroll member). */
+  const TEAM = "Ledgerline";
+  let team: string;
+  let tomId: string;
+  /** Leo's session on `api` (Payroll, on Dana's device), visible to Ledgerline only. */
+  let probe: string;
+  /** The answer of the POST that created it. */
+  let created: Json;
+
+  const panel = async (as: TestClient, id: string) =>
+    (await ok(as.request("GET", `/api/v1/work-sessions/${id}/visibility`))) as Json;
+
+  beforeAll(async () => {
+    ({ userId: tomId } = await invite(stack, admin, "tom@example.test", "Tom", "developer"));
+    team = (
+      await ok(admin.request("POST", "/api/v1/units", { kind: "team", name: TEAM, parentId: financeId }))
+    ).id as string;
+    await ok(admin.request("POST", `/api/v1/units/${team}/members`, { userId: tomId, role: "member" }));
+    await ok(admin.request("POST", `/api/v1/work-projects/${payroll}/teams`, { unitId: team }));
+
+    // The POST answer is kept (asserted below); then the session is brought to idle as `startSession` does.
+    created = await ok(
+      leo.request("POST", "/api/v1/work-sessions", { projectId: apiRepo, title: "Quarter audit" }),
+    );
+    probe = created.id as string;
+    const start = await device.command("session.start", probe);
+    device.ack(start.id);
+    device.event(probe, {
+      type: "session.started",
+      runtime: "claude-code",
+      runtimeSessionId: `rt-${probe}`,
+      model: "claude-opus-5-5",
+      permissionMode: "default",
+    });
+    device.event(probe, { type: "session.state", status: "idle" });
+    await eventually(async () => (await detail(leo, probe)).session.status === "idle");
+    await setAudience(leo, probe, { kind: "teams", teamIds: [team] });
+  });
+
+  it("the device owner outside the project reads the panel's hidden form: no project id, name, default, teams or team reasons", async () => {
+    const v = await panel(dana, probe);
+    expect(v.project).toEqual({ kind: "hidden" });
+    expect(v.projectDefault).toBeNull();
+    expect(v.teams).toEqual([]);
+    expect(v.people).toEqual([]);
+    // Still a useful, truthful panel: the audience kind, the owner, who can see it and why, who always sees it.
+    expect(v.kind).toBe("teams");
+    expect(v.owner).toMatchObject({ userId: leoId, name: "Leo" });
+    const tom = (v.viewers.people as Json[]).find((p) => p.userId === tomId);
+    expect(tom, "Tom sees it through the team").toMatchObject({ reason: "team", via: null });
+    expect(v.alwaysVisible.deviceOwner).toMatchObject({ userId: danaId, isViewer: true });
+    expect(v.viewerCan.change).toBe(false);
+    // The whole serialized answer, not selected fields.
+    for (const secret of [PAYROLL, payroll, TEAM, team]) {
+      expect(JSON.stringify(v), `the panel carried "${secret}"`).not.toContain(secret);
+    }
+  });
+
+  it("the creator and the admin read it named, with the project's teams and the team each viewer comes through", async () => {
+    for (const [name, as] of [
+      ["Leo (creator)", () => leo],
+      ["Víctor (admin)", () => admin],
+    ] as const) {
+      const v = await panel(as(), probe);
+      expect(v.project, name).toEqual({ kind: "team", id: payroll, name: PAYROLL });
+      expect(v.projectDefault, name).not.toBeNull();
+      expect(
+        (v.teams as Json[]).find((t) => t.id === team),
+        name,
+      ).toMatchObject({ name: TEAM, selected: true, active: true });
+      const tom = (v.viewers.people as Json[]).find((p) => p.userId === tomId);
+      expect(tom?.via, name).toEqual({ id: team, name: TEAM });
+    }
+  });
+
+  it("organization B gets a 404 for A's panel, and A for B's", async () => {
+    expect((await eve.request("GET", `/api/v1/work-sessions/${probe}/visibility`)).status).toBe(404);
+    expect((await admin.request("GET", `/api/v1/work-sessions/${eveSession}/visibility`)).status).toBe(404);
+  });
+
+  it("POST /work-sessions, the settings PATCH and /controls answer with no per-viewer field and no project name", async () => {
+    const patched = await ok(
+      leo.request("PATCH", `/api/v1/work-sessions/${probe}/settings`, { model: "sonnet" }),
+    );
+    const answers: Array<[string, Json]> = [
+      ["POST /work-sessions", created],
+      ["PATCH /settings", patched],
+      ["GET /controls (Leo)", await ok(leo.request("GET", `/api/v1/work-sessions/${probe}/controls`))],
+      ["GET /controls (Dana)", await ok(dana.request("GET", `/api/v1/work-sessions/${probe}/controls`))],
+    ];
+    for (const [name, body] of answers) {
+      for (const k of PER_VIEWER) expect(Object.keys(body), `${name} carried ${k}`).not.toContain(k);
+      for (const secret of [PAYROLL, payroll]) {
+        expect(JSON.stringify(body), `${name} carried "${secret}"`).not.toContain(secret);
+      }
     }
   });
 });

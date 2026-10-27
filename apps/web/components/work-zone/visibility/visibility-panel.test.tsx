@@ -128,6 +128,58 @@ describe("read-only panel (§1.4)", () => {
   });
 });
 
+describe("the hidden form: a project the viewer can't open (07.10-07, HI-01)", () => {
+  const hidden = (over: Partial<WorkSessionVisibilityView> = {}) =>
+    view({
+      kind: "teams",
+      projectDefault: null,
+      project: { kind: "hidden" },
+      teams: [],
+      people: [],
+      viewers: {
+        count: 3,
+        people: [
+          { ...person(ANA, "Ana Ruiz"), reason: "owner", via: null },
+          { ...person(LEO, "Leo Park"), reason: "device_owner", via: null },
+          { ...person(PIA, "Pia Gómez"), reason: "team", via: null },
+        ],
+        more: 0,
+      },
+      alwaysVisible: {
+        admins: true,
+        deviceOwner: { userId: LEO, firstName: "Leo", deviceName: "Leo's Mac", isViewer: true },
+      },
+      viewerCan: { change: false },
+      ...over,
+    });
+
+  it("is read-only and says the session is linked to a project the viewer can't open, naming none", () => {
+    const html = render(modelFromView(hidden(), LEO, null), { initialSeeAll: true });
+    expect(html).toContain('data-editable="false"');
+    expect(html).not.toContain('type="radio"');
+    expect(html).toContain('data-testid="visibility-readonly-note"');
+    expect(html).toContain("Linked to a project you can&#x27;t open.");
+    // Teams with no team listed is still "3 people can see this", never "Only Ana Ruiz".
+    expect(html).toContain("3 people can see this");
+    expect(html).toContain("Admins and you can always see it: it runs on Leo&#x27;s Mac.");
+    expect(html).toContain("Through a team");
+    expect(html).not.toContain("/work-zone/projects/");
+    expect(html).not.toContain("Customer portal");
+    expect(html).not.toContain("Everyone in </");
+  });
+
+  it("words a whole-project audience without a project name", () => {
+    const html = render(modelFromView(hidden({ kind: "project" }), LEO, null));
+    expect(html).toContain("Everyone in a project you can&#x27;t open · 3 people");
+  });
+
+  it("stays read-only even if the API ever said the viewer may change it", () => {
+    const html = render(modelFromView(hidden({ viewerCan: { change: true } }), LEO, null));
+    expect(html).toContain('data-editable="false"');
+    expect(html).not.toContain('type="radio"');
+  });
+});
+
 describe("empty states", () => {
   it("disables Teams on a personal project and names the device (U-9)", () => {
     const v = view({

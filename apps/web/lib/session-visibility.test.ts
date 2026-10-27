@@ -414,4 +414,23 @@ describe("panel words (07.9-10)", () => {
       personal: true,
     });
   });
+
+  it("words a view of a project the viewer can't open without naming any project (07.10-07, HI-01)", () => {
+    const hidden = view({
+      project: { kind: "hidden" },
+      projectDefault: null,
+      alwaysVisible: {
+        admins: true,
+        deviceOwner: { userId: LEO, firstName: "Leo", deviceName: "Leo's Mac", isViewer: true },
+      },
+    });
+    expect(viewPlace(hidden)).toEqual({
+      projectName: "",
+      deviceName: "Leo's Mac",
+      personal: false,
+      hidden: true,
+    });
+    expect(viewLongLabel(hidden, LEO)).toBe("Everyone in a project you can't open");
+    expect(viewLongLabel({ ...hidden, kind: "owner" }, LEO)).toBe("Only Ana Ruiz");
+  });
 });

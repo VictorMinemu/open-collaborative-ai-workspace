@@ -47,6 +47,7 @@ import { sessionFacts, sessionFactsForUsers } from "./facts";
 import { sessionNotFound } from "./hidden";
 import { assignedTeams, defaultVisibilityOf, projectFacts, subtreeMemberCounts } from "./projects";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
+import { projectNamedFor } from "./viewer-fields";
 
 /**
  * Who can see a Work Zone session, through the API (Phase 07.9, D-03, D-04, D-11, D-12, D-13; UI-SPEC R2–R4, R12).
@@ -465,6 +466,15 @@ export async function visibilityView(
   const target = await requireTarget(tx, s.projectId);
   const facts = await sessionFacts(tx, userId, s);
   const dir = await memberDirectory(tx);
+  // Phase 07.10-07 (HI-01, D-14): the team project is named to the caller exactly as on the session list and detail
+  // (`projectNamedFor`: the creator, or whoever may open the project). Anyone else who reads the session (the D-11
+  // device owner outside the project) gets the hidden form: no id, name, default, teams, stored people or team names.
+  const named = await projectNamedFor(tx, {
+    viewerId: userId,
+    createdBy: s.createdBy,
+    project: target.unit,
+    filter: (items, permission, toResource) => perms.filter(req, tx, items, permission, toResource),
+  });
   const grants =
     stored ??
     (await tx
@@ -474,7 +484,7 @@ export async function visibilityView(
 
   // Teams: every assigned team, plus selected teams no longer assigned (shown inactive, UI-SPEC §1.5).
   const teams: WorkSessionVisibilityView["teams"] = [];
-  if (target.unit) {
+  if (target.unit && named) {
     const selected = new Set(grants.filter((g) => g.subjectKind === "unit").map((g) => g.subjectId));
     const assigned = await assignedTeams(tx, target.unit.id);
     for (const t of assigned) teams.push({ ...t, selected: selected.has(t.id), active: true });
@@ -502,10 +512,11 @@ export async function visibilityView(
     }
   }
 
-  // People: the chosen people (owner aside); `active` = the rule still lets them see it (project access, D-04).
-  const chosen = grants
-    .filter((g) => g.subjectKind === "user" && g.subjectId !== s.createdBy)
-    .map((g) => g.subjectId);
+  // People: the chosen people (owner aside); `active` = the rule still lets them see it (project access, D-04). Not in
+  // the hidden form: `active` would say who has access to a project the caller can't open.
+  const chosen = named
+    ? grants.filter((g) => g.subjectKind === "user" && g.subjectId !== s.createdBy).map((g) => g.subjectId)
+    : [];
   const seeing = await sessionFactsForUsers(tx, s, chosen);
   const people = chosen
     .map((id) => ({ ...personOf(dir, id), active: seeing.get(id)?.relations.has("viewer") === true }))
@@ -514,7 +525,10 @@ export async function visibilityView(
   // Who can see it now, with one reason each.
   const list = sortReaders(await readers(tx, perms, s), dir);
   const shown = list.slice(0, WORK_PROJECT_LIMITS.viewersMax);
-  const teamIds = [...new Set(shown.flatMap((r) => (r.reason === "team" && r.via ? [r.via] : [])))];
+  // A `team` row names its team only to a caller who may see the project named (else "Through a team").
+  const teamIds = named
+    ? [...new Set(shown.flatMap((r) => (r.reason === "team" && r.via ? [r.via] : [])))]
+    : [];
   const teamNames = new Map(
     teamIds.length === 0
       ? []
@@ -537,10 +551,12 @@ export async function visibilityView(
 
   return WorkSessionVisibilityView.parse({
     kind: s.visibility,
-    projectDefault: target.unit ? await defaultVisibilityOf(tx, target.unit.id) : null,
-    project: target.unit
-      ? { kind: "team", id: target.unit.id, name: target.unit.name }
-      : { kind: "personal", deviceName: target.device.name },
+    projectDefault: target.unit && named ? await defaultVisibilityOf(tx, target.unit.id) : null,
+    project: !target.unit
+      ? { kind: "personal", deviceName: target.device.name }
+      : named
+        ? { kind: "team", id: target.unit.id, name: target.unit.name }
+        : { kind: "hidden" },
     owner: { userId: s.createdBy, name: nameIn(dir, s.createdBy) },
     teams,
     people,

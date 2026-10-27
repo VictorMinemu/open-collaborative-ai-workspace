@@ -18,7 +18,9 @@ import { type PermissionService, type ResourceFacts, uuidArray, workProjectResou
  * These fields travel only on a viewer's own surfaces: the list and the detail (shaped for the requester) and each
  * `user:` frame (shaped for its recipient). The shared `ws:` stream and the public `WorkSessionService.session` /
  * `sessions` carry the viewer-neutral DTO (`withoutViewerFields`): a surface that forgets the shaping answers less,
- * never more. Every decision is batched (never one query per row) and taken by the resolver, never by reading a role.
+ * never more. The visibility panel (`visibility.ts`, 07.10-07) names the project with the same decision
+ * (`projectNamedFor`). The decisions are taken by the resolver, never by reading a role; the list and the delivery
+ * batch the project access (one query per list or batch).
  */
 
 /** A session's team project as the shaping needs it (its unit path decides module and unit rules); never sent as is. */
@@ -137,6 +139,45 @@ const lastTurnFor = (turn: LastTurn | undefined, userId: string): string | null 
   turn && turn.authorUserId === userId ? turn.endedAt : null;
 
 /**
+ * The team projects among `projects` that ONE viewer may open (PD-04): `work_session.read` on each project's
+ * `work_project` resource, built from `app.work_project_access` (the `GET /projects` decision, 07.9 D-14), through the
+ * request's `filter`. One query for every project. Every surface that names a session's project to its reader decides
+ * it here (the list, the detail, the visibility panel), so the rule cannot drift between them.
+ */
+export async function openProjects(
+  tx: Tx,
+  a: { viewerId: string; projects: readonly SessionProject[]; filter: ViewerFilter },
+): Promise<Set<string>> {
+  const open = new Set<string>();
+  if (a.projects.length === 0) return open;
+  const res = await tx.execute(sql`
+    select u.id::text as unit_id, app.work_project_access(u.id, ${a.viewerId}::uuid) as access
+      from unnest(${uuidArray(a.projects.map((p) => p.id))}) as u(id)`);
+  const access = new Map(
+    (res.rows as Array<{ unit_id: string; access: string | null }>).map((r) => [r.unit_id, r.access]),
+  );
+  const allowed = await a.filter(a.projects, "work_session.read", (p) =>
+    workProjectResource({ id: p.id, path: p.path, access: access.get(p.id) ?? null }, a.viewerId),
+  );
+  for (const p of allowed) open.add(p.id);
+  return open;
+}
+
+/**
+ * Whether ONE viewer reads a session's team project named: its creator always (D-12), anyone else only when they may
+ * open the project (`openProjects`). A personal repository has no project to name (true).
+ */
+export async function projectNamedFor(
+  tx: Tx,
+  a: { viewerId: string; createdBy: string; project: SessionProject | null; filter: ViewerFilter },
+): Promise<boolean> {
+  if (!a.project || a.createdBy === a.viewerId) return true;
+  return (await openProjects(tx, { viewerId: a.viewerId, projects: [a.project], filter: a.filter })).has(
+    a.project.id,
+  );
+}
+
+/**
  * The per-viewer fields of `sessions` for ONE viewer (the list and the detail), by session id. One project-access
  * query over the distinct team projects the viewer did not create a session in and one last-turn query over the
  * sessions, then in-memory resolver decisions through the request's `filter` (one per project, one per session with a
@@ -147,25 +188,12 @@ export async function loadViewerFields(
   a: { viewerId: string; sessions: readonly ViewerSource[]; filter: ViewerFilter },
 ): Promise<Map<string, ViewerFields>> {
   const toDecide = distinctProjects(a.sessions.filter((s) => s.dto.createdBy !== a.viewerId));
-  const open = new Set<string>();
-  const [turns] = await Promise.all([
+  const [turns, open] = await Promise.all([
     lastTurns(
       tx,
       a.sessions.map((s) => s.dto.id),
     ),
-    (async () => {
-      if (toDecide.length === 0) return;
-      const res = await tx.execute(sql`
-        select u.id::text as unit_id, app.work_project_access(u.id, ${a.viewerId}::uuid) as access
-          from unnest(${uuidArray(toDecide.map((p) => p.id))}) as u(id)`);
-      const access = new Map(
-        (res.rows as Array<{ unit_id: string; access: string | null }>).map((r) => [r.unit_id, r.access]),
-      );
-      const allowed = await a.filter(toDecide, "work_session.read", (p) =>
-        workProjectResource({ id: p.id, path: p.path, access: access.get(p.id) ?? null }, a.viewerId),
-      );
-      for (const p of allowed) open.add(p.id);
-    })(),
+    openProjects(tx, { viewerId: a.viewerId, projects: toDecide, filter: a.filter }),
   ]);
   // PD-05: the session-level approve decision on the viewer's own facts, only where something is pending.
   const approves = new Set(

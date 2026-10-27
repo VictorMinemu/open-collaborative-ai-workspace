@@ -237,6 +237,16 @@ describe("visibility panel view (07.9-01, D-04, D-11, D-12, R2, R12)", () => {
     ).toBe("left_project");
   });
 
+  it("parses the hidden form (07.10-07, HI-01): a project the viewer can't open, with no id and no name", () => {
+    const hidden = { ...teamView, project: { kind: "hidden" }, projectDefault: null, teams: [], people: [] };
+    expect(WorkSessionVisibilityView.parse(hidden).project).toEqual({ kind: "hidden" });
+    // Strict: the hidden variant never carries the project's id or name.
+    expect(
+      WorkSessionVisibilityView.parse({ ...hidden, project: { kind: "hidden", id: uuid(1), name: "x" } })
+        .project,
+    ).toEqual({ kind: "hidden" });
+  });
+
   it("refuses more than 50 viewer rows, an unknown reason, a project kind outside team/personal", () => {
     const rows = ids(WORK_PROJECT_LIMITS.viewersMax + 1, 500).map((userId) => ({
       userId,

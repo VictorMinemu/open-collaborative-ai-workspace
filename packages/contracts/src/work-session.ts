@@ -362,11 +362,20 @@ export type AlwaysVisible = z.infer<typeof AlwaysVisible>;
  */
 export const WorkSessionVisibilityView = z.object({
   kind: SessionVisibilityKind,
-  /** The project's default for new sessions; null = a personal repository (no project setting). */
+  /**
+   * The project's default for new sessions; null = a personal repository (no project setting) or a project the viewer
+   * can't open (`project.kind` `hidden`).
+   */
   projectDefault: ProjectDefaultVisibility.nullable(),
+  /**
+   * Where the session runs. `hidden` (Phase 07.10-07, HI-01): a team project the viewer may not open (the D-11 device
+   * owner outside it), decided per viewer like the session's `teamProject`; then no id, no name, no default, no teams
+   * and no stored people are sent, and no `team` viewer row names its team.
+   */
   project: z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("team"), id: Id, name: TeamProjectRef.shape.name }),
     z.object({ kind: z.literal("personal"), deviceName: z.string().max(200) }),
+    z.object({ kind: z.literal("hidden") }),
   ]),
   owner: z.object({ userId: Id, name: z.string().max(200) }),
   /** The project's assigned teams plus selected teams no longer assigned. */
