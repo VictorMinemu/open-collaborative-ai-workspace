@@ -74,6 +74,40 @@ export const RuntimeInfo = z.object({
 });
 export type RuntimeInfo = z.infer<typeof RuntimeInfo>;
 
+/**
+ * 07.11 (D-02): the device's runtime updates level. A local copy of the contracts enum: the desktop package does not
+ * depend on `@ocw/contracts`.
+ */
+export const DesktopRuntimeUpdatesLevel = z.enum(["automatic", "notify", "off"]);
+export type DesktopRuntimeUpdatesLevel = z.infer<typeof DesktopRuntimeUpdatesLevel>;
+
+/**
+ * 07.11 (D-09): the subset of the daemon's `status().runtimeUpdates` the menu shows (the daemon sends every status
+ * field; unknown keys are dropped). Every field is optional and the free-text ones are plain strings, so a newer daemon
+ * that adds a state or a reason never breaks the parse.
+ */
+export const DaemonRuntimeUpdates = z.object({
+  localLevel: DesktopRuntimeUpdatesLevel.optional(),
+  /** `env` (OCW_RUNTIME_UPDATES, not switchable from the menu) or `config` (runtime.json). */
+  localLevelSource: z.enum(["env", "config"]).optional(),
+  effectiveLevel: DesktopRuntimeUpdatesLevel.optional(),
+  orgLevelReceived: z.boolean().optional(),
+  runtimes: z
+    .array(
+      z.object({
+        runtime: z.string(),
+        installedVersion: z.string().nullable().optional(),
+        latestVersion: z.string().nullable().optional(),
+        advisory: z.string().optional(),
+        state: z.string().optional(),
+        lastRun: z.object({ outcome: z.string().optional() }).nullable().optional(),
+        reason: z.string().nullable().optional(),
+      }),
+    )
+    .optional(),
+});
+export type DaemonRuntimeUpdates = z.infer<typeof DaemonRuntimeUpdates>;
+
 /** What the daemon returns over the control socket for `status` (subset we rely on). */
 export const DaemonStatusPayload = z.object({
   paired: z.boolean(),
@@ -86,6 +120,11 @@ export const DaemonStatusPayload = z.object({
   fullAccessOptIn: z.boolean().optional(),
   /** Where it comes from: `env` (OCW_ALLOW_FULL_ACCESS, not switchable from the menu) or `config` (runtime.json). */
   fullAccessSource: z.enum(["env", "config"]).optional(),
+  /**
+   * 07.11: the runtime CLIs' update status and the device's level (absent on older daemons and where maintenance does
+   * not run). Main process only: never part of `DesktopStatus`. A block this app cannot read is dropped, never fatal.
+   */
+  runtimeUpdates: DaemonRuntimeUpdates.optional().catch(undefined),
 });
 export type DaemonStatusPayload = z.infer<typeof DaemonStatusPayload>;
 

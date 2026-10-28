@@ -7,6 +7,9 @@
 // - Main window loads the web app; `window.ocwDesktop` is a narrow, validated bridge.
 // - Full access opt-in (ADR-0012): switched ONLY from the Runtime menu / tray here, after a native confirmation;
 //   written to the daemon's runtime.json and applied with `reloadConfig`. Web content can only read it.
+// - Runtime CLI updates (07.11, D-02, D-09): the Runtime menu / tray shows each runtime's update status from the
+//   daemon and switches the device's own level (Automatic / Notify only / Off) the same way as Full access, without a
+//   confirmation. Web content never sees or sets it.
 
 import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, statSync, truncateSync } from "node:fs";
@@ -34,6 +37,7 @@ import {
   ChatgptLoopbackCancelArgs,
   CheckServerArgs,
   DaemonStatusPayload,
+  type DesktopRuntimeUpdatesLevel,
   type DesktopStatus,
   EnrollArgs,
   FinishArgs,
@@ -45,6 +49,7 @@ import {
   toPublicProject,
 } from "../shared/ipc";
 import { ProjectPathError, validateProjectDir } from "../shared/project-path";
+import { runtimeUpdateLines, runtimeUpdatesMenuModel } from "../shared/runtime-updates";
 import { type DaemonProcessState, deriveStatus, sameStatus } from "../shared/status";
 import { deriveApiUrl, normalizeServerUrl, UrlError } from "../shared/urls";
 import {
@@ -58,7 +63,12 @@ import { ControlError, controlRequest, controlSocketPath } from "./control-clien
 import { buildDaemonEnv, ocwHomeDir, resolveDaemonCommand } from "./daemon-launch";
 import { checkServer, EnrollError, enrollDevice } from "./enroll";
 import { pidfilePath, reapStaleDaemon, removePidfile, removePidfileIfOwner, writePidfile } from "./pidfile";
-import { readDaemonFullAccess, writeDaemonFullAccess } from "./runtime-config";
+import {
+  readDaemonFullAccess,
+  readDaemonRuntimeUpdates,
+  writeDaemonFullAccess,
+  writeDaemonRuntimeUpdates,
+} from "./runtime-config";
 import { hardenedPreferences, installGlobalGuards, isTrustedSender, restrictNavigation } from "./security";
 import { DaemonSupervisor } from "./supervisor";
 
@@ -87,6 +97,10 @@ let externalDaemon = false;
 let lastReport: DaemonStatusPayload | null = null;
 /** runtime.json's Full access opt-in as last read here (shown while the daemon is unreachable). */
 let localFullAccess = false;
+/** runtime.json's runtime updates level as last read here (shown while the daemon is unreachable). */
+let localUpdatesLevel: DesktopRuntimeUpdatesLevel = "automatic";
+/** What the menu last showed about runtime updates: they are not part of DesktopStatus (web content never sees them). */
+let updatesChromeKey = "";
 let status: DesktopStatus | null = null;
 let polling = false;
 let quitting = false;
@@ -196,10 +210,18 @@ function computeStatus(): DesktopStatus {
 
 function publishStatus(): void {
   const next = computeStatus();
-  if (sameStatus(status, next)) return;
+  const updatesKey = JSON.stringify([
+    runtimeUpdateLines(lastReport),
+    runtimeUpdatesMenuModel(lastReport, localUpdatesLevel),
+  ]);
+  const statusChanged = !sameStatus(status, next);
+  if (!statusChanged && updatesKey === updatesChromeKey) return;
   status = next;
-  for (const w of [mainWindow, onboardingWindow]) {
-    if (w && !w.isDestroyed()) w.webContents.send(Channels.statusChanged, next);
+  updatesChromeKey = updatesKey;
+  if (statusChanged) {
+    for (const w of [mainWindow, onboardingWindow]) {
+      if (w && !w.isDestroyed()) w.webContents.send(Channels.statusChanged, next);
+    }
   }
   refreshChrome();
 }
@@ -548,6 +570,70 @@ async function setFullAccess(on: boolean): Promise<void> {
   refreshChrome();
 }
 
+async function readLocalUpdatesLevel(): Promise<void> {
+  try {
+    localUpdatesLevel = await readDaemonRuntimeUpdates(ocwHome);
+  } catch {
+    localUpdatesLevel = "automatic"; // a malformed runtime.json is reported when the owner tries to change it
+  }
+}
+
+/**
+ * The device owner's runtime updates level (07.11, D-02): it can only lower the organization's level, so no
+ * confirmation. Written to runtime.json; the daemon reloads it at once (no restart), drops a pending automatic update
+ * when lowered and tells the server. Never reachable from web content.
+ */
+async function setRuntimeUpdatesLevel(level: DesktopRuntimeUpdatesLevel): Promise<void> {
+  try {
+    await writeDaemonRuntimeUpdates(ocwHome, level);
+    localUpdatesLevel = level;
+  } catch (err) {
+    dialog.showErrorBox(
+      "Runtime updates were not changed",
+      err instanceof Error ? err.message : "The runtime configuration could not be written.",
+    );
+    refreshChrome(); // the radio item moved itself on click; put it back
+    return;
+  }
+  await controlRequest(socketPath, { cmd: "reloadConfig" }).catch(() => undefined); // daemon down: read at start
+  log(`runtime updates set to ${level} on this device`);
+  await pollStatus();
+  refreshChrome();
+}
+
+/** Each runtime's update status (disabled lines) and the "Runtime updates" submenu; nothing from an older daemon. */
+function runtimeUpdatesItems(): MenuItemConstructorOptions[] {
+  const lines = runtimeUpdateLines(lastReport);
+  const model = runtimeUpdatesMenuModel(lastReport, localUpdatesLevel);
+  if (lines.length === 0 && !model) return [];
+  const items: MenuItemConstructorOptions[] = [
+    { type: "separator" },
+    ...lines.map((label): MenuItemConstructorOptions => ({ label, enabled: false })),
+  ];
+  if (model) {
+    items.push({
+      label: model.label,
+      submenu: [
+        ...(model.note
+          ? ([{ label: model.note, enabled: false }, { type: "separator" }] as MenuItemConstructorOptions[])
+          : []),
+        ...model.items.map(
+          (i): MenuItemConstructorOptions => ({
+            label: i.label,
+            type: "radio",
+            checked: i.checked,
+            enabled: i.enabled,
+            click: () => {
+              if (!i.checked) void setRuntimeUpdatesLevel(i.level);
+            },
+          }),
+        ),
+      ],
+    });
+  }
+  return items;
+}
+
 function fullAccessItem(s: DesktopStatus): MenuItemConstructorOptions {
   const fromEnv = lastReport?.fullAccessSource === "env";
   return {
@@ -576,6 +662,7 @@ function runtimeItems(s: DesktopStatus): MenuItemConstructorOptions[] {
     },
     { type: "separator" },
     fullAccessItem(s),
+    ...runtimeUpdatesItems(),
   ];
 }
 
@@ -677,6 +764,7 @@ async function main(): Promise<void> {
   });
   await store.load();
   await readLocalFullAccess();
+  await readLocalUpdatesLevel();
 
   supervisor = new DaemonSupervisor({
     spawn: spawnDaemon,
