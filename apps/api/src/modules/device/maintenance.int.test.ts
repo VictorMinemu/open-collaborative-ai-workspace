@@ -598,3 +598,99 @@ describe("07.11-06 Task 2: Update now (owner or admin, one pending at a time, pa
     expect(await audits("device.runtime_update_requested", dId)).toHaveLength(3);
   });
 });
+
+/** Drop the `runtime.config` frames a device already got, so the next one is the push under test. */
+function forgetConfigs(dev: FakeDevice): void {
+  for (let i = dev.frames.length - 1; i >= 0; i--)
+    if (dev.frames[i]!.type === "runtime.config") dev.frames.splice(i, 1);
+}
+
+const configsOf = (dev: FakeDevice) => dev.frames.filter((f) => f.type === "runtime.config");
+
+async function setLevel(level: "automatic" | "notify" | "off"): Promise<void> {
+  const res = await ada.request("PUT", "/api/v1/work-zone-policy", { runtimeUpdates: level });
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  expect(res.body!.runtimeUpdates).toBe(level);
+}
+
+describe("07.11-06 Task 3: every device hears the org's level and the manifest; organization B is never touched", () => {
+  it("a connecting device gets runtime.config right after welcome: the org level and the hub's manifest", async () => {
+    const fresh = await pairDevice(stack, owen, "Owen's mini");
+    const dev = await FakeDevice.connect(stack.baseUrl, fresh.token);
+    open.push(dev);
+    // `connect` consumed `welcome`; the next frame is the config.
+    const first = await eventually(async () => dev.frames[0]);
+    expect(first).toEqual({
+      type: "runtime.config",
+      policy: "automatic",
+      manifest: stack.built.deviceHub.runtimeManifest,
+    });
+    await dev.close();
+  });
+
+  it("an admin's level change reaches every online device of the org within a second, and no device of org B", async () => {
+    // Both devices got their config at connect.
+    expect(configsOf(d).length).toBeGreaterThan(0);
+    expect(configsOf(e).length).toBeGreaterThan(0);
+    forgetConfigs(d);
+    forgetConfigs(e);
+
+    const t0 = Date.now();
+    await setLevel("notify");
+    const pushed = await d.next((f) => f.type === "runtime.config", 1000);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(pushed).toEqual({
+      type: "runtime.config",
+      policy: "notify",
+      manifest: stack.built.deviceHub.runtimeManifest,
+    });
+    await sleep(300);
+    expect(configsOf(e)).toEqual([]);
+
+    // The owner's and an admin's view applies the org level.
+    for (const viewer of [owen, ada]) {
+      expect((await seen(viewer, dId)).runtimeMaintenance).toMatchObject({ orgLevel: "notify" });
+    }
+
+    // A change that leaves runtimeUpdates alone sends nothing.
+    const fast = (await ada.request("GET", "/api/v1/work-zone-policy")).body!.allowFastMode as boolean;
+    const other = await ada.request("PUT", "/api/v1/work-zone-policy", { allowFastMode: !fast });
+    expect(other.status, JSON.stringify(other.body)).toBe(200);
+    const same = await ada.request("PUT", "/api/v1/work-zone-policy", { runtimeUpdates: "notify" });
+    expect(same.status, JSON.stringify(same.body)).toBe(200);
+    await sleep(500);
+    expect(configsOf(d)).toEqual([]);
+    expect(configsOf(e)).toEqual([]);
+  });
+
+  it("with the org level off, Update now is 409 runtime_updates_off and the device hears off", async () => {
+    forgetConfigs(d);
+    await setLevel("off");
+    expect(await d.next((f) => f.type === "runtime.config", 1000)).toMatchObject({ policy: "off" });
+    const res = await owen.request("POST", updateUrl(dId));
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    expect(errorCode(res)).toBe("runtime_updates_off");
+
+    await setLevel("automatic");
+    expect(await d.next((f) => f.type === "runtime.config", 1000)).toMatchObject({ policy: "automatic" });
+    await sleep(300);
+    expect(configsOf(e)).toEqual([]);
+  });
+
+  it("organization B can neither request, list nor read anything about organization A's device", async () => {
+    const post = await eve.request("POST", updateUrl(dId));
+    expect(post.status, JSON.stringify(post.body)).toBe(404);
+    const history = await eve.request("GET", `/api/v1/devices/${dId}/runtime-updates`);
+    expect(history.status, JSON.stringify(history.body)).toBe(404);
+    const { list, raw } = await devicesOf(eve);
+    expect(list.map((x) => x.id)).toEqual([eId]);
+    expect(raw).not.toContain(dId);
+    expect(raw).not.toContain("Owen");
+    expect(list[0]).not.toHaveProperty("runtimeMaintenance");
+    // And organization A never lists B's device.
+    expect((await devicesOf(ada)).list.map((x) => x.id)).not.toContain(eId);
+    // Nothing of B's device was ever written by A's activity.
+    expect(await runs(eId)).toEqual([]);
+    expect((await deviceRow(eId)).runtime_maintenance).toBeNull();
+  });
+});

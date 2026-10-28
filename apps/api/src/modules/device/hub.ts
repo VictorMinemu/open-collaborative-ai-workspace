@@ -18,7 +18,7 @@ import {
   type TitleResultFrame,
 } from "@ocw/contracts";
 import { deviceCommands, devices, type TenantDb, type Tx, tenantOf } from "@ocw/db";
-import { and, asc, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
 import type { WebSocket } from "ws";
 import type { RedisBus } from "../../lib/redis";
@@ -124,7 +124,8 @@ interface LocalLink {
 const deviceChannel = (deviceId: string) => `ocw:device:${deviceId}`;
 const diffChannel = (requestId: string) => `ocw:diff:${requestId}`;
 
-type ControlMessage = { op: "flush" } | { op: "close"; code: number; reason: string };
+/** `config` (07.11, PD-03): re-send `runtime.config` to the device (the org's runtime updates level changed). */
+type ControlMessage = { op: "flush" } | { op: "close"; code: number; reason: string } | { op: "config" };
 
 /** Reads the organization's runtime updates level inside its tenant transaction (07.11, D-02). */
 export type RuntimePolicySource = (tx: Tx) => Promise<RuntimeUpdatesLevel>;
@@ -292,6 +293,7 @@ export class DeviceHub {
       }
       if (control.op === "flush") void this.flush(device.deviceId, false);
       else if (control.op === "close") socket.close(control.code, control.reason);
+      else if (control.op === "config") void this.sendRuntimeConfig(link);
     });
 
     const runtimes = hello.runtimes;
@@ -319,6 +321,8 @@ export class DeviceHub {
       });
     });
     this.send(socket, { type: "welcome", deviceId: device.deviceId, organizationId: device.organizationId });
+    // 07.11 (PD-03, D-10): the org's level and the manifest, so the device never stays at its `notify` fallback here.
+    await this.sendRuntimeConfig(link);
     await this.handler?.onHello(device, hello);
     // Redeliver everything not acked yet (at-least-once), then anything new.
     await this.flush(device.deviceId, true);
@@ -376,6 +380,20 @@ export class DeviceHub {
     );
     // ADR-0012: the owner turned Full access off on the device: its live sessions leave Full access now.
     if (optedOut) await this.handler?.onAccessChanged(device, "device_opt_out");
+  }
+
+  /**
+   * 07.11 (PD-03, D-02): the organization's runtime updates level changed; every online device of that organization
+   * (listed inside its tenant) gets a fresh `runtime.config` from whichever API instance holds its socket.
+   */
+  async pushRuntimeConfig(organizationId: string): Promise<void> {
+    const online = await this.opts.db.withTenant({ organizationId, userId: null }, (tx) =>
+      tx
+        .select({ id: devices.id })
+        .from(devices)
+        .where(and(eq(devices.status, "online"), isNull(devices.revokedAt))),
+    );
+    for (const { id } of online) await this.publishControl(id, { op: "config" });
   }
 
   /** 07.11 (PD-03, PD-06): the device's maintenance snapshot; written only from its authenticated socket. */
@@ -495,6 +513,24 @@ export class DeviceHub {
     }
     socket.send(serialized);
     return "sent";
+  }
+
+  /**
+   * 07.11 (PD-03): `runtime.config` to one local link: the org's level (read in its tenant) and the manifest. Never
+   * queued (latest wins); it names no command, path or version (D-05). A failure is logged and the link stays up.
+   */
+  private async sendRuntimeConfig(link: LocalLink): Promise<void> {
+    const { device, socket } = link;
+    try {
+      const policy = await this.opts.db.withTenant(
+        { organizationId: device.organizationId, userId: null },
+        (tx) => this.runtimePolicy(tx),
+      );
+      if (this.links.get(device.deviceId) !== link) return;
+      this.send(socket, { type: "runtime.config", policy, manifest: this.runtimeManifest });
+    } catch (err) {
+      this.opts.log.error({ err, deviceId: device.deviceId }, "runtime config could not be sent");
+    }
   }
 
   private async publishControl(deviceId: string, msg: ControlMessage): Promise<void> {

@@ -229,9 +229,9 @@ export function registerWorkSessionRoutes(
   app.put(
     "/work-zone-policy",
     { ...manage, schema: { tags, body: UpdateWorkZonePolicyRequest, response: { 200: WorkZonePolicyView } } },
-    async (req) =>
-      core.db.withTenant(tenant(req), async (tx) => {
-        const auth = authOf(req);
+    async (req) => {
+      const auth = authOf(req);
+      const { view, changed } = await core.db.withTenant(tenant(req), async (tx) => {
         const { policy, changed } = await saveWorkZonePolicy(tx, req.body, auth.userId);
         if (changed.length > 0) {
           await core.audit.record(tx, {
@@ -244,8 +244,12 @@ export function registerWorkSessionRoutes(
           // ADR-0012: a tighter policy reaches live sessions at once (downgrade, audited, device told).
           await svc.reauthorizeOrg(tx, "policy");
         }
-        return policyView(tx, policy);
-      }),
+        return { view: await policyView(tx, policy), changed };
+      });
+      // 07.11 (D-02, PD-03): once committed, every online device of the org hears the new runtime updates level.
+      if (changed.includes("runtimeUpdates")) await hub.pushRuntimeConfig(auth.organizationId);
+      return view;
+    },
   );
 
   app.get(
