@@ -5,15 +5,15 @@ current_phase: 1
 current_phase_name: MVP 0 — Collaborative Workspace Demo Slice
 status: planning
 stopped_at: Phase 03.1 complete, ready to plan Phase 1
-last_updated: "2026-10-27T13:24:40.220Z"
+last_updated: "2026-10-28T20:00:16.966Z"
 last_activity: 2026-10-05
 last_activity_desc: Phase 03.1 complete, transitioned to Phase 1
-state_head: 04282fdf5c0aae449d39dbaa6dea05c0b7e162c0
+state_head: 197b9c89617930dedfda44a6d689471d890032b2
 progress:
   total_phases: 12
   completed_phases: 4
-  total_plans: 253
-  completed_plans: 218
+  total_plans: 259
+  completed_plans: 224
 ---
 
 # Project State
@@ -99,6 +99,7 @@ Recent decisions affecting current work:
 - Phase 3.1 inserted after Phase 3: Personal (owner-only) bots with an automatic private chat, and per-bot capability toggles (internet, memory, reply mode, time context, usage limit) capped by org policy — requested by the owner 2026-10-04 (URGENT)
 - Phase 03.2 inserted after Phase 03.1: Work Zone session controls
 - Phase 07.10 inserted after Phase 07.9: Work Zone sidebar by team like chat channels (owner request 2026-10-27)
+- Phase 07.11 inserted after Phase 07.10: Runtime CLI auto-updates for Claude Code and Codex on every device, server-type shared devices first (modeled on T3 Code) (URGENT)
 
 ## Deferred Items
 
