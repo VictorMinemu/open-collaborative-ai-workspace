@@ -1489,4 +1489,200 @@ describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
       orgLevelReceived: false,
     });
   });
+  // ---- 07.11 Task 2: never cut a turn (D-03, D-03a, D-03b, PD-07) ----
+
+  async function startOn(sessionId: string, rt: "claude-code" | "codex", localId: string): Promise<void> {
+    server.send({
+      id: `start-${sessionId}`,
+      kind: "session.start",
+      sessionId,
+      payload: { projectLocalId: localId, runtime: rt, permissionMode: "default" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === `start-${sessionId}`)).toMatchObject({
+      ok: true,
+    });
+  }
+  const ackOf = (id: string, timeoutMs = 3000) => server.frame("ack", (f) => f.commandId === id, timeoutMs);
+  const hasAck = (id: string) => server.allFrames.some((f) => f.type === "ack" && f.commandId === id);
+  const updateEvents = (sessionId: string) =>
+    server.allFrames.flatMap((f) =>
+      f.type === "event" && f.sessionId === sessionId && f.event.type === "runtime.update" ? [f.event] : [],
+    );
+  const claudeState = (f: Extract<DeviceToServerFrame, { type: "runtime.maintenance" }>) =>
+    f.runtimes.find((s) => s.runtime === "claude-code");
+  const automatic = (): ServerToDeviceFrame => ({
+    type: "runtime.config",
+    policy: "automatic",
+    manifest: RUNTIME_COMPATIBILITY_MANIFEST,
+  });
+  const WAITING = { type: "runtime.update", runtime: "claude-code", phase: "waiting" };
+
+  it("a Claude turn in flight: the update waits with the gate open, then takes the idle moment; during the run only new Claude turns wait", async () => {
+    await updatesDaemon({ fakeUpdate: { delayMs: 1500 }, maintenance: { drainPollMs: 20 } });
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    await startOn("A", "claude-code", localId);
+    await startOn("B", "claude-code", localId);
+    await startOn("C", "codex", localId);
+    runtime.activeTurnsCount = 1; // A's turn is running
+    server.push(automatic());
+    await server.frame("runtime.maintenance", (f) => claudeState(f)?.state === "pending", 10_000);
+
+    // Opportunistic phase: the gate is open for every session and for Codex.
+    server.send({ id: "pb1", kind: "prompt", sessionId: "B", payload: { promptId: "b1", text: "go" } });
+    server.send({ id: "pc1", kind: "prompt", sessionId: "C", payload: { promptId: "c1", text: "go" } });
+    expect(await ackOf("pb1")).toMatchObject({ ok: true });
+    expect(await ackOf("pc1")).toMatchObject({ ok: true });
+    expect(runtime.prompts.map((p) => p.promptId)).toContain("b1");
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run")).toBe(false);
+
+    // A's turn ends: the update starts right away.
+    runtime.activeTurnsCount = 0;
+    runtime.emit("A", {
+      type: "prompt.completed",
+      promptId: "a1",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    await server.frame("runtime.update.run", (f) => f.phase === "started", 2000);
+
+    // During the run (the fake CLI takes 1.5 s): a new Claude turn waits; Codex, interrupts and approvals pass.
+    server.send({ id: "pb2", kind: "prompt", sessionId: "B", payload: { promptId: "b2", text: "next" } });
+    server.send({ id: "pc2", kind: "prompt", sessionId: "C", payload: { promptId: "c2", text: "next" } });
+    server.send({ id: "ia", kind: "interrupt", sessionId: "A" });
+    server.send({
+      id: "ra",
+      kind: "approval.resolve",
+      sessionId: "A",
+      payload: { approvalId: "ap1", decision: "once" },
+    });
+    expect(await ackOf("pc2")).toMatchObject({ ok: true });
+    expect(await ackOf("ia")).toMatchObject({ ok: true });
+    expect(await ackOf("ra")).toMatchObject({ ok: true });
+    await sleep07(200);
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run" && f.phase === "finished")).toBe(
+      false,
+    );
+    expect(hasAck("pb2")).toBe(false);
+    expect(runtime.prompts.map((p) => p.promptId)).not.toContain("b2");
+    expect(updateEvents("B")).toEqual([WAITING]);
+
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 15_000);
+    expect(finished.outcome).toBe("succeeded");
+    expect(await ackOf("pb2", 5000)).toMatchObject({ ok: true });
+    expect(runtime.prompts.map((p) => p.promptId)).toContain("b2");
+    await server.waitFor(() => (updateEvents("B").length === 2 ? true : undefined));
+    expect(updateEvents("B")).toEqual([
+      WAITING,
+      { type: "runtime.update", runtime: "claude-code", phase: "done", version: "2.1.300" },
+    ]);
+    expect(updateEvents("A")).toEqual([]);
+    expect(updateEvents("C")).toEqual([]);
+    expect(runtime.interrupts).toEqual(["A"]); // only the member's own interrupt command
+  }, 40_000);
+
+  it("after the drain delay new Claude starts are held while the in-flight turn finishes; stale is reported; nothing is interrupted", async () => {
+    await updatesDaemon({
+      maintenance: { drainAfterMs: 300, staleAfterMs: 900, pollMs: 50, drainPollMs: 20 },
+    });
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    await startOn("A", "claude-code", localId);
+    runtime.activeTurnsCount = 1; // stuck busy
+    server.push(automatic());
+    await server.frame("runtime.maintenance", (f) => claudeState(f)?.state === "draining", 10_000);
+
+    server.send({
+      id: "start-D",
+      kind: "session.start",
+      sessionId: "D",
+      payload: { projectLocalId: localId, runtime: "claude-code", permissionMode: "default" },
+    });
+    await startOn("E", "codex", localId); // Codex is never held
+    await sleep07(200);
+    expect(hasAck("start-D")).toBe(false);
+    expect(updateEvents("D")).toEqual([WAITING]);
+
+    const stale = await server.frame("runtime.maintenance", (f) => claudeState(f)?.stale === true, 10_000);
+    expect(claudeState(stale)?.pendingSince).not.toBeNull();
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run")).toBe(false);
+
+    runtime.activeTurnsCount = 0; // the in-flight turn ends on its own
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 15_000);
+    expect(finished.outcome).toBe("succeeded");
+    expect(await ackOf("start-D", 5000)).toMatchObject({ ok: true });
+    expect(runtime.interrupts).toEqual([]);
+    await server.waitFor(() => (updateEvents("D").length === 2 ? true : undefined));
+    expect(updateEvents("D")[1]).toMatchObject({ phase: "done", version: "2.1.300" });
+  }, 40_000);
+
+  it("a failed run reopens the gate: the held turn runs, its session is told failed, lastRun is failed", async () => {
+    await updatesDaemon({ fakeUpdate: { exitCode: 1, delayMs: 1000 } });
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    await startOn("B", "claude-code", localId);
+    server.push(automatic());
+    await server.frame("runtime.update.run", (f) => f.phase === "started", 10_000);
+    server.send({ id: "pb1", kind: "prompt", sessionId: "B", payload: { promptId: "b1", text: "go" } });
+    await sleep07(150);
+    expect(hasAck("pb1")).toBe(false);
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 15_000);
+    expect(finished).toMatchObject({ outcome: "failed", fromVersion: "2.1.290", toVersion: null });
+    expect(finished.output).toContain("exited with code 1");
+    expect(JSON.stringify(finished)).not.toContain(userHome);
+    expect(await ackOf("pb1", 5000)).toMatchObject({ ok: true });
+    await server.waitFor(() => (updateEvents("B").length === 2 ? true : undefined));
+    expect(updateEvents("B")[1]).toMatchObject({ phase: "failed" });
+    const snap = await server.frame(
+      "runtime.maintenance",
+      (f) => claudeState(f)?.lastRun?.outcome === "failed",
+    );
+    expect(claudeState(snap)).toMatchObject({ installedVersion: "2.1.290", state: "idle" });
+    expect(fakeClaudeVersion()).toBe("2.1.290 (Claude Code)");
+  }, 40_000);
+
+  it("session.title and catalog collection for Claude wait while its gate is closed; Codex's do not", async () => {
+    await updatesDaemon({ fakeUpdate: { delayMs: 1500 } });
+    runtime.extraModels = ["haiku"];
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    await startOn("A", "claude-code", localId);
+    await startOn("C", "codex", localId);
+    server.push(automatic());
+    await server.frame("runtime.update.run", (f) => f.phase === "started", 10_000);
+
+    const title = (id: string, sessionId: string, rt: string) =>
+      server.send({
+        id,
+        kind: "session.title",
+        sessionId,
+        payload: { runtime: rt, model: "haiku", prompt: "Please fix the login redirect bug" },
+      });
+    title("tA", "A", "claude-code");
+    title("tC", "C", "codex");
+    await ackOf("tC", 1000); // answered (ok or not) while Claude updates
+    const catalogs = await (
+      daemon as unknown as { collectCatalogs(): Promise<RuntimeCatalog[]> }
+    ).collectCatalogs();
+    expect(catalogs.map((c) => c.runtime)).not.toContain("claude-code");
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run" && f.phase === "finished")).toBe(
+      false,
+    );
+    expect(hasAck("tA")).toBe(false);
+    expect(server.allFrames.some((f) => f.type === "title.result" && f.requestId === "tA")).toBe(false);
+
+    await server.frame("runtime.update.run", (f) => f.phase === "finished", 15_000);
+    expect(await ackOf("tA", 5000)).toMatchObject({ ok: true });
+    const after = await (
+      daemon as unknown as { collectCatalogs(): Promise<RuntimeCatalog[]> }
+    ).collectCatalogs();
+    expect(after.map((c) => c.runtime)).toContain("claude-code");
+  }, 40_000);
 });

@@ -17,10 +17,13 @@ import { RuntimeGate } from "./gate.js";
 import type { InstallResolution } from "./install-method.js";
 import {
   CHECK_EVERY_MS,
+  DRAIN_AFTER_MS,
   ORG_LEVEL_GRACE_MS,
+  PENDING_POLL_MS,
   REFUSED_OUTSIDE_SCRATCH_HOME,
   RuntimeMaintenance,
   type RuntimeMaintenanceOptions,
+  STALE_AFTER_MS,
   UNCHANGED_BACKOFF_MS,
 } from "./maintenance.js";
 import type { RunResult, RunUpdateOptions } from "./runner.js";
@@ -408,5 +411,133 @@ describe("RuntimeMaintenance: automatic updates on an idle runtime (D-03, D-07)"
     expect(finished).toMatchObject({ outcome: "failed" });
     expect(finished?.output).toContain(REFUSED_OUTSIDE_SCRATCH_HOME);
     expect(h.gate.isOpen).toBe(true);
+  });
+});
+
+describe("RuntimeMaintenance: never cut a turn (D-03, D-03a, D-03b, PD-07)", () => {
+  const realWait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("a busy runtime: the update waits with the gate open and runs at the first idle moment (activity)", async () => {
+    const h = harness();
+    h.adapter.turns = 1;
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    expect(h.runs).toEqual([]);
+    expect(h.gate.isOpen).toBe(true);
+    expect(claudeStatus(h)).toMatchObject({ state: "pending", pendingSince: "2026-10-28T12:00:00.000Z" });
+    h.m.onRuntimeActivity("claude-code"); // still busy: nothing
+    await flush();
+    expect(h.runs).toEqual([]);
+    h.adapter.turns = 0;
+    h.m.onRuntimeActivity("claude-code");
+    expect(h.gate.isOpen).toBe(false); // closed in the same tick as the idle check
+    await flush();
+    expect(h.runs).toHaveLength(1);
+    expect(h.gate.isOpen).toBe(true);
+    expect(h.adapter.interrupts).toBe(0);
+  });
+
+  it("without any activity the 5 s poll finds the idle moment", async () => {
+    const h = harness();
+    h.adapter.turns = 1;
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    h.adapter.turns = 0;
+    await h.advance(PENDING_POLL_MS - 1);
+    expect(h.runs).toEqual([]);
+    await h.advance(1);
+    expect(h.runs).toHaveLength(1);
+  });
+
+  it("after DRAIN_AFTER_MS it drains: gate closed, the in-flight turn finishes, then the update runs; nothing interrupted", async () => {
+    const h = harness({ pollMs: 10 * 60 * 1000, drainPollMs: 5 });
+    h.adapter.turns = 1;
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    await h.advance(DRAIN_AFTER_MS - 1);
+    expect(claudeStatus(h).state).toBe("pending");
+    expect(h.gate.isOpen).toBe(true);
+    await h.advance(1);
+    expect(claudeStatus(h).state).toBe("draining");
+    expect(h.gate.isOpen).toBe(false);
+    await realWait(30);
+    expect(h.runs).toEqual([]);
+    h.adapter.turns = 0;
+    await realWait(30);
+    await flush();
+    expect(h.runs).toHaveLength(1);
+    expect(h.gate.isOpen).toBe(true);
+    expect(h.adapter.interrupts).toBe(0);
+    expect(claudeStatus(h)).toMatchObject({ state: "idle", stale: false, pendingSince: null });
+  });
+
+  it("still busy after STALE_AFTER_MS: reported stale with pendingSince (snapshot re-sent)", async () => {
+    const h = harness({ pollMs: 60 * 60 * 1000, drainPollMs: 5 });
+    h.adapter.turns = 1;
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    await h.advance(STALE_AFTER_MS - 1);
+    expect(claudeStatus(h).stale).toBe(false);
+    const before = h.snapshots.length;
+    await h.advance(1);
+    expect(h.snapshots.length).toBeGreaterThan(before);
+    expect(claudeStatus(h)).toMatchObject({
+      stale: true,
+      state: "draining",
+      pendingSince: "2026-10-28T12:00:00.000Z",
+    });
+    h.adapter.turns = 0;
+    await realWait(30);
+    await flush();
+    expect(h.runs).toHaveLength(1);
+    expect(claudeStatus(h).stale).toBe(false);
+  });
+
+  it("a failed run reopens the gate, tells the held sessions it failed and reports lastRun failed", async () => {
+    const h = harness();
+    h.setRunResult(() => ({
+      outcome: "failed",
+      fromVersion: "2.1.290",
+      toVersion: null,
+      output: "Error: fake update failed with code 1 (<path>)",
+      error: "the update command exited with code 1",
+    }));
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    expect(h.gate.isOpen).toBe(true);
+    expect(h.notified).toEqual([["claude-code", "failed", "2.1.290"]]);
+    expect(claudeStatus(h)).toMatchObject({ lastRun: { outcome: "failed" }, installedVersion: "2.1.290" });
+    const finished = h.runFrames.find((f) => f.phase === "finished");
+    expect(finished?.output).toContain("the update command exited with code 1");
+    // Not retried at once (no hot loop on a failing installer).
+    await h.m.check();
+    await flush();
+    expect(h.runs).toHaveLength(1);
+  });
+
+  it("a lowered level drops a pending automatic update before it drains", async () => {
+    const h = harness();
+    h.adapter.turns = 1;
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    expect(claudeStatus(h).state).toBe("pending");
+    h.m.setLocalLevel("notify", "env");
+    await flush();
+    expect(claudeStatus(h)).toMatchObject({ state: "idle", pendingSince: null });
+    expect(lastSnapshot(h)).toMatchObject({
+      localLevel: "notify",
+      localLevelSource: "env",
+      effectiveLevel: "notify",
+    });
+    h.adapter.turns = 0;
+    h.m.onRuntimeActivity("claude-code");
+    await flush();
+    expect(h.runs).toEqual([]);
   });
 });

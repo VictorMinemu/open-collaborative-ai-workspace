@@ -199,6 +199,8 @@ export class Daemon {
   private readonly gates = new Map<RuntimeId, RuntimeGate>();
   /** 07.11: runtime CLI update maintenance; null when PD-19 does not allow it here. */
   private maintenance: RuntimeMaintenance | null = null;
+  /** 07.11 (PD-07): per runtime, the sessions told `runtime.update` `waiting` during the current update. */
+  private readonly heldSessions = new Map<RuntimeId, Set<string>>();
   private readonly sessions = new Map<string, ActiveSession>();
   /** Roots per session survive session end so late events are still contained. */
   private readonly rootsBySession = new Map<string, string[]>();
@@ -298,6 +300,7 @@ export class Daemon {
         if (this.isConnected) this.send(frame);
       },
       sendRun: (frame) => this.send(frame),
+      notifySession: (runtime, phase, version) => this.notifyHeldSessions(runtime, phase, version),
       afterRun: async () => {
         this.detectCache = null;
         if (this.isConnected) this.send(await this.capabilitiesFrame());
@@ -459,8 +462,12 @@ export class Daemon {
     for (const r of this.runtimes.values()) {
       const info = infos.find((i) => i.id === r.id);
       if (!info?.installed || !info.loggedIn || !r.catalog) continue;
+      // 07.11 (PD-07): never while this runtime's CLI updates; the capabilities sent after the run cover it.
+      const gate = this.gates.get(r.id);
+      if (gate && !gate.isOpen) continue;
+      const collect = r.catalog.bind(r);
       try {
-        const catalog = await r.catalog();
+        const catalog = await (gate ? gate.admit(collect) : collect());
         if (!catalog) continue;
         const parsed = RuntimeCatalog.safeParse(sanitizeValue(catalog, roots));
         if (parsed.success) {
@@ -534,6 +541,48 @@ export class Daemon {
     const out: SessionEvent =
       event.type === "session.error" ? { ...event, message: stripImageData(event.message) } : event;
     this.send({ type: "event", sessionId, event: sanitizeEvent(out, roots), localSeq });
+    // 07.11 (PD-07): a turn ended or a session changed state: a pending update may take this idle moment.
+    if (event.type === "prompt.completed" || event.type === "session.state") {
+      const runtime = this.sessions.get(sessionId)?.runtime.id;
+      if (runtime) this.maintenance?.onRuntimeActivity(runtime);
+    }
+  }
+
+  /**
+   * 07.11 (PD-07, D-03): runs a command that starts or shapes a turn of `runtime` through that runtime's gate. While
+   * its CLI updates the command waits (it is never refused or dropped) and its session is told once (`runtime.update`
+   * `waiting`); the other runtime is never held. Without a known runtime it runs as before (and fails as before).
+   */
+  private admit<T>(runtime: RuntimeId | undefined, sessionId: string, fn: () => Promise<T>): Promise<T> {
+    const gate = runtime ? this.gates.get(runtime) : undefined;
+    if (!runtime || !gate) return fn();
+    return gate.admit(fn, () => this.tellWaiting(runtime, sessionId));
+  }
+
+  private tellWaiting(runtime: RuntimeId, sessionId: string): void {
+    let held = this.heldSessions.get(runtime);
+    if (!held) {
+      held = new Set();
+      this.heldSessions.set(runtime, held);
+    }
+    if (held.has(sessionId)) return;
+    held.add(sessionId);
+    this.forwardEvent(sessionId, { type: "runtime.update", runtime, phase: "waiting" });
+  }
+
+  /** The update ended: every session told `waiting` gets `done` (with the version now installed) or `failed`. */
+  private notifyHeldSessions(runtime: RuntimeId, phase: "done" | "failed", version?: string): void {
+    const held = this.heldSessions.get(runtime);
+    if (!held) return;
+    this.heldSessions.delete(runtime);
+    for (const sessionId of held) {
+      this.forwardEvent(sessionId, {
+        type: "runtime.update",
+        runtime,
+        phase,
+        ...(version ? { version } : {}),
+      });
+    }
   }
 
   private ack(commandId: string, error?: string, roots: string[] = []): void {
@@ -636,27 +685,20 @@ export class Daemon {
     const roots = this.rootsBySession.get(cmd.sessionId) ?? [];
     try {
       switch (cmd.kind) {
+        // 07.11 (PD-07): session.start, prompt (and steer), session.configure and session.title wait at their
+        // runtime's gate while its CLI updates; interrupt, approval.resolve, session.stop and diff.request never do.
         case "session.start":
-          await this.startSession(cmd);
+          await this.admit(
+            SessionStartPayload.safeParse(cmd.payload ?? {}).data?.runtime,
+            cmd.sessionId,
+            () => this.startSession(cmd),
+          );
           break;
-        case "prompt": {
-          const s = this.requireSession(cmd.sessionId);
-          const prompt = PromptPayload.parse(cmd.payload);
-          // A turn may run in fullAccess only while the opt-in is on (an explicit fullAccess cap, or a session
-          // still in fullAccess with no cap); checked before the adapter sees the prompt.
-          this.refuseFullAccess(prompt.permissionMode ?? s.mode);
-          if (prompt.permissionMode === "fullAccess") this.refuseFullAccess("fullAccess");
-          // P-10: images go to the adapter in memory only, and only to a runtime that can take them.
-          if (prompt.images?.length && !s.runtime.capabilities.supportsImages) {
-            throw new Error(IMAGES_NOT_SUPPORTED_MESSAGE);
-          }
-          if (prompt.delivery === "steer" && s.runtime.capabilities.supportsSteer && s.runtime.steer) {
-            await s.runtime.steer(cmd.sessionId, prompt);
-          } else {
-            await s.runtime.prompt(cmd.sessionId, prompt);
-          }
+        case "prompt":
+          await this.admit(this.requireSession(cmd.sessionId).runtime.id, cmd.sessionId, () =>
+            this.runPrompt(cmd),
+          );
           break;
-        }
         case "interrupt":
           await this.requireSession(cmd.sessionId).runtime.interrupt(cmd.sessionId);
           break;
@@ -683,10 +725,16 @@ export class Daemon {
           await this.sendDiff(cmd);
           break;
         case "session.configure":
-          await this.configureSession(cmd);
+          await this.admit(this.sessions.get(cmd.sessionId)?.runtime.id, cmd.sessionId, () =>
+            this.configureSession(cmd),
+          );
           break;
         case "session.title":
-          await this.sendTitle(cmd);
+          await this.admit(
+            SessionTitlePayload.safeParse(cmd.payload ?? {}).data?.runtime,
+            cmd.sessionId,
+            () => this.sendTitle(cmd),
+          );
           break;
       }
       this.ack(cmd.id);
@@ -702,6 +750,25 @@ export class Daemon {
         this.forwardEvent(cmd.sessionId, { type: "session.error", message });
         this.forwardEvent(cmd.sessionId, { type: "session.state", status: "failed" });
       }
+    }
+  }
+
+  /** A prompt (or steer), checked after admission so a held prompt sees the device's current gates. */
+  private async runPrompt(cmd: CommandFrame): Promise<void> {
+    const s = this.requireSession(cmd.sessionId);
+    const prompt = PromptPayload.parse(cmd.payload);
+    // A turn may run in fullAccess only while the opt-in is on (an explicit fullAccess cap, or a session
+    // still in fullAccess with no cap); checked before the adapter sees the prompt.
+    this.refuseFullAccess(prompt.permissionMode ?? s.mode);
+    if (prompt.permissionMode === "fullAccess") this.refuseFullAccess("fullAccess");
+    // P-10: images go to the adapter in memory only, and only to a runtime that can take them.
+    if (prompt.images?.length && !s.runtime.capabilities.supportsImages) {
+      throw new Error(IMAGES_NOT_SUPPORTED_MESSAGE);
+    }
+    if (prompt.delivery === "steer" && s.runtime.capabilities.supportsSteer && s.runtime.steer) {
+      await s.runtime.steer(cmd.sessionId, prompt);
+    } else {
+      await s.runtime.prompt(cmd.sessionId, prompt);
     }
   }
 

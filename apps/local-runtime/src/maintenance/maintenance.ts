@@ -68,6 +68,8 @@ export const UNCHANGED_BACKOFF_MS = 24 * 60 * 60 * 1000;
 export const FAILED_BACKOFF_MS = CHECK_EVERY_MS;
 /** How often a pending update looks for an idle moment besides the runtime's own activity. */
 export const PENDING_POLL_MS = 5_000;
+/** How often a draining update re-checks that the in-flight turns have finished. */
+export const DRAIN_POLL_MS = 1_000;
 /**
  * A paired daemon waits this long for the server's `runtime.config` before its first registry request, so an
  * organization at `off` never sees one (D-02); an unpaired daemon checks at once (`notify`, D-10).
@@ -115,6 +117,8 @@ export interface RuntimeMaintenanceOptions {
   drainAfterMs?: number;
   staleAfterMs?: number;
   pollMs?: number;
+  /** `gate.waitIdle` poll while draining (default `DRAIN_POLL_MS`). */
+  drainPollMs?: number;
   now?: () => number;
   random?: () => number;
   setTimer?: (fn: () => void, ms: number) => TimerHandle;
@@ -159,6 +163,7 @@ interface RuntimeState {
   /** Broken candidates already reported once (D-04). */
   skippedBroken: Set<string>;
   pollTimer: TimerHandle | null;
+  staleTimer: TimerHandle | null;
 }
 
 const RUNTIME_ORDER: readonly RuntimeId[] = ["claude-code", "codex"];
@@ -221,6 +226,7 @@ export class RuntimeMaintenance {
         backoff: new Map(),
         skippedBroken: new Set(),
         pollTimer: null,
+        staleTimer: null,
       });
     }
     this.log = opts.log ?? silentLogger;
@@ -299,7 +305,17 @@ export class RuntimeMaintenance {
     for (const h of [this.checkTimer, this.graceTimer]) if (h !== null) this.clearTimer(h);
     this.checkTimer = null;
     this.graceTimer = null;
-    for (const st of this.states.values()) this.clearPoll(st);
+    for (const [id, st] of this.states) {
+      this.clearPoll(st);
+      if (st.staleTimer !== null) this.clearTimer(st.staleTimer);
+      st.staleTimer = null;
+      // A drain that has not started its run lets the held commands go; a running install finishes on its own.
+      if (st.state === "draining") {
+        st.job = null;
+        st.state = "idle";
+        this.opts.gates.get(id)?.open();
+      }
+    }
   }
 
   private allowRegistry(): void {
@@ -413,10 +429,7 @@ export class RuntimeMaintenance {
         continue;
       }
       if ((st.backoff.get(candidate) ?? 0) > this.now()) continue;
-      st.job = { trigger: "automatic", candidate, drainNow: false };
-      st.state = "pending";
-      st.pendingSince = this.now();
-      this.attempt(r.id);
+      this.begin(r.id, st, { trigger: "automatic", candidate, drainNow: false });
     }
   }
 
@@ -441,6 +454,8 @@ export class RuntimeMaintenance {
 
   private dropJob(st: RuntimeState): void {
     this.clearPoll(st);
+    if (st.staleTimer !== null) this.clearTimer(st.staleTimer);
+    st.staleTimer = null;
     st.job = null;
     st.state = "idle";
     st.pendingSince = null;
@@ -454,7 +469,37 @@ export class RuntimeMaintenance {
 
   // ---- the run (D-03, PD-07, PD-11) ----
 
-  /** Takes the first idle moment: the gate closes in the same tick as the idle check, or the update tries again later. */
+  /** A new update for `runtime`: pending from now, `stale` if it is still waiting after `STALE_AFTER_MS`. */
+  private begin(runtime: RuntimeId, st: RuntimeState, job: Job): void {
+    st.job = job;
+    st.state = "pending";
+    st.pendingSince = this.now();
+    st.stale = false;
+    if (st.staleTimer !== null) this.clearTimer(st.staleTimer);
+    st.staleTimer = this.setTimer(() => {
+      st.staleTimer = null;
+      if (!st.job || st.state === "running") return;
+      st.stale = true;
+      void this.publish(true);
+    }, this.opts.staleAfterMs ?? STALE_AFTER_MS);
+    void this.publish(true);
+    this.attempt(runtime);
+  }
+
+  /**
+   * A turn of `runtime` ended or its session changed state (the daemon calls this after `prompt.completed` and
+   * `session.state`): a pending update tries the idle moment now, and once more after the adapter settled.
+   */
+  onRuntimeActivity(runtime: RuntimeId): void {
+    if (this.states.get(runtime)?.state !== "pending") return;
+    this.attempt(runtime);
+    setImmediate(() => this.attempt(runtime)).unref?.();
+  }
+
+  /**
+   * PD-07. Opportunistic first: the gate stays open and the update takes the first idle moment, closing the gate in
+   * the same tick as the idle check (`closeIfIdle`). After `DRAIN_AFTER_MS` (at once for "Update now") it drains.
+   */
   private attempt(runtime: RuntimeId): void {
     const st = this.stateOf(runtime);
     if (this.stopped || !st.job || st.state !== "pending") return;
@@ -465,12 +510,37 @@ export class RuntimeMaintenance {
       void this.runJob(runtime);
       return;
     }
+    const drainAt = st.job.drainNow
+      ? this.now()
+      : (st.pendingSince ?? this.now()) + (this.opts.drainAfterMs ?? DRAIN_AFTER_MS);
+    if (this.now() >= drainAt) {
+      this.clearPoll(st);
+      void this.drain(runtime);
+      return;
+    }
     if (st.pollTimer === null) {
+      const wait = Math.max(0, Math.min(this.opts.pollMs ?? PENDING_POLL_MS, drainAt - this.now()));
       st.pollTimer = this.setTimer(() => {
         st.pollTimer = null;
         this.attempt(runtime);
-      }, this.opts.pollMs ?? PENDING_POLL_MS);
+      }, wait);
     }
+  }
+
+  /**
+   * Drain (PD-07, D-03b): the gate closes so new turns of this runtime are held (their sessions are told), turns
+   * already running finish on their own (never interrupted), then the update runs.
+   */
+  private async drain(runtime: RuntimeId): Promise<void> {
+    const st = this.stateOf(runtime);
+    const gate = this.gateOf(runtime);
+    const adapter = this.adapterOf(runtime);
+    st.state = "draining";
+    gate.close();
+    void this.publish(true);
+    await gate.waitIdle(() => adapter.activeTurns(), this.opts.drainPollMs ?? DRAIN_POLL_MS);
+    if (this.stopped || st.state !== "draining" || !st.job) return;
+    await this.runJob(runtime);
   }
 
   private adapterOf(runtime: RuntimeId): MaintainedRuntime {
