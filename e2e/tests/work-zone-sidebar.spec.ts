@@ -176,9 +176,23 @@ test.beforeAll(async () => {
   T.settled = `Ship the release notes ${run}`;
   for (const title of [T.four, T.three, T.two, T.one]) await startSession(admin, portalRepo.projectId, title);
   S.settled = await startSession(admin, portalRepo.projectId, T.settled);
+  // Both rows are rewritten only once the fake device has settled them (idle), so its own late answer never overwrites
+  // the status (pipeline 83: under CI load "running" went back to idle and "● 1" never showed).
+  const live = sessionIds.at(-2) as string;
+  for (const id of [S.settled, live]) {
+    await expect
+      .poll(
+        async () => {
+          const r = await admin.get(`/api/v1/work-sessions/${id}`);
+          return r.ok() ? ((await r.json()) as { session: { status: string } }).session.status : undefined;
+        },
+        { timeout: 30_000, message: "the session is idle before its status is rewritten" },
+      )
+      .toBe("idle");
+  }
   await asSuperuser("update app.work_sessions set status = $2 where id = $1", [S.settled, "completed"]);
   // One live session: the project row shows "● 1".
-  await asSuperuser("update app.work_sessions set status = $2 where id = $1", [sessionIds.at(-2), "running"]);
+  await asSuperuser("update app.work_sessions set status = $2 where id = $1", [live, "running"]);
 
   // Pia's own devices: an unlinked repository, and one linked to the admin's vault (D-11: she owns the device).
   piaScratch = await startFakeDevice(pia, {
