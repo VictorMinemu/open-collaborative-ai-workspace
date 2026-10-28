@@ -1,6 +1,17 @@
 import { z } from "zod";
-import { RelativePath } from "./common";
+import { IsoDateTime, RelativePath } from "./common";
 import { RuntimeInfo } from "./device";
+import {
+  InstallMethod,
+  RuntimeCompatibilityManifest,
+  RuntimeMaintenanceStatus,
+  RuntimeUpdateOutcome,
+  RuntimeUpdateOutputText,
+  RuntimeUpdatesLevel,
+  RuntimeUpdatesLevelSource,
+  RuntimeUpdateTrigger,
+  RuntimeVersion,
+} from "./runtime-maintenance";
 import { PermissionMode, RuntimeId, SessionEvent } from "./session-events";
 import { ContextWindow, EffortLevel, RuntimeCatalog, SessionSettingsPatch } from "./session-settings";
 import { TITLE_PROMPT_MAX_CHARS } from "./session-title";
@@ -149,6 +160,52 @@ export const TitleResultFrame = z.object({
 });
 export type TitleResultFrame = z.infer<typeof TitleResultFrame>;
 
+/**
+ * Phase 07.11 (PD-03): the device's runtime maintenance snapshot (versions, install method, update state, the
+ * device-local level). Sent in the handshake and on change, only while connected (like `projects.sync`; the next
+ * handshake covers offline changes). `runtimeInfo` refreshes the versions the hub otherwise only learns at `hello`.
+ * No host path: locations are `~`-relative and display commands path-free by schema.
+ */
+export const RuntimeMaintenanceFrame = z.object({
+  type: z.literal("runtime.maintenance"),
+  runtimes: z.array(RuntimeMaintenanceStatus).max(4),
+  runtimeInfo: z.array(RuntimeInfo).max(4),
+  localLevel: RuntimeUpdatesLevel,
+  localLevelSource: RuntimeUpdatesLevelSource,
+  effectiveLevel: RuntimeUpdatesLevel,
+  /** False until a `runtime.config` arrived (the org level then counts as `notify`, D-10). */
+  orgLevelReceived: z.boolean(),
+});
+export type RuntimeMaintenanceFrame = z.infer<typeof RuntimeMaintenanceFrame>;
+
+/**
+ * Phase 07.11 (PD-03, PD-06): one update run on the device, `started` then `finished` (with its `outcome`; a `started`
+ * frame never carries one). Goes through the offline log so no audit is lost; idempotent by the device-generated
+ * `runId`. `commandId` ties it to the "Update now" command it answers. `output` is sanitised on the device and scrubbed
+ * of host paths again when parsed.
+ */
+export const RuntimeUpdateRunFrame = z
+  .object({
+    type: z.literal("runtime.update.run"),
+    runId: z.uuid(),
+    runtime: RuntimeId,
+    trigger: RuntimeUpdateTrigger,
+    commandId: z.uuid().optional(),
+    phase: z.enum(["started", "finished"]),
+    outcome: RuntimeUpdateOutcome.optional(),
+    fromVersion: RuntimeVersion.nullable(),
+    toVersion: RuntimeVersion.nullable(),
+    candidate: RuntimeVersion.nullable(),
+    method: InstallMethod,
+    output: RuntimeUpdateOutputText.optional(),
+    at: IsoDateTime,
+  })
+  .refine((f) => (f.phase === "finished") === (f.outcome !== undefined), {
+    message: "a finished run carries an outcome; a started run does not",
+    path: ["outcome"],
+  });
+export type RuntimeUpdateRunFrame = z.infer<typeof RuntimeUpdateRunFrame>;
+
 export const DeviceToServerFrame = z.discriminatedUnion("type", [
   HelloFrame,
   ProjectsSyncFrame,
@@ -158,6 +215,8 @@ export const DeviceToServerFrame = z.discriminatedUnion("type", [
   DiffResultFrame,
   CapabilitiesFrame,
   TitleResultFrame,
+  RuntimeMaintenanceFrame,
+  RuntimeUpdateRunFrame,
 ]);
 export type DeviceToServerFrame = z.infer<typeof DeviceToServerFrame>;
 
@@ -172,6 +231,18 @@ export const CommandFrame = z.object({
 });
 export type CommandFrame = z.infer<typeof CommandFrame>;
 
+/**
+ * Phase 07.11 (PD-03): the org's runtime updates level and the Control Plane's compatibility manifest. Ephemeral
+ * (never queued): sent right after `welcome` and again when the org's level changes; latest wins. It names no command,
+ * path or version to install (D-05). Older daemons ignore it.
+ */
+export const RuntimeConfigFrame = z.object({
+  type: z.literal("runtime.config"),
+  policy: RuntimeUpdatesLevel,
+  manifest: RuntimeCompatibilityManifest,
+});
+export type RuntimeConfigFrame = z.infer<typeof RuntimeConfigFrame>;
+
 export const ServerToDeviceFrame = z.discriminatedUnion("type", [
   z.object({ type: z.literal("welcome"), deviceId: z.uuid(), organizationId: z.uuid() }),
   CommandFrame,
@@ -180,6 +251,7 @@ export const ServerToDeviceFrame = z.discriminatedUnion("type", [
     projects: z.array(z.object({ localId: z.string(), projectId: z.uuid() })),
   }),
   z.object({ type: z.literal("error"), code: z.string(), message: z.string() }),
+  RuntimeConfigFrame,
 ]);
 export type ServerToDeviceFrame = z.infer<typeof ServerToDeviceFrame>;
 
