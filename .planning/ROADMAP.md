@@ -864,20 +864,37 @@ from its shipped bundle, 2026-10-28):
   4. The device owner and admins see versions, status and history per device and can update now; members never can;
      the org policy and the device opt-out are honoured and audited
   5. Works on a headless Linux daemon and on macOS; Settings › Devices at 1440 and 390, light and dark
+
 **Plans:** 11 plans in 6 waves (CONTEXT/RESEARCH/PATTERNS/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 09 the end-to-end tracer, 11 the gate)
 
 Plans:
+**Wave 1**
 
 - [ ] 07.11-01-PLAN.md — Wave 1: Contracts (versions, levels, manifest, statuses, frames, history DTOs, `runtime.update` event), `device.maintain`, and the phase hub (plan map, shared files, PD-01…PD-19)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 07.11-02-PLAN.md — Wave 2: Storage and the org policy field: one migration (`runtime_updates`, `runtime_maintenance`, `device_runtime_updates`), `CommandKind` `runtime.update`, policy save/audit, RLS
 - [ ] 07.11-03-PLAN.md — Wave 2: Compatibility at session start: a broken version refuses a start, `runtimeCompatibility` on every device, test-only manifest injection
 - [ ] 07.11-04-PLAN.md — Wave 2: Daemon maintenance core: install-method resolver (fixed table), registry client (channels, cache), runner (lock, timeout, output, verify), fake CLI
 - [ ] 07.11-05-PLAN.md — Wave 2: Never interrupt: adapters' `activeTurns` / `retireIdle` / lazy resume, CLI self-updaters off, the per-runtime gate
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 07.11-06-PLAN.md — Wave 3: API device maintenance: frame handlers, history, audit, Update now, `runtime.config` push, owner/admin-only details
 - [ ] 07.11-07-PLAN.md — Wave 3: Daemon wiring: the `RuntimeMaintenance` orchestrator, frames, gate on commands, drain and stale, `runtime.update` command, CLI and control socket triggers
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 07.11-08-PLAN.md — Wave 4: Device-local level (runtime.json, env, `ocw-runtime updates automatic|notify|off`, reload) and the desktop status lines and toggle
 - [ ] 07.11-09-PLAN.md — Wave 4: Phase end-to-end tracer on the real stack (busy device, held turn, owner view, audit), Update now / member / off, headless Linux proof
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
 - [ ] 07.11-10-PLAN.md — Wave 5: Web: Settings › Devices runtime updates block, Update now, history sheet, member flags, policy select, new-session flag, session line; 1440/390 light/dark
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
 - [ ] 07.11-11-PLAN.md — Wave 6: Phase gate: full local gate, full isolated e2e, Linux proof, `gate:compose`, ADR-0032, DEMO owner checks, INSTALL, STATUS, AGENTS, CODEOWNERS, signed VALIDATION
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
