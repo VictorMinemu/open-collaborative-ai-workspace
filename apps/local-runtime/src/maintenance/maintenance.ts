@@ -451,8 +451,13 @@ export class RuntimeMaintenance {
     for (const r of this.runtimes) {
       const st = this.stateOf(r.id);
       if (!automatic) {
-        // A lowered level drops an automatic update that has not started draining yet.
-        if (st.state === "pending" && st.job?.trigger === "automatic") this.dropJob(st);
+        // A lowered level drops an automatic update that has not started its run. A draining one also reopens the
+        // gate and releases the sessions it held (the pending `drain()` sees the dropped job and returns).
+        if (st.job?.trigger === "automatic" && (st.state === "pending" || st.state === "draining")) {
+          const wasDraining = st.state === "draining";
+          this.dropJob(st);
+          if (wasDraining) this.releaseHeld(r.id, st);
+        }
         continue;
       }
       if (st.state !== "idle" || st.job) continue;
@@ -494,6 +499,19 @@ export class RuntimeMaintenance {
     st.state = "idle";
     st.pendingSince = null;
     st.stale = false;
+  }
+
+  /** Reopens a gate closed by a drain that will not run, and tells the held sessions they can go on. */
+  private releaseHeld(runtime: RuntimeId, st: RuntimeState): void {
+    this.opts.gates.get(runtime)?.open();
+    try {
+      this.opts.notifySession?.(runtime, "done", st.installedVersion ?? undefined);
+    } catch (err) {
+      this.log.warn("could not tell the held sessions", {
+        runtime,
+        error: scrubHostPaths(errorMessage(err)),
+      });
+    }
   }
 
   private clearPoll(st: RuntimeState): void {

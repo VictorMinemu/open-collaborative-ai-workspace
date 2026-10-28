@@ -548,6 +548,27 @@ describe("RuntimeMaintenance: never cut a turn (D-03, D-03a, D-03b, PD-07)", () 
     await flush();
     expect(h.runs).toEqual([]);
   });
+
+  it("a lowered level also drops an automatic update that is draining: the gate reopens, held sessions are released, nothing runs", async () => {
+    const h = harness({ pollMs: 10 * 60 * 1000, drainPollMs: 5 });
+    h.adapter.turns = 1;
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    await h.advance(DRAIN_AFTER_MS);
+    expect(claudeStatus(h).state).toBe("draining");
+    expect(h.gate.isOpen).toBe(false);
+    h.m.setLocalLevel("notify", "config");
+    await flush();
+    expect(h.gate.isOpen).toBe(true);
+    expect(claudeStatus(h)).toMatchObject({ state: "idle", pendingSince: null, stale: false });
+    expect(h.notified).toEqual([["claude-code", "done", "2.1.290"]]);
+    h.adapter.turns = 0;
+    await realWait(30);
+    await flush();
+    expect(h.runs).toEqual([]);
+    expect(h.adapter.interrupts).toBe(0);
+  });
 });
 
 describe('RuntimeMaintenance: "Update now" (D-05, PD-08)', () => {
