@@ -90,6 +90,9 @@ export const Permission = z.enum([
   // Phase 07.9 (07.9-01, D-04, D-10, D-13): who can see a Work Zone session, and team project governance.
   "work_session.visibility",
   "work_project.manage",
+  // Phase 07.11 (07.11-01, D-11): see a device's runtime versions, install method and update history, and press
+  // "Update now". The device owner (relation) and admins (role) only; relation-only non-delegable.
+  "device.maintain",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -126,6 +129,7 @@ export const PERMISSION_SURFACE: Record<Permission, PermissionSurface> = {
   "device.use": "workzone",
   "device.update": "workzone",
   "device.revoke": "workzone",
+  "device.maintain": "workzone",
   "device.link": "runtime",
   "work_session.read": "workzone",
   "work_session.create": "workzone",
@@ -236,6 +240,7 @@ const ADMIN: readonly Permission[] = [
   "provider.manage",
   "cell.manage",
   "device.revoke",
+  "device.maintain",
   "work_session.approve",
   "work_session.archive",
   "bot.configure",
@@ -258,6 +263,7 @@ const ADMIN: readonly Permission[] = [
 /**
  * Unconditional, organization-wide grants per role (cumulative). `account.manage`, `device.use`,
  * `device.update` and `device.full_access` come only from relations (self, device owner/shared/grantee);
+ * `device.maintain` from the device owner relation or the admin role (Phase 07.11);
  * `cell.sync` and `device.link` only from non-human principals.
  */
 export const ROLE_PERMISSIONS: Record<OrgRole, readonly Permission[]> = {
@@ -310,10 +316,15 @@ export const DEVICE_PERMISSIONS: readonly Permission[] = ["device.link"];
 
 /**
  * Relation-only permissions that no allow rule may confer either: Full access on a device comes only from the
- * device owner's grant (cap) intersected with the device opt-in and the org policy, and sharing a device
- * (`device.update`: grants, share max mode) belongs to its owner alone (ADR-0012).
+ * device owner's grant (cap) intersected with the device opt-in and the org policy, sharing a device
+ * (`device.update`: grants, share max mode) belongs to its owner alone (ADR-0012), and updating a device's coding CLIs
+ * (`device.maintain`) belongs to its owner and to admins by role (Phase 07.11, D-11).
  */
-const RELATION_ONLY_NON_DELEGABLE: readonly Permission[] = ["device.full_access", "device.update"];
+const RELATION_ONLY_NON_DELEGABLE: readonly Permission[] = [
+  "device.full_access",
+  "device.update",
+  "device.maintain",
+];
 
 /** Admin- and runtime-surface permissions plus relation-only ones: explicit allow rules can never grant these. */
 export const NON_DELEGABLE_PERMISSIONS: readonly Permission[] = Permission.options.filter(
@@ -425,6 +436,7 @@ export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
   "device.use": "Run work on a device you own or that is shared with you",
   "device.update": "Rename and share your own devices",
   "device.revoke": "Revoke any device",
+  "device.maintain": "Update the coding CLIs on your devices, or on any device as an admin",
   "device.link": "Connect a paired device to the workspace",
   "work_session.read": "See Work Zone sessions",
   "work_session.create": "Start Work Zone sessions on a usable device",

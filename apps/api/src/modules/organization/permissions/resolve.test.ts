@@ -103,6 +103,7 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "device.use": false,
     "device.update": false,
     "device.revoke": false,
+    "device.maintain": false,
     "device.link": false,
     "work_session.read": false,
     "work_session.create": false,
@@ -177,6 +178,7 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "device.use": false,
     "device.update": false,
     "device.revoke": false,
+    "device.maintain": false,
     "device.link": false,
     "work_session.read": true,
     "work_session.create": true,
@@ -251,6 +253,7 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "device.use": false,
     "device.update": false,
     "device.revoke": false,
+    "device.maintain": false,
     "device.link": false,
     "work_session.read": true,
     "work_session.create": true,
@@ -325,6 +328,7 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "device.use": false,
     "device.update": false,
     "device.revoke": true,
+    "device.maintain": true,
     "device.link": false,
     "work_session.read": true,
     "work_session.create": true,
@@ -428,6 +432,61 @@ describe("relation grants", () => {
     const shared = deviceResource({ ownerUserId: "other", shared: true, revoked: false }, "u-1");
     expect(allowed(user("developer"), shared, "device.use")).toBe(true);
     expect(allowed(user("developer"), shared, "device.update")).toBe(false);
+  });
+
+  describe("device.maintain: owners and admins only, never delegable (Phase 07.11, D-11)", () => {
+    const others = (cap?: Parameters<typeof deviceResource>[0]["cap"]) =>
+      deviceResource({ ownerUserId: "other", shared: cap === undefined, revoked: false, cap }, "u-1");
+
+    it("an admin holds it on any device (role)", () => {
+      expect(allowed(user("admin"), others(), "device.maintain")).toBe(true);
+      expect(allowed(user("admin"), others(null), "device.maintain")).toBe(true);
+    });
+
+    it("a developer owning a device holds it (relation)", () => {
+      expect(ownDevice.relations.has("owner")).toBe(true);
+      expect(allowed(user("developer"), ownDevice, "device.maintain")).toBe(true);
+      expect(allowed(user("lead"), ownDevice, "device.maintain")).toBe(true);
+    });
+
+    it("no grantee holds it: shared, acceptEdits and Full access grantees", () => {
+      for (const r of [others(), others("acceptEdits"), others("fullAccess")]) {
+        expect(allowed(user("developer"), r, "device.use")).toBe(true);
+        expect(allowed(user("developer"), r, "device.maintain")).toBe(false);
+      }
+    });
+
+    it("a standard user owning a device does not (no Work Zone surface)", () => {
+      expect(allowed(user("standard"), ownDevice, "device.maintain")).toBe(false);
+    });
+
+    it("a lead without ownership does not", () => {
+      expect(allowed(user("lead"), others(), "device.maintain")).toBe(false);
+      expect(allowed(user("lead"), others(null), "device.maintain")).toBe(false);
+    });
+
+    it("no allow rule confers it", () => {
+      const allow = rule({ permission: "device.maintain", effect: "allow" });
+      const allowUser = rule({
+        permission: "device.maintain",
+        effect: "allow",
+        subjectKind: "user",
+        subjectId: "u-1",
+      });
+      for (const role of ["standard", "developer", "lead"] as const) {
+        for (const r of [others(), others("fullAccess"), others(null)]) {
+          expect(allowed(user(role), r, "device.maintain", [allow, allowUser]), role).toBe(false);
+        }
+      }
+    });
+
+    it("a revoked device denies it at the device layer, even for its owner", () => {
+      const revoked = deviceResource({ ownerUserId: "u-1", shared: false, revoked: true }, "u-1");
+      expect(decide(user("developer"), revoked, [], "device.maintain").denial).toMatchObject({
+        layer: "device",
+        reason: "device_revoked",
+      });
+    });
   });
 
   it("a revoked device denies at the device layer, even for its owner", () => {
@@ -1464,6 +1523,7 @@ describe("module catalog rules (Phase 07.3, ADR-0024)", () => {
       for (const keep of [
         "device.read",
         "device.revoke",
+        "device.maintain",
         "bot.manage",
         "work_zone.manage",
         "unit.modules.manage",
@@ -1491,6 +1551,7 @@ describe("module catalog rules (Phase 07.3, ADR-0024)", () => {
     expect(allowed(inT, orgResource(), "device.read", rows)).toBe(true);
     const own = deviceResource({ ownerUserId: "u-t", shared: false, revoked: false }, "u-t");
     expect(allowed(inT, own, "device.revoke", rows)).toBe(true);
+    expect(allowed(inT, own, "device.maintain", rows)).toBe(true);
     expect(allowed(inT, own, "device.use", rows)).toBe(false);
   });
 
