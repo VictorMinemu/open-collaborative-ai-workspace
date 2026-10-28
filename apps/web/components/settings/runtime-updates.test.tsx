@@ -3,13 +3,16 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { CompatFlag } from "./devices-settings";
 import {
+  compatFlag,
   DeviceRuntimeUpdates,
   lastRunText,
   RunList,
   runTrigger,
   runtimeUpdateStatus,
 } from "./runtime-updates";
+import { RuntimeUpdatesField } from "./work-zone-policy-settings";
 
 /**
  * Settings › Devices › Runtime updates (07.11-10, D-05, D-06, PD-15): the status pill for every state, the rows the
@@ -344,5 +347,33 @@ describe("the history list", () => {
     expect(runTrigger({ ...base, trigger: "manual", requestedBy: { id: OWNER, name: "Owen" } })).toBe(
       "By Owen",
     );
+  });
+});
+
+/** 07.11-10 (D-04): every viewer sees the manifest's verdict after a runtime's version; (D-02) the org level select. */
+describe("compatibility flags and the policy select", () => {
+  it("adds a suffix only for versions that are too old or can't run sessions", () => {
+    expect(compatFlag("unsupported")?.text).toBe("· older than supported");
+    expect(compatFlag("broken")?.text).toBe("· can't run sessions");
+    for (const c of ["supported", "graceful", "unknown", undefined] as const)
+      expect(compatFlag(c)).toBeNull();
+  });
+
+  it("renders the chip suffix from the device's runtimeCompatibility", () => {
+    const flag = (compat: Device["runtimeCompatibility"]) =>
+      render(<CompatFlag device={device({ runtimeCompatibility: compat })} runtime="claude-code" />);
+    expect(flag({ "claude-code": "unsupported" })).toContain("· older than supported");
+    expect(flag({ "claude-code": "unsupported" })).toContain('data-testid="runtime-compat-flag"');
+    expect(flag({ "claude-code": "broken" })).toContain("· can&#x27;t run sessions");
+    expect(flag({ "claude-code": "supported" })).toBe("");
+    expect(flag({ codex: "broken" })).toBe("");
+    expect(flag(undefined)).toBe("");
+  });
+
+  it("shows the saved level's description and the note about devices", () => {
+    const html = render(<RuntimeUpdatesField value="notify" onChange={() => undefined} />);
+    expect(html).toContain('data-testid="policy-runtime-updates"');
+    expect(html).toContain("Devices report new versions; the device owner or an admin presses Update now.");
+    expect(html).toContain("A device owner can lower this on the device");
   });
 });

@@ -51,7 +51,7 @@ import {
 } from "@/lib/workzone-queries";
 import { CopyLine } from "./copy-line";
 import { DeviceSharing } from "./device-sharing";
-import { DeviceRuntimeUpdates } from "./runtime-updates";
+import { compatFlag, DeviceRuntimeUpdates } from "./runtime-updates";
 
 const PLATFORM: Record<string, string> = { darwin: "macOS", linux: "Linux", win32: "Windows" };
 
@@ -229,6 +229,7 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
                   <RuntimeLogo runtime={r.id} className="size-4 rounded-[4px]" />
                   {RUNTIMES[r.id].label}
                   {r.version ? <span className="text-muted-foreground">{r.version}</span> : null}
+                  <CompatFlag device={d} runtime={r.id} />
                   {!r.installed ? (
                     <span className="text-muted-foreground">· not installed</span>
                   ) : r.loggedIn ? (
@@ -290,6 +291,16 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
       </Dialog>
     </li>
   );
+}
+
+/** 07.11 (D-04): "· older than supported" / "· can't run sessions" after a runtime's version, for every viewer. */
+export function CompatFlag({ device, runtime }: { device: Device; runtime: RuntimeId }) {
+  const flag = compatFlag(device.runtimeCompatibility?.[runtime]);
+  return flag ? (
+    <span data-testid="runtime-compat-flag" className={flag.className}>
+      {flag.text}
+    </span>
+  ) : null;
 }
 
 /** Whose subscription a runtime on the device uses (D-06). */

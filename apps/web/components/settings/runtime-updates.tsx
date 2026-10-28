@@ -4,6 +4,7 @@ import {
   type Device,
   type InstallMethod,
   RUNTIME_UPDATES_RANK,
+  type RuntimeCompatibility,
   type RuntimeId,
   type RuntimeMaintenanceStatus,
   type RuntimeUpdateRun,
@@ -127,6 +128,20 @@ export function lastRunText(s: RuntimeMaintenanceStatus, now: number = Date.now(
     }
   }
   return s.checkedAt ? `Checked ${relativeTime(s.checkedAt, now)}` : null;
+}
+
+/**
+ * The suffix every viewer sees on a device's runtime chip (D-04): what the Control Plane's manifest says about the
+ * installed version. Amber / red text in the Badge pill colours (AA in both themes); null when it can run sessions.
+ */
+export function compatFlag(
+  compat: RuntimeCompatibility | undefined,
+): { text: string; className: string } | null {
+  if (compat === "unsupported")
+    return { text: "· older than supported", className: "text-amber-700 dark:text-amber-300" };
+  if (compat === "broken")
+    return { text: "· can't run sessions", className: "text-red-700 dark:text-red-300" };
+  return null;
 }
 
 /** Why "Update now" is disabled, or null when it can be pressed (the API decides again). */
@@ -487,7 +502,9 @@ function RunItem({ run }: { run: RuntimeUpdateRun }) {
           </>
         ) : null}
       </p>
-      {run.error ? <p className="break-words text-[13px] text-destructive">{run.error}</p> : null}
+      {run.error ? (
+        <p className="break-words text-[13px] text-red-700 dark:text-red-300">{run.error}</p>
+      ) : null}
       {run.output ? (
         <details className="group text-xs">
           <summary className="flex min-h-11 w-fit cursor-pointer list-none items-center gap-1 text-muted-foreground hover:text-foreground md:min-h-7 [&::-webkit-details-marker]:hidden">

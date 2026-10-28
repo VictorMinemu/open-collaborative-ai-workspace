@@ -1,7 +1,7 @@
 import type { Project } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
 import { ApiRequestError } from "@/lib/api";
-import { audienceRefusal, preselectedRepo } from "./new-session-dialog";
+import { audienceRefusal, preselectedRepo, runtimeCardState, whoUpdates } from "./new-session-dialog";
 
 /**
  * A refused create request words the stale draft with the names the dialog showed (07.9-14, UI-SPEC Copy "Refusal
@@ -131,5 +131,48 @@ describe("preselectedRepo", () => {
   it("a team project with no repository the viewer can use falls back to the default", () => {
     expect(preselectedRepo([offlinePortal, scratch], { teamProjectId: BILLING_ID })).toBe(scratch.id);
     expect(preselectedRepo([hidden, scratch], { teamProjectId: PORTAL_ID })).toBe(scratch.id);
+  });
+});
+
+/** 07.11-10 (D-04, PD-13): a runtime card on the chosen device follows the manifest's verdict on its version. */
+describe("runtimeCardState", () => {
+  const info = { id: "claude-code" as const, installed: true, version: "2.1.200", loggedIn: true };
+  const ask = "ask Owen to update";
+
+  it("keeps a supported or unknown version ready with no note", () => {
+    expect(runtimeCardState(info, "supported", ask)).toEqual({ ready: true, note: null, tone: "muted" });
+    expect(runtimeCardState(info, undefined, ask)).toEqual({ ready: true, note: null, tone: "muted" });
+    expect(runtimeCardState(info, "unknown", ask).ready).toBe(true);
+  });
+
+  it("keeps an unsupported version ready with a warning", () => {
+    expect(runtimeCardState(info, "unsupported", ask)).toEqual({
+      ready: true,
+      note: "2.1.200 is older than supported · ask Owen to update",
+      tone: "warning",
+    });
+  });
+
+  it("disables a version that can't run sessions", () => {
+    expect(runtimeCardState(info, "broken", ask)).toEqual({
+      ready: false,
+      note: "2.1.200 can't run sessions · ask Owen to update",
+      tone: "destructive",
+    });
+  });
+
+  it("still says why a runtime is missing or signed out first", () => {
+    expect(runtimeCardState(undefined, "broken", ask).note).toBe("Not installed on this device");
+    expect(runtimeCardState({ ...info, loggedIn: false }, "broken", ask).note).toBe(
+      "Not signed in on this device",
+    );
+  });
+
+  it("asks the owner, or points the owner to Settings › Devices", () => {
+    expect(whoUpdates({ ownerUserId: LEO, ownerName: "Leo Park" }, PIA)).toBe("ask Leo Park to update");
+    expect(whoUpdates({ ownerUserId: LEO, ownerName: null }, PIA)).toBe("ask its owner to update");
+    expect(whoUpdates({ ownerUserId: LEO, ownerName: "Leo Park" }, LEO)).toBe(
+      "update it in Settings › Devices",
+    );
   });
 });
