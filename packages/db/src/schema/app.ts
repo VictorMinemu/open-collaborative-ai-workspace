@@ -1129,6 +1129,11 @@ export const devices = appSchema.table(
     shareMaxMode: text("share_max_mode", { enum: PERMISSION_MODES }).notNull().default("acceptEdits"),
     /** `RuntimeCatalog[]` from the device's last `capabilities` frame (P-05). */
     runtimeCatalog: jsonb("runtime_catalog").$type<unknown[]>().notNull().default([]),
+    /**
+     * The device's last `runtime.maintenance` snapshot, written only from the device socket (07.11 PD-04); null =
+     * never reported.
+     */
+    runtimeMaintenance: jsonb("runtime_maintenance").$type<unknown>(),
     revokedAt: ts("revoked_at"),
     createdAt: createdAt(),
   },
@@ -1168,21 +1173,31 @@ export const deviceGrants = appSchema.table(
 );
 
 /** Organization Work Zone policy (D-02, D-11): one row per org; an absent row means the defaults. */
-export const workZonePolicies = appSchema.table("work_zone_policies", {
-  organizationId: orgId().primaryKey(),
-  allowedPermissionModes: text("allowed_permission_modes")
-    .array()
-    .notNull()
-    .default(sql`'{plan,default,acceptEdits,auto}'::text[]`),
-  allowFullAccess: boolean("allow_full_access").notNull().default(false),
-  /** `{ "claude-code": string[], codex: string[] }` (partial; `[]` = every reported model). */
-  allowedModels: jsonb("allowed_models").$type<Record<string, unknown>>().notNull().default({}),
-  /** `{ "claude-code": effort | null, codex: effort | null }` (partial; absent = no cap). */
-  maxEffort: jsonb("max_effort").$type<Record<string, unknown>>().notNull().default({}),
-  allowFastMode: boolean("allow_fast_mode").notNull().default(false),
-  updatedBy: uuid("updated_by"),
-  updatedAt: ts("updated_at").notNull().defaultNow(),
-});
+export const workZonePolicies = appSchema.table(
+  "work_zone_policies",
+  {
+    organizationId: orgId().primaryKey(),
+    allowedPermissionModes: text("allowed_permission_modes")
+      .array()
+      .notNull()
+      .default(sql`'{plan,default,acceptEdits,auto}'::text[]`),
+    allowFullAccess: boolean("allow_full_access").notNull().default(false),
+    /** `{ "claude-code": string[], codex: string[] }` (partial; `[]` = every reported model). */
+    allowedModels: jsonb("allowed_models").$type<Record<string, unknown>>().notNull().default({}),
+    /** `{ "claude-code": effort | null, codex: effort | null }` (partial; absent = no cap). */
+    maxEffort: jsonb("max_effort").$type<Record<string, unknown>>().notNull().default({}),
+    allowFastMode: boolean("allow_fast_mode").notNull().default(false),
+    /** Phase 07.11 (D-02): the devices' runtime CLI updates level; a device can only lower it. */
+    runtimeUpdates: text("runtime_updates", { enum: ["automatic", "notify", "off"] })
+      .notNull()
+      .default("automatic"),
+    updatedBy: uuid("updated_by"),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("work_zone_policies_runtime_updates_ck", sql`${t.runtimeUpdates} in ('automatic','notify','off')`),
+  ],
+);
 
 export const deviceEnrollments = appSchema.table(
   "device_enrollments",
@@ -1519,6 +1534,7 @@ export const deviceCommands = appSchema.table(
         "diff.request",
         "session.configure",
         "session.title",
+        "runtime.update",
       ],
     }).notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
@@ -1531,6 +1547,74 @@ export const deviceCommands = appSchema.table(
     ackedAt: ts("acked_at"),
   },
   (t) => [index("device_commands_device_status_idx").on(t.organizationId, t.deviceId, t.status, t.createdAt)],
+);
+
+/**
+ * Runtime CLI update history (Phase 07.11, D-06, PD-04): one row per "Update now" request and per run a device
+ * reports. "Update now" inserts a `requested` row (`command_id`, `requested_by`); the device's `started` frame carrying
+ * that command id adopts it (`run_id`); runs without a command id insert their own row; replays are idempotent by
+ * `run_id`. Rows are written only by the device module. No column ever holds a host path (principle 7).
+ */
+export const deviceRuntimeUpdates = appSchema.table(
+  "device_runtime_updates",
+  {
+    id: id(),
+    organizationId: orgId(),
+    deviceId: uuid("device_id").notNull(),
+    runtime: text("runtime", { enum: ["claude-code", "codex"] }).notNull(),
+    /** Device-generated run id; null while only requested. */
+    runId: uuid("run_id"),
+    /** The `runtime.update` command of an "Update now" request. */
+    commandId: uuid("command_id"),
+    trigger: text("trigger", { enum: ["automatic", "manual", "local"] }).notNull(),
+    requestedBy: uuid("requested_by"),
+    state: text("state", {
+      enum: [
+        "requested",
+        "started",
+        "succeeded",
+        "unchanged",
+        "failed",
+        "skipped_broken",
+        "refused",
+        "expired",
+      ],
+    }).notNull(),
+    fromVersion: text("from_version"),
+    toVersion: text("to_version"),
+    candidate: text("candidate"),
+    method: text("method"),
+    output: text("output"),
+    error: text("error"),
+    requestedAt: ts("requested_at"),
+    startedAt: ts("started_at"),
+    finishedAt: ts("finished_at"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    foreignKey({
+      name: "device_runtime_updates_device_fk",
+      columns: [t.organizationId, t.deviceId],
+      foreignColumns: [devices.organizationId, devices.id],
+    }).onDelete("cascade"),
+    unique("device_runtime_updates_run_uq").on(t.organizationId, t.deviceId, t.runId),
+    /** One pending "Update now" per device and runtime (T-07.11-02-03). */
+    uniqueIndex("device_runtime_updates_requested_uq")
+      .on(t.organizationId, t.deviceId, t.runtime)
+      .where(sql`state = 'requested'`),
+    index("device_runtime_updates_device_idx").on(t.organizationId, t.deviceId, t.createdAt),
+    check("device_runtime_updates_runtime_ck", sql`${t.runtime} in ('claude-code','codex')`),
+    check("device_runtime_updates_trigger_ck", sql`${t.trigger} in ('automatic','manual','local')`),
+    check(
+      "device_runtime_updates_state_ck",
+      sql`${t.state} in ('requested','started','succeeded','unchanged','failed','skipped_broken','refused','expired')`,
+    ),
+    check(
+      "device_runtime_updates_output_len_ck",
+      sql`${t.output} is null or char_length(${t.output}) <= 4096`,
+    ),
+    check("device_runtime_updates_error_len_ck", sql`${t.error} is null or char_length(${t.error}) <= 500`),
+  ],
 );
 
 // ---------------------------------------------------------------- direct AI chat (Phase 5)

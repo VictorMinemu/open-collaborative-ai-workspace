@@ -253,3 +253,129 @@ describe("Work Zone policy (D-02, D-11)", () => {
     expect(b.rows[0]).toEqual({ allowed_permission_modes: ["plan"], allow_full_access: true });
   });
 });
+
+describe("07.11: runtime updates level (D-02)", () => {
+  async function newOrg(name: string): Promise<{ org: string; user: string }> {
+    const org = randomUUID();
+    const user = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, $2, $3)", [
+      org,
+      name,
+      `${name.toLowerCase()}-${org}`,
+    ]);
+    await su.query("insert into auth.user (id, name, email) values ($1, $2, $3)", [
+      user,
+      name,
+      `${user}@${name.toLowerCase()}.test`,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, $3, 'admin')",
+      [org, user, name],
+    );
+    return { org, user };
+  }
+  const levelAudits = async () =>
+    (
+      await su.query(
+        "select metadata from app.audit_events where action = 'work_zone_policy.updated' and metadata->'changed' @> '[\"runtimeUpdates\"]'::jsonb order by occurred_at",
+      )
+    ).rows;
+
+  it("an organization with no policy row reads automatic (the D-02 default)", async () => {
+    expect(DEFAULT_WORK_ZONE_POLICY.runtimeUpdates).toBe("automatic");
+    const { org, user } = await newOrg("Fresh");
+    const policy = await stack.built.core.db.withTenant({ organizationId: org, userId: user }, (tx) =>
+      loadWorkZonePolicy(tx),
+    );
+    expect(policy.runtimeUpdates).toBe("automatic");
+    expect(policy.updatedAt).toBeNull();
+  });
+
+  it("an admin switches it to notify: answered, read back and audited once with the changed key", async () => {
+    const before = await admin.request("GET", "/api/v1/work-zone-policy");
+    expect(before.status, JSON.stringify(before.body)).toBe(200);
+    expect(before.body).toMatchObject({ runtimeUpdates: "automatic" });
+
+    const res = await put({ runtimeUpdates: "notify" });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({ runtimeUpdates: "notify" });
+    const read = await admin.request("GET", "/api/v1/work-zone-policy");
+    expect(read.body).toMatchObject({ runtimeUpdates: "notify" });
+    const row = await su.query(
+      "select runtime_updates from app.work_zone_policies where organization_id = $1",
+      [orgId],
+    );
+    expect(row.rows[0].runtime_updates).toBe("notify");
+
+    const audits = await levelAudits();
+    expect(audits).toHaveLength(1);
+    expect(audits[0].metadata.changed).toEqual(["runtimeUpdates"]);
+
+    // The same body again changes nothing and audits nothing.
+    expect((await put({ runtimeUpdates: "notify" })).status).toBe(200);
+    expect(await levelAudits()).toHaveLength(1);
+  });
+
+  it("an unknown level is refused by the schema and nothing is written", async () => {
+    const res = await put({ runtimeUpdates: "sometimes" });
+    expect(res.status).toBe(400);
+    const row = await su.query(
+      "select runtime_updates from app.work_zone_policies where organization_id = $1",
+      [orgId],
+    );
+    expect(row.rows[0].runtime_updates).toBe("notify");
+  });
+
+  it("a developer can neither read nor change it", async () => {
+    expect((await dana.request("GET", "/api/v1/work-zone-policy")).status).toBe(403);
+    expect((await put({ runtimeUpdates: "off" }, dana)).status).toBe(403);
+    const row = await su.query(
+      "select runtime_updates from app.work_zone_policies where organization_id = $1",
+      [orgId],
+    );
+    expect(row.rows[0].runtime_updates).toBe("notify");
+    expect(await levelAudits()).toHaveLength(1);
+  });
+
+  it("another organization still reads automatic, with or without its own row", async () => {
+    const { org, user } = await newOrg("Beta");
+    const { db } = stack.built.core;
+    const read = () => db.withTenant({ organizationId: org, userId: user }, (tx) => loadWorkZonePolicy(tx));
+    expect((await read()).runtimeUpdates).toBe("automatic");
+    await su.query(
+      "insert into app.work_zone_policies (organization_id, allow_fast_mode) values ($1, true)",
+      [org],
+    );
+    expect(await read()).toMatchObject({ runtimeUpdates: "automatic", allowFastMode: true });
+    // Not vacuous: org A reads its own notify.
+    const a = await db.withTenant({ organizationId: orgId, userId: null }, (tx) => loadWorkZonePolicy(tx));
+    expect(a.runtimeUpdates).toBe("notify");
+  });
+
+  it("a stored level that no longer parses reads back as automatic (tolerant read)", async () => {
+    const { org, user } = await newOrg("Legacy");
+    await su.query("insert into app.work_zone_policies (organization_id) values ($1)", [org]);
+    // Only a superuser with the check constraint dropped can store an unknown level; restored right after.
+    await su.query(
+      "alter table app.work_zone_policies drop constraint work_zone_policies_runtime_updates_ck",
+    );
+    try {
+      await su.query(
+        "update app.work_zone_policies set runtime_updates = 'sometimes' where organization_id = $1",
+        [org],
+      );
+      const policy = await stack.built.core.db.withTenant({ organizationId: org, userId: user }, (tx) =>
+        loadWorkZonePolicy(tx),
+      );
+      expect(policy.runtimeUpdates).toBe("automatic");
+    } finally {
+      await su.query(
+        "update app.work_zone_policies set runtime_updates = 'automatic' where organization_id = $1",
+        [org],
+      );
+      await su.query(
+        "alter table app.work_zone_policies add constraint work_zone_policies_runtime_updates_ck check (runtime_updates in ('automatic','notify','off'))",
+      );
+    }
+  });
+});

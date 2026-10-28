@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { IsoDateTime } from "./common";
+import { RuntimeUpdatesLevel } from "./runtime-maintenance";
 import { PermissionMode } from "./session-events";
 import { EffortLevel } from "./session-settings";
 
@@ -25,6 +26,12 @@ export const WorkZonePolicy = z.object({
   maxEffort: z.object({ "claude-code": EffortLevel.nullable(), codex: EffortLevel.nullable() }),
   /** Fast mode is metered (D-11): off by default. */
   allowFastMode: z.boolean(),
+  /**
+   * Phase 07.11 (D-02): whether the organization's devices update their Claude Code / Codex CLIs on their own.
+   * `automatic` by default; a device can only lower it (the effective level is the lower of the two). D-10: a device
+   * that never received it behaves as `notify`.
+   */
+  runtimeUpdates: RuntimeUpdatesLevel,
   /** null = no policy saved yet (the defaults apply). */
   updatedAt: IsoDateTime.nullable(),
 });
@@ -37,6 +44,7 @@ export const DEFAULT_WORK_ZONE_POLICY: Omit<WorkZonePolicy, "updatedAt"> = {
   allowedModels: { "claude-code": [], codex: [] },
   maxEffort: { "claude-code": null, codex: null },
   allowFastMode: false,
+  runtimeUpdates: "automatic",
 };
 
 /** `PUT /api/v1/work-zone-policy`: any subset. */

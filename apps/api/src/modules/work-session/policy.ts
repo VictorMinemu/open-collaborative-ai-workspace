@@ -3,6 +3,7 @@ import {
   EffortLevel,
   PermissionMode,
   type RuntimeId,
+  RuntimeUpdatesLevel,
   type UpdateWorkZonePolicyRequest,
   type WorkZonePolicy,
   type WorkZonePolicyView,
@@ -39,12 +40,14 @@ function fromRow(row: PolicyRow | undefined): WorkZonePolicy {
     const e = EffortLevel.nullable().safeParse(efforts[rt]);
     if (e.success) maxEffort[rt] = e.data;
   }
+  const runtimeUpdates = RuntimeUpdatesLevel.safeParse(row.runtimeUpdates);
   return {
     allowedPermissionModes: modes.success ? [...new Set(modes.data)] : d.allowedPermissionModes,
     allowFullAccess: row.allowFullAccess,
     allowedModels,
     maxEffort,
     allowFastMode: row.allowFastMode,
+    runtimeUpdates: runtimeUpdates.success ? runtimeUpdates.data : d.runtimeUpdates,
     updatedAt: new Date(row.updatedAt).toISOString(),
   };
 }
@@ -67,6 +70,7 @@ function changedKeys(before: WorkZonePolicy, after: WorkZonePolicy): string[] {
     out.push("allowedModels");
   if (RUNTIMES.some((rt) => before.maxEffort[rt] !== after.maxEffort[rt])) out.push("maxEffort");
   if (before.allowFastMode !== after.allowFastMode) out.push("allowFastMode");
+  if (before.runtimeUpdates !== after.runtimeUpdates) out.push("runtimeUpdates");
   return out;
 }
 
@@ -99,6 +103,7 @@ export async function saveWorkZonePolicy(
         }
       : before.maxEffort,
     allowFastMode: patch.allowFastMode ?? before.allowFastMode,
+    runtimeUpdates: patch.runtimeUpdates ?? before.runtimeUpdates,
     updatedAt: before.updatedAt,
   };
   if (next.allowedPermissionModes.length === 0) {
@@ -113,6 +118,7 @@ export async function saveWorkZonePolicy(
     allowedModels: next.allowedModels,
     maxEffort: next.maxEffort,
     allowFastMode: next.allowFastMode,
+    runtimeUpdates: next.runtimeUpdates,
     updatedBy: actorUserId,
     updatedAt: new Date().toISOString(),
   };

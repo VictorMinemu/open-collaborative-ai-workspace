@@ -50,6 +50,11 @@ export const CommandKind = z.enum([
   "session.configure",
   /** Ask the session runtime's small model for a short title (D-18, P-15); answered by a `title.result` frame. */
   "session.title",
+  /**
+   * Run this device's own detected update for one runtime (Phase 07.11, D-05): payload `RuntimeUpdatePayload` only;
+   * acked when accepted, the result arrives as `runtime.update.run` frames.
+   */
+  "runtime.update",
 ]);
 export type CommandKind = z.infer<typeof CommandKind>;
 
