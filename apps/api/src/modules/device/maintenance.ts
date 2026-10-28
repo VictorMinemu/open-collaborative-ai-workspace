@@ -3,10 +3,13 @@ import {
   EventTypes,
   IdParams,
   InstallMethod,
+  RequestRuntimeUpdateResponse,
   type RuntimeId,
   type RuntimeMaintenanceFrame,
   type RuntimeMaintenanceStatus,
   RuntimeUpdateHistoryQuery,
+  RuntimeUpdateParams,
+  type RuntimeUpdatePayload,
   type RuntimeUpdateRun,
   type RuntimeUpdateRunFrame,
   RuntimeUpdateRunList,
@@ -14,11 +17,11 @@ import {
   RuntimeVersion,
   scrubHostPaths,
 } from "@ocw/contracts";
-import { deviceRuntimeUpdates, devices, type Tx } from "@ocw/db";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { type deviceCommands, deviceRuntimeUpdates, devices, type Tx } from "@ocw/db";
+import { and, desc, eq, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../core";
-import { notFound } from "../../lib/errors";
+import { conflict, notFound } from "../../lib/errors";
 import type { AuditEventInput, AuditService } from "../audit";
 import { memberDirectory, type PermissionService } from "../organization";
 import type { RealtimeService } from "../realtime";
@@ -45,6 +48,12 @@ export interface MaintenanceDeps {
 }
 
 type RunRow = typeof deviceRuntimeUpdates.$inferSelect;
+type CommandRow = typeof deviceCommands.$inferSelect;
+
+/** "Update now" waits at most this long for the device's answer before a new request may replace it (PD-04). */
+export const RUNTIME_UPDATE_REQUEST_TTL_MS = 60 * 60_000;
+const REQUESTED_UQ = "device_runtime_updates_requested_uq";
+const RUNTIME_LABEL: Readonly<Record<RuntimeId, string>> = { "claude-code": "Claude Code", codex: "Codex" };
 
 /** The stored snapshot: the device's report plus whether it had the org level when it sent it (D-10). */
 const StoredMaintenance = DeviceRuntimeMaintenance.omit({ orgLevel: true }).extend({
@@ -441,24 +450,81 @@ export async function onRuntimeUpdateRun(
   if (changed) await pingOrg(tx, deps, device, locked.status);
 }
 
+/**
+ * The device's ack of a `runtime.update` command (PD-08): accepted → the run frames follow; refused (updates off on
+ * the device, already up to date, …) → the requested row becomes `refused` with the scrubbed reason, audited as a
+ * finished run with `result: "error"`.
+ */
+export async function onRuntimeUpdateAck(
+  tx: Tx,
+  deps: MaintenanceDeps,
+  device: DeviceRef,
+  command: CommandRow,
+  ok: boolean,
+  error: string | null,
+): Promise<void> {
+  if (ok) return;
+  // The device row first, as every other maintenance write does (one lock order, no deadlock with the run frames).
+  const locked = await lockDevice(tx, device);
+  if (!locked) return;
+  const [row] = await tx
+    .update(deviceRuntimeUpdates)
+    .set({
+      state: "refused",
+      error: scrubHostPaths(error ?? "refused by the device").slice(0, 500),
+      finishedAt: sql`now()`,
+    })
+    .where(
+      and(
+        eq(deviceRuntimeUpdates.deviceId, device.deviceId),
+        eq(deviceRuntimeUpdates.commandId, command.id),
+        eq(deviceRuntimeUpdates.state, "requested"),
+      ),
+    )
+    .returning();
+  if (!row) return;
+  await auditRun(tx, deps, device, row, "device.runtime_update_finished");
+  await pingOrg(tx, deps, device, locked.status);
+}
+
 // ---------------------------------------------------------------- routes (owner and admins: device.maintain)
 
+function pgError(err: unknown): { code?: string; constraint?: string } {
+  const e = err as { code?: string; constraint?: string; cause?: { code?: string; constraint?: string } };
+  return e?.cause?.code ? e.cause : (e ?? {});
+}
+
+const updatePending = () =>
+  conflict("An update of this CLI is already waiting for the device", "update_pending");
+
+function manualUpdateMessage(runtime: RuntimeId, status: RuntimeMaintenanceStatus): string {
+  const how = status.updateCommand
+    ? ` Run \`${status.updateCommand}\` on the device.`
+    : " Update it on the device.";
+  return status.reason === "needs_admin"
+    ? `${RUNTIME_LABEL[runtime]} on this device needs administrator rights to update.${how}`
+    : `${RUNTIME_LABEL[runtime]} on this device was installed in a way OCW can't update.${how}`;
+}
+
 /**
- * `GET /devices/:id/runtime-updates` (the last 50, newest first, optionally one runtime), decided by the resolver on
- * `device.maintain` (the device owner or an admin, D-11); a device the caller cannot see, or a revoked one, is 404.
+ * `GET /devices/:id/runtime-updates` (the last 50, newest first, optionally one runtime) and `POST
+ * /devices/:id/runtimes/:runtime/update` ("Update now"). Both are decided by the resolver on `device.maintain` (the
+ * device owner or an admin, D-11); a device the caller cannot see, or a revoked one, is 404.
  */
 export function registerDeviceMaintenanceRoutes(
   app: App,
   core: Core,
-  _hub: DeviceHub,
+  hub: DeviceHub,
   perms: PermissionService,
 ): void {
   const user = { config: { authz: "user" as const }, preHandler: core.identity.requireUser };
   const tags = ["device"];
 
-  async function maintainable(req: Parameters<typeof authOf>[0], tx: Tx, deviceId: string) {
+  /** The device, when the caller holds `device.maintain` on it; `lock` serializes "Update now" per device. */
+  async function maintainable(req: Parameters<typeof authOf>[0], tx: Tx, deviceId: string, lock: boolean) {
     const userId = authOf(req).userId;
-    const [row] = await tx.select().from(devices).where(eq(devices.id, deviceId)).for("update");
+    const query = tx.select().from(devices).where(eq(devices.id, deviceId));
+    const [row] = lock ? await query.for("update") : await query;
     if (!row || row.revokedAt) throw notFound("Device not found");
     await perms.assertCan(
       req,
@@ -482,7 +548,7 @@ export function registerDeviceMaintenanceRoutes(
     },
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
-        const row = await maintainable(req, tx, req.params.id);
+        const row = await maintainable(req, tx, req.params.id, false);
         const rows = await tx
           .select()
           .from(deviceRuntimeUpdates)
@@ -496,6 +562,91 @@ export function registerDeviceMaintenanceRoutes(
           .limit(50);
         const names = await memberDirectory(tx);
         return { runs: rows.map((r) => toRuntimeUpdateRun(r, names)) };
+      }),
+  );
+
+  app.post(
+    "/devices/:id/runtimes/:runtime/update",
+    {
+      ...user,
+      schema: { tags, params: RuntimeUpdateParams, response: { 200: RequestRuntimeUpdateResponse } },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const auth = authOf(req);
+        const runtime = req.params.runtime;
+        const row = await maintainable(req, tx, req.params.id, true);
+        if (row.status !== "online") {
+          throw conflict("This device is offline. Update it once it is connected", "device_offline");
+        }
+        if ((await hub.runtimePolicy(tx)) === "off") {
+          throw conflict("Runtime updates are off for this organization", "runtime_updates_off");
+        }
+        const status = storedMaintenance(row.runtimeMaintenance)?.runtimes.find((s) => s.runtime === runtime);
+        if (status && !status.canUpdate && (status.reason === "manual" || status.reason === "needs_admin")) {
+          throw conflict(manualUpdateMessage(runtime, status), "manual_update");
+        }
+        const mine = and(
+          eq(deviceRuntimeUpdates.deviceId, row.id),
+          eq(deviceRuntimeUpdates.runtime, runtime),
+          eq(deviceRuntimeUpdates.state, "requested"),
+        );
+        // PD-04: a request the device never answered within the hour no longer blocks a new one.
+        await tx
+          .update(deviceRuntimeUpdates)
+          .set({ state: "expired", finishedAt: sql`now()` })
+          .where(
+            and(
+              mine,
+              lt(
+                deviceRuntimeUpdates.requestedAt,
+                new Date(Date.now() - RUNTIME_UPDATE_REQUEST_TTL_MS).toISOString(),
+              ),
+            ),
+          );
+        const [waiting] = await tx
+          .select({ id: deviceRuntimeUpdates.id })
+          .from(deviceRuntimeUpdates)
+          .where(mine)
+          .limit(1);
+        if (waiting) throw updatePending();
+
+        // D-05: the command names the runtime and nothing else; the device picks the method and the version.
+        const payload: RuntimeUpdatePayload = { runtime };
+        const commandId = await hub.enqueue(tx, {
+          deviceId: row.id,
+          workSessionId: null,
+          kind: "runtime.update",
+          payload,
+        });
+        let run: RunRow | undefined;
+        try {
+          [run] = await tx
+            .insert(deviceRuntimeUpdates)
+            .values({
+              organizationId: auth.organizationId,
+              deviceId: row.id,
+              runtime,
+              commandId,
+              trigger: "manual",
+              requestedBy: auth.userId,
+              state: "requested",
+              requestedAt: sql`now()`,
+            })
+            .returning();
+        } catch (err) {
+          // The device row lock serializes requests; the partial unique index is the backstop (T-07.11-06-06).
+          if (pgError(err).constraint === REQUESTED_UQ) throw updatePending();
+          throw err;
+        }
+        await core.audit.record(tx, {
+          action: "device.runtime_update_requested",
+          resourceType: "device",
+          resourceId: row.id,
+          deviceId: row.id,
+          metadata: { runtime },
+        });
+        return { run: toRuntimeUpdateRun(run!, await memberDirectory(tx)) };
       }),
   );
 }

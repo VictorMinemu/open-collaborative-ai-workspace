@@ -404,3 +404,197 @@ describe("07.11-06 Task 1: a device reports its CLIs and updates itself; owners 
     expect(errorCode(unknown)).toBe("not_found");
   });
 });
+
+const ZERO_SESSION = "00000000-0000-0000-0000-000000000000";
+const updateUrl = (deviceId: string, runtime = "claude-code") =>
+  `/api/v1/devices/${deviceId}/runtimes/${runtime}/update`;
+
+describe("07.11-06 Task 2: Update now (owner or admin, one pending at a time, payload = runtime id)", () => {
+  it("the owner's request is audited with the runtime only, queues { runtime } exactly, and the device's run adopts it", async () => {
+    const res = await owen.request("POST", updateUrl(dId));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const run = res.body!.run as Row;
+    expect(run).toMatchObject({
+      runtime: "claude-code",
+      state: "requested",
+      trigger: "manual",
+      requestedBy: { id: owenId, name: "Owen" },
+      startedAt: null,
+      finishedAt: null,
+    });
+    expect(typeof run.requestedAt).toBe("string");
+
+    const requested = await audits("device.runtime_update_requested", dId);
+    expect(requested).toHaveLength(1);
+    expect(requested[0]).toMatchObject({ actor_kind: "user", actor_id: owenId, user_id: owenId });
+    expect(requested[0]!.metadata).toEqual({ runtime: "claude-code" });
+
+    // D-05: the command names the runtime and nothing else.
+    const cmd = await d.command("runtime.update");
+    expect(cmd.payload).toEqual({ runtime: "claude-code" });
+    expect(cmd.sessionId).toBe(ZERO_SESSION);
+    expect((await runs(dId)).find((r) => r.id === run.id)!.command_id).toBe(cmd.id);
+
+    d.ack(cmd.id);
+    const runId = randomUUID();
+    d.updateRun({
+      runId,
+      trigger: "manual",
+      commandId: cmd.id,
+      fromVersion: "2.1.300",
+      candidate: "2.1.301",
+    });
+    await barrier(d, dId, CURRENT);
+    const adopted = (await runs(dId)).find((r) => r.id === run.id)!;
+    expect(adopted).toMatchObject({
+      state: "started",
+      run_id: runId,
+      requested_by: owenId,
+      method: "native",
+    });
+    const started = (await audits("device.runtime_update_started", dId)).filter(
+      (a) => a.actor_kind === "user",
+    );
+    expect(started).toHaveLength(1);
+    expect(started[0]).toMatchObject({ actor_id: owenId, user_id: owenId, metadata: { trigger: "manual" } });
+
+    d.updateRun({
+      runId,
+      trigger: "manual",
+      commandId: cmd.id,
+      phase: "finished",
+      outcome: "succeeded",
+      fromVersion: "2.1.300",
+      toVersion: "2.1.301",
+      candidate: "2.1.301",
+    });
+    await barrier(d, dId, CURRENT);
+    expect((await runs(dId)).find((r) => r.id === run.id)!.state).toBe("succeeded");
+    const finished = (await audits("device.runtime_update_finished", dId)).filter(
+      (a) => a.actor_kind === "user",
+    );
+    expect(finished).toHaveLength(1);
+    expect(finished[0]).toMatchObject({
+      actor_id: owenId,
+      result: "success",
+      metadata: { outcome: "succeeded", from: "2.1.300", to: "2.1.301", trigger: "manual" },
+    });
+    expect(await runs(dId)).toHaveLength(2);
+  });
+
+  it("a second request while one waits is 409 update_pending; one older than an hour expires and a new one is accepted", async () => {
+    const first = await owen.request("POST", updateUrl(dId));
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    const firstId = (first.body!.run as Row).id as string;
+    const again = await ada.request("POST", updateUrl(dId));
+    expect(again.status, JSON.stringify(again.body)).toBe(409);
+    expect(errorCode(again)).toBe("update_pending");
+
+    await su.query(
+      "update app.device_runtime_updates set requested_at = now() - interval '2 hours' where id = $1",
+      [firstId],
+    );
+    const fresh = await ada.request("POST", updateUrl(dId));
+    expect(fresh.status, JSON.stringify(fresh.body)).toBe(200);
+    expect((fresh.body!.run as Row).requestedBy).toEqual({ id: adaId, name: "Ada Admin" });
+    const rows = await runs(dId);
+    expect(rows.find((r) => r.id === firstId)!.state).toBe("expired");
+    expect(rows.filter((r) => r.state === "requested")).toHaveLength(1);
+  });
+
+  it("the device refusing the command marks the request refused with its reason, audited as an error", async () => {
+    // Owen's expired command and Ada's both reach the device, in order.
+    const expired = await d.command("runtime.update");
+    d.ack(expired.id);
+    const cmd = await d.command("runtime.update");
+    expect(cmd.payload).toEqual({ runtime: "claude-code" });
+    d.ack(cmd.id, false, "updates are off on this device");
+    const refused = await eventually(async () =>
+      (await runs(dId)).find((r) => r.command_id === cmd.id && r.state === "refused"),
+    );
+    expect(refused).toMatchObject({ error: "updates are off on this device", requested_by: adaId });
+    expect(refused.finished_at).not.toBeNull();
+    const finished = (await audits("device.runtime_update_finished", dId)).filter(
+      (a) => a.actor_id === adaId,
+    );
+    expect(finished).toHaveLength(1);
+    expect(finished[0]).toMatchObject({
+      actor_kind: "user",
+      result: "error",
+      metadata: { runtime: "claude-code", outcome: "refused", trigger: "manual" },
+    });
+    // The expired request stays expired (its accepted ack changes nothing).
+    expect((await runs(dId)).find((r) => r.command_id === expired.id)!.state).toBe("expired");
+
+    const history = await owen.request("GET", `/api/v1/devices/${dId}/runtime-updates`);
+    expect(history.status).toBe(200);
+    const listed = history.body!.runs as Row[];
+    expect(listed[0]).toMatchObject({ state: "refused", error: "updates are off on this device" });
+    expect(listed.map((r) => r.state)).toEqual(["refused", "expired", "succeeded", "succeeded"]);
+  });
+
+  it("only the owner and admins may ask: a grantee and a member get 403; bad runtime 400; unknown or revoked device 404", async () => {
+    for (const viewer of [gail, max]) {
+      const res = await viewer.request("POST", updateUrl(dId));
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+    }
+    const bad = await owen.request("POST", updateUrl(dId, "gemini"));
+    expect(bad.status).toBe(400);
+    const unknown = await ada.request("POST", updateUrl(randomUUID()));
+    expect(unknown.status).toBe(404);
+
+    const old = await pairDevice(stack, owen, "Owen's old laptop");
+    const revoke = await owen.request("DELETE", `/api/v1/devices/${old.deviceId}`);
+    expect(revoke.status, JSON.stringify(revoke.body)).toBe(200);
+    for (const viewer of [owen, ada]) {
+      expect((await viewer.request("POST", updateUrl(old.deviceId))).status).toBe(404);
+      expect((await viewer.request("GET", `/api/v1/devices/${old.deviceId}/runtime-updates`)).status).toBe(
+        404,
+      );
+    }
+    // Nobody but the owner and Ada asked: still one requested audit per accepted request.
+    expect(await audits("device.runtime_update_requested", dId)).toHaveLength(3);
+  });
+
+  it("refusals: an offline device is 409 device_offline; a CLI the device cannot update is 409 manual_update", async () => {
+    const asleep = await pairDevice(stack, owen, "Owen's iMac");
+    const offline = await owen.request("POST", updateUrl(asleep.deviceId));
+    expect(offline.status, JSON.stringify(offline.body)).toBe(409);
+    expect(errorCode(offline)).toBe("device_offline");
+
+    d.maintenance(
+      snapshot({
+        method: "homebrew_cask",
+        location: null,
+        canUpdate: false,
+        reason: "manual",
+        updateCommand: "brew upgrade --cask claude-code",
+      }),
+    );
+    await eventually(
+      async () => (await deviceRow(dId)).runtime_maintenance?.runtimes[0]?.canUpdate === false,
+    );
+    const manual = await owen.request("POST", updateUrl(dId));
+    expect(manual.status, JSON.stringify(manual.body)).toBe(409);
+    expect(errorCode(manual)).toBe("manual_update");
+    expect((manual.body!.error as { message: string }).message).toContain("brew upgrade --cask claude-code");
+
+    await barrier(
+      d,
+      dId,
+      snapshot({
+        canUpdate: false,
+        reason: "needs_admin",
+        updateCommand: "sudo npm install -g @anthropic-ai/claude-code",
+      }),
+    );
+    const admin = await ada.request("POST", updateUrl(dId));
+    expect(admin.status, JSON.stringify(admin.body)).toBe(409);
+    expect(errorCode(admin)).toBe("manual_update");
+    expect((admin.body!.error as { message: string }).message).toContain("administrator");
+
+    // Codex on the same device is still updatable; restore the snapshot for the next cases.
+    await barrier(d, dId, CURRENT);
+    expect(await audits("device.runtime_update_requested", dId)).toHaveLength(3);
+  });
+});

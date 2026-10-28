@@ -24,7 +24,12 @@ import type { WebSocket } from "ws";
 import type { RedisBus } from "../../lib/redis";
 import type { AuditService } from "../audit";
 import type { RealtimeService } from "../realtime";
-import { type MaintenanceDeps, onRuntimeMaintenance, onRuntimeUpdateRun } from "./maintenance";
+import {
+  type MaintenanceDeps,
+  onRuntimeMaintenance,
+  onRuntimeUpdateAck,
+  onRuntimeUpdateRun,
+} from "./maintenance";
 
 /** The authenticated device behind a Device Link socket (from the bearer token lookup). */
 export interface DeviceRef {
@@ -406,11 +411,15 @@ export class DeviceHub {
             ),
           )
           .returning();
+        // 07.11 (PD-08): a device-level `runtime.update` is answered here, in the same transaction; no session has it.
+        if (updated?.kind === "runtime.update") {
+          await onRuntimeUpdateAck(tx, this.maintenance, device, updated, ok, error);
+        }
         return updated ?? null;
       },
     );
     // A repeated ack (redelivered command the daemon had already executed) changes nothing.
-    if (row) await this.handler?.onCommandResult(device, row, ok, error);
+    if (row && row.kind !== "runtime.update") await this.handler?.onCommandResult(device, row, ok, error);
   }
 
   async onDiffResult(device: DeviceRef, frame: DiffResultFrame): Promise<void> {
@@ -595,6 +604,12 @@ export class DeviceHub {
   private async reportUndelivered(device: DeviceRef, rows: DeviceCommandRow[]): Promise<void> {
     for (const row of rows) {
       try {
+        if (row.kind === "runtime.update") {
+          await this.opts.db.withTenant({ organizationId: device.organizationId, userId: null }, (tx) =>
+            onRuntimeUpdateAck(tx, this.maintenance, device, row, false, row.error),
+          );
+          continue;
+        }
         await this.handler?.onCommandResult(device, row, false, row.error, "hub");
       } catch (err) {
         this.opts.log.error({ err, commandId: row.id }, "device command failure handling failed");
