@@ -2,9 +2,7 @@
   "version": "8",
   "dialect": "postgres",
   "id": "e9591a22-5236-4e59-9afd-805a3e330b0d",
-  "prevIds": [
-    "25c0f42c-04f9-4ade-8d18-84dfe17acd8a"
-  ],
+  "prevIds": ["25c0f42c-04f9-4ade-8d18-84dfe17acd8a"],
   "ddl": [
     {
       "name": "app",
@@ -18629,14 +18627,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_credentials_organization_id_organization_id_fkey",
@@ -18646,14 +18640,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "agent_id"
-      ],
+      "columns": ["agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_credentials_agent_id_agents_id_fkey",
@@ -18663,14 +18653,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_limit_notices_organization_id_organization_id_fkey",
@@ -18680,14 +18666,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_member_data_organization_id_organization_id_fkey",
@@ -18697,16 +18679,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "agent_id"
-      ],
+      "columns": ["organization_id", "agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_member_data_agent_fk",
@@ -18716,16 +18692,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "conversation_id"
-      ],
+      "columns": ["organization_id", "conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_member_data_conversation_fk",
@@ -18735,14 +18705,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_memories_organization_id_organization_id_fkey",
@@ -18752,14 +18718,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "agent_id"
-      ],
+      "columns": ["agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_memories_agent_id_agents_id_fkey",
@@ -18769,14 +18731,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_template_versions_organization_id_organization_id_fkey",
@@ -18786,14 +18744,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "template_id"
-      ],
+      "columns": ["template_id"],
       "schemaTo": "app",
       "tableTo": "agent_templates",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_template_versions_template_id_agent_templates_id_fkey",
@@ -18803,14 +18757,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_templates_organization_id_organization_id_fkey",
@@ -18820,14 +18770,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "unit_id"
-      ],
+      "columns": ["unit_id"],
       "schemaTo": "app",
       "tableTo": "org_units",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "name": "agent_templates_unit_id_org_units_id_fkey",
@@ -18837,14 +18783,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_tool_calls_organization_id_organization_id_fkey",
@@ -18854,14 +18796,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_turns_organization_id_organization_id_fkey",
@@ -18871,14 +18809,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "agent_id"
-      ],
+      "columns": ["agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_turns_agent_id_agents_id_fkey",
@@ -18888,14 +18822,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_usage_daily_organization_id_organization_id_fkey",
@@ -18905,14 +18835,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "agent_id"
-      ],
+      "columns": ["agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_usage_daily_agent_id_agents_id_fkey",
@@ -18922,14 +18848,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_vault_grants_organization_id_organization_id_fkey",
@@ -18939,14 +18861,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "agent_id"
-      ],
+      "columns": ["agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_vault_grants_agent_id_agents_id_fkey",
@@ -18956,14 +18874,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "vault_item_id"
-      ],
+      "columns": ["vault_item_id"],
       "schemaTo": "app",
       "tableTo": "vault_items",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agent_vault_grants_vault_item_id_vault_items_id_fkey",
@@ -18973,14 +18887,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "agents_organization_id_organization_id_fkey",
@@ -18990,14 +18900,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "unit_id"
-      ],
+      "columns": ["unit_id"],
       "schemaTo": "app",
       "tableTo": "org_units",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "name": "agents_unit_id_org_units_id_fkey",
@@ -19007,14 +18913,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "template_id"
-      ],
+      "columns": ["template_id"],
       "schemaTo": "app",
       "tableTo": "agent_templates",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "agents_template_id_agent_templates_id_fkey",
@@ -19024,14 +18926,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_chat_grants_organization_id_organization_id_fkey",
@@ -19041,14 +18939,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_chat_grants_conversation_id_conversations_id_fkey",
@@ -19058,14 +18952,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_chat_policies_organization_id_organization_id_fkey",
@@ -19075,14 +18965,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_chat_shares_organization_id_organization_id_fkey",
@@ -19092,14 +18978,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_chat_shares_conversation_id_conversations_id_fkey",
@@ -19109,14 +18991,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_chats_conversation_id_conversations_id_fkey",
@@ -19126,14 +19004,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_chats_organization_id_organization_id_fkey",
@@ -19143,14 +19017,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_generations_organization_id_organization_id_fkey",
@@ -19160,14 +19030,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_generations_conversation_id_conversations_id_fkey",
@@ -19177,14 +19043,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "assistant_message_id"
-      ],
+      "columns": ["assistant_message_id"],
       "schemaTo": "app",
       "tableTo": "messages",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_generations_assistant_message_id_messages_id_fkey",
@@ -19194,14 +19056,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "message_id"
-      ],
+      "columns": ["message_id"],
       "schemaTo": "app",
       "tableTo": "messages",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_message_context_message_id_messages_id_fkey",
@@ -19211,14 +19069,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_message_context_organization_id_organization_id_fkey",
@@ -19228,14 +19082,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_message_context_conversation_id_conversations_id_fkey",
@@ -19245,14 +19095,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "grant_id"
-      ],
+      "columns": ["grant_id"],
       "schemaTo": "app",
       "tableTo": "ai_chat_grants",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "ai_message_context_grant_id_ai_chat_grants_id_fkey",
@@ -19262,14 +19108,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "answered_by_generation_id"
-      ],
+      "columns": ["answered_by_generation_id"],
       "schemaTo": "app",
       "tableTo": "ai_generations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "ai_message_context_TfCJ8DLlUbSc_fkey",
@@ -19279,14 +19121,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_usage_daily_organization_id_organization_id_fkey",
@@ -19296,14 +19134,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_usage_records_organization_id_organization_id_fkey",
@@ -19313,14 +19147,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "ai_user_preferences_organization_id_organization_id_fkey",
@@ -19330,14 +19160,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "approval_requests_organization_id_organization_id_fkey",
@@ -19347,14 +19173,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "requested_by_agent_id"
-      ],
+      "columns": ["requested_by_agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "approval_requests_requested_by_agent_id_agents_id_fkey",
@@ -19364,14 +19186,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "card_message_id"
-      ],
+      "columns": ["card_message_id"],
       "schemaTo": "app",
       "tableTo": "messages",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "approval_requests_card_message_id_messages_id_fkey",
@@ -19381,14 +19199,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "attachments_organization_id_organization_id_fkey",
@@ -19398,14 +19212,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "attachments_conversation_id_conversations_id_fkey",
@@ -19415,14 +19225,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "message_id"
-      ],
+      "columns": ["message_id"],
       "schemaTo": "app",
       "tableTo": "messages",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "attachments_message_id_messages_id_fkey",
@@ -19432,14 +19238,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "work_prompt_id"
-      ],
+      "columns": ["work_prompt_id"],
       "schemaTo": "app",
       "tableTo": "work_prompts",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "attachments_work_prompt_id_work_prompts_id_fkey",
@@ -19449,14 +19251,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "audit_events_organization_id_organization_id_fkey",
@@ -19466,14 +19264,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "board_cards_organization_id_organization_id_fkey",
@@ -19483,16 +19277,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "message_id",
-        "conversation_id"
-      ],
+      "columns": ["message_id", "conversation_id"],
       "schemaTo": "app",
       "tableTo": "messages",
-      "columnsTo": [
-        "id",
-        "conversation_id"
-      ],
+      "columnsTo": ["id", "conversation_id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "board_cards_message_fk",
@@ -19502,16 +19290,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "column_id",
-        "conversation_id"
-      ],
+      "columns": ["column_id", "conversation_id"],
       "schemaTo": "app",
       "tableTo": "board_columns",
-      "columnsTo": [
-        "id",
-        "conversation_id"
-      ],
+      "columnsTo": ["id", "conversation_id"],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "name": "board_cards_column_fk",
@@ -19521,14 +19303,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "boards",
-      "columnsTo": [
-        "conversation_id"
-      ],
+      "columnsTo": ["conversation_id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "board_cards_board_fk",
@@ -19538,14 +19316,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "board_columns_organization_id_organization_id_fkey",
@@ -19555,14 +19329,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "boards",
-      "columnsTo": [
-        "conversation_id"
-      ],
+      "columnsTo": ["conversation_id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "board_columns_board_fk",
@@ -19572,14 +19342,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "boards_conversation_id_conversations_id_fkey",
@@ -19589,14 +19355,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "boards_organization_id_organization_id_fkey",
@@ -19606,14 +19368,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "template_id"
-      ],
+      "columns": ["template_id"],
       "schemaTo": "app",
       "tableTo": "record_templates",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "boards_template_id_record_templates_id_fkey",
@@ -19623,14 +19381,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "bot_policies_organization_id_organization_id_fkey",
@@ -19640,14 +19394,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "bot_sandboxes_organization_id_organization_id_fkey",
@@ -19657,16 +19407,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "agent_id"
-      ],
+      "columns": ["organization_id", "agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "bot_sandboxes_agent_fk",
@@ -19676,14 +19420,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "bot_tool_grants_organization_id_organization_id_fkey",
@@ -19693,14 +19433,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "agent_id"
-      ],
+      "columns": ["agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "bot_tool_grants_agent_id_agents_id_fkey",
@@ -19710,14 +19446,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "bot_turn_activity_organization_id_organization_id_fkey",
@@ -19727,16 +19459,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "agent_id"
-      ],
+      "columns": ["organization_id", "agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "bot_turn_activity_agent_fk",
@@ -19746,14 +19472,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "browser_contexts_organization_id_organization_id_fkey",
@@ -19763,16 +19485,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "agent_id"
-      ],
+      "columns": ["organization_id", "agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "browser_contexts_agent_fk",
@@ -19782,16 +19498,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "conversation_id"
-      ],
+      "columns": ["organization_id", "conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "browser_contexts_conversation_fk",
@@ -19801,16 +19511,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "session_id"
-      ],
+      "columns": ["organization_id", "session_id"],
       "schemaTo": "app",
       "tableTo": "browser_sessions",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "browser_contexts_session_fk",
@@ -19820,14 +19524,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "browser_sessions_organization_id_organization_id_fkey",
@@ -19837,16 +19537,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "agent_id"
-      ],
+      "columns": ["organization_id", "agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "browser_sessions_agent_fk",
@@ -19856,16 +19550,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "secret_id"
-      ],
+      "columns": ["organization_id", "secret_id"],
       "schemaTo": "app",
       "tableTo": "secrets",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "browser_sessions_secret_fk",
@@ -19875,14 +19563,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "browser_signin_requests_organization_id_organization_id_fkey",
@@ -19892,16 +19576,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "agent_id"
-      ],
+      "columns": ["organization_id", "agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "browser_signin_requests_agent_fk",
@@ -19911,16 +19589,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "context_id"
-      ],
+      "columns": ["organization_id", "context_id"],
       "schemaTo": "app",
       "tableTo": "browser_contexts",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "browser_signin_requests_context_fk",
@@ -19930,16 +19602,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "session_id"
-      ],
+      "columns": ["organization_id", "session_id"],
       "schemaTo": "app",
       "tableTo": "browser_sessions",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "browser_signin_requests_session_fk",
@@ -19949,14 +19615,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "cell_plugin_tools_organization_id_organization_id_fkey",
@@ -19966,14 +19628,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "plugin_row_id"
-      ],
+      "columns": ["plugin_row_id"],
       "schemaTo": "app",
       "tableTo": "cell_plugins",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "cell_plugin_tools_plugin_row_id_cell_plugins_id_fkey",
@@ -19983,14 +19641,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "cell_plugins_organization_id_organization_id_fkey",
@@ -20000,14 +19654,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "connector_connections_organization_id_organization_id_fkey",
@@ -20017,14 +19667,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "server_id"
-      ],
+      "columns": ["server_id"],
       "schemaTo": "app",
       "tableTo": "mcp_servers",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "connector_connections_server_id_mcp_servers_id_fkey",
@@ -20034,14 +19680,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "secret_id"
-      ],
+      "columns": ["secret_id"],
       "schemaTo": "app",
       "tableTo": "secrets",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "connector_connections_secret_id_secrets_id_fkey",
@@ -20051,14 +19693,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "connector_oauth_clients_organization_id_organization_id_fkey",
@@ -20068,14 +19706,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "server_id"
-      ],
+      "columns": ["server_id"],
       "schemaTo": "app",
       "tableTo": "mcp_servers",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "connector_oauth_clients_server_id_mcp_servers_id_fkey",
@@ -20085,14 +19719,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "client_secret_id"
-      ],
+      "columns": ["client_secret_id"],
       "schemaTo": "app",
       "tableTo": "secrets",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "connector_oauth_clients_client_secret_id_secrets_id_fkey",
@@ -20102,14 +19732,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "conversation_members_conversation_id_conversations_id_fkey",
@@ -20119,14 +19745,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "conversation_members_organization_id_organization_id_fkey",
@@ -20136,14 +19758,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "conversations_organization_id_organization_id_fkey",
@@ -20153,14 +19771,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "unit_id"
-      ],
+      "columns": ["unit_id"],
       "schemaTo": "app",
       "tableTo": "org_units",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "conversations_unit_id_org_units_id_fkey",
@@ -20170,14 +19784,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "device_commands_organization_id_organization_id_fkey",
@@ -20187,14 +19797,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "device_id"
-      ],
+      "columns": ["device_id"],
       "schemaTo": "app",
       "tableTo": "devices",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "device_commands_device_id_devices_id_fkey",
@@ -20204,14 +19810,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "work_session_id"
-      ],
+      "columns": ["work_session_id"],
       "schemaTo": "app",
       "tableTo": "work_sessions",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "device_commands_work_session_id_work_sessions_id_fkey",
@@ -20221,14 +19823,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "device_enrollments_organization_id_organization_id_fkey",
@@ -20238,14 +19836,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "device_grants_organization_id_organization_id_fkey",
@@ -20255,14 +19849,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "device_id"
-      ],
+      "columns": ["device_id"],
       "schemaTo": "app",
       "tableTo": "devices",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "device_grants_device_id_devices_id_fkey",
@@ -20272,14 +19862,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "device_runtime_updates_organization_id_organization_id_fkey",
@@ -20289,16 +19875,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "device_id"
-      ],
+      "columns": ["organization_id", "device_id"],
       "schemaTo": "app",
       "tableTo": "devices",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "device_runtime_updates_device_fk",
@@ -20308,14 +19888,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "devices_organization_id_organization_id_fkey",
@@ -20325,14 +19901,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "mcp_server_tools_organization_id_organization_id_fkey",
@@ -20342,14 +19914,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "server_id"
-      ],
+      "columns": ["server_id"],
       "schemaTo": "app",
       "tableTo": "mcp_servers",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "mcp_server_tools_server_id_mcp_servers_id_fkey",
@@ -20359,14 +19927,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "mcp_servers_organization_id_organization_id_fkey",
@@ -20376,14 +19940,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "member_account_shares_organization_id_organization_id_fkey",
@@ -20393,14 +19953,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "member_account_shares_conversation_id_conversations_id_fkey",
@@ -20410,14 +19966,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "memory_file_revisions_organization_id_organization_id_fkey",
@@ -20427,14 +19979,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "file_id"
-      ],
+      "columns": ["file_id"],
       "schemaTo": "app",
       "tableTo": "memory_files",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "memory_file_revisions_file_id_memory_files_id_fkey",
@@ -20444,14 +19992,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "approval_request_id"
-      ],
+      "columns": ["approval_request_id"],
       "schemaTo": "app",
       "tableTo": "approval_requests",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "memory_file_revisions_approval_fk",
@@ -20461,14 +20005,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "memory_files_organization_id_organization_id_fkey",
@@ -20478,14 +20018,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "scope_id"
-      ],
+      "columns": ["scope_id"],
       "schemaTo": "app",
       "tableTo": "memory_scopes",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "memory_files_scope_id_memory_scopes_id_fkey",
@@ -20495,14 +20031,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "memory_proposals_organization_id_organization_id_fkey",
@@ -20512,14 +20044,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "scope_id"
-      ],
+      "columns": ["scope_id"],
       "schemaTo": "app",
       "tableTo": "memory_scopes",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "memory_proposals_scope_id_memory_scopes_id_fkey",
@@ -20529,14 +20057,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "file_id"
-      ],
+      "columns": ["file_id"],
       "schemaTo": "app",
       "tableTo": "memory_files",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "memory_proposals_file_id_memory_files_id_fkey",
@@ -20546,14 +20070,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "requested_by_agent_id"
-      ],
+      "columns": ["requested_by_agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "memory_proposals_requested_by_agent_id_agents_id_fkey",
@@ -20563,14 +20083,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "memory_scopes_organization_id_organization_id_fkey",
@@ -20580,14 +20096,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "agent_id"
-      ],
+      "columns": ["agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "memory_scopes_agent_id_agents_id_fkey",
@@ -20597,14 +20109,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "unit_id"
-      ],
+      "columns": ["unit_id"],
       "schemaTo": "app",
       "tableTo": "org_units",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "memory_scopes_unit_id_org_units_id_fkey",
@@ -20614,14 +20122,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "message_card_follows_organization_id_organization_id_fkey",
@@ -20631,14 +20135,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "message_id"
-      ],
+      "columns": ["message_id"],
       "schemaTo": "app",
       "tableTo": "message_cards",
-      "columnsTo": [
-        "message_id"
-      ],
+      "columnsTo": ["message_id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "message_card_follows_message_id_message_cards_message_id_fkey",
@@ -20648,14 +20148,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "message_id"
-      ],
+      "columns": ["message_id"],
       "schemaTo": "app",
       "tableTo": "messages",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "message_cards_message_id_messages_id_fkey",
@@ -20665,14 +20161,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "message_cards_organization_id_organization_id_fkey",
@@ -20682,14 +20174,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "message_cards_conversation_id_conversations_id_fkey",
@@ -20699,14 +20187,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "agent_id"
-      ],
+      "columns": ["agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "NO ACTION",
       "name": "message_cards_agent_id_agents_id_fkey",
@@ -20716,14 +20200,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "message_pins_organization_id_organization_id_fkey",
@@ -20733,14 +20213,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "message_pins_conversation_id_conversations_id_fkey",
@@ -20750,14 +20226,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "message_id"
-      ],
+      "columns": ["message_id"],
       "schemaTo": "app",
       "tableTo": "messages",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "message_pins_message_id_messages_id_fkey",
@@ -20767,14 +20239,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "message_reactions_organization_id_organization_id_fkey",
@@ -20784,14 +20252,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "message_id"
-      ],
+      "columns": ["message_id"],
       "schemaTo": "app",
       "tableTo": "messages",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "message_reactions_message_id_messages_id_fkey",
@@ -20801,14 +20265,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "message_saves_organization_id_organization_id_fkey",
@@ -20818,14 +20278,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "message_id"
-      ],
+      "columns": ["message_id"],
       "schemaTo": "app",
       "tableTo": "messages",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "message_saves_message_id_messages_id_fkey",
@@ -20835,14 +20291,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "message_versions_organization_id_organization_id_fkey",
@@ -20852,14 +20304,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "message_id"
-      ],
+      "columns": ["message_id"],
       "schemaTo": "app",
       "tableTo": "messages",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "message_versions_message_id_messages_id_fkey",
@@ -20869,14 +20317,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "messages_organization_id_organization_id_fkey",
@@ -20886,14 +20330,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "messages_conversation_id_conversations_id_fkey",
@@ -20903,14 +20343,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "model_providers_organization_id_organization_id_fkey",
@@ -20920,14 +20356,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "secret_id"
-      ],
+      "columns": ["secret_id"],
       "schemaTo": "app",
       "tableTo": "secrets",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "model_providers_secret_id_secrets_id_fkey",
@@ -20937,14 +20369,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "notification_prefs_organization_id_organization_id_fkey",
@@ -20954,14 +20382,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "notifications_organization_id_organization_id_fkey",
@@ -20971,14 +20395,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "notifications_conversation_id_conversations_id_fkey",
@@ -20988,14 +20408,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "message_id"
-      ],
+      "columns": ["message_id"],
       "schemaTo": "app",
       "tableTo": "messages",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "notifications_message_id_messages_id_fkey",
@@ -21005,14 +20421,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "org_members_organization_id_organization_id_fkey",
@@ -21022,14 +20434,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "user_id"
-      ],
+      "columns": ["user_id"],
       "schemaTo": "auth",
       "tableTo": "user",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "org_members_user_id_user_id_fkey",
@@ -21039,14 +20447,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "org_units_organization_id_organization_id_fkey",
@@ -21056,14 +20460,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "parent_id"
-      ],
+      "columns": ["parent_id"],
       "schemaTo": "app",
       "tableTo": "org_units",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "name": "org_units_parent_id_org_units_id_fkey",
@@ -21073,14 +20473,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "permission_rules_organization_id_organization_id_fkey",
@@ -21090,14 +20486,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "scope_unit_id"
-      ],
+      "columns": ["scope_unit_id"],
       "schemaTo": "app",
       "tableTo": "org_units",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "permission_rules_scope_unit_id_org_units_id_fkey",
@@ -21107,14 +20499,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "projects_organization_id_organization_id_fkey",
@@ -21124,14 +20512,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "device_id"
-      ],
+      "columns": ["device_id"],
       "schemaTo": "app",
       "tableTo": "devices",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "projects_device_id_devices_id_fkey",
@@ -21141,14 +20525,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "record_templates_organization_id_organization_id_fkey",
@@ -21158,14 +20538,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "unit_id"
-      ],
+      "columns": ["unit_id"],
       "schemaTo": "app",
       "tableTo": "org_units",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "record_templates_unit_id_org_units_id_fkey",
@@ -21175,14 +20551,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "sandbox_event_cursor_organization_id_organization_id_fkey",
@@ -21192,14 +20564,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "sandbox_package_installs_organization_id_organization_id_fkey",
@@ -21209,16 +20577,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "agent_id"
-      ],
+      "columns": ["organization_id", "agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "sandbox_package_installs_agent_fk",
@@ -21228,16 +20590,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "package_id"
-      ],
+      "columns": ["organization_id", "package_id"],
       "schemaTo": "app",
       "tableTo": "sandbox_packages",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "sandbox_package_installs_package_fk",
@@ -21247,14 +20603,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "sandbox_packages_organization_id_organization_id_fkey",
@@ -21264,14 +20616,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "sandbox_policies_organization_id_organization_id_fkey",
@@ -21281,14 +20629,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "sandbox_usage_daily_organization_id_organization_id_fkey",
@@ -21298,16 +20642,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "agent_id"
-      ],
+      "columns": ["organization_id", "agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "sandbox_usage_daily_agent_fk",
@@ -21317,14 +20655,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "secrets_organization_id_organization_id_fkey",
@@ -21334,14 +20668,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "stream_events_organization_id_organization_id_fkey",
@@ -21351,14 +20681,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "streams_organization_id_organization_id_fkey",
@@ -21368,14 +20694,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "thread_reads_organization_id_organization_id_fkey",
@@ -21385,14 +20707,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "root_message_id"
-      ],
+      "columns": ["root_message_id"],
       "schemaTo": "app",
       "tableTo": "messages",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "thread_reads_root_message_id_messages_id_fkey",
@@ -21402,14 +20720,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "tool_approval_policies_organization_id_organization_id_fkey",
@@ -21419,16 +20733,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "scope_unit_id"
-      ],
+      "columns": ["organization_id", "scope_unit_id"],
       "schemaTo": "app",
       "tableTo": "org_units",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "tool_approval_policies_unit_fk",
@@ -21438,14 +20746,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "tool_call_approvals_organization_id_organization_id_fkey",
@@ -21455,16 +20759,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "agent_id"
-      ],
+      "columns": ["organization_id", "agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "tool_call_approvals_agent_fk",
@@ -21474,16 +20772,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "policy_id"
-      ],
+      "columns": ["organization_id", "policy_id"],
       "schemaTo": "app",
       "tableTo": "tool_approval_policies",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "tool_call_approvals_policy_fk",
@@ -21493,14 +20785,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "unit_memberships_organization_id_organization_id_fkey",
@@ -21510,14 +20798,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "unit_id"
-      ],
+      "columns": ["unit_id"],
       "schemaTo": "app",
       "tableTo": "org_units",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "unit_memberships_unit_id_org_units_id_fkey",
@@ -21527,14 +20811,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "user_id"
-      ],
+      "columns": ["user_id"],
       "schemaTo": "auth",
       "tableTo": "user",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "unit_memberships_user_id_user_id_fkey",
@@ -21544,14 +20824,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "user_model_credentials_organization_id_organization_id_fkey",
@@ -21561,14 +20837,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "secret_id"
-      ],
+      "columns": ["secret_id"],
       "schemaTo": "app",
       "tableTo": "secrets",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "user_model_credentials_secret_id_secrets_id_fkey",
@@ -21578,14 +20850,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "vault_items_organization_id_organization_id_fkey",
@@ -21595,14 +20863,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "unit_id"
-      ],
+      "columns": ["unit_id"],
       "schemaTo": "app",
       "tableTo": "org_units",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "name": "vault_items_unit_id_org_units_id_fkey",
@@ -21612,14 +20876,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_approvals_organization_id_organization_id_fkey",
@@ -21629,14 +20889,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "work_session_id"
-      ],
+      "columns": ["work_session_id"],
       "schemaTo": "app",
       "tableTo": "work_sessions",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_approvals_work_session_id_work_sessions_id_fkey",
@@ -21646,14 +20902,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_project_repos_organization_id_organization_id_fkey",
@@ -21663,18 +20915,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "project_id",
-        "device_id"
-      ],
+      "columns": ["organization_id", "project_id", "device_id"],
       "schemaTo": "app",
       "tableTo": "projects",
-      "columnsTo": [
-        "organization_id",
-        "id",
-        "device_id"
-      ],
+      "columnsTo": ["organization_id", "id", "device_id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_project_repos_project_fk",
@@ -21684,16 +20928,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "unit_id"
-      ],
+      "columns": ["organization_id", "unit_id"],
       "schemaTo": "app",
       "tableTo": "org_units",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "RESTRICT",
       "name": "work_project_repos_unit_fk",
@@ -21703,14 +20941,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_project_settings_organization_id_organization_id_fkey",
@@ -21720,16 +20954,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "unit_id"
-      ],
+      "columns": ["organization_id", "unit_id"],
       "schemaTo": "app",
       "tableTo": "org_units",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_project_settings_unit_fk",
@@ -21739,14 +20967,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_project_teams_organization_id_organization_id_fkey",
@@ -21756,16 +20980,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "project_unit_id"
-      ],
+      "columns": ["organization_id", "project_unit_id"],
       "schemaTo": "app",
       "tableTo": "org_units",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_project_teams_project_fk",
@@ -21775,16 +20993,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "team_unit_id"
-      ],
+      "columns": ["organization_id", "team_unit_id"],
       "schemaTo": "app",
       "tableTo": "org_units",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_project_teams_team_fk",
@@ -21794,14 +21006,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_prompts_organization_id_organization_id_fkey",
@@ -21811,14 +21019,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "work_session_id"
-      ],
+      "columns": ["work_session_id"],
       "schemaTo": "app",
       "tableTo": "work_sessions",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_prompts_work_session_id_work_sessions_id_fkey",
@@ -21828,16 +21032,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "proposed_by_agent_id"
-      ],
+      "columns": ["organization_id", "proposed_by_agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "work_prompts_proposed_by_agent_fk",
@@ -21847,14 +21045,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_session_grants_organization_id_organization_id_fkey",
@@ -21864,16 +21058,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "work_session_id"
-      ],
+      "columns": ["organization_id", "work_session_id"],
       "schemaTo": "app",
       "tableTo": "work_sessions",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_session_grants_session_fk",
@@ -21883,14 +21071,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_sessions_organization_id_organization_id_fkey",
@@ -21900,14 +21084,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "schemaTo": "app",
       "tableTo": "conversations",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_sessions_conversation_id_conversations_id_fkey",
@@ -21917,14 +21097,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "project_id"
-      ],
+      "columns": ["project_id"],
       "schemaTo": "app",
       "tableTo": "projects",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_sessions_project_id_projects_id_fkey",
@@ -21934,14 +21110,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "device_id"
-      ],
+      "columns": ["device_id"],
       "schemaTo": "app",
       "tableTo": "devices",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_sessions_device_id_devices_id_fkey",
@@ -21951,14 +21123,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_zone_policies_organization_id_organization_id_fkey",
@@ -21968,14 +21136,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_zone_proposals_organization_id_organization_id_fkey",
@@ -21985,16 +21149,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "agent_id"
-      ],
+      "columns": ["organization_id", "agent_id"],
       "schemaTo": "app",
       "tableTo": "agents",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_zone_proposals_agent_fk",
@@ -22004,18 +21162,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "project_id",
-        "device_id"
-      ],
+      "columns": ["organization_id", "project_id", "device_id"],
       "schemaTo": "app",
       "tableTo": "projects",
-      "columnsTo": [
-        "organization_id",
-        "id",
-        "device_id"
-      ],
+      "columnsTo": ["organization_id", "id", "device_id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_zone_proposals_project_fk",
@@ -22025,16 +21175,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "device_id"
-      ],
+      "columns": ["organization_id", "device_id"],
       "schemaTo": "app",
       "tableTo": "devices",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "work_zone_proposals_device_fk",
@@ -22044,16 +21188,10 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "work_session_id"
-      ],
+      "columns": ["organization_id", "work_session_id"],
       "schemaTo": "app",
       "tableTo": "work_sessions",
-      "columnsTo": [
-        "organization_id",
-        "id"
-      ],
+      "columnsTo": ["organization_id", "id"],
       "onUpdate": "NO ACTION",
       "onDelete": "SET NULL",
       "name": "work_zone_proposals_session_fk",
@@ -22063,14 +21201,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "user_id"
-      ],
+      "columns": ["user_id"],
       "schemaTo": "auth",
       "tableTo": "user",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "account_user_id_user_id_fkey",
@@ -22080,14 +21214,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "invitation_organization_id_organization_id_fkey",
@@ -22097,14 +21227,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "inviter_id"
-      ],
+      "columns": ["inviter_id"],
       "schemaTo": "auth",
       "tableTo": "user",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "invitation_inviter_id_user_id_fkey",
@@ -22114,14 +21240,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "schemaTo": "auth",
       "tableTo": "organization",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "member_organization_id_organization_id_fkey",
@@ -22131,14 +21253,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "user_id"
-      ],
+      "columns": ["user_id"],
       "schemaTo": "auth",
       "tableTo": "user",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "member_user_id_user_id_fkey",
@@ -22148,14 +21266,10 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "user_id"
-      ],
+      "columns": ["user_id"],
       "schemaTo": "auth",
       "tableTo": "user",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "name": "session_user_id_user_id_fkey",
@@ -22164,11 +21278,7 @@
       "table": "session"
     },
     {
-      "columns": [
-        "agent_id",
-        "conversation_id",
-        "day"
-      ],
+      "columns": ["agent_id", "conversation_id", "day"],
       "nameExplicit": false,
       "name": "agent_limit_notices_pkey",
       "entityType": "pks",
@@ -22176,11 +21286,7 @@
       "table": "agent_limit_notices"
     },
     {
-      "columns": [
-        "organization_id",
-        "agent_id",
-        "conversation_id"
-      ],
+      "columns": ["organization_id", "agent_id", "conversation_id"],
       "nameExplicit": false,
       "name": "agent_member_data_pkey",
       "entityType": "pks",
@@ -22188,10 +21294,7 @@
       "table": "agent_member_data"
     },
     {
-      "columns": [
-        "template_id",
-        "version"
-      ],
+      "columns": ["template_id", "version"],
       "nameExplicit": false,
       "name": "agent_template_versions_pkey",
       "entityType": "pks",
@@ -22199,11 +21302,7 @@
       "table": "agent_template_versions"
     },
     {
-      "columns": [
-        "organization_id",
-        "agent_id",
-        "day"
-      ],
+      "columns": ["organization_id", "agent_id", "day"],
       "nameExplicit": false,
       "name": "agent_usage_daily_pkey",
       "entityType": "pks",
@@ -22211,10 +21310,7 @@
       "table": "agent_usage_daily"
     },
     {
-      "columns": [
-        "agent_id",
-        "vault_item_id"
-      ],
+      "columns": ["agent_id", "vault_item_id"],
       "nameExplicit": false,
       "name": "agent_vault_grants_pkey",
       "entityType": "pks",
@@ -22222,12 +21318,7 @@
       "table": "agent_vault_grants"
     },
     {
-      "columns": [
-        "organization_id",
-        "user_id",
-        "day",
-        "backend_class"
-      ],
+      "columns": ["organization_id", "user_id", "day", "backend_class"],
       "nameExplicit": false,
       "name": "ai_usage_daily_pkey",
       "entityType": "pks",
@@ -22235,10 +21326,7 @@
       "table": "ai_usage_daily"
     },
     {
-      "columns": [
-        "organization_id",
-        "user_id"
-      ],
+      "columns": ["organization_id", "user_id"],
       "nameExplicit": false,
       "name": "ai_user_preferences_pkey",
       "entityType": "pks",
@@ -22246,12 +21334,7 @@
       "table": "ai_user_preferences"
     },
     {
-      "columns": [
-        "agent_id",
-        "source_kind",
-        "source_id",
-        "tool_name"
-      ],
+      "columns": ["agent_id", "source_kind", "source_id", "tool_name"],
       "nameExplicit": false,
       "name": "bot_tool_grants_pkey",
       "entityType": "pks",
@@ -22259,10 +21342,7 @@
       "table": "bot_tool_grants"
     },
     {
-      "columns": [
-        "plugin_row_id",
-        "name"
-      ],
+      "columns": ["plugin_row_id", "name"],
       "nameExplicit": false,
       "name": "cell_plugin_tools_pkey",
       "entityType": "pks",
@@ -22270,11 +21350,7 @@
       "table": "cell_plugin_tools"
     },
     {
-      "columns": [
-        "conversation_id",
-        "member_kind",
-        "member_id"
-      ],
+      "columns": ["conversation_id", "member_kind", "member_id"],
       "nameExplicit": false,
       "name": "conversation_members_pkey",
       "entityType": "pks",
@@ -22282,11 +21358,7 @@
       "table": "conversation_members"
     },
     {
-      "columns": [
-        "device_id",
-        "principal_kind",
-        "principal_id"
-      ],
+      "columns": ["device_id", "principal_kind", "principal_id"],
       "nameExplicit": false,
       "name": "device_grants_pkey",
       "entityType": "pks",
@@ -22294,10 +21366,7 @@
       "table": "device_grants"
     },
     {
-      "columns": [
-        "server_id",
-        "name"
-      ],
+      "columns": ["server_id", "name"],
       "nameExplicit": false,
       "name": "mcp_server_tools_pkey",
       "entityType": "pks",
@@ -22305,10 +21374,7 @@
       "table": "mcp_server_tools"
     },
     {
-      "columns": [
-        "message_id",
-        "user_id"
-      ],
+      "columns": ["message_id", "user_id"],
       "nameExplicit": false,
       "name": "message_card_follows_pkey",
       "entityType": "pks",
@@ -22316,10 +21382,7 @@
       "table": "message_card_follows"
     },
     {
-      "columns": [
-        "conversation_id",
-        "message_id"
-      ],
+      "columns": ["conversation_id", "message_id"],
       "nameExplicit": false,
       "name": "message_pins_pkey",
       "entityType": "pks",
@@ -22327,12 +21390,7 @@
       "table": "message_pins"
     },
     {
-      "columns": [
-        "message_id",
-        "emoji",
-        "member_kind",
-        "member_id"
-      ],
+      "columns": ["message_id", "emoji", "member_kind", "member_id"],
       "nameExplicit": false,
       "name": "message_reactions_pkey",
       "entityType": "pks",
@@ -22340,10 +21398,7 @@
       "table": "message_reactions"
     },
     {
-      "columns": [
-        "user_id",
-        "message_id"
-      ],
+      "columns": ["user_id", "message_id"],
       "nameExplicit": false,
       "name": "message_saves_pkey",
       "entityType": "pks",
@@ -22351,10 +21406,7 @@
       "table": "message_saves"
     },
     {
-      "columns": [
-        "organization_id",
-        "user_id"
-      ],
+      "columns": ["organization_id", "user_id"],
       "nameExplicit": false,
       "name": "notification_prefs_pkey",
       "entityType": "pks",
@@ -22362,10 +21414,7 @@
       "table": "notification_prefs"
     },
     {
-      "columns": [
-        "organization_id",
-        "user_id"
-      ],
+      "columns": ["organization_id", "user_id"],
       "nameExplicit": false,
       "name": "org_members_pkey",
       "entityType": "pks",
@@ -22373,11 +21422,7 @@
       "table": "org_members"
     },
     {
-      "columns": [
-        "organization_id",
-        "agent_id",
-        "package_id"
-      ],
+      "columns": ["organization_id", "agent_id", "package_id"],
       "nameExplicit": false,
       "name": "sandbox_package_installs_pkey",
       "entityType": "pks",
@@ -22385,11 +21430,7 @@
       "table": "sandbox_package_installs"
     },
     {
-      "columns": [
-        "organization_id",
-        "agent_id",
-        "day"
-      ],
+      "columns": ["organization_id", "agent_id", "day"],
       "nameExplicit": false,
       "name": "sandbox_usage_daily_pkey",
       "entityType": "pks",
@@ -22397,10 +21438,7 @@
       "table": "sandbox_usage_daily"
     },
     {
-      "columns": [
-        "stream_id",
-        "seq"
-      ],
+      "columns": ["stream_id", "seq"],
       "nameExplicit": false,
       "name": "stream_events_pkey",
       "entityType": "pks",
@@ -22408,10 +21446,7 @@
       "table": "stream_events"
     },
     {
-      "columns": [
-        "user_id",
-        "root_message_id"
-      ],
+      "columns": ["user_id", "root_message_id"],
       "nameExplicit": false,
       "name": "thread_reads_pkey",
       "entityType": "pks",
@@ -22419,10 +21454,7 @@
       "table": "thread_reads"
     },
     {
-      "columns": [
-        "unit_id",
-        "user_id"
-      ],
+      "columns": ["unit_id", "user_id"],
       "nameExplicit": false,
       "name": "unit_memberships_pkey",
       "entityType": "pks",
@@ -22430,10 +21462,7 @@
       "table": "unit_memberships"
     },
     {
-      "columns": [
-        "project_unit_id",
-        "team_unit_id"
-      ],
+      "columns": ["project_unit_id", "team_unit_id"],
       "nameExplicit": false,
       "name": "work_project_teams_pkey",
       "entityType": "pks",
@@ -22441,9 +21470,7 @@
       "table": "work_project_teams"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "agent_credentials_pkey",
       "schema": "app",
@@ -22451,9 +21478,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "agent_memories_pkey",
       "schema": "app",
@@ -22461,9 +21486,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "agent_templates_pkey",
       "schema": "app",
@@ -22471,9 +21494,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "agent_tool_calls_pkey",
       "schema": "app",
@@ -22481,9 +21502,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "event_id"
-      ],
+      "columns": ["event_id"],
       "nameExplicit": false,
       "name": "agent_turns_pkey",
       "schema": "app",
@@ -22491,9 +21510,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "agents_pkey",
       "schema": "app",
@@ -22501,9 +21518,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "ai_chat_grants_pkey",
       "schema": "app",
@@ -22511,9 +21526,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "nameExplicit": false,
       "name": "ai_chat_policies_pkey",
       "schema": "app",
@@ -22521,9 +21534,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "ai_chat_shares_pkey",
       "schema": "app",
@@ -22531,9 +21542,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "nameExplicit": false,
       "name": "ai_chats_pkey",
       "schema": "app",
@@ -22541,9 +21550,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "ai_generations_pkey",
       "schema": "app",
@@ -22551,9 +21558,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "message_id"
-      ],
+      "columns": ["message_id"],
       "nameExplicit": false,
       "name": "ai_message_context_pkey",
       "schema": "app",
@@ -22561,9 +21566,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "ai_usage_records_pkey",
       "schema": "app",
@@ -22571,9 +21574,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "approval_requests_pkey",
       "schema": "app",
@@ -22581,9 +21582,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "attachments_pkey",
       "schema": "app",
@@ -22591,9 +21590,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "audit_events_pkey",
       "schema": "app",
@@ -22601,9 +21598,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "message_id"
-      ],
+      "columns": ["message_id"],
       "nameExplicit": false,
       "name": "board_cards_pkey",
       "schema": "app",
@@ -22611,9 +21606,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "board_columns_pkey",
       "schema": "app",
@@ -22621,9 +21614,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "conversation_id"
-      ],
+      "columns": ["conversation_id"],
       "nameExplicit": false,
       "name": "boards_pkey",
       "schema": "app",
@@ -22631,9 +21622,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "nameExplicit": false,
       "name": "bot_policies_pkey",
       "schema": "app",
@@ -22641,9 +21630,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "bot_sandboxes_pkey",
       "schema": "app",
@@ -22651,9 +21638,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "event_id"
-      ],
+      "columns": ["event_id"],
       "nameExplicit": false,
       "name": "bot_turn_activity_pkey",
       "schema": "app",
@@ -22661,9 +21646,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "browser_contexts_pkey",
       "schema": "app",
@@ -22671,9 +21654,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "browser_sessions_pkey",
       "schema": "app",
@@ -22681,9 +21662,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "browser_signin_requests_pkey",
       "schema": "app",
@@ -22691,9 +21670,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "cell_plugins_pkey",
       "schema": "app",
@@ -22701,9 +21678,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "connector_connections_pkey",
       "schema": "app",
@@ -22711,9 +21686,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "connector_oauth_clients_pkey",
       "schema": "app",
@@ -22721,9 +21694,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "conversations_pkey",
       "schema": "app",
@@ -22731,9 +21702,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "device_commands_pkey",
       "schema": "app",
@@ -22741,9 +21710,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "code_hash"
-      ],
+      "columns": ["code_hash"],
       "nameExplicit": false,
       "name": "device_enrollments_pkey",
       "schema": "app",
@@ -22751,9 +21718,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "device_runtime_updates_pkey",
       "schema": "app",
@@ -22761,9 +21726,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "devices_pkey",
       "schema": "app",
@@ -22771,9 +21734,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "mcp_servers_pkey",
       "schema": "app",
@@ -22781,9 +21742,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "member_account_shares_pkey",
       "schema": "app",
@@ -22791,9 +21750,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "memory_file_revisions_pkey",
       "schema": "app",
@@ -22801,9 +21758,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "memory_files_pkey",
       "schema": "app",
@@ -22811,9 +21766,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "memory_proposals_pkey",
       "schema": "app",
@@ -22821,9 +21774,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "memory_scopes_pkey",
       "schema": "app",
@@ -22831,9 +21782,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "message_id"
-      ],
+      "columns": ["message_id"],
       "nameExplicit": false,
       "name": "message_cards_pkey",
       "schema": "app",
@@ -22841,9 +21790,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "message_versions_pkey",
       "schema": "app",
@@ -22851,9 +21798,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "messages_pkey",
       "schema": "app",
@@ -22861,9 +21806,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "model_providers_pkey",
       "schema": "app",
@@ -22871,9 +21814,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "notifications_pkey",
       "schema": "app",
@@ -22881,9 +21822,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "org_units_pkey",
       "schema": "app",
@@ -22891,9 +21830,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "permission_rules_pkey",
       "schema": "app",
@@ -22901,9 +21838,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "projects_pkey",
       "schema": "app",
@@ -22911,9 +21846,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "record_templates_pkey",
       "schema": "app",
@@ -22921,9 +21854,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "nameExplicit": false,
       "name": "sandbox_event_cursor_pkey",
       "schema": "app",
@@ -22931,9 +21862,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "sandbox_packages_pkey",
       "schema": "app",
@@ -22941,9 +21870,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "nameExplicit": false,
       "name": "sandbox_policies_pkey",
       "schema": "app",
@@ -22951,9 +21878,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "secrets_pkey",
       "schema": "app",
@@ -22961,9 +21886,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "streams_pkey",
       "schema": "app",
@@ -22971,9 +21894,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "tool_approval_policies_pkey",
       "schema": "app",
@@ -22981,9 +21902,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "tool_call_approvals_pkey",
       "schema": "app",
@@ -22991,9 +21910,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "user_model_credentials_pkey",
       "schema": "app",
@@ -23001,9 +21918,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "vault_items_pkey",
       "schema": "app",
@@ -23011,9 +21926,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "work_approvals_pkey",
       "schema": "app",
@@ -23021,9 +21934,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "project_id"
-      ],
+      "columns": ["project_id"],
       "nameExplicit": false,
       "name": "work_project_repos_pkey",
       "schema": "app",
@@ -23031,9 +21942,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "unit_id"
-      ],
+      "columns": ["unit_id"],
       "nameExplicit": false,
       "name": "work_project_settings_pkey",
       "schema": "app",
@@ -23041,9 +21950,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "work_prompts_pkey",
       "schema": "app",
@@ -23051,9 +21958,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "work_session_grants_pkey",
       "schema": "app",
@@ -23061,9 +21966,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "work_sessions_pkey",
       "schema": "app",
@@ -23071,9 +21974,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "organization_id"
-      ],
+      "columns": ["organization_id"],
       "nameExplicit": false,
       "name": "work_zone_policies_pkey",
       "schema": "app",
@@ -23081,9 +21982,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "work_zone_proposals_pkey",
       "schema": "app",
@@ -23091,9 +21990,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "account_pkey",
       "schema": "auth",
@@ -23101,9 +21998,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "instance_setup_pkey",
       "schema": "auth",
@@ -23111,9 +22006,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "invitation_pkey",
       "schema": "auth",
@@ -23121,9 +22014,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "jwks_pkey",
       "schema": "auth",
@@ -23131,9 +22022,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "member_pkey",
       "schema": "auth",
@@ -23141,9 +22030,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "organization_pkey",
       "schema": "auth",
@@ -23151,9 +22038,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "session_pkey",
       "schema": "auth",
@@ -23161,9 +22046,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "user_pkey",
       "schema": "auth",
@@ -23171,9 +22054,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "verification_pkey",
       "schema": "auth",
@@ -23182,10 +22063,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "id"
-      ],
+      "columns": ["organization_id", "id"],
       "nullsNotDistinct": false,
       "name": "agents_org_id_uq",
       "entityType": "uniques",
@@ -23194,10 +22072,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "id",
-        "conversation_id"
-      ],
+      "columns": ["id", "conversation_id"],
       "nullsNotDistinct": false,
       "name": "board_columns_id_conversation_uq",
       "entityType": "uniques",
@@ -23206,11 +22081,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "agent_id",
-        "kind"
-      ],
+      "columns": ["organization_id", "agent_id", "kind"],
       "nullsNotDistinct": false,
       "name": "bot_sandboxes_agent_kind_uq",
       "entityType": "uniques",
@@ -23219,10 +22090,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "id"
-      ],
+      "columns": ["organization_id", "id"],
       "nullsNotDistinct": false,
       "name": "browser_contexts_org_id_uq",
       "entityType": "uniques",
@@ -23231,12 +22099,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "user_id",
-        "agent_id",
-        "site_key"
-      ],
+      "columns": ["organization_id", "user_id", "agent_id", "site_key"],
       "nullsNotDistinct": false,
       "name": "browser_sessions_owner_site_uq",
       "entityType": "uniques",
@@ -23245,10 +22108,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "id"
-      ],
+      "columns": ["organization_id", "id"],
       "nullsNotDistinct": false,
       "name": "browser_sessions_org_id_uq",
       "entityType": "uniques",
@@ -23257,11 +22117,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "event_id",
-        "context_id"
-      ],
+      "columns": ["organization_id", "event_id", "context_id"],
       "nullsNotDistinct": false,
       "name": "browser_signin_requests_event_uq",
       "entityType": "uniques",
@@ -23270,11 +22126,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "user_id",
-        "server_id"
-      ],
+      "columns": ["organization_id", "user_id", "server_id"],
       "nullsNotDistinct": false,
       "name": "connector_connections_org_user_server_uq",
       "entityType": "uniques",
@@ -23283,10 +22135,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "server_id",
-        "issuer"
-      ],
+      "columns": ["server_id", "issuer"],
       "nullsNotDistinct": false,
       "name": "connector_oauth_clients_server_issuer_uq",
       "entityType": "uniques",
@@ -23295,10 +22144,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "id"
-      ],
+      "columns": ["organization_id", "id"],
       "nullsNotDistinct": false,
       "name": "conversations_org_id_uq",
       "entityType": "uniques",
@@ -23307,11 +22153,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "device_id",
-        "run_id"
-      ],
+      "columns": ["organization_id", "device_id", "run_id"],
       "nullsNotDistinct": false,
       "name": "device_runtime_updates_run_uq",
       "entityType": "uniques",
@@ -23320,10 +22162,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "id"
-      ],
+      "columns": ["organization_id", "id"],
       "nullsNotDistinct": false,
       "name": "devices_org_id_uq",
       "entityType": "uniques",
@@ -23332,10 +22171,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "file_id",
-        "version"
-      ],
+      "columns": ["file_id", "version"],
       "nullsNotDistinct": false,
       "name": "memory_file_revisions_file_version_uq",
       "entityType": "uniques",
@@ -23344,10 +22180,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "id",
-        "conversation_id"
-      ],
+      "columns": ["id", "conversation_id"],
       "nullsNotDistinct": false,
       "name": "messages_id_conversation_uq",
       "entityType": "uniques",
@@ -23356,10 +22189,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "id"
-      ],
+      "columns": ["organization_id", "id"],
       "nullsNotDistinct": false,
       "name": "org_units_org_id_uq",
       "entityType": "uniques",
@@ -23368,11 +22198,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "id",
-        "device_id"
-      ],
+      "columns": ["organization_id", "id", "device_id"],
       "nullsNotDistinct": false,
       "name": "projects_org_id_device_uq",
       "entityType": "uniques",
@@ -23381,10 +22207,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "id"
-      ],
+      "columns": ["organization_id", "id"],
       "nullsNotDistinct": false,
       "name": "sandbox_packages_org_id_uq",
       "entityType": "uniques",
@@ -23393,10 +22216,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "id"
-      ],
+      "columns": ["organization_id", "id"],
       "nullsNotDistinct": false,
       "name": "secrets_org_id_uq",
       "entityType": "uniques",
@@ -23405,11 +22225,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "scope_unit_id",
-        "tool_pattern"
-      ],
+      "columns": ["organization_id", "scope_unit_id", "tool_pattern"],
       "nullsNotDistinct": true,
       "name": "tool_approval_policies_scope_pattern_uq",
       "entityType": "uniques",
@@ -23418,10 +22234,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "id"
-      ],
+      "columns": ["organization_id", "id"],
       "nullsNotDistinct": false,
       "name": "tool_approval_policies_org_id_uq",
       "entityType": "uniques",
@@ -23430,10 +22243,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "handle"
-      ],
+      "columns": ["organization_id", "handle"],
       "nullsNotDistinct": false,
       "name": "vault_items_org_handle_uq",
       "entityType": "uniques",
@@ -23442,10 +22252,7 @@
     },
     {
       "nameExplicit": true,
-      "columns": [
-        "organization_id",
-        "id"
-      ],
+      "columns": ["organization_id", "id"],
       "nullsNotDistinct": false,
       "name": "work_sessions_org_id_uq",
       "entityType": "uniques",
@@ -23454,9 +22261,7 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "token_hash"
-      ],
+      "columns": ["token_hash"],
       "nullsNotDistinct": false,
       "name": "agent_credentials_token_hash_key",
       "schema": "app",
@@ -23465,9 +22270,7 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "token_hash"
-      ],
+      "columns": ["token_hash"],
       "nullsNotDistinct": false,
       "name": "devices_token_hash_key",
       "schema": "app",
@@ -23476,9 +22279,7 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nullsNotDistinct": false,
       "name": "org_members_id_key",
       "schema": "app",
@@ -23487,9 +22288,7 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "singleton"
-      ],
+      "columns": ["singleton"],
       "nullsNotDistinct": false,
       "name": "instance_setup_singleton_key",
       "schema": "auth",
@@ -23498,9 +22297,7 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "slug"
-      ],
+      "columns": ["slug"],
       "nullsNotDistinct": false,
       "name": "organization_slug_key",
       "schema": "auth",
@@ -23509,9 +22306,7 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "token"
-      ],
+      "columns": ["token"],
       "nullsNotDistinct": false,
       "name": "session_token_key",
       "schema": "auth",
@@ -23520,9 +22315,7 @@
     },
     {
       "nameExplicit": false,
-      "columns": [
-        "email"
-      ],
+      "columns": ["email"],
       "nullsNotDistinct": false,
       "name": "user_email_key",
       "schema": "auth",
