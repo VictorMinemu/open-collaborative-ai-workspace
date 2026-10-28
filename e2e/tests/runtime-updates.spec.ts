@@ -1,8 +1,9 @@
 import { type APIRequestContext, expect, test } from "@playwright/test";
-import { apiAs } from "../support/actors";
+import { apiAs, ensureMember, SAM, userIdOf } from "../support/actors";
 import {
   auditActions,
   type CliHome,
+  deviceAs,
   deviceEnv,
   type FakeRegistry,
   makeCliHome,
@@ -23,6 +24,10 @@ import { ADMIN } from "./env";
  *   Claude turn waits on an approval; the update waits, Codex and another Claude session keep working, it runs once
  *   the turn ends, a Claude prompt sent meanwhile is held and its session stores `runtime.update` waiting → done before
  *   the prompt starts; the owner sees the new version and the run, and the audit log holds available/started/finished.
+ * - "Update now" at the org level `notify` (D-02, D-05): nothing installs by itself; the owner's request does, the
+ *   history names the requester, a second request on a current runtime ends refused "already up to date".
+ * - a member (D-06, D-11): sees the device's compatibility, never its maintenance details; 403 on both routes.
+ * - the org level `off` (D-02): the device never asks the registry, and Update now is 409 `runtime_updates_off`.
  * API-level spec: it runs once, on the desktop project.
  */
 
@@ -285,4 +290,237 @@ test("the phase tracer: on a busy device Claude Code updates between turns, held
     cli?.remove();
     await restoreOrgLevel(admin, previousLevel);
   }
+});
+
+interface HistoryRun {
+  id: string;
+  runtime: string;
+  trigger: string;
+  state: string;
+  requestedBy: { id: string; name: string } | null;
+  fromVersion: string | null;
+  toVersion: string | null;
+  error: string | null;
+}
+
+const historyOf = async (api: APIRequestContext, deviceId: string, runtime: "claude-code" | "codex") =>
+  (
+    await ok<{ runs: HistoryRun[] }>(
+      await api.get(`/api/v1/devices/${deviceId}/runtime-updates?runtime=${runtime}`),
+      "history",
+    )
+  ).runs;
+
+/** One device on scratch CLIs and its own registry; everything is removed and the org level restored in `finally`. */
+async function withUpdatingDevice(
+  admin: APIRequestContext,
+  setup: {
+    orgLevel: "automatic" | "notify" | "off" | null;
+    registry: { claude: string; codex: string };
+    installed: { claude: string; codex: string };
+  },
+  body: (ctx: { device: FakeDeviceHandle; registry: FakeRegistry; cli: CliHome }) => Promise<void>,
+) {
+  const run = Date.now().toString(36);
+  let previousLevel: string | null = null;
+  let registry: FakeRegistry | null = null;
+  let cli: CliHome | null = null;
+  let device: FakeDeviceHandle | null = null;
+  try {
+    if (setup.orgLevel) previousLevel = await setOrgLevel(admin, setup.orgLevel);
+    registry = await startFakeRegistry();
+    registry.setLatest(CLAUDE_PKG, "latest", setup.registry.claude);
+    registry.setLatest(CODEX_PKG, "latest", setup.registry.codex);
+    cli = makeCliHome(setup.installed);
+    device = await startFakeDevice(admin, {
+      name: `E2E Updates ${run}`,
+      projectName: `updates-${run}`,
+      env: deviceEnv(cli.home, registry),
+    });
+    await body({ device, registry, cli });
+  } finally {
+    await device?.stop();
+    await registry?.stop();
+    cli?.remove();
+    await restoreOrgLevel(admin, previousLevel);
+  }
+}
+
+test("Update now: at the notify level the owner's request updates Codex, the history names the requester, a current runtime is refused", async () => {
+  test.skip(test.info().project.name !== "desktop", DESKTOP_ONLY);
+  test.setTimeout(180_000);
+  const admin = await apiAs(ADMIN);
+  const adminId = await userIdOf(admin);
+  await withUpdatingDevice(
+    admin,
+    {
+      orgLevel: "notify",
+      registry: { claude: "2.1.290", codex: "0.165.0" },
+      installed: { claude: "2.1.290", codex: "0.164.0" },
+    },
+    async ({ device, cli }) => {
+      const { deviceId } = device;
+      cli.setNextUpdate("codex", { next: "0.165.0" });
+      const codex = () => ownerRuntimeStatus(admin, deviceId, "codex");
+      await expect
+        .poll(async () => pick(await codex(), ["installedVersion", "method"]), {
+          timeout: 60_000,
+          message: "the owner sees the scratch Codex",
+        })
+        .toEqual({ installedVersion: "0.164.0", method: "codex_standalone" });
+
+      // ---- notify: the device checks and reports, but never installs by itself (D-02)
+      await device.runtimeCli(["updates", "check"]);
+      await expect
+        .poll(async () => pick(await codex(), ["advisory", "latestVersion", "state"]), {
+          timeout: 30_000,
+          message: "Codex is behind and idle",
+        })
+        .toEqual({ advisory: "behind", latestVersion: "0.165.0", state: "idle" });
+      await new Promise((r) => setTimeout(r, 3_000));
+      expect(pick(await codex(), ["installedVersion", "state"])).toEqual({
+        installedVersion: "0.164.0",
+        state: "idle",
+      });
+      expect(await historyOf(admin, deviceId, "codex")).toEqual([]);
+
+      // ---- Update now (D-05): the request carries the runtime only; the device picks the command
+      const res = await admin.post(`/api/v1/devices/${deviceId}/runtimes/codex/update`);
+      expect(res.status(), await res.text()).toBe(200);
+      const { run } = (await res.json()) as { run: HistoryRun };
+      expect(run).toMatchObject({ runtime: "codex", trigger: "manual", state: "requested" });
+      expect(run.requestedBy?.id).toBe(adminId);
+      await expect
+        .poll(async () => pick(await codex(), ["installedVersion", "state", "advisory"]), {
+          timeout: 60_000,
+          message: "Codex 0.165.0 is installed",
+        })
+        .toEqual({ installedVersion: "0.165.0", state: "idle", advisory: "current" });
+      expect(cli.version("codex")).toBe("codex-cli 0.165.0");
+      expect((await codex())?.lastRun?.outcome).toBe("succeeded");
+      await expect
+        .poll(async () => (await historyOf(admin, deviceId, "codex")).map((r) => [r.state, r.trigger]), {
+          timeout: 15_000,
+          message: "the history lists the run",
+        })
+        .toEqual([["succeeded", "manual"]]);
+      const [done] = await historyOf(admin, deviceId, "codex");
+      expect(done).toMatchObject({ id: run.id, fromVersion: "0.164.0", toVersion: "0.165.0" });
+      expect(done?.requestedBy?.id).toBe(adminId);
+      // Claude Code was never touched.
+      expect(cli.version("claude-code")).toBe("2.1.290 (Claude Code)");
+      expect(await historyOf(admin, deviceId, "claude-code")).toEqual([]);
+
+      // ---- a second request on a now current runtime: accepted by the API, refused by the device
+      const again = await admin.post(`/api/v1/devices/${deviceId}/runtimes/codex/update`);
+      expect(again.status(), await again.text()).toBe(200);
+      await expect
+        .poll(async () => (await historyOf(admin, deviceId, "codex"))[0]?.state, {
+          timeout: 30_000,
+          message: "the second request is refused",
+        })
+        .toBe("refused");
+      const [refused] = await historyOf(admin, deviceId, "codex");
+      expect(refused?.error).toContain("already up to date");
+      expect(cli.version("codex")).toBe("codex-cli 0.165.0");
+
+      const audits = await auditActions(deviceId);
+      expect(audits.filter((r) => r.action === "device.runtime_update_requested")).toHaveLength(2);
+      expect(audits.find((r) => r.action === "device.runtime_update_requested")).toMatchObject({
+        actor_kind: "user",
+        metadata: { runtime: "codex" },
+      });
+      for (const row of audits) expect(JSON.stringify(row.metadata)).not.toContain(cli.home);
+    },
+  );
+});
+
+test("a member sees the device's compatibility but no maintenance details, and may neither update nor read the history", async () => {
+  test.skip(test.info().project.name !== "desktop", DESKTOP_ONLY);
+  test.setTimeout(180_000);
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, SAM, "developer");
+  const sam = await apiAs(SAM);
+  await withUpdatingDevice(
+    admin,
+    {
+      orgLevel: null,
+      registry: { claude: "2.1.290", codex: "0.164.0" },
+      installed: { claude: "2.1.290", codex: "0.164.0" },
+    },
+    async ({ device }) => {
+      const { deviceId } = device;
+      await expect
+        .poll(async () => (await ownerRuntimeStatus(admin, deviceId, "claude-code"))?.installedVersion, {
+          timeout: 60_000,
+          message: "the owner sees the maintenance status",
+        })
+        .toBe("2.1.290");
+
+      // D-06, D-11, PD-05: Sam sees the device and its compatibility, never the install method, state or history.
+      const seen = await deviceAs(sam, deviceId);
+      expect(seen, "Sam sees the device").not.toBeNull();
+      expect(seen?.runtimeMaintenance).toBeUndefined();
+      expect(seen?.runtimeCompatibility).toEqual({ "claude-code": "supported", codex: "supported" });
+      expect(JSON.stringify(seen)).not.toMatch(/codex_standalone|claude update|\.local/);
+
+      const update = await sam.post(`/api/v1/devices/${deviceId}/runtimes/claude-code/update`);
+      expect(update.status()).toBe(403);
+      const history = await sam.get(`/api/v1/devices/${deviceId}/runtime-updates`);
+      expect(history.status()).toBe(403);
+      expect(await historyOf(admin, deviceId, "claude-code")).toEqual([]);
+      expect((await auditActions(deviceId)).map((r) => r.action)).not.toContain(
+        "device.runtime_update_requested",
+      );
+    },
+  );
+});
+
+test("with the organization's level off the device never asks the registry and Update now is refused", async () => {
+  test.skip(test.info().project.name !== "desktop", DESKTOP_ONLY);
+  test.setTimeout(180_000);
+  const admin = await apiAs(ADMIN);
+  await withUpdatingDevice(
+    admin,
+    {
+      orgLevel: "off",
+      registry: { claude: "2.1.300", codex: "0.165.0" },
+      installed: { claude: "2.1.290", codex: "0.164.0" },
+    },
+    async ({ device, registry, cli }) => {
+      const { deviceId } = device;
+      // runtime.config (level off) reached the device: its snapshot says so, and it still reports what is installed.
+      await expect
+        .poll(
+          async () => {
+            const d = await deviceAs(admin, deviceId);
+            const claude = d?.runtimeMaintenance?.runtimes.find((r) => r.runtime === "claude-code");
+            return {
+              effectiveLevel: d?.runtimeMaintenance?.effectiveLevel,
+              installedVersion: claude?.installedVersion,
+              latestVersion: claude?.latestVersion,
+              advisory: claude?.advisory,
+            };
+          },
+          { timeout: 60_000, message: "the device reports level off" },
+        )
+        .toEqual({
+          effectiveLevel: "off",
+          installedVersion: "2.1.290",
+          latestVersion: null,
+          advisory: "unknown",
+        });
+
+      await device.runtimeCli(["updates", "check"]);
+      await new Promise((r) => setTimeout(r, 2_000));
+      expect(registry.requests(), "no registry request from a device at off (D-02)").toEqual([]);
+
+      const res = await admin.post(`/api/v1/devices/${deviceId}/runtimes/claude-code/update`);
+      expect(res.status()).toBe(409);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe("runtime_updates_off");
+      expect(cli.version("claude-code")).toBe("2.1.290 (Claude Code)");
+      expect(await historyOf(admin, deviceId, "claude-code")).toEqual([]);
+      expect(registry.requests()).toEqual([]);
+    },
+  );
 });
