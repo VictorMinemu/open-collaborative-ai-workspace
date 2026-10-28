@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import type { RuntimeCompatibilityManifest } from "@ocw/contracts";
 import { startAllOrNone, startTestDatabase, type TestDatabase } from "@ocw/db/testing";
 import { RedisContainer, type StartedRedisContainer } from "@testcontainers/redis";
 import { type BuiltApp, buildApp } from "./app";
@@ -25,6 +26,8 @@ export interface TestStackOptions {
   logStream?: { write(msg: string): void };
   /** A lower Device Link frame limit for this stack (06.1-02 frame guard tests). */
   deviceFrameMaxBytes?: number;
+  /** A compatibility manifest other than the bundled one, e.g. with a broken range (07.11 PD-12 start tests). */
+  runtimeManifest?: RuntimeCompatibilityManifest;
   /** Shorter bot browser call deadlines for this stack (CI p64/p66 deadline tests). */
   browserBudgetsMs?: BrowserBudgets;
 }
@@ -68,6 +71,7 @@ async function buildStack(
     ...(opts.logStream ? { logger: true, logStream: opts.logStream } : { logger: false }),
     secretStore,
     ...(opts.deviceFrameMaxBytes ? { deviceFrameMaxBytes: opts.deviceFrameMaxBytes } : {}),
+    ...(opts.runtimeManifest ? { runtimeManifest: opts.runtimeManifest } : {}),
     ...(opts.browserBudgetsMs ? { browserBudgetsMs: opts.browserBudgetsMs } : {}),
   });
   try {

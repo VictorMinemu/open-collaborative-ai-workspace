@@ -45,7 +45,15 @@ export class FakeDevice {
     baseUrl: string,
     deviceToken: string,
     sessions?: string[],
-    opts: { codexLoggedIn?: boolean } = {},
+    opts: {
+      codexLoggedIn?: boolean;
+      /** The reported Claude Code version (default 2.1.287; null = installed, version unknown). */
+      claudeVersion?: string | null;
+      /** The reported Codex version (default 0.160.0). */
+      codexVersion?: string | null;
+      /** Report Codex as not installed (07.11: a runtime that is not installed has no compatibility). */
+      codexInstalled?: boolean;
+    } = {},
   ): Promise<FakeDevice> {
     const d = await FakeDevice.open(baseUrl, await FakeDevice.exchange(baseUrl, deviceToken));
     d.send({
@@ -53,8 +61,20 @@ export class FakeDevice {
       protocolVersion: 1,
       device: { name: "Test Mac", platform: "darwin", daemonVersion: "0.0.0-test" },
       runtimes: [
-        { id: "claude-code", installed: true, version: "2.1.287", loggedIn: true },
-        { id: "codex", installed: true, version: "0.160.0", loggedIn: opts.codexLoggedIn ?? false },
+        {
+          id: "claude-code",
+          installed: true,
+          version: opts.claudeVersion === undefined ? "2.1.287" : opts.claudeVersion,
+          loggedIn: true,
+        },
+        opts.codexInstalled === false
+          ? { id: "codex", installed: false, version: null, loggedIn: false }
+          : {
+              id: "codex",
+              installed: true,
+              version: opts.codexVersion === undefined ? "0.160.0" : opts.codexVersion,
+              loggedIn: opts.codexLoggedIn ?? false,
+            },
       ],
       ...(sessions ? { sessions } : {}),
     });
