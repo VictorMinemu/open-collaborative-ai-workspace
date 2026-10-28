@@ -10,9 +10,15 @@
 // adapter in memory only (never written to disk, a worktree or tmp); a runtime without `supportsImages` refuses them
 // visibly. Ack errors, the command-failure log and every `session.error` pass through `stripImageData`, so a runtime
 // that echoes its input never sends image bytes back.
+//
+// Runtime CLI updates (07.11, D-02, D-03, D-09, D-10, PD-03, PD-07, PD-19): one `RuntimeGate` per runtime and one
+// `RuntimeMaintenance` that keeps the CLIs current by itself. The server's `runtime.config` sets the org level; this
+// device's level comes from runtime.json or `OCW_RUNTIME_UPDATES`. Snapshots go out only while connected, run frames
+// through the offline log. Maintenance runs only when the daemon drives its real adapters, or in fake-CLI mode with a
+// scratch `HOME`, or when a test passes `DaemonOptions.maintenance`: a test or demo daemon never touches a real CLI.
 
 import { realpathSync } from "node:fs";
-import { arch, platform } from "node:os";
+import { arch, homedir, platform, userInfo } from "node:os";
 import {
   ApprovalResolvePayload,
   type CommandFrame,
@@ -26,6 +32,8 @@ import {
   RuntimeCatalog,
   type RuntimeId,
   type RuntimeInfo,
+  RuntimeUpdatePayload,
+  type ServerToDeviceFrame,
   SessionConfigurePayload,
   type SessionEvent,
   SessionStartPayload,
@@ -46,6 +54,7 @@ import {
   ProjectRegistry,
   type RuntimeConfig,
   resolveFullAccess,
+  resolveRuntimeUpdates,
   toWebSocketUrl,
 } from "./config.js";
 import { type ControlRequest, ControlSocketServer, controlSocketPath } from "./control-socket.js";
@@ -53,6 +62,12 @@ import { DeviceLink, type DeviceLinkOptions } from "./device-link.js";
 import { FakeRuntime } from "./fake/fake-runtime.js";
 import { changedFiles, ensureSessionWorktree, repoInfo, unifiedPatch } from "./git.js";
 import { createLogger, errorMessage, type Logger } from "./logger.js";
+import { RuntimeGate } from "./maintenance/gate.js";
+import {
+  RuntimeMaintenance,
+  type RuntimeMaintenanceOptions,
+  type UpdateRequestAnswer,
+} from "./maintenance/maintenance.js";
 import type { AgentRuntime } from "./runtime.js";
 import { sanitizeEvent, sanitizeString, sanitizeValue } from "./sanitize.js";
 import { runTitle } from "./title.js";
@@ -87,6 +102,11 @@ export const IMAGES_NOT_SUPPORTED_MESSAGE = "This runtime can't receive images";
 export const FULL_ACCESS_OFF_MESSAGE =
   "Full access is not enabled on this device (its owner turns it on in the desktop app or with `ocw-runtime full-access on`)";
 
+/** 07.11: the ack of a `runtime.update` command whose payload is anything but `{ runtime }` (D-05). */
+export const INVALID_PAYLOAD_MESSAGE = "invalid payload";
+/** 07.11 (PD-19): a daemon that does not maintain its CLIs (test runtimes, fake mode without a scratch HOME). */
+export const RUNTIME_UPDATES_UNAVAILABLE_MESSAGE = "runtime updates are not available on this device";
+
 /** The daemon's Full access gate, shared with every adapter it builds (read on every call). */
 interface FullAccessGate {
   optIn: boolean;
@@ -110,6 +130,56 @@ export interface DaemonOptions {
   controlSocket?: string | false;
   /** The daemon's own deadline for a `session.title` call (default TITLE_TIMEOUT_MS; lowered in tests). */
   titleTimeoutMs?: number;
+  /**
+   * Tests only (07.11, PD-19): runtime update maintenance for test-supplied runtimes runs only when this is given,
+   * with `userHome` (a scratch home) and usually `which`, a registry URL in `env` and short timers.
+   */
+  maintenance?: Partial<RuntimeMaintenanceOptions>;
+}
+
+/** Where runtime update maintenance may run (PD-19), or null: never against a real install from a test or a demo. */
+interface MaintenanceScope {
+  userHome: string;
+  requireScratchHome: boolean;
+}
+
+function sameDirectory(a: string, b: string): boolean {
+  return realpathOr(a) === realpathOr(b);
+}
+
+function osUserHome(): string | null {
+  try {
+    return userInfo().homedir;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * PD-19: real adapters → the user's home; fake runtimes → only with `OCW_RUNTIME_FAKE_CLI=1` and a `HOME` that is not
+ * the OS user's real home (scratch mode: installs outside it are refused); test-supplied runtimes → only when the test
+ * passes `DaemonOptions.maintenance.userHome`.
+ */
+function maintenanceScope(
+  opts: DaemonOptions,
+  env: NodeJS.ProcessEnv,
+  fake: boolean,
+): MaintenanceScope | null {
+  if (opts.runtimes !== undefined) {
+    const userHome = opts.maintenance?.userHome;
+    if (!userHome) return null;
+    return { userHome, requireScratchHome: opts.maintenance?.requireScratchHome ?? true };
+  }
+  if (fake) {
+    const home = env.HOME;
+    const real = osUserHome();
+    if (env.OCW_RUNTIME_FAKE_CLI !== "1" || !home || real === null || sameDirectory(home, real)) return null;
+    return { userHome: home, requireScratchHome: true };
+  }
+  return {
+    userHome: opts.maintenance?.userHome ?? homedir(),
+    requireScratchHome: opts.maintenance?.requireScratchHome ?? false,
+  };
 }
 
 interface ActiveSession {
@@ -135,6 +205,12 @@ export class Daemon {
   private link: DeviceLink | null = null;
   private control: ControlSocketServer | null = null;
   private readonly runtimes = new Map<RuntimeId, AgentRuntime>();
+  /** 07.11 (PD-07): one gate per runtime; held commands of that runtime wait while its CLI updates. */
+  private readonly gates = new Map<RuntimeId, RuntimeGate>();
+  /** 07.11: runtime CLI update maintenance; null when PD-19 does not allow it here. */
+  private maintenance: RuntimeMaintenance | null = null;
+  /** 07.11 (PD-07): per runtime, the sessions told `runtime.update` `waiting` during the current update. */
+  private readonly heldSessions = new Map<RuntimeId, Set<string>>();
   private readonly sessions = new Map<string, ActiveSession>();
   /** Roots per session survive session end so late events are still contained. */
   private readonly rootsBySession = new Map<string, string[]>();
@@ -162,7 +238,10 @@ export class Daemon {
     private readonly gate: FullAccessGate,
   ) {
     this.registry = new ProjectRegistry(home);
-    for (const r of runtimes) this.runtimes.set(r.id, r);
+    for (const r of runtimes) {
+      this.runtimes.set(r.id, r);
+      this.gates.set(r.id, new RuntimeGate());
+    }
   }
 
   static async create(opts: DaemonOptions = {}): Promise<Daemon> {
@@ -201,7 +280,45 @@ export class Daemon {
       ];
     const daemon = new Daemon(home, config, token, runtimes, log, opts, env, gate);
     await daemon.registry.load();
+    const scope = maintenanceScope(opts, env, fake && opts.runtimes === undefined);
+    if (scope) daemon.maintenance = daemon.buildMaintenance(scope);
+    else if (fake)
+      log.info("runtime updates are off: fake runtime without OCW_RUNTIME_FAKE_CLI=1 and a scratch HOME");
     return daemon;
+  }
+
+  private buildMaintenance(scope: MaintenanceScope): RuntimeMaintenance {
+    const level = resolveRuntimeUpdates(this.config, this.env);
+    const configuredPaths: Partial<Record<RuntimeId, string>> = {
+      ...(this.config.claude.path ? { "claude-code": this.config.claude.path } : {}),
+      ...(this.config.codex.path ? { codex: this.config.codex.path } : {}),
+    };
+    return new RuntimeMaintenance({
+      runtimes: [...this.runtimes.values()],
+      gates: this.gates,
+      env: this.env,
+      configuredPaths,
+      localLevel: level.level,
+      localLevelSource: level.source,
+      log: this.log,
+      runtimeInfo: async ({ fresh }) => {
+        if (fresh) this.detectCache = null;
+        return this.detectRuntimes();
+      },
+      // PD-03: a snapshot only while connected (the handshake carries one on every connect); runs never get lost.
+      sendSnapshot: (frame) => {
+        if (this.isConnected) this.send(frame);
+      },
+      sendRun: (frame) => this.send(frame),
+      notifySession: (runtime, phase, version) => this.notifyHeldSessions(runtime, phase, version),
+      afterRun: async () => {
+        this.detectCache = null;
+        if (this.isConnected) this.send(await this.capabilitiesFrame());
+      },
+      ...this.opts.maintenance,
+      userHome: scope.userHome,
+      requireScratchHome: scope.requireScratchHome,
+    });
   }
 
   /** The device's own Full access opt-in, as the daemon enforces it right now. */
@@ -224,6 +341,8 @@ export class Daemon {
     }
     if (!this.token) {
       this.log.warn("no device token found; pair this device from the desktop app, then restart the runtime");
+      // A headless, unpaired daemon still keeps its CLIs checked and reports locally (`notify`, D-10).
+      this.maintenance?.start({ paired: false });
       return;
     }
     this.link = new DeviceLink({
@@ -232,14 +351,22 @@ export class Daemon {
       getAccessToken: ({ refresh }) => this.getAccessToken(refresh),
       onOpenFrames: () => this.handshakeFrames(),
       onCommand: (cmd) => void this.handleCommand(cmd),
+      onServerFrame: (frame) => this.onServerFrame(frame),
       logger: this.log,
       ...this.opts.link,
     });
     this.link.start();
     this.log.info("connecting to server", { serverUrl: this.config.serverUrl });
+    this.maintenance?.start({ paired: true });
+  }
+
+  /** Server frames besides commands (PD-03): `runtime.config` sets the org level and the manifest. */
+  private onServerFrame(frame: Exclude<ServerToDeviceFrame, CommandFrame>): void {
+    if (frame.type === "runtime.config") this.maintenance?.setOrgPolicy(frame.policy, frame.manifest);
   }
 
   async stop(): Promise<void> {
+    this.maintenance?.stop();
     await Promise.all([...this.runtimes.values()].map((r) => r.stopAll().catch(() => undefined)));
     this.sessions.clear();
     await this.link?.stop();
@@ -258,12 +385,24 @@ export class Daemon {
       projects: this.registry.list().length,
       fullAccessOptIn: this.gate.optIn,
       fullAccessSource: this.gate.source,
+      ...(this.maintenance ? { runtimeUpdates: this.runtimeUpdatesStatus(this.maintenance) } : {}),
       sessions: [...this.sessions.values()].map((s) => ({
         sessionId: s.sessionId,
         projectLocalId: s.project.localId,
         runtime: s.runtime.id,
         worktreeBranch: s.worktreeBranch,
       })),
+    };
+  }
+
+  /** 07.11 (D-06): the levels and each runtime's status, exactly as the snapshot reports them. */
+  private runtimeUpdatesStatus(m: RuntimeMaintenance) {
+    return {
+      localLevel: m.localLevel,
+      localLevelSource: m.localLevelSource,
+      effectiveLevel: m.effectiveLevel,
+      orgLevelReceived: m.orgLevelReceived,
+      runtimes: m.statuses(),
     };
   }
 
@@ -334,8 +473,12 @@ export class Daemon {
     for (const r of this.runtimes.values()) {
       const info = infos.find((i) => i.id === r.id);
       if (!info?.installed || !info.loggedIn || !r.catalog) continue;
+      // 07.11 (PD-07): never while this runtime's CLI updates; the capabilities sent after the run cover it.
+      const gate = this.gates.get(r.id);
+      if (gate && !gate.isOpen) continue;
+      const collect = r.catalog.bind(r);
       try {
-        const catalog = await r.catalog();
+        const catalog = await (gate ? gate.admit(collect) : collect());
         if (!catalog) continue;
         const parsed = RuntimeCatalog.safeParse(sanitizeValue(catalog, roots));
         if (parsed.success) {
@@ -373,6 +516,7 @@ export class Daemon {
       },
       { type: "projects.sync", projects: this.registry.toSynced() },
       await this.capabilitiesFrame(),
+      ...(this.maintenance ? [await this.maintenance.snapshot()] : []),
     ];
   }
 
@@ -408,6 +552,48 @@ export class Daemon {
     const out: SessionEvent =
       event.type === "session.error" ? { ...event, message: stripImageData(event.message) } : event;
     this.send({ type: "event", sessionId, event: sanitizeEvent(out, roots), localSeq });
+    // 07.11 (PD-07): a turn ended or a session changed state: a pending update may take this idle moment.
+    if (event.type === "prompt.completed" || event.type === "session.state") {
+      const runtime = this.sessions.get(sessionId)?.runtime.id;
+      if (runtime) this.maintenance?.onRuntimeActivity(runtime);
+    }
+  }
+
+  /**
+   * 07.11 (PD-07, D-03): runs a command that starts or shapes a turn of `runtime` through that runtime's gate. While
+   * its CLI updates the command waits (it is never refused or dropped) and its session is told once (`runtime.update`
+   * `waiting`); the other runtime is never held. Without a known runtime it runs as before (and fails as before).
+   */
+  private admit<T>(runtime: RuntimeId | undefined, sessionId: string, fn: () => Promise<T>): Promise<T> {
+    const gate = runtime ? this.gates.get(runtime) : undefined;
+    if (!runtime || !gate) return fn();
+    return gate.admit(fn, () => this.tellWaiting(runtime, sessionId));
+  }
+
+  private tellWaiting(runtime: RuntimeId, sessionId: string): void {
+    let held = this.heldSessions.get(runtime);
+    if (!held) {
+      held = new Set();
+      this.heldSessions.set(runtime, held);
+    }
+    if (held.has(sessionId)) return;
+    held.add(sessionId);
+    this.forwardEvent(sessionId, { type: "runtime.update", runtime, phase: "waiting" });
+  }
+
+  /** The update ended: every session told `waiting` gets `done` (with the version now installed) or `failed`. */
+  private notifyHeldSessions(runtime: RuntimeId, phase: "done" | "failed", version?: string): void {
+    const held = this.heldSessions.get(runtime);
+    if (!held) return;
+    this.heldSessions.delete(runtime);
+    for (const sessionId of held) {
+      this.forwardEvent(sessionId, {
+        type: "runtime.update",
+        runtime,
+        phase,
+        ...(version ? { version } : {}),
+      });
+    }
   }
 
   private ack(commandId: string, error?: string, roots: string[] = []): void {
@@ -510,27 +696,20 @@ export class Daemon {
     const roots = this.rootsBySession.get(cmd.sessionId) ?? [];
     try {
       switch (cmd.kind) {
+        // 07.11 (PD-07): session.start, prompt (and steer), session.configure and session.title wait at their
+        // runtime's gate while its CLI updates; interrupt, approval.resolve, session.stop and diff.request never do.
         case "session.start":
-          await this.startSession(cmd);
+          await this.admit(
+            SessionStartPayload.safeParse(cmd.payload ?? {}).data?.runtime,
+            cmd.sessionId,
+            () => this.startSession(cmd),
+          );
           break;
-        case "prompt": {
-          const s = this.requireSession(cmd.sessionId);
-          const prompt = PromptPayload.parse(cmd.payload);
-          // A turn may run in fullAccess only while the opt-in is on (an explicit fullAccess cap, or a session
-          // still in fullAccess with no cap); checked before the adapter sees the prompt.
-          this.refuseFullAccess(prompt.permissionMode ?? s.mode);
-          if (prompt.permissionMode === "fullAccess") this.refuseFullAccess("fullAccess");
-          // P-10: images go to the adapter in memory only, and only to a runtime that can take them.
-          if (prompt.images?.length && !s.runtime.capabilities.supportsImages) {
-            throw new Error(IMAGES_NOT_SUPPORTED_MESSAGE);
-          }
-          if (prompt.delivery === "steer" && s.runtime.capabilities.supportsSteer && s.runtime.steer) {
-            await s.runtime.steer(cmd.sessionId, prompt);
-          } else {
-            await s.runtime.prompt(cmd.sessionId, prompt);
-          }
+        case "prompt":
+          await this.admit(this.requireSession(cmd.sessionId).runtime.id, cmd.sessionId, () =>
+            this.runPrompt(cmd),
+          );
           break;
-        }
         case "interrupt":
           await this.requireSession(cmd.sessionId).runtime.interrupt(cmd.sessionId);
           break;
@@ -557,10 +736,20 @@ export class Daemon {
           await this.sendDiff(cmd);
           break;
         case "session.configure":
-          await this.configureSession(cmd);
+          await this.admit(this.sessions.get(cmd.sessionId)?.runtime.id, cmd.sessionId, () =>
+            this.configureSession(cmd),
+          );
           break;
         case "session.title":
-          await this.sendTitle(cmd);
+          await this.admit(
+            SessionTitlePayload.safeParse(cmd.payload ?? {}).data?.runtime,
+            cmd.sessionId,
+            () => this.sendTitle(cmd),
+          );
+          break;
+        // 07.11 "Update now" (D-05, PD-08): never in session order, never gated; acked once accepted.
+        case "runtime.update":
+          await this.requestRuntimeUpdate(cmd);
           break;
       }
       this.ack(cmd.id);
@@ -576,6 +765,38 @@ export class Daemon {
         this.forwardEvent(cmd.sessionId, { type: "session.error", message });
         this.forwardEvent(cmd.sessionId, { type: "session.state", status: "failed" });
       }
+    }
+  }
+
+  /**
+   * "Update now" from the web (D-05, PD-08): the payload names the runtime and nothing else (strict); the device picks
+   * the candidate and the command from its own table. Refusals are the ack's error text; the result arrives as
+   * `runtime.update.run` frames carrying this command's id.
+   */
+  private async requestRuntimeUpdate(cmd: CommandFrame): Promise<void> {
+    const payload = RuntimeUpdatePayload.safeParse(cmd.payload);
+    if (!payload.success) throw new Error(INVALID_PAYLOAD_MESSAGE);
+    if (!this.maintenance) throw new Error(RUNTIME_UPDATES_UNAVAILABLE_MESSAGE);
+    const answer = await this.maintenance.requestUpdate(payload.data.runtime, "manual", cmd.id);
+    if (!answer.accepted) throw new Error(answer.reason);
+  }
+
+  /** A prompt (or steer), checked after admission so a held prompt sees the device's current gates. */
+  private async runPrompt(cmd: CommandFrame): Promise<void> {
+    const s = this.requireSession(cmd.sessionId);
+    const prompt = PromptPayload.parse(cmd.payload);
+    // A turn may run in fullAccess only while the opt-in is on (an explicit fullAccess cap, or a session
+    // still in fullAccess with no cap); checked before the adapter sees the prompt.
+    this.refuseFullAccess(prompt.permissionMode ?? s.mode);
+    if (prompt.permissionMode === "fullAccess") this.refuseFullAccess("fullAccess");
+    // P-10: images go to the adapter in memory only, and only to a runtime that can take them.
+    if (prompt.images?.length && !s.runtime.capabilities.supportsImages) {
+      throw new Error(IMAGES_NOT_SUPPORTED_MESSAGE);
+    }
+    if (prompt.delivery === "steer" && s.runtime.capabilities.supportsSteer && s.runtime.steer) {
+      await s.runtime.steer(cmd.sessionId, prompt);
+    } else {
+      await s.runtime.prompt(cmd.sessionId, prompt);
     }
   }
 
@@ -755,6 +976,17 @@ export class Daemon {
       }
       case "reloadConfig":
         return this.reloadConfig();
+      // 07.11 (D-09, PD-08): local only; the command still comes from the on-device table.
+      case "runtimeCheck": {
+        if (!this.maintenance) throw new Error(RUNTIME_UPDATES_UNAVAILABLE_MESSAGE);
+        await this.maintenance.check({ fresh: true });
+        return this.runtimeUpdatesStatus(this.maintenance);
+      }
+      case "runtimeUpdate": {
+        if (!this.maintenance) throw new Error(RUNTIME_UPDATES_UNAVAILABLE_MESSAGE);
+        const answer: UpdateRequestAnswer = await this.maintenance.requestUpdate(req.runtime, "local");
+        return answer;
+      }
     }
   }
 }

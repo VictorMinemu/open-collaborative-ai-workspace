@@ -8,7 +8,12 @@
 //   ocw-runtime full-access on|off|status
 //                                  the device owner's Full access opt-in (ADR-0012); writes runtime.json and asks
 //                                  a running daemon to reload it. OCW_ALLOW_FULL_ACCESS overrides it per process.
+//   ocw-runtime updates status|check|now <claude-code|codex>
+//                                  the runtime CLIs' versions and update state (07.11); `check` asks the registry
+//                                  now, `now` updates one runtime when it is idle (local only, never from the server).
 
+import { homedir } from "node:os";
+import { RuntimeId } from "@ocw/contracts";
 import { detectClaudeCode } from "./claude/detect.js";
 import {
   ensureOcwHome,
@@ -16,12 +21,14 @@ import {
   ocwHome,
   ProjectRegistry,
   resolveFullAccess,
+  resolveRuntimeUpdates,
   setFullAccessOptIn,
 } from "./config.js";
 import { type ControlRequest, controlRequest, controlSocketPath } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
 import { enroll } from "./enroll.js";
 import { errorMessage } from "./logger.js";
+import { publicInstallFields, resolveInstall } from "./maintenance/install-method.js";
 
 async function viaSocket(req: ControlRequest): Promise<void> {
   const res = await controlRequest(controlSocketPath(ocwHome()), req);
@@ -76,6 +83,83 @@ async function fullAccess(sub: string | undefined): Promise<void> {
     process.stderr.write("Note: OCW_ALLOW_FULL_ACCESS in the daemon's environment overrides runtime.json.\n");
   }
   process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
+}
+
+const UPDATES_USAGE = "usage: ocw-runtime updates status|check|now <claude-code|codex>";
+const RUNTIME_NOT_RUNNING = "the runtime is not running";
+/** A check or an update waits for the registry and the install, so the socket gets longer than the default. */
+const UPDATES_TIMEOUT_MS = 60_000;
+
+/**
+ * The daemon is stopped: what this machine has installed and how, from the install resolution only (no registry
+ * request, no version probe: nothing is run).
+ */
+async function localUpdatesReport(home: string): Promise<Record<string, unknown>> {
+  const config = await loadConfig(home);
+  const level = resolveRuntimeUpdates(config);
+  const paths: Record<RuntimeId, string | undefined> = {
+    "claude-code": config.claude.path,
+    codex: config.codex.path,
+  };
+  const runtimes = RuntimeId.options.map((runtime) => {
+    const configuredPath = paths[runtime];
+    const r = resolveInstall(runtime, {
+      home: homedir(),
+      env: process.env,
+      ...(configuredPath ? { configuredPath } : {}),
+    });
+    const { display, ...fields } = publicInstallFields(r);
+    return { runtime, ...fields, updateCommand: display };
+  });
+  return { daemon: "stopped", localLevel: level.level, localLevelSource: level.source, runtimes };
+}
+
+/** `updates status|check|now <runtime>` (07.11, D-05, D-09, PD-08): local only; the server can never call this. */
+async function updates(sub: string | undefined, arg: string | undefined): Promise<void> {
+  const home = ocwHome();
+  const socket = controlSocketPath(home);
+  const print = (value: unknown) =>
+    process.stdout.write(typeof value === "string" ? `${value}\n` : `${JSON.stringify(value, null, 2)}\n`);
+  let req: ControlRequest;
+  if (sub === "status") req = { cmd: "status" };
+  else if (sub === "check") req = { cmd: "runtimeCheck" };
+  else if (sub === "now") {
+    const runtime = RuntimeId.safeParse(arg);
+    if (!runtime.success) throw new Error(UPDATES_USAGE);
+    req = { cmd: "runtimeUpdate", runtime: runtime.data };
+  } else throw new Error(UPDATES_USAGE);
+
+  let res: { ok: boolean; result?: unknown; error?: string };
+  try {
+    res = await controlRequest(socket, req, UPDATES_TIMEOUT_MS);
+  } catch (err) {
+    if (!daemonDown(err)) throw err;
+    if (sub === "status") {
+      print(await localUpdatesReport(home));
+      return;
+    }
+    print(RUNTIME_NOT_RUNNING);
+    process.exitCode = 1;
+    return;
+  }
+  if (!res.ok) throw new Error(res.error ?? "request failed");
+  if (sub === "status") {
+    const status = res.result as { runtimeUpdates?: Record<string, unknown> };
+    if (!status.runtimeUpdates) throw new Error("runtime updates are not available on this device");
+    print({ daemon: "running", ...status.runtimeUpdates });
+    return;
+  }
+  if (sub === "check") {
+    print(res.result);
+    return;
+  }
+  const answer = res.result as { accepted?: boolean; reason?: string };
+  if (answer.accepted === true) {
+    print("accepted");
+    return;
+  }
+  print(answer.reason ?? "refused");
+  process.exitCode = 1;
 }
 
 async function run(): Promise<void> {
@@ -140,6 +224,8 @@ async function main(argv: string[]): Promise<void> {
     }
     case "full-access":
       return fullAccess(rest[0]);
+    case "updates":
+      return updates(rest[0], rest[1]);
     case "remove-project": {
       const localId = rest[0];
       if (!localId) throw new Error("usage: ocw-runtime remove-project <localId>");

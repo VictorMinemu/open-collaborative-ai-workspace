@@ -1,18 +1,31 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
-import type {
-  ApprovalDecision,
-  CommandFrame,
-  DeviceToServerFrame,
-  PromptPayload,
-  RuntimeCatalog,
-  RuntimeInfo,
-  SessionEvent,
-  SessionSettingsPatch,
+import { fileURLToPath } from "node:url";
+import {
+  type ApprovalDecision,
+  type CommandFrame,
+  type DeviceToServerFrame,
+  type PromptPayload,
+  RUNTIME_COMPATIBILITY_MANIFEST,
+  type RuntimeCatalog,
+  type RuntimeInfo,
+  type ServerToDeviceFrame,
+  type SessionEvent,
+  type SessionSettingsPatch,
 } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
@@ -21,6 +34,7 @@ import { controlRequest } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
 import { type Logger, silentLogger } from "./logger.js";
+import type { RuntimeMaintenanceOptions } from "./maintenance/maintenance.js";
 import type {
   AgentRuntime,
   EventSink,
@@ -64,6 +78,10 @@ class FakeRuntime implements AgentRuntime {
   /** 07.11: what `activeTurns()` reports (0 unless a test sets it); `retireIdle()` calls are counted. */
   activeTurnsCount = 0;
   retireIdleCalls = 0;
+  refreshInstallCalls = 0;
+  refreshInstall(): void {
+    this.refreshInstallCalls++;
+  }
   activeTurns(): number {
     return this.activeTurnsCount;
   }
@@ -250,15 +268,26 @@ class FakeServer {
   frame<T extends DeviceToServerFrame["type"]>(
     type: T,
     pred: (f: Extract<DeviceToServerFrame, { type: T }>) => boolean = () => true,
+    timeoutMs = 3000,
   ) {
-    return this.waitFor(() =>
-      this.connections
-        .flatMap((c) => c.frames)
-        .find(
-          (f): f is Extract<DeviceToServerFrame, { type: T }> =>
-            f.type === type && pred(f as Extract<DeviceToServerFrame, { type: T }>),
-        ),
+    return this.waitFor(
+      () =>
+        this.connections
+          .flatMap((c) => c.frames)
+          .find(
+            (f): f is Extract<DeviceToServerFrame, { type: T }> =>
+              f.type === type && pred(f as Extract<DeviceToServerFrame, { type: T }>),
+          ),
+      timeoutMs,
     );
+  }
+  /** Every frame the daemon sent, across connections. */
+  get allFrames(): DeviceToServerFrame[] {
+    return this.connections.flatMap((c) => c.frames);
+  }
+  /** A server → device frame on the current connection (welcome, runtime.config, …). */
+  push(frame: ServerToDeviceFrame): void {
+    this.last.ws.send(JSON.stringify(frame));
   }
   send(cmd: Omit<CommandFrame, "type">): void {
     this.last.ws.send(JSON.stringify({ type: "command", ...cmd }));
@@ -1191,4 +1220,615 @@ describe("Prompt images (06.1-03, D-05, P-01, P-10, P-11)", () => {
     const diff = await server.frame("diff.result", (f) => f.requestId === "di1");
     expect(diff.patch).toContain(dataUrl);
   });
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.11 runtime updates: the daemon keeps its CLIs current by itself (D-02, D-03, D-07, D-09, D-10, PD-19)
+
+const FAKE_CLI = fileURLToPath(new URL("./maintenance/fake-cli/fake-cli.mjs", import.meta.url));
+
+/** The npm registry as the daemon sees it (`OCW_RUNTIME_REGISTRY_URL`): one dist-tag answer, every request counted. */
+class RegistryStub {
+  readonly requests: string[] = [];
+  version = "2.1.300";
+  private readonly http: Server;
+  constructor() {
+    this.http = createServer((req, res) => {
+      this.requests.push(req.url ?? "");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ name: "x", version: this.version }));
+    });
+  }
+  listen(): Promise<void> {
+    return new Promise((resolve) => this.http.listen(0, "127.0.0.1", () => resolve()));
+  }
+  get url(): string {
+    return `http://127.0.0.1:${(this.http.address() as AddressInfo).port}`;
+  }
+  async close(): Promise<void> {
+    this.http.closeAllConnections();
+    await new Promise<void>((r) => this.http.close(() => r()));
+  }
+}
+
+const sleep07 = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
+  let registry: RegistryStub;
+  let userHome: string;
+  let nodeBin: string;
+  let codex: ScriptedRuntime;
+
+  beforeEach(async () => {
+    registry = new RegistryStub();
+    await registry.listen();
+    userHome = join(home, "user");
+    mkdirSync(userHome);
+    nodeBin = join(userHome, "node-bin");
+    mkdirSync(nodeBin);
+    symlinkSync(process.execPath, join(nodeBin, "node"));
+  });
+
+  afterEach(async () => {
+    await registry.close();
+  });
+
+  const claudeBin = () => join(userHome, ".local", "bin");
+  const nativeRoot = () => join(userHome, ".local", "share", "claude");
+  /** The scratch fake CLI's own answer (PD-19: never the machine's real `claude`). */
+  const fakeClaudeVersion = () =>
+    execFileSync(join(claudeBin(), "claude"), ["--version"], { env: { PATH: `${nodeBin}:/usr/bin:/bin` } })
+      .toString()
+      .trim();
+
+  /** A native fake Claude Code 2.1.290 in a scratch user home whose update goes to 2.1.300; a daemon around it. */
+  async function updatesDaemon(
+    o: {
+      env?: Record<string, string>;
+      fakeUpdate?: Record<string, unknown>;
+      maintenance?: Partial<RuntimeMaintenanceOptions>;
+    } = {},
+  ): Promise<void> {
+    await daemon.stop();
+    execFileSync(process.execPath, [FAKE_CLI, "install-fake", "claude-native", userHome, "2.1.290"]);
+    writeFileSync(
+      join(nativeRoot(), "fake-update.json"),
+      JSON.stringify({ next: "2.1.300", ...o.fakeUpdate }),
+    );
+    runtime = new FakeRuntime();
+    codex = new ScriptedRuntime("codex", 1);
+    daemon = await Daemon.create({
+      home,
+      env: {
+        PATH: [claudeBin(), nodeBin, "/usr/bin", "/bin"].join(":"),
+        HOME: userHome,
+        OCW_RUNTIME_REGISTRY_URL: registry.url,
+        ...o.env,
+      },
+      token: "device-token-123",
+      config: { serverUrl: server.url },
+      runtimes: [runtime, codex],
+      logger: silentLogger,
+      controlSocket: socketPath(),
+      link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+      maintenance: {
+        userHome,
+        which: (name) => (name === "claude" ? join(claudeBin(), "claude") : null),
+        ...o.maintenance,
+      },
+    });
+  }
+
+  const welcome = (): ServerToDeviceFrame => ({
+    type: "welcome",
+    deviceId: randomUUID(),
+    organizationId: randomUUID(),
+  });
+
+  it("automatic: a behind Claude Code is updated at start while no turn runs, and the server hears every step", async () => {
+    await updatesDaemon();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    server.push({ type: "runtime.config", policy: "automatic", manifest: RUNTIME_COMPATIBILITY_MANIFEST });
+
+    const started = await server.frame("runtime.update.run", (f) => f.phase === "started", 15_000);
+    expect(started).toMatchObject({
+      runtime: "claude-code",
+      trigger: "automatic",
+      fromVersion: "2.1.290",
+      candidate: "2.1.300",
+      method: "native",
+    });
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 20_000);
+    expect(finished).toMatchObject({
+      runId: started.runId,
+      outcome: "succeeded",
+      fromVersion: "2.1.290",
+      toVersion: "2.1.300",
+    });
+    const snapshot = await server.frame(
+      "runtime.maintenance",
+      (f) => f.runtimes.some((s) => s.runtime === "claude-code" && s.installedVersion === "2.1.300"),
+      10_000,
+    );
+    expect(snapshot).toMatchObject({
+      orgLevelReceived: true,
+      effectiveLevel: "automatic",
+      localLevel: "automatic",
+    });
+    expect(snapshot.runtimes.find((s) => s.runtime === "claude-code")).toMatchObject({
+      advisory: "current",
+      method: "native",
+      location: "~/.local/bin",
+      lastRun: { outcome: "succeeded", fromVersion: "2.1.290", toVersion: "2.1.300" },
+      state: "idle",
+    });
+    const finishedAt = server.allFrames.indexOf(finished);
+    await server.waitFor(
+      () =>
+        server.allFrames.slice(finishedAt + 1).some((f) => f.type === "capabilities") ? true : undefined,
+      10_000,
+    );
+    expect(server.allFrames.indexOf(started)).toBeLessThan(finishedAt);
+    expect(finishedAt).toBeLessThan(server.allFrames.indexOf(snapshot));
+    expect(runtime.retireIdleCalls).toBe(1);
+    expect(runtime.refreshInstallCalls).toBe(1);
+    expect(runtime.interrupts).toEqual([]);
+    expect(fakeClaudeVersion()).toBe("2.1.300 (Claude Code)");
+    const wire = JSON.stringify(server.allFrames);
+    expect(wire).not.toContain(userHome);
+    expect(wire).not.toContain(home);
+    const status = (await daemon.status()) as { runtimeUpdates?: { effectiveLevel: string } };
+    expect(status.runtimeUpdates).toMatchObject({ effectiveLevel: "automatic", orgLevelReceived: true });
+  }, 40_000);
+
+  it("D-10: without a runtime.config the daemon checks and reports behind but never installs", async () => {
+    await updatesDaemon({ maintenance: { orgLevelGraceMs: 50 } });
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    const behind = await server.frame(
+      "runtime.maintenance",
+      (f) => f.runtimes.some((s) => s.runtime === "claude-code" && s.advisory === "behind"),
+      10_000,
+    );
+    expect(behind).toMatchObject({
+      orgLevelReceived: false,
+      effectiveLevel: "notify",
+      localLevel: "automatic",
+    });
+    expect(behind.runtimes.find((s) => s.runtime === "claude-code")).toMatchObject({
+      installedVersion: "2.1.290",
+      latestVersion: "2.1.300",
+      state: "idle",
+    });
+    await sleep07(1500);
+    expect(server.allFrames.filter((f) => f.type === "runtime.update.run")).toEqual([]);
+    expect(fakeClaudeVersion()).toBe("2.1.290 (Claude Code)");
+    expect(registry.requests.length).toBeGreaterThan(0);
+    expect(registry.requests[0]).toContain("/@anthropic-ai%2Fclaude-code/");
+  }, 20_000);
+
+  it("off: no registry request at all; the snapshot still reports the installed version and method", async () => {
+    await updatesDaemon();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    server.push({ type: "runtime.config", policy: "off", manifest: RUNTIME_COMPATIBILITY_MANIFEST });
+    const off = await server.frame(
+      "runtime.maintenance",
+      (f) =>
+        f.orgLevelReceived &&
+        f.runtimes.some((s) => s.runtime === "claude-code" && s.installedVersion === "2.1.290"),
+      10_000,
+    );
+    expect(off.effectiveLevel).toBe("off");
+    expect(off.runtimes.find((s) => s.runtime === "claude-code")).toMatchObject({
+      method: "native",
+      latestVersion: null,
+      checkedAt: null,
+    });
+    await sleep07(500);
+    expect(registry.requests).toEqual([]);
+    expect(server.allFrames.filter((f) => f.type === "runtime.update.run")).toEqual([]);
+  }, 20_000);
+
+  it("PD-19: test runtimes without DaemonOptions.maintenance never start maintenance (no request, no snapshot)", async () => {
+    await daemon.stop();
+    runtime = new FakeRuntime();
+    daemon = await Daemon.create({
+      home,
+      env: { OCW_RUNTIME_REGISTRY_URL: registry.url, HOME: userHome },
+      token: "device-token-123",
+      config: { serverUrl: server.url },
+      runtimes: [runtime],
+      logger: silentLogger,
+      controlSocket: socketPath(),
+      link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+    });
+    await daemon.start();
+    await server.frame("hello");
+    server.push({ type: "runtime.config", policy: "automatic", manifest: RUNTIME_COMPATIBILITY_MANIFEST });
+    await server.frame("capabilities");
+    await sleep07(300);
+    expect(registry.requests).toEqual([]);
+    expect(server.allFrames.filter((f) => f.type === "runtime.maintenance")).toEqual([]);
+    expect(((await daemon.status()) as { runtimeUpdates?: unknown }).runtimeUpdates).toBeUndefined();
+  });
+
+  it("PD-19: fake mode without OCW_RUNTIME_FAKE_CLI=1, or with the real HOME, never starts maintenance", async () => {
+    await daemon.stop();
+    const base = { home, token: null, logger: silentLogger, controlSocket: false as const };
+    daemon = await Daemon.create({
+      ...base,
+      env: { OCW_RUNTIME_FAKE: "1", OCW_RUNTIME_REGISTRY_URL: registry.url, HOME: userHome },
+    });
+    expect(((await daemon.status()) as { runtimeUpdates?: unknown }).runtimeUpdates).toBeUndefined();
+    await daemon.start();
+    await sleep07(200);
+    await daemon.stop();
+    daemon = await Daemon.create({
+      ...base,
+      env: {
+        OCW_RUNTIME_FAKE: "1",
+        OCW_RUNTIME_FAKE_CLI: "1",
+        OCW_RUNTIME_REGISTRY_URL: registry.url,
+        HOME: userInfo().homedir,
+      },
+    });
+    expect(((await daemon.status()) as { runtimeUpdates?: unknown }).runtimeUpdates).toBeUndefined();
+    expect(registry.requests).toEqual([]);
+    // With a scratch HOME the fake-CLI daemon does maintain (status reports the levels; not started here).
+    daemon = await Daemon.create({
+      ...base,
+      env: { OCW_RUNTIME_FAKE: "1", OCW_RUNTIME_FAKE_CLI: "1", HOME: userHome, PATH: nodeBin },
+    });
+    expect(((await daemon.status()) as { runtimeUpdates?: unknown }).runtimeUpdates).toMatchObject({
+      localLevel: "automatic",
+      orgLevelReceived: false,
+    });
+  });
+  // ---- 07.11 Task 2: never cut a turn (D-03, D-03a, D-03b, PD-07) ----
+
+  async function startOn(sessionId: string, rt: "claude-code" | "codex", localId: string): Promise<void> {
+    server.send({
+      id: `start-${sessionId}`,
+      kind: "session.start",
+      sessionId,
+      payload: { projectLocalId: localId, runtime: rt, permissionMode: "default" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === `start-${sessionId}`)).toMatchObject({
+      ok: true,
+    });
+  }
+  const ackOf = (id: string, timeoutMs = 3000) => server.frame("ack", (f) => f.commandId === id, timeoutMs);
+  const hasAck = (id: string) => server.allFrames.some((f) => f.type === "ack" && f.commandId === id);
+  const updateEvents = (sessionId: string) =>
+    server.allFrames.flatMap((f) =>
+      f.type === "event" && f.sessionId === sessionId && f.event.type === "runtime.update" ? [f.event] : [],
+    );
+  const claudeState = (f: Extract<DeviceToServerFrame, { type: "runtime.maintenance" }>) =>
+    f.runtimes.find((s) => s.runtime === "claude-code");
+  const automatic = (): ServerToDeviceFrame => ({
+    type: "runtime.config",
+    policy: "automatic",
+    manifest: RUNTIME_COMPATIBILITY_MANIFEST,
+  });
+  const WAITING = { type: "runtime.update", runtime: "claude-code", phase: "waiting" };
+
+  it("a Claude turn in flight: the update waits with the gate open, then takes the idle moment; during the run only new Claude turns wait", async () => {
+    await updatesDaemon({ fakeUpdate: { delayMs: 1500 }, maintenance: { drainPollMs: 20 } });
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    await startOn("A", "claude-code", localId);
+    await startOn("B", "claude-code", localId);
+    await startOn("C", "codex", localId);
+    runtime.activeTurnsCount = 1; // A's turn is running
+    server.push(automatic());
+    await server.frame("runtime.maintenance", (f) => claudeState(f)?.state === "pending", 10_000);
+
+    // Opportunistic phase: the gate is open for every session and for Codex.
+    server.send({ id: "pb1", kind: "prompt", sessionId: "B", payload: { promptId: "b1", text: "go" } });
+    server.send({ id: "pc1", kind: "prompt", sessionId: "C", payload: { promptId: "c1", text: "go" } });
+    expect(await ackOf("pb1")).toMatchObject({ ok: true });
+    expect(await ackOf("pc1")).toMatchObject({ ok: true });
+    expect(runtime.prompts.map((p) => p.promptId)).toContain("b1");
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run")).toBe(false);
+
+    // A's turn ends: the update starts right away.
+    runtime.activeTurnsCount = 0;
+    runtime.emit("A", {
+      type: "prompt.completed",
+      promptId: "a1",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    await server.frame("runtime.update.run", (f) => f.phase === "started", 2000);
+
+    // During the run (the fake CLI takes 1.5 s): a new Claude turn waits; Codex, interrupts and approvals pass.
+    server.send({ id: "pb2", kind: "prompt", sessionId: "B", payload: { promptId: "b2", text: "next" } });
+    server.send({ id: "pc2", kind: "prompt", sessionId: "C", payload: { promptId: "c2", text: "next" } });
+    server.send({ id: "ia", kind: "interrupt", sessionId: "A" });
+    server.send({
+      id: "ra",
+      kind: "approval.resolve",
+      sessionId: "A",
+      payload: { approvalId: "ap1", decision: "once" },
+    });
+    expect(await ackOf("pc2")).toMatchObject({ ok: true });
+    expect(await ackOf("ia")).toMatchObject({ ok: true });
+    expect(await ackOf("ra")).toMatchObject({ ok: true });
+    await sleep07(200);
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run" && f.phase === "finished")).toBe(
+      false,
+    );
+    expect(hasAck("pb2")).toBe(false);
+    expect(runtime.prompts.map((p) => p.promptId)).not.toContain("b2");
+    expect(updateEvents("B")).toEqual([WAITING]);
+
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 15_000);
+    expect(finished.outcome).toBe("succeeded");
+    expect(await ackOf("pb2", 5000)).toMatchObject({ ok: true });
+    expect(runtime.prompts.map((p) => p.promptId)).toContain("b2");
+    await server.waitFor(() => (updateEvents("B").length === 2 ? true : undefined));
+    expect(updateEvents("B")).toEqual([
+      WAITING,
+      { type: "runtime.update", runtime: "claude-code", phase: "done", version: "2.1.300" },
+    ]);
+    expect(updateEvents("A")).toEqual([]);
+    expect(updateEvents("C")).toEqual([]);
+    expect(runtime.interrupts).toEqual(["A"]); // only the member's own interrupt command
+  }, 40_000);
+
+  it("after the drain delay new Claude starts are held while the in-flight turn finishes; stale is reported; nothing is interrupted", async () => {
+    await updatesDaemon({
+      maintenance: { drainAfterMs: 300, staleAfterMs: 900, pollMs: 50, drainPollMs: 20 },
+    });
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    await startOn("A", "claude-code", localId);
+    runtime.activeTurnsCount = 1; // stuck busy
+    server.push(automatic());
+    await server.frame("runtime.maintenance", (f) => claudeState(f)?.state === "draining", 10_000);
+
+    server.send({
+      id: "start-D",
+      kind: "session.start",
+      sessionId: "D",
+      payload: { projectLocalId: localId, runtime: "claude-code", permissionMode: "default" },
+    });
+    await startOn("E", "codex", localId); // Codex is never held
+    await sleep07(200);
+    expect(hasAck("start-D")).toBe(false);
+    expect(updateEvents("D")).toEqual([WAITING]);
+
+    const stale = await server.frame("runtime.maintenance", (f) => claudeState(f)?.stale === true, 10_000);
+    expect(claudeState(stale)?.pendingSince).not.toBeNull();
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run")).toBe(false);
+
+    runtime.activeTurnsCount = 0; // the in-flight turn ends on its own
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 15_000);
+    expect(finished.outcome).toBe("succeeded");
+    expect(await ackOf("start-D", 5000)).toMatchObject({ ok: true });
+    expect(runtime.interrupts).toEqual([]);
+    await server.waitFor(() => (updateEvents("D").length === 2 ? true : undefined));
+    expect(updateEvents("D")[1]).toMatchObject({ phase: "done", version: "2.1.300" });
+  }, 40_000);
+
+  it("a failed run reopens the gate: the held turn runs, its session is told failed, lastRun is failed", async () => {
+    await updatesDaemon({ fakeUpdate: { exitCode: 1, delayMs: 1000 } });
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    await startOn("B", "claude-code", localId);
+    server.push(automatic());
+    await server.frame("runtime.update.run", (f) => f.phase === "started", 10_000);
+    server.send({ id: "pb1", kind: "prompt", sessionId: "B", payload: { promptId: "b1", text: "go" } });
+    await sleep07(150);
+    expect(hasAck("pb1")).toBe(false);
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 15_000);
+    expect(finished).toMatchObject({ outcome: "failed", fromVersion: "2.1.290", toVersion: null });
+    expect(finished.output).toContain("exited with code 1");
+    expect(JSON.stringify(finished)).not.toContain(userHome);
+    expect(await ackOf("pb1", 5000)).toMatchObject({ ok: true });
+    await server.waitFor(() => (updateEvents("B").length === 2 ? true : undefined));
+    expect(updateEvents("B")[1]).toMatchObject({ phase: "failed" });
+    const snap = await server.frame(
+      "runtime.maintenance",
+      (f) => claudeState(f)?.lastRun?.outcome === "failed",
+    );
+    expect(claudeState(snap)).toMatchObject({ installedVersion: "2.1.290", state: "idle" });
+    expect(fakeClaudeVersion()).toBe("2.1.290 (Claude Code)");
+  }, 40_000);
+
+  it("session.title and catalog collection for Claude wait while its gate is closed; Codex's do not", async () => {
+    await updatesDaemon({ fakeUpdate: { delayMs: 1500 } });
+    runtime.extraModels = ["haiku"];
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    await startOn("A", "claude-code", localId);
+    await startOn("C", "codex", localId);
+    server.push(automatic());
+    await server.frame("runtime.update.run", (f) => f.phase === "started", 10_000);
+
+    const title = (id: string, sessionId: string, rt: string) =>
+      server.send({
+        id,
+        kind: "session.title",
+        sessionId,
+        payload: { runtime: rt, model: "haiku", prompt: "Please fix the login redirect bug" },
+      });
+    title("tA", "A", "claude-code");
+    title("tC", "C", "codex");
+    await ackOf("tC", 1000); // answered (ok or not) while Claude updates
+    const catalogs = await (
+      daemon as unknown as { collectCatalogs(): Promise<RuntimeCatalog[]> }
+    ).collectCatalogs();
+    expect(catalogs.map((c) => c.runtime)).not.toContain("claude-code");
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run" && f.phase === "finished")).toBe(
+      false,
+    );
+    expect(hasAck("tA")).toBe(false);
+    expect(server.allFrames.some((f) => f.type === "title.result" && f.requestId === "tA")).toBe(false);
+
+    await server.frame("runtime.update.run", (f) => f.phase === "finished", 15_000);
+    expect(await ackOf("tA", 5000)).toMatchObject({ ok: true });
+    const after = await (
+      daemon as unknown as { collectCatalogs(): Promise<RuntimeCatalog[]> }
+    ).collectCatalogs();
+    expect(after.map((c) => c.runtime)).toContain("claude-code");
+  }, 40_000);
+  // ---- 07.11 Task 3: "Update now" from the web and the control socket (D-05, PD-08) ----
+
+  const updateCmd = (payload: unknown) => ({
+    id: randomUUID(),
+    kind: "runtime.update" as const,
+    sessionId: randomUUID(),
+    payload,
+  });
+  const notify = (): ServerToDeviceFrame => ({
+    type: "runtime.config",
+    policy: "notify",
+    manifest: RUNTIME_COMPATIBILITY_MANIFEST,
+  });
+
+  it('"Update now": acked ok, drains at once (no opportunistic hour), the run carries trigger manual and the command id', async () => {
+    await updatesDaemon({ maintenance: { drainPollMs: 20 } });
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    server.push(notify());
+    await server.frame("runtime.maintenance", (f) => claudeState(f)?.advisory === "behind", 10_000);
+    await startOn("A", "claude-code", localId);
+    runtime.activeTurnsCount = 1;
+    const cmd = updateCmd({ runtime: "claude-code" });
+    server.send(cmd);
+    expect(await ackOf(cmd.id, 10_000)).toMatchObject({ ok: true });
+    await server.frame("runtime.maintenance", (f) => claudeState(f)?.state === "draining", 5000);
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run")).toBe(false);
+    runtime.activeTurnsCount = 0;
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 15_000);
+    expect(finished).toMatchObject({
+      trigger: "manual",
+      commandId: cmd.id,
+      outcome: "succeeded",
+      fromVersion: "2.1.290",
+      toVersion: "2.1.300",
+    });
+    expect(
+      server.allFrames.find((f) => f.type === "runtime.update.run" && f.phase === "started"),
+    ).toMatchObject({ trigger: "manual", commandId: cmd.id });
+    expect(runtime.interrupts).toEqual([]);
+  }, 40_000);
+
+  it('"Update now" refusals: off on this device; an extra key, an unknown runtime or no payload is an invalid payload; nothing runs', async () => {
+    await updatesDaemon({ env: { OCW_RUNTIME_UPDATES: "off" } });
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    server.push(automatic());
+    const off = updateCmd({ runtime: "claude-code" });
+    server.send(off);
+    expect(await ackOf(off.id, 10_000)).toMatchObject({ ok: false, error: "updates are off on this device" });
+    for (const payload of [{ runtime: "claude-code", command: "rm" }, { runtime: "opencode" }, undefined]) {
+      const c = updateCmd(payload);
+      server.send(c);
+      expect(await ackOf(c.id)).toMatchObject({ ok: false, error: "invalid payload" });
+    }
+    await sleep07(200);
+    expect(registry.requests).toEqual([]);
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run")).toBe(false);
+    expect(fakeClaudeVersion()).toBe("2.1.290 (Claude Code)");
+  }, 20_000);
+
+  it('"Update now" refusals: a fresh registry check says current → already up to date', async () => {
+    registry.version = "2.1.290";
+    await updatesDaemon();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    server.push(notify());
+    const c = updateCmd({ runtime: "claude-code" });
+    server.send(c);
+    expect(await ackOf(c.id, 10_000)).toMatchObject({ ok: false, error: "already up to date" });
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run")).toBe(false);
+  }, 20_000);
+
+  it('"Update now" refusals: a second request while the first runs → already updating', async () => {
+    await updatesDaemon({ fakeUpdate: { delayMs: 1500 } });
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    server.push(notify());
+    const first = updateCmd({ runtime: "claude-code" });
+    server.send(first);
+    expect(await ackOf(first.id, 10_000)).toMatchObject({ ok: true });
+    const second = updateCmd({ runtime: "claude-code" });
+    server.send(second);
+    expect(await ackOf(second.id, 10_000)).toMatchObject({ ok: false, error: "already updating" });
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 15_000);
+    expect(finished).toMatchObject({ commandId: first.id, outcome: "succeeded" });
+    expect(
+      server.allFrames.filter((f) => f.type === "runtime.update.run" && f.phase === "started"),
+    ).toHaveLength(1);
+  }, 40_000);
+
+  it("control socket: runtimeCheck answers fresh statuses, runtimeUpdate runs with trigger local, both strict", async () => {
+    await updatesDaemon();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    server.push(notify());
+    await server.frame("runtime.maintenance", (f) => f.orgLevelReceived, 10_000);
+    const before = registry.requests.length;
+    const check = await controlRequest(socketPath(), { cmd: "runtimeCheck" });
+    expect(check).toMatchObject({ ok: true, result: { effectiveLevel: "notify", orgLevelReceived: true } });
+    const statuses = (check.result as { runtimes: Array<{ runtime: string }> }).runtimes;
+    expect(statuses.find((s) => s.runtime === "claude-code")).toMatchObject({
+      installedVersion: "2.1.290",
+      latestVersion: "2.1.300",
+      advisory: "behind",
+      method: "native",
+    });
+    expect(statuses.find((s) => s.runtime === "codex")).toMatchObject({ method: "not_installed" });
+    expect(registry.requests.length).toBeGreaterThan(before); // fresh: not the cached answer
+    expect(await controlRequest(socketPath(), { cmd: "runtimeCheck", args: ["x"] } as never)).toMatchObject({
+      ok: false,
+      error: "invalid request",
+    });
+    expect(
+      await controlRequest(socketPath(), {
+        cmd: "runtimeUpdate",
+        runtime: "claude-code",
+        command: "rm",
+      } as never),
+    ).toMatchObject({ ok: false, error: "invalid request" });
+    expect(await controlRequest(socketPath(), { cmd: "runtimeUpdate", runtime: "codex" })).toMatchObject({
+      ok: true,
+      result: { accepted: false, reason: "not installed on this device" },
+    });
+    expect(
+      await controlRequest(socketPath(), { cmd: "runtimeUpdate", runtime: "claude-code" }),
+    ).toMatchObject({
+      ok: true,
+      result: { accepted: true },
+    });
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 15_000);
+    expect(finished).toMatchObject({ trigger: "local", outcome: "succeeded", toVersion: "2.1.300" });
+    expect(finished.commandId).toBeUndefined();
+    const status = (await daemon.status()) as {
+      runtimeUpdates: { runtimes: Array<{ runtime: string; installedVersion: string | null }> };
+    };
+    expect(status.runtimeUpdates.runtimes.find((s) => s.runtime === "claude-code")?.installedVersion).toBe(
+      "2.1.300",
+    );
+  }, 40_000);
 });
