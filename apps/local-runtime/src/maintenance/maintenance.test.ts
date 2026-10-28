@@ -81,6 +81,7 @@ interface Harness {
     refreshInstall(): void;
   };
   registryCalls: string[];
+  freshCalls: string[];
   runs: RunUpdateOptions[];
   snapshots: RuntimeMaintenanceFrame[];
   runFrames: RuntimeUpdateRunFrame[];
@@ -122,6 +123,7 @@ function harness(over: Partial<RuntimeMaintenanceOptions> & { local?: RuntimeUpd
     gate,
     adapter,
     registryCalls: [] as string[],
+    freshCalls: [] as string[],
     runs: [] as RunUpdateOptions[],
     snapshots: [] as RuntimeMaintenanceFrame[],
     runFrames: [] as RuntimeUpdateRunFrame[],
@@ -172,6 +174,12 @@ function harness(over: Partial<RuntimeMaintenanceOptions> & { local?: RuntimeUpd
     registry: {
       latest: async (rt, tag) => {
         h.registryCalls.push(`${rt}@${tag}`);
+        return state.latest;
+      },
+    },
+    freshRegistry: {
+      latest: async (rt, tag) => {
+        h.freshCalls.push(`${rt}@${tag}`);
         return state.latest;
       },
     },
@@ -539,5 +547,117 @@ describe("RuntimeMaintenance: never cut a turn (D-03, D-03a, D-03b, PD-07)", () 
     h.m.onRuntimeActivity("claude-code");
     await flush();
     expect(h.runs).toEqual([]);
+  });
+});
+
+describe('RuntimeMaintenance: "Update now" (D-05, PD-08)', () => {
+  const realWait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("accepted: a fresh registry check, then it drains at once (no opportunistic hour), trigger and command id on the run", async () => {
+    const h = harness({ drainPollMs: 5 });
+    h.m.setOrgPolicy("notify", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    h.adapter.turns = 1;
+    const commandId = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
+    expect(await h.m.requestUpdate("claude-code", "manual", commandId)).toEqual({ accepted: true });
+    expect(h.freshCalls).toEqual(["claude-code@latest"]);
+    await flush();
+    expect(claudeStatus(h).state).toBe("draining");
+    expect(h.gate.isOpen).toBe(false);
+    h.adapter.turns = 0;
+    await realWait(30);
+    await flush();
+    expect(h.runs).toHaveLength(1);
+    expect(h.runFrames.map((f) => [f.phase, f.trigger, f.commandId])).toEqual([
+      ["started", "manual", commandId],
+      ["finished", "manual", commandId],
+    ]);
+  });
+
+  it("a local request carries trigger local and no command id", async () => {
+    const h = harness();
+    h.m.start({ paired: false });
+    await flush();
+    expect(await h.m.requestUpdate("claude-code", "local")).toEqual({ accepted: true });
+    await flush();
+    expect(h.runFrames.map((f) => [f.phase, f.trigger, f.commandId])).toEqual([
+      ["started", "local", undefined],
+      ["finished", "local", undefined],
+    ]);
+  });
+
+  it.each<[string, Partial<RuntimeMaintenanceOptions> & { local?: RuntimeUpdatesLevel }, string]>([
+    ["the device's level is off", { local: "off" }, "updates are off on this device"],
+    [
+      "a manual install",
+      { resolve: () => nativeResolution({ method: "system_package", canUpdate: false, reason: "manual" }) },
+      "update it with the tool that installed it",
+    ],
+    [
+      "an install that needs admin",
+      {
+        resolve: () =>
+          nativeResolution({ canUpdate: false, reason: "needs_admin", display: "sudo npm i -g x" }),
+      },
+      "needs admin on this machine",
+    ],
+  ])("refused when %s", async (_name, over, reason) => {
+    const h = harness(over);
+    h.m.start({ paired: false });
+    await flush();
+    expect(await h.m.requestUpdate("claude-code", "manual")).toEqual({ accepted: false, reason });
+    await flush();
+    expect(h.runs).toEqual([]);
+    expect(h.runFrames).toEqual([]);
+  });
+
+  it("refused when a fresh registry check says it is current (the cached answer is not trusted)", async () => {
+    const h = harness();
+    h.m.start({ paired: false });
+    await flush();
+    h.state.installed = "2.1.300"; // updated by hand since the last check
+    expect(await h.m.requestUpdate("claude-code", "manual")).toEqual({
+      accepted: false,
+      reason: "already up to date",
+    });
+    expect(h.freshCalls).toHaveLength(1);
+    expect(h.runs).toEqual([]);
+  });
+
+  it("refused while an update of the same runtime is pending or running", async () => {
+    const h = harness({ drainPollMs: 5 });
+    h.adapter.turns = 1;
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    expect(claudeStatus(h).state).toBe("pending");
+    expect(await h.m.requestUpdate("claude-code", "manual")).toEqual({
+      accepted: false,
+      reason: "already updating",
+    });
+    h.adapter.turns = 0;
+    await h.advance(PENDING_POLL_MS);
+    expect(h.runs).toHaveLength(1);
+  });
+
+  it("an unknown runtime on this device is refused, nothing runs", async () => {
+    const h = harness();
+    h.m.start({ paired: false });
+    await flush();
+    expect(await h.m.requestUpdate("codex", "manual")).toEqual({
+      accepted: false,
+      reason: "this runtime is not available on this device",
+    });
+  });
+
+  it("check({ fresh: true }) bypasses the registry cache", async () => {
+    const h = harness();
+    h.m.start({ paired: false });
+    await flush();
+    expect(h.freshCalls).toEqual([]);
+    await h.m.check({ fresh: true });
+    expect(h.freshCalls).toEqual(["claude-code@latest"]);
+    expect(h.registryCalls).toHaveLength(1);
   });
 });

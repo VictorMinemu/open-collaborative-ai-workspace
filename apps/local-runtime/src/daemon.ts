@@ -32,6 +32,7 @@ import {
   RuntimeCatalog,
   type RuntimeId,
   type RuntimeInfo,
+  RuntimeUpdatePayload,
   type ServerToDeviceFrame,
   SessionConfigurePayload,
   type SessionEvent,
@@ -62,7 +63,11 @@ import { FakeRuntime } from "./fake/fake-runtime.js";
 import { changedFiles, ensureSessionWorktree, repoInfo, unifiedPatch } from "./git.js";
 import { createLogger, errorMessage, type Logger } from "./logger.js";
 import { RuntimeGate } from "./maintenance/gate.js";
-import { RuntimeMaintenance, type RuntimeMaintenanceOptions } from "./maintenance/maintenance.js";
+import {
+  RuntimeMaintenance,
+  type RuntimeMaintenanceOptions,
+  type UpdateRequestAnswer,
+} from "./maintenance/maintenance.js";
 import type { AgentRuntime } from "./runtime.js";
 import { sanitizeEvent, sanitizeString, sanitizeValue } from "./sanitize.js";
 import { runTitle } from "./title.js";
@@ -96,6 +101,11 @@ export const IMAGES_NOT_SUPPORTED_MESSAGE = "This runtime can't receive images";
 /** The refusal every fullAccess request gets while the device's own opt-in is off. */
 export const FULL_ACCESS_OFF_MESSAGE =
   "Full access is not enabled on this device (its owner turns it on in the desktop app or with `ocw-runtime full-access on`)";
+
+/** 07.11: the ack of a `runtime.update` command whose payload is anything but `{ runtime }` (D-05). */
+export const INVALID_PAYLOAD_MESSAGE = "invalid payload";
+/** 07.11 (PD-19): a daemon that does not maintain its CLIs (test runtimes, fake mode without a scratch HOME). */
+export const RUNTIME_UPDATES_UNAVAILABLE_MESSAGE = "runtime updates are not available on this device";
 
 /** The daemon's Full access gate, shared with every adapter it builds (read on every call). */
 interface FullAccessGate {
@@ -375,23 +385,24 @@ export class Daemon {
       projects: this.registry.list().length,
       fullAccessOptIn: this.gate.optIn,
       fullAccessSource: this.gate.source,
-      ...(this.maintenance
-        ? {
-            runtimeUpdates: {
-              localLevel: this.maintenance.localLevel,
-              localLevelSource: this.maintenance.localLevelSource,
-              effectiveLevel: this.maintenance.effectiveLevel,
-              orgLevelReceived: this.maintenance.orgLevelReceived,
-              runtimes: this.maintenance.statuses(),
-            },
-          }
-        : {}),
+      ...(this.maintenance ? { runtimeUpdates: this.runtimeUpdatesStatus(this.maintenance) } : {}),
       sessions: [...this.sessions.values()].map((s) => ({
         sessionId: s.sessionId,
         projectLocalId: s.project.localId,
         runtime: s.runtime.id,
         worktreeBranch: s.worktreeBranch,
       })),
+    };
+  }
+
+  /** 07.11 (D-06): the levels and each runtime's status, exactly as the snapshot reports them. */
+  private runtimeUpdatesStatus(m: RuntimeMaintenance) {
+    return {
+      localLevel: m.localLevel,
+      localLevelSource: m.localLevelSource,
+      effectiveLevel: m.effectiveLevel,
+      orgLevelReceived: m.orgLevelReceived,
+      runtimes: m.statuses(),
     };
   }
 
@@ -736,6 +747,10 @@ export class Daemon {
             () => this.sendTitle(cmd),
           );
           break;
+        // 07.11 "Update now" (D-05, PD-08): never in session order, never gated; acked once accepted.
+        case "runtime.update":
+          await this.requestRuntimeUpdate(cmd);
+          break;
       }
       this.ack(cmd.id);
     } catch (err) {
@@ -751,6 +766,19 @@ export class Daemon {
         this.forwardEvent(cmd.sessionId, { type: "session.state", status: "failed" });
       }
     }
+  }
+
+  /**
+   * "Update now" from the web (D-05, PD-08): the payload names the runtime and nothing else (strict); the device picks
+   * the candidate and the command from its own table. Refusals are the ack's error text; the result arrives as
+   * `runtime.update.run` frames carrying this command's id.
+   */
+  private async requestRuntimeUpdate(cmd: CommandFrame): Promise<void> {
+    const payload = RuntimeUpdatePayload.safeParse(cmd.payload);
+    if (!payload.success) throw new Error(INVALID_PAYLOAD_MESSAGE);
+    if (!this.maintenance) throw new Error(RUNTIME_UPDATES_UNAVAILABLE_MESSAGE);
+    const answer = await this.maintenance.requestUpdate(payload.data.runtime, "manual", cmd.id);
+    if (!answer.accepted) throw new Error(answer.reason);
   }
 
   /** A prompt (or steer), checked after admission so a held prompt sees the device's current gates. */
@@ -948,6 +976,17 @@ export class Daemon {
       }
       case "reloadConfig":
         return this.reloadConfig();
+      // 07.11 (D-09, PD-08): local only; the command still comes from the on-device table.
+      case "runtimeCheck": {
+        if (!this.maintenance) throw new Error(RUNTIME_UPDATES_UNAVAILABLE_MESSAGE);
+        await this.maintenance.check({ fresh: true });
+        return this.runtimeUpdatesStatus(this.maintenance);
+      }
+      case "runtimeUpdate": {
+        if (!this.maintenance) throw new Error(RUNTIME_UPDATES_UNAVAILABLE_MESSAGE);
+        const answer: UpdateRequestAnswer = await this.maintenance.requestUpdate(req.runtime, "local");
+        return answer;
+      }
     }
   }
 }

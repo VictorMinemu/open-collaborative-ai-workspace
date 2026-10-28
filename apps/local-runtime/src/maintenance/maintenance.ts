@@ -41,6 +41,7 @@ import {
   type UpdateAdvisory,
   type UpdateChannel,
 } from "@ocw/contracts";
+import { z } from "zod";
 import { errorMessage, type Logger, silentLogger } from "../logger.js";
 import type { AgentRuntime } from "../runtime.js";
 import type { RuntimeGate } from "./gate.js";
@@ -79,6 +80,26 @@ export const ORG_LEVEL_GRACE_MS = 30_000;
 export const MAX_RUN_OUTPUT_CHARS = 4096;
 
 export const REFUSED_OUTSIDE_SCRATCH_HOME = "refused outside a scratch home";
+
+/**
+ * The answers "Update now" gets when the device will not run it (D-05, PD-08); each is the ack's error text, the
+ * control socket's `reason` and what `ocw-runtime updates now` prints.
+ */
+export const UPDATE_REFUSALS = {
+  off: "updates are off on this device",
+  orgOff: "updates are off for this organization",
+  upToDate: "already up to date",
+  manual: "update it with the tool that installed it",
+  needsAdmin: "needs admin on this machine",
+  disabled: "updates are turned off for this CLI on this device",
+  notInstalled: "not installed on this device",
+  busy: "already updating",
+  noLatest: "could not check the latest version",
+  broken: "the latest version is marked broken and is not installed",
+  unknownRuntime: "this runtime is not available on this device",
+} as const;
+
+export type UpdateRequestAnswer = { accepted: true } | { accepted: false; reason: string };
 
 /** The adapter surface the orchestrator uses: it never prompts, interrupts or stops anything. */
 export type MaintainedRuntime = Pick<AgentRuntime, "id" | "activeTurns" | "retireIdle" | "refreshInstall">;
@@ -194,6 +215,9 @@ export class RuntimeMaintenance {
   private readonly setTimer: (fn: () => void, ms: number) => TimerHandle;
   private readonly clearTimer: (handle: TimerHandle) => void;
   private readonly registry: LatestVersionSource;
+  private readonly freshRegistry: LatestVersionSource;
+  /** The next check bypasses the registry cache (a local `runtimeCheck`). */
+  private freshNext = false;
   private readonly lockDir: string;
   private manifest: RuntimeCompatibilityManifest = RUNTIME_COMPATIBILITY_MANIFEST;
   private orgLevel: RuntimeUpdatesLevel | null = null;
@@ -241,6 +265,7 @@ export class RuntimeMaintenance {
       });
     this.clearTimer = opts.clearTimer ?? ((h) => clearTimeout(h as NodeJS.Timeout));
     this.registry = opts.registry ?? new RegistryClient({ env: opts.env });
+    this.freshRegistry = opts.freshRegistry ?? new RegistryClient({ env: opts.env, ttlMs: 0 });
     this.lockDir = opts.lockDir ?? defaultLockDir(opts.userHome);
     this.local = { level: opts.localLevel ?? "automatic", source: opts.localLevelSource ?? "config" };
   }
@@ -338,8 +363,12 @@ export class RuntimeMaintenance {
 
   // ---- checks ----
 
-  /** One check of every runtime (serialised: a check asked for while one runs runs once more after it). */
-  check(): Promise<void> {
+  /**
+   * One check of every runtime (serialised: a check asked for while one runs runs once more after it). `fresh`
+   * bypasses the registry cache (the install is always re-resolved).
+   */
+  check(opts: { fresh?: boolean } = {}): Promise<void> {
+    if (opts.fresh) this.freshNext = true;
     if (this.checking) {
       this.checkAgain = true;
       return this.checking;
@@ -376,6 +405,8 @@ export class RuntimeMaintenance {
   private async checkOnce(): Promise<void> {
     const level = this.effectiveLevel;
     const askRegistry = level !== "off" && this.registryAllowed;
+    const registry = this.freshNext ? this.freshRegistry : this.registry;
+    this.freshNext = false;
     for (const r of this.runtimes) {
       const st = this.stateOf(r.id);
       // A run in progress owns its resolution; the next check after it re-reads everything.
@@ -388,7 +419,7 @@ export class RuntimeMaintenance {
           st.latestVersion = null;
           st.checkedAt = null;
         } else if (askRegistry && st.installedVersion !== null) {
-          st.latestVersion = await this.registry.latest(r.id, resolution.channel);
+          st.latestVersion = await registry.latest(r.id, resolution.channel);
           st.checkedAt = this.now();
         }
       } catch (err) {
@@ -468,6 +499,59 @@ export class RuntimeMaintenance {
   }
 
   // ---- the run (D-03, PD-07, PD-11) ----
+
+  /**
+   * "Update now" (D-05, PD-08): from the web (`manual`, with the command's id) or this machine (`local`). Refused,
+   * with a plain reason, when this device's level is off, an update of this runtime is already under way, the install
+   * is not one the device updates, or a fresh registry check says it is current; accepted, it drains at once (no
+   * opportunistic hour) and runs the one command from the fixed table, never anything the request named.
+   */
+  async requestUpdate(
+    runtime: RuntimeId,
+    trigger: "manual" | "local",
+    commandId?: string,
+  ): Promise<UpdateRequestAnswer> {
+    const refuse = (reason: string): UpdateRequestAnswer => ({ accepted: false, reason });
+    const st = this.states.get(runtime);
+    if (!st) return refuse(UPDATE_REFUSALS.unknownRuntime);
+    if (this.local.level === "off") return refuse(UPDATE_REFUSALS.off);
+    if (this.orgLevel === "off") return refuse(UPDATE_REFUSALS.orgOff);
+    if (st.job || st.state !== "idle") return refuse(UPDATE_REFUSALS.busy);
+
+    const resolution = this.resolve(runtime);
+    st.resolution = resolution;
+    st.installedVersion = resolution.binPath ? await this.probe(resolution.binPath) : null;
+    if (!resolution.canUpdate) {
+      switch (resolution.reason) {
+        case "needs_admin":
+          return refuse(UPDATE_REFUSALS.needsAdmin);
+        case "updates_disabled":
+          return refuse(UPDATE_REFUSALS.disabled);
+        case "not_installed":
+          return refuse(UPDATE_REFUSALS.notInstalled);
+        default:
+          return refuse(UPDATE_REFUSALS.manual);
+      }
+    }
+    const latest = await this.freshRegistry.latest(runtime, resolution.channel).catch(() => null);
+    if (latest === null) return refuse(UPDATE_REFUSALS.noLatest);
+    st.latestVersion = latest;
+    st.checkedAt = this.now();
+    if (st.installedVersion !== null && compareRuntimeVersions(latest, st.installedVersion) <= 0) {
+      void this.publish(false);
+      return refuse(UPDATE_REFUSALS.upToDate);
+    }
+    if (compatibilityOf(this.manifest, runtime, latest) === "broken") return refuse(UPDATE_REFUSALS.broken);
+    // Another trigger may have started while we asked the registry.
+    if (st.job || st.state !== "idle") return refuse(UPDATE_REFUSALS.busy);
+    this.begin(runtime, st, {
+      trigger,
+      candidate: latest,
+      drainNow: true,
+      ...(commandId ? { commandId } : {}),
+    });
+    return { accepted: true };
+  }
 
   /** A new update for `runtime`: pending from now, `stale` if it is still waiting after `STALE_AFTER_MS`. */
   private begin(runtime: RuntimeId, st: RuntimeState, job: Job): void {
@@ -595,7 +679,8 @@ export class RuntimeMaintenance {
       runId,
       runtime,
       trigger: job.trigger,
-      ...(job.commandId ? { commandId: job.commandId } : {}),
+      // Only a server command id (a uuid) ties a run to an "Update now" request.
+      ...(job.commandId && z.uuid().safeParse(job.commandId).success ? { commandId: job.commandId } : {}),
       candidate: job.candidate,
       method: resolution.method,
     };
