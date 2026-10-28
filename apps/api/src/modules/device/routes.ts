@@ -1,8 +1,10 @@
 import { randomInt } from "node:crypto";
 import {
   CreateEnrollmentResponse,
+  compatibilityOf,
   type Device,
   DeviceList,
+  type DeviceRuntimeCompatibility,
   EnrollDeviceRequest,
   EnrollDeviceResponse,
   EventTypes,
@@ -12,6 +14,7 @@ import {
   type Project,
   ProjectList,
   type RepoTeamProject,
+  type RuntimeCompatibilityManifest,
   RuntimeInfo,
   UpdateDeviceRequest,
 } from "@ocw/contracts";
@@ -81,6 +84,19 @@ export function deviceFacts(
   );
 }
 
+/**
+ * 07.11 (D-04, PD-05): the manifest's verdict per installed runtime, for everyone who already sees the device (it is
+ * derived from the versions they see). A runtime that is not installed has no key; an unparsable version is `unknown`.
+ */
+export function deviceRuntimeCompatibility(
+  manifest: RuntimeCompatibilityManifest,
+  runtimes: RuntimeInfo[],
+): DeviceRuntimeCompatibility {
+  const out: DeviceRuntimeCompatibility = {};
+  for (const r of runtimes) if (r.installed) out[r.id] = compatibilityOf(manifest, r.id, r.version);
+  return out;
+}
+
 /** Permissions a device card renders controls for (`Device.viewerCan`). */
 const DEVICE_VIEWER_CAN = ["device.use", "device.update", "device.revoke"] as const;
 
@@ -89,6 +105,7 @@ async function listDevices(
   tx: Tx,
   perms: PermissionService,
   userId: string,
+  manifest: RuntimeCompatibilityManifest,
 ): Promise<Device[]> {
   const access = await loadDeviceAccess(tx, userId);
   const [rows, dir, counts] = await Promise.all([
@@ -107,10 +124,12 @@ async function listDevices(
     const viewerCan = await perms.viewerCan(req, tx, deviceFacts(r, userId, access), DEVICE_VIEWER_CAN);
     // The list of grants is for the owner (device.update) and admins (device.revoke) only (T-03.2-05-05).
     if (viewerCan.includes("device.update") || viewerCan.includes("device.revoke")) managed.push(r.id);
+    const device = toDevice(r, dir.get(r.ownerUserId)?.displayName ?? null, byDevice.get(r.id) ?? 0);
     out.push({
-      ...toDevice(r, dir.get(r.ownerUserId)?.displayName ?? null, byDevice.get(r.id) ?? 0),
+      ...device,
       viewerMaxMode: access.capOf(r),
       viewerCan,
+      runtimeCompatibility: deviceRuntimeCompatibility(manifest, device.runtimes),
     });
   }
   const grants = await loadGrants(tx, managed);
@@ -252,7 +271,9 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
       schema: { tags: ["device"], response: { 200: DeviceList } },
     },
     async (req) => ({
-      devices: await core.db.withTenant(tenant(req), (tx) => listDevices(req, tx, perms, authOf(req).userId)),
+      devices: await core.db.withTenant(tenant(req), (tx) =>
+        listDevices(req, tx, perms, authOf(req).userId, hub.runtimeManifest),
+      ),
     }),
   );
 

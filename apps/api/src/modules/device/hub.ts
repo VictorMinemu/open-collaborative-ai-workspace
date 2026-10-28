@@ -8,6 +8,8 @@ import {
   type EventFrame,
   EventTypes,
   type HelloFrame,
+  RUNTIME_COMPATIBILITY_MANIFEST,
+  type RuntimeCompatibilityManifest,
   type ServerToDeviceFrame,
   stripImageData,
   type TitleResultFrame,
@@ -126,6 +128,11 @@ export interface DeviceHubOptions {
    * Tests only lower it; it is never read from the environment.
    */
   maxFrameBytes?: number;
+  /**
+   * The compatibility manifest the Control Plane decides with (default RUNTIME_COMPATIBILITY_MANIFEST, the bundled
+   * copy). Tests only; it is never read from the environment (07.11 PD-12).
+   */
+  runtimeManifest?: RuntimeCompatibilityManifest;
 }
 
 /**
@@ -153,10 +160,13 @@ export class DeviceHub {
   private handler: DeviceSessionHandler | null = null;
   readonly offlineGraceMs: number;
   private readonly maxFrameBytes: number;
+  /** What session start and the device DTO decide compatibility with (07.11 D-04, PD-12, PD-13). */
+  readonly runtimeManifest: RuntimeCompatibilityManifest;
 
   constructor(private readonly opts: DeviceHubOptions) {
     this.offlineGraceMs = opts.offlineGraceMs ?? 10_000;
     this.maxFrameBytes = opts.maxFrameBytes ?? DEVICE_LINK_MAX_COMMAND_FRAME_BYTES;
+    this.runtimeManifest = opts.runtimeManifest ?? RUNTIME_COMPATIBILITY_MANIFEST;
   }
 
   setSessionHandler(handler: DeviceSessionHandler): void {

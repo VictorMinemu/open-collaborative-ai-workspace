@@ -2,6 +2,7 @@ import {
   type AuthzDenial,
   type ControlDenialReason,
   type CreateWorkSessionRequest,
+  compatibilityOf,
   type RuntimeId,
   RuntimeInfo,
   type SessionAudienceInput,
@@ -259,6 +260,14 @@ export async function createWorkSession(
       ok: false,
       code: "runtime_unavailable",
       message: `${RUNTIME_LABEL[runtimeId]} is not signed in on ${d.name}. Sign in from a terminal first.`,
+    };
+  }
+  // 07.11 (D-04, PD-13): a version the manifest marks `broken` refuses; `unsupported` and `unknown` still start.
+  if (compatibilityOf(hub.runtimeManifest, runtimeId, runtime.version) === "broken") {
+    return {
+      ok: false,
+      code: "runtime_unavailable",
+      message: `${RUNTIME_LABEL[runtimeId]} ${runtime.version} on ${d.name} can't run Work Zone sessions. Ask the device owner to update it.`,
     };
   }
   // The start settings go through the same decision as a change (ADR-0012: full access needs policy ∩

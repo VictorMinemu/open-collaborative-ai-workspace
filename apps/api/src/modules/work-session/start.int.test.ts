@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import { RUNTIME_COMPATIBILITY_MANIFEST, type RuntimeCompatibilityManifest } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
-import { eventually, type FakeDevice } from "../../testing-device";
+import { eventually, FakeDevice } from "../../testing-device";
 import {
   CLAUDE_CATALOG,
   CODEX_CATALOG,
@@ -750,5 +751,122 @@ describe("a new session's audience and the D-13 start rule (07.9-06, D-03, D-13,
     });
     expect(errorOf(await post(max, { projectId: teamRepo }))).toEqual([403, "device_not_shared"]);
     await refusedWith(leoId, proposal({ projectId: teamRepo }), "not_in_project");
+  });
+});
+
+/**
+ * Phase 07.11 (D-04, PD-12, PD-13, RTU-03): the Control Plane's compatibility manifest decides at session start. A
+ * `broken` installed version refuses a start on that runtime with a message naming who can fix it; `unsupported` and
+ * `unknown` (no version, or one that does not parse, like the fake runtime's `fake`) always start. The bundled manifest
+ * has no broken range, so this stack injects one (a build/test option only, never the environment).
+ */
+describe("07.11: compatibility at start (D-04)", () => {
+  const BROKEN_MANIFEST: RuntimeCompatibilityManifest = {
+    ...RUNTIME_COMPATIBILITY_MANIFEST,
+    updatedAt: "2026-10-29T00:00:00.000Z",
+    runtimes: {
+      ...RUNTIME_COMPATIBILITY_MANIFEST.runtimes,
+      "claude-code": {
+        ...RUNTIME_COMPATIBILITY_MANIFEST.runtimes["claude-code"],
+        ranges: [
+          {
+            bounds: { min: "2.1.300", maxExclusive: "2.1.301" },
+            status: "broken",
+            note: "Breaks the Work Zone adapter",
+          },
+          ...RUNTIME_COMPATIBILITY_MANIFEST.runtimes["claude-code"].ranges,
+        ],
+      },
+    },
+  };
+
+  let cstack: TestStack;
+  let owner: TestClient;
+  const devicesToClose: FakeDevice[] = [];
+
+  /** Pair a device for `owner`, say hello with these versions (both runtimes signed in), announce one project. */
+  async function deviceAt(
+    name: string,
+    versions: { claudeVersion?: string | null; codexVersion?: string | null },
+  ): Promise<{ deviceId: string; projectId: string }> {
+    const paired = await pairDevice(cstack, owner, name);
+    const d = await FakeDevice.connect(cstack.baseUrl, paired.token, undefined, {
+      codexLoggedIn: true,
+      ...versions,
+    });
+    devicesToClose.push(d);
+    const localId = `lp_${randomUUID().slice(0, 8)}`;
+    d.send({
+      type: "projects.sync",
+      projects: [{ localId, name: `${name} repo`, gitRemote: null, defaultBranch: "main" }],
+    });
+    await d.next((f) => f.type === "projects.ack");
+    const listed = (await owner.request("GET", "/api/v1/projects")).body!.projects as Array<{
+      id: string;
+      name: string;
+      deviceId: string;
+    }>;
+    const project = listed.find((p) => p.deviceId === paired.deviceId)!;
+    return { deviceId: paired.deviceId, projectId: project.id };
+  }
+
+  const post = (body: Record<string, unknown>) => owner.request("POST", "/api/v1/work-sessions", body);
+  const errorOf = (res: { status: number; body: Record<string, unknown> | null }) => {
+    const e = res.body?.error as { code?: string; message?: string } | undefined;
+    return [res.status, e?.code, e?.message];
+  };
+
+  beforeAll(async () => {
+    cstack = await startTestStack({ runtimeManifest: BROKEN_MANIFEST });
+    owner = new TestClient(cstack.baseUrl);
+    const setup = await owner.request("POST", "/api/v1/setup", {
+      token: TEST_SETUP_TOKEN,
+      ...ADMIN,
+      orgName: "Autofy Labs",
+    });
+    expect(setup.status, JSON.stringify(setup.body)).toBe(200);
+  }, 180_000);
+
+  afterAll(async () => {
+    for (const d of devicesToClose) await d.close().catch(() => {});
+    await cstack?.stop();
+  });
+
+  it("the default stack decides with the bundled manifest; an injected one replaces it", () => {
+    expect(stack.built.deviceHub.runtimeManifest).toBe(RUNTIME_COMPATIBILITY_MANIFEST);
+    expect(cstack.built.deviceHub.runtimeManifest).toBe(BROKEN_MANIFEST);
+  });
+
+  it("a broken Claude Code refuses a Claude session with who can fix it; Codex on the same device starts", async () => {
+    const mac = await deviceAt("Broken Mac", { claudeVersion: "2.1.300" });
+    const refused = await post({ projectId: mac.projectId, runtime: "claude-code" });
+    expect(errorOf(refused)).toEqual([
+      409,
+      "runtime_unavailable",
+      "Claude Code 2.1.300 on Broken Mac can't run Work Zone sessions. Ask the device owner to update it.",
+    ]);
+    const sessions = await owner.request("GET", "/api/v1/work-sessions");
+    expect(JSON.stringify(sessions.body)).not.toContain(mac.projectId);
+    const codex = await post({ projectId: mac.projectId, runtime: "codex" });
+    expect(codex.status, JSON.stringify(codex.body)).toBe(200);
+  });
+
+  it("an unsupported Claude Code (below the floor) still starts", async () => {
+    const old = await deviceAt("Old Mac", { claudeVersion: "2.1.200" });
+    const res = await post({ projectId: old.projectId, runtime: "claude-code" });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+  });
+
+  it("an unknown version (`fake`, or none) never blocks a start", async () => {
+    const fake = await deviceAt("Fake Mac", { claudeVersion: "fake", codexVersion: "fake" });
+    expect((await post({ projectId: fake.projectId, runtime: "claude-code" })).status).toBe(200);
+    expect((await post({ projectId: fake.projectId, runtime: "codex" })).status).toBe(200);
+    const none = await deviceAt("Versionless Mac", { claudeVersion: null });
+    expect((await post({ projectId: none.projectId, runtime: "claude-code" })).status).toBe(200);
+  });
+
+  it("the version just past the broken range starts", async () => {
+    const next = await deviceAt("Fixed Mac", { claudeVersion: "2.1.301" });
+    expect((await post({ projectId: next.projectId, runtime: "claude-code" })).status).toBe(200);
   });
 });
