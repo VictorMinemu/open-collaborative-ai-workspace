@@ -399,3 +399,54 @@ describe("FakeRuntime retire idle and resume (07.11 D-03a)", () => {
     expect(rt.wakeUps).toBe(2);
   });
 });
+
+describe("FakeRuntime fake-CLI version (07.11, OCW_RUNTIME_FAKE_CLI=1)", () => {
+  const saved = { path: process.env.PATH, flag: process.env.OCW_RUNTIME_FAKE_CLI };
+  afterEach(() => {
+    process.env.PATH = saved.path;
+    if (saved.flag === undefined) delete process.env.OCW_RUNTIME_FAKE_CLI;
+    else process.env.OCW_RUNTIME_FAKE_CLI = saved.flag;
+  });
+  /** A two-line executable Node script standing in for the CLI. */
+  const cli = (dir: string, name: string, body: string) =>
+    writeFileSync(join(dir, name), `#!${process.execPath}\n${body}\n`, { mode: 0o755 });
+
+  it("reports the version of the fake claude / codex found on PATH in detect() and catalog()", async () => {
+    const dir = tmp();
+    cli(dir, "claude", 'console.log("2.1.290 (Claude Code)")');
+    cli(dir, "codex", 'console.log("codex-cli 0.165.0")');
+    process.env.PATH = dir;
+    process.env.OCW_RUNTIME_FAKE_CLI = "1";
+    const claude = new FakeRuntime("claude-code", 1);
+    expect(await claude.detect()).toMatchObject({ id: "claude-code", installed: true, version: "2.1.290" });
+    expect((await claude.catalog()).runtimeVersion).toBe("2.1.290");
+    const codex = new FakeRuntime("codex", 1);
+    expect((await codex.detect()).version).toBe("0.165.0");
+    expect((await codex.catalog()).runtimeVersion).toBe("0.165.0");
+    // The version follows the CLI: an "update" of the fake is visible on the next call.
+    cli(dir, "claude", 'console.log("2.1.291 (Claude Code)")');
+    expect((await claude.detect()).version).toBe("2.1.291");
+  });
+
+  it("without the variable it still reports fake", async () => {
+    const dir = tmp();
+    cli(dir, "claude", 'console.log("2.1.290 (Claude Code)")');
+    process.env.PATH = dir;
+    delete process.env.OCW_RUNTIME_FAKE_CLI;
+    const rt = new FakeRuntime("claude-code", 1);
+    expect((await rt.detect()).version).toBe("fake");
+    expect((await rt.catalog()).runtimeVersion).toBe("fake");
+  });
+
+  it("a missing, failing or versionless CLI reports fake", async () => {
+    process.env.OCW_RUNTIME_FAKE_CLI = "1";
+    const missing = new FakeRuntime("claude-code", 1, { findExecutable: () => null });
+    expect((await missing.detect()).version).toBe("fake");
+    const dir = tmp();
+    process.env.PATH = dir;
+    cli(dir, "claude", "process.exit(3)");
+    expect((await new FakeRuntime("claude-code", 1).detect()).version).toBe("fake");
+    cli(dir, "claude", 'console.log("Claude Code")');
+    expect((await new FakeRuntime("claude-code", 1).catalog()).runtimeVersion).toBe("fake");
+  });
+});
