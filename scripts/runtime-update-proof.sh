@@ -17,8 +17,8 @@
 #   - no status, run frame or output carries a host path.
 # Every CLI is a copy of the fake and the npm registry is a 127.0.0.1 stub inside the container (PD-19): nothing runs a
 # real `claude update`, `codex update`, npm or brew, on this machine or in the container. The host's node_modules and
-# home are never mounted. The container and the temp directory are removed on exit. Prints "runtime-update proof: ok"
-# last on success and exits non-zero otherwise.
+# home are never mounted. The container and the temp directory are removed on exit. On success its last line is the
+# proof's ok line; otherwise it exits non-zero.
 #   PROOF_KEEP_LOG=1   keep the container's log in the temp directory (printed path) instead of removing it
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
