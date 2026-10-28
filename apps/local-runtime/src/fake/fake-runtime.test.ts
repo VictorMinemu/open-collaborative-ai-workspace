@@ -366,3 +366,87 @@ describe("FakeRuntime titles (03.2-12)", () => {
     expect(luna!.efforts.map((e) => e.value)).toEqual(["low", "medium", "high", "xhigh", "max"]);
   });
 });
+
+describe("FakeRuntime retire idle and resume (07.11 D-03a)", () => {
+  it("counts turns in flight, retires only idle sessions and wakes one on its next prompt", async () => {
+    const cwd = tmp();
+    writeFileSync(join(cwd, "README.md"), "# Demo\n");
+    const idle: SessionEvent[] = [];
+    const busy: SessionEvent[] = [];
+    const rt = new FakeRuntime("claude-code", 1);
+    await rt.start({ sessionId: "a", cwd, permissionMode: "plan" }, (e) => idle.push(e));
+    await rt.start({ sessionId: "b", cwd, permissionMode: "default" }, (e) => busy.push(e));
+    expect(rt.activeTurns()).toBe(0);
+    await rt.prompt("b", { promptId: "b1", text: "write it" });
+    const req = await until(busy, (e) => e.type === "approval.requested");
+    if (req.type !== "approval.requested") throw new Error("unreachable");
+
+    expect(rt.activeTurns()).toBe(1);
+    const before = idle.length;
+    await expect(rt.retireIdle()).resolves.toBe(1);
+    await expect(rt.retireIdle()).resolves.toBe(0);
+    expect(idle.slice(before)).toEqual([]);
+    expect(rt.wakeUps).toBe(0);
+
+    await rt.prompt("a", { promptId: "a1", text: "plan it" });
+    expect(rt.wakeUps).toBe(1);
+    await until(idle, (e) => e.type === "prompt.completed");
+    expect(rt.resolveApproval("b", req.approvalId, "once")).toBe(true);
+    await until(busy, (e) => e.type === "prompt.completed");
+    expect(rt.activeTurns()).toBe(0);
+    await expect(rt.retireIdle()).resolves.toBe(2);
+    await rt.configure("b", { effort: "high" });
+    expect(rt.wakeUps).toBe(2);
+  });
+});
+
+describe("FakeRuntime fake-CLI version (07.11, OCW_RUNTIME_FAKE_CLI=1)", () => {
+  const saved = { path: process.env.PATH, flag: process.env.OCW_RUNTIME_FAKE_CLI };
+  afterEach(() => {
+    process.env.PATH = saved.path;
+    if (saved.flag === undefined) delete process.env.OCW_RUNTIME_FAKE_CLI;
+    else process.env.OCW_RUNTIME_FAKE_CLI = saved.flag;
+  });
+  /** A two-line executable Node script standing in for the CLI. */
+  const cli = (dir: string, name: string, body: string) =>
+    writeFileSync(join(dir, name), `#!${process.execPath}\n${body}\n`, { mode: 0o755 });
+
+  it("reports the version of the fake claude / codex found on PATH in detect() and catalog()", async () => {
+    const dir = tmp();
+    cli(dir, "claude", 'console.log("2.1.290 (Claude Code)")');
+    cli(dir, "codex", 'console.log("codex-cli 0.165.0")');
+    process.env.PATH = dir;
+    process.env.OCW_RUNTIME_FAKE_CLI = "1";
+    const claude = new FakeRuntime("claude-code", 1);
+    expect(await claude.detect()).toMatchObject({ id: "claude-code", installed: true, version: "2.1.290" });
+    expect((await claude.catalog()).runtimeVersion).toBe("2.1.290");
+    const codex = new FakeRuntime("codex", 1);
+    expect((await codex.detect()).version).toBe("0.165.0");
+    expect((await codex.catalog()).runtimeVersion).toBe("0.165.0");
+    // The version follows the CLI: an "update" of the fake is visible on the next call.
+    cli(dir, "claude", 'console.log("2.1.291 (Claude Code)")');
+    expect((await claude.detect()).version).toBe("2.1.291");
+  });
+
+  it("without the variable it still reports fake", async () => {
+    const dir = tmp();
+    cli(dir, "claude", 'console.log("2.1.290 (Claude Code)")');
+    process.env.PATH = dir;
+    delete process.env.OCW_RUNTIME_FAKE_CLI;
+    const rt = new FakeRuntime("claude-code", 1);
+    expect((await rt.detect()).version).toBe("fake");
+    expect((await rt.catalog()).runtimeVersion).toBe("fake");
+  });
+
+  it("a missing, failing or versionless CLI reports fake", async () => {
+    process.env.OCW_RUNTIME_FAKE_CLI = "1";
+    const missing = new FakeRuntime("claude-code", 1, { findExecutable: () => null });
+    expect((await missing.detect()).version).toBe("fake");
+    const dir = tmp();
+    process.env.PATH = dir;
+    cli(dir, "claude", "process.exit(3)");
+    expect((await new FakeRuntime("claude-code", 1).detect()).version).toBe("fake");
+    cli(dir, "claude", 'console.log("Claude Code")');
+    expect((await new FakeRuntime("claude-code", 1).catalog()).runtimeVersion).toBe("fake");
+  });
+});

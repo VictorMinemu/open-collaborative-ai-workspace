@@ -61,6 +61,16 @@ class FakeRuntime implements AgentRuntime {
   /** Order in which configure / prompt calls reached the runtime. */
   readonly calls: string[] = [];
   configureDelayMs = 0;
+  /** 07.11: what `activeTurns()` reports (0 unless a test sets it); `retireIdle()` calls are counted. */
+  activeTurnsCount = 0;
+  retireIdleCalls = 0;
+  activeTurns(): number {
+    return this.activeTurnsCount;
+  }
+  async retireIdle(): Promise<number> {
+    this.retireIdleCalls++;
+    return 0;
+  }
   sinks = new Map<string, EventSink>();
   /** Catalog rows besides `opus` (the title tests add `haiku`). */
   extraModels: string[] = [];

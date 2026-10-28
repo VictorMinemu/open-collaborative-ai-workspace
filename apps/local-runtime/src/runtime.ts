@@ -104,6 +104,19 @@ export interface AgentRuntime {
    * text; the daemon normalizes, sanitizes and validates it (`runTitle`). Absent = no automatic titles.
    */
   generateTitle?(req: TitleRequest): Promise<string>;
+  /**
+   * Sessions of this runtime with a turn running, waiting on an approval or prompts queued in the adapter; never
+   * sends anything (07.11 D-03). The update gate updates runtime R only while this is 0 for R.
+   */
+  activeTurns(): number;
+  /**
+   * Closes the CLI process of every session with no turn in flight; each resumes lazily on its next prompt or
+   * settings change (so it runs on the binary installed by then). Never interrupts, never ends a session; returns how
+   * many it retired (07.11 D-03a).
+   */
+  retireIdle(): Promise<number>;
+  /** Re-resolve the CLI path and drop cached catalogs after an update (07.11). Absent = nothing cached. */
+  refreshInstall?(): void;
   /** Stop the session and release the runtime process. */
   stop(sessionId: string): Promise<void>;
   /** Stop every session (daemon shutdown). */

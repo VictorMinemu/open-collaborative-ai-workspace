@@ -10,7 +10,11 @@
 // Images (06.1, P-10): it takes images (`supportsImages: true`) and, when a prompt carries some, its footer gains
 // `Images: <n> (<mediaType>, …)` after the `Mode:` line, so end-to-end tests can see they arrived. It never looks at
 // the bytes and never writes them anywhere.
+// Runtime updates (07.11): with OCW_RUNTIME_FAKE_CLI=1, `detect()` and `catalog()` report the version printed by the
+// `claude` / `codex` found on PATH (a fake CLI in end-to-end tests), so tests see versions move; any failure keeps
+// `fake`. `retireIdle()` marks idle sessions dormant and `wakeUps` counts how many woke again.
 
+import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
@@ -24,12 +28,14 @@ import type {
 } from "@ocw/contracts";
 import {
   minMode,
+  parseRuntimeVersion,
   type RuntimeCatalog,
   type RuntimeModel,
   SESSION_TITLE_MAX_CHARS,
   SESSION_TITLE_MAX_WORDS,
   type SessionSettingsPatch,
 } from "@ocw/contracts";
+import { findExecutable } from "../exec-path.js";
 import {
   type AgentRuntime,
   type EventSink,
@@ -61,9 +67,23 @@ interface FakeSession {
   approvals: Map<string, (outcome: ApprovalOutcome, comment?: string) => void>;
   allowAll: boolean;
   turns: number;
+  /** Its "process" was retired while idle (07.11 D-03a); the next prompt or settings change wakes it. */
+  dormant: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** The CLI whose version the fake reports with OCW_RUNTIME_FAKE_CLI=1. */
+const CLI_NAME: Record<RuntimeId, string> = { "claude-code": "claude", codex: "codex" };
+const CLI_VERSION_TIMEOUT_MS = 10_000;
+
+export interface FakeRuntimeOptions extends FullAccessGateOptions {
+  /** Where to look for the fake CLI (tests). Default: PATH plus the usual user install dirs. */
+  findExecutable?: (name: string) => string | null;
+}
+
+/** A turn in flight: running, waiting on an approval or with prompts queued. */
+const busy = (s: FakeSession) => s.running !== null || s.queue.length > 0 || s.approvals.size > 0;
 
 const EFFORTS = (levels: string[]) => levels.map((value) => ({ value, description: null }));
 const fakeModel = (id: string, displayName: string, extra: Partial<RuntimeModel> = {}): RuntimeModel => ({
@@ -160,13 +180,31 @@ export class FakeRuntime implements AgentRuntime {
   private readonly sessions = new Map<string, FakeSession>();
   private readonly allowFullAccess: () => boolean;
   private readonly echoPrompt = process.env.OCW_RUNTIME_FAKE_ECHO === "1";
+  /** How many retired sessions were woken by a prompt or settings change (07.11 D-03a; tests read it). */
+  wakeUps = 0;
 
   constructor(
     readonly id: RuntimeId,
     private readonly delayMs = Number(process.env.OCW_RUNTIME_FAKE_DELAY_MS ?? 120),
-    opts: FullAccessGateOptions = {},
+    opts: FakeRuntimeOptions = {},
   ) {
     this.allowFullAccess = opts.allowFullAccess ?? (() => false);
+    this.findCli = opts.findExecutable ?? ((name) => findExecutable(name));
+  }
+
+  private readonly findCli: (name: string) => string | null;
+
+  /** `fake`, or with OCW_RUNTIME_FAKE_CLI=1 the version the fake CLI on PATH prints (no shell, 10 s). */
+  private async version(): Promise<string> {
+    if (process.env.OCW_RUNTIME_FAKE_CLI !== "1") return "fake";
+    const path = this.findCli(CLI_NAME[this.id]);
+    if (!path) return "fake";
+    const stdout = await new Promise<string | null>((resolve) => {
+      execFile(path, ["--version"], { timeout: CLI_VERSION_TIMEOUT_MS, windowsHide: true }, (err, out) =>
+        resolve(err ? null : String(out)),
+      );
+    });
+    return (stdout && parseRuntimeVersion(stdout)) ?? "fake";
   }
 
   get capabilities(): RuntimeCapabilities {
@@ -185,13 +223,13 @@ export class FakeRuntime implements AgentRuntime {
   }
 
   async detect(): Promise<RuntimeInfo> {
-    return { id: this.id, installed: true, version: "fake", loggedIn: true };
+    return { id: this.id, installed: true, version: await this.version(), loggedIn: true };
   }
 
   async catalog(): Promise<RuntimeCatalog> {
     return {
       runtime: this.id,
-      runtimeVersion: "fake",
+      runtimeVersion: await this.version(),
       models: FAKE_MODELS[this.id],
       permissionModes: [...this.capabilities.supportsPermissionModes],
       fastModeCost: FAST_MODE_COST[this.id],
@@ -216,6 +254,24 @@ export class FakeRuntime implements AgentRuntime {
     return fakeTitle(req.prompt);
   }
 
+  /** Sessions with a turn running, waiting on an approval or prompts queued (07.11 D-03). */
+  activeTurns(): number {
+    let n = 0;
+    for (const s of this.sessions.values()) if (busy(s)) n++;
+    return n;
+  }
+
+  /** Marks every idle session dormant, as the real adapters close their idle CLI processes (07.11 D-03a). */
+  async retireIdle(): Promise<number> {
+    let n = 0;
+    for (const s of this.sessions.values()) {
+      if (s.dormant || busy(s)) continue;
+      s.dormant = true;
+      n++;
+    }
+    return n;
+  }
+
   async configure(sessionId: string, patch: SessionSettingsPatch): Promise<void> {
     const s = this.get(sessionId);
     if (patch.permissionMode && !this.capabilities.supportsPermissionModes.includes(patch.permissionMode)) {
@@ -228,6 +284,7 @@ export class FakeRuntime implements AgentRuntime {
       s.pending = { ...(s.pending ?? {}), ...patch };
       return;
     }
+    this.wake(s);
     this.apply(s, patch);
   }
 
@@ -254,6 +311,7 @@ export class FakeRuntime implements AgentRuntime {
       approvals: new Map(),
       allowAll: false,
       turns: 0,
+      dormant: false,
     };
     this.sessions.set(s.id, s);
     sink({
@@ -274,6 +332,7 @@ export class FakeRuntime implements AgentRuntime {
       s.queue.push(prompt);
       return;
     }
+    this.wake(s);
     void this.run(s, prompt);
   }
 
@@ -319,6 +378,12 @@ export class FakeRuntime implements AgentRuntime {
 
   private emit(s: FakeSession, e: SessionEvent) {
     s.sink(e);
+  }
+
+  private wake(s: FakeSession): void {
+    if (!s.dormant) return;
+    s.dormant = false;
+    this.wakeUps++;
   }
 
   private defaultModel(): string {
