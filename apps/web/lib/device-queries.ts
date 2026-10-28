@@ -6,6 +6,9 @@ import {
   type DeviceGrantPrincipalKind,
   Ok,
   type PermissionMode,
+  RequestRuntimeUpdateResponse,
+  type RuntimeId,
+  RuntimeUpdateRunList,
 } from "@ocw/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
@@ -60,5 +63,46 @@ export function useDeleteDeviceGrant(deviceId: string) {
     mutationFn: ({ kind, principalId }: { kind: DeviceGrantPrincipalKind; principalId: string }) =>
       api.del(`/api/v1/devices/${deviceId}/grants/${kind}/${principalId}`, { schema: Ok }),
     onSuccess: invalidate,
+  });
+}
+
+/**
+ * Runtime CLI updates (Phase 07.11, D-05, D-06): a device's update history and "Update now", both for the device owner
+ * and admins only (`device.maintain`, decided by the API). The device list refetches on every `device.updated` ping,
+ * so a row's state follows the device live; an open history refetches with it (`useWorkZoneOrgSync`).
+ */
+export const runtimeUpdatesKey = (deviceId: string) => ["wz", "device-runtime-updates", deviceId] as const;
+
+export function useRuntimeUpdateHistory(
+  deviceId: string,
+  runtime: RuntimeId | undefined,
+  enabled: boolean,
+  opts: { refetchInterval?: number | false } = {},
+) {
+  return useQuery({
+    enabled,
+    queryKey: [...runtimeUpdatesKey(deviceId), runtime ?? "all"],
+    queryFn: ({ signal }) =>
+      api.get(
+        `/api/v1/devices/${deviceId}/runtime-updates${runtime ? `?runtime=${encodeURIComponent(runtime)}` : ""}`,
+        { schema: RuntimeUpdateRunList, signal },
+      ),
+    select: (d) => d.runs,
+    refetchInterval: opts.refetchInterval ?? false,
+  });
+}
+
+/** "Update now": a request the API decides and audits; on an error the caller shows `errorMessage(err)`. */
+export function useRequestRuntimeUpdate(deviceId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (runtime: RuntimeId) =>
+      api.post(`/api/v1/devices/${deviceId}/runtimes/${encodeURIComponent(runtime)}/update`, {
+        schema: RequestRuntimeUpdateResponse,
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: wzKeys.devices });
+      void qc.invalidateQueries({ queryKey: runtimeUpdatesKey(deviceId) });
+    },
   });
 }

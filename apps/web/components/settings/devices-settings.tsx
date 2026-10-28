@@ -49,7 +49,9 @@ import {
   useWorkZoneOrgSync,
   wzKeys,
 } from "@/lib/workzone-queries";
+import { CopyLine } from "./copy-line";
 import { DeviceSharing } from "./device-sharing";
+import { DeviceRuntimeUpdates } from "./runtime-updates";
 
 const PLATFORM: Record<string, string> = { darwin: "macOS", linux: "Linux", win32: "Windows" };
 
@@ -357,6 +359,7 @@ function DeviceFacts({ device: d, owned }: { device: Device; owned: boolean }) {
           </p>
         </div>
       </div>
+      {d.runtimeMaintenance ? <DeviceRuntimeUpdates device={d} /> : null}
     </div>
   );
 }
@@ -542,19 +545,5 @@ function Steps({ steps, start = 1 }: { steps: ReactNode[]; start?: number }) {
         </li>
       ))}
     </ol>
-  );
-}
-
-function CopyLine({ text }: { text: string }) {
-  const { copy, copied } = useCopy();
-  return (
-    <div className="flex items-center gap-2 rounded-lg border bg-muted/50 py-1.5 pr-1.5 pl-3">
-      <code className="scrollbar-thin min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-[12px]">
-        {text}
-      </code>
-      <Button size="icon-xs" variant="ghost" aria-label="Copy command" onClick={() => void copy(text)}>
-        {copied === text ? <Check className="text-success" /> : <Copy />}
-      </Button>
-    </div>
   );
 }
