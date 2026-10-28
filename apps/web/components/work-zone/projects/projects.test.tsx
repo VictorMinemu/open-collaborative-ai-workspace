@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { Project, WorkProjectDetail, WorkProjectIndex, WorkSession } from "@ocw/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { NEW_PROJECT_COPY, parentLabel } from "./new-project-dialog";
+import { chosenParent, NEW_PROJECT_COPY, parentLabel } from "./new-project-dialog";
 import { repoCount, teamCaption, trailText } from "./project-labels";
 import { NO_ACCESS_COPY, ProjectNoAccess } from "./project-page";
 import {
@@ -46,9 +46,28 @@ const REPO2 = "01a11635-d6e7-7c87-9f17-0000000000b2";
 const DEVICE = "01a11635-d6e7-7c87-9f17-0000000000c1";
 const ANA = "01a11635-d6e7-7c87-9f17-0000000000a1";
 
+/** 07.10 (R1): where a project sits and how the viewer belongs; the index page itself does not read them. */
+const where = {
+  parent: { id: "01a11635-d6e7-7c87-9f17-0000000000e2", name: "Web", kind: "team" },
+  top: {
+    id: "01a11635-d6e7-7c87-9f17-0000000000e1",
+    name: "Engineering",
+    kind: "department",
+    viewerIsMember: true,
+  },
+  membership: "member",
+} as const;
+
 const index = (over: Partial<WorkProjectIndex> = {}): WorkProjectIndex => ({
   teamProjects: [
-    { id: PORTAL, name: "Customer portal", trail: ["Engineering", "Web"], peopleCount: 3, repoCount: 2 },
+    {
+      id: PORTAL,
+      name: "Customer portal",
+      trail: ["Engineering", "Web"],
+      peopleCount: 3,
+      repoCount: 2,
+      ...where,
+    },
   ],
   personalRepos: [
     {
@@ -201,8 +220,8 @@ describe("ProjectsIndexBody", () => {
       <ProjectsIndexBody
         data={index({
           teamProjects: [
-            { id: PORTAL, name: "Solo", trail: ["Web"], peopleCount: 1, repoCount: 1 },
-            { id: OTHER, name: "Empty", trail: ["Web"], peopleCount: 3, repoCount: 0 },
+            { id: PORTAL, name: "Solo", trail: ["Web"], peopleCount: 1, repoCount: 1, ...where },
+            { id: OTHER, name: "Empty", trail: ["Web"], peopleCount: 3, repoCount: 0, ...where },
           ],
         })}
         onNewSession={noop}
@@ -387,5 +406,17 @@ describe("NewProjectDialog", () => {
     expect(NEW_PROJECT_COPY.nameMissing).toBe("Enter a name");
     expect(NEW_PROJECT_COPY.created("Customer portal")).toBe("Customer portal created");
     expect(NEW_PROJECT_COPY.submit).toBe("Create project");
+  });
+
+  // 07.10-05 (R6): the section "+" preselects its unit; a unit the viewer may not use is ignored, never forced.
+  it("preselects defaultParentId only when it is one of the viewer's parents; the person's choice wins", () => {
+    const web = { id: "01a11635-d6e7-7c87-9f17-0000000000e2", name: "Web" };
+    const api = { id: "01a11635-d6e7-7c87-9f17-0000000000e3", name: "API" };
+    const parents = [api, web];
+    expect(chosenParent(parents, null)).toBe(api);
+    expect(chosenParent(parents, null, web.id)).toBe(web);
+    expect(chosenParent(parents, null, "01a11635-d6e7-7c87-9f17-00000000dead")).toBe(api);
+    expect(chosenParent(parents, api.id, web.id)).toBe(api);
+    expect(chosenParent([], null, web.id)).toBeNull();
   });
 });

@@ -1,4 +1,4 @@
-import { EventTypes, WorkProjectUpdatedEvent } from "@ocw/contracts";
+import { EventTypes, WorkProjectUpdatedEvent, type WorkSession } from "@ocw/contracts";
 import { orgMembers, permissionRules, type Tx, workSessions } from "@ocw/db";
 import { eq, sql } from "drizzle-orm";
 import type { ApiModule, Core } from "../../core";
@@ -24,6 +24,7 @@ import {
   type WorkSessionStartOptions,
   type WorkSessionStartResult,
 } from "./start";
+import { withoutViewerFields } from "./viewer-fields";
 
 export { sessionFacts, sessionFactsForUsers } from "./facts";
 export { createWorkSessionAttachmentScope } from "./images";
@@ -139,6 +140,13 @@ export function createWorkSessionModule(
       }
       return { allowed: false as const, cause: revokeCauseOf(denial, rulePermission) };
     }),
+  );
+  // 07.10-07 (LO-02): `ws:` snapshots stored before 07.10 still name the session's team project; a replay strips the
+  // per-viewer fields on read, so the shared stream is viewer-neutral from seq 0, as it is live (PD-03).
+  core.realtime.registerReplayMapper("ws", (type, payload) =>
+    type === EventTypes.workSessionUpdated && payload !== null && typeof payload === "object"
+      ? withoutViewerFields(payload as WorkSession)
+      : payload,
   );
   // A team project's teams or repositories changed (P-09): who may see its sessions changed for anyone in the
   // organization, so every live subscription is re-decided (coalesced by the gateway queue), as for `units.updated`.

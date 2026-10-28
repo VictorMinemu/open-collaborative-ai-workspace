@@ -1,6 +1,7 @@
+import type { Project } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
 import { ApiRequestError } from "@/lib/api";
-import { audienceRefusal } from "./new-session-dialog";
+import { audienceRefusal, preselectedRepo } from "./new-session-dialog";
 
 /**
  * A refused create request words the stale draft with the names the dialog showed (07.9-14, UI-SPEC Copy "Refusal
@@ -73,5 +74,62 @@ describe("audienceRefusal", () => {
     expect(
       audienceRefusal(new ApiRequestError(422, "audience_outside_project", "x", null), people, team),
     ).toBeNull();
+  });
+});
+
+/**
+ * What the dialog preselects (07.10-05, R5, D-14): a repository id keeps the 07.9 rule; a team project picks that
+ * project's first online repository the viewer can start on, else its first; a hidden project's repository is never
+ * preselected; a target the viewer may not use falls back to the default, never forced.
+ */
+describe("preselectedRepo", () => {
+  const PORTAL_ID = "01a11635-d6e7-7c87-9f17-0000000000e1";
+  const BILLING_ID = "01a11635-d6e7-7c87-9f17-0000000000e2";
+  const repo = (id: string, over: Partial<Project> = {}): Project => ({
+    id: `01a11635-d6e7-7c87-9f17-0000000000${id}`,
+    deviceId: "01a11635-d6e7-7c87-9f17-0000000000c1",
+    deviceName: "Ana's MacBook",
+    deviceOnline: true,
+    name: `repo-${id}`,
+    gitRemote: null,
+    defaultBranch: "main",
+    available: true,
+    createdAt: "2026-10-22T10:00:00Z",
+    teamProject: null,
+    ...over,
+  });
+  const portal = { id: PORTAL_ID, name: "Customer portal", defaultVisibility: "project" as const };
+  const billing = { id: BILLING_ID, name: "Billing ops", defaultVisibility: "project" as const };
+  const offlinePortal = repo("b1", { teamProject: portal, deviceOnline: false });
+  const onlinePortal = repo("b2", { teamProject: portal });
+  const billingRepo = repo("b3", { teamProject: billing });
+  const scratch = repo("b4");
+  const hidden = repo("b5", { teamProjectHidden: true });
+
+  it("without a target: the first online repository the viewer can start on, else the first", () => {
+    expect(preselectedRepo([hidden, offlinePortal, scratch], undefined)).toBe(scratch.id);
+    expect(preselectedRepo([hidden, offlinePortal], undefined)).toBe(offlinePortal.id);
+    expect(preselectedRepo([hidden], undefined)).toBeNull();
+    expect(preselectedRepo([], undefined)).toBeNull();
+  });
+
+  it("a repository id keeps today's rule; a hidden project's repository is never preselected", () => {
+    expect(preselectedRepo([scratch, offlinePortal], offlinePortal.id)).toBe(offlinePortal.id);
+    expect(preselectedRepo([scratch, hidden], hidden.id)).toBe(scratch.id);
+    expect(preselectedRepo([scratch], "01a11635-d6e7-7c87-9f17-00000000dead")).toBe(scratch.id);
+  });
+
+  it("a team project: its first online repository, else its first", () => {
+    const all = [scratch, offlinePortal, billingRepo, onlinePortal];
+    expect(preselectedRepo(all, { teamProjectId: PORTAL_ID })).toBe(onlinePortal.id);
+    expect(preselectedRepo([scratch, offlinePortal, billingRepo], { teamProjectId: PORTAL_ID })).toBe(
+      offlinePortal.id,
+    );
+    expect(preselectedRepo(all, { teamProjectId: BILLING_ID })).toBe(billingRepo.id);
+  });
+
+  it("a team project with no repository the viewer can use falls back to the default", () => {
+    expect(preselectedRepo([offlinePortal, scratch], { teamProjectId: BILLING_ID })).toBe(scratch.id);
+    expect(preselectedRepo([hidden, scratch], { teamProjectId: PORTAL_ID })).toBe(scratch.id);
   });
 });

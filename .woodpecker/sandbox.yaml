@@ -16,9 +16,13 @@ when:
 
 # After the e2e workflows, never beside them (pipelines 64-69): this workflow's per-bot networks made the e2e Chromium
 # fail with net::ERR_NETWORK_CHANGED, and its CPU and Docker load pushed the kill switch and the first browser open past
-# their budgets. It still runs beside verify, cell-smoke and images, and whatever the e2e result.
+# their budgets. After verify too (pipelines 76, 82): verify's testcontainers load on the shared Docker daemon pushed
+# the kill switch to 16-18 s against its 5 s budget. It still runs beside cell-smoke and images, and whatever the
+# e2e and verify results.
 depends_on:
   - name: e2e
+    optional: true
+  - name: verify
     optional: true
 runs_on: [success, failure]
 

@@ -9,6 +9,7 @@ import {
   UpdateWorkSessionVisibilityRequest,
   UpdateWorkSessionVisibilityResult,
   WorkSession,
+  WorkSessionAttention,
   WorkSessionDetail,
   WorkSessionRemovedEvent,
   WorkSessionVisibilityChangedEvent,
@@ -196,6 +197,34 @@ describe("work session list DTO summary (07.9-01, R1)", () => {
   });
 });
 
+describe("work session per-viewer fields (07.10-02, PD-03, PD-04)", () => {
+  it("teamProjectHidden: true parses with teamProject null; a DTO without it (replayed, ws:) parses; a non-boolean is refused", () => {
+    const hidden = WorkSession.parse({ ...oldSession, teamProject: null, teamProjectHidden: true });
+    expect(hidden).toMatchObject({ teamProject: null, teamProjectHidden: true });
+    expect(WorkSession.parse(oldSession).teamProjectHidden).toBeUndefined();
+    expect(WorkSession.safeParse({ ...oldSession, teamProjectHidden: "yes" }).success).toBe(false);
+  });
+
+  it("WorkSessionAttention: approval with a null or ISO lastTurnEndedAt parses; a missing approval is refused", () => {
+    expect(WorkSessionAttention.parse({ approval: true, lastTurnEndedAt: null })).toEqual({
+      approval: true,
+      lastTurnEndedAt: null,
+    });
+    expect(WorkSessionAttention.parse({ approval: false, lastTurnEndedAt: now }).lastTurnEndedAt).toBe(now);
+    expect(WorkSessionAttention.safeParse({ lastTurnEndedAt: null }).success).toBe(false);
+    expect(WorkSessionAttention.safeParse({ approval: true, lastTurnEndedAt: "yesterday" }).success).toBe(
+      false,
+    );
+  });
+
+  it("a WorkSession parses with attention (list, detail, user:) and without it (ws:, replayed)", () => {
+    const attention = { approval: true, lastTurnEndedAt: now };
+    expect(WorkSession.parse({ ...oldSession, attention }).attention).toEqual(attention);
+    expect(WorkSession.parse(oldSession).attention).toBeUndefined();
+    expect(WorkSession.safeParse({ ...oldSession, attention: { approval: "yes" } }).success).toBe(false);
+  });
+});
+
 describe("visibility panel view (07.9-01, D-04, D-11, D-12, R2, R12)", () => {
   it("parses a team-project view and a personal view", () => {
     expect(WorkSessionVisibilityView.parse(teamView).viewers.people).toHaveLength(12);
@@ -206,6 +235,16 @@ describe("visibility panel view (07.9-01, D-04, D-11, D-12, R2, R12)", () => {
     expect(
       WorkSessionVisibilityView.parse({ ...personalView, viewerState: "left_project" }).viewerState,
     ).toBe("left_project");
+  });
+
+  it("parses the hidden form (07.10-07, HI-01): a project the viewer can't open, with no id and no name", () => {
+    const hidden = { ...teamView, project: { kind: "hidden" }, projectDefault: null, teams: [], people: [] };
+    expect(WorkSessionVisibilityView.parse(hidden).project).toEqual({ kind: "hidden" });
+    // Strict: the hidden variant never carries the project's id or name.
+    expect(
+      WorkSessionVisibilityView.parse({ ...hidden, project: { kind: "hidden", id: uuid(1), name: "x" } })
+        .project,
+    ).toEqual({ kind: "hidden" });
   });
 
   it("refuses more than 50 viewer rows, an unknown reason, a project kind outside team/personal", () => {

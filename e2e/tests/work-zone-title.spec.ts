@@ -14,7 +14,8 @@ import { ADMIN, shot } from "./env";
  * an untitled session's first prompt comes back from the device as a short title, live in the sidebar row, the
  * breadcrumb and the browser tab of every controller; a typed title is never replaced. A session created empty
  * gets its title from its first prompt; when the org policy leaves the small model out, the first line stays; and
- * both fit the sidebar row, the breadcrumb and the page at 1440 and 390, light and dark (`wz-title-*`).
+ * both fit the sidebar row, the breadcrumb and the page at 1440 and 390, light and dark (`wz-title-*`). Since 07.10
+ * (PD-08) the sidebar sub-row may truncate a title: it keeps the full title in its `title` and accessible name.
  */
 
 test.describe.configure({ mode: "serial" });
@@ -115,6 +116,28 @@ function expectNotTruncated(
   expect(m.client, `${message}: the box has a width`).toBeGreaterThan(100);
   expect(m.scroll, message).toBeLessThanOrEqual(m.client);
   expect(m.textWidth, message).toBeLessThanOrEqual(m.box + 0.5);
+}
+
+/**
+ * The sidebar sub-row's title contract since 07.10 (PD-08): the full title in the title's `title` attribute and at the
+ * start of the link's accessible name, cut with an ellipsis inside its own box, the box no wider than `maxBox`, and the
+ * row inside the sidebar (never past its column or the page).
+ */
+async function expectSubRowTitle(page: Page, id: string, title: string, maxBox: number) {
+  const row = sessionRow(page, id);
+  const m = await measure(page, "row-title", row);
+  expect(m.title).toBe(title);
+  expect(m.textOverflow, "the row title is cut with an ellipsis").toBe("ellipsis");
+  expect(m.client, "the title has room in its row").toBeGreaterThan(60);
+  expect(m.client, `the title box stays inside the ${maxBox} px of the sidebar`).toBeLessThanOrEqual(maxBox);
+  await expect(row).toHaveAccessibleName(new RegExp(`^${title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, `));
+  const fits = await row.evaluate((el) => {
+    const nav = el.closest('[data-testid="session-list"]')?.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    return { inNav: nav ? r.left >= nav.left - 0.5 && r.right <= nav.right + 0.5 : false, right: r.right };
+  });
+  expect(fits.inNav, "the row stays inside the sidebar").toBe(true);
+  expect(fits.right).toBeLessThanOrEqual(page.viewportSize()?.width ?? 1440);
 }
 
 /** No horizontal page overflow. */
@@ -371,13 +394,12 @@ test("fallback and fit: a policy without haiku keeps the first line; titles fit 
     expect(header.title).toBe(AUTO);
     expectNotTruncated(header, `the breadcrumb title is not truncated at ${tag}`);
     if (!mobile) {
-      const row = await measure(page, "row-title", sessionRow(page, auto));
-      expect(row.title).toBe(AUTO);
-      // D-20: a title of at most 32 characters fits the ref-4 sidebar row (~219 px) in full.
-      expectNotTruncated(row, "the auto title is not truncated in its 1440 sidebar row");
-      expect(row.client, "the row stays inside the 256 px sidebar").toBeLessThanOrEqual(240);
+      // 07.10 PD-08 (D-20 under the tree): the sub-row is indented under its repository with its status on the same
+      // line, so a title may truncate there; the full title is in its `title` and the link's name, the ellipsis stays
+      // inside the row and the row inside the 256 px column. D-20 keeps holding in the header and the tab above.
+      await expectSubRowTitle(page, auto, AUTO, 240);
       for (const fit of await fitsLike(sessionRow(page, auto).getByTestId("row-title"), RECORDED_TITLES)) {
-        expectNotTruncated(fit, `"${fit.text}" fits a 1440 sidebar row`);
+        expect(fit.client, `"${fit.text}" never widens its 1440 sidebar row`).toBeLessThanOrEqual(240);
       }
     }
     await expectPageFits(page);
@@ -385,11 +407,10 @@ test("fallback and fit: a policy without haiku keeps the first line; titles fit 
     if (mobile) {
       await page.getByTestId("mobile-nav-trigger").click();
       await expect(page.getByTestId("session-list")).toBeVisible();
-      const row = await measure(page, "row-title", sessionRow(page, auto));
-      expect(row.title).toBe(AUTO);
-      expectNotTruncated(row, "the auto title is not truncated in the 390 drawer");
+      // 07.10 PD-08: as at 1440, inside the 288 px of drawer content.
+      await expectSubRowTitle(page, auto, AUTO, 288);
       for (const fit of await fitsLike(sessionRow(page, auto).getByTestId("row-title"), RECORDED_TITLES)) {
-        expectNotTruncated(fit, `"${fit.text}" fits a 390 drawer row`);
+        expect(fit.client, `"${fit.text}" never widens its 390 drawer row`).toBeLessThanOrEqual(288);
       }
       await expectPageFits(page);
       await bothThemes(page, "wz-title-sidebar-390");

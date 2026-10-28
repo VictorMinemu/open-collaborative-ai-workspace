@@ -17,8 +17,9 @@ import { ADMIN, API_URL } from "./env";
  * - silence on the default: a session that follows its project's default shows no marker and no extra words;
  * - Only me under a default-on project shows a 12 px lock, a session shared with a team a people icon, a personal
  *   repository's Only me a lock; each row link says it to screen readers, the desktop pointer gets a tooltip;
- * - sessions on two repositories linked to one team project sort together under its name; an unlinked one keeps its
- *   repository; the home page's recent sessions show the same marker.
+ * - sessions on two repositories linked to one team project are sub-rows of its project row (07.10: 3, then "+1 more"
+ *   to the project page); an unlinked one sits under its repository; the home page's recent sessions show the same
+ *   marker.
  * The audience is set with the guarded superuser (the visibility API and its UI come in 06 and 10); the API computes
  * `differsFromDefault`, the web only words it. Ended and failed sessions sit under Settled with readable badges (07.9
  * polish: axe runs on the whole sidebar and home, with no exclusion), and every sidebar control is 44 px on a phone.
@@ -137,11 +138,11 @@ test("Work Zone sidebar: a quiet marker only where the audience differs, rows gr
       api: `API ${run}`,
       scratch: `Scratch ${run}`,
     };
-    await startSession(repoA.projectId, T.plain);
+    const plainId = await startSession(repoA.projectId, T.plain);
     const mine = await startSession(repoA.projectId, T.mine);
     const team = await startSession(repoA.projectId, T.team);
     const scratch = await startSession(repoC.projectId, T.scratch);
-    await startSession(repoB.projectId, T.api);
+    const apiId = await startSession(repoB.projectId, T.api);
     await setAudience(mine, "owner");
     await setAudience(team, "teams", design.id);
     await setAudience(scratch, "owner");
@@ -151,6 +152,25 @@ test("Work Zone sidebar: a quiet marker only where the audience differs, rows gr
     const failed = await startSession(repoC.projectId, S.failed);
     await asSuperuser("update app.work_sessions set status = $2 where id = $1", [ended, "completed"]);
     await asSuperuser("update app.work_sessions set status = $2 where id = $1", [failed, "failed"]);
+    // 07.10: a project lists 3 active sessions, then "+1 more". Once every session is idle, the plain one is made the
+    // oldest, so the fourth Portal session (behind "+1 more", checked on the project page below) is always the plain
+    // one and every marker case stays in the sidebar, whatever order the device answered in.
+    await expect
+      .poll(
+        async () => {
+          const all = (await (await adminApi.get(`${API_URL}/api/v1/work-sessions`)).json()) as {
+            sessions: Array<{ id: string; status: string }>;
+          };
+          return [plainId, mine, team, scratch, apiId].every(
+            (id) => all.sessions.find((s) => s.id === id)?.status === "idle",
+          );
+        },
+        { timeout: 30_000, message: "the five sessions are idle" },
+      )
+      .toBe(true);
+    await asSuperuser("update app.work_sessions set updated_at = now() - interval '2 hours' where id = $1", [
+      plainId,
+    ]);
 
     // The API decides "differs" (default on: project shows nothing; personal: project is the default).
     const listed = (await (await adminApi.get(`${API_URL}/api/v1/work-sessions`)).json()) as {
@@ -168,11 +188,12 @@ test("Work Zone sidebar: a quiet marker only where the audience differs, rows gr
     await expect(list).toBeVisible();
     await expect(rowOf(list, T.api)).toHaveCount(1, { timeout: 30_000 });
 
-    // ---- silence on the default; one icon and a spoken suffix otherwise
-    const plain = rowOf(list, T.plain);
+    // ---- silence on the default; one icon and a spoken suffix otherwise. 07.10: the plain session is the fourth of
+    // Portal, behind "+1 more" (its silence is checked on the project page below); the API one is the default here.
+    const plain = rowOf(list, T.api);
     await expect(plain.getByTestId("visibility-marker")).toHaveCount(0);
     await expect(plain.locator(".sr-only")).toHaveCount(0);
-    await expect(rowOf(list, T.api).getByTestId("visibility-marker")).toHaveCount(0);
+    await expect(rowOf(list, T.plain)).toHaveCount(0);
 
     const mineRow = rowOf(list, T.mine);
     await expect(mineRow.getByTestId("visibility-marker")).toHaveAttribute("data-kind", "lock");
@@ -192,23 +213,24 @@ test("Work Zone sidebar: a quiet marker only where the audience differs, rows gr
     expect(box?.height).toBe(12);
     await expect(icon).toHaveAttribute("aria-hidden", "true");
 
-    // ---- grouping: both linked repositories show the team project and sit together; the personal one its repo
-    for (const title of [T.plain, T.mine, T.team, T.api])
-      await expect(rowOf(list, title).getByTestId("row-project")).toHaveText(portalName);
-    await expect(rowOf(list, T.scratch).getByTestId("row-project")).toHaveText(`mk-scratch-${tag}`);
+    // ---- grouping (07.10): the sessions of both linked repositories are sub-rows of Portal's project row (3, then
+    // "+1 more" for the fourth); the personal one is a sub-row of its repository
+    await expect(list.getByTestId(`project-row-${portal.id}`)).toContainText(portalName);
+    const portalSubs = list.getByRole("list", { name: `Active sessions in ${portalName}`, exact: true });
+    for (const title of [T.mine, T.team, T.api]) await expect(rowOf(portalSubs, title)).toHaveCount(1);
+    await expect(portalSubs.getByTestId("project-more")).toHaveText("+1 more");
+    await expect(list.getByTestId(`repo-row-${repoC.projectId}`)).toHaveText(`mk-scratch-${tag}`);
+    const scratchSubs = list.getByRole("list", { name: `Active sessions in mk-scratch-${tag}`, exact: true });
+    await expect(rowOf(scratchSubs, T.scratch)).toHaveCount(1);
     const ours = new Set(Object.values(T));
     const order = (
-      await list.getByTestId("session-row").evaluateAll((rows) =>
-        rows.map((r) => ({
-          title: r.querySelector('[data-testid="row-title"]')?.textContent ?? "",
-          project: r.querySelector('[data-testid="row-project"]')?.textContent ?? "",
-        })),
-      )
-    ).filter((r) => ours.has(r.title));
-    expect(order).toHaveLength(5);
-    const portalAt = order.flatMap((r, i) => (r.project === portalName ? [i] : []));
-    expect(portalAt).toHaveLength(4);
-    expect((portalAt.at(-1) ?? 0) - (portalAt[0] ?? 0)).toBe(3);
+      await list
+        .getByTestId("session-row")
+        .evaluateAll((rows) =>
+          rows.map((r) => r.querySelector('[data-testid="row-title"]')?.textContent ?? ""),
+        )
+    ).filter((t) => ours.has(t));
+    expect(order).toHaveLength(4);
 
     // ---- the tooltip on a desktop pointer; touch: the row is the target (no new control)
     if (!mobile) {
@@ -222,8 +244,10 @@ test("Work Zone sidebar: a quiet marker only where the audience differs, rows gr
       }
     }
     // Settled: the ended and failed rows, 44 px on a phone like every other sidebar control (the hover-only "+"
-    // is not offered to a touch screen).
+    // is not offered to a touch screen). 07.10-04: Settled is a section, collapsed by default: open it first.
     const settledGroup = list.getByTestId("settled-group");
+    await settledGroup.getByTestId("settled-toggle").click();
+    await expect(settledGroup.getByTestId("settled-toggle")).toHaveAttribute("aria-expanded", "true");
     await expect(rowOf(settledGroup, S.ended)).toHaveAttribute("data-status", "completed");
     await expect(rowOf(settledGroup, S.failed)).toHaveAttribute("data-status", "failed");
     if (mobile) {
@@ -283,6 +307,24 @@ test("Work Zone sidebar: a quiet marker only where the audience differs, rows gr
     await page.emulateMedia({ colorScheme: "light" });
     await expectNoSidewaysScroll(page, "home");
     await captureReview(page, `09-home-markers-${tag}`);
+
+    // ---- the fourth Portal session, behind "+1 more" (07.10): the project page lists it, silent on the default,
+    // next to the marked ones
+    if (mobile) await page.getByTestId("mobile-nav-trigger").click();
+    await page
+      .getByTestId("session-list")
+      .getByRole("list", { name: `Active sessions in ${portalName}`, exact: true })
+      .getByTestId("project-more")
+      .click();
+    await expect(page).toHaveURL(new RegExp(`/work-zone/projects/${portal.id}$`));
+    const onPage = page.getByTestId("project-session-row");
+    await expect(onPage.filter({ hasText: T.plain })).toHaveCount(1, { timeout: 30_000 });
+    await expect(onPage.filter({ hasText: T.plain }).getByTestId("visibility-marker")).toHaveCount(0);
+    await expect(onPage.filter({ hasText: T.plain })).not.toContainText("visible to");
+    await expect(onPage.filter({ hasText: T.mine }).getByTestId("visibility-marker")).toHaveAttribute(
+      "data-kind",
+      "lock",
+    );
   } finally {
     for (const id of sessionIds) {
       await adminApi

@@ -1,10 +1,11 @@
 "use client";
 
 import { badgeStyle, type ChannelSummary, type ChannelUnit } from "@ocw/contracts";
-import { BellOff, ChevronRight, Plus } from "lucide-react";
+import { BellOff, Plus } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { sectionItemClass } from "@/components/shell/section-sidebar";
+import { SidebarSectionHeader } from "@/components/shell/sidebar-section-header";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useReadHold } from "@/lib/chat-queries";
 import { cn } from "@/lib/utils";
@@ -205,48 +206,28 @@ export function SidebarSections({
             data-collapsed={isCollapsed ? "true" : undefined}
             className="grid grid-cols-1 gap-px"
           >
-            <div className="group/section flex h-7 items-center gap-1 pr-1">
-              <button
-                type="button"
-                id={headingId}
-                data-testid="section-toggle"
-                aria-expanded={!isCollapsed}
-                onClick={() => toggle(s.key)}
-                className="flex h-7 min-w-0 flex-1 items-center gap-1 rounded-md px-1 text-left outline-none transition-colors hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
-              >
-                <ChevronRight
-                  aria-hidden
-                  className={cn(
-                    "size-3.5 shrink-0 text-muted-foreground/70 transition-transform",
-                    !isCollapsed && "rotate-90",
-                  )}
-                />
-                <span className="truncate font-semibold text-[11.5px] text-muted-foreground uppercase tracking-wider">
-                  {s.title}
-                </span>
-                {isCollapsed && hidden > 0 ? (
-                  <span
-                    data-testid="section-count"
-                    className="ml-1 rounded-full bg-muted px-1.5 text-[10.5px] text-muted-foreground tabular-nums"
-                  >
-                    {hidden}
-                  </span>
-                ) : null}
-              </button>
-              {onCreate && (canPlace?.(unitId) ?? true) ? (
-                <Tooltip content={s.unit ? `Create a channel in ${s.title}` : "Create a channel"}>
-                  <button
-                    type="button"
-                    aria-label={s.unit ? `Create a channel in ${s.title}` : "Create a channel"}
-                    data-testid="section-create"
-                    onClick={() => onCreate(unitId)}
-                    className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 outline-none transition-opacity hover:bg-sidebar-accent hover:text-foreground focus-visible:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/40 group-hover/section:opacity-100 [@media(hover:none)]:hidden"
-                  >
-                    <Plus className="size-3.5" />
-                  </button>
-                </Tooltip>
-              ) : null}
-            </div>
+            <SidebarSectionHeader
+              id={headingId}
+              title={s.title}
+              expanded={!isCollapsed}
+              hidden={hidden}
+              onToggle={() => toggle(s.key)}
+              action={
+                onCreate && (canPlace?.(unitId) ?? true) ? (
+                  <Tooltip content={s.unit ? `Create a channel in ${s.title}` : "Create a channel"}>
+                    <button
+                      type="button"
+                      aria-label={s.unit ? `Create a channel in ${s.title}` : "Create a channel"}
+                      data-testid="section-create"
+                      onClick={() => onCreate(unitId)}
+                      className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 outline-none transition-opacity hover:bg-sidebar-accent hover:text-foreground focus-visible:opacity-100 focus-visible:ring-[3px] focus-visible:ring-ring/40 group-hover/section:opacity-100 [@media(hover:none)]:hidden"
+                    >
+                      <Plus className="size-3.5" />
+                    </button>
+                  </Tooltip>
+                ) : null
+              }
+            />
             {shown.map((c) => (
               <ChannelRow key={c.id} c={c} active={c.id === activeId} />
             ))}

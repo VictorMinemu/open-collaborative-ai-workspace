@@ -1,5 +1,9 @@
 name: CI
 
+# Woodpecker (.woodpecker/**, https://ci.autofy.ing) is the CI of record (ADR-0021). These jobs run only when the
+# repository variable GH_ACTIONS_CI is "true": while GitHub Actions billing is off they would fail before starting.
+# Set the variable to turn them back on; nothing else changes.
+
 on:
   pull_request:
   push:
@@ -14,6 +18,7 @@ permissions:
 
 jobs:
   verify:
+    if: ${{ vars.GH_ACTIONS_CI == 'true' }}
     name: verify (lint, typecheck, unit + integration)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -36,6 +41,7 @@ jobs:
           pnpm --filter @ocw/desktop test
 
   e2e:
+    if: ${{ vars.GH_ACTIONS_CI == 'true' }}
     # Runs alongside verify (no `needs`), one job per viewport, each on its own fresh stack.
     name: e2e (Playwright, ${{ matrix.project }})
     runs-on: ubuntu-latest
@@ -122,6 +128,7 @@ jobs:
           retention-days: 7
 
   images:
+    if: ${{ vars.GH_ACTIONS_CI == 'true' }}
     name: docker images (api, web, openclaw cell)
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -141,6 +148,7 @@ jobs:
       - run: docker build -f infra/sandbox/egress/Dockerfile -t ocw-sandbox-egress:ci .
 
   cell-smoke:
+    if: ${{ vars.GH_ACTIONS_CI == 'true' }}
     name: openclaw cell smoke (real container, offline)
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -165,6 +173,7 @@ jobs:
         run: SMOKE_BUILD=1 bash infra/openclaw/test/run-container-smoke.sh
 
   sandbox:
+    if: ${{ vars.GH_ACTIONS_CI == 'true' }}
     # Mirror of .woodpecker/sandbox.yaml's runc smokes (07.8-24): real Docker, hardened runc, every object removed by
     # its label. The gVisor job and the real-stack proof run in Woodpecker only (nested runsc daemon, real cell).
     name: bot sandbox smokes (real Docker, runc)

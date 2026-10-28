@@ -407,7 +407,7 @@ of the thin Work Zone that Phase 1 already ships.
 **Operations features (inserted 2026-10-08, owner).** Phases 07.1–07.7 turn the 2026-10-06 operations meeting into
 generic capabilities for any organization (research: `.planning/research/OPS-FEATURES.md`). Each feature is owned by the
 Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits → Agent Card when a human approves);
-OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.6 → 07.7 (07.8 added 2026-10-14 and 07.9 added 2026-10-22 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
+OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.6 → 07.7 (07.8 added 2026-10-14 and 07.9 added 2026-10-22 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
 (F17), ERP-driven board columns beyond watched records.
 
 ### Phase 07.1: Board channels and record templates (INSERTED)
@@ -782,6 +782,49 @@ Plans:
 - [ ] 07.9-13-PLAN.md — Wave 6: Web project Settings tab and dialogs, Settings › Organization project sections
 - [ ] 07.9-14-PLAN.md — Wave 6: Web new-session dialog: repos grouped under team projects and "Visible to: … · Change"
 - [ ] 07.9-15-PLAN.md — Wave 7: Phase gate: full local gate and CI, ADR-0030, DEMO owner checks, STATUS, AGENTS row, CODEOWNERS, signed VALIDATION
+
+### Phase 07.10: Work Zone sidebar by team (INSERTED)
+
+**Goal**: The Work Zone sidebar is organised like the chat sidebar, by team. It scales to many people and many
+projects:
+- **Sections:** one collapsible section per department, remembered per person. Your own units come first.
+- **Projects:** each section lists only the team projects the viewer belongs to (directly or through a team). Each one
+  shows a live-session count, and clicking it opens the project page, as clicking a channel opens the channel.
+- **Sessions:** only active sessions appear under their project (at most 3, then "+N more").
+- **"Needs you":** a section on top gathers the sessions waiting on the viewer's approval or turn, from any project.
+- **Personal:** a section at the end holds the viewer's unlinked repositories.
+- **"+" buttons:** one per section creates a project there; one per project starts a session in it.
+- **Other projects** are reached through "Browse projects".
+
+The sidebar is the same on desktop and in the mobile drawer, and adds very little visual noise.
+**Requirements**: WZS-01, WZS-02, WZS-03, WZS-04, WZS-05, WZS-06, WZS-07, WZS-08, WZS-09, WZS-10, WZS-11
+**Depends on:** Phase 07.9
+**UI hint**: yes (`07.10-UI-SPEC.md` approved)
+**Success Criteria** (what must be TRUE):
+
+  1. One collapsible section per department holding the team projects the viewer belongs to (member, through a team,
+     or lead), own departments first; collapse is remembered, and a collapsed section keeps what needs the viewer and
+     the open session
+  2. Project rows open the project page and show a team pill and a live count; at most 3 active sessions under each,
+     then "+N more"; settled history stays one click away (a collapsed Settled section, the project page, search)
+  3. "Needs you" gathers approvals the viewer can decide and the viewer's finished turns; Personal holds unlinked
+     repositories; "+" creates a project where the viewer may and starts a session in a project or repository; every
+     other project is reached through Browse projects and search
+  4. Two list requests serve the sidebar at any organization size; a project the viewer cannot open is never named on
+     any surface (sidebar, tooltips, search, accessible names, the session list, detail and live frames), with
+     cross-tenant tests
+  5. One component on desktop and in the mobile drawer: 1440 and 390, light and dark, axe-clean, 44 px touch targets,
+     arrow-key navigation; existing search, Settled, live status texts and the 07.9 visibility marker keep working
+**Plans:** 6 plans in 4 waves (UI-SPEC/VALIDATION in the phase folder; 01 is the hub, 03 the end-to-end tracer, 06 the gate)
+
+Plans:
+
+- [ ] 07.10-01-PLAN.md — Wave 1: Projects index data (parent, top unit, membership; parents' top unit) and the phase hub (plan map, shared files, PD-01…PD-14)
+- [ ] 07.10-02-PLAN.md — Wave 1: Session rows per viewer: the 07.9 D-14 leak proven and closed on list, detail, `user:` and `ws:`; `attention`
+- [ ] 07.10-03-PLAN.md — Wave 2: Web tracer: the sidebar by department (sections, project rows, sub-rows, Personal, collapse, shared header), existing specs moved
+- [ ] 07.10-04-PLAN.md — Wave 3: Needs you and the seen map, Settled in scope, grouped search, sessions-request states, arrow keys
+- [ ] 07.10-05-PLAN.md — Wave 3: "+" actions (section, project, repository), onboarding line, projects-request states
+- [ ] 07.10-06-PLAN.md — Wave 4: Phase gate: full local gate, full isolated e2e, `gate:compose`, ADR-0031, DEMO owner checks, STATUS, AGENTS, CODEOWNERS, signed VALIDATION
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 

@@ -30,6 +30,7 @@ import {
   draftInput,
   footerAlwaysLine,
   footerCount,
+  HIDDEN_PROJECT_NOTE,
   LOAD_FAILED,
   narrowToast,
   PANEL_SUBLINE,
@@ -83,6 +84,8 @@ export interface PanelModel {
   lines: ChoiceLines;
   /** The project a creator left (D-12): read-only with its own note. */
   leftProject: string | null;
+  /** A team project the viewer can't open (07.10-07, HI-01): read-only, its own note, no project named anywhere. */
+  hiddenProject?: boolean;
   footer: {
     count: number | null;
     loading: boolean;
@@ -119,16 +122,20 @@ export function modelFromView(
   const owner = { userId: v.owner.userId, name: v.owner.name, viewerIsOwner: viewerId === v.owner.userId };
   const ownerCtx = { ownerName: owner.name, viewerIsOwner: owner.viewerIsOwner };
   const place = viewPlace(v);
+  // 07.10-07 (HI-01): a project the viewer can't open comes without its teams and people, so the panel only reads.
+  const hidden = v.project.kind === "hidden";
   const people = v.people.map((p) => ({ ...p }));
   const active = activeCountOf(v.kind, v.teams, people);
-  // Nobody but the owner: "Only you can see this", whatever the choice (a personal repository nobody shares).
+  // Nobody but the owner: "Only you can see this", whatever the choice (a personal repository nobody shares). In the
+  // hidden form the stored teams and people are not sent: only the viewer count says it.
   const ownerOnly =
     v.kind === "owner" ||
-    ((v.kind === "teams" || v.kind === "people") && active === 0) ||
+    (!hidden && (v.kind === "teams" || v.kind === "people") && active === 0) ||
     v.viewers.count <= 1;
   return {
     mode: "edit",
-    editable: v.viewerCan.change,
+    editable: v.viewerCan.change && !hidden,
+    hiddenProject: hidden,
     kind: v.kind,
     defaultKind: v.projectDefault ?? "project",
     place,
@@ -492,7 +499,11 @@ export function PanelBody({
       kind={model.kind}
       line={model.lines[model.kind]}
       names={<CurrentNames model={model} />}
-      note={readOnlyNote({ ownerName: model.owner.name, leftProject: model.leftProject })}
+      note={
+        model.hiddenProject
+          ? HIDDEN_PROJECT_NOTE
+          : readOnlyNote({ ownerName: model.owner.name, leftProject: model.leftProject })
+      }
     />
   );
 
@@ -522,7 +533,7 @@ export function PanelBody({
             viewers={model.footer.viewers}
             more={model.footer.more}
             viewerId={model.viewerId}
-            projectName={model.place.personal ? undefined : model.place.projectName}
+            projectName={model.place.personal || model.place.hidden ? undefined : model.place.projectName}
           />
         ) : null}
       </div>

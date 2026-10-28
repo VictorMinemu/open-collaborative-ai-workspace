@@ -42,6 +42,30 @@ export const WorkSessionVisibilitySummary = z.object({
 });
 export type WorkSessionVisibilitySummary = z.infer<typeof WorkSessionVisibilitySummary>;
 
+/**
+ * How long a finished turn waits on its author as "Your turn" (Phase 07.10, UI-SPEC § 3). The API reads only turns
+ * that ended within it (`attention.lastTurnEndedAt`, 07.10-07 LO-01); the sidebar drops a reason older than it.
+ */
+export const WORK_SESSION_TURN_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * What in one session waits on one viewer (Phase 07.10, PD-05, D-05; UI-SPEC R2, § 3 Needs you), decided by the API
+ * for that viewer only and never sent to anyone else.
+ */
+export const WorkSessionAttention = z.object({
+  /**
+   * The session has a pending approval and the resolver lets this viewer decide it (`work_session.approve` on the
+   * session: the creator, the device owner, an admin). A Tool-layer rule still decides when the approval is answered.
+   */
+  approval: z.boolean(),
+  /**
+   * When the session's last finished turn (its most recent prompt that was dispatched and then completed or failed)
+   * ended, only when that turn ran this viewer's prompt; null otherwise. Queued and running prompts never count.
+   */
+  lastTurnEndedAt: IsoDateTime.nullable(),
+});
+export type WorkSessionAttention = z.infer<typeof WorkSessionAttention>;
+
 export const WorkSession = z.object({
   id: Id,
   conversationId: Id,
@@ -79,10 +103,23 @@ export const WorkSession = z.object({
   /** Who can see the session (Phase 07.9). Always sent by the API from 07.9; optional so replayed DTOs parse. */
   visibility: WorkSessionVisibilitySummary.optional(),
   /**
-   * The team project the session's repository is linked to; null = a personal repository (Phase 07.9). Always sent
-   * by the API from 07.9; optional so replayed DTOs parse.
+   * The team project the session's repository is linked to; null = a personal repository, or a project this viewer
+   * may not see named (then `teamProjectHidden` is true) (Phase 07.9; per viewer from 07.10, PD-03, PD-04). Sent on
+   * the viewer's own surfaces (the list, the detail, their `user:` frames); absent on the shared `ws:` stream, so
+   * optional (replayed and `ws:` DTOs parse).
    */
   teamProject: TeamProjectRef.nullable().optional(),
+  /**
+   * Per viewer (Phase 07.10, PD-04; 07.9 D-14): present and true only when the session's repository is linked to a
+   * team project this viewer may not see named (they cannot open it and did not create the session, e.g. the device
+   * owner outside the project, D-11). `teamProject` is then null. Absent = false; absent on `ws:`.
+   */
+  teamProjectHidden: z.boolean().optional(),
+  /**
+   * What in the session waits on this viewer (Phase 07.10, PD-05; UI-SPEC R2). Per viewer: sent on the viewer's own
+   * surfaces (the list, the detail, their `user:` frames); absent on the shared `ws:` stream, so optional.
+   */
+  attention: WorkSessionAttention.optional(),
 });
 export type WorkSession = z.infer<typeof WorkSession>;
 
@@ -331,11 +368,20 @@ export type AlwaysVisible = z.infer<typeof AlwaysVisible>;
  */
 export const WorkSessionVisibilityView = z.object({
   kind: SessionVisibilityKind,
-  /** The project's default for new sessions; null = a personal repository (no project setting). */
+  /**
+   * The project's default for new sessions; null = a personal repository (no project setting) or a project the viewer
+   * can't open (`project.kind` `hidden`).
+   */
   projectDefault: ProjectDefaultVisibility.nullable(),
+  /**
+   * Where the session runs. `hidden` (Phase 07.10-07, HI-01): a team project the viewer may not open (the D-11 device
+   * owner outside it), decided per viewer like the session's `teamProject`; then no id, no name, no default, no teams
+   * and no stored people are sent, and no `team` viewer row names its team.
+   */
   project: z.discriminatedUnion("kind", [
     z.object({ kind: z.literal("team"), id: Id, name: TeamProjectRef.shape.name }),
     z.object({ kind: z.literal("personal"), deviceName: z.string().max(200) }),
+    z.object({ kind: z.literal("hidden") }),
   ]),
   owner: z.object({ userId: Id, name: z.string().max(200) }),
   /** The project's assigned teams plus selected teams no longer assigned. */

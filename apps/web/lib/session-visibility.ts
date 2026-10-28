@@ -40,12 +40,28 @@ export type OwnerContext = {
 
 /** Where the session runs: its team project, or the device of a personal repository. */
 export type PlaceContext = {
-  /** The team project's name (or the repository's name for a personal project). */
+  /** The team project's name (or the repository's name for a personal project); empty when `hidden`. */
   projectName: string;
   deviceName: string;
   /** A personal repository (no team project): "Project" means everyone who can use the device. */
   personal: boolean;
+  /**
+   * A team project the viewer can't open (Phase 07.10-07, HI-01, ME-01: the API sends no name). Never "personal": the
+   * audience is that project's people, so every label says "a project you can't open" and names no project.
+   */
+  hidden?: boolean | undefined;
 };
+
+/** The one phrase for a project the viewer can't open, inside an audience label (07.9 D-14 wording). */
+export const HIDDEN_PROJECT_PLACE = "a project you can't open";
+/** The read-only panel's note for such a session (§1.4). */
+export const HIDDEN_PROJECT_NOTE = "Linked to a project you can't open.";
+
+/** "Everyone in {project}" · "Everyone in a project you can't open" · "Everyone who can use {device}". */
+function everyoneIn(p: PlaceContext): string {
+  if (p.hidden) return `Everyone in ${HIDDEN_PROJECT_PLACE}`;
+  return p.personal ? `Everyone who can use ${p.deviceName}` : `Everyone in ${p.projectName}`;
+}
 
 export type ShortLabelInput = OwnerContext & {
   kind: SessionVisibilityKind;
@@ -84,8 +100,7 @@ export function shortLabel(s: ShortLabelInput): string {
 export function longLabel(s: LongLabelInput): string {
   const kind = effectiveKind(s.kind, s.activeCount);
   if (kind === "owner") return s.viewerIsOwner ? "Only you" : `Only ${ownerFull(s)}`;
-  if (kind === "project")
-    return s.personal ? `Everyone who can use ${s.deviceName}` : `Everyone in ${s.projectName}`;
+  if (kind === "project") return everyoneIn(s);
   if (kind === "people") return people(s.activeCount + 1);
   const names = s.teamNames ?? (s.firstTeamName ? [s.firstTeamName] : []);
   const [a, b] = names;
@@ -129,12 +144,34 @@ export function markerSrSuffix(s: LongLabelInput): string {
   return `, ${tooltip.charAt(0).toLowerCase()}${tooltip.slice(1)}`;
 }
 
+/** The session fields its audience labels read (the sidebar rows, the marker, the header chip). */
+export type LabelledSession = Pick<
+  WorkSession,
+  | "visibility"
+  | "teamProject"
+  | "teamProjectHidden"
+  | "projectName"
+  | "deviceName"
+  | "createdBy"
+  | "createdByName"
+>;
+
+/**
+ * Where a session runs, as its DTO says it to this viewer: its team project named, a project the viewer can't open
+ * (`teamProjectHidden`, 07.10-07 ME-01: never read as a personal repository), or a personal repository on its device.
+ */
+export function sessionPlace(
+  s: Pick<LabelledSession, "teamProject" | "teamProjectHidden" | "projectName" | "deviceName">,
+): PlaceContext {
+  if (s.teamProject) return { projectName: s.teamProject.name, deviceName: s.deviceName, personal: false };
+  if (s.teamProjectHidden === true)
+    return { projectName: "", deviceName: s.deviceName, personal: false, hidden: true };
+  return { projectName: s.projectName, deviceName: s.deviceName, personal: true, hidden: false };
+}
+
 /** A list row's labels for its viewer, from the session DTO alone (the marker never waits for a request). */
 export function sessionLabels(
-  s: Pick<
-    WorkSession,
-    "visibility" | "teamProject" | "projectName" | "deviceName" | "createdBy" | "createdByName"
-  >,
+  s: LabelledSession,
   viewerId: string | null | undefined,
 ): { marker: MarkerKind; tooltip: string | null; srSuffix: string } {
   const marker = markerKind(s.visibility);
@@ -145,9 +182,7 @@ export function sessionLabels(
     firstTeamName: s.visibility.firstTeamName,
     ownerName: s.createdByName,
     viewerIsOwner: viewerId === s.createdBy,
-    projectName: s.teamProject?.name ?? s.projectName,
-    deviceName: s.deviceName,
-    personal: !s.teamProject,
+    ...sessionPlace(s),
   };
   return { marker, tooltip: markerTooltip(input), srSuffix: markerSrSuffix(input) };
 }
@@ -239,12 +274,14 @@ export function choiceLines(
   const owner = ctx.viewerIsOwner
     ? { label: "Only me", line: "Just you." }
     : { label: `Only ${ownerFull(ctx)}`, line: `Just ${ownerFull(ctx)}.` };
-  const everyone = ctx.personal ? `Everyone who can use ${ctx.deviceName}` : `Everyone in ${ctx.projectName}`;
-  const teams = ctx.personal
-    ? { label: "Teams", line: "Personal projects have no teams", disabled: true }
-    : ctx.hasTeams
-      ? { label: "Teams", line: `Choose from ${ctx.projectName}'s teams`, disabled: false }
-      : { label: "Teams", line: `${ctx.projectName} has no teams yet`, disabled: true };
+  const everyone = everyoneIn(ctx);
+  const teams = ctx.hidden
+    ? { label: "Teams", line: `Teams of ${HIDDEN_PROJECT_PLACE}`, disabled: true }
+    : ctx.personal
+      ? { label: "Teams", line: "Personal projects have no teams", disabled: true }
+      : ctx.hasTeams
+        ? { label: "Teams", line: `Choose from ${ctx.projectName}'s teams`, disabled: false }
+        : { label: "Teams", line: `${ctx.projectName} has no teams yet`, disabled: true };
   return {
     owner,
     project: {
@@ -254,9 +291,11 @@ export function choiceLines(
     teams,
     people: {
       label: "People",
-      line: ctx.personal
-        ? `Choose people who can use ${ctx.deviceName}`
-        : `Choose people in ${ctx.projectName}`,
+      line: ctx.hidden
+        ? `People in ${HIDDEN_PROJECT_PLACE}`
+        : ctx.personal
+          ? `Choose people who can use ${ctx.deviceName}`
+          : `Choose people in ${ctx.projectName}`,
     },
   };
 }
@@ -353,13 +392,15 @@ export function viewInput(v: WorkSessionVisibilityView): SessionAudienceInput {
 
 /** Where a view's session runs, for the labels. */
 export function viewPlace(v: WorkSessionVisibilityView): PlaceContext {
-  return v.project.kind === "team"
-    ? {
-        projectName: v.project.name,
-        deviceName: v.alwaysVisible.deviceOwner?.deviceName ?? "",
-        personal: false,
-      }
-    : { projectName: v.project.deviceName, deviceName: v.project.deviceName, personal: true };
+  const deviceName = v.alwaysVisible.deviceOwner?.deviceName ?? "";
+  switch (v.project.kind) {
+    case "team":
+      return { projectName: v.project.name, deviceName, personal: false };
+    case "hidden":
+      return { projectName: "", deviceName, personal: false, hidden: true };
+    case "personal":
+      return { projectName: v.project.deviceName, deviceName: v.project.deviceName, personal: true };
+  }
 }
 
 /** A view's long label for its viewer (the announcement, the chip's name while the panel is open). */

@@ -353,6 +353,20 @@ Deferred to later milestones. Tracked but not in the current roadmap.
 - [ ] **WZP-09**: Session UI: one visibility chip + popover (bottom sheet below 640) with four choices, inline team/people pickers, a "who can see it now" footer, a read-only panel and inactive entries; a sidebar marker only when the audience differs from the project default; the new-session dialog groups repos under team projects and shows "Visible to: … · Change"; 1440/390, light/dark, axe, 44 px
 - [ ] **WZP-10**: Project UI: `/work-zone/projects` index and `/work-zone/projects/<unitId>` (Sessions · Settings: access line, default switch, people, teams, repositories with link/unlink dialogs), and the Teams + Work Zone sections on a project unit in Settings › Organization; the Work Zone layout no longer treats `/work-zone/projects` as a session
 
+### Work Zone Sidebar by Team (WZS) — added 2026-10-27 by the owner
+
+- [ ] **WZS-01**: The Work Zone sidebar has one collapsible section per top-level unit (department) that holds a team project the viewer belongs to, the viewer's own departments first, then alphabetical; a project under a team shows the team as a pill; collapse state persists per browser, and a collapsed section still shows what needs the viewer and the open session, with a count of what it hides
+- [ ] **WZS-02**: The sidebar lists only the team projects the viewer belongs to (direct member, member of an assigned team, or project lead); projects the viewer only manages or opens as an admin are reached through "Browse projects" and search, so an admin's sidebar never lists every project
+- [ ] **WZS-03**: A project row shows its icon, name, team pill and a live count of the running sessions the viewer can see, and opens the project page, highlighted while that page is open, like a channel row
+- [ ] **WZS-04**: Only active sessions appear under a project, at most 3 (approvals first, then live, then recent), then "+N more" to the project page; the open session always shows; settled history stays one click away in a collapsed Settled section limited to the viewer's sidebar scope, on the project page and in search
+- [ ] **WZS-05**: A "Needs you" section on top gathers, from any project or personal repository in the viewer's scope, sessions with a pending approval the viewer may decide and the viewer's own finished turns not yet opened (within 24 h); it is hidden when empty and updates live
+- [ ] **WZS-06**: A "Personal" section at the end holds the viewer's repositories not linked to a team project, with their active sessions; a session whose project the viewer may not see named sits there under its repository, and that project is never named
+- [ ] **WZS-07**: "+" actions: a section "+" creates a team project in that department only where the viewer may create (preselected), a project "+" starts a session on one of its repositories, a repository "+" starts one there, and the header "+" keeps starting a new session
+- [ ] **WZS-08**: With no team project the sidebar shows one discreet onboarding line ("Share sessions with your team → Create project", or a plain line for people who cannot create); search covers projects, sessions and personal repositories in grouped results; loading and error states never hide a session the viewer had
+- [ ] **WZS-09**: The sidebar stays usable with hundreds of members, dozens of departments and hundreds of projects: collapsed sections, membership-only listing, caps (3 sessions per project, 15 projects per section, 5 repositories, 5 Needs-you rows), two list requests with no per-project request, and live updates only through the existing per-user delivery
+- [ ] **WZS-10**: The data is additive and contract-first: each projects-index row carries its parent and top-level unit and the viewer's membership, each creatable parent its top unit, and each session row per-viewer `attention` and `teamProjectHidden`; a project the viewer may not see named is never named on any session surface (closing the 07.9 D-14 leak in the session list, detail and live frames); cross-tenant tests prove isolation
+- [ ] **WZS-11**: The sidebar is one component on desktop and in the mobile drawer, verified at 1440 and 390 in light and dark: axe-clean, 44 px touch targets below 768, arrow-key navigation with focus kept on live updates; existing search, Settled, live status texts and the 07.9 visibility marker keep working
+
 ### Operations backlog (from the 2026-10-08 research, not yet scheduled)
 
 - **OPS-BL-01**: Organization groups — several organizations per user with a switcher, and consolidated aggregate reporting computed per organization under its own tenant context (needs an identity/tenancy ADR)
@@ -551,6 +565,17 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | WZP-08 | Phase 07.9 | Pending | New (owner, 2026-10-22; plans 07.9-02, 03, 05, 08, 15) |
 | WZP-09 | Phase 07.9 | Pending | New (owner, 2026-10-22; plans 07.9-09, 10, 14) |
 | WZP-10 | Phase 07.9 | Pending | New (owner, 2026-10-22; plans 07.9-11, 13) |
+| WZS-01 | Phase 07.10 | Pending | New (owner, 2026-10-27; plans 07.10-03, 04, 06) |
+| WZS-02 | Phase 07.10 | Pending | New (owner, 2026-10-27; plans 07.10-01, 03, 04, 06) |
+| WZS-03 | Phase 07.10 | Pending | New (owner, 2026-10-27; plans 07.10-01, 03, 06) |
+| WZS-04 | Phase 07.10 | Pending | New (owner, 2026-10-27; plans 07.10-03, 04, 06) |
+| WZS-05 | Phase 07.10 | Pending | New (owner, 2026-10-27; plans 07.10-02, 04, 06) |
+| WZS-06 | Phase 07.10 | Pending | New (owner, 2026-10-27; plans 07.10-02, 03, 05, 06) |
+| WZS-07 | Phase 07.10 | Pending | New (owner, 2026-10-27; plans 07.10-01, 05, 06) |
+| WZS-08 | Phase 07.10 | Pending | New (owner, 2026-10-27; plans 07.10-04, 05, 06) |
+| WZS-09 | Phase 07.10 | Pending | New (owner, 2026-10-27; plans 07.10-01, 02, 03, 04, 06) |
+| WZS-10 | Phase 07.10 | Pending | New (owner, 2026-10-27; plans 07.10-01, 02, 06) |
+| WZS-11 | Phase 07.10 | Pending | New (owner, 2026-10-27; plans 07.10-03, 04, 05, 06) |
 | DEV-01 | Phase 8 | Partial | Session events + Device Link frames in `packages/contracts`; no `packages/protocol`; capability flags only inside the daemon |
 | DEV-02 | Phase 8 | Partial | One-time code + hashed bearer token (SLICE-13); no Ed25519 signed challenge or RFC 8628 |
 | DEV-03 | Phase 8 | Partial | Device list + immediate revocation (SLICE-13); no active sessions, no admin view |
@@ -632,4 +657,4 @@ today; every later phase still audits the sensitive actions it introduces.
 
 ---
 *Requirements defined: 2026-09-10*
-*Last updated: 2026-10-22 when Phase 07.9 was planned (WZP-01…10 added, owner request). Previously: 2026-10-08 after Phase 7 (FOUND-05…07, SELF-01…07 complete; FOUND-06 says Garage, not MinIO; owner clean-machine check human_needed). Previously: 2026-10-07 after Phase 6 (MULTI-01…08, AGENT-01/02/04 delivered; MULTI-07's metered run deferred to the owner). Previously: 2026-10-07 after Phase 5 (AICHAT-01…09 delivered); before that: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered); before that: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*
+*Last updated: 2026-10-27 when Phase 07.10 was planned (WZS-01…11 added, owner request). Previously: 2026-10-22 when Phase 07.9 was planned (WZP-01…10 added, owner request). Previously: 2026-10-08 after Phase 7 (FOUND-05…07, SELF-01…07 complete; FOUND-06 says Garage, not MinIO; owner clean-machine check human_needed). Previously: 2026-10-07 after Phase 6 (MULTI-01…08, AGENT-01/02/04 delivered; MULTI-07's metered run deferred to the owner). Previously: 2026-10-07 after Phase 5 (AICHAT-01…09 delivered); before that: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered); before that: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*

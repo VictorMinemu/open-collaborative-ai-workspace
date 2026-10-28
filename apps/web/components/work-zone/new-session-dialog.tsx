@@ -36,6 +36,7 @@ import {
 } from "@/lib/workzone-queries";
 import { controlReasonText, isShown, OnlineDot, PERMISSION_MODES, RUNTIMES, RuntimeLogo } from "./meta";
 import { NewSessionVisibilityLine } from "./visibility/new-session-visibility-line";
+import type { NewSessionPreselect } from "./work-zone-context";
 
 /** Before the device's controls load (or for a device with no catalog): the modes every runtime always had. */
 const LEGACY_MODES: PermissionMode[] = ["default", "acceptEdits", "plan"];
@@ -84,14 +85,35 @@ export function audienceRefusal(
   return null;
 }
 
+/**
+ * The repository the dialog opens on (07.9 rule, 07.10-05 R5). A repository nobody can start on from here (D-14: its
+ * project is hidden from the caller) is never preselected. A repository id is kept when it is one the caller may
+ * choose; a team project picks its first online repository, else its first; anything else (no target, or one the
+ * caller may not use) falls back to the first online repository, else the first. Never forced: the API decides.
+ */
+export function preselectedRepo(
+  available: readonly Project[],
+  target: NewSessionPreselect | undefined,
+): string | null {
+  const startable = available.filter((p) => !p.teamProjectHidden);
+  const firstOf = (list: readonly Project[]) => list.find((p) => p.deviceOnline) ?? list[0];
+  let chosen: Project | undefined;
+  if (typeof target === "string") chosen = startable.find((p) => p.id === target);
+  else if (target) chosen = firstOf(startable.filter((p) => p.teamProject?.id === target.teamProjectId));
+  return (chosen ?? firstOf(startable))?.id ?? null;
+}
+
 export function NewSessionDialog({
   open,
   onOpenChange,
   initialProjectId,
+  initialTarget,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   initialProjectId?: string | undefined;
+  /** A repository or a team project to preselect (the Work Zone sidebar's "+", 07.10-05); wins over the id. */
+  initialTarget?: NewSessionPreselect | undefined;
 }) {
   const router = useRouter();
   const qc = useQueryClient();
@@ -120,15 +142,8 @@ export function NewSessionDialog({
   useEffect(() => {
     if (!open) return;
     setError(null);
-    // A repository nobody can start on from here (D-14: its project is hidden from the caller) is never preselected.
-    const startable = available.filter((p) => !p.teamProjectHidden);
-    const preferred =
-      startable.find((p) => p.id === initialProjectId) ??
-      startable.find((p) => p.deviceOnline) ??
-      startable[0] ??
-      null;
-    setProjectId(preferred?.id ?? null);
-  }, [open, initialProjectId, available]);
+    setProjectId(preselectedRepo(available, initialTarget ?? initialProjectId));
+  }, [open, initialTarget, initialProjectId, available]);
 
   const project = available.find((p) => p.id === projectId) ?? null;
   // Choosing another repository (or reopening the dialog) resets the line to that repository's default (D-03): the

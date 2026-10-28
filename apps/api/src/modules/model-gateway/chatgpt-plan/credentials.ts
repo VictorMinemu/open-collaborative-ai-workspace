@@ -318,8 +318,9 @@ export async function accessTokenFor(tx: Tx, core: Core, userId: string): Promis
   if (!row.secretId) throw new ModelUnavailableError("needs_reconnect");
   const { organizationId } = tenantOf(tx);
   const bundle = await openBundle(tx, core, row.secretId, organizationId, userId);
-  if (!bundle) throw new ModelUnavailableError("needs_reconnect");
-  if (fresh(bundle)) return bundle.accessToken;
+  if (bundle && fresh(bundle)) return bundle.accessToken;
+  // An unreadable bundle is decided under the row lock: another send's refresh may have rotated (and deleted) the
+  // secret this unlocked read named, so only the locked re-read can tell a rotation from a dead credential.
   return refreshSerialized(core, { organizationId, userId, credentialId: row.id });
 }
 

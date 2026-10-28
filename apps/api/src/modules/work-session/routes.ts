@@ -61,6 +61,7 @@ import {
   type WorkSessionStartDeps,
   type WorkSessionStartFailure,
 } from "./start";
+import { loadViewerFields, type ViewerFilter, withViewerFields } from "./viewer-fields";
 import { audienceError, registerVisibilityRoutes, viewerStateOf } from "./visibility";
 
 const SessionParams = z.object({ id: z.uuid() });
@@ -98,6 +99,12 @@ export function registerWorkSessionRoutes(
   const perms = createPermissionService(core);
   /** Session creation (07.5-05): the route and Work Zone proposals start sessions through `createWorkSession`. */
   const startDeps: WorkSessionStartDeps = { core, perms, svc, hub };
+
+  /** The request's own resolver decisions for its viewer (the per-viewer session fields, Phase 07.10). */
+  const filterFor =
+    (req: FastifyRequest, tx: Tx): ViewerFilter =>
+    (items, permission, toResource) =>
+      perms.filter(req, tx, items, permission, toResource);
 
   /** Lock + load a session the caller may know about and assert `permission` on it (403 with the denial, else). */
   async function lockedFor(
@@ -252,12 +259,20 @@ export function registerWorkSessionRoutes(
       sessions: await core.db.withTenant(tenant(req), async (tx) => {
         // D-09: the same facts and the same decision as GET /work-sessions/:id, per session: the audience, a unit or
         // device deny rule, the Work Zone module on the project's path or a revoked host hide it from the list.
+        const viewerId = authOf(req).userId;
         const rows = await svc.readableSessions(
           tx,
-          authOf(req).userId,
+          viewerId,
           req.query.archived === "1" ? undefined : ne(workSessions.status, "archived"),
         );
-        return (await perms.filter(req, tx, rows, "work_session.read", (r) => r.facts)).map((r) => r.dto);
+        const readable = await perms.filter(req, tx, rows, "work_session.read", (r) => r.facts);
+        // Phase 07.10 (PD-04): each row as this viewer reads it (the team project named only to who may open it).
+        const fields = await loadViewerFields(tx, {
+          viewerId,
+          sessions: readable,
+          filter: filterFor(req, tx),
+        });
+        return readable.map((r) => withViewerFields(r.dto, fields.get(r.dto.id)!));
       }),
     }),
   );
@@ -381,8 +396,9 @@ export function registerWorkSessionRoutes(
     { ...user, schema: { tags, params: SessionParams, response: { 200: WorkSessionDetail } } },
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
-        const found = await svc.session(tx, req.params.id);
-        if (!found) return sessionNotFound(tx, req.params.id, SESSION_NOT_FOUND);
+        const first = await svc.sessionSource(tx, req.params.id);
+        if (!first) return sessionNotFound(tx, req.params.id, SESSION_NOT_FOUND);
+        const found = first.dto;
         const facts = await sessionFacts(tx, authOf(req), found);
         await assertReadable(req, tx, facts);
         const viewerCan = await perms.viewerCan(req, tx, facts, SESSION_VIEWER_CAN);
@@ -409,7 +425,15 @@ export function registerWorkSessionRoutes(
         // snapshot, so an event committed in between would otherwise be both in `events` and replayed after
         // `lastSeq` (rendered twice); anything newer than the cut arrives through the topic replay instead.
         const lastSeq = await core.realtime.lastSeq(tx, topic);
-        const session = (await svc.session(tx, found.id)) ?? found;
+        const source = (await svc.sessionSource(tx, found.id)) ?? first;
+        // Phase 07.10 (PD-04, PD-05): the session as this viewer reads it (its project, what waits on them).
+        const viewerId = authOf(req).userId;
+        const fields = await loadViewerFields(tx, {
+          viewerId,
+          sessions: [{ ...source, facts }],
+          filter: filterFor(req, tx),
+        });
+        const session = withViewerFields(source.dto, fields.get(source.dto.id)!);
         const prompts = await svc.prompts(tx, session.id);
         const approvals = await svc.approvals(tx, session.id);
         const rows = await tx

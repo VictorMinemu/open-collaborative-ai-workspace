@@ -177,20 +177,24 @@ test("Pia reaches her team project from the sidebar and sees exactly the session
     await page.goto("/work-zone");
     await openSidebar(page, mobile);
     const list = page.getByTestId("session-list");
-    // Sidebar grouping (R10): the two sessions on the two linked repositories sit under the project's name.
+    // Sidebar grouping (07.10): the two sessions on the two linked repositories are sub-rows of the project's row.
+    await expect(list.getByTestId(`project-row-${portal}`)).toContainText(portalName, { timeout: 30_000 });
     for (const title of [T.login, T.sdk]) {
       const row = list
+        .getByRole("list", { name: `Active sessions in ${portalName}`, exact: true })
         .getByTestId("session-row")
         .filter({ has: page.getByTestId("row-title").getByText(title, { exact: true }) });
-      await expect(row.getByTestId("row-project")).toHaveText(portalName, { timeout: 30_000 });
+      await expect(row).toHaveCount(1, { timeout: 30_000 });
     }
     await expect(list.getByText(T.spike)).toHaveCount(0);
 
+    await expect(page.getByTestId("sidebar-projects")).toHaveText("Browse projects");
     await page.getByTestId("sidebar-projects").click();
     await expect(page).toHaveURL(/\/work-zone\/projects$/);
     const index = page.getByTestId("projects-index");
     await expect(index).toBeVisible();
-    const row = page.getByTestId(`project-row-${portal}`);
+    // The index's row (the sidebar has a project row of the same id since 07.10).
+    const row = index.getByTestId(`project-row-${portal}`);
     await expect(row).toContainText(portalName);
     await expect(row).toContainText(`Engineering ${run} › Web ${run} · 2 people · 2 repositories`);
     await expect(row).toHaveAttribute("title", portalName);
@@ -209,6 +213,12 @@ test("Pia reaches her team project from the sidebar and sees exactly the session
     await expect(project).toBeVisible();
     await expect(project.getByRole("heading", { level: 1 })).toHaveText(portalName);
     await expect(project).toContainText(`Engineering ${run} › Web ${run}`);
+    // 07.10: the sidebar highlights the open project's row; Browse projects is current only on the index.
+    if (!mobile) {
+      const sidebar = page.getByTestId("session-list");
+      await expect(sidebar.getByTestId(`project-row-${portal}`)).toHaveAttribute("aria-current", "page");
+      await expect(sidebar.getByTestId("sidebar-projects")).not.toHaveAttribute("aria-current", "page");
+    }
     const rows = page.getByTestId("project-session-row");
     await expect(rows.filter({ hasText: T.login })).toHaveCount(1, { timeout: 30_000 });
     await expect(rows.filter({ hasText: T.sdk })).toHaveCount(1);
@@ -217,7 +227,9 @@ test("Pia reaches her team project from the sidebar and sees exactly the session
     await expect(page.getByTestId("project-sessions-footnote")).toHaveText(
       "Sessions people keep to themselves don't appear here.",
     );
-    // Pia cannot use the project's devices: she follows its sessions but has no New session here (D-13).
+    // Pia cannot use the project's devices: she follows its sessions but has no New session here (D-13). Scoped to the
+    // page: since 07.10-05 the sidebar's project "+" carries the same test id (and is absent for her too).
+    await expect(project.getByTestId("project-new-session")).toHaveCount(0);
     await expect(page.getByTestId("project-new-session")).toHaveCount(0);
     await checkScreen(page, "project-page");
     await captureReview(page, `project-sessions-${tag}`);
@@ -244,7 +256,8 @@ test("the admin's New session opens the dialog on the project's first online rep
     await expect(page.getByTestId("project-session-row").filter({ hasText: T.spike })).toHaveCount(1, {
       timeout: 30_000,
     });
-    await page.getByTestId("project-new-session").click();
+    // The page's New session (the sidebar's project "+" shares the test id since 07.10-05).
+    await page.getByTestId("project-page").getByTestId("project-new-session").click();
     const dialog = page.getByTestId("new-session-dialog");
     await expect(dialog).toBeVisible();
     const selected = dialog.locator('[data-testid="project-option"][aria-checked="true"]');
@@ -341,7 +354,7 @@ test("Leo, a team lead, creates a project inside the team he leads and opens the
     // A new project has no repositories: its editor reads how to start (UI-SPEC § Copy).
     await expect(project).toContainText("No repositories yet");
     await expect(project).toContainText("Link a repository so the team can start sessions here.");
-    await expect(page.getByTestId("project-new-session")).toHaveCount(0);
+    await expect(project.getByTestId("project-new-session")).toHaveCount(0);
     await checkScreen(page, "project-page");
     await captureReview(page, `project-empty-${tag}`);
 
@@ -354,7 +367,7 @@ test("Leo, a team lead, creates a project inside the team he leads and opens the
     // 07.9-13: a manager outside the project reads why, not the member's "Start one".
     await expect(other).toContainText("You manage this project but aren't in it.");
     await expect(page.getByTestId("project-session-row")).toHaveCount(0);
-    await expect(page.getByTestId("project-new-session")).toHaveCount(0);
+    await expect(other.getByTestId("project-new-session")).toHaveCount(0);
   } finally {
     if (created) {
       await del(admin, `/api/v1/units/${created}`);
@@ -393,7 +406,9 @@ test("with Work Zone off, the projects pages show the off state at once, never k
   const rules: string[] = [];
   try {
     await page.goto("/work-zone/projects");
-    await expect(page.getByTestId(`project-row-${portal}`)).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId("projects-index").getByTestId(`project-row-${portal}`)).toBeVisible({
+      timeout: 30_000,
+    });
     for (const permission of MODULE_CATALOG.work_zone.patterns) {
       const rule = await post<{ id: string }>(admin, "/api/v1/permission-rules", {
         scopeUnitId: null,

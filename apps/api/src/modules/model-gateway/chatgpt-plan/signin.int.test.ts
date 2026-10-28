@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { TEST_SETUP_TOKEN, TestClient } from "../../../testing";
 import { type AiStack, startAiStack, withoutTitles } from "../../../testing-ai";
 import { invite } from "../../../testing-workzone";
+import { accessTokenFor } from "./credentials";
 
 /**
  * Per-member "Sign in with ChatGPT – ChatGPT plan usage" (05-05, D-02) against the in-process fake SIWC server:
@@ -429,6 +430,39 @@ describe("refresh is serialized and rotation-safe; failures degrade (Pitfall 2)"
       }),
     });
     expect(((await replay.json()) as Json).error).toBe("refresh_token_reused");
+  });
+
+  it("a send whose row read lands just before another send's refresh rotates the bundle still gets the new token", async () => {
+    await scenario({ expires_in: 1 });
+    await signIn(sam);
+    await scenario({});
+    const { core } = stack.built;
+    const old = await bundleOf(samId);
+    const oldSecretId = (await credential(samId))?.secret_id;
+    const reveal = core.secrets.revealSealed;
+    let raced = false;
+    // The other send's refresh commits between this send's unlocked row read and its read of the sealed bundle, so
+    // the secret this send's row names is already gone (seen once under CI load, Woodpecker pipeline 80).
+    core.secrets.revealSealed = async (tx, secretId, aad) => {
+      if (!raced && secretId === oldSecretId) {
+        raced = true;
+        await core.db.withTenant({ organizationId: orgId, userId: samId }, (other) =>
+          accessTokenFor(other, core, samId),
+        );
+      }
+      return reveal.call(core.secrets, tx, secretId, aad);
+    };
+    try {
+      const token = await core.db.withTenant({ organizationId: orgId, userId: samId }, (tx) =>
+        accessTokenFor(tx, core, samId),
+      );
+      expect(raced).toBe(true);
+      expect(token).not.toBe(old?.accessToken);
+      expect(token).toBe((await bundleOf(samId))?.accessToken);
+      expect((await credential(samId))?.status).toBe("connected");
+    } finally {
+      core.secrets.revealSealed = reveal;
+    }
   });
 
   it("a transient auth outage keeps the tokens and the send answers 503 usage_unavailable", async () => {
