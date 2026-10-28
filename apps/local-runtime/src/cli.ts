@@ -11,9 +11,13 @@
 //   ocw-runtime updates status|check|now <claude-code|codex>
 //                                  the runtime CLIs' versions and update state (07.11); `check` asks the registry
 //                                  now, `now` updates one runtime when it is idle (local only, never from the server).
+//   ocw-runtime updates automatic|notify|off
+//                                  this device's runtime updates level (07.11, D-02; it can only lower the
+//                                  organization's); writes runtime.json and asks a running daemon to reload it.
+//                                  OCW_RUNTIME_UPDATES overrides it per process.
 
 import { homedir } from "node:os";
-import { RuntimeId } from "@ocw/contracts";
+import { RuntimeId, RuntimeUpdatesLevel } from "@ocw/contracts";
 import { detectClaudeCode } from "./claude/detect.js";
 import {
   ensureOcwHome,
@@ -23,6 +27,7 @@ import {
   resolveFullAccess,
   resolveRuntimeUpdates,
   setFullAccessOptIn,
+  setRuntimeUpdatesLevel,
 } from "./config.js";
 import { type ControlRequest, controlRequest, controlSocketPath } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
@@ -85,7 +90,8 @@ async function fullAccess(sub: string | undefined): Promise<void> {
   process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
 }
 
-const UPDATES_USAGE = "usage: ocw-runtime updates status|check|now <claude-code|codex>";
+const UPDATES_USAGE =
+  "usage: ocw-runtime updates automatic|notify|off|status|check, or ocw-runtime updates now <claude-code|codex>";
 const RUNTIME_NOT_RUNNING = "the runtime is not running";
 /** A check or an update waits for the registry and the install, so the socket gets longer than the default. */
 const UPDATES_TIMEOUT_MS = 60_000;
@@ -114,8 +120,43 @@ async function localUpdatesReport(home: string): Promise<Record<string, unknown>
   return { daemon: "stopped", localLevel: level.level, localLevelSource: level.source, runtimes };
 }
 
+/**
+ * `updates automatic|notify|off` (07.11, D-02): writes this device's level to runtime.json, then asks a running daemon
+ * to re-read it (the value-less `reloadConfig`, like `full-access`); a stopped daemon reads it on start. Local only.
+ */
+async function updatesLevel(level: RuntimeUpdatesLevel): Promise<void> {
+  const home = ocwHome();
+  await setRuntimeUpdatesLevel(home, level);
+  let out: Record<string, unknown>;
+  try {
+    const res = await controlRequest(controlSocketPath(home), { cmd: "reloadConfig" });
+    if (!res.ok) throw new Error(res.error ?? "request failed");
+    const r = res.result as {
+      runtimeUpdatesLevel?: string;
+      runtimeUpdatesSource?: string;
+      runtimeUpdatesEffectiveLevel?: string;
+    };
+    out = {
+      localLevel: r.runtimeUpdatesLevel,
+      localLevelSource: r.runtimeUpdatesSource,
+      ...(r.runtimeUpdatesEffectiveLevel ? { effectiveLevel: r.runtimeUpdatesEffectiveLevel } : {}),
+      daemon: "running",
+    };
+  } catch (err) {
+    if (!daemonDown(err)) throw err;
+    const local = resolveRuntimeUpdates(await loadConfig(home));
+    out = { localLevel: local.level, localLevelSource: local.source, daemon: "stopped" };
+  }
+  if (out.localLevelSource === "env") {
+    process.stderr.write("Note: OCW_RUNTIME_UPDATES in the daemon's environment overrides runtime.json.\n");
+  }
+  process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
+}
+
 /** `updates status|check|now <runtime>` (07.11, D-05, D-09, PD-08): local only; the server can never call this. */
 async function updates(sub: string | undefined, arg: string | undefined): Promise<void> {
+  const level = RuntimeUpdatesLevel.safeParse(sub);
+  if (level.success) return updatesLevel(level.data);
   const home = ocwHome();
   const socket = controlSocketPath(home);
   const print = (value: unknown) =>

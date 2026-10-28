@@ -1,5 +1,14 @@
 import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -183,6 +192,111 @@ describe("ocw-runtime updates (07.11, D-09, PD-08)", () => {
       const check = await cliAsync(home, ["updates", "check"], env);
       expect(check.code).toBe(0);
       expect(JSON.parse(check.stdout)).toMatchObject({ effectiveLevel: "off" });
+    } finally {
+      await daemon.stop();
+    }
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.11-08 `ocw-runtime updates automatic|notify|off` (D-02): the device owner's level, written to runtime.json and
+// applied by a running daemon through the value-less reloadConfig.
+
+const ENV_NOTE = "Note: OCW_RUNTIME_UPDATES in the daemon's environment overrides runtime.json.";
+
+describe("ocw-runtime updates automatic|notify|off (07.11-08, D-02)", () => {
+  function plainHome(): string {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(home);
+    return home;
+  }
+
+  it("daemon down: writes runtime.json (0600, other keys kept) and prints the file's level; a bad level is a usage error", async () => {
+    const home = plainHome();
+    writeFileSync(join(home, "runtime.json"), JSON.stringify({ fullAccess: { optIn: true } }));
+    const env = { OCW_RUNTIME_REGISTRY_URL: "http://127.0.0.1:9" };
+    const notify = await cliAsync(home, ["updates", "notify"], env);
+    expect(notify.code).toBe(0);
+    expect(JSON.parse(notify.stdout)).toEqual({
+      localLevel: "notify",
+      localLevelSource: "config",
+      daemon: "stopped",
+    });
+    expect(notify.stderr).toBe("");
+    const file = join(home, "runtime.json");
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      fullAccess: { optIn: true },
+      runtimeUpdates: { level: "notify" },
+    });
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+
+    const overridden = await cliAsync(home, ["updates", "off"], { ...env, OCW_RUNTIME_UPDATES: "automatic" });
+    expect(overridden.code).toBe(0);
+    expect(JSON.parse(overridden.stdout)).toEqual({
+      localLevel: "automatic",
+      localLevelSource: "env",
+      daemon: "stopped",
+    });
+    expect(overridden.stderr).toContain(ENV_NOTE);
+    expect(JSON.parse(readFileSync(file, "utf8")).runtimeUpdates).toEqual({ level: "off" });
+
+    const bad = await cliAsync(home, ["updates", "sometimes"], env);
+    expect(bad.code).toBe(1);
+    expect(bad.stderr).toContain("usage: ocw-runtime updates automatic|notify|off");
+    expect(JSON.parse(readFileSync(file, "utf8")).runtimeUpdates).toEqual({ level: "off" });
+  }, 60_000);
+
+  it("daemon running: the daemon reloads the level at once; with OCW_RUNTIME_UPDATES in its env the change is overridden", async () => {
+    const home = plainHome();
+    const userHome = join(home, "user");
+    mkdirSync(userHome);
+    const daemonEnv = {
+      HOME: userHome,
+      PATH: "/usr/bin:/bin",
+      OCW_RUNTIME_REGISTRY_URL: "http://127.0.0.1:9",
+    };
+    const opts = {
+      home,
+      token: null,
+      runtimes: [stubRuntime("claude-code")],
+      logger: silentLogger,
+      maintenance: { userHome, which: () => null },
+    };
+    let daemon = await Daemon.create({ ...opts, env: daemonEnv });
+    try {
+      await daemon.start();
+      const notify = await cliAsync(home, ["updates", "notify"]);
+      expect(notify.code).toBe(0);
+      expect(JSON.parse(notify.stdout)).toEqual({
+        localLevel: "notify",
+        localLevelSource: "config",
+        effectiveLevel: "notify",
+        daemon: "running",
+      });
+      expect(notify.stderr).toBe("");
+      const status = (await daemon.status()) as { runtimeUpdates: Record<string, unknown> };
+      expect(status.runtimeUpdates).toMatchObject({ localLevel: "notify", localLevelSource: "config" });
+      const off = await cliAsync(home, ["updates", "off"]);
+      expect(JSON.parse(off.stdout)).toMatchObject({ localLevel: "off", effectiveLevel: "off" });
+    } finally {
+      await daemon.stop();
+    }
+
+    daemon = await Daemon.create({ ...opts, env: { ...daemonEnv, OCW_RUNTIME_UPDATES: "automatic" } });
+    try {
+      await daemon.start();
+      const off = await cliAsync(home, ["updates", "off"]);
+      expect(off.code).toBe(0);
+      expect(JSON.parse(off.stdout)).toEqual({
+        localLevel: "automatic",
+        localLevelSource: "env",
+        effectiveLevel: "notify", // no org level yet (D-10)
+        daemon: "running",
+      });
+      expect(off.stderr).toContain(ENV_NOTE);
+      expect(JSON.parse(readFileSync(join(home, "runtime.json"), "utf8")).runtimeUpdates).toEqual({
+        level: "off",
+      });
     } finally {
       await daemon.stop();
     }

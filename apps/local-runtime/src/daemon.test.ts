@@ -29,7 +29,7 @@ import {
 } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
-import { setFullAccessOptIn } from "./config.js";
+import { setFullAccessOptIn, setRuntimeUpdatesLevel } from "./config.js";
 import { controlRequest } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
@@ -1831,4 +1831,112 @@ describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
       "2.1.300",
     );
   }, 40_000);
+
+  // ---- 07.11-08: the device owner's level through the value-less reloadConfig (D-02) ----
+
+  const reload = async () => {
+    const res = await controlRequest(socketPath(), { cmd: "reloadConfig" });
+    expect(res.ok).toBe(true);
+    return res.result as Record<string, unknown>;
+  };
+
+  it("reloadConfig applies the device level at once: notify cancels a pending automatic update and the server hears it; off stops registry checks; automatic resumes them", async () => {
+    await updatesDaemon({ maintenance: { pollMs: 50 } });
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    runtime.activeTurnsCount = 1; // a Claude turn is running: the automatic update waits (opportunistic)
+    server.push(automatic());
+    await server.frame("runtime.maintenance", (f) => claudeState(f)?.state === "pending", 10_000);
+
+    await setRuntimeUpdatesLevel(home, "notify");
+    const marker = server.allFrames.length;
+    expect(await reload()).toMatchObject({
+      fullAccessOptIn: false,
+      fullAccessSource: "config",
+      runtimeUpdatesLevel: "notify",
+      runtimeUpdatesSource: "config",
+    });
+    const lowered = await server.frame(
+      "runtime.maintenance",
+      (f) => server.allFrames.indexOf(f) >= marker && f.localLevel === "notify",
+      10_000,
+    );
+    expect(lowered).toMatchObject({
+      localLevelSource: "config",
+      effectiveLevel: "notify",
+      orgLevelReceived: true,
+    });
+    expect(claudeState(lowered)).toMatchObject({ state: "idle", advisory: "behind" });
+    // The turn ends: nothing runs any more.
+    runtime.activeTurnsCount = 0;
+    await sleep07(400);
+    expect(server.allFrames.some((f) => f.type === "runtime.update.run")).toBe(false);
+    expect(fakeClaudeVersion()).toBe("2.1.290 (Claude Code)");
+
+    // off: no registry request, even for a fresh check.
+    await setRuntimeUpdatesLevel(home, "off");
+    expect(await reload()).toMatchObject({ runtimeUpdatesLevel: "off", runtimeUpdatesSource: "config" });
+    await server.frame(
+      "runtime.maintenance",
+      (f) => f.localLevel === "off" && f.effectiveLevel === "off",
+      10_000,
+    );
+    const before = registry.requests.length;
+    expect(await controlRequest(socketPath(), { cmd: "runtimeCheck" })).toMatchObject({
+      ok: true,
+      result: { localLevel: "off", effectiveLevel: "off" },
+    });
+    await sleep07(200);
+    expect(registry.requests.length).toBe(before);
+
+    // automatic again: checks resume (and the behind CLI is updated at the idle moment).
+    await setRuntimeUpdatesLevel(home, "automatic");
+    expect(await reload()).toMatchObject({ runtimeUpdatesLevel: "automatic" });
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 20_000);
+    expect(finished).toMatchObject({ trigger: "automatic", outcome: "succeeded", toVersion: "2.1.300" });
+    const resumed = registry.requests.length;
+    await controlRequest(socketPath(), { cmd: "runtimeCheck" });
+    expect(registry.requests.length).toBeGreaterThan(resumed); // a fresh check reaches the registry again
+  }, 60_000);
+
+  it("lowering the level while an update runs lets it finish", async () => {
+    await updatesDaemon({ fakeUpdate: { delayMs: 1500 } });
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    server.push(automatic());
+    await server.frame("runtime.update.run", (f) => f.phase === "started", 15_000);
+    await setRuntimeUpdatesLevel(home, "off");
+    expect(await reload()).toMatchObject({ runtimeUpdatesLevel: "off" });
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 20_000);
+    expect(finished).toMatchObject({ outcome: "succeeded", toVersion: "2.1.300" });
+    expect(fakeClaudeVersion()).toBe("2.1.300 (Claude Code)");
+    const status = (await daemon.status()) as { runtimeUpdates: Record<string, unknown> };
+    expect(status.runtimeUpdates).toMatchObject({ localLevel: "off", effectiveLevel: "off" });
+  }, 40_000);
+
+  it("OCW_RUNTIME_UPDATES in the daemon's env wins over the file on reload (source env, no effect)", async () => {
+    await updatesDaemon({ env: { OCW_RUNTIME_UPDATES: "notify" } });
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    server.push(automatic());
+    await server.frame("runtime.maintenance", (f) => f.orgLevelReceived, 10_000);
+    await setRuntimeUpdatesLevel(home, "off");
+    expect(await reload()).toMatchObject({ runtimeUpdatesLevel: "notify", runtimeUpdatesSource: "env" });
+    const status = (await daemon.status()) as { runtimeUpdates: Record<string, unknown> };
+    expect(status.runtimeUpdates).toMatchObject({
+      localLevel: "notify",
+      localLevelSource: "env",
+      effectiveLevel: "notify",
+    });
+    // The request still carries no value (strict), whatever the level.
+    expect(
+      await controlRequest(socketPath(), {
+        cmd: "reloadConfig",
+        runtimeUpdates: { level: "automatic" },
+      } as never),
+    ).toMatchObject({ ok: false });
+  }, 20_000);
 });

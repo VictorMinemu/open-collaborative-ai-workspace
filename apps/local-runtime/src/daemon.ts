@@ -33,6 +33,8 @@ import {
   type RuntimeId,
   type RuntimeInfo,
   RuntimeUpdatePayload,
+  type RuntimeUpdatesLevel,
+  type RuntimeUpdatesLevelSource,
   type ServerToDeviceFrame,
   SessionConfigurePayload,
   type SessionEvent,
@@ -199,6 +201,17 @@ function realpathOr(p: string): string {
     return p;
   }
 }
+
+/** What `reloadConfig` answers (control socket): the levels it now enforces, never a value it was sent. */
+export type ReloadConfigResult = {
+  fullAccessOptIn: boolean;
+  fullAccessSource: FullAccessSource;
+  /** 07.11 (D-02): this device's runtime updates level and where it comes from. */
+  runtimeUpdatesLevel: RuntimeUpdatesLevel;
+  runtimeUpdatesSource: RuntimeUpdatesLevelSource;
+  /** The lower of the organization's and this device's levels; absent where runtime updates are not maintained. */
+  runtimeUpdatesEffectiveLevel?: RuntimeUpdatesLevel;
+};
 
 export class Daemon {
   readonly registry: ProjectRegistry;
@@ -643,10 +656,24 @@ export class Daemon {
    * wins). Turning the opt-in OFF takes effect at once: the gate closes for every adapter, running full-access turns
    * are interrupted, the server gets `capabilities` with `fullAccessOptIn: false`, and those sessions are lowered to
    * acceptEdits here (the server's own downgrade follows). Turning it on is only reported.
+   *
+   * 07.11 (D-02): it also re-reads the device's runtime updates level (`OCW_RUNTIME_UPDATES` still wins) and hands a
+   * change to maintenance, which drops a pending (not running) automatic update when the effective level falls below
+   * `automatic`, stops registry requests at `off`, and sends the server a fresh `runtime.maintenance` snapshot.
    */
-  async reloadConfig(): Promise<{ fullAccessOptIn: boolean; fullAccessSource: FullAccessSource }> {
+  async reloadConfig(): Promise<ReloadConfigResult> {
     const loaded = await loadConfig(this.home, this.env);
-    const next = resolveFullAccess({ ...loaded, ...this.opts.config }, this.env);
+    const merged = { ...loaded, ...this.opts.config };
+    const updates = resolveRuntimeUpdates(merged, this.env);
+    const m = this.maintenance;
+    if (m && (m.localLevel !== updates.level || m.localLevelSource !== updates.source)) {
+      this.log.info("runtime updates level changed on this device", {
+        level: updates.level,
+        source: updates.source,
+      });
+      m.setLocalLevel(updates.level, updates.source);
+    }
+    const next = resolveFullAccess(merged, this.env);
     const was = this.gate.optIn;
     this.gate.optIn = next.optIn;
     this.gate.source = next.source;
@@ -671,7 +698,13 @@ export class Daemon {
       if (this.isConnected) this.send(await this.capabilitiesFrame());
       await Promise.all(full.map((s) => this.leaveFullAccess(s)));
     }
-    return { fullAccessOptIn: next.optIn, fullAccessSource: next.source };
+    return {
+      fullAccessOptIn: next.optIn,
+      fullAccessSource: next.source,
+      runtimeUpdatesLevel: updates.level,
+      runtimeUpdatesSource: updates.source,
+      ...(m ? { runtimeUpdatesEffectiveLevel: m.effectiveLevel } : {}),
+    };
   }
 
   /** Lowers one session out of fullAccess after the opt-out (in session order, before any later prompt). */

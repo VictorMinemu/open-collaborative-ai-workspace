@@ -93,6 +93,24 @@ export function fullAccessOptIn(
  * writer for the same file. A running daemon picks the change up on `reloadConfig`.
  */
 export async function setFullAccessOptIn(home: string, on: boolean): Promise<void> {
+  await patchRuntimeJsonSection(home, "fullAccess", { optIn: on });
+}
+
+/**
+ * Phase 07.11 (D-02): writes `runtimeUpdates.level` into `<home>/runtime.json` (atomic, 0600), keeping every other key,
+ * exactly like `setFullAccessOptIn`. Local callers only (CLI, tests; the desktop app has its own writer). A running
+ * daemon applies it on the value-less `reloadConfig`; `OCW_RUNTIME_UPDATES` still wins.
+ */
+export async function setRuntimeUpdatesLevel(home: string, level: RuntimeUpdatesLevel): Promise<void> {
+  await patchRuntimeJsonSection(home, "runtimeUpdates", { level: RuntimeUpdatesLevel.parse(level) });
+}
+
+/** Merges `patch` into one object section of runtime.json; a malformed file is never overwritten. */
+async function patchRuntimeJsonSection(
+  home: string,
+  section: "fullAccess" | "runtimeUpdates",
+  patch: Record<string, unknown>,
+): Promise<void> {
   await ensureOcwHome(home);
   const file = join(home, "runtime.json");
   const raw = (await readJson(file)) ?? {};
@@ -100,9 +118,9 @@ export async function setFullAccessOptIn(home: string, on: boolean): Promise<voi
     throw new Error("cannot update runtime.json: it is not a JSON object");
   }
   const current = raw as Record<string, unknown>;
-  const previous =
-    typeof current.fullAccess === "object" && current.fullAccess !== null ? current.fullAccess : {};
-  await writeJsonAtomic(file, { ...current, fullAccess: { ...previous, optIn: on } });
+  const previous = current[section];
+  const kept = typeof previous === "object" && previous !== null && !Array.isArray(previous) ? previous : {};
+  await writeJsonAtomic(file, { ...current, [section]: { ...kept, ...patch } });
 }
 
 async function readJson(path: string): Promise<unknown | undefined> {

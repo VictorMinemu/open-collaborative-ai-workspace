@@ -8,6 +8,7 @@ import {
   resolveFullAccess,
   resolveRuntimeUpdates,
   setFullAccessOptIn,
+  setRuntimeUpdatesLevel,
 } from "./config.js";
 
 const dirs: string[] = [];
@@ -119,5 +120,54 @@ describe("Runtime updates level on this device (07.11, D-02)", () => {
     const h = home();
     writeFileSync(join(h, "runtime.json"), JSON.stringify({ runtimeUpdates: { level: "always" } }));
     await expect(loadConfig(h, {})).rejects.toThrow();
+  });
+
+  it("setRuntimeUpdatesLevel writes runtimeUpdates.level atomically with mode 0600 and keeps every other key", async () => {
+    const h = home();
+    writeFileSync(
+      join(h, "runtime.json"),
+      JSON.stringify({
+        serverUrl: "https://ocw.example.com",
+        fullAccess: { optIn: true },
+        runtimeUpdates: { level: "automatic" },
+      }),
+    );
+    await setRuntimeUpdatesLevel(h, "notify");
+    const file = join(h, "runtime.json");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      serverUrl: "https://ocw.example.com",
+      fullAccess: { optIn: true },
+      runtimeUpdates: { level: "notify" },
+    });
+    const config = await loadConfig(h, {});
+    expect(resolveRuntimeUpdates(config, {})).toEqual({ level: "notify", source: "config" });
+    expect(config.fullAccess.optIn).toBe(true);
+    await setRuntimeUpdatesLevel(h, "off");
+    expect(resolveRuntimeUpdates(await loadConfig(h, {}), {})).toEqual({ level: "off", source: "config" });
+    // Full access written afterwards keeps the level too (one shared writer).
+    await setFullAccessOptIn(h, false);
+    expect(JSON.parse(readFileSync(file, "utf8")).runtimeUpdates).toEqual({ level: "off" });
+  });
+
+  it("setRuntimeUpdatesLevel creates runtime.json when missing, refuses a malformed one and an unknown level", async () => {
+    const h = home();
+    await setRuntimeUpdatesLevel(h, "off");
+    expect(JSON.parse(readFileSync(join(h, "runtime.json"), "utf8"))).toEqual({
+      runtimeUpdates: { level: "off" },
+    });
+    const broken = home();
+    writeFileSync(join(broken, "runtime.json"), "{ not json");
+    await expect(setRuntimeUpdatesLevel(broken, "notify")).rejects.toThrow(/runtime\.json/);
+    expect(readFileSync(join(broken, "runtime.json"), "utf8")).toBe("{ not json");
+    const list = home();
+    writeFileSync(join(list, "runtime.json"), "[]");
+    await expect(setRuntimeUpdatesLevel(list, "notify")).rejects.toThrow(
+      "cannot update runtime.json: it is not a JSON object",
+    );
+    await expect(setRuntimeUpdatesLevel(h, "sometimes" as never)).rejects.toThrow();
+    expect(JSON.parse(readFileSync(join(h, "runtime.json"), "utf8"))).toEqual({
+      runtimeUpdates: { level: "off" },
+    });
   });
 });
