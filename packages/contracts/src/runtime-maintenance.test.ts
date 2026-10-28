@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { Device } from "./device";
 import {
   DeviceToServerFrame,
   RuntimeMaintenanceFrame,
@@ -21,6 +22,7 @@ import {
   RuntimeUpdateRun,
   scrubHostPaths,
 } from "./runtime-maintenance";
+import { EPHEMERAL_SESSION_EVENTS, SessionEvent } from "./session-events";
 
 const RUN_ID = "0199f0a0-0000-7000-8000-000000000001";
 const AT = "2026-10-28T10:00:00.000Z";
@@ -342,5 +344,81 @@ describe("levels", () => {
     expect(effectiveRuntimeUpdatesLevel("automatic", "automatic")).toBe("automatic");
     expect(effectiveRuntimeUpdatesLevel(null, "automatic")).toBe("notify");
     expect(effectiveRuntimeUpdatesLevel(null, "off")).toBe("off");
+  });
+});
+
+describe("DTO and event", () => {
+  const device = {
+    id: RUN_ID,
+    ownerUserId: RUN_ID,
+    ownerName: "Ada",
+    name: "build-box",
+    platform: "linux",
+    status: "online",
+    shared: true,
+    fullAccessOptIn: false,
+    shareMaxMode: "default",
+    lastSeenAt: AT,
+    runtimes: [{ id: "claude-code", installed: true, version: "2.1.286", loggedIn: true }],
+    daemonVersion: "0.1.0",
+    projectCount: 2,
+    revokedAt: null,
+    createdAt: AT,
+  };
+  const codexStatus: RuntimeMaintenanceStatus = {
+    ...claudeStatus,
+    runtime: "codex",
+    installedVersion: "0.160.0",
+    method: "npm",
+    location: null,
+    canUpdate: false,
+    reason: "needs_admin",
+    updateCommand: "sudo npm install -g @openai/codex@0.164.0",
+    latestVersion: "0.164.0",
+    state: "idle",
+    pendingSince: null,
+  };
+
+  it("an older Device payload without the new fields still parses", () => {
+    expect(Device.parse(device)).toEqual(device);
+  });
+
+  it("a Device carries maintenance and compatibility", () => {
+    const withBoth = {
+      ...device,
+      runtimeMaintenance: {
+        runtimes: [claudeStatus, codexStatus],
+        localLevel: "automatic",
+        localLevelSource: "env",
+        effectiveLevel: "notify",
+        orgLevel: "notify",
+        reportedAt: AT,
+      },
+      runtimeCompatibility: { "claude-code": "unsupported" },
+    };
+    expect(Device.parse(withBoth)).toEqual(withBoth);
+    expect(Device.safeParse({ ...device, runtimeCompatibility: { "claude-code": "fine" } }).success).toBe(
+      false,
+    );
+  });
+
+  it("a session can be told its turn waits for a runtime update", () => {
+    expect(SessionEvent.parse({ type: "runtime.update", runtime: "claude-code", phase: "waiting" })).toEqual({
+      type: "runtime.update",
+      runtime: "claude-code",
+      phase: "waiting",
+    });
+    const done = { type: "runtime.update", runtime: "claude-code", phase: "done", version: "2.1.300" };
+    expect(SessionEvent.parse(done)).toEqual(done);
+    expect(
+      SessionEvent.safeParse({ type: "runtime.update", runtime: "codex", phase: "started" }).success,
+    ).toBe(false);
+    expect(
+      SessionEvent.safeParse({ type: "runtime.update", runtime: "opencode", phase: "done" }).success,
+    ).toBe(false);
+  });
+
+  it("runtime.update is persisted (not ephemeral) so the timeline shows it after a reload", () => {
+    expect(EPHEMERAL_SESSION_EVENTS.has("runtime.update" as never)).toBe(false);
   });
 });
