@@ -423,7 +423,10 @@ export class RuntimeMaintenance {
           st.checkedAt = this.now();
         }
       } catch (err) {
-        this.log.warn("runtime update check failed", { runtime: r.id, error: errorMessage(err) });
+        this.log.warn("runtime update check failed", {
+          runtime: r.id,
+          error: scrubHostPaths(errorMessage(err)),
+        });
       }
     }
     if (askRegistry) this.scheduleNextCheck();
@@ -670,7 +673,10 @@ export class RuntimeMaintenance {
       resolution = this.resolve(runtime);
     } catch (err) {
       resolution = st.resolution ?? this.notInstalled(runtime);
-      this.log.warn("runtime update could not re-resolve the install", { runtime, error: errorMessage(err) });
+      this.log.warn("runtime update could not re-resolve the install", {
+        runtime,
+        error: scrubHostPaths(errorMessage(err)),
+      });
     }
     const fromVersion = st.installedVersion;
     st.state = "running";
@@ -720,12 +726,21 @@ export class RuntimeMaintenance {
         });
       }
     } catch (err) {
-      result = { outcome: "failed", fromVersion, toVersion: null, output: "", error: errorMessage(err) };
+      result = {
+        outcome: "failed",
+        fromVersion,
+        toVersion: null,
+        output: "",
+        error: scrubHostPaths(errorMessage(err)),
+      };
     }
     try {
       adapter.refreshInstall?.();
     } catch (err) {
-      this.log.warn("runtime adapter could not refresh its install", { runtime, error: errorMessage(err) });
+      this.log.warn("runtime adapter could not refresh its install", {
+        runtime,
+        error: scrubHostPaths(errorMessage(err)),
+      });
     }
 
     const outcome: RuntimeUpdateOutcome = result.outcome;
@@ -751,7 +766,10 @@ export class RuntimeMaintenance {
         st.installedVersion ?? undefined,
       );
     } catch (err) {
-      this.log.warn("could not tell the held sessions", { runtime, error: errorMessage(err) });
+      this.log.warn("could not tell the held sessions", {
+        runtime,
+        error: scrubHostPaths(errorMessage(err)),
+      });
     }
     const text = [result.error, result.output].filter((s): s is string => !!s).join("\n");
     const output = text ? runOutputForFrame(text) : "";
@@ -768,7 +786,7 @@ export class RuntimeMaintenance {
     try {
       await this.opts.afterRun?.(runtime);
     } catch (err) {
-      this.log.warn("after-update refresh failed", { runtime, error: errorMessage(err) });
+      this.log.warn("after-update refresh failed", { runtime, error: scrubHostPaths(errorMessage(err)) });
     }
   }
 
@@ -868,7 +886,7 @@ export class RuntimeMaintenance {
     try {
       this.opts.sendSnapshot(await this.snapshot({ fresh }));
     } catch (err) {
-      this.log.warn("runtime maintenance snapshot failed", { error: errorMessage(err) });
+      this.log.warn("runtime maintenance snapshot failed", { error: scrubHostPaths(errorMessage(err)) });
     }
   }
 }
