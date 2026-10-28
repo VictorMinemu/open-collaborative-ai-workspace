@@ -50,6 +50,8 @@ function stubRuntime(
     interrupt: async () => {},
     resolveApproval: () => false,
     catalog: async () => catalog,
+    activeTurns: () => 0,
+    retireIdle: async () => 0,
     stop: async () => {},
     stopAll: async () => {},
   } as AgentRuntime & { requests: TitleRequest[] };

@@ -366,3 +366,36 @@ describe("FakeRuntime titles (03.2-12)", () => {
     expect(luna!.efforts.map((e) => e.value)).toEqual(["low", "medium", "high", "xhigh", "max"]);
   });
 });
+
+describe("FakeRuntime retire idle and resume (07.11 D-03a)", () => {
+  it("counts turns in flight, retires only idle sessions and wakes one on its next prompt", async () => {
+    const cwd = tmp();
+    writeFileSync(join(cwd, "README.md"), "# Demo\n");
+    const idle: SessionEvent[] = [];
+    const busy: SessionEvent[] = [];
+    const rt = new FakeRuntime("claude-code", 1);
+    await rt.start({ sessionId: "a", cwd, permissionMode: "plan" }, (e) => idle.push(e));
+    await rt.start({ sessionId: "b", cwd, permissionMode: "default" }, (e) => busy.push(e));
+    expect(rt.activeTurns()).toBe(0);
+    await rt.prompt("b", { promptId: "b1", text: "write it" });
+    const req = await until(busy, (e) => e.type === "approval.requested");
+    if (req.type !== "approval.requested") throw new Error("unreachable");
+
+    expect(rt.activeTurns()).toBe(1);
+    const before = idle.length;
+    await expect(rt.retireIdle()).resolves.toBe(1);
+    await expect(rt.retireIdle()).resolves.toBe(0);
+    expect(idle.slice(before)).toEqual([]);
+    expect(rt.wakeUps).toBe(0);
+
+    await rt.prompt("a", { promptId: "a1", text: "plan it" });
+    expect(rt.wakeUps).toBe(1);
+    await until(idle, (e) => e.type === "prompt.completed");
+    expect(rt.resolveApproval("b", req.approvalId, "once")).toBe(true);
+    await until(busy, (e) => e.type === "prompt.completed");
+    expect(rt.activeTurns()).toBe(0);
+    await expect(rt.retireIdle()).resolves.toBe(2);
+    await rt.configure("b", { effort: "high" });
+    expect(rt.wakeUps).toBe(2);
+  });
+});

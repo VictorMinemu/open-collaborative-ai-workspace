@@ -61,9 +61,14 @@ interface FakeSession {
   approvals: Map<string, (outcome: ApprovalOutcome, comment?: string) => void>;
   allowAll: boolean;
   turns: number;
+  /** Its "process" was retired while idle (07.11 D-03a); the next prompt or settings change wakes it. */
+  dormant: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** A turn in flight: running, waiting on an approval or with prompts queued. */
+const busy = (s: FakeSession) => s.running !== null || s.queue.length > 0 || s.approvals.size > 0;
 
 const EFFORTS = (levels: string[]) => levels.map((value) => ({ value, description: null }));
 const fakeModel = (id: string, displayName: string, extra: Partial<RuntimeModel> = {}): RuntimeModel => ({
@@ -160,6 +165,8 @@ export class FakeRuntime implements AgentRuntime {
   private readonly sessions = new Map<string, FakeSession>();
   private readonly allowFullAccess: () => boolean;
   private readonly echoPrompt = process.env.OCW_RUNTIME_FAKE_ECHO === "1";
+  /** How many retired sessions were woken by a prompt or settings change (07.11 D-03a; tests read it). */
+  wakeUps = 0;
 
   constructor(
     readonly id: RuntimeId,
@@ -216,6 +223,24 @@ export class FakeRuntime implements AgentRuntime {
     return fakeTitle(req.prompt);
   }
 
+  /** Sessions with a turn running, waiting on an approval or prompts queued (07.11 D-03). */
+  activeTurns(): number {
+    let n = 0;
+    for (const s of this.sessions.values()) if (busy(s)) n++;
+    return n;
+  }
+
+  /** Marks every idle session dormant, as the real adapters close their idle CLI processes (07.11 D-03a). */
+  async retireIdle(): Promise<number> {
+    let n = 0;
+    for (const s of this.sessions.values()) {
+      if (s.dormant || busy(s)) continue;
+      s.dormant = true;
+      n++;
+    }
+    return n;
+  }
+
   async configure(sessionId: string, patch: SessionSettingsPatch): Promise<void> {
     const s = this.get(sessionId);
     if (patch.permissionMode && !this.capabilities.supportsPermissionModes.includes(patch.permissionMode)) {
@@ -228,6 +253,7 @@ export class FakeRuntime implements AgentRuntime {
       s.pending = { ...(s.pending ?? {}), ...patch };
       return;
     }
+    this.wake(s);
     this.apply(s, patch);
   }
 
@@ -254,6 +280,7 @@ export class FakeRuntime implements AgentRuntime {
       approvals: new Map(),
       allowAll: false,
       turns: 0,
+      dormant: false,
     };
     this.sessions.set(s.id, s);
     sink({
@@ -274,6 +301,7 @@ export class FakeRuntime implements AgentRuntime {
       s.queue.push(prompt);
       return;
     }
+    this.wake(s);
     void this.run(s, prompt);
   }
 
@@ -319,6 +347,12 @@ export class FakeRuntime implements AgentRuntime {
 
   private emit(s: FakeSession, e: SessionEvent) {
     s.sink(e);
+  }
+
+  private wake(s: FakeSession): void {
+    if (!s.dormant) return;
+    s.dormant = false;
+    this.wakeUps++;
   }
 
   private defaultModel(): string {

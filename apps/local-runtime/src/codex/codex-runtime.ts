@@ -516,6 +516,20 @@ export class CodexRuntime implements AgentRuntime {
     return true;
   }
 
+  /** Sessions with a turn running, waiting on an approval or prompts queued (07.11 D-03). Sends nothing. */
+  activeTurns(): number {
+    let n = 0;
+    for (const s of this.sessions.values()) {
+      if (s.running !== null || s.queue.length > 0 || s.approvals.size > 0) n++;
+    }
+    return n;
+  }
+
+  /** Not yet: Codex app-servers are retired from 07.11-05 Task 2 on. */
+  async retireIdle(): Promise<number> {
+    return 0;
+  }
+
   async stop(sessionId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;

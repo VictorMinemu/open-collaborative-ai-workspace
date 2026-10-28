@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -959,5 +959,252 @@ describe("tool policy", () => {
   it("blocks Glob/Grep searches for .env files", () => {
     expect(secretDenyReason("Glob", { pattern: "**/.env*" }, cwd, home)).not.toBeNull();
     expect(secretDenyReason("Grep", { pattern: "TODO" }, cwd, home)).toBeNull();
+  });
+});
+
+describe("ClaudeCodeRuntime — retire idle and resume (07.11 D-03a)", () => {
+  const promptTexts = (q: FakeQuery) => q.prompts.map((p) => p.message.content);
+  const sessionEnds = (events: SessionEvent[]) =>
+    events.filter(
+      (e) =>
+        e.type === "session.error" ||
+        (e.type === "session.state" && (e.status === "completed" || e.status === "failed")),
+    );
+
+  it("closes an idle session's CLI without ending it and never touches one with a turn in flight", async () => {
+    const { start, runtime, events, queries, cwd } = setup();
+    const a = await start("acceptEdits");
+    a.emit(init("acceptEdits"));
+    await settle();
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await settle();
+    a.emit(result());
+    await settle();
+
+    const bEvents: SessionEvent[] = [];
+    await runtime.start({ sessionId: "s2", cwd, permissionMode: "default" }, (e) => bEvents.push(e));
+    const b = queries.at(-1) as FakeQuery;
+    await runtime.prompt("s2", { promptId: "q1", text: "edit it" });
+    await settle();
+    const approval = b.params.options.canUseTool?.("Edit", { file_path: `${cwd}/src/a.ts` }, {
+      signal: signal(),
+      toolUseID: "t1",
+    } as never);
+    await tick();
+
+    expect(runtime.activeTurns()).toBe(1);
+    const before = { a: events.length, b: bEvents.length };
+    await expect(runtime.retireIdle()).resolves.toBe(1);
+    expect(a.closed).toBe(true);
+    expect(b.closed).toBe(false);
+    expect(events.slice(before.a)).toEqual([]);
+    expect(bEvents.slice(before.b)).toEqual([]);
+    // Nothing more to retire: A is already dormant, B is still busy.
+    await expect(runtime.retireIdle()).resolves.toBe(0);
+
+    const req = bEvents.find((e) => e.type === "approval.requested") as { approvalId: string };
+    expect(runtime.resolveApproval("s2", req.approvalId, "once")).toBe(true);
+    await expect(approval).resolves.toMatchObject({ behavior: "allow" });
+    expect(runtime.activeTurns()).toBe(1);
+    b.emit(result());
+    await settle();
+    expect(runtime.activeTurns()).toBe(0);
+    expect(sessionEnds(bEvents)).toEqual([]);
+    await runtime.stopAll();
+  });
+
+  it("counts a session with prompts queued once and never retires it", async () => {
+    const { start, runtime } = setup();
+    const q = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    await settle();
+    expect(runtime.activeTurns()).toBe(1);
+    await expect(runtime.retireIdle()).resolves.toBe(0);
+    expect(q.closed).toBe(false);
+    q.emit(result());
+    await settle();
+    expect(promptTexts(q)).toEqual(["one", "two"]);
+    expect(runtime.activeTurns()).toBe(1);
+    q.emit(result());
+    await settle();
+    expect(runtime.activeTurns()).toBe(0);
+  });
+
+  it("the next prompt relaunches with resume, the applied mode and the flag settings, and the turn runs", async () => {
+    const { start, runtime, events, queries } = setup();
+    const first = await start("acceptEdits", { model: "sonnet" });
+    first.emit(init("acceptEdits"));
+    await settle();
+    await runtime.configure("s1", { effort: "high", fastMode: true });
+    await expect(runtime.retireIdle()).resolves.toBe(1);
+    expect(queries).toHaveLength(1);
+
+    await runtime.prompt("s1", { promptId: "p1", text: "after the update" });
+    await settle();
+    expect(queries).toHaveLength(2);
+    const woken = queries[1] as FakeQuery;
+    expect(woken.params.options).toMatchObject({
+      resume: "rt-1",
+      model: "sonnet",
+      permissionMode: "acceptEdits",
+      allowDangerouslySkipPermissions: false,
+    });
+    expect(perms(woken).disableBypassPermissionsMode).toBe("disable");
+    expect(woken.methodCalls("applyFlagSettings")).toEqual([{ effortLevel: "high", fastMode: true }]);
+    expect(woken.methodCalls("setPermissionMode")).toEqual([]);
+    expect(first.prompts).toHaveLength(0);
+    expect(promptTexts(woken)).toEqual(["after the update"]);
+    expect(runtime.activeTurns()).toBe(1);
+
+    woken.emit(result());
+    await settle();
+    expect(runtime.activeTurns()).toBe(0);
+    const completed = events.filter((e) => e.type === "prompt.completed");
+    expect(completed).toEqual([expect.objectContaining({ promptId: "p1" })]);
+    expect(completed[0]).not.toHaveProperty("isError");
+    expect(sessionEnds(events)).toEqual([]);
+    expect(events.at(-1)).toEqual({ type: "session.state", status: "idle" });
+  });
+
+  it("a capped turn wakes the CLI directly in the capped mode", async () => {
+    const { start, runtime, queries } = setup();
+    const first = await start("acceptEdits");
+    first.emit(init("acceptEdits"));
+    await settle();
+    await runtime.retireIdle();
+    await runtime.prompt("s1", { promptId: "p1", text: "read only", permissionMode: "plan" });
+    await settle();
+    const woken = queries[1] as FakeQuery;
+    expect(woken.params.options).toMatchObject({ resume: "rt-1", permissionMode: "plan" });
+    expect(woken.methodCalls("setPermissionMode")).toEqual([]);
+    woken.emit(result());
+    await settle();
+    await runtime.prompt("s1", { promptId: "p2", text: "uncapped" });
+    await settle();
+    expect(queries).toHaveLength(2);
+    expect(woken.methodCalls("setPermissionMode")).toEqual(["acceptEdits"]);
+  });
+
+  it("configure() on a dormant session wakes it once, in the new mode, and applies the change on that launch", async () => {
+    const { start, runtime, events, queries } = setup();
+    const first = await start("default");
+    first.emit(init("default"));
+    await settle();
+    await runtime.retireIdle();
+    await runtime.configure("s1", { permissionMode: "acceptEdits", effort: "high" });
+    expect(queries).toHaveLength(2);
+    const woken = queries[1] as FakeQuery;
+    expect(woken.params.options).toMatchObject({ resume: "rt-1", permissionMode: "acceptEdits" });
+    expect(woken.methodCalls("setPermissionMode")).toEqual([]);
+    expect(woken.methodCalls("applyFlagSettings")).toEqual([{ effortLevel: "high" }]);
+    expect(settingsEvents(events).at(-1)).toMatchObject({ permissionMode: "acceptEdits", effort: "high" });
+    await runtime.prompt("s1", { promptId: "p1", text: "go" });
+    await settle();
+    expect(queries).toHaveLength(2);
+    expect(promptTexts(woken)).toEqual(["go"]);
+    expect(sessionEnds(events)).toEqual([]);
+  });
+
+  it("stop() on a dormant session ends it cleanly without a process to close", async () => {
+    const { start, runtime, events, queries } = setup();
+    const first = await start();
+    first.emit(init("default"));
+    await settle();
+    await runtime.retireIdle();
+    const before = events.length;
+    await runtime.stop("s1");
+    expect(events.slice(before)).toEqual([{ type: "session.state", status: "completed" }]);
+    expect(queries).toHaveLength(1);
+    expect(runtime.hasSession("s1")).toBe(false);
+    expect(runtime.activeTurns()).toBe(0);
+  });
+
+  it("every CLI process it launches gets DISABLE_AUTOUPDATER=1 (D-12, PD-14)", async () => {
+    const { start, runtime, queries } = setup({ prepare: prepareProbe, allowFullAccess: () => true });
+    await runtime.catalog(); // catalog query
+    const first = await start("acceptEdits"); // session start
+    first.emit(init("acceptEdits"));
+    await settle();
+    await runtime.configure("s1", { permissionMode: "fullAccess" }); // relaunch (P-11)
+    await runtime.retireIdle();
+    await runtime.prompt("s1", { promptId: "p1", text: "go" }); // wake-up
+    await settle();
+    await runtime
+      .generateTitle({ prompt: "fix the bug", model: "haiku", signal: signal() })
+      .catch(() => undefined);
+    const launches = queries.map((q) => ({
+      kind: Array.isArray(q.params.options.tools) ? "title" : q.params.options.resume ? "resume" : "other",
+      autoUpdater: q.params.options.env?.DISABLE_AUTOUPDATER,
+    }));
+    expect(launches.filter((l) => l.kind === "title")).toHaveLength(1);
+    expect(launches.filter((l) => l.kind === "resume")).toHaveLength(2);
+    expect(launches.length).toBeGreaterThanOrEqual(5);
+    expect(launches.every((l) => l.autoUpdater === "1")).toBe(true);
+    // One place for it: a parent value cannot switch the updater back on.
+    expect(childEnv({ PATH: "/bin", DISABLE_AUTOUPDATER: "0" }).DISABLE_AUTOUPDATER).toBe("1");
+    expect(childEnv({ PATH: "/bin" }, true).DISABLE_AUTOUPDATER).toBe("1");
+    await runtime.stopAll();
+  });
+
+  it("refreshInstall() re-resolves the CLI path for the next launch and drops the catalog cache", async () => {
+    const savedPath = process.env.PATH;
+    const dirA = mkdtempSync(join(tmpdir(), "ocw-claude-a-"));
+    const dirB = mkdtempSync(join(tmpdir(), "ocw-claude-b-"));
+    for (const dir of [dirA, dirB])
+      writeFileSync(join(dir, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-claude-rt-")));
+    const queries: FakeQuery[] = [];
+    try {
+      process.env.PATH = dirA;
+      const runtime = new ClaudeCodeRuntime({
+        queryFn: (params) => {
+          const q = new FakeQuery(params);
+          prepareProbe(q);
+          queries.push(q);
+          return q;
+        },
+        catalogCwd: cwd,
+        detect: () =>
+          Promise.resolve({ id: "claude-code", installed: true, version: "2.1.289", loggedIn: true }),
+      });
+      await runtime.catalog();
+      await runtime.catalog();
+      expect(queries).toHaveLength(1);
+      expect(queries[0]?.params.options.pathToClaudeCodeExecutable).toBe(join(dirA, "claude"));
+      await runtime.start({ sessionId: "s1", cwd, permissionMode: "default" }, () => undefined);
+      const session = queries.at(-1) as FakeQuery;
+      session.emit(init("default"));
+      await settle();
+      expect(session.params.options.pathToClaudeCodeExecutable).toBe(join(dirA, "claude"));
+
+      process.env.PATH = dirB;
+      runtime.refreshInstall();
+      await runtime.retireIdle();
+      await runtime.prompt("s1", { promptId: "p1", text: "go" });
+      await settle();
+      const woken = queries.at(-1) as FakeQuery;
+      expect(woken).not.toBe(session);
+      expect(woken.params.options.pathToClaudeCodeExecutable).toBe(join(dirB, "claude"));
+      const count = queries.length;
+      await runtime.catalog();
+      expect(queries).toHaveLength(count + 1);
+      expect(queries.at(-1)?.params.options.pathToClaudeCodeExecutable).toBe(join(dirB, "claude"));
+      await runtime.stopAll();
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it("refreshInstall() keeps an explicitly configured CLI path", async () => {
+    const { start, runtime, queries } = setup({ claudePath: "/opt/claude/bin/claude" });
+    const first = await start();
+    first.emit(init("default"));
+    await settle();
+    runtime.refreshInstall();
+    await runtime.retireIdle();
+    await runtime.prompt("s1", { promptId: "p1", text: "go" });
+    await settle();
+    expect(queries.at(-1)?.params.options.pathToClaudeCodeExecutable).toBe("/opt/claude/bin/claude");
   });
 });
