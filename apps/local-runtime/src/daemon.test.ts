@@ -1,18 +1,31 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
-import type {
-  ApprovalDecision,
-  CommandFrame,
-  DeviceToServerFrame,
-  PromptPayload,
-  RuntimeCatalog,
-  RuntimeInfo,
-  SessionEvent,
-  SessionSettingsPatch,
+import { fileURLToPath } from "node:url";
+import {
+  type ApprovalDecision,
+  type CommandFrame,
+  type DeviceToServerFrame,
+  type PromptPayload,
+  RUNTIME_COMPATIBILITY_MANIFEST,
+  type RuntimeCatalog,
+  type RuntimeInfo,
+  type ServerToDeviceFrame,
+  type SessionEvent,
+  type SessionSettingsPatch,
 } from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
@@ -21,6 +34,7 @@ import { controlRequest } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
 import { type Logger, silentLogger } from "./logger.js";
+import type { RuntimeMaintenanceOptions } from "./maintenance/maintenance.js";
 import type {
   AgentRuntime,
   EventSink,
@@ -64,6 +78,10 @@ class FakeRuntime implements AgentRuntime {
   /** 07.11: what `activeTurns()` reports (0 unless a test sets it); `retireIdle()` calls are counted. */
   activeTurnsCount = 0;
   retireIdleCalls = 0;
+  refreshInstallCalls = 0;
+  refreshInstall(): void {
+    this.refreshInstallCalls++;
+  }
   activeTurns(): number {
     return this.activeTurnsCount;
   }
@@ -250,15 +268,26 @@ class FakeServer {
   frame<T extends DeviceToServerFrame["type"]>(
     type: T,
     pred: (f: Extract<DeviceToServerFrame, { type: T }>) => boolean = () => true,
+    timeoutMs = 3000,
   ) {
-    return this.waitFor(() =>
-      this.connections
-        .flatMap((c) => c.frames)
-        .find(
-          (f): f is Extract<DeviceToServerFrame, { type: T }> =>
-            f.type === type && pred(f as Extract<DeviceToServerFrame, { type: T }>),
-        ),
+    return this.waitFor(
+      () =>
+        this.connections
+          .flatMap((c) => c.frames)
+          .find(
+            (f): f is Extract<DeviceToServerFrame, { type: T }> =>
+              f.type === type && pred(f as Extract<DeviceToServerFrame, { type: T }>),
+          ),
+      timeoutMs,
     );
+  }
+  /** Every frame the daemon sent, across connections. */
+  get allFrames(): DeviceToServerFrame[] {
+    return this.connections.flatMap((c) => c.frames);
+  }
+  /** A server → device frame on the current connection (welcome, runtime.config, …). */
+  push(frame: ServerToDeviceFrame): void {
+    this.last.ws.send(JSON.stringify(frame));
   }
   send(cmd: Omit<CommandFrame, "type">): void {
     this.last.ws.send(JSON.stringify({ type: "command", ...cmd }));
@@ -1190,5 +1219,274 @@ describe("Prompt images (06.1-03, D-05, P-01, P-10, P-11)", () => {
     server.send({ id: "di1", kind: "diff.request", sessionId: "wi5", payload: { projectLocalId: localId } });
     const diff = await server.frame("diff.result", (f) => f.requestId === "di1");
     expect(diff.patch).toContain(dataUrl);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.11 runtime updates: the daemon keeps its CLIs current by itself (D-02, D-03, D-07, D-09, D-10, PD-19)
+
+const FAKE_CLI = fileURLToPath(new URL("./maintenance/fake-cli/fake-cli.mjs", import.meta.url));
+
+/** The npm registry as the daemon sees it (`OCW_RUNTIME_REGISTRY_URL`): one dist-tag answer, every request counted. */
+class RegistryStub {
+  readonly requests: string[] = [];
+  version = "2.1.300";
+  private readonly http: Server;
+  constructor() {
+    this.http = createServer((req, res) => {
+      this.requests.push(req.url ?? "");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ name: "x", version: this.version }));
+    });
+  }
+  listen(): Promise<void> {
+    return new Promise((resolve) => this.http.listen(0, "127.0.0.1", () => resolve()));
+  }
+  get url(): string {
+    return `http://127.0.0.1:${(this.http.address() as AddressInfo).port}`;
+  }
+  async close(): Promise<void> {
+    this.http.closeAllConnections();
+    await new Promise<void>((r) => this.http.close(() => r()));
+  }
+}
+
+const sleep07 = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe("07.11 runtime updates: the daemon updates its CLIs by itself", () => {
+  let registry: RegistryStub;
+  let userHome: string;
+  let nodeBin: string;
+  let codex: ScriptedRuntime;
+
+  beforeEach(async () => {
+    registry = new RegistryStub();
+    await registry.listen();
+    userHome = join(home, "user");
+    mkdirSync(userHome);
+    nodeBin = join(userHome, "node-bin");
+    mkdirSync(nodeBin);
+    symlinkSync(process.execPath, join(nodeBin, "node"));
+  });
+
+  afterEach(async () => {
+    await registry.close();
+  });
+
+  const claudeBin = () => join(userHome, ".local", "bin");
+  const nativeRoot = () => join(userHome, ".local", "share", "claude");
+  /** The scratch fake CLI's own answer (PD-19: never the machine's real `claude`). */
+  const fakeClaudeVersion = () =>
+    execFileSync(join(claudeBin(), "claude"), ["--version"], { env: { PATH: `${nodeBin}:/usr/bin:/bin` } })
+      .toString()
+      .trim();
+
+  /** A native fake Claude Code 2.1.290 in a scratch user home whose update goes to 2.1.300; a daemon around it. */
+  async function updatesDaemon(
+    o: {
+      env?: Record<string, string>;
+      fakeUpdate?: Record<string, unknown>;
+      maintenance?: Partial<RuntimeMaintenanceOptions>;
+    } = {},
+  ): Promise<void> {
+    await daemon.stop();
+    execFileSync(process.execPath, [FAKE_CLI, "install-fake", "claude-native", userHome, "2.1.290"]);
+    writeFileSync(
+      join(nativeRoot(), "fake-update.json"),
+      JSON.stringify({ next: "2.1.300", ...o.fakeUpdate }),
+    );
+    runtime = new FakeRuntime();
+    codex = new ScriptedRuntime("codex", 1);
+    daemon = await Daemon.create({
+      home,
+      env: {
+        PATH: [claudeBin(), nodeBin, "/usr/bin", "/bin"].join(":"),
+        HOME: userHome,
+        OCW_RUNTIME_REGISTRY_URL: registry.url,
+        ...o.env,
+      },
+      token: "device-token-123",
+      config: { serverUrl: server.url },
+      runtimes: [runtime, codex],
+      logger: silentLogger,
+      controlSocket: socketPath(),
+      link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+      maintenance: {
+        userHome,
+        which: (name) => (name === "claude" ? join(claudeBin(), "claude") : null),
+        ...o.maintenance,
+      },
+    });
+  }
+
+  const welcome = (): ServerToDeviceFrame => ({
+    type: "welcome",
+    deviceId: randomUUID(),
+    organizationId: randomUUID(),
+  });
+
+  it("automatic: a behind Claude Code is updated at start while no turn runs, and the server hears every step", async () => {
+    await updatesDaemon();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    server.push({ type: "runtime.config", policy: "automatic", manifest: RUNTIME_COMPATIBILITY_MANIFEST });
+
+    const started = await server.frame("runtime.update.run", (f) => f.phase === "started", 15_000);
+    expect(started).toMatchObject({
+      runtime: "claude-code",
+      trigger: "automatic",
+      fromVersion: "2.1.290",
+      candidate: "2.1.300",
+      method: "native",
+    });
+    const finished = await server.frame("runtime.update.run", (f) => f.phase === "finished", 20_000);
+    expect(finished).toMatchObject({
+      runId: started.runId,
+      outcome: "succeeded",
+      fromVersion: "2.1.290",
+      toVersion: "2.1.300",
+    });
+    const snapshot = await server.frame(
+      "runtime.maintenance",
+      (f) => f.runtimes.some((s) => s.runtime === "claude-code" && s.installedVersion === "2.1.300"),
+      10_000,
+    );
+    expect(snapshot).toMatchObject({
+      orgLevelReceived: true,
+      effectiveLevel: "automatic",
+      localLevel: "automatic",
+    });
+    expect(snapshot.runtimes.find((s) => s.runtime === "claude-code")).toMatchObject({
+      advisory: "current",
+      method: "native",
+      location: "~/.local/bin",
+      lastRun: { outcome: "succeeded", fromVersion: "2.1.290", toVersion: "2.1.300" },
+      state: "idle",
+    });
+    const finishedAt = server.allFrames.indexOf(finished);
+    await server.waitFor(
+      () =>
+        server.allFrames.slice(finishedAt + 1).some((f) => f.type === "capabilities") ? true : undefined,
+      10_000,
+    );
+    expect(server.allFrames.indexOf(started)).toBeLessThan(finishedAt);
+    expect(finishedAt).toBeLessThan(server.allFrames.indexOf(snapshot));
+    expect(runtime.retireIdleCalls).toBe(1);
+    expect(runtime.refreshInstallCalls).toBe(1);
+    expect(runtime.interrupts).toEqual([]);
+    expect(fakeClaudeVersion()).toBe("2.1.300 (Claude Code)");
+    const wire = JSON.stringify(server.allFrames);
+    expect(wire).not.toContain(userHome);
+    expect(wire).not.toContain(home);
+    const status = (await daemon.status()) as { runtimeUpdates?: { effectiveLevel: string } };
+    expect(status.runtimeUpdates).toMatchObject({ effectiveLevel: "automatic", orgLevelReceived: true });
+  }, 40_000);
+
+  it("D-10: without a runtime.config the daemon checks and reports behind but never installs", async () => {
+    await updatesDaemon({ maintenance: { orgLevelGraceMs: 50 } });
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    const behind = await server.frame(
+      "runtime.maintenance",
+      (f) => f.runtimes.some((s) => s.runtime === "claude-code" && s.advisory === "behind"),
+      10_000,
+    );
+    expect(behind).toMatchObject({
+      orgLevelReceived: false,
+      effectiveLevel: "notify",
+      localLevel: "automatic",
+    });
+    expect(behind.runtimes.find((s) => s.runtime === "claude-code")).toMatchObject({
+      installedVersion: "2.1.290",
+      latestVersion: "2.1.300",
+      state: "idle",
+    });
+    await sleep07(1500);
+    expect(server.allFrames.filter((f) => f.type === "runtime.update.run")).toEqual([]);
+    expect(fakeClaudeVersion()).toBe("2.1.290 (Claude Code)");
+    expect(registry.requests.length).toBeGreaterThan(0);
+    expect(registry.requests[0]).toContain("/@anthropic-ai%2Fclaude-code/");
+  }, 20_000);
+
+  it("off: no registry request at all; the snapshot still reports the installed version and method", async () => {
+    await updatesDaemon();
+    await daemon.start();
+    await server.frame("hello");
+    server.push(welcome());
+    server.push({ type: "runtime.config", policy: "off", manifest: RUNTIME_COMPATIBILITY_MANIFEST });
+    const off = await server.frame(
+      "runtime.maintenance",
+      (f) =>
+        f.orgLevelReceived &&
+        f.runtimes.some((s) => s.runtime === "claude-code" && s.installedVersion === "2.1.290"),
+      10_000,
+    );
+    expect(off.effectiveLevel).toBe("off");
+    expect(off.runtimes.find((s) => s.runtime === "claude-code")).toMatchObject({
+      method: "native",
+      latestVersion: null,
+      checkedAt: null,
+    });
+    await sleep07(500);
+    expect(registry.requests).toEqual([]);
+    expect(server.allFrames.filter((f) => f.type === "runtime.update.run")).toEqual([]);
+  }, 20_000);
+
+  it("PD-19: test runtimes without DaemonOptions.maintenance never start maintenance (no request, no snapshot)", async () => {
+    await daemon.stop();
+    runtime = new FakeRuntime();
+    daemon = await Daemon.create({
+      home,
+      env: { OCW_RUNTIME_REGISTRY_URL: registry.url, HOME: userHome },
+      token: "device-token-123",
+      config: { serverUrl: server.url },
+      runtimes: [runtime],
+      logger: silentLogger,
+      controlSocket: socketPath(),
+      link: { backoffMinMs: 20, backoffMaxMs: 50, heartbeatMs: 60_000 },
+    });
+    await daemon.start();
+    await server.frame("hello");
+    server.push({ type: "runtime.config", policy: "automatic", manifest: RUNTIME_COMPATIBILITY_MANIFEST });
+    await server.frame("capabilities");
+    await sleep07(300);
+    expect(registry.requests).toEqual([]);
+    expect(server.allFrames.filter((f) => f.type === "runtime.maintenance")).toEqual([]);
+    expect(((await daemon.status()) as { runtimeUpdates?: unknown }).runtimeUpdates).toBeUndefined();
+  });
+
+  it("PD-19: fake mode without OCW_RUNTIME_FAKE_CLI=1, or with the real HOME, never starts maintenance", async () => {
+    await daemon.stop();
+    const base = { home, token: null, logger: silentLogger, controlSocket: false as const };
+    daemon = await Daemon.create({
+      ...base,
+      env: { OCW_RUNTIME_FAKE: "1", OCW_RUNTIME_REGISTRY_URL: registry.url, HOME: userHome },
+    });
+    expect(((await daemon.status()) as { runtimeUpdates?: unknown }).runtimeUpdates).toBeUndefined();
+    await daemon.start();
+    await sleep07(200);
+    await daemon.stop();
+    daemon = await Daemon.create({
+      ...base,
+      env: {
+        OCW_RUNTIME_FAKE: "1",
+        OCW_RUNTIME_FAKE_CLI: "1",
+        OCW_RUNTIME_REGISTRY_URL: registry.url,
+        HOME: userInfo().homedir,
+      },
+    });
+    expect(((await daemon.status()) as { runtimeUpdates?: unknown }).runtimeUpdates).toBeUndefined();
+    expect(registry.requests).toEqual([]);
+    // With a scratch HOME the fake-CLI daemon does maintain (status reports the levels; not started here).
+    daemon = await Daemon.create({
+      ...base,
+      env: { OCW_RUNTIME_FAKE: "1", OCW_RUNTIME_FAKE_CLI: "1", HOME: userHome, PATH: nodeBin },
+    });
+    expect(((await daemon.status()) as { runtimeUpdates?: unknown }).runtimeUpdates).toMatchObject({
+      localLevel: "automatic",
+      orgLevelReceived: false,
+    });
   });
 });

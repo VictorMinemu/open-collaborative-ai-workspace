@@ -10,9 +10,15 @@
 // adapter in memory only (never written to disk, a worktree or tmp); a runtime without `supportsImages` refuses them
 // visibly. Ack errors, the command-failure log and every `session.error` pass through `stripImageData`, so a runtime
 // that echoes its input never sends image bytes back.
+//
+// Runtime CLI updates (07.11, D-02, D-03, D-09, D-10, PD-03, PD-07, PD-19): one `RuntimeGate` per runtime and one
+// `RuntimeMaintenance` that keeps the CLIs current by itself. The server's `runtime.config` sets the org level; this
+// device's level comes from runtime.json or `OCW_RUNTIME_UPDATES`. Snapshots go out only while connected, run frames
+// through the offline log. Maintenance runs only when the daemon drives its real adapters, or in fake-CLI mode with a
+// scratch `HOME`, or when a test passes `DaemonOptions.maintenance`: a test or demo daemon never touches a real CLI.
 
 import { realpathSync } from "node:fs";
-import { arch, platform } from "node:os";
+import { arch, homedir, platform, userInfo } from "node:os";
 import {
   ApprovalResolvePayload,
   type CommandFrame,
@@ -26,6 +32,7 @@ import {
   RuntimeCatalog,
   type RuntimeId,
   type RuntimeInfo,
+  type ServerToDeviceFrame,
   SessionConfigurePayload,
   type SessionEvent,
   SessionStartPayload,
@@ -46,6 +53,7 @@ import {
   ProjectRegistry,
   type RuntimeConfig,
   resolveFullAccess,
+  resolveRuntimeUpdates,
   toWebSocketUrl,
 } from "./config.js";
 import { type ControlRequest, ControlSocketServer, controlSocketPath } from "./control-socket.js";
@@ -53,6 +61,8 @@ import { DeviceLink, type DeviceLinkOptions } from "./device-link.js";
 import { FakeRuntime } from "./fake/fake-runtime.js";
 import { changedFiles, ensureSessionWorktree, repoInfo, unifiedPatch } from "./git.js";
 import { createLogger, errorMessage, type Logger } from "./logger.js";
+import { RuntimeGate } from "./maintenance/gate.js";
+import { RuntimeMaintenance, type RuntimeMaintenanceOptions } from "./maintenance/maintenance.js";
 import type { AgentRuntime } from "./runtime.js";
 import { sanitizeEvent, sanitizeString, sanitizeValue } from "./sanitize.js";
 import { runTitle } from "./title.js";
@@ -110,6 +120,56 @@ export interface DaemonOptions {
   controlSocket?: string | false;
   /** The daemon's own deadline for a `session.title` call (default TITLE_TIMEOUT_MS; lowered in tests). */
   titleTimeoutMs?: number;
+  /**
+   * Tests only (07.11, PD-19): runtime update maintenance for test-supplied runtimes runs only when this is given,
+   * with `userHome` (a scratch home) and usually `which`, a registry URL in `env` and short timers.
+   */
+  maintenance?: Partial<RuntimeMaintenanceOptions>;
+}
+
+/** Where runtime update maintenance may run (PD-19), or null: never against a real install from a test or a demo. */
+interface MaintenanceScope {
+  userHome: string;
+  requireScratchHome: boolean;
+}
+
+function sameDirectory(a: string, b: string): boolean {
+  return realpathOr(a) === realpathOr(b);
+}
+
+function osUserHome(): string | null {
+  try {
+    return userInfo().homedir;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * PD-19: real adapters → the user's home; fake runtimes → only with `OCW_RUNTIME_FAKE_CLI=1` and a `HOME` that is not
+ * the OS user's real home (scratch mode: installs outside it are refused); test-supplied runtimes → only when the test
+ * passes `DaemonOptions.maintenance.userHome`.
+ */
+function maintenanceScope(
+  opts: DaemonOptions,
+  env: NodeJS.ProcessEnv,
+  fake: boolean,
+): MaintenanceScope | null {
+  if (opts.runtimes !== undefined) {
+    const userHome = opts.maintenance?.userHome;
+    if (!userHome) return null;
+    return { userHome, requireScratchHome: opts.maintenance?.requireScratchHome ?? true };
+  }
+  if (fake) {
+    const home = env.HOME;
+    const real = osUserHome();
+    if (env.OCW_RUNTIME_FAKE_CLI !== "1" || !home || real === null || sameDirectory(home, real)) return null;
+    return { userHome: home, requireScratchHome: true };
+  }
+  return {
+    userHome: opts.maintenance?.userHome ?? homedir(),
+    requireScratchHome: opts.maintenance?.requireScratchHome ?? false,
+  };
 }
 
 interface ActiveSession {
@@ -135,6 +195,10 @@ export class Daemon {
   private link: DeviceLink | null = null;
   private control: ControlSocketServer | null = null;
   private readonly runtimes = new Map<RuntimeId, AgentRuntime>();
+  /** 07.11 (PD-07): one gate per runtime; held commands of that runtime wait while its CLI updates. */
+  private readonly gates = new Map<RuntimeId, RuntimeGate>();
+  /** 07.11: runtime CLI update maintenance; null when PD-19 does not allow it here. */
+  private maintenance: RuntimeMaintenance | null = null;
   private readonly sessions = new Map<string, ActiveSession>();
   /** Roots per session survive session end so late events are still contained. */
   private readonly rootsBySession = new Map<string, string[]>();
@@ -162,7 +226,10 @@ export class Daemon {
     private readonly gate: FullAccessGate,
   ) {
     this.registry = new ProjectRegistry(home);
-    for (const r of runtimes) this.runtimes.set(r.id, r);
+    for (const r of runtimes) {
+      this.runtimes.set(r.id, r);
+      this.gates.set(r.id, new RuntimeGate());
+    }
   }
 
   static async create(opts: DaemonOptions = {}): Promise<Daemon> {
@@ -201,7 +268,44 @@ export class Daemon {
       ];
     const daemon = new Daemon(home, config, token, runtimes, log, opts, env, gate);
     await daemon.registry.load();
+    const scope = maintenanceScope(opts, env, fake && opts.runtimes === undefined);
+    if (scope) daemon.maintenance = daemon.buildMaintenance(scope);
+    else if (fake)
+      log.info("runtime updates are off: fake runtime without OCW_RUNTIME_FAKE_CLI=1 and a scratch HOME");
     return daemon;
+  }
+
+  private buildMaintenance(scope: MaintenanceScope): RuntimeMaintenance {
+    const level = resolveRuntimeUpdates(this.config, this.env);
+    const configuredPaths: Partial<Record<RuntimeId, string>> = {
+      ...(this.config.claude.path ? { "claude-code": this.config.claude.path } : {}),
+      ...(this.config.codex.path ? { codex: this.config.codex.path } : {}),
+    };
+    return new RuntimeMaintenance({
+      runtimes: [...this.runtimes.values()],
+      gates: this.gates,
+      env: this.env,
+      configuredPaths,
+      localLevel: level.level,
+      localLevelSource: level.source,
+      log: this.log,
+      runtimeInfo: async ({ fresh }) => {
+        if (fresh) this.detectCache = null;
+        return this.detectRuntimes();
+      },
+      // PD-03: a snapshot only while connected (the handshake carries one on every connect); runs never get lost.
+      sendSnapshot: (frame) => {
+        if (this.isConnected) this.send(frame);
+      },
+      sendRun: (frame) => this.send(frame),
+      afterRun: async () => {
+        this.detectCache = null;
+        if (this.isConnected) this.send(await this.capabilitiesFrame());
+      },
+      ...this.opts.maintenance,
+      userHome: scope.userHome,
+      requireScratchHome: scope.requireScratchHome,
+    });
   }
 
   /** The device's own Full access opt-in, as the daemon enforces it right now. */
@@ -224,6 +328,8 @@ export class Daemon {
     }
     if (!this.token) {
       this.log.warn("no device token found; pair this device from the desktop app, then restart the runtime");
+      // A headless, unpaired daemon still keeps its CLIs checked and reports locally (`notify`, D-10).
+      this.maintenance?.start({ paired: false });
       return;
     }
     this.link = new DeviceLink({
@@ -232,14 +338,22 @@ export class Daemon {
       getAccessToken: ({ refresh }) => this.getAccessToken(refresh),
       onOpenFrames: () => this.handshakeFrames(),
       onCommand: (cmd) => void this.handleCommand(cmd),
+      onServerFrame: (frame) => this.onServerFrame(frame),
       logger: this.log,
       ...this.opts.link,
     });
     this.link.start();
     this.log.info("connecting to server", { serverUrl: this.config.serverUrl });
+    this.maintenance?.start({ paired: true });
+  }
+
+  /** Server frames besides commands (PD-03): `runtime.config` sets the org level and the manifest. */
+  private onServerFrame(frame: Exclude<ServerToDeviceFrame, CommandFrame>): void {
+    if (frame.type === "runtime.config") this.maintenance?.setOrgPolicy(frame.policy, frame.manifest);
   }
 
   async stop(): Promise<void> {
+    this.maintenance?.stop();
     await Promise.all([...this.runtimes.values()].map((r) => r.stopAll().catch(() => undefined)));
     this.sessions.clear();
     await this.link?.stop();
@@ -258,6 +372,17 @@ export class Daemon {
       projects: this.registry.list().length,
       fullAccessOptIn: this.gate.optIn,
       fullAccessSource: this.gate.source,
+      ...(this.maintenance
+        ? {
+            runtimeUpdates: {
+              localLevel: this.maintenance.localLevel,
+              localLevelSource: this.maintenance.localLevelSource,
+              effectiveLevel: this.maintenance.effectiveLevel,
+              orgLevelReceived: this.maintenance.orgLevelReceived,
+              runtimes: this.maintenance.statuses(),
+            },
+          }
+        : {}),
       sessions: [...this.sessions.values()].map((s) => ({
         sessionId: s.sessionId,
         projectLocalId: s.project.localId,
@@ -373,6 +498,7 @@ export class Daemon {
       },
       { type: "projects.sync", projects: this.registry.toSynced() },
       await this.capabilitiesFrame(),
+      ...(this.maintenance ? [await this.maintenance.snapshot()] : []),
     ];
   }
 

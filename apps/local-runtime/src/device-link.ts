@@ -5,7 +5,12 @@
 // Server → device frames are capped at `DEVICE_LINK_MAX_COMMAND_FRAME_BYTES` (06.1, P-01): a larger one closes the
 // socket with 1009 and the link reconnects; the API's hub refuses to send anything above the same limit.
 
-import { CommandFrame, DEVICE_LINK_MAX_COMMAND_FRAME_BYTES, type DeviceToServerFrame } from "@ocw/contracts";
+import {
+  CommandFrame,
+  DEVICE_LINK_MAX_COMMAND_FRAME_BYTES,
+  type DeviceToServerFrame,
+  ServerToDeviceFrame,
+} from "@ocw/contracts";
 import WebSocket from "ws";
 import { errorMessage, type Logger, silentLogger } from "./logger.js";
 
@@ -22,6 +27,11 @@ export interface DeviceLinkOptions {
   /** Frames sent first on every (re)connect, before the offline log is replayed. */
   onOpenFrames: () => Promise<DeviceToServerFrame[]> | DeviceToServerFrame[];
   onCommand: (command: CommandFrame) => void;
+  /**
+   * Every other server frame that parses (`welcome`, `projects.ack`, `error`, and 07.11's `runtime.config`, PD-03).
+   * A frame that does not parse is ignored with a debug log, as before.
+   */
+  onServerFrame?: (frame: Exclude<ServerToDeviceFrame, CommandFrame>) => void;
   logger?: Logger;
   heartbeatMs?: number;
   backoffMinMs?: number;
@@ -209,7 +219,16 @@ export class DeviceLink {
     }
     const type = (parsed as { type?: unknown } | null)?.type;
     if (type !== "command") {
-      this.log.debug("ignoring server frame", { type: String(type) });
+      const frame = ServerToDeviceFrame.safeParse(parsed);
+      if (!frame.success || frame.data.type === "command") {
+        this.log.debug("ignoring server frame", { type: String(type) });
+        return;
+      }
+      try {
+        this.opts.onServerFrame?.(frame.data);
+      } catch (err) {
+        this.log.warn("server frame handler failed", { type: frame.data.type, error: errorMessage(err) });
+      }
       return;
     }
     const cmd = CommandFrame.safeParse(parsed);
