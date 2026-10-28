@@ -10,6 +10,9 @@ import {
   type HelloFrame,
   RUNTIME_COMPATIBILITY_MANIFEST,
   type RuntimeCompatibilityManifest,
+  type RuntimeMaintenanceFrame,
+  type RuntimeUpdateRunFrame,
+  type RuntimeUpdatesLevel,
   type ServerToDeviceFrame,
   stripImageData,
   type TitleResultFrame,
@@ -19,7 +22,9 @@ import { and, asc, eq, inArray, lt, sql } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
 import type { WebSocket } from "ws";
 import type { RedisBus } from "../../lib/redis";
+import type { AuditService } from "../audit";
 import type { RealtimeService } from "../realtime";
+import { type MaintenanceDeps, onRuntimeMaintenance, onRuntimeUpdateRun } from "./maintenance";
 
 /** The authenticated device behind a Device Link socket (from the bearer token lookup). */
 export interface DeviceRef {
@@ -116,10 +121,15 @@ const diffChannel = (requestId: string) => `ocw:diff:${requestId}`;
 
 type ControlMessage = { op: "flush" } | { op: "close"; code: number; reason: string };
 
+/** Reads the organization's runtime updates level inside its tenant transaction (07.11, D-02). */
+export type RuntimePolicySource = (tx: Tx) => Promise<RuntimeUpdatesLevel>;
+
 export interface DeviceHubOptions {
   db: TenantDb;
   bus: RedisBus;
   realtime: RealtimeService;
+  /** Audit rows of the device's own reports (07.11 runtime maintenance, PD-06), written in their transaction. */
+  audit: AuditService;
   log: FastifyBaseLogger;
   /** How long a device may stay disconnected before it is marked offline (default 10 s). */
   offlineGraceMs?: number;
@@ -162,15 +172,31 @@ export class DeviceHub {
   private readonly maxFrameBytes: number;
   /** What session start and the device DTO decide compatibility with (07.11 D-04, PD-12, PD-13). */
   readonly runtimeManifest: RuntimeCompatibilityManifest;
+  private policySource: RuntimePolicySource | null = null;
+  private readonly maintenance: MaintenanceDeps;
 
   constructor(private readonly opts: DeviceHubOptions) {
     this.offlineGraceMs = opts.offlineGraceMs ?? 10_000;
     this.maxFrameBytes = opts.maxFrameBytes ?? DEVICE_LINK_MAX_COMMAND_FRAME_BYTES;
     this.runtimeManifest = opts.runtimeManifest ?? RUNTIME_COMPATIBILITY_MANIFEST;
+    this.maintenance = { audit: opts.audit, realtime: opts.realtime };
   }
 
   setSessionHandler(handler: DeviceSessionHandler): void {
     this.handler = handler;
+  }
+
+  /**
+   * 07.11 (D-02): where the organization's runtime updates level comes from. The work-session module registers its
+   * Work Zone policy here, so the device module never imports its internals.
+   */
+  setRuntimePolicySource(source: RuntimePolicySource): void {
+    this.policySource = source;
+  }
+
+  /** The organization's runtime updates level, read in `tx` (its tenant); `automatic` (the default) until registered. */
+  async runtimePolicy(tx: Tx): Promise<RuntimeUpdatesLevel> {
+    return this.policySource ? this.policySource(tx) : "automatic";
   }
 
   get sessionHandler(): DeviceSessionHandler | null {
@@ -345,6 +371,20 @@ export class DeviceHub {
     );
     // ADR-0012: the owner turned Full access off on the device: its live sessions leave Full access now.
     if (optedOut) await this.handler?.onAccessChanged(device, "device_opt_out");
+  }
+
+  /** 07.11 (PD-03, PD-06): the device's maintenance snapshot; written only from its authenticated socket. */
+  async onRuntimeMaintenance(device: DeviceRef, frame: RuntimeMaintenanceFrame): Promise<void> {
+    await this.opts.db.withTenant({ organizationId: device.organizationId, userId: null }, (tx) =>
+      onRuntimeMaintenance(tx, this.maintenance, device, frame),
+    );
+  }
+
+  /** 07.11 (PD-04, PD-06): one update run step of the device; idempotent by its run id. */
+  async onRuntimeUpdateRun(device: DeviceRef, frame: RuntimeUpdateRunFrame): Promise<void> {
+    await this.opts.db.withTenant({ organizationId: device.organizationId, userId: null }, (tx) =>
+      onRuntimeUpdateRun(tx, this.maintenance, device, frame),
+    );
   }
 
   async onAck(device: DeviceRef, frame: AckFrame): Promise<void> {

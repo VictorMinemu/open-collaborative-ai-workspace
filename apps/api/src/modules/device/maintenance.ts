@@ -1,0 +1,501 @@
+import {
+  DeviceRuntimeMaintenance,
+  EventTypes,
+  IdParams,
+  InstallMethod,
+  type RuntimeId,
+  type RuntimeMaintenanceFrame,
+  type RuntimeMaintenanceStatus,
+  RuntimeUpdateHistoryQuery,
+  type RuntimeUpdateRun,
+  type RuntimeUpdateRunFrame,
+  RuntimeUpdateRunList,
+  type RuntimeUpdatesLevel,
+  RuntimeVersion,
+  scrubHostPaths,
+} from "@ocw/contracts";
+import { deviceRuntimeUpdates, devices, type Tx } from "@ocw/db";
+import { and, desc, eq, isNull } from "drizzle-orm";
+import { z } from "zod";
+import { type App, authOf, type Core, tenant } from "../../core";
+import { notFound } from "../../lib/errors";
+import type { AuditEventInput, AuditService } from "../audit";
+import { memberDirectory, type PermissionService } from "../organization";
+import type { RealtimeService } from "../realtime";
+import { loadDeviceAccess } from "./access";
+import type { DeviceHub, DeviceRef } from "./hub";
+import { deviceFacts } from "./routes";
+
+/**
+ * Runtime CLI maintenance on the Control Plane (Phase 07.11, D-05, D-06, D-11, ADR-0032; PD-04, PD-05, PD-06, PD-08).
+ *
+ * The device reports a snapshot of its coding CLIs (`runtime.maintenance`, stored as `devices.runtime_maintenance`)
+ * and every update run (`runtime.update.run`, kept in `device_runtime_updates`); the owner or an admin
+ * (`device.maintain`) reads the history and presses "Update now", whose `runtime.update` command carries the runtime
+ * id and nothing else. Everything here is written only from the authenticated device socket or by a `device.maintain`
+ * holder, audited in the same transaction (never with output or a path), and never carries a host path: device text
+ * is scrubbed again before it is stored (principle 7). The `org:` stream only ever gets the id-only `device.updated`
+ * ping.
+ */
+
+/** What the frame handlers write with (the hub's own services; the device module never imports the core here). */
+export interface MaintenanceDeps {
+  audit: AuditService;
+  realtime: RealtimeService;
+}
+
+type RunRow = typeof deviceRuntimeUpdates.$inferSelect;
+
+/** The stored snapshot: the device's report plus whether it had the org level when it sent it (D-10). */
+const StoredMaintenance = DeviceRuntimeMaintenance.omit({ orgLevel: true }).extend({
+  orgLevelReceived: z.boolean(),
+});
+type StoredMaintenance = z.infer<typeof StoredMaintenance>;
+
+/** The device's last snapshot, or null when it never reported one (or the stored value no longer parses). */
+export function storedMaintenance(value: unknown): StoredMaintenance | null {
+  const parsed = StoredMaintenance.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/** `Device.runtimeMaintenance` for a `device.maintain` holder: the snapshot plus the org level the API applies. */
+export function toDeviceRuntimeMaintenance(
+  stored: StoredMaintenance,
+  orgLevel: RuntimeUpdatesLevel,
+): DeviceRuntimeMaintenance {
+  return {
+    runtimes: stored.runtimes,
+    localLevel: stored.localLevel,
+    localLevelSource: stored.localLevelSource,
+    effectiveLevel: stored.effectiveLevel,
+    orgLevel,
+    reportedAt: stored.reportedAt,
+  };
+}
+
+/** Every string inside `value` scrubbed of host paths once more (defence in depth: the schemas already refuse them). */
+function scrubDeep<T>(value: T): T {
+  if (typeof value === "string") return scrubHostPaths(value) as T;
+  if (Array.isArray(value)) return value.map(scrubDeep) as T;
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scrubDeep(v)])) as T;
+  }
+  return value;
+}
+
+const versionOrNull = (v: string | null) => (v !== null && RuntimeVersion.safeParse(v).success ? v : null);
+const isoOrNull = (v: string | null) => (v ? new Date(v).toISOString() : null);
+
+/** One history row as owners and admins read it (`RuntimeUpdateRun`), the requester named from the directory. */
+export function toRuntimeUpdateRun(
+  row: RunRow,
+  names: ReadonlyMap<string, { displayName: string | null }>,
+): RuntimeUpdateRun {
+  const method = InstallMethod.safeParse(row.method);
+  return {
+    id: row.id,
+    runtime: row.runtime,
+    trigger: row.trigger,
+    state: row.state,
+    requestedBy: row.requestedBy
+      ? { id: row.requestedBy, name: names.get(row.requestedBy)?.displayName ?? null }
+      : null,
+    fromVersion: versionOrNull(row.fromVersion),
+    toVersion: versionOrNull(row.toVersion),
+    candidate: versionOrNull(row.candidate),
+    method: method.success ? method.data : null,
+    output: row.output,
+    error: row.error,
+    requestedAt: isoOrNull(row.requestedAt),
+    startedAt: isoOrNull(row.startedAt),
+    finishedAt: isoOrNull(row.finishedAt),
+  };
+}
+
+// ---------------------------------------------------------------- audit (PD-06)
+
+type Actor = Pick<AuditEventInput, "actorKind" | "actorId" | "userId">;
+
+const deviceActor = (device: DeviceRef): Actor => ({
+  actorKind: "device",
+  actorId: device.deviceId,
+  userId: null,
+});
+
+/** Who a run step is attributed to: the requester for "Update now", the system for automatic, else the device. */
+function runActor(row: RunRow, device: DeviceRef): Actor {
+  if (row.trigger === "manual" && row.requestedBy) {
+    return { actorKind: "user", actorId: row.requestedBy, userId: row.requestedBy };
+  }
+  if (row.trigger === "automatic") return { actorKind: "system", actorId: null, userId: null };
+  return deviceActor(device);
+}
+
+async function auditDevice(
+  tx: Tx,
+  deps: MaintenanceDeps,
+  device: DeviceRef,
+  action: string,
+  actor: Actor,
+  metadata: Record<string, unknown>,
+  result: "success" | "error" = "success",
+): Promise<void> {
+  await deps.audit.record(tx, {
+    action,
+    resourceType: "device",
+    resourceId: device.deviceId,
+    deviceId: device.deviceId,
+    result,
+    ...actor,
+    metadata,
+  });
+}
+
+/** Run metadata: versions, outcome, trigger and method; never output, error text or a path. */
+const runMetadata = (row: RunRow) => ({
+  runtime: row.runtime,
+  from: row.fromVersion,
+  to: row.toVersion,
+  candidate: row.candidate,
+  outcome: row.state === "started" ? null : row.state,
+  trigger: row.trigger,
+  method: row.method,
+});
+
+async function auditRun(
+  tx: Tx,
+  deps: MaintenanceDeps,
+  device: DeviceRef,
+  row: RunRow,
+  action: "device.runtime_update_started" | "device.runtime_update_finished",
+): Promise<void> {
+  const failed = row.state === "failed" || row.state === "refused";
+  await auditDevice(
+    tx,
+    deps,
+    device,
+    action,
+    runActor(row, device),
+    runMetadata(row),
+    failed ? "error" : "success",
+  );
+}
+
+async function pingOrg(tx: Tx, deps: MaintenanceDeps, device: DeviceRef, status: string): Promise<void> {
+  await deps.realtime.appendEvent(tx, `org:${device.organizationId}`, EventTypes.deviceUpdated, {
+    deviceId: device.deviceId,
+    status,
+    changed: true,
+  });
+}
+
+async function lockDevice(tx: Tx, device: DeviceRef) {
+  const [row] = await tx
+    .select({ status: devices.status, maintenance: devices.runtimeMaintenance })
+    .from(devices)
+    .where(eq(devices.id, device.deviceId))
+    .for("update");
+  return row ?? null;
+}
+
+// ---------------------------------------------------------------- device → server frames
+
+/**
+ * `runtime.maintenance` (PD-03, PD-06): store the snapshot and the runtimes it reports, audit transitions only
+ * (`available` once per runtime and latest version, `stale` when it turns true, the local level when it changes),
+ * then the id-only `org:` ping.
+ */
+export async function onRuntimeMaintenance(
+  tx: Tx,
+  deps: MaintenanceDeps,
+  device: DeviceRef,
+  frame: RuntimeMaintenanceFrame,
+): Promise<void> {
+  const locked = await lockDevice(tx, device);
+  if (!locked) return;
+  const previous = storedMaintenance(locked.maintenance);
+  const runtimes = scrubDeep(frame.runtimes);
+  const next: StoredMaintenance = {
+    runtimes,
+    localLevel: frame.localLevel,
+    localLevelSource: frame.localLevelSource,
+    effectiveLevel: frame.effectiveLevel,
+    orgLevelReceived: frame.orgLevelReceived,
+    reportedAt: new Date().toISOString(),
+  };
+  await tx
+    .update(devices)
+    .set({ runtimeMaintenance: next, runtimeInfo: scrubDeep(frame.runtimeInfo) })
+    .where(eq(devices.id, device.deviceId));
+
+  const actor = deviceActor(device);
+  for (const s of runtimes) {
+    const before: RuntimeMaintenanceStatus | undefined = previous?.runtimes.find(
+      (p) => p.runtime === s.runtime,
+    );
+    const alreadyBehind = before?.advisory === "behind" && before.latestVersion === s.latestVersion;
+    if (s.advisory === "behind" && s.latestVersion !== null && !alreadyBehind) {
+      await auditDevice(tx, deps, device, "device.runtime_update_available", actor, {
+        runtime: s.runtime,
+        installed: s.installedVersion,
+        candidate: s.latestVersion,
+        candidateCompatibility: s.candidateCompatibility,
+      });
+    }
+    if (s.stale && !before?.stale) {
+      await auditDevice(tx, deps, device, "device.runtime_update_stale", actor, {
+        runtime: s.runtime,
+        installed: s.installedVersion,
+        candidate: s.latestVersion,
+        pendingSince: s.pendingSince,
+      });
+    }
+  }
+  if (previous && previous.localLevel !== frame.localLevel) {
+    await auditDevice(tx, deps, device, "device.runtime_updates_level_changed", actor, {
+      from: previous.localLevel,
+      to: frame.localLevel,
+      source: frame.localLevelSource,
+    });
+  }
+  await pingOrg(tx, deps, device, locked.status);
+}
+
+const byRunId = (device: DeviceRef, runId: string) =>
+  and(eq(deviceRuntimeUpdates.deviceId, device.deviceId), eq(deviceRuntimeUpdates.runId, runId));
+
+/** The `requested` row of this device's "Update now" command `commandId` for `runtime`, not adopted yet. */
+const requestedBy = (device: DeviceRef, runtime: RuntimeId, commandId: string) =>
+  and(
+    eq(deviceRuntimeUpdates.deviceId, device.deviceId),
+    eq(deviceRuntimeUpdates.commandId, commandId),
+    eq(deviceRuntimeUpdates.runtime, runtime),
+    eq(deviceRuntimeUpdates.state, "requested"),
+    isNull(deviceRuntimeUpdates.runId),
+  );
+
+async function runStarted(
+  tx: Tx,
+  deps: MaintenanceDeps,
+  device: DeviceRef,
+  frame: RuntimeUpdateRunFrame,
+): Promise<boolean> {
+  const [known] = await tx
+    .select({ id: deviceRuntimeUpdates.id })
+    .from(deviceRuntimeUpdates)
+    .where(byRunId(device, frame.runId));
+  if (known) return false;
+  const values = {
+    runId: frame.runId,
+    state: "started" as const,
+    fromVersion: frame.fromVersion,
+    toVersion: frame.toVersion,
+    candidate: frame.candidate,
+    method: frame.method,
+    startedAt: frame.at,
+  };
+  let row: RunRow | undefined;
+  // "Update now": the device's run adopts the requested row (its requester stays the actor).
+  if (frame.commandId) {
+    [row] = await tx
+      .update(deviceRuntimeUpdates)
+      .set(values)
+      .where(requestedBy(device, frame.runtime, frame.commandId))
+      .returning();
+  }
+  if (!row) {
+    [row] = await tx
+      .insert(deviceRuntimeUpdates)
+      .values({
+        organizationId: device.organizationId,
+        deviceId: device.deviceId,
+        runtime: frame.runtime,
+        commandId: frame.commandId ?? null,
+        trigger: frame.trigger,
+        ...values,
+      })
+      .onConflictDoNothing({
+        target: [
+          deviceRuntimeUpdates.organizationId,
+          deviceRuntimeUpdates.deviceId,
+          deviceRuntimeUpdates.runId,
+        ],
+      })
+      .returning();
+  }
+  if (!row) return false;
+  await auditRun(tx, deps, device, row, "device.runtime_update_started");
+  return true;
+}
+
+async function runFinished(
+  tx: Tx,
+  deps: MaintenanceDeps,
+  device: DeviceRef,
+  frame: RuntimeUpdateRunFrame,
+): Promise<boolean> {
+  const outcome = frame.outcome!;
+  const finished = {
+    state: outcome,
+    fromVersion: frame.fromVersion,
+    toVersion: frame.toVersion,
+    candidate: frame.candidate,
+    method: frame.method,
+    output: frame.output === undefined ? null : scrubHostPaths(frame.output).slice(0, 4096),
+    finishedAt: frame.at,
+  };
+  const [closed] = await tx
+    .update(deviceRuntimeUpdates)
+    .set(finished)
+    .where(and(byRunId(device, frame.runId), eq(deviceRuntimeUpdates.state, "started")))
+    .returning();
+  if (closed) {
+    await auditRun(tx, deps, device, closed, "device.runtime_update_finished");
+    return true;
+  }
+  // Already finished: a replay from the device's offline log.
+  const [known] = await tx
+    .select({ id: deviceRuntimeUpdates.id })
+    .from(deviceRuntimeUpdates)
+    .where(byRunId(device, frame.runId));
+  if (known) return false;
+
+  // Finished without a started row: a broken candidate skipped before anything ran, or a lost `started`.
+  let row: RunRow | undefined;
+  if (frame.commandId) {
+    [row] = await tx
+      .update(deviceRuntimeUpdates)
+      .set({ runId: frame.runId, ...finished })
+      .where(requestedBy(device, frame.runtime, frame.commandId))
+      .returning();
+  }
+  if (!row && outcome === "skipped_broken") {
+    // Once per candidate: the device reports the same skip at every check.
+    const [latest] = await tx
+      .select({ state: deviceRuntimeUpdates.state, candidate: deviceRuntimeUpdates.candidate })
+      .from(deviceRuntimeUpdates)
+      .where(
+        and(
+          eq(deviceRuntimeUpdates.deviceId, device.deviceId),
+          eq(deviceRuntimeUpdates.runtime, frame.runtime),
+        ),
+      )
+      .orderBy(desc(deviceRuntimeUpdates.createdAt), desc(deviceRuntimeUpdates.id))
+      .limit(1);
+    if (latest?.state === "skipped_broken" && latest.candidate === frame.candidate) return false;
+  }
+  if (!row) {
+    [row] = await tx
+      .insert(deviceRuntimeUpdates)
+      .values({
+        organizationId: device.organizationId,
+        deviceId: device.deviceId,
+        runtime: frame.runtime,
+        runId: frame.runId,
+        commandId: frame.commandId ?? null,
+        trigger: frame.trigger,
+        ...finished,
+      })
+      .onConflictDoNothing({
+        target: [
+          deviceRuntimeUpdates.organizationId,
+          deviceRuntimeUpdates.deviceId,
+          deviceRuntimeUpdates.runId,
+        ],
+      })
+      .returning();
+  }
+  if (!row) return false;
+  if (outcome === "skipped_broken") {
+    await auditDevice(
+      tx,
+      deps,
+      device,
+      "device.runtime_update_skipped",
+      { actorKind: "system", actorId: null, userId: null },
+      runMetadata(row),
+    );
+  } else {
+    await auditRun(tx, deps, device, row, "device.runtime_update_finished");
+  }
+  return true;
+}
+
+/**
+ * `runtime.update.run` (PD-04, PD-06): `started` adopts the "Update now" row it answers or inserts its own; `finished`
+ * closes it with the outcome and the (scrubbed, bounded) output. Idempotent by the device's run id: a replay inserts
+ * nothing and audits nothing.
+ */
+export async function onRuntimeUpdateRun(
+  tx: Tx,
+  deps: MaintenanceDeps,
+  device: DeviceRef,
+  frame: RuntimeUpdateRunFrame,
+): Promise<void> {
+  const locked = await lockDevice(tx, device);
+  if (!locked) return;
+  const changed =
+    frame.phase === "started"
+      ? await runStarted(tx, deps, device, frame)
+      : await runFinished(tx, deps, device, frame);
+  if (changed) await pingOrg(tx, deps, device, locked.status);
+}
+
+// ---------------------------------------------------------------- routes (owner and admins: device.maintain)
+
+/**
+ * `GET /devices/:id/runtime-updates` (the last 50, newest first, optionally one runtime), decided by the resolver on
+ * `device.maintain` (the device owner or an admin, D-11); a device the caller cannot see, or a revoked one, is 404.
+ */
+export function registerDeviceMaintenanceRoutes(
+  app: App,
+  core: Core,
+  _hub: DeviceHub,
+  perms: PermissionService,
+): void {
+  const user = { config: { authz: "user" as const }, preHandler: core.identity.requireUser };
+  const tags = ["device"];
+
+  async function maintainable(req: Parameters<typeof authOf>[0], tx: Tx, deviceId: string) {
+    const userId = authOf(req).userId;
+    const [row] = await tx.select().from(devices).where(eq(devices.id, deviceId)).for("update");
+    if (!row || row.revokedAt) throw notFound("Device not found");
+    await perms.assertCan(
+      req,
+      tx,
+      "device.maintain",
+      deviceFacts(row, userId, await loadDeviceAccess(tx, userId)),
+    );
+    return row;
+  }
+
+  app.get(
+    "/devices/:id/runtime-updates",
+    {
+      ...user,
+      schema: {
+        tags,
+        params: IdParams,
+        querystring: RuntimeUpdateHistoryQuery,
+        response: { 200: RuntimeUpdateRunList },
+      },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), async (tx) => {
+        const row = await maintainable(req, tx, req.params.id);
+        const rows = await tx
+          .select()
+          .from(deviceRuntimeUpdates)
+          .where(
+            and(
+              eq(deviceRuntimeUpdates.deviceId, row.id),
+              ...(req.query.runtime ? [eq(deviceRuntimeUpdates.runtime, req.query.runtime)] : []),
+            ),
+          )
+          .orderBy(desc(deviceRuntimeUpdates.createdAt), desc(deviceRuntimeUpdates.id))
+          .limit(50);
+        const names = await memberDirectory(tx);
+        return { runs: rows.map((r) => toRuntimeUpdateRun(r, names)) };
+      }),
+  );
+}

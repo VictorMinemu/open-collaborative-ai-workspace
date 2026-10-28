@@ -22,6 +22,7 @@ export {
   type DeviceSessionHandler,
   type EnqueueCommand,
   frameFits,
+  type RuntimePolicySource,
 } from "./hub";
 export { looksAbsolute, sanitizeAnnouncements } from "./link";
 export { deviceFacts, normalizePairingCode, toDevice } from "./routes";
@@ -45,6 +46,7 @@ export function createDeviceModule(
     db: core.db,
     bus: core.bus,
     realtime: core.realtime,
+    audit: core.audit,
     log: core.log,
     ...(Number.isFinite(graceEnv) && graceEnv > 0 ? { offlineGraceMs: graceEnv } : {}),
     ...(opts.maxFrameBytes ? { maxFrameBytes: opts.maxFrameBytes } : {}),

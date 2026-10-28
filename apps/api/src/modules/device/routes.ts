@@ -16,6 +16,7 @@ import {
   type RepoTeamProject,
   type RuntimeCompatibilityManifest,
   RuntimeInfo,
+  type RuntimeUpdatesLevel,
   UpdateDeviceRequest,
 } from "@ocw/contracts";
 import {
@@ -43,6 +44,11 @@ import {
 import { type DeviceAccess, loadDeviceAccess } from "./access";
 import { FULL_ACCESS_OPT_IN_MESSAGE, loadGrants, registerDeviceGrantRoutes } from "./grants";
 import type { DeviceHub } from "./hub";
+import {
+  registerDeviceMaintenanceRoutes,
+  storedMaintenance,
+  toDeviceRuntimeMaintenance,
+} from "./maintenance";
 
 export const ENROLLMENT_TTL_MS = 10 * 60_000;
 /** Crockford-ish alphabet without look-alikes (0/O, 1/I/L). */
@@ -97,8 +103,11 @@ export function deviceRuntimeCompatibility(
   return out;
 }
 
-/** Permissions a device card renders controls for (`Device.viewerCan`). */
-const DEVICE_VIEWER_CAN = ["device.use", "device.update", "device.revoke"] as const;
+/**
+ * Permissions a device card renders controls for (`Device.viewerCan`). 07.11: `device.maintain` (the owner or an
+ * admin) also decides whether the device carries `runtimeMaintenance` (D-06, D-11, PD-05).
+ */
+const DEVICE_VIEWER_CAN = ["device.use", "device.update", "device.revoke", "device.maintain"] as const;
 
 async function listDevices(
   req: FastifyRequest,
@@ -106,6 +115,7 @@ async function listDevices(
   perms: PermissionService,
   userId: string,
   manifest: RuntimeCompatibilityManifest,
+  orgLevelOf: (tx: Tx) => Promise<RuntimeUpdatesLevel>,
 ): Promise<Device[]> {
   const access = await loadDeviceAccess(tx, userId);
   const [rows, dir, counts] = await Promise.all([
@@ -120,16 +130,22 @@ async function listDevices(
   const byDevice = new Map(counts.map((c) => [c.deviceId, Number(c.n)]));
   const out: Device[] = [];
   const managed: string[] = [];
+  /** Read once per request, only when some device shows its maintenance. */
+  let orgLevel: RuntimeUpdatesLevel | undefined;
   for (const r of rows) {
     const viewerCan = await perms.viewerCan(req, tx, deviceFacts(r, userId, access), DEVICE_VIEWER_CAN);
     // The list of grants is for the owner (device.update) and admins (device.revoke) only (T-03.2-05-05).
     if (viewerCan.includes("device.update") || viewerCan.includes("device.revoke")) managed.push(r.id);
     const device = toDevice(r, dir.get(r.ownerUserId)?.displayName ?? null, byDevice.get(r.id) ?? 0);
+    // 07.11 (PD-05): install method, location, update command, state and levels only for the owner and admins.
+    const stored = viewerCan.includes("device.maintain") ? storedMaintenance(r.runtimeMaintenance) : null;
+    if (stored) orgLevel ??= await orgLevelOf(tx);
     out.push({
       ...device,
       viewerMaxMode: access.capOf(r),
       viewerCan,
       runtimeCompatibility: deviceRuntimeCompatibility(manifest, device.runtimes),
+      ...(stored && orgLevel ? { runtimeMaintenance: toDeviceRuntimeMaintenance(stored, orgLevel) } : {}),
     });
   }
   const grants = await loadGrants(tx, managed);
@@ -181,6 +197,7 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
   const user = { config: { authz: "user" as const }, preHandler: requireUser };
 
   registerDeviceGrantRoutes(app, core, hub, perms);
+  registerDeviceMaintenanceRoutes(app, core, hub, perms);
 
   app.post(
     "/devices/enrollments",
@@ -272,7 +289,7 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
     },
     async (req) => ({
       devices: await core.db.withTenant(tenant(req), (tx) =>
-        listDevices(req, tx, perms, authOf(req).userId, hub.runtimeManifest),
+        listDevices(req, tx, perms, authOf(req).userId, hub.runtimeManifest, (t) => hub.runtimePolicy(t)),
       ),
     }),
   );

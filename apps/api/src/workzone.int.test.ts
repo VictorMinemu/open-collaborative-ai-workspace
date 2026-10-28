@@ -746,17 +746,23 @@ describe("devices and Work Zone on the permission resolver", () => {
 
     const adminDeviceId = (await listDevices(admin)).find((d) => d.id !== alexDeviceId)!.id;
     const asAdmin = await listDevices(admin);
-    expect(asAdmin.find((d) => d.id === alexDeviceId)!.viewerCan).toEqual(["device.revoke"]);
+    // 07.11: `device.maintain` (update the coding CLIs) is the owner's and every admin's, like revoke.
+    expect(asAdmin.find((d) => d.id === alexDeviceId)!.viewerCan).toEqual([
+      "device.revoke",
+      "device.maintain",
+    ]);
     expect(asAdmin.find((d) => d.id !== alexDeviceId)!.viewerCan).toEqual([
       "device.use",
       "device.update",
       "device.revoke",
+      "device.maintain",
     ]);
     const asAlex = await listDevices(alex);
     expect(asAlex.find((d) => d.id === alexDeviceId)!.viewerCan).toEqual([
       "device.use",
       "device.update",
       "device.revoke",
+      "device.maintain",
     ]);
     expect(asAlex.find((d) => d.id === adminDeviceId)!.viewerCan).toEqual([]);
 

@@ -207,6 +207,10 @@ export function registerDeviceLink(app: App, core: Core, hub: DeviceHub): void {
             return hub.onTitleResult(device, frame);
           case "capabilities":
             return hub.onCapabilities(device, frame);
+          case "runtime.maintenance":
+            return hub.onRuntimeMaintenance(device, frame);
+          case "runtime.update.run":
+            return hub.onRuntimeUpdateRun(device, frame);
         }
       };
 

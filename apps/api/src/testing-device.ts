@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 
 /**
@@ -127,6 +128,56 @@ export class FakeDevice {
     this.send({ type: "title.result", requestId, sessionId, title, model });
   }
 
+  /**
+   * 07.11: report the runtimes' maintenance snapshot (PD-03). Defaults: Claude Code 2.1.300 native and current, Codex
+   * 0.160.0 standalone and current, levels `automatic` from the config, the org level received.
+   */
+  maintenance(frame: Record<string, unknown> = {}) {
+    this.send({
+      type: "runtime.maintenance",
+      runtimes: [
+        maintenanceStatus(),
+        maintenanceStatus({
+          runtime: "codex",
+          installedVersion: "0.160.0",
+          method: "codex_standalone",
+          location: "~/.codex/packages/standalone",
+          updateCommand: "codex update",
+          latestVersion: "0.160.0",
+        }),
+      ],
+      runtimeInfo: [
+        { id: "claude-code", installed: true, version: "2.1.300", loggedIn: true },
+        { id: "codex", installed: true, version: "0.160.0", loggedIn: false },
+      ],
+      localLevel: "automatic",
+      localLevelSource: "config",
+      effectiveLevel: "automatic",
+      orgLevelReceived: true,
+      ...frame,
+    });
+  }
+
+  /**
+   * 07.11: report one update run phase (PD-03, PD-06). Defaults: a new run id, Claude Code, automatic, `started`,
+   * 2.1.290 → candidate 2.1.300, native. Pass `phase: "finished"` with an `outcome`.
+   */
+  updateRun(frame: Record<string, unknown> = {}) {
+    this.send({
+      type: "runtime.update.run",
+      runId: randomUUID(),
+      runtime: "claude-code",
+      trigger: "automatic",
+      phase: "started",
+      fromVersion: "2.1.290",
+      toVersion: null,
+      candidate: "2.1.300",
+      method: "native",
+      at: new Date().toISOString(),
+      ...frame,
+    });
+  }
+
   seq = Date.now() * 1000;
   event(sessionId: string, event: Record<string, unknown>, localSeq = ++this.seq) {
     this.send({ type: "event", sessionId, localSeq, event });
@@ -139,6 +190,30 @@ export class FakeDevice {
       this.ws.close();
     });
   }
+}
+
+/** 07.11: one runtime's maintenance status as a device reports it (`RuntimeMaintenanceStatus`), with overrides. */
+export function maintenanceStatus(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    runtime: "claude-code",
+    installedVersion: "2.1.300",
+    method: "native",
+    location: "~/.local/bin",
+    canUpdate: true,
+    reason: null,
+    updateCommand: "claude update",
+    channel: "latest",
+    latestVersion: "2.1.300",
+    advisory: "current",
+    installedCompatibility: "supported",
+    candidateCompatibility: "supported",
+    state: "idle",
+    pendingSince: null,
+    stale: false,
+    lastRun: null,
+    checkedAt: new Date().toISOString(),
+    ...over,
+  };
 }
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
