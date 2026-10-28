@@ -4,6 +4,8 @@
 //
 // No host path leaves the device: this module sends only the package name and the dist-tag.
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { parseRuntimeVersion, type RuntimeId, RuntimeVersion, type UpdateChannel } from "@ocw/contracts";
 import { z } from "zod";
 import type { InstallResolution } from "./install-method.js";
@@ -121,10 +123,30 @@ export class RegistryClient {
   }
 }
 
-/** The dist-tag the install follows (PD-10). Task 1: every install follows `latest`. */
+/**
+ * The dist-tag the install follows (PD-10, Pitfall 6): Homebrew `claude-code` → `stable` (`claude-code@latest` →
+ * `latest`); native Claude → `stable` when `~/.claude/settings.json` says `"autoUpdatesChannel": "stable"`; everything
+ * else (npm, Codex) → `latest`. Codex has many prerelease tags, so only `latest` is ever read.
+ */
 export function channelFor(
-  _resolution: Pick<InstallResolution, "runtime" | "method" | "brewName">,
-  _home: string,
+  resolution: Pick<InstallResolution, "runtime" | "method" | "brewName">,
+  home: string,
 ): UpdateChannel {
+  if (resolution.runtime !== "claude-code") return "latest";
+  if (resolution.method === "homebrew_cask")
+    return resolution.brewName === "claude-code" ? "stable" : "latest";
+  if (resolution.method === "native") return nativeClaudeChannel(home);
   return "latest";
+}
+
+/** `autoUpdatesChannel` from `~/.claude/settings.json` (read tolerantly: anything unexpected is `latest`). */
+function nativeClaudeChannel(home: string): UpdateChannel {
+  try {
+    const settings = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8")) as unknown;
+    return (settings as { autoUpdatesChannel?: unknown } | null)?.autoUpdatesChannel === "stable"
+      ? "stable"
+      : "latest";
+  } catch {
+    return "latest";
+  }
 }
