@@ -150,6 +150,7 @@ export function updateNowBlock(device: Device, s: RuntimeMaintenanceStatus): str
   if (device.runtimeMaintenance?.effectiveLevel === "off") return "Runtime updates are off";
   if (s.state === "pending") return "An update is waiting for an idle moment";
   if (s.state !== "idle") return "An update is in progress";
+  if (s.advisory === "current") return "Already up to date";
   return null;
 }
 

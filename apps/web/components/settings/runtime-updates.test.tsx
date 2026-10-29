@@ -253,6 +253,17 @@ describe("DeviceRuntimeUpdates", () => {
     );
   });
 
+  it("disables Update now on a runtime that is already current, and keeps it when the latest version is unknown", () => {
+    const d = device();
+    d.runtimeMaintenance = { ...d.runtimeMaintenance!, runtimes: [status({ advisory: "current" })] };
+    expect(render(<DeviceRuntimeUpdates device={d} />)).toContain('title="Already up to date"');
+    d.runtimeMaintenance = {
+      ...d.runtimeMaintenance,
+      runtimes: [status({ advisory: "unknown", latestVersion: null })],
+    };
+    expect(render(<DeviceRuntimeUpdates device={d} />)).not.toContain('title="Already up to date"');
+  });
+
   it("offers no button to a viewer without device.maintain, and no block without runtimeMaintenance", () => {
     const html = render(<DeviceRuntimeUpdates device={device({ viewerCan: ["device.update"] })} />);
     expect(count(html, 'data-testid="runtime-update-row"')).toBe(2);
