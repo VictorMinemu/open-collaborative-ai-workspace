@@ -74,6 +74,8 @@ steps:
       - rm -rf "$${W}" && mkdir -p "$${W}" && cp -a . "$${W}/"
       - cd "$${W}" && pnpm install --frozen-lockfile --store-dir "$${PNPM_STORE}"
       - pnpm --dir apps/web build
+      # The Local Runtime bundle the API serves (07.12; the headless-server spec installs it).
+      - pnpm --filter @ocw/local-runtime build:bundle
       # Chromium and its system packages are baked into ocw-ci at the locked version; this only checks it.
       - pnpm exec playwright install chromium
 

@@ -310,6 +310,9 @@ if [ "$sandbox" -eq 1 ]; then
 fi
 
 # ---------------------------------------------------------------- fake server + API + web
+# The Local Runtime bundle the API serves (07.12): built from this checkout before the API starts, because the API keeps
+# the first verified bundle until it restarts and the headless-server spec installs it.
+pnpm --filter @ocw/local-runtime build:bundle >"$RUN_DIR/bundle.log" 2>&1 || { cat "$RUN_DIR/bundle.log"; exit 1; }
 (PORT="$FAKE_PORT" FAKE_MODEL_HOST=127.0.0.1 FAKE_MCP_TOKEN="$OCW_E2E_FAKE_MCP_TOKEN" FAKE_SANDBOX_TOKEN="$FAKE_SANDBOX_TOKEN" \
   nohup node infra/fake-model/server.mjs >"$RUN_DIR/fake.log" 2>&1 & echo $! >"$RUN_DIR/fake.pid")
 (cd apps/api && nohup node --env-file-if-exists=../../.env --import tsx src/main.ts >"$RUN_DIR/api.log" 2>&1 & echo $! >"$RUN_DIR/api.pid")
