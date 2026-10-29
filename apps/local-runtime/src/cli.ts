@@ -211,6 +211,30 @@ async function updates(sub: string | undefined, arg: string | undefined): Promis
   process.exitCode = 1;
 }
 
+/**
+ * `remove-project <dir|name|id>` (07.12, D-07): resolved against projects.json, then removed through the running daemon
+ * (which tells the server at once), or straight from projects.json when the daemon is down (the server learns it from
+ * `projects.sync` on the next connect). An ambiguous or unknown name fails listing the candidates.
+ */
+async function removeProject(ref: string | undefined): Promise<void> {
+  if (!ref) throw new Error("usage: ocw-runtime remove-project <dir|name|id>");
+  const home = ocwHome();
+  const registry = new ProjectRegistry(home);
+  await registry.load();
+  const project = await registry.resolveRef(ref);
+  try {
+    const res = await controlRequest(controlSocketPath(home), {
+      cmd: "removeProject",
+      localId: project.localId,
+    });
+    if (!res.ok) throw new Error(res.error ?? "request failed");
+  } catch (err) {
+    if (!daemonDown(err)) throw err;
+    await registry.remove(project.localId);
+  }
+  process.stdout.write(`Removed "${project.name}" (${project.localId}).\n`);
+}
+
 const ENROLL_USAGE = "usage: ocw-runtime enroll [--server <url>] [--code <XXXX-XXXX>] [--name <name>]";
 
 /**
@@ -324,11 +348,8 @@ async function main(argv: string[]): Promise<void> {
       return fullAccess(rest[0]);
     case "updates":
       return updates(rest[0], rest[1]);
-    case "remove-project": {
-      const localId = rest[0];
-      if (!localId) throw new Error("usage: ocw-runtime remove-project <localId>");
-      return viaSocket({ cmd: "removeProject", localId });
-    }
+    case "remove-project":
+      return removeProject(rest[0]);
     default:
       throw new Error(`unknown command: ${cmd}`);
   }

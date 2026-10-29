@@ -499,3 +499,124 @@ describe("ocw-runtime enroll (07.12-03, D-03)", () => {
     expect(existsSync(join(home, "device-token"))).toBe(false);
   }, 30_000);
 });
+
+// ---------------------------------------------------------------------------------------------
+// 07.12-03 `ocw-runtime remove-project <dir|name|id>` (D-07) with the daemon up or down, and the headless "not paired"
+// line of an unpaired daemon.
+
+describe("ocw-runtime remove-project (07.12-03, D-07)", () => {
+  /** An OCW home plus three project directories; `api` exists twice. */
+  function projectsHome(): { home: string; root: string } {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(root);
+    const home = join(root, "ocw");
+    for (const d of ["one/api", "two/api", "web", "docs"]) mkdirSync(join(root, d), { recursive: true });
+    return { home, root };
+  }
+  const env = { OCW_RUNTIME_REGISTRY_URL: "http://127.0.0.1:9" };
+  async function add(home: string, dir: string): Promise<{ localId: string; name: string }> {
+    const r = await cliAsync(home, ["add-project", dir], env);
+    expect(r.code, r.stderr).toBe(0);
+    return JSON.parse(r.stdout) as { localId: string; name: string };
+  }
+  const registered = (home: string) =>
+    (
+      JSON.parse(readFileSync(join(home, "projects.json"), "utf8")) as {
+        projects: Array<{ localId: string }>;
+      }
+    ).projects;
+
+  it("daemon down: removes by directory, by name and by id straight from projects.json (0600 kept)", async () => {
+    const { home, root } = projectsHome();
+    const api1 = await add(home, join(root, "one", "api"));
+    const api2 = await add(home, join(root, "two", "api"));
+    const web = await add(home, join(root, "web"));
+    const docs = await add(home, join(root, "docs"));
+
+    const byDir = await cliAsync(home, ["remove-project", join(root, "one", "api")], env);
+    expect(byDir.code, byDir.stderr).toBe(0);
+    expect(byDir.stdout).toContain(`Removed "api" (${api1.localId})`);
+    const byName = await cliAsync(home, ["remove-project", "web"], env);
+    expect(byName.code, byName.stderr).toBe(0);
+    expect(byName.stdout).toContain(`Removed "web" (${web.localId})`);
+    const byId = await cliAsync(home, ["remove-project", docs.localId], env);
+    expect(byId.code, byId.stderr).toBe(0);
+    expect(byId.stdout).toContain(`Removed "docs" (${docs.localId})`);
+
+    expect(registered(home).map((p) => p.localId)).toEqual([api2.localId]);
+    expect(statSync(join(home, "projects.json")).mode & 0o777).toBe(0o600);
+
+    const unknown = await cliAsync(home, ["remove-project", "nope"], env);
+    expect(unknown.code).toBe(1);
+    expect(unknown.stderr).toContain('no registered project matches "nope"');
+    expect(unknown.stderr).toContain(`api (${api2.localId})`);
+    const usage = await cliAsync(home, ["remove-project"], env);
+    expect(usage.code).toBe(1);
+    expect(usage.stderr).toContain("usage: ocw-runtime remove-project <dir|name|id>");
+  }, 60_000);
+
+  it("an ambiguous name fails listing the candidates and removes nothing", async () => {
+    const { home, root } = projectsHome();
+    const api1 = await add(home, join(root, "one", "api"));
+    const api2 = await add(home, join(root, "two", "api"));
+    const r = await cliAsync(home, ["remove-project", "api"], env);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain(
+      `ambiguous: api (${api1.localId}), api (${api2.localId}); use the id or the directory`,
+    );
+    expect(registered(home)).toHaveLength(2);
+  }, 30_000);
+
+  it("daemon up: the removal goes through the daemon, whose registry no longer lists it", async () => {
+    const { home, root } = projectsHome();
+    const userHome = join(root, "user");
+    mkdirSync(userHome);
+    const daemon = await Daemon.create({
+      home,
+      env: { HOME: userHome, PATH: "/usr/bin:/bin", ...env },
+      token: null,
+      runtimes: [stubRuntime("claude-code")],
+      logger: silentLogger,
+      maintenance: { userHome, which: () => null },
+    });
+    try {
+      await daemon.start();
+      const web = await add(home, join(root, "web"));
+      const docs = await add(home, join(root, "docs"));
+      const r = await cliAsync(home, ["remove-project", "web"], env);
+      expect(r.code, r.stderr).toBe(0);
+      expect(r.stdout).toContain(`Removed "web" (${web.localId})`);
+      const listed = await cliAsync(home, ["projects"], env);
+      expect((JSON.parse(listed.stdout) as Array<{ localId: string }>).map((p) => p.localId)).toEqual([
+        docs.localId,
+      ]);
+    } finally {
+      await daemon.stop();
+    }
+  }, 60_000);
+});
+
+describe("an unpaired daemon (07.12-03)", () => {
+  it("tells a headless owner to pair with ocw-runtime setup (or the desktop app)", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(home);
+    const warnings: string[] = [];
+    const daemon = await Daemon.create({
+      home,
+      env: { HOME: home, PATH: "/usr/bin:/bin", OCW_RUNTIME_UPDATES: "off" },
+      token: null,
+      runtimes: [stubRuntime("claude-code")],
+      logger: { ...silentLogger, warn: (msg) => warnings.push(msg) },
+      controlSocket: false,
+      maintenance: { userHome: home, which: () => null },
+    });
+    try {
+      await daemon.start();
+      expect(warnings).toContain(
+        "no device token found; pair this device with `ocw-runtime setup` (or from the desktop app), then restart the runtime",
+      );
+    } finally {
+      await daemon.stop();
+    }
+  });
+});
