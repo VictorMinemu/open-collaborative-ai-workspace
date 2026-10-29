@@ -334,6 +334,31 @@ describe("manifest", () => {
     const twin = { ...newer };
     expect(newerManifest(newer, twin)).toBe(newer);
   });
+
+  it("newerManifest never lifts a broken range of the older copy: broken wins (07.11 review LO-01)", () => {
+    const claude = RUNTIME_COMPATIBILITY_MANIFEST.runtimes["claude-code"];
+    const bundled = {
+      ...RUNTIME_COMPATIBILITY_MANIFEST,
+      updatedAt: "2026-11-01T00:00:00.000Z",
+      runtimes: {
+        ...RUNTIME_COMPATIBILITY_MANIFEST.runtimes,
+        "claude-code": {
+          ...claude,
+          ranges: [
+            { bounds: { min: "2.1.300", maxExclusive: "2.1.301" }, status: "broken" as const },
+            ...claude.ranges,
+          ],
+        },
+      },
+    };
+    const server = { ...RUNTIME_COMPATIBILITY_MANIFEST, updatedAt: "2026-12-01T00:00:00.000Z" };
+    for (const merged of [newerManifest(bundled, server), newerManifest(server, bundled)]) {
+      expect(merged.updatedAt).toBe("2026-12-01T00:00:00.000Z");
+      expect(compatibilityOf(merged, "claude-code", "2.1.300")).toBe("broken");
+      expect(compatibilityOf(merged, "claude-code", "2.1.301")).toBe("supported");
+      expect(RuntimeCompatibilityManifest.safeParse(merged).success).toBe(true);
+    }
+  });
 });
 
 describe("levels", () => {

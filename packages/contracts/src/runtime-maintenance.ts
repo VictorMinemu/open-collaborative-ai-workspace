@@ -204,12 +204,30 @@ export function compatibilityOf(
   return compareRuntimeVersions(version, highest) >= 0 ? "supported" : "unsupported";
 }
 
-/** The manifest with the later `updatedAt`; a tie keeps `a` (the device passes its bundled copy as `a`). */
+/**
+ * The manifest with the later `updatedAt` (a tie keeps `a`; the device passes its bundled copy as `a`), keeping every
+ * `broken` range of the other copy in front of its ranges (07.11 review LO-01): a manifest can only block, so a later
+ * copy that lacks a broken range never re-enables that version.
+ */
 export function newerManifest(
   a: RuntimeCompatibilityManifest,
   b: RuntimeCompatibilityManifest,
 ): RuntimeCompatibilityManifest {
-  return Date.parse(b.updatedAt) > Date.parse(a.updatedAt) ? b : a;
+  const bNewer = Date.parse(b.updatedAt) > Date.parse(a.updatedAt);
+  const newer = bNewer ? b : a;
+  const older = bNewer ? a : b;
+  let changed = false;
+  const runtimes = { ...newer.runtimes };
+  for (const id of Object.keys(runtimes) as RuntimeId[]) {
+    const own = new Set(newer.runtimes[id].ranges.map((r) => JSON.stringify(r)));
+    const keep = older.runtimes[id].ranges.filter(
+      (r) => r.status === "broken" && !own.has(JSON.stringify(r)),
+    );
+    if (keep.length === 0) continue;
+    changed = true;
+    runtimes[id] = { ...newer.runtimes[id], ranges: [...keep, ...newer.runtimes[id].ranges] };
+  }
+  return changed ? { ...newer, runtimes } : newer;
 }
 
 // ---- install methods, states, runs (D-01, D-05, D-08, PD-09) ----
