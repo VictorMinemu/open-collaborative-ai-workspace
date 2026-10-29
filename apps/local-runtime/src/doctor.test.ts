@@ -18,8 +18,10 @@ import {
   type DoctorDeps,
   DoctorReport,
   doctorExitCode,
+  formatDoctorJson,
   formatDoctorText,
   runDoctor,
+  safeLine,
 } from "./doctor.js";
 import type { RuntimeInstallInfo } from "./install-info.js";
 import type { ServiceEnvSummary, ServiceStatus } from "./service/types.js";
@@ -608,5 +610,102 @@ describe("createDoctorDeps (07.12, PD-12)", () => {
       rmSync(home, { recursive: true, force: true });
       rmSync(repo, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------- Task 3
+
+describe("doctor output is safe to paste (07.12, D-05, principle 7, T-07.12-05-01..03)", () => {
+  const ENV_VALUE = "sk-ant-oat01-SECRETvalue123";
+  const JWT = "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJkZXZpY2UifQ.c2lnbmF0dXJlLXNlY3JldA";
+
+  function planted(): DoctorDeps & { requests: Recorded[] } {
+    return deps({
+      controlStatus: async () => null,
+      projects: async () => [
+        { name: "payments", path: "/srv/repos/payments", exists: true, isGitRepo: true },
+        { name: "app", path: `${HOME}/src/app`, exists: true, isGitRepo: true },
+      ],
+      git: async () => {
+        throw new Error(`spawn failed at /opt/secret/path/git with ${TOKEN}`);
+      },
+      detectClaude: async () => {
+        throw new Error(
+          `auth status said CLAUDE_CODE_OAUTH_TOKEN=${ENV_VALUE} in ${HOME}/.claude/.credentials.json`,
+        );
+      },
+      detectCodex: async () => {
+        throw new Error(`proxy replied Authorization: Bearer ${JWT}`);
+      },
+      service: async () => ({
+        ...serviceActive,
+        manager: "none",
+        installed: false,
+        active: null,
+        unitPath: null,
+        reason: `no systemd; tried /run/systemd/system and ${HOME}/.config/systemd/user`,
+      }),
+      serviceEnv: async () => ({ status: "loaded", keys: ["CLAUDE_CODE_OAUTH_TOKEN"], invalidLines: 0 }),
+    });
+  }
+
+  it("never prints a token, a JWT, a service.env value or an absolute path outside the home", async () => {
+    const report = await runDoctor(planted());
+    const text = formatDoctorText(report);
+    const json = formatDoctorJson(report);
+    for (const out of [text, json]) {
+      for (const forbidden of [
+        "ocwd_SECRET",
+        "sk-ant-oat01-SECRET",
+        "/srv/repos",
+        "/opt/secret",
+        "/run/systemd",
+        `${HOME}/`,
+        "Bearer ey",
+        "eyJhbGciOiJFZERTQSJ9",
+      ]) {
+        expect(out, forbidden).not.toContain(forbidden);
+      }
+    }
+    const projects = check(report, "projects").summary;
+    expect(projects).toContain("payments (<outside home>)");
+    expect(projects).toContain("app (~/src/app)");
+    expect(check(report, "claude-code").summary).toContain("~/.claude/.credentials.json");
+    expect(DoctorReport.parse(JSON.parse(json))).toEqual(report);
+  });
+
+  it("asks the server exactly three things: health, the version and the token exchange (bearer only, no body)", async () => {
+    const d = planted();
+    await runDoctor(d);
+    expect(d.requests.map((r) => `${r.method} ${r.path}`).sort()).toEqual([
+      "GET /api/v1/runtime/version",
+      "GET /health",
+      "POST /api/v1/devices/token",
+    ]);
+    for (const r of d.requests) {
+      expect(r.body).toBeNull();
+      expect(r.authorization).toBe(r.path === "/api/v1/devices/token" ? `Bearer ${TOKEN}` : null);
+    }
+  });
+
+  it("safeLine redacts, keeps the home relative, hides other absolute paths, keeps URLs and is idempotent", () => {
+    const line =
+      `token ${TOKEN} at /srv/repos/x (see ${HOME}/src/app and '/opt/a b'), ` +
+      "https://ocw.example.com/settings/devices, http://127.0.0.1:4290/health, ~/.ocw/service.env, src/app, " +
+      `Bearer ${JWT} /etc/systemd/system/ocw-runtime.service`;
+    const once = safeLine(line, HOME);
+    expect(once).not.toContain("ocwd_SECRET");
+    expect(once).not.toContain("/srv/repos");
+    expect(once).not.toContain("/opt/a");
+    expect(once).not.toContain(HOME);
+    expect(once).toContain("~/src/app");
+    expect(once).toContain("<outside home>");
+    expect(once).toContain("https://ocw.example.com/settings/devices");
+    expect(once).toContain("http://127.0.0.1:4290/health");
+    expect(once).toContain("~/.ocw/service.env");
+    expect(once).toContain(" src/app");
+    expect(once).toContain("/etc/systemd/system/ocw-runtime.service");
+    expect(once).not.toContain(JWT);
+    expect(safeLine(once, HOME)).toBe(once);
   });
 });

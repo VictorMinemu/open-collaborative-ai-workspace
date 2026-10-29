@@ -37,6 +37,7 @@ import { findExecutable } from "./exec-path.js";
 import { isGitRepo } from "./git.js";
 import { installedBundlePath, type RuntimeInstallInfo, readInstallInfo } from "./install-info.js";
 import { errorMessage } from "./logger.js";
+import { contain, redact } from "./sanitize.js";
 import type { ServiceEnvSummary, ServiceStatus } from "./service/types.js";
 
 // ---------------------------------------------------------------- report (local only, never sent anywhere)
@@ -343,7 +344,7 @@ async function checkRuntime(ctx: Context): Promise<Finding> {
   if (!served) {
     return warn(
       `${installed}; could not compare with the server`,
-      "Check the server check below; the version route is `GET /api/v1/runtime/version`",
+      "Fix the server check below, then re-run `ocw-runtime doctor`",
     );
   }
   if (served.sha256 !== installedSha) {
@@ -694,22 +695,55 @@ export async function runDoctor(deps: DoctorDeps): Promise<DoctorReport> {
   const config = await ctx.config().catch(() => null);
   const counts = { ok: 0, warn: 0, fail: 0 };
   for (const c of checks) counts[c.status] += 1;
+
+  // Every string of the report goes through the same rule here, so the text and the JSON are equally safe (T-05-01/02).
+  const token = await ctx.token().catch(() => null);
+  const home = attempt(() => deps.homeDir(), "");
+  const safe = (text: string): string => {
+    const scrubbed = token && token.length >= 8 ? text.split(token).join(DEVICE_TOKEN_PLACEHOLDER) : text;
+    return safeLine(scrubbed, home);
+  };
   return {
-    account: safeAccount(deps),
-    device: config ? configDeviceName(config) : null,
-    checks,
-    link: config?.webUrl ? `${trimSlash(config.webUrl)}/settings/devices` : null,
+    account: safe(attempt(() => deps.account(), "unknown")),
+    device: config ? safe(configDeviceName(config)) : null,
+    checks: checks.map((c) => ({ ...c, summary: safe(c.summary), fix: c.fix === null ? null : safe(c.fix) })),
+    link: config?.webUrl ? safe(`${trimSlash(config.webUrl)}/settings/devices`) : null,
     counts,
-    checkedAt: deps.now().toISOString(),
+    checkedAt: attempt(() => deps.now(), new Date()).toISOString(),
   };
 }
 
-function safeAccount(deps: DoctorDeps): string {
+function attempt<T>(fn: () => T, fallback: T): T {
   try {
-    return deps.account();
+    return fn();
   } catch {
-    return "unknown";
+    return fallback;
   }
+}
+
+// ---------------------------------------------------------------- safe output (D-05, principle 7)
+
+const DEVICE_TOKEN_PLACEHOLDER = "[REDACTED:device-token]";
+/** A raw device token (`ocwd_…`), whichever token it is: redact() does not know this prefix. */
+const DEVICE_TOKEN_RE = /\bocwd_[A-Za-z0-9_-]{8,}/g;
+/**
+ * An absolute POSIX path: a `/` followed by a path character, at the start or after a separator. A URL's `//host` and
+ * its path never match (the `/` after a scheme's `:` is followed by another `/`; a URL path follows a host character).
+ */
+const ABSOLUTE_PATH_RE = /(^|[\s"'`(=:,[<{])(\/[A-Za-z0-9._~@+%-][^\s"'`()<>,;\]}]*)/g;
+/** Fixed system paths that say nothing about this host (the system unit's documented location). */
+const PUBLIC_ABSOLUTE_PATHS: ReadonlySet<string> = new Set(["/etc/systemd/system/ocw-runtime.service"]);
+
+/**
+ * One line made safe to paste: secrets redacted (`redact()` plus device tokens), paths under `home` shown as `~/…`
+ * (`contain()`), any other absolute path replaced with `<outside home>`; URLs with a scheme are kept. Idempotent.
+ */
+export function safeLine(text: string, home: string): string {
+  const redacted = redact(text).replace(DEVICE_TOKEN_RE, DEVICE_TOKEN_PLACEHOLDER);
+  const contained = contain(redacted, [], home);
+  return contained.replace(ABSOLUTE_PATH_RE, (match, lead: string, path: string) =>
+    PUBLIC_ABSOLUTE_PATHS.has(path) ? match : `${lead}<outside home>`,
+  );
 }
 
 // ---------------------------------------------------------------- production probes
