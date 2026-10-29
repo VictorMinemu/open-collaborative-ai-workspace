@@ -23,6 +23,7 @@ import {
   compareRuntimeVersions,
   compatibilityOf,
   effectiveRuntimeUpdatesLevel,
+  type InstallMethod,
   newerManifest,
   RUNTIME_COMPATIBILITY_MANIFEST,
   type RuntimeCompatibilityManifest,
@@ -80,6 +81,19 @@ export const ORG_LEVEL_GRACE_MS = 30_000;
 export const MAX_RUN_OUTPUT_CHARS = 4096;
 
 export const REFUSED_OUTSIDE_SCRATCH_HOME = "refused outside a scratch home";
+/** A run that ended on a version the manifest marks broken (07.11 review HI-02): failed, never succeeded. */
+export const INSTALLED_BROKEN = "installed a version marked broken";
+
+/**
+ * Installers that pick the version themselves when they run (`claude update`, `codex update`, `brew upgrade`), so the
+ * checked candidate does not bind them: the latest is asked again right before they run (07.11 review HI-02).
+ */
+const SELF_CHOOSING_METHODS: ReadonlySet<InstallMethod> = new Set<InstallMethod>([
+  "native",
+  "codex_standalone",
+  "homebrew_cask",
+  "homebrew_formula",
+]);
 
 /**
  * The answers "Update now" gets when the device will not run it (D-05, PD-08); each is the ack's error text, the
@@ -292,6 +306,8 @@ export class RuntimeMaintenance {
   setOrgPolicy(level: RuntimeUpdatesLevel, manifest: RuntimeCompatibilityManifest): void {
     this.orgLevel = level;
     this.manifest = newerManifest(this.manifest, manifest);
+    // At once, not after the next check's registry request: a job whose candidate is now broken never runs.
+    for (const r of this.runtimes) this.dropIfBroken(r.id, this.stateOf(r.id));
     this.allowRegistry();
     if (this.started) void this.check();
   }
@@ -480,7 +496,9 @@ export class RuntimeMaintenance {
    */
   private revalidatePending(runtime: RuntimeId, st: RuntimeState): void {
     const job = st.job;
-    if (!job || st.state !== "pending") return;
+    if (!job) return;
+    if (this.dropIfBroken(runtime, st)) return;
+    if (st.state !== "pending") return;
     if (st.installedVersion !== null && compareRuntimeVersions(st.installedVersion, job.candidate) >= 0) {
       this.dropJob(st);
       return;
@@ -495,15 +513,36 @@ export class RuntimeMaintenance {
     }
   }
 
-  /** D-04: a broken candidate is never installed; one `skipped_broken` run frame per candidate. */
-  private skipBroken(runtime: RuntimeId, st: RuntimeState, candidate: string): void {
-    if (st.skippedBroken.has(candidate)) return;
+  /**
+   * D-04 (07.11 review HI-02): a job that has not started its run and whose candidate the current manifest marks
+   * broken is dropped and reported `skipped_broken`; a draining one reopens the gate and releases the held sessions.
+   */
+  private dropIfBroken(runtime: RuntimeId, st: RuntimeState): boolean {
+    const job = st.job;
+    if (!job || (st.state !== "pending" && st.state !== "draining")) return false;
+    if (compatibilityOf(this.manifest, runtime, job.candidate) !== "broken") return false;
+    const wasDraining = st.state === "draining";
+    this.dropJob(st);
+    if (wasDraining) this.releaseHeld(runtime, st);
+    this.skipBroken(runtime, st, job.candidate, job);
+    void this.publish(true);
+    return true;
+  }
+
+  /**
+   * D-04: a broken candidate is never installed; one `skipped_broken` run frame per candidate (an "Update now" job
+   * always gets its own, with its command id, so its request is closed).
+   */
+  private skipBroken(runtime: RuntimeId, st: RuntimeState, candidate: string, job?: Job): void {
+    const commandId = job?.commandId && z.uuid().safeParse(job.commandId).success ? job.commandId : null;
+    if (st.skippedBroken.has(candidate) && commandId === null) return;
     st.skippedBroken.add(candidate);
     this.sendRun({
       type: "runtime.update.run",
       runId: randomUUID(),
       runtime,
-      trigger: "automatic",
+      trigger: job?.trigger ?? "automatic",
+      ...(commandId ? { commandId } : {}),
       phase: "finished",
       outcome: "skipped_broken",
       fromVersion: st.installedVersion,
@@ -709,6 +748,8 @@ export class RuntimeMaintenance {
     }
     const adapter = this.adapterOf(runtime);
     const runId = randomUUID();
+    // Running from here on: nothing else drops this job or reopens the gate behind its back while it awaits.
+    st.state = "running";
     let resolution: InstallResolution;
     try {
       resolution = this.resolve(runtime);
@@ -719,8 +760,18 @@ export class RuntimeMaintenance {
         error: scrubHostPaths(errorMessage(err)),
       });
     }
+    // D-04 (07.11 review HI-02), right before anything runs: the candidate is still not broken, and an installer that
+    // picks its own version (`claude update`, `codex update`, `brew upgrade`) would not land on a release published,
+    // and marked broken, since the check.
+    const broken = await this.brokenBeforeRun(runtime, job, resolution);
+    if (broken !== null) {
+      this.dropJob(st);
+      this.releaseHeld(runtime, st);
+      this.skipBroken(runtime, st, broken, job);
+      await this.publish(true);
+      return;
+    }
     const fromVersion = st.installedVersion;
-    st.state = "running";
     const base = {
       type: "runtime.update.run" as const,
       runId,
@@ -774,6 +825,14 @@ export class RuntimeMaintenance {
         output: "",
         error: scrubHostPaths(errorMessage(err)),
       };
+    }
+    // Verify after (RESEARCH Pitfall 7, 07.11 review HI-02): a run that ended on a version the manifest marks broken
+    // is a failure, never a success, so the audit carries `result: "error"` and the held sessions are told it failed.
+    if (
+      result.outcome === "succeeded" &&
+      compatibilityOf(this.manifest, runtime, result.toVersion) === "broken"
+    ) {
+      result = { ...result, outcome: "failed", error: INSTALLED_BROKEN };
     }
     try {
       adapter.refreshInstall?.();
@@ -829,6 +888,19 @@ export class RuntimeMaintenance {
     } catch (err) {
       this.log.warn("after-update refresh failed", { runtime, error: scrubHostPaths(errorMessage(err)) });
     }
+  }
+
+  /** The broken version a run would install now, or null (the latest is asked again only for self-choosing installers). */
+  private async brokenBeforeRun(
+    runtime: RuntimeId,
+    job: Job,
+    resolution: InstallResolution,
+  ): Promise<string | null> {
+    if (compatibilityOf(this.manifest, runtime, job.candidate) === "broken") return job.candidate;
+    if (!SELF_CHOOSING_METHODS.has(resolution.method)) return null;
+    const latest = await this.freshRegistry.latest(runtime, resolution.channel).catch(() => null);
+    if (latest === null || compareRuntimeVersions(latest, job.candidate) <= 0) return null;
+    return compatibilityOf(this.manifest, runtime, latest) === "broken" ? latest : null;
   }
 
   private notInstalled(runtime: RuntimeId): InstallResolution {

@@ -363,6 +363,88 @@ describe("RuntimeMaintenance: automatic updates on an idle runtime (D-03, D-07)"
     expect(h.runs.map((r) => r.candidate)).toEqual(["2.1.301"]);
   });
 
+  it("a pending update whose candidate a newer manifest marks broken is dropped and reported skipped_broken (07.11 review HI-02)", async () => {
+    const h = harness();
+    h.adapter.turns = 1;
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    expect(claudeStatus(h)).toMatchObject({ state: "pending" });
+    h.m.setOrgPolicy("automatic", BROKEN_2_1_300);
+    await flush();
+    expect(claudeStatus(h)).toMatchObject({ state: "idle", pendingSince: null });
+    expect(h.runFrames).toEqual([
+      expect.objectContaining({ phase: "finished", outcome: "skipped_broken", candidate: "2.1.300" }),
+    ]);
+    h.adapter.turns = 0;
+    h.m.onRuntimeActivity("claude-code");
+    await h.advance(PENDING_POLL_MS);
+    expect(h.runs).toEqual([]);
+  });
+
+  it("a draining update whose candidate turns broken reopens the gate, releases the held sessions and never runs (07.11 review HI-02)", async () => {
+    const h = harness({ pollMs: 10 * 60 * 1000, drainPollMs: 5 });
+    h.adapter.turns = 1;
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    await h.advance(DRAIN_AFTER_MS);
+    expect(claudeStatus(h).state).toBe("draining");
+    expect(h.gate.isOpen).toBe(false);
+    h.m.setOrgPolicy("automatic", BROKEN_2_1_300);
+    expect(h.gate.isOpen).toBe(true); // at once, not after the next check's registry request
+    h.adapter.turns = 0;
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(h.runs).toEqual([]);
+    expect(h.runFrames.map((f) => f.outcome)).toEqual(["skipped_broken"]);
+  });
+
+  it("a self-updating installer is not run when the latest moved to a broken release since the check (07.11 review HI-02)", async () => {
+    const h = harness();
+    h.state.latest = "2.1.299";
+    h.adapter.turns = 1;
+    h.m.setOrgPolicy("automatic", BROKEN_2_1_300);
+    h.m.start({ paired: true });
+    await flush();
+    expect(claudeStatus(h)).toMatchObject({ state: "pending" });
+    // `claude update` installs whatever is latest when it runs, not the checked candidate.
+    h.state.latest = "2.1.300";
+    h.adapter.turns = 0;
+    h.m.onRuntimeActivity("claude-code");
+    await flush();
+    expect(h.runs).toEqual([]);
+    expect(h.gate.isOpen).toBe(true);
+    expect(h.runFrames.at(-1)).toMatchObject({
+      phase: "finished",
+      outcome: "skipped_broken",
+      candidate: "2.1.300",
+    });
+    expect(claudeStatus(h)).toMatchObject({ state: "idle", installedVersion: "2.1.290" });
+  });
+
+  it("an update that ends on a version marked broken is failed, never succeeded (07.11 review HI-02)", async () => {
+    const h = harness();
+    h.state.latest = "2.1.299";
+    h.setRunResult(() => {
+      h.state.installed = "2.1.300";
+      return { outcome: "succeeded", fromVersion: "2.1.290", toVersion: "2.1.300", output: "Updated" };
+    });
+    h.m.setOrgPolicy("automatic", BROKEN_2_1_300);
+    h.m.start({ paired: true });
+    await flush();
+    expect(h.runs).toHaveLength(1);
+    const finished = h.runFrames.find((f) => f.phase === "finished");
+    expect(finished).toMatchObject({ outcome: "failed", toVersion: "2.1.300" });
+    expect(finished?.output).toContain("installed a version marked broken");
+    expect(h.notified).toEqual([["claude-code", "failed", "2.1.300"]]);
+    expect(claudeStatus(h)).toMatchObject({
+      installedVersion: "2.1.300",
+      installedCompatibility: "broken",
+      lastRun: { outcome: "failed" },
+    });
+  });
+
   it("after an unchanged run the same candidate is not retried automatically for 24 h", async () => {
     const h = harness();
     h.setRunResult(() => ({
