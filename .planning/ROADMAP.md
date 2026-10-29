@@ -407,7 +407,7 @@ of the thin Work Zone that Phase 1 already ships.
 **Operations features (inserted 2026-10-08, owner).** Phases 07.1–07.7 turn the 2026-10-06 operations meeting into
 generic capabilities for any organization (research: `.planning/research/OPS-FEATURES.md`). Each feature is owned by the
 Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits → Agent Card when a human approves);
-OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
+OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.12 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 and 07.12 added 2026-10-29 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
 (F17), ERP-driven board columns beyond watched records.
 
 ### Phase 07.1: Board channels and record templates (INSERTED)
@@ -896,6 +896,44 @@ Plans:
 **Wave 6** *(blocked on Wave 5 completion)*
 
 - [ ] 07.11-11-PLAN.md — Wave 6: Phase gate: full local gate, full isolated e2e, Linux proof, `gate:compose`, ADR-0032, DEMO owner checks, INSTALL, STATUS, AGENTS, CODEOWNERS, signed VALIDATION
+
+### Phase 07.12: Headless Work Zone server (INSERTED)
+
+**Goal**: Anyone can turn a server (or any spare machine) into a Work Zone device without the desktop app: install the
+Local Runtime from their own workspace with one command, pair it from the terminal, run it as a service, check it, and
+let members and teams run their shared sessions there.
+
+- **Install from your own server:** `curl -fsSL https://<workspace>/install.sh | sh` fetches the runtime bundle the API
+  serves (no third party); Node 24 is required and checked.
+- **One setup command:** `ocw-runtime setup` (interactive, or fully by flags for scripts) pairs, names the device,
+  registers repositories, installs the service and runs the checks.
+- **Pair from a terminal:** `ocw-runtime enroll --server <url>` shows a short code and a link; the owner approves it in
+  Settings › Devices. The existing `--code` flow stays.
+- **Runs as a service:** `ocw-runtime service install|uninstall|status|logs` (systemd on Linux, user or system unit;
+  launchd on macOS), restarts on failure, never a TCP port.
+- **Doctor:** `ocw-runtime doctor [--json]` checks Node, pairing, server reachability, Claude Code and Codex installed
+  and signed in (headless sign-in instructions), git, projects, the service and the update level.
+- **Sharing stays in the web:** the owner shares the device with members and teams as today (03.2-05, 07.9); the CLI
+  prints the link.
+
+**Requirements**: HSR-01 … HSR-07 (written by plan-phase)
+**Depends on:** Phase 07.11 (runtime CLI updates on the same daemon)
+**Success Criteria** (what must be TRUE):
+
+  1. On a clean Linux server with Node 24, one command installs `ocw-runtime` from the workspace itself, and
+     `ocw-runtime setup` leaves a paired device running as a service that survives a reboot and a crash
+  2. Pairing works from a terminal without copying a code from the web: the owner approves a short code in Settings ›
+     Devices; codes expire, are single-use and rate-limited, and every approval is audited
+  3. `ocw-runtime doctor` reports every prerequisite with a fix line, in text and `--json`, and never prints a secret or
+     sends an absolute path to the server
+  4. Members the owner shares the device with start and run sessions on it from the web, with no desktop app anywhere
+  5. Proven in a Linux container end to end (install script → setup → session from the web) and documented in
+     `docs/SERVER.md`; macOS launchd covered by unit tests
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.12 to break down)
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
