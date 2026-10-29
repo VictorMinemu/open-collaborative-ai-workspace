@@ -4,11 +4,16 @@ Out-of-scope findings logged by executors (not fixed in the plan that found them
 
 ## From 07.12-08
 
-- **`cli.test.ts` › "ocw-runtime run reads ~/.ocw/service.env" › "a group- or world-readable file is refused…"
-  is intermittent.** It failed once in 7 local runs (fast, about 210 ms) and passed on every rerun. Likely cause:
-  `run()` in `apps/local-runtime/src/cli.ts` installs its SIGTERM handler only after `daemon.start()` resolves, while
-  the test sends SIGTERM as soon as the control socket file exists. A SIGTERM in that window ends the process with
-  the default action (exit code null, not 0). Fix candidates: install the signal handlers before `daemon.start()`, or
-  have the test wait for the daemon's "started" log line. Not touched in 08 (plan 03's test and code).
-- **`cli.test.ts` › "ocw-runtime updates (07.11)" › "daemon running: status prints…"** failed once under load and
-  passed on every rerun, as plan 03 also recorded. Not touched.
+- **Closed (orchestrator, `43f3b4cc`).** `cli.test.ts` › "ocw-runtime run reads ~/.ocw/service.env" › "a group- or
+  world-readable file is refused…" was intermittent: `run()` installed its SIGTERM handler only after
+  `daemon.start()` resolved, so a SIGTERM in that window ended the process with the default action. `run()` now
+  installs the signal handlers before the daemon starts.
+- **Closed (orchestrator, `0d5f9f4e`).** `cli.test.ts` › "ocw-runtime updates (07.11)" › "daemon running: status
+  prints…" failed under load: it read the updates status before the daemon's first version probe had finished. The
+  test now waits for the first probe.
+
+## From 07.12-11
+
+None open. Two gate findings were fixed at their source (see `07.12-11-SUMMARY.md`): the doctor's `updates` check
+now reports the running daemon's level, and the served runtime's manifest names its source commit on compose and
+gate builds.
