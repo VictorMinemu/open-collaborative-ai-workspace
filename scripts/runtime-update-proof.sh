@@ -4,7 +4,8 @@
 #
 #   bash scripts/runtime-update-proof.sh
 #
-# It copies this tree's files (git ls-files: tracked plus untracked-but-not-ignored, so no node_modules, no .env and no
+# It copies this tree's files (git ls-files: tracked plus untracked-but-not-ignored minus anything shaped like a
+# credential, so no node_modules, no .env, no keys and no
 # build output) into a throwaway, pinned Node 24 container (`docker run --rm --init`), installs the local-runtime's
 # dependencies there with the frozen lockfile (`pnpm install --filter @ocw/local-runtime... --filter ocw`), builds a
 # ROOT-OWNED npm prefix with the fake CLI (`install-fake claude-npm`, as root), then runs the maintenance tests as the
@@ -45,7 +46,19 @@ docker info >/dev/null 2>&1 || fail "the Docker daemon is not reachable"
 command -v git >/dev/null || fail "git is required"
 
 # ---------------------------------------------------------------- the tree (no node_modules, no .env, no builds)
-git ls-files -z --cached --others --exclude-standard |
+# Tracked files, plus untracked-but-not-ignored ones except anything shaped like a credential (07.11 review LO-07: a
+# scratch `.env.local`, key or certificate never leaves this machine, even into a throwaway container).
+tree_files() {
+  git ls-files -z --cached
+  git ls-files -z --others --exclude-standard |
+    while IFS= read -r -d '' f; do
+      case "/$f" in
+        */.env* | *.env | *.pem | *.key | *.p12 | *.pfx | */id_rsa* | */id_ed25519* | */id_ecdsa*) continue ;;
+      esac
+      printf '%s\0' "$f"
+    done
+}
+tree_files |
   while IFS= read -r -d '' f; do [[ -f "$f" || -L "$f" ]] && printf '%s\0' "$f"; done |
   COPYFILE_DISABLE=1 tar --no-xattrs --null -T - -cf "$WORK/src.tar"   # no macOS ._* or xattr records
 
