@@ -543,7 +543,7 @@ describe("runUpdate (Phase 07.11, PD-11)", () => {
     });
     expect(result.outcome).toBe("succeeded");
     expect(Buffer.byteLength(result.output)).toBeLessThan(10 * 1024 + 100);
-    expect(result.output).toMatch(/…\[truncated \d+ bytes\]$/);
+    expect(result.output).toMatch(/^…\[truncated \d+ bytes\]\n/);
     expect(progress.length).toBeLessThanOrEqual(4);
     for (const p of progress) {
       expect(p.message.length).toBeLessThanOrEqual(200);
@@ -645,9 +645,9 @@ describe("sanitizeUpdateOutput (Phase 07.11, Pitfall 9)", () => {
     expect(out).not.toContain("\r");
   });
 
-  it("truncates above 10 KB with the marker", () => {
-    const out = sanitizeUpdateOutput("x".repeat(20_000), [], home);
-    expect(out).toMatch(/^x{10240}\n…\[truncated 9760 bytes\]$/);
+  it("truncates above 10 KB with the marker, keeping the tail where installers print their error (07.11 review LO-06)", () => {
+    const out = sanitizeUpdateOutput(`${"x".repeat(20_000)}npm error code EACCES`, [], home);
+    expect(out).toMatch(/^…\[truncated 9781 bytes\]\nx{10219}npm error code EACCES$/);
   });
 });
 

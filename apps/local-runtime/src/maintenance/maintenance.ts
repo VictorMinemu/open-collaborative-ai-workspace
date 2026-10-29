@@ -259,9 +259,17 @@ function within(path: string, root: string): boolean {
   return path === root || path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
 }
 
-/** At most `MAX_RUN_OUTPUT_CHARS`, cut from the start, scrubbed again so a cut can never leave a path behind. */
-export function runOutputForFrame(output: string): string {
-  return scrubHostPaths(output.slice(0, MAX_RUN_OUTPUT_CHARS)).slice(0, MAX_RUN_OUTPUT_CHARS);
+/**
+ * What a run frame carries (at most `MAX_RUN_OUTPUT_CHARS`): the error sentence first, then the END of the installer's
+ * output, where its own error is (07.11 review LO-06), behind `…`; scrubbed again so a cut can never leave a path
+ * behind.
+ */
+export function runOutputForFrame(output: string, error?: string): string {
+  const head = error ? error.slice(0, MAX_RUN_OUTPUT_CHARS) : "";
+  const room = MAX_RUN_OUTPUT_CHARS - (head ? head.length + 1 : 0);
+  const tail = room <= 1 ? "" : output.length > room ? `…${output.slice(-(room - 1))}` : output;
+  const text = [head, tail].filter((s) => s !== "").join("\n");
+  return scrubHostPaths(text).slice(0, MAX_RUN_OUTPUT_CHARS);
 }
 
 export class RuntimeMaintenance {
@@ -912,7 +920,7 @@ export class RuntimeMaintenance {
       toVersion: null,
       candidate: job.candidate,
       method: st.resolution?.method ?? "unknown",
-      output: runOutputForFrame(error),
+      output: runOutputForFrame("", error),
       at,
     });
   }
@@ -1132,8 +1140,7 @@ export class RuntimeMaintenance {
           error: scrubHostPaths(errorMessage(err)),
         });
       }
-      const text = [final.error, final.output].filter((s): s is string => !!s).join("\n");
-      const output = text ? runOutputForFrame(text) : "";
+      const output = runOutputForFrame(final.output, final.error);
       this.sendRun({
         ...base,
         phase: "finished",

@@ -673,6 +673,24 @@ describe("RuntimeMaintenance: never cut a turn (D-03, D-03a, D-03b, PD-07)", () 
     expect(h.runs).toHaveLength(1);
   });
 
+  it("a long failed run's frame keeps the error first and the installer's last lines, within 4 KB (07.11 review LO-06)", async () => {
+    const h = harness();
+    h.setRunResult(() => ({
+      outcome: "failed",
+      fromVersion: "2.1.290",
+      toVersion: null,
+      output: `${"progress line\n".repeat(1000)}npm error code EACCES`,
+      error: "the update command exited with code 243",
+    }));
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    const output = h.runFrames.find((f) => f.phase === "finished")?.output ?? "";
+    expect(output.startsWith("the update command exited with code 243\n")).toBe(true);
+    expect(output.endsWith("npm error code EACCES")).toBe(true);
+    expect(output.length).toBeLessThanOrEqual(4096);
+  });
+
   it("idle CLI processes that never stop fail the run and the gate reopens (07.11 review HI-03)", async () => {
     const h = harness({ retireTimeoutMs: 20 });
     h.adapter.retireIdle = () => new Promise<number>(() => undefined);

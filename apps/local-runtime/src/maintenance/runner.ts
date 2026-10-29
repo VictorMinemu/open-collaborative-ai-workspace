@@ -13,7 +13,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { compareRuntimeVersions, parseRuntimeVersion, scrubHostPaths } from "@ocw/contracts";
 import { defaultExec, type ExecFn } from "../claude/detect.js";
-import { sanitizeString, truncateBytes } from "../sanitize.js";
+import { sanitizeString } from "../sanitize.js";
 import { type InstallResolution, resolveInstall, updateCommandFor } from "./install-method.js";
 
 export const UPDATE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -220,9 +220,22 @@ function scrub(raw: string, roots: readonly string[], home: string): string {
   return scrubHostPaths(text);
 }
 
-/** ANSI strip → contain/redact (home and its realpath) → `scrubHostPaths` → 10 KB cap (Pitfall 9). */
+/**
+ * The last `maxBytes` of `text` (installers print their error at the end, 07.11 review LO-06), behind a marker that
+ * says how much was cut; never splits a UTF-8 character.
+ */
+export function keepTail(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.byteLength <= maxBytes) return text;
+  let start = buf.byteLength - maxBytes;
+  // Continuation bytes (10xxxxxx) belong to the character before them.
+  while (start < buf.byteLength && ((buf[start] ?? 0) & 0xc0) === 0x80) start++;
+  return `…[truncated ${start} bytes]\n${buf.subarray(start).toString("utf8")}`;
+}
+
+/** ANSI strip → contain/redact (home and its realpath) → `scrubHostPaths` → the last 10 KB (Pitfall 9). */
 export function sanitizeUpdateOutput(raw: string, roots: readonly string[], home: string): string {
-  return truncateBytes(scrub(raw, roots, home), MAX_KEPT_OUTPUT_BYTES).text;
+  return keepTail(scrub(raw, roots, home), MAX_KEPT_OUTPUT_BYTES);
 }
 
 export interface RunUpdateOptions {
