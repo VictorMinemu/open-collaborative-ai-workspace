@@ -18,7 +18,7 @@ import {
   USER_CODE_ALPHABET,
   USER_CODE_LENGTH,
 } from "@ocw/contracts";
-import { deviceEnrollments } from "@ocw/db";
+import { deviceEnrollments, type Tx } from "@ocw/db";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../core";
@@ -90,6 +90,22 @@ local r = cjson.decode(v)
 if r.status ~= ARGV[1] then return 0 end
 r.status = ARGV[2]
 for k, val in pairs(cjson.decode(ARGV[3])) do r[k] = val end
+redis.call('set', KEYS[1], cjson.encode(r), 'KEEPTTL')
+return 1
+`;
+
+/**
+ * The reverse of one decision (KEYS[1] the record, ARGV[1] the decided status, ARGV[2] the deciding user): back to
+ * pending, only while the record still holds that decision by that user. Keeps the TTL. 1 when it was undone.
+ */
+const UNDECIDE = `
+local v = redis.call('get', KEYS[1])
+if not v then return 0 end
+local r = cjson.decode(v)
+if r.status ~= ARGV[1] or r.decidedBy ~= ARGV[2] then return 0 end
+r.status = 'pending'
+r.approvedName = cjson.null
+r.decidedBy = cjson.null
 redis.call('set', KEYS[1], cjson.encode(r), 'KEEPTTL')
 return 1
 `;
@@ -174,6 +190,18 @@ export class PairingStore {
     return won === 1;
   }
 
+  /**
+   * Undo `decide(…, "pending", status, { decidedBy })` when the transaction it ran in did not commit (07.12 review
+   * LO-02): otherwise Redis would say approved with no enrollment row, and every retry would answer 409.
+   */
+  async undecide(deviceCodeHash: string, status: "approved" | "denied", decidedBy: string): Promise<boolean> {
+    const undone = await this.redis.eval(UNDECIDE, {
+      keys: [deviceCodeKey(deviceCodeHash)],
+      arguments: [status, decidedBy],
+    });
+    return undone === 1;
+  }
+
   /** The record before this poll (null when gone); a pending record gets `lastPollAt = now`. */
   async touchPoll(deviceCodeHash: string, now: Date): Promise<PairingRecord | null> {
     return parseRecord(
@@ -232,6 +260,33 @@ export function registerDevicePairingRoutes(app: App, core: Core, perms: Permiss
     // requireUser first, so the shared bucket is the member, not the IP.
     preHandler: [requireUser, decisionLimit, perms.requirePermission("device.pair")],
   };
+
+  /**
+   * One decision: `write` records it in the approver's tenant transaction, then, last inside that transaction, the
+   * Redis compare-and-set from pending runs (a lost race throws 409 and rolls `write` back). Redis cannot join the
+   * transaction, so when the commit itself fails after the compare-and-set won, the decision is undone in Redis
+   * (07.12 review LO-02): the request is pending again and the approver can retry, instead of an "approved" record
+   * with no enrollment row that answers 409 to every retry until it expires.
+   */
+  async function decideInTransaction(
+    req: FastifyRequest,
+    deviceCodeHash: string,
+    status: "approved" | "denied",
+    write: (tx: Tx) => Promise<{ approvedName?: string }>,
+  ): Promise<void> {
+    const decidedBy = authOf(req).userId;
+    let won = false;
+    try {
+      await core.db.withTenant(tenant(req), async (tx) => {
+        const fields = await write(tx);
+        won = await store.decide(deviceCodeHash, "pending", status, { ...fields, decidedBy });
+        if (!won) throw alreadyDecided();
+      });
+    } catch (err) {
+      if (won) await store.undecide(deviceCodeHash, status, decidedBy).catch(() => {});
+      throw err;
+    }
+  }
 
   app.post(
     "/devices/pairings",
@@ -321,8 +376,8 @@ export function registerDevicePairingRoutes(app: App, core: Core, perms: Permiss
       if (!found) throw notFoundCode();
       const { deviceCodeHash, record } = found;
       if (record.status !== "pending") throw alreadyDecided();
-      await core.db.withTenant(tenant(req), async (tx) => {
-        const auth = authOf(req);
+      const auth = authOf(req);
+      await decideInTransaction(req, deviceCodeHash, "approved", async (tx) => {
         try {
           await tx.insert(deviceEnrollments).values({
             codeHash: record.enrollmentHash,
@@ -347,11 +402,7 @@ export function registerDevicePairingRoutes(app: App, core: Core, perms: Permiss
           },
         });
         // Last, still inside the transaction: a lost race rolls the enrollment row and the audit row back.
-        const won = await store.decide(deviceCodeHash, "pending", "approved", {
-          approvedName: name,
-          decidedBy: auth.userId,
-        });
-        if (!won) throw alreadyDecided();
+        return { approvedName: name };
       });
       return { ok: true as const };
     },
@@ -365,17 +416,14 @@ export function registerDevicePairingRoutes(app: App, core: Core, perms: Permiss
       if (!found) throw notFoundCode();
       const { deviceCodeHash, record } = found;
       if (record.status !== "pending") throw alreadyDecided();
-      await core.db.withTenant(tenant(req), async (tx) => {
+      await decideInTransaction(req, deviceCodeHash, "denied", async (tx) => {
         await core.audit.record(tx, {
           action: "device.pairing_denied",
           resourceType: "device_pairing",
           metadata: { requestedName: record.name, platform: record.platform, requestIp: record.requestIp },
         });
-        // A lost race throws here, so the audit row rolls back with it.
-        const won = await store.decide(deviceCodeHash, "pending", "denied", {
-          decidedBy: authOf(req).userId,
-        });
-        if (!won) throw alreadyDecided();
+        // A lost race throws in the compare-and-set after this, so the audit row rolls back with it.
+        return {};
       });
       return { ok: true as const };
     },

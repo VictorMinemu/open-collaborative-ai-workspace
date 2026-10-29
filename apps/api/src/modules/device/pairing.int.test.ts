@@ -430,6 +430,55 @@ describe("every RFC 8628 answer, lookup, deny and single use (Task 2)", () => {
     expect(await enrollmentRows(deviceCode)).toBe(approve.status === 200 ? 1 : 0);
     expect(deniedAudit).toHaveLength(deny.status === 200 ? 1 : 0);
   });
+
+  it("a decision whose transaction fails after Redis flipped is undone: the request is pending again (LO-02)", async () => {
+    const redis = stack.built.core.bus.pub;
+    const db = stack.built.core.db;
+    const original = db.withTenant;
+    for (const decision of ["approve", "deny"] as const) {
+      const { ip, deviceCode, userCode } = await started();
+      const { client: approver } = await freshAdmin();
+      // The transaction that flips this request's record fails at commit (a serialization failure, a dropped
+      // connection): everything it wrote rolls back, after the Redis compare-and-set already ran.
+      let armed = true;
+      db.withTenant = (async (ctx: Parameters<typeof original>[0], fn: Parameters<typeof original>[1]) =>
+        original.call(db, ctx, async (tx, afterCommit) => {
+          const result = await fn(tx, afterCommit);
+          const raw = await redis.get(recordKey(deviceCode));
+          if (armed && raw && JSON.parse(raw).status !== "pending") {
+            armed = false;
+            throw new Error("could not serialize access due to concurrent update");
+          }
+          return result;
+        })) as typeof original;
+      let failed: Awaited<ReturnType<typeof approver.request>>;
+      try {
+        failed = await approver.request(
+          "POST",
+          `/api/v1/devices/pairings/${decision}`,
+          decision === "approve" ? { userCode, name: "Retried" } : { userCode },
+        );
+      } finally {
+        db.withTenant = original;
+      }
+      expect(armed, "the failing commit ran").toBe(false);
+      expect(failed.status).toBe(500);
+      expect(await enrollmentRows(deviceCode)).toBe(0);
+      expect(JSON.parse((await redis.get(recordKey(deviceCode)))!).status).toBe("pending");
+
+      // The approver retries and it works: no 409, no stranded "approved" without its row.
+      expect((await poll(ip, deviceCode)).body).toMatchObject({ error: { code: "authorization_pending" } });
+      const retry = await approver.request("POST", "/api/v1/devices/pairings/approve", {
+        userCode,
+        name: "Retried",
+      });
+      expect(retry.status, JSON.stringify(retry.body)).toBe(200);
+      await agePoll(deviceCode, 10_000);
+      const token = await poll(ip, deviceCode);
+      expect(token.status, JSON.stringify(token.body)).toBe(200);
+      expect(token.body!.deviceToken).toMatch(/^ocwd_/);
+    }
+  });
 });
 
 /** One deny row per Work Zone catalog pattern for `userId` (the 07.3 module-off mechanism); returns the rule ids. */
