@@ -344,7 +344,7 @@ export function NewSessionDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-xl" data-testid="new-session-dialog">
-        <form onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col">
+        <form onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col gap-4">
           <DialogHeader>
             <DialogTitle>New session</DialogTitle>
             <DialogDescription>
