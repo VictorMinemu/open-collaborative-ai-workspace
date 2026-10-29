@@ -43,8 +43,9 @@ If `~/.local/bin` is not on your PATH, the script prints the line to add to `~/.
 
 Options, as environment variables before `sh`:
 
-- `OCW_HOME=/srv/ocw`: install somewhere other than `~/.ocw`. Every `ocw-runtime` command and the service then use it.
-  Where this guide (and the doctor's fix lines) say `~/.ocw/…`, read `$OCW_HOME/…`.
+- `OCW_HOME=/srv/ocw`: install somewhere other than `~/.ocw`. The launcher keeps it, so every `ocw-runtime` command
+  and the service then use it (an `OCW_HOME` exported later still wins). Where this guide (and the doctor's fix
+  lines) say `~/.ocw/…`, read `$OCW_HOME/…`.
 - `OCW_SERVER_URL=<url>`: download from another address for the same workspace (for example inside a container).
 - `OCW_INSTALL_ALLOW_HTTP=1`: allow plain `http://` to a host other than this machine. Only on a network you trust.
 

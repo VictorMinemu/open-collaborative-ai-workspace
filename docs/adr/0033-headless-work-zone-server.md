@@ -54,8 +54,9 @@ third-party host for the runtime: a self-hosted workspace must serve its own.
   `main()` on the last line, so a cut download runs nothing. It refuses a non-Linux/macOS system, Node below 24, a
   missing npm, and plain `http://` to a non-loopback host unless `OCW_INSTALL_ALLOW_HTTP=1`. It checks the sha256 with
   node before using the file. It installs for the current user only into `$OCW_HOME/runtime/versions/<sha12>/`, links
-  `current`, writes `install.json` and the launcher `~/.local/bin/ocw-runtime`, keeps the new and the previous
-  version, never uses sudo, warns as root, and never restarts a running service (it prints the restart command).
+  `current`, writes `install.json` and the launcher `~/.local/bin/ocw-runtime` (which keeps a non-default `OCW_HOME`
+  as the default of every command), keeps the new and the previous version, never uses sudo, warns as root, and never
+  restarts a running service (it prints the restart command).
 
 ### Terminal pairing by device code (D-03, D-13, PD-06, PD-07, PD-08)
 

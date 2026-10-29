@@ -131,7 +131,8 @@ const SDK = "@anthropic-ai/claude-agent-sdk";
 const SYSTEM_TOOLS = ["uname", "id", "mktemp", "curl", "mkdir", "rm", "mv", "readlink", "cat", "ln", "chmod"];
 
 const bundleFor = (version: string) =>
-  `import "${SDK}";\nif (process.argv[2] === "version") console.log(${JSON.stringify(version)});\n`;
+  `import "${SDK}";\nif (process.argv[2] === "version") console.log(${JSON.stringify(version)});\n` +
+  `if (process.argv[2] === "home") console.log(process.env.OCW_HOME ?? "<unset>");\n`;
 
 let root: string;
 let tools: string;
@@ -382,6 +383,29 @@ describe("install.sh run with sh in a scratch HOME (07.12-06, D-01, D-10, PD-04,
     expect(done.code, done.stderr).toBe(0);
     const info = JSON.parse(await readFile(join(ocwRuntime(ok), "install.json"), "utf8"));
     expect(info.serverUrl).toBe(stubUrl);
+  });
+
+  it("an OCW_HOME given at install is kept by the launcher (ME-02); the default adds nothing", async () => {
+    stub.bundle = bundleFor("0.1.0");
+    const script = renderInstallScript({ serverUrl: stubUrl, manifest: manifestFor(stub.bundle) });
+
+    const custom = await newCase();
+    const home = join(custom.dir, "srv o'cw $x");
+    const res = await install(custom, script, { OCW_HOME: home });
+    expect(res.code, res.stderr).toBe(0);
+    expect(existsSync(join(home, "runtime", "install.json"))).toBe(true);
+    // Every later command (setup, service install, doctor) sees the install's home without OCW_HOME exported...
+    const ran = await sh(shimPath(custom), custom, {}, ["home"]);
+    expect(ran.code, ran.stderr).toBe(0);
+    expect(ran.stdout.trim()).toBe(home);
+    // ...and an explicit OCW_HOME still wins.
+    const other = await sh(shimPath(custom), custom, { OCW_HOME: "/elsewhere" }, ["home"]);
+    expect(other.stdout.trim()).toBe("/elsewhere");
+
+    const plain = await newCase();
+    expect((await install(plain, script)).code).toBe(0);
+    expect(await readFile(shimPath(plain), "utf8")).not.toContain("OCW_HOME");
+    expect((await sh(shimPath(plain), plain, {}, ["home"])).stdout.trim()).toBe("<unset>");
   });
 
   it("a truncated download runs nothing", async () => {

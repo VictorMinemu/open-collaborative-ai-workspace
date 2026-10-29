@@ -196,6 +196,11 @@ fs.renameSync(`${file}.tmp`, file);
   {
     printf '#!/bin/sh\n'
     printf '# ocw-runtime: written by the OCW install script. Runs the installed runtime with the node it was installed with.\n'
+    # A non-default OCW_HOME stays the default of every later command (an exported OCW_HOME still wins).
+    if [ "$ocw_home" != "$HOME/.ocw" ]; then
+      # shellcheck disable=SC2016 # written into the launcher, expanded when it runs.
+      printf 'OCW_HOME=${OCW_HOME:-%s}\nexport OCW_HOME\n' "$(shq "$ocw_home")"
+    fi
     printf 'exec %s %s "$@"\n' "$(shq "$node_bin")" "$(shq "$runtime_dir/current/$OCW_BUNDLE_FILE")"
   } >"$shim.tmp.$$"
   chmod 755 "$shim.tmp.$$"
