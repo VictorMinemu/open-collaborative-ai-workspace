@@ -18,7 +18,7 @@
 #   4. in the container, `ocw-runtime doctor --json` has no fail, the service is a warn, and neither the device token
 #      nor /home/node is in it; `ocw-runtime service install` refuses with the own-supervisor line (no systemd);
 #   5. the proof's facts (image digest, /bin/sh, installed version and sha, SDK version, doctor) are printed for the
-#      gate (07.12-11), then `headless-server proof: ok` as its last line.
+#      gate (07.12-11), then the proof's ok line as its last line.
 #
 # PD-19, no real tools: the daemon runs the fake runtime (OCW_RUNTIME_FAKE=1, OCW_RUNTIME_UPDATES=off), no Claude Code
 # or Codex is installed, and no registry is contacted for the SDK. install.sh's `npm install` meets an offline fake npm
