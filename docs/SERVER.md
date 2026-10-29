@@ -86,8 +86,9 @@ ocw-runtime setup --yes --name build-01 --project ~/src/app --project ~/src/api 
 Exit codes: `0` done, `1` a step failed, `2` a missing or wrong flag (or a value it cannot ask for without a terminal),
 `130` cancelled.
 
-If the device was revoked in the web, `setup` asks before pairing again (`--yes` confirms). Setup warns when the
-server URL is plain `http://` to another host.
+If the device was revoked in the web, `setup` asks before pairing again (`--yes` confirms), then restarts the running
+service so it connects with the new pairing (when a session runs, or for a system unit, it prints the restart line
+instead). Setup warns when the server URL is plain `http://` to another host.
 
 Repositories later: `ocw-runtime add-project <dir>`, `ocw-runtime remove-project <dir|name>`, `ocw-runtime projects`.
 

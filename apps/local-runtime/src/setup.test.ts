@@ -376,6 +376,87 @@ describe("runSetup: the service step (07.12-08, D-04, D-14, PD-13, RESEARCH Pitf
     expect(h.stdout.join("\n")).toContain("restart it so it connects with the new pairing");
   });
 
+  describe("re-pairing a revoked device restarts the runtime that still holds the old token (ME-01)", () => {
+    /** A revoked device whose service runs (the daemon reports paired: it holds the revoked token). */
+    const revokedRunning = (sessions: number[] = [0, 0]) => {
+      let n = 0;
+      const h = harness({
+        daemonStatus: async () => ({
+          paired: true,
+          sessions: sessions[Math.min(n++, sessions.length - 1)] ?? 0,
+        }),
+      });
+      h.state.token = "dt_revoked";
+      h.state.tokenState = "revoked";
+      h.state.paired = { serverUrl: SERVER, deviceName: "rack-1" };
+      h.deps.service.install = async (opts) => {
+        h.calls.push(`service.install ${opts?.manager ?? ""}`);
+        return {
+          ok: true,
+          manager: "systemd-user",
+          unitPath: "~/.config/systemd/user/ocw-runtime.service",
+          outcome: "unchanged",
+          active: true,
+          lines: [],
+        };
+      };
+      return h;
+    };
+
+    it("an unchanged, running service is restarted once the new token is saved", async () => {
+      const h = revokedRunning();
+      expect(await runSetup(flagsArgs({ service: "user" }), h.deps)).toBe(0);
+      expect(h.calls).toEqual([
+        "token",
+        `tokenCheck ${SERVER}`,
+        `pair ${SERVER} rack-1`,
+        `add ${USER_HOME}/repo`,
+        "service.detect",
+        "service.install systemd-user",
+        "service.restart",
+        "doctor",
+      ]);
+      expect(h.stdout.join("\n")).toContain("Restarted ocw-runtime.service");
+    });
+
+    it("a running session: no restart, the restart command is printed", async () => {
+      const h = revokedRunning([0, 1]);
+      expect(await runSetup(flagsArgs({ service: "user" }), h.deps)).toBe(0);
+      expect(h.calls).not.toContain("service.restart");
+      expect(h.stdout.join("\n")).toContain("ocw-runtime service restart");
+    });
+
+    it("no service but a running runtime: says to restart it", async () => {
+      const h = revokedRunning();
+      expect(await runSetup(flagsArgs({ service: "none" }), h.deps)).toBe(0);
+      expect(h.calls).not.toContain("service.restart");
+      expect(h.stdout.join("\n")).toContain("restart it so it connects with the new pairing");
+    });
+
+    it("a system unit: prints root's restart line", async () => {
+      const h = revokedRunning();
+      h.deps.service.install = async () => ({
+        ok: true,
+        manager: "systemd-system",
+        unitPath: "/etc/systemd/system/ocw-runtime.service",
+        outcome: "unchanged",
+        active: true,
+        lines: [],
+      });
+      expect(await runSetup(flagsArgs({ service: "system", userName: "alice" }), h.deps)).toBe(0);
+      expect(h.calls).not.toContain("service.restart");
+      expect(h.stdout.join("\n")).toContain("sudo systemctl restart ocw-runtime.service");
+    });
+
+    it("a still-valid pairing restarts nothing", async () => {
+      const h = revokedRunning();
+      h.state.tokenState = "valid";
+      expect(await runSetup(flagsArgs({ service: "user" }), h.deps)).toBe(0);
+      expect(h.calls).not.toContain("service.restart");
+      expect(h.stdout.join("\n")).not.toContain("restart it");
+    });
+  });
+
   it("--service system: refused as root and for another account; as that account it prints the root command", async () => {
     const sys = flagsArgs({ service: "system", userName: "alice" });
     const root = harness({ uid: 0, account: "root" });

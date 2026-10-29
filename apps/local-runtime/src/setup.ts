@@ -366,7 +366,7 @@ async function setupSteps(args: SetupArgs, deps: SetupDeps): Promise<number> {
   }
 
   // 4. Service.
-  await serviceStep(args, deps, daemonBefore, stop, interactive);
+  await serviceStep(args, deps, daemonBefore, pairNow, stop, interactive);
 
   // 5. Doctor: printed; its findings never change setup's exit code.
   await runDoctorStep(deps);
@@ -384,23 +384,25 @@ async function setupSteps(args: SetupArgs, deps: SetupDeps): Promise<number> {
 }
 
 const RESTART_NOTE =
-  "A runtime is already running here without a pairing: restart it so it connects with the new pairing.";
+  "A runtime is already running here from before this pairing: restart it so it connects with the new pairing.";
 const NEXT_STEPS =
   "Check it with `ocw-runtime service status`; read its log with `ocw-runtime service logs`.";
 
 /**
  * Installs the service after pairing and projects (PD-13). `--yes` without `--service` installs the user service when
- * a manager can take it, else prints the supervisor line and goes on. A service that ran unpaired is restarted once
+ * a manager can take it, else prints the supervisor line and goes on. A runtime that was running before this run's
+ * pairing (unpaired, or holding the revoked token: the daemon reads its token once, at start) is restarted once
  * paired, unless the daemon reports a running session (then the restart command is printed instead).
  */
 async function serviceStep(
   args: SetupArgs,
   deps: SetupDeps,
   daemonBefore: DaemonView | null,
+  pairedNow: boolean,
   stop: (code: number, message: string) => never,
   interactive: boolean,
 ): Promise<void> {
-  const ranUnpaired = daemonBefore !== null && !daemonBefore.paired;
+  const staleDaemon = daemonBefore !== null && (!daemonBefore.paired || pairedNow);
   let choice = args.service;
   let detected: DetectedManager | null = null;
   if (!choice) {
@@ -410,7 +412,7 @@ async function serviceStep(
       choice = await askService(deps, usable ? "user" : "none", stop);
     } else if (!usable) {
       deps.out(`No service installed: ${detected.reason ?? SUPERVISOR_FALLBACK}.`);
-      if (ranUnpaired) deps.out(RESTART_NOTE);
+      if (staleDaemon) deps.out(RESTART_NOTE);
       return;
     } else {
       choice = "user";
@@ -418,7 +420,7 @@ async function serviceStep(
   }
   if (choice === "none") {
     deps.out(`No service installed: ${SUPERVISOR_FALLBACK}.`);
-    if (ranUnpaired) deps.out(RESTART_NOTE);
+    if (staleDaemon) deps.out(RESTART_NOTE);
     return;
   }
   if (choice === "system") {
@@ -432,7 +434,15 @@ async function serviceStep(
     if (r.outcome === "unchanged")
       deps.out(`Service: ${r.manager} ${r.unitPath}: already installed and running`);
     deps.out(NEXT_STEPS);
-    if (ranUnpaired) deps.out(RESTART_NOTE);
+    if (staleDaemon && r.outcome === "unchanged") {
+      // Restarting a system unit is root's, with systemctl only (HI-01).
+      deps.out(
+        "It started before the pairing: as root, when no session runs, run " +
+          "`sudo systemctl restart ocw-runtime.service` so it connects.",
+      );
+    } else if (staleDaemon && !(r.outcome === "root-step" && r.active)) {
+      deps.out(RESTART_NOTE);
+    }
     return;
   }
 
@@ -447,7 +457,7 @@ async function serviceStep(
     r.outcome === "unchanged" ? "already installed and running" : r.active ? "running" : "installed";
   deps.out(`Service: ${r.manager} ${r.unitPath}: ${state}`);
   // A fresh install starts the paired runtime, and "updated" was already restarted when idle.
-  if (ranUnpaired && (r.outcome === "unchanged" || r.outcome === "updated-restart-pending")) {
+  if (staleDaemon && (r.outcome === "unchanged" || r.outcome === "updated-restart-pending")) {
     const now = await deps.daemonStatus();
     if (now !== null && now.sessions > 0) {
       deps.out(
