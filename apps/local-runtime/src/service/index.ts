@@ -20,6 +20,7 @@ import {
   parseLaunchdProgramArguments,
   renderLaunchdPlist,
 } from "./launchd.js";
+import { runtimeIdle, runtimeOwnerConflict } from "./owner.js";
 import {
   isValidAccountName,
   parseSystemdExecStart,
@@ -403,31 +404,78 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
     return state.running;
   }
 
-  async function startSystemd(t: Target, lines: string[]): Promise<boolean | null> {
-    for (const step of [
-      [...ctl(t), "daemon-reload"],
-      [...ctl(t), "enable", "--now", SYSTEMD_UNIT_NAME],
-    ]) {
-      const r = await run(step);
-      if (r.code !== 0) throw new ServiceError(`${step.join(" ")} failed: ${firstLine(r)}`);
-    }
-    const active = await systemdActive(t);
-    if (t.kind === "systemd-user" && (await linger(t.account)) === false) {
-      lines.push(
-        `Lingering is off: the runtime stops when ${t.account} logs out and does not start at boot. Turn it on with:`,
-        `  sudo loginctl enable-linger ${t.account}`,
-      );
-    }
-    return active;
+  async function mustRun(argv: string[]): Promise<void> {
+    const r = await run(argv);
+    if (r.code !== 0) throw new ServiceError(`${argv.join(" ")} failed: ${firstLine(r)}`);
   }
 
+  async function startSystemd(t: Target): Promise<boolean | null> {
+    await mustRun([...ctl(t), "daemon-reload"]);
+    await mustRun([...ctl(t), "enable", "--now", SYSTEMD_UNIT_NAME]);
+    return systemdActive(t);
+  }
+
+  async function lingerNote(t: Target, lines: string[]): Promise<void> {
+    if ((await linger(t.account)) !== false) return;
+    lines.push(
+      `Lingering is off: the runtime stops when ${t.account} logs out and does not start at boot. Turn it on with:`,
+      `  sudo loginctl enable-linger ${t.account}`,
+    );
+  }
+
+  async function isRunning(t: Target): Promise<boolean> {
+    return t.kind === "launchd" ? (await launchdPrint()).running : (await systemdActive(t)) === true;
+  }
+
+  /**
+   * Install, or re-install idempotently (D-14, PD-11): the same definition on a running service changes nothing; a
+   * changed one is written and applied by a restart only when the runtime reports no session, else the restart command
+   * is printed. Refuses before writing anything while another runtime owns this `~/.ocw`.
+   */
   async function installTarget(t: Target): Promise<InstallResult> {
     const { text, notes } = await render(t);
     const lines = [...notes];
-    if (t.kind === "launchd") await ensureLogDir(t);
-    await writeUnit(t.unitPath, text);
-    const active = t.kind === "launchd" ? await startLaunchd(t) : await startSystemd(t, lines);
-    return finishInstall(t, "installed", active, lines);
+    const existing = await readText(t.unitPath);
+    const running = existing !== null && (await isRunning(t));
+    const conflict = await runtimeOwnerConflict(t.ocwHome, {
+      controlRequest: deps.controlRequest,
+      readText,
+      kill: deps.kill,
+      serviceActive: running,
+    });
+    if (conflict.kind !== "none") throw new ServiceError(conflict.message);
+
+    let outcome: InstallOutcome;
+    let active: boolean | null;
+    if (running && existing === text) {
+      outcome = "unchanged";
+      active = true;
+    } else {
+      if (t.kind === "launchd") await ensureLogDir(t);
+      await writeUnit(t.unitPath, text);
+      if (running) {
+        if (t.kind !== "launchd") await mustRun([...ctl(t), "daemon-reload"]);
+        if (await runtimeIdle(t.ocwHome, deps)) {
+          if (t.kind === "launchd") active = await startLaunchd(t);
+          else {
+            await mustRun([...ctl(t), "restart", SYSTEMD_UNIT_NAME]);
+            active = await systemdActive(t);
+          }
+          outcome = "updated";
+        } else {
+          lines.push(
+            "The new definition applies at the next start: restart with `ocw-runtime service restart` when no session runs.",
+          );
+          active = true;
+          outcome = "updated-restart-pending";
+        }
+      } else {
+        active = t.kind === "launchd" ? await startLaunchd(t) : await startSystemd(t);
+        outcome = existing === null ? "installed" : "updated";
+      }
+    }
+    if (t.kind === "systemd-user") await lingerNote(t, lines);
+    return finishInstall(t, outcome, active, lines);
   }
 
   async function ensureLogDir(t: Target): Promise<void> {

@@ -583,3 +583,192 @@ describe("service install on macOS (07.12, D-04, PD-11, RESEARCH Pitfall 9)", ()
     expect(h.lines.join("\n")).toContain("never runs as root");
   });
 });
+
+/** A daemon answering on the control socket with these sessions. */
+function answering(sessions: unknown[]) {
+  return async () => ({ ok: true, result: { paired: true, connected: true, sessions } });
+}
+
+const OLD = new Date("2026-01-01T00:00:00Z");
+
+describe("one runtime owner per ~/.ocw at install (07.12, D-14, PD-15)", () => {
+  it("refuses while another runtime answers on the socket, and writes nothing", async () => {
+    const h = harness({ exec: systemdUser(), controlRequest: answering([]) });
+    expect(await serviceCommand(["install"], h.deps)).toBe(1);
+    expect(h.lines.join("\n")).toContain(
+      "a runtime already runs on this account (the desktop app or a hand-started `ocw-runtime run`); stop it, then re-run",
+    );
+    expect(existsSync(h.at("/home/alice/.config"))).toBe(false);
+    expect(h.calls).toEqual([["systemctl", "--user", "show-environment"]]);
+  });
+
+  it("refuses while the desktop app's daemon is alive", async () => {
+    const h = harness({ exec: systemdUser(), kill: () => undefined });
+    h.write(
+      "/home/alice/.ocw/desktop-daemon.pid",
+      JSON.stringify({ pid: 777, startedAt: "2026-10-29T10:00:00Z" }),
+    );
+    expect(await serviceCommand(["install"], h.deps)).toBe(1);
+    expect(h.lines.join("\n")).toContain(
+      "the desktop app supervises the runtime on this account; use the desktop app or the service, not both",
+    );
+    expect(existsSync(h.at(USER_UNIT_PATH))).toBe(false);
+  });
+
+  it("installs over a stale desktop pidfile", async () => {
+    const h = harness({ exec: systemdUser("yes") });
+    h.write(
+      "/home/alice/.ocw/desktop-daemon.pid",
+      JSON.stringify({ pid: 777, startedAt: "2026-10-29T10:00:00Z" }),
+    );
+    expect(await serviceCommand(["install"], h.deps)).toBe(0);
+    expect(existsSync(h.at(USER_UNIT_PATH))).toBe(true);
+  });
+
+  it("refuses on macOS too while a hand-started runtime answers", async () => {
+    const h = mac("not loaded");
+    h.deps.controlRequest = answering([]);
+    expect(await serviceCommand(["install"], h.deps)).toBe(1);
+    expect(existsSync(h.at(PLIST_PATH))).toBe(false);
+    expect(h.calls).toEqual([]);
+  });
+
+  it("checks the named account's ~/.ocw for a system unit", async () => {
+    const h = systemServer();
+    const paths: string[] = [];
+    h.deps.controlRequest = async (path) => {
+      paths.push(path);
+      return { ok: true, result: { sessions: [] } };
+    };
+    expect(await serviceCommand(["install", "--system", "--user-name", "build"], h.deps)).toBe(1);
+    expect(paths).toEqual([`${BUILD_HOME}/.ocw/runtime.sock`]);
+    expect(existsSync(h.at(SYSTEM_UNIT_PATH))).toBe(false);
+  });
+});
+
+describe("re-install is idempotent (07.12, D-14, PD-11)", () => {
+  async function installedUser(sessions: unknown[]) {
+    const h = harness({ exec: systemdUser("yes") });
+    expect(await serviceCommand(["install"], h.deps)).toBe(0);
+    // From now on the service's own daemon answers on the socket.
+    h.deps.controlRequest = answering(sessions);
+    h.calls.length = 0;
+    h.lines.length = 0;
+    return h;
+  }
+
+  it("same unit, running: no write, no restart, 'already installed and running'", async () => {
+    const h = await installedUser([]);
+    const { utimesSync } = await import("node:fs");
+    utimesSync(h.at(USER_UNIT_PATH), OLD, OLD);
+    expect(await serviceCommand(["install"], h.deps)).toBe(0);
+    expect(statSync(h.at(USER_UNIT_PATH)).mtimeMs).toBe(OLD.getTime());
+    expect(h.calls).toEqual([
+      ["systemctl", "--user", "show-environment"],
+      ["systemctl", "--user", "is-active", "ocw-runtime.service"],
+      ["loginctl", "show-user", "alice", "--property=Linger"],
+    ]);
+    expect(h.lines.join("\n")).toContain("already installed and running");
+  });
+
+  it("changed unit and no session: write, daemon-reload, restart", async () => {
+    const h = await installedUser([]);
+    h.write(USER_UNIT_PATH, EXPECTED_USER_UNIT.replace("RestartSec=5", "RestartSec=1"));
+    expect(await serviceCommand(["install"], h.deps)).toBe(0);
+    expect(readFileSync(h.at(USER_UNIT_PATH), "utf8")).toBe(EXPECTED_USER_UNIT);
+    expect(h.calls).toEqual([
+      ["systemctl", "--user", "show-environment"],
+      ["systemctl", "--user", "is-active", "ocw-runtime.service"],
+      ["systemctl", "--user", "daemon-reload"],
+      ["systemctl", "--user", "restart", "ocw-runtime.service"],
+      ["systemctl", "--user", "is-active", "ocw-runtime.service"],
+      ["loginctl", "show-user", "alice", "--property=Linger"],
+    ]);
+  });
+
+  it("changed unit while a session runs: write and daemon-reload only, with the restart line", async () => {
+    const h = await installedUser([{ sessionId: "s1", runtime: "claude-code" }]);
+    h.write(USER_UNIT_PATH, EXPECTED_USER_UNIT.replace("RestartSec=5", "RestartSec=1"));
+    expect(await serviceCommand(["install"], h.deps)).toBe(0);
+    expect(readFileSync(h.at(USER_UNIT_PATH), "utf8")).toBe(EXPECTED_USER_UNIT);
+    expect(h.calls).toEqual([
+      ["systemctl", "--user", "show-environment"],
+      ["systemctl", "--user", "is-active", "ocw-runtime.service"],
+      ["systemctl", "--user", "daemon-reload"],
+      ["loginctl", "show-user", "alice", "--property=Linger"],
+    ]);
+    expect(h.lines.join("\n")).toContain("restart with `ocw-runtime service restart` when no session runs");
+  });
+
+  it("changed unit and a daemon that does not answer: no restart (a session may be running)", async () => {
+    const h = await installedUser([]);
+    h.deps.controlRequest = async () => {
+      throw new Error("control socket timeout");
+    };
+    h.write(USER_UNIT_PATH, EXPECTED_USER_UNIT.replace("RestartSec=5", "RestartSec=1"));
+    expect(await serviceCommand(["install"], h.deps)).toBe(0);
+    expect(h.calls.some((c) => c.includes("restart"))).toBe(false);
+  });
+
+  it("an installed unit that is stopped is started again", async () => {
+    const h = harness({
+      exec: (argv) => {
+        const cmd = argv.join(" ");
+        if (cmd === "systemctl --user is-active ocw-runtime.service") {
+          return h.calls.some((c) => c.includes("enable"))
+            ? { stdout: "active\n" }
+            : { code: 3, stdout: "inactive\n" };
+        }
+        return undefined;
+      },
+    });
+    h.write(USER_UNIT_PATH, EXPECTED_USER_UNIT);
+    expect(await serviceCommand(["install"], h.deps)).toBe(0);
+    expect(h.calls).toEqual([
+      ["systemctl", "--user", "show-environment"],
+      ["systemctl", "--user", "is-active", "ocw-runtime.service"],
+      ["systemctl", "--user", "daemon-reload"],
+      ["systemctl", "--user", "enable", "--now", "ocw-runtime.service"],
+      ["systemctl", "--user", "is-active", "ocw-runtime.service"],
+      ["loginctl", "show-user", "alice", "--property=Linger"],
+    ]);
+  });
+
+  it("macOS: same plist and running → nothing; changed and idle → bootout, rotate, bootstrap", async () => {
+    const h = mac("not loaded");
+    await serviceCommand(["install"], h.deps);
+    h.deps.controlRequest = answering([]);
+    h.calls.length = 0;
+    expect(await serviceCommand(["install"], h.deps)).toBe(0);
+    expect(h.calls).toEqual([["launchctl", "print", "gui/501/org.ocw.runtime"]]);
+    expect(h.lines.join("\n")).toContain("already installed and running");
+
+    const plist = readFileSync(h.at(PLIST_PATH), "utf8");
+    h.write(PLIST_PATH, plist.replace("<string>Standard</string>", "<string>Background</string>"));
+    h.write(LOG, "x".repeat(6 * 1024 * 1024));
+    h.calls.length = 0;
+    expect(await serviceCommand(["install"], h.deps)).toBe(0);
+    expect(readFileSync(h.at(PLIST_PATH), "utf8")).toBe(plist);
+    expect(existsSync(h.at(`${LOG}.1`))).toBe(true);
+    expect(h.calls).toEqual([
+      ["launchctl", "print", "gui/501/org.ocw.runtime"],
+      ["launchctl", "bootout", "gui/501/org.ocw.runtime"],
+      ["launchctl", "bootstrap", "gui/501", PLIST_PATH],
+      ["launchctl", "print", "gui/501/org.ocw.runtime"],
+    ]);
+  });
+
+  it("macOS: changed plist while a session runs → written, not restarted", async () => {
+    const h = mac("not loaded");
+    await serviceCommand(["install"], h.deps);
+    h.deps.controlRequest = answering([{ sessionId: "s1" }]);
+    const plist = readFileSync(h.at(PLIST_PATH), "utf8");
+    h.write(PLIST_PATH, plist.replace("<string>Standard</string>", "<string>Background</string>"));
+    h.calls.length = 0;
+    h.lines.length = 0;
+    expect(await serviceCommand(["install"], h.deps)).toBe(0);
+    expect(readFileSync(h.at(PLIST_PATH), "utf8")).toBe(plist);
+    expect(h.calls).toEqual([["launchctl", "print", "gui/501/org.ocw.runtime"]]);
+    expect(h.lines.join("\n")).toContain("restart with `ocw-runtime service restart` when no session runs");
+  });
+});
