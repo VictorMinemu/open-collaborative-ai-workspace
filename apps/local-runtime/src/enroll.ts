@@ -70,7 +70,28 @@ export async function enroll(opts: EnrollOptions): Promise<EnrollResult> {
   });
   const body = (await res.json().catch(() => null)) as unknown;
   if (!res.ok) throw new Error(apiErrorMessage(body, res.status, "pairing"));
-  return saveEnrollment(opts.home, EnrollDeviceResponse.parse(body), serverUrl, name);
+  return saveEnrollment(
+    opts.home,
+    EnrollDeviceResponse.parse(withoutBadOptionalFields(body)),
+    serverUrl,
+    name,
+  );
+}
+
+const OPTIONAL_ANSWER_FIELDS = ["name", "webUrl", "organizationName", "ownerName"] as const;
+
+/**
+ * An enroll answer without the optional fields its contract refuses (07.12 review LO-01). The server consumed the code
+ * when it answered, so the token in it is the only copy: an over-long organization name must not lose it. The id and
+ * token fields stay required as they are. Used by both pairing paths.
+ */
+export function withoutBadOptionalFields(body: unknown): unknown {
+  if (typeof body !== "object" || body === null) return body;
+  const out: Record<string, unknown> = { ...body };
+  for (const key of OPTIONAL_ANSWER_FIELDS) {
+    if (key in out && !EnrollDeviceResponse.shape[key].safeParse(out[key]).success) delete out[key];
+  }
+  return out;
 }
 
 /**

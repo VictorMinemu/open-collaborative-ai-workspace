@@ -1,4 +1,4 @@
-import { type DevicePlatform, type EnrollDeviceResponse, EventTypes } from "@ocw/contracts";
+import { type DevicePlatform, EnrollDeviceResponse, EventTypes } from "@ocw/contracts";
 import { deviceEnrollments, devices } from "@ocw/db";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
@@ -32,6 +32,9 @@ export async function enrollWithCodeHash(
   }
   const deviceToken = `ocwd_${randomToken(32)}`;
   const { organizationId, userId } = enrollment;
+  // Read before the transaction and optional (07.12 review LO-01): once the enrollment is consumed below, the token in
+  // this answer is the only copy, so nothing after the commit may fail the request.
+  const organizationName = await core.identity.organizationName(organizationId).catch(() => null);
   const enrolled = await core.db.withTenant({ organizationId, userId }, async (tx) => {
     const consumed = await tx
       .update(deviceEnrollments)
@@ -58,14 +61,27 @@ export async function enrollWithCodeHash(
     const ownerName = (await memberDirectory(tx)).get(userId)?.displayName ?? null;
     return { deviceId: row!.id, name: row!.name, ownerName };
   });
-  const organizationName = await core.identity.organizationName(organizationId);
   return {
     deviceId: enrolled.deviceId,
     organizationId,
     deviceToken,
-    name: enrolled.name,
-    webUrl: core.env.OCW_PUBLIC_WEB_URL.replace(/\/+$/u, ""),
-    ...(organizationName ? { organizationName } : {}),
-    ...(enrolled.ownerName ? { ownerName: enrolled.ownerName } : {}),
+    ...fitting("name", enrolled.name),
+    ...fitting("webUrl", core.env.OCW_PUBLIC_WEB_URL.replace(/\/+$/u, "")),
+    ...fitting("organizationName", organizationName),
+    ...fitting("ownerName", enrolled.ownerName),
   };
+}
+
+type OptionalField = "name" | "webUrl" | "organizationName" | "ownerName";
+
+/**
+ * An optional answer field only when the response contract accepts it, so the serializer can never turn a committed
+ * enrollment into a 500 (LO-01): a value over its bound is left out, never the token.
+ */
+function fitting<K extends OptionalField>(
+  key: K,
+  value: string | null | undefined,
+): Partial<Record<K, string>> {
+  if (!value || !EnrollDeviceResponse.shape[key].safeParse(value).success) return {};
+  return { [key]: value } as Record<K, string>;
 }

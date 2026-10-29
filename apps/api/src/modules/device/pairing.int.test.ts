@@ -231,6 +231,36 @@ describe("start → approve → token (Task 1)", () => {
     expect(bad.status).toBe(400);
     expect(errorCode(bad)).toBe("invalid_code");
   });
+
+  it("the token survives an organization name that cannot be read or does not fit: the field is left out (LO-01)", async () => {
+    const identity = stack.built.core.identity;
+    const original = identity.organizationName.bind(identity);
+    for (const broken of [
+      async () => {
+        throw new Error("connection terminated");
+      },
+      async () => "x".repeat(201),
+    ]) {
+      identity.organizationName = broken;
+      try {
+        const { ip, deviceCode, userCode } = await started();
+        const { client: approver } = await freshAdmin();
+        const approve = await approver.request("POST", "/api/v1/devices/pairings/approve", {
+          userCode,
+          name: "Name-less org",
+        });
+        expect(approve.status, JSON.stringify(approve.body)).toBe(200);
+        const token = await poll(ip, deviceCode);
+        // The enrollment is consumed in the same request: a 500 here would lose the only copy of the token.
+        expect(token.status, JSON.stringify(token.body)).toBe(200);
+        expect(token.body!.deviceToken).toMatch(/^ocwd_/);
+        expect(token.body).not.toHaveProperty("organizationName");
+        expect(token.body).toMatchObject({ organizationId: orgA, name: "Name-less org" });
+      } finally {
+        identity.organizationName = original;
+      }
+    }
+  });
 });
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");

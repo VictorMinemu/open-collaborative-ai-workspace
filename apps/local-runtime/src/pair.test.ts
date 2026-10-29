@@ -186,6 +186,46 @@ describe("pairByDeviceCode (07.12, D-03, PD-06)", () => {
     expect(existsSync(join(home, "device-token"))).toBe(true);
   });
 
+  it("keeps the token when an optional field of the approved answer is off-contract (LO-01)", async () => {
+    // The server has already consumed the pairing: refusing the answer would lose the only copy of the token.
+    const home = tempHome();
+    const server = fakeServer({ status: 200, body: START }, [
+      { status: 200, body: { ...APPROVED, organizationName: "x".repeat(300), webUrl: "not a url" } },
+    ]);
+    const c = clock();
+    const result = await pairByDeviceCode({
+      home,
+      serverUrl: SERVER,
+      name: "proposed-name",
+      fetchFn: server.fetchFn,
+      sleep: c.sleep,
+      now: c.now,
+      out: () => {},
+    });
+    expect(readFileSync(join(home, "device-token"), "utf8").trim()).toBe(DEVICE_TOKEN);
+    expect(result).toMatchObject({ deviceId: DEVICE_ID, organizationId: ORG_ID, name: "rack-1" });
+    expect(result.webUrl).toBeUndefined();
+    expect(result.pairedWith).toBeUndefined();
+  });
+
+  it("an approved answer without a device token is still refused, and nothing is written", async () => {
+    const home = tempHome();
+    const { deviceToken: _omit, ...noToken } = APPROVED;
+    const server = fakeServer({ status: 200, body: START }, [{ status: 200, body: noToken }]);
+    const c = clock();
+    await expect(
+      pairByDeviceCode({
+        home,
+        serverUrl: SERVER,
+        fetchFn: server.fetchFn,
+        sleep: c.sleep,
+        now: c.now,
+        out: () => {},
+      }),
+    ).rejects.toThrow("its answer is not valid");
+    expect(existsSync(join(home, "device-token"))).toBe(false);
+  });
+
   it("access_denied ends with the denial line and writes nothing", async () => {
     const home = tempHome();
     const server = fakeServer({ status: 200, body: START }, [

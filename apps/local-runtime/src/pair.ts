@@ -21,6 +21,7 @@ import {
   platformOf,
   proposedDeviceName,
   saveEnrollment,
+  withoutBadOptionalFields,
 } from "./enroll.js";
 import { RUNTIME_VERSION } from "./version.js";
 
@@ -183,7 +184,7 @@ async function poll(
   });
   const body = (await res.json().catch(() => null)) as unknown;
   if (res.ok) {
-    const approved = PairingTokenResponse.safeParse(body);
+    const approved = PairingTokenResponse.safeParse(withoutBadOptionalFields(body));
     if (!approved.success) {
       throw new PairingError("The server approved the pairing but its answer is not valid.", "refused");
     }
