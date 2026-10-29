@@ -27,7 +27,9 @@ export function CopyLine({
       <code
         className={cn(
           "min-w-0 flex-1 font-mono text-[12px]",
-          wrap ? "whitespace-pre-wrap py-0.5 [overflow-wrap:anywhere]" : "scrollbar-thin overflow-x-auto whitespace-nowrap",
+          wrap
+            ? "whitespace-pre-wrap py-0.5 [overflow-wrap:anywhere]"
+            : "scrollbar-thin overflow-x-auto whitespace-nowrap",
         )}
       >
         {text}
