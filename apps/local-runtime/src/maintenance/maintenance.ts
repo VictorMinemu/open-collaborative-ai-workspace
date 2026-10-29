@@ -123,6 +123,7 @@ export const UPDATE_REFUSALS = {
   noLatest: "could not check the latest version",
   broken: "the latest version is marked broken and is not installed",
   unknownRuntime: "this runtime is not available on this device",
+  noControlPlane: "this device is not paired with a Control Plane",
 } as const;
 
 export type UpdateRequestAnswer = { accepted: true } | { accepted: false; reason: string };
@@ -284,6 +285,8 @@ export class RuntimeMaintenance {
   private registryAllowed = false;
   private started = false;
   private stopped = false;
+  /** A Device Link exists (its run frames reach the Control Plane's audit, through the offline log if need be). */
+  private paired = false;
   private checking: Promise<void> | null = null;
   private checkAgain = false;
   private checkTimer: TimerHandle | null = null;
@@ -377,6 +380,7 @@ export class RuntimeMaintenance {
     if (this.started) return;
     this.started = true;
     this.stopped = false;
+    this.paired = opts.paired;
     if (!opts.paired) this.registryAllowed = true;
     else if (!this.registryAllowed) {
       this.graceTimer = this.setTimer(() => {
@@ -673,6 +677,8 @@ export class RuntimeMaintenance {
           return refuse(UPDATE_REFUSALS.manual);
       }
     }
+    // D-10 (07.11 review ME-05): nothing installs without a Control Plane that can audit it.
+    if (!this.paired) return refuse(UPDATE_REFUSALS.noControlPlane);
     const latest = await this.freshRegistry.latest(runtime, resolution.channel).catch(() => null);
     if (latest === null) return refuse(UPDATE_REFUSALS.noLatest);
     st.latestVersion = latest;

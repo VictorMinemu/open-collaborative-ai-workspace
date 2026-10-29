@@ -178,3 +178,40 @@ describe("DeviceLink server frames (07.11, PD-03)", () => {
     expect(debug).toContain("ignoring server frame");
   });
 });
+
+describe("DeviceLink offline log (07.11 review ME-05)", () => {
+  it("a full offline log evicts other frames first, never a runtime.update.run (its audit record)", async () => {
+    const received: Array<{ type: string }> = [];
+    server.wss.on("connection", (ws) => {
+      ws.on("message", (data) => received.push(JSON.parse(String(data)) as { type: string }));
+    });
+    link = new DeviceLink({
+      url: server.url,
+      token: "device-token",
+      onOpenFrames: () => [],
+      onCommand: (c) => commands.push(c),
+      backoffMinMs: 10,
+      backoffMaxMs: 20,
+      heartbeatMs: 60_000,
+      maxOfflineFrames: 3,
+    });
+    const run = {
+      type: "runtime.update.run",
+      runId: "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f",
+      runtime: "claude-code",
+      trigger: "automatic",
+      phase: "started",
+      fromVersion: "2.1.290",
+      toVersion: null,
+      candidate: "2.1.300",
+      method: "native",
+      at: "2026-10-28T12:00:00.000Z",
+    } as never;
+    link.send(run);
+    for (let i = 0; i < 5; i++) link.send({ type: "projects.sync", projects: [] } as never);
+    expect(link.queuedFrames).toBe(3);
+    link.start();
+    await server.waitFor(() => (received.length >= 3 ? true : undefined));
+    expect(received.map((f) => f.type)).toEqual(["runtime.update.run", "projects.sync", "projects.sync"]);
+  });
+});

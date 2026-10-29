@@ -894,9 +894,22 @@ describe('RuntimeMaintenance: "Update now" (D-05, PD-08)', () => {
     expect(h.heldLocks.size).toBe(0);
   });
 
-  it("a local request carries trigger local and no command id", async () => {
+  it("a local request on a daemon with no Control Plane is refused: nothing installs unaudited (D-10, 07.11 review ME-05)", async () => {
     const h = harness();
     h.m.start({ paired: false });
+    await flush();
+    expect(await h.m.requestUpdate("claude-code", "local")).toEqual({
+      accepted: false,
+      reason: "this device is not paired with a Control Plane",
+    });
+    await flush();
+    expect(h.runs).toEqual([]);
+    expect(h.runFrames).toEqual([]);
+  });
+
+  it("a local request carries trigger local and no command id", async () => {
+    const h = harness();
+    h.m.start({ paired: true });
     await flush();
     expect(await h.m.requestUpdate("claude-code", "local")).toEqual({ accepted: true });
     await flush();
@@ -933,7 +946,7 @@ describe('RuntimeMaintenance: "Update now" (D-05, PD-08)', () => {
 
   it("refused when a fresh registry check says it is current (the cached answer is not trusted)", async () => {
     const h = harness();
-    h.m.start({ paired: false });
+    h.m.start({ paired: true });
     await flush();
     h.state.installed = "2.1.300"; // updated by hand since the last check
     expect(await h.m.requestUpdate("claude-code", "manual")).toEqual({

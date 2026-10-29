@@ -106,7 +106,10 @@ export class DeviceLink {
     this.offline.push(frame);
     const max = this.opts.maxOfflineFrames ?? 10_000;
     if (this.offline.length > max) {
-      this.offline.shift();
+      // 07.11 review ME-05: a runtime update run frame is an audit record; the oldest other frame goes first.
+      const oldest = this.offline.findIndex((f) => f.type !== "runtime.update.run");
+      if (oldest === -1) return;
+      this.offline.splice(oldest, 1);
       this.droppedFrames++;
       if (this.droppedFrames === 1 || this.droppedFrames % 1000 === 0) {
         this.log.warn("offline log full; dropping oldest frames", { dropped: this.droppedFrames });
