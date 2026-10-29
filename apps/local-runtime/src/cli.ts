@@ -372,20 +372,25 @@ async function run(): Promise<void> {
     .catch(() => "info" as const);
   await applyServiceEnv(home, process.env, createLogger(level));
   const daemon = await Daemon.create();
-  await daemon.start();
+  // Handlers go in before start: the control socket exists before start() resolves, and a service manager (or a
+  // test) may stop the daemon in that window. A signal then waits for start to settle and stops cleanly.
   let stopping = false;
+  let started: Promise<void> = Promise.resolve();
   const shutdown = (signal: string) => {
     if (stopping) return;
     stopping = true;
     process.stderr.write(`received ${signal}, stopping\n`);
-    daemon
-      .stop()
+    started
+      .catch(() => undefined)
+      .then(() => daemon.stop())
       .catch(() => undefined)
       .finally(() => process.exit(0));
     setTimeout(() => process.exit(1), 10_000).unref();
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  started = daemon.start();
+  await started;
 }
 
 async function main(argv: string[]): Promise<void> {
