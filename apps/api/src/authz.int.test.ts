@@ -25,6 +25,9 @@ const PUBLIC_ROUTES = [
   "POST /api/v1/password-reset/request",
   "POST /api/v1/password-reset",
   "POST /api/v1/devices/enroll",
+  // 07.12-02 (D-03): a server starts a device-code pairing and polls for its token before any session exists.
+  "POST /api/v1/devices/pairings",
+  "POST /api/v1/devices/pairings/token",
   // 07.4-10: the OAuth callback checks the member's session against the flow by hand; the CIMD document is public.
   "GET /api/v1/connectors/oauth/callback",
   "GET /api/v1/connectors/oauth/client-metadata.json",
@@ -68,6 +71,13 @@ describe("route authorization coverage (strict in tests)", () => {
     expect(modes.get("GET /ws")).toBe<AuthzMode>("user");
     expect(modes.get("GET /runtime/ws")).toBe<AuthzMode>("device");
     expect(modes.get("GET /agent-channel/v1/ws")).toBe<AuthzMode>("cell");
+  });
+
+  it("the device-code pairing decisions (07.12-02) are user routes", () => {
+    const modes = stack.built.authz.routes;
+    for (const path of ["lookup", "approve", "deny"]) {
+      expect(modes.get(`POST /api/v1/devices/pairings/${path}`)).toBe<AuthzMode>("user");
+    }
   });
 
   it("the Work Zone proposal routes (07.5-08) are cell routes", () => {
