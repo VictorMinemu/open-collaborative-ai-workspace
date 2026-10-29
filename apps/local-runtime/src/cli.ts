@@ -38,9 +38,10 @@ import { type ControlRequest, controlRequest, controlSocketPath } from "./contro
 import { Daemon } from "./daemon.js";
 import { type EnrollResult, enroll } from "./enroll.js";
 import { readInstallInfo } from "./install-info.js";
-import { errorMessage } from "./logger.js";
+import { createLogger, errorMessage } from "./logger.js";
 import { publicInstallFields, resolveInstall } from "./maintenance/install-method.js";
 import { PairingCancelledError, pairByDeviceCode } from "./pair.js";
+import { applyServiceEnv } from "./service-env.js";
 import { RUNTIME_VERSION } from "./version.js";
 
 async function viaSocket(req: ControlRequest): Promise<void> {
@@ -290,7 +291,16 @@ async function enrollCommand(args: string[]): Promise<void> {
   print("Start the runtime with: ocw-runtime run (or install it as a service with: ocw-runtime setup)");
 }
 
+/**
+ * `run`: applies `~/.ocw/service.env` to this process's environment first (07.12, D-12: keys already set win, refused
+ * unless 0600 and owned by this user, names logged, never values), then creates and starts the daemon.
+ */
 async function run(): Promise<void> {
+  const home = ocwHome();
+  const level = await loadConfig(home)
+    .then((c) => c.logLevel)
+    .catch(() => "info" as const);
+  await applyServiceEnv(home, process.env, createLogger(level));
   const daemon = await Daemon.create();
   await daemon.start();
   let stopping = false;

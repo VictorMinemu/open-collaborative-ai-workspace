@@ -1,5 +1,6 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -619,4 +620,81 @@ describe("an unpaired daemon (07.12-03)", () => {
       await daemon.stop();
     }
   });
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.12-03 `~/.ocw/service.env` (D-12, PD-10): `ocw-runtime run` reads it before the daemon is created. PD-19: a scratch
+// HOME and PATH, updates off and a dead registry, so nothing real is ever run or updated.
+
+describe("ocw-runtime run reads ~/.ocw/service.env (07.12-03, D-12)", () => {
+  /** Starts `run`, waits for the control socket, stops it with SIGTERM and returns its stderr. */
+  async function runDaemon(env: Record<string, string>, socket: string): Promise<string> {
+    const base = Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => !k.startsWith("OCW_")),
+    ) as Record<string, string>;
+    const child = spawn(process.execPath, [BIN, "run"], {
+      env: { ...base, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let logs = "";
+    child.stdout.on("data", (d: Buffer) => {
+      logs += d.toString();
+    });
+    child.stderr.on("data", (d: Buffer) => {
+      logs += d.toString();
+    });
+    const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+    try {
+      const deadline = Date.now() + 20_000;
+      while (!existsSync(socket)) {
+        if (child.exitCode !== null) throw new Error(`daemon exited early: ${logs}`);
+        if (Date.now() > deadline) throw new Error(`no control socket after 20 s: ${logs}`);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    } finally {
+      child.kill("SIGTERM");
+    }
+    expect(await exited).toBe(0);
+    return logs;
+  }
+
+  function scratch(): { userHome: string; home: string; env: Record<string, string> } {
+    const userHome = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(userHome);
+    const home = join(userHome, ".ocw");
+    mkdirSync(home, { mode: 0o700 });
+    return {
+      userHome,
+      home,
+      env: {
+        HOME: userHome,
+        OCW_HOME: home,
+        PATH: "/usr/bin:/bin",
+        OCW_RUNTIME_UPDATES: "off",
+        OCW_RUNTIME_REGISTRY_URL: "http://127.0.0.1:9",
+      },
+    };
+  }
+
+  it("a 0600 file is applied before the daemon is created (it switches the fake runtime on)", async () => {
+    const { home, env } = scratch();
+    const file = join(home, "service.env");
+    writeFileSync(file, "# service secrets\nOCW_RUNTIME_FAKE=1\nSECRET_PROBE=probe-value-71\n", {
+      mode: 0o600,
+    });
+    const logs = await runDaemon(env, join(home, "runtime.sock"));
+    expect(logs).toContain("OCW_RUNTIME_FAKE=1: using the fake runtime");
+    expect(logs).toContain("SECRET_PROBE");
+    expect(logs).not.toContain("probe-value-71");
+  }, 60_000);
+
+  it("a group- or world-readable file is refused with the chmod line and no value", async () => {
+    const { home, env } = scratch();
+    const file = join(home, "service.env");
+    writeFileSync(file, "SECRET_PROBE=probe-value-72\n", { mode: 0o644 });
+    chmodSync(file, 0o644);
+    const logs = await runDaemon({ ...env, OCW_RUNTIME_FAKE: "1" }, join(home, "runtime.sock"));
+    expect(logs).toContain("chmod 600 ~/.ocw/service.env");
+    expect(logs).not.toContain("probe-value-72");
+  }, 60_000);
 });
