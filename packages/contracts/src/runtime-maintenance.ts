@@ -300,10 +300,11 @@ export type RuntimeUpdateRunState = z.infer<typeof RuntimeUpdateRunState>;
 // ---- no host path (principle 7, Pitfall 9) ----
 
 /**
- * Characters after which an absolute path may start inside a token (`--prefix=/usr`, `(/usr/x.js:1:2)`, `error:/x`).
- * A `//` never starts one, so `scheme://` inside a token is left alone.
+ * Characters after which an absolute path may start inside a token (`--prefix=/usr`, `(/usr/x.js:1:2)`, `error:/x`,
+ * `a->/opt/x`, `x|/usr/lib`, `a;/x`, `user@/srv`, `!/x`, `(a)/x`). A `//` never starts one, so `scheme://` inside a
+ * token is left alone.
  */
-const PATH_LEAD = "(?<=^|[\\s\"'`(=\\[{<,:])";
+const PATH_LEAD = "(?<=^|[\\s\"'`(=\\[{<,:>|;@!)])";
 const PATH_BODY = "[^\\s\"'`]";
 const HOST_PATH_RE = new RegExp(
   [

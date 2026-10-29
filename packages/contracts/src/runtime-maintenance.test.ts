@@ -193,6 +193,13 @@ describe("no host path", () => {
     ["--prefix=/usr/local done", "--prefix=<path> done"],
     ["error:/usr/x", "error:<path>"],
     ["url=https://h/x then /var/y", "url=https://h/x then <path>"],
+    // 07.11 review LO-05: after >, |, ;, @, ! and ) inside a token.
+    ["a->/opt/x/y", "a-><path>"],
+    ["x|/usr/lib/node_modules/y", "x|<path>"],
+    ["a;/usr/x", "a;<path>"],
+    ["user@/srv/x", "user@<path>"],
+    ["!/usr/x", "!<path>"],
+    ["(a)/usr/x", "(a)<path>"],
   ])("scrubs %s", (input, expected) => {
     expect(scrubHostPaths(input)).toBe(expected);
   });
@@ -205,6 +212,7 @@ describe("no host path", () => {
     "added 3 packages in 4s",
     "and / or",
     "1/2 done",
+    "@anthropic-ai/claude-code@2.1.300",
   ])("keeps %s", (input) => {
     expect(scrubHostPaths(input)).toBe(input);
   });
