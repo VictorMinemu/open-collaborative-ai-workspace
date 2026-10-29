@@ -695,6 +695,24 @@ describe("07.11-06 Task 3: every device hears the org's level and the manifest; 
   });
 });
 
+describe("07.11 review LO-03: a committed policy change never answers 500", () => {
+  it("a failing push of the new level to the devices still answers 200 with the saved policy", async () => {
+    const hub = stack.built.deviceHub;
+    const push = hub.pushRuntimeConfig.bind(hub);
+    hub.pushRuntimeConfig = async () => {
+      throw new Error("redis is down");
+    };
+    try {
+      await setLevel("notify");
+      const read = await ada.request("GET", "/api/v1/work-zone-policy");
+      expect(read.body!.runtimeUpdates).toBe("notify");
+    } finally {
+      hub.pushRuntimeConfig = push;
+    }
+    await setLevel("automatic");
+  });
+});
+
 describe("07.11 review ME-04: history rows that can never finish are closed", () => {
   it("a run the device started and never finished is closed as failed (interrupted) at its next snapshot; a late finished frame still records the real outcome", async () => {
     const runId = randomUUID();

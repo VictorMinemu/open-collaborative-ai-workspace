@@ -246,8 +246,14 @@ export function registerWorkSessionRoutes(
         }
         return { view: await policyView(tx, policy), changed };
       });
-      // 07.11 (D-02, PD-03): once committed, every online device of the org hears the new runtime updates level.
-      if (changed.includes("runtimeUpdates")) await hub.pushRuntimeConfig(auth.organizationId);
+      // 07.11 (D-02, PD-03): once committed, every online device of the org hears the new runtime updates level. A
+      // failed push never turns the saved change into an error (07.11 review LO-03): devices also get the level on
+      // their next hello.
+      if (changed.includes("runtimeUpdates")) {
+        await hub
+          .pushRuntimeConfig(auth.organizationId)
+          .catch((err: unknown) => req.log.error({ err }, "runtime config push failed"));
+      }
       return view;
     },
   );
