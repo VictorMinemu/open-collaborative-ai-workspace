@@ -191,7 +191,9 @@ describe("the runtime bundle build (07.12, D-01, D-10)", () => {
 
     it("reads the block-style lockfile `turbo prune` writes for the image build as well as pnpm's flow style", async () => {
       const mod = (await import(pathToFileURL(join(PKG_ROOT, "scripts", "external-lock.mjs")).href)) as {
-        readPnpmPackages: (text: string) => Map<string, { integrity?: string; os?: string[]; cpu?: string[] }>;
+        readPnpmPackages: (
+          text: string,
+        ) => Map<string, { integrity?: string; os?: string[]; cpu?: string[] }>;
       };
       const flow = [
         "lockfileVersion: '9.0'",
