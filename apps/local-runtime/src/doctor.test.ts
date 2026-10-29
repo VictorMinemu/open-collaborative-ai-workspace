@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import { ProjectRegistry, RuntimeConfigSchema } from "./config.js";
 import {
   createDoctorDeps,
+  type DaemonStatusView,
   DOCTOR_CHECK_IDS,
   type DoctorCheck,
   type DoctorCheckId,
@@ -159,6 +160,13 @@ function deps(
       deviceName: "build-01",
       runtimes: [claudeReady, codexReady],
       projects: 1,
+      // A 07.11+ daemon with real runtimes always runs maintenance and reports its levels.
+      runtimeUpdates: {
+        localLevel: "automatic",
+        localLevelSource: "config",
+        effectiveLevel: "automatic",
+        runtimes: [],
+      },
       sessions: [],
     }),
     service: async () => serviceActive,
@@ -493,6 +501,51 @@ describe("ocw-runtime doctor: every other check with its fix line (07.12, D-05, 
       }),
     );
     expect(check(report, "claude-code").status).toBe("fail");
+  });
+
+  it("updates: reports what the running daemon does, not this shell's environment (07.12-11)", async () => {
+    const running = (runtimeUpdates?: DaemonStatusView["runtimeUpdates"]) =>
+      deps({
+        controlStatus: async () => ({
+          paired: true,
+          connected: true,
+          runtimes: [claudeReady, codexReady],
+          ...(runtimeUpdates ? { runtimeUpdates } : {}),
+          sessions: [],
+        }),
+        // This shell would say "automatic"; the daemon's answer must win.
+        updatesLevel: async () => ({ level: "automatic", source: "config" }),
+      });
+
+    // A daemon that manages no updates (fake runtime, or a runtime older than 07.11) updates nothing.
+    const none = check(await runDoctor(running()), "updates");
+    expect(none.status).toBe("warn");
+    expect(none.summary).toContain("The running runtime does not manage CLI updates");
+    expect(none.fix).toContain("`ocw-runtime service restart`");
+
+    // The daemon got OCW_RUNTIME_UPDATES=off from its own environment (supervisor or service.env).
+    const offFromEnv = check(
+      await runDoctor(
+        running({ localLevel: "off", localLevelSource: "env", effectiveLevel: "off", runtimes: [] }),
+      ),
+      "updates",
+    );
+    expect(offFromEnv.status).toBe("warn");
+    expect(offFromEnv.summary).toBe("Runtime CLI updates are off (from OCW_RUNTIME_UPDATES)");
+    expect(offFromEnv.fix).toContain("OCW_RUNTIME_UPDATES");
+
+    const automatic = check(
+      await runDoctor(
+        running({
+          localLevel: "automatic",
+          localLevelSource: "config",
+          effectiveLevel: "automatic",
+          runtimes: [],
+        }),
+      ),
+      "updates",
+    );
+    expect(automatic).toMatchObject({ status: "ok", summary: "Runtime CLI updates: automatic", fix: null });
   });
 
   it("runtimes: fails when nothing is installed and signed in", async () => {

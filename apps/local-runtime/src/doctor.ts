@@ -113,6 +113,7 @@ export const DaemonStatusView = z.object({
   runtimeUpdates: z
     .object({
       localLevel: RuntimeUpdatesLevel,
+      localLevelSource: z.enum(["env", "config"]).optional(),
       effectiveLevel: RuntimeUpdatesLevel.optional(),
       runtimes: z
         .array(z.object({ runtime: z.string(), installedCompatibility: z.string() }).loose())
@@ -606,11 +607,20 @@ async function checkUpdates(ctx: Context): Promise<Finding> {
   let level: RuntimeUpdatesLevel;
   let orgLowered = false;
   let note = "";
+  if (status && !status.runtimeUpdates) {
+    // The daemon that answers is the one that would update the CLIs. When it runs no maintenance (a fake runtime,
+    // or a runtime older than 07.11) nothing is updated, whatever this shell's OCW_RUNTIME_UPDATES says.
+    return warn(
+      "The running runtime does not manage CLI updates",
+      "Restart it from this install so it applies the updates level: `ocw-runtime service restart` (or restart `ocw-runtime run` under your supervisor)",
+    );
+  }
   if (status?.runtimeUpdates) {
-    const { localLevel, effectiveLevel } = status.runtimeUpdates;
+    const { localLevel, localLevelSource, effectiveLevel } = status.runtimeUpdates;
     level = effectiveLevel ?? localLevel;
     orgLowered = level !== localLevel;
     if (orgLowered) note = ` (this device says ${localLevel}; the organization lowers it)`;
+    else if (localLevelSource === "env") note = " (from OCW_RUNTIME_UPDATES)";
   } else {
     const local = await ctx.deps.updatesLevel();
     level = local.level;
@@ -621,7 +631,9 @@ async function checkUpdates(ctx: Context): Promise<Finding> {
       `Runtime CLI updates are off${note}`,
       orgLowered
         ? "Your organization turned them off; ask a workspace admin"
-        : "`ocw-runtime updates automatic` (or `notify`) so Claude Code and Codex stay supported",
+        : note
+          ? "Remove OCW_RUNTIME_UPDATES=off from the runtime's environment (or ~/.ocw/service.env), then restart it"
+          : "`ocw-runtime updates automatic` (or `notify`) so Claude Code and Codex stay supported",
     );
   }
   return ok(`Runtime CLI updates: ${level}${note}`);
