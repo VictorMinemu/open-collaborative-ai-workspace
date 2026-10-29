@@ -188,6 +188,52 @@ describe("the runtime bundle build (07.12, D-01, D-10)", () => {
       expect(mod.EXTERNAL_LOCK_FILE).toBe(RUNTIME_EXTERNAL_LOCK_FILE);
       expect(mod.EXTERNAL_LOCK_ROOT_NAME).toBe(RUNTIME_EXTERNAL_LOCK_ROOT);
     });
+
+    it("reads the block-style lockfile `turbo prune` writes for the image build as well as pnpm's flow style", async () => {
+      const mod = (await import(pathToFileURL(join(PKG_ROOT, "scripts", "external-lock.mjs")).href)) as {
+        readPnpmPackages: (text: string) => Map<string, { integrity?: string; os?: string[]; cpu?: string[] }>;
+      };
+      const flow = [
+        "lockfileVersion: '9.0'",
+        "packages:",
+        "  '@scope/a@1.0.0':",
+        "    resolution: {integrity: sha512-AAA=}",
+        "    os: [darwin, linux]",
+        "    cpu: [arm64]",
+        "  b@2.0.0:",
+        "    resolution: {integrity: sha512-BBB=}",
+        "snapshots:",
+        "  b@2.0.0: {}",
+      ].join("\n");
+      const block = [
+        "lockfileVersion: '9.0'",
+        "packages:",
+        "  '@scope/a@1.0.0':",
+        "    resolution:",
+        "      integrity: sha512-AAA=",
+        "    engines:",
+        "      node: '>=18'",
+        "    os:",
+        "    - darwin",
+        "    - linux",
+        "    cpu:",
+        "    - arm64",
+        "  b@2.0.0:",
+        "    resolution:",
+        "      integrity: sha512-BBB=",
+        "snapshots:",
+        "  b@2.0.0: {}",
+      ].join("\n");
+      for (const text of [flow, block]) {
+        const read = mod.readPnpmPackages(text);
+        expect(read.get("@scope/a@1.0.0")).toMatchObject({
+          integrity: "sha512-AAA=",
+          os: ["darwin", "linux"],
+          cpu: ["arm64"],
+        });
+        expect(read.get("b@2.0.0")).toMatchObject({ integrity: "sha512-BBB=" });
+      }
+    });
   });
 
   it("names the runtime, its version and its license on line 1 and ends with the third-party notices", () => {

@@ -30,29 +30,55 @@ export function findPnpmLock(dir) {
   }
 }
 
-/** `name@version` → integrity and platform fields, from the `packages:` section of a pnpm v9 lockfile. */
+/**
+ * `name@version` → integrity and platform fields, from the `packages:` section of a pnpm v9 lockfile. Reads both the
+ * flow style pnpm writes (`resolution: {integrity: …}`, `os: [a, b]`) and the block style `turbo prune` rewrites the
+ * pruned lockfile into (`resolution:` / `integrity: …`, `os:` / `- a`), which is what the image build reads.
+ */
 export function readPnpmPackages(text) {
   const out = new Map();
   let inPackages = false;
   let current = null;
+  let block = null; // "resolution" | "os" | "cpu" | "libc" while reading a block-style field
+  const unquote = (s) => s.trim().replace(/^'(.*)'$/, "$1");
   for (const line of text.split("\n")) {
     if (/^\S/.test(line)) {
       inPackages = line === "packages:";
       current = null;
+      block = null;
       continue;
     }
     if (!inPackages) continue;
     const header = /^ {2}(\S.*):$/.exec(line);
     if (header) {
-      current = { key: header[1].replace(/^'(.*)'$/, "$1") };
+      current = { key: unquote(header[1]) };
       out.set(current.key, current);
+      block = null;
       continue;
     }
     if (!current) continue;
+    if (block === "resolution") {
+      const nested = /^ {6}integrity: ([A-Za-z0-9+/=-]+)$/.exec(line);
+      if (nested) current.integrity = nested[1];
+      if (/^ {6}/.test(line)) continue;
+    } else if (block) {
+      const item = /^ {4,6}- (.+)$/.exec(line);
+      if (item) {
+        current[block].push(unquote(item[1]));
+        continue;
+      }
+    }
+    block = null;
     const integrity = /^ {4}resolution: \{integrity: ([A-Za-z0-9+/=-]+)\}$/.exec(line);
     if (integrity) current.integrity = integrity[1];
+    if (/^ {4}resolution:$/.test(line)) block = "resolution";
     const list = /^ {4}(os|cpu|libc): \[(.*)\]$/.exec(line);
-    if (list) current[list[1]] = list[2].split(",").map((s) => s.trim().replace(/^'(.*)'$/, "$1"));
+    if (list) current[list[1]] = list[2].split(",").map(unquote);
+    const listBlock = /^ {4}(os|cpu|libc):$/.exec(line);
+    if (listBlock) {
+      block = listBlock[1];
+      current[block] = [];
+    }
   }
   return out;
 }
