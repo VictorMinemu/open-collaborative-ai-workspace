@@ -329,6 +329,11 @@ export async function runUpdate(opts: RunUpdateOptions): Promise<RunResult> {
     const command = updateCommandFor(before, opts.candidate, env);
     if (!command || !before.binPath) return failed(null, "", "this install is not updatable here");
     const fromVersion = await probeVersion(before.binPath, exec);
+    // Never a downgrade (07.11 review HI-01): the install may have caught up with (or moved past) the candidate since
+    // the check, by hand or through another daemon; then there is nothing to run.
+    if (fromVersion !== null && compareRuntimeVersions(fromVersion, opts.candidate) >= 0) {
+      return { outcome: "unchanged", fromVersion, toVersion: fromVersion, output: "" };
+    }
 
     let lastProgressAt = Number.NEGATIVE_INFINITY;
     const progress = (state: RunProgress["state"], text: string) => {

@@ -450,6 +450,7 @@ export class RuntimeMaintenance {
     const automatic = this.effectiveLevel === "automatic";
     for (const r of this.runtimes) {
       const st = this.stateOf(r.id);
+      this.revalidatePending(r.id, st);
       if (!automatic) {
         // A lowered level drops an automatic update that has not started its run. A draining one also reopens the
         // gate and releases the sessions it held (the pending `drain()` sees the dropped job and returns).
@@ -469,6 +470,28 @@ export class RuntimeMaintenance {
       }
       if ((st.backoff.get(candidate) ?? 0) > this.now()) continue;
       this.begin(r.id, st, { trigger: "automatic", candidate, drainNow: false });
+    }
+  }
+
+  /**
+   * A job still waiting for its idle moment follows the last check (07.11 review HI-01): an install already at or past
+   * its candidate drops it (never a downgrade); a newer, not broken latest becomes its candidate, keeping its
+   * `pendingSince` so the drain and stale clocks never restart.
+   */
+  private revalidatePending(runtime: RuntimeId, st: RuntimeState): void {
+    const job = st.job;
+    if (!job || st.state !== "pending") return;
+    if (st.installedVersion !== null && compareRuntimeVersions(st.installedVersion, job.candidate) >= 0) {
+      this.dropJob(st);
+      return;
+    }
+    const latest = st.latestVersion;
+    if (
+      latest !== null &&
+      compareRuntimeVersions(latest, job.candidate) > 0 &&
+      compatibilityOf(this.manifest, runtime, latest) !== "broken"
+    ) {
+      job.candidate = latest;
     }
   }
 

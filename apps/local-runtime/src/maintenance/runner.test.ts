@@ -113,7 +113,22 @@ describe("runUpdate (Phase 07.11, PD-11)", () => {
   });
 
   it("reports unchanged when the installer says it is up to date and the version did not move", async () => {
-    installFake("claude-native", home, "2.1.300");
+    // The installer finds nothing newer than what is installed (its channel lags the registry's answer).
+    installFake("claude-native", home, "2.1.290");
+    writeFileSync(join(nativeRoot(), "fake-update.json"), JSON.stringify({ next: "2.1.290" }));
+    const result = await runUpdate({
+      resolution: resolveClaude(),
+      candidate: "2.1.300",
+      lockDir: lockDir(),
+      home,
+      env,
+    });
+    expect(result).toMatchObject({ outcome: "unchanged", fromVersion: "2.1.290", toVersion: "2.1.290" });
+    expect(result.output).toContain("Claude Code is up to date (2.1.290)");
+  });
+
+  it("never runs a candidate at or below the installed version (no downgrade): unchanged, nothing run (07.11 review HI-01)", async () => {
+    installFake("claude-native", home, "2.1.305");
     writeFileSync(join(nativeRoot(), "fake-update.json"), JSON.stringify({ next: "2.1.300" }));
     const result = await runUpdate({
       resolution: resolveClaude(),
@@ -122,8 +137,29 @@ describe("runUpdate (Phase 07.11, PD-11)", () => {
       home,
       env,
     });
-    expect(result).toMatchObject({ outcome: "unchanged", fromVersion: "2.1.300", toVersion: "2.1.300" });
-    expect(result.output).toContain("Claude Code is up to date (2.1.300)");
+    expect(result).toMatchObject({ outcome: "unchanged", fromVersion: "2.1.305", toVersion: "2.1.305" });
+    expect(claudeVersion()).toBe("2.1.305 (Claude Code)");
+    // The fake installer never ran: it would have left its env report in the install root.
+    expect(existsSync(join(nativeRoot(), "fake-update-env.json"))).toBe(false);
+  });
+
+  it("never downgrades an npm install that moved past the pending candidate (07.11 review HI-01)", async () => {
+    const prefix = join(tmp, "prefix");
+    installFake("claude-npm", prefix, "2.1.305");
+    const bin = join(prefix, "bin");
+    const resolution = assertScratch(
+      resolveInstall("claude-code", { home, env: { ...env, PATH: bin }, which: scratchWhich([bin]) }),
+    );
+    const result = await runUpdate({ resolution, candidate: "2.1.300", lockDir: lockDir(), home, env });
+    expect(result).toMatchObject({ outcome: "unchanged", fromVersion: "2.1.305", toVersion: "2.1.305" });
+    const pkg = JSON.parse(
+      readFileSync(
+        join(prefix, "lib", "node_modules", "@anthropic-ai", "claude-code", "package.json"),
+        "utf8",
+      ),
+    ) as { version: string };
+    expect(pkg.version).toBe("2.1.305");
+    expect(existsSync(join(prefix, "fake-update-env.json"))).toBe(false);
   });
 
   it("fails on a non-zero exit and keeps the installer's error line", async () => {

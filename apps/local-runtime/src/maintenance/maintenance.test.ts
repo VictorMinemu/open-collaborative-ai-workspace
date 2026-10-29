@@ -505,6 +505,47 @@ describe("RuntimeMaintenance: never cut a turn (D-03, D-03a, D-03b, PD-07)", () 
     expect(claudeStatus(h).stale).toBe(false);
   });
 
+  it("a pending update whose candidate the install already reached is dropped, never run (07.11 review HI-01)", async () => {
+    const h = harness();
+    h.adapter.turns = 1;
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    expect(claudeStatus(h)).toMatchObject({ state: "pending" });
+    // The owner updated by hand past the candidate while the session was busy.
+    h.state.installed = "2.1.305";
+    h.state.latest = "2.1.305";
+    await h.m.check();
+    await flush();
+    expect(claudeStatus(h)).toMatchObject({ state: "idle", pendingSince: null, advisory: "current" });
+    h.adapter.turns = 0;
+    h.m.onRuntimeActivity("claude-code");
+    await h.advance(PENDING_POLL_MS);
+    expect(h.runs).toEqual([]);
+  });
+
+  it("a pending update follows a newer latest and keeps its pendingSince (07.11 review HI-01)", async () => {
+    const h = harness();
+    h.adapter.turns = 1;
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    const since = claudeStatus(h).pendingSince;
+    h.state.latest = "2.1.310";
+    await h.advance(60_000);
+    await h.m.check();
+    await flush();
+    expect(claudeStatus(h)).toMatchObject({
+      state: "pending",
+      pendingSince: since,
+      latestVersion: "2.1.310",
+    });
+    h.adapter.turns = 0;
+    h.m.onRuntimeActivity("claude-code");
+    await flush();
+    expect(h.runs.map((r) => r.candidate)).toEqual(["2.1.310"]);
+  });
+
   it("a failed run reopens the gate, tells the held sessions it failed and reports lastRun failed", async () => {
     const h = harness();
     h.setRunResult(() => ({
