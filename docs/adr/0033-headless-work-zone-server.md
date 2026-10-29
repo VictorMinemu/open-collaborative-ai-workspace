@@ -39,10 +39,18 @@ third-party host for the runtime: a self-hosted workspace must serve its own.
   versions, and `source` (repository and commit). The build fails on a license outside the allowlist, on any input
   from the SDK, or on an SDK or peer that is not pinned exactly.
 - **The Claude Agent SDK is never redistributed (D-10).** It is external to the bundle. `install.sh` installs that
-  exact version and its peers beside the bundle with `npm install --prefix <dir> --no-audit --no-fund --omit=optional
-  --ignore-scripts`, from the npm registry the machine already uses. The workspace serves only our AGPL code and its
-  permissive dependencies. So the ADR-0021 decision 11 exception is not widened to every self-hosted API: the SDK
-  remains the server admin's own npm download, as it is for any npm user.
+  exact version, its peers and their whole dependency tree beside the bundle with `npm ci --prefix <dir> --no-audit
+  --no-fund --omit=optional --ignore-scripts`, from the npm registry the machine already uses.
+- **The external tree is locked (07.12 review ME-03).** The daemon that holds the device token imports that tree, so
+  pinning only the SDK and its peers would let every transitive range float to whatever the registry serves on install
+  day. The build writes `npm-shrinkwrap.json` (lockfile v3) next to the bundle: the tree this checkout installed, each
+  package at its exact version with its pnpm-lock.yaml integrity, in npm's nested layout, optional platform packages
+  marked optional. Its sha256 is `externalLockSha256` in the manifest; the API re-hashes it with the bundle, and
+  `install.sh` embeds it and its `package.json` in quoted heredocs. `npm ci` installs exactly that tree or fails, and
+  every tarball is checked against its integrity. The lockfile names only public registry packages and their hashes:
+  the workspace still serves only our AGPL code and its permissive dependencies. So the ADR-0021 decision 11 exception
+  is not widened to every self-hosted API: the SDK remains the server admin's own npm download, as it is for any npm
+  user.
 - **Served by the API.** Four public, read-only routes under `/api/v1/runtime/`: `version` (the manifest),
   `bundle` (with `ETag` and `x-content-sha256`), `bundle.sha256` and `install.sh`. The dist directory is
   `OCW_RUNTIME_DIST_DIR` (the image sets `/app/runtime-dist`, root-owned, built in a `runtime-bundle` stage that

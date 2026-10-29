@@ -47,6 +47,15 @@ export type BundleLicense = z.infer<typeof BundleLicense>;
 /** The Claude Agent SDK: never inside the bundle, installed beside it from the server's npm registry (D-10). */
 export const CLAUDE_AGENT_SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk";
 
+/**
+ * The npm lockfile of everything installed beside the bundle (07.12 review ME-03): the SDK, its peers and their whole
+ * dependency tree at the exact versions and integrity the runtime was built with. Written next to the bundle by the
+ * build, embedded in `install.sh` with a `package.json` named `RUNTIME_EXTERNAL_LOCK_ROOT`, installed by `npm ci`.
+ * `build-bundle.mjs` keeps equal copies of both names (bundle.test.ts checks them).
+ */
+export const RUNTIME_EXTERNAL_LOCK_FILE = "npm-shrinkwrap.json";
+export const RUNTIME_EXTERNAL_LOCK_ROOT = "ocw-runtime-deps";
+
 const NPM_NAME_RE = /^(@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
 const EXACT_VERSION_RE = /^\d+\.\d+\.\d+$/;
 const BUNDLE_VERSION_RE = /^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/;
@@ -70,7 +79,9 @@ export type BundledPackage = z.infer<typeof BundledPackage>;
  * One build of the runtime (`manifest.json` beside `ocw-runtime.mjs`; `GET /api/v1/runtime/version`). `sha256` and
  * `bytes` are computed over the final file; the API re-hashes before serving and `install.sh` verifies before
  * installing. `external` is the SDK followed by its peer dependencies, each at the exact version the runtime was
- * tested with; `bundled` never names the SDK. `source` points at the corresponding source (AGPL).
+ * tested with; `externalLockSha256` is the sha256 of `RUNTIME_EXTERNAL_LOCK_FILE`, which pins their whole tree (the API
+ * re-hashes it before embedding it in `install.sh`). `bundled` never names the SDK. `source` points at the corresponding
+ * source (AGPL).
  */
 export const RuntimeDistManifest = z.strictObject({
   version: z.string().max(64).regex(BUNDLE_VERSION_RE),
@@ -85,6 +96,7 @@ export const RuntimeDistManifest = z.strictObject({
     .refine((pins) => pins[0]?.name === CLAUDE_AGENT_SDK_PACKAGE, {
       message: `the first external package must be ${CLAUDE_AGENT_SDK_PACKAGE}`,
     }),
+  externalLockSha256: z.string().regex(/^[0-9a-f]{64}$/),
   bundled: z
     .array(BundledPackage)
     .max(300)

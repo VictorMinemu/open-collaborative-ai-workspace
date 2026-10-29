@@ -3,7 +3,8 @@
 #
 # It installs ocw-runtime for the current user only:
 #   - downloads the runtime bundle from your workspace and verifies its SHA-256 with node before using it;
-#   - installs the Claude Agent SDK and its peers beside it from your npm registry, at exact versions, without
+#   - installs the Claude Agent SDK, its peers and their whole dependency tree beside it from your npm registry with
+#     `npm ci`, from the lockfile below (exact versions, each tarball checked against its integrity), without
 #     running any package install script;
 #   - writes only under $OCW_HOME (default ~/.ocw) and the launcher ~/.local/bin/ocw-runtime.
 # It never asks for elevated rights, never changes system files and runs nothing it downloads except the verified
@@ -22,6 +23,7 @@ OCW_MIN_NODE=@MIN_NODE@
 OCW_BUNDLE_ROUTE=@BUNDLE_ROUTE@
 OCW_BUNDLE_FILE=@BUNDLE_FILE@
 OCW_SDK_PACKAGE=@SDK_PACKAGE@
+OCW_LOCK_FILE=@LOCK_FILE@
 
 say() { printf '%s\n' "$*"; }
 warn() { printf 'ocw-runtime install: warning: %s\n' "$*" >&2; }
@@ -70,6 +72,16 @@ fetch() {
 
 sha256_of() {
   "$node_bin" -e 'process.stdout.write(require("node:crypto").createHash("sha256").update(require("node:fs").readFileSync(process.argv[1])).digest("hex"))' "$1"
+}
+
+# Writes the package.json and the lockfile `npm ci` installs from into $1 (quoted heredocs: nothing is expanded).
+write_npm_files() {
+  cat >"$1/package.json" <<'OCW_PACKAGE_JSON'
+@PACKAGE_JSON@
+OCW_PACKAGE_JSON
+  cat >"$1/$OCW_LOCK_FILE" <<'OCW_EXTERNAL_LOCK'
+@EXTERNAL_LOCK@
+OCW_EXTERNAL_LOCK
 }
 
 cleanup() {
@@ -162,6 +174,7 @@ main() {
   mkdir -p "$runtime_dir/versions"
   if [ -f "$version_dir/$OCW_BUNDLE_FILE" ] &&
     [ -f "$version_dir/node_modules/$OCW_SDK_PACKAGE/package.json" ] &&
+    [ -f "$version_dir/$OCW_LOCK_FILE" ] &&
     [ "$(sha256_of "$version_dir/$OCW_BUNDLE_FILE")" = "$OCW_SHA256" ]; then
     say "ocw-runtime $OCW_VERSION is already installed; reusing it"
   else
@@ -169,8 +182,9 @@ main() {
     building=$version_dir
     mkdir "$version_dir"
     mv "$tmp/$OCW_BUNDLE_FILE" "$version_dir/$OCW_BUNDLE_FILE"
-    say "Installing $OCW_SDK_PACKAGE and its peers with npm"
-    if ! npm install --prefix "$version_dir" --no-audit --no-fund --omit=optional --ignore-scripts @PINS@ >"$tmp/npm.log" 2>&1; then
+    write_npm_files "$version_dir"
+    say "Installing $OCW_SDK_PACKAGE and its dependencies with npm ci (exact versions from the lockfile)"
+    if ! npm ci --prefix "$version_dir" --no-audit --no-fund --omit=optional --ignore-scripts >"$tmp/npm.log" 2>&1; then
       cat "$tmp/npm.log" >&2
       die "npm could not install $OCW_SDK_PACKAGE beside the runtime (output above)"
     fi

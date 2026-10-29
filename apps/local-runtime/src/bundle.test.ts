@@ -17,7 +17,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { BUNDLE_LICENSE_ALLOWLIST, RuntimeDistManifest } from "@ocw/contracts";
+import {
+  BUNDLE_LICENSE_ALLOWLIST,
+  RUNTIME_EXTERNAL_LOCK_FILE,
+  RUNTIME_EXTERNAL_LOCK_ROOT,
+  RuntimeDistManifest,
+} from "@ocw/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { RUNTIME_VERSION } from "./version.js";
 
@@ -100,6 +105,89 @@ describe("the runtime bundle build (07.12, D-01, D-10)", () => {
     expect(manifest.bundled.every((p) => !p.name.startsWith(SDK))).toBe(true);
     for (const p of manifest.bundled) expect(BUNDLE_LICENSE_ALLOWLIST).toContain(p.license);
     expect(bundleText).not.toContain("node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs");
+  });
+
+  describe("pins the whole external tree with integrity (07.12 review ME-03)", () => {
+    interface LockEntry {
+      name?: string;
+      version?: string;
+      resolved?: string;
+      integrity?: string;
+      optional?: boolean;
+      dependencies?: Record<string, string>;
+      optionalDependencies?: Record<string, string>;
+      peerDependencies?: Record<string, string>;
+      peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+    }
+    const lockText = () => readFileSync(join(out, RUNTIME_EXTERNAL_LOCK_FILE), "utf8");
+    const lock = () =>
+      JSON.parse(lockText()) as { lockfileVersion: number; packages: Record<string, LockEntry> };
+    /** What `name` resolves to from the package at `location`, through npm's nested node_modules layout. */
+    const resolveIn = (packages: Record<string, LockEntry>, location: string, name: string) => {
+      for (let loc = location; ; ) {
+        const hit = packages[`${loc ? `${loc}/` : ""}node_modules/${name}`];
+        if (hit) return hit;
+        if (!loc) return undefined;
+        const at = loc.lastIndexOf("/node_modules/");
+        loc = at === -1 ? "" : loc.slice(0, at);
+      }
+    };
+
+    it("writes npm-shrinkwrap.json, hashed in the manifest, rooted at the pins", () => {
+      expect(manifest.externalLockSha256).toBe(createHash("sha256").update(lockText()).digest("hex"));
+      const { lockfileVersion, packages } = lock();
+      expect(lockfileVersion).toBe(3);
+      expect(packages[""]).toEqual({
+        name: RUNTIME_EXTERNAL_LOCK_ROOT,
+        dependencies: Object.fromEntries(manifest.external.map((p) => [p.name, p.version])),
+      });
+    });
+
+    it("every package has an exact version, its registry tarball and a sha512 integrity", () => {
+      const { packages } = lock();
+      const entries = Object.entries(packages).filter(([loc]) => loc !== "");
+      // The SDK, its peers and their transitive dependencies (the MCP SDK alone pulls express, ajv, …).
+      expect(entries.length).toBeGreaterThan(30);
+      for (const name of ["ajv", "express", "zod-to-json-schema", "json-schema-to-ts"]) {
+        expect(packages[`node_modules/${name}`], name).toBeDefined();
+      }
+      for (const [loc, entry] of entries) {
+        expect(entry.version, loc).toMatch(/^\d+\.\d+\.\d+/);
+        expect(entry.integrity, loc).toMatch(/^sha512-[A-Za-z0-9+/]+=*$/);
+        const name = loc.slice(loc.lastIndexOf("node_modules/") + "node_modules/".length);
+        expect(entry.resolved, loc).toBe(
+          `https://registry.npmjs.org/${name}/-/${name.split("/").pop()}-${entry.version}.tgz`,
+        );
+      }
+      for (const pin of manifest.external)
+        expect(packages[`node_modules/${pin.name}`]?.version).toBe(pin.version);
+    });
+
+    it("every required dependency resolves inside the lockfile; optional platform packages are marked optional", () => {
+      const { packages } = lock();
+      for (const [loc, entry] of Object.entries(packages)) {
+        if (loc === "" || entry.optional) continue;
+        const required = [
+          ...Object.keys(entry.dependencies ?? {}),
+          ...Object.keys(entry.peerDependencies ?? {}).filter(
+            (n) => entry.peerDependenciesMeta?.[n]?.optional !== true,
+          ),
+        ];
+        for (const dep of required) expect(resolveIn(packages, loc, dep), `${loc} → ${dep}`).toBeDefined();
+      }
+      const platform = Object.entries(packages).filter(([loc]) => loc.includes(`${SDK}-`));
+      expect(platform.length).toBeGreaterThan(0);
+      for (const [loc, entry] of platform) expect(entry.optional, loc).toBe(true);
+    });
+
+    it("keeps the script's lockfile names equal to the contract's", async () => {
+      const mod = (await import(pathToFileURL(join(PKG_ROOT, "scripts", "external-lock.mjs")).href)) as {
+        EXTERNAL_LOCK_FILE: string;
+        EXTERNAL_LOCK_ROOT_NAME: string;
+      };
+      expect(mod.EXTERNAL_LOCK_FILE).toBe(RUNTIME_EXTERNAL_LOCK_FILE);
+      expect(mod.EXTERNAL_LOCK_ROOT_NAME).toBe(RUNTIME_EXTERNAL_LOCK_ROOT);
+    });
   });
 
   it("names the runtime, its version and its license on line 1 and ends with the third-party notices", () => {

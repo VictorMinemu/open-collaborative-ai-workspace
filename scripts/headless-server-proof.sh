@@ -21,10 +21,10 @@
 #      gate (07.12-11), then the proof's ok line as its last line.
 #
 # PD-19, no real tools: the daemon runs the fake runtime (OCW_RUNTIME_FAKE=1, OCW_RUNTIME_UPDATES=off), no Claude Code
-# or Codex is installed, and no registry is contacted for the SDK. install.sh's `npm install` meets an offline fake npm
-# (first on PATH for that one command only) that accepts only exact pins with --omit=optional --ignore-scripts and
-# copies those exact package versions from this checkout's lockfile install (each copied file by file, nested
-# node_modules excluded). The real npm is never run (npm_config_registry also points at a closed loopback port).
+# or Codex is installed, and no registry is contacted for the SDK. install.sh's `npm ci` meets an offline fake npm
+# (first on PATH for that one command only) that checks the lockfile install.sh wrote (in sync, exact pins with an
+# integrity), requires --omit=optional --ignore-scripts and copies those exact package versions from this checkout's
+# lockfile install (each copied file by file, nested node_modules excluded). The real npm is never run (npm_config_registry also points at a closed loopback port).
 # Nothing from the host is mounted: no HOME, node_modules or .env; the container downloads only from the isolated API
 # and the Debian mirrors (apt). The container is removed on exit, whatever happens.
 #   PROOF_KEEP_LOG=1   keep install.log, setup.log, run.log and the proof's facts in the printed temp directory
@@ -124,8 +124,10 @@ for (const { name, version } of external) {
 cat >"$WORK/proof/bin/npm" <<'FAKE_NPM'
 #!/usr/local/bin/node
 // Proof-only fake npm (scripts/headless-server-proof.sh, PD-19): offline, never a registry. It accepts only what
-// install.sh runs (`install --prefix <dir> … --omit=optional --ignore-scripts <name>@<x.y.z>…`) and copies those exact
-// package versions from /opt/ocw-proof/npm-packages into <dir>/node_modules.
+// install.sh runs (`ci --prefix <dir> … --omit=optional --ignore-scripts`, from the package.json and npm-shrinkwrap.json
+// install.sh wrote in <dir>), checks what `npm ci` checks before installing (a v3 lockfile in sync with package.json,
+// every pin in it at its exact version with an integrity) and copies those exact package versions from
+// /opt/ocw-proof/npm-packages into <dir>/node_modules.
 const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
@@ -134,31 +136,32 @@ const die = (m) => {
   console.error(`fake npm: ${m}`);
   process.exit(1);
 };
-if (args[0] !== "install") die(`only "install" is supported, got "${args[0] ?? ""}"`);
+if (args[0] !== "ci") die(`only "ci" is supported, got "${args[0] ?? ""}"`);
 let prefix = null;
 const flags = [];
-const pins = [];
 for (let i = 1; i < args.length; i++) {
   if (args[i] === "--prefix") prefix = args[++i];
   else if (args[i].startsWith("-")) flags.push(args[i]);
-  else pins.push(args[i]);
+  else die(`npm ci takes no package argument, got ${args[i]}`);
 }
 if (!prefix || !path.isAbsolute(prefix)) die("--prefix <absolute dir> is required");
 for (const f of ["--omit=optional", "--ignore-scripts"]) if (!flags.includes(f)) die(`${f} is required`);
+const read = (f) => JSON.parse(fs.readFileSync(path.join(prefix, f), "utf8"));
+const deps = read("package.json").dependencies ?? {};
+const lock = read("npm-shrinkwrap.json");
+if (lock.lockfileVersion !== 3 || JSON.stringify(lock.packages[""]?.dependencies) !== JSON.stringify(deps))
+  die("package.json and npm-shrinkwrap.json are not in sync");
+const pins = Object.entries(deps);
 if (pins.length === 0) die("no package to install");
-const deps = {};
-for (const pin of pins) {
-  const m = /^(@[a-z0-9._-]+\/[a-z0-9._-]+|[a-z0-9._-]+)@(\d+\.\d+\.\d+)$/.exec(pin);
-  if (!m) die(`not an exact pin: ${pin}`);
-  const [, name, version] = m;
+for (const [name, version] of pins) {
+  const entry = lock.packages[`node_modules/${name}`];
+  if (entry?.version !== version || !/^sha512-/.test(entry.integrity ?? "")) die(`${name}@${version} has no integrity`);
   const src = path.join("/opt/ocw-proof/npm-packages", name);
   const got = fs.existsSync(src) ? JSON.parse(fs.readFileSync(path.join(src, "package.json"), "utf8")).version : null;
   if (got !== version) die(`${name}@${version} is not available offline (have ${got ?? "nothing"})`);
   fs.cpSync(src, path.join(prefix, "node_modules", name), { recursive: true });
-  deps[name] = version;
 }
-fs.writeFileSync(path.join(prefix, "package.json"), `${JSON.stringify({ dependencies: deps }, null, 2)}\n`);
-console.log(`added ${pins.length} packages offline (proof fake npm)`);
+console.log(`added ${pins.length} packages offline from npm-shrinkwrap.json (proof fake npm)`);
 FAKE_NPM
 
 # ---------------------------------------------------------------- a clean Linux server
@@ -197,9 +200,9 @@ docker exec -u node -e "HOME=$HOME_IN" -w "$HOME_IN" \
   sh -c 'set -e; curl -fsSL "$SERVER/api/v1/runtime/install.sh" | OCW_SERVER_URL="$SERVER" OCW_INSTALL_ALLOW_HTTP=1 sh 2>&1 | tee ~/install.log'
 as_node grep -q "Installed ocw-runtime" "$HOME_IN/install.log" || fail "install.sh did not report an install"
 NPM_CALL="$(as_node cat /tmp/ocw-proof-npm.log)"
-[[ "$(wc -l <<<"$NPM_CALL" | tr -d ' ')" == "1" && "$NPM_CALL" == *"--omit=optional --ignore-scripts"* ]] ||
+[[ "$(wc -l <<<"$NPM_CALL" | tr -d ' ')" == "1" && "$NPM_CALL" == "npm ci "*"--omit=optional --ignore-scripts" ]] ||
   fail "unexpected npm calls: $NPM_CALL"
-echo "   npm (offline fake): ${NPM_CALL#*--ignore-scripts }"
+echo "   npm (offline fake): ${NPM_CALL} (from the embedded npm-shrinkwrap.json)"
 
 # ---------------------------------------------------------------- setup, as a server admin would run it
 # The API answers 503 setup_required until the workspace exists: run the first-run setup before pairing.
@@ -243,7 +246,7 @@ SDK_VERSION="$(as_node node -p 'require(process.env.HOME + "/.ocw/runtime/curren
 echo "proof: image ${IMAGE#*@}"
 echo "proof: /bin/sh -> $SH_TARGET"
 echo "proof: installed ocw-runtime ${INSTALLED}"
-echo "proof: claude-agent-sdk ${SDK_VERSION} in current/node_modules (offline fake npm, exact pins)"
+echo "proof: claude-agent-sdk ${SDK_VERSION} in current/node_modules (offline fake npm ci, lockfile pins)"
 [[ -f "$FACTS" ]] || fail "the proof spec wrote no facts"
 sed 's/^/proof: /' "$FACTS"
 

@@ -152,14 +152,13 @@ test("install.sh from the workspace, setup --yes --service none, approval in the
   expect(record).toMatchObject({ serverUrl: API_URL, version: version.version, sha256: version.sha256 });
   const npmCalls = server.npmCalls();
   expect(npmCalls).toHaveLength(1);
-  expect(npmCalls[0]).toEqual(
-    expect.arrayContaining([
-      "install",
-      "--prefix",
-      "--ignore-scripts",
-      expect.stringMatching(/^@anthropic-ai\/claude-agent-sdk@\d+\.\d+\.\d+$/),
-    ]),
-  );
+  // `npm ci` from the lockfile install.sh wrote (the whole tree pinned with integrity, review ME-03).
+  expect(npmCalls[0]?.slice(0, 2)).toEqual(["ci", "--prefix"]);
+  expect(npmCalls[0]).toEqual(expect.arrayContaining(["--omit=optional", "--ignore-scripts"]));
+  const lock = JSON.parse(
+    readFileSync(join(server.ocwHome, "runtime", "current", "npm-shrinkwrap.json"), "utf8"),
+  ) as { packages: Record<string, { version?: string; integrity?: string }> };
+  expect(lock.packages["node_modules/@anthropic-ai/claude-agent-sdk"]?.integrity).toMatch(/^sha512-/);
 
   // ---- setup prints the link; the owner approves it in Settings › Devices
   const pairingUrl = await server.pairingUrl;

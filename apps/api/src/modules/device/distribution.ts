@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { RUNTIME_BUNDLE_FILE, RUNTIME_ROUTES, RuntimeDistManifest } from "@ocw/contracts";
+import {
+  RUNTIME_BUNDLE_FILE,
+  RUNTIME_EXTERNAL_LOCK_FILE,
+  RUNTIME_ROUTES,
+  RuntimeDistManifest,
+} from "@ocw/contracts";
 import type { FastifyBaseLogger } from "fastify";
 import type { App, Core } from "../../core";
 import { HttpError } from "../../lib/errors";
@@ -15,7 +20,8 @@ import { renderInstallScript } from "./install-script";
  * read), each limited to 30 requests per minute per client IP: `version` (the manifest), `bundle` (the file),
  * `bundle.sha256` (its checksum line) and `install.sh` (rendered from `OCW_PUBLIC_API_URL`, never from Host or
  * X-Forwarded-Host). The dist directory is `OCW_RUNTIME_DIST_DIR`, else this checkout's `apps/local-runtime/dist`.
- * It is read on first use and re-hashed against its manifest (sha256 and bytes); only a verified load is cached (until
+ * It is read on first use and re-hashed against its manifest (the bundle's sha256 and bytes, and the sha256 of the npm
+ * lockfile `install.sh` embeds, 07.12 review ME-03); only a verified load is cached (until
  * the API restarts). A missing dist answers 404 `runtime_unavailable` and a mismatching one 503 `runtime_corrupt`, both
  * re-checked on the next request.
  */
@@ -30,6 +36,8 @@ export function defaultRuntimeDistDir(): string {
 export interface RuntimeDist {
   manifest: RuntimeDistManifest;
   bundle: Buffer;
+  /** The npm lockfile embedded in install.sh (hashed in the manifest). */
+  externalLock: string;
   /** `"<sha256>"`, the bundle's strong ETag. */
   etag: string;
 }
@@ -78,9 +86,11 @@ export class RuntimeDistStore {
   private async read(): Promise<RuntimeDistLoad> {
     let manifestText: string;
     let bundle: Buffer;
+    let lock: Buffer;
     try {
       manifestText = await readFile(join(this.dir, MANIFEST_FILE), "utf8");
       bundle = await readFile(join(this.dir, RUNTIME_BUNDLE_FILE));
+      lock = await readFile(join(this.dir, RUNTIME_EXTERNAL_LOCK_FILE));
     } catch (err) {
       if (isMissing(err)) return "missing";
       throw err;
@@ -93,7 +103,9 @@ export class RuntimeDistStore {
     }
     const sha256 = createHash("sha256").update(bundle).digest("hex");
     if (sha256 !== manifest.sha256 || bundle.length !== manifest.bytes) return "corrupt";
-    this.verified = { manifest, bundle, etag: `"${manifest.sha256}"` };
+    // The lockfile install.sh embeds (ME-03): the bytes the build hashed into the manifest, or nothing is served.
+    if (createHash("sha256").update(lock).digest("hex") !== manifest.externalLockSha256) return "corrupt";
+    this.verified = { manifest, bundle, externalLock: lock.toString("utf8"), etag: `"${manifest.sha256}"` };
     return this.verified;
   }
 }
@@ -162,13 +174,18 @@ export function registerRuntimeDistRoutes(app: App, core: Core): void {
   });
 
   app.get(scoped(RUNTIME_ROUTES.installScript), { ...route, schema: { tags } }, async (_req, reply) => {
-    const { manifest } = await need();
+    const dist = await need();
+    const { manifest } = dist;
     if (script?.sha256 !== manifest.sha256) {
       try {
         // The URL is the configured public API URL only: a Host or X-Forwarded-Host header never reaches the script.
         script = {
           sha256: manifest.sha256,
-          text: renderInstallScript({ serverUrl: core.env.OCW_PUBLIC_API_URL, manifest }),
+          text: renderInstallScript({
+            serverUrl: core.env.OCW_PUBLIC_API_URL,
+            manifest,
+            externalLock: dist.externalLock,
+          }),
         };
       } catch (err) {
         core.log.error({ err }, "runtime dist: OCW_PUBLIC_API_URL cannot be embedded in install.sh");

@@ -1,8 +1,9 @@
 // Builds the Local Runtime as one self-contained file (07.12, D-01, D-10, PD-03):
 //   node scripts/build-bundle.mjs [--out <dir>] [--commit <sha>]
-// writes <out>/ocw-runtime.mjs and <out>/manifest.json (RuntimeDistManifest in @ocw/contracts). The API serves both
-// (07.12-06); install.sh verifies the file and installs the Claude Agent SDK and its peers beside it from npm, at the
-// exact versions pinned in this package (the SDK is never inside the file, D-10).
+// writes <out>/ocw-runtime.mjs, <out>/npm-shrinkwrap.json and <out>/manifest.json (RuntimeDistManifest in
+// @ocw/contracts). The API serves the bundle and the manifest and embeds the lockfile in install.sh (07.12-06); install.sh
+// verifies the file and installs the Claude Agent SDK, its peers and their whole dependency tree beside it with
+// `npm ci`, at the exact versions and integrity this checkout was built with (the SDK is never inside the file, D-10).
 //
 // Fails when any bundled input comes from the Claude Agent SDK, when a bundled third-party package's license is outside
 // the allowlist, or when the SDK or one of its peer dependencies is not pinned to an exact version in package.json.
@@ -13,6 +14,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
+import { buildExternalLock, EXTERNAL_LOCK_FILE, findPnpmLock } from "./external-lock.mjs";
 
 /** Equal to `RUNTIME_BUNDLE_FILE` in packages/contracts/src/runtime-dist.ts. */
 export const RUNTIME_BUNDLE_FILE = "ocw-runtime.mjs";
@@ -202,6 +204,14 @@ export async function buildBundle({ out, commit } = {}) {
   const bytes = Buffer.from(text, "utf8");
   const sha256 = createHash("sha256").update(bytes).digest("hex");
 
+  // The whole external tree, exact versions and integrity (ME-03): install.sh installs it with `npm ci`.
+  const lock = buildExternalLock({
+    pkgRoot,
+    pins: external,
+    pnpmLockText: readFileSync(findPnpmLock(pkgRoot), "utf8"),
+  });
+  const lockBytes = Buffer.from(`${JSON.stringify(lock, null, 2)}\n`, "utf8");
+
   const manifest = {
     version,
     sha256,
@@ -209,12 +219,14 @@ export async function buildBundle({ out, commit } = {}) {
     file: RUNTIME_BUNDLE_FILE,
     minNode: MIN_NODE,
     external,
+    externalLockSha256: createHash("sha256").update(lockBytes).digest("hex"),
     bundled: packages.map(({ name, version: v, license }) => ({ name, version: v, license })),
     source: { repository: SOURCE_REPOSITORY, commit: sourceCommit(commit) },
     builtAt: new Date().toISOString(),
   };
   mkdirSync(outDir, { recursive: true });
   writeFileSync(join(outDir, RUNTIME_BUNDLE_FILE), bytes);
+  writeFileSync(join(outDir, EXTERNAL_LOCK_FILE), lockBytes);
   writeFileSync(join(outDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   return { manifest, outDir };
 }

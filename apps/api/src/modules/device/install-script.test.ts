@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RuntimeDistManifest } from "@ocw/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { assertScriptSafeUrl, renderInstallScript } from "./install-script";
+import { assertScriptSafeUrl, renderInstallScript as renderWithLock } from "./install-script";
 
 /**
  * Phase 07.12-06 (HSR-01, D-01, D-10, PD-04, PD-05): the installer the API serves at `/api/v1/runtime/install.sh`.
@@ -30,6 +30,45 @@ import { assertScriptSafeUrl, renderInstallScript } from "./install-script";
 
 const SHA = "a".repeat(64);
 
+const EXTERNAL = [
+  { name: "@anthropic-ai/claude-agent-sdk", version: "0.3.282" },
+  { name: "@anthropic-ai/sdk", version: "0.128.0" },
+  { name: "@modelcontextprotocol/sdk", version: "1.30.1" },
+  { name: "zod", version: "4.6.5" },
+];
+
+/** A small npm-shrinkwrap.json for the pins, shaped like the one build-bundle.mjs writes (ME-03). */
+function lockFor(external = EXTERNAL, rootName = "ocw-runtime-deps"): string {
+  const packages: Record<string, unknown> = {
+    "": { name: rootName, dependencies: Object.fromEntries(external.map((p) => [p.name, p.version])) },
+  };
+  for (const p of external) {
+    packages[`node_modules/${p.name}`] = {
+      version: p.version,
+      resolved: `https://registry.npmjs.org/${p.name}/-/${p.name.split("/").pop()}-${p.version}.tgz`,
+      integrity: `sha512-${createHash("sha512").update(p.name).digest("base64")}`,
+    };
+  }
+  packages["node_modules/ajv"] = {
+    version: "8.20.0",
+    resolved: "https://registry.npmjs.org/ajv/-/ajv-8.20.0.tgz",
+    integrity: `sha512-${createHash("sha512").update("ajv").digest("base64")}`,
+  };
+  return `${JSON.stringify({ name: rootName, lockfileVersion: 3, requires: true, packages }, null, 2)}\n`;
+}
+
+const LOCK = lockFor();
+const sha256Hex = (text: string) => createHash("sha256").update(text).digest("hex");
+
+/** The real renderer with the fixture lockfile unless a case passes its own. */
+function renderInstallScript(input: {
+  serverUrl: string;
+  manifest: RuntimeDistManifest;
+  externalLock?: string;
+}): string {
+  return renderWithLock({ externalLock: LOCK, ...input });
+}
+
 function manifestFor(bundle: Buffer | string, version = "0.1.0"): RuntimeDistManifest {
   const bytes = Buffer.from(bundle);
   return {
@@ -38,12 +77,8 @@ function manifestFor(bundle: Buffer | string, version = "0.1.0"): RuntimeDistMan
     bytes: bytes.length,
     file: "ocw-runtime.mjs",
     minNode: 24,
-    external: [
-      { name: "@anthropic-ai/claude-agent-sdk", version: "0.3.282" },
-      { name: "@anthropic-ai/sdk", version: "0.128.0" },
-      { name: "@modelcontextprotocol/sdk", version: "1.30.1" },
-      { name: "zod", version: "4.6.5" },
-    ],
+    external: EXTERNAL,
+    externalLockSha256: sha256Hex(LOCK),
     bundled: [{ name: "ws", version: "8.21.3", license: "MIT" }],
     source: { repository: "https://github.com/VictorMinemu/open-collaborative-ai-workspace", commit: null },
     builtAt: "2026-10-29T08:00:00.000Z",
@@ -91,18 +126,34 @@ describe("renderInstallScript (07.12-06, PD-04)", () => {
     expect(script.trimEnd().split("\n").at(-1)).toBe('main "$@"');
   });
 
-  it("embeds the server URL single-quoted, the version, the sha256 and the pins as name@version words", () => {
+  it("embeds the server URL single-quoted, the version and the sha256", () => {
     expect(script).toContain("'https://ocw.example.com'");
     expect(script).toContain("'0.1.0'");
     expect(script).toContain(`'${SHA}'`);
     expect(script).toContain(`'${SHA.slice(0, 12)}'`);
-    expect(script).toContain(
-      "'@anthropic-ai/claude-agent-sdk@0.3.282' '@anthropic-ai/sdk@0.128.0' '@modelcontextprotocol/sdk@1.30.1' 'zod@4.6.5'",
-    );
-    expect(script).toContain("--no-audit --no-fund --omit=optional --ignore-scripts");
   });
 
-  it("refuses an unsafe URL and a manifest that does not parse", () => {
+  it("embeds the lockfile and its package.json in quoted heredocs and installs them with npm ci (ME-03)", () => {
+    const body = (marker: string) => {
+      const start = lines.findIndex((l) => l.endsWith(`<<'${marker}'`));
+      const end = lines.indexOf(marker, start + 1);
+      expect(start, marker).toBeGreaterThan(0);
+      expect(end, marker).toBeGreaterThan(start);
+      return `${lines.slice(start + 1, end).join("\n")}\n`;
+    };
+    expect(body("OCW_EXTERNAL_LOCK")).toBe(LOCK);
+    expect(JSON.parse(body("OCW_PACKAGE_JSON"))).toEqual({
+      name: "ocw-runtime-deps",
+      private: true,
+      dependencies: Object.fromEntries(EXTERNAL.map((p) => [p.name, p.version])),
+    });
+    expect(script).toContain(
+      'npm ci --prefix "$version_dir" --no-audit --no-fund --omit=optional --ignore-scripts',
+    );
+    expect(script).not.toMatch(/npm install\b/);
+  });
+
+  it("refuses an unsafe URL, a manifest that does not parse, and a lockfile that is not the manifest's", () => {
     expect(() => renderInstallScript({ serverUrl: "https://h/$(id)", manifest: MANIFEST })).toThrow();
     expect(() =>
       renderInstallScript({
@@ -110,6 +161,26 @@ describe("renderInstallScript (07.12-06, PD-04)", () => {
         manifest: { ...MANIFEST, version: "1.0.0'; id; '" },
       }),
     ).toThrow();
+    const ok = { serverUrl: "https://ocw.example.com", manifest: MANIFEST };
+    // Bytes other than the ones the manifest hashed.
+    expect(() => renderInstallScript({ ...ok, externalLock: LOCK.replace("8.20.0", "8.20.1") })).toThrow(
+      /externalLockSha256/,
+    );
+    // Hashed by its own manifest, but rooted at other pins or under another name, or not JSON.
+    for (const lock of [
+      lockFor(EXTERNAL.slice(0, 2)),
+      lockFor(EXTERNAL, "other"),
+      "{",
+      `${LOCK}OCW_EXTERNAL_LOCK\n`,
+    ]) {
+      expect(() =>
+        renderInstallScript({
+          ...ok,
+          manifest: { ...MANIFEST, externalLockSha256: sha256Hex(lock) },
+          externalLock: lock,
+        }),
+      ).toThrow();
+    }
   });
 
   it("never elevates and never evaluates text (outside comments)", () => {
@@ -172,6 +243,10 @@ async function newCase(opts: { node?: "real" | "old"; npm?: boolean } = {}): Pro
         `printf '%s\\n' "$@" > '${npmArgs}'`,
         "prefix=",
         'while [ $# -gt 0 ]; do if [ "$1" = --prefix ]; then prefix=$2; fi; shift; done',
+        // `npm ci` installs only what package.json and the lockfile beside it name: keep copies to check them.
+        'for f in package.json npm-shrinkwrap.json; do [ -f "$prefix/$f" ] || { echo "fake npm: no $f" >&2; exit 1; }; done',
+        `cat "$prefix/package.json" > '${join(dir, "npm-package.json")}'`,
+        `cat "$prefix/npm-shrinkwrap.json" > '${join(dir, "npm-shrinkwrap.json")}'`,
         `mkdir -p ${sdkDir}`,
         `printf '{"name":"${SDK}","version":"0.3.282","main":"index.js"}\\n' > ${sdkDir}/package.json`,
         `printf 'module.exports = {};\\n' > ${sdkDir}/index.js`,
@@ -296,16 +371,23 @@ describe("install.sh run with sh in a scratch HOME (07.12-06, D-01, D-10, PD-04,
     expect(ran.stdout.trim()).toBe("0.1.0");
 
     const npmArgs = (await readFile(c.npmArgs, "utf8")).trimEnd().split("\n");
+    // ME-03: `npm ci` from the embedded lockfile, so the whole tree is exact and integrity-checked.
     expect(npmArgs).toEqual([
-      "install",
+      "ci",
       "--prefix",
       versionDir,
       "--no-audit",
       "--no-fund",
       "--omit=optional",
       "--ignore-scripts",
-      ...manifest.external.map((p) => `${p.name}@${p.version}`),
     ]);
+    expect(await readFile(join(c.dir, "npm-shrinkwrap.json"), "utf8")).toBe(LOCK);
+    expect(JSON.parse(await readFile(join(c.dir, "npm-package.json"), "utf8"))).toEqual({
+      name: "ocw-runtime-deps",
+      private: true,
+      dependencies: Object.fromEntries(manifest.external.map((p) => [p.name, p.version])),
+    });
+    expect(await readFile(join(versionDir, "npm-shrinkwrap.json"), "utf8")).toBe(LOCK);
     expect(await groupOrWorldWritable(join(c.home, ".ocw"))).toEqual([]);
     expect(res.stdout).toContain("Next: ocw-runtime setup");
     expect(res.stdout).toContain("is not on your PATH");

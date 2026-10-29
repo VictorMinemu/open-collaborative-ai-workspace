@@ -33,8 +33,10 @@ curl -fsSL https://ocw.example.com/api/v1/runtime/install.sh | sh
 The script:
 
 - downloads the runtime from your workspace (`/api/v1/runtime/bundle`) and checks its SHA-256 before using it;
-- installs the Claude Agent SDK and its peers beside it from npm, at the exact versions the runtime was tested with
-  (`npm install --omit=optional --ignore-scripts`). The workspace never serves the SDK: it is your own npm download;
+- installs the Claude Agent SDK, its peers and their whole dependency tree beside it from npm with `npm ci
+  --omit=optional --ignore-scripts`, from a lockfile embedded in the script: every package at the exact version the
+  runtime was built and tested with, each download checked against its integrity hash. The workspace never serves the
+  SDK: it is your own npm download;
 - writes only to `~/.ocw/runtime/versions/<sha>/`, the `~/.ocw/runtime/current` link, `~/.ocw/install.json` and the
   launcher `~/.local/bin/ocw-runtime`;
 - never uses sudo and never changes system files. It warns when run as root.

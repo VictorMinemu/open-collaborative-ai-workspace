@@ -26,6 +26,23 @@ let ipSeq = 10;
 /** A fresh documentation-range client IP per case, so the per-IP limits of one case never touch another. */
 const nextIp = () => `203.0.113.${ipSeq++}`;
 
+/** The npm lockfile install.sh embeds (07.12 review ME-03), rooted at the manifest's pins. */
+const LOCK = `${JSON.stringify(
+  {
+    name: "ocw-runtime-deps",
+    lockfileVersion: 3,
+    requires: true,
+    packages: {
+      "": {
+        name: "ocw-runtime-deps",
+        dependencies: { "@anthropic-ai/claude-agent-sdk": "0.3.282", zod: "4.6.5" },
+      },
+    },
+  },
+  null,
+  2,
+)}\n`;
+
 const manifest = RuntimeDistManifest.parse({
   version: "0.1.0",
   sha256: createHash("sha256").update(BUNDLE).digest("hex"),
@@ -36,6 +53,7 @@ const manifest = RuntimeDistManifest.parse({
     { name: "@anthropic-ai/claude-agent-sdk", version: "0.3.282" },
     { name: "zod", version: "4.6.5" },
   ],
+  externalLockSha256: createHash("sha256").update(LOCK).digest("hex"),
   bundled: [{ name: "ws", version: "8.21.3", license: "MIT" }],
   source: { repository: "https://github.com/VictorMinemu/open-collaborative-ai-workspace", commit: null },
   builtAt: "2026-10-29T08:00:00.000Z",
@@ -66,6 +84,7 @@ describe("runtime distribution routes (07.12-06, D-01, D-13, PD-05)", () => {
 
   it("a bundle whose bytes differ from the manifest answers 503 runtime_corrupt (re-checked, never cached)", async () => {
     await writeFile(join(dist, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+    await writeFile(join(dist, "npm-shrinkwrap.json"), LOCK);
     await writeFile(
       join(dist, "ocw-runtime.mjs"),
       Buffer.concat([BUNDLE.subarray(0, -2), Buffer.from("!\n")]),
@@ -75,6 +94,10 @@ describe("runtime distribution routes (07.12-06, D-01, D-13, PD-05)", () => {
       expect(res.statusCode, route).toBe(503);
       expect(res.json().error.code, route).toBe("runtime_corrupt");
     }
+    // A lockfile whose bytes differ from the manifest's externalLockSha256 is corrupt too (ME-03).
+    await writeFile(join(dist, "ocw-runtime.mjs"), BUNDLE);
+    await writeFile(join(dist, "npm-shrinkwrap.json"), LOCK.replace("4.6.5", "4.6.6"));
+    for (const route of ROUTES) expect((await get(route)).statusCode, route).toBe(503);
     // A manifest that does not parse is corrupt too.
     await writeFile(join(dist, "manifest.json"), '{"version":"0.1.0"}');
     const res = await get(RUNTIME_ROUTES.version);
@@ -84,6 +107,7 @@ describe("runtime distribution routes (07.12-06, D-01, D-13, PD-05)", () => {
 
   it("once the files are right the next request answers 200: version is the manifest, no-cache", async () => {
     await writeFile(join(dist, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+    await writeFile(join(dist, "npm-shrinkwrap.json"), LOCK);
     await writeFile(join(dist, "ocw-runtime.mjs"), BUNDLE);
     const res = await get(RUNTIME_ROUTES.version);
     expect(res.statusCode).toBe(200);
@@ -130,6 +154,8 @@ describe("runtime distribution routes (07.12-06, D-01, D-13, PD-05)", () => {
     expect(res.body).toContain(`'${manifest.sha256}'`);
     expect(res.body).toContain(`'${manifest.version}'`);
     expect(res.body).not.toContain("evil.example");
+    // The lockfile npm ci installs from (ME-03).
+    expect(res.body).toContain(`<<'OCW_EXTERNAL_LOCK'\n${LOCK}OCW_EXTERNAL_LOCK\n`);
   });
 
   it("the 31st bundle request in a minute from one IP answers 429; another IP is unaffected", async () => {

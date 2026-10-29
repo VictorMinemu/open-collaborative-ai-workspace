@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   BUNDLE_LICENSE_ALLOWLIST,
   RUNTIME_BUNDLE_FILE,
+  RUNTIME_EXTERNAL_LOCK_FILE,
   RUNTIME_ROUTES,
   RuntimeDistManifest,
   runtimeInstallCommand,
@@ -19,6 +20,7 @@ const manifest = {
     { name: "@modelcontextprotocol/sdk", version: "1.30.1" },
     { name: "zod", version: "4.6.5" },
   ],
+  externalLockSha256: "b".repeat(64),
   bundled: [
     { name: "ws", version: "8.21.3", license: "MIT" },
     { name: "zod", version: "4.6.5", license: "MIT" },
@@ -52,6 +54,8 @@ describe("RuntimeDistManifest (07.12, D-01, D-10, D-13)", () => {
       "an external range instead of an exact version",
       { external: [{ name: "@anthropic-ai/claude-agent-sdk", version: "^0.3.0" }] },
     ],
+    ["no lockfile sha256", { externalLockSha256: undefined }],
+    ["a short lockfile sha256", { externalLockSha256: "b".repeat(63) }],
     ["an extra key", { extra: true }],
   ])("refuses %s", (_label, patch) => {
     expect(RuntimeDistManifest.safeParse({ ...manifest, ...patch }).success).toBe(false);
@@ -59,6 +63,7 @@ describe("RuntimeDistManifest (07.12, D-01, D-10, D-13)", () => {
 
   it("names the file, the routes and the install command", () => {
     expect(RUNTIME_BUNDLE_FILE).toBe("ocw-runtime.mjs");
+    expect(RUNTIME_EXTERNAL_LOCK_FILE).toBe("npm-shrinkwrap.json");
     expect(RUNTIME_ROUTES).toEqual({
       installScript: "/api/v1/runtime/install.sh",
       bundle: "/api/v1/runtime/bundle",

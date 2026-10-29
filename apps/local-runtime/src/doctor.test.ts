@@ -41,6 +41,7 @@ const manifest = (sha = SHA, version = "0.1.0"): RuntimeDistManifest => ({
   file: "ocw-runtime.mjs",
   minNode: 24,
   external: [{ name: "@anthropic-ai/claude-agent-sdk", version: "0.3.282" }],
+  externalLockSha256: "b".repeat(64),
   bundled: [],
   source: { repository: "https://github.com/example/ocw", commit: null },
   builtAt: "2026-10-29T10:00:00.000Z",
