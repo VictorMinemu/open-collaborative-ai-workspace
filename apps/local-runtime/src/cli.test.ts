@@ -1,5 +1,6 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -9,6 +10,8 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createServer, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -301,4 +304,198 @@ describe("ocw-runtime updates automatic|notify|off (07.11-08, D-02)", () => {
       await daemon.stop();
     }
   }, 60_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.12-03 `ocw-runtime enroll` (D-03, D-06, PD-06, PD-09): terminal pairing by device code against an in-process HTTP
+// stub that speaks the pairing protocol; the typed-code path is unchanged and saves the richer answer too.
+
+const STUB_DEVICE_CODE = "dc_STUB_secret_device_code_0123456789abcdef";
+const STUB_TOKEN = "dt_STUB_secret_device_token_0123456789";
+const STUB_WEB = "http://web.test";
+
+interface PairingStub {
+  url: string;
+  requests: Array<{ path: string; body: Record<string, unknown> }>;
+  close: () => Promise<void>;
+}
+
+/** PD-06 in miniature: start, one `authorization_pending`, then approval; `/devices/enroll` for the typed code. */
+async function pairingStub(): Promise<PairingStub> {
+  const requests: PairingStub["requests"] = [];
+  let polls = 0;
+  const answer = (res: ServerResponse, status: number, body: unknown) => {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(body));
+  };
+  const enrolled = (name: string) => ({
+    deviceId: "3f0c1a8e-6c55-4b8e-9d0e-0d3c6d8b9a11",
+    organizationId: "7b3e2c51-41f4-4a3e-a5d8-9c1b2e4f6a70",
+    deviceToken: STUB_TOKEN,
+    name,
+    webUrl: STUB_WEB,
+    organizationName: "Acme",
+    ownerName: "Ada",
+  });
+  let proposedName = "rack-1";
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk: Buffer) => {
+      raw += chunk.toString();
+    });
+    req.on("end", () => {
+      const body = (raw ? JSON.parse(raw) : {}) as Record<string, unknown>;
+      const path = req.url ?? "";
+      requests.push({ path, body });
+      if (req.method !== "POST") return answer(res, 405, { error: { code: "method", message: "POST only" } });
+      if (path === "/api/v1/devices/pairings") {
+        proposedName = String(body.name);
+        return answer(res, 200, {
+          deviceCode: STUB_DEVICE_CODE,
+          userCode: "ABCD-EFGH",
+          verificationUri: `${STUB_WEB}/settings/devices?add=server`,
+          verificationUriComplete: `${STUB_WEB}/settings/devices?pair=ABCD-EFGH`,
+          expiresIn: 600,
+          interval: 1,
+        });
+      }
+      if (path === "/api/v1/devices/pairings/token") {
+        if (body.deviceCode !== STUB_DEVICE_CODE) {
+          return answer(res, 400, { error: { code: "expired_token", message: "expired" } });
+        }
+        if (polls++ === 0) {
+          return answer(res, 400, { error: { code: "authorization_pending", message: "pending" } });
+        }
+        return answer(res, 200, enrolled(proposedName));
+      }
+      if (path === "/api/v1/devices/enroll") return answer(res, 200, enrolled(String(body.name)));
+      return answer(res, 404, { error: { code: "not_found", message: "not found" } });
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    requests,
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
+}
+
+describe("ocw-runtime enroll (07.12-03, D-03)", () => {
+  const stubs: PairingStub[] = [];
+  afterEach(async () => {
+    for (const s of stubs.splice(0)) await s.close();
+  });
+  async function setup(): Promise<{ home: string; stub: PairingStub }> {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(home);
+    const stub = await pairingStub();
+    stubs.push(stub);
+    return { home, stub };
+  }
+
+  it("without --code: prints the link and the code, pairs once approved, never prints the device code or token", async () => {
+    const { home, stub } = await setup();
+    const r = await cliAsync(home, ["enroll", "--server", stub.url, "--name", "rack-1"]);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`${STUB_WEB}/settings/devices?pair=ABCD-EFGH`);
+    expect(r.stdout).toContain("ABCD-EFGH");
+    expect(r.stdout).toContain('Paired "rack-1" with Acme as Ada');
+    expect(r.stdout).toContain(`Settings › Devices: ${STUB_WEB}/settings/devices`);
+    for (const secret of [STUB_DEVICE_CODE, STUB_TOKEN]) {
+      expect(r.stdout).not.toContain(secret);
+      expect(r.stderr).not.toContain(secret);
+    }
+    expect(stub.requests[0]).toMatchObject({ path: "/api/v1/devices/pairings", body: { name: "rack-1" } });
+    expect(stub.requests.filter((q) => q.path === "/api/v1/devices/pairings/token")).toHaveLength(2);
+    expect(readFileSync(join(home, "device-token"), "utf8").trim()).toBe(STUB_TOKEN);
+    expect(statSync(join(home, "device-token")).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(join(home, "runtime.json"), "utf8"))).toMatchObject({
+      serverUrl: stub.url,
+      deviceName: "rack-1",
+      deviceId: "3f0c1a8e-6c55-4b8e-9d0e-0d3c6d8b9a11",
+      webUrl: STUB_WEB,
+      pairedWith: { organization: "Acme", owner: "Ada" },
+    });
+  }, 30_000);
+
+  it("without --server: uses the server recorded by install.sh", async () => {
+    const { home, stub } = await setup();
+    mkdirSync(join(home, "runtime"), { recursive: true });
+    writeFileSync(
+      join(home, "runtime", "install.json"),
+      JSON.stringify({
+        serverUrl: stub.url,
+        version: "0.1.0",
+        sha256: "a".repeat(64),
+        installedAt: new Date().toISOString(),
+        nodePath: process.execPath,
+      }),
+    );
+    const r = await cliAsync(home, ["enroll", "--name", "rack-2"]);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain('Paired "rack-2" with Acme as Ada');
+    expect(stub.requests[0]?.path).toBe("/api/v1/devices/pairings");
+  }, 30_000);
+
+  it("with no server anywhere: a usage error", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(home);
+    const r = await cliAsync(home, ["enroll"]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("usage: ocw-runtime enroll");
+  });
+
+  it("with --code: the typed-code enroll as before, and the answer's webUrl is saved too", async () => {
+    const { home, stub } = await setup();
+    const r = await cliAsync(home, [
+      "enroll",
+      "--server",
+      stub.url,
+      "--code",
+      "ABCD-EFGH",
+      "--name",
+      "laptop",
+    ]);
+    expect(r.code, r.stderr).toBe(0);
+    expect(stub.requests.map((q) => q.path)).toEqual(["/api/v1/devices/enroll"]);
+    expect(stub.requests[0]?.body).toMatchObject({ code: "ABCD-EFGH", name: "laptop" });
+    expect(r.stdout).toContain(`Paired "laptop" with ${stub.url}.`);
+    expect(r.stdout).toContain(`${STUB_WEB}/settings/devices`);
+    expect(r.stdout).not.toContain(STUB_TOKEN);
+    expect(JSON.parse(readFileSync(join(home, "runtime.json"), "utf8"))).toMatchObject({
+      serverUrl: stub.url,
+      deviceName: "laptop",
+      webUrl: STUB_WEB,
+    });
+  }, 30_000);
+
+  it("Ctrl-C while waiting: 'Pairing cancelled.', exit 130, nothing written", async () => {
+    const { home, stub } = await setup();
+    const base = Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => !k.startsWith("OCW_")),
+    ) as Record<string, string>;
+    const child = spawn(process.execPath, [BIN, "enroll", "--server", stub.url], {
+      env: { ...base, OCW_HOME: home },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d: Buffer) => {
+      stdout += d.toString();
+    });
+    child.stderr.on("data", (d: Buffer) => {
+      stderr += d.toString();
+    });
+    const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+    const deadline = Date.now() + 20_000;
+    while (!stdout.includes("Waiting for approval")) {
+      if (Date.now() > deadline) throw new Error(`no prompt: ${stdout} ${stderr}`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    child.kill("SIGINT");
+    expect(await exited).toBe(130);
+    expect(stderr).toContain("Pairing cancelled.");
+    expect(existsSync(join(home, "device-token"))).toBe(false);
+  }, 30_000);
 });

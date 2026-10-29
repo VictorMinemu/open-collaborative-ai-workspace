@@ -1,5 +1,8 @@
 // ocw-runtime CLI.
-//   ocw-runtime enroll --server <url> --code <code> [--name <name>]   pair this machine (writes ~/.ocw)
+//   ocw-runtime enroll [--server <url>] [--code <code>] [--name <name>]
+//                                  pair this machine (writes ~/.ocw). With --code: the code from Settings › Devices.
+//                                  Without it (07.12, D-03): prints a link and a XXXX-XXXX code to approve signed in,
+//                                  and waits. The server defaults to OCW_SERVER_URL, then the one install.sh recorded.
 //   ocw-runtime [run]              start the daemon (default)
 //   ocw-runtime version | --version
 //                                  print this runtime's version (the bundle's package version; 0.0.0-dev under tsx)
@@ -33,9 +36,11 @@ import {
 } from "./config.js";
 import { type ControlRequest, controlRequest, controlSocketPath } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
-import { enroll } from "./enroll.js";
+import { type EnrollResult, enroll } from "./enroll.js";
+import { readInstallInfo } from "./install-info.js";
 import { errorMessage } from "./logger.js";
 import { publicInstallFields, resolveInstall } from "./maintenance/install-method.js";
+import { PairingCancelledError, pairByDeviceCode } from "./pair.js";
 import { RUNTIME_VERSION } from "./version.js";
 
 async function viaSocket(req: ControlRequest): Promise<void> {
@@ -206,6 +211,61 @@ async function updates(sub: string | undefined, arg: string | undefined): Promis
   process.exitCode = 1;
 }
 
+const ENROLL_USAGE = "usage: ocw-runtime enroll [--server <url>] [--code <XXXX-XXXX>] [--name <name>]";
+
+/**
+ * `enroll` (07.12, D-03): the server is `--server`, else `OCW_SERVER_URL`, else the one `install.sh` recorded. With
+ * `--code` the typed-code flow (unchanged); without it, terminal pairing by device code, cancelled by Ctrl-C (exit 130).
+ */
+async function enrollCommand(args: string[]): Promise<void> {
+  const home = ocwHome();
+  const server =
+    flag(args, "server") ?? process.env.OCW_SERVER_URL ?? (await readInstallInfo(home))?.serverUrl;
+  if (!server) throw new Error(ENROLL_USAGE);
+  const code = flag(args, "code");
+  const name = flag(args, "name");
+  const print = (line: string) => process.stdout.write(`${line}\n`);
+
+  if (code) {
+    const out = await enroll({ home, serverUrl: server, code, ...(name ? { name } : {}) });
+    print(`Paired "${out.name}" with ${out.serverUrl}.`);
+    print(`Token saved to ${out.tokenPath} (0600).`);
+    if (out.webUrl) print(`Settings › Devices: ${out.webUrl}/settings/devices`);
+    print("Start the runtime with: ocw-runtime run");
+    return;
+  }
+
+  const controller = new AbortController();
+  const onSigint = () => controller.abort();
+  process.once("SIGINT", onSigint);
+  let out: EnrollResult;
+  try {
+    out = await pairByDeviceCode({
+      home,
+      serverUrl: server,
+      signal: controller.signal,
+      ...(name ? { name } : {}),
+    });
+  } catch (err) {
+    if (err instanceof PairingCancelledError) {
+      process.stderr.write(`${err.message}\n`);
+      process.exitCode = 130; // 128 + SIGINT; the pending timer and request were aborted, so the process ends here
+      return;
+    }
+    throw err;
+  } finally {
+    process.removeListener("SIGINT", onSigint);
+  }
+  print(
+    out.pairedWith
+      ? `Paired "${out.name}" with ${out.pairedWith.organization} as ${out.pairedWith.owner}.`
+      : `Paired "${out.name}" with ${out.serverUrl}.`,
+  );
+  print(`Token saved to ${out.tokenPath} (0600).`);
+  if (out.webUrl) print(`Settings › Devices: ${out.webUrl}/settings/devices`);
+  print("Start the runtime with: ocw-runtime run (or install it as a service with: ocw-runtime setup)");
+}
+
 async function run(): Promise<void> {
   const daemon = await Daemon.create();
   await daemon.start();
@@ -258,18 +318,8 @@ async function main(argv: string[]): Promise<void> {
         return;
       }
     }
-    case "enroll": {
-      const server = flag(rest, "server") ?? process.env.OCW_SERVER_URL;
-      const code = flag(rest, "code");
-      if (!server || !code)
-        throw new Error("usage: ocw-runtime enroll --server <url> --code <XXXX-XXXX> [--name <name>]");
-      const name = flag(rest, "name");
-      const out = await enroll({ home: ocwHome(), serverUrl: server, code, ...(name ? { name } : {}) });
-      process.stdout.write(
-        `Paired "${out.name}" with ${out.serverUrl}.\nToken saved to ${out.tokenPath} (0600).\nStart the runtime with: ocw-runtime run\n`,
-      );
-      return;
-    }
+    case "enroll":
+      return enrollCommand(rest);
     case "full-access":
       return fullAccess(rest[0]);
     case "updates":
