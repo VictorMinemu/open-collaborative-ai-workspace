@@ -621,10 +621,15 @@ describe("updateChildEnv (07.11 review ME-03): an allowlist, never the daemon's 
         "npm_config_update_notifier",
         "npm_config_fund",
         "HOMEBREW_NO_ENV_HINTS",
+        "HOMEBREW_NO_INSTALL_CLEANUP",
+        "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK",
       ].sort(),
     );
     expect(out.CODEX_HOME).toBe("/scratch/.codex");
     expect(out.NO_COLOR).toBe("1");
+    // 07.11 review LO-02: `brew upgrade <cli>` touches nothing else (no cleanup, no dependents upgraded).
+    expect(out.HOMEBREW_NO_INSTALL_CLEANUP).toBe("1");
+    expect(out.HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK).toBe("1");
   });
 });
 

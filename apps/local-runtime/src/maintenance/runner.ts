@@ -338,6 +338,10 @@ export function updateChildEnv(env: NodeJS.ProcessEnv, extra: Record<string, str
     npm_config_update_notifier: "false",
     npm_config_fund: "false",
     HOMEBREW_NO_ENV_HINTS: "1",
+    // 07.11 review LO-02: `brew upgrade <cli>` changes nothing else unattended (no cleanup, no dependents upgraded).
+    // Auto-update stays on: without it a server nobody runs `brew update` on would never see the new version.
+    HOMEBREW_NO_INSTALL_CLEANUP: "1",
+    HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1",
     ...extra,
   };
 }
