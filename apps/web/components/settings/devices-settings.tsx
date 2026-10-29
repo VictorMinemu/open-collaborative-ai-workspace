@@ -222,7 +222,7 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
                 <span
                   key={r.id}
                   className={cn(
-                    "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs",
+                    "inline-flex max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5 rounded-md border px-2 py-1 text-xs",
                     !(r.installed && r.loggedIn) && "opacity-60",
                   )}
                 >
@@ -297,7 +297,7 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
 export function CompatFlag({ device, runtime }: { device: Device; runtime: RuntimeId }) {
   const flag = compatFlag(device.runtimeCompatibility?.[runtime]);
   return flag ? (
-    <span data-testid="runtime-compat-flag" className={flag.className}>
+    <span data-testid="runtime-compat-flag" className={cn("whitespace-nowrap", flag.className)}>
       {flag.text}
     </span>
   ) : null;
