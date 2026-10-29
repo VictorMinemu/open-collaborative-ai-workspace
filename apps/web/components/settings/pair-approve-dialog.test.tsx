@@ -2,6 +2,7 @@ import type { PairingRequestView } from "@ocw/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiRequestError } from "@/lib/api";
+import { ServerSteps } from "./devices-settings";
 import { PairCodeField, PairRequestDetails, pairErrorText, requestAge } from "./pair-approve-dialog";
 
 /**
@@ -112,5 +113,20 @@ describe("PairCodeField", () => {
     expect(valid).not.toMatch(
       /data-testid="pair-code-continue"[^>]*disabled=""|disabled=""[^>]*data-testid="pair-code-continue"/,
     );
+  });
+});
+
+describe("ServerSteps (Add a device › Server)", () => {
+  it("shows this workspace's install command, ocw-runtime setup, the code field and the requirements", () => {
+    const html = renderToStaticMarkup(
+      <ServerSteps apiUrl="https://ocw.example.com/" onContinue={() => undefined} />,
+    );
+    expect(html).toContain("curl -fsSL https://ocw.example.com/api/v1/runtime/install.sh | sh");
+    expect(html).toContain('data-testid="server-install-command"');
+    expect(html).toContain("ocw-runtime setup");
+    expect(html).toContain('data-testid="server-setup-command"');
+    expect(html).toContain("Enter the code the server shows:");
+    expect(html).toContain('data-testid="pair-code-input"');
+    expect(html).toContain("Needs Node 24 on the server. Linux or macOS.");
   });
 });
