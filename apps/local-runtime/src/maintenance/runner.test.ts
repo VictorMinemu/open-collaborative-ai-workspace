@@ -25,7 +25,7 @@ import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type InstallResolution, resolveInstall } from "./install-method.js";
-import { InstallLock, type RunProgress, runUpdate, sanitizeUpdateOutput } from "./runner.js";
+import { InstallLock, type RunProgress, runUpdate, sanitizeUpdateOutput, updateChildEnv } from "./runner.js";
 
 const FAKE = fileURLToPath(new URL("./fake-cli/fake-cli.mjs", import.meta.url));
 
@@ -549,6 +549,82 @@ describe("runUpdate (Phase 07.11, PD-11)", () => {
       expect(p.message.length).toBeLessThanOrEqual(200);
       expect(p.message).not.toContain(realTmp);
     }
+  });
+});
+
+describe("updateChildEnv (07.11 review ME-03): an allowlist, never the daemon's whole environment", () => {
+  it("keeps what installers need and drops every credential", () => {
+    const daemonEnv: NodeJS.ProcessEnv = {
+      PATH: "/usr/bin:/bin",
+      HOME: "/home/u",
+      USER: "u",
+      LOGNAME: "u",
+      SHELL: "/bin/bash",
+      LANG: "en_US.UTF-8",
+      LC_ALL: "en_US.UTF-8",
+      TMPDIR: "/tmp/u",
+      TZ: "UTC",
+      HTTPS_PROXY: "http://proxy:3128",
+      https_proxy: "http://proxy:3128",
+      NO_PROXY: "localhost",
+      NODE_EXTRA_CA_CERTS: "/etc/ssl/corp.pem",
+      SSL_CERT_FILE: "/etc/ssl/cert.pem",
+      CODEX_HOME: "/home/u/.codex",
+      CLAUDE_CONFIG_DIR: "/home/u/.claude",
+      XDG_CONFIG_HOME: "/home/u/.config",
+      npm_config_registry: "https://registry.example",
+      NPM_CONFIG_CAFILE: "/etc/ssl/corp.pem",
+      HOMEBREW_PREFIX: "/opt/homebrew",
+      // Never: credentials and anything else the daemon happens to carry.
+      GH_TOKEN: "x",
+      GITHUB_TOKEN: "x",
+      AWS_SECRET_ACCESS_KEY: "x",
+      AWS_SESSION_TOKEN: "x",
+      CLAUDE_CODE_OAUTH_TOKEN: "x",
+      DATABASE_URL: "postgres://u:p@h/db",
+      SSH_AUTH_SOCK: "/tmp/ssh.sock",
+      MY_SECRET: "x",
+      DB_PASSWORD: "x",
+      HOMEBREW_GITHUB_API_TOKEN: "x",
+      npm_config__authToken: "x",
+      "npm_config_//registry.npmjs.org/:_authToken": "x",
+      NPM_CONFIG_PASSWORD: "x",
+      OCW_DEVICE_TOKEN: "x",
+      ANTHROPIC_API_KEY: "x",
+      OPENAI_API_KEY: "x",
+      NODE_OPTIONS: "--require /x.js",
+    };
+    const out = updateChildEnv(daemonEnv, { CODEX_HOME: "/scratch/.codex" });
+    expect(Object.keys(out).sort()).toEqual(
+      [
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LC_ALL",
+        "TMPDIR",
+        "TZ",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "NO_PROXY",
+        "NODE_EXTRA_CA_CERTS",
+        "SSL_CERT_FILE",
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "XDG_CONFIG_HOME",
+        "npm_config_registry",
+        "NPM_CONFIG_CAFILE",
+        "HOMEBREW_PREFIX",
+        "NO_COLOR",
+        "npm_config_update_notifier",
+        "npm_config_fund",
+        "HOMEBREW_NO_ENV_HINTS",
+      ].sort(),
+    );
+    expect(out.CODEX_HOME).toBe("/scratch/.codex");
+    expect(out.NO_COLOR).toBe("1");
   });
 });
 

@@ -12,9 +12,7 @@ import { chmod, link, lstat, mkdir, open, readFile, rename, stat, unlink, writeF
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { compareRuntimeVersions, parseRuntimeVersion, scrubHostPaths } from "@ocw/contracts";
-import { CLAUDE_API_KEY_VARS } from "../claude/claude-runtime.js";
 import { defaultExec, type ExecFn } from "../claude/detect.js";
-import { filterEnv } from "../exec-path.js";
 import { sanitizeString, truncateBytes } from "../sanitize.js";
 import { type InstallResolution, resolveInstall, updateCommandFor } from "./install-method.js";
 
@@ -37,9 +35,6 @@ const UNREADABLE_LOCK_STALE_MS = 60_000;
 
 export const QUEUED_MESSAGE = "Waiting for another update of this install to finish";
 export const LOCK_GAVE_UP = "gave up waiting for another update of this install to finish";
-
-/** Credentials the installer never receives (besides every `OCW_*`, which includes the device token). */
-const CHILD_ENV_DROP = new Set([...CLAUDE_API_KEY_VARS, "OPENAI_API_KEY", "CODEX_API_KEY"]);
 
 export interface RunResult {
   outcome: "succeeded" | "unchanged" | "failed";
@@ -265,10 +260,67 @@ interface ChildOutcome {
   raw: string;
 }
 
-/** The installer's environment: no `OCW_*` (device token, server URL), no API key; quiet, colourless output. */
+/**
+ * What the installer may receive from the daemon's environment (07.11 review ME-03): an allowlist, so a headless
+ * server's tokens, cloud keys, database URLs or agent sockets never reach an installer (or the lifecycle scripts of
+ * the packages it installs). The user, locale, temp directory, proxies and CA bundles, the CLIs' own config homes,
+ * and npm/Homebrew settings stay; anything named like a credential is dropped even inside those families.
+ */
+const CHILD_ENV_KEEP = new Set([
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "LANG",
+  "LANGUAGE",
+  "TZ",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "ALL_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+  "all_proxy",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "CODEX_HOME",
+  "CLAUDE_CONFIG_DIR",
+  "XDG_CONFIG_HOME",
+  "XDG_CACHE_HOME",
+  "XDG_DATA_HOME",
+  "XDG_STATE_HOME",
+  // Windows (manual-only there today; kept so a future method finds a sane environment).
+  "SystemRoot",
+  "SYSTEMROOT",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "USERPROFILE",
+  "PATHEXT",
+  "ComSpec",
+  "COMSPEC",
+]);
+const CHILD_ENV_KEEP_PREFIXES = ["LC_", "npm_config_", "NPM_CONFIG_", "HOMEBREW_"];
+const CREDENTIAL_NAME_RE = /auth|token|passw|secret|_key$|otp/i;
+
+function keepForInstaller(name: string): boolean {
+  if (name.startsWith("OCW_") || CREDENTIAL_NAME_RE.test(name)) return false;
+  return CHILD_ENV_KEEP.has(name) || CHILD_ENV_KEEP_PREFIXES.some((p) => name.startsWith(p));
+}
+
+/** The installer's environment: the allowlist above (no `OCW_*`, no credential); quiet, colourless output. */
 export function updateChildEnv(env: NodeJS.ProcessEnv, extra: Record<string, string>): NodeJS.ProcessEnv {
+  const kept: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (value !== undefined && keepForInstaller(name)) kept[name] = value;
+  }
   return {
-    ...filterEnv(env, (k) => k.startsWith("OCW_") || CHILD_ENV_DROP.has(k) || k.endsWith("_API_KEY")),
+    ...kept,
     NO_COLOR: "1",
     npm_config_update_notifier: "false",
     npm_config_fund: "false",
