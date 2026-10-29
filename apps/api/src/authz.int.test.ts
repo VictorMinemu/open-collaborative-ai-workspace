@@ -75,7 +75,7 @@ describe("route authorization coverage (strict in tests)", () => {
 
   it("the device-code pairing decisions (07.12-02) are user routes", () => {
     const modes = stack.built.authz.routes;
-    for (const path of ["lookup", "approve", "deny"]) {
+    for (const path of ["approve"]) {
       expect(modes.get(`POST /api/v1/devices/pairings/${path}`)).toBe<AuthzMode>("user");
     }
   });

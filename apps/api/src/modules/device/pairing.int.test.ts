@@ -31,7 +31,10 @@ const nextIp = () => `198.51.100.${ipSeq++}`;
 
 const anon = () => new TestClient(stack.baseUrl);
 
-function startPairing(ip: string, body: Json = { name: "rack-1", platform: "linux", runtimeVersion: "0.1.0" }) {
+function startPairing(
+  ip: string,
+  body: Json = { name: "rack-1", platform: "linux", runtimeVersion: "0.1.0" },
+) {
   return anon().request("POST", "/api/v1/devices/pairings", body, { headers: { "x-forwarded-for": ip } });
 }
 
@@ -47,7 +50,12 @@ function poll(ip: string, deviceCode: string) {
 async function started(ip = nextIp(), body?: Json) {
   const res = await startPairing(ip, body);
   expect(res.status, JSON.stringify(res.body)).toBe(200);
-  return { ip, deviceCode: res.body!.deviceCode as string, userCode: res.body!.userCode as string, body: res.body! };
+  return {
+    ip,
+    deviceCode: res.body!.deviceCode as string,
+    userCode: res.body!.userCode as string,
+    body: res.body!,
+  };
 }
 
 let adminSeq = 0;
@@ -94,7 +102,9 @@ describe("start → approve → token (Task 1)", () => {
     const body = res.body!;
     expect(body.userCode).toMatch(USER_CODE);
     expect(body.verificationUri).toBe(`${WEB_ORIGIN}/settings/devices?add=server`);
-    expect(body.verificationUriComplete).toBe(`${WEB_ORIGIN}/settings/devices?pair=${body.userCode as string}`);
+    expect(body.verificationUriComplete).toBe(
+      `${WEB_ORIGIN}/settings/devices?pair=${body.userCode as string}`,
+    );
     expect(body.expiresIn).toBe(600);
     expect(body.interval).toBe(5);
     expect((body.deviceCode as string).length).toBeGreaterThanOrEqual(32);
@@ -188,9 +198,15 @@ describe("start → approve → token (Task 1)", () => {
     });
     expect(res.body!.deviceToken).toMatch(/^ocwd_/);
     const enrolled = (await auditRows("device.enrolled")).filter((r) => r.device_id === res.body!.deviceId);
-    expect(enrolled[0]).toMatchObject({ metadata: { name: "Víctor's MacBook", platform: "darwin", via: "code" } });
+    expect(enrolled[0]).toMatchObject({
+      metadata: { name: "Víctor's MacBook", platform: "darwin", via: "code" },
+    });
 
-    const reuse = await anon().request("POST", "/api/v1/devices/enroll", { code, name: "y", platform: "linux" });
+    const reuse = await anon().request("POST", "/api/v1/devices/enroll", {
+      code,
+      name: "y",
+      platform: "linux",
+    });
     expect(reuse.status).toBe(410);
     expect(errorCode(reuse)).toBe("code_used");
     const bad = await anon().request("POST", "/api/v1/devices/enroll", {

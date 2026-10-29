@@ -28,12 +28,12 @@ import {
   workProjectRepos,
   workProjectSettings,
 } from "@ocw/db";
-import { and, asc, count, eq, isNull, sql } from "drizzle-orm";
+import { asc, count, eq, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../core";
-import { randomToken, sha256Hex } from "../../lib/crypto";
-import { badRequest, conflict, gone, notFound } from "../../lib/errors";
+import { sha256Hex } from "../../lib/crypto";
+import { conflict, notFound } from "../../lib/errors";
 import {
   createPermissionService,
   deviceResource,
@@ -42,6 +42,7 @@ import {
   workProjectResource,
 } from "../organization";
 import { type DeviceAccess, loadDeviceAccess } from "./access";
+import { enrollWithCodeHash } from "./enroll";
 import { FULL_ACCESS_OPT_IN_MESSAGE, loadGrants, registerDeviceGrantRoutes } from "./grants";
 import type { DeviceHub } from "./hub";
 import {
@@ -49,6 +50,7 @@ import {
   storedMaintenance,
   toDeviceRuntimeMaintenance,
 } from "./maintenance";
+import { registerDevicePairingRoutes } from "./pairing";
 
 export const ENROLLMENT_TTL_MS = 10 * 60_000;
 /** Crockford-ish alphabet without look-alikes (0/O, 1/I/L). */
@@ -198,6 +200,7 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
 
   registerDeviceGrantRoutes(app, core, hub, perms);
   registerDeviceMaintenanceRoutes(app, core, hub, perms);
+  registerDevicePairingRoutes(app, core, perms);
 
   app.post(
     "/devices/enrollments",
@@ -235,48 +238,7 @@ export function registerDeviceRoutes(app: App, core: Core, hub: DeviceHub): void
     },
     async (req) => {
       const { code, name, platform } = req.body;
-      const codeHash = sha256Hex(normalizePairingCode(code));
-      const enrollment = await core.db.lookups.deviceEnrollmentByCodeHash(codeHash);
-      if (!enrollment) throw badRequest("This pairing code is not valid", "invalid_code");
-      if (enrollment.consumedAt) throw gone("This pairing code was already used", "code_used");
-      if (new Date(enrollment.expiresAt).getTime() < Date.now()) {
-        throw gone("This pairing code expired. Create a new one in Settings › Devices", "code_expired");
-      }
-      const deviceToken = `ocwd_${randomToken(32)}`;
-      return core.db.withTenant(
-        { organizationId: enrollment.organizationId, userId: enrollment.userId },
-        async (tx) => {
-          const consumed = await tx
-            .update(deviceEnrollments)
-            .set({ consumedAt: sql`now()` })
-            .where(and(eq(deviceEnrollments.codeHash, codeHash), isNull(deviceEnrollments.consumedAt)))
-            .returning({ codeHash: deviceEnrollments.codeHash });
-          if (consumed.length === 0) throw gone("This pairing code was already used", "code_used");
-          const [row] = await tx
-            .insert(devices)
-            .values({
-              organizationId: enrollment.organizationId,
-              ownerUserId: enrollment.userId,
-              name,
-              platform,
-              tokenHash: sha256Hex(deviceToken),
-            })
-            .returning();
-          await core.audit.record(tx, {
-            action: "device.enrolled",
-            resourceType: "device",
-            resourceId: row!.id,
-            deviceId: row!.id,
-            metadata: { name, platform },
-          });
-          await core.realtime.appendEvent(tx, `org:${enrollment.organizationId}`, EventTypes.deviceUpdated, {
-            deviceId: row!.id,
-            status: row!.status,
-            changed: true,
-          });
-          return { deviceId: row!.id, organizationId: enrollment.organizationId, deviceToken };
-        },
-      );
+      return enrollWithCodeHash(core, sha256Hex(normalizePairingCode(code)), { name, platform, via: "code" });
     },
   );
 
