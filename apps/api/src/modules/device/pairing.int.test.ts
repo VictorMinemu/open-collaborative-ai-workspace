@@ -22,7 +22,6 @@ let victorId: string;
 let orgA: string;
 const devices: FakeDevice[] = [];
 
-type Res = { status: number; body: Record<string, unknown> | null };
 type Json = Record<string, unknown>;
 
 let ipSeq = 10;
@@ -216,5 +215,174 @@ describe("start → approve → token (Task 1)", () => {
     });
     expect(bad.status).toBe(400);
     expect(errorCode(bad)).toBe("invalid_code");
+  });
+});
+
+const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+const recordKey = (deviceCode: string) => `ocw:pair:dc:${sha(deviceCode)}`;
+
+/** Move the stored `lastPollAt` back by `ms` (instead of sleeping through the interval). */
+async function agePoll(deviceCode: string, ms: number) {
+  const redis = stack.built.core.bus.pub;
+  const raw = await redis.get(recordKey(deviceCode));
+  const record = JSON.parse(raw!) as { lastPollAt: string | null };
+  record.lastPollAt = new Date(Date.now() - ms).toISOString();
+  await redis.set(recordKey(deviceCode), JSON.stringify(record), { expiration: "KEEPTTL" });
+}
+
+async function enrollmentRows(deviceCode: string): Promise<number> {
+  const { rows } = await su.query(
+    "select count(*)::int as n from app.device_enrollments where code_hash = $1",
+    [sha(`pair:${deviceCode}`)],
+  );
+  return rows[0].n as number;
+}
+
+describe("every RFC 8628 answer, lookup, deny and single use (Task 2)", () => {
+  it("pending: authorization_pending, then slow_down within the interval, then pending again", async () => {
+    const { ip, deviceCode } = await started();
+    const first = await poll(ip, deviceCode);
+    expect(first.status).toBe(400);
+    expect(errorCode(first)).toBe("authorization_pending");
+    const fast = await poll(ip, deviceCode);
+    expect(fast.status).toBe(400);
+    expect(errorCode(fast)).toBe("slow_down");
+    await agePoll(deviceCode, 6_000);
+    const later = await poll(ip, deviceCode);
+    expect(errorCode(later)).toBe("authorization_pending");
+    // A device code nobody started reads as expired (start again).
+    const unknown = await poll(ip, "x".repeat(43));
+    expect(unknown.status).toBe(400);
+    expect(errorCode(unknown)).toBe("expired_token");
+  });
+
+  it("lookup shows what is asking, without the device code; unknown and malformed codes are refused", async () => {
+    const ip = nextIp();
+    const { deviceCode, userCode } = await started(ip, {
+      name: "gpu-box",
+      platform: "linux",
+      runtimeVersion: "0.2.0",
+    });
+    const { client: approver } = await freshAdmin();
+    const view = await approver.request("POST", "/api/v1/devices/pairings/lookup", {
+      userCode: userCode.toLowerCase(),
+    });
+    expect(view.status, JSON.stringify(view.body)).toBe(200);
+    expect(view.body).toMatchObject({
+      userCode,
+      name: "gpu-box",
+      platform: "linux",
+      runtimeVersion: "0.2.0",
+      requestIp: ip,
+    });
+    const requestedAt = new Date(view.body!.requestedAt as string).getTime();
+    const expiresAt = new Date(view.body!.expiresAt as string).getTime();
+    expect(expiresAt - requestedAt).toBe(600_000);
+    expect(JSON.stringify(view.body)).not.toContain(deviceCode);
+
+    const unknown = await approver.request("POST", "/api/v1/devices/pairings/lookup", {
+      userCode: "ZZZZ-ZZZZ",
+    });
+    expect(unknown.status).toBe(404);
+    expect(errorCode(unknown)).toBe("pairing_not_found");
+    const malformed = await approver.request("POST", "/api/v1/devices/pairings/lookup", {
+      userCode: "UUUU-UUUU",
+    });
+    expect(malformed.status).toBe(400);
+  });
+
+  it("deny: audited, the next poll is access_denied, then expired_token; a later approve is 404", async () => {
+    const { ip, deviceCode, userCode } = await started();
+    const { client: approver, userId } = await freshAdmin();
+    const deny = await approver.request("POST", "/api/v1/devices/pairings/deny", { userCode });
+    expect(deny.status, JSON.stringify(deny.body)).toBe(200);
+    const denied = (await auditRows("device.pairing_denied")).filter((r) => r.actor_id === userId);
+    expect(denied).toHaveLength(1);
+    expect(denied[0]).toMatchObject({
+      organization_id: orgA,
+      resource_type: "device_pairing",
+      metadata: { requestedName: "rack-1", platform: "linux", requestIp: ip },
+    });
+    expect(JSON.stringify(denied)).not.toContain(userCode.replace("-", ""));
+
+    const first = await poll(ip, deviceCode);
+    expect(first.status).toBe(400);
+    expect(errorCode(first)).toBe("access_denied");
+    const second = await poll(ip, deviceCode);
+    expect(errorCode(second)).toBe("expired_token");
+    const approve = await approver.request("POST", "/api/v1/devices/pairings/approve", {
+      userCode,
+      name: "x",
+    });
+    expect(approve.status).toBe(404);
+    expect(await enrollmentRows(deviceCode)).toBe(0);
+  });
+
+  it("single use: after the token a poll is expired_token, approving again is 404, one device only", async () => {
+    const { ip, deviceCode, userCode } = await started(nextIp(), { name: "once-1", platform: "darwin" });
+    const { client: approver } = await freshAdmin();
+    expect(
+      (await approver.request("POST", "/api/v1/devices/pairings/approve", { userCode, name: "Once" })).status,
+    ).toBe(200);
+    const token = await poll(ip, deviceCode);
+    expect(token.status, JSON.stringify(token.body)).toBe(200);
+    expect(token.body).toMatchObject({ name: "Once" });
+    const again = await poll(ip, deviceCode);
+    expect(again.status).toBe(400);
+    expect(errorCode(again)).toBe("expired_token");
+    const reapprove = await approver.request("POST", "/api/v1/devices/pairings/approve", {
+      userCode,
+      name: "Twice",
+    });
+    expect(reapprove.status).toBe(404);
+    const { rows } = await su.query(
+      "select count(*)::int as n from app.devices where name in ('Once', 'Twice')",
+    );
+    expect(rows[0].n).toBe(1);
+    expect(await enrollmentRows(deviceCode)).toBe(1);
+  });
+
+  it("expiry: once Redis forgets the request, the poll is expired_token and the lookup 404", async () => {
+    const { ip, deviceCode, userCode } = await started();
+    const redis = stack.built.core.bus.pub;
+    const ucKey = `ocw:pair:uc:${sha(userCode.replace("-", ""))}`;
+    expect(await redis.ttl(recordKey(deviceCode))).toBeGreaterThan(590);
+    expect(await redis.ttl(ucKey)).toBeGreaterThan(590);
+    await redis.del([recordKey(deviceCode), ucKey]);
+    const res = await poll(ip, deviceCode);
+    expect(errorCode(res)).toBe("expired_token");
+    const { client: approver } = await freshAdmin();
+    const lookup = await approver.request("POST", "/api/v1/devices/pairings/lookup", { userCode });
+    expect(lookup.status).toBe(404);
+  });
+
+  it("race: two approvals at once give one 200 and one 409 already_decided, one enrollment row", async () => {
+    const { deviceCode, userCode } = await started();
+    const [{ client: a }, { client: b }] = await Promise.all([freshAdmin(), freshAdmin()]);
+    const results = await Promise.all([
+      a.request("POST", "/api/v1/devices/pairings/approve", { userCode, name: "A" }),
+      b.request("POST", "/api/v1/devices/pairings/approve", { userCode, name: "B" }),
+    ]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(errorCode(results.find((r) => r.status === 409)!)).toBe("already_decided");
+    expect(await enrollmentRows(deviceCode)).toBe(1);
+    // Approved first, so a deny afterwards loses.
+    const deny = await a.request("POST", "/api/v1/devices/pairings/deny", { userCode });
+    expect(deny.status).toBe(409);
+    expect(errorCode(deny)).toBe("already_decided");
+  });
+
+  it("race: an approval and a denial at once give one 200 and one 409; the loser leaves no row behind", async () => {
+    const { deviceCode, userCode } = await started();
+    const { client: a } = await freshAdmin();
+    const { client: b, userId: bId } = await freshAdmin();
+    const [approve, deny] = await Promise.all([
+      a.request("POST", "/api/v1/devices/pairings/approve", { userCode, name: "A" }),
+      b.request("POST", "/api/v1/devices/pairings/deny", { userCode }),
+    ]);
+    expect([approve.status, deny.status].sort()).toEqual([200, 409]);
+    const deniedAudit = (await auditRows("device.pairing_denied")).filter((r) => r.actor_id === bId);
+    expect(await enrollmentRows(deviceCode)).toBe(approve.status === 200 ? 1 : 0);
+    expect(deniedAudit).toHaveLength(deny.status === 200 ? 1 : 0);
   });
 });
