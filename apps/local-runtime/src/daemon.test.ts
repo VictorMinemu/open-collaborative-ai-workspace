@@ -34,6 +34,7 @@ import { controlRequest } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
 import { FakeRuntime as ScriptedRuntime } from "./fake/fake-runtime.js";
 import { type Logger, silentLogger } from "./logger.js";
+import type { RuntimeGate } from "./maintenance/gate.js";
 import type { RuntimeMaintenanceOptions } from "./maintenance/maintenance.js";
 import type {
   AgentRuntime,
@@ -905,6 +906,36 @@ describe("Full access: reloadConfig (the desktop menu / CLI path, D-02, P-12)", 
       (f) => f.fullAccessOptIn && server.last.frames.indexOf(f) > 2,
     );
     for (const c of back.catalogs) expect(c.permissionModes).toContain("fullAccess");
+  });
+
+  it("turning Full access off while the runtime's CLI updates lowers the session only once the update ends (07.11 review ME-06)", async () => {
+    await setFullAccessOptIn(home, true);
+    await gatedDaemon({});
+    const localId = await addProject();
+    await daemon.start();
+    await server.frame("hello");
+    server.send({
+      id: "u1",
+      kind: "session.start",
+      sessionId: "wu1",
+      payload: { projectLocalId: localId, permissionMode: "fullAccess" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "u1")).toMatchObject({ ok: true });
+
+    // An update of this runtime is running: its gate is closed.
+    const gate = (daemon as unknown as { gates: Map<string, RuntimeGate> }).gates.get(runtime.id);
+    gate?.close();
+    await setFullAccessOptIn(home, false);
+    expect(await controlRequest(socketPath(), { cmd: "reloadConfig" })).toMatchObject({
+      ok: true,
+      result: { fullAccessOptIn: false },
+    });
+    await sleep(100);
+    // Nothing launched the CLI mid-update.
+    expect(runtime.configured).toEqual([]);
+    gate?.open();
+    await server.waitFor(() => (runtime.configured.length > 0 ? true : undefined));
+    expect(runtime.configured).toEqual([{ permissionMode: "acceptEdits" }]);
   });
 
   it("the request carries no value: it only re-reads runtime.json, and the environment still wins", async () => {

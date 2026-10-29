@@ -696,7 +696,10 @@ export class Daemon {
         ),
       );
       if (this.isConnected) this.send(await this.capabilitiesFrame());
-      await Promise.all(full.map((s) => this.leaveFullAccess(s)));
+      // 07.11 review ME-06: lowering goes through the runtime's gate. A session whose CLI is updating is lowered once
+      // the update ends (the adapters refuse its fullAccess turns meanwhile); the reload answers now rather than then.
+      const lowering = Promise.all(full.map((s) => this.leaveFullAccess(s).catch(() => undefined)));
+      if (full.every((s) => this.gates.get(s.runtime.id)?.isOpen !== false)) await lowering;
     }
     return {
       fullAccessOptIn: next.optIn,
@@ -712,8 +715,13 @@ export class Daemon {
     return this.inSessionOrder(s.sessionId, async () => {
       if (s.mode !== "fullAccess" || !this.sessions.has(s.sessionId)) return;
       try {
-        if (!s.runtime.configure) throw new Error(`settings changes are not supported by ${s.runtime.id}`);
-        await s.runtime.configure(s.sessionId, { permissionMode: "acceptEdits" });
+        const configure = s.runtime.configure?.bind(s.runtime);
+        if (!configure) throw new Error(`settings changes are not supported by ${s.runtime.id}`);
+        // Through the gate (ME-06): a configure may wake or relaunch the CLI, never mid-update.
+        await this.admit(s.runtime.id, s.sessionId, () =>
+          configure(s.sessionId, { permissionMode: "acceptEdits" }),
+        );
+        if (!this.sessions.has(s.sessionId)) return;
         s.mode = "acceptEdits";
       } catch (err) {
         // The adapters' own gate still refuses every fullAccess turn; the server's downgrade follows.
