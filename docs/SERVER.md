@@ -253,7 +253,7 @@ The pairing and download routes are rate limited per client IP, per route and pe
 
 | Route | Limit |
 | --- | --- |
-| Start a pairing | 10 per 10 minutes per IP |
+| Start a pairing | 10 per 10 minutes per IP (an IPv6 /64 counts as one IP); at most 1,000 per 10 minutes per workspace |
 | Poll for approval | 60 per minute per IP |
 | Look up, approve, deny | 10 per minute per member, shared |
 | `install.sh`, bundle, checksum, version | 30 per minute per IP, each |

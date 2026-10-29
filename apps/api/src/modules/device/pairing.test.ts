@@ -1,7 +1,7 @@
 import { normalizeUserCode, USER_CODE_ALPHABET } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../../lib/crypto";
-import { generateUserCode, pairingEnrollmentHash } from "./pairing";
+import { generateUserCode, pairingEnrollmentHash, startLimitKey } from "./pairing";
 import { normalizePairingCode } from "./routes";
 
 const FORMATTED = /^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/;
@@ -40,5 +40,29 @@ describe("pairingEnrollmentHash (PD-06: domain-separated from the typed-code has
     expect(pairingEnrollmentHash(deviceCode)).toBe(sha256Hex(`pair:${deviceCode}`));
     expect(pairingEnrollmentHash(deviceCode)).not.toBe(sha256Hex(normalizePairingCode(deviceCode)));
     expect(pairingEnrollmentHash(deviceCode)).not.toBe(sha256Hex(deviceCode));
+  });
+});
+
+describe("startLimitKey (07.12 review LO-04: one start budget per IPv6 /64)", () => {
+  it.each([
+    ["203.0.113.7", "203.0.113.7"],
+    ["::ffff:203.0.113.7", "203.0.113.7"],
+    ["2001:db8:1:2:aaaa:bbbb:cccc:dddd", "2001:db8:1:2::/64"],
+    ["2001:db8:1:2::1", "2001:db8:1:2::/64"],
+    ["2001:0db8:0001:0002:ffff::", "2001:db8:1:2::/64"],
+    ["2001:db8::", "2001:db8:0:0::/64"],
+    ["::1", "0:0:0:0::/64"],
+  ])("%s → %s", (ip, key) => {
+    expect(startLimitKey(ip)).toBe(key);
+  });
+
+  it("addresses of one /64 share a key; another /64 does not", () => {
+    expect(startLimitKey("2001:db8:1:2::1")).toBe(startLimitKey("2001:db8:1:2:ffff:ffff:ffff:ffff"));
+    expect(startLimitKey("2001:db8:1:2::1")).not.toBe(startLimitKey("2001:db8:1:3::1"));
+  });
+
+  it("anything else is its own key", () => {
+    expect(startLimitKey("not-an-ip")).toBe("not-an-ip");
+    expect(startLimitKey("")).toBe("");
   });
 });

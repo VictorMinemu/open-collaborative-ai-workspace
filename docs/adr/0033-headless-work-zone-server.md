@@ -81,8 +81,10 @@ third-party host for the runtime: a self-hosted workspace must serve its own.
   `enrollWithCodeHash`, the same transaction the typed-code path uses. The device belongs to the approver's
   organization and user, exactly like today's enroll; the typed-code flow is unchanged. No migration.
 - **Limits** (in memory, per API instance, per apparent client IP; `OCW_TRUST_PROXY` behind a proxy): start 10 per
-  10 minutes per IP; token 60 per minute per IP plus `slow_down` per device code; lookup, approve and deny 10 per minute
-  per member, one shared bucket; the four download routes 30 per minute per IP each.
+  10 minutes per IP, an IPv6 /64 counting as one IP, plus a workspace-wide cap of 1,000 starts per 10 minutes counted in
+  Redis (over it, 503 `pairing_unavailable`; 07.12 review LO-04); token 60 per minute per IP plus `slow_down` per
+  device code; lookup, approve and deny 10 per minute per member, one shared bucket; the four download routes 30 per
+  minute per IP each.
 - **Audit:** `device.pairing_approved`, `device.pairing_denied`, and `device.enrolled` with `via: code | device_code`.
   No audit row or log line carries a code or a token. Start and poll are pre-tenant and not audited.
 - **Phishing and guessing.** The approve dialog shows the code, the requested name, platform, request IP, age and

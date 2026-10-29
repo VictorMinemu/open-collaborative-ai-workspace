@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "../../testing";
 import { FakeDevice } from "../../testing-device";
 import { errorCode, invite } from "../../testing-workzone";
+import { PAIRING_STARTS_CAP, PAIRING_STARTS_KEY } from "./pairing";
 
 /**
  * Phase 07.12-02 (HSR-03, D-03, PD-06..PD-08): terminal pairing by device code against real PostgreSQL and Redis. A
@@ -519,6 +520,29 @@ async function moveToOrgB(userId: string, displayName: string): Promise<string> 
 }
 
 describe("abuse bounds and isolation (Task 3)", () => {
+  it("start: one IPv6 /64 shares one budget of 10, whatever its addresses; another /64 is unaffected (LO-04)", async () => {
+    const prefix = `2001:db8:${(ipSeq++).toString(16)}:1`;
+    for (let i = 0; i < 10; i++)
+      expect((await startPairing(`${prefix}::${(i + 1).toString(16)}`)).status).toBe(200);
+    expect((await startPairing(`${prefix}:ffff:ffff:ffff:ffff`)).status).toBe(429);
+    expect((await startPairing(`2001:db8:${(ipSeq++).toString(16)}:2::1`)).status).toBe(200);
+  });
+
+  it("start: over the workspace-wide cap of pending pairings answers 503 pairing_unavailable (LO-04)", async () => {
+    const redis = stack.built.core.bus.pub;
+    await redis.set(PAIRING_STARTS_KEY, String(PAIRING_STARTS_CAP), {
+      expiration: { type: "EX", value: 600 },
+    });
+    try {
+      const res = await startPairing(nextIp());
+      expect(res.status).toBe(503);
+      expect(errorCode(res)).toBe("pairing_unavailable");
+    } finally {
+      await redis.del(PAIRING_STARTS_KEY);
+    }
+    expect((await startPairing(nextIp())).status).toBe(200);
+  });
+
   it("start: the 11th request from one IP within 10 minutes is 429; another IP is unaffected", async () => {
     const ip = nextIp();
     for (let i = 0; i < 10; i++) expect((await startPairing(ip)).status).toBe(200);

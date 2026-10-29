@@ -1,4 +1,5 @@
 import { randomInt } from "node:crypto";
+import { isIP } from "node:net";
 import {
   ApprovePairingRequest,
   DenyPairingRequest,
@@ -44,6 +45,37 @@ const userCodeKey = (userCodeHash: string) => `${KEY_PREFIX}uc:${userCodeHash}`;
 
 /** Up to this many user-code collisions are retried before a start answers 503. */
 const USER_CODE_ATTEMPTS = 5;
+
+/**
+ * Workspace-wide bound on starts (07.12 review LO-04): at most this many pairings start in one pairing lifetime (a
+ * fixed 10-minute window counted in Redis), so rotating client addresses cannot fill the Redis that carries realtime.
+ * Far above any real workspace's pairings; over it a start answers 503 `pairing_unavailable` until the window ends.
+ */
+export const PAIRING_STARTS_CAP = 1_000;
+export const PAIRING_STARTS_KEY = `${KEY_PREFIX}starts`;
+
+/**
+ * The start route's rate-limit key (LO-04): an IPv4 address as it is (an IPv4-mapped IPv6 address as its IPv4), an
+ * IPv6 address as its /64, since one host usually holds a whole /64 and could otherwise rotate through it. Anything
+ * else is its own key.
+ */
+export function startLimitKey(ip: string): string {
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(ip);
+  if (mapped) return mapped[1]!;
+  if (isIP(ip) !== 6) return ip;
+  const [head = "", tail = ""] = ip.toLowerCase().split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  // `::` stands for the zero groups between the two halves (an embedded IPv4 tail counts as two groups).
+  const rightGroups = right.reduce((n, g) => n + (g.includes(".") ? 2 : 1), 0);
+  const groups = ip.includes("::")
+    ? [...left, ...Array<string>(8 - left.length - rightGroups).fill("0"), ...right]
+    : left;
+  return `${groups
+    .slice(0, 4)
+    .map((g) => Number.parseInt(g, 16).toString(16))
+    .join(":")}::/64`;
+}
 
 /** A fresh user code: 8 uniform draws over the 32-symbol Crockford alphabet (40 bits), shown `XXXX-XXXX`. */
 export function generateUserCode(): string {
@@ -92,6 +124,13 @@ r.status = ARGV[2]
 for k, val in pairs(cjson.decode(ARGV[3])) do r[k] = val end
 redis.call('set', KEYS[1], cjson.encode(r), 'KEEPTTL')
 return 1
+`;
+
+/** One start in the window (KEYS[1] the counter, ARGV[1] the window in seconds): the new count. */
+const ADMIT_START = `
+local n = redis.call('incr', KEYS[1])
+if redis.call('ttl', KEYS[1]) < 0 then redis.call('expire', KEYS[1], ARGV[1]) end
+return n
 `;
 
 /**
@@ -174,6 +213,21 @@ export class PairingStore {
     if (typeof deviceCodeHash !== "string") return null;
     const record = await this.byDeviceCodeHash(deviceCodeHash);
     return record ? { deviceCodeHash, record } : null;
+  }
+
+  /** Counts one start in the current window; 503 `pairing_unavailable` above `PAIRING_STARTS_CAP` (LO-04). */
+  async admitStart(): Promise<void> {
+    const n = await this.redis.eval(ADMIT_START, {
+      keys: [PAIRING_STARTS_KEY],
+      arguments: [String(PAIRING_TTL_SECONDS)],
+    });
+    if (typeof n === "number" && n > PAIRING_STARTS_CAP) {
+      throw new HttpError(
+        503,
+        "pairing_unavailable",
+        "Pairing is busy right now; try again in a few minutes",
+      );
+    }
   }
 
   /** Atomic status change `from` → `to` with merged fields; false when another decision (or expiry) came first. */
@@ -292,11 +346,20 @@ export function registerDevicePairingRoutes(app: App, core: Core, perms: Permiss
     "/devices/pairings",
     {
       // No session yet: the server is anonymous until an owner approves it.
-      config: { authz: "public", rateLimit: { max: 10, timeWindow: "10 minutes" } },
+      // Per IPv4 address or IPv6 /64 (LO-04), plus the workspace-wide cap in the handler.
+      config: {
+        authz: "public",
+        rateLimit: {
+          max: 10,
+          timeWindow: "10 minutes",
+          keyGenerator: (req: FastifyRequest) => `pair-start:${startLimitKey(req.ip)}`,
+        },
+      },
       schema: { tags: ["device"], body: StartPairingRequest, response: { 200: StartPairingResponse } },
     },
     async (req) => {
       const { name, platform, runtimeVersion } = req.body;
+      await store.admitStart();
       const deviceCode = randomToken(32);
       const now = new Date();
       const userCode = await store.create(sha256Hex(deviceCode), {
