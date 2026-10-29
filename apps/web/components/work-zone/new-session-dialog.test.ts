@@ -1,7 +1,15 @@
 import type { Project } from "@ocw/contracts";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiRequestError } from "@/lib/api";
-import { audienceRefusal, preselectedRepo, runtimeCardState, whoUpdates } from "./new-session-dialog";
+import {
+  AddServerLink,
+  audienceRefusal,
+  preselectedRepo,
+  runtimeCardState,
+  whoUpdates,
+} from "./new-session-dialog";
 
 /**
  * A refused create request words the stale draft with the names the dialog showed (07.9-14, UI-SPEC Copy "Refusal
@@ -174,5 +182,14 @@ describe("runtimeCardState", () => {
     expect(whoUpdates({ ownerUserId: LEO, ownerName: "Leo Park" }, LEO)).toBe(
       "update it in Settings › Devices",
     );
+  });
+});
+
+describe("AddServerLink (07.12-07, owner feedback 2026-10-29)", () => {
+  it("points from New session to Add a device › Server", () => {
+    const html = renderToStaticMarkup(createElement(AddServerLink));
+    expect(html).toContain('data-testid="new-session-add-server"');
+    expect(html).toContain('href="/settings/devices?add=server"');
+    expect(html).toContain("Run sessions on a server");
   });
 });
