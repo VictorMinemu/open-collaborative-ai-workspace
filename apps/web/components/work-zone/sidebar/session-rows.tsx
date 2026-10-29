@@ -88,7 +88,12 @@ export function SettledRow({
       <VisibilitySrSuffix session={s} viewerId={viewerId} />
       <VisibilityMarker session={s} viewerId={viewerId} />
       <RowDiffStat s={s} className="text-[12px]" />
-      <span className={cn("w-8 shrink-0 text-right text-[12px] tabular-nums", failed && "text-destructive")}>
+      <span
+        className={cn(
+          "w-8 shrink-0 text-right text-[12px] tabular-nums",
+          failed && "text-red-700 dark:text-red-300",
+        )}
+      >
         {shortAgo(s.updatedAt, now)}
       </span>
     </Link>
