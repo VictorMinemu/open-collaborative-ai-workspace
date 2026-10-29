@@ -277,6 +277,8 @@ test("a release that changed upstream between review and approval refreshes the 
   await expect(sheet).toBeHidden();
 
   // Only a dependency changed: the same toast, and the refreshed review (same top digest) approves.
+  // Sonner pauses a toast while the pointer rests on it (the sheet closed under the cursor): move it away first.
+  await page.mouse.move(0, 0);
   await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 15_000 });
   const deps = { source: "pypi", name: "ocw-deps", version: "0.9.0" } as const;
   sheet = await reviewInSheet(page, deps);
