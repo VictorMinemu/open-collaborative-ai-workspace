@@ -28,6 +28,11 @@ const PUBLIC_ROUTES = [
   // 07.12-02 (D-03): a server starts a device-code pairing and polls for its token before any session exists.
   "POST /api/v1/devices/pairings",
   "POST /api/v1/devices/pairings/token",
+  // 07.12-06 (D-01, D-13): a server downloads the Local Runtime and its installer before any session exists.
+  "GET /api/v1/runtime/version",
+  "GET /api/v1/runtime/bundle",
+  "GET /api/v1/runtime/bundle.sha256",
+  "GET /api/v1/runtime/install.sh",
   // 07.4-10: the OAuth callback checks the member's session against the flow by hand; the CIMD document is public.
   "GET /api/v1/connectors/oauth/callback",
   "GET /api/v1/connectors/oauth/client-metadata.json",
