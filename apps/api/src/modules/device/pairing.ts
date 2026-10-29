@@ -1,6 +1,7 @@
 import { randomInt } from "node:crypto";
 import {
   ApprovePairingRequest,
+  DenyPairingRequest,
   DevicePlatform,
   formatUserCode,
   normalizeUserCode,
@@ -8,6 +9,8 @@ import {
   PAIRING_INTERVAL_SECONDS,
   PAIRING_TTL_SECONDS,
   type PairingErrorCode,
+  PairingLookupRequest,
+  PairingRequestView,
   PairingTokenRequest,
   PairingTokenResponse,
   StartPairingRequest,
@@ -351,6 +354,55 @@ export function registerDevicePairingRoutes(app: App, core: Core, perms: Permiss
         if (!won) throw alreadyDecided();
       });
       return { ok: true as const };
+    },
+  );
+
+  app.post(
+    "/devices/pairings/deny",
+    { ...decider, schema: { tags: ["device"], body: DenyPairingRequest, response: { 200: Ok } } },
+    async (req) => {
+      const found = await store.byUserCode(canonicalOf(req.body.userCode));
+      if (!found) throw notFoundCode();
+      const { deviceCodeHash, record } = found;
+      if (record.status !== "pending") throw alreadyDecided();
+      await core.db.withTenant(tenant(req), async (tx) => {
+        await core.audit.record(tx, {
+          action: "device.pairing_denied",
+          resourceType: "device_pairing",
+          metadata: { requestedName: record.name, platform: record.platform, requestIp: record.requestIp },
+        });
+        // A lost race throws here, so the audit row rolls back with it.
+        const won = await store.decide(deviceCodeHash, "pending", "denied", {
+          decidedBy: authOf(req).userId,
+        });
+        if (!won) throw alreadyDecided();
+      });
+      return { ok: true as const };
+    },
+  );
+
+  app.post(
+    "/devices/pairings/lookup",
+    {
+      ...decider,
+      schema: { tags: ["device"], body: PairingLookupRequest, response: { 200: PairingRequestView } },
+    },
+    async (req) => {
+      const canonical = canonicalOf(req.body.userCode);
+      const found = await store.byUserCode(canonical);
+      // Only a pending request can be shown; a decided or vanished one reads like an unknown code.
+      if (found?.record.status !== "pending") throw notFoundCode();
+      const { record } = found;
+      // The resolver decided `device.pair` in the preHandler; this read is pre-tenant (Redis) and names no org data.
+      return {
+        userCode: formatUserCode(canonical),
+        name: record.name,
+        platform: record.platform,
+        runtimeVersion: record.runtimeVersion,
+        requestIp: record.requestIp,
+        requestedAt: record.createdAt,
+        expiresAt: record.expiresAt,
+      };
     },
   );
 }
