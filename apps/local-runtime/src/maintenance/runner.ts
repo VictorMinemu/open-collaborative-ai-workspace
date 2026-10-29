@@ -36,6 +36,7 @@ const PROBE_TIMEOUT_MS = 10_000;
 const UNREADABLE_LOCK_STALE_MS = 60_000;
 
 export const QUEUED_MESSAGE = "Waiting for another update of this install to finish";
+export const LOCK_GAVE_UP = "gave up waiting for another update of this install to finish";
 
 /** Credentials the installer never receives (besides every `OCW_*`, which includes the device token). */
 const CHILD_ENV_DROP = new Set([...CLAUDE_API_KEY_VARS, "OPENAI_API_KEY", "CODEX_API_KEY"]);
@@ -246,6 +247,8 @@ export interface RunUpdateOptions {
   /** Retry interval while another updater holds the install's lock (5 s), and when to give up (10 min). */
   lockRetryMs?: number;
   lockGiveUpMs?: number;
+  /** The install's lock, already held by the caller (who releases it); the runner then never waits for one. */
+  lock?: HeldInstallLock;
   spawnFn?: typeof spawn;
   exec?: ExecFn;
   /** A fresh resolution (before and after the command); default re-resolves the same binary. */
@@ -404,21 +407,25 @@ export async function runUpdate(opts: RunUpdateOptions): Promise<RunResult> {
     return failed(null, "", "this install is not updatable here");
   }
 
-  const locks = new InstallLock(opts.lockDir);
-  const giveUpAt = now() + (opts.lockGiveUpMs ?? LOCK_GIVE_UP_MS);
-  let lock = await locks.acquire(input.installRoot);
-  let reportedQueued = false;
-  while (lock === "busy") {
-    if (!reportedQueued) {
-      opts.onProgress?.({ state: "queued", message: QUEUED_MESSAGE });
-      reportedQueued = true;
+  // A lock handed over by the caller (taken before it closed its gate, 07.11 review ME-02) stays the caller's to release.
+  let held: HeldInstallLock;
+  if (opts.lock) held = opts.lock;
+  else {
+    const locks = new InstallLock(opts.lockDir);
+    const giveUpAt = now() + (opts.lockGiveUpMs ?? LOCK_GIVE_UP_MS);
+    let lock = await locks.acquire(input.installRoot);
+    let reportedQueued = false;
+    while (lock === "busy") {
+      if (!reportedQueued) {
+        opts.onProgress?.({ state: "queued", message: QUEUED_MESSAGE });
+        reportedQueued = true;
+      }
+      if (now() >= giveUpAt) return failed(null, "", LOCK_GAVE_UP);
+      await sleep(opts.lockRetryMs ?? LOCK_RETRY_MS);
+      lock = await locks.acquire(input.installRoot);
     }
-    if (now() >= giveUpAt)
-      return failed(null, "", "gave up waiting for another update of this install to finish");
-    await sleep(opts.lockRetryMs ?? LOCK_RETRY_MS);
-    lock = await locks.acquire(input.installRoot);
+    held = lock;
   }
-  const held: HeldInstallLock = lock;
 
   try {
     // Fresh, under the lock: the binary may have moved, or another updater may already have done the work.
@@ -485,6 +492,6 @@ export async function runUpdate(opts: RunUpdateOptions): Promise<RunResult> {
     }
     return { outcome: "succeeded", fromVersion, toVersion, output };
   } finally {
-    await held.release();
+    if (!opts.lock) await held.release();
   }
 }

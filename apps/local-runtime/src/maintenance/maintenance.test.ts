@@ -27,7 +27,7 @@ import {
   STALE_AFTER_MS,
   UNCHANGED_BACKOFF_MS,
 } from "./maintenance.js";
-import type { RunResult, RunUpdateOptions } from "./runner.js";
+import { LOCK_GIVE_UP_MS, LOCK_RETRY_MS, type RunResult, type RunUpdateOptions } from "./runner.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -88,6 +88,8 @@ interface Harness {
   runFrames: RuntimeUpdateRunFrame[];
   notified: Array<[string, string, string | undefined]>;
   afterRuns: string[];
+  /** Install roots whose lock is held (by this daemon's runs, or by "another daemon" when a test adds one). */
+  heldLocks: Set<string>;
   state: { installed: string | null; latest: string | null; clock: number };
   setRunResult(fn: (opts: RunUpdateOptions) => RunResult | Promise<RunResult>): void;
   advance(ms: number): Promise<void>;
@@ -130,6 +132,7 @@ function harness(over: Partial<RuntimeMaintenanceOptions> & { local?: RuntimeUpd
     runFrames: [] as RuntimeUpdateRunFrame[],
     notified: [] as Array<[string, string, string | undefined]>,
     afterRuns: [] as string[],
+    heldLocks: new Set<string>(),
     state,
   } as Harness;
   let runResult = (opts: RunUpdateOptions): RunResult | Promise<RunResult> => {
@@ -187,6 +190,18 @@ function harness(over: Partial<RuntimeMaintenanceOptions> & { local?: RuntimeUpd
     run: async (opts) => {
       h.runs.push(opts);
       return runResult(opts);
+    },
+    locks: {
+      acquire: async (root) => {
+        if (h.heldLocks.has(root)) return "busy";
+        h.heldLocks.add(root);
+        return {
+          release: async () => {
+            h.heldLocks.delete(root);
+          },
+          recordInstaller: async () => undefined,
+        };
+      },
     },
     now: () => state.clock,
     random: () => 0.5,
@@ -522,8 +537,14 @@ describe("RuntimeMaintenance: never cut a turn (D-03, D-03a, D-03b, PD-07)", () 
     expect(h.runs).toEqual([]);
     h.adapter.turns = 0;
     h.m.onRuntimeActivity("claude-code");
-    expect(h.gate.isOpen).toBe(false); // closed in the same tick as the idle check
+    // The install lock first (07.11 review ME-02), then the gate closes in the same tick as the idle re-check.
+    let closedBeforeRun = false;
+    h.setRunResult((opts) => {
+      closedBeforeRun = !h.gate.isOpen;
+      return { outcome: "succeeded", fromVersion: "2.1.290", toVersion: opts.candidate, output: "" };
+    });
     await flush();
+    expect(closedBeforeRun).toBe(true);
     expect(h.runs).toHaveLength(1);
     expect(h.gate.isOpen).toBe(true);
     expect(h.adapter.interrupts).toBe(0);
@@ -723,6 +744,79 @@ describe("RuntimeMaintenance: never cut a turn (D-03, D-03a, D-03b, PD-07)", () 
     await flush();
     expect(h.runs).toEqual([]);
     expect(h.adapter.interrupts).toBe(0);
+  });
+});
+
+describe("RuntimeMaintenance: the install lock before the gate (07.11 review ME-02)", () => {
+  const ROOT = "/scratch/home/.local/share/claude";
+  const realWait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("Update now while another daemon updates the same install: queued with the gate open, then it runs", async () => {
+    const h = harness({ drainPollMs: 5 });
+    h.m.setOrgPolicy("notify", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    h.heldLocks.add(ROOT); // another daemon of this OS user
+    expect(await h.m.requestUpdate("claude-code", "manual")).toEqual({ accepted: true });
+    await flush();
+    expect(claudeStatus(h).state).toBe("queued");
+    expect(h.gate.isOpen).toBe(true);
+    expect(h.adapter.retired).toBe(0);
+    await h.advance(LOCK_RETRY_MS * 3);
+    expect(claudeStatus(h).state).toBe("queued");
+    expect(h.gate.isOpen).toBe(true);
+    expect(h.runs).toEqual([]);
+    h.heldLocks.delete(ROOT);
+    await h.advance(LOCK_RETRY_MS);
+    await realWait(30);
+    await flush();
+    expect(h.runs).toHaveLength(1);
+    expect(h.gate.isOpen).toBe(true);
+    expect(h.heldLocks.size).toBe(0); // released after the run
+  });
+
+  it("gives up after LOCK_GIVE_UP_MS without ever closing the gate: failed, reported", async () => {
+    const h = harness({ drainPollMs: 5 });
+    h.m.setOrgPolicy("notify", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    h.heldLocks.add(ROOT);
+    const commandId = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
+    expect(await h.m.requestUpdate("claude-code", "manual", commandId)).toEqual({ accepted: true });
+    await h.advance(LOCK_GIVE_UP_MS + LOCK_RETRY_MS);
+    expect(h.runs).toEqual([]);
+    expect(h.gate.isOpen).toBe(true);
+    expect(h.adapter.retired).toBe(0);
+    expect(h.runFrames).toEqual([
+      expect.objectContaining({ phase: "finished", outcome: "failed", commandId, trigger: "manual" }),
+    ]);
+    expect(h.runFrames[0]?.output).toContain("gave up waiting for another update of this install");
+    expect(claudeStatus(h)).toMatchObject({ state: "idle", lastRun: { outcome: "failed" } });
+  });
+
+  it("an idle moment while the lock is busy keeps the update pending with the gate open, and takes the next one", async () => {
+    const h = harness();
+    h.heldLocks.add(ROOT);
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    expect(claudeStatus(h).state).toBe("pending");
+    expect(h.gate.isOpen).toBe(true);
+    expect(h.runs).toEqual([]);
+    h.heldLocks.delete(ROOT);
+    await h.advance(PENDING_POLL_MS);
+    expect(h.runs).toHaveLength(1);
+    expect(h.gate.isOpen).toBe(true);
+    expect(h.heldLocks.size).toBe(0);
+  });
+
+  it("the run gets the lock taken before the gate closed (the runner never waits for it with the gate closed)", async () => {
+    const h = harness();
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    expect(h.runs).toHaveLength(1);
+    expect(h.runs[0]?.lock).toBeDefined();
   });
 });
 

@@ -5,7 +5,8 @@
 // channel's latest unless the effective level is `off` (no request at all then), compares with the compatibility
 // manifest (the newer of the bundled copy and the Control Plane's), and with the effective level `automatic` (the
 // lower of the org's and this device's; `notify` until a `runtime.config` arrived, D-10) installs a newer, not broken
-// candidate when the runtime is idle: gate closed in the same tick as the idle check → idle CLI processes retired →
+// candidate when the runtime is idle: install lock taken (gate still open) → gate closed in the same tick as the idle
+// check → idle CLI processes retired →
 // the one command from the fixed table (`runUpdate`) → install re-read → gate opened → `runtime.update.run` finished
 // and a fresh `runtime.maintenance` snapshot. Nothing here ever interrupts a turn (D-03).
 //
@@ -50,6 +51,11 @@ import { type InstallResolution, resolveInstall } from "./install-method.js";
 import { RegistryClient } from "./registry.js";
 import {
   defaultLockDir,
+  type HeldInstallLock,
+  InstallLock,
+  LOCK_GAVE_UP,
+  LOCK_GIVE_UP_MS,
+  LOCK_RETRY_MS,
   probeVersion,
   type RunProgress,
   type RunResult,
@@ -159,6 +165,11 @@ export interface RuntimeMaintenanceOptions {
   drainPollMs?: number;
   /** How long `retireIdle` may take before the run fails (default `RETIRE_TIMEOUT_MS`). */
   retireTimeoutMs?: number;
+  /** Install locks (default: `InstallLock` on `lockDir`). */
+  locks?: InstallLocks;
+  /** A draining update retries a busy lock this often (5 s) and gives up after this long (10 min). */
+  lockRetryMs?: number;
+  lockGiveUpMs?: number;
   now?: () => number;
   random?: () => number;
   setTimer?: (fn: () => void, ms: number) => TimerHandle;
@@ -186,6 +197,23 @@ interface Job {
   commandId?: string;
   /** "Update now" drains at once; an automatic update first waits for an idle moment (PD-07). */
   drainNow: boolean;
+  /** The install's lock, taken before the gate closes and released when the job ends (07.11 review ME-02). */
+  lock?: JobLock | null;
+  /** A lock attempt is in flight (one at a time). */
+  locking?: boolean;
+  /** When a draining job first found the lock busy (its give-up clock). */
+  lockWaitSince?: number;
+}
+
+/** A held install lock and the resolution it was taken for (the run updates exactly that install). */
+interface JobLock {
+  held: HeldInstallLock;
+  resolution: InstallResolution;
+}
+
+/** Where install locks come from (the per-OS-user lock directory, or a test double). */
+export interface InstallLocks {
+  acquire(installRoot: string): Promise<HeldInstallLock | "busy">;
 }
 
 interface RuntimeState {
@@ -207,6 +235,13 @@ interface RuntimeState {
 }
 
 const RUNTIME_ORDER: readonly RuntimeId[] = ["claude-code", "codex"];
+
+/** A job in these states has not started its run: it can still be dropped (a draining one holds the gate). */
+const WAITING_STATES: ReadonlySet<RuntimeMaintenanceState> = new Set<RuntimeMaintenanceState>([
+  "pending",
+  "queued",
+  "draining",
+]);
 
 function realpathOr(p: string): string {
   try {
@@ -238,6 +273,7 @@ export class RuntimeMaintenance {
   /** The next check bypasses the registry cache (a local `runtimeCheck`). */
   private freshNext = false;
   private readonly lockDir: string;
+  private readonly locks: InstallLocks;
   private manifest: RuntimeCompatibilityManifest = RUNTIME_COMPATIBILITY_MANIFEST;
   private orgLevel: RuntimeUpdatesLevel | null = null;
   private local: { level: RuntimeUpdatesLevel; source: RuntimeUpdatesLevelSource };
@@ -286,6 +322,7 @@ export class RuntimeMaintenance {
     this.registry = opts.registry ?? new RegistryClient({ env: opts.env });
     this.freshRegistry = opts.freshRegistry ?? new RegistryClient({ env: opts.env, ttlMs: 0 });
     this.lockDir = opts.lockDir ?? defaultLockDir(opts.userHome);
+    this.locks = opts.locks ?? new InstallLock(this.lockDir);
     this.local = { level: opts.localLevel ?? "automatic", source: opts.localLevelSource ?? "config" };
   }
 
@@ -355,10 +392,10 @@ export class RuntimeMaintenance {
       this.clearPoll(st);
       if (st.staleTimer !== null) this.clearTimer(st.staleTimer);
       st.staleTimer = null;
-      // A drain that has not started its run lets the held commands go; a running install finishes on its own.
-      if (st.state === "draining") {
-        st.job = null;
-        st.state = "idle";
+      // A drain that has not started its run lets the held commands go (and its install lock); a running install
+      // finishes on its own.
+      if (st.state === "draining" || st.state === "queued") {
+        this.dropJob(st);
         this.opts.gates.get(id)?.open();
       }
     }
@@ -475,7 +512,7 @@ export class RuntimeMaintenance {
       if (!automatic) {
         // A lowered level drops an automatic update that has not started its run. A draining one also reopens the
         // gate and releases the sessions it held (the pending `drain()` sees the dropped job and returns).
-        if (st.job?.trigger === "automatic" && (st.state === "pending" || st.state === "draining")) {
+        if (st.job?.trigger === "automatic" && WAITING_STATES.has(st.state)) {
           const wasDraining = st.state === "draining";
           this.dropJob(st);
           if (wasDraining) this.releaseHeld(r.id, st);
@@ -524,7 +561,7 @@ export class RuntimeMaintenance {
    */
   private dropIfBroken(runtime: RuntimeId, st: RuntimeState): boolean {
     const job = st.job;
-    if (!job || (st.state !== "pending" && st.state !== "draining")) return false;
+    if (!job || !WAITING_STATES.has(st.state)) return false;
     if (compatibilityOf(this.manifest, runtime, job.candidate) !== "broken") return false;
     const wasDraining = st.state === "draining";
     this.dropJob(st);
@@ -558,10 +595,20 @@ export class RuntimeMaintenance {
     });
   }
 
+  /** Ends the job (whatever its state): timers cleared, its install lock released, state back to idle. */
   private dropJob(st: RuntimeState): void {
     this.clearPoll(st);
     if (st.staleTimer !== null) this.clearTimer(st.staleTimer);
     st.staleTimer = null;
+    const lock = st.job?.lock;
+    if (st.job) st.job.lock = null;
+    if (lock) {
+      lock.held
+        .release()
+        .catch((err: unknown) =>
+          this.log.warn("could not release the install lock", { error: scrubHostPaths(errorMessage(err)) }),
+        );
+    }
     st.job = null;
     st.state = "idle";
     st.pendingSince = null;
@@ -569,10 +616,10 @@ export class RuntimeMaintenance {
   }
 
   /** Reopens a gate closed by a drain that will not run, and tells the held sessions they can go on. */
-  private releaseHeld(runtime: RuntimeId, st: RuntimeState): void {
+  private releaseHeld(runtime: RuntimeId, st: RuntimeState, phase: "done" | "failed" = "done"): void {
     this.opts.gates.get(runtime)?.open();
     try {
-      this.opts.notifySession?.(runtime, "done", st.installedVersion ?? undefined);
+      this.opts.notifySession?.(runtime, phase, st.installedVersion ?? undefined);
     } catch (err) {
       this.log.warn("could not tell the held sessions", {
         runtime,
@@ -674,36 +721,108 @@ export class RuntimeMaintenance {
    */
   private attempt(runtime: RuntimeId): void {
     const st = this.stateOf(runtime);
-    if (this.stopped || !st.job || st.state !== "pending") return;
+    const job = st.job;
+    if (this.stopped || !job || st.state !== "pending" || job.locking) return;
     const adapter = this.adapterOf(runtime);
     const gate = this.gateOf(runtime);
-    if (gate.closeIfIdle(() => adapter.activeTurns())) {
+    const drainAt = this.drainAt(st, job);
+    const drainDue = this.now() >= drainAt;
+    if (drainDue || (gate.admitted === 0 && adapter.activeTurns() === 0)) {
       this.clearPoll(st);
-      void this.runJob(runtime);
+      void this.withInstallLock(runtime, job, drainDue ? "drain" : "idle");
       return;
     }
-    const drainAt = st.job.drainNow
+    this.schedulePoll(runtime, st, drainAt);
+  }
+
+  private drainAt(st: RuntimeState, job: Job): number {
+    return job.drainNow
       ? this.now()
       : (st.pendingSince ?? this.now()) + (this.opts.drainAfterMs ?? DRAIN_AFTER_MS);
-    if (this.now() >= drainAt) {
-      this.clearPoll(st);
-      void this.drain(runtime);
+  }
+
+  private schedulePoll(runtime: RuntimeId, st: RuntimeState, drainAt: number): void {
+    if (st.pollTimer !== null) return;
+    const wait = Math.max(0, Math.min(this.opts.pollMs ?? PENDING_POLL_MS, drainAt - this.now()));
+    st.pollTimer = this.setTimer(() => {
+      st.pollTimer = null;
+      this.attempt(runtime);
+    }, wait);
+  }
+
+  /** The install's lock for the run (null: nothing to lock, the runner refuses such an install by itself). */
+  private async takeInstallLock(runtime: RuntimeId): Promise<JobLock | "busy" | null> {
+    const resolution = this.resolve(runtime);
+    if (!resolution.canUpdate || !resolution.installRoot) return null;
+    const held = await this.locks.acquire(resolution.installRoot);
+    return held === "busy" ? "busy" : { held, resolution };
+  }
+
+  /**
+   * 07.11 review ME-02: the install lock is taken BEFORE the gate closes, so new turns are never held while this
+   * daemon waits for another daemon's update of the same install. At an idle moment (`idle`) a busy lock keeps the
+   * update pending; a draining update (`drain`) waits `queued` with the gate open, retrying every `LOCK_RETRY_MS`, and
+   * gives up (failed) after `LOCK_GIVE_UP_MS`. Once held: `idle` closes the gate if the runtime is still idle (else
+   * lets the lock go and keeps waiting); `drain` drains.
+   */
+  private async withInstallLock(runtime: RuntimeId, job: Job, mode: "idle" | "drain"): Promise<void> {
+    const st = this.stateOf(runtime);
+    job.locking = true;
+    let taken: JobLock | "busy" | null;
+    try {
+      taken = await this.takeInstallLock(runtime);
+    } catch (err) {
+      job.locking = false;
+      if (st.job === job) this.finishWithoutRun(runtime, st, job, scrubHostPaths(errorMessage(err)));
       return;
     }
-    if (st.pollTimer === null) {
-      const wait = Math.max(0, Math.min(this.opts.pollMs ?? PENDING_POLL_MS, drainAt - this.now()));
+    job.locking = false;
+    if (this.stopped || st.job !== job) {
+      if (taken && taken !== "busy") await taken.held.release().catch(() => undefined);
+      return;
+    }
+    if (taken === "busy") {
+      if (mode === "idle") {
+        this.schedulePoll(runtime, st, this.drainAt(st, job));
+        return;
+      }
+      job.lockWaitSince ??= this.now();
+      if (this.now() - job.lockWaitSince >= (this.opts.lockGiveUpMs ?? LOCK_GIVE_UP_MS)) {
+        this.finishWithoutRun(runtime, st, job, LOCK_GAVE_UP);
+        return;
+      }
+      if (st.state !== "queued") {
+        st.state = "queued";
+        void this.publish(true);
+      }
+      this.clearPoll(st);
       st.pollTimer = this.setTimer(() => {
         st.pollTimer = null;
-        this.attempt(runtime);
-      }, wait);
+        if (st.job === job && st.state === "queued") void this.withInstallLock(runtime, job, "drain");
+      }, this.opts.lockRetryMs ?? LOCK_RETRY_MS);
+      return;
     }
+    job.lock = taken;
+    if (mode === "idle") {
+      const adapter = this.adapterOf(runtime);
+      if (st.state === "pending" && this.gateOf(runtime).closeIfIdle(() => adapter.activeTurns())) {
+        void this.runJob(runtime);
+        return;
+      }
+      // Busy again meanwhile: the lock goes back and the update keeps waiting with the gate open.
+      job.lock = null;
+      await taken?.held.release().catch(() => undefined);
+      this.schedulePoll(runtime, st, this.drainAt(st, job));
+      return;
+    }
+    await this.drain(runtime, job);
   }
 
   /**
    * Drain (PD-07, D-03b): the gate closes so new turns of this runtime are held (their sessions are told), turns
    * already running finish on their own (never interrupted), then the update runs.
    */
-  private async drain(runtime: RuntimeId): Promise<void> {
+  private async drain(runtime: RuntimeId, job: Job): Promise<void> {
     const st = this.stateOf(runtime);
     const gate = this.gateOf(runtime);
     const adapter = this.adapterOf(runtime);
@@ -711,8 +830,39 @@ export class RuntimeMaintenance {
     gate.close();
     void this.publish(true);
     await gate.waitIdle(() => adapter.activeTurns(), this.opts.drainPollMs ?? DRAIN_POLL_MS);
-    if (this.stopped || st.state !== "draining" || !st.job) return;
+    if (this.stopped || st.state !== "draining" || st.job !== job) return;
     await this.runJob(runtime);
+  }
+
+  /**
+   * Ends a job that never ran (no `started` frame): `failed` with `error`, reported in one `finished` frame (with the
+   * "Update now" command id, so its request is closed), last run recorded, a held gate reopened.
+   */
+  private finishWithoutRun(runtime: RuntimeId, st: RuntimeState, job: Job, error: string): void {
+    const at = new Date(this.now()).toISOString();
+    const runId = randomUUID();
+    const wasHolding = st.state === "draining";
+    st.lastRun = { runId, outcome: "failed", at, fromVersion: st.installedVersion, toVersion: null };
+    if (job.trigger === "automatic") st.backoff.set(job.candidate, this.now() + FAILED_BACKOFF_MS);
+    this.dropJob(st);
+    if (wasHolding) this.releaseHeld(runtime, st, "failed");
+    const commandId = job.commandId && z.uuid().safeParse(job.commandId).success ? job.commandId : null;
+    this.sendRun({
+      type: "runtime.update.run",
+      runId,
+      runtime,
+      trigger: job.trigger,
+      ...(commandId ? { commandId } : {}),
+      phase: "finished",
+      outcome: "failed",
+      fromVersion: st.installedVersion,
+      toVersion: null,
+      candidate: job.candidate,
+      method: st.resolution?.method ?? "unknown",
+      output: runOutputForFrame(error),
+      at,
+    });
+    void this.publish(true);
   }
 
   private adapterOf(runtime: RuntimeId): MaintainedRuntime {
@@ -801,7 +951,8 @@ export class RuntimeMaintenance {
     const runId = randomUUID();
     let resolution: InstallResolution;
     try {
-      resolution = this.resolve(runtime);
+      // The install the lock was taken for; the runner re-reads it under that lock (changed → failed).
+      resolution = job.lock?.resolution ?? this.resolve(runtime);
     } catch (err) {
       resolution = st.resolution ?? this.notInstalled(runtime);
       this.log.warn("runtime update could not re-resolve the install", {
@@ -857,6 +1008,7 @@ export class RuntimeMaintenance {
           resolution,
           candidate: job.candidate,
           lockDir: this.lockDir,
+          ...(job.lock ? { lock: job.lock.held } : {}),
           home: this.opts.userHome,
           env: this.opts.env,
           onProgress: (p: RunProgress) => {
