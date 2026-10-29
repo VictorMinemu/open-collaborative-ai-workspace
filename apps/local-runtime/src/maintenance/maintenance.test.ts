@@ -21,6 +21,7 @@ import {
   ORG_LEVEL_GRACE_MS,
   PENDING_POLL_MS,
   REFUSED_OUTSIDE_SCRATCH_HOME,
+  RETIRE_TIMED_OUT,
   RuntimeMaintenance,
   type RuntimeMaintenanceOptions,
   STALE_AFTER_MS,
@@ -649,6 +650,37 @@ describe("RuntimeMaintenance: never cut a turn (D-03, D-03a, D-03b, PD-07)", () 
     await h.m.check();
     await flush();
     expect(h.runs).toHaveLength(1);
+  });
+
+  it("idle CLI processes that never stop fail the run and the gate reopens (07.11 review HI-03)", async () => {
+    const h = harness({ retireTimeoutMs: 20 });
+    h.adapter.retireIdle = () => new Promise<number>(() => undefined);
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    expect(h.gate.isOpen).toBe(false);
+    await realWait(60);
+    await flush();
+    expect(h.gate.isOpen).toBe(true);
+    expect(h.runs).toEqual([]);
+    const finished = h.runFrames.find((f) => f.phase === "finished");
+    expect(finished).toMatchObject({ outcome: "failed" });
+    expect(finished?.output).toContain(RETIRE_TIMED_OUT);
+    expect(h.notified).toEqual([["claude-code", "failed", "2.1.290"]]);
+    expect(claudeStatus(h)).toMatchObject({ state: "idle", lastRun: { outcome: "failed" } });
+  });
+
+  it("no path leaves the gate closed: a throw while running still ends the job and reopens it (07.11 review HI-03)", async () => {
+    const h = harness({
+      sendRun: () => {
+        throw new Error("link down");
+      },
+    });
+    h.m.setOrgPolicy("automatic", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    expect(h.gate.isOpen).toBe(true);
+    expect(h.m.statuses()[0]).toMatchObject({ state: "idle", pendingSince: null });
   });
 
   it("a lowered level drops a pending automatic update before it drains", async () => {

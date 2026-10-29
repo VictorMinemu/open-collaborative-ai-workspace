@@ -81,6 +81,9 @@ export const ORG_LEVEL_GRACE_MS = 30_000;
 export const MAX_RUN_OUTPUT_CHARS = 4096;
 
 export const REFUSED_OUTSIDE_SCRATCH_HOME = "refused outside a scratch home";
+/** How long the idle CLI processes of a runtime may take to stop before an update (07.11 review HI-03). */
+export const RETIRE_TIMEOUT_MS = 60_000;
+export const RETIRE_TIMED_OUT = "the idle sessions did not stop in time";
 /** A run that ended on a version the manifest marks broken (07.11 review HI-02): failed, never succeeded. */
 export const INSTALLED_BROKEN = "installed a version marked broken";
 
@@ -154,6 +157,8 @@ export interface RuntimeMaintenanceOptions {
   pollMs?: number;
   /** `gate.waitIdle` poll while draining (default `DRAIN_POLL_MS`). */
   drainPollMs?: number;
+  /** How long `retireIdle` may take before the run fails (default `RETIRE_TIMEOUT_MS`). */
+  retireTimeoutMs?: number;
   now?: () => number;
   random?: () => number;
   setTimer?: (fn: () => void, ms: number) => TimerHandle;
@@ -737,7 +742,10 @@ export class RuntimeMaintenance {
     return real !== null && root !== null && within(real, home) && within(realpathOr(root), home);
   }
 
-  /** The gate is closed and the runtime idle: retire, update, re-read, reopen, report. */
+  /**
+   * The gate is closed and the runtime idle: retire, update, re-read, reopen, report. Whatever happens on the way (a
+   * throw, a retire that never settles), the job ends and the gate opens (D-03, 07.11 review HI-03).
+   */
   private async runJob(runtime: RuntimeId): Promise<void> {
     const st = this.stateOf(runtime);
     const job = st.job;
@@ -746,10 +754,51 @@ export class RuntimeMaintenance {
       gate.open();
       return;
     }
-    const adapter = this.adapterOf(runtime);
-    const runId = randomUUID();
     // Running from here on: nothing else drops this job or reopens the gate behind its back while it awaits.
     st.state = "running";
+    let report: (() => Promise<void>) | null = null;
+    try {
+      report = await this.executeJob(runtime, st, job);
+    } catch (err) {
+      this.log.warn("runtime update failed unexpectedly", {
+        runtime,
+        error: scrubHostPaths(errorMessage(err)),
+      });
+    } finally {
+      if (st.job === job) this.dropJob(st);
+      gate.open();
+    }
+    try {
+      await report?.();
+    } catch (err) {
+      this.log.warn("runtime update report failed", { runtime, error: scrubHostPaths(errorMessage(err)) });
+    }
+  }
+
+  /** `retireIdle`, bounded: a CLI process that never stops fails the run instead of holding the gate (HI-03). */
+  private async retireBounded(adapter: MaintainedRuntime): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const limit = this.opts.retireTimeoutMs ?? RETIRE_TIMEOUT_MS;
+    try {
+      await Promise.race([
+        adapter.retireIdle(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(RETIRE_TIMED_OUT)), limit);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Runs the job (state `running`, gate closed) and records its result; returns what to report once the gate is open
+   * again (the held sessions, the `finished` frame, the snapshot, the daemon's refresh).
+   */
+  private async executeJob(runtime: RuntimeId, st: RuntimeState, job: Job): Promise<() => Promise<void>> {
+    const adapter = this.adapterOf(runtime);
+    const runId = randomUUID();
     let resolution: InstallResolution;
     try {
       resolution = this.resolve(runtime);
@@ -765,11 +814,11 @@ export class RuntimeMaintenance {
     // and marked broken, since the check.
     const broken = await this.brokenBeforeRun(runtime, job, resolution);
     if (broken !== null) {
-      this.dropJob(st);
-      this.releaseHeld(runtime, st);
-      this.skipBroken(runtime, st, broken, job);
-      await this.publish(true);
-      return;
+      return async () => {
+        this.releaseHeld(runtime, st);
+        this.skipBroken(runtime, st, broken, job);
+        await this.publish(true);
+      };
     }
     const fromVersion = st.installedVersion;
     const base = {
@@ -803,7 +852,7 @@ export class RuntimeMaintenance {
           error: REFUSED_OUTSIDE_SCRATCH_HOME,
         };
       } else {
-        await adapter.retireIdle();
+        await this.retireBounded(adapter);
         result = await (this.opts.run ?? runUpdate)({
           resolution,
           candidate: job.candidate,
@@ -857,37 +906,38 @@ export class RuntimeMaintenance {
     } catch {
       // keep the last resolution
     }
-    this.dropJob(st);
-    gate.open();
-    try {
-      this.opts.notifySession?.(
-        runtime,
-        outcome === "failed" ? "failed" : "done",
-        st.installedVersion ?? undefined,
-      );
-    } catch (err) {
-      this.log.warn("could not tell the held sessions", {
-        runtime,
-        error: scrubHostPaths(errorMessage(err)),
+    const final = result;
+    return async () => {
+      try {
+        this.opts.notifySession?.(
+          runtime,
+          outcome === "failed" ? "failed" : "done",
+          st.installedVersion ?? undefined,
+        );
+      } catch (err) {
+        this.log.warn("could not tell the held sessions", {
+          runtime,
+          error: scrubHostPaths(errorMessage(err)),
+        });
+      }
+      const text = [final.error, final.output].filter((s): s is string => !!s).join("\n");
+      const output = text ? runOutputForFrame(text) : "";
+      this.sendRun({
+        ...base,
+        phase: "finished",
+        outcome,
+        fromVersion: from,
+        toVersion: final.toVersion,
+        ...(output ? { output } : {}),
+        at,
       });
-    }
-    const text = [result.error, result.output].filter((s): s is string => !!s).join("\n");
-    const output = text ? runOutputForFrame(text) : "";
-    this.sendRun({
-      ...base,
-      phase: "finished",
-      outcome,
-      fromVersion: from,
-      toVersion: result.toVersion,
-      ...(output ? { output } : {}),
-      at,
-    });
-    await this.publish(true, true);
-    try {
-      await this.opts.afterRun?.(runtime);
-    } catch (err) {
-      this.log.warn("after-update refresh failed", { runtime, error: scrubHostPaths(errorMessage(err)) });
-    }
+      await this.publish(true, true);
+      try {
+        await this.opts.afterRun?.(runtime);
+      } catch (err) {
+        this.log.warn("after-update refresh failed", { runtime, error: scrubHostPaths(errorMessage(err)) });
+      }
+    };
   }
 
   /** The broken version a run would install now, or null (the latest is asked again only for self-choosing installers). */

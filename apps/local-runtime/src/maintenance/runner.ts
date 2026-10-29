@@ -20,6 +20,10 @@ import { type InstallResolution, resolveInstall, updateCommandFor } from "./inst
 
 export const UPDATE_TIMEOUT_MS = 5 * 60 * 1000;
 export const KILL_GRACE_MS = 5_000;
+/** After the installer exits, its output gets this long to drain; then its pipes are closed (07.11 review HI-03). */
+export const STDIO_GRACE_MS = 2_000;
+/** Past timeout + kill grace + output grace, a run settles as timed out whatever the process does. */
+const HARD_DEADLINE_SLACK_MS = 1_000;
 export const LOCK_RETRY_MS = 5_000;
 export const LOCK_GIVE_UP_MS = 10 * 60 * 1000;
 export const MAX_KEPT_OUTPUT_BYTES = 10 * 1024;
@@ -176,6 +180,8 @@ export interface RunUpdateOptions {
   /** 5 min: then the process group gets SIGTERM, and SIGKILL `killGraceMs` later. */
   timeoutMs?: number;
   killGraceMs?: number;
+  /** After the installer exits, how long its output may drain before the run settles (default 2 s). */
+  stdioGraceMs?: number;
   /** Retry interval while another updater holds the install's lock (5 s), and when to give up (10 min). */
   lockRetryMs?: number;
   lockGiveUpMs?: number;
@@ -217,20 +223,33 @@ function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
   }
 }
 
+interface ChildLimits {
+  timeoutMs: number;
+  killGraceMs: number;
+  /** After the installer exits, how long its output may take to drain before the pipes are closed. */
+  stdioGraceMs: number;
+}
+
+/**
+ * Runs the installer and settles on its exit plus a short grace for the output to drain (a helper it left behind may
+ * hold the pipes open for ever), on a spawn error, or at a hard deadline whatever the process and its pipes do
+ * (07.11 review HI-03): the caller always gets an answer, so the gate is always reopened.
+ */
 function runChild(
   spawnFn: typeof spawn,
   file: string,
   args: string[],
   env: NodeJS.ProcessEnv,
   cwd: string,
-  timeoutMs: number,
-  killGraceMs: number,
+  limits: ChildLimits,
   onChunk: (text: string) => void,
 ): Promise<ChildOutcome> {
+  const { timeoutMs, killGraceMs, stdioGraceMs } = limits;
   return new Promise((resolve) => {
     let raw = "";
     let rawBytes = 0;
     let timedOut = false;
+    let settled = false;
     let child: ChildProcess;
     try {
       child = spawnFn(file, args, {
@@ -255,20 +274,35 @@ function runChild(
     child.stdout?.on("data", collect);
     child.stderr?.on("data", collect);
     let killTimer: NodeJS.Timeout | undefined;
+    let drainTimer: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
       timedOut = true;
       killGroup(child, "SIGTERM");
       killTimer = setTimeout(() => killGroup(child, "SIGKILL"), killGraceMs);
     }, timeoutMs);
+    const deadline = setTimeout(
+      () => {
+        timedOut = true;
+        done({ code: null, timedOut: true, spawnError: false, raw });
+      },
+      timeoutMs + killGraceMs + stdioGraceMs + HARD_DEADLINE_SLACK_MS,
+    );
     const done = (outcome: ChildOutcome) => {
-      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      for (const t of [timer, killTimer, drainTimer, deadline]) if (t) clearTimeout(t);
       // The leader is gone; make sure nothing it started outlives it.
       if (outcome.timedOut) killGroup(child, "SIGKILL");
-      if (killTimer) clearTimeout(killTimer);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       resolve(outcome);
     };
     child.once("error", () => done({ code: null, timedOut, spawnError: true, raw }));
-    child.once("close", (code) => done({ code, timedOut, spawnError: false, raw }));
+    child.once("close", (code: number | null) => done({ code, timedOut, spawnError: false, raw }));
+    // `close` waits for every pipe; a helper the installer left behind may hold them open for ever.
+    child.once("exit", (code: number | null) => {
+      drainTimer = setTimeout(() => done({ code, timedOut, spawnError: false, raw }), stdioGraceMs);
+    });
   });
 }
 
@@ -352,8 +386,11 @@ export async function runUpdate(opts: RunUpdateOptions): Promise<RunResult> {
       command.args,
       updateChildEnv(env, command.env),
       home,
-      opts.timeoutMs ?? UPDATE_TIMEOUT_MS,
-      opts.killGraceMs ?? KILL_GRACE_MS,
+      {
+        timeoutMs: opts.timeoutMs ?? UPDATE_TIMEOUT_MS,
+        killGraceMs: opts.killGraceMs ?? KILL_GRACE_MS,
+        stdioGraceMs: opts.stdioGraceMs ?? STDIO_GRACE_MS,
+      },
       (text) => {
         const lines = text.split(/\r?\n|\r/).filter((l) => l.trim() !== "");
         const last = lines[lines.length - 1];

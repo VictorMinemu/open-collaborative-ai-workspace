@@ -4,6 +4,7 @@
 
 import { execFileSync, type SpawnOptions, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
   accessSync,
   constants,
@@ -20,6 +21,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type InstallResolution, resolveInstall } from "./install-method.js";
@@ -206,6 +208,79 @@ describe("runUpdate (Phase 07.11, PD-11)", () => {
     expect(() => process.kill(pids[0] ?? 0, 0)).toThrow();
     expect(readdirSync(lockDir())).toEqual([]);
     expect(claudeVersion()).toBe("2.1.290 (Claude Code)");
+  });
+
+  it("settles when the installer exits even if a process it left behind keeps its output open (07.11 review HI-03)", async () => {
+    installFake("claude-native", home, "2.1.290");
+    const pidFile = join(tmp, "escaped.pid");
+    // The installer starts a helper in its own session (out of the installer's process group) that inherits stdout
+    // and stderr and outlives it, then exits 0: `close` never fires while the helper lives.
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      "const fs = require('node:fs');",
+      "const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] });",
+      `fs.writeFileSync(${JSON.stringify(pidFile)}, String(c.pid));`,
+      "c.unref();",
+      "process.stdout.write('done\\n');",
+    ].join("\n");
+    const spawnFn = ((_file: string, _args: readonly string[], options: SpawnOptions) =>
+      spawn(process.execPath, ["-e", script], options)) as typeof spawn;
+    const started = Date.now();
+    try {
+      const result = await runUpdate({
+        resolution: resolveClaude(),
+        candidate: "2.1.300",
+        lockDir: lockDir(),
+        home,
+        env,
+        spawnFn,
+        stdioGraceMs: 200,
+      });
+      expect(Date.now() - started).toBeLessThan(5000);
+      expect(result).toMatchObject({ outcome: "unchanged", fromVersion: "2.1.290", toVersion: "2.1.290" });
+      expect(result.output).toContain("done");
+      expect(readdirSync(lockDir())).toEqual([]);
+    } finally {
+      const pid = Number(readFileSync(pidFile, "utf8"));
+      if (pid > 0) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+      }
+    }
+  });
+
+  it("settles at a hard deadline even when the installer never reports an exit (07.11 review HI-03)", async () => {
+    installFake("claude-native", home, "2.1.290");
+    const spawnFn = (() => {
+      const child = new EventEmitter() as EventEmitter & {
+        stdout: PassThrough;
+        stderr: PassThrough;
+        pid: undefined;
+      };
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.pid = undefined;
+      return child;
+    }) as unknown as typeof spawn;
+    const started = Date.now();
+    const result = await runUpdate({
+      resolution: resolveClaude(),
+      candidate: "2.1.300",
+      lockDir: lockDir(),
+      home,
+      env,
+      spawnFn,
+      timeoutMs: 50,
+      killGraceMs: 50,
+      stdioGraceMs: 50,
+    });
+    expect(Date.now() - started).toBeLessThan(4000);
+    expect(result.outcome).toBe("failed");
+    expect(result.error).toMatch(/timed out/);
+    expect(readdirSync(lockDir())).toEqual([]);
   });
 
   it("queues behind a second updater of the same install and then finds nothing left to do", async () => {
