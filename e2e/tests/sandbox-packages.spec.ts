@@ -257,11 +257,15 @@ test("a release that changed upstream between review and approval refreshes the 
 }, info) => {
   test.skip(info.project.name !== "desktop", "the review flows run at 1440");
   const fake = fakeSandboxd();
+  const moving = { source: "npm", name: "ocw-moving", version: "3.1.0" } as const;
+  const deps = { source: "pypi", name: "ocw-deps", version: "0.9.0" } as const;
+  // A retry of the serial group runs this again against the same fake registries: start from the unchanged releases.
+  await fake.setPackage(moving, { topChanged: false });
+  await fake.setPackage(deps, { depChanged: false });
   const page = await signIn(browser, info.project.name);
   await openPackages(page);
 
   // The artifact was republished after the review: the toast, and the sheet shows the new digest.
-  const moving = { source: "npm", name: "ocw-moving", version: "3.1.0" } as const;
   let sheet = await reviewInSheet(page, moving);
   const before = await sheet.getByTestId("package-digest-value").textContent();
   await fake.setPackage(moving, { topChanged: true });
@@ -280,7 +284,6 @@ test("a release that changed upstream between review and approval refreshes the 
   // Sonner pauses a toast while the pointer rests on it (the sheet closed under the cursor): move it away first.
   await page.mouse.move(0, 0);
   await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 15_000 });
-  const deps = { source: "pypi", name: "ocw-deps", version: "0.9.0" } as const;
   sheet = await reviewInSheet(page, deps);
   const top = await sheet.getByTestId("package-digest-value").textContent();
   await fake.setPackage(deps, { depChanged: true });
