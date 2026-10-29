@@ -110,7 +110,10 @@ test.beforeAll(async () => {
   test.setTimeout(180_000);
   // The API serves apps/local-runtime/dist (PD-05) and caches a verified load until it restarts: build it before
   // anything asks for it, as an owner's workspace image does.
-  execFileSync(process.execPath, ["apps/local-runtime/scripts/build-bundle.mjs"], { cwd: REPO_ROOT, stdio: "pipe" });
+  execFileSync(process.execPath, ["apps/local-runtime/scripts/build-bundle.mjs"], {
+    cwd: REPO_ROOT,
+    stdio: "pipe",
+  });
   adminApi = await apiAs(ADMIN);
   samId = await ensureMember(adminApi, SAM, "developer");
 });
@@ -135,7 +138,9 @@ test("install.sh from the workspace, setup --yes --service none, approval in the
   const versionRes = await adminApi.get("/api/v1/runtime/version");
   expect(versionRes.ok(), "GET /api/v1/runtime/version").toBe(true);
   const version = (await versionRes.json()) as { version: string; sha256: string };
-  expect(server.installOutput).toContain(`Installed ocw-runtime ${version.version} (${version.sha256.slice(0, 12)}).`);
+  expect(server.installOutput).toContain(
+    `Installed ocw-runtime ${version.version} (${version.sha256.slice(0, 12)}).`,
+  );
   expect(existsSync(server.shim), "~/.local/bin/ocw-runtime").toBe(true);
   const installed = readFileSync(join(server.ocwHome, "runtime", "current", "ocw-runtime.mjs"));
   expect(sha256(installed)).toBe(version.sha256);
@@ -148,12 +153,21 @@ test("install.sh from the workspace, setup --yes --service none, approval in the
   const npmCalls = server.npmCalls();
   expect(npmCalls).toHaveLength(1);
   expect(npmCalls[0]).toEqual(
-    expect.arrayContaining(["install", "--prefix", "--ignore-scripts", expect.stringMatching(/^@anthropic-ai\/claude-agent-sdk@\d+\.\d+\.\d+$/)]),
+    expect.arrayContaining([
+      "install",
+      "--prefix",
+      "--ignore-scripts",
+      expect.stringMatching(/^@anthropic-ai\/claude-agent-sdk@\d+\.\d+\.\d+$/),
+    ]),
   );
 
   // ---- setup prints the link; the owner approves it in Settings › Devices
   const pairingUrl = await server.pairingUrl;
-  expect(pairingUrl).toMatch(new RegExp(`^${BASE_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/settings/devices\\?pair=[0-9A-Z]{4}-[0-9A-Z]{4}$`));
+  expect(pairingUrl).toMatch(
+    new RegExp(
+      `^${BASE_URL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/settings/devices\\?pair=[0-9A-Z]{4}-[0-9A-Z]{4}$`,
+    ),
+  );
   await signIn(page);
   await approvePairingInUi(page, pairingUrl);
   expect(await server.setupDone, `setup's output:\n${server.setupOutput()}`).toBe(0);
@@ -166,7 +180,10 @@ test("install.sh from the workspace, setup --yes --service none, approval in the
     "Share it with members and teams there.",
   ];
   const at = steps.map((s) => out.indexOf(s));
-  expect(at.every((i) => i >= 0), `setup's output:\n${out}`).toBe(true);
+  expect(
+    at.every((i) => i >= 0),
+    `setup's output:\n${out}`,
+  ).toBe(true);
   expect([...at].sort((a, b) => a - b)).toEqual(at);
 
   // ---- the installed daemon comes online with its repository
@@ -176,7 +193,9 @@ test("install.sh from the workspace, setup --yes --service none, approval in the
   await expect(card).toHaveAttribute("data-status", "online", { timeout: 15_000 });
 });
 
-test("the owner shares the device with Sam; Sam runs a session on it from the Work Zone", async ({ browser }) => {
+test("the owner shares the device with Sam; Sam runs a session on it from the Work Zone", async ({
+  browser,
+}) => {
   test.setTimeout(120_000);
   expect(device, "the headless device is online").not.toBeNull();
   if (!device) return;
@@ -194,7 +213,9 @@ test("the owner shares the device with Sam; Sam runs a session on it from the Wo
   }
 });
 
-test("a team project with the device's repository: Sam starts a session from the project", async ({ browser }) => {
+test("a team project with the device's repository: Sam starts a session from the project", async ({
+  browser,
+}) => {
   test.setTimeout(120_000);
   expect(device, "the headless device is online").not.toBeNull();
   if (!device) return;
@@ -209,7 +230,9 @@ test("a team project with the device's repository: Sam starts a session from the
     await project.getByTestId("project-new-session").click();
     const dialog = sam.page.getByTestId("new-session-dialog");
     await expect(dialog).toBeVisible();
-    await expect(dialog.locator('[data-testid="project-option"][aria-checked="true"]')).toContainText(PROJECT);
+    await expect(dialog.locator('[data-testid="project-option"][aria-checked="true"]')).toContainText(
+      PROJECT,
+    );
     const sessionId = await runSamsSession(sam.page, "Write release notes for the team");
     const res = await samApi.get(`/api/v1/work-sessions/${sessionId}`);
     expect(res.ok(), "Sam reads the session").toBe(true);

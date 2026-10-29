@@ -83,12 +83,19 @@ describe("fake-npm.mjs (07.12-09, PD-19)", () => {
     const link = join(prefix, "node_modules", SDK);
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(readlinkSync(link)).toBe(realpathSync(WORKSPACE_SDK));
-    const log = readFileSync(join(prefix, "..", "fake-npm.log"), "utf8").trimEnd().split("\n");
+    const log = readFileSync(join(prefix, "..", "fake-npm.log"), "utf8")
+      .trimEnd()
+      .split("\n");
     expect(log.map((l) => JSON.parse(l))).toEqual([args]);
   });
 
   it("refuses anything else, so a real npm call is never silently faked", async () => {
-    for (const args of [["view", SDK], ["install", `${SDK}@1.0.0`], ["install", "--prefix", "/x", "zod@4"], []]) {
+    for (const args of [
+      ["view", SDK],
+      ["install", `${SDK}@1.0.0`],
+      ["install", "--prefix", "/x", "zod@4"],
+      [],
+    ]) {
       const r = await run(args);
       expect(r.code, args.join(" ")).toBe(1);
       expect(r.stderr).toContain("fake npm: unsupported");
