@@ -23,7 +23,8 @@ export default function AppLayout({ children }: { children: ReactNode }) {
     if (!unauthenticated || !setup.data) return;
     if (!setup.data.setupComplete) router.replace("/setup");
     // The query travels too (07.12, D-13): a signed-out owner opening a server's `?pair=` link gets it back after
-    // sign-in. The effect runs only in the browser; `safeNext` on the login page keeps it a same-app path.
+    // sign-in. The effect runs only in the browser. The login page passes `next` through `safeNext`
+    // (lib/safe-next.ts), which keeps only a same-origin path: no `//`, backslash, control character or scheme.
     else router.replace(`/login?next=${encodeURIComponent(`${pathname}${window.location.search}`)}`);
   }, [unauthenticated, setup.data, pathname, router]);
 

@@ -17,13 +17,9 @@ import { useAuthCapabilities } from "@/lib/account-queries";
 import { errorMessage, isApiError } from "@/lib/api";
 import { type FieldErrors, validate } from "@/lib/form";
 import { signedInMe, useMe, useSetupStatus, useSignIn } from "@/lib/queries";
+import { safeNext } from "@/lib/safe-next";
 
 type Field = "email" | "password";
-
-/** Only allow same-app relative redirects. */
-function safeNext(next: string | null): string {
-  return next?.startsWith("/") && !next.startsWith("//") ? next : "/chat";
-}
 
 export default function LoginPage() {
   return (
