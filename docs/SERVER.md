@@ -118,8 +118,8 @@ organization, within a few seconds.
 
 Sharing stays in the web, never in the CLI. In **Settings › Devices**, on the server's card:
 
-- **Share** it with members or teams. They start as Supervised; raise the highest mode each may use from the list.
-  The server then appears in their New session.
+- **Add people or teams** on the server's card. They start as Supervised; raise the highest mode each may use from
+  the list. The server then appears in their New session.
 - **Team projects:** link the server's repositories to a team project (Work Zone › the project). Members of the
   project's teams start sessions there.
 
