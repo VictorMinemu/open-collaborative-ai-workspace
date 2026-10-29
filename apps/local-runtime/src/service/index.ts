@@ -1,6 +1,8 @@
 // `ocw-runtime service …` (07.12-04, HSR-04, D-04, D-14, PD-11, PD-19): keep the runtime running across logouts,
 // crashes and reboots on a server, through a systemd user unit, a systemd system unit for a named non-root account, or
-// a macOS LaunchAgent. Every command goes through the injected exec and every file through the injected root, so tests
+// a macOS LaunchAgent. Root never runs this code (07.12 review HI-01): every file of the runtime belongs to its account,
+// which its sessions can change, so a system unit is printed here, as that account, with the only commands root runs
+// (`install` and `systemctl`). Every command goes through the injected exec and every file through the injected root, so tests
 // never touch a real service manager or the developer's home. `setup` (08) installs through `createServiceManager`;
 // `doctor` (05) reads its `ServiceStatus`; 08 wires `serviceCommand` into the CLI.
 
@@ -88,7 +90,8 @@ export function defaultServiceDeps(home: string = defaultOcwHome()): ServiceDeps
 
 export const NOT_INSTALLED_BUNDLE = "install the runtime with the command from Settings › Devices first";
 
-export type InstallOutcome = "installed" | "unchanged" | "updated" | "updated-restart-pending";
+/** `root-step`: a system unit, printed with the commands root runs; nothing was written or started. */
+export type InstallOutcome = "installed" | "unchanged" | "updated" | "updated-restart-pending" | "root-step";
 
 export type InstallResult =
   | {
@@ -133,6 +136,35 @@ interface Target {
 }
 
 const SYSTEM_UNIT_PATH = join(SYSTEMD_SYSTEM_UNIT_DIR, SYSTEMD_UNIT_NAME);
+
+/** The heredoc delimiter of the printed root block; no unit line can equal it (each is a directive or a header). */
+export const ROOT_BLOCK_MARKER = "OCW_UNIT";
+
+/**
+ * Root never runs `ocw-runtime` (HI-01): the launcher, the bundle and install.json belong to the runtime's account, so
+ * anything that account (or a session running as it) writes would run as root. Every `service` command run as uid 0
+ * stops with this line, which names the system binaries root uses instead.
+ */
+export const ROOT_REFUSAL =
+  "ocw-runtime does not run as root: its files belong to the account that runs it, and that account's sessions can " +
+  "change them. Run it as that account (`sudo -u <account> -i ocw-runtime service …`); for a system unit it prints " +
+  `the only commands root runs. Root itself uses \`systemctl restart|status ${SYSTEMD_UNIT_NAME}\` and ` +
+  `\`journalctl -u ${SYSTEMD_UNIT_NAME}\`.`;
+
+/** The lines an admin runs as root to write a system unit: only `install` and `systemctl`, never a file of the account. */
+export function systemUnitRootBlock(unitText: string, opts: { update: boolean }): string[] {
+  const body = unitText.replace(/\n$/, "").split("\n");
+  if (body.includes(ROOT_BLOCK_MARKER)) throw new Error("the unit cannot be printed as a root block");
+  return [
+    `sudo install -m 0644 /dev/stdin ${SYSTEM_UNIT_PATH} <<'${ROOT_BLOCK_MARKER}'`,
+    ...body,
+    ROOT_BLOCK_MARKER,
+    "sudo systemctl daemon-reload",
+    opts.update
+      ? `sudo systemctl restart ${SYSTEMD_UNIT_NAME}`
+      : `sudo systemctl enable --now ${SYSTEMD_UNIT_NAME}`,
+  ];
+}
 
 export function createServiceManager(deps: ServiceDeps): ServiceManager {
   const at = (p: string) => (deps.root === "/" ? p : join(deps.root, p));
@@ -200,8 +232,8 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
     };
   }
 
-  function systemTarget(account: string, home: string): Target {
-    return { kind: "systemd-system", account, home, ocwHome: join(home, ".ocw"), unitPath: SYSTEM_UNIT_PATH };
+  function systemTarget(account: string, home: string, ocwHome = join(home, ".ocw")): Target {
+    return { kind: "systemd-system", account, home, ocwHome, unitPath: SYSTEM_UNIT_PATH };
   }
 
   function launchdTarget(): Target {
@@ -221,47 +253,28 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
   const launchdService = () => `${launchdDomain()}/${LAUNCHD_LABEL}`;
   const logFile = (t: Target) => join(t.ocwHome, "logs", "runtime.log");
 
-  /** `getent passwd <name>` → the account's uid and home; refuses unknown accounts and uid 0. */
-  async function lookupAccount(name: string): Promise<{ home: string }> {
-    const r = await run(["getent", "passwd", name]);
-    const line = r.code === 0 ? r.stdout.split("\n").find((l) => l.startsWith(`${name}:`)) : undefined;
-    if (!line) throw new ServiceError(`no such account: ${name}`);
-    const fields = line.split(":");
-    if (fields[2] === "0") throw new ServiceError("the runtime never runs as root: name a non-root account");
-    const home = fields[5] ?? "";
-    if (!isAbsolute(home)) throw new ServiceError(`the account ${name} has no absolute home directory`);
-    return { home };
-  }
-
   async function resolveInstallTarget(opts: {
     manager?: ServiceManagerKind;
     account?: string;
   }): Promise<Target> {
     const manager = opts.manager ?? (deps.platform === "darwin" ? "launchd" : "systemd-user");
     if (manager === "none") throw new ServiceError("no service manager was chosen");
+    if (deps.uid === 0) throw new ServiceError(ROOT_REFUSAL);
     if (manager === "systemd-system") {
       const detected = await detect({ system: true });
       if (!detected.available) throw new ServiceError(detected.reason ?? "no service manager here");
-      if (deps.uid !== 0) {
-        throw new ServiceError("a system unit is installed by root: run it as root (for example with sudo)");
-      }
-      const account = opts.account;
-      if (!account)
-        throw new ServiceError("--system needs --user-name <account>, the non-root account it runs as");
+      // Printed by the account it runs as, from that account's own install: root only writes the printed text.
+      const account = opts.account ?? deps.account;
       if (!isValidAccountName(account))
         throw new ServiceError(`invalid account name: ${JSON.stringify(account)}`);
       if (account === "root")
         throw new ServiceError("the runtime never runs as root: name a non-root account");
-      const { home } = await lookupAccount(account);
-      return systemTarget(account, home);
-    }
-    if (deps.uid === 0) {
-      throw new ServiceError(
-        deps.platform === "darwin"
-          ? "the runtime never runs as root: run `ocw-runtime service install` as the account that should run it"
-          : "the runtime never runs as root: install a system unit for a non-root account with " +
-              "`ocw-runtime service install --system --user-name <account>`",
-      );
+      if (account !== deps.account) {
+        throw new ServiceError(
+          `a system unit is printed by the account it runs as: run \`sudo -u ${account} -i ocw-runtime service install --system\``,
+        );
+      }
+      return systemTarget(deps.account, deps.home, deps.ocwHome);
     }
     const detected = await detect();
     if (!detected.available) throw new ServiceError(detected.reason ?? "no service manager here");
@@ -278,7 +291,10 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
     if (text !== null) {
       const account = /^User=(.+)$/m.exec(text)?.[1] ?? deps.account;
       const home = /^WorkingDirectory=(.+)$/m.exec(text)?.[1]?.replaceAll("%%", "%") ?? deps.home;
-      return systemTarget(account, home);
+      // The account itself knows its OCW_HOME (the unit names it only when it is not the default).
+      return account === deps.account && home === deps.home
+        ? systemTarget(account, home, deps.ocwHome)
+        : systemTarget(account, home);
     }
     if (opts.system || deps.uid === 0) return systemTarget(deps.account, deps.home);
     return user;
@@ -293,12 +309,7 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
     const info = await readInstallInfo(at(t.ocwHome));
     const bundlePath = installedBundlePath(t.ocwHome);
     if (!info || !(await exists(bundlePath))) {
-      throw new ServiceError(
-        t.kind === "systemd-system"
-          ? `install the runtime as ${t.account} first: run the command from Settings › Devices as ${t.account} ` +
-              `(sudo -u ${t.account} -i)`
-          : NOT_INSTALLED_BUNDLE,
-      );
+      throw new ServiceError(NOT_INSTALLED_BUNDLE);
     }
     const notes: string[] = [];
     let nodePath = info.nodePath;
@@ -433,6 +444,7 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
    * is printed. Refuses before writing anything while another runtime owns this `~/.ocw`.
    */
   async function installTarget(t: Target): Promise<InstallResult> {
+    if (t.kind === "systemd-system") return printSystemUnit(t);
     const { text, notes } = await render(t);
     const lines = [...notes];
     const existing = await readText(t.unitPath);
@@ -478,6 +490,36 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
     return finishInstall(t, outcome, active, lines);
   }
 
+  /**
+   * A system unit (HI-01): rendered from this account's install and printed with the root block (`install` from stdin,
+   * then `systemctl`), so root never runs a file the account can change. The unit's `User=` keeps the runtime itself on
+   * the account. Nothing is written or started here; the same unit, already running, prints only its state.
+   */
+  async function printSystemUnit(t: Target): Promise<InstallResult> {
+    const { text, notes } = await render(t);
+    const lines = [...notes];
+    const existing = await readText(t.unitPath);
+    const running = existing !== null && (await isRunning(t));
+    const conflict = await runtimeOwnerConflict(t.ocwHome, {
+      controlRequest: deps.controlRequest,
+      readText,
+      kill: deps.kill,
+      serviceActive: running,
+    });
+    if (conflict.kind !== "none") throw new ServiceError(conflict.message);
+    if (running && existing === text) return finishInstall(t, "unchanged", true, lines);
+    const update = existing !== null;
+    lines.push(
+      `A system unit is written by root, and root runs nothing ${t.account} can change: only install and systemctl.`,
+      `Check that the unit below runs as ${t.account} (User=${t.account}), then run these lines as root` +
+        (update ? ", when no session runs:" : ":"),
+      "",
+      ...systemUnitRootBlock(text, { update }),
+      "",
+    );
+    return finishInstall(t, "root-step", running ? true : null, lines);
+  }
+
   async function ensureLogDir(t: Target): Promise<void> {
     const dir = at(join(t.ocwHome, "logs"));
     await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -500,8 +542,8 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
     }
     lines.push(
       t.kind === "systemd-system"
-        ? `The service runs as ${t.account}: sign Claude Code and Codex in as ${t.account} ` +
-            `(sudo -u ${t.account} -i), then check with \`ocw-runtime doctor\`.`
+        ? `The service runs as ${t.account}: sign Claude Code and Codex in as ${t.account}, then check with ` +
+            "`ocw-runtime doctor`."
         : `The service runs as ${t.account}: sign Claude Code and Codex in as ${t.account}.`,
     );
     return { ok: true, manager: t.kind, unitPath, outcome, active, lines };
@@ -603,6 +645,17 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
     async uninstall(opts = {}) {
       const t = await resolveExistingTarget(opts);
       if (!(await exists(t.unitPath))) return { ok: true, lines: [`${unitName(t)} is not installed`] };
+      if (t.kind === "systemd-system") {
+        return {
+          ok: false,
+          error: "a system unit is removed by root: run the lines above as root",
+          lines: [
+            `sudo systemctl disable --now ${SYSTEMD_UNIT_NAME}`,
+            `sudo rm ${SYSTEM_UNIT_PATH}`,
+            "sudo systemctl daemon-reload",
+          ],
+        };
+      }
       const lines = [`Removed ${display(t.unitPath)}`];
       if (t.kind === "launchd") {
         await run(["launchctl", "bootout", launchdService()]);
@@ -680,6 +733,13 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
           lines: [],
         };
       }
+      if (t.kind === "systemd-system") {
+        return {
+          ok: false,
+          error: `a system unit is restarted by root: \`sudo systemctl restart ${SYSTEMD_UNIT_NAME}\``,
+          lines: [],
+        };
+      }
       try {
         if (t.kind === "launchd") {
           await run(["launchctl", "bootout", launchdService()]);
@@ -700,7 +760,8 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
 
 const USAGE = [
   "usage: ocw-runtime service <command>",
-  "  install [--system --user-name <account>]   install and start the runtime service",
+  "  install [--system [--user-name <account>]] install and start the runtime service; --system prints the",
+  "                                             system unit and the commands root runs (run it as the account)",
   "  uninstall [--system]                       stop and remove it",
   "  status [--json] [--system]                 show its state",
   "  logs [-n <lines>] [--follow] [--system]    show its log",
@@ -795,6 +856,7 @@ export async function serviceCommand(
     for (const line of USAGE) deps.out(line);
     return 1;
   }
+  if (deps.uid === 0) return fail(ROOT_REFUSAL);
   let args: ParsedArgs;
   try {
     args = parseArgs(sub, rest);
@@ -812,7 +874,13 @@ export async function serviceCommand(
       for (const line of r.lines) deps.out(line);
       if (!r.ok) return fail(r.error);
       const state =
-        r.outcome === "unchanged" ? "already installed and running" : r.active ? "running" : "installed";
+        r.outcome === "root-step"
+          ? "run the lines above as root"
+          : r.outcome === "unchanged"
+            ? "already installed and running"
+            : r.active
+              ? "running"
+              : "installed";
       deps.out(`ocw-runtime service: ${r.manager} ${r.unitPath}: ${state}`);
       return 0;
     }

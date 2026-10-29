@@ -250,7 +250,7 @@ async function setupSteps(args: SetupArgs, deps: SetupDeps): Promise<number> {
       stop(
         2,
         `ocw-runtime setup: a system unit runs as ${account}, and setup pairs the account that runs it: run ` +
-          `\`sudo -u ${account} -i ocw-runtime setup --service system --user-name ${account}\`, then the root command it prints.`,
+          `\`sudo -u ${account} -i ocw-runtime setup --service system --user-name ${account}\`, then the root lines it prints.`,
       );
     }
     if (account !== deps.account) {
@@ -422,10 +422,15 @@ async function serviceStep(
     return;
   }
   if (choice === "system") {
-    const d = await deps.service.detect({ system: true });
-    if (!d.available) stop(1, d.reason ?? "no service manager here");
-    deps.out("A system unit is installed by root. As root, run:");
-    deps.out(`  sudo "$(command -v ocw-runtime)" service install --system --user-name ${args.userName}`);
+    // Printed here, as the account; root only writes the printed unit and runs systemctl (HI-01).
+    const r = await deps.service.install({
+      manager: "systemd-system",
+      ...(args.userName ? { account: args.userName } : {}),
+    });
+    for (const line of r.lines) deps.out(line);
+    if (!r.ok) return stop(1, r.error);
+    if (r.outcome === "unchanged")
+      deps.out(`Service: ${r.manager} ${r.unitPath}: already installed and running`);
     deps.out(NEXT_STEPS);
     if (ranUnpaired) deps.out(RESTART_NOTE);
     return;

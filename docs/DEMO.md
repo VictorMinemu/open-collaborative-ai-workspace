@@ -807,8 +807,8 @@ Phase 07.12 (ADR-0033). A Linux or macOS machine runs Work Zone sessions without
   `~/.ocw` and `~/.local/bin`.
 - **Pair from the terminal.** `ocw-runtime setup` prints a link and a code. You open it signed in (a phone works), check
   the code, name the device and press Approve. The server becomes one of your devices.
-- **Run it as a service.** `setup` installs a systemd user unit (with the `loginctl enable-linger` line), a system unit
-  for a named account, or a macOS LaunchAgent. `ocw-runtime doctor` checks 13 things with one fix line each.
+- **Run it as a service.** `setup` installs a systemd user unit (with the `loginctl enable-linger` line) or a macOS
+  LaunchAgent, or prints a system unit for a named account with the only lines root runs (`install`, `systemctl`). `ocw-runtime doctor` checks 13 things with one fix line each.
 - **Share it in the web.** Share the server with members and teams in Settings › Devices, or link its repositories to
   a team project. In **New session**, "Run sessions on a server" leads to the Server tab.
 

@@ -87,11 +87,20 @@ third-party host for the runtime: a self-hosted workspace must serve its own.
 - **`ocw-runtime setup`** runs server URL → pairing (skipped when the token still works; re-pairing a revoked device
   needs a confirmation or `--yes`; a different server is refused) → projects → service → doctor → the Settings ›
   Devices link. Prompts only on a terminal, every prompt has a flag, re-running changes nothing. Exit codes 0, 1, 2,
-  130. A system unit is two steps: setup as the account, then the printed root command.
+  130. A system unit is two steps: setup as the account prints the unit and the root lines, then root runs them.
 - **`ocw-runtime service install|uninstall|status|logs|restart`.**
   - Linux: a systemd **user** unit by default (it prints `sudo loginctl enable-linger <account>` when lingering is
-    off, since a server must run without a login session), or `--system --user-name <account>`, a system unit with
-    `User=<account>`, which only root installs.
+    off, since a server must run without a login session), or `--system`, a system unit with `User=<account>`.
+  - **Root never runs the runtime's files (07.12 review HI-01).** The launcher, the bundle and `install.json` belong to
+    the runtime's account, which its sessions (prompted by any member the device is shared with) can change, so root
+    running any of them would be a one-step escalation. `service install --system` therefore runs as the account and
+    only prints: the unit, rendered from that account's install, inside a heredoc for
+    `sudo install -m 0644 /dev/stdin /etc/systemd/system/ocw-runtime.service`, then `sudo systemctl daemon-reload` and
+    `enable --now` (or `restart` for a changed unit). The admin reads `User=<account>` and runs those lines: root runs
+    only `install` and `systemctl`, and the unit runs the account's files as the account. `restart` and `uninstall` on
+    a system unit print the `systemctl` lines instead of running them, and every `ocw-runtime service` command run as
+    uid 0 stops with this rule. A root-owned copy of the runtime (for example under `/opt`) was rejected: it needs a
+    second, root-run install and update path, while `User=` already confines the runtime to its account.
   - macOS: a LaunchAgent (`ProcessType=Standard`, logs in `~/.ocw/logs/runtime.log`, rotated at 5 MB). A LaunchAgent
     needs the account's login session, so a Mac server needs automatic login for that account.
   - Anything else (containers, WSL without systemd): refused with "run `ocw-runtime run` under your own supervisor".
@@ -100,8 +109,8 @@ third-party host for the runtime: a self-hosted workspace must serve its own.
   - **Escaping.** `ExecStart=` words are double-quoted with `%`, `$`, `\` and `"` escaped. `Environment=` values escape
     `\`, `"` and `%` but not `$` (systemd does not expand it there; `$$` would reach the service as two dollars).
     `WorkingDirectory=` is unquoted (systemd does not unquote it) with `%` doubled. Plist values are XML-escaped.
-  - **Never as root.** A system unit refuses `--user-name root`; a user unit or LaunchAgent is refused when run as
-    uid 0.
+  - **Never as root.** A system unit refuses `--user-name root` and any account other than the one printing it; no
+    `service` command runs as uid 0.
   - **One runtime per `~/.ocw` (D-14).** Install refuses while another runtime owns the account's `~/.ocw` (a live
     control socket that is not this unit, or the desktop app's daemon). A re-install rewrites the unit and restarts it
     only when the content changed and no session runs.
@@ -146,7 +155,8 @@ pinned `node:24` slim container (plus `curl git ca-certificates`, D-11) under da
 - **Sessions run as the server's account.** Sharing a server means sharing that account's files, git credentials and
   sign-ins with the members it is shared with, within the modes the owner allows (ADR-0012).
 - **Known limits:** a Mac server needs automatic login; a user unit needs lingering and a real login of the account to
-  install; a system unit uses the account's default `~/.ocw`; doctor run as another account checks that account.
+  install; root writes a system unit from printed lines (one copy and paste); doctor run as another account checks
+  that account.
 - **Deferred:** a Windows service; Ed25519 device identity and key rotation (Phase 8); cloning repositories from the
   CLI; sharing or grants from the CLI; a container image for the runtime; self-update of the runtime (re-running the
   install command upgrades it today).

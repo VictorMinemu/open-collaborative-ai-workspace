@@ -388,16 +388,23 @@ describe("runSetup: the service step (07.12-08, D-04, D-14, PD-13, RESEARCH Pitf
     expect(other.calls).toEqual([]);
 
     const h = harness();
-    h.deps.service.detect = async (opts) => {
-      h.calls.push(`service.detect ${opts?.system ? "system" : ""}`);
-      return { kind: "systemd-system", available: true, reason: null };
+    h.deps.service.install = async (opts) => {
+      h.calls.push(`service.install ${opts?.manager ?? ""} ${opts?.account ?? ""}`);
+      return {
+        ok: true,
+        manager: "systemd-system",
+        unitPath: "/etc/systemd/system/ocw-runtime.service",
+        outcome: "root-step",
+        active: null,
+        lines: ["sudo install -m 0644 /dev/stdin /etc/systemd/system/ocw-runtime.service <<'OCW_UNIT'"],
+      };
     };
     expect(await runSetup(sys, h.deps)).toBe(0);
-    expect(h.calls).toContain("service.detect system");
-    expect(h.calls.some((c) => c.startsWith("service.install"))).toBe(false);
-    expect(h.stdout.join("\n")).toContain(
-      'sudo "$(command -v ocw-runtime)" service install --system --user-name alice',
-    );
+    expect(h.calls).toContain("service.install systemd-system alice");
+    const text = h.stdout.join("\n");
+    expect(text).toContain("sudo install -m 0644 /dev/stdin /etc/systemd/system/ocw-runtime.service");
+    // Root never runs the account's launcher (HI-01).
+    expect(text).not.toMatch(/sudo .*ocw-runtime service install/);
   });
 
   it("parseSetupArgs: --service system without --user-name names --user-name", () => {
