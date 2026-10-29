@@ -6,7 +6,9 @@ import {
   type CreateWorkSessionRequest,
   DeviceList,
   EventTypes,
+  normalizeUserCode,
   Ok,
+  PairingRequestView,
   ProjectList,
   type ResolveApprovalRequest,
   RuntimeControls,
@@ -63,6 +65,52 @@ export function useProjects() {
 export function useCreateEnrollment() {
   return useMutation({
     mutationFn: () => api.post("/api/v1/devices/enrollments", { body: {}, schema: CreateEnrollmentResponse }),
+  });
+}
+
+// ---- terminal pairing (07.12, D-03): the owner looks up, approves or denies what a server asked for ----
+
+/**
+ * The pending request behind a user code (`POST /devices/pairings/lookup`, `device.pair`). Keyed by the canonical code;
+ * off for anything that is not a well-formed code. Never retried or refetched on its own: the three routes share a
+ * budget of 10 calls a minute per member, and a decided request answers 404.
+ */
+export function usePairingLookup(userCode: string | null) {
+  const canonical = userCode ? normalizeUserCode(userCode) : null;
+  return useQuery({
+    queryKey: ["wz", "pairing", canonical] as const,
+    queryFn: ({ signal }) =>
+      api.post("/api/v1/devices/pairings/lookup", {
+        body: { userCode: canonical },
+        schema: PairingRequestView,
+        signal,
+      }),
+    enabled: canonical !== null,
+    retry: false,
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: 0,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+}
+
+/** Approves a pending pairing under the name the owner chose; the server picks up its token on its next poll. */
+export function useApprovePairing() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { userCode: string; name: string }) =>
+      api.post("/api/v1/devices/pairings/approve", { body, schema: Ok }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: wzKeys.devices }),
+  });
+}
+
+/** Denies a pending pairing; the polling server gets `access_denied`. */
+export function useDenyPairing() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { userCode: string }) =>
+      api.post("/api/v1/devices/pairings/deny", { body, schema: Ok }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: wzKeys.devices }),
   });
 }
 

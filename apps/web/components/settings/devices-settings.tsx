@@ -17,7 +17,7 @@ import {
   Trash2,
   Users,
 } from "lucide-react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
@@ -51,9 +51,10 @@ import {
 } from "@/lib/workzone-queries";
 import { CopyLine } from "./copy-line";
 import { DeviceSharing } from "./device-sharing";
+import { PairApproveDialog, PLATFORM_LABEL } from "./pair-approve-dialog";
 import { compatFlag, DeviceRuntimeUpdates } from "./runtime-updates";
 
-const PLATFORM: Record<string, string> = { darwin: "macOS", linux: "Linux", win32: "Windows" };
+const PLATFORM = PLATFORM_LABEL;
 
 /** The Devices page subtitle: it offers pairing only while `device.pair` is not decided off (07.3, P-08). */
 export function DevicesSubtitle() {
@@ -66,7 +67,10 @@ export function DevicesSettings() {
   const devices = useDevices();
   const me = useMe({ enabled: false });
   const params = useSearchParams();
+  const router = useRouter();
   const [adding, setAdding] = useState(false);
+  // 07.12 (D-03): the code a server printed (`?pair=`) or typed in the Server tab, shown in the approve dialog.
+  const [pairCode, setPairCode] = useState<string | null>(null);
   const desktop = useDesktop();
   const qc = useQueryClient();
   // Pairing belongs to the Work Zone module (07.3, D-01): it leaves once `device.pair` is decided off, never while
@@ -76,7 +80,15 @@ export function DevicesSettings() {
 
   useEffect(() => {
     if (params.get("add") === "1") setAdding(true);
+    const pair = params.get("pair");
+    if (pair) setPairCode(pair);
   }, [params]);
+
+  const closePairing = () => {
+    setPairCode(null);
+    // A reload must not reopen it: the link's code leaves the address bar once the dialog closes (T-07.12-07-03).
+    if (params.get("pair")) router.replace("/settings/devices");
+  };
 
   const mine = (devices.data ?? []).filter((d) => d.ownerUserId === me.data?.user.id);
   const others = (devices.data ?? []).filter((d) => d.ownerUserId !== me.data?.user.id);
@@ -166,6 +178,15 @@ export function DevicesSettings() {
           </ul>
         </section>
       ) : null}
+
+      <PairApproveDialog
+        code={pairCode}
+        open={pairCode !== null}
+        allowed={canPair}
+        onOpenChange={(o) => {
+          if (!o) closePairing();
+        }}
+      />
 
       <AddDeviceDialog
         open={adding && canPair}
