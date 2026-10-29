@@ -315,7 +315,7 @@ function PairApproveContent({
   }
 
   const busy = approve.isPending || deny.isPending;
-  const title = view === "connected" ? "Device connected" : view === "waiting" ? "Approved" : "Pair a server";
+  const title = view === "connected" ? "Device connected" : "Pair a server";
   const description =
     view === "connected"
       ? "It is ready for Work Zone sessions."

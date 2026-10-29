@@ -165,7 +165,7 @@ export function AddServerLink({ className, onClick }: { className?: string; onCl
       data-testid="new-session-add-server"
       onClick={onClick}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-sm text-muted-foreground text-xs underline-offset-4 outline-none hover:text-foreground hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/40 max-lg:min-h-11",
+        "inline-flex items-center gap-1.5 rounded-sm text-muted-foreground text-xs underline decoration-dotted decoration-muted-foreground/50 underline-offset-4 outline-none hover:text-foreground hover:decoration-solid focus-visible:ring-[3px] focus-visible:ring-ring/40 max-lg:min-h-11",
         className,
       )}
     >

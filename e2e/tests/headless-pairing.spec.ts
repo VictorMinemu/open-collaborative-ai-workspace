@@ -1,6 +1,6 @@
 import { type Browser, type BrowserContext, expect, type Page, test } from "@playwright/test";
 import { expectNoSeriousA11y } from "../support/a11y";
-import { apiAs, BASE_URL, openAs } from "../support/actors";
+import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { expectNoSidewaysScroll, expectTouchTargets, unnamedControls } from "../support/layout";
 import { pollPairingToken, startPairing } from "../support/pairing";
 import { type FakeDeviceHandle, startFakeDevice } from "../support/work-zone-device";
@@ -12,7 +12,8 @@ import { ADMIN, API_URL, shot } from "./env";
  * the owner approves or denies it in Settings › Devices:
  * - from the link the server printed (`?pair=CODE`): compare the code, rename, Approve, "Device connected";
  * - from Add a device › Server: the install command for this workspace, `ocw-runtime setup`, the code field;
- * - Deny, an unknown code, and a signed-out owner who keeps the code through sign-in.
+ * - Deny, an unknown code, and a signed-out member who keeps the code through sign-in;
+ * - New session's "Run sessions on a server" link to Add a device › Server (owner feedback 2026-10-29).
  * Every state passes axe (no serious issue), names every control, never scrolls sideways and keeps 44 px targets below
  * 1024, on both projects (1440 and 390) and in light and dark; screenshots go to OCW_E2E_SCREENSHOT_DIR.
  */
@@ -180,9 +181,18 @@ test("Add a device › Server shows this workspace's commands, takes the code th
   }
 });
 
+// The lookup, approve and deny routes share 10 calls a minute per member (07.12-02): the admin's approvals and denials
+// above use 4 per project, so the next two cases run as Sam (a developer, who may pair his own devices).
+async function asSam() {
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, SAM, "developer");
+  await admin.dispose();
+}
+
 test("an unknown or expired code says so and offers another try", async ({ browser }, info) => {
   const tag = tagOf(info.project.name);
-  const owner = await openAs(browser, ADMIN, info.project.name);
+  await asSam();
+  const owner = await openAs(browser, SAM, info.project.name);
   try {
     const page = owner.page;
     await page.goto(`${BASE_URL}/settings/devices?pair=ZZZZ-ZZZZ`);
@@ -203,16 +213,17 @@ test("an unknown or expired code says so and offers another try", async ({ brows
   }
 });
 
-test("a signed-out owner keeps the code through sign-in", async ({ browser }, info) => {
+test("a signed-out member keeps the code through sign-in", async ({ browser }, info) => {
   const tag = tagOf(info.project.name);
+  await asSam();
   const start = await startPairing(API_URL, { name: `E2E login ${tag}`, platform: "linux" });
   const { context, page } = await signedOut(browser, info.project.name);
   try {
     await page.goto(start.verificationUriComplete);
     const next = encodeURIComponent(`/settings/devices?pair=${start.userCode}`);
     await expect(page).toHaveURL(`${BASE_URL}/login?next=${next}`);
-    await page.getByLabel("Email").fill(ADMIN.email);
-    await page.getByLabel("Password", { exact: true }).fill(ADMIN.password);
+    await page.getByLabel("Email").fill(SAM.email);
+    await page.getByLabel("Password", { exact: true }).fill(SAM.password);
     await page
       .getByTestId("login-form")
       .getByRole("button", { name: /sign in|log in/i })

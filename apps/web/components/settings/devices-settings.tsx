@@ -19,7 +19,7 @@ import {
   Users,
 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { useGrain } from "@/components/shell/module-gate";
@@ -415,6 +415,12 @@ function DeviceFacts({ device: d, owned }: { device: Device; owned: boolean }) {
 
 type AddTab = "desktop" | "cli" | "server";
 
+const ADD_TABS = [
+  ["desktop", "Desktop app", <Laptop key="d" />],
+  ["cli", "Command line", <Terminal key="c" />],
+  ["server", "Server", <Server key="s" />],
+] as const;
+
 function AddDeviceDialog({
   open,
   onOpenChange,
@@ -468,6 +474,17 @@ function AddDeviceDialog({
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, [open]);
+
+  const tabRefs = useRef<Partial<Record<AddTab, HTMLButtonElement | null>>>({});
+  const onTabKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    const ids = ADD_TABS.map(([id]) => id);
+    const next = ids[(ids.indexOf(tab) + step + ids.length) % ids.length] ?? tab;
+    setPicked(next);
+    tabRefs.current[next]?.focus();
+  };
 
   const server = tab === "server";
   const code = create.data?.code;
@@ -543,24 +560,28 @@ function AddDeviceDialog({
                 </div>
               )}
 
-              <div className="grid gap-3">
-                <div className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1" role="tablist">
-                  {(
-                    [
-                      ["desktop", "Desktop app", <Laptop key="d" />],
-                      ["cli", "Command line", <Terminal key="c" />],
-                      ["server", "Server", <Server key="s" />],
-                    ] as const
-                  ).map(([id, label, icon]) => (
+              <div className="grid min-w-0 grid-cols-1 gap-3">
+                <div
+                  className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1"
+                  role="tablist"
+                  aria-label="How to pair"
+                  onKeyDown={onTabKey}
+                >
+                  {ADD_TABS.map(([id, label, icon]) => (
                     <button
                       key={id}
+                      ref={(el) => {
+                        tabRefs.current[id] = el;
+                      }}
                       type="button"
                       role="tab"
                       aria-selected={tab === id}
+                      // One tab stop for the list; the arrow keys move between tabs (WAI-ARIA tabs pattern).
+                      tabIndex={tab === id ? 0 : -1}
                       onClick={() => setPicked(id)}
                       data-testid={`add-device-tab-${id}`}
                       className={cn(
-                        "flex h-11 min-w-0 items-center justify-center gap-1.5 rounded-md px-1 font-medium text-[13px] transition-colors sm:h-8 [&_svg]:size-3.5 [&_svg]:shrink-0",
+                        "flex h-11 min-w-0 items-center justify-center gap-1.5 rounded-md px-1 font-medium text-[13px] transition-colors sm:h-8 max-sm:[&_svg]:hidden [&_svg]:size-3.5 [&_svg]:shrink-0",
                         tab === id
                           ? "bg-background shadow-sm"
                           : "text-muted-foreground hover:text-foreground",
@@ -582,7 +603,7 @@ function AddDeviceDialog({
                     ]}
                   />
                 ) : tab === "cli" ? (
-                  <div className="grid gap-2">
+                  <div className="grid min-w-0 grid-cols-1 gap-2">
                     <Steps steps={["On the computer with your code, run:"]} />
                     <CopyLine text={cli} buttonClassName="max-lg:size-11" />
                     <Steps steps={["Register a repository and start the runtime:"]} start={2} />
@@ -632,15 +653,21 @@ function AddDeviceDialog({
 export function ServerSteps({ apiUrl, onContinue }: { apiUrl: string; onContinue: (code: string) => void }) {
   const [value, setValue] = useState("");
   return (
-    <div className="grid gap-2">
+    <div className="grid min-w-0 grid-cols-1 gap-2">
       <Steps steps={["On the server, as the account that will run it, install the runtime:"]} />
       <CopyLine
         text={runtimeInstallCommand(apiUrl)}
         testId="server-install-command"
         buttonClassName="max-lg:size-11"
+        wrap
       />
       <Steps steps={["Pair it and install the service:"]} start={2} />
-      <CopyLine text="ocw-runtime setup" testId="server-setup-command" buttonClassName="max-lg:size-11" />
+      <CopyLine
+        text="ocw-runtime setup"
+        testId="server-setup-command"
+        buttonClassName="max-lg:size-11"
+        wrap
+      />
       <Steps steps={["Enter the code the server shows:"]} start={3} />
       <PairCodeField value={value} onChange={setValue} onSubmit={onContinue} label="Code the server shows" />
       <p className="text-muted-foreground text-xs">
