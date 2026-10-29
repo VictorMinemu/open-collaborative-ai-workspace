@@ -407,7 +407,7 @@ of the thin Work Zone that Phase 1 already ships.
 **Operations features (inserted 2026-10-08, owner).** Phases 07.1–07.7 turn the 2026-10-06 operations meeting into
 generic capabilities for any organization (research: `.planning/research/OPS-FEATURES.md`). Each feature is owned by the
 Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits → Agent Card when a human approves);
-OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
+OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.12 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 and 07.12 added 2026-10-29 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
 (F17), ERP-driven board columns beyond watched records.
 
 ### Phase 07.1: Board channels and record templates (INSERTED)
@@ -896,6 +896,68 @@ Plans:
 **Wave 6** *(blocked on Wave 5 completion)*
 
 - [ ] 07.11-11-PLAN.md — Wave 6: Phase gate: full local gate, full isolated e2e, Linux proof, `gate:compose`, ADR-0032, DEMO owner checks, INSTALL, STATUS, AGENTS, CODEOWNERS, signed VALIDATION
+
+### Phase 07.12: Headless Work Zone server (INSERTED)
+
+**Goal**: Anyone can turn a server (or any spare machine) into a Work Zone device without the desktop app: install the
+Local Runtime from their own workspace with one command, pair it from the terminal, run it as a service, check it, and
+let members and teams run their shared sessions there.
+
+- **Install from your own server:** `curl -fsSL https://<workspace>/install.sh | sh` fetches the runtime bundle the API
+  serves (no third party); Node 24 is required and checked.
+- **One setup command:** `ocw-runtime setup` (interactive, or fully by flags for scripts) pairs, names the device,
+  registers repositories, installs the service and runs the checks.
+- **Pair from a terminal:** `ocw-runtime enroll --server <url>` shows a short code and a link; the owner approves it in
+  Settings › Devices. The existing `--code` flow stays.
+- **Runs as a service:** `ocw-runtime service install|uninstall|status|logs` (systemd on Linux, user or system unit;
+  launchd on macOS), restarts on failure, never a TCP port.
+- **Doctor:** `ocw-runtime doctor [--json]` checks Node, pairing, server reachability, Claude Code and Codex installed
+  and signed in (headless sign-in instructions), git, projects, the service and the update level.
+- **Sharing stays in the web:** the owner shares the device with members and teams as today (03.2-05, 07.9); the CLI
+  prints the link.
+
+**Requirements**: HSR-01, HSR-02, HSR-03, HSR-04, HSR-05, HSR-06, HSR-07
+**Depends on:** Phase 07.11 (runtime CLI updates on the same daemon)
+**Success Criteria** (what must be TRUE):
+
+  1. On a clean Linux server with Node 24, one command installs `ocw-runtime` from the workspace itself, and
+     `ocw-runtime setup` leaves a paired device running as a service that survives a reboot and a crash
+  2. Pairing works from a terminal without copying a code from the web: the owner approves a short code in Settings ›
+     Devices; codes expire, are single-use and rate-limited, and every approval is audited
+  3. `ocw-runtime doctor` reports every prerequisite with a fix line, in text and `--json`, and never prints a secret or
+     sends an absolute path to the server
+  4. Members the owner shares the device with start and run sessions on it from the web, with no desktop app anywhere
+  5. Proven in a Linux container end to end (install script → setup → session from the web) and documented in
+     `docs/SERVER.md`; macOS launchd covered by unit tests
+
+**Plans:** 11 plans in 5 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 09 the end-to-end tracer, 10 the container proof, 11 the gate)
+
+Plans:
+**Wave 1**
+
+- [ ] 07.12-01-PLAN.md — Wave 1: Contracts (dist manifest, device-code pairing, enroll answer fields), the self-contained bundle (esbuild, SDK external), `ocw-runtime version`, local records, and the phase hub (plan map, shared files, PD-01…PD-19)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 07.12-02-PLAN.md — Wave 2: API device-code pairing: Redis pending request, `device.pair` approval, `enrollWithCodeHash`, RFC 8628 answers, limits, audit, org B
+- [ ] 07.12-03-PLAN.md — Wave 2: CLI terminal pairing (`enroll --server` without a code), `remove-project <dir|name|id>`, `~/.ocw/service.env` read by the daemon (D-12)
+- [ ] 07.12-04-PLAN.md — Wave 2: Service module: systemd user/system units, launchd LaunchAgent, injected exec with the test guard, one runtime owner per `~/.ocw`
+- [ ] 07.12-05-PLAN.md — Wave 2: Doctor module: every D-05 check with a fix line, headless sign-in lines, text and JSON, safe to paste
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 07.12-06-PLAN.md — Wave 3: API distribution: `/api/v1/runtime/{install.sh,bundle,bundle.sha256,version}`, `install.sh` (SDK from npm beside the bundle), the image stage, the compose-gate check
+- [ ] 07.12-07-PLAN.md — Wave 3: Web: Add a device › Server tab, the `?pair=` approve dialog, login keeps `?pair=`; 1440/390 light/dark
+- [ ] 07.12-08-PLAN.md — Wave 3: `ocw-runtime setup` and the `service` and `doctor` CLI commands
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 07.12-09-PLAN.md — Wave 4: Phase end-to-end tracer: install.sh from the API → setup → web approval → bundled daemon → shared with a member and a team project → the member's sessions
+- [ ] 07.12-10-PLAN.md — Wave 4: Opt-in Linux container proof (pinned slim `node:24` + curl git ca-certificates): the whole chain, doctor JSON, no-systemd refusal
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 07.12-11-PLAN.md — Wave 5: Phase gate: full gate, container proof, `gate:compose`, `docs/SERVER.md`, INSTALL, DEMO owner checks, STATUS, AGENTS, CODEOWNERS, ADR-0033, signed VALIDATION
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
