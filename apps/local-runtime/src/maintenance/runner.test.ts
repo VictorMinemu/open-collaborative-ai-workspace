@@ -352,6 +352,39 @@ describe("runUpdate (Phase 07.11, PD-11)", () => {
     expect(readdirSync(lockDir())).toEqual([]);
   });
 
+  it("two daemons judging the same stale lock: exactly one takes it over, the other's view never removes it (07.11 review ME-01)", async () => {
+    const root = "/some/install/root";
+    mkdirSync(lockDir(), { recursive: true, mode: 0o700 });
+    const file = join(lockDir(), `${createHash("sha256").update(root).digest("hex")}.lock`);
+    writeFileSync(file, JSON.stringify({ pid: 99_999_999, startedAt: "2026-10-27T00:00:00.000Z" }), {
+      mode: 0o600,
+    });
+    let resume: () => void = () => undefined;
+    let judged: () => void = () => undefined;
+    const judgedStale = new Promise<void>((r) => {
+      judged = r;
+    });
+    const slow = new InstallLock(lockDir(), {
+      onStaleJudged: () =>
+        new Promise<void>((r) => {
+          resume = r;
+          judged();
+        }),
+    });
+    const a = slow.acquire(root);
+    await judgedStale;
+    // While A sits between its stale judgement and the takeover, B takes the lock over.
+    const b = await new InstallLock(lockDir()).acquire(root);
+    expect(b).not.toBe("busy");
+    const bOwner = readFileSync(file, "utf8");
+    resume();
+    expect(await a).toBe("busy");
+    expect(readFileSync(file, "utf8")).toBe(bOwner);
+    expect(readdirSync(lockDir()).filter((f) => !f.endsWith(".lock"))).toEqual([]);
+    if (b !== "busy") await b.release();
+    expect(readdirSync(lockDir())).toEqual([]);
+  });
+
   it("never takes over a lock whose daemon is gone while its installer still runs (07.11 review HI-04)", async () => {
     const installer = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
       detached: true,

@@ -8,7 +8,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { compareRuntimeVersions, parseRuntimeVersion, scrubHostPaths } from "@ocw/contracts";
@@ -97,7 +97,11 @@ export interface HeldInstallLock {
  * group is alive: a daemon restarted mid-install waits for the orphaned installer (07.11 review HI-04).
  */
 export class InstallLock {
-  constructor(private readonly dir: string) {}
+  constructor(
+    private readonly dir: string,
+    /** Test seam: runs between judging a lock stale and taking it over (the race ME-01 closes). */
+    private readonly hooks: { onStaleJudged?: () => Promise<void> } = {},
+  ) {}
 
   async acquire(installRoot: string): Promise<HeldInstallLock | "busy"> {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
@@ -134,16 +138,42 @@ export class InstallLock {
         };
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-        if (attempt > 0 || !(await this.isStale(file))) return "busy";
-        await unlink(file).catch(() => undefined);
+        if (attempt > 0) return "busy";
+        const content = await readFile(file, "utf8").catch(() => null);
+        if (content === null || !(await this.isStale(file, content))) return "busy";
+        await this.hooks.onStaleJudged?.();
+        if (!(await this.takeOver(file, content, owner.nonce))) return "busy";
       }
     }
     return "busy";
   }
 
-  private async isStale(file: string): Promise<boolean> {
-    const content = await readFile(file, "utf8").catch(() => null);
-    if (content === null) return false;
+  /**
+   * Removes the stale lock `content` judged above, atomically (07.11 review ME-01): whatever is at `file` now is moved
+   * aside in one step and deleted only when it is that same stale lock; a fresh lock another daemon took meanwhile is
+   * put back and this caller stays busy. Never unlinks a path not just proven to be the stale one.
+   */
+  private async takeOver(file: string, content: string, nonce: string): Promise<boolean> {
+    const aside = `${file}.stale.${nonce}`;
+    try {
+      await rename(file, aside);
+    } catch (err) {
+      // Gone already (released, or taken over and released): try to create it.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return true;
+      throw err;
+    }
+    const moved = await readFile(aside, "utf8").catch(() => null);
+    if (moved === content) {
+      await unlink(aside).catch(() => undefined);
+      return true;
+    }
+    // Someone else's live lock: back where it was (never over a lock created since), and wait.
+    await link(aside, file).catch(() => undefined);
+    await unlink(aside).catch(() => undefined);
+    return false;
+  }
+
+  private async isStale(file: string, content: string): Promise<boolean> {
     let owner: { pid?: unknown; installerPid?: unknown } = {};
     try {
       owner = JSON.parse(content) as { pid?: unknown; installerPid?: unknown };
