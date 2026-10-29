@@ -23,6 +23,23 @@ export const RuntimeConfigSchema = z.object({
   deviceTokenPath: z.string().optional(),
   deviceName: z.string().optional(),
   /**
+   * Phase 07.12 (D-06, PD-09): the paired device's id, written at pairing (typed code or device code) from the API's
+   * answer; read by `setup` and `doctor` to say which device this is. Local only; absent before 07.12.
+   */
+  deviceId: z.uuid().optional(),
+  /**
+   * Phase 07.12 (D-06, PD-09): the workspace's web origin from the pairing answer, so `setup` and `doctor` can print
+   * `<webUrl>/settings/devices` (sharing stays in the web). Local only; absent before 07.12 or from an older API.
+   */
+  webUrl: z.url().optional(),
+  /**
+   * Phase 07.12 (D-06, PD-09, RESEARCH Pitfall 3): whom this device was paired with, so a server admin sees who owns it
+   * ("Paired with <organization> as <owner>"). Written at pairing, read by `setup` and `doctor`. Local only.
+   */
+  pairedWith: z
+    .object({ organization: z.string().max(200), owner: z.string().max(200), at: z.string() })
+    .optional(),
+  /**
    * Runtimes run on the user's own CLI logins (Claude Pro/Max, ChatGPT). API keys in the
    * environment are stripped unless `useApiKey` is explicitly true (metered billing).
    */
