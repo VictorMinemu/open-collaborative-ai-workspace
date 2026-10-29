@@ -916,7 +916,7 @@ let members and teams run their shared sessions there.
 - **Sharing stays in the web:** the owner shares the device with members and teams as today (03.2-05, 07.9); the CLI
   prints the link.
 
-**Requirements**: HSR-01 … HSR-07 (written by plan-phase)
+**Requirements**: HSR-01, HSR-02, HSR-03, HSR-04, HSR-05, HSR-06, HSR-07
 **Depends on:** Phase 07.11 (runtime CLI updates on the same daemon)
 **Success Criteria** (what must be TRUE):
 
@@ -929,11 +929,35 @@ let members and teams run their shared sessions there.
   4. Members the owner shares the device with start and run sessions on it from the web, with no desktop app anywhere
   5. Proven in a Linux container end to end (install script → setup → session from the web) and documented in
      `docs/SERVER.md`; macOS launchd covered by unit tests
-**Plans:** 0 plans
+
+**Plans:** 11 plans in 5 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 09 the end-to-end tracer, 10 the container proof, 11 the gate)
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 07.12 to break down)
+- [ ] 07.12-01-PLAN.md — Wave 1: Contracts (dist manifest, device-code pairing, enroll answer fields), the self-contained bundle (esbuild, SDK external), `ocw-runtime version`, local records, and the phase hub (plan map, shared files, PD-01…PD-19)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 07.12-02-PLAN.md — Wave 2: API device-code pairing: Redis pending request, `device.pair` approval, `enrollWithCodeHash`, RFC 8628 answers, limits, audit, org B
+- [ ] 07.12-03-PLAN.md — Wave 2: CLI terminal pairing (`enroll --server` without a code), `remove-project <dir|name|id>`, `~/.ocw/service.env` read by the daemon (D-12)
+- [ ] 07.12-04-PLAN.md — Wave 2: Service module: systemd user/system units, launchd LaunchAgent, injected exec with the test guard, one runtime owner per `~/.ocw`
+- [ ] 07.12-05-PLAN.md — Wave 2: Doctor module: every D-05 check with a fix line, headless sign-in lines, text and JSON, safe to paste
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 07.12-06-PLAN.md — Wave 3: API distribution: `/api/v1/runtime/{install.sh,bundle,bundle.sha256,version}`, `install.sh` (SDK from npm beside the bundle), the image stage, the compose-gate check
+- [ ] 07.12-07-PLAN.md — Wave 3: Web: Add a device › Server tab, the `?pair=` approve dialog, login keeps `?pair=`; 1440/390 light/dark
+- [ ] 07.12-08-PLAN.md — Wave 3: `ocw-runtime setup` and the `service` and `doctor` CLI commands
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 07.12-09-PLAN.md — Wave 4: Phase end-to-end tracer: install.sh from the API → setup → web approval → bundled daemon → shared with a member and a team project → the member's sessions
+- [ ] 07.12-10-PLAN.md — Wave 4: Opt-in Linux container proof (pinned slim `node:24` + curl git ca-certificates): the whole chain, doctor JSON, no-systemd refusal
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 07.12-11-PLAN.md — Wave 5: Phase gate: full gate, container proof, `gate:compose`, `docs/SERVER.md`, INSTALL, DEMO owner checks, STATUS, AGENTS, CODEOWNERS, ADR-0033, signed VALIDATION
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
