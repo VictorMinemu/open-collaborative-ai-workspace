@@ -153,7 +153,7 @@ async function httpOk(url) {
  * sha256, the checksum line starts with it, the bundle's bytes hash to it and install.sh is a POSIX script. Details
  * carry only the version and a sha prefix.
  */
-export async function checkRuntimeDist(apiUrl, { fetchImpl = fetch } = {}) {
+export async function checkRuntimeDist(apiUrl, { fetchImpl = fetch, sourceCommit = "" } = {}) {
   const get = (route) =>
     fetchImpl(`${apiUrl}/api/v1/runtime/${route}`, { signal: AbortSignal.timeout(30_000) });
   const res = await get("version");
@@ -163,9 +163,17 @@ export async function checkRuntimeDist(apiUrl, { fetchImpl = fetch } = {}) {
   }
   const manifest = await res.json();
   const sha256 = typeof manifest?.sha256 === "string" ? manifest.sha256 : "";
-  const details = { version: manifest?.version ?? null, sha: sha256.slice(0, 12) };
+  const commit = typeof manifest?.source?.commit === "string" ? manifest.source.commit : null;
+  const details = {
+    version: manifest?.version ?? null,
+    sha: sha256.slice(0, 12),
+    commit: commit?.slice(0, 12) ?? null,
+  };
   if (!/^[0-9a-f]{64}$/.test(sha256))
     return { ok: false, ...details, reason: "manifest sha256 is not 64 hex" };
+  // A gate built from a clean commit must serve a bundle that names that commit as its source (AGPL, ADR-0033).
+  if (sourceCommit && commit !== sourceCommit)
+    return { ok: false, ...details, reason: "manifest source.commit is not the commit the gate built" };
   const line = await get("bundle.sha256");
   const lineText = await line.text();
   if (line.status !== 200 || !lineText.startsWith(sha256))
@@ -213,7 +221,9 @@ export async function run(ctx, { admin = true } = {}) {
     return { ok: s?.State === "exited" && s?.ExitCode === 0, state: s?.State, exitCode: s?.ExitCode };
   });
   await check("api-health", () => poll(() => httpOk(`${ctx.urls.api}/health`), { timeoutMs: 120_000 }));
-  await check("runtime-dist", () => checkRuntimeDist(ctx.urls.api));
+  await check("runtime-dist", () =>
+    checkRuntimeDist(ctx.urls.api, { sourceCommit: ctx.env.OCW_SOURCE_COMMIT ?? "" }),
+  );
   await check("web-login", () => poll(() => httpOk(`${ctx.urls.web}/login`), { timeoutMs: 120_000 }));
   // The cell image is ~5 GB and its gateway takes a while on first boot (Pitfall 11).
   await check("cell-healthy", () =>

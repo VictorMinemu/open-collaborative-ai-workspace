@@ -235,6 +235,26 @@ describe("createGateEnv", () => {
     assert.equal(env2.COMPOSE_PROFILES, "proxy");
     assert.equal(env2.COMPOSE_PROJECT_NAME, "ocw-gate-t2");
     assert.equal(env2.OCW_PUBLIC_WEB_URL, "https://localhost:3643");
+    assert.equal(env2.OCW_SOURCE_COMMIT, undefined, "no commit given: none written");
+  });
+
+  it("writes OCW_SOURCE_COMMIT for the api build when the gate builds a clean commit (07.12-11)", () => {
+    const dir = mkdtempSync(path.join(tmp, "env-"));
+    const commit = "c".repeat(40);
+    const env = parseEnvFile(
+      createGateEnv({ dir, runId: "t3", imageTag: "gate-abc", block: 37, sourceCommit: commit }),
+    );
+    assert.equal(env.OCW_SOURCE_COMMIT, commit);
+    assert.throws(
+      () =>
+        createGateEnv({
+          dir: mkdtempSync(path.join(tmp, "env-")),
+          runId: "t4",
+          imageTag: "gate-abc",
+          sourceCommit: "HEAD",
+        }),
+      /sourceCommit/,
+    );
   });
 
   it("refuses a run id that would not make an ocw-gate project, and a directory outside the temp dir", () => {

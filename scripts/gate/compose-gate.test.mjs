@@ -4,6 +4,7 @@
 // flags appending their stages (--with-sandbox after compose and Playwright), and unknown names refused before anything starts.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { checkRuntimeDist, DEFAULT_STAGES, STAGES, selectStages, stackOptions } from "./compose-gate.mjs";
 
@@ -85,7 +86,7 @@ describe("checkRuntimeDist (07.12-06)", () => {
   it("passes when the four routes agree, with only the version and a sha prefix in its details", async () => {
     const asked = [];
     const res = await checkRuntimeDist("http://127.0.0.1:3400", { fetchImpl: fakeFetch(good(), asked) });
-    assert.deepEqual(res, { ok: true, version: "0.1.0", sha: sha.slice(0, 12) });
+    assert.deepEqual(res, { ok: true, version: "0.1.0", sha: sha.slice(0, 12), commit: null });
     assert.deepEqual(asked, [
       "http://127.0.0.1:3400/api/v1/runtime/version",
       "http://127.0.0.1:3400/api/v1/runtime/bundle.sha256",
@@ -105,5 +106,42 @@ describe("checkRuntimeDist (07.12-06)", () => {
       const res = await checkRuntimeDist("http://x", { fetchImpl: fakeFetch({ ...good(), ...override }) });
       assert.equal(res.ok, false, JSON.stringify(override).slice(0, 40));
     }
+  });
+
+  it("names the AGPL source: the manifest's source.commit must be the commit the gate built (07.12-11)", async () => {
+    const built = "a".repeat(40);
+    const withCommit = (commit) => ({
+      ...good(),
+      version: [
+        200,
+        JSON.stringify({ version: "0.1.0", sha256: sha, source: { repository: "https://x", commit } }),
+      ],
+    });
+    const same = await checkRuntimeDist("http://x", {
+      fetchImpl: fakeFetch(withCommit(built)),
+      sourceCommit: built,
+    });
+    assert.deepEqual(same, { ok: true, version: "0.1.0", sha: sha.slice(0, 12), commit: built.slice(0, 12) });
+    for (const commit of [null, "b".repeat(40)]) {
+      const res = await checkRuntimeDist("http://x", {
+        fetchImpl: fakeFetch(withCommit(commit)),
+        sourceCommit: built,
+      });
+      assert.equal(res.ok, false, String(commit));
+      assert.match(res.reason, /source\.commit/);
+    }
+    // A dirty tree has no commit that is its source: nothing is required then.
+    const dirty = await checkRuntimeDist("http://x", {
+      fetchImpl: fakeFetch(withCommit(null)),
+      sourceCommit: "",
+    });
+    assert.equal(dirty.ok, true);
+  });
+
+  it("compose passes OCW_SOURCE_COMMIT to the api image build (07.12-11)", () => {
+    const compose = readFileSync(new URL("../../compose.yaml", import.meta.url), "utf8");
+    const migrate = compose.slice(compose.indexOf("\n  migrate:"), compose.indexOf("\n  api:"));
+    assert.match(migrate, /dockerfile: apps\/api\/Dockerfile/);
+    assert.match(migrate, /args:\n\s+OCW_SOURCE_COMMIT: \$\{OCW_SOURCE_COMMIT:-\}/);
   });
 });

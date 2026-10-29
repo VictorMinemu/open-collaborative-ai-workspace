@@ -78,6 +78,9 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
+      # The served runtime's manifest names its AGPL source (ADR-0033): `OCW_SOURCE_COMMIT=$(git rev-parse HEAD)`.
+      args:
+        OCW_SOURCE_COMMIT: ${OCW_SOURCE_COMMIT:-}
     image: ocw-api:${OCW_IMAGE_TAG:-local}
     working_dir: /app/packages/db
     command: ["node", "--import", "tsx", "src/migrate-cli.ts"]
