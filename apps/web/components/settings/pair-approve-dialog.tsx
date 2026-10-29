@@ -185,7 +185,45 @@ export function PairApproveDialog({
   /** False once `device.pair` is decided off: the dialog says so and never calls the API (T-07.12-07-04). */
   allowed?: boolean;
 }) {
-  const [current, setCurrent] = useState<string | null>(code);
+  // Each opening gets fresh content (a new key), while a closing dialog keeps showing what it showed during its fade
+  // (the last code, the last state) instead of flashing an empty or error state.
+  const [opening, setOpening] = useState(0);
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) setOpening((n) => n + 1);
+  }
+  const last = useRef(code);
+  if (code) last.current = code;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg" data-testid="pair-approve-dialog">
+        <PairApproveContent
+          key={opening}
+          code={code ?? last.current}
+          active={open}
+          allowed={allowed}
+          onClose={() => onOpenChange(false)}
+        />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function PairApproveContent({
+  code,
+  active,
+  allowed,
+  onClose,
+}: {
+  code: string | null;
+  active: boolean;
+  allowed: boolean;
+  onClose: () => void;
+}) {
+  // A code typed after an error wins over the one the dialog was opened with.
+  const [typed, setTyped] = useState<string | null>(null);
+  const current = typed ?? code;
   const [retry, setRetry] = useState("");
   const [name, setName] = useState("");
   const [failure, setFailure] = useState<unknown>(null);
@@ -194,31 +232,20 @@ export function PairApproveDialog({
   const baseline = useRef<Set<string>>(new Set());
 
   const canonical = current ? normalizeUserCode(current) : null;
-  const lookup = usePairingLookup(open && allowed && !approved && !failure ? canonical : null);
+  const lookup = usePairingLookup(canonical, allowed && !approved && !failure);
   const approve = useApprovePairing();
   const deny = useDenyPairing();
   const devices = useDevices();
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: a fresh start each time it opens or the code changes
-  useEffect(() => {
-    if (!open) return;
-    setCurrent(code);
-    setRetry("");
-    setFailure(null);
-    setApproved(null);
-    approve.reset();
-    deny.reset();
-  }, [open, code]);
 
   useEffect(() => {
     if (lookup.data) setName(lookup.data.name);
   }, [lookup.data]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!active) return;
     const t = setInterval(() => setNow(Date.now()), 15_000);
     return () => clearInterval(t);
-  }, [open]);
+  }, [active]);
 
   // The device row is written when the server picks up its token; match the approved name among new ids.
   const connected = approved
@@ -228,10 +255,10 @@ export function PairApproveDialog({
   // The org topic refreshes the list when the device appears; a slow poll covers a missed frame.
   const { refetch } = devices;
   useEffect(() => {
-    if (!open || !approved || connected) return;
+    if (!active || !approved || connected) return;
     const t = setInterval(() => void refetch(), 3000);
     return () => clearInterval(t);
-  }, [open, approved, connected, refetch]);
+  }, [active, approved, connected, refetch]);
 
   const view: View = !allowed
     ? "error"
@@ -274,7 +301,7 @@ export function PairApproveDialog({
       {
         onSuccess: () => {
           toast.success("Pairing denied");
-          onOpenChange(false);
+          onClose();
         },
         onError: decided,
       },
@@ -284,7 +311,7 @@ export function PairApproveDialog({
   function tryAnother(next: string) {
     setFailure(null);
     setRetry("");
-    setCurrent(next);
+    setTyped(next);
   }
 
   const busy = approve.isPending || deny.isPending;
@@ -299,105 +326,95 @@ export function PairApproveDialog({
           : "A computer asked to join your Work Zone devices.";
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg" data-testid="pair-approve-dialog" data-view={view}>
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>{description}</DialogDescription>
-        </DialogHeader>
-        <DialogBody className="grid gap-5">
-          {view === "loading" ? (
-            <div className="grid gap-5" aria-busy="true">
-              <span className="sr-only">Loading the request</span>
-              <Skeleton className="h-24 rounded-xl" />
-              <Skeleton className="h-9" />
-              <Skeleton className="h-20" />
-            </div>
-          ) : view === "error" ? (
-            <div className="grid gap-4">
-              <p
-                role="alert"
-                data-testid="pair-error"
-                className="flex gap-2.5 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-sm"
-              >
-                <CircleAlert aria-hidden className="mt-0.5 size-4 shrink-0 text-destructive" />
-                <span>{errorText}</span>
-              </p>
-              {allowed && !isApiError(failure ?? lookup.error, 403) ? (
-                <div className="grid gap-2">
-                  <p className="font-medium text-[13px]">Try another code</p>
-                  <PairCodeField value={retry} onChange={setRetry} onSubmit={tryAnother} />
-                </div>
-              ) : null}
-            </div>
-          ) : view === "request" && lookup.data ? (
-            <PairRequestDetails request={lookup.data} now={now} name={name} onNameChange={setName} />
-          ) : view === "waiting" ? (
-            <div
-              className="flex flex-col items-center gap-3 py-6 text-center"
-              data-testid="pair-approved"
-              aria-live="polite"
+    <>
+      <DialogHeader>
+        <DialogTitle>{title}</DialogTitle>
+        <DialogDescription>{description}</DialogDescription>
+      </DialogHeader>
+      <DialogBody className="grid gap-5">
+        {view === "loading" ? (
+          <div className="grid gap-5" aria-busy="true">
+            <span className="sr-only">Loading the request</span>
+            <Skeleton className="h-24 rounded-xl" />
+            <Skeleton className="h-9" />
+            <Skeleton className="h-20" />
+          </div>
+        ) : view === "error" ? (
+          <div className="grid gap-4">
+            <p
+              role="alert"
+              data-testid="pair-error"
+              className="flex gap-2.5 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-sm"
             >
-              <Spinner className="size-6 text-muted-foreground" />
-              <p className="font-medium">Approved · waiting for the server</p>
-              <p className="max-w-sm break-words text-muted-foreground text-sm">{approved?.name}</p>
-            </div>
-          ) : connected ? (
-            <div
-              className="flex flex-col items-center gap-3 py-6 text-center"
-              data-testid="pair-connected"
-              aria-live="polite"
-            >
-              <CheckCircle2 className="size-10 text-success" aria-hidden />
-              <p className="max-w-full break-words font-medium" data-testid="pair-connected-name">
-                {connected.name}
-              </p>
-              <p className="max-w-sm text-muted-foreground text-sm">
-                Share it with members and teams from its card.
-              </p>
-            </div>
-          ) : null}
-        </DialogBody>
-        <DialogFooter>
-          {view === "request" ? (
-            <>
-              <Button
-                variant="outline"
-                onClick={onDeny}
-                disabled={busy}
-                data-testid="pair-deny"
-                className={cn("w-full sm:w-auto", TAP)}
-              >
-                {deny.isPending ? <Spinner /> : <X />} Deny
-              </Button>
-              <Button
-                onClick={onApprove}
-                disabled={busy || !name.trim()}
-                data-testid="pair-approve"
-                className={cn("w-full sm:w-auto", TAP)}
-              >
-                {approve.isPending ? <Spinner /> : <CheckCircle2 />} Approve
-              </Button>
-            </>
-          ) : view === "connected" ? (
-            <Button
-              onClick={() => onOpenChange(false)}
-              data-testid="pair-done"
-              className={cn("w-full sm:w-auto", TAP)}
-            >
-              Done
-            </Button>
-          ) : (
+              <CircleAlert aria-hidden className="mt-0.5 size-4 shrink-0 text-destructive" />
+              <span>{errorText}</span>
+            </p>
+            {allowed && !isApiError(failure ?? lookup.error, 403) ? (
+              <div className="grid gap-2">
+                <p className="font-medium text-[13px]">Try another code</p>
+                <PairCodeField value={retry} onChange={setRetry} onSubmit={tryAnother} />
+              </div>
+            ) : null}
+          </div>
+        ) : view === "request" && lookup.data ? (
+          <PairRequestDetails request={lookup.data} now={now} name={name} onNameChange={setName} />
+        ) : view === "waiting" ? (
+          <div
+            className="flex flex-col items-center gap-3 py-6 text-center"
+            data-testid="pair-approved"
+            aria-live="polite"
+          >
+            <Spinner className="size-6 text-muted-foreground" />
+            <p className="font-medium">Approved · waiting for the server</p>
+            <p className="max-w-sm break-words text-muted-foreground text-sm">{approved?.name}</p>
+          </div>
+        ) : connected ? (
+          <div
+            className="flex flex-col items-center gap-3 py-6 text-center"
+            data-testid="pair-connected"
+            aria-live="polite"
+          >
+            <CheckCircle2 className="size-10 text-success" aria-hidden />
+            <p className="max-w-full break-words font-medium" data-testid="pair-connected-name">
+              {connected.name}
+            </p>
+            <p className="max-w-sm text-muted-foreground text-sm">
+              Share it with members and teams from its card.
+            </p>
+          </div>
+        ) : null}
+      </DialogBody>
+      <DialogFooter>
+        {view === "request" ? (
+          <>
             <Button
               variant="outline"
-              onClick={() => onOpenChange(false)}
+              onClick={onDeny}
+              disabled={busy}
+              data-testid="pair-deny"
               className={cn("w-full sm:w-auto", TAP)}
             >
-              Close
+              {deny.isPending ? <Spinner /> : <X />} Deny
             </Button>
-          )}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+            <Button
+              onClick={onApprove}
+              disabled={busy || !name.trim()}
+              data-testid="pair-approve"
+              className={cn("w-full sm:w-auto", TAP)}
+            >
+              {approve.isPending ? <Spinner /> : <CheckCircle2 />} Approve
+            </Button>
+          </>
+        ) : view === "connected" ? (
+          <Button onClick={onClose} data-testid="pair-done" className={cn("w-full sm:w-auto", TAP)}>
+            Done
+          </Button>
+        ) : (
+          <Button variant="outline" onClick={onClose} className={cn("w-full sm:w-auto", TAP)}>
+            Close
+          </Button>
+        )}
+      </DialogFooter>
+    </>
   );
 }

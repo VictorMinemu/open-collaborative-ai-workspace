@@ -22,7 +22,9 @@ export default function AppLayout({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!unauthenticated || !setup.data) return;
     if (!setup.data.setupComplete) router.replace("/setup");
-    else router.replace(`/login?next=${encodeURIComponent(pathname)}`);
+    // The query travels too (07.12, D-13): a signed-out owner opening a server's `?pair=` link gets it back after
+    // sign-in. The effect runs only in the browser; `safeNext` on the login page keeps it a same-app path.
+    else router.replace(`/login?next=${encodeURIComponent(`${pathname}${window.location.search}`)}`);
   }, [unauthenticated, setup.data, pathname, router]);
 
   // A 401 wins over the cached `/me`: the session ended, so the shell is not rendered while sign-in opens.

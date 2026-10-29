@@ -75,7 +75,7 @@ export function useCreateEnrollment() {
  * off for anything that is not a well-formed code. Never retried or refetched on its own: the three routes share a
  * budget of 10 calls a minute per member, and a decided request answers 404.
  */
-export function usePairingLookup(userCode: string | null) {
+export function usePairingLookup(userCode: string | null, enabled = true) {
   const canonical = userCode ? normalizeUserCode(userCode) : null;
   return useQuery({
     queryKey: ["wz", "pairing", canonical] as const,
@@ -85,7 +85,7 @@ export function usePairingLookup(userCode: string | null) {
         schema: PairingRequestView,
         signal,
       }),
-    enabled: canonical !== null,
+    enabled: enabled && canonical !== null,
     retry: false,
     staleTime: Number.POSITIVE_INFINITY,
     gcTime: 0,

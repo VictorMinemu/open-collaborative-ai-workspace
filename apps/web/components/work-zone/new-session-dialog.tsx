@@ -10,11 +10,22 @@ import {
   type RuntimeInfo,
 } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import { Check, FolderGit2, FolderKanban, FolderPlus, GitBranch, Laptop, Lock, Rocket } from "lucide-react";
+import {
+  Check,
+  FolderGit2,
+  FolderKanban,
+  FolderPlus,
+  GitBranch,
+  Laptop,
+  Lock,
+  Rocket,
+  Server,
+} from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { useGrain } from "@/components/shell/module-gate";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -143,6 +154,27 @@ export function preselectedRepo(
   return (chosen ?? firstOf(startable))?.id ?? null;
 }
 
+/**
+ * "Run sessions on a server" (07.12-07, owner feedback 2026-10-29): where sessions start, the way to Add a device ›
+ * Server. A paired server then shows up here as one more device, like a laptop.
+ */
+export function AddServerLink({ className, onClick }: { className?: string; onClick?: () => void }) {
+  return (
+    <Link
+      href="/settings/devices?add=server"
+      data-testid="new-session-add-server"
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-sm text-muted-foreground text-xs underline-offset-4 outline-none hover:text-foreground hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/40 max-lg:min-h-11",
+        className,
+      )}
+    >
+      <Server aria-hidden className="size-3.5 shrink-0" />
+      Run sessions on a server
+    </Link>
+  );
+}
+
 export function NewSessionDialog({
   open,
   onOpenChange,
@@ -161,6 +193,8 @@ export function NewSessionDialog({
   const devices = useDevices();
   const create = useCreateWorkSession();
   const desktop = useDesktop();
+  // Pairing (and so the way to a server) leaves with the Work Zone module's `device.pair` (07.3, D-01).
+  const canPair = useGrain("device.pair") !== "off";
 
   const available = useMemo(() => (projects.data ?? []).filter((p) => p.available), [projects.data]);
   const [projectId, setProjectId] = useState<string | null>(null);
@@ -339,6 +373,11 @@ export function NewSessionDialog({
                   <Link href="/settings/devices" className="text-primary underline-offset-4 hover:underline">
                     Manage devices
                   </Link>
+                  {canPair ? (
+                    <div className="mt-2 flex justify-center">
+                      <AddServerLink onClick={() => onOpenChange(false)} />
+                    </div>
+                  ) : null}
                 </div>
               ) : (
                 <div className="grid gap-3" role="radiogroup" aria-label="Project">
@@ -409,6 +448,9 @@ export function NewSessionDialog({
                   ))}
                 </div>
               )}
+              {canPair && available.length > 0 ? (
+                <AddServerLink className="justify-self-start" onClick={() => onOpenChange(false)} />
+              ) : null}
               <NewSessionVisibilityLine project={project} value={audience} onChange={setAudience} />
             </section>
 
