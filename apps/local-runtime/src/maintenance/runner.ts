@@ -8,7 +8,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, stat, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { compareRuntimeVersions, parseRuntimeVersion, scrubHostPaths } from "@ocw/contracts";
@@ -70,25 +70,43 @@ function pidAlive(pid: number): boolean {
   }
 }
 
+/** Whether the installer's process group (it is spawned as its own group leader) still has a live member. */
+function groupAlive(pgid: number): boolean {
+  if (process.platform === "win32") return pidAlive(pgid);
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM" || pidAlive(pgid);
+  }
+}
+
+const isPid = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
+
+/** A held install lock: released by its holder; the installer's pid is recorded in it while it runs. */
+export interface HeldInstallLock {
+  release(): Promise<void>;
+  /** Records the installer's pid (its process group), so the lock outlives a daemon that dies mid-install. */
+  recordInstaller(pid: number): Promise<void>;
+}
+
 /**
  * One lock file per install root (`<sha256(installRoot)>.lock`, directory 0700, file 0600, `open(…, "wx")`, `{ pid,
- * startedAt }` inside), so two daemons of the same OS user never run two installers on one install (Pitfall 5). A
- * lock whose pid is gone is taken over.
+ * startedAt }` inside, plus `installerPid` once the installer runs), so two daemons of the same OS user never run two
+ * installers on one install (Pitfall 5). A lock is taken over only when neither its daemon nor its installer's process
+ * group is alive: a daemon restarted mid-install waits for the orphaned installer (07.11 review HI-04).
  */
 export class InstallLock {
   constructor(private readonly dir: string) {}
 
-  async acquire(installRoot: string): Promise<{ release: () => Promise<void> } | "busy"> {
+  async acquire(installRoot: string): Promise<HeldInstallLock | "busy"> {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
     const st = await lstat(this.dir);
     if (!st.isDirectory()) throw new Error("the update lock directory is not a directory");
     await chmod(this.dir, 0o700);
     const file = join(this.dir, `${createHash("sha256").update(installRoot).digest("hex")}.lock`);
-    const token = JSON.stringify({
-      pid: process.pid,
-      startedAt: new Date().toISOString(),
-      nonce: randomUUID(),
-    });
+    const owner = { pid: process.pid, startedAt: new Date().toISOString(), nonce: randomUUID() };
+    let token = JSON.stringify(owner);
 
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -103,6 +121,16 @@ export class InstallLock {
             const current = await readFile(file, "utf8").catch(() => null);
             if (current === token) await unlink(file).catch(() => undefined);
           },
+          recordInstaller: async (installerPid: number) => {
+            const current = await readFile(file, "utf8").catch(() => null);
+            if (current !== token) return;
+            const next = JSON.stringify({ ...owner, installerPid });
+            // Replaced in one step (a reader never sees a half-written owner).
+            const tmp = `${file}.${owner.nonce}.tmp`;
+            await writeFile(tmp, next, { mode: 0o600 });
+            await rename(tmp, file);
+            token = next;
+          },
         };
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
@@ -116,13 +144,16 @@ export class InstallLock {
   private async isStale(file: string): Promise<boolean> {
     const content = await readFile(file, "utf8").catch(() => null);
     if (content === null) return false;
-    let pid: unknown;
+    let owner: { pid?: unknown; installerPid?: unknown } = {};
     try {
-      pid = (JSON.parse(content) as { pid?: unknown }).pid;
+      owner = JSON.parse(content) as { pid?: unknown; installerPid?: unknown };
     } catch {
-      pid = undefined;
+      owner = {};
     }
-    if (typeof pid === "number" && Number.isInteger(pid) && pid > 0) return !pidAlive(pid);
+    if (isPid(owner.pid)) {
+      if (pidAlive(owner.pid)) return false;
+      return !(isPid(owner.installerPid) && groupAlive(owner.installerPid));
+    }
     const st = await stat(file).catch(() => null);
     return st !== null && Date.now() - st.mtimeMs > UNREADABLE_LOCK_STALE_MS;
   }
@@ -243,6 +274,7 @@ function runChild(
   cwd: string,
   limits: ChildLimits,
   onChunk: (text: string) => void,
+  onSpawn: (pid: number) => void = () => undefined,
 ): Promise<ChildOutcome> {
   const { timeoutMs, killGraceMs, stdioGraceMs } = limits;
   return new Promise((resolve) => {
@@ -264,6 +296,7 @@ function runChild(
       resolve({ code: null, timedOut: false, spawnError: true, raw: "" });
       return;
     }
+    if (child.pid) onSpawn(child.pid);
     const collect = (chunk: Buffer) => {
       if (rawBytes >= MAX_RAW_OUTPUT_BYTES) return;
       rawBytes += chunk.byteLength;
@@ -355,6 +388,7 @@ export async function runUpdate(opts: RunUpdateOptions): Promise<RunResult> {
     await sleep(opts.lockRetryMs ?? LOCK_RETRY_MS);
     lock = await locks.acquire(input.installRoot);
   }
+  const held: HeldInstallLock = lock;
 
   try {
     // Fresh, under the lock: the binary may have moved, or another updater may already have done the work.
@@ -396,6 +430,10 @@ export async function runUpdate(opts: RunUpdateOptions): Promise<RunResult> {
         const last = lines[lines.length - 1];
         if (last) progress("running", last);
       },
+      // HI-04: the lock names the installer, so it is not taken over while the installer outlives this daemon.
+      (pid) => {
+        held.recordInstaller(pid).catch(() => undefined);
+      },
     );
     const output = sanitizeUpdateOutput(child.raw, [], home);
     if (child.spawnError) return failed(fromVersion, output, "the update command could not be started");
@@ -417,6 +455,6 @@ export async function runUpdate(opts: RunUpdateOptions): Promise<RunResult> {
     }
     return { outcome: "succeeded", fromVersion, toVersion, output };
   } finally {
-    await lock.release();
+    await held.release();
   }
 }

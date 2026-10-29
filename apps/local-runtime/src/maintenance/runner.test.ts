@@ -352,6 +352,77 @@ describe("runUpdate (Phase 07.11, PD-11)", () => {
     expect(readdirSync(lockDir())).toEqual([]);
   });
 
+  it("never takes over a lock whose daemon is gone while its installer still runs (07.11 review HI-04)", async () => {
+    const installer = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    try {
+      const root = "/some/install/root";
+      mkdirSync(lockDir(), { recursive: true, mode: 0o700 });
+      const file = join(lockDir(), `${createHash("sha256").update(root).digest("hex")}.lock`);
+      writeFileSync(
+        file,
+        JSON.stringify({
+          pid: 99_999_999,
+          installerPid: installer.pid,
+          startedAt: "2026-10-27T00:00:00.000Z",
+        }),
+        { mode: 0o600 },
+      );
+      const lock = new InstallLock(lockDir());
+      expect(await lock.acquire(root)).toBe("busy");
+      installer.kill("SIGKILL");
+      await waitFor(() => {
+        try {
+          process.kill(installer.pid ?? 0, 0);
+          return false;
+        } catch {
+          return true;
+        }
+      });
+      const held = await lock.acquire(root);
+      expect(held).not.toBe("busy");
+      if (held !== "busy") await held.release();
+    } finally {
+      installer.kill("SIGKILL");
+    }
+  });
+
+  it("records the installer's pid in the lock while it runs, so a restarted daemon waits for it (07.11 review HI-04)", async () => {
+    installFake("claude-native", home, "2.1.290");
+    writeFileSync(join(nativeRoot(), "fake-update.json"), JSON.stringify({ next: "2.1.300", delayMs: 800 }));
+    const pids: number[] = [];
+    const spawnFn = ((file: string, args: readonly string[], options: SpawnOptions) => {
+      const child = spawn(file, args, options);
+      if (child.pid) pids.push(child.pid);
+      return child;
+    }) as typeof spawn;
+    const run = runUpdate({
+      resolution: resolveClaude(),
+      candidate: "2.1.300",
+      lockDir: lockDir(),
+      home,
+      env,
+      spawnFn,
+    });
+    let recorded: { pid?: number; installerPid?: number } = {};
+    await waitFor(() => {
+      const [f] = existsSync(lockDir()) ? readdirSync(lockDir()) : [];
+      if (!f?.endsWith(".lock")) return false;
+      try {
+        recorded = JSON.parse(readFileSync(join(lockDir(), f), "utf8"));
+      } catch {
+        return false;
+      }
+      return typeof recorded.installerPid === "number";
+    });
+    expect(recorded.pid).toBe(process.pid);
+    expect(recorded.installerPid).toBe(pids[0]);
+    expect(await run).toMatchObject({ outcome: "succeeded" });
+    expect(readdirSync(lockDir())).toEqual([]);
+  });
+
   it("keeps the lock in a 0700 directory as a 0600 file and refuses a second holder", async () => {
     const lock = new InstallLock(lockDir());
     const held = await lock.acquire("/some/install/root");
