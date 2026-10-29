@@ -8,6 +8,7 @@
 import { readFile, realpath } from "node:fs/promises";
 import { homedir, hostname, userInfo } from "node:os";
 import { join, resolve } from "node:path";
+import { createInterface, type Interface } from "node:readline/promises";
 import { ensureOcwHome, type LocalProject, loadConfig, loadDeviceToken, ProjectRegistry } from "./config.js";
 import { controlRequest, controlSocketPath } from "./control-socket.js";
 import { toDeviceTokenUrl } from "./daemon.js";
@@ -225,22 +226,21 @@ async function setupSteps(args: SetupArgs, deps: SetupDeps): Promise<number> {
     deps.err(message);
     throw new SetupStop(code);
   };
+  const interactive = deps.isTTY && !args.yes;
+  /** One question; an empty answer takes the default shown in brackets. */
+  const ask = async (question: string, fallback?: string): Promise<string> => {
+    const answer = (await deps.prompt(fallback ? `${question} (${fallback}): ` : `${question}: `)).trim();
+    return answer || fallback || "";
+  };
   const before = await deps.pairedState();
 
-  // 1. The server URL: flag, OCW_SERVER_URL, install.json, runtime.json.
+  // Checked up front, so a script never pairs and then stops: what cannot be asked must be given as a flag.
   const fallback =
     deps.env.OCW_SERVER_URL || (await deps.installInfo())?.serverUrl || before.serverUrl || undefined;
-  const rawServer = args.server ?? fallback;
-  if (!rawServer) stop(2, "ocw-runtime setup: no server URL: pass --server <url>");
-  // 2 (checked up front so a script never pairs and then stops): how the runtime keeps running.
-  if (!args.service && !args.yes) {
+  if (!args.server && !fallback && !deps.isTTY)
+    stop(2, "ocw-runtime setup: no server URL: pass --server <url>");
+  if (!args.service && !args.yes && !deps.isTTY) {
     stop(2, "ocw-runtime setup: pass --service user|system|none (or --yes)");
-  }
-  let server: string;
-  try {
-    server = normalizeServerUrl(rawServer as string);
-  } catch {
-    return stop(2, `ocw-runtime setup: not a URL: ${JSON.stringify(rawServer)}`);
   }
   if (args.service === "system") {
     // A system unit runs as a named account, but setup pairs the account that runs it, and only root installs the
@@ -261,17 +261,36 @@ async function setupSteps(args: SetupArgs, deps: SetupDeps): Promise<number> {
       );
     }
   }
+
+  // 1. The server URL: flag, OCW_SERVER_URL, install.json, runtime.json; asked on a terminal (the default shown).
+  let rawServer = args.server;
+  if (!rawServer) {
+    rawServer = interactive || !fallback ? await ask("Workspace server URL", fallback) : fallback;
+    if (!rawServer) stop(2, "ocw-runtime setup: no server URL: pass --server <url>");
+  }
+  let server: string;
+  try {
+    server = normalizeServerUrl(rawServer as string);
+  } catch {
+    return stop(2, `ocw-runtime setup: not a URL: ${JSON.stringify(rawServer)}`);
+  }
   // Before pairing: a runtime already running unpaired never picks up the new token (RESEARCH Pitfall 7).
   const daemonBefore = await deps.daemonStatus();
 
-  // 2. Pairing: skipped when the server accepts this device's token.
+  // 2. Pairing: skipped when the server accepts this device's token; a revoked token is re-paired only after a
+  // confirmation (or --yes); a token valid on another server is never silently replaced (T-07.12-08-01).
   const token = await deps.token();
   let paired: PairedState = before;
-  let pairedNow = false;
+  let pairNow = !token;
   if (token) {
     const at = before.serverUrl ? normalizeServerUrl(before.serverUrl) : server;
     const state = await deps.tokenCheck(at, token);
-    if (state === "valid") {
+    if (state === "valid" && at !== server) {
+      stop(
+        1,
+        `This device is paired with ${at}. Revoke it in Settings › Devices first, then run setup with --server ${server}.`,
+      );
+    } else if (state === "valid") {
       const name = before.deviceName ?? deps.hostname();
       const owner = before.pairedWith
         ? ` (${before.pairedWith.organization}, owned by ${before.pairedWith.owner})`
@@ -280,16 +299,29 @@ async function setupSteps(args: SetupArgs, deps: SetupDeps): Promise<number> {
     } else if (state === "unreachable") {
       stop(
         1,
-        `Could not reach ${at} to check this device's pairing: check the URL and the network, then re-run setup.`,
+        at === server
+          ? `Could not reach ${at} to check this device's pairing: check the URL and the network, then re-run setup.`
+          : `This device is paired with ${at}, which did not answer. Revoke it in Settings › Devices first (or, if ` +
+              `that server is gone for good, delete ${tilde(deps.home, deps.userHome)}/device-token), then run setup with --server ${server}.`,
       );
+    } else if (args.yes) {
+      deps.out("This device's pairing was revoked: pairing it again.");
+      pairNow = true;
+    } else if (!deps.isTTY) {
+      stop(2, "ocw-runtime setup: this device's pairing was revoked: pass --yes to pair it again.");
     } else {
-      pairedNow = true;
+      const answer = (await deps.prompt("This device's pairing was revoked. Pair it again? [Y/n] ")).trim();
+      if (answer !== "" && !/^y(es)?$/i.test(answer)) {
+        stop(1, "This device stays unpaired: run `ocw-runtime setup` again to pair it.");
+      }
+      pairNow = true;
     }
-  } else {
-    pairedNow = true;
   }
-  if (pairedNow) {
-    const name = proposedDeviceName(args.name ?? deps.hostname());
+  if (pairNow) {
+    const proposed = proposedDeviceName(deps.hostname());
+    const name = proposedDeviceName(
+      args.name ?? (interactive ? await ask("Device name", proposed) : proposed),
+    );
     let result: EnrollResult;
     try {
       result = await deps.pair({ serverUrl: server, name });
@@ -309,8 +341,16 @@ async function setupSteps(args: SetupArgs, deps: SetupDeps): Promise<number> {
     };
   }
 
-  // 3. Projects (idempotent).
-  for (const dir of args.projects) {
+  // 3. Projects (idempotent); asked on a terminal until an empty answer.
+  const dirs = [...args.projects];
+  if (interactive && dirs.length === 0) {
+    for (;;) {
+      const dir = (await deps.prompt("Path of a repository to register (empty to finish): ")).trim();
+      if (!dir) break;
+      dirs.push(dir);
+    }
+  }
+  for (const dir of dirs) {
     let added: { project: LocalProject; added: boolean };
     try {
       added = await deps.registry.add(dir);
@@ -326,7 +366,7 @@ async function setupSteps(args: SetupArgs, deps: SetupDeps): Promise<number> {
   }
 
   // 4. Service.
-  await serviceStep(args, deps, daemonBefore, stop);
+  await serviceStep(args, deps, daemonBefore, stop, interactive);
 
   // 5. Doctor: printed; its findings never change setup's exit code.
   await runDoctorStep(deps);
@@ -358,18 +398,23 @@ async function serviceStep(
   deps: SetupDeps,
   daemonBefore: DaemonView | null,
   stop: (code: number, message: string) => never,
+  interactive: boolean,
 ): Promise<void> {
   const ranUnpaired = daemonBefore !== null && !daemonBefore.paired;
   let choice = args.service;
   let detected: DetectedManager | null = null;
   if (!choice) {
     detected = await deps.service.detect();
-    if (!detected.available || detected.kind === "none") {
+    const usable = detected.available && detected.kind !== "none";
+    if (interactive) {
+      choice = await askService(deps, usable ? "user" : "none", stop);
+    } else if (!usable) {
       deps.out(`No service installed: ${detected.reason ?? SUPERVISOR_FALLBACK}.`);
       if (ranUnpaired) deps.out(RESTART_NOTE);
       return;
+    } else {
+      choice = "user";
     }
-    choice = "user";
   }
   if (choice === "none") {
     deps.out(`No service installed: ${SUPERVISOR_FALLBACK}.`);
@@ -410,6 +455,20 @@ async function serviceStep(
     }
   }
   deps.out(NEXT_STEPS);
+}
+
+/** "Run as a service? [user/none]" (a system unit is flag-only); three unreadable answers stop with the flag. */
+async function askService(
+  deps: SetupDeps,
+  fallback: "user" | "none",
+  stop: (code: number, message: string) => never,
+): Promise<"user" | "none"> {
+  for (let i = 0; i < 3; i++) {
+    const answer = (await deps.prompt(`Run as a service? [user/none] (${fallback}): `)).trim().toLowerCase();
+    const choice = answer || fallback;
+    if (choice === "user" || choice === "none") return choice;
+  }
+  return stop(2, "ocw-runtime setup: answer user or none, or pass --service user|system|none");
 }
 
 async function runDoctorStep(deps: SetupDeps): Promise<void> {
@@ -472,11 +531,51 @@ async function readPairedState(home: string): Promise<PairedState> {
   };
 }
 
+export interface TerminalPrompter {
+  prompt: (question: string) => Promise<string>;
+  /** Closes the interface (if it was ever opened), releasing stdin. */
+  close: () => void;
+  opened: () => boolean;
+}
+
+/**
+ * The terminal's questions through the promise-based readline: the interface is created on the first question only (a
+ * script never touches stdin) and closed once setup ends. Ctrl-C at a prompt calls `onInterrupt` (the CLI aborts).
+ */
+export function terminalPrompter(io: {
+  input: NodeJS.ReadableStream;
+  output: NodeJS.WritableStream;
+  onInterrupt: () => void;
+  signal?: AbortSignal;
+}): TerminalPrompter {
+  let rl: Interface | null = null;
+  return {
+    prompt: (question) => {
+      if (!rl) {
+        rl = createInterface({ input: io.input, output: io.output });
+        rl.on("SIGINT", io.onInterrupt);
+      }
+      return io.signal ? rl.question(question, { signal: io.signal }) : rl.question(question);
+    },
+    close: () => {
+      rl?.close();
+      rl = null;
+    },
+    opened: () => rl !== null,
+  };
+}
+
 /** The real dependencies; `cancel()` aborts a pending pairing (the CLI calls it on SIGINT). */
 export function defaultSetupDeps(home: string): SetupDeps & { cancel: () => void } {
   const controller = new AbortController();
   const env = process.env;
   const socket = controlSocketPath(home);
+  const terminal = terminalPrompter({
+    input: process.stdin,
+    output: process.stdout,
+    onInterrupt: () => controller.abort(),
+    signal: controller.signal,
+  });
   return {
     home,
     userHome: homedir(),
@@ -485,9 +584,7 @@ export function defaultSetupDeps(home: string): SetupDeps & { cancel: () => void
     account: userInfo().username,
     uid: typeof process.getuid === "function" ? process.getuid() : -1,
     hostname: () => hostname().replace(/\.local$/, ""),
-    prompt: async () => {
-      throw new Error("prompts need a terminal");
-    },
+    prompt: (question) => terminal.prompt(question),
     out: (line) => process.stdout.write(`${line}\n`),
     err: (line) => process.stderr.write(`${line}\n`),
     installInfo: () => readInstallInfo(home),
@@ -543,6 +640,7 @@ export function defaultSetupDeps(home: string): SetupDeps & { cancel: () => void
       }
     },
     signal: controller.signal,
+    close: () => terminal.close(),
     cancel: () => controller.abort(),
   };
 }

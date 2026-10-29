@@ -1,12 +1,20 @@
 // `ocw-runtime setup` (07.12-08, HSR-02, D-02, D-06, D-14, PD-13). Every dependency is a fake: no real pairing, server,
 // service manager, daemon or `~/.ocw` (PD-19). The CLI half (a spawned `ocw-runtime setup`) lives in cli.test.ts.
 
+import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import type { DoctorReport } from "./doctor.js";
 import type { EnrollResult } from "./enroll.js";
 import { PairingCancelledError, PairingError } from "./pair.js";
 import type { InstallResult } from "./service/index.js";
-import { parseSetupArgs, runSetup, type SetupArgs, type SetupDeps, SetupUsageError } from "./setup.js";
+import {
+  parseSetupArgs,
+  runSetup,
+  type SetupArgs,
+  type SetupDeps,
+  SetupUsageError,
+  terminalPrompter,
+} from "./setup.js";
 
 const SERVER = "https://ocw.example.com";
 const WEB = "https://app.example.com";
@@ -395,5 +403,165 @@ describe("runSetup: the service step (07.12-08, D-04, D-14, PD-13, RESEARCH Pitf
   it("parseSetupArgs: --service system without --user-name names --user-name", () => {
     expect(() => parseSetupArgs(["--service", "system"])).toThrow(/--user-name/);
     expect(() => parseSetupArgs(["--user-name", "alice"])).toThrow(/--service system/);
+  });
+});
+
+describe("runSetup: prompts on a terminal, flags everywhere else (07.12-08, D-02, PD-13)", () => {
+  const OTHER = "https://other.example.com";
+
+  it("a terminal with no flags asks the server, the name, the repositories and the service, with defaults", async () => {
+    const h = harness({
+      isTTY: true,
+      installInfo: async () => ({
+        serverUrl: SERVER,
+        version: "0.1.0",
+        sha256: "a".repeat(64),
+        installedAt: "2026-10-29T00:00:00.000Z",
+        nodePath: "/usr/bin/node",
+      }),
+      answers: ["", "", `${USER_HOME}/repo`, `${USER_HOME}/api`, "", ""],
+    });
+    expect(await runSetup(parseSetupArgs([]), h.deps)).toBe(0);
+    expect(h.prompts).toEqual([
+      `Workspace server URL (${SERVER}): `,
+      "Device name (box-7): ",
+      "Path of a repository to register (empty to finish): ",
+      "Path of a repository to register (empty to finish): ",
+      "Path of a repository to register (empty to finish): ",
+      "Run as a service? [user/none] (user): ",
+    ]);
+    expect(h.calls).toEqual([
+      "token",
+      `pair ${SERVER} box-7`,
+      `add ${USER_HOME}/repo`,
+      `add ${USER_HOME}/api`,
+      "service.detect",
+      "service.install systemd-user",
+      "doctor",
+    ]);
+  });
+
+  it("typed answers drive the same steps as the flags; no manager makes `none` the default", async () => {
+    const h = harness({ isTTY: true, answers: [OTHER, "rack-9", "", "nope", "none"] });
+    h.deps.service.detect = async () => ({ kind: "none", available: false, reason: "no manager" });
+    expect(await runSetup(parseSetupArgs([]), h.deps)).toBe(0);
+    expect(h.prompts).toEqual([
+      "Workspace server URL: ",
+      "Device name (box-7): ",
+      "Path of a repository to register (empty to finish): ",
+      "Run as a service? [user/none] (none): ",
+      "Run as a service? [user/none] (none): ",
+    ]);
+    expect(h.calls).toContain(`pair ${OTHER} rack-9`);
+    expect(h.calls.some((c) => c.startsWith("service.install"))).toBe(false);
+  });
+
+  it("flags given on a terminal are not asked again, and --yes asks nothing", async () => {
+    const tty = harness({ isTTY: true, answers: [] });
+    expect(await runSetup(flagsArgs(), tty.deps)).toBe(0);
+    expect(tty.prompts).toEqual([]);
+    const partial = harness({ isTTY: true, answers: [""] });
+    expect(await runSetup(flagsArgs({ yes: false, service: undefined }), partial.deps)).toBe(0);
+    expect(partial.prompts).toEqual(["Run as a service? [user/none] (user): "]);
+  });
+
+  it("no terminal: a missing server or service stops before anything runs, naming the flag (exit 2)", async () => {
+    const noServer = harness();
+    expect(await runSetup({ yes: true, projects: [], service: "none" }, noServer.deps)).toBe(2);
+    expect(noServer.stderr.join("\n")).toContain("pass --server <url>");
+    expect(noServer.calls).toEqual([]);
+
+    const noService = harness();
+    expect(await runSetup({ yes: false, projects: [], server: SERVER }, noService.deps)).toBe(2);
+    expect(noService.stderr.join("\n")).toContain("pass --service user|system|none (or --yes)");
+    expect(noService.calls).toEqual([]);
+  });
+
+  it("the server falls back to OCW_SERVER_URL, then install.json, then runtime.json", async () => {
+    const env = harness({ env: { OCW_SERVER_URL: OTHER } });
+    expect(await runSetup(flagsArgs({ server: undefined }), env.deps)).toBe(0);
+    expect(env.calls).toContain(`pair ${OTHER} rack-1`);
+    const recorded = harness();
+    recorded.state.paired = { serverUrl: OTHER };
+    expect(await runSetup(flagsArgs({ server: undefined }), recorded.deps)).toBe(0);
+    expect(recorded.calls).toContain(`pair ${OTHER} rack-1`);
+  });
+
+  it("a revoked pairing: a terminal asks before pairing again, --yes re-pairs, `n` stops, no terminal names --yes", async () => {
+    const revoked = (over: Parameters<typeof harness>[0] = {}) => {
+      const h = harness(over);
+      h.state.token = "dt_old";
+      h.state.tokenState = "revoked";
+      h.state.paired = { serverUrl: SERVER, deviceName: "rack-1" };
+      return h;
+    };
+    const ask = revoked({ isTTY: true, answers: [""] });
+    expect(await runSetup(flagsArgs({ yes: false }), ask.deps)).toBe(0);
+    expect(ask.prompts).toEqual(["This device's pairing was revoked. Pair it again? [Y/n] "]);
+    expect(ask.calls).toContain(`pair ${SERVER} rack-1`);
+
+    const yes = revoked();
+    expect(await runSetup(flagsArgs(), yes.deps)).toBe(0);
+    expect(yes.prompts).toEqual([]);
+    expect(yes.calls).toContain(`pair ${SERVER} rack-1`);
+
+    const no = revoked({ isTTY: true, answers: ["n"] });
+    expect(await runSetup(flagsArgs({ yes: false }), no.deps)).toBe(1);
+    expect(no.calls.some((c) => c.startsWith("pair"))).toBe(false);
+
+    const script = revoked();
+    expect(await runSetup(flagsArgs({ yes: false }), script.deps)).toBe(2);
+    expect(script.stderr.join("\n")).toContain("pass --yes");
+    expect(script.calls.some((c) => c.startsWith("pair"))).toBe(false);
+  });
+
+  it("--server different from the paired server while the token is valid there: refused, nothing re-paired", async () => {
+    const h = harness();
+    h.state.token = "dt_old";
+    h.state.tokenState = "valid";
+    h.state.paired = { serverUrl: SERVER, deviceName: "rack-1" };
+    expect(await runSetup(flagsArgs({ server: OTHER }), h.deps)).toBe(1);
+    expect(h.stderr).toContain(
+      `This device is paired with ${SERVER}. Revoke it in Settings › Devices first, then run setup with --server ${OTHER}.`,
+    );
+    expect(h.calls).toEqual(["token", `tokenCheck ${SERVER}`]);
+
+    const gone = harness();
+    gone.state.token = "dt_old";
+    gone.state.tokenState = "revoked";
+    gone.state.paired = { serverUrl: SERVER };
+    expect(await runSetup(flagsArgs({ server: OTHER }), gone.deps)).toBe(0);
+    expect(gone.calls).toContain(`pair ${OTHER} rack-1`);
+  });
+
+  it("Ctrl-C at a prompt ends with exit 130", async () => {
+    const controller = new AbortController();
+    const h = harness({
+      isTTY: true,
+      signal: controller.signal,
+      prompt: async () => {
+        controller.abort();
+        throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
+      },
+    });
+    expect(await runSetup(parseSetupArgs([]), h.deps)).toBe(130);
+    expect(h.stderr).toContain("Setup cancelled.");
+    expect(h.calls).toEqual([]);
+  });
+});
+
+describe("terminalPrompter (07.12-08, PD-13: readline only on a terminal)", () => {
+  it("opens the interface on the first question only, answers from the input, and closes it", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.resume();
+    const p = terminalPrompter({ input, output, onInterrupt: () => undefined });
+    expect(p.opened()).toBe(false);
+    const answer = p.prompt("Name: ");
+    input.write("rack-3\n");
+    expect(await answer).toBe("rack-3");
+    expect(p.opened()).toBe(true);
+    p.close();
+    expect(p.opened()).toBe(false);
   });
 });
