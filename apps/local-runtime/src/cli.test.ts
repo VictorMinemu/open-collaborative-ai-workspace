@@ -919,10 +919,16 @@ describe("ocw-runtime doctor and service (07.12-08, D-04, D-05)", () => {
       ...env,
       PATH: `${fakes}:/usr/bin:/bin`,
     });
-    expect([0, 1]).toContain(r.code);
-    const status = JSON.parse(r.stdout) as { manager: string; active: boolean | null };
-    expect(["systemd-user", "systemd-system", "launchd", "none"]).toContain(status.manager);
-    expect(status.active).not.toBe(true);
+    if (process.getuid?.() === 0) {
+      // CI containers run as root, where every `service` command stops before touching a manager (HI-01).
+      expect(r.code).toBe(1);
+      expect(r.stdout).toContain("ocw-runtime does not run as root");
+    } else {
+      expect([0, 1]).toContain(r.code);
+      const status = JSON.parse(r.stdout) as { manager: string; active: boolean | null };
+      expect(["systemd-user", "systemd-system", "launchd", "none"]).toContain(status.manager);
+      expect(status.active).not.toBe(true);
+    }
     expect(readdirSync(markers)).toEqual([]);
 
     const usage = await cliAsync(home, ["service"], env);
