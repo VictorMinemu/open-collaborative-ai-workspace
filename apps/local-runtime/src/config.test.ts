@@ -171,3 +171,43 @@ describe("Runtime updates level on this device (07.11, D-02)", () => {
     });
   });
 });
+
+describe("pairing records in runtime.json (07.12, D-06, PD-09)", () => {
+  it("loads a runtime.json written before 07.12 unchanged (no deviceId, webUrl or pairedWith)", async () => {
+    const h = home();
+    writeFileSync(
+      join(h, "runtime.json"),
+      JSON.stringify({ serverUrl: "https://ocw.example.com", deviceName: "build-01" }),
+    );
+    const config = await loadConfig(h, {});
+    expect(config.serverUrl).toBe("https://ocw.example.com");
+    expect(config.deviceName).toBe("build-01");
+    expect(config.deviceId).toBeUndefined();
+    expect(config.webUrl).toBeUndefined();
+    expect(config.pairedWith).toBeUndefined();
+  });
+
+  it("keeps deviceId, webUrl and pairedWith when pairing wrote them", async () => {
+    const h = home();
+    const pairing = {
+      deviceId: "0199f0a0-0000-7000-8000-000000000001",
+      webUrl: "https://ocw.example.com",
+      pairedWith: { organization: "Acme", owner: "Ada Lovelace", at: "2026-10-29T10:00:00.000Z" },
+    };
+    writeFileSync(
+      join(h, "runtime.json"),
+      JSON.stringify({ serverUrl: "https://api.ocw.example.com", ...pairing }),
+    );
+    expect(await loadConfig(h, {})).toMatchObject(pairing);
+  });
+
+  it("refuses a webUrl that is not a URL, like any other invalid key", async () => {
+    const h = home();
+    writeFileSync(join(h, "runtime.json"), JSON.stringify({ webUrl: "settings/devices" }));
+    await expect(loadConfig(h, {})).rejects.toThrow();
+    writeFileSync(join(h, "runtime.json"), JSON.stringify({ deviceId: "build-01" }));
+    await expect(loadConfig(h, {})).rejects.toThrow();
+    writeFileSync(join(h, "runtime.json"), JSON.stringify({ pairedWith: { organization: "Acme" } }));
+    await expect(loadConfig(h, {})).rejects.toThrow();
+  });
+});
