@@ -796,6 +796,42 @@ itself, above all shared servers that nobody watches:
    device shows only the CLI versions, and the "older than supported" flag when it applies: no install method, no
    status pill, no Update now, no History.
 
+## Headless Work Zone server (Phase 07.12)
+
+Phase 07.12 (ADR-0033). A Linux or macOS machine runs Work Zone sessions without the desktop app
+([SERVER.md](SERVER.md)):
+
+- **Install from your workspace.** Settings › Devices › Add a device › **Server** shows
+  `curl -fsSL <api>/api/v1/runtime/install.sh | sh`. The API serves the runtime built into its image; the script checks
+  its SHA-256, installs the Claude Agent SDK beside it from npm (never served by the workspace) and writes only under
+  `~/.ocw` and `~/.local/bin`.
+- **Pair from the terminal.** `ocw-runtime setup` prints a link and a code. You open it signed in (a phone works), check
+  the code, name the device and press Approve. The server becomes one of your devices.
+- **Run it as a service.** `setup` installs a systemd user unit (with the `loginctl enable-linger` line), a system unit
+  for a named account, or a macOS LaunchAgent. `ocw-runtime doctor` checks 13 things with one fix line each.
+- **Share it in the web.** Share the server with members and teams in Settings › Devices, or link its repositories to
+  a team project. In **New session**, "Run sessions on a server" leads to the Server tab.
+
+**Owner check** (never run by an agent: they install real services and run the real vendors' CLIs; record each result
+in `.planning/phases/07.12-headless-work-zone-server/07.12-VALIDATION.md` › Manual-Only Verifications):
+
+1. **A real Linux VM, from New session.** In the web, open **New session** and click **Run sessions on a server**: it
+   opens Settings › Devices › Add a device on the **Server** tab. On a Linux VM with Node 24 and git, as a normal
+   account, run the install command it shows, then `ocw-runtime setup` with one cloned repository and
+   `--service user` (and `sudo loginctl enable-linger <account>` if it asks). Open the printed link on your phone,
+   check the code and approve. Back in **New session**, the server appears as a device with its repository.
+2. **Reboot.** Reboot the VM and do not log in: the device comes back online in Settings › Devices (lingering).
+3. **Restart on failure.** Kill the runtime (`pkill -f ocw-runtime.mjs`): systemd starts it again within seconds and
+   the device returns online (`ocw-runtime service logs` shows the restart).
+4. **Real turns by a member.** Install Claude Code and Codex as the server's account and sign in with the headless
+   lines the doctor prints (`claude auth login` or `claude setup-token` with `~/.ocw/service.env`;
+   `codex login --device-auth`). Share the server with a second member (e.g. Marta). As Marta, start a Claude Code
+   session and a Codex session on it from New session: each answers a real turn.
+5. **A Mac server.** On a Mac with automatic login for its account, install, `ocw-runtime setup --service user`
+   (LaunchAgent) and approve. Reboot: the device comes back online.
+6. **A safe doctor.** Paste the output of `ocw-runtime doctor` from the Linux VM into a draft issue: it shows no token,
+   no service.env value and no absolute path outside the home.
+
 ## Troubleshooting
 
 | Symptom | Fix |

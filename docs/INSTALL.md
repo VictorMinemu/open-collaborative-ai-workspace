@@ -204,6 +204,14 @@ Settings, limits, network modes, sandbox packages and sign-ins are explained in
 [self-hosting/sandbox.md](self-hosting/sandbox.md); the gVisor install, rootless Docker, a Docker authorization plugin
 and XFS project quotas in [infra/sandbox/README.md](../infra/sandbox/README.md).
 
+## Work Zone servers (no desktop app)
+
+A Linux or macOS machine can run Work Zone sessions for the team without the desktop app. Your workspace serves the
+Local Runtime and its installer (`/api/v1/runtime/install.sh`, shown in Settings › Devices › Add a device › Server).
+On the server, `ocw-runtime setup` pairs it with a code you approve in the web, registers repositories and installs a
+systemd or launchd service; `ocw-runtime doctor` checks it. You then share the server with members and teams in
+Settings › Devices. Requirements, sign-ins, the service, proxies and troubleshooting: [SERVER.md](SERVER.md).
+
 ## Keep Claude Code and Codex up to date on devices
 
 The Local Runtime on each device (desktop app or headless daemon) keeps the Claude Code and Codex CLIs it drives up to
