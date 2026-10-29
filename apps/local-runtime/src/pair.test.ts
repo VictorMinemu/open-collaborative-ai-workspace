@@ -341,6 +341,10 @@ describe("pairByDeviceCode (07.12, D-03, PD-06)", () => {
     for (const [url, warned] of [
       ["http://ocw.lan:4000", true],
       ["http://127.0.0.1:4000", false],
+      ["http://127.8.9.10:4000", false],
+      // Public DNS names that only start like a loopback address (LO-03).
+      ["http://127.0.0.1.nip.io:4000", true],
+      ["http://127.evil.example", true],
       ["http://localhost:4000", false],
       ["https://ocw.example.com", false],
     ] as const) {

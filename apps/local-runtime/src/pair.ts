@@ -90,7 +90,8 @@ export function isPlainHttpToNetwork(serverUrl: string): boolean {
   const url = new URL(serverUrl);
   if (url.protocol !== "http:") return false;
   const host = url.hostname.toLowerCase();
-  return !(LOOPBACK_HOSTS.has(host) || host.startsWith("127.") || host.endsWith(".localhost"));
+  // A numeric 127/8 address only: `127.0.0.1.nip.io` is a public DNS name (07.12 review LO-03).
+  return !(LOOPBACK_HOSTS.has(host) || /^127(\.\d{1,3}){3}$/.test(host) || host.endsWith(".localhost"));
 }
 
 type PollOutcome =

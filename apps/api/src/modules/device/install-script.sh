@@ -55,9 +55,16 @@ host_of() {
   printf '%s' "${_h%%:*}"
 }
 
+# localhost, or a numeric IPv4 address in 127/8 (not a DNS name such as 127.0.0.1.nip.io that only starts like one).
 is_loopback() {
   case $1 in
-    localhost | 127.*) return 0 ;;
+    localhost) return 0 ;;
+    127.*)
+      case $1 in
+        *[!0-9.]* | *..* | *.) return 1 ;;
+      esac
+      return 0
+      ;;
   esac
   return 1
 }

@@ -446,6 +446,15 @@ describe("install.sh run with sh in a scratch HOME (07.12-06, D-01, D-10, PD-04,
     expect(res.stderr).toContain("plain http to a non-loopback host");
     expectNothingWritten(refused);
 
+    // Public DNS names that only start like 127/8 are not loopback (LO-03).
+    for (const lookalike of ["http://127.0.0.1.nip.io:4000", "http://127.evil.example"]) {
+      const c = await newCase();
+      const r = await install(c, script, { OCW_SERVER_URL: lookalike });
+      expect(r.code, lookalike).not.toBe(0);
+      expect(r.stderr, lookalike).toContain("plain http to a non-loopback host");
+      expectNothingWritten(c);
+    }
+
     // The rule applies to OCW_SERVER_URL too. With the flag the script goes on to the download: 0.0.0.0:1 never
     // leaves this machine and refuses the connection at once.
     const viaEnv = await newCase();
