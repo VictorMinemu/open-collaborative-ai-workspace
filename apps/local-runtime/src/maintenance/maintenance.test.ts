@@ -845,6 +845,55 @@ describe('RuntimeMaintenance: "Update now" (D-05, PD-08)', () => {
     ]);
   });
 
+  it.each<[string, (h: Harness) => void]>([
+    ["the device turns updates off", (h) => h.m.setLocalLevel("off", "config")],
+    ["the organization turns them off", (h) => h.m.setOrgPolicy("off", RUNTIME_COMPATIBILITY_MANIFEST)],
+  ])(
+    "an accepted Update now that has not run is cancelled when %s: gate reopened, request closed (07.11 review ME-04)",
+    async (_name, turnOff) => {
+      const h = harness({ drainPollMs: 5 });
+      h.m.setOrgPolicy("notify", RUNTIME_COMPATIBILITY_MANIFEST);
+      h.m.start({ paired: true });
+      await flush();
+      h.adapter.turns = 1;
+      const commandId = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
+      expect(await h.m.requestUpdate("claude-code", "manual", commandId)).toEqual({ accepted: true });
+      await flush();
+      expect(claudeStatus(h).state).toBe("draining");
+      expect(h.gate.isOpen).toBe(false);
+      turnOff(h);
+      expect(h.gate.isOpen).toBe(true);
+      expect(h.runFrames).toEqual([
+        expect.objectContaining({ phase: "finished", outcome: "failed", trigger: "manual", commandId }),
+      ]);
+      expect(h.runFrames[0]?.output).toContain("cancelled: updates are off");
+      expect(h.notified).toEqual([["claude-code", "done", "2.1.290"]]);
+      expect(h.heldLocks.size).toBe(0);
+      h.adapter.turns = 0;
+      await realWait(30);
+      await flush();
+      expect(h.runs).toEqual([]);
+    },
+  );
+
+  it("stopping the daemon closes an accepted Update now that never ran (07.11 review ME-04)", async () => {
+    const h = harness({ drainPollMs: 5 });
+    h.m.setOrgPolicy("notify", RUNTIME_COMPATIBILITY_MANIFEST);
+    h.m.start({ paired: true });
+    await flush();
+    h.adapter.turns = 1;
+    const commandId = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
+    expect(await h.m.requestUpdate("claude-code", "manual", commandId)).toEqual({ accepted: true });
+    await flush();
+    h.m.stop();
+    expect(h.gate.isOpen).toBe(true);
+    expect(h.runFrames).toEqual([
+      expect.objectContaining({ phase: "finished", outcome: "failed", commandId }),
+    ]);
+    expect(h.runFrames[0]?.output).toContain("cancelled: the runtime stopped");
+    expect(h.heldLocks.size).toBe(0);
+  });
+
   it("a local request carries trigger local and no command id", async () => {
     const h = harness();
     h.m.start({ paired: false });

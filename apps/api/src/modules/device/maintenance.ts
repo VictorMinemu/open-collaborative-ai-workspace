@@ -18,7 +18,7 @@ import {
   scrubHostPaths,
 } from "@ocw/contracts";
 import { type deviceCommands, deviceRuntimeUpdates, devices, type Tx } from "@ocw/db";
-import { and, desc, eq, isNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { conflict, notFound } from "../../lib/errors";
@@ -52,6 +52,13 @@ type CommandRow = typeof deviceCommands.$inferSelect;
 
 /** "Update now" waits at most this long for the device's answer before a new request may replace it (PD-04). */
 export const RUNTIME_UPDATE_REQUEST_TTL_MS = 60 * 60_000;
+/**
+ * A run `started` longer ago than this without its `finished` frame can no longer be running (a run is bounded at a
+ * few minutes on the device): the device died or restarted mid-install. Its row is closed as failed (07.11 review
+ * ME-04); a late `finished` frame from the device's offline log still records the real outcome.
+ */
+export const RUNTIME_UPDATE_RUN_ABANDON_MS = 30 * 60_000;
+export const RUN_INTERRUPTED = "interrupted: the device never reported how this update ended";
 const REQUESTED_UQ = "device_runtime_updates_requested_uq";
 const RUNTIME_LABEL: Readonly<Record<RuntimeId, string>> = { "claude-code": "Claude Code", codex: "Codex" };
 
@@ -267,7 +274,59 @@ export async function onRuntimeMaintenance(
       source: frame.localLevelSource,
     });
   }
+  await closeAbandonedRuns(tx, deps, device);
   await pingOrg(tx, deps, device, locked.status);
+}
+
+/**
+ * 07.11 review ME-04: this device's runs `started` more than `RUNTIME_UPDATE_RUN_ABANDON_MS` ago and never finished
+ * are closed as failed (`interrupted`), audited as finished with `result: "error"` by the system. Checked at every
+ * snapshot (the handshake carries one on every connect).
+ */
+async function closeAbandonedRuns(tx: Tx, deps: MaintenanceDeps, device: DeviceRef): Promise<void> {
+  const closed = await tx
+    .update(deviceRuntimeUpdates)
+    .set({ state: "failed", error: RUN_INTERRUPTED, finishedAt: sql`now()` })
+    .where(
+      and(
+        eq(deviceRuntimeUpdates.deviceId, device.deviceId),
+        eq(deviceRuntimeUpdates.state, "started"),
+        lt(
+          deviceRuntimeUpdates.startedAt,
+          new Date(Date.now() - RUNTIME_UPDATE_RUN_ABANDON_MS).toISOString(),
+        ),
+      ),
+    )
+    .returning();
+  for (const row of closed) {
+    await auditDevice(
+      tx,
+      deps,
+      device,
+      "device.runtime_update_finished",
+      { actorKind: "system", actorId: null, userId: null },
+      runMetadata(row),
+      "error",
+    );
+  }
+}
+
+/** PD-04: this device's "Update now" requests the device never answered within the hour become `expired`. */
+async function expireRequests(tx: Tx, deviceId: string, runtime?: RuntimeId): Promise<void> {
+  await tx
+    .update(deviceRuntimeUpdates)
+    .set({ state: "expired", finishedAt: sql`now()` })
+    .where(
+      and(
+        eq(deviceRuntimeUpdates.deviceId, deviceId),
+        ...(runtime ? [eq(deviceRuntimeUpdates.runtime, runtime)] : []),
+        eq(deviceRuntimeUpdates.state, "requested"),
+        lt(
+          deviceRuntimeUpdates.requestedAt,
+          new Date(Date.now() - RUNTIME_UPDATE_REQUEST_TTL_MS).toISOString(),
+        ),
+      ),
+    );
 }
 
 const byRunId = (device: DeviceRef, runId: string) =>
@@ -351,12 +410,22 @@ async function runFinished(
     candidate: frame.candidate,
     method: frame.method,
     output: frame.output === undefined ? null : scrubHostPaths(frame.output).slice(0, 4096),
+    error: null,
     finishedAt: frame.at,
   };
+  // A run closed as interrupted (ME-04) still takes the device's real outcome when its frame arrives late.
   const [closed] = await tx
     .update(deviceRuntimeUpdates)
     .set(finished)
-    .where(and(byRunId(device, frame.runId), eq(deviceRuntimeUpdates.state, "started")))
+    .where(
+      and(
+        byRunId(device, frame.runId),
+        or(
+          eq(deviceRuntimeUpdates.state, "started"),
+          and(eq(deviceRuntimeUpdates.state, "failed"), eq(deviceRuntimeUpdates.error, RUN_INTERRUPTED)),
+        ),
+      ),
+    )
     .returning();
   if (closed) {
     await auditRun(tx, deps, device, closed, "device.runtime_update_finished");
@@ -549,6 +618,8 @@ export function registerDeviceMaintenanceRoutes(
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const row = await maintainable(req, tx, req.params.id, false);
+        // ME-04: a request the device never answered reads as expired, not as "Updating…" for ever.
+        await expireRequests(tx, row.id);
         const rows = await tx
           .select()
           .from(deviceRuntimeUpdates)
@@ -592,18 +663,7 @@ export function registerDeviceMaintenanceRoutes(
           eq(deviceRuntimeUpdates.state, "requested"),
         );
         // PD-04: a request the device never answered within the hour no longer blocks a new one.
-        await tx
-          .update(deviceRuntimeUpdates)
-          .set({ state: "expired", finishedAt: sql`now()` })
-          .where(
-            and(
-              mine,
-              lt(
-                deviceRuntimeUpdates.requestedAt,
-                new Date(Date.now() - RUNTIME_UPDATE_REQUEST_TTL_MS).toISOString(),
-              ),
-            ),
-          );
+        await expireRequests(tx, row.id, runtime);
         const [waiting] = await tx
           .select({ id: deviceRuntimeUpdates.id })
           .from(deviceRuntimeUpdates)

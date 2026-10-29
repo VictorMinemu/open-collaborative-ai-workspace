@@ -87,6 +87,9 @@ export const ORG_LEVEL_GRACE_MS = 30_000;
 export const MAX_RUN_OUTPUT_CHARS = 4096;
 
 export const REFUSED_OUTSIDE_SCRATCH_HOME = "refused outside a scratch home";
+/** Why an accepted update that never ran was closed (07.11 review ME-04). */
+export const CANCELLED_OFF = "cancelled: updates are off";
+export const CANCELLED_STOPPED = "cancelled: the runtime stopped";
 /** How long the idle CLI processes of a runtime may take to stop before an update (07.11 review HI-03). */
 export const RETIRE_TIMEOUT_MS = 60_000;
 export const RETIRE_TIMED_OUT = "the idle sessions did not stop in time";
@@ -348,8 +351,10 @@ export class RuntimeMaintenance {
   setOrgPolicy(level: RuntimeUpdatesLevel, manifest: RuntimeCompatibilityManifest): void {
     this.orgLevel = level;
     this.manifest = newerManifest(this.manifest, manifest);
-    // At once, not after the next check's registry request: a job whose candidate is now broken never runs.
+    // At once, not after the next check's registry request: a job whose candidate is now broken never runs, and an
+    // organization at `off` cancels whatever has not run (ME-04).
     for (const r of this.runtimes) this.dropIfBroken(r.id, this.stateOf(r.id));
+    this.applyLevel();
     this.allowRegistry();
     if (this.started) void this.check();
   }
@@ -358,6 +363,7 @@ export class RuntimeMaintenance {
   setLocalLevel(level: RuntimeUpdatesLevel, source: RuntimeUpdatesLevelSource): void {
     const changed = level !== this.local.level || source !== this.local.source;
     this.local = { level, source };
+    this.applyLevel();
     if (changed && this.started) void this.check();
   }
 
@@ -392,10 +398,10 @@ export class RuntimeMaintenance {
       this.clearPoll(st);
       if (st.staleTimer !== null) this.clearTimer(st.staleTimer);
       st.staleTimer = null;
-      // A drain that has not started its run lets the held commands go (and its install lock); a running install
-      // finishes on its own.
-      if (st.state === "draining" || st.state === "queued") {
-        this.dropJob(st);
+      // A job that has not started its run ends here: a drain lets the held commands go (and its install lock), an
+      // accepted "Update now" is closed with a finished frame (ME-04); a running install finishes on its own.
+      if (st.job && WAITING_STATES.has(st.state)) {
+        this.cancelJob(id, st, CANCELLED_STOPPED);
         this.opts.gates.get(id)?.open();
       }
     }
@@ -510,12 +516,11 @@ export class RuntimeMaintenance {
       const st = this.stateOf(r.id);
       this.revalidatePending(r.id, st);
       if (!automatic) {
-        // A lowered level drops an automatic update that has not started its run. A draining one also reopens the
-        // gate and releases the sessions it held (the pending `drain()` sees the dropped job and returns).
-        if (st.job?.trigger === "automatic" && WAITING_STATES.has(st.state)) {
-          const wasDraining = st.state === "draining";
-          this.dropJob(st);
-          if (wasDraining) this.releaseHeld(r.id, st);
+        // A lowered level drops an automatic update that has not started its run (`off`: any update, ME-04). A
+        // draining one also reopens the gate and releases the sessions it held (the pending `drain()` sees the dropped
+        // job and returns).
+        if (st.job && (this.effectiveLevel === "off" || st.job.trigger === "automatic")) {
+          this.cancelJob(r.id, st, CANCELLED_OFF);
         }
         continue;
       }
@@ -838,14 +843,56 @@ export class RuntimeMaintenance {
    * Ends a job that never ran (no `started` frame): `failed` with `error`, reported in one `finished` frame (with the
    * "Update now" command id, so its request is closed), last run recorded, a held gate reopened.
    */
-  private finishWithoutRun(runtime: RuntimeId, st: RuntimeState, job: Job, error: string): void {
+  private finishWithoutRun(
+    runtime: RuntimeId,
+    st: RuntimeState,
+    job: Job,
+    error: string,
+    heldPhase: "done" | "failed" = "failed",
+  ): void {
+    const wasHolding = st.state === "draining";
+    this.dropJob(st);
+    if (wasHolding) this.releaseHeld(runtime, st, heldPhase);
+    this.reportNotRun(runtime, st, job, error);
+    void this.publish(true);
+  }
+
+  /**
+   * 07.11 review ME-04: a job that has not started its run is dropped when updates are turned off (or the daemon
+   * stops). An automatic one goes silently (nothing on the server knows it); an accepted "Update now" (or local
+   * request) is closed with a `finished` `failed` frame saying why, so its history row never waits for ever. A draining
+   * one reopens the gate; the held sessions go on with the version they have.
+   */
+  private cancelJob(runtime: RuntimeId, st: RuntimeState, reason: string): void {
+    const job = st.job;
+    if (!job || !WAITING_STATES.has(st.state)) return;
+    if (job.trigger !== "automatic") {
+      this.finishWithoutRun(runtime, st, job, reason, "done");
+      return;
+    }
+    const wasDraining = st.state === "draining";
+    this.dropJob(st);
+    if (wasDraining) this.releaseHeld(runtime, st);
+    void this.publish(true);
+  }
+
+  /** The effective level fell: `off` cancels every job that has not run, anything below `automatic` the automatic ones. */
+  private applyLevel(): void {
+    const level = this.effectiveLevel;
+    if (level === "automatic") return;
+    for (const r of this.runtimes) {
+      const st = this.stateOf(r.id);
+      if (st.job && (level === "off" || st.job.trigger === "automatic"))
+        this.cancelJob(r.id, st, CANCELLED_OFF);
+    }
+  }
+
+  /** The `finished` `failed` frame (and last run) of a job that never ran, with its command id when it has one. */
+  private reportNotRun(runtime: RuntimeId, st: RuntimeState, job: Job, error: string): void {
     const at = new Date(this.now()).toISOString();
     const runId = randomUUID();
-    const wasHolding = st.state === "draining";
     st.lastRun = { runId, outcome: "failed", at, fromVersion: st.installedVersion, toVersion: null };
     if (job.trigger === "automatic") st.backoff.set(job.candidate, this.now() + FAILED_BACKOFF_MS);
-    this.dropJob(st);
-    if (wasHolding) this.releaseHeld(runtime, st, "failed");
     const commandId = job.commandId && z.uuid().safeParse(job.commandId).success ? job.commandId : null;
     this.sendRun({
       type: "runtime.update.run",
@@ -862,7 +909,6 @@ export class RuntimeMaintenance {
       output: runOutputForFrame(error),
       at,
     });
-    void this.publish(true);
   }
 
   private adapterOf(runtime: RuntimeId): MaintainedRuntime {
@@ -949,6 +995,14 @@ export class RuntimeMaintenance {
   private async executeJob(runtime: RuntimeId, st: RuntimeState, job: Job): Promise<() => Promise<void>> {
     const adapter = this.adapterOf(runtime);
     const runId = randomUUID();
+    // ME-04, right before running: updates turned off since the job was accepted → nothing runs, the request closes.
+    if (this.effectiveLevel === "off") {
+      return async () => {
+        this.releaseHeld(runtime, st);
+        if (job.trigger !== "automatic") this.reportNotRun(runtime, st, job, CANCELLED_OFF);
+        await this.publish(true);
+      };
+    }
     let resolution: InstallResolution;
     try {
       // The install the lock was taken for; the runner re-reads it under that lock (changed → failed).

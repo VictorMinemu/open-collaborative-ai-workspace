@@ -694,3 +694,69 @@ describe("07.11-06 Task 3: every device hears the org's level and the manifest; 
     expect((await deviceRow(eId)).runtime_maintenance).toBeNull();
   });
 });
+
+describe("07.11 review ME-04: history rows that can never finish are closed", () => {
+  it("a run the device started and never finished is closed as failed (interrupted) at its next snapshot; a late finished frame still records the real outcome", async () => {
+    const runId = randomUUID();
+    d.updateRun({ runId, phase: "started", fromVersion: "2.1.300", candidate: "2.1.301" });
+    await barrier(d, dId, CURRENT);
+    expect((await runs(dId)).find((r) => r.run_id === runId)).toMatchObject({ state: "started" });
+    // A fresh run is left alone by the next snapshot.
+    await barrier(d, dId, CURRENT);
+    expect((await runs(dId)).find((r) => r.run_id === runId)).toMatchObject({ state: "started" });
+
+    // The daemon died mid-install (07.11 review HI-04): no finished frame for over half an hour.
+    await su.query(
+      "update app.device_runtime_updates set started_at = now() - interval '2 hours' where run_id = $1",
+      [runId],
+    );
+    const before = (await audits("device.runtime_update_finished", dId)).length;
+    await barrier(d, dId, CURRENT);
+    const closed = (await runs(dId)).find((r) => r.run_id === runId)!;
+    expect(closed).toMatchObject({ state: "failed" });
+    expect(String(closed.error)).toMatch(/^interrupted/);
+    expect(closed.finished_at).not.toBeNull();
+    const finished = await audits("device.runtime_update_finished", dId);
+    expect(finished).toHaveLength(before + 1);
+    expect(finished.at(-1)).toMatchObject({
+      actor_kind: "system",
+      result: "error",
+      metadata: { runtime: "claude-code", outcome: "failed", candidate: "2.1.301" },
+    });
+
+    // The device's real finished frame, replayed late from its offline log, still closes it.
+    d.updateRun({
+      runId,
+      phase: "finished",
+      outcome: "succeeded",
+      fromVersion: "2.1.300",
+      toVersion: "2.1.301",
+      candidate: "2.1.301",
+    });
+    await barrier(d, dId, CURRENT);
+    expect((await runs(dId)).find((r) => r.run_id === runId)).toMatchObject({
+      state: "succeeded",
+      to_version: "2.1.301",
+      error: null,
+    });
+  });
+
+  it("reading the history expires a request older than the hour (and organization B's reads touch nothing of A)", async () => {
+    await setLevel("automatic");
+    const res = await owen.request("POST", updateUrl(dId));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const id = (res.body!.run as Row).id as string;
+    await su.query(
+      "update app.device_runtime_updates set requested_at = now() - interval '2 hours' where id = $1",
+      [id],
+    );
+    const other = await eve.request("GET", `/api/v1/devices/${eId}/runtime-updates`);
+    expect(other.status, JSON.stringify(other.body)).toBe(200);
+    expect((await runs(dId)).find((r) => r.id === id)).toMatchObject({ state: "requested" });
+
+    const history = await owen.request("GET", `/api/v1/devices/${dId}/runtime-updates`);
+    expect(history.status, JSON.stringify(history.body)).toBe(200);
+    expect((history.body!.runs as Row[]).find((r) => r.id === id)).toMatchObject({ state: "expired" });
+    expect((await runs(dId)).find((r) => r.id === id)).toMatchObject({ state: "expired" });
+  });
+});
