@@ -184,6 +184,7 @@ main() {
 
   # 5. Switch current, record the install, write the launcher, keep this version and the previous one.
   ln -sfn "versions/$OCW_SHA12" "$runtime_dir/current"
+  # shellcheck disable=SC2016 # JavaScript template literals, not shell expansions; the values come in as arguments.
   "$node_bin" -e '
 const fs = require("node:fs");
 const [file, serverUrl, version, sha256, nodePath] = process.argv.slice(1);
