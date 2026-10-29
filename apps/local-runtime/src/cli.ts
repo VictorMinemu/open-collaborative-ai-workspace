@@ -24,6 +24,10 @@
 //                     [--user-name <account>] [--yes]
 //                                  07.12 (D-02): pair, register repositories, install the service, run the doctor and
 //                                  print the Settings › Devices link. Prompts only on a terminal; safe to re-run.
+//   ocw-runtime service install|uninstall|status|logs|restart [--system --user-name <account>]
+//                                  07.12 (D-04): the runtime as a systemd user/system unit or a macOS LaunchAgent.
+//   ocw-runtime doctor [--json]    07.12 (D-05): every check between this machine and a working device, ok|warn|fail
+//                                  with one fix line; reads ~/.ocw/service.env as the service does; exit 1 on any fail.
 //   ocw-runtime remove-project <dir|name|id>
 //                                  unregister a project (via the running daemon, or directly when stopped)
 
@@ -42,14 +46,17 @@ import {
 } from "./config.js";
 import { type ControlRequest, controlRequest, controlSocketPath } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
+import { createDoctorDeps, doctorExitCode, formatDoctorJson, formatDoctorText, runDoctor } from "./doctor.js";
 import { type EnrollResult, enroll } from "./enroll.js";
 import { readInstallInfo } from "./install-info.js";
-import { createLogger, errorMessage } from "./logger.js";
+import { createLogger, errorMessage, silentLogger } from "./logger.js";
 import { publicInstallFields, resolveInstall } from "./maintenance/install-method.js";
 import { PairingCancelledError, pairByDeviceCode } from "./pair.js";
+import { defaultServiceDeps, serviceCommand } from "./service/index.js";
 import { applyServiceEnv } from "./service-env.js";
 import {
   defaultSetupDeps,
+  doctorProbes,
   parseSetupArgs,
   runSetup,
   SETUP_USAGE,
@@ -334,6 +341,27 @@ async function setupCommand(argv: string[]): Promise<void> {
 }
 
 /**
+ * `doctor [--json]` (07.12, D-05, PD-12): service.env is applied to this process first (PD-10), so the local probes see
+ * what the service sees; the service status comes from the same manager `service status` uses. Exit 1 on any fail.
+ */
+async function doctorCommand(argv: string[]): Promise<void> {
+  const json = argv.includes("--json");
+  const unknown = argv.find((a) => a !== "--json");
+  if (unknown !== undefined) {
+    process.stderr.write(
+      `ocw-runtime doctor: unknown option ${unknown}\nusage: ocw-runtime doctor [--json]\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  const home = ocwHome();
+  await applyServiceEnv(home, process.env, silentLogger);
+  const report = await runDoctor(createDoctorDeps(home, doctorProbes(home)));
+  process.stdout.write(json ? formatDoctorJson(report) : formatDoctorText(report));
+  process.exitCode = doctorExitCode(report);
+}
+
+/**
  * `run`: applies `~/.ocw/service.env` to this process's environment first (07.12, D-12: keys already set win, refused
  * unless 0600 and owned by this user, names logged, never values), then creates and starts the daemon.
  */
@@ -404,6 +432,11 @@ async function main(argv: string[]): Promise<void> {
       return removeProject(rest[0]);
     case "setup":
       return setupCommand(rest);
+    case "service":
+      process.exitCode = await serviceCommand(rest, defaultServiceDeps(ocwHome()));
+      return;
+    case "doctor":
+      return doctorCommand(rest);
     default:
       throw new Error(`unknown command: ${cmd}`);
   }

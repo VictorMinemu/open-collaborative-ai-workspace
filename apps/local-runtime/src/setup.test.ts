@@ -243,3 +243,157 @@ describe("runSetup --yes … --service none (07.12-08 tracer, D-02, D-06, PD-13)
     expect(h.stderr.join("\n")).toContain("path does not exist");
   });
 });
+
+describe("runSetup: the service step (07.12-08, D-04, D-14, PD-13, RESEARCH Pitfall 7)", () => {
+  it("--service user installs after pairing and projects, then prints the next steps", async () => {
+    const h = harness();
+    expect(await runSetup(flagsArgs({ service: "user" }), h.deps)).toBe(0);
+    expect(h.calls).toEqual([
+      "token",
+      `pair ${SERVER} rack-1`,
+      `add ${USER_HOME}/repo`,
+      "service.detect",
+      "service.install systemd-user",
+      "doctor",
+    ]);
+    const text = h.stdout.join("\n");
+    expect(text).toContain("The service runs as alice");
+    expect(text).toContain("~/.config/systemd/user/ocw-runtime.service");
+    expect(text).toContain("ocw-runtime service status");
+    expect(text).toContain("ocw-runtime service logs");
+  });
+
+  it("a service that ran unpaired is restarted after pairing", async () => {
+    const h = harness({ daemonStatus: async () => ({ paired: false, sessions: 0 }) });
+    h.deps.service.detect = async () => ({ kind: "launchd", available: true, reason: null });
+    h.deps.service.install = async (opts) => {
+      h.calls.push(`service.install ${opts?.manager ?? ""}`);
+      return {
+        ok: true,
+        manager: "launchd",
+        unitPath: "~/Library/LaunchAgents/org.ocw.runtime.plist",
+        outcome: "unchanged",
+        active: true,
+        lines: [],
+      };
+    };
+    h.deps.service.restart = async () => {
+      h.calls.push("service.restart");
+      return { ok: true, lines: ["Restarted org.ocw.runtime"] };
+    };
+    expect(await runSetup(flagsArgs({ service: "user" }), h.deps)).toBe(0);
+    expect(h.calls).toEqual([
+      "token",
+      `pair ${SERVER} rack-1`,
+      `add ${USER_HOME}/repo`,
+      "service.install launchd",
+      "service.restart",
+      "doctor",
+    ]);
+    expect(h.stdout.join("\n")).toContain("Restarted org.ocw.runtime");
+  });
+
+  it("never restarts a daemon that reports a running session: it prints the restart command instead", async () => {
+    let n = 0;
+    const h = harness({
+      daemonStatus: async () => (n++ === 0 ? { paired: false, sessions: 0 } : { paired: false, sessions: 1 }),
+    });
+    h.deps.service.install = async () => ({
+      ok: true,
+      manager: "systemd-user",
+      unitPath: "~/.config/systemd/user/ocw-runtime.service",
+      outcome: "unchanged",
+      active: true,
+      lines: [],
+    });
+    expect(await runSetup(flagsArgs({ service: "user" }), h.deps)).toBe(0);
+    expect(h.calls).not.toContain("service.restart");
+    expect(h.stdout.join("\n")).toContain("ocw-runtime service restart");
+  });
+
+  it("a fresh install starts the paired runtime: no extra restart", async () => {
+    const h = harness({ daemonStatus: async () => null });
+    expect(await runSetup(flagsArgs({ service: "user" }), h.deps)).toBe(0);
+    expect(h.calls).not.toContain("service.restart");
+  });
+
+  it("--yes without --service on a machine with no manager: the supervisor line, and setup goes on", async () => {
+    const h = harness();
+    h.deps.service.detect = async () => ({
+      kind: "none",
+      available: false,
+      reason:
+        "systemd is not running here: run `ocw-runtime run` under your own supervisor (Docker restart policy, tmux, supervisord)",
+    });
+    const { service: _omit, ...args } = flagsArgs();
+    expect(await runSetup(args, h.deps)).toBe(0);
+    expect(h.calls.some((c) => c.startsWith("service.install"))).toBe(false);
+    expect(h.stdout.join("\n")).toContain("run `ocw-runtime run` under your own supervisor");
+    expect(h.calls).toContain("doctor");
+  });
+
+  it("--yes without --service where a manager exists installs the user service", async () => {
+    const h = harness();
+    const { service: _omit, ...args } = flagsArgs();
+    expect(await runSetup(args, h.deps)).toBe(0);
+    expect(h.calls).toContain("service.install systemd-user");
+  });
+
+  it("--service user on a machine without a manager: exit 1 with the manager's reason", async () => {
+    const h = harness();
+    h.deps.service.detect = async () => ({
+      kind: "systemd-user",
+      available: false,
+      reason: "the systemd user manager of alice is not reachable from this shell",
+    });
+    expect(await runSetup(flagsArgs({ service: "user" }), h.deps)).toBe(1);
+    expect(h.stderr.join("\n")).toContain("not reachable from this shell");
+    expect(h.calls).not.toContain("doctor");
+  });
+
+  it("a conflicting runtime on the account: exit 1 with install's message (D-14)", async () => {
+    const h = harness();
+    h.deps.service.install = async () => ({
+      ok: false,
+      error: "the desktop app supervises a runtime on this account; use one or the other",
+      lines: [],
+    });
+    expect(await runSetup(flagsArgs({ service: "user" }), h.deps)).toBe(1);
+    expect(h.stderr.join("\n")).toContain("the desktop app supervises a runtime");
+  });
+
+  it("--service none while an unpaired runtime runs: says to restart it", async () => {
+    const h = harness({ daemonStatus: async () => ({ paired: false, sessions: 0 }) });
+    expect(await runSetup(flagsArgs(), h.deps)).toBe(0);
+    expect(h.stdout.join("\n")).toContain("restart it so it connects with the new pairing");
+  });
+
+  it("--service system: refused as root and for another account; as that account it prints the root command", async () => {
+    const sys = flagsArgs({ service: "system", userName: "alice" });
+    const root = harness({ uid: 0, account: "root" });
+    expect(await runSetup(sys, root.deps)).toBe(2);
+    expect(root.stderr.join("\n")).toContain("sudo -u alice -i ocw-runtime setup");
+    expect(root.calls).toEqual([]);
+
+    const other = harness({ account: "bob" });
+    expect(await runSetup(sys, other.deps)).toBe(2);
+    expect(other.calls).toEqual([]);
+
+    const h = harness();
+    h.deps.service.detect = async (opts) => {
+      h.calls.push(`service.detect ${opts?.system ? "system" : ""}`);
+      return { kind: "systemd-system", available: true, reason: null };
+    };
+    expect(await runSetup(sys, h.deps)).toBe(0);
+    expect(h.calls).toContain("service.detect system");
+    expect(h.calls.some((c) => c.startsWith("service.install"))).toBe(false);
+    expect(h.stdout.join("\n")).toContain(
+      'sudo "$(command -v ocw-runtime)" service install --system --user-name alice',
+    );
+  });
+
+  it("parseSetupArgs: --service system without --user-name names --user-name", () => {
+    expect(() => parseSetupArgs(["--service", "system"])).toThrow(/--user-name/);
+    expect(() => parseSetupArgs(["--user-name", "alice"])).toThrow(/--service system/);
+  });
+});

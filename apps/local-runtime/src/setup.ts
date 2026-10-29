@@ -22,7 +22,7 @@ import { type EnrollResult, normalizeServerUrl, proposedDeviceName } from "./enr
 import { type RuntimeInstallInfo, readInstallInfo } from "./install-info.js";
 import { errorMessage, silentLogger } from "./logger.js";
 import { PairingCancelledError, PairingError, pairByDeviceCode } from "./pair.js";
-import { SUPERVISOR_FALLBACK } from "./service/detect.js";
+import { type DetectedManager, SUPERVISOR_FALLBACK } from "./service/detect.js";
 import { createServiceManager, defaultServiceDeps, type ServiceManager } from "./service/index.js";
 import { applyServiceEnv, readServiceEnv } from "./service-env.js";
 
@@ -242,6 +242,27 @@ async function setupSteps(args: SetupArgs, deps: SetupDeps): Promise<number> {
   } catch {
     return stop(2, `ocw-runtime setup: not a URL: ${JSON.stringify(rawServer)}`);
   }
+  if (args.service === "system") {
+    // A system unit runs as a named account, but setup pairs the account that runs it, and only root installs the
+    // unit: the account pairs here, then root installs the unit with the command printed at the service step.
+    const account = args.userName as string;
+    if (deps.uid === 0) {
+      stop(
+        2,
+        `ocw-runtime setup: a system unit runs as ${account}, and setup pairs the account that runs it: run ` +
+          `\`sudo -u ${account} -i ocw-runtime setup --service system --user-name ${account}\`, then the root command it prints.`,
+      );
+    }
+    if (account !== deps.account) {
+      stop(
+        2,
+        `ocw-runtime setup: --user-name must be the account running setup (${deps.account}), whose runtime it pairs: ` +
+          `run it as ${account} (sudo -u ${account} -i ocw-runtime setup …).`,
+      );
+    }
+  }
+  // Before pairing: a runtime already running unpaired never picks up the new token (RESEARCH Pitfall 7).
+  const daemonBefore = await deps.daemonStatus();
 
   // 2. Pairing: skipped when the server accepts this device's token.
   const token = await deps.token();
@@ -305,7 +326,7 @@ async function setupSteps(args: SetupArgs, deps: SetupDeps): Promise<number> {
   }
 
   // 4. Service.
-  deps.out(`No service installed: ${SUPERVISOR_FALLBACK}.`);
+  await serviceStep(args, deps, daemonBefore, stop);
 
   // 5. Doctor: printed; its findings never change setup's exit code.
   await runDoctorStep(deps);
@@ -320,6 +341,75 @@ async function setupSteps(args: SetupArgs, deps: SetupDeps): Promise<number> {
     deps.out("Share it with members and teams in your workspace's Settings › Devices.");
   }
   return 0;
+}
+
+const RESTART_NOTE =
+  "A runtime is already running here without a pairing: restart it so it connects with the new pairing.";
+const NEXT_STEPS =
+  "Check it with `ocw-runtime service status`; read its log with `ocw-runtime service logs`.";
+
+/**
+ * Installs the service after pairing and projects (PD-13). `--yes` without `--service` installs the user service when
+ * a manager can take it, else prints the supervisor line and goes on. A service that ran unpaired is restarted once
+ * paired, unless the daemon reports a running session (then the restart command is printed instead).
+ */
+async function serviceStep(
+  args: SetupArgs,
+  deps: SetupDeps,
+  daemonBefore: DaemonView | null,
+  stop: (code: number, message: string) => never,
+): Promise<void> {
+  const ranUnpaired = daemonBefore !== null && !daemonBefore.paired;
+  let choice = args.service;
+  let detected: DetectedManager | null = null;
+  if (!choice) {
+    detected = await deps.service.detect();
+    if (!detected.available || detected.kind === "none") {
+      deps.out(`No service installed: ${detected.reason ?? SUPERVISOR_FALLBACK}.`);
+      if (ranUnpaired) deps.out(RESTART_NOTE);
+      return;
+    }
+    choice = "user";
+  }
+  if (choice === "none") {
+    deps.out(`No service installed: ${SUPERVISOR_FALLBACK}.`);
+    if (ranUnpaired) deps.out(RESTART_NOTE);
+    return;
+  }
+  if (choice === "system") {
+    const d = await deps.service.detect({ system: true });
+    if (!d.available) stop(1, d.reason ?? "no service manager here");
+    deps.out("A system unit is installed by root. As root, run:");
+    deps.out(`  sudo "$(command -v ocw-runtime)" service install --system --user-name ${args.userName}`);
+    deps.out(NEXT_STEPS);
+    if (ranUnpaired) deps.out(RESTART_NOTE);
+    return;
+  }
+
+  detected ??= await deps.service.detect();
+  if (!detected.available || detected.kind === "none") {
+    stop(1, detected.reason ?? `no service manager here: ${SUPERVISOR_FALLBACK}`);
+  }
+  const r = await deps.service.install({ manager: detected.kind });
+  for (const line of r.lines) deps.out(line);
+  if (!r.ok) return stop(1, r.error);
+  const state =
+    r.outcome === "unchanged" ? "already installed and running" : r.active ? "running" : "installed";
+  deps.out(`Service: ${r.manager} ${r.unitPath}: ${state}`);
+  // A fresh install starts the paired runtime, and "updated" was already restarted when idle.
+  if (ranUnpaired && (r.outcome === "unchanged" || r.outcome === "updated-restart-pending")) {
+    const now = await deps.daemonStatus();
+    if (now !== null && now.sessions > 0) {
+      deps.out(
+        "It started before the pairing: restart it with `ocw-runtime service restart` when no session runs, so it connects.",
+      );
+    } else {
+      const restarted = await deps.service.restart();
+      for (const line of restarted.lines) deps.out(line);
+      if (!restarted.ok) stop(1, restarted.error);
+    }
+  }
+  deps.out(NEXT_STEPS);
 }
 
 async function runDoctorStep(deps: SetupDeps): Promise<void> {
