@@ -870,32 +870,32 @@ from its shipped bundle, 2026-10-28):
 Plans:
 **Wave 1**
 
-- [ ] 07.11-01-PLAN.md — Wave 1: Contracts (versions, levels, manifest, statuses, frames, history DTOs, `runtime.update` event), `device.maintain`, and the phase hub (plan map, shared files, PD-01…PD-19)
+- [x] 07.11-01-PLAN.md — Wave 1: Contracts (versions, levels, manifest, statuses, frames, history DTOs, `runtime.update` event), `device.maintain`, and the phase hub (plan map, shared files, PD-01…PD-19)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 07.11-02-PLAN.md — Wave 2: Storage and the org policy field: one migration (`runtime_updates`, `runtime_maintenance`, `device_runtime_updates`), `CommandKind` `runtime.update`, policy save/audit, RLS
-- [ ] 07.11-03-PLAN.md — Wave 2: Compatibility at session start: a broken version refuses a start, `runtimeCompatibility` on every device, test-only manifest injection
-- [ ] 07.11-04-PLAN.md — Wave 2: Daemon maintenance core: install-method resolver (fixed table), registry client (channels, cache), runner (lock, timeout, output, verify), fake CLI
-- [ ] 07.11-05-PLAN.md — Wave 2: Never interrupt: adapters' `activeTurns` / `retireIdle` / lazy resume, CLI self-updaters off, the per-runtime gate
+- [x] 07.11-02-PLAN.md — Wave 2: Storage and the org policy field: one migration (`runtime_updates`, `runtime_maintenance`, `device_runtime_updates`), `CommandKind` `runtime.update`, policy save/audit, RLS
+- [x] 07.11-03-PLAN.md — Wave 2: Compatibility at session start: a broken version refuses a start, `runtimeCompatibility` on every device, test-only manifest injection
+- [x] 07.11-04-PLAN.md — Wave 2: Daemon maintenance core: install-method resolver (fixed table), registry client (channels, cache), runner (lock, timeout, output, verify), fake CLI
+- [x] 07.11-05-PLAN.md — Wave 2: Never interrupt: adapters' `activeTurns` / `retireIdle` / lazy resume, CLI self-updaters off, the per-runtime gate
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 07.11-06-PLAN.md — Wave 3: API device maintenance: frame handlers, history, audit, Update now, `runtime.config` push, owner/admin-only details
-- [ ] 07.11-07-PLAN.md — Wave 3: Daemon wiring: the `RuntimeMaintenance` orchestrator, frames, gate on commands, drain and stale, `runtime.update` command, CLI and control socket triggers
+- [x] 07.11-06-PLAN.md — Wave 3: API device maintenance: frame handlers, history, audit, Update now, `runtime.config` push, owner/admin-only details
+- [x] 07.11-07-PLAN.md — Wave 3: Daemon wiring: the `RuntimeMaintenance` orchestrator, frames, gate on commands, drain and stale, `runtime.update` command, CLI and control socket triggers
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 07.11-08-PLAN.md — Wave 4: Device-local level (runtime.json, env, `ocw-runtime updates automatic|notify|off`, reload) and the desktop status lines and toggle
-- [ ] 07.11-09-PLAN.md — Wave 4: Phase end-to-end tracer on the real stack (busy device, held turn, owner view, audit), Update now / member / off, headless Linux proof
+- [x] 07.11-08-PLAN.md — Wave 4: Device-local level (runtime.json, env, `ocw-runtime updates automatic|notify|off`, reload) and the desktop status lines and toggle
+- [x] 07.11-09-PLAN.md — Wave 4: Phase end-to-end tracer on the real stack (busy device, held turn, owner view, audit), Update now / member / off, headless Linux proof
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 07.11-10-PLAN.md — Wave 5: Web: Settings › Devices runtime updates block, Update now, history sheet, member flags, policy select, new-session flag, session line; 1440/390 light/dark
+- [x] 07.11-10-PLAN.md — Wave 5: Web: Settings › Devices runtime updates block, Update now, history sheet, member flags, policy select, new-session flag, session line; 1440/390 light/dark
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 07.11-11-PLAN.md — Wave 6: Phase gate: full local gate, full isolated e2e, Linux proof, `gate:compose`, ADR-0032, DEMO owner checks, INSTALL, STATUS, AGENTS, CODEOWNERS, signed VALIDATION
+- [x] 07.11-11-PLAN.md — Wave 6: Phase gate: full local gate, full isolated e2e, Linux proof, `gate:compose`, ADR-0032, DEMO owner checks, INSTALL, STATUS, AGENTS, CODEOWNERS, signed VALIDATION
 
 ### Phase 07.12: Headless Work Zone server (INSERTED)
 
@@ -935,29 +935,29 @@ let members and teams run their shared sessions there.
 Plans:
 **Wave 1**
 
-- [ ] 07.12-01-PLAN.md — Wave 1: Contracts (dist manifest, device-code pairing, enroll answer fields), the self-contained bundle (esbuild, SDK external), `ocw-runtime version`, local records, and the phase hub (plan map, shared files, PD-01…PD-19)
+- [x] 07.12-01-PLAN.md — Wave 1: Contracts (dist manifest, device-code pairing, enroll answer fields), the self-contained bundle (esbuild, SDK external), `ocw-runtime version`, local records, and the phase hub (plan map, shared files, PD-01…PD-19)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 07.12-02-PLAN.md — Wave 2: API device-code pairing: Redis pending request, `device.pair` approval, `enrollWithCodeHash`, RFC 8628 answers, limits, audit, org B
-- [ ] 07.12-03-PLAN.md — Wave 2: CLI terminal pairing (`enroll --server` without a code), `remove-project <dir|name|id>`, `~/.ocw/service.env` read by the daemon (D-12)
-- [ ] 07.12-04-PLAN.md — Wave 2: Service module: systemd user/system units, launchd LaunchAgent, injected exec with the test guard, one runtime owner per `~/.ocw`
-- [ ] 07.12-05-PLAN.md — Wave 2: Doctor module: every D-05 check with a fix line, headless sign-in lines, text and JSON, safe to paste
+- [x] 07.12-02-PLAN.md — Wave 2: API device-code pairing: Redis pending request, `device.pair` approval, `enrollWithCodeHash`, RFC 8628 answers, limits, audit, org B
+- [x] 07.12-03-PLAN.md — Wave 2: CLI terminal pairing (`enroll --server` without a code), `remove-project <dir|name|id>`, `~/.ocw/service.env` read by the daemon (D-12)
+- [x] 07.12-04-PLAN.md — Wave 2: Service module: systemd user/system units, launchd LaunchAgent, injected exec with the test guard, one runtime owner per `~/.ocw`
+- [x] 07.12-05-PLAN.md — Wave 2: Doctor module: every D-05 check with a fix line, headless sign-in lines, text and JSON, safe to paste
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 07.12-06-PLAN.md — Wave 3: API distribution: `/api/v1/runtime/{install.sh,bundle,bundle.sha256,version}`, `install.sh` (SDK from npm beside the bundle), the image stage, the compose-gate check
-- [ ] 07.12-07-PLAN.md — Wave 3: Web: Add a device › Server tab, the `?pair=` approve dialog, login keeps `?pair=`; 1440/390 light/dark
-- [ ] 07.12-08-PLAN.md — Wave 3: `ocw-runtime setup` and the `service` and `doctor` CLI commands
+- [x] 07.12-06-PLAN.md — Wave 3: API distribution: `/api/v1/runtime/{install.sh,bundle,bundle.sha256,version}`, `install.sh` (SDK from npm beside the bundle), the image stage, the compose-gate check
+- [x] 07.12-07-PLAN.md — Wave 3: Web: Add a device › Server tab, the `?pair=` approve dialog, login keeps `?pair=`; 1440/390 light/dark
+- [x] 07.12-08-PLAN.md — Wave 3: `ocw-runtime setup` and the `service` and `doctor` CLI commands
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 07.12-09-PLAN.md — Wave 4: Phase end-to-end tracer: install.sh from the API → setup → web approval → bundled daemon → shared with a member and a team project → the member's sessions
-- [ ] 07.12-10-PLAN.md — Wave 4: Opt-in Linux container proof (pinned slim `node:24` + curl git ca-certificates): the whole chain, doctor JSON, no-systemd refusal
+- [x] 07.12-09-PLAN.md — Wave 4: Phase end-to-end tracer: install.sh from the API → setup → web approval → bundled daemon → shared with a member and a team project → the member's sessions
+- [x] 07.12-10-PLAN.md — Wave 4: Opt-in Linux container proof (pinned slim `node:24` + curl git ca-certificates): the whole chain, doctor JSON, no-systemd refusal
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 07.12-11-PLAN.md — Wave 5: Phase gate: full gate, container proof, `gate:compose`, `docs/SERVER.md`, INSTALL, DEMO owner checks, STATUS, AGENTS, CODEOWNERS, ADR-0033, signed VALIDATION
+- [x] 07.12-11-PLAN.md — Wave 5: Phase gate: full gate, container proof, `gate:compose`, `docs/SERVER.md`, INSTALL, DEMO owner checks, STATUS, AGENTS, CODEOWNERS, ADR-0033, signed VALIDATION
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
