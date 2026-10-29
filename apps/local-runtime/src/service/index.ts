@@ -4,7 +4,7 @@
 // never touch a real service manager or the developer's home. `setup` (08) installs through `createServiceManager`;
 // `doctor` (05) reads its `ServiceStatus`; 08 wires `serviceCommand` into the CLI.
 
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { ocwHome as defaultOcwHome } from "../config.js";
@@ -13,7 +13,20 @@ import { findExecutable } from "../exec-path.js";
 import { installedBundlePath, readInstallInfo } from "../install-info.js";
 import { type DetectedManager, detectServiceManager } from "./detect.js";
 import { defaultServiceExec, type ServiceExecFn, type ServiceExecResult } from "./exec.js";
-import { parseSystemdExecStart, renderSystemdUnit, SYSTEMD_UNIT_NAME } from "./systemd.js";
+import {
+  LAUNCHD_LABEL,
+  LAUNCHD_PLIST_FILE,
+  parseLaunchctlPrint,
+  parseLaunchdProgramArguments,
+  renderLaunchdPlist,
+} from "./launchd.js";
+import {
+  isValidAccountName,
+  parseSystemdExecStart,
+  renderSystemdUnit,
+  SYSTEMD_SYSTEM_UNIT_DIR,
+  SYSTEMD_UNIT_NAME,
+} from "./systemd.js";
 import type { ServiceManagerKind, ServiceStatus } from "./types.js";
 
 export type { DetectedManager } from "./detect.js";
@@ -103,19 +116,22 @@ export interface ServiceManager {
 
 class ServiceError extends Error {}
 
-/** The unit a command acts on: whose it is, where its file lives, and how to drive it. */
+/** Above this the LaunchAgent's log is moved to `runtime.log.1` at install and restart (launchd holds it open). */
+export const LOG_ROTATE_BYTES = 5 * 1024 * 1024;
+/** `logs` without follow reads at most this much of the end of the log file. */
+const LOG_TAIL_READ_BYTES = 1024 * 1024;
+
+/** The unit a command acts on: whose it is, and where its file lives. */
 interface Target {
-  kind: "systemd-user" | "systemd-system";
+  kind: "systemd-user" | "systemd-system" | "launchd";
   account: string;
   home: string;
   ocwHome: string;
-  /** Machine path of the unit file. */
+  /** Machine path of the unit or plist file. */
   unitPath: string;
-  /** `systemctl --user` or `systemctl`. */
-  ctl: string[];
-  /** `journalctl --user` or `journalctl`. */
-  journal: string[];
 }
+
+const SYSTEM_UNIT_PATH = join(SYSTEMD_SYSTEM_UNIT_DIR, SYSTEMD_UNIT_NAME);
 
 export function createServiceManager(deps: ServiceDeps): ServiceManager {
   const at = (p: string) => (deps.root === "/" ? p : join(deps.root, p));
@@ -141,16 +157,16 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
       return null;
     }
   };
-  const writeUnit = async (p: string, text: string, dirMode = 0o755) => {
-    await mkdir(at(dirname(p)), { recursive: true, mode: dirMode });
+  const writeUnit = async (p: string, text: string) => {
+    await mkdir(at(dirname(p)), { recursive: true, mode: 0o755 });
     const tmp = `${at(p)}.tmp-${process.pid}`;
     await writeFile(tmp, text, { mode: 0o644 });
     await chmod(tmp, 0o644);
     await rename(tmp, at(p));
   };
-  /** `~/…` under the running account's home; other paths as they are (never a host path that leaves the device). */
-  const display = (p: string, home = deps.home) =>
-    p === home ? "~" : p.startsWith(`${home}/`) ? `~/${p.slice(home.length + 1)}` : p;
+  /** `~/…` under the running account's home; other paths as they are (local output only, AGENTS principle 7). */
+  const display = (p: string) =>
+    p === deps.home ? "~" : p.startsWith(`${deps.home}/`) ? `~/${p.slice(deps.home.length + 1)}` : p;
   const run = (argv: string[], opts?: { inherit?: boolean }): Promise<ServiceExecResult> =>
     deps.exec(argv[0]!, argv.slice(1), opts).catch((err: unknown) => ({
       code: null,
@@ -169,31 +185,120 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
       opts,
     );
 
-  function userUnitPath(): string {
-    const xdg = deps.env.XDG_CONFIG_HOME;
-    const config = xdg && isAbsolute(xdg) ? xdg : join(deps.home, ".config");
-    return join(config, "systemd", "user", SYSTEMD_UNIT_NAME);
-  }
+  // --- targets -------------------------------------------------------------------------------------------------
 
   function userTarget(): Target {
+    const xdg = deps.env.XDG_CONFIG_HOME;
+    const config = xdg && isAbsolute(xdg) ? xdg : join(deps.home, ".config");
     return {
       kind: "systemd-user",
       account: deps.account,
       home: deps.home,
       ocwHome: deps.ocwHome,
-      unitPath: userUnitPath(),
-      ctl: ["systemctl", "--user"],
-      journal: ["journalctl", "--user"],
+      unitPath: join(config, "systemd", "user", SYSTEMD_UNIT_NAME),
     };
   }
 
+  function systemTarget(account: string, home: string): Target {
+    return { kind: "systemd-system", account, home, ocwHome: join(home, ".ocw"), unitPath: SYSTEM_UNIT_PATH };
+  }
+
+  function launchdTarget(): Target {
+    return {
+      kind: "launchd",
+      account: deps.account,
+      home: deps.home,
+      ocwHome: deps.ocwHome,
+      unitPath: join(deps.home, "Library", "LaunchAgents", LAUNCHD_PLIST_FILE),
+    };
+  }
+
+  const ctl = (t: Target) => (t.kind === "systemd-user" ? ["systemctl", "--user"] : ["systemctl"]);
+  const journal = (t: Target) => (t.kind === "systemd-user" ? ["journalctl", "--user"] : ["journalctl"]);
+  const unitName = (t: Target) => (t.kind === "launchd" ? LAUNCHD_LABEL : SYSTEMD_UNIT_NAME);
+  const launchdDomain = () => `gui/${deps.uid}`;
+  const launchdService = () => `${launchdDomain()}/${LAUNCHD_LABEL}`;
+  const logFile = (t: Target) => join(t.ocwHome, "logs", "runtime.log");
+
+  /** `getent passwd <name>` → the account's uid and home; refuses unknown accounts and uid 0. */
+  async function lookupAccount(name: string): Promise<{ home: string }> {
+    const r = await run(["getent", "passwd", name]);
+    const line = r.code === 0 ? r.stdout.split("\n").find((l) => l.startsWith(`${name}:`)) : undefined;
+    if (!line) throw new ServiceError(`no such account: ${name}`);
+    const fields = line.split(":");
+    if (fields[2] === "0") throw new ServiceError("the runtime never runs as root: name a non-root account");
+    const home = fields[5] ?? "";
+    if (!isAbsolute(home)) throw new ServiceError(`the account ${name} has no absolute home directory`);
+    return { home };
+  }
+
+  async function resolveInstallTarget(opts: {
+    manager?: ServiceManagerKind;
+    account?: string;
+  }): Promise<Target> {
+    const manager = opts.manager ?? (deps.platform === "darwin" ? "launchd" : "systemd-user");
+    if (manager === "none") throw new ServiceError("no service manager was chosen");
+    if (manager === "systemd-system") {
+      const detected = await detect({ system: true });
+      if (!detected.available) throw new ServiceError(detected.reason ?? "no service manager here");
+      if (deps.uid !== 0) {
+        throw new ServiceError("a system unit is installed by root: run it as root (for example with sudo)");
+      }
+      const account = opts.account;
+      if (!account)
+        throw new ServiceError("--system needs --user-name <account>, the non-root account it runs as");
+      if (!isValidAccountName(account))
+        throw new ServiceError(`invalid account name: ${JSON.stringify(account)}`);
+      if (account === "root")
+        throw new ServiceError("the runtime never runs as root: name a non-root account");
+      const { home } = await lookupAccount(account);
+      return systemTarget(account, home);
+    }
+    if (deps.uid === 0) {
+      throw new ServiceError(
+        deps.platform === "darwin"
+          ? "the runtime never runs as root: run `ocw-runtime service install` as the account that should run it"
+          : "the runtime never runs as root: install a system unit for a non-root account with " +
+              "`ocw-runtime service install --system --user-name <account>`",
+      );
+    }
+    const detected = await detect();
+    if (!detected.available) throw new ServiceError(detected.reason ?? "no service manager here");
+    if (detected.kind !== manager) throw new ServiceError(`${manager} is not available here`);
+    return manager === "launchd" ? launchdTarget() : userTarget();
+  }
+
+  /** The installed unit that status, uninstall, restart and logs act on. */
+  async function resolveExistingTarget(opts: { system?: boolean } = {}): Promise<Target> {
+    if (deps.platform === "darwin") return launchdTarget();
+    const user = userTarget();
+    if (!opts.system && (await exists(user.unitPath))) return user;
+    const text = await readText(SYSTEM_UNIT_PATH);
+    if (text !== null) {
+      const account = /^User=(.+)$/m.exec(text)?.[1] ?? deps.account;
+      const home = /^WorkingDirectory=(.+)$/m.exec(text)?.[1]?.replaceAll("%%", "%") ?? deps.home;
+      return systemTarget(account, home);
+    }
+    if (opts.system || deps.uid === 0) return systemTarget(deps.account, deps.home);
+    return user;
+  }
+
+  // --- install -------------------------------------------------------------------------------------------------
+
   /** The node and PATH the unit runs with: install.json's node (else this one), then existing PATH entries, once. */
   async function serviceRuntime(
-    ocwHome: string,
+    t: Target,
   ): Promise<{ nodePath: string; bundlePath: string; path: string; notes: string[] }> {
-    const info = await readInstallInfo(at(ocwHome));
-    const bundlePath = installedBundlePath(ocwHome);
-    if (!info || !(await exists(bundlePath))) throw new ServiceError(NOT_INSTALLED_BUNDLE);
+    const info = await readInstallInfo(at(t.ocwHome));
+    const bundlePath = installedBundlePath(t.ocwHome);
+    if (!info || !(await exists(bundlePath))) {
+      throw new ServiceError(
+        t.kind === "systemd-system"
+          ? `install the runtime as ${t.account} first: run the command from Settings › Devices as ${t.account} ` +
+              `(sudo -u ${t.account} -i)`
+          : NOT_INSTALLED_BUNDLE,
+      );
+    }
     const notes: string[] = [];
     let nodePath = info.nodePath;
     if (!isAbsolute(nodePath) || !(await exists(nodePath))) {
@@ -209,8 +314,46 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
     return { nodePath, bundlePath, path: dirs.join(delimiter), notes };
   }
 
+  async function render(t: Target): Promise<{ text: string; notes: string[] }> {
+    const rt = await serviceRuntime(t);
+    try {
+      return renderFor(t, rt);
+    } catch (err) {
+      // A path with a newline or control character, or an account the renderer refuses: nothing is written.
+      throw new ServiceError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function renderFor(
+    t: Target,
+    rt: { nodePath: string; bundlePath: string; path: string; notes: string[] },
+  ): { text: string; notes: string[] } {
+    const ocwHome = t.ocwHome !== join(t.home, ".ocw") ? { ocwHome: t.ocwHome } : {};
+    if (t.kind === "launchd") {
+      const text = renderLaunchdPlist({
+        nodePath: rt.nodePath,
+        bundlePath: rt.bundlePath,
+        workingDirectory: t.home,
+        path: rt.path,
+        logFile: logFile(t),
+        ...ocwHome,
+      });
+      return { text, notes: rt.notes };
+    }
+    const text = renderSystemdUnit({
+      scope: t.kind === "systemd-user" ? "user" : "system",
+      nodePath: rt.nodePath,
+      bundlePath: rt.bundlePath,
+      workingDirectory: t.home,
+      path: rt.path,
+      ...ocwHome,
+      ...(t.kind === "systemd-system" ? { account: t.account } : {}),
+    });
+    return { text, notes: rt.notes };
+  }
+
   async function systemdActive(t: Target): Promise<boolean | null> {
-    const r = await run([...t.ctl, "is-active", SYSTEMD_UNIT_NAME]);
+    const r = await run([...ctl(t), "is-active", SYSTEMD_UNIT_NAME]);
     if (r.code === null && !r.stdout) return null;
     return r.stdout.trim() === "active";
   }
@@ -221,25 +364,52 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
     return m ? m[1] === "yes" : null;
   }
 
-  async function installSystemd(t: Target): Promise<InstallResult> {
-    const rt = await serviceRuntime(t.ocwHome);
-    const unit = renderSystemdUnit({
-      scope: t.kind === "systemd-user" ? "user" : "system",
-      nodePath: rt.nodePath,
-      bundlePath: rt.bundlePath,
-      workingDirectory: t.home,
-      path: rt.path,
-      ...(t.ocwHome !== join(t.home, ".ocw") ? { ocwHome: t.ocwHome } : {}),
-      ...(t.kind === "systemd-system" ? { account: t.account } : {}),
-    });
-    const lines = [...rt.notes];
-    await writeUnit(t.unitPath, unit);
+  async function launchdPrint(): Promise<{ loaded: boolean; running: boolean }> {
+    const r = await run(["launchctl", "print", launchdService()]);
+    if (r.code !== 0) return { loaded: false, running: false };
+    const { state, pid } = parseLaunchctlPrint(r.stdout);
+    return { loaded: true, running: state === "running" && pid !== null };
+  }
+
+  /** Move a log above 5 MB aside; launchd reopens the path when the agent starts again. */
+  async function rotateLog(t: Target): Promise<void> {
+    const file = at(logFile(t));
+    try {
+      if ((await stat(file)).size > LOG_ROTATE_BYTES) await rename(file, `${file}.1`);
+    } catch {
+      // no log yet
+    }
+  }
+
+  async function bootstrap(t: Target): Promise<void> {
+    let r = await run(["launchctl", "bootstrap", launchdDomain(), t.unitPath]);
+    if (r.code !== 0) {
+      // launchd may still be tearing the previous instance down (`Bootstrap failed: 5`): one retry.
+      await deps.sleep(1_000);
+      r = await run(["launchctl", "bootstrap", launchdDomain(), t.unitPath]);
+    }
+    if (r.code !== 0) throw new ServiceError(`launchctl bootstrap failed: ${firstLine(r)}`);
+  }
+
+  async function startLaunchd(t: Target): Promise<boolean> {
+    await run(["launchctl", "bootout", launchdService()]); // not loaded is fine
+    await rotateLog(t);
+    await bootstrap(t);
+    let state = await launchdPrint();
+    if (!state.running) {
+      await deps.sleep(1_000);
+      state = await launchdPrint();
+    }
+    return state.running;
+  }
+
+  async function startSystemd(t: Target, lines: string[]): Promise<boolean | null> {
     for (const step of [
-      [...t.ctl, "daemon-reload"],
-      [...t.ctl, "enable", "--now", SYSTEMD_UNIT_NAME],
+      [...ctl(t), "daemon-reload"],
+      [...ctl(t), "enable", "--now", SYSTEMD_UNIT_NAME],
     ]) {
       const r = await run(step);
-      if (r.code !== 0) throw new ServiceError(`${step.slice(0, 3).join(" ")} failed: ${firstLine(r)}`);
+      if (r.code !== 0) throw new ServiceError(`${step.join(" ")} failed: ${firstLine(r)}`);
     }
     const active = await systemdActive(t);
     if (t.kind === "systemd-user" && (await linger(t.account)) === false) {
@@ -248,7 +418,22 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
         `  sudo loginctl enable-linger ${t.account}`,
       );
     }
+    return active;
+  }
+
+  async function installTarget(t: Target): Promise<InstallResult> {
+    const { text, notes } = await render(t);
+    const lines = [...notes];
+    if (t.kind === "launchd") await ensureLogDir(t);
+    await writeUnit(t.unitPath, text);
+    const active = t.kind === "launchd" ? await startLaunchd(t) : await startSystemd(t, lines);
     return finishInstall(t, "installed", active, lines);
+  }
+
+  async function ensureLogDir(t: Target): Promise<void> {
+    const dir = at(join(t.ocwHome, "logs"));
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await chmod(dir, 0o700);
   }
 
   function finishInstall(
@@ -261,37 +446,20 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
     if (active === false) {
       return {
         ok: false,
-        error: `${SYSTEMD_UNIT_NAME} is installed (${unitPath}) but not running: see \`ocw-runtime service logs\``,
+        error: `${unitName(t)} is installed (${unitPath}) but not running: see \`ocw-runtime service logs\``,
         lines,
       };
     }
-    lines.push(`The service runs as ${t.account}: sign Claude Code and Codex in as ${t.account}.`);
+    lines.push(
+      t.kind === "systemd-system"
+        ? `The service runs as ${t.account}: sign Claude Code and Codex in as ${t.account} ` +
+            `(sudo -u ${t.account} -i), then check with \`ocw-runtime doctor\`.`
+        : `The service runs as ${t.account}: sign Claude Code and Codex in as ${t.account}.`,
+    );
     return { ok: true, manager: t.kind, unitPath, outcome, active, lines };
   }
 
-  async function resolveInstallTarget(opts: {
-    manager?: ServiceManagerKind;
-    account?: string;
-  }): Promise<Target> {
-    const manager = opts.manager ?? (deps.platform === "darwin" ? "launchd" : "systemd-user");
-    if (manager === "none") throw new ServiceError("no service requested");
-    if (manager === "systemd-system" || manager === "launchd") {
-      throw new ServiceError(`${manager} is not supported yet`);
-    }
-    if (deps.uid === 0) {
-      throw new ServiceError(
-        "the runtime never runs as root: install a system unit for a non-root account with `ocw-runtime service install --system --user-name <account>`",
-      );
-    }
-    const detected = await detect();
-    if (!detected.available) throw new ServiceError(detected.reason ?? "no service manager here");
-    return userTarget();
-  }
-
-  /** The installed unit status/uninstall/restart/logs act on. */
-  async function resolveExistingTarget(_opts: { system?: boolean } = {}): Promise<Target> {
-    return userTarget();
-  }
+  // --- status --------------------------------------------------------------------------------------------------
 
   function emptyStatus(manager: ServiceManagerKind, account: string, reason: string | null): ServiceStatus {
     return {
@@ -308,11 +476,17 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
     };
   }
 
+  async function pathFacts(paths: { nodePath: string; bundlePath: string } | null) {
+    return {
+      nodePathExists: paths ? await exists(paths.nodePath) : null,
+      bundlePathExists: paths ? await exists(paths.bundlePath) : null,
+    };
+  }
+
   async function systemdStatus(t: Target): Promise<ServiceStatus> {
     const text = await readText(t.unitPath);
     if (text === null) return emptyStatus(t.kind, t.account, null);
-    const paths = parseSystemdExecStart(text);
-    const enabledOut = (await run([...t.ctl, "is-enabled", SYSTEMD_UNIT_NAME])).stdout.trim();
+    const enabledOut = (await run([...ctl(t), "is-enabled", SYSTEMD_UNIT_NAME])).stdout.trim();
     const enabled = ["enabled", "enabled-runtime"].includes(enabledOut)
       ? true
       : ["disabled", "masked"].includes(enabledOut)
@@ -326,10 +500,44 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
       linger: t.kind === "systemd-user" ? await linger(t.account) : null,
       account: t.account,
       unitPath: display(t.unitPath),
-      nodePathExists: paths ? await exists(paths.nodePath) : null,
-      bundlePathExists: paths ? await exists(paths.bundlePath) : null,
+      ...(await pathFacts(parseSystemdExecStart(text))),
       reason: null,
     };
+  }
+
+  async function launchdStatus(t: Target): Promise<ServiceStatus> {
+    const text = await readText(t.unitPath);
+    if (text === null) return emptyStatus("launchd", t.account, null);
+    const { loaded, running } = await launchdPrint();
+    return {
+      manager: "launchd",
+      installed: true,
+      enabled: loaded,
+      active: running,
+      linger: null,
+      account: t.account,
+      unitPath: display(t.unitPath),
+      ...(await pathFacts(parseLaunchdProgramArguments(text))),
+      reason: null,
+    };
+  }
+
+  /** Last `n` lines of a file, reading at most the final megabyte. */
+  async function tailFile(p: string, n: number): Promise<string[] | null> {
+    let handle: Awaited<ReturnType<typeof open>> | null = null;
+    try {
+      handle = await open(at(p), "r");
+      const { size } = await handle.stat();
+      const length = Math.min(size, LOG_TAIL_READ_BYTES);
+      const buf = Buffer.alloc(length);
+      await handle.read(buf, 0, length, size - length);
+      const text = buf.toString("utf8").replace(/\n$/, "");
+      return text ? text.split("\n").slice(-n) : [];
+    } catch {
+      return null;
+    } finally {
+      await handle?.close();
+    }
   }
 
   return {
@@ -337,8 +545,7 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
 
     async install(opts = {}) {
       try {
-        const t = await resolveInstallTarget(opts);
-        return await installSystemd(t);
+        return await installTarget(await resolveInstallTarget(opts));
       } catch (err) {
         if (err instanceof ServiceError) return { ok: false, error: err.message, lines: [] };
         throw err;
@@ -347,33 +554,55 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
 
     async uninstall(opts = {}) {
       const t = await resolveExistingTarget(opts);
-      if (!(await exists(t.unitPath))) return { ok: true, lines: [`${SYSTEMD_UNIT_NAME} is not installed`] };
-      const disable = await run([...t.ctl, "disable", "--now", SYSTEMD_UNIT_NAME]);
-      await rm(at(t.unitPath), { force: true });
-      await run([...t.ctl, "daemon-reload"]);
+      if (!(await exists(t.unitPath))) return { ok: true, lines: [`${unitName(t)} is not installed`] };
       const lines = [`Removed ${display(t.unitPath)}`];
+      if (t.kind === "launchd") {
+        await run(["launchctl", "bootout", launchdService()]);
+        await rm(at(t.unitPath), { force: true });
+        return { ok: true, lines };
+      }
+      const disable = await run([...ctl(t), "disable", "--now", SYSTEMD_UNIT_NAME]);
+      await rm(at(t.unitPath), { force: true });
+      await run([...ctl(t), "daemon-reload"]);
       if (disable.code !== 0) lines.push(`systemctl disable reported: ${firstLine(disable)}`);
       return { ok: true, lines };
     },
 
     async status(opts = {}) {
-      if (deps.platform !== "linux") {
+      if (deps.platform !== "linux" && deps.platform !== "darwin") {
         const d = await detect();
         return emptyStatus(d.kind, deps.account, d.reason);
       }
-      const d = await detect(opts);
-      if (d.kind === "none") return emptyStatus("none", deps.account, d.reason);
       const t = await resolveExistingTarget(opts);
+      if (t.kind === "launchd") return launchdStatus(t);
+      const d = await detect({ system: t.kind === "systemd-system" });
+      if (d.kind === "none") return emptyStatus("none", deps.account, d.reason);
       const s = await systemdStatus(t);
-      if (s.installed && !d.available)
-        return { ...s, enabled: null, active: null, linger: null, reason: d.reason };
+      if (!d.available) {
+        return s.installed
+          ? { ...s, enabled: null, active: null, linger: null, reason: d.reason }
+          : { ...s, reason: d.reason };
+      }
       return s;
     },
 
     async logs({ lines, follow, ...opts }) {
       const t = await resolveExistingTarget(opts);
+      if (t.kind === "launchd") {
+        if (follow) {
+          const r = await run(["tail", "-n", String(lines), "-F", logFile(t)], { inherit: true });
+          return r.code === 0 || r.code === null ? 0 : 1;
+        }
+        const tail = await tailFile(logFile(t), lines);
+        if (tail === null) {
+          deps.out(`no log yet at ${display(logFile(t))}`);
+          return 0;
+        }
+        for (const line of tail) deps.out(line);
+        return 0;
+      }
       const argv = [
-        ...t.journal,
+        ...journal(t),
         "-u",
         SYSTEMD_UNIT_NAME,
         "-n",
@@ -399,13 +628,24 @@ export function createServiceManager(deps: ServiceDeps): ServiceManager {
       if (!(await exists(t.unitPath))) {
         return {
           ok: false,
-          error: `${SYSTEMD_UNIT_NAME} is not installed: run \`ocw-runtime service install\``,
+          error: `${unitName(t)} is not installed: run \`ocw-runtime service install\``,
           lines: [],
         };
       }
-      const r = await run([...t.ctl, "restart", SYSTEMD_UNIT_NAME]);
-      if (r.code !== 0) return { ok: false, error: `restart failed: ${firstLine(r)}`, lines: [] };
-      return { ok: true, lines: [`Restarted ${SYSTEMD_UNIT_NAME}`] };
+      try {
+        if (t.kind === "launchd") {
+          await run(["launchctl", "bootout", launchdService()]);
+          await rotateLog(t);
+          await bootstrap(t);
+        } else {
+          const r = await run([...ctl(t), "restart", SYSTEMD_UNIT_NAME]);
+          if (r.code !== 0) return { ok: false, error: `restart failed: ${firstLine(r)}`, lines: [] };
+        }
+      } catch (err) {
+        if (err instanceof ServiceError) return { ok: false, error: err.message, lines: [] };
+        throw err;
+      }
+      return { ok: true, lines: [`Restarted ${unitName(t)}`] };
     },
   };
 }

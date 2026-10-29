@@ -68,9 +68,19 @@ export interface SystemdUnitOptions {
   account?: string;
 }
 
+/** A POSIX-portable account name (useradd's default rule), checked before the name reaches any command or unit. */
+export function isValidAccountName(name: string): boolean {
+  return /^[a-z_][a-z0-9_-]*\$?$/.test(name) && name.length <= 32;
+}
+
 export function renderSystemdUnit(opts: SystemdUnitOptions): string {
   const system = opts.scope === "system";
-  if (system && !opts.account) throw new Error("a system unit needs the account it runs as");
+  if (system) {
+    if (!opts.account) throw new Error("a system unit needs the account it runs as");
+    if (!isValidAccountName(opts.account))
+      throw new Error(`invalid account name ${JSON.stringify(opts.account)}`);
+    if (opts.account === "root") throw new Error("the runtime never runs as root");
+  }
   const unit = [
     HEADER,
     "[Unit]",
