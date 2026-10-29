@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -19,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import type { RuntimeId } from "@ocw/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { Daemon } from "./daemon.js";
+import { DoctorReport } from "./doctor.js";
 import { silentLogger } from "./logger.js";
 import type { AgentRuntime } from "./runtime.js";
 
@@ -348,7 +350,17 @@ async function pairingStub(): Promise<PairingStub> {
       const body = (raw ? JSON.parse(raw) : {}) as Record<string, unknown>;
       const path = req.url ?? "";
       requests.push({ path, body });
+      // What `setup` and `doctor` also ask (07.12-08): health, the served runtime (none here) and the token check.
+      if (req.method === "GET" && path === "/health") return answer(res, 200, { status: "ok" });
+      if (req.method === "GET" && path === "/api/v1/runtime/version") {
+        return answer(res, 404, { error: { code: "runtime_unavailable", message: "no runtime bundle" } });
+      }
       if (req.method !== "POST") return answer(res, 405, { error: { code: "method", message: "POST only" } });
+      if (path === "/api/v1/devices/token") {
+        return req.headers.authorization === `Bearer ${STUB_TOKEN}`
+          ? answer(res, 200, { token: "eyJ.stub.jwt", expiresIn: 900 })
+          : answer(res, 401, { error: { code: "unauthorized", message: "unknown device" } });
+      }
       if (path === "/api/v1/devices/pairings") {
         proposedName = String(body.name);
         return answer(res, 200, {
@@ -696,5 +708,217 @@ describe("ocw-runtime run reads ~/.ocw/service.env (07.12-03, D-12)", () => {
     const logs = await runDaemon({ ...env, OCW_RUNTIME_FAKE: "1" }, join(home, "runtime.sock"));
     expect(logs).toContain("chmod 600 ~/.ocw/service.env");
     expect(logs).not.toContain("probe-value-72");
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.12-08 `ocw-runtime setup` (D-02, D-06, PD-13) against the pairing stub. PD-19: a scratch HOME, OCW_HOME and PATH,
+// runtime.json pointing Claude Code and Codex at missing files (the doctor never runs the real CLIs), the fake runtime,
+// updates off, a dead registry and `--service none` (no service manager is touched).
+
+describe("ocw-runtime setup (07.12-08, D-02)", () => {
+  const stubs: PairingStub[] = [];
+  afterEach(async () => {
+    for (const s of stubs.splice(0)) await s.close();
+  });
+
+  async function scratch(): Promise<{
+    userHome: string;
+    home: string;
+    repo: string;
+    env: Record<string, string>;
+    stub: PairingStub;
+  }> {
+    const userHome = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(userHome);
+    const home = join(userHome, ".ocw");
+    mkdirSync(home, { mode: 0o700 });
+    writeFileSync(
+      join(home, "runtime.json"),
+      JSON.stringify({
+        claude: { path: join(userHome, "no-claude") },
+        codex: { path: join(userHome, "no-codex") },
+      }),
+      { mode: 0o600 },
+    );
+    const repo = join(userHome, "repo");
+    mkdirSync(repo);
+    execFileSync("git", ["init", "-q", repo]);
+    const stub = await pairingStub();
+    stubs.push(stub);
+    return {
+      userHome,
+      home,
+      repo,
+      stub,
+      env: {
+        HOME: userHome,
+        OCW_HOME: home,
+        PATH: "/usr/bin:/bin",
+        OCW_RUNTIME_FAKE: "1",
+        OCW_RUNTIME_UPDATES: "off",
+        OCW_RUNTIME_REGISTRY_URL: "http://127.0.0.1:9",
+      },
+    };
+  }
+
+  it("--yes --service none pairs, registers the repo, skips the service, runs the doctor and prints the link; a re-run changes nothing", async () => {
+    const { home, repo, env, stub } = await scratch();
+    const args = [
+      "setup",
+      "--yes",
+      "--server",
+      stub.url,
+      "--name",
+      "rack-1",
+      "--project",
+      repo,
+      "--service",
+      "none",
+    ];
+    const first = await cliAsync(home, args, env);
+    expect(first.code, first.stderr).toBe(0);
+    expect(first.stdout).toContain("ABCD-EFGH");
+    expect(first.stdout).toContain('Paired "rack-1" with Acme as Ada.');
+    expect(first.stdout).toContain('Registered "repo" (~/repo).');
+    expect(first.stdout).toContain("run `ocw-runtime run` under your own supervisor");
+    expect(first.stdout).toContain("ocw-runtime doctor · account");
+    expect(first.stdout).toContain(`Settings › Devices: ${STUB_WEB}/settings/devices`);
+    expect(first.stdout.trimEnd().endsWith("Share it with members and teams there.")).toBe(true);
+    for (const secret of [STUB_DEVICE_CODE, STUB_TOKEN]) {
+      expect(first.stdout).not.toContain(secret);
+      expect(first.stderr).not.toContain(secret);
+    }
+    const projects = JSON.parse(readFileSync(join(home, "projects.json"), "utf8")) as {
+      projects: Array<{ path: string; name: string }>;
+    };
+    expect(projects.projects).toMatchObject([{ path: repo, name: "repo" }]);
+
+    const pairingsBefore = stub.requests.filter((q) => q.path === "/api/v1/devices/pairings").length;
+    const second = await cliAsync(home, args, env);
+    expect(second.code, second.stderr).toBe(0);
+    expect(second.stdout).toContain(`Already paired as "rack-1" with ${stub.url}`);
+    expect(second.stdout).toContain("~/repo is already registered");
+    expect(stub.requests.filter((q) => q.path === "/api/v1/devices/pairings")).toHaveLength(pairingsBefore);
+    expect(second.stdout).not.toContain(STUB_TOKEN);
+  }, 60_000);
+
+  it("a usage error exits 2 with the usage; without a terminal a missing value names its flag", async () => {
+    const { home, env } = await scratch();
+    const bad = await cliAsync(home, ["setup", "--frobnicate"], env);
+    expect(bad.code).toBe(2);
+    expect(bad.stderr).toContain("unknown option --frobnicate");
+    expect(bad.stderr).toContain("usage: ocw-runtime setup");
+    const noServer = await cliAsync(home, ["setup", "--yes"], env);
+    expect(noServer.code).toBe(2);
+    expect(noServer.stderr).toContain("pass --server <url>");
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.12-08 `ocw-runtime doctor [--json]` and `ocw-runtime service …` (D-04, D-05, D-12, PD-12, PD-19). Scratch HOME and
+// OCW_HOME; the server is a dead loopback port; Claude Code and Codex point at missing files. The spawned CLI inherits
+// VITEST, so the PD-19 guard refuses systemctl/launchctl/loginctl/journalctl in the child: fakes of all four sit first on
+// PATH and would leave a marker if anything ever ran them.
+
+describe("ocw-runtime doctor and service (07.12-08, D-04, D-05)", () => {
+  function scratch(): { userHome: string; home: string; env: Record<string, string> } {
+    const userHome = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(userHome);
+    const home = join(userHome, ".ocw");
+    mkdirSync(home, { mode: 0o700 });
+    writeFileSync(
+      join(home, "runtime.json"),
+      JSON.stringify({
+        serverUrl: "http://127.0.0.1:9",
+        claude: { path: join(userHome, "no-claude") },
+        codex: { path: join(userHome, "no-codex") },
+      }),
+      { mode: 0o600 },
+    );
+    return {
+      userHome,
+      home,
+      env: {
+        HOME: userHome,
+        OCW_HOME: home,
+        PATH: "/usr/bin:/bin",
+        OCW_RUNTIME_UPDATES: "off",
+        OCW_RUNTIME_REGISTRY_URL: "http://127.0.0.1:9",
+      },
+    };
+  }
+
+  it("doctor --json (not paired, no daemon): a DoctorReport with pairing fail, exit 1; the text has the header and counts", async () => {
+    expect(process.env.VITEST).toBeTruthy(); // reaches the child: the PD-19 guard is active there
+    const { home, env } = scratch();
+    const json = await cliAsync(home, ["doctor", "--json"], env);
+    expect(json.code, json.stderr).toBe(1);
+    const report = DoctorReport.parse(JSON.parse(json.stdout));
+    expect(report.checks.find((c) => c.id === "pairing")?.status).toBe("fail");
+    const text = await cliAsync(home, ["doctor"], env);
+    expect(text.code).toBe(1);
+    expect(text.stdout).toContain("ocw-runtime doctor · account");
+    expect(text.stdout).toMatch(/\d+ warnings?, \d+ failures?/);
+    const bad = await cliAsync(home, ["doctor", "--yaml"], env);
+    expect(bad.code).toBe(2);
+    expect(bad.stderr).toContain("usage: ocw-runtime doctor [--json]");
+  }, 60_000);
+
+  it("doctor reads service.env as the service would: 0644 is a fail, a 0600 key is named and its value never shown", async () => {
+    const { home, env } = scratch();
+    const file = join(home, "service.env");
+    writeFileSync(file, "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-doctor-secret-value-1234\n", { mode: 0o644 });
+    chmodSync(file, 0o644);
+    const loose = await cliAsync(home, ["doctor", "--json"], env);
+    const looseReport = DoctorReport.parse(JSON.parse(loose.stdout));
+    expect(looseReport.checks.find((c) => c.id === "service-env")?.status).toBe("fail");
+    expect(loose.stdout).not.toContain("doctor-secret-value");
+
+    chmodSync(file, 0o600);
+    const tight = await cliAsync(home, ["doctor", "--json"], env);
+    const tightReport = DoctorReport.parse(JSON.parse(tight.stdout));
+    const check = tightReport.checks.find((c) => c.id === "service-env");
+    expect(check?.status).toBe("ok");
+    expect(check?.summary).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(tight.stdout).not.toContain("doctor-secret-value");
+    expect(tight.stderr).not.toContain("doctor-secret-value");
+  }, 60_000);
+
+  it("service status --json names the manager and no real service manager ever runs (PD-19)", async () => {
+    const { userHome, home, env } = scratch();
+    const fakes = join(userHome, "fake-bin");
+    const markers = join(userHome, "markers");
+    mkdirSync(fakes);
+    mkdirSync(markers);
+    for (const tool of ["systemctl", "launchctl", "loginctl", "journalctl"]) {
+      writeFileSync(join(fakes, tool), `#!/bin/sh\necho "$@" > "${markers}/${tool}"\nexit 0\n`, {
+        mode: 0o755,
+      });
+    }
+    // An installed unit and LaunchAgent, so status would ask the manager about them.
+    const unitDir = join(userHome, ".config", "systemd", "user");
+    mkdirSync(unitDir, { recursive: true });
+    writeFileSync(
+      join(unitDir, "ocw-runtime.service"),
+      '[Service]\nExecStart="/usr/bin/node" "/x.mjs" run\n',
+    );
+    const agents = join(userHome, "Library", "LaunchAgents");
+    mkdirSync(agents, { recursive: true });
+    writeFileSync(join(agents, "org.ocw.runtime.plist"), "<plist><dict></dict></plist>\n");
+
+    const r = await cliAsync(home, ["service", "status", "--json"], {
+      ...env,
+      PATH: `${fakes}:/usr/bin:/bin`,
+    });
+    expect([0, 1]).toContain(r.code);
+    const status = JSON.parse(r.stdout) as { manager: string; active: boolean | null };
+    expect(["systemd-user", "systemd-system", "launchd", "none"]).toContain(status.manager);
+    expect(status.active).not.toBe(true);
+    expect(readdirSync(markers)).toEqual([]);
+
+    const usage = await cliAsync(home, ["service"], env);
+    expect(usage.code).toBe(1);
+    expect(usage.stdout).toContain("usage: ocw-runtime service");
   }, 60_000);
 });
