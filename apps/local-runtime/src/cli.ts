@@ -1,6 +1,8 @@
 // ocw-runtime CLI.
 //   ocw-runtime enroll --server <url> --code <code> [--name <name>]   pair this machine (writes ~/.ocw)
 //   ocw-runtime [run]              start the daemon (default)
+//   ocw-runtime version | --version
+//                                  print this runtime's version (the bundle's package version; 0.0.0-dev under tsx)
 //   ocw-runtime detect             print Claude Code detection
 //   ocw-runtime status             query a running daemon over the control socket
 //   ocw-runtime add-project <dir>  register a project (via the running daemon, or directly when stopped)
@@ -34,6 +36,7 @@ import { Daemon } from "./daemon.js";
 import { enroll } from "./enroll.js";
 import { errorMessage } from "./logger.js";
 import { publicInstallFields, resolveInstall } from "./maintenance/install-method.js";
+import { RUNTIME_VERSION } from "./version.js";
 
 async function viaSocket(req: ControlRequest): Promise<void> {
   const res = await controlRequest(controlSocketPath(ocwHome()), req);
@@ -226,6 +229,10 @@ async function main(argv: string[]): Promise<void> {
   switch (cmd) {
     case "run":
       return run();
+    case "version":
+    case "--version":
+      process.stdout.write(`${RUNTIME_VERSION}\n`);
+      return;
     case "detect":
       process.stdout.write(`${JSON.stringify(await detectClaudeCode(), null, 2)}\n`);
       return;

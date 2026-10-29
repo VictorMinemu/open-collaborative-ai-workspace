@@ -26,6 +26,7 @@ export * from "./organization";
 export * from "./permissions";
 export * from "./realtime";
 export * from "./runtime-controls/index";
+export * from "./runtime-dist";
 export * from "./runtime-maintenance";
 export * from "./sandbox";
 export * from "./sandboxd-protocol";
