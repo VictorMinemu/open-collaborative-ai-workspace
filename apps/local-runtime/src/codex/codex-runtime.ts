@@ -598,10 +598,22 @@ export class CodexRuntime implements AgentRuntime {
 
   private spawnReal(cwd: string, env: Record<string, string | undefined>): ChildProcess & AppServerProcess {
     if (!this.codexPath) throw new RuntimeError("codex CLI not found on PATH", "runtime_unavailable");
+    // 07.11 review ME-07: right after an update relinked it, the binary may be gone for a moment.
+    if (!existsSync(this.codexPath)) {
+      throw new RuntimeError("codex CLI not found where it was installed", "runtime_unavailable");
+    }
     const child = spawn(this.codexPath, [...CODEX_APP_SERVER_ARGS], {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
+    });
+    // A spawn that fails (ENOENT, EACCES) emits `error` asynchronously; unheard, it would crash the whole daemon. It
+    // ends the process's output instead, so the JSON-RPC peer closes and the start or wake fails as unavailable.
+    child.on("error", (err) => {
+      // The code only: the error text names the binary's absolute path.
+      const code = (err as NodeJS.ErrnoException).code ?? "error";
+      this.log.warn("codex app-server could not be started", { code });
+      child.stdout?.destroy(new Error(`codex app-server could not be started (${code})`));
     });
     return child as ChildProcess & AppServerProcess;
   }

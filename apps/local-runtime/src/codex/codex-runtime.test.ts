@@ -320,6 +320,31 @@ describe("CodexRuntime — handshake, sandbox and billing", () => {
   });
 });
 
+describe("CodexRuntime — a codex binary that cannot be spawned (07.11 review ME-07)", () => {
+  it("a spawn error (not executable) fails the start with runtime_unavailable instead of crashing the daemon", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-spawn-")));
+    const codexPath = join(dir, "codex");
+    writeFileSync(codexPath, "not a program", { mode: 0o644 });
+    const runtime = new CodexRuntime({ codexPath });
+    const err = await runtime
+      .start({ sessionId: "s1", cwd: dir, permissionMode: "default" }, () => undefined)
+      .then(
+        () => null,
+        (e: unknown) => e as RuntimeError,
+      );
+    expect(err).toMatchObject({ code: "runtime_unavailable" });
+    expect(err?.message).not.toContain(dir);
+  });
+
+  it("a binary gone since it was found (an update relinked it) is refused before spawning", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-spawn-")));
+    const runtime = new CodexRuntime({ codexPath: join(dir, "missing", "codex") });
+    await expect(
+      runtime.start({ sessionId: "s1", cwd: dir, permissionMode: "default" }, () => undefined),
+    ).rejects.toMatchObject({ code: "runtime_unavailable" });
+  });
+});
+
 describe("CodexRuntime — turns and approvals", () => {
   it("maps a turn with a command approval answered from approval.resolve", async () => {
     const { start, runtime, events, cwd } = setup();
