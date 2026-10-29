@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RuntimeId } from "@ocw/contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Daemon } from "./daemon.js";
 import { DoctorReport } from "./doctor.js";
 import { silentLogger } from "./logger.js";
@@ -176,9 +176,17 @@ describe("ocw-runtime updates (07.11, D-09, PD-08)", () => {
     });
     try {
       await daemon.start();
-      const status = await cliAsync(home, ["updates", "status"], env);
-      expect(status.code).toBe(0);
-      const parsed = JSON.parse(status.stdout) as { runtimes: Array<Record<string, unknown>> };
+      // The first version probe runs after start resolves; under load it can still be pending on the first status.
+      let parsed: { runtimes: Array<Record<string, unknown>> } = { runtimes: [] };
+      await vi.waitFor(
+        async () => {
+          const status = await cliAsync(home, ["updates", "status"], env);
+          expect(status.code).toBe(0);
+          parsed = JSON.parse(status.stdout) as typeof parsed;
+          expect(parsed.runtimes.find((r) => r.runtime === "claude-code")?.installedVersion).toBe("2.1.290");
+        },
+        { timeout: 20_000, interval: 250 },
+      );
       expect(parsed).toMatchObject({
         daemon: "running",
         localLevel: "off",
