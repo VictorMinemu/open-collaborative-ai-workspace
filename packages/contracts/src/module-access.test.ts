@@ -95,6 +95,7 @@ describe("module catalog (Phase 07.3, ADR-0024)", () => {
         "device.read",
         "device.update",
         "device.revoke",
+        "device.maintain",
         "device.link",
         "bot.manage",
         "bot.manage_unit",

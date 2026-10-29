@@ -25,16 +25,16 @@ const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const now = 1_790_000_000;
 
 describe("permission vocabulary", () => {
-  it("has exactly the 72 agreed permissions", () => {
+  it("has exactly the 73 agreed permissions", () => {
     // 64 through 07.4; 07.5-01 appended `tool_approval.manage`; 07.8-30 appended the five sandbox and browser grains;
-    // 07.9-01 appended `work_session.visibility` and `work_project.manage`.
-    expect(Permission.options).toHaveLength(72);
-    expect(new Set(Permission.options).size).toBe(72);
+    // 07.9-01 appended `work_session.visibility` and `work_project.manage`; 07.11-01 appended `device.maintain`.
+    expect(Permission.options).toHaveLength(73);
+    expect(new Set(Permission.options).size).toBe(73);
   });
 
   it("Phase 07.9 session visibility and team project grains exist exactly as 07.9-01 defines them (D-04, D-10, D-13)", () => {
     // Appended at the end, never renamed (positions 70–71).
-    expect(Permission.options.slice(70)).toEqual(["work_session.visibility", "work_project.manage"]);
+    expect(Permission.options.slice(70, 72)).toEqual(["work_session.visibility", "work_project.manage"]);
     expect(PERMISSION_SURFACE["work_session.visibility"]).toBe("workzone");
     expect(PERMISSION_SURFACE["work_project.manage"]).toBe("team");
     // Organization-wide only for admins; the session creator gets `work_session.visibility` as a relation (resolver).
@@ -355,6 +355,19 @@ describe("permission vocabulary", () => {
     }
   });
 
+  it("Phase 07.11 device.maintain: Work Zone surface, admins by role, owners by relation, never delegable (D-11)", () => {
+    expect(Permission.options.slice(72)).toEqual(["device.maintain"]);
+    expect(PERMISSION_SURFACE["device.maintain"]).toBe("workzone");
+    for (const role of OrgRole.options) {
+      if (role === "admin") expect(ROLE_PERMISSIONS[role]).toContain("device.maintain");
+      else expect(ROLE_PERMISSIONS[role], role).not.toContain("device.maintain");
+    }
+    expect(NON_DELEGABLE_PERMISSIONS).toContain("device.maintain");
+    expect(PERMISSION_DESCRIPTIONS["device.maintain"]).toBe(
+      "Update the coding CLIs on your devices, or on any device as an admin",
+    );
+  });
+
   it("Phase 3.1 bot permissions exist exactly as D-02 defines them", () => {
     expect(PERMISSION_SURFACE).toMatchObject({
       "bot.create_personal": "bots",
@@ -447,13 +460,14 @@ describe("permission vocabulary", () => {
     expect(Object.keys(PERMISSION_DESCRIPTIONS).sort()).toEqual([...Permission.options].sort());
   });
 
-  it("non-delegable permissions are exactly the admin- and runtime-surface permissions plus device.full_access and device.update", () => {
+  it("non-delegable permissions are exactly the admin- and runtime-surface permissions plus device.full_access, device.update and device.maintain", () => {
     const expected = Permission.options.filter(
       (p) =>
         PERMISSION_SURFACE[p] === "admin" ||
         PERMISSION_SURFACE[p] === "runtime" ||
         p === "device.full_access" ||
-        p === "device.update",
+        p === "device.update" ||
+        p === "device.maintain",
     );
     expect([...NON_DELEGABLE_PERMISSIONS].sort()).toEqual(expected.sort());
     expect(NON_DELEGABLE_PERMISSIONS).toContain("member.manage");

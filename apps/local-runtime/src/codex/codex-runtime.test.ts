@@ -1,12 +1,17 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { type PermissionMode, type SessionEvent, stripImageData } from "@ocw/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { RuntimeError } from "../runtime.js";
-import { type AppServerProcess, CodexRuntime, codexChildEnv } from "./codex-runtime.js";
+import {
+  type AppServerProcess,
+  CODEX_APP_SERVER_ARGS,
+  CodexRuntime,
+  codexChildEnv,
+} from "./codex-runtime.js";
 import { parseCodexLogin } from "./detect.js";
 import type { ItemStartedNotification } from "./generated/v2/ItemStartedNotification.js";
 import type { TurnStartParams } from "./generated/v2/TurnStartParams.js";
@@ -312,6 +317,31 @@ describe("CodexRuntime — handshake, sandbox and billing", () => {
     expect(parseCodexLogin("Logged in using ChatGPT")).toBe("chatgpt");
     expect(parseCodexLogin("Logged in using an API key - sk-***")).toBe("apikey");
     expect(parseCodexLogin("Not logged in")).toBeNull();
+  });
+});
+
+describe("CodexRuntime — a codex binary that cannot be spawned (07.11 review ME-07)", () => {
+  it("a spawn error (not executable) fails the start with runtime_unavailable instead of crashing the daemon", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-spawn-")));
+    const codexPath = join(dir, "codex");
+    writeFileSync(codexPath, "not a program", { mode: 0o644 });
+    const runtime = new CodexRuntime({ codexPath });
+    const err = await runtime
+      .start({ sessionId: "s1", cwd: dir, permissionMode: "default" }, () => undefined)
+      .then(
+        () => null,
+        (e: unknown) => e as RuntimeError,
+      );
+    expect(err).toMatchObject({ code: "runtime_unavailable" });
+    expect(err?.message).not.toContain(dir);
+  });
+
+  it("a binary gone since it was found (an update relinked it) is refused before spawning", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-spawn-")));
+    const runtime = new CodexRuntime({ codexPath: join(dir, "missing", "codex") });
+    await expect(
+      runtime.start({ sessionId: "s1", cwd: dir, permissionMode: "default" }, () => undefined),
+    ).rejects.toMatchObject({ code: "runtime_unavailable" });
   });
 });
 
@@ -1309,5 +1339,221 @@ describe("CodexRuntime — Full access through ADR-0012 only (D-01, D-03, P-11)"
       promptId: "p1",
       isError: true,
     });
+  });
+});
+
+describe("CodexRuntime — retire idle and resume (07.11 D-03a)", () => {
+  const sessionEnds = (events: SessionEvent[]) =>
+    events.filter(
+      (e) =>
+        e.type === "session.error" ||
+        (e.type === "session.state" && (e.status === "completed" || e.status === "failed")),
+    );
+
+  it("stops an idle session's app-server without finishing it and never touches one with a turn running", async () => {
+    const { start, runtime, events, servers, cwd } = setup();
+    const a = await start();
+    const bEvents: SessionEvent[] = [];
+    await runtime.start({ sessionId: "s2", cwd, permissionMode: "default" }, (e) => bEvents.push(e));
+    const b = servers[1] as FakeAppServer;
+    await runtime.prompt("s2", { promptId: "b1", text: "work" });
+    await wait();
+
+    expect(runtime.activeTurns()).toBe(1);
+    const before = { a: events.length, b: bEvents.length };
+    await expect(runtime.retireIdle()).resolves.toBe(1);
+    expect(a.stdin.writableEnded).toBe(true);
+    expect(a.killed).toEqual(["SIGTERM"]);
+    expect(b.killed).toEqual([]);
+    expect(b.stdin.writableEnded).toBe(false);
+    await wait();
+    expect(events.slice(before.a)).toEqual([]);
+    expect(bEvents.slice(before.b)).toEqual([]);
+    await expect(runtime.retireIdle()).resolves.toBe(0);
+
+    b.completeTurn();
+    await wait();
+    expect(runtime.activeTurns()).toBe(0);
+    expect(sessionEnds(bEvents)).toEqual([]);
+    await runtime.stopAll();
+  });
+
+  it("counts a session with prompts queued once and never retires it", async () => {
+    const { start, runtime } = setup();
+    const server = await start();
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    await wait();
+    expect(runtime.activeTurns()).toBe(1);
+    await expect(runtime.retireIdle()).resolves.toBe(0);
+    expect(server.killed).toEqual([]);
+    server.completeTurn();
+    await wait();
+    expect(runtime.activeTurns()).toBe(1);
+    server.completeTurn();
+    await wait();
+    expect(runtime.activeTurns()).toBe(0);
+  });
+
+  it("the next prompt spawns a new app-server, resumes the thread with the start params, then starts the turn", async () => {
+    const { start, runtime, events, servers } = setup();
+    const first = await start("acceptEdits");
+    const startParams = first.received.find((m) => m.method === "thread/start")?.params;
+    await expect(runtime.retireIdle()).resolves.toBe(1);
+    // A change made while dormant is held and rides on the wake-up turn/start (D-14), with no extra process.
+    await runtime.configure("s1", { effort: "high" });
+    expect(servers).toHaveLength(1);
+
+    await runtime.prompt("s1", { promptId: "p1", text: "after the update" });
+    await wait();
+    expect(servers).toHaveLength(2);
+    const woken = servers[1] as FakeAppServer;
+    expect(woken.received.map((m) => m.method)).toEqual([
+      "initialize",
+      "initialized",
+      "thread/resume",
+      "turn/start",
+    ]);
+    expect(woken.received[2]?.params).toEqual({ ...startParams, threadId: "thread-1" });
+    expect(woken.received[3]?.params).toMatchObject({
+      threadId: "thread-1",
+      effort: "high",
+      approvalPolicy: "on-request",
+    });
+    expect(first.received.filter((m) => m.method === "turn/start")).toEqual([]);
+    expect(runtime.activeTurns()).toBe(1);
+
+    woken.completeTurn();
+    await wait();
+    expect(runtime.activeTurns()).toBe(0);
+    const completed = events.filter((e) => e.type === "prompt.completed");
+    expect(completed).toEqual([expect.objectContaining({ promptId: "p1" })]);
+    expect(completed[0]).not.toHaveProperty("isError");
+    expect(sessionEnds(events)).toEqual([]);
+    expect(events.at(-1)).toEqual({ type: "session.state", status: "idle" });
+
+    // The woken process is the session's process now: stop() ends it.
+    await runtime.stop("s1");
+    expect(woken.killed).toContain("SIGTERM");
+    expect(sessionEnds(events)).toEqual([{ type: "session.state", status: "completed" }]);
+  });
+
+  it("a woken app-server that fails to resume leaves the session dormant and fails only that turn", async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-rt-")));
+    const servers: FakeAppServer[] = [];
+    const next: Array<(env: Record<string, string | undefined>) => FakeAppServer> = [];
+    const runtime = new CodexRuntime({
+      codexPath: "/usr/local/bin/codex",
+      spawnAppServer: ({ env }) => {
+        const s = (next.shift() ?? ((e) => new FakeAppServer(e)))(env);
+        servers.push(s);
+        return s;
+      },
+    });
+    const events: SessionEvent[] = [];
+    await runtime.start({ sessionId: "s1", cwd, permissionMode: "default" }, (e) => events.push(e));
+    await runtime.retireIdle();
+    class NoThread extends FakeAppServer {
+      protected override handleExtra(m: Msg): boolean {
+        if (m.method !== "thread/resume") return false;
+        this.send({ id: m.id, error: { code: -32000, message: "thread not found" } });
+        return true;
+      }
+    }
+    next.push((env) => new NoThread(env));
+    await runtime.prompt("s1", { promptId: "p1", text: "one" });
+    await wait(20);
+    const failing = servers[1] as FakeAppServer;
+    expect(failing).toBeInstanceOf(NoThread);
+    expect(failing.killed).toContain("SIGTERM");
+    expect(failing.received.map((m) => m.method)).not.toContain("turn/start");
+    expect(events.filter((e) => e.type === "prompt.completed")).toEqual([
+      expect.objectContaining({ promptId: "p1", isError: true }),
+    ]);
+    expect(events.some((e) => e.type === "session.state" && e.status === "failed")).toBe(false);
+    expect(runtime.activeTurns()).toBe(0);
+    // The next prompt tries again on a fresh process.
+    await runtime.prompt("s1", { promptId: "p2", text: "two" });
+    await wait();
+    expect(servers).toHaveLength(3);
+    expect(servers[2]?.received.map((m) => m.method)).toEqual([
+      "initialize",
+      "initialized",
+      "thread/resume",
+      "turn/start",
+    ]);
+    await runtime.stopAll();
+  });
+
+  it("stop() on a dormant session finishes cleanly with no process to kill", async () => {
+    const { start, runtime, events, servers } = setup();
+    const server = await start();
+    await runtime.retireIdle();
+    const before = events.length;
+    await runtime.stop("s1");
+    expect(events.slice(before)).toEqual([{ type: "session.state", status: "completed" }]);
+    expect(server.killed).toEqual(["SIGTERM"]);
+    expect(servers).toHaveLength(1);
+    expect(runtime.activeTurns()).toBe(0);
+  });
+
+  it("every app-server it launches runs with the startup update check off (D-12, PD-14)", () => {
+    expect(CODEX_APP_SERVER_ARGS).toEqual(["app-server", "-c", "check_for_update_on_startup=false"]);
+  });
+
+  it("the real spawn passes the update-check flag and refreshInstall() finds a newly installed CLI", async () => {
+    const savedPath = process.env.PATH;
+    const log = join(realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-log-"))), "args.log");
+    const dirA = mkdtempSync(join(tmpdir(), "ocw-codex-a-"));
+    const dirB = mkdtempSync(join(tmpdir(), "ocw-codex-b-"));
+    // A stand-in `codex` that records which copy ran and its arguments, then exits (start then fails).
+    for (const [dir, tag] of [
+      [dirA, "A"],
+      [dirB, "B"],
+    ] as const) {
+      writeFileSync(
+        join(dir, "codex"),
+        `#!${process.execPath}\nrequire("node:fs").appendFileSync(${JSON.stringify(log)}, ${JSON.stringify(tag)} + " " + process.argv.slice(2).join(" ") + "\\n");\n`,
+        { mode: 0o755 },
+      );
+    }
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ocw-codex-rt-")));
+    try {
+      process.env.PATH = dirA;
+      const runtime = new CodexRuntime();
+      await expect(
+        runtime.start({ sessionId: "s1", cwd, permissionMode: "default" }, () => undefined),
+      ).rejects.toBeInstanceOf(RuntimeError);
+      process.env.PATH = dirB;
+      runtime.refreshInstall();
+      await expect(
+        runtime.start({ sessionId: "s2", cwd, permissionMode: "default" }, () => undefined),
+      ).rejects.toBeInstanceOf(RuntimeError);
+      expect(readFileSync(log, "utf8").trim().split("\n")).toEqual([
+        "A app-server -c check_for_update_on_startup=false",
+        "B app-server -c check_for_update_on_startup=false",
+      ]);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+  });
+
+  it("refreshInstall() drops the catalog cache", async () => {
+    const servers: CatalogAppServer[] = [];
+    const runtime = new CodexRuntime({
+      codexPath: "/usr/local/bin/codex",
+      detect: async () => ({ id: "codex", installed: true, version: "0.160.0", loggedIn: true }),
+      spawnAppServer: ({ env }) => {
+        const s = new CatalogAppServer(env);
+        servers.push(s);
+        return s;
+      },
+    });
+    await runtime.catalog();
+    await runtime.catalog();
+    expect(servers).toHaveLength(1);
+    runtime.refreshInstall();
+    await runtime.catalog();
+    expect(servers).toHaveLength(2);
   });
 });

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { Id, IsoDateTime } from "./common";
 import { Permission } from "./permissions";
+import { DeviceRuntimeCompatibility, DeviceRuntimeMaintenance } from "./runtime-maintenance";
 import { PermissionMode, RuntimeId } from "./session-events";
 import { RepoTeamProject } from "./work-projects";
 
@@ -57,6 +58,16 @@ export const Device = z.object({
   createdAt: IsoDateTime,
   /** Permissions the caller holds on this resource, decided by the API resolver (UI gating only). */
   viewerCan: z.array(Permission).optional(),
+  /**
+   * Phase 07.11: runtime versions, install method, update state; the device owner and admins only (`device.maintain`,
+   * D-06, D-11); filled by the API from the device's own reports. Absent for everyone else and for older payloads.
+   */
+  runtimeMaintenance: DeviceRuntimeMaintenance.optional(),
+  /**
+   * Phase 07.11: per runtime, what the Control Plane's manifest says about the installed version; everyone who sees
+   * the device (D-04).
+   */
+  runtimeCompatibility: DeviceRuntimeCompatibility.optional(),
 });
 export type Device = z.infer<typeof Device>;
 

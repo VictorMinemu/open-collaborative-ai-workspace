@@ -1,6 +1,14 @@
 "use client";
 
-import { EFFORT_LABELS, type PermissionMode, type Project, type RuntimeId } from "@ocw/contracts";
+import {
+  type Device,
+  EFFORT_LABELS,
+  type PermissionMode,
+  type Project,
+  type RuntimeCompatibility,
+  type RuntimeId,
+  type RuntimeInfo,
+} from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import { Check, FolderGit2, FolderKanban, FolderPlus, GitBranch, Laptop, Lock, Rocket } from "lucide-react";
 import Link from "next/link";
@@ -25,6 +33,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useDesktop } from "@/lib/desktop";
 import { defaultAudience, groupRepos, isStartable } from "@/lib/new-session-groups";
+import { useMe } from "@/lib/queries";
 import { type DraftAudience, draftInput } from "@/lib/session-visibility";
 import { cn } from "@/lib/utils";
 import {
@@ -49,6 +58,37 @@ function namesOf(names: readonly string[]): string {
   const [a, b] = names;
   if (names.length === 1 || !b) return a ?? "";
   return names.length === 2 ? `${a} and ${b}` : `${a}, ${b} and ${names.length - 2} more`;
+}
+
+/**
+ * A runtime card on the chosen device (D-04, PD-13): installed and signed in, and not a version that can't run sessions
+ * (`broken`); an `unsupported` version stays usable with a warning. `whoUpdates` ends the note: "ask Owen to update".
+ */
+export function runtimeCardState(
+  info: RuntimeInfo | undefined,
+  compat: RuntimeCompatibility | undefined,
+  whoUpdates: string,
+): { ready: boolean; note: string | null; tone: "muted" | "warning" | "destructive" } {
+  if (!info?.installed) return { ready: false, note: "Not installed on this device", tone: "muted" };
+  if (!info.loggedIn) return { ready: false, note: "Not signed in on this device", tone: "muted" };
+  const version = info.version ?? "This version";
+  if (compat === "broken") {
+    return { ready: false, note: `${version} can't run sessions · ${whoUpdates}`, tone: "destructive" };
+  }
+  if (compat === "unsupported") {
+    return { ready: true, note: `${version} is older than supported · ${whoUpdates}`, tone: "warning" };
+  }
+  return { ready: true, note: null, tone: "muted" };
+}
+
+/** Who can update a device's CLIs, as the end of the card's note. */
+export function whoUpdates(
+  device: Pick<Device, "ownerUserId" | "ownerName">,
+  meId: string | undefined,
+): string {
+  return device.ownerUserId === meId
+    ? "update it in Settings › Devices"
+    : `ask ${device.ownerName ?? "its owner"} to update`;
 }
 
 /**
@@ -156,6 +196,10 @@ export function NewSessionDialog({
   }, [placeKey]);
   const device = devices.data?.find((d) => d.id === project?.deviceId) ?? null;
   const runtimeInfo = (id: RuntimeId) => device?.runtimes.find((r) => r.id === id);
+  const me = useMe({ enabled: false });
+  const updater = device ? whoUpdates(device, me.data?.user.id) : "";
+  const cardState = (id: RuntimeId) =>
+    runtimeCardState(runtimeInfo(id), device?.runtimeCompatibility?.[id], updater);
 
   // Everything below the runtime comes from the device's reported catalog as the API filtered it for the caller
   // (D-08, WZC-03): models, efforts and modes, with the reason for each refused mode.
@@ -208,10 +252,12 @@ export function NewSessionDialog({
 
   useEffect(() => {
     // Prefer a runtime that is ready on the chosen device.
-    const ready = (id: RuntimeId) => {
-      const r = device?.runtimes.find((x) => x.id === id);
-      return !!r?.installed && r.loggedIn;
-    };
+    const ready = (id: RuntimeId) =>
+      runtimeCardState(
+        device?.runtimes.find((x) => x.id === id),
+        device?.runtimeCompatibility?.[id],
+        "",
+      ).ready;
     if (device && !ready(runtime)) {
       const alt = (["claude-code", "codex"] as const).find(ready);
       if (alt) {
@@ -258,8 +304,7 @@ export function NewSessionDialog({
     }
   }
 
-  const rt = runtimeInfo(runtime);
-  const runtimeReady = !!rt?.installed && rt.loggedIn;
+  const runtimeReady = cardState(runtime).ready;
   const canSubmit = !!project && isStartable(project) && runtimeReady && !create.isPending;
 
   return (
@@ -373,7 +418,8 @@ export function NewSessionDialog({
               <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Agent">
                 {(["claude-code", "codex"] as const).map((id) => {
                   const info = runtimeInfo(id);
-                  const ready = !!info?.installed && info.loggedIn;
+                  const state = cardState(id);
+                  const ready = state.ready;
                   const selected = runtime === id;
                   return (
                     <button
@@ -403,14 +449,18 @@ export function NewSessionDialog({
                             <span className="font-normal text-muted-foreground text-xs">{info.version}</span>
                           ) : null}
                         </span>
-                        <span className="text-muted-foreground text-xs leading-snug">
-                          {!device
-                            ? RUNTIMES[id].subscription
-                            : !info?.installed
-                              ? "Not installed on this device"
-                              : !info.loggedIn
-                                ? "Not signed in on this device"
-                                : RUNTIMES[id].subscription}
+                        <span
+                          data-testid={device && state.tone !== "muted" ? "runtime-compat-note" : undefined}
+                          className={cn(
+                            "text-xs leading-snug",
+                            !device || state.tone === "muted"
+                              ? "text-muted-foreground"
+                              : state.tone === "warning"
+                                ? "text-amber-700 dark:text-amber-300"
+                                : "text-red-700 dark:text-red-300",
+                          )}
+                        >
+                          {!device ? RUNTIMES[id].subscription : (state.note ?? RUNTIMES[id].subscription)}
                         </span>
                       </span>
                     </button>

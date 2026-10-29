@@ -95,6 +95,9 @@
 # Runtime adapters (ADR-0012 path) and the OpenClaw plugin install gate.
 /apps/local-runtime/src/claude/                    @VictorMinemu
 /apps/local-runtime/src/codex/                     @VictorMinemu
+# Phase 07.11 (ADR-0032): what the daemon runs on a device and who may ask it to.
+/apps/local-runtime/src/maintenance/               @VictorMinemu
+/apps/api/src/modules/device/maintenance.ts        @VictorMinemu
 /infra/openclaw/install-policy.mjs                 @VictorMinemu
 
 # The guardrails themselves and the decisions they enforce.

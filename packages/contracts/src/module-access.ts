@@ -21,8 +21,8 @@ export interface ModuleDefinition {
 }
 
 /**
- * Exact grains per module. Work Zone keeps device hygiene (`device.read`, `.update`, `.revoke`) out, so a member whose
- * Work Zone is off can still see, unshare and revoke their devices. Bots lists grains instead of `bot.*`, which would
+ * Exact grains per module. Work Zone keeps device hygiene (`device.read`, `.update`, `.revoke`, `.maintain`) out, so a
+ * member whose Work Zone is off can still see, unshare, revoke and update the coding CLIs of their devices. Bots lists grains instead of `bot.*`, which would
  * reach governance (`bot.manage`, `bot.manage_unit`). New Work Zone session grains must keep the `work_session.`
  * prefix (the contract test refuses an unclassified Work Zone, Bots or `ai_chat.` grain).
  */
@@ -82,6 +82,8 @@ export const MODULE_EXCLUDED: readonly Permission[] = [
   "device.read",
   "device.update",
   "device.revoke",
+  // Phase 07.11: keeping a device's coding CLIs current is device hygiene, available while Work Zone is off.
+  "device.maintain",
   "device.link",
   "bot.manage",
   "bot.manage_unit",

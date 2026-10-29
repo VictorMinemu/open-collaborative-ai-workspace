@@ -23,8 +23,9 @@ export const RELATION_PERMISSIONS: Record<ResourceType, Partial<Record<Relation,
   channel: { owner: ["channel.archive", "channel.members.remove", "channel.update"] },
   channel_member: { owner: ["channel.members.remove"], self: ["channel.members.remove"] },
   // P-06: `device.full_access` is relation-only — the owner, or a member whose cap on the device is Full access.
+  // Phase 07.11 (D-11): `device.maintain` (the device's coding CLI updates) goes to the owner only, never a grantee.
   device: {
-    owner: ["device.use", "device.update", "device.revoke", "device.full_access"],
+    owner: ["device.use", "device.update", "device.revoke", "device.full_access", "device.maintain"],
     grantee: ["device.use"],
     full_access_grantee: ["device.use", "device.full_access"],
   },

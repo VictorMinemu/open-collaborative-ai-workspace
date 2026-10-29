@@ -7,6 +7,7 @@ import type { ObjectStorage } from "../artifact";
 import type { DeviceHub } from "../device";
 import { createPermissionService } from "../organization";
 import { sessionFacts } from "./facts";
+import { loadWorkZonePolicy } from "./policy";
 import { registerProjectRoutes } from "./projects";
 import {
   listProposableProjects,
@@ -93,6 +94,8 @@ export function createWorkSessionModule(
     storage: deps.storage ?? null,
   });
   hub.setSessionHandler(service);
+  // 07.11 (D-02, PD-03): the org's runtime updates level reaches the device module only through this source.
+  hub.setRuntimePolicySource(async (tx) => (await loadWorkZonePolicy(tx)).runtimeUpdates);
 
   // Following a session's stream is `work_session.read` on that session, with the facts of `sessionFacts` (the session's
   // audience, D-04/D-09; RLS scopes the lookup to the org). Nobody outside the audience subscribes `ws:<id>`. A refusal

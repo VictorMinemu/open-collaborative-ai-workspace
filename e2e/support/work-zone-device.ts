@@ -1,4 +1,4 @@
-import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { type ChildProcess, execFile, execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,9 @@ import { API_URL } from "../tests/env";
  * login), paired through the API as the signed-in owner of `adminApi`, with one scratch git repo registered.
  * Used by the Work Zone controls specs (Phase 03.2); `stop()` kills the daemon, revokes the device and removes
  * the temp dirs.
+ * Runtime CLI updates (07.11, PD-19): every device runs with `OCW_RUNTIME_UPDATES=off` unless the spec's `env`
+ * overrides it; only the runtime-updates specs do, together with a scratch `HOME` and `PATH`
+ * (`e2e/support/runtime-updates.ts`), so no spec's daemon ever touches a real CLI.
  */
 
 const RUNTIME_BIN = join(import.meta.dirname, "..", "..", "apps", "local-runtime", "bin", "ocw-runtime");
@@ -18,6 +21,14 @@ export interface FakeDeviceHandle {
   deviceId: string;
   projectId: string;
   projectName: string;
+  /** The device's scratch `OCW_HOME` (control socket, config, token). */
+  ocwHome: string;
+  /**
+   * Runs `ocw-runtime <args>` with the device's env (its `OCW_HOME`) and resolves with stdout; rejects on a non-zero
+   * exit. Asynchronous on purpose: a stub the spec serves from its own process (a fake registry) must keep answering
+   * while the CLI waits for the daemon.
+   */
+  runtimeCli(args: string[]): Promise<string>;
   /**
    * Stop the daemon gracefully (SIGTERM) WITHOUT revoking the device: its runtimes report every session as ended
    * ("completed"), so the sessions stay listed (a revoked host hides them). `stop()` still cleans up afterwards.
@@ -56,6 +67,8 @@ export async function startFakeDevice(
     OCW_HOME: home,
     OCW_RUNTIME_FAKE: "1",
     OCW_RUNTIME_FAKE_DELAY_MS: "120",
+    // 07.11 (PD-19): runtime CLI updates off unless the spec overrides it (before `...opts.env`).
+    OCW_RUNTIME_UPDATES: "off",
     ...opts.env,
   };
   let daemon: ChildProcess | null = null;
@@ -145,10 +158,19 @@ export async function startFakeDevice(
         )
         .toBe(false);
     };
+    const runtimeCli = (args: string[]) =>
+      new Promise<string>((resolve, reject) => {
+        execFile(process.execPath, [RUNTIME_BIN, ...args], { env }, (err, stdout, stderr) => {
+          if (err) reject(new Error(`ocw-runtime ${args.join(" ")}: ${err.message} ${stderr}`.trim()));
+          else resolve(stdout);
+        });
+      });
     return {
       deviceId,
       projectId,
       projectName: opts.projectName,
+      ocwHome: home,
+      runtimeCli,
       shutdown,
       restart,
       removeProject,

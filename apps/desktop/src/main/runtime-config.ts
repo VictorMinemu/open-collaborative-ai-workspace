@@ -1,10 +1,12 @@
 // The Local Runtime daemon's own config file (`<OCW_HOME>/runtime.json`) as far as the desktop app touches it: the
-// device owner's Full access opt-in (ADR-0012, P-12). Only the main process writes it, after a native confirmation
-// from the Runtime menu; the web origin and the preload API can never change it. The daemon picks the change up on
-// the `reloadConfig` control request (no restart). No Electron imports (unit-tested).
+// device owner's Full access opt-in (ADR-0012, P-12) and runtime updates level (07.11, D-02). Only the main process
+// writes it, from the Runtime menu (Full access after a native confirmation); the web origin and the preload API can
+// never change it. The daemon picks the change up on the `reloadConfig` control request (no restart). No Electron
+// imports (unit-tested).
 
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { DesktopRuntimeUpdatesLevel } from "../shared/ipc";
 
 const FILE = "runtime.json";
 
@@ -37,19 +39,40 @@ export async function readDaemonFullAccess(ocwHome: string): Promise<boolean> {
 
 /** Sets `fullAccess.optIn` atomically (temp file + rename, mode 0600), keeping every other key. */
 export async function writeDaemonFullAccess(ocwHome: string, on: boolean): Promise<void> {
+  await patchSection(ocwHome, "fullAccess", { optIn: on });
+}
+
+/** The device's runtime updates level as runtime.json says it (`automatic` when missing or unknown here). */
+export async function readDaemonRuntimeUpdates(ocwHome: string): Promise<DesktopRuntimeUpdatesLevel> {
+  const config = await readObject(ocwHome);
+  const updates = config.runtimeUpdates as { level?: unknown } | undefined;
+  const level = DesktopRuntimeUpdatesLevel.safeParse(updates?.level);
+  return level.success ? level.data : "automatic";
+}
+
+/** Sets `runtimeUpdates.level` atomically (temp file + rename, mode 0600), keeping every other key. */
+export async function writeDaemonRuntimeUpdates(
+  ocwHome: string,
+  level: DesktopRuntimeUpdatesLevel,
+): Promise<void> {
+  await patchSection(ocwHome, "runtimeUpdates", { level: DesktopRuntimeUpdatesLevel.parse(level) });
+}
+
+/** Merges `patch` into one object section of runtime.json; a malformed file is never overwritten. */
+async function patchSection(
+  ocwHome: string,
+  section: "fullAccess" | "runtimeUpdates",
+  patch: Record<string, unknown>,
+): Promise<void> {
   await mkdir(ocwHome, { recursive: true, mode: 0o700 });
   const config = await readObject(ocwHome);
-  const previous =
-    typeof config.fullAccess === "object" && config.fullAccess !== null ? config.fullAccess : {};
+  const previous = config[section];
+  const kept = typeof previous === "object" && previous !== null && !Array.isArray(previous) ? previous : {};
   const path = join(ocwHome, FILE);
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(
-    tmp,
-    `${JSON.stringify({ ...config, fullAccess: { ...previous, optIn: on } }, null, 2)}\n`,
-    {
-      mode: 0o600,
-    },
-  );
+  await writeFile(tmp, `${JSON.stringify({ ...config, [section]: { ...kept, ...patch } }, null, 2)}\n`, {
+    mode: 0o600,
+  });
   await chmod(tmp, 0o600);
   await rename(tmp, path);
 }

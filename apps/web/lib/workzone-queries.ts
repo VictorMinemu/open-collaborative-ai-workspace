@@ -310,6 +310,8 @@ export function useWorkZoneOrgSync() {
     if (frame.type === EventTypes.deviceUpdated) {
       void qc.invalidateQueries({ queryKey: wzKeys.devices });
       void qc.invalidateQueries({ queryKey: wzKeys.projects });
+      // 07.11: an open runtime-update history follows the device's runs (only active queries refetch).
+      void qc.invalidateQueries({ queryKey: ["wz", "device-runtime-updates"] });
     }
     if (sessionListStale(frame, userId)) void qc.invalidateQueries({ queryKey: wzKeys.sessions });
   });

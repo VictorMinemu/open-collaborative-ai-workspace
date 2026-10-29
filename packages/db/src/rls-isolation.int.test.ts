@@ -599,6 +599,12 @@ async function seedOrg(c: pg.Client, org: string) {
     "insert into app.work_session_grants (organization_id, work_session_id, subject_kind, subject_id, granted_by) values ($1, $2, 'user', $3, $3), ($1, $2, 'unit', $4, $3)",
     [org, ws, user, team],
   );
+
+  // Phase 07.11 (D-06, PD-04): one finished automatic run on the seeded device.
+  await q(
+    "insert into app.device_runtime_updates (organization_id, device_id, runtime, run_id, trigger, state, from_version, to_version, candidate, method, started_at, finished_at) values ($1, $2, 'claude-code', $3, 'automatic', 'succeeded', '2.1.289', '2.1.290', '2.1.290', 'native', now(), now())",
+    [org, device, randomUUID()],
+  );
 }
 
 const SANDBOX_TABLES = [
@@ -2797,6 +2803,164 @@ describe("tenant isolation (RLS)", () => {
       ).rows[0].n;
     });
     expect(orgGone).toBe(0);
+  });
+
+  it("Phase 07.11 schema constraints: the update history is org-scoped and checked, the policy level too (D-02, D-06, PD-04)", async () => {
+    const tbl = "app.device_runtime_updates";
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: 1 });
+    const seeded = async (org: string) =>
+      (
+        await migrator.query(
+          "select u.device_id as device, u.run_id as run, d.owner_user_id as user from app.device_runtime_updates u join app.devices d on d.id = u.device_id where u.organization_id = $1",
+          [org],
+        )
+      ).rows[0] as { device: string; run: string; user: string };
+    const a = await seeded(A);
+    const b = await seeded(B);
+
+    // Tenant isolation as the app role: B reads none of A's history and cannot write a row for A's device.
+    expect(
+      (
+        await inTenant(A, () =>
+          app.query(`select count(*)::int as n from ${tbl} where device_id = $1`, [a.device]),
+        )
+      ).rows[0].n,
+    ).toBe(1);
+    expect(
+      (
+        await inTenant(B, () =>
+          app.query(`select count(*)::int as n from ${tbl} where device_id = $1`, [a.device]),
+        )
+      ).rows[0].n,
+    ).toBe(0);
+    await expect(
+      inTenant(B, () =>
+        app.query(
+          `insert into ${tbl} (organization_id, device_id, runtime, trigger, state) values ($1, $2, 'codex', 'manual', 'requested')`,
+          [A, a.device],
+        ),
+      ),
+    ).rejects.toThrow(/row-level security/);
+    // Inside its own tenant, B naming A's device finds no parent: the device reference carries the organization.
+    await expect(
+      inTenant(B, () =>
+        app.query(
+          `insert into ${tbl} (organization_id, device_id, runtime, trigger, state) values ($1, $2, 'codex', 'manual', 'requested')`,
+          [B, a.device],
+        ),
+      ),
+    ).rejects.toThrow(/device_runtime_updates_device_fk/);
+
+    /** Each check runs in its own migrator transaction that is rolled back, so the seeds stay as they are. */
+    const rolledBack = async <T>(fn: () => Promise<T>): Promise<T> => {
+      await migrator.query("begin");
+      try {
+        return await fn();
+      } finally {
+        await migrator.query("rollback");
+      }
+    };
+    const m = (text: string, values: unknown[]) => migrator.query(text, values);
+    const request = (device = a.device, runtime = "claude-code", org = A) =>
+      m(
+        `insert into ${tbl} (organization_id, device_id, runtime, trigger, requested_by, state, requested_at) values ($1, $2, $3, 'manual', $4, 'requested', now()) returning id`,
+        [org, device, runtime, a.user],
+      );
+
+    // One pending "Update now" per device and runtime; the other runtime and an expired request leave the slot free.
+    await expect(
+      rolledBack(async () => {
+        await request();
+        return request();
+      }),
+    ).rejects.toThrow(/device_runtime_updates_requested_uq/);
+    const freed = await rolledBack(async () => {
+      const first = (await request()).rows[0].id as string;
+      await request(a.device, "codex");
+      await m(`update ${tbl} set state = 'expired' where id = $1`, [first]);
+      return (await request()).rowCount;
+    });
+    expect(freed).toBe(1);
+
+    // A replayed run id on the same device is refused.
+    await expect(
+      m(
+        `insert into ${tbl} (organization_id, device_id, runtime, run_id, trigger, state) values ($1, $2, 'claude-code', $3, 'automatic', 'started')`,
+        [A, a.device, a.run],
+      ),
+    ).rejects.toThrow(/device_runtime_updates_run_uq/);
+
+    // Closed vocabularies and bounded text.
+    const bad: Array<[Record<string, unknown>, RegExp]> = [
+      [{ runtime: "opencode" }, /device_runtime_updates_runtime_ck/],
+      [{ trigger: "cron" }, /device_runtime_updates_trigger_ck/],
+      [{ state: "queued" }, /device_runtime_updates_state_ck/],
+      [{ output: "x".repeat(4097) }, /device_runtime_updates_output_len_ck/],
+      [{ error: "x".repeat(501) }, /device_runtime_updates_error_len_ck/],
+    ];
+    for (const [patch, ck] of bad) {
+      const row = {
+        runtime: "codex",
+        trigger: "automatic",
+        state: "started",
+        output: null,
+        error: null,
+        ...patch,
+      };
+      await expect(
+        m(
+          `insert into ${tbl} (organization_id, device_id, runtime, trigger, state, output, error) values ($1, $2, $3, $4, $5, $6, $7)`,
+          [A, a.device, row.runtime, row.trigger, row.state, row.output, row.error],
+        ),
+        JSON.stringify(Object.keys(patch)),
+      ).rejects.toThrow(ck);
+    }
+    // At the limits it is accepted.
+    const atLimit = await rolledBack(() =>
+      m(
+        `insert into ${tbl} (organization_id, device_id, runtime, trigger, state, output, error) values ($1, $2, 'codex', 'local', 'failed', $3, $4)`,
+        [A, a.device, "x".repeat(4096), "x".repeat(500)],
+      ).then((r) => r.rowCount),
+    );
+    expect(atLimit).toBe(1);
+
+    // A row of org A naming org B's device fails the composite foreign key, even for the migrator.
+    await expect(request(b.device)).rejects.toThrow(/device_runtime_updates_device_fk/);
+
+    // Deleting a device deletes its history.
+    const cascade = await rolledBack(async () => {
+      const device = randomUUID();
+      await m(
+        "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash) values ($1, $2, $3, 'spare', 'linux', $4)",
+        [device, A, a.user, `dev-${device}`],
+      );
+      await request(device);
+      const count = async () =>
+        (await m(`select count(*)::int as n from ${tbl} where device_id = $1`, [device])).rows[0].n as number;
+      const before = await count();
+      await m("delete from app.devices where id = $1", [device]);
+      return [before, await count()];
+    });
+    expect(cascade).toEqual([1, 0]);
+
+    // The organization's level is checked and defaults to automatic; a device's snapshot starts empty.
+    const defaults = await migrator.query(
+      "select p.runtime_updates, d.runtime_maintenance from app.work_zone_policies p join app.devices d on d.organization_id = p.organization_id where d.id = $1",
+      [a.device],
+    );
+    expect(defaults.rows[0]).toEqual({ runtime_updates: "automatic", runtime_maintenance: null });
+    await expect(
+      m("update app.work_zone_policies set runtime_updates = 'sometimes' where organization_id = $1", [A]),
+    ).rejects.toThrow(/work_zone_policies_runtime_updates_ck/);
+    for (const ok of ["automatic", "notify", "off"]) {
+      const n = await rolledBack(() =>
+        m("update app.work_zone_policies set runtime_updates = $2 where organization_id = $1", [A, ok]).then(
+          (r) => r.rowCount,
+        ),
+      );
+      expect(n, ok).toBe(1);
+    }
   });
 
   it("Phase 4: accent-insensitive Spanish search, a stored tsvector and the search indexes", async () => {

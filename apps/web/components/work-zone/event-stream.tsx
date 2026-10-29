@@ -51,7 +51,7 @@ export type Item = { key: string; at?: string } & (
       tone: "ok" | "warn" | "error";
       tokens: string | null;
     }
-  | { kind: "system"; text: string }
+  | { kind: "system"; text: string; testId?: string }
   | { kind: "error"; message: string }
 );
 
@@ -133,6 +133,18 @@ export function buildItems(state: LiveSession): Item[] {
       case "session.error":
         items.push({ kind: "error", key, at, message: e.message });
         break;
+      case "runtime.update": {
+        // 07.11 (D-03): a turn held while the device updates its CLI says why it waits, then how it ended.
+        const label = RUNTIMES[e.runtime].label;
+        const text =
+          e.phase === "waiting"
+            ? `Updating ${label}… your turn starts when it finishes`
+            : e.phase === "done"
+              ? `${label} updated${e.version ? ` to ${e.version}` : ""}`
+              : `${label} update failed · your turn runs on the installed version`;
+        items.push({ kind: "system", key, at, text, testId: "runtime-update-line" });
+        break;
+      }
       default:
         break;
     }
@@ -444,7 +456,11 @@ function StreamItem({ item, session }: { item: Item; session: WorkSession }) {
         </div>
       );
     case "system":
-      return <p className="text-center text-[11px] text-muted-foreground">{item.text}</p>;
+      return (
+        <p className="text-center text-[11px] text-muted-foreground" data-testid={item.testId}>
+          {item.text}
+        </p>
+      );
     case "error":
       return (
         <div className="flex gap-2 rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-destructive text-sm">

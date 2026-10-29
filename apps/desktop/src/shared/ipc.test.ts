@@ -256,3 +256,69 @@ describe("ChatGPT loopback sign-in channels (05-07, T-05-07-04)", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 });
+
+describe("DaemonStatusPayload.runtimeUpdates (07.11, D-09)", () => {
+  const base = { paired: true, connected: true };
+  // The daemon's own status().runtimeUpdates, as 07.11-07 sends it (every status field, not only the menu's subset).
+  const fromDaemon = {
+    localLevel: "notify",
+    localLevelSource: "config",
+    effectiveLevel: "notify",
+    orgLevelReceived: true,
+    runtimes: [
+      {
+        runtime: "claude-code",
+        installedVersion: "2.1.307",
+        method: "native",
+        location: "~/.local/bin",
+        canUpdate: true,
+        reason: null,
+        updateCommand: "claude update",
+        channel: "latest",
+        latestVersion: "2.1.312",
+        advisory: "behind",
+        installedCompatibility: "supported",
+        candidateCompatibility: "supported",
+        state: "pending",
+        pendingSince: "2026-10-28T10:00:00.000Z",
+        stale: false,
+        lastRun: { outcome: "failed", trigger: "automatic", fromVersion: "2.1.300", toVersion: null },
+        checkedAt: "2026-10-28T10:00:00.000Z",
+      },
+    ],
+  };
+
+  it("parses the daemon's block, keeping the subset the menu uses", () => {
+    const parsed = DaemonStatusPayload.parse({ ...base, runtimeUpdates: fromDaemon });
+    expect(parsed.runtimeUpdates).toMatchObject({
+      localLevel: "notify",
+      localLevelSource: "config",
+      effectiveLevel: "notify",
+      orgLevelReceived: true,
+    });
+    expect(parsed.runtimeUpdates?.runtimes?.[0]).toEqual({
+      runtime: "claude-code",
+      installedVersion: "2.1.307",
+      latestVersion: "2.1.312",
+      advisory: "behind",
+      state: "pending",
+      lastRun: { outcome: "failed" },
+      reason: null,
+    });
+  });
+
+  it("an older daemon without it still parses; a block this app cannot read never breaks the status", () => {
+    expect(DaemonStatusPayload.parse(base).runtimeUpdates).toBeUndefined();
+    for (const odd of ["weird", { localLevel: "sometimes" }, { runtimes: [{ installedVersion: 3 }] }]) {
+      const parsed = DaemonStatusPayload.safeParse({ ...base, runtimeUpdates: odd });
+      expect(parsed.success).toBe(true);
+      expect(parsed.data?.runtimeUpdates).toBeUndefined();
+    }
+  });
+
+  it("stays in the main process: DesktopStatus (what web content sees) has no runtime updates", () => {
+    const report = DaemonStatusPayload.parse({ ...base, runtimeUpdates: fromDaemon });
+    const s = deriveStatus({ paused: false, paired: true, daemon: "running", report });
+    expect(Object.keys(s)).not.toContain("runtimeUpdates");
+  });
+});

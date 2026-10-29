@@ -3,10 +3,16 @@
 // frame up to it reaches `onCommand`. Against a real local `ws` server; nothing listens on the device side.
 
 import type { AddressInfo } from "node:net";
-import { type CommandFrame, DEVICE_LINK_MAX_COMMAND_FRAME_BYTES } from "@ocw/contracts";
+import {
+  type CommandFrame,
+  DEVICE_LINK_MAX_COMMAND_FRAME_BYTES,
+  RUNTIME_COMPATIBILITY_MANIFEST,
+  type ServerToDeviceFrame,
+} from "@ocw/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type WebSocket, WebSocketServer } from "ws";
 import { DeviceLink } from "./device-link.js";
+import type { Logger } from "./logger.js";
 
 class LinkServer {
   readonly wss: WebSocketServer;
@@ -128,5 +134,84 @@ describe("DeviceLink frame limit (P-01)", () => {
     expect(server.closeCodes[0]).toBe(1009);
     expect(commands.map((c) => c.id)).toEqual(["at-limit"]);
     await connected(2);
+  });
+});
+
+describe("DeviceLink server frames (07.11, PD-03)", () => {
+  it("a runtime.config frame reaches onServerFrame parsed; a malformed one is ignored with a debug log; commands are unchanged", async () => {
+    const frames: ServerToDeviceFrame[] = [];
+    const debug: string[] = [];
+    const logger: Logger = {
+      debug: (msg) => debug.push(msg),
+      info: () => undefined,
+      warn: () => undefined,
+      error: () => undefined,
+    };
+    link = new DeviceLink({
+      url: server.url,
+      token: "device-token",
+      onOpenFrames: () => [],
+      onCommand: (c) => commands.push(c),
+      onServerFrame: (f) => frames.push(f),
+      logger,
+      backoffMinMs: 10,
+      backoffMaxMs: 20,
+      heartbeatMs: 60_000,
+    });
+    link.start();
+    await connected(1);
+    const ws = server.sockets[0];
+    ws?.send(JSON.stringify({ type: "runtime.config", policy: "off", manifest: { nope: true } }));
+    ws?.send(
+      JSON.stringify({
+        type: "runtime.config",
+        policy: "automatic",
+        manifest: RUNTIME_COMPATIBILITY_MANIFEST,
+      }),
+    );
+    ws?.send(commandOfSize(400, "after"));
+    await server.waitFor(() => (commands.length > 0 && frames.length > 0 ? true : undefined));
+    expect(frames).toEqual([
+      { type: "runtime.config", policy: "automatic", manifest: RUNTIME_COMPATIBILITY_MANIFEST },
+    ]);
+    expect(commands.map((c) => c.id)).toEqual(["after"]);
+    expect(debug).toContain("ignoring server frame");
+  });
+});
+
+describe("DeviceLink offline log (07.11 review ME-05)", () => {
+  it("a full offline log evicts other frames first, never a runtime.update.run (its audit record)", async () => {
+    const received: Array<{ type: string }> = [];
+    server.wss.on("connection", (ws) => {
+      ws.on("message", (data) => received.push(JSON.parse(String(data)) as { type: string }));
+    });
+    link = new DeviceLink({
+      url: server.url,
+      token: "device-token",
+      onOpenFrames: () => [],
+      onCommand: (c) => commands.push(c),
+      backoffMinMs: 10,
+      backoffMaxMs: 20,
+      heartbeatMs: 60_000,
+      maxOfflineFrames: 3,
+    });
+    const run = {
+      type: "runtime.update.run",
+      runId: "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f",
+      runtime: "claude-code",
+      trigger: "automatic",
+      phase: "started",
+      fromVersion: "2.1.290",
+      toVersion: null,
+      candidate: "2.1.300",
+      method: "native",
+      at: "2026-10-28T12:00:00.000Z",
+    } as never;
+    link.send(run);
+    for (let i = 0; i < 5; i++) link.send({ type: "projects.sync", projects: [] } as never);
+    expect(link.queuedFrames).toBe(3);
+    link.start();
+    await server.waitFor(() => (received.length >= 3 ? true : undefined));
+    expect(received.map((f) => f.type)).toEqual(["runtime.update.run", "projects.sync", "projects.sync"]);
   });
 });

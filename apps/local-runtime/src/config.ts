@@ -5,7 +5,11 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
-import type { DeviceProjectAnnouncement } from "@ocw/contracts";
+import {
+  type DeviceProjectAnnouncement,
+  RuntimeUpdatesLevel,
+  type RuntimeUpdatesLevelSource,
+} from "@ocw/contracts";
 import { z } from "zod";
 import { isGitRepo, repoInfo } from "./git.js";
 
@@ -35,6 +39,14 @@ export const RuntimeConfigSchema = z.object({
    * server or the web.
    */
   fullAccess: z.object({ optIn: z.boolean().default(false) }).default({ optIn: false }),
+  /**
+   * Phase 07.11 (D-02): this device's own runtime CLI updates level (default `automatic`). Set only on this device:
+   * the desktop app's menu, `ocw-runtime updates automatic|notify|off`, or `OCW_RUNTIME_UPDATES` for a headless daemon.
+   * It can only lower the organization's level (the effective level is the lower of the two), never raise it.
+   */
+  runtimeUpdates: z
+    .object({ level: RuntimeUpdatesLevel.default("automatic") })
+    .default({ level: "automatic" }),
 });
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
 
@@ -55,6 +67,19 @@ export function resolveFullAccess(
   return { optIn: config.fullAccess?.optIn === true, source: "config" };
 }
 
+/**
+ * Phase 07.11 (D-02): the device's runtime updates level. `OCW_RUNTIME_UPDATES` = `automatic` | `notify` | `off` wins
+ * (headless servers); any other value is ignored and runtime.json decides (default `automatic`).
+ */
+export function resolveRuntimeUpdates(
+  config: Partial<Pick<RuntimeConfig, "runtimeUpdates">>,
+  env: NodeJS.ProcessEnv = process.env,
+): { level: RuntimeUpdatesLevel; source: RuntimeUpdatesLevelSource } {
+  const fromEnv = RuntimeUpdatesLevel.safeParse(env.OCW_RUNTIME_UPDATES?.trim().toLowerCase());
+  if (fromEnv.success) return { level: fromEnv.data, source: "env" };
+  return { level: config.runtimeUpdates?.level ?? "automatic", source: "config" };
+}
+
 export function fullAccessOptIn(
   config: Pick<RuntimeConfig, "fullAccess">,
   env: NodeJS.ProcessEnv = process.env,
@@ -68,6 +93,24 @@ export function fullAccessOptIn(
  * writer for the same file. A running daemon picks the change up on `reloadConfig`.
  */
 export async function setFullAccessOptIn(home: string, on: boolean): Promise<void> {
+  await patchRuntimeJsonSection(home, "fullAccess", { optIn: on });
+}
+
+/**
+ * Phase 07.11 (D-02): writes `runtimeUpdates.level` into `<home>/runtime.json` (atomic, 0600), keeping every other key,
+ * exactly like `setFullAccessOptIn`. Local callers only (CLI, tests; the desktop app has its own writer). A running
+ * daemon applies it on the value-less `reloadConfig`; `OCW_RUNTIME_UPDATES` still wins.
+ */
+export async function setRuntimeUpdatesLevel(home: string, level: RuntimeUpdatesLevel): Promise<void> {
+  await patchRuntimeJsonSection(home, "runtimeUpdates", { level: RuntimeUpdatesLevel.parse(level) });
+}
+
+/** Merges `patch` into one object section of runtime.json; a malformed file is never overwritten. */
+async function patchRuntimeJsonSection(
+  home: string,
+  section: "fullAccess" | "runtimeUpdates",
+  patch: Record<string, unknown>,
+): Promise<void> {
   await ensureOcwHome(home);
   const file = join(home, "runtime.json");
   const raw = (await readJson(file)) ?? {};
@@ -75,9 +118,9 @@ export async function setFullAccessOptIn(home: string, on: boolean): Promise<voi
     throw new Error("cannot update runtime.json: it is not a JSON object");
   }
   const current = raw as Record<string, unknown>;
-  const previous =
-    typeof current.fullAccess === "object" && current.fullAccess !== null ? current.fullAccess : {};
-  await writeJsonAtomic(file, { ...current, fullAccess: { ...previous, optIn: on } });
+  const previous = current[section];
+  const kept = typeof previous === "object" && previous !== null && !Array.isArray(previous) ? previous : {};
+  await writeJsonAtomic(file, { ...current, [section]: { ...kept, ...patch } });
 }
 
 async function readJson(path: string): Promise<unknown | undefined> {

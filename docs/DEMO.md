@@ -748,6 +748,54 @@ with Workspace App set up as in the 07.9 steps above (Team Alpha assigned, a rep
    name appears nowhere in her sidebar, its tooltips or search. If the demo has no such device, record "not
    applicable" (the e2e `work-zone-sidebar.spec.ts` proves it on fixtures).
 
+## Runtime CLI updates (Phase 07.11)
+
+Phase 07.11 (ADR-0032). Every device that runs the Local Runtime keeps its Claude Code and Codex CLIs current by
+itself, above all shared servers that nobody watches:
+
+- **The daemon decides how to update.** It finds how each CLI was installed (native installer, Codex standalone, npm,
+  Homebrew; pnpm, bun, yarn, Volta, mise, system packages and others are manual) and the one command that updates it.
+  The server never sends a command. Root-owned installs show "Needs admin on this machine" with the command and are
+  never run.
+- **It never cuts a turn.** An update waits for a moment when that CLI has no turn running on the device (up to 1 h),
+  then stops new turns of that CLI until the running ones end, updates, and lets the held turns start on the new
+  version. A held turn says "Updating Claude Code… your turn starts when it finishes", then "Claude Code updated to
+  {version}". The other CLI is not affected.
+- **Levels.** Admin › **Settings › Work Zone policy › Runtime updates**: Automatic (default), Notify only, Off. A
+  device can only lower it: the desktop menu's **Runtime updates** submenu, `ocw-runtime updates
+  automatic|notify|off`, or `OCW_RUNTIME_UPDATES`.
+- **Who sees what.** The device owner and admins see, in **Settings › Devices** › the device card › Runtime updates,
+  each CLI's version, a status pill (Up to date, {version} available, Updating…, Waiting for an idle moment, Update
+  failed, Unsupported version, Can't run sessions, Not checked, Not installed), the install method and `~` location,
+  the last run, **Update now** and **History**. Everyone else sees only the version, and a flag after it when the
+  version is older than supported or can't run sessions (also in the new-session dialog).
+- Every check that finds an update, every start and every result is in the audit log.
+
+**Owner check** (never run by an agent: they run the real vendors' installers; record each result in
+`.planning/phases/07.11-runtime-cli-auto-updates/07.11-VALIDATION.md` › Manual-Only Verifications):
+
+1. **Your Mac.** With the desktop app running, **Settings › Devices** › your Mac shows Claude Code and Codex with their
+   versions, "Native installer · ~/.local/bin" for Claude Code and "Standalone installer" for Codex, and "Checked …".
+2. **A real update on the Mac.** Install an older Claude Code with the native installer (`claude install <older
+   version>`, as Anthropic's setup docs describe). At the next check (or right away with `ocw-runtime updates check`,
+   or **Update now** on the card) the daemon updates it: the pill goes Updating… then Up to date, and **History** shows
+   the run (from → to, Succeeded, Automatic or By you).
+3. **A Linux server with live shared sessions.** On a Linux server running the headless daemon (CLIs installed as the
+   daemon's user, see [INSTALL.md](INSTALL.md#keep-claude-code-and-codex-up-to-date-on-devices)), share the device with a
+   second member, set the organization to *Notify only* for this check (so the update waits for you) and install an
+   older Claude Code there as in step 2. Each of you starts a Claude Code session on it.
+   Send a long prompt in yours and, while it runs, press **Update now**: your turn keeps running and is not cut, the
+   other member's new prompt shows "Updating Claude Code…" until your turn ends and the update finishes, and then both
+   sessions continue on the new version (History shows one run). Repeat once with Codex, then set the organization
+   back to Automatic.
+4. **Notify only and the desktop toggle.** Set **Settings › Work Zone policy › Runtime updates** to *Notify only*: a
+   behind CLI shows "{version} available" and is not installed until you press **Update now**. Then, in the desktop
+   app's tray, **Runtime updates › Off**: Settings › Devices shows "This device: Off" with "Set on the device", and the
+   tray lines (for example "Claude Code 2.1.307 · up to date") stay. Set both back to Automatic.
+5. **A member's view.** Signed in as a member who is not the owner (e.g. Marta, with your device shared with her), the
+   device shows only the CLI versions, and the "older than supported" flag when it applies: no install method, no
+   status pill, no Update now, no History.
+
 ## Troubleshooting
 
 | Symptom | Fix |

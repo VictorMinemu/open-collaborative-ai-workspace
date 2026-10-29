@@ -21,6 +21,13 @@ test("login → app shell → navigate → sign out", async ({ page }, info) => 
   await expect(page.getByTestId("app-shell")).toBeVisible();
   await expect(page.getByTestId("connection-status").first()).toBeAttached();
   await shot(page, `shell-chat-${tag}`);
+  // `/chat` opens the default channel once the channel list loads; navigate only after that redirect settled, or the
+  // redirect lands after the Settings click and wins.
+  await expect(async () => {
+    const opened = /\/chat\/[^/?#]+/.test(page.url());
+    const empty = await page.getByText("Start the first conversation").isVisible();
+    expect(opened || empty).toBe(true);
+  }).toPass();
 
   if (mobile) {
     await page.getByTestId("mobile-nav-trigger").click();

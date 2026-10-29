@@ -204,6 +204,55 @@ Settings, limits, network modes, sandbox packages and sign-ins are explained in
 [self-hosting/sandbox.md](self-hosting/sandbox.md); the gVisor install, rootless Docker, a Docker authorization plugin
 and XFS project quotas in [infra/sandbox/README.md](../infra/sandbox/README.md).
 
+## Keep Claude Code and Codex up to date on devices
+
+The Local Runtime on each device (desktop app or headless daemon) keeps the Claude Code and Codex CLIs it drives up to
+date by itself. It never cuts a running turn: it updates a CLI when that CLI has no turn running on the device, and
+new turns wait a few minutes at most (ADR-0032). This matters most on a shared server where several members run
+sessions and nobody watches the machine.
+
+**Install the CLIs so the daemon can update them.** Install them as the same OS user that runs the daemon, in that
+user's home:
+
+- Claude Code with Anthropic's native installer (`curl -fsSL https://claude.ai/install.sh | bash`): it lives in
+  `~/.local/bin` and `~/.local/share/claude`, and the daemon updates it with `claude update`.
+- Codex with OpenAI's standalone installer (see the Codex README): it lives in `~/.codex/packages/standalone` (or
+  under `CODEX_HOME`), and the daemon updates it with `codex update`.
+- An npm global install in a prefix the daemon's user owns (for example under nvm) and a Homebrew install owned by
+  that user also work.
+
+Root-owned installs (apt, dnf or apk packages, a system npm prefix such as `/usr/lib/node_modules`, another user's
+Homebrew) are shown as **Needs admin on this machine** with the command to run, and the daemon never runs it. It
+never uses `sudo`. pnpm, bun, yarn, Volta, mise and asdf installs are shown with their command and stay manual.
+
+**Levels.** The organization's level is in Settings › Work Zone policy › Runtime updates:
+
+| Level | What the device does |
+|---|---|
+| Automatic (default) | Checks at start and every 6 hours, and installs a newer version when the CLI is idle |
+| Notify only | Checks and shows "{version} available"; installs only when the owner or an admin presses Update now |
+| Off | Never asks for the latest version and never installs |
+
+A device can only lower that level:
+
+```bash
+ocw-runtime updates notify          # or automatic | off; written to runtime.json, applied at once
+ocw-runtime updates status          # what the daemon sees: versions, install method, level
+ocw-runtime updates check           # check now
+ocw-runtime updates now claude-code # update one CLI now (waits for its running turns to end)
+```
+
+`OCW_RUNTIME_UPDATES=automatic|notify|off` in the daemon's environment wins over `runtime.json`. The desktop app has
+the same choice in its tray menu (Runtime updates). A daemon that has not heard from its server yet behaves as
+*Notify only*.
+
+**Network.** To learn the latest version the device asks the npm registry (`https://registry.npmjs.org`) for
+`@anthropic-ai/claude-code` and `@openai/codex`. Set `OCW_RUNTIME_REGISTRY_URL` in the daemon's environment to use a
+corporate npm mirror instead. The device makes no other outbound call for this, besides what the installer itself
+downloads. At *Off* it makes none.
+
+The owner and admins see versions, status and history in Settings › Devices; other members see only the versions.
+
 ## Back up, restore and upgrade
 
 ```bash

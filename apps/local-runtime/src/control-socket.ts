@@ -4,6 +4,7 @@
 import { chmod, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
+import { RuntimeId } from "@ocw/contracts";
 import { z } from "zod";
 import { errorMessage, type Logger, silentLogger } from "./logger.js";
 
@@ -26,6 +27,22 @@ export const ControlRequestSchema = z.discriminatedUnion("cmd", [
    * the opt-in can only change through the file on this device; strict so a forged value is refused, not ignored.
    */
   z.object({ id: z.union([z.string(), z.number()]).optional(), cmd: z.literal("reloadConfig") }).strict(),
+  /**
+   * 07.11 (D-09, PD-08): a fresh check of the runtime CLIs (`ocw-runtime updates check`); answers the levels and each
+   * runtime's status. Local only (never reachable from the server); carries no value; strict.
+   */
+  z.object({ id: z.union([z.string(), z.number()]).optional(), cmd: z.literal("runtimeCheck") }).strict(),
+  /**
+   * 07.11 (D-05, PD-08): "Update now" from this machine (`ocw-runtime updates now <runtime>`, the desktop app). Names
+   * the runtime only; the command still comes from the on-device table. Local only; strict, so no other key is taken.
+   */
+  z
+    .object({
+      id: z.union([z.string(), z.number()]).optional(),
+      cmd: z.literal("runtimeUpdate"),
+      runtime: RuntimeId,
+    })
+    .strict(),
 ]);
 export type ControlRequest = z.infer<typeof ControlRequestSchema>;
 

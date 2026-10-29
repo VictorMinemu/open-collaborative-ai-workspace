@@ -49,7 +49,9 @@ import {
   useWorkZoneOrgSync,
   wzKeys,
 } from "@/lib/workzone-queries";
+import { CopyLine } from "./copy-line";
 import { DeviceSharing } from "./device-sharing";
+import { compatFlag, DeviceRuntimeUpdates } from "./runtime-updates";
 
 const PLATFORM: Record<string, string> = { darwin: "macOS", linux: "Linux", win32: "Windows" };
 
@@ -220,13 +222,14 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
                 <span
                   key={r.id}
                   className={cn(
-                    "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs",
+                    "inline-flex max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5 rounded-md border px-2 py-1 text-xs",
                     !(r.installed && r.loggedIn) && "opacity-60",
                   )}
                 >
                   <RuntimeLogo runtime={r.id} className="size-4 rounded-[4px]" />
                   {RUNTIMES[r.id].label}
                   {r.version ? <span className="text-muted-foreground">{r.version}</span> : null}
+                  <CompatFlag device={d} runtime={r.id} />
                   {!r.installed ? (
                     <span className="text-muted-foreground">· not installed</span>
                   ) : r.loggedIn ? (
@@ -288,6 +291,16 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
       </Dialog>
     </li>
   );
+}
+
+/** 07.11 (D-04): "· older than supported" / "· can't run sessions" after a runtime's version, for every viewer. */
+export function CompatFlag({ device, runtime }: { device: Device; runtime: RuntimeId }) {
+  const flag = compatFlag(device.runtimeCompatibility?.[runtime]);
+  return flag ? (
+    <span data-testid="runtime-compat-flag" className={cn("whitespace-nowrap", flag.className)}>
+      {flag.text}
+    </span>
+  ) : null;
 }
 
 /** Whose subscription a runtime on the device uses (D-06). */
@@ -357,6 +370,7 @@ function DeviceFacts({ device: d, owned }: { device: Device; owned: boolean }) {
           </p>
         </div>
       </div>
+      {d.runtimeMaintenance ? <DeviceRuntimeUpdates device={d} /> : null}
     </div>
   );
 }
@@ -542,19 +556,5 @@ function Steps({ steps, start = 1 }: { steps: ReactNode[]; start?: number }) {
         </li>
       ))}
     </ol>
-  );
-}
-
-function CopyLine({ text }: { text: string }) {
-  const { copy, copied } = useCopy();
-  return (
-    <div className="flex items-center gap-2 rounded-lg border bg-muted/50 py-1.5 pr-1.5 pl-3">
-      <code className="scrollbar-thin min-w-0 flex-1 overflow-x-auto whitespace-nowrap font-mono text-[12px]">
-        {text}
-      </code>
-      <Button size="icon-xs" variant="ghost" aria-label="Copy command" onClick={() => void copy(text)}>
-        {copied === text ? <Check className="text-success" /> : <Copy />}
-      </Button>
-    </div>
   );
 }

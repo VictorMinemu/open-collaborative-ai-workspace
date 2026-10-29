@@ -73,3 +73,14 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   or repository, arrow-key navigation; two list requests at any size; a session's team project and its "needs you"
   facts are decided per viewer and sent only on that viewer's list, detail and `user:` frames, never on `ws:`, which
   closes a 07.9 leak of a hidden project's name to the device owner (ADR-0031).
+- **07.11 Runtime CLI updates:** every device's Local Runtime keeps the Claude Code and Codex CLIs it drives current:
+  it finds how each was installed and the one command that updates it from a fixed on-device table (native installer,
+  Codex standalone, npm, Homebrew; other and root-owned installs are manual or "needs admin", never run with sudo),
+  asks the npm registry (or a mirror) for the latest version on the install's channel, refuses a `broken` candidate
+  from the compatibility manifest the Control Plane serves, and updates only when that CLI has no turn in flight
+  (opportunistic for 1 h, then new turns of that CLI wait; nothing is ever interrupted; idle CLIs are retired and
+  resume on the next turn); daemon-launched CLIs run with their own updaters off; levels Automatic / Notify only / Off
+  per organization, lowered per device (desktop menu, `ocw-runtime updates`, `OCW_RUNTIME_UPDATES`), Notify only until
+  the server's level arrives; owners and admins (`device.maintain`) see versions, status, history and Update now in
+  Settings › Devices, members only versions and an "older than supported" flag; a `broken` installed version refuses
+  new sessions; every check, start and result is audited (ADR-0032).

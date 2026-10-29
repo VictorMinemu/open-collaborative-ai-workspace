@@ -3,7 +3,7 @@ import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import swagger from "@fastify/swagger";
 import websocket from "@fastify/websocket";
-import { HealthResponse, WS_PROTOCOL } from "@ocw/contracts";
+import { HealthResponse, type RuntimeCompatibilityManifest, WS_PROTOCOL } from "@ocw/contracts";
 import { createTenantDb } from "@ocw/db";
 import scalar from "@scalar/fastify-api-reference";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -85,6 +85,8 @@ export async function buildApp(
     secretStore?: SecretStore;
     /** Test hook: a lower Device Link frame limit (06.1-02); never read from the environment. */
     deviceFrameMaxBytes?: number;
+    /** Test hook: a compatibility manifest other than the bundled one (07.11 PD-12); never read from the environment. */
+    runtimeManifest?: RuntimeCompatibilityManifest;
     /** Test hook: shorter bot browser call deadlines (CI p64/p66); never read from the environment. */
     browserBudgetsMs?: BrowserBudgets;
   } = {},
@@ -276,10 +278,10 @@ export async function buildApp(
   // Add a module: implement apps/api/src/modules/<name>/index.ts and add ONE line here.
   // Modules are mounted under /api/v1 unless they set `prefix`.
   // B3: owns the Device Link hub used by work-session.
-  const deviceModule = createDeviceModule(
-    core,
-    opts.deviceFrameMaxBytes ? { maxFrameBytes: opts.deviceFrameMaxBytes } : {},
-  );
+  const deviceModule = createDeviceModule(core, {
+    ...(opts.deviceFrameMaxBytes ? { maxFrameBytes: opts.deviceFrameMaxBytes } : {}),
+    ...(opts.runtimeManifest ? { runtimeManifest: opts.runtimeManifest } : {}),
+  });
   const modelGateway = createModelGateway(core); // Phase 5: the only place a LanguageModel is built (P-04)
   // Phase 4: attachments (ADR-0015); 06.1: a Work Zone session's images follow the session (P-04).
   const artifactModule = createArtifactModule(core, {

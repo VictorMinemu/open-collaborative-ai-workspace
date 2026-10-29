@@ -16,7 +16,11 @@
 // - user/local Claude settings are not loaded, so personal allow-rules cannot skip cloud approvals;
 // - OCW_* variables (device token) are stripped from the Claude Code process environment;
 // - billing: runs on the user's local Claude Code login (subscription) through the installed CLI;
-//   ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN are stripped unless `useApiKey` is set.
+//   ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN are stripped unless `useApiKey` is set;
+// - one update authority (07.11 D-12): every CLI process the daemon launches (sessions, catalog, titles) runs with
+//   DISABLE_AUTOUPDATER=1, so the CLI never updates itself behind the daemon's update gate;
+// - runtime updates never cut a turn (07.11 D-03a): `retireIdle()` closes only the CLI processes of sessions with
+//   no turn in flight; such a session is `dormant` and relaunches with `resume` on its next prompt or settings change.
 
 import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
@@ -135,8 +139,13 @@ interface Session {
   runtimeModel: string | undefined;
   /** The current CLI process was launched in bypass mode (authorized fullAccess only). */
   bypass: boolean;
-  /** Queries closed by a relaunch: their end is not the session's end. */
+  /** Queries closed by a relaunch or a retirement: their end is not the session's end. */
   retired: WeakSet<QueryHandle>;
+  /**
+   * The CLI process was retired while idle (07.11 D-03a): no query runs, the session lives on. The next prompt or
+   * settings change wakes it with `resume` (so it runs on the binary installed now).
+   */
+  dormant: boolean;
   input: AsyncQueue<SDKUserMessage>;
   q: QueryHandle | null;
   mapper: ClaudeEventMapper;
@@ -173,17 +182,24 @@ export const CLAUDE_API_KEY_VARS: readonly string[] = ["ANTHROPIC_API_KEY", "ANT
 /**
  * Environment for the Claude Code child process: never leak daemon credentials (OCW_*), and by
  * default strip Anthropic API keys so the session runs on the local Claude Code login
- * (Pro/Max subscription). `useApiKey` opts back in.
+ * (Pro/Max subscription). `useApiKey` opts back in. The CLI's own background updater is always off
+ * (07.11 D-12): the daemon is the only update authority for the processes it launches. The user's own
+ * interactive CLI keeps its updater (nothing outside this env changes).
  */
 export function childEnv(
   env: NodeJS.ProcessEnv = process.env,
   useApiKey = false,
 ): Record<string, string | undefined> {
-  return filterEnv(
-    env,
-    (k) =>
-      k.startsWith("OCW_") || PARENT_SESSION_VARS.test(k) || (!useApiKey && CLAUDE_API_KEY_VARS.includes(k)),
-  );
+  return {
+    ...filterEnv(
+      env,
+      (k) =>
+        k.startsWith("OCW_") ||
+        PARENT_SESSION_VARS.test(k) ||
+        (!useApiKey && CLAUDE_API_KEY_VARS.includes(k)),
+    ),
+    DISABLE_AUTOUPDATER: "1",
+  };
 }
 
 function toUserMessage(prompt: PromptPayload): SDKUserMessage {
@@ -224,7 +240,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   private readonly queryFn: QueryFn;
   private readonly approvalTimeoutMs: number;
   private readonly log: Logger;
-  private readonly claudePath: string | null;
+  /** Re-resolved by `refreshInstall()` (an update may install the CLI where none was found at start). */
+  private claudePath: string | null;
   private readonly allowFullAccess: () => boolean;
   private catalogCache: { at: number; value: RuntimeCatalog } | null = null;
   private catalogInFlight: Promise<RuntimeCatalog | null> | null = null;
@@ -300,6 +317,42 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     return this.sessions.has(sessionId);
   }
 
+  /** Sessions with a turn running, waiting on an approval or prompts queued (07.11 D-03). Sends nothing. */
+  activeTurns(): number {
+    let n = 0;
+    for (const s of this.sessions.values()) if (isBusy(s)) n++;
+    return n;
+  }
+
+  /**
+   * Closes the CLI process of every session with no turn in flight (07.11 D-03a), exactly as `relaunch()` closes
+   * one, without ending the session: no state, no error. Each wakes lazily with `resume` on its next prompt or
+   * settings change. Never interrupts; a session that got busy meanwhile is left alone.
+   */
+  async retireIdle(): Promise<number> {
+    const candidates = [...this.sessions.values()].filter((s) => !s.dormant && !s.stopping && !isBusy(s));
+    const retired = await Promise.all(
+      candidates.map((s) =>
+        // Serialized with settings changes and the per-turn mode, so no control request hits a closing query.
+        this.serially(s, async () => {
+          if (s.dormant || s.stopping || isBusy(s)) return false;
+          await this.closeQuery(s);
+          s.q = null;
+          s.dormant = true;
+          this.log.info("claude-code process retired while idle", { sessionId: s.id });
+          return true;
+        }),
+      ),
+    );
+    return retired.filter(Boolean).length;
+  }
+
+  /** After an update: find the CLI again (unless configured) and collect a fresh catalog next time. */
+  refreshInstall(): void {
+    this.claudePath = this.opts.claudePath ?? findExecutable("claude");
+    this.catalogCache = null;
+  }
+
   async start(options: StartSessionOptions, sink: EventSink): Promise<void> {
     if (this.sessions.has(options.sessionId)) {
       throw new RuntimeError(`session ${options.sessionId} already running`, "session_exists");
@@ -326,6 +379,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       runtimeModel: options.model,
       bypass: mode.data === "fullAccess",
       retired: new WeakSet(),
+      dormant: false,
       input,
       mapper: new ClaudeEventMapper(),
       sink,
@@ -416,6 +470,30 @@ export class ClaudeCodeRuntime implements AgentRuntime {
    */
   private async relaunch(s: Session, mode: PermissionMode): Promise<void> {
     const options = this.launchOptions(s, mode, s.mapper.runtimeSessionId ?? s.resumeId);
+    await this.closeQuery(s);
+    if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
+    await this.launch(s, mode, options);
+    this.log.info("claude-code relaunched for a permission mode change", {
+      sessionId: s.id,
+      fullAccess: s.bypass,
+    });
+  }
+
+  /**
+   * Wakes a dormant session (07.11 D-03a): a new CLI process resuming the same runtime session in `mode`, with the
+   * flag settings it ran with re-applied, exactly like `relaunch()` minus the close. Callers pass the mode the next
+   * step needs, so waking never costs a second launch.
+   */
+  private async wake(s: Session, mode: PermissionMode): Promise<void> {
+    const options = this.launchOptions(s, mode, s.mapper.runtimeSessionId ?? s.resumeId);
+    if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
+    s.dormant = false;
+    await this.launch(s, mode, options);
+    this.log.info("claude-code woke a retired session", { sessionId: s.id, fullAccess: s.bypass });
+  }
+
+  /** Closes the current query so that its end is not the session's end (relaunch, retirement). */
+  private async closeQuery(s: Session): Promise<void> {
     const old = s.q;
     if (old) s.retired.add(old);
     s.input.close();
@@ -425,7 +503,10 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       // already closed
     }
     await s.done.catch(() => undefined);
-    if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
+  }
+
+  /** Starts a new query for the session with `options` and re-applies its scalar flag settings. */
+  private async launch(s: Session, mode: PermissionMode, options: Options): Promise<void> {
     s.abort = new AbortController();
     options.abortController = s.abort;
     s.input = new AsyncQueue<SDKUserMessage>();
@@ -434,10 +515,6 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     s.bypass = mode === "fullAccess";
     s.applied.permissionMode = mode;
     s.done = this.consume(s, q);
-    this.log.info("claude-code relaunched for a permission mode change", {
-      sessionId: s.id,
-      fullAccess: s.bypass,
-    });
     const flags: { effortLevel?: SdkEffortLevel | null; fastMode?: boolean } = {};
     if (s.applied.effort !== null) flags.effortLevel = s.applied.effort as SdkEffortLevel;
     if (s.applied.fastMode) flags.fastMode = true;
@@ -471,7 +548,11 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     }
     s.pending = { ...(s.pending ?? {}), ...patch };
     if (s.running) return;
-    await this.serially(s, () => this.applyPending(s, true));
+    await this.serially(s, async () => {
+      // A retired CLI wakes directly in the mode being set, so the change costs one launch.
+      if (s.dormant) await this.wake(s, s.pending?.permissionMode ?? s.configured.permissionMode);
+      await this.applyPending(s, true);
+    });
   }
 
   async interrupt(sessionId: string): Promise<void> {
@@ -506,6 +587,13 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     s.queue.length = 0;
     if (s.running) await this.interrupt(sessionId);
     this.settleAllApprovals(s, "deny", "Session stopped");
+    if (s.dormant) {
+      // No process to close: the retired query already ended without reporting.
+      await s.applying;
+      this.finish(s, null);
+      this.sessions.delete(sessionId);
+      return;
+    }
     s.input.close();
     const finished = await Promise.race([
       s.done.then(() => true),
@@ -556,6 +644,22 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     // Then the turn's mode = min(configured, the author's cap) (P-07): if it cannot be set, the turn fails
     // instead of running at a higher mode.
     const capped = await this.serially(s, async () => {
+      if (s.dormant) {
+        // 07.11 D-03a: the retired CLI wakes directly in this turn's mode (held mode change and cap included).
+        const configured = s.pending?.permissionMode ?? s.configured.permissionMode;
+        const mode = prompt.permissionMode ? minMode(configured, prompt.permissionMode) : configured;
+        try {
+          await this.wake(s, mode);
+        } catch (err) {
+          if (!s.stopping) {
+            this.emit(s, {
+              type: "session.error",
+              message: `Claude Code could not be restarted for this turn: ${redact(errorMessage(err)).slice(0, 300)}`,
+            });
+          }
+          return false;
+        }
+      }
       await this.applyPending(s, false);
       try {
         await this.syncMode(s, prompt.permissionMode);
@@ -568,7 +672,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
         return false;
       }
     });
-    if (s.stopping || s.input.isClosed) return; // finish() / stop() completes the prompt
+    // finish() / stop() completes the prompt (a session still dormant only failed to wake: completed below).
+    if (s.stopping || (s.input.isClosed && !s.dormant)) return;
     if (!capped) {
       this.emit(s, {
         type: "prompt.completed",
@@ -882,6 +987,11 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       return { behavior: "deny", message };
     };
   }
+}
+
+/** A turn in flight: running, waiting on an approval or with prompts queued in the adapter (07.11 D-03). */
+function isBusy(s: Session): boolean {
+  return s.running !== null || s.queue.length > 0 || s.approvals.size > 0;
 }
 
 /**

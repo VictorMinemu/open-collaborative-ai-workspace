@@ -407,7 +407,7 @@ of the thin Work Zone that Phase 1 already ships.
 **Operations features (inserted 2026-10-08, owner).** Phases 07.1–07.7 turn the 2026-10-06 operations meeting into
 generic capabilities for any organization (research: `.planning/research/OPS-FEATURES.md`). Each feature is owned by the
 Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits → Agent Card when a human approves);
-OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.6 → 07.7 (07.8 added 2026-10-14 and 07.9 added 2026-10-22 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
+OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
 (F17), ERP-driven board columns beyond watched records.
 
 ### Phase 07.1: Board channels and record templates (INSERTED)
@@ -787,6 +787,7 @@ Plans:
 
 **Goal**: The Work Zone sidebar is organised like the chat sidebar, by team. It scales to many people and many
 projects:
+
 - **Sections:** one collapsible section per department, remembered per person. Your own units come first.
 - **Projects:** each section lists only the team projects the viewer belongs to (directly or through a team). Each one
   shows a live-session count, and clicking it opens the project page, as clicking a channel opens the channel.
@@ -825,6 +826,76 @@ Plans:
 - [ ] 07.10-04-PLAN.md — Wave 3: Needs you and the seen map, Settled in scope, grouped search, sessions-request states, arrow keys
 - [ ] 07.10-05-PLAN.md — Wave 3: "+" actions (section, project, repository), onboarding line, projects-request states
 - [ ] 07.10-06-PLAN.md — Wave 4: Phase gate: full local gate, full isolated e2e, `gate:compose`, ADR-0031, DEMO owner checks, STATUS, AGENTS, CODEOWNERS, signed VALIDATION
+
+### Phase 07.11: Runtime CLI auto-updates (INSERTED)
+
+**Goal**: The Claude Code and Codex CLIs that the Local Runtime drives stay up to date on every device without anyone
+touching it — above all on server-type shared devices (a headless daemon, often Linux, where several members run shared
+sessions on the owner's login), and on members' own computers too. Modeled on T3 Code's provider maintenance (studied
+from its shipped bundle, 2026-10-28):
+
+- **Install method:** the daemon finds how each CLI was installed and the one command that updates it (native
+  `claude update` / `codex update`; npm, pnpm, bun, yarn or Volta global; Homebrew). mise, WinGet or anything unknown is
+  "update it with the tool that installed it" — reported, never guessed.
+- **Latest and compatible:** the latest version comes from the npm registry; a compatibility manifest (per runtime:
+  supported / graceful / unsupported / broken ranges and a recommended range, derived from the adapters' pinned
+  fixtures) is bundled in `packages/contracts` and served by our own Control Plane, never fetched from a third party.
+  A version the manifest calls broken is never installed.
+- **Never interrupts anyone:** an update runs only when that runtime is idle on the device (no turn running); new turns
+  for it wait and then start on the new version; long-lived processes (Codex `app-server`) are recycled between turns.
+  One update per install lock, 5 min timeout, capped output, then the installed version is verified (succeeded /
+  unchanged / failed).
+- **Who decides:** an org policy (automatic, default · notify only · off) intersected with a device-local opt-out, like
+  Full access. The device owner and admins see each device's runtime versions, compatibility, update status and history
+  in Settings › Devices and can press "Update now"; every update (automatic or manual) is audited.
+- **Headless first:** everything works from the daemon alone; the desktop app only shows the status.
+
+**Requirements**: RTU-01, RTU-02, RTU-03, RTU-04, RTU-05, RTU-06, RTU-07
+**Depends on:** Phase 07.10 (adapters from 03.2, shared devices from 03.2-05)
+**Success Criteria** (what must be TRUE):
+
+  1. A device reports, per runtime, the installed version, how it was installed, whether it can update itself and the
+     exact update command; unknown or tool-managed installs say so and are never updated
+  2. With the policy on automatic, an outdated runtime updates itself on a shared server device while other members'
+     sessions on that device keep running: no turn is cut, queued turns start on the new version, and the result is
+     verified and audited
+  3. A version marked broken in the Control Plane's compatibility manifest is never installed, and a device running an
+     unsupported version is flagged where members start sessions on it
+  4. The device owner and admins see versions, status and history per device and can update now; members never can;
+     the org policy and the device opt-out are honoured and audited
+  5. Works on a headless Linux daemon and on macOS; Settings › Devices at 1440 and 390, light and dark
+
+**Plans:** 11 plans in 6 waves (CONTEXT/RESEARCH/PATTERNS/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 09 the end-to-end tracer, 11 the gate)
+
+Plans:
+**Wave 1**
+
+- [ ] 07.11-01-PLAN.md — Wave 1: Contracts (versions, levels, manifest, statuses, frames, history DTOs, `runtime.update` event), `device.maintain`, and the phase hub (plan map, shared files, PD-01…PD-19)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 07.11-02-PLAN.md — Wave 2: Storage and the org policy field: one migration (`runtime_updates`, `runtime_maintenance`, `device_runtime_updates`), `CommandKind` `runtime.update`, policy save/audit, RLS
+- [ ] 07.11-03-PLAN.md — Wave 2: Compatibility at session start: a broken version refuses a start, `runtimeCompatibility` on every device, test-only manifest injection
+- [ ] 07.11-04-PLAN.md — Wave 2: Daemon maintenance core: install-method resolver (fixed table), registry client (channels, cache), runner (lock, timeout, output, verify), fake CLI
+- [ ] 07.11-05-PLAN.md — Wave 2: Never interrupt: adapters' `activeTurns` / `retireIdle` / lazy resume, CLI self-updaters off, the per-runtime gate
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 07.11-06-PLAN.md — Wave 3: API device maintenance: frame handlers, history, audit, Update now, `runtime.config` push, owner/admin-only details
+- [ ] 07.11-07-PLAN.md — Wave 3: Daemon wiring: the `RuntimeMaintenance` orchestrator, frames, gate on commands, drain and stale, `runtime.update` command, CLI and control socket triggers
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 07.11-08-PLAN.md — Wave 4: Device-local level (runtime.json, env, `ocw-runtime updates automatic|notify|off`, reload) and the desktop status lines and toggle
+- [ ] 07.11-09-PLAN.md — Wave 4: Phase end-to-end tracer on the real stack (busy device, held turn, owner view, audit), Update now / member / off, headless Linux proof
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 07.11-10-PLAN.md — Wave 5: Web: Settings › Devices runtime updates block, Update now, history sheet, member flags, policy select, new-session flag, session line; 1440/390 light/dark
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 07.11-11-PLAN.md — Wave 6: Phase gate: full local gate, full isolated e2e, Linux proof, `gate:compose`, ADR-0032, DEMO owner checks, INSTALL, STATUS, AGENTS, CODEOWNERS, signed VALIDATION
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 

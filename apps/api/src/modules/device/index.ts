@@ -1,3 +1,4 @@
+import type { RuntimeCompatibilityManifest } from "@ocw/contracts";
 import type { ApiModule, Core } from "../../core";
 import { DeviceHub } from "./hub";
 import { registerDeviceLink } from "./link";
@@ -21,6 +22,7 @@ export {
   type DeviceSessionHandler,
   type EnqueueCommand,
   frameFits,
+  type RuntimePolicySource,
 } from "./hub";
 export { looksAbsolute, sanitizeAnnouncements } from "./link";
 export { deviceFacts, normalizePairingCode, toDevice } from "./routes";
@@ -35,15 +37,20 @@ export interface DeviceModule extends ApiModule {
  * devices list/rename/share/revoke, projects announced by devices, and the Device Link `GET /runtime/ws`
  * (mounted at the root).
  */
-export function createDeviceModule(core: Core, opts: { maxFrameBytes?: number } = {}): DeviceModule {
+export function createDeviceModule(
+  core: Core,
+  opts: { maxFrameBytes?: number; runtimeManifest?: RuntimeCompatibilityManifest } = {},
+): DeviceModule {
   const graceEnv = Number(process.env.OCW_DEVICE_OFFLINE_GRACE_MS);
   const hub = new DeviceHub({
     db: core.db,
     bus: core.bus,
     realtime: core.realtime,
+    audit: core.audit,
     log: core.log,
     ...(Number.isFinite(graceEnv) && graceEnv > 0 ? { offlineGraceMs: graceEnv } : {}),
     ...(opts.maxFrameBytes ? { maxFrameBytes: opts.maxFrameBytes } : {}),
+    ...(opts.runtimeManifest ? { runtimeManifest: opts.runtimeManifest } : {}),
   });
   return {
     name: "device",

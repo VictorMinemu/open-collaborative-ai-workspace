@@ -15,6 +15,11 @@
 //   stripped from the child environment unless `useApiKey` is set. OCW_* never reaches Codex.
 // - approval requests (commands, patches, extra permissions) are forwarded as approval.requested
 //   and answered from approval.resolve; secret paths are declined without asking.
+// - one update authority (07.11 D-12): every app-server the daemon launches (sessions, catalog, titles) runs with
+//   `-c check_for_update_on_startup=false`; the user's own interactive Codex keeps its own behaviour.
+// - runtime updates never cut a turn (07.11 D-03a): `retireIdle()` stops only the app-servers of sessions with no
+//   turn in flight; such a session is `dormant` and its next turn spawns a new app-server that `thread/resume`s the
+//   same thread. Codex's in-process "approve for this session" decisions do not survive that (asked again once).
 // Known limit: Codex's sandbox restricts writes and network, not reads; secrets read by a sandboxed
 // command are still caught on the way out by redact().
 
@@ -81,6 +86,16 @@ export const CODEX_APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
 /** How long a collected `model/list` catalog is reused. */
 export const CODEX_CATALOG_TTL_MS = 10 * 60 * 1000;
 const STOP_GRACE_MS = 3_000;
+
+/**
+ * Arguments of every `codex app-server` the daemon spawns. The CLI's own startup update check is off (07.11 D-12,
+ * PD-14): the key is in the config schema of the pinned 0.160.0 and of 0.164.0, and `app-server` takes `-c` overrides.
+ */
+export const CODEX_APP_SERVER_ARGS: readonly string[] = [
+  "app-server",
+  "-c",
+  "check_for_update_on_startup=false",
+];
 
 export interface AppServerProcess {
   stdin: Writable;
@@ -160,6 +175,35 @@ interface Session {
   stopping: boolean;
   exited: Promise<void>;
   finished: boolean;
+  /** Peers of app-servers stopped by `retireIdle()`: their end is not the session's end. */
+  retired: WeakSet<JsonRpcPeer>;
+  /**
+   * The app-server was stopped while idle (07.11 D-03a): the session lives on and the next turn spawns a new one
+   * that resumes `threadId`.
+   */
+  dormant: boolean;
+}
+
+/** A turn in flight: running, waiting on an approval or with prompts queued in the adapter (07.11 D-03). */
+function isBusy(s: Session): boolean {
+  return s.running !== null || s.queue.length > 0 || s.approvals.size > 0;
+}
+
+/** The `thread/start` / `thread/resume` parameters of a session (one builder for both, 07.11 D-03a). */
+function codexThreadParams(
+  cwd: string,
+  policy: ReturnType<typeof codexModePolicy>,
+  model: string | undefined,
+  fastMode: boolean | undefined,
+): ThreadStartParams {
+  return {
+    cwd,
+    approvalPolicy: policy.approvalPolicy,
+    approvalsReviewer: policy.approvalsReviewer,
+    sandbox: policy.sandbox,
+    ...(model ? { model } : {}),
+    ...(fastMode !== undefined ? { serviceTier: fastMode ? "priority" : "default" } : {}),
+  };
 }
 
 function toInput(p: PromptPayload): UserInput[] {
@@ -191,7 +235,8 @@ export class CodexRuntime implements AgentRuntime {
 
   private readonly sessions = new Map<string, Session>();
   private readonly log: Logger;
-  private readonly codexPath: string | null;
+  /** Re-resolved by `refreshInstall()` (an update may install the CLI where none was found at start). */
+  private codexPath: string | null;
   private readonly approvalTimeoutMs: number;
   private readonly allowFullAccess: () => boolean;
   private catalogCache: { at: number; value: RuntimeCatalog } | null = null;
@@ -288,14 +333,7 @@ export class CodexRuntime implements AgentRuntime {
       throw new RuntimeError("project directory not found on this device", "runtime_unavailable");
     }
 
-    const env = codexChildEnv(process.env, this.opts.useApiKey ?? false);
-    const proc = this.opts.spawnAppServer
-      ? this.opts.spawnAppServer({ cwd: options.cwd, env })
-      : this.spawnReal(options.cwd, env);
-    proc.stderr?.setEncoding("utf8");
-    proc.stderr?.on("data", (d: string) =>
-      this.log.debug(`[codex ${options.sessionId}] ${redact(d.trimEnd())}`),
-    );
+    const proc = this.spawnSessionServer(options.sessionId, options.cwd);
 
     // The session object is completed once the thread exists; handlers only run after that.
     const startMode: CodexPolicyMode = mode.data;
@@ -333,36 +371,14 @@ export class CodexRuntime implements AgentRuntime {
       status: null,
       stopping: false,
       finished: false,
+      retired: new WeakSet(),
+      dormant: false,
     } as Omit<Session, "peer" | "exited"> as Session;
-
-    session.exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
-    session.peer = new JsonRpcPeer(proc.stdout, proc.stdin, {
-      onNotification: (n) => this.onNotification(session, n),
-      onRequest: (r) => this.onServerRequest(session, r),
-      onClose: (err) =>
-        this.finish(
-          session,
-          session.stopping ? null : err ? errorMessage(err) : "Codex app-server exited unexpectedly",
-        ),
-      ...(this.opts.onRpcMessage ? { onLine: this.opts.onRpcMessage } : {}),
-    });
+    this.attach(session, proc);
 
     try {
-      const init: InitializeParams = {
-        clientInfo: { name: "ocw_local_runtime", title: "Open Collaborative AI Workspace", version: "0.0.0" },
-        capabilities: { experimentalApi: false, requestAttestation: false },
-      };
-      await session.peer.request("initialize", init, 30_000);
-      session.peer.notify("initialized");
-
-      const threadParams: ThreadStartParams = {
-        cwd: options.cwd,
-        approvalPolicy: policy.approvalPolicy,
-        approvalsReviewer: policy.approvalsReviewer,
-        sandbox: policy.sandbox,
-        ...(options.model ? { model: options.model } : {}),
-        ...(options.fastMode !== undefined ? { serviceTier: options.fastMode ? "priority" : "default" } : {}),
-      };
+      await this.initialize(session.peer);
+      const threadParams = codexThreadParams(options.cwd, policy, options.model, options.fastMode);
       const resp = options.resumeRuntimeSessionId
         ? await session.peer.request<ThreadStartResponse>(
             "thread/resume",
@@ -516,6 +532,39 @@ export class CodexRuntime implements AgentRuntime {
     return true;
   }
 
+  /** Sessions with a turn running, waiting on an approval or prompts queued (07.11 D-03). Sends nothing. */
+  activeTurns(): number {
+    let n = 0;
+    for (const s of this.sessions.values()) if (isBusy(s)) n++;
+    return n;
+  }
+
+  /**
+   * Stops the app-server of every session with no turn in flight (07.11 D-03a) the way `stop()` does (stdin end,
+   * SIGTERM, SIGKILL after the grace) but without finishing the session: no state, no error. Each resumes its thread
+   * on a new app-server at its next turn. Never interrupts.
+   */
+  async retireIdle(): Promise<number> {
+    const idle = [...this.sessions.values()].filter(
+      (s) => !s.dormant && !s.stopping && !s.finished && !isBusy(s),
+    );
+    // Dormant first, in the same step as the idle check: a prompt arriving meanwhile wakes a new process.
+    for (const s of idle) s.dormant = true;
+    await Promise.all(
+      idle.map(async (s) => {
+        await this.closeProcess(s, s.proc, s.peer, s.exited);
+        this.log.info("codex app-server retired while idle", { sessionId: s.id });
+      }),
+    );
+    return idle.length;
+  }
+
+  /** After an update: find the CLI again (unless configured) and collect a fresh catalog next time. */
+  refreshInstall(): void {
+    this.codexPath = this.opts.codexPath ?? findExecutable("codex");
+    this.catalogCache = null;
+  }
+
   async stop(sessionId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
@@ -523,6 +572,12 @@ export class CodexRuntime implements AgentRuntime {
     s.queue.length = 0;
     if (s.running) await this.interrupt(sessionId);
     this.settleAll(s, "deny", "Session stopped");
+    if (s.dormant) {
+      // No process to kill: the retired one is already gone.
+      this.finish(s, null);
+      this.sessions.delete(sessionId);
+      return;
+    }
     s.proc.stdin.end();
     s.proc.kill("SIGTERM");
     const exited = await Promise.race([
@@ -543,8 +598,132 @@ export class CodexRuntime implements AgentRuntime {
 
   private spawnReal(cwd: string, env: Record<string, string | undefined>): ChildProcess & AppServerProcess {
     if (!this.codexPath) throw new RuntimeError("codex CLI not found on PATH", "runtime_unavailable");
-    const child = spawn(this.codexPath, ["app-server"], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    // 07.11 review ME-07: right after an update relinked it, the binary may be gone for a moment.
+    if (!existsSync(this.codexPath)) {
+      throw new RuntimeError("codex CLI not found where it was installed", "runtime_unavailable");
+    }
+    const child = spawn(this.codexPath, [...CODEX_APP_SERVER_ARGS], {
+      cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    // A spawn that fails (ENOENT, EACCES) emits `error` asynchronously; unheard, it would crash the whole daemon. It
+    // ends the process's output instead, so the JSON-RPC peer closes and the start or wake fails as unavailable.
+    child.on("error", (err) => {
+      // The code only: the error text names the binary's absolute path.
+      const code = (err as NodeJS.ErrnoException).code ?? "error";
+      this.log.warn("codex app-server could not be started", { code });
+      child.stdout?.destroy(new Error(`codex app-server could not be started (${code})`));
+    });
     return child as ChildProcess & AppServerProcess;
+  }
+
+  /** A session's app-server (start and wake-up): the same filtered env and arguments every time. */
+  private spawnSessionServer(sessionId: string, cwd: string): AppServerProcess {
+    const env = codexChildEnv(process.env, this.opts.useApiKey ?? false);
+    const proc = this.opts.spawnAppServer ? this.opts.spawnAppServer({ cwd, env }) : this.spawnReal(cwd, env);
+    proc.stderr?.setEncoding("utf8");
+    proc.stderr?.on("data", (d: string) => this.log.debug(`[codex ${sessionId}] ${redact(d.trimEnd())}`));
+    return proc;
+  }
+
+  /** Connects the session to `proc`; a retired peer's traffic and end are ignored (07.11 D-03a). */
+  private attach(s: Session, proc: AppServerProcess): void {
+    s.proc = proc;
+    s.exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
+    const peer: JsonRpcPeer = new JsonRpcPeer(proc.stdout, proc.stdin, {
+      onNotification: (n) => {
+        if (!s.retired.has(peer)) this.onNotification(s, n);
+      },
+      onRequest: (r) =>
+        s.retired.has(peer)
+          ? Promise.reject(new JsonRpcError("session app-server retired", -32000))
+          : this.onServerRequest(s, r),
+      onClose: (err) => {
+        if (s.retired.has(peer)) return;
+        this.finish(s, s.stopping ? null : err ? errorMessage(err) : "Codex app-server exited unexpectedly");
+      },
+      ...(this.opts.onRpcMessage ? { onLine: this.opts.onRpcMessage } : {}),
+    });
+    s.peer = peer;
+  }
+
+  private async initialize(peer: JsonRpcPeer): Promise<void> {
+    const init: InitializeParams = {
+      clientInfo: { name: "ocw_local_runtime", title: "Open Collaborative AI Workspace", version: "0.0.0" },
+      capabilities: { experimentalApi: false, requestAttestation: false },
+    };
+    await peer.request("initialize", init, 30_000);
+    peer.notify("initialized");
+  }
+
+  /** Stops one app-server as `stop()` does, marking its peer retired first so its end is expected. */
+  private async closeProcess(
+    s: Session,
+    proc: AppServerProcess,
+    peer: JsonRpcPeer,
+    exited: Promise<void>,
+  ): Promise<void> {
+    s.retired.add(peer);
+    proc.stdin.end();
+    proc.kill("SIGTERM");
+    const gone = await Promise.race([
+      exited.then(() => true),
+      new Promise<boolean>((r) => setTimeout(() => r(false), STOP_GRACE_MS).unref()),
+    ]);
+    if (!gone) proc.kill("SIGKILL");
+    peer.close();
+  }
+
+  /**
+   * Wakes a dormant session (07.11 D-03a): a new app-server with the same env and arguments, `initialize`, then
+   * `thread/resume` of the same thread with the thread params `start` would send for the session's configured
+   * settings (the start's own params when nothing changed). On failure the new process is stopped and the session
+   * stays dormant (the next turn tries again).
+   */
+  private async wake(s: Session): Promise<void> {
+    if (s.stopping) throw new RuntimeError("session is stopping", "invalid_state");
+    const proc = this.spawnSessionServer(s.id, s.cwd);
+    this.attach(s, proc);
+    s.dormant = false;
+    const { peer, exited } = s;
+    const c = s.configured;
+    // Never resume into full access without the device opt-in (ADR-0012); the turn itself is refused anyway.
+    const mode = c.permissionMode === "fullAccess" && !this.allowFullAccess() ? "default" : c.permissionMode;
+    const params = codexThreadParams(s.cwd, codexModePolicy(mode, s.cwd), c.model ?? undefined, c.fastMode);
+    try {
+      await this.initialize(peer);
+      const resp = await peer.request<ThreadStartResponse>(
+        "thread/resume",
+        { ...params, threadId: s.threadId },
+        60_000,
+      );
+      if (
+        isUnrestrictedCodexPolicy({ approvalPolicy: resp.approvalPolicy, sandboxPolicy: resp.sandbox }) &&
+        !(mode === "fullAccess" && this.allowFullAccess())
+      ) {
+        throw new RuntimeError(
+          "Codex reported an unrestricted sandbox/approval policy on resume",
+          "permission_mode_rejected",
+        );
+      }
+      // The base for the next synthesized readback; the turn/start right after reports the effective values.
+      s.applied = {
+        model: resp.model ?? s.applied.model,
+        effort: resp.reasoningEffort ?? null,
+        serviceTier: resp.serviceTier ?? null,
+        approvalPolicy: resp.approvalPolicy ?? null,
+        sandboxPolicy: resp.sandbox ?? null,
+        approvalsReviewer: resp.approvalsReviewer ?? null,
+      };
+      this.log.info("codex app-server woke a retired session", { sessionId: s.id });
+    } catch (err) {
+      s.dormant = true;
+      await this.closeProcess(s, proc, peer, exited);
+      throw err instanceof RuntimeError
+        ? err
+        : new RuntimeError(`codex app-server failed to resume: ${errorMessage(err)}`, "runtime_unavailable");
+    }
   }
 
   private get(sessionId: string): Session {
@@ -628,6 +807,7 @@ export class CodexRuntime implements AgentRuntime {
     this.emit(s, { type: "prompt.started", promptId: prompt.promptId });
     this.emit(s, { type: "session.state", status: "running" });
     try {
+      if (s.dormant) await this.wake(s);
       await s.peer.request("thread/compact/start", {
         threadId: s.threadId,
       } satisfies ThreadCompactStartParams);
@@ -654,6 +834,8 @@ export class CodexRuntime implements AgentRuntime {
     this.emit(s, { type: "session.state", status: "running" });
     try {
       const { mode, params } = this.turnOverrides(s, prompt);
+      // 07.11 D-03a: a retired session resumes its thread on a new app-server before the turn.
+      if (s.dormant) await this.wake(s);
       s.turnMode = mode;
       s.pending = null;
       const resp = await s.peer.request<TurnStartResponse>("turn/start", {
