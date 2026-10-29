@@ -1,5 +1,7 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import {
+  chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -9,6 +11,8 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createServer, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -300,5 +304,397 @@ describe("ocw-runtime updates automatic|notify|off (07.11-08, D-02)", () => {
     } finally {
       await daemon.stop();
     }
+  }, 60_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.12-03 `ocw-runtime enroll` (D-03, D-06, PD-06, PD-09): terminal pairing by device code against an in-process HTTP
+// stub that speaks the pairing protocol; the typed-code path is unchanged and saves the richer answer too.
+
+const STUB_DEVICE_CODE = "dc_STUB_secret_device_code_0123456789abcdef";
+const STUB_TOKEN = "dt_STUB_secret_device_token_0123456789";
+const STUB_WEB = "http://web.test";
+
+interface PairingStub {
+  url: string;
+  requests: Array<{ path: string; body: Record<string, unknown> }>;
+  close: () => Promise<void>;
+}
+
+/** PD-06 in miniature: start, one `authorization_pending`, then approval; `/devices/enroll` for the typed code. */
+async function pairingStub(): Promise<PairingStub> {
+  const requests: PairingStub["requests"] = [];
+  let polls = 0;
+  const answer = (res: ServerResponse, status: number, body: unknown) => {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(body));
+  };
+  const enrolled = (name: string) => ({
+    deviceId: "3f0c1a8e-6c55-4b8e-9d0e-0d3c6d8b9a11",
+    organizationId: "7b3e2c51-41f4-4a3e-a5d8-9c1b2e4f6a70",
+    deviceToken: STUB_TOKEN,
+    name,
+    webUrl: STUB_WEB,
+    organizationName: "Acme",
+    ownerName: "Ada",
+  });
+  let proposedName = "rack-1";
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk: Buffer) => {
+      raw += chunk.toString();
+    });
+    req.on("end", () => {
+      const body = (raw ? JSON.parse(raw) : {}) as Record<string, unknown>;
+      const path = req.url ?? "";
+      requests.push({ path, body });
+      if (req.method !== "POST") return answer(res, 405, { error: { code: "method", message: "POST only" } });
+      if (path === "/api/v1/devices/pairings") {
+        proposedName = String(body.name);
+        return answer(res, 200, {
+          deviceCode: STUB_DEVICE_CODE,
+          userCode: "ABCD-EFGH",
+          verificationUri: `${STUB_WEB}/settings/devices?add=server`,
+          verificationUriComplete: `${STUB_WEB}/settings/devices?pair=ABCD-EFGH`,
+          expiresIn: 600,
+          interval: 1,
+        });
+      }
+      if (path === "/api/v1/devices/pairings/token") {
+        if (body.deviceCode !== STUB_DEVICE_CODE) {
+          return answer(res, 400, { error: { code: "expired_token", message: "expired" } });
+        }
+        if (polls++ === 0) {
+          return answer(res, 400, { error: { code: "authorization_pending", message: "pending" } });
+        }
+        return answer(res, 200, enrolled(proposedName));
+      }
+      if (path === "/api/v1/devices/enroll") return answer(res, 200, enrolled(String(body.name)));
+      return answer(res, 404, { error: { code: "not_found", message: "not found" } });
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    requests,
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
+}
+
+describe("ocw-runtime enroll (07.12-03, D-03)", () => {
+  const stubs: PairingStub[] = [];
+  afterEach(async () => {
+    for (const s of stubs.splice(0)) await s.close();
+  });
+  async function setup(): Promise<{ home: string; stub: PairingStub }> {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(home);
+    const stub = await pairingStub();
+    stubs.push(stub);
+    return { home, stub };
+  }
+
+  it("without --code: prints the link and the code, pairs once approved, never prints the device code or token", async () => {
+    const { home, stub } = await setup();
+    const r = await cliAsync(home, ["enroll", "--server", stub.url, "--name", "rack-1"]);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain(`${STUB_WEB}/settings/devices?pair=ABCD-EFGH`);
+    expect(r.stdout).toContain("ABCD-EFGH");
+    expect(r.stdout).toContain('Paired "rack-1" with Acme as Ada');
+    expect(r.stdout).toContain(`Settings › Devices: ${STUB_WEB}/settings/devices`);
+    for (const secret of [STUB_DEVICE_CODE, STUB_TOKEN]) {
+      expect(r.stdout).not.toContain(secret);
+      expect(r.stderr).not.toContain(secret);
+    }
+    expect(stub.requests[0]).toMatchObject({ path: "/api/v1/devices/pairings", body: { name: "rack-1" } });
+    expect(stub.requests.filter((q) => q.path === "/api/v1/devices/pairings/token")).toHaveLength(2);
+    expect(readFileSync(join(home, "device-token"), "utf8").trim()).toBe(STUB_TOKEN);
+    expect(statSync(join(home, "device-token")).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(join(home, "runtime.json"), "utf8"))).toMatchObject({
+      serverUrl: stub.url,
+      deviceName: "rack-1",
+      deviceId: "3f0c1a8e-6c55-4b8e-9d0e-0d3c6d8b9a11",
+      webUrl: STUB_WEB,
+      pairedWith: { organization: "Acme", owner: "Ada" },
+    });
+  }, 30_000);
+
+  it("without --server: uses the server recorded by install.sh", async () => {
+    const { home, stub } = await setup();
+    mkdirSync(join(home, "runtime"), { recursive: true });
+    writeFileSync(
+      join(home, "runtime", "install.json"),
+      JSON.stringify({
+        serverUrl: stub.url,
+        version: "0.1.0",
+        sha256: "a".repeat(64),
+        installedAt: new Date().toISOString(),
+        nodePath: process.execPath,
+      }),
+    );
+    const r = await cliAsync(home, ["enroll", "--name", "rack-2"]);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stdout).toContain('Paired "rack-2" with Acme as Ada');
+    expect(stub.requests[0]?.path).toBe("/api/v1/devices/pairings");
+  }, 30_000);
+
+  it("with no server anywhere: a usage error", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(home);
+    const r = await cliAsync(home, ["enroll"]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("usage: ocw-runtime enroll");
+  });
+
+  it("with --code: the typed-code enroll as before, and the answer's webUrl is saved too", async () => {
+    const { home, stub } = await setup();
+    const r = await cliAsync(home, [
+      "enroll",
+      "--server",
+      stub.url,
+      "--code",
+      "ABCD-EFGH",
+      "--name",
+      "laptop",
+    ]);
+    expect(r.code, r.stderr).toBe(0);
+    expect(stub.requests.map((q) => q.path)).toEqual(["/api/v1/devices/enroll"]);
+    expect(stub.requests[0]?.body).toMatchObject({ code: "ABCD-EFGH", name: "laptop" });
+    expect(r.stdout).toContain(`Paired "laptop" with ${stub.url}.`);
+    expect(r.stdout).toContain(`${STUB_WEB}/settings/devices`);
+    expect(r.stdout).not.toContain(STUB_TOKEN);
+    expect(JSON.parse(readFileSync(join(home, "runtime.json"), "utf8"))).toMatchObject({
+      serverUrl: stub.url,
+      deviceName: "laptop",
+      webUrl: STUB_WEB,
+    });
+  }, 30_000);
+
+  it("Ctrl-C while waiting: 'Pairing cancelled.', exit 130, nothing written", async () => {
+    const { home, stub } = await setup();
+    const base = Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => !k.startsWith("OCW_")),
+    ) as Record<string, string>;
+    const child = spawn(process.execPath, [BIN, "enroll", "--server", stub.url], {
+      env: { ...base, OCW_HOME: home },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d: Buffer) => {
+      stdout += d.toString();
+    });
+    child.stderr.on("data", (d: Buffer) => {
+      stderr += d.toString();
+    });
+    const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+    const deadline = Date.now() + 20_000;
+    while (!stdout.includes("Waiting for approval")) {
+      if (Date.now() > deadline) throw new Error(`no prompt: ${stdout} ${stderr}`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    child.kill("SIGINT");
+    expect(await exited).toBe(130);
+    expect(stderr).toContain("Pairing cancelled.");
+    expect(existsSync(join(home, "device-token"))).toBe(false);
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.12-03 `ocw-runtime remove-project <dir|name|id>` (D-07) with the daemon up or down, and the headless "not paired"
+// line of an unpaired daemon.
+
+describe("ocw-runtime remove-project (07.12-03, D-07)", () => {
+  /** An OCW home plus three project directories; `api` exists twice. */
+  function projectsHome(): { home: string; root: string } {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(root);
+    const home = join(root, "ocw");
+    for (const d of ["one/api", "two/api", "web", "docs"]) mkdirSync(join(root, d), { recursive: true });
+    return { home, root };
+  }
+  const env = { OCW_RUNTIME_REGISTRY_URL: "http://127.0.0.1:9" };
+  async function add(home: string, dir: string): Promise<{ localId: string; name: string }> {
+    const r = await cliAsync(home, ["add-project", dir], env);
+    expect(r.code, r.stderr).toBe(0);
+    return JSON.parse(r.stdout) as { localId: string; name: string };
+  }
+  const registered = (home: string) =>
+    (
+      JSON.parse(readFileSync(join(home, "projects.json"), "utf8")) as {
+        projects: Array<{ localId: string }>;
+      }
+    ).projects;
+
+  it("daemon down: removes by directory, by name and by id straight from projects.json (0600 kept)", async () => {
+    const { home, root } = projectsHome();
+    const api1 = await add(home, join(root, "one", "api"));
+    const api2 = await add(home, join(root, "two", "api"));
+    const web = await add(home, join(root, "web"));
+    const docs = await add(home, join(root, "docs"));
+
+    const byDir = await cliAsync(home, ["remove-project", join(root, "one", "api")], env);
+    expect(byDir.code, byDir.stderr).toBe(0);
+    expect(byDir.stdout).toContain(`Removed "api" (${api1.localId})`);
+    const byName = await cliAsync(home, ["remove-project", "web"], env);
+    expect(byName.code, byName.stderr).toBe(0);
+    expect(byName.stdout).toContain(`Removed "web" (${web.localId})`);
+    const byId = await cliAsync(home, ["remove-project", docs.localId], env);
+    expect(byId.code, byId.stderr).toBe(0);
+    expect(byId.stdout).toContain(`Removed "docs" (${docs.localId})`);
+
+    expect(registered(home).map((p) => p.localId)).toEqual([api2.localId]);
+    expect(statSync(join(home, "projects.json")).mode & 0o777).toBe(0o600);
+
+    const unknown = await cliAsync(home, ["remove-project", "nope"], env);
+    expect(unknown.code).toBe(1);
+    expect(unknown.stderr).toContain('no registered project matches "nope"');
+    expect(unknown.stderr).toContain(`api (${api2.localId})`);
+    const usage = await cliAsync(home, ["remove-project"], env);
+    expect(usage.code).toBe(1);
+    expect(usage.stderr).toContain("usage: ocw-runtime remove-project <dir|name|id>");
+  }, 60_000);
+
+  it("an ambiguous name fails listing the candidates and removes nothing", async () => {
+    const { home, root } = projectsHome();
+    const api1 = await add(home, join(root, "one", "api"));
+    const api2 = await add(home, join(root, "two", "api"));
+    const r = await cliAsync(home, ["remove-project", "api"], env);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain(
+      `ambiguous: api (${api1.localId}), api (${api2.localId}); use the id or the directory`,
+    );
+    expect(registered(home)).toHaveLength(2);
+  }, 30_000);
+
+  it("daemon up: the removal goes through the daemon, whose registry no longer lists it", async () => {
+    const { home, root } = projectsHome();
+    const userHome = join(root, "user");
+    mkdirSync(userHome);
+    const daemon = await Daemon.create({
+      home,
+      env: { HOME: userHome, PATH: "/usr/bin:/bin", ...env },
+      token: null,
+      runtimes: [stubRuntime("claude-code")],
+      logger: silentLogger,
+      maintenance: { userHome, which: () => null },
+    });
+    try {
+      await daemon.start();
+      const web = await add(home, join(root, "web"));
+      const docs = await add(home, join(root, "docs"));
+      const r = await cliAsync(home, ["remove-project", "web"], env);
+      expect(r.code, r.stderr).toBe(0);
+      expect(r.stdout).toContain(`Removed "web" (${web.localId})`);
+      const listed = await cliAsync(home, ["projects"], env);
+      expect((JSON.parse(listed.stdout) as Array<{ localId: string }>).map((p) => p.localId)).toEqual([
+        docs.localId,
+      ]);
+    } finally {
+      await daemon.stop();
+    }
+  }, 60_000);
+});
+
+describe("an unpaired daemon (07.12-03)", () => {
+  it("tells a headless owner to pair with ocw-runtime setup (or the desktop app)", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(home);
+    const warnings: string[] = [];
+    const daemon = await Daemon.create({
+      home,
+      env: { HOME: home, PATH: "/usr/bin:/bin", OCW_RUNTIME_UPDATES: "off" },
+      token: null,
+      runtimes: [stubRuntime("claude-code")],
+      logger: { ...silentLogger, warn: (msg) => warnings.push(msg) },
+      controlSocket: false,
+      maintenance: { userHome: home, which: () => null },
+    });
+    try {
+      await daemon.start();
+      expect(warnings).toContain(
+        "no device token found; pair this device with `ocw-runtime setup` (or from the desktop app), then restart the runtime",
+      );
+    } finally {
+      await daemon.stop();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// 07.12-03 `~/.ocw/service.env` (D-12, PD-10): `ocw-runtime run` reads it before the daemon is created. PD-19: a scratch
+// HOME and PATH, updates off and a dead registry, so nothing real is ever run or updated.
+
+describe("ocw-runtime run reads ~/.ocw/service.env (07.12-03, D-12)", () => {
+  /** Starts `run`, waits for the control socket, stops it with SIGTERM and returns its stderr. */
+  async function runDaemon(env: Record<string, string>, socket: string): Promise<string> {
+    const base = Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => !k.startsWith("OCW_")),
+    ) as Record<string, string>;
+    const child = spawn(process.execPath, [BIN, "run"], {
+      env: { ...base, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let logs = "";
+    child.stdout.on("data", (d: Buffer) => {
+      logs += d.toString();
+    });
+    child.stderr.on("data", (d: Buffer) => {
+      logs += d.toString();
+    });
+    const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+    try {
+      const deadline = Date.now() + 20_000;
+      while (!existsSync(socket)) {
+        if (child.exitCode !== null) throw new Error(`daemon exited early: ${logs}`);
+        if (Date.now() > deadline) throw new Error(`no control socket after 20 s: ${logs}`);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    } finally {
+      child.kill("SIGTERM");
+    }
+    expect(await exited).toBe(0);
+    return logs;
+  }
+
+  function scratch(): { userHome: string; home: string; env: Record<string, string> } {
+    const userHome = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(userHome);
+    const home = join(userHome, ".ocw");
+    mkdirSync(home, { mode: 0o700 });
+    return {
+      userHome,
+      home,
+      env: {
+        HOME: userHome,
+        OCW_HOME: home,
+        PATH: "/usr/bin:/bin",
+        OCW_RUNTIME_UPDATES: "off",
+        OCW_RUNTIME_REGISTRY_URL: "http://127.0.0.1:9",
+      },
+    };
+  }
+
+  it("a 0600 file is applied before the daemon is created (it switches the fake runtime on)", async () => {
+    const { home, env } = scratch();
+    const file = join(home, "service.env");
+    writeFileSync(file, "# service secrets\nOCW_RUNTIME_FAKE=1\nSECRET_PROBE=probe-value-71\n", {
+      mode: 0o600,
+    });
+    const logs = await runDaemon(env, join(home, "runtime.sock"));
+    expect(logs).toContain("OCW_RUNTIME_FAKE=1: using the fake runtime");
+    expect(logs).toContain("SECRET_PROBE");
+    expect(logs).not.toContain("probe-value-71");
+  }, 60_000);
+
+  it("a group- or world-readable file is refused with the chmod line and no value", async () => {
+    const { home, env } = scratch();
+    const file = join(home, "service.env");
+    writeFileSync(file, "SECRET_PROBE=probe-value-72\n", { mode: 0o644 });
+    chmodSync(file, 0o644);
+    const logs = await runDaemon({ ...env, OCW_RUNTIME_FAKE: "1" }, join(home, "runtime.sock"));
+    expect(logs).toContain("chmod 600 ~/.ocw/service.env");
+    expect(logs).not.toContain("probe-value-72");
   }, 60_000);
 });

@@ -355,7 +355,9 @@ export class Daemon {
       this.log.info("control socket listening");
     }
     if (!this.token) {
-      this.log.warn("no device token found; pair this device from the desktop app, then restart the runtime");
+      this.log.warn(
+        "no device token found; pair this device with `ocw-runtime setup` (or from the desktop app), then restart the runtime",
+      );
       // A headless, unpaired daemon still keeps its CLIs checked and reports locally (`notify`, D-10).
       this.maintenance?.start({ paired: false });
       return;
