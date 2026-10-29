@@ -3,8 +3,9 @@
 // `pnpm gate:compose` stage selection (no Docker): the default run, --steps subsets in canonical order, the profile
 // flags appending their stages (--with-sandbox after compose and Playwright), and unknown names refused before anything starts.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
-import { DEFAULT_STAGES, STAGES, selectStages, stackOptions } from "./compose-gate.mjs";
+import { checkRuntimeDist, DEFAULT_STAGES, STAGES, selectStages, stackOptions } from "./compose-gate.mjs";
 
 describe("selectStages", () => {
   it("runs compose, playwright, proxy, schema-refusal and backup by default", () => {
@@ -59,5 +60,50 @@ describe("selectStages", () => {
 
   it("refuses an unknown stage name", () => {
     assert.throws(() => selectStages({ steps: "playwright,scenario-c" }), /unknown stage.*scenario-c/);
+  });
+});
+
+describe("checkRuntimeDist (07.12-06)", () => {
+  const bundle = Buffer.from('console.log("ocw-runtime");\n');
+  const sha = createHash("sha256").update(bundle).digest("hex");
+  /** A fake fetch over a route → [status, body] table; records the URLs asked for. */
+  const fakeFetch =
+    (table, asked = []) =>
+    async (url) => {
+      asked.push(url);
+      const route = url.replace(/^.*\/api\/v1\/runtime\//, "");
+      const [status, body] = table[route] ?? [404, "{}"];
+      return new Response(body, { status });
+    };
+  const good = () => ({
+    version: [200, JSON.stringify({ version: "0.1.0", sha256: sha })],
+    "bundle.sha256": [200, `${sha}  ocw-runtime.mjs\n`],
+    bundle: [200, bundle],
+    "install.sh": [200, "#!/bin/sh\nset -eu\n"],
+  });
+
+  it("passes when the four routes agree, with only the version and a sha prefix in its details", async () => {
+    const asked = [];
+    const res = await checkRuntimeDist("http://127.0.0.1:3400", { fetchImpl: fakeFetch(good(), asked) });
+    assert.deepEqual(res, { ok: true, version: "0.1.0", sha: sha.slice(0, 12) });
+    assert.deepEqual(asked, [
+      "http://127.0.0.1:3400/api/v1/runtime/version",
+      "http://127.0.0.1:3400/api/v1/runtime/bundle.sha256",
+      "http://127.0.0.1:3400/api/v1/runtime/bundle",
+      "http://127.0.0.1:3400/api/v1/runtime/install.sh",
+    ]);
+  });
+
+  it("fails on a missing dist, a bundle that does not hash, a wrong checksum line or a non-sh script", async () => {
+    const cases = [
+      { version: [404, '{"error":{"code":"runtime_unavailable"}}'] },
+      { bundle: [200, Buffer.from("tampered")] },
+      { "bundle.sha256": [200, `${"0".repeat(64)}  ocw-runtime.mjs\n`] },
+      { "install.sh": [200, "<html>"] },
+    ];
+    for (const override of cases) {
+      const res = await checkRuntimeDist("http://x", { fetchImpl: fakeFetch({ ...good(), ...override }) });
+      assert.equal(res.ok, false, JSON.stringify(override).slice(0, 40));
+    }
   });
 });

@@ -15,10 +15,32 @@ COPY --from=pruner /repo/out/json/ .
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile --prod
 COPY --from=pruner /repo/out/full/ .
 
+# Phase 07.12-06 (D-01, D-10, PD-03, PD-05): the Local Runtime as one file plus manifest.json, served by this API under
+# /api/v1/runtime/*. Built from its own pruned workspace (dev dependencies included: esbuild); only /out reaches the
+# runner, so the Claude Agent SDK installed here for the build never enters the API image.
+FROM base AS runtime-pruner
+WORKDIR /repo
+COPY . .
+RUN npx --yes turbo@2.11.4 prune @ocw/local-runtime --docker
+
+FROM base AS runtime-bundle
+WORKDIR /app
+COPY --from=runtime-pruner /repo/out/json/ .
+# No --no-optional: it would also drop esbuild's platform binary, which esbuild's postinstall then fetches with npm
+# outside the lockfile. The SDK's optional platform package stays in this builder layer only.
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile --filter @ocw/local-runtime...
+COPY --from=runtime-pruner /repo/out/full/ .
+# The corresponding source (AGPL): pass --build-arg OCW_SOURCE_COMMIT=<40-hex sha>; without it the manifest says null.
+ARG OCW_SOURCE_COMMIT=""
+RUN OCW_SOURCE_COMMIT="$OCW_SOURCE_COMMIT" pnpm --filter @ocw/local-runtime build:bundle --out /out
+
 FROM base AS runner
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=installer --chown=node:node /app .
+# Owned by root: the API only reads and re-hashes the bundle it serves.
+COPY --from=runtime-bundle /out /app/runtime-dist
+ENV OCW_RUNTIME_DIST_DIR=/app/runtime-dist
 USER node
 WORKDIR /app/apps/api
 EXPOSE 4000
