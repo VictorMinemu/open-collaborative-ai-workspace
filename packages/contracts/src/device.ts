@@ -114,6 +114,17 @@ export const EnrollDeviceResponse = z.object({
   organizationId: Id,
   /** Returned exactly once; the API stores only its sha256. */
   deviceToken: z.string(),
+  // Phase 07.12 (D-06): filled by the API for both pairing paths (typed code and device code) since 07.12; older APIs
+  // omit them. The runtime keeps them in runtime.json so `setup` and `doctor` can say which device this is, where its
+  // Settings › Devices page is and whom it was paired with.
+  /** The device's name as stored (the approver may have changed the proposed one). */
+  name: z.string().max(80).optional(),
+  /** The workspace's web origin (`OCW_PUBLIC_WEB_URL`), for the Settings › Devices link. */
+  webUrl: z.url().optional(),
+  /** The organization the device now belongs to. */
+  organizationName: z.string().max(200).optional(),
+  /** The member who owns the device (who created the code or approved the pairing). */
+  ownerName: z.string().max(200).optional(),
 });
 export type EnrollDeviceResponse = z.infer<typeof EnrollDeviceResponse>;
 

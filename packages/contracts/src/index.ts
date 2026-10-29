@@ -13,6 +13,7 @@ export * from "./common";
 export * from "./connectors";
 export * from "./device";
 export * from "./device-link";
+export * from "./device-pairing";
 export * from "./health";
 export * from "./identity";
 export * from "./keychain";
