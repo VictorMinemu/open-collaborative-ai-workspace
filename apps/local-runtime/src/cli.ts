@@ -20,6 +20,12 @@
 //                                  this device's runtime updates level (07.11, D-02; it can only lower the
 //                                  organization's); writes runtime.json and asks a running daemon to reload it.
 //                                  OCW_RUNTIME_UPDATES overrides it per process.
+//   ocw-runtime setup [--server <url>] [--name <name>] [--project <dir>]… [--service user|system|none]
+//                     [--user-name <account>] [--yes]
+//                                  07.12 (D-02): pair, register repositories, install the service, run the doctor and
+//                                  print the Settings › Devices link. Prompts only on a terminal; safe to re-run.
+//   ocw-runtime remove-project <dir|name|id>
+//                                  unregister a project (via the running daemon, or directly when stopped)
 
 import { homedir } from "node:os";
 import { RuntimeId, RuntimeUpdatesLevel } from "@ocw/contracts";
@@ -42,6 +48,14 @@ import { createLogger, errorMessage } from "./logger.js";
 import { publicInstallFields, resolveInstall } from "./maintenance/install-method.js";
 import { PairingCancelledError, pairByDeviceCode } from "./pair.js";
 import { applyServiceEnv } from "./service-env.js";
+import {
+  defaultSetupDeps,
+  parseSetupArgs,
+  runSetup,
+  SETUP_USAGE,
+  type SetupArgs,
+  SetupUsageError,
+} from "./setup.js";
 import { RUNTIME_VERSION } from "./version.js";
 
 async function viaSocket(req: ControlRequest): Promise<void> {
@@ -292,6 +306,34 @@ async function enrollCommand(args: string[]): Promise<void> {
 }
 
 /**
+ * `setup` (07.12, D-02, PD-13): exit 0 done, 1 a step failed, 2 a usage error or a value missing without a terminal,
+ * 130 cancelled (Ctrl-C aborts a pending prompt or pairing).
+ */
+async function setupCommand(argv: string[]): Promise<void> {
+  let args: SetupArgs;
+  try {
+    args = parseSetupArgs(argv);
+  } catch (err) {
+    if (!(err instanceof SetupUsageError)) throw err;
+    process.stderr.write(`ocw-runtime setup: ${err.message}\n${SETUP_USAGE.join("\n")}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  if (args.help) {
+    process.stdout.write(`${SETUP_USAGE.join("\n")}\n`);
+    return;
+  }
+  const deps = defaultSetupDeps(ocwHome());
+  const onSigint = () => deps.cancel();
+  process.on("SIGINT", onSigint);
+  try {
+    process.exitCode = await runSetup(args, deps);
+  } finally {
+    process.removeListener("SIGINT", onSigint);
+  }
+}
+
+/**
  * `run`: applies `~/.ocw/service.env` to this process's environment first (07.12, D-12: keys already set win, refused
  * unless 0600 and owned by this user, names logged, never values), then creates and starts the daemon.
  */
@@ -360,6 +402,8 @@ async function main(argv: string[]): Promise<void> {
       return updates(rest[0], rest[1]);
     case "remove-project":
       return removeProject(rest[0]);
+    case "setup":
+      return setupCommand(rest);
     default:
       throw new Error(`unknown command: ${cmd}`);
   }
