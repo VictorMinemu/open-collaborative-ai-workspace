@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { MODULE_CATALOG } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack, WEB_ORIGIN } from "../../testing";
@@ -21,6 +22,8 @@ let victor: TestClient;
 let victorId: string;
 let orgA: string;
 const devices: FakeDevice[] = [];
+/** Every API log line of this file's stack (PD-08: no code ever reaches a log line). */
+const logLines: string[] = [];
 
 type Json = Record<string, unknown>;
 
@@ -30,11 +33,20 @@ const nextIp = () => `198.51.100.${ipSeq++}`;
 
 const anon = () => new TestClient(stack.baseUrl);
 
-function startPairing(
+/** Every code this file was given (the log case looks for each of them in every captured line). */
+const issued: Array<{ deviceCode: string; userCode: string }> = [];
+
+async function startPairing(
   ip: string,
   body: Json = { name: "rack-1", platform: "linux", runtimeVersion: "0.1.0" },
 ) {
-  return anon().request("POST", "/api/v1/devices/pairings", body, { headers: { "x-forwarded-for": ip } });
+  const res = await anon().request("POST", "/api/v1/devices/pairings", body, {
+    headers: { "x-forwarded-for": ip },
+  });
+  if (res.status === 200) {
+    issued.push({ deviceCode: res.body!.deviceCode as string, userCode: res.body!.userCode as string });
+  }
+  return res;
 }
 
 function poll(ip: string, deviceCode: string) {
@@ -73,7 +85,10 @@ async function auditRows(action: string): Promise<Array<Json>> {
 }
 
 beforeAll(async () => {
-  stack = await startTestStack({ env: { OCW_TRUST_PROXY: "1" } });
+  stack = await startTestStack({
+    env: { OCW_TRUST_PROXY: "1", LOG_LEVEL: "debug" },
+    logStream: { write: (line) => void logLines.push(line) },
+  });
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
   victor = new TestClient(stack.baseUrl);
@@ -384,5 +399,193 @@ describe("every RFC 8628 answer, lookup, deny and single use (Task 2)", () => {
     const deniedAudit = (await auditRows("device.pairing_denied")).filter((r) => r.actor_id === bId);
     expect(await enrollmentRows(deviceCode)).toBe(approve.status === 200 ? 1 : 0);
     expect(deniedAudit).toHaveLength(deny.status === 200 ? 1 : 0);
+  });
+});
+
+/** One deny row per Work Zone catalog pattern for `userId` (the 07.3 module-off mechanism); returns the rule ids. */
+async function workZoneOff(userId: string): Promise<string[]> {
+  const ids: string[] = [];
+  for (const permission of MODULE_CATALOG.work_zone.patterns) {
+    const rule = await victor.request("POST", "/api/v1/permission-rules", {
+      subjectKind: "user",
+      subjectId: userId,
+      permission,
+      effect: "deny",
+    });
+    expect(rule.status, JSON.stringify(rule.body)).toBe(200);
+    ids.push(rule.body!.id as string);
+  }
+  return ids;
+}
+
+/** A member leaves organization A and becomes the admin of a new organization B (the cross-tenant matrix pattern). */
+async function moveToOrgB(userId: string, displayName: string): Promise<string> {
+  const orgB = randomUUID();
+  await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other Co', $2)", [
+    orgB,
+    `o-${orgB}`,
+  ]);
+  await su.query("delete from auth.member where user_id = $1", [userId]);
+  await su.query("delete from app.org_members where user_id = $1", [userId]);
+  await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+    orgB,
+    userId,
+  ]);
+  await su.query(
+    "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, $3, 'admin')",
+    [orgB, userId, displayName],
+  );
+  await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, userId]);
+  return orgB;
+}
+
+describe("abuse bounds and isolation (Task 3)", () => {
+  it("start: the 11th request from one IP within 10 minutes is 429; another IP is unaffected", async () => {
+    const ip = nextIp();
+    for (let i = 0; i < 10; i++) expect((await startPairing(ip)).status).toBe(200);
+    const over = await startPairing(ip);
+    expect(over.status).toBe(429);
+    expect((await startPairing(nextIp())).status).toBe(200);
+  });
+
+  it("token: the 61st poll from one IP within a minute is 429", async () => {
+    const ip = nextIp();
+    for (let i = 0; i < 60; i++) {
+      const res = await poll(ip, `unknown-device-code-${i}-${"x".repeat(24)}`);
+      expect(res.status).toBe(400);
+    }
+    const over = await poll(ip, `unknown-device-code-61-${"x".repeat(24)}`);
+    expect(over.status).toBe(429);
+    expect(errorCode(await poll(nextIp(), `unknown-device-code-62-${"x".repeat(24)}`))).toBe("expired_token");
+  });
+
+  it("lookup, approve and deny share one bucket of 10 per minute per member; another member is unaffected", async () => {
+    const { client: guesser } = await freshAdmin();
+    const { client: other } = await freshAdmin();
+    const calls = [
+      ...Array.from({ length: 4 }, () => ["lookup", { userCode: "ZZZZ-ZZZZ" }] as const),
+      ...Array.from({ length: 3 }, () => ["approve", { userCode: "ZZZZ-ZZZZ", name: "x" }] as const),
+      ...Array.from({ length: 3 }, () => ["deny", { userCode: "ZZZZ-ZZZZ" }] as const),
+    ];
+    for (const [path, body] of calls) {
+      expect((await guesser.request("POST", `/api/v1/devices/pairings/${path}`, body)).status).toBe(404);
+    }
+    for (const [path, body] of [
+      ["lookup", { userCode: "ZZZZ-ZZZZ" }],
+      ["approve", { userCode: "ZZZZ-ZZZZ", name: "x" }],
+      ["deny", { userCode: "ZZZZ-ZZZZ" }],
+    ] as const) {
+      expect((await guesser.request("POST", `/api/v1/devices/pairings/${path}`, body)).status).toBe(429);
+    }
+    const fine = await other.request("POST", "/api/v1/devices/pairings/lookup", { userCode: "ZZZZ-ZZZZ" });
+    expect(fine.status).toBe(404);
+  });
+
+  it("without device.pair (standard role, or the Work Zone module off) lookup, approve and deny are 403; anonymous is 401", async () => {
+    const { userCode, deviceCode } = await started();
+    const { client: standard } = await invite(stack, victor, "stan-pair@example.test", "Stan", "standard");
+    const { client: dev, userId: devId } = await invite(
+      stack,
+      victor,
+      "dana-pair@example.test",
+      "Dana",
+      "developer",
+    );
+    // Positive control: a developer may look it up.
+    expect((await dev.request("POST", "/api/v1/devices/pairings/lookup", { userCode })).status).toBe(200);
+    const rules = await workZoneOff(devId);
+    try {
+      for (const member of [standard, dev]) {
+        for (const [path, body] of [
+          ["lookup", { userCode }],
+          ["approve", { userCode, name: "Mine" }],
+          ["deny", { userCode }],
+        ] as const) {
+          const res = await member.request("POST", `/api/v1/devices/pairings/${path}`, body);
+          expect(res.status, `${path}: ${JSON.stringify(res.body)}`).toBe(403);
+        }
+      }
+    } finally {
+      for (const id of rules) await victor.request("DELETE", `/api/v1/permission-rules/${id}`);
+    }
+    for (const path of ["lookup", "deny"]) {
+      const res = await anon().request("POST", `/api/v1/devices/pairings/${path}`, { userCode });
+      expect(res.status).toBe(401);
+    }
+    // Nothing was decided: the request is still pending and no enrollment row exists.
+    expect(await enrollmentRows(deviceCode)).toBe(0);
+    expect(errorCode(await poll(nextIp(), deviceCode))).toBe("authorization_pending");
+  });
+
+  it("an admin of organization B approves: the device exists in organization B only, audited there", async () => {
+    const { client: eve, userId: eveId } = await invite(
+      stack,
+      victor,
+      "eve-pair@example.test",
+      "Eve",
+      "developer",
+    );
+    const orgB = await moveToOrgB(eveId, "Eve");
+    const { ip, deviceCode, userCode } = await started();
+    const approve = await eve.request("POST", "/api/v1/devices/pairings/approve", {
+      userCode,
+      name: "B server",
+    });
+    expect(approve.status, JSON.stringify(approve.body)).toBe(200);
+    const token = await poll(ip, deviceCode);
+    expect(token.status, JSON.stringify(token.body)).toBe(200);
+    expect(token.body).toMatchObject({
+      organizationId: orgB,
+      organizationName: "Other Co",
+      ownerName: "Eve",
+    });
+    const deviceId = token.body!.deviceId as string;
+
+    const { rows } = await su.query("select organization_id, owner_user_id from app.devices where id = $1", [
+      deviceId,
+    ]);
+    expect(rows).toEqual([{ organization_id: orgB, owner_user_id: eveId }]);
+    const listA = await victor.request("GET", "/api/v1/devices");
+    expect(listA.status).toBe(200);
+    expect(JSON.stringify(listA.body)).not.toContain(deviceId);
+    expect((await victor.request("PATCH", `/api/v1/devices/${deviceId}`, { name: "mine now" })).status).toBe(
+      404,
+    );
+    expect((await victor.request("DELETE", `/api/v1/devices/${deviceId}`)).status).toBe(404);
+    const listB = await eve.request("GET", "/api/v1/devices");
+    expect(JSON.stringify(listB.body)).toContain(deviceId);
+
+    const approved = (await auditRows("device.pairing_approved")).filter((r) => r.actor_id === eveId);
+    expect(approved).toHaveLength(1);
+    expect(approved[0]!.organization_id).toBe(orgB);
+    const enrolled = (await auditRows("device.enrolled")).filter((r) => r.device_id === deviceId);
+    expect(enrolled).toHaveLength(1);
+    expect(enrolled[0]!.organization_id).toBe(orgB);
+  });
+
+  it("logs: no captured API line carries a user code (any form) or a device code", async () => {
+    // One more full pairing with the log capture on, then every code this file was ever given.
+    const { ip, deviceCode, userCode } = await started();
+    const { client: approver } = await freshAdmin();
+    expect((await approver.request("POST", "/api/v1/devices/pairings/lookup", { userCode })).status).toBe(
+      200,
+    );
+    expect(
+      (await approver.request("POST", "/api/v1/devices/pairings/approve", { userCode, name: "Logged" }))
+        .status,
+    ).toBe(200);
+    expect((await poll(ip, deviceCode)).status).toBe(200);
+
+    expect(logLines.length).toBeGreaterThan(0);
+    expect(logLines.some((l) => l.includes("/api/v1/devices/pairings"))).toBe(true);
+    const all = logLines.join("\n");
+    const lower = all.toLowerCase();
+    expect(issued.length).toBeGreaterThan(10);
+    for (const code of issued) {
+      const canonical = code.userCode.replace("-", "");
+      expect(all).not.toContain(code.deviceCode);
+      expect(all).not.toContain(code.userCode);
+      expect(lower).not.toContain(canonical.toLowerCase());
+    }
   });
 });
