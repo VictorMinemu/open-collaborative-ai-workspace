@@ -44,6 +44,13 @@ export const REQUIRED_AREAS = [
   { area: "session audience changes", file: "apps/api/src/modules/work-session/visibility.ts" },
   // 07.9 verification (W1): the `ws:` authorizer decides who may subscribe to a session's live view.
   { area: "session live-view authorizer (ws:)", file: "apps/api/src/modules/work-session/index.ts" },
+  // Phase 07.11 (ADR-0032): the on-device update command table, the runner that executes it, and who may ask.
+  {
+    area: "runtime CLI update commands (on-device table)",
+    file: "apps/local-runtime/src/maintenance/install-method.ts",
+  },
+  { area: "runtime CLI update runner", file: "apps/local-runtime/src/maintenance/runner.ts" },
+  { area: "runtime update requests (device.maintain)", file: "apps/api/src/modules/device/maintenance.ts" },
 ];
 
 /** GitHub CODEOWNERS pattern (gitignore subset) → RegExp over repo-relative paths. */
