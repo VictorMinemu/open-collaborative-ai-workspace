@@ -37,8 +37,8 @@ The script:
   --omit=optional --ignore-scripts`, from a lockfile embedded in the script: every package at the exact version the
   runtime was built and tested with, each download checked against its integrity hash. The workspace never serves the
   SDK: it is your own npm download;
-- writes only to `~/.ocw/runtime/versions/<sha>/`, the `~/.ocw/runtime/current` link, `~/.ocw/install.json` and the
-  launcher `~/.local/bin/ocw-runtime`;
+- writes only to `~/.ocw/runtime/versions/<sha>/`, the `~/.ocw/runtime/current` link, `~/.ocw/runtime/install.json`
+  and the launcher `~/.local/bin/ocw-runtime`;
 - never uses sudo and never changes system files. It warns when run as root.
 
 If `~/.local/bin` is not on your PATH, the script prints the line to add to `~/.profile`.
@@ -307,7 +307,7 @@ Other common cases:
 
 ```bash
 ocw-runtime service uninstall
-rm -rf ~/.ocw/runtime ~/.ocw/install.json ~/.local/bin/ocw-runtime
+rm -rf ~/.ocw/runtime ~/.local/bin/ocw-runtime     # ~/.ocw/runtime holds install.json too
 ```
 
 Then revoke the device in Settings › Devices. `~/.ocw` also holds the pairing and the registered repositories; remove
