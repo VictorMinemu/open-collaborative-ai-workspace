@@ -185,7 +185,11 @@ export class DeviceHub {
     this.offlineGraceMs = opts.offlineGraceMs ?? 10_000;
     this.maxFrameBytes = opts.maxFrameBytes ?? DEVICE_LINK_MAX_COMMAND_FRAME_BYTES;
     this.runtimeManifest = opts.runtimeManifest ?? RUNTIME_COMPATIBILITY_MANIFEST;
-    this.maintenance = { audit: opts.audit, realtime: opts.realtime };
+    this.maintenance = {
+      audit: opts.audit,
+      realtime: opts.realtime,
+      runtimePolicy: (tx) => this.runtimePolicy(tx),
+    };
   }
 
   setSessionHandler(handler: DeviceSessionHandler): void {

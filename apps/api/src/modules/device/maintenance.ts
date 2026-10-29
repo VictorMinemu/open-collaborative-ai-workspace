@@ -45,6 +45,8 @@ import { deviceFacts } from "./routes";
 export interface MaintenanceDeps {
   audit: AuditService;
   realtime: RealtimeService;
+  /** The organization's runtime updates level, read in `tx` (an automatic run against it is flagged, LO-04). */
+  runtimePolicy?: (tx: Tx) => Promise<RuntimeUpdatesLevel>;
 }
 
 type RunRow = typeof deviceRuntimeUpdates.$inferSelect;
@@ -392,6 +394,21 @@ async function runStarted(
       .returning();
   }
   if (!row) return false;
+  // 07.11 review LO-04: the device declares the trigger. An automatic run while the org is not at `automatic` is a
+  // daemon installing against policy (buggy or old): never audited as a legitimate system action.
+  const level = row.trigger === "automatic" && deps.runtimePolicy ? await deps.runtimePolicy(tx) : null;
+  if (level !== null && level !== "automatic") {
+    await auditDevice(
+      tx,
+      deps,
+      device,
+      "device.runtime_update_started",
+      runActor(row, device),
+      { ...runMetadata(row), policyViolation: true, orgLevel: level },
+      "error",
+    );
+    return true;
+  }
   await auditRun(tx, deps, device, row, "device.runtime_update_started");
   return true;
 }

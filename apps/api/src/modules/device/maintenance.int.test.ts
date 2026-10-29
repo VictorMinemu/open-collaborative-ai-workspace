@@ -695,6 +695,54 @@ describe("07.11-06 Task 3: every device hears the org's level and the manifest; 
   });
 });
 
+describe("07.11 review LO-04: an automatic run against the org's policy is audited as a violation", () => {
+  it("an automatic run started while the org is at notify is audited with result error and policyViolation", async () => {
+    await setLevel("notify");
+    try {
+      const runId = randomUUID();
+      d.updateRun({ runId, phase: "started", fromVersion: "2.1.300", candidate: "2.1.302" });
+      await barrier(d, dId, CURRENT);
+      const started = (await audits("device.runtime_update_started", dId)).find(
+        (a) => a.metadata.candidate === "2.1.302",
+      );
+      expect(started).toMatchObject({
+        actor_kind: "system",
+        result: "error",
+        metadata: { trigger: "automatic", policyViolation: true },
+      });
+      d.updateRun({
+        runId,
+        phase: "finished",
+        outcome: "succeeded",
+        fromVersion: "2.1.300",
+        toVersion: "2.1.302",
+        candidate: "2.1.302",
+      });
+      await barrier(d, dId, CURRENT);
+    } finally {
+      await setLevel("automatic");
+    }
+    // At automatic nothing is flagged.
+    const ok = randomUUID();
+    d.updateRun({ runId: ok, phase: "started", fromVersion: "2.1.302", candidate: "2.1.303" });
+    await barrier(d, dId, CURRENT);
+    const fine = (await audits("device.runtime_update_started", dId)).find(
+      (a) => a.metadata.candidate === "2.1.303",
+    );
+    expect(fine).toMatchObject({ result: "success" });
+    expect(fine?.metadata).not.toHaveProperty("policyViolation");
+    d.updateRun({
+      runId: ok,
+      phase: "finished",
+      outcome: "succeeded",
+      fromVersion: "2.1.302",
+      toVersion: "2.1.303",
+      candidate: "2.1.303",
+    });
+    await barrier(d, dId, CURRENT);
+  });
+});
+
 describe("07.11 review LO-03: a committed policy change never answers 500", () => {
   it("a failing push of the new level to the devices still answers 200 with the saved policy", async () => {
     const hub = stack.built.deviceHub;
