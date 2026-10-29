@@ -1,5 +1,14 @@
 import { execFile } from "node:child_process";
-import { lstatSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -63,21 +72,36 @@ describe("fake-npm.mjs (07.12-09, PD-19)", () => {
       });
     });
 
-  it("install --prefix links the workspace's SDK beside the bundle and records its arguments", async () => {
+  /** A version directory as install.sh leaves it before `npm ci`: package.json and the lockfile (07.12 review ME-03). */
+  const versionDir = (deps: Record<string, string> = { [SDK]: "0.3.282", zod: "4.6.5" }, lockDeps = deps) => {
     const root = mkdtempSync(join(tmpdir(), "ocw-fake-npm-"));
     dirs.push(root);
     const prefix = join(root, "versions", "abcdef012345");
-    const args = [
-      "install",
-      "--prefix",
-      prefix,
-      "--no-audit",
-      "--no-fund",
-      "--omit=optional",
-      "--ignore-scripts",
-      `${SDK}@0.3.282`,
-      "zod@4.6.5",
-    ];
+    mkdirSync(prefix, { recursive: true });
+    writeFileSync(
+      join(prefix, "package.json"),
+      JSON.stringify({ name: "ocw-runtime-deps", dependencies: deps }),
+    );
+    const packages: Record<string, unknown> = { "": { name: "ocw-runtime-deps", dependencies: lockDeps } };
+    for (const [name, version] of Object.entries(lockDeps)) {
+      packages[`node_modules/${name}`] = { version, integrity: `sha512-${name.length}` };
+    }
+    writeFileSync(join(prefix, "npm-shrinkwrap.json"), JSON.stringify({ lockfileVersion: 3, packages }));
+    return prefix;
+  };
+  const ciArgs = (prefix: string) => [
+    "ci",
+    "--prefix",
+    prefix,
+    "--no-audit",
+    "--no-fund",
+    "--omit=optional",
+    "--ignore-scripts",
+  ];
+
+  it("npm ci --prefix links the workspace's SDK beside the bundle and records its arguments", async () => {
+    const prefix = versionDir();
+    const args = ciArgs(prefix);
     const r = await run(args);
     expect(r).toEqual({ code: 0, stderr: "" });
     const link = join(prefix, "node_modules", SDK);
@@ -94,11 +118,24 @@ describe("fake-npm.mjs (07.12-09, PD-19)", () => {
       ["view", SDK],
       ["install", `${SDK}@1.0.0`],
       ["install", "--prefix", "/x", "zod@4"],
+      ["ci", "--prefix", "/x"],
       [],
     ]) {
       const r = await run(args);
       expect(r.code, args.join(" ")).toBe(1);
       expect(r.stderr).toContain("fake npm: unsupported");
+    }
+  });
+
+  it("refuses what npm ci would: no lockfile, a lockfile out of sync, an SDK without integrity", async () => {
+    const noLock = versionDir();
+    rmSync(join(noLock, "npm-shrinkwrap.json"));
+    const outOfSync = versionDir({ [SDK]: "0.3.282" }, { [SDK]: "0.3.281" });
+    const noSdk = versionDir({ zod: "4.6.5" });
+    for (const prefix of [noLock, outOfSync, noSdk]) {
+      const r = await run(ciArgs(prefix));
+      expect(r.code, prefix).toBe(1);
+      expect(r.stderr).toContain("fake npm:");
     }
   });
 });
