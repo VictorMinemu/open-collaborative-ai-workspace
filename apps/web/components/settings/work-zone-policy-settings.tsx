@@ -5,6 +5,7 @@ import {
   KNOWN_EFFORTS,
   type PermissionMode,
   type RuntimeId,
+  type RuntimeUpdatesLevel,
   type WorkZonePolicyView,
 } from "@ocw/contracts";
 import {
@@ -12,6 +13,7 @@ import {
   FilePen,
   Hand,
   type LucideIcon,
+  RefreshCw,
   RotateCcw,
   Save,
   ShieldAlert,
@@ -76,6 +78,21 @@ const FULL_ACCESS_LEGS = [
 ];
 
 const NO_LIMIT = "none";
+
+/** 07.11 (D-02): how far devices may update their coding CLIs; each device can only lower it. */
+const RUNTIME_UPDATE_LEVELS: Array<{ value: RuntimeUpdatesLevel; label: string; description: string }> = [
+  {
+    value: "automatic",
+    label: "Automatic",
+    description: "Devices update Claude Code and Codex when the agent is idle. Turns are never cut.",
+  },
+  {
+    value: "notify",
+    label: "Notify only",
+    description: "Devices report new versions; the device owner or an admin presses Update now.",
+  },
+  { value: "off", label: "Off", description: "Devices don't check for new versions." },
+];
 
 const toDraft = ({ updatedAt: _u, knownModels: _k, ...rest }: WorkZonePolicyView): Draft => rest;
 const restrictOf = (d: Draft): Restrict => ({
@@ -369,6 +386,16 @@ function PolicyForm({ policy }: { policy: WorkZonePolicyView }) {
         </div>
       </Section>
 
+      <Section
+        title="Runtime updates"
+        description="How the organization's devices keep Claude Code and Codex up to date."
+      >
+        <RuntimeUpdatesField
+          value={draft.runtimeUpdates}
+          onChange={(runtimeUpdates) => setDraft((d) => ({ ...d, runtimeUpdates }))}
+        />
+      </Section>
+
       <div className="sticky bottom-0 z-10 -mx-4 flex flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t bg-background/90 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6">
         <span
           className={cn("mr-auto text-xs", noModes ? "text-destructive" : "text-muted-foreground")}
@@ -552,6 +579,63 @@ function EffortField({
           ? "Sessions may pick any effort the model offers"
           : "Sessions cannot pick a higher level"}
       </span>
+    </div>
+  );
+}
+
+export function RuntimeUpdatesField({
+  value,
+  onChange,
+}: {
+  value: RuntimeUpdatesLevel;
+  onChange: (v: RuntimeUpdatesLevel) => void;
+}) {
+  const id = useId();
+  const chosen = RUNTIME_UPDATE_LEVELS.find((l) => l.value === value);
+  return (
+    <div className="grid gap-3 rounded-2xl border bg-card p-4 shadow-xs">
+      <div className="flex items-start gap-3">
+        <IconTile icon={RefreshCw} warn={false} />
+        <div className="grid min-w-0 flex-1 gap-1.5">
+          <span id={id} className="font-medium text-sm">
+            Updates on devices
+          </span>
+          <Select
+            items={RUNTIME_UPDATE_LEVELS.map((l) => ({ value: l.value, label: l.label }))}
+            value={value}
+            onValueChange={(v) => {
+              const level = RUNTIME_UPDATE_LEVELS.find((l) => l.value === v);
+              if (level) onChange(level.value);
+            }}
+          >
+            <SelectTrigger
+              aria-labelledby={id}
+              data-testid="policy-runtime-updates"
+              className="h-11 w-full sm:h-9 sm:w-64"
+            />
+            <SelectContent>
+              {RUNTIME_UPDATE_LEVELS.map((l) => (
+                <SelectItem key={l.value} value={l.value}>
+                  <span className="grid gap-0.5 py-0.5">
+                    <span>{l.label}</span>
+                    <span className="max-w-72 whitespace-normal text-muted-foreground text-xs">
+                      {l.description}
+                    </span>
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <span className="text-muted-foreground text-xs">{chosen?.description}</span>
+        </div>
+      </div>
+      <p className="ml-11 text-muted-foreground text-xs leading-relaxed">
+        A device owner can lower this on the device (desktop app › Runtime updates, or{" "}
+        <code className="whitespace-nowrap rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
+          ocw-runtime updates
+        </code>
+        ).
+      </p>
     </div>
   );
 }
