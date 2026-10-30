@@ -4,6 +4,7 @@ import { installJobSchema, JOB_QUEUE_NAMES } from "@ocw/db/migrate";
 import { startTestDatabase, type TestDatabase } from "@ocw/db/testing";
 import type { FastifyBaseLogger } from "fastify";
 import pg from "pg";
+import { TestClock } from "pg-boss";
 import pino from "pino";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createJobs, type Jobs, JobsSchemaError } from "./jobs";
@@ -255,6 +256,147 @@ describe("job runtime (pg-boss, 07.6-03)", () => {
         "select cron, timezone from pgboss.schedule where name = 'maintenance.daily'",
       );
       expect(s).toEqual({ cron: "0 3 * * *", timezone: "UTC" });
+    });
+  });
+
+  describe("replicas, restarts and shutdown (AUTO-01)", () => {
+    it("two instances on one database run each of 20 jobs exactly once", async () => {
+      const a = jobsFor(tdb.appUrl, true).jobs;
+      const b = jobsFor(tdb.appUrl, true).jobs;
+      const runs: { by: string; jobId: string; runId: string }[] = [];
+      for (const [by, jobs] of [
+        ["a", a],
+        ["b", b],
+      ] as const) {
+        jobs.work("automation.fire", async (data, ctx) => {
+          runs.push({ by, jobId: ctx.jobId, runId: data.runId });
+          await new Promise((r) => setTimeout(r, 20));
+        });
+      }
+      await Promise.all([a.start(), b.start()]);
+      const organizationId = randomUUID();
+      const runIds = Array.from({ length: 20 }, () => randomUUID());
+      await db.withTenant({ organizationId }, async (tx) => {
+        for (const runId of runIds) await a.sendInTx(tx, "automation.fire", { organizationId, runId });
+      });
+      await vi.waitFor(() => expect(new Set(runs.map((r) => r.runId)).size).toBe(20), {
+        timeout: 30_000,
+        interval: 100,
+      });
+      // A late duplicate would land within a polling interval or two.
+      await new Promise((r) => setTimeout(r, 2_500));
+      expect(runs).toHaveLength(20);
+      expect(new Set(runs.map((r) => r.jobId)).size).toBe(20);
+      expect([...new Set(runs.map((r) => r.runId))].sort()).toEqual([...runIds].sort());
+      await Promise.all([a.stop(), b.stop()]);
+    });
+
+    it("a global cron registered by two instances ticks once per interval (pg-boss TestClock)", async () => {
+      // TestClock attaches to the schema with DDL (its own clock table and job_now override), which ocw_app can never
+      // run: these two instances connect as the schema's owner. Cron coordination does not depend on the role.
+      const clock = new TestClock("2026-01-05T10:00:30Z");
+      const ticks: string[] = [];
+      const make = (by: string) => {
+        const { log } = captureLog();
+        const jobs = createJobs({ connectionString: tdb.migratorUrl, workers: true, log, clock });
+        started.push(jobs);
+        jobs.work("automation.tick", async (_data, ctx) => {
+          ticks.push(`${by}:${ctx.jobId}`);
+        });
+        jobs.schedule("automation.tick", "* * * * *");
+        return jobs;
+      };
+      // An earlier test's real-time schedule (its row and the ticks it queued) is not this test's, and its real-time
+      // cron claim (pgboss.version.cron_on, later than this clock) would keep the fake clock from claiming a pass.
+      const resetCron =
+        "delete from pgboss.job where name = 'automation.tick'; delete from pgboss.schedule where name = 'automation.tick'; update pgboss.version set cron_on = null";
+      await query(tdb.superuserUrl, resetCron);
+      const a = make("a");
+      const b = make("b");
+      try {
+        await a.start();
+        await b.start();
+        // Three minute boundaries: 10:01, 10:02 and 10:03.
+        for (let s = 0; s < 3 * 60 + 15; s += 5) await clock.tick(5_000);
+        await a.drain("automation.tick");
+        const [made] = await query<{ n: number }>(
+          tdb.superuserUrl,
+          "select count(*)::int as n from pgboss.job where name = 'automation.tick'",
+        );
+        expect(made?.n).toBe(3);
+        await vi.waitFor(() => expect(ticks).toHaveLength(3), { timeout: 10_000 });
+        expect(new Set(ticks.map((t) => t.split(":")[1])).size).toBe(3);
+      } finally {
+        // Detaches the clock (restores job_now) even when an assertion failed, so later tests read real time.
+        await a.stop();
+        await b.stop();
+        await query(tdb.superuserUrl, resetCron);
+      }
+    });
+
+    it("jobs queued before a restart run after it", async () => {
+      const first = jobsFor(tdb.appUrl, false).jobs;
+      first.work("watched.check", async () => {
+        throw new Error("workers are off: never called");
+      });
+      await first.start();
+      const organizationId = randomUUID();
+      const ids = Array.from({ length: 5 }, () => randomUUID());
+      await db.withTenant({ organizationId }, async (tx) => {
+        for (const watchedRecordId of ids)
+          await first.sendInTx(tx, "watched.check", { organizationId, watchedRecordId, source: "schedule" });
+      });
+      await first.stop();
+
+      const second = jobsFor(tdb.appUrl, true).jobs;
+      const seen: string[] = [];
+      second.work("watched.check", async (data) => {
+        seen.push(data.watchedRecordId);
+      });
+      await second.start();
+      await vi.waitFor(() => expect(seen.sort()).toEqual([...ids].sort()), {
+        timeout: 20_000,
+        interval: 100,
+      });
+      await second.stop();
+    });
+
+    it("stop() lets an in-flight handler finish before the pool closes; a queued job waits for the next start", async () => {
+      const jobs = jobsFor(tdb.appUrl, true).jobs;
+      const events: string[] = [];
+      let entered!: () => void;
+      const inFlight = new Promise<void>((r) => {
+        entered = r;
+      });
+      jobs.work("work_session.summarize", async (data) => {
+        events.push(`start:${data.workSessionId}`);
+        entered();
+        await new Promise((r) => setTimeout(r, 500));
+        events.push(`end:${data.workSessionId}`);
+      });
+      await jobs.start();
+      const organizationId = randomUUID();
+      const [s1, s2] = [randomUUID(), randomUUID()];
+      const id1 = await db.withTenant({ organizationId }, (tx) =>
+        jobs.sendInTx(tx, "work_session.summarize", { organizationId, workSessionId: s1, mode: "manual" }),
+      );
+      await inFlight;
+      const id2 = await db.withTenant({ organizationId }, (tx) =>
+        jobs.sendInTx(tx, "work_session.summarize", { organizationId, workSessionId: s2, mode: "auto" }),
+      );
+      await jobs.stop();
+      expect(events).toEqual([`start:${s1}`, `end:${s1}`]);
+      expect(await stateOf(id1)).toBe("completed");
+      expect(await stateOf(id2)).toBe("created");
+
+      const next = jobsFor(tdb.appUrl, true).jobs;
+      next.work("work_session.summarize", async (data) => {
+        events.push(`next:${data.workSessionId}`);
+      });
+      await next.start();
+      await vi.waitFor(() => expect(events).toContain(`next:${s2}`), { timeout: 20_000, interval: 100 });
+      await next.stop();
+      expect(await stateOf(id2)).toBe("completed");
     });
   });
 

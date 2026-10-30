@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkSchema, createTenantDb, localMigrations } from "@ocw/db";
-import { bootstrapRoles, runMigrations } from "@ocw/db/migrate";
+import { bootstrapRoles, JOB_QUEUE_NAMES, runMigrations } from "@ocw/db/migrate";
 import { startAllOrNone } from "@ocw/db/testing";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { RedisContainer, type StartedRedisContainer } from "@testcontainers/redis";
@@ -192,6 +192,22 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
     }
   }
 
+  /** The pgboss schema's catalog queues (pg-boss's own `__pgboss…` queues aside), or null when it is not installed. */
+  async function pgbossQueues(): Promise<string[] | null> {
+    const c = new pg.Client({ connectionString: urls.superuser });
+    await c.connect();
+    try {
+      const ns = await c.query("select to_regnamespace('pgboss') is not null as installed");
+      if (!ns.rows[0].installed) return null;
+      const { rows } = await c.query<{ name: string }>(
+        "select name from pgboss.queue where name not like '\\_\\_pgboss%' order by name",
+      );
+      return rows.map((r) => r.name);
+    } finally {
+      await c.end();
+    }
+  }
+
   beforeAll(async () => {
     [pgc, redis] = await startAllOrNone([
       new PostgreSqlContainer("postgres:18")
@@ -316,6 +332,8 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
     expect(res).toEqual({ status: "behind", pending: HEAD_ONLY, unknown: [], modified: [] });
     // N-1 had no read grant for ocw_app: an N-1 database is "never migrated" to the guard until `migrate` runs.
     expect((await checkSchema(urls.app)).status).toBe("missing");
+    // Phase 07.6: N-1 has no job runtime.
+    expect(await pgbossQueues()).toBeNull();
   });
 
   describe("after HEAD's migrations", () => {
@@ -330,6 +348,20 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
 
     it("is ok for the API's own role", async () => {
       expect(await checkSchema(urls.app)).toEqual({ status: "ok", pending: [], unknown: [], modified: [] });
+    });
+
+    it("installs pg-boss as the migrator, with every catalog queue, and lets ocw_app use it (Phase 07.6, D-07)", async () => {
+      expect(await pgbossQueues()).toEqual([...JOB_QUEUE_NAMES].sort());
+      const c = new pg.Client({ connectionString: urls.app });
+      await c.connect();
+      try {
+        const { rows } = await c.query(
+          "select has_schema_privilege('pgboss', 'USAGE') as usage, has_schema_privilege('pgboss', 'CREATE') as create",
+        );
+        expect(rows[0]).toEqual({ usage: true, create: false });
+      } finally {
+        await c.end();
+      }
     });
 
     it("keeps every seeded row", async () => {
@@ -695,6 +727,8 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       });
       const built = await buildApp(env, { logger: false });
       try {
+        // Ready starts the job runtime as ocw_app (Phase 07.6): a missing or older pgboss schema would reject here.
+        await built.app.ready();
         const res = await built.app.inject({ method: "GET", url: "/health" });
         expect(res.statusCode).toBe(200);
         expect(res.json()).toMatchObject({ status: "ok", checks: { db: "ok", redis: "ok" } });
