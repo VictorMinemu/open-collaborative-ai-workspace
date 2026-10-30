@@ -470,6 +470,10 @@ export const AutomationRunList = z.object({
 });
 export type AutomationRunList = z.infer<typeof AutomationRunList>;
 
+/** `POST /automations/:id/run` ("Run now", 202): the `manual` run it queued (or recorded as skipped at a limit). */
+export const RunAutomationResponse = z.object({ runId: Id });
+export type RunAutomationResponse = z.infer<typeof RunAutomationResponse>;
+
 /** `POST /automations/schedule-preview` (R13): the same code path as save. */
 export const SchedulePreviewRequest = AutomationSchedule;
 export type SchedulePreviewRequest = z.infer<typeof SchedulePreviewRequest>;

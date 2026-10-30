@@ -160,6 +160,8 @@ export {
   aiAccessSql,
   aiGrantMatchSql,
   type ConversationRow,
+  // Phase 07.6 (07.6-05): an automation's target is decided for its creator and its bot on the channel's facts.
+  channelFacts,
   convTopic,
   getMembership,
   iso,
