@@ -72,6 +72,7 @@ export {
   type CreateMemoryProposalInput,
   type CreateMemoryProposalResult,
   createMemoryProposal,
+  type MemoryProposalOrigin,
   type ProposalDeps,
   type ProposalPrescan,
 } from "./proposals";

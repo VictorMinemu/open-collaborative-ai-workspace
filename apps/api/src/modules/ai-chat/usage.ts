@@ -49,17 +49,7 @@ export async function recordUsage(
 ): Promise<AiUsage> {
   const g = input.generation;
   const m = input.model ?? { backend: g.backend, provider: g.provider, modelId: g.modelId };
-  const r = input.reported;
-  const reported = r !== null && typeof r.inputTokens === "number" && typeof r.outputTokens === "number";
-  const inputTokens = reported ? (r?.inputTokens ?? 0) : estimateTokens(input.promptText);
-  const outputTokens = reported ? (r?.outputTokens ?? 0) : estimateTokens(input.outputText);
-  const cachedInputTokens = reported ? (r?.cachedInputTokens ?? null) : null;
-  const reasoningTokens = reported ? (r?.reasoningTokens ?? null) : null;
-  const cost = estimateCostMicros(m.backend, m.provider as ModelProviderKind, m.modelId, {
-    inputTokens,
-    outputTokens,
-    cachedInputTokens,
-  });
+  const measured = measure(m, input);
   const [row] = await tx
     .insert(aiUsageRecords)
     .values({
@@ -69,21 +59,16 @@ export async function recordUsage(
       requesterUserId: g.requesterUserId,
       conversationId: g.conversationId,
       messageId: g.assistantMessageId,
-      backend: m.backend,
-      provider: m.provider,
-      modelId: m.modelId,
-      inputTokens,
-      outputTokens,
-      cachedInputTokens,
-      reasoningTokens,
-      estimated: !reported,
-      costMicrosUsd: cost.costMicrosUsd,
-      priceRef: cost.priceRef,
+      ...measured,
     })
     .onConflictDoNothing({ target: [aiUsageRecords.generationId, aiUsageRecords.kind] })
     .returning();
   if (row) {
-    await addToToday(tx, g, row);
+    await addToToday(
+      tx,
+      { userId: g.requesterUserId, at: new Date(g.startedAt), backend: g.backend as AiBackend },
+      row,
+    );
     return usageDto(row);
   }
   // Already recorded (a retried finalize): the first record stands.
@@ -96,10 +81,89 @@ export async function recordUsage(
   return usageDto(existing);
 }
 
-/** Adds one record's tokens and cost to the requester's counters of the generation's UTC day (one upsert). */
+/**
+ * Phase 07.6 (D-05, D-06, P-16): the usage record of a model call that is not a chat generation: a digest's summary
+ * (`digest`, subject = the automation run) or a Work Zone session's memory summary (`session_summary`, subject = the
+ * session; a later summary of new work in the same session uses its own subject id, `summarySubjectId`). Same estimate,
+ * price table and daily counters as `recordUsage`, billed to `requesterUserId`. Idempotent on (subject_id, kind): a
+ * retried job adds nothing, and the first record stands.
+ */
+export async function recordStandaloneUsage(
+  tx: Tx,
+  i: {
+    kind: "digest" | "session_summary";
+    subjectId: string;
+    requesterUserId: string;
+    model: ModelRef;
+    reported: ReportedUsage | null;
+    promptText: string;
+    outputText: string;
+  },
+): Promise<AiUsage> {
+  const [row] = await tx
+    .insert(aiUsageRecords)
+    .values({
+      organizationId: tenantOf(tx).organizationId,
+      generationId: null,
+      kind: i.kind,
+      requesterUserId: i.requesterUserId,
+      conversationId: null,
+      messageId: null,
+      subjectId: i.subjectId,
+      ...measure(i.model, i),
+    })
+    .onConflictDoNothing({
+      target: [aiUsageRecords.subjectId, aiUsageRecords.kind],
+      where: sql`subject_id is not null`,
+    })
+    .returning();
+  if (row) {
+    await addToToday(tx, { userId: i.requesterUserId, at: new Date(), backend: i.model.backend }, row);
+    return usageDto(row);
+  }
+  const [existing] = await tx
+    .select()
+    .from(aiUsageRecords)
+    .where(and(eq(aiUsageRecords.subjectId, i.subjectId), eq(aiUsageRecords.kind, i.kind)))
+    .limit(1);
+  if (!existing) throw new Error("usage record missing after conflict");
+  return usageDto(existing);
+}
+
+/** Tokens (reported, else estimated from the text) and cost of one model call on `m`. */
+function measure(
+  m: { backend: AiBackend; provider: string; modelId: string },
+  input: { reported: ReportedUsage | null; promptText: string; outputText: string },
+) {
+  const r = input.reported;
+  const reported = r !== null && typeof r.inputTokens === "number" && typeof r.outputTokens === "number";
+  const inputTokens = reported ? (r?.inputTokens ?? 0) : estimateTokens(input.promptText);
+  const outputTokens = reported ? (r?.outputTokens ?? 0) : estimateTokens(input.outputText);
+  const cachedInputTokens = reported ? (r?.cachedInputTokens ?? null) : null;
+  const reasoningTokens = reported ? (r?.reasoningTokens ?? null) : null;
+  const cost = estimateCostMicros(m.backend, m.provider as ModelProviderKind, m.modelId, {
+    inputTokens,
+    outputTokens,
+    cachedInputTokens,
+  });
+  return {
+    backend: m.backend,
+    provider: m.provider,
+    modelId: m.modelId,
+    inputTokens,
+    outputTokens,
+    cachedInputTokens,
+    reasoningTokens,
+    estimated: !reported,
+    costMicrosUsd: cost.costMicrosUsd,
+    priceRef: cost.priceRef,
+  };
+}
+
+/** Adds one record's tokens and cost to the requester's counters of that UTC day and backend class (one upsert). */
 async function addToToday(
   tx: Tx,
-  g: GenerationRow,
+  who: { userId: string; at: Date; backend: AiBackend },
   r: { inputTokens: number; outputTokens: number; costMicrosUsd: number | null },
 ): Promise<void> {
   const cost = r.costMicrosUsd ?? 0;
@@ -107,9 +171,9 @@ async function addToToday(
     .insert(aiUsageDaily)
     .values({
       organizationId: tenantOf(tx).organizationId,
-      userId: g.requesterUserId,
-      day: utcDay(new Date(g.startedAt)),
-      backendClass: backendClassOf(g.backend as AiBackend),
+      userId: who.userId,
+      day: utcDay(who.at),
+      backendClass: backendClassOf(who.backend),
       generations: 0,
       inputTokens: r.inputTokens,
       outputTokens: r.outputTokens,

@@ -92,6 +92,8 @@ export function createWorkSessionModule(
     log: core.log,
     perms,
     storage: deps.storage ?? null,
+    // 07.6 (AUTO-06): a finished session enqueues its memory summary job.
+    jobs: core.jobs,
   });
   hub.setSessionHandler(service);
   // 07.11 (D-02, PD-03): the org's runtime updates level reaches the device module only through this source.

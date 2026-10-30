@@ -41,6 +41,8 @@ export { registerShareRoutes, snapshotOf } from "./shares";
 export { createGenerationSweeper, type GenerationSweeper } from "./sweeper";
 export { createTitler, heuristicTitle, pickTitleModel, type Titler } from "./titles";
 export { toolStates, webAllowed } from "./tools-state";
+/** Phase 07.6 (P-16): model calls that are not chat generations (digests, Work Zone session summaries). */
+export { backendClassOf, type ReportedUsage, recordStandaloneUsage } from "./usage";
 export { searxngWebSearchTool } from "./web-tools";
 
 export function createAiChatModule(

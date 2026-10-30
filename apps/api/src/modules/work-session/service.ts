@@ -41,6 +41,7 @@ import {
 } from "@ocw/db";
 import { and, asc, count, desc, eq, inArray, isNull, min, type SQL, sql } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
+import type { Jobs } from "../../lib/jobs";
 import { attachmentRowsForWorkPrompt, attachmentsForWorkPrompts, type ObjectStorage } from "../artifact";
 import type { AuditService } from "../audit";
 import type { DeviceCommandRow, DeviceHub, DeviceRef, DeviceSessionHandler } from "../device";
@@ -152,6 +153,11 @@ export interface WorkSessionDeps {
   storage?: ObjectStorage | null;
   /** The background queue's bounds (07.9 fan-out); tests shorten the retries. */
   background?: Omit<OrgQueueOptions, "log">;
+  /**
+   * Phase 07.6 (AUTO-06, D-06): the job runtime. A session entering `completed` or `archived` enqueues its memory
+   * summary job in the same transaction; the job decides (consent, linked team project, new work). Null = no jobs.
+   */
+  jobs?: Pick<Jobs, "sendInTx"> | null;
 }
 
 /**
@@ -607,11 +613,22 @@ export class WorkSessionService implements DeviceSessionHandler {
     status: WorkSessionStatus,
     extra: Partial<Pick<SessionRow, "lastError">> = {},
   ): Promise<void> {
+    const entered = s.status !== status;
     await tx
       .update(workSessions)
       .set({ status, updatedAt: sql`now()`, ...extra })
       .where(eq(workSessions.id, s.id));
     s.status = status;
+    // 07.6 (AUTO-06, D-06, D-07): a finished session may feed its team project's memory. Ids only; the job checks the
+    // owner's consent (button or automatic preference), the 07.9 link and whether anything is new.
+    if (entered && (status === "completed" || status === "archived") && this.deps.jobs) {
+      await this.deps.jobs.sendInTx(
+        tx,
+        "work_session.summarize",
+        { organizationId: s.organizationId, workSessionId: s.id, mode: "auto" },
+        { singletonKey: `ws:${s.id}:${s.lastLocalSeq}` },
+      );
+    }
     await this.emitSession(tx, s.id);
   }
 
