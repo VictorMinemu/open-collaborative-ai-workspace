@@ -50,6 +50,16 @@ afterAll(async () => {
   await stack?.stop();
 });
 
+describe("module wiring (07.6-03)", () => {
+  it("wires the 07.6 modules once, next to the existing ones, with the job runtime on core", () => {
+    expect(stack.built.moduleNames).toEqual(
+      expect.arrayContaining(["automation", "watched", "digest", "work-memory", "chat", "work-session"]),
+    );
+    expect(new Set(stack.built.moduleNames).size).toBe(stack.built.moduleNames.length);
+    expect(typeof stack.built.core.jobs.sendInTx).toBe("function");
+  });
+});
+
 describe("route authorization coverage (strict in tests)", () => {
   it("runs in strict mode under NODE_ENV=test", () => {
     expect(stack.env.NODE_ENV).toBe("test");

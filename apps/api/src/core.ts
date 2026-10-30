@@ -6,6 +6,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import type { Env } from "./config/env";
 import type { ChatAgentBridge } from "./lib/chat-agent-bridge";
 import type { ChatEvents } from "./lib/chat-events";
+import type { Jobs } from "./lib/jobs";
 import type { RedisBus } from "./lib/redis";
 import type { SecretStore } from "./lib/secret-store";
 import type { AuditService } from "./modules/audit";
@@ -57,6 +58,11 @@ export interface Core {
   chatAgent: ChatAgentBridge;
   /** Seam between chat and the observers of its messages (notifications, CHAT-08); see lib/chat-events.ts. */
   chatEvents: ChatEvents;
+  /**
+   * Phase 07.6 (AUTO-01): the pg-boss job runtime. Modules call `work` / `schedule` in `register`; app.ts starts it
+   * once every module is registered (onReady) and stops it before the pool closes. Payloads are ids only (lib/jobs.ts).
+   */
+  jobs: Jobs;
 }
 
 export interface ApiModule {

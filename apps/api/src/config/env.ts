@@ -317,6 +317,15 @@ export const EnvSchema = z
     OCW_OPENBAO_ADDR: optionalUrl,
     /** TEST-ONLY (D-07): egress test hosts (see EgressTestHosts). Refused in production. */
     OCW_EGRESS_TEST_HOSTS: EgressTestHosts,
+    /**
+     * Phase 07.6 (AUTO-01, D-07): whether this process runs job handlers and the global cron ticks (`on`) or only
+     * enqueues (`off`), so a later dedicated worker service can run the same image. Default `on`; `off` when
+     * NODE_ENV is test (test stacks run jobs themselves through `jobs.drain`).
+     */
+    OCW_JOBS_WORKER: z.preprocess(
+      (v) => (v === "" ? undefined : v),
+      z.enum(["on", "off"], "must be on or off").optional(),
+    ),
     OCW_PRESIDIO_TIMEOUT_MS: z.preprocess(
       (v) => (v === "" ? undefined : v),
       z.coerce.number().int().min(100).max(10_000).default(2000),
@@ -362,6 +371,7 @@ export const EnvSchema = z
   })
   .transform((v) => ({
     ...v,
+    OCW_JOBS_WORKER: v.OCW_JOBS_WORKER ?? (v.NODE_ENV === "test" ? ("off" as const) : ("on" as const)),
     OCW_S3_PUBLIC_URL: v.OCW_S3_PUBLIC_URL ?? v.OCW_S3_ENDPOINT,
     OCW_AI_MOCK_BASE_URL: v.OCW_AI_MOCK_BASE_URL ?? v.OCW_MOCK_MODEL_BASE_URL,
     OCW_AI_SEARXNG_URL: v.OCW_AI_SEARXNG_URL ?? v.OCW_SEARXNG_URL,

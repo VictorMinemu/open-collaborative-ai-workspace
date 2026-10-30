@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
+import { installJobSchema } from "./jobs-schema";
+
+export { installJobSchema, JOB_QUEUE_NAMES, JOB_SCHEMA, type JobQueueName } from "./jobs-schema";
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const MIGRATIONS_DIR = join(here, "..", "drizzle");
@@ -59,5 +62,7 @@ export async function runMigrations(opts: MigrateOptions): Promise<void> {
   } finally {
     await pool.end();
   }
+  // Phase 07.6 (D-07): pg-boss is installed and upgraded by this role only; the API runs it with migrate:false.
+  await installJobSchema(opts.migratorUrl, log);
   log("migrate: done");
 }
