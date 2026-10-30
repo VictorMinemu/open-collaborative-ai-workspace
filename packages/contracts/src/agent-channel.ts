@@ -6,8 +6,15 @@ import {
   ProviderAuthErrorCode,
   SubscriptionProviderKind,
 } from "./agent";
-import { AgentCardInput, AgentCardKind, AgentCardPatch, BrowserHost } from "./agent-cards";
+import {
+  AGENT_CARD_TITLE_MAX,
+  AgentCardInput,
+  AgentCardKind,
+  AgentCardPatch,
+  BrowserHost,
+} from "./agent-cards";
 import { APPROVAL_NOTE_MAX, ApprovalNote } from "./approvals";
+import { AUTOMATION_LIMITS, AutomationRunTrigger } from "./automations";
 import {
   BOARD_CARD_DESCRIPTION_MAX,
   BOARD_MAX_COLUMNS,
@@ -76,6 +83,11 @@ export const AgentChannelEventTypes = {
   pluginUninstall: "plugin.uninstall.v1",
   /** Phase 6 (AGENT-04, P-11): a reader decided one of this agent's Agent Cards. */
   cardAction: "agent.card_action.v1",
+  /**
+   * Phase 07.6 (D-03): an automation run. The mention payload (structural author = the run-as human, text = a server
+   * sentence) plus the standing order and, for inbound triggers, the outside content as a separate labelled block.
+   */
+  automationRun: "agent.automation_run.v1",
 } as const;
 
 const UUID_RE = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
@@ -194,6 +206,39 @@ export const AgentCardActionEvent = AgentMentionEvent.omit({ type: true }).exten
   }),
 });
 export type AgentCardActionEvent = z.infer<typeof AgentCardActionEvent>;
+
+/**
+ * Phase 07.6 (D-03, C-01): outside content that started a run (a webhook payload or a mail), composed by the API.
+ * Never merged into `message.text` or the standing order: the plugin labels it as untrusted and the turn starts tainted.
+ */
+export const AgentAutomationRunInbound = z.object({
+  source: z.enum(["webhook", "mail"]),
+  title: z.string().max(AGENT_CARD_TITLE_MAX),
+  text: z.string().max(AUTOMATION_LIMITS.mailTextMaxChars),
+  /** The mail sender's address; null for webhooks. */
+  from: z.string().max(320).nullable(),
+  receivedAt: IsoDateTime,
+});
+export type AgentAutomationRunInbound = z.infer<typeof AgentAutomationRunInbound>;
+
+/**
+ * Phase 07.6 (D-03, P-22): an automation run delivered to the bot. Built like a mention on the run's anchor message:
+ * `message.author` is the run-as human (server-resolved) and `turn` is computed for that human (unattended: no browser
+ * tools). The standing order travels in `automationRun.instructions`, the outside content in `automationRun.inbound`.
+ * Older plugins skip the unknown type.
+ */
+export const AgentAutomationRunEvent = AgentMentionEvent.omit({ type: true }).extend({
+  type: z.literal(AgentChannelEventTypes.automationRun),
+  automationRun: z.object({
+    automationId: Id,
+    runId: Id,
+    name: z.string().max(AUTOMATION_LIMITS.nameMax),
+    trigger: AutomationRunTrigger,
+    instructions: z.string().max(AUTOMATION_LIMITS.instructionsMax),
+    inbound: AgentAutomationRunInbound.nullable(),
+  }),
+});
+export type AgentAutomationRunEvent = z.infer<typeof AgentAutomationRunEvent>;
 
 export const CellConfigChangedEvent = z.object({
   type: z.literal(AgentChannelEventTypes.configChanged),
