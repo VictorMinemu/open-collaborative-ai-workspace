@@ -603,7 +603,9 @@ Plans:
 cards — and they notice when a record changed outside the platform; people get a personal digest and finished Work Zone
 sessions feed project memory through the promotion flow
 **Requirements**: AUTO-01, AUTO-02, AUTO-03, AUTO-04, AUTO-05, AUTO-06
-**Depends on:** Phase 07.1, Phase 07.2, Phase 07.3, Phase 07.4, Phase 07.5
+**Depends on:** Phase 07.1, Phase 07.2, Phase 07.3, Phase 07.4, Phase 07.5; since the 2026-10-30 revision also Phase
+07.8 (sandbox tools in unattended run turns, D-12) and Phase 07.9 (linked team projects and session audience, D-10, D-11)
+**ADR:** 0028 (reserved for this phase; 0027 is reserved for 07.7 and 0029–0033 are taken by 07.8–07.12, D-13)
 **Research:** done (`OPS-FEATURES.md` F6, F8, F9, F13)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
@@ -629,7 +631,7 @@ Plans:
 - [ ] 07.6-05-PLAN.md — Wave 2: The automation entity as a REST resource: CRUD, schedules and time zones, access and target rules, run history, Run
 - [ ] 07.6-06-PLAN.md — Wave 2: The proactive-delivery primitive: an automation run becomes a cell turn bound to an anchor message and a person, with
 - [ ] 07.6-07-PLAN.md — Wave 3: Watched records: link a board card to an external record, hash its watched fields in the API, check on access and on
-- [ ] 07.6-08-PLAN.md — Wave 2: Work Zone sessions feed project memory: repository → unit mapping, the summary job, the system-origin proposal, the
+- [ ] 07.6-08-PLAN.md — Wave 2: Work Zone sessions feed project memory: the session's unit read from 07.9's linked repositories, the summary job, the system-origin proposal, the per-viewer
 - [ ] 07.6-09-PLAN.md — Wave 3: The phase's API tracer: scheduled automations actually run — tick, fire, re-decision, budgets, breaker, no-reply,
 - [ ] 07.6-10-PLAN.md — Wave 5: Signed webhooks as a trigger: endpoint lifecycle inside the automation, the public route with verification, replay
 - [ ] 07.6-11-PLAN.md — Wave 5: IMAP mail as a trigger: mailbox lifecycle inside the automation, Keychain-only sign-in, pinned TLS connections,
@@ -643,7 +645,7 @@ Plans:
 - [ ] 07.6-19-PLAN.md — Wave 7: The phase gate: release images, the full suite on one stack, CI, documentation, ADR-0028 and the signed validation.
 - [ ] 07.6-20-PLAN.md — Wave 2: Everything the cell needs for this phase, in one plan: delivering automation runs as turns and the two new tools.
 - [ ] 07.6-21-PLAN.md — Wave 4: Inbound processing: every webhook or mail item becomes a deterministic post (thread, DM or board card) and, if asked,
-- [ ] 07.6-22-PLAN.md — Wave 3: The Work Zone → memory UI: the session strip and its dialogs, and the unit's Linked repositories card.
+- [ ] 07.6-22-PLAN.md — Wave 3: The Work Zone → memory UI: the session memory strip and its dialogs; repository linking stays 07.9's.
 - [ ] 07.6-23-PLAN.md — Wave 6: The natural-language proposal in the browser: the decider-only card, confirm and discard, and Edit → draft editor.
 - [ ] 07.6-24-PLAN.md — Wave 6: Prove the phase's security properties across all modules and the cell side in a real OpenClaw container.
 
