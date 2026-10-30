@@ -5,6 +5,7 @@ import {
   MAX_SANDBOX_CALLS_PER_TURN,
   SANDBOX_TOOL_NAMES,
 } from "@ocw/contracts";
+import type { Tx } from "@ocw/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type AutomationRunPayload, FakeCellPlugin } from "../../../../../e2e/support/fake-cell-plugin";
 import {
@@ -36,8 +37,9 @@ let salesId: string;
 const ORDER = "Every Friday, summarise this week's closed deals for the team.";
 
 const core = () => s.stack.built.core;
-const asPerson = <T>(userId: string, fn: Parameters<ReturnType<typeof core>["db"]["withTenant"]>[1]) =>
-  core().db.withTenant({ organizationId: s.orgA, userId }, fn) as Promise<T>;
+/** A transaction as `userId` (what a job opens for a run's person, 07.6-03). */
+const asPerson = <T>(userId: string, fn: (tx: Tx) => Promise<T>): Promise<T> =>
+  core().db.withTenant({ organizationId: s.orgA, userId }, fn);
 
 /** An automation row as 05's create route would store it (run-as = creator, D-07). */
 async function newAutomation(
