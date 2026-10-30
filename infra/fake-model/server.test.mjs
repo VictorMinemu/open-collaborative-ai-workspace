@@ -998,3 +998,53 @@ describe("/__sandboxd (07.8-08: the e2e harness's fake sandboxd)", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------- fake ERP MCP (07.6-04, D-04)
+
+describe("fake ERP MCP mounted at /erp-mcp", () => {
+  async function erpInit(base, token) {
+    const headers = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+    if (token) headers.authorization = `Bearer ${token}`;
+    return fetch(`${base}/erp-mcp`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18" },
+      }),
+    });
+  }
+  async function withErp(opts, fn) {
+    const server = createFakeModelServer({ mcpToken: "fake-mcp-token", ...opts });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      await fn(`http://127.0.0.1:${server.address().port}`);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((r) => server.close(r));
+    }
+  }
+
+  it("answers with its own token (default e2e-erp-token), never the fake MCP's", async () => {
+    await withErp({}, async (base) => {
+      assert.equal((await erpInit(base)).status, 401);
+      assert.equal((await erpInit(base, "fake-mcp-token")).status, 401);
+      const ok = await erpInit(base, "e2e-erp-token");
+      assert.equal(ok.status, 200);
+      assert.equal((await ok.json()).result.serverInfo.name, "ocw-fake-erp-mcp");
+      // The generic fake MCP keeps its own token and route.
+      const mcp = await initialize(base, { token: "fake-mcp-token" });
+      assert.equal(mcp.res.status, 200);
+      assert.equal(mcp.body.result.serverInfo.name, "ocw-fake-mcp");
+    });
+  });
+
+  it("opts.erpToken overrides the default", async () => {
+    await withErp({ erpToken: "custom-erp" }, async (base) => {
+      assert.equal((await erpInit(base, "e2e-erp-token")).status, 401);
+      assert.equal((await erpInit(base, "custom-erp")).status, 200);
+    });
+  });
+});
