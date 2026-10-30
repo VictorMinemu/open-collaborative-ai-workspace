@@ -564,10 +564,19 @@ export const AiMyUsageReportQuery = AiUsageReportQuery.extend({
 });
 export type AiMyUsageReportQuery = z.infer<typeof AiMyUsageReportQuery>;
 
+/**
+ * What a usage record paid for: an AI chat answer, its automatic title, and (Phase 07.6, P-16) a digest's summary or a
+ * Work Zone session's memory summary. Only `chat` records count as answers.
+ */
+export const AiUsageKind = z.enum(["chat", "title", "digest", "session_summary"]);
+export type AiUsageKind = z.infer<typeof AiUsageKind>;
+
 export const AiUsageReportRow = BackendTotals.extend({
   key: z.string(),
   label: z.string(),
   backend: AiBackend.nullable(),
+  /** By model only: the kind the row adds up (a model's titles, digests and session summaries are rows of their own). */
+  kind: AiUsageKind.optional(),
   costMicrosUsd: z.number().int().nonnegative().nullable(),
   estimatedGenerations: z.number().int().nonnegative(),
 });

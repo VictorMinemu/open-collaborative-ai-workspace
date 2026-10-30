@@ -600,3 +600,31 @@ describe("consent, cost, repetition and audience", () => {
     expect(count.rows[0]?.n).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------- Task 3: usage reports
+
+describe("usage reports show digest and session-summary spend as their own rows (P-16)", () => {
+  it("by model: session summaries and digests are separate rows, in the totals, never counted as answers", async () => {
+    await su.query(
+      `insert into app.ai_usage_records
+         (organization_id, kind, requester_user_id, subject_id, backend, provider, model_id, input_tokens, output_tokens, estimated, cost_micros_usd)
+       values ($1, 'digest', $2, $3, 'mock', 'mock', 'mock-model', 40, 10, false, 0)`,
+      [orgId, anaId, randomUUID()],
+    );
+    const r = await ok(admin.request("GET", "/api/v1/ai-usage/report?groupBy=model&days=30"));
+    const rows = r.rows as Json[];
+    const summaries = rows.find((x) => (x.key as string).endsWith(" · session summaries"));
+    const digests = rows.find((x) => (x.key as string).endsWith(" · digests"));
+    expect(summaries).toMatchObject({ generations: 0, estimatedGenerations: 0 });
+    expect(summaries?.label).toMatch(/ · session summaries$/);
+    expect(digests).toMatchObject({ generations: 0, inputTokens: 40, outputTokens: 10 });
+    expect(digests?.label).toMatch(/ · digests$/);
+    const sum = (k: string) => rows.reduce((n, x) => n + (x[k] as number), 0);
+    expect(r.totals.inputTokens).toBe(sum("inputTokens"));
+    expect(r.totals.generations).toBe(0);
+
+    // The owner sees their own summaries in their report.
+    const mine = await ok(ana.request("GET", "/api/v1/me/ai-usage/report?days=30"));
+    expect((mine.rows as Json[]).some((x) => (x.key as string).endsWith(" · session summaries"))).toBe(true);
+  });
+});
