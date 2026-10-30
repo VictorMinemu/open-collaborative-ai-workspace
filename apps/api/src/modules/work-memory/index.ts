@@ -34,9 +34,7 @@ export function createWorkMemoryModule(core: Core, deps: WorkMemoryDeps): ApiMod
   return {
     name: "work-memory",
     register(app: App) {
-      core.jobs.work("work_session.summarize", (data, ctx) =>
-        summarizeSession(core, summaryDeps, data, ctx.signal),
-      );
+      core.jobs.work("work_session.summarize", (data, ctx) => summarizeSession(core, summaryDeps, data, ctx));
       registerWorkMemoryRoutes(app, { core, perms: deps.perms, gateway: deps.modelGateway });
     },
   };

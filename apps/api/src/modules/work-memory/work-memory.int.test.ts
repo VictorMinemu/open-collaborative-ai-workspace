@@ -8,11 +8,15 @@ import { eventually, FakeDevice, type Frame } from "../../testing-device";
 import {
   CLAUDE_CATALOG,
   createTeamProject,
+  errorCode,
   invite,
   pairDevice,
+  setAudience,
   shareDevice,
   startSession,
 } from "../../testing-workzone";
+import { createPermissionService } from "../organization";
+import { canMapFor } from "./session-unit";
 
 /**
  * Phase 07.6-08 (AUTO-06; D-06, D-07, D-10, D-11; P-15, P-16): a finished Work Zone session feeds the memory of the team
@@ -375,5 +379,224 @@ describe("a finished session in a linked repository becomes a pending proposal i
 
     const m = await ok(memoryOf(ana, s1));
     expect(m).toMatchObject({ status: "applied", decidedBy: { id: martaId, displayName: "Marta" } });
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: consent, cost, repetition, audience
+
+describe("consent, cost, repetition and audience", () => {
+  /** Ana's session with the automatic proposal (proposed again after a restart). */
+  let s2: string;
+
+  it("preferences: automatic proposals are off until turned on; then Ana's sessions propose without a click, another owner's do not", async () => {
+    expect(await ok(ana.request("GET", "/api/v1/me/preferences"))).toEqual({
+      autoProposeSessionSummaries: false,
+    });
+    expect(
+      await ok(ana.request("PUT", "/api/v1/me/preferences", { autoProposeSessionSummaries: true })),
+    ).toEqual({ autoProposeSessionSummaries: true });
+    expect(await ok(ana.request("GET", "/api/v1/me/preferences"))).toEqual({
+      autoProposeSessionSummaries: true,
+    });
+    expect(await ok(marta.request("GET", "/api/v1/me/preferences"))).toEqual({
+      autoProposeSessionSummaries: false,
+    });
+
+    s2 = await startSession(ana, device, billingRepo, { title: "Tax rounding" });
+    await turn(ana, s2, "Fix the tax rounding", "Rounded half-even.");
+    const before = summaryRequests().length;
+    await complete(ana, s2);
+    expect(await drain()).toBe(1);
+    expect(summaryRequests()).toHaveLength(before + 1);
+    expect(await ok(memoryOf(ana, s2))).toMatchObject({ status: "pending", auto: true, nothingNew: true });
+
+    // Marta never opted in: her finished session in the same repository is not summarized.
+    const ms = await startSession(marta, device, billingRepo, { title: "Marta's fix" });
+    await turn(marta, ms, "Fix a typo", "Fixed.");
+    await complete(marta, ms);
+    expect(await drain()).toBe(1);
+    expect(summaryRequests()).toHaveLength(before + 1);
+    expect(await ok(memoryOf(marta, ms))).toMatchObject({ status: "none", auto: false, canPropose: true });
+  });
+
+  it("at the owner's AI chat cap nothing is generated or billed: failed with limit_reached; Try again works once under the cap", async () => {
+    let s3 = "";
+    await su.query(
+      `insert into app.ai_chat_policies (organization_id, org_key_daily_generations) values ($1, 1)
+       on conflict (organization_id) do update set org_key_daily_generations = 1`,
+      [orgId],
+    );
+    await su.query(
+      `insert into app.ai_usage_daily (organization_id, user_id, day, backend_class, generations)
+       values ($1, $2, (now() at time zone 'utc')::date, 'org_key', 1)
+       on conflict (organization_id, user_id, day, backend_class) do update set generations = 1`,
+      [orgId, anaId],
+    );
+    try {
+      s3 = await startSession(ana, device, billingRepo, { title: "Capped" });
+      await turn(ana, s3, "Something small", "Ok.");
+      const before = summaryRequests().length;
+      await complete(ana, s3);
+      expect(await drain()).toBe(1);
+      expect(summaryRequests()).toHaveLength(before);
+      expect(await ok(memoryOf(ana, s3))).toMatchObject({ status: "failed" });
+      const row = await su.query(
+        "select error_code from app.work_session_memory where work_session_id = $1",
+        [s3],
+      );
+      expect(row.rows[0]?.error_code).toBe("limit_reached");
+      expect(await usageRows([s3])).toEqual([]);
+      const audit = await su.query(
+        "select metadata from app.audit_events where action = 'work_session.summary_failed' and resource_id = $1",
+        [s3],
+      );
+      expect(audit.rows[0]?.metadata).toMatchObject({ code: "limit_reached" });
+    } finally {
+      await su.query(
+        "update app.ai_chat_policies set org_key_daily_generations = 200 where organization_id = $1",
+        [orgId],
+      );
+      await su.query("update app.ai_usage_daily set generations = 0 where user_id = $1", [anaId]);
+    }
+    // Back under the cap, the strip's Try again proposes it, billed to Ana once.
+    const before = summaryRequests().length;
+    expect((await propose(ana, s3)).status).toBe(202);
+    expect(await drain()).toBe(1);
+    expect(summaryRequests()).toHaveLength(before + 1);
+    expect(await ok(memoryOf(ana, s3))).toMatchObject({ status: "pending", nothingNew: true });
+    expect(await usageRows([s3])).toHaveLength(1);
+  });
+
+  it("nothing new: Propose says so and an archive proposes nothing; a restart with new work proposes exactly once more", async () => {
+    const nothing = await propose(ana, s1);
+    expect(nothing.status).toBe(409);
+    expect(errorCode(nothing)).toBe("nothing_new");
+    expect(await ok(memoryOf(ana, s1))).toMatchObject({ status: "applied", nothingNew: true });
+
+    const firstApproval = (await ok(memoryOf(ana, s2))).proposalId as string;
+    const approvalsBefore = (await systemApprovals()).length;
+    const before = summaryRequests().length;
+    await restartWithTurn(ana, s2, "Also round the totals");
+    // New work after the last proposal: the strip offers Propose again.
+    await complete(ana, s2);
+    expect(await drain()).toBe(1);
+    expect(summaryRequests()).toHaveLength(before + 1);
+    expect(await systemApprovals()).toHaveLength(approvalsBefore + 1);
+    const again = await ok(memoryOf(ana, s2));
+    expect(again).toMatchObject({ status: "pending", auto: true, nothingNew: true });
+    expect(again.proposalId).not.toBe(firstApproval);
+    // Billed once more, to Ana, under its own subject (one record per subject and kind).
+    const billed = (
+      await su.query(
+        "select subject_id from app.ai_usage_records where kind = 'session_summary' and requester_user_id = $1",
+        [anaId],
+      )
+    ).rows.map((r) => r.subject_id as string);
+    expect(billed.filter((id) => id === s2)).toHaveLength(1);
+    expect(billed.length).toBe(new Set(billed).size);
+
+    // Archived with nothing new: the automatic job finds nothing to say.
+    await ok(ana.request("POST", `/api/v1/work-sessions/${s2}/archive`, {}));
+    expect(await drain()).toBe(1);
+    expect(summaryRequests()).toHaveLength(before + 1);
+    expect(await systemApprovals()).toHaveLength(approvalsBefore + 1);
+  });
+
+  it("unmapped: no summary even with auto on; canMap follows 07.9's linking rule; linking then unlinking through 07.9", async () => {
+    const s4 = await startSession(ana, device, notesRepo, { title: "Notes cleanup" });
+    await turn(ana, s4, "Tidy the notes", "Tidied.");
+    const before = summaryRequests().length;
+    await complete(ana, s4);
+    expect(await drain()).toBe(1);
+    expect(summaryRequests()).toHaveLength(before);
+
+    // Ana manages no team project; Marta leads Billing and may use the MacBook; Sam may use it but manages nothing.
+    expect(await ok(memoryOf(ana, s4))).toMatchObject({ status: "unmapped", unit: null, canMap: false });
+    expect(await ok(memoryOf(marta, s4))).toMatchObject({
+      status: "unmapped",
+      canMap: true,
+      canPropose: false,
+    });
+    expect(await ok(memoryOf(sam, s4))).toMatchObject({ status: "unmapped", canMap: false });
+    // Marta on a device she cannot use (Ana's Laptop): 07.9 would refuse the link, so canMap is false.
+    const onLaptop = await stack.built.core.db.withTenant({ organizationId: orgId, userId: martaId }, (tx) =>
+      canMapFor(tx, createPermissionService(stack.built.core), martaId, {
+        id: randomUUID(),
+        createdBy: anaId,
+        deviceId: laptopId,
+      }),
+    );
+    expect(onLaptop).toBe(false);
+    const unmapped = await propose(ana, s4);
+    expect(unmapped.status).toBe(409);
+    expect(errorCode(unmapped)).toBe("session_unmapped");
+
+    // Linked through 07.9: the next completion proposes there.
+    await ok(
+      marta.request("POST", `/api/v1/work-projects/${billing.unitId}/repos`, { projectId: notesRepo }),
+    );
+    await restartWithTurn(ana, s4, "Add a README section");
+    await complete(ana, s4);
+    expect(await drain()).toBe(1);
+    expect(summaryRequests()).toHaveLength(before + 1);
+    const proposed = await ok(memoryOf(ana, s4));
+    expect(proposed).toMatchObject({ status: "pending", unit: { id: billing.unitId, name: "Billing" } });
+
+    // Unlinked through 07.9: the proposal and its approval stay; the next completion is unmapped.
+    await ok(marta.request("DELETE", `/api/v1/work-projects/${billing.unitId}/repos/${notesRepo}`));
+    const kept = await su.query("select status from app.approval_requests where id = $1", [
+      proposed.proposalId,
+    ]);
+    expect(kept.rows[0]?.status).toBe("pending");
+    await restartWithTurn(ana, s4, "One more line");
+    await complete(ana, s4);
+    expect(await drain()).toBe(1);
+    expect(summaryRequests()).toHaveLength(before + 1);
+    expect(await ok(memoryOf(ana, s4))).toMatchObject({ status: "unmapped", unit: null });
+
+    await ok(ana.request("PUT", "/api/v1/me/preferences", { autoProposeSessionSummaries: false }));
+  });
+
+  it("audience (D-11): an `owner` session is 404 and silent for everyone else, a lead included; the owner still hears it", async () => {
+    const s5 = await startSession(ana, device, billingRepo, { title: "Private spike" });
+    await turn(ana, s5, "Try an idea", "Tried.");
+    await complete(ana, s5);
+    expect(await drain()).toBe(1);
+    // Marta reads it while the audience is the project.
+    expect((await memoryOf(marta, s5)).status).toBe(200);
+
+    await setAudience(ana, s5, { kind: "owner" });
+    for (const other of [marta, sam]) expect((await memoryOf(other, s5)).status).toBe(404);
+    const framesFrom = published.length;
+    expect((await propose(ana, s5)).status).toBe(202);
+    expect(await drain()).toBe(1);
+    expect(await ok(memoryOf(ana, s5))).toMatchObject({ status: "pending" });
+    expect(framesFor(anaId, s5, framesFrom).length).toBeGreaterThanOrEqual(2);
+    // Marta was a reader until the audience narrowed: no later frame reaches her; Sam never read it.
+    expect(framesFor(martaId, s5, framesFrom)).toEqual([]);
+    expect(framesFor(samId, s5, framesFrom)).toEqual([]);
+    expect((await propose(marta, s5)).status).toBe(404);
+    expectNoSharedMemoryFrames();
+  });
+
+  it("a reader who is not the owner sees the state but cannot propose (403)", async () => {
+    const m = await ok(memoryOf(marta, s1));
+    expect(m).toMatchObject({ status: "applied", canPropose: false, model: null });
+    const refused = await propose(marta, s1);
+    expect(refused.status).toBe(403);
+    expect(errorCode(refused)).toBe("not_session_owner");
+  });
+
+  it("organization B: every session route is 404 and its preferences are its own", async () => {
+    await moveToOrgB(eveId);
+    expect((await memoryOf(eve, s1)).status).toBe(404);
+    expect((await propose(eve, s1)).status).toBe(404);
+    expect(await ok(eve.request("GET", "/api/v1/me/preferences"))).toEqual({
+      autoProposeSessionSummaries: false,
+    });
+    const count = await su.query("select count(*)::int as n from app.work_memory_prefs where user_id = $1", [
+      eveId,
+    ]);
+    expect(count.rows[0]?.n).toBe(0);
   });
 });

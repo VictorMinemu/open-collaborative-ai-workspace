@@ -16,7 +16,7 @@ import type { ModelGateway } from "../model-gateway";
 import { AuthzDeniedError, type PermissionService } from "../organization";
 import { sessionFacts } from "../work-session";
 import { canMapFor, unitForSession } from "./session-unit";
-import { hasNewWork, summaryModelFor } from "./summarize";
+import { coveredSeq, hasNewWork, nothingNew, summaryModelFor } from "./summarize";
 
 /**
  * Work Zone → memory routes (Phase 07.6, AUTO-06, D-06, D-07, D-10, D-11; UI-SPEC R7, surface 9).
@@ -78,7 +78,7 @@ async function summaryFor(
     .limit(1);
   const now = await unitForSession(tx, s.id);
   const isOwner = viewerId === s.createdBy;
-  const newWork = await hasNewWork(tx, s.id, mem?.summarizedSeq ?? null);
+  const covered = await nothingNew(tx, s.id, mem);
   const unitName = async (unitId: string | null) => {
     if (!unitId) return null;
     if (now?.unitId === unitId) return { id: unitId, name: now.unitName };
@@ -92,45 +92,39 @@ async function summaryFor(
   let decidedBy: SessionMemorySummary["decidedBy"] = null;
   let decisionNote: string | null = null;
   const proposalId = mem?.approvalId ?? null;
-  const nothingNew = mem?.status === "proposed" && !newWork;
   if (mem?.status === "writing") {
     status = "writing";
     unit = (await unitName(mem.unitId)) ?? unit;
   } else if (mem?.status === "failed") {
     // A failure is shown while the session can still be summarized there; unlinked since, it reads as unmapped.
     if (now) status = "failed";
-  } else if (mem?.status === "proposed" && (nothingNew || now)) {
-    // The last proposal stands until new work can be proposed (P-15): then the strip offers Propose again.
-    if (nothingNew) {
-      const [approval] = mem.approvalId
-        ? await tx
-            .select({
-              status: approvalRequests.status,
-              decidedBy: approvalRequests.decidedBy,
-              decisionNote: approvalRequests.decisionNote,
-            })
-            .from(approvalRequests)
-            .where(eq(approvalRequests.id, mem.approvalId))
-            .limit(1)
-        : [];
-      status =
-        approval?.status === "applied" || approval?.status === "approved"
-          ? "applied"
-          : approval?.status === "denied"
-            ? "denied"
-            : approval?.status === "pending"
-              ? "pending"
-              : "failed";
-      unit = (await unitName(mem.unitId)) ?? unit;
-      if (approval?.decidedBy) {
-        const [who] = await tx
-          .select({ displayName: orgMembers.displayName })
-          .from(orgMembers)
-          .where(eq(orgMembers.userId, approval.decidedBy))
-          .limit(1);
-        decidedBy = { id: approval.decidedBy, displayName: who?.displayName ?? "Former member" };
-        decisionNote = approval.decisionNote ?? null;
-      }
+  } else if (mem?.status === "proposed" && covered && mem.approvalId) {
+    // The last proposal stands until there is new work to propose (P-15); then the strip offers Propose again (`none`,
+    // or `unmapped` once its repository was unlinked). A proposal that expired or failed never covers anything.
+    const [approval] = await tx
+      .select({
+        status: approvalRequests.status,
+        decidedBy: approvalRequests.decidedBy,
+        decisionNote: approvalRequests.decisionNote,
+      })
+      .from(approvalRequests)
+      .where(eq(approvalRequests.id, mem.approvalId))
+      .limit(1);
+    status =
+      approval?.status === "applied" || approval?.status === "approved"
+        ? "applied"
+        : approval?.status === "denied"
+          ? "denied"
+          : "pending";
+    unit = (await unitName(mem.unitId)) ?? unit;
+    if (approval?.decidedBy) {
+      const [who] = await tx
+        .select({ displayName: orgMembers.displayName })
+        .from(orgMembers)
+        .where(eq(orgMembers.userId, approval.decidedBy))
+        .limit(1);
+      decidedBy = { id: approval.decidedBy, displayName: who?.displayName ?? "Former member" };
+      decisionNote = approval.decisionNote ?? null;
     }
   }
 
@@ -140,7 +134,7 @@ async function summaryFor(
     unit,
     proposalId,
     auto: mem?.auto ?? false,
-    nothingNew,
+    nothingNew: covered,
     decidedBy,
     decisionNote,
     canPropose: isOwner,
@@ -187,7 +181,7 @@ export function registerWorkMemoryRoutes(app: App, deps: WorkMemoryRouteDeps): v
           .where(eq(workSessionMemory.workSessionId, s.id))
           .limit(1);
         if (mem?.status === "writing") return;
-        if (!(await hasNewWork(tx, s.id, mem?.summarizedSeq ?? null))) {
+        if (!(await hasNewWork(tx, s.id, await coveredSeq(tx, mem)))) {
           throw conflict("Already proposed. Nothing new since then.", "nothing_new");
         }
         await core.jobs.sendInTx(

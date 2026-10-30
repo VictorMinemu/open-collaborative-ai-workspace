@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { EventTypes, MEMORY_LIMITS, type ModelRef } from "@ocw/contracts";
 import {
+  aiUsageRecords,
+  approvalRequests,
   projects,
   streamEvents,
   type Tx,
@@ -185,6 +187,35 @@ export async function hasNewWork(tx: Tx, sessionId: string, sinceSeq: number | n
   return row !== undefined;
 }
 
+type MemoryRow = Pick<typeof workSessionMemory.$inferSelect, "status" | "summarizedSeq" | "approvalId">;
+
+/**
+ * The last content event a standing proposal covers: its `summarized_seq`, unless that proposal can no longer land
+ * (its approval expired or failed), in which case the next summary covers the whole session again. Null = none.
+ */
+export async function coveredSeq(tx: Tx, mem: MemoryRow | undefined): Promise<number | null> {
+  if (!mem || mem.summarizedSeq === null) return null;
+  if (!mem.approvalId) return mem.summarizedSeq;
+  const [approval] = await tx
+    .select({ status: approvalRequests.status })
+    .from(approvalRequests)
+    .where(eq(approvalRequests.id, mem.approvalId))
+    .limit(1);
+  return approval && (approval.status === "expired" || approval.status === "failed")
+    ? null
+    : mem.summarizedSeq;
+}
+
+/**
+ * P-15 `nothingNew`: the session's last proposal already covers everything it did, so Propose has nothing to add (the
+ * strip says so) and the job writes nothing. A restarted session that did more is no longer `nothingNew`.
+ */
+export async function nothingNew(tx: Tx, sessionId: string, mem: MemoryRow | undefined): Promise<boolean> {
+  if (mem?.status !== "proposed") return false;
+  const covered = await coveredSeq(tx, mem);
+  return covered !== null && !(await hasNewWork(tx, sessionId, covered));
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** The session's content after `sinceSeq` (call after the caller read the session through its audience rule). */
@@ -296,13 +327,14 @@ export async function summaryModelFor(
 }
 
 /**
- * The `subject_id` of a summary's usage record: the session itself for its first summary (P-16), and an id derived
- * from the session and the last event it covers for a later one (the table keeps one record per subject and kind, so a
- * re-proposal of new work is billed once, and a retried job adds nothing).
+ * The `subject_id` of a summary's usage record (P-16). The table keeps one record per subject and kind, and a session
+ * can be summarized more than once (new work after a restart, a retry after a failure), each call billed: the session
+ * itself for its first billed summary, then an id derived from the session and the job that made the call (stable
+ * across a retried delivery of the same job, so a retry that already committed adds nothing).
  */
-export function summarySubjectId(sessionId: string, previousSeq: number | null, lastSeq: number): string {
-  if (previousSeq === null) return sessionId;
-  const h = createHash("sha256").update(`work_session_summary:${sessionId}:${lastSeq}`).digest();
+export function summarySubjectId(sessionId: string, first: boolean, jobId: string): string {
+  if (first) return sessionId;
+  const h = createHash("sha256").update(`work_session_summary:${sessionId}:${jobId}`).digest();
   h[6] = ((h[6] ?? 0) & 0x0f) | 0x80;
   h[8] = ((h[8] ?? 0) & 0x3f) | 0x80;
   const hex = h.subarray(0, 16).toString("hex");
@@ -356,7 +388,6 @@ interface Prepared {
   repoName: string | null;
   resolved: ResolvedModel;
   input: SessionInput;
-  previousSeq: number | null;
   auto: boolean;
 }
 
@@ -458,8 +489,8 @@ async function prepare(
     .from(workSessionMemory)
     .where(eq(workSessionMemory.workSessionId, s.id))
     .limit(1);
-  const previousSeq = mem?.summarizedSeq ?? null;
-  const input = await collectSessionInput(tx, s.id, previousSeq);
+  const input = await collectSessionInput(tx, s.id, await coveredSeq(tx, mem));
+  // `nothingNew` (P-15): nothing happened since the last proposal, or nothing at all.
   if (input.empty) return null;
   // The claim: one run per session at a time (a dead run's `writing` is taken over after STALE_WRITING).
   const claimed = await tx
@@ -517,7 +548,6 @@ async function prepare(
     repoName: repo?.name ?? null,
     resolved,
     input,
-    previousSeq,
     auto,
   };
 }
@@ -570,9 +600,10 @@ export async function summarizeSession(
   core: Core,
   deps: SummaryDeps,
   p: JobData<"work_session.summarize">,
-  signal?: AbortSignal,
+  job: { jobId: string; signal?: AbortSignal },
 ): Promise<void> {
   const { organizationId, workSessionId } = p;
+  const { signal } = job;
   // Who owns it: the job has no user yet (a user-less read; RLS still scopes it to the organization).
   const owner = await core.db.withTenant({ organizationId, userId: null }, async (tx) => {
     const [row] = await tx
@@ -616,15 +647,24 @@ export async function summarizeSession(
     try {
       prescan = await deps.memory.prescan(organizationId, proposal);
     } catch (err) {
-      core.log.warn({ err, workSessionId }, "work session summary scan failed");
+      // A code only: the error may carry the scanned text.
+      core.log.warn(
+        { workSessionId, code: (err as { name?: string })?.name ?? "unknown" },
+        "summary scan failed",
+      );
     }
   }
 
   await core.db.withTenant({ organizationId, userId: owner }, async (tx) => {
     // Every model call that answered is billed to the owner, whatever happens to the proposal.
+    const [billedBefore] = await tx
+      .select({ id: aiUsageRecords.id })
+      .from(aiUsageRecords)
+      .where(and(eq(aiUsageRecords.subjectId, s.id), eq(aiUsageRecords.kind, "session_summary")))
+      .limit(1);
     await recordStandaloneUsage(tx, {
       kind: "session_summary",
-      subjectId: summarySubjectId(s.id, prepared.previousSeq, prepared.input.lastSeq),
+      subjectId: summarySubjectId(s.id, billedBefore === undefined, job.jobId),
       requesterUserId: owner,
       model: prepared.resolved.ref,
       reported: out.usage,
