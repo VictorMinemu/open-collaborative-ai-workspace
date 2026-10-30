@@ -73,8 +73,10 @@ import {
 import type { AgentRuntime } from "./runtime.js";
 import { sanitizeEvent, sanitizeString, sanitizeValue } from "./sanitize.js";
 import { runTitle } from "./title.js";
+import { RUNTIME_VERSION } from "./version.js";
 
-export const DAEMON_VERSION = "0.0.0";
+/** The bundle's version (07.12; `0.0.0-dev` under tsx), sent as `hello.device.daemonVersion`. */
+export const DAEMON_VERSION = RUNTIME_VERSION;
 const DETECT_CACHE_MS = 60_000;
 const MAX_REMEMBERED_COMMANDS = 1000;
 /** A cached device JWT is replaced once fewer than this many milliseconds of validity remain. */
@@ -353,7 +355,9 @@ export class Daemon {
       this.log.info("control socket listening");
     }
     if (!this.token) {
-      this.log.warn("no device token found; pair this device from the desktop app, then restart the runtime");
+      this.log.warn(
+        "no device token found; pair this device with `ocw-runtime setup` (or from the desktop app), then restart the runtime",
+      );
       // A headless, unpaired daemon still keeps its CLIs checked and reports locally (`notify`, D-10).
       this.maintenance?.start({ paired: false });
       return;

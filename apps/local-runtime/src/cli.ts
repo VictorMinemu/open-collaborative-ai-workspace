@@ -1,6 +1,11 @@
 // ocw-runtime CLI.
-//   ocw-runtime enroll --server <url> --code <code> [--name <name>]   pair this machine (writes ~/.ocw)
+//   ocw-runtime enroll [--server <url>] [--code <code>] [--name <name>]
+//                                  pair this machine (writes ~/.ocw). With --code: the code from Settings › Devices.
+//                                  Without it (07.12, D-03): prints a link and a XXXX-XXXX code to approve signed in,
+//                                  and waits. The server defaults to OCW_SERVER_URL, then the one install.sh recorded.
 //   ocw-runtime [run]              start the daemon (default)
+//   ocw-runtime version | --version
+//                                  print this runtime's version (the bundle's package version; 0.0.0-dev under tsx)
 //   ocw-runtime detect             print Claude Code detection
 //   ocw-runtime status             query a running daemon over the control socket
 //   ocw-runtime add-project <dir>  register a project (via the running daemon, or directly when stopped)
@@ -15,6 +20,16 @@
 //                                  this device's runtime updates level (07.11, D-02; it can only lower the
 //                                  organization's); writes runtime.json and asks a running daemon to reload it.
 //                                  OCW_RUNTIME_UPDATES overrides it per process.
+//   ocw-runtime setup [--server <url>] [--name <name>] [--project <dir>]… [--service user|system|none]
+//                     [--user-name <account>] [--yes]
+//                                  07.12 (D-02): pair, register repositories, install the service, run the doctor and
+//                                  print the Settings › Devices link. Prompts only on a terminal; safe to re-run.
+//   ocw-runtime service install|uninstall|status|logs|restart [--system --user-name <account>]
+//                                  07.12 (D-04): the runtime as a systemd user/system unit or a macOS LaunchAgent.
+//   ocw-runtime doctor [--json]    07.12 (D-05): every check between this machine and a working device, ok|warn|fail
+//                                  with one fix line; reads ~/.ocw/service.env as the service does; exit 1 on any fail.
+//   ocw-runtime remove-project <dir|name|id>
+//                                  unregister a project (via the running daemon, or directly when stopped)
 
 import { homedir } from "node:os";
 import { RuntimeId, RuntimeUpdatesLevel } from "@ocw/contracts";
@@ -31,9 +46,24 @@ import {
 } from "./config.js";
 import { type ControlRequest, controlRequest, controlSocketPath } from "./control-socket.js";
 import { Daemon } from "./daemon.js";
-import { enroll } from "./enroll.js";
-import { errorMessage } from "./logger.js";
+import { createDoctorDeps, doctorExitCode, formatDoctorJson, formatDoctorText, runDoctor } from "./doctor.js";
+import { type EnrollResult, enroll } from "./enroll.js";
+import { readInstallInfo } from "./install-info.js";
+import { createLogger, errorMessage, silentLogger } from "./logger.js";
 import { publicInstallFields, resolveInstall } from "./maintenance/install-method.js";
+import { PairingCancelledError, pairByDeviceCode } from "./pair.js";
+import { defaultServiceDeps, serviceCommand } from "./service/index.js";
+import { applyServiceEnv } from "./service-env.js";
+import {
+  defaultSetupDeps,
+  doctorProbes,
+  parseSetupArgs,
+  runSetup,
+  SETUP_USAGE,
+  type SetupArgs,
+  SetupUsageError,
+} from "./setup.js";
+import { RUNTIME_VERSION } from "./version.js";
 
 async function viaSocket(req: ControlRequest): Promise<void> {
   const res = await controlRequest(controlSocketPath(ocwHome()), req);
@@ -203,22 +233,164 @@ async function updates(sub: string | undefined, arg: string | undefined): Promis
   process.exitCode = 1;
 }
 
+/**
+ * `remove-project <dir|name|id>` (07.12, D-07): resolved against projects.json, then removed through the running daemon
+ * (which tells the server at once), or straight from projects.json when the daemon is down (the server learns it from
+ * `projects.sync` on the next connect). An ambiguous or unknown name fails listing the candidates.
+ */
+async function removeProject(ref: string | undefined): Promise<void> {
+  if (!ref) throw new Error("usage: ocw-runtime remove-project <dir|name|id>");
+  const home = ocwHome();
+  const registry = new ProjectRegistry(home);
+  await registry.load();
+  const project = await registry.resolveRef(ref);
+  try {
+    const res = await controlRequest(controlSocketPath(home), {
+      cmd: "removeProject",
+      localId: project.localId,
+    });
+    if (!res.ok) throw new Error(res.error ?? "request failed");
+  } catch (err) {
+    if (!daemonDown(err)) throw err;
+    await registry.remove(project.localId);
+  }
+  process.stdout.write(`Removed "${project.name}" (${project.localId}).\n`);
+}
+
+const ENROLL_USAGE = "usage: ocw-runtime enroll [--server <url>] [--code <XXXX-XXXX>] [--name <name>]";
+
+/**
+ * `enroll` (07.12, D-03): the server is `--server`, else `OCW_SERVER_URL`, else the one `install.sh` recorded. With
+ * `--code` the typed-code flow (unchanged); without it, terminal pairing by device code, cancelled by Ctrl-C (exit 130).
+ */
+async function enrollCommand(args: string[]): Promise<void> {
+  const home = ocwHome();
+  const server =
+    flag(args, "server") ?? process.env.OCW_SERVER_URL ?? (await readInstallInfo(home))?.serverUrl;
+  if (!server) throw new Error(ENROLL_USAGE);
+  const code = flag(args, "code");
+  const name = flag(args, "name");
+  const print = (line: string) => process.stdout.write(`${line}\n`);
+
+  if (code) {
+    const out = await enroll({ home, serverUrl: server, code, ...(name ? { name } : {}) });
+    print(`Paired "${out.name}" with ${out.serverUrl}.`);
+    print(`Token saved to ${out.tokenPath} (0600).`);
+    if (out.webUrl) print(`Settings › Devices: ${out.webUrl}/settings/devices`);
+    print("Start the runtime with: ocw-runtime run");
+    return;
+  }
+
+  const controller = new AbortController();
+  const onSigint = () => controller.abort();
+  process.once("SIGINT", onSigint);
+  let out: EnrollResult;
+  try {
+    out = await pairByDeviceCode({
+      home,
+      serverUrl: server,
+      signal: controller.signal,
+      ...(name ? { name } : {}),
+    });
+  } catch (err) {
+    if (err instanceof PairingCancelledError) {
+      process.stderr.write(`${err.message}\n`);
+      process.exitCode = 130; // 128 + SIGINT; the pending timer and request were aborted, so the process ends here
+      return;
+    }
+    throw err;
+  } finally {
+    process.removeListener("SIGINT", onSigint);
+  }
+  print(
+    out.pairedWith
+      ? `Paired "${out.name}" with ${out.pairedWith.organization} as ${out.pairedWith.owner}.`
+      : `Paired "${out.name}" with ${out.serverUrl}.`,
+  );
+  print(`Token saved to ${out.tokenPath} (0600).`);
+  if (out.webUrl) print(`Settings › Devices: ${out.webUrl}/settings/devices`);
+  print("Start the runtime with: ocw-runtime run (or install it as a service with: ocw-runtime setup)");
+}
+
+/**
+ * `setup` (07.12, D-02, PD-13): exit 0 done, 1 a step failed, 2 a usage error or a value missing without a terminal,
+ * 130 cancelled (Ctrl-C aborts a pending prompt or pairing).
+ */
+async function setupCommand(argv: string[]): Promise<void> {
+  let args: SetupArgs;
+  try {
+    args = parseSetupArgs(argv);
+  } catch (err) {
+    if (!(err instanceof SetupUsageError)) throw err;
+    process.stderr.write(`ocw-runtime setup: ${err.message}\n${SETUP_USAGE.join("\n")}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  if (args.help) {
+    process.stdout.write(`${SETUP_USAGE.join("\n")}\n`);
+    return;
+  }
+  const deps = defaultSetupDeps(ocwHome());
+  const onSigint = () => deps.cancel();
+  process.on("SIGINT", onSigint);
+  try {
+    process.exitCode = await runSetup(args, deps);
+  } finally {
+    process.removeListener("SIGINT", onSigint);
+  }
+}
+
+/**
+ * `doctor [--json]` (07.12, D-05, PD-12): service.env is applied to this process first (PD-10), so the local probes see
+ * what the service sees; the service status comes from the same manager `service status` uses. Exit 1 on any fail.
+ */
+async function doctorCommand(argv: string[]): Promise<void> {
+  const json = argv.includes("--json");
+  const unknown = argv.find((a) => a !== "--json");
+  if (unknown !== undefined) {
+    process.stderr.write(
+      `ocw-runtime doctor: unknown option ${unknown}\nusage: ocw-runtime doctor [--json]\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  const home = ocwHome();
+  await applyServiceEnv(home, process.env, silentLogger);
+  const report = await runDoctor(createDoctorDeps(home, doctorProbes(home)));
+  process.stdout.write(json ? formatDoctorJson(report) : formatDoctorText(report));
+  process.exitCode = doctorExitCode(report);
+}
+
+/**
+ * `run`: applies `~/.ocw/service.env` to this process's environment first (07.12, D-12: keys already set win, refused
+ * unless 0600 and owned by this user, names logged, never values), then creates and starts the daemon.
+ */
 async function run(): Promise<void> {
+  const home = ocwHome();
+  const level = await loadConfig(home)
+    .then((c) => c.logLevel)
+    .catch(() => "info" as const);
+  await applyServiceEnv(home, process.env, createLogger(level));
   const daemon = await Daemon.create();
-  await daemon.start();
+  // Handlers go in before start: the control socket exists before start() resolves, and a service manager (or a
+  // test) may stop the daemon in that window. A signal then waits for start to settle and stops cleanly.
   let stopping = false;
+  let started: Promise<void> = Promise.resolve();
   const shutdown = (signal: string) => {
     if (stopping) return;
     stopping = true;
     process.stderr.write(`received ${signal}, stopping\n`);
-    daemon
-      .stop()
+    started
+      .catch(() => undefined)
+      .then(() => daemon.stop())
       .catch(() => undefined)
       .finally(() => process.exit(0));
     setTimeout(() => process.exit(1), 10_000).unref();
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  started = daemon.start();
+  await started;
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -226,6 +398,10 @@ async function main(argv: string[]): Promise<void> {
   switch (cmd) {
     case "run":
       return run();
+    case "version":
+    case "--version":
+      process.stdout.write(`${RUNTIME_VERSION}\n`);
+      return;
     case "detect":
       process.stdout.write(`${JSON.stringify(await detectClaudeCode(), null, 2)}\n`);
       return;
@@ -251,27 +427,21 @@ async function main(argv: string[]): Promise<void> {
         return;
       }
     }
-    case "enroll": {
-      const server = flag(rest, "server") ?? process.env.OCW_SERVER_URL;
-      const code = flag(rest, "code");
-      if (!server || !code)
-        throw new Error("usage: ocw-runtime enroll --server <url> --code <XXXX-XXXX> [--name <name>]");
-      const name = flag(rest, "name");
-      const out = await enroll({ home: ocwHome(), serverUrl: server, code, ...(name ? { name } : {}) });
-      process.stdout.write(
-        `Paired "${out.name}" with ${out.serverUrl}.\nToken saved to ${out.tokenPath} (0600).\nStart the runtime with: ocw-runtime run\n`,
-      );
-      return;
-    }
+    case "enroll":
+      return enrollCommand(rest);
     case "full-access":
       return fullAccess(rest[0]);
     case "updates":
       return updates(rest[0], rest[1]);
-    case "remove-project": {
-      const localId = rest[0];
-      if (!localId) throw new Error("usage: ocw-runtime remove-project <localId>");
-      return viaSocket({ cmd: "removeProject", localId });
-    }
+    case "remove-project":
+      return removeProject(rest[0]);
+    case "setup":
+      return setupCommand(rest);
+    case "service":
+      process.exitCode = await serviceCommand(rest, defaultServiceDeps(ocwHome()));
+      return;
+    case "doctor":
+      return doctorCommand(rest);
     default:
       throw new Error(`unknown command: ${cmd}`);
   }

@@ -267,7 +267,18 @@ function ocwQuiet(args, label) {
  * gate keys: GATE_COMPOSE_FILE, COMPOSE_PROFILES (proxy + `profiles`), the mock model, GATE_SIGNIN_RATE_LIMIT and
  * `extra`. Returns the file's path. Prints nothing (command output, which never holds a value, is swallowed).
  */
-export function createGateEnv({ dir, runId, block = 34, imageTag, profiles = [], proxy = true, extra = {} }) {
+export function createGateEnv({
+  dir,
+  runId,
+  block = 34,
+  imageTag,
+  profiles = [],
+  proxy = true,
+  extra = {},
+  sourceCommit = "",
+}) {
+  if (sourceCommit && !/^[0-9a-f]{40}$/.test(sourceCommit))
+    throw new Error("createGateEnv: sourceCommit must be a 40-hex commit or empty");
   const project = `ocw-gate-${runId}`;
   const envFile = path.join(path.resolve(dir), ".env");
   const ports = gatePorts(block);
@@ -303,6 +314,8 @@ export function createGateEnv({ dir, runId, block = 34, imageTag, profiles = [],
         }),
     ...Object.fromEntries(Object.entries(extra).map(([k, v]) => [k, String(v)])),
     COMPOSE_PROFILES: allProfiles.join(","),
+    // The api image build stamps it into the runtime manifest's source.commit (compose.yaml, ADR-0033).
+    ...(sourceCommit ? { OCW_SOURCE_COMMIT: sourceCommit } : {}),
   };
   setEnvKeys(envFile, values);
   const env = parseEnvFile(envFile);
@@ -524,6 +537,12 @@ export function gateImageTag(runId) {
   const sha = run("git", ["rev-parse", "--short=12", "HEAD"], { check: true }).stdout.trim();
   const dirty = run("git", ["status", "--porcelain"], { check: true }).stdout.trim() !== "";
   return `gate-${sha}${dirty ? "-dirty" : ""}-${runId}`;
+}
+
+/** The full HEAD commit when the tree is clean, else "" (a dirty tree has no commit that is its source). */
+export function gateSourceCommit() {
+  const dirty = run("git", ["status", "--porcelain"], { check: true }).stdout.trim() !== "";
+  return dirty ? "" : run("git", ["rev-parse", "HEAD"], { check: true }).stdout.trim();
 }
 
 export function newRunId() {
@@ -774,7 +793,15 @@ export async function withGateStack(
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
   try {
-    const envFile = createGateEnv({ dir, runId, block, imageTag, profiles, extra });
+    const envFile = createGateEnv({
+      dir,
+      runId,
+      block,
+      imageTag,
+      profiles,
+      extra,
+      sourceCommit: gateSourceCommit(),
+    });
     ctx = gateContext(envFile, { steps });
     log(`project ${ctx.project}, tag ${ctx.imageTag}, web ${ctx.urls.web}, api ${ctx.urls.api}`);
     await timed(steps, "ports-free", async () => {

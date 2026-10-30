@@ -1,6 +1,6 @@
 "use client";
 
-import type { Device, RuntimeId } from "@ocw/contracts";
+import { type Device, type RuntimeId, runtimeInstallCommand } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Check,
@@ -11,14 +11,15 @@ import {
   Lock,
   Monitor,
   Plus,
+  Server,
   ShieldAlert,
   ShieldCheck,
   Terminal,
   Trash2,
   Users,
 } from "lucide-react";
-import { useSearchParams } from "next/navigation";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { useGrain } from "@/components/shell/module-gate";
@@ -51,9 +52,10 @@ import {
 } from "@/lib/workzone-queries";
 import { CopyLine } from "./copy-line";
 import { DeviceSharing } from "./device-sharing";
+import { PairApproveDialog, PairCodeField, PLATFORM_LABEL } from "./pair-approve-dialog";
 import { compatFlag, DeviceRuntimeUpdates } from "./runtime-updates";
 
-const PLATFORM: Record<string, string> = { darwin: "macOS", linux: "Linux", win32: "Windows" };
+const PLATFORM = PLATFORM_LABEL;
 
 /** The Devices page subtitle: it offers pairing only while `device.pair` is not decided off (07.3, P-08). */
 export function DevicesSubtitle() {
@@ -66,7 +68,11 @@ export function DevicesSettings() {
   const devices = useDevices();
   const me = useMe({ enabled: false });
   const params = useSearchParams();
+  const router = useRouter();
   const [adding, setAdding] = useState(false);
+  const [addTab, setAddTab] = useState<AddTab>("desktop");
+  // 07.12 (D-03): the code a server printed (`?pair=`) or typed in the Server tab, shown in the approve dialog.
+  const [pairCode, setPairCode] = useState<string | null>(null);
   const desktop = useDesktop();
   const qc = useQueryClient();
   // Pairing belongs to the Work Zone module (07.3, D-01): it leaves once `device.pair` is decided off, never while
@@ -75,8 +81,26 @@ export function DevicesSettings() {
   useWorkZoneOrgSync();
 
   useEffect(() => {
-    if (params.get("add") === "1") setAdding(true);
+    const add = params.get("add");
+    if (add === "1" || add === "server") {
+      // `?add=server` is the link a server prints next to its code (07.12, D-01).
+      setAddTab(add === "server" ? "server" : "desktop");
+      setAdding(true);
+    }
+    const pair = params.get("pair");
+    if (pair) setPairCode(pair);
   }, [params]);
+
+  const openAdd = () => {
+    setAddTab("desktop");
+    setAdding(true);
+  };
+
+  const closePairing = () => {
+    setPairCode(null);
+    // A reload must not reopen it: the link's code leaves the address bar once the dialog closes (T-07.12-07-03).
+    if (params.get("pair")) router.replace("/settings/devices");
+  };
 
   const mine = (devices.data ?? []).filter((d) => d.ownerUserId === me.data?.user.id);
   const others = (devices.data ?? []).filter((d) => d.ownerUserId !== me.data?.user.id);
@@ -107,7 +131,7 @@ export function DevicesSettings() {
               </Button>
             ) : null}
             {canPair ? (
-              <Button onClick={() => setAdding(true)} data-testid="add-device">
+              <Button onClick={openAdd} data-testid="add-device">
                 <Plus /> Add device
               </Button>
             ) : null}
@@ -129,7 +153,7 @@ export function DevicesSettings() {
         ) : mine.length === 0 ? (
           <button
             type="button"
-            onClick={() => setAdding(true)}
+            onClick={openAdd}
             data-testid="add-first-device"
             className="flex flex-col items-center gap-2 rounded-xl border border-dashed px-6 py-10 text-center transition-colors hover:bg-accent/30"
           >
@@ -167,10 +191,24 @@ export function DevicesSettings() {
         </section>
       ) : null}
 
+      <PairApproveDialog
+        code={pairCode}
+        open={pairCode !== null}
+        allowed={canPair}
+        onOpenChange={(o) => {
+          if (!o) closePairing();
+        }}
+      />
+
       <AddDeviceDialog
         open={adding && canPair}
         onOpenChange={setAdding}
         known={(devices.data ?? []).map((d) => d.id)}
+        initialTab={addTab}
+        onPairCode={(code) => {
+          setAdding(false);
+          setPairCode(code);
+        }}
       />
     </div>
   );
@@ -375,29 +413,61 @@ function DeviceFacts({ device: d, owned }: { device: Device; owned: boolean }) {
   );
 }
 
+type AddTab = "desktop" | "cli" | "server";
+
+const ADD_TABS = [
+  ["desktop", "Desktop app", <Laptop key="d" />],
+  ["cli", "Command line", <Terminal key="c" />],
+  ["server", "Server", <Server key="s" />],
+] as const;
+
 function AddDeviceDialog({
   open,
   onOpenChange,
   known,
+  initialTab = "desktop",
+  onPairCode,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
   known: string[];
+  initialTab?: AddTab;
+  /** The Server tab's Continue: the code the server shows, opened in the approve dialog. */
+  onPairCode: (code: string) => void;
 }) {
   const create = useCreateEnrollment();
   const devices = useDevices();
   const { apiUrl } = useRuntimeConfig();
   const { copy, copied } = useCopy();
-  const [tab, setTab] = useState<"desktop" | "cli">("desktop");
+  // The tab the person picked in this opening; until then the one the page asked for (`?add=server`). Reset while
+  // rendering the opening (not in an effect), so its first render already knows it is on the Server tab and no
+  // one-time code is created for it; a closing dialog keeps its tab during the fade.
+  const [picked, setPicked] = useState<AddTab | null>(null);
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) setPicked(null);
+  }
+  const tab = picked ?? initialTab;
   const [now, setNow] = useState(Date.now());
   const baseline = useRef<Set<string>>(new Set());
+  // One one-time code per opening, created only once the Desktop app or Command line tab is shown (07.12, D-01): the
+  // Server tab pairs by the code the server prints instead.
+  const coded = useRef(false);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: new code each time the dialog opens
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a fresh start each time the dialog opens
   useEffect(() => {
     if (!open) return;
     baseline.current = new Set(known);
-    create.mutate();
+    coded.current = false;
   }, [open]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new code the first time a code tab is shown
+  useEffect(() => {
+    if (!open || tab === "server" || coded.current) return;
+    coded.current = true;
+    create.mutate();
+  }, [open, tab]);
 
   useEffect(() => {
     if (!open) return;
@@ -405,6 +475,18 @@ function AddDeviceDialog({
     return () => clearInterval(t);
   }, [open]);
 
+  const tabRefs = useRef<Partial<Record<AddTab, HTMLButtonElement | null>>>({});
+  const onTabKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    const ids = ADD_TABS.map(([id]) => id);
+    const next = ids[(ids.indexOf(tab) + step + ids.length) % ids.length] ?? tab;
+    setPicked(next);
+    tabRefs.current[next]?.focus();
+  };
+
+  const server = tab === "server";
   const code = create.data?.code;
   const remaining = create.data ? Math.max(0, new Date(create.data.expiresAt).getTime() - now) : 0;
   const expired = !!create.data && remaining === 0;
@@ -413,13 +495,15 @@ function AddDeviceDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg" data-testid="add-device-dialog">
+      <DialogContent className="sm:max-w-lg" data-testid="add-device-dialog" data-tab={tab}>
         <DialogHeader>
           <DialogTitle>{paired ? "Device connected" : "Add a device"}</DialogTitle>
           <DialogDescription>
             {paired
               ? "It is ready for Work Zone sessions."
-              : "Pair a computer with this one-time code. It expires in 10 minutes."}
+              : server
+                ? "Pair a server, or any computer without a screen, from its terminal. You approve it here."
+                : "Pair a computer with this one-time code. It expires in 10 minutes."}
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="grid gap-5">
@@ -435,68 +519,76 @@ function AddDeviceDialog({
             </div>
           ) : (
             <>
-              <div className="grid justify-items-center gap-2 rounded-xl border bg-muted/40 px-4 py-5">
-                {create.isPending || !code ? (
-                  <Skeleton className="h-11 w-56" />
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => void copy(code)}
-                    data-testid="pairing-code"
-                    className={cn(
-                      "group flex items-center gap-3 rounded-lg px-3 py-1 font-mono font-semibold text-3xl tracking-[0.18em] transition-colors hover:bg-background",
-                      expired && "text-muted-foreground line-through",
-                    )}
-                    aria-label="Copy pairing code"
-                  >
-                    {code}
-                    {copied === code ? (
-                      <Check className="size-4 text-success" />
-                    ) : (
-                      <Copy className="size-4 text-muted-foreground group-hover:text-foreground" />
-                    )}
-                  </button>
-                )}
-                <p className="text-muted-foreground text-xs" aria-live="polite">
-                  {create.isError ? (
-                    <span className="text-destructive">{errorMessage(create.error)}</span>
-                  ) : expired ? (
-                    "Code expired"
-                  ) : create.data ? (
-                    <>
-                      Expires in {Math.floor(remaining / 60_000)}:
-                      {String(Math.floor((remaining % 60_000) / 1000)).padStart(2, "0")} · waiting for the
-                      device <Spinner className="ml-1 inline size-3" />
-                    </>
+              {server ? null : (
+                <div className="grid justify-items-center gap-2 rounded-xl border bg-muted/40 px-4 py-5">
+                  {create.isPending || !code ? (
+                    <Skeleton className="h-11 w-56" />
                   ) : (
-                    "Generating…"
+                    <button
+                      type="button"
+                      onClick={() => void copy(code)}
+                      data-testid="pairing-code"
+                      className={cn(
+                        "group flex items-center gap-3 rounded-lg px-3 py-1 font-mono font-semibold text-3xl tracking-[0.18em] transition-colors hover:bg-background",
+                        expired && "text-muted-foreground line-through",
+                      )}
+                      aria-label="Copy pairing code"
+                    >
+                      {code}
+                      {copied === code ? (
+                        <Check className="size-4 text-success" />
+                      ) : (
+                        <Copy className="size-4 text-muted-foreground group-hover:text-foreground" />
+                      )}
+                    </button>
                   )}
-                </p>
-              </div>
+                  <p className="text-muted-foreground text-xs" aria-live="polite">
+                    {create.isError ? (
+                      <span className="text-destructive">{errorMessage(create.error)}</span>
+                    ) : expired ? (
+                      "Code expired"
+                    ) : create.data ? (
+                      <>
+                        Expires in {Math.floor(remaining / 60_000)}:
+                        {String(Math.floor((remaining % 60_000) / 1000)).padStart(2, "0")} · waiting for the
+                        device <Spinner className="ml-1 inline size-3" />
+                      </>
+                    ) : (
+                      "Generating…"
+                    )}
+                  </p>
+                </div>
+              )}
 
-              <div className="grid gap-3">
-                <div className="grid grid-cols-2 gap-1 rounded-lg bg-muted p-1" role="tablist">
-                  {(
-                    [
-                      ["desktop", "Desktop app", <Laptop key="d" />],
-                      ["cli", "Command line", <Terminal key="c" />],
-                    ] as const
-                  ).map(([id, label, icon]) => (
+              <div className="grid min-w-0 grid-cols-1 gap-3">
+                <div
+                  className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1"
+                  role="tablist"
+                  aria-label="How to pair"
+                  onKeyDown={onTabKey}
+                >
+                  {ADD_TABS.map(([id, label, icon]) => (
                     <button
                       key={id}
+                      ref={(el) => {
+                        tabRefs.current[id] = el;
+                      }}
                       type="button"
                       role="tab"
                       aria-selected={tab === id}
-                      onClick={() => setTab(id)}
+                      // One tab stop for the list; the arrow keys move between tabs (WAI-ARIA tabs pattern).
+                      tabIndex={tab === id ? 0 : -1}
+                      onClick={() => setPicked(id)}
+                      data-testid={`add-device-tab-${id}`}
                       className={cn(
-                        "flex h-8 items-center justify-center gap-1.5 rounded-md font-medium text-[13px] transition-colors [&_svg]:size-3.5",
+                        "flex h-11 min-w-0 items-center justify-center gap-1.5 rounded-md px-1 font-medium text-[13px] transition-colors sm:h-8 max-sm:[&_svg]:hidden [&_svg]:size-3.5 [&_svg]:shrink-0",
                         tab === id
                           ? "bg-background shadow-sm"
                           : "text-muted-foreground hover:text-foreground",
                       )}
                     >
                       {icon}
-                      {label}
+                      <span className="truncate">{label}</span>
                     </button>
                   ))}
                 </div>
@@ -510,13 +602,18 @@ function AddDeviceDialog({
                       </>,
                     ]}
                   />
-                ) : (
-                  <div className="grid gap-2">
+                ) : tab === "cli" ? (
+                  <div className="grid min-w-0 grid-cols-1 gap-2">
                     <Steps steps={["On the computer with your code, run:"]} />
-                    <CopyLine text={cli} />
+                    <CopyLine text={cli} buttonClassName="max-lg:size-11" />
                     <Steps steps={["Register a repository and start the runtime:"]} start={2} />
-                    <CopyLine text="ocw-runtime add-project ~/code/my-repo && ocw-runtime run" />
+                    <CopyLine
+                      text="ocw-runtime add-project ~/code/my-repo && ocw-runtime run"
+                      buttonClassName="max-lg:size-11"
+                    />
                   </div>
+                ) : (
+                  <ServerSteps apiUrl={apiUrl} onContinue={onPairCode} />
                 )}
                 <p className="text-muted-foreground text-xs">
                   Sessions use the Claude Code / Codex login already on that computer. No API keys are
@@ -528,18 +625,55 @@ function AddDeviceDialog({
         </DialogBody>
         <DialogFooter>
           {paired ? (
-            <Button onClick={() => onOpenChange(false)}>Done</Button>
+            <Button onClick={() => onOpenChange(false)} className="max-lg:h-11">
+              Done
+            </Button>
           ) : (
             <>
-              <Button variant="outline" onClick={() => onOpenChange(false)}>
+              <Button variant="outline" onClick={() => onOpenChange(false)} className="max-lg:h-11">
                 Close
               </Button>
-              {expired ? <Button onClick={() => create.mutate()}>New code</Button> : null}
+              {expired && !server ? (
+                <Button onClick={() => create.mutate()} className="max-lg:h-11">
+                  New code
+                </Button>
+              ) : null}
             </>
           )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/**
+ * Add a device › Server (07.12, D-01, D-02): install the runtime for this workspace, run `ocw-runtime setup`, then type
+ * the code the server prints (or open the link it prints) to approve it. No one-time code is shown here.
+ */
+export function ServerSteps({ apiUrl, onContinue }: { apiUrl: string; onContinue: (code: string) => void }) {
+  const [value, setValue] = useState("");
+  return (
+    <div className="grid min-w-0 grid-cols-1 gap-2">
+      <Steps steps={["On the server, as the account that will run it, install the runtime:"]} />
+      <CopyLine
+        text={runtimeInstallCommand(apiUrl)}
+        testId="server-install-command"
+        buttonClassName="max-lg:size-11"
+        wrap
+      />
+      <Steps steps={["Pair it and install the service:"]} start={2} />
+      <CopyLine
+        text="ocw-runtime setup"
+        testId="server-setup-command"
+        buttonClassName="max-lg:size-11"
+        wrap
+      />
+      <Steps steps={["Enter the code the server shows:"]} start={3} />
+      <PairCodeField value={value} onChange={setValue} onSubmit={onContinue} label="Code the server shows" />
+      <p className="text-muted-foreground text-xs">
+        Needs Node 24 on the server. Linux or macOS. Opening the link the server prints works too.
+      </p>
+    </div>
   );
 }
 

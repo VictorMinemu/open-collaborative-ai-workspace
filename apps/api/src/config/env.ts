@@ -137,6 +137,13 @@ export const EnvSchema = z
     OCW_PUBLIC_API_URL: Url.default("http://localhost:4000"),
     OCW_TRUST_PROXY: TrustProxy,
     /**
+     * Phase 07.12-06 (D-01, PD-05): the directory holding the Local Runtime bundle (`ocw-runtime.mjs`) and its
+     * `manifest.json`, served under `/api/v1/runtime/*`. The API image sets `/app/runtime-dist` (built in its own
+     * stage); unset (or empty) = this checkout's `apps/local-runtime/dist` (`pnpm --filter @ocw/local-runtime
+     * build:bundle`). A missing directory only makes those routes answer 404 `runtime_unavailable`.
+     */
+    OCW_RUNTIME_DIST_DIR: z.preprocess((v) => (v === "" ? undefined : v), z.string().min(1).optional()),
+    /**
      * Bootstrap bearer token for the OpenClaw cell (Agent Channel API), bound to the instance's organization.
      * Written by `pnpm setup:env`; shared with the openclaw container so it starts with no manual step.
      * Admins can also mint a token in Settings › Bots runtime (stored as SHA-256 only).

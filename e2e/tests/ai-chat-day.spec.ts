@@ -162,12 +162,23 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   await admin?.dispose();
+  if (!FAKE_URL) return;
+  // Later specs run with the default cap even when the test timed out, when its own contexts are already closed
+  // (an interrupted run here left the cap at 5 and refused every later organization-model answer).
+  const fresh = await apiAs(ADMIN);
+  try {
+    const restored = await fresh.put("/api/v1/ai-chat/policy", { data: { orgKeyDailyGenerations: 200 } });
+    expect(restored.ok(), "restore the organization cap").toBe(true);
+  } finally {
+    await fresh.dispose();
+  }
 });
 
 test("an AI chat day: own ChatGPT plan, Web, title, stop, regenerate on a METERED model, image, rename, search, share, usage", async ({
   browser,
 }, info) => {
-  test.setTimeout(300_000);
+  // The longest spec in the suite; a loaded CI agent took more than 5 minutes on mobile (pipelines 67, 89, 96).
+  test.setTimeout(480_000);
   const project = info.project.name;
   const mobile = project === "mobile";
   const size = mobile ? "390" : "1440";
@@ -421,9 +432,7 @@ test("an AI chat day: own ChatGPT plan, Web, title, stop, regenerate on a METERE
       await reader.page.keyboard.press("Escape");
     }
   } finally {
-    // Later specs run with the default cap.
-    const restored = await admin.put("/api/v1/ai-chat/policy", { data: { orgKeyDailyGenerations: 200 } });
-    expect(restored.ok(), "restore the organization cap").toBe(true);
+    // The organization cap goes back to its default in afterAll (also after a timeout).
     await memberApi.dispose();
     await adminUi.context.close();
     await day.context.close();

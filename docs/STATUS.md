@@ -84,3 +84,12 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   the server's level arrives; owners and admins (`device.maintain`) see versions, status, history and Update now in
   Settings › Devices, members only versions and an "older than supported" flag; a `broken` installed version refuses
   new sessions; every check, start and result is audited (ADR-0032).
+- **07.12 Headless Work Zone server:** a Linux or macOS machine runs Work Zone sessions without the desktop app. The
+  API serves the Local Runtime as one verified AGPL file built into its image, its manifest and a POSIX `install.sh`
+  (`/api/v1/runtime/*`, public, rate-limited, URL only from `OCW_PUBLIC_API_URL`); the script checks the SHA-256,
+  installs the Claude Agent SDK beside it from npm at exact pins (never redistributed) and writes only under `~/.ocw`
+  and `~/.local/bin`; `ocw-runtime setup` pairs by device code (RFC 8628 shape, 40-bit codes, 10 minutes, single use,
+  rate-limited, approved in Settings › Devices from the printed link or the new Server tab, audited), registers
+  repositories, installs a systemd user or system unit or a macOS LaunchAgent (never as root, one runtime per
+  `~/.ocw`, `~/.ocw/service.env` read by the daemon) and runs `ocw-runtime doctor` (13 checks with headless sign-in
+  lines, safe to paste); sharing stays in the web (ADR-0033, docs/SERVER.md).

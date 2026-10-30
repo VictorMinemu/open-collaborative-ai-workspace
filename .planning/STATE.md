@@ -1,19 +1,19 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 07.11
-current_phase_name: runtime-cli-auto-updates
+current_phase: 07.12
+current_phase_name: headless-work-zone-server
 status: executing
 stopped_at: Phase 03.1 complete, ready to plan Phase 1
-last_updated: "2026-10-28T21:02:35.729Z"
-last_activity: 2026-10-28
-last_activity_desc: Phase 07.11 execution started
-state_head: f088be280db4c85c86472a940f2155d77bea5bb4
+last_updated: "2026-10-29T07:12:40.000Z"
+last_activity: 2026-10-29
+last_activity_desc: Phase 07.12 execution started
+state_head: 1311b4c5eb19bb6a843b5ade877c30ec6d677ed4
 progress:
   total_phases: 12
   completed_phases: 4
-  total_plans: 270
-  completed_plans: 224
+  total_plans: 281
+  completed_plans: 235
 ---
 
 # Project State
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-02)
 
 **Core value:** AI sessions are multiplayer — a private AI chat or coding session can be shared live with colleagues, the model knows who each participant is, and everything stays attributed and auditable.
-**Current focus:** Phase 07.11 — runtime-cli-auto-updates
+**Current focus:** Phase 07.12 — headless-work-zone-server
 
 ## Current Position
 
-Phase: 07.11 (runtime-cli-auto-updates) — EXECUTING
+Phase: 07.12 (headless-work-zone-server) — EXECUTING
 Plan: 1 of 11
-Status: Executing Phase 07.11
-Last activity: 2026-10-28 — Phase 07.11 execution started
+Status: Executing Phase 07.12
+Last activity: 2026-10-29 — Phase 07.12 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -100,6 +100,7 @@ Recent decisions affecting current work:
 - Phase 03.2 inserted after Phase 03.1: Work Zone session controls
 - Phase 07.10 inserted after Phase 07.9: Work Zone sidebar by team like chat channels (owner request 2026-10-27)
 - Phase 07.11 inserted after Phase 07.10: Runtime CLI auto-updates for Claude Code and Codex on every device, server-type shared devices first (modeled on T3 Code) (URGENT)
+- Phase 07.12 inserted after Phase 07.11: Headless Work Zone server: install, terminal pairing, service and doctor from the CLI, no desktop app (URGENT)
 
 ## Deferred Items
 

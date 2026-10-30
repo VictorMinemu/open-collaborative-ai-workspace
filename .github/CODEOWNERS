@@ -99,6 +99,15 @@
 /apps/local-runtime/src/maintenance/               @VictorMinemu
 /apps/api/src/modules/device/maintenance.ts        @VictorMinemu
 /infra/openclaw/install-policy.mjs                 @VictorMinemu
+# Phase 07.12 (ADR-0033): what servers install and how they pair.
+/apps/api/src/modules/device/pairing.ts            @VictorMinemu
+/apps/api/src/modules/device/enroll.ts             @VictorMinemu
+/apps/api/src/modules/device/distribution.ts       @VictorMinemu
+/apps/api/src/modules/device/install-script.ts     @VictorMinemu
+/apps/api/src/modules/device/install-script.sh     @VictorMinemu
+/apps/local-runtime/src/service/                   @VictorMinemu
+/apps/local-runtime/src/doctor.ts                  @VictorMinemu
+/apps/local-runtime/scripts/build-bundle.mjs       @VictorMinemu
 
 # The guardrails themselves and the decisions they enforce.
 /.semgrep/                                         @VictorMinemu

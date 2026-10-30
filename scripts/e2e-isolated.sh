@@ -310,7 +310,11 @@ if [ "$sandbox" -eq 1 ]; then
 fi
 
 # ---------------------------------------------------------------- fake server + API + web
-(PORT="$FAKE_PORT" FAKE_MODEL_HOST=127.0.0.1 FAKE_MCP_TOKEN="$OCW_E2E_FAKE_MCP_TOKEN" FAKE_SANDBOX_TOKEN="$FAKE_SANDBOX_TOKEN" \
+# The Local Runtime bundle the API serves (07.12): built from this checkout before the API starts, because the API keeps
+# the first verified bundle until it restarts and the headless-server spec installs it.
+pnpm --filter @ocw/local-runtime build:bundle >"$RUN_DIR/bundle.log" 2>&1 || { cat "$RUN_DIR/bundle.log"; exit 1; }
+# The fake's pre-registered OAuth client must redirect to this run's API (OCW_E2E_API_PORT may move it off :4290).
+(PORT="$FAKE_PORT" FAKE_MODEL_HOST=127.0.0.1 FAKE_MCP_TOKEN="$OCW_E2E_FAKE_MCP_TOKEN" FAKE_SANDBOX_TOKEN="$FAKE_SANDBOX_TOKEN" FAKE_MCP_OAUTH_REDIRECTS="http://127.0.0.1:$API_PORT/api/v1/connectors/oauth/callback" \
   nohup node infra/fake-model/server.mjs >"$RUN_DIR/fake.log" 2>&1 & echo $! >"$RUN_DIR/fake.pid")
 (cd apps/api && nohup node --env-file-if-exists=../../.env --import tsx src/main.ts >"$RUN_DIR/api.log" 2>&1 & echo $! >"$RUN_DIR/api.pid")
 (cd apps/web && OCW_NEXT_DIST_DIR="$WEB_DIST" nohup node --env-file-if-exists=../../.env ./node_modules/next/dist/bin/next start -p "$WEB_PORT" -H 127.0.0.1 >"$RUN_DIR/web.log" 2>&1 & echo $! >"$RUN_DIR/web.pid")

@@ -51,6 +51,13 @@ export const REQUIRED_AREAS = [
   },
   { area: "runtime CLI update runner", file: "apps/local-runtime/src/maintenance/runner.ts" },
   { area: "runtime update requests (device.maintain)", file: "apps/api/src/modules/device/maintenance.ts" },
+  // Phase 07.12 (ADR-0033): device-code pairing, the enroll transaction both pairing paths share, and what a server
+  // runs as an installer and as a service.
+  { area: "device-code pairing", file: "apps/api/src/modules/device/pairing.ts" },
+  { area: "device enrollment", file: "apps/api/src/modules/device/enroll.ts" },
+  { area: "runtime install script", file: "apps/api/src/modules/device/install-script.sh" },
+  { area: "runtime distribution", file: "apps/api/src/modules/device/distribution.ts" },
+  { area: "runtime service units", file: "apps/local-runtime/src/service/systemd.ts" },
 ];
 
 /** GitHub CODEOWNERS pattern (gitignore subset) → RegExp over repo-relative paths. */

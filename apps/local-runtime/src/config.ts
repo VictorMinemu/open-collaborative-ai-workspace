@@ -23,6 +23,23 @@ export const RuntimeConfigSchema = z.object({
   deviceTokenPath: z.string().optional(),
   deviceName: z.string().optional(),
   /**
+   * Phase 07.12 (D-06, PD-09): the paired device's id, written at pairing (typed code or device code) from the API's
+   * answer; read by `setup` and `doctor` to say which device this is. Local only; absent before 07.12.
+   */
+  deviceId: z.uuid().optional(),
+  /**
+   * Phase 07.12 (D-06, PD-09): the workspace's web origin from the pairing answer, so `setup` and `doctor` can print
+   * `<webUrl>/settings/devices` (sharing stays in the web). Local only; absent before 07.12 or from an older API.
+   */
+  webUrl: z.url().optional(),
+  /**
+   * Phase 07.12 (D-06, PD-09, RESEARCH Pitfall 3): whom this device was paired with, so a server admin sees who owns it
+   * ("Paired with <organization> as <owner>"). Written at pairing, read by `setup` and `doctor`. Local only.
+   */
+  pairedWith: z
+    .object({ organization: z.string().max(200), owner: z.string().max(200), at: z.string() })
+    .optional(),
+  /**
    * Runtimes run on the user's own CLI logins (Claude Pro/Max, ChatGPT). API keys in the
    * environment are stripped unless `useApiKey` is explicitly true (metered billing).
    */
@@ -255,6 +272,38 @@ export class ProjectRegistry {
     this.projects.push(project);
     await this.save();
     return project;
+  }
+
+  /**
+   * Phase 07.12 (D-07): the project `ref` names, as `remove-project` takes it. In order: an exact `localId`; a directory
+   * (`ref` contains `/` or starts with `.` or `~`; `~/` expands against the user's home) matched by its real path, or by
+   * the plain resolved path when the directory no longer exists; else a name that exactly one project has. An ambiguous
+   * name or no match throws, listing the candidates (or every registered project) by name and id.
+   */
+  async resolveRef(ref: string, opts: { cwd?: string; userHome?: string } = {}): Promise<LocalProject> {
+    const byId = this.get(ref);
+    if (byId) return byId;
+    const label = (p: LocalProject) => `${p.name} (${p.localId})`;
+    const noMatch = () =>
+      new Error(
+        this.projects.length === 0
+          ? `no registered project matches "${ref}"; none are registered`
+          : `no registered project matches "${ref}"; registered: ${this.projects.map(label).join(", ")}`,
+      );
+    if (ref.includes("/") || ref.startsWith(".") || ref.startsWith("~")) {
+      const expanded =
+        ref === "~" || ref.startsWith("~/") ? join(opts.userHome ?? homedir(), ref.slice(1)) : ref;
+      const abs = resolve(opts.cwd ?? process.cwd(), expanded);
+      const real = await realpath(abs).catch(() => abs);
+      const match = this.projects.find((p) => p.path === real) ?? this.projects.find((p) => p.path === abs);
+      if (match) return match;
+      throw noMatch();
+    }
+    const named = this.projects.filter((p) => p.name === ref);
+    if (named.length === 1 && named[0]) return named[0];
+    if (named.length > 1)
+      throw new Error(`ambiguous: ${named.map(label).join(", ")}; use the id or the directory`);
+    throw noMatch();
   }
 
   async remove(localId: string): Promise<boolean> {

@@ -220,6 +220,16 @@ describe("e2e env parity: scripts/e2e-isolated.sh (default mode) ↔ .woodpecker
       "the CI fake server gets FAKE_SANDBOX_TOKEN",
     );
   });
+  it("the runner's fake registers the OAuth redirect on the runner's own API port, as CI does (07.12-11)", () => {
+    // With OCW_E2E_API_PORT overridden, the fake's default (:4290) would refuse the API's callback
+    // ("redirect_uri is not registered") and the connector specs would fail for the port alone.
+    const start =
+      RUNNER.split("\n").find((l) => l.includes('FAKE_SANDBOX_TOKEN="$FAKE_SANDBOX_TOKEN"')) ?? "";
+    assert.ok(
+      start.includes('FAKE_MCP_OAUTH_REDIRECTS="http://127.0.0.1:$API_PORT/api/v1/connectors/oauth/callback'),
+      "the runner's fake server gets FAKE_MCP_OAUTH_REDIRECTS for $API_PORT",
+    );
+  });
   it("each viewport's fake, API and web listen where its URLs point, all in its own port block", () => {
     const entries = matrixEntries(CI);
     assert.equal(entries.length, 2, "desktop and mobile");

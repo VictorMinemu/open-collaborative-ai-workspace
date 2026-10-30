@@ -13,7 +13,9 @@
 //   pnpm gate:compose --down <envFile>                 tears down a stack left by --keep
 //
 // Stages, always in this order (default: compose … backup; the flags add the profile stages at the end):
-//   compose         migrate exited 0, api /health, web /login, cell healthy, admin setup/sign-in (loopback)
+//   compose         migrate exited 0, api /health, runtime-dist (07.12-06: /api/v1/runtime/version, bundle.sha256,
+//                   the bundle hashing to the manifest, install.sh), web /login, cell healthy, admin setup/sign-in
+//                   (loopback)
 //   playwright      e2e/playwright.compose.config.ts from the host through Caddy: setup, Scenario B at 1440 and 390,
 //                   the attachments API flow; fails if any test is skipped, failed or flaky, or if none ran
 //   sandbox         --with-sandbox (the stack runs the `sandbox` profile): scripts/gate/sandbox-check.mjs (sandboxd
@@ -32,6 +34,7 @@
 // Progress, build and Playwright output go to stderr. Exit 0 = every stage ok. Env: OCW_GATE_MIN_FREE_GB (default
 // 6), OCW_GATE_KEEP_BUILD_CACHE=1, OCW_E2E_SCREENSHOT_DIR (review screenshots of the Playwright stage).
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -146,6 +149,53 @@ async function httpOk(url) {
 }
 
 /**
+ * Phase 07.12-06 (D-01, PD-05): the API image serves the Local Runtime it was built with. The manifest has a 64-hex
+ * sha256, the checksum line starts with it, the bundle's bytes hash to it and install.sh is a POSIX script. Details
+ * carry only the version and a sha prefix.
+ */
+export async function checkRuntimeDist(apiUrl, { fetchImpl = fetch, sourceCommit = "" } = {}) {
+  const get = (route) =>
+    fetchImpl(`${apiUrl}/api/v1/runtime/${route}`, { signal: AbortSignal.timeout(30_000) });
+  const res = await get("version");
+  if (res.status !== 200) {
+    await res.arrayBuffer();
+    return { ok: false, route: "version", status: res.status };
+  }
+  const manifest = await res.json();
+  const sha256 = typeof manifest?.sha256 === "string" ? manifest.sha256 : "";
+  const commit = typeof manifest?.source?.commit === "string" ? manifest.source.commit : null;
+  const details = {
+    version: manifest?.version ?? null,
+    sha: sha256.slice(0, 12),
+    commit: commit?.slice(0, 12) ?? null,
+  };
+  if (!/^[0-9a-f]{64}$/.test(sha256))
+    return { ok: false, ...details, reason: "manifest sha256 is not 64 hex" };
+  // A gate built from a clean commit must serve a bundle that names that commit as its source (AGPL, ADR-0033).
+  if (sourceCommit && commit !== sourceCommit)
+    return { ok: false, ...details, reason: "manifest source.commit is not the commit the gate built" };
+  const line = await get("bundle.sha256");
+  const lineText = await line.text();
+  if (line.status !== 200 || !lineText.startsWith(sha256))
+    return { ok: false, ...details, route: "bundle.sha256", status: line.status };
+  const bundle = await get("bundle");
+  const bytes = Buffer.from(await bundle.arrayBuffer());
+  if (bundle.status !== 200 || createHash("sha256").update(bytes).digest("hex") !== sha256)
+    return {
+      ok: false,
+      ...details,
+      route: "bundle",
+      status: bundle.status,
+      reason: "bundle does not hash to sha256",
+    };
+  const script = await get("install.sh");
+  const scriptText = await script.text();
+  if (script.status !== 200 || !scriptText.startsWith("#!/bin/sh"))
+    return { ok: false, ...details, route: "install.sh", status: script.status };
+  return { ok: true, ...details };
+}
+
+/**
  * The stack checks (gate step convention): pushes one step per check to ctx.steps. `admin: false` skips the admin
  * check, which would redeem the setup token: when Playwright follows, its `setup` project does the first-run setup in
  * the browser (and must not find it done).
@@ -171,6 +221,9 @@ export async function run(ctx, { admin = true } = {}) {
     return { ok: s?.State === "exited" && s?.ExitCode === 0, state: s?.State, exitCode: s?.ExitCode };
   });
   await check("api-health", () => poll(() => httpOk(`${ctx.urls.api}/health`), { timeoutMs: 120_000 }));
+  await check("runtime-dist", () =>
+    checkRuntimeDist(ctx.urls.api, { sourceCommit: ctx.env.OCW_SOURCE_COMMIT ?? "" }),
+  );
   await check("web-login", () => poll(() => httpOk(`${ctx.urls.web}/login`), { timeoutMs: 120_000 }));
   // The cell image is ~5 GB and its gateway takes a while on first boot (Pitfall 11).
   await check("cell-healthy", () =>
