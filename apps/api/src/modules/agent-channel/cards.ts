@@ -21,7 +21,7 @@ import {
 } from "@ocw/db";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { App, Core } from "../../core";
-import type { AgentMention, CardAction } from "../../lib/chat-agent-bridge";
+import type { AgentMention, CardAction, PostAgentMessageInput } from "../../lib/chat-agent-bridge";
 import { badRequest, HttpError, notFound } from "../../lib/errors";
 import { findAgent } from "../agent";
 import { createConversationAccess, patchCard } from "../chat";
@@ -29,6 +29,7 @@ import type { MemoryService } from "../memory";
 import { notifyUsers } from "../notification";
 import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
 import { cellOf } from "./auth";
+import { automationInactive, markRunAnswered, runAnchorTrigger } from "./automation-runs";
 import { buildMentionEvents } from "./mentions";
 
 /**
@@ -58,6 +59,40 @@ export interface ReplyTarget {
   root: string | null;
   /** The human of the delivered turn the post answers (`agent_turns.user_id`); chat re-checks they still read. */
   onBehalfOf: string;
+  /**
+   * Phase 07.6 (D-08, P-03): the automation run whose anchor the turn was delivered on, or null. The first accepted post
+   * for it marks the run answered (`postForTurn`).
+   */
+  runId: string | null;
+}
+
+/** Why a post has no reply target: no live turn (403), or the run it answers lost its automation (409). */
+export type ReplyRefusal = { refused: "no_trigger" | "automation_inactive" };
+
+/** The reply target, or the refusal as its HTTP error (thrown after the checking transaction committed its audit). */
+export function replyTargetOrThrow(check: ReplyTarget | ReplyRefusal): ReplyTarget {
+  if ("refused" in check) throw check.refused === "automation_inactive" ? automationInactive() : noTrigger();
+  return check;
+}
+
+/**
+ * Posts an agent's message for a resolved reply target (the chat path, rules and audit of `postAgentMessage`). For a run
+ * anchor's turn the post and the run's `answered` share one transaction (P-03): a reply that chat refuses (the run-as
+ * person no longer reads the conversation, confused deputy) leaves the run as it was.
+ */
+export async function postForTurn(
+  core: Core,
+  ctx: { organizationId: string; userId: string },
+  target: ReplyTarget,
+  input: PostAgentMessageInput,
+): Promise<{ messageId: string; created: boolean; cardVersion?: number }> {
+  const { runId } = target;
+  if (!runId) return core.chatAgent.postAgentMessage(ctx, input);
+  return core.db.withTenant(ctx, async (tx) => {
+    const result = await core.chatAgent.postAgentMessageIn(tx, input);
+    if (result.created) await markRunAnswered(tx, { core }, runId);
+    return result;
+  });
 }
 
 /**
@@ -74,7 +109,7 @@ async function findTurn(
     inReplyToMessageId?: string | undefined;
     eventId?: string | undefined;
   },
-): Promise<{ eventId: string; userId: string } | null> {
+): Promise<{ eventId: string; userId: string; messageId: string } | null> {
   const cols = {
     eventId: agentTurns.eventId,
     userId: agentTurns.userId,
@@ -122,7 +157,7 @@ export async function resolveReplyTarget(
     eventId?: string | undefined;
   },
   refusal: { route: "messages" | "cards"; sessionId: string },
-): Promise<ReplyTarget | null> {
+): Promise<ReplyTarget | ReplyRefusal> {
   const conv = await getConversation(tx, body.conversationId);
   let root: string | null = null;
   if (body.threadRootMessageId) {
@@ -138,8 +173,7 @@ export async function resolveReplyTarget(
     // Single-level threads: a reply's root is its thread root.
     root = m.threadId ?? m.id;
   }
-  const turn = await findTurn(tx, body);
-  if (!turn) {
+  const refuse = async (reason: ReplyRefusal["refused"]): Promise<ReplyRefusal> => {
     // Ids only: never the text or the card.
     await core.audit.record(tx, {
       action: "agent.message.refused",
@@ -152,16 +186,26 @@ export async function resolveReplyTarget(
       clientKind: "agent",
       sessionId: refusal.sessionId,
       metadata: {
-        reason: "no_trigger",
+        reason,
         route: refusal.route,
         conversationId: conv.id,
         eventId: body.eventId ?? null,
         inReplyToMessageId: body.inReplyToMessageId ?? null,
       },
     });
-    return null;
-  }
-  return { root, onBehalfOf: turn.userId };
+    return { refused: reason };
+  };
+  const turn = await findTurn(tx, body);
+  if (!turn) return refuse("no_trigger");
+  // Phase 07.6 (D-08, P-03): the one trigger automations add. A turn delivered on a run's anchor is the run-as person's
+  // (chat re-checks that they still read the conversation); once the automation is deleted nothing more is posted for it.
+  const run = await runAnchorTrigger(tx, turn.messageId);
+  if (run && !run.automationActive) return refuse("automation_inactive");
+  return {
+    root,
+    onBehalfOf: run?.runAsUserId ?? turn.userId,
+    runId: run?.automationActive ? run.runId : null,
+  };
 }
 
 /**
@@ -337,7 +381,7 @@ export function registerCardRoutes(app: App, ctx: { core: Core }): void {
     async (req, reply) => {
       const cell = cellOf(req);
       const body = req.body;
-      const target = await core.db.withTenant(
+      const check = await core.db.withTenant(
         { organizationId: cell.organizationId, userId: null },
         async (tx) => {
           await assertCellAgent(tx, body.agentId);
@@ -355,24 +399,24 @@ export function registerCardRoutes(app: App, ctx: { core: Core }): void {
           );
         },
       );
-      if (!target) throw noTrigger();
+      const target = replyTargetOrThrow(check);
       // Chat decides exactly as for a message (agent principal, membership, confused deputy for the turn's human, flat
       // conversations), stores the message and its card in one transaction and audits `agent_card.posted`.
-      const result = await core.chatAgent
-        .postAgentMessage(
-          { organizationId: cell.organizationId, userId: target.onBehalfOf },
-          {
-            agentId: body.agentId,
-            conversationId: body.conversationId,
-            threadRootId: target.root,
-            body: body.card.summary,
-            idempotencyKey: body.idempotencyKey,
-            inReplyToMessageId: body.inReplyToMessageId,
-            onBehalfOfUserId: target.onBehalfOf,
-            card: body.card,
-          },
-        )
-        .catch(chatUnavailable);
+      const result = await postForTurn(
+        core,
+        { organizationId: cell.organizationId, userId: target.onBehalfOf },
+        target,
+        {
+          agentId: body.agentId,
+          conversationId: body.conversationId,
+          threadRootId: target.root,
+          body: body.card.summary,
+          idempotencyKey: body.idempotencyKey,
+          inReplyToMessageId: body.inReplyToMessageId,
+          onBehalfOfUserId: target.onBehalfOf,
+          card: body.card,
+        },
+      ).catch(chatUnavailable);
       reply.code(result.created ? 201 : 200);
       return { messageId: result.messageId, created: result.created, version: result.cardVersion ?? 1 };
     },

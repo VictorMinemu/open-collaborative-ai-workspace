@@ -34,6 +34,7 @@ import {
 import { REPLY_MODE_PER_MINUTE } from "../chat";
 import type { MemoryService } from "../memory";
 import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
+import { inboundRooted } from "./inbound-origin";
 import { conversationAudience } from "./memory-files";
 
 /** Bounded thread context per mention (A2.2). */
@@ -245,6 +246,19 @@ export async function buildMentionEvents(
   // D-06, P-10: in an AI chat, scoped tools must be fine for everyone who reads the persona's answer.
   const audience = aiChat ? await audienceOf(tx, conv.id) : null;
 
+  // Phase 07.6 (D-02, D-07, P-11): a run started by outside content starts tainted, and so does every turn that reads
+  // outside content: a thread rooted in an inbound item (or a tainted run's anchor), or a flat conversation or thread
+  // whose history window holds one. One lookup per mention, for every bot it reaches; a person's @mention included.
+  const taintedAtStart =
+    mention.taintedAtStart === true ||
+    (await inboundRooted(
+      tx,
+      root,
+      historyRows.map((m) => m.id),
+    ));
+  // D-12: an automation run's turn has nobody present (no browser tools); a person's message never is one.
+  const unattended = mention.trigger === "automation";
+
   const events: StoredMention[] = [];
   for (const a of delivered) {
     // The event id first: the turn ledger row (`agent_turns`) is keyed by it.
@@ -262,6 +276,8 @@ export async function buildMentionEvents(
         eventId,
         // The asking human's zone (D-12); turnPolicy re-validates it and falls back to UTC.
         clientTimeZone: mention.clientTimeZone ?? null,
+        taintedAtStart,
+        unattended,
       },
       {
         audience,

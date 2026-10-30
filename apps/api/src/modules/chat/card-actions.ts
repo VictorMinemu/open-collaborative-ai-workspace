@@ -6,12 +6,14 @@ import {
   type AgentCardInput,
   AgentCardParams,
   type AgentCardPatch,
+  AgentCardStatus,
   EventTypes,
   type Message,
 } from "@ocw/contracts";
 import { conversations, messageCardFollows, messageCards, messages, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
+import { z } from "zod";
 import { markDecided } from "../../authz";
 import { type App, authOf, type Core, tenant } from "../../core";
 import type {
@@ -129,6 +131,10 @@ function cardFromRow(row: CardRow, dir: Directory | null, link?: LinkedCardInfo)
     decision,
     updatedAt: iso(row.updatedAt),
     ...(row.platformOwned ? { platformOwned: true } : {}),
+    // Phase 07.6 (R1, P-12): the server's pill word and notices, only on platform-owned cards; absent otherwise, so
+    // every other card keeps its exact shape.
+    ...(row.platformOwned && row.statusLabel ? { statusLabel: row.statusLabel } : {}),
+    ...(row.platformOwned && row.notices.length > 0 ? { notices: row.notices } : {}),
   };
 }
 
@@ -266,6 +272,10 @@ export async function insertCard(
       status: a.input.status,
       actions: a.input.actions,
       platformOwned: a.platformOwned === true,
+      // Phase 07.6 (R1, P-12): the pill word and notices are the platform's words only; an agent's are dropped.
+      ...(a.platformOwned === true
+        ? { statusLabel: a.input.statusLabel ?? null, notices: a.input.notices ?? [] }
+        : {}),
     })
     .returning();
   if (!row) throw new Error("card insert returned no row");
@@ -360,6 +370,61 @@ export async function patchCard(
     message: dto,
   });
   return { before, after, message: dto };
+}
+
+/** What the server may change on one of its own cards (Phase 07.6, R1): never the kind, the agent or the actions. */
+export const PlatformCardUpdate = z
+  .object({
+    status: AgentCardStatus.optional(),
+    statusLabel: AgentCard.shape.statusLabel.unwrap().nullable().optional(),
+    notices: AgentCard.shape.notices.unwrap().optional(),
+    fields: AgentCard.shape.fields.optional(),
+  })
+  .strict();
+export type PlatformCardUpdate = z.infer<typeof PlatformCardUpdate>;
+
+/**
+ * The server's update of a platform-owned card (Phase 07.6, R1, P-12: a run card's "Done" / "No reply", an inbound
+ * card's notices), in the caller's transaction: the card row is locked, only a platform-owned card changes (any other
+ * card throws, nothing written; an agent's card is the agent's alone), the values are bounded by the contract (label
+ * 1..24, at most three notices), and the version goes up by one with the same `message.updated` every reader gets from
+ * `patchCard`. `statusLabel: null` clears the label. A tombstoned message's card is left as it is.
+ */
+export async function updatePlatformCard(
+  tx: Tx,
+  deps: Pick<ChatDeps, "realtime">,
+  p: { messageId: string } & PlatformCardUpdate,
+): Promise<{ version: number } | null> {
+  const { messageId, ...input } = p;
+  const update = PlatformCardUpdate.parse(input);
+  const [before] = await tx
+    .select({ platformOwned: messageCards.platformOwned })
+    .from(messageCards)
+    .where(eq(messageCards.messageId, messageId))
+    .limit(1)
+    .for("update");
+  if (!before) throw notFound("Card not found", "card_not_found");
+  if (!before.platformOwned) throw new Error("updatePlatformCard: not a platform-owned card");
+  const [message] = await tx.select().from(messages).where(eq(messages.id, messageId)).limit(1);
+  if (!message || message.deletedAt) return null;
+  const [after] = await tx
+    .update(messageCards)
+    .set({
+      ...(update.status !== undefined ? { status: update.status } : {}),
+      ...(update.statusLabel !== undefined ? { statusLabel: update.statusLabel } : {}),
+      ...(update.notices !== undefined ? { notices: update.notices } : {}),
+      ...(update.fields !== undefined ? { fields: update.fields } : {}),
+      version: sql`${messageCards.version} + 1`,
+      updatedAt: sql`now()`,
+    })
+    .where(and(eq(messageCards.messageId, messageId), eq(messageCards.platformOwned, true)))
+    .returning({ version: messageCards.version });
+  if (!after) throw new Error("platform card update returned no row");
+  const dto = await cardMessageOf(tx, message, await loadDirectory(tx));
+  await deps.realtime.appendEvent(tx, convTopic(message.conversationId), EventTypes.messageUpdated, {
+    message: dto,
+  });
+  return { version: after.version };
 }
 
 /**

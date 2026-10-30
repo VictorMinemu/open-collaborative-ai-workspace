@@ -323,6 +323,11 @@ async function computeTurn(
      * call themselves.
      */
     sandbox?: boolean;
+    /**
+     * Phase 07.6 (D-12, P-22): an automation run's turn, with no person present. The browser family (a member's sign-in,
+     * live control) is neither offered nor listed as withheld; the sandbox family is decided exactly as for any turn.
+     */
+    unattended?: boolean;
   },
   env: SearchEnv,
   audience?: TurnAudience | null,
@@ -510,7 +515,8 @@ async function computeTurn(
         on: caps.browser,
       },
     ];
-    for (const family of families) {
+    // D-12: nobody is there to sign in or watch a browser on an unattended run turn.
+    for (const family of p.unattended ? families.filter((f) => f.kind !== "browser") : families) {
       const available = await sandboxAvailable(
         tx,
         perms,
@@ -793,6 +799,13 @@ export async function turnPolicy(
     messageId: string;
     eventId: string;
     clientTimeZone?: string | null;
+    /**
+     * Phase 07.6 (D-02, D-07, P-11): the turn starts tainted (`agent_turns.tainted` at insert): a run started by a webhook
+     * or a mail, or any turn in a thread that holds inbound content. Side-effecting calls are refused from the first one.
+     */
+    taintedAtStart?: boolean;
+    /** Phase 07.6 (D-12): an automation run's turn (no person present): never the browser tools. */
+    unattended?: boolean;
   },
   opts: {
     /** AI chat deliveries only (06-10): the chat's readers, for scoped tools and `turn.withheld`. */
@@ -811,7 +824,15 @@ export async function turnPolicy(
     tx,
     perms,
     // Sandbox tools only while sandboxd is configured (07.8-05): without it nothing could run them.
-    { ...p, conversationKind: scopeKind, board, sandbox: core.env.OCW_SANDBOX_URL !== null },
+    {
+      agentId: p.agentId,
+      humanUserId: p.humanUserId,
+      conversationId: p.conversationId,
+      conversationKind: scopeKind,
+      board,
+      sandbox: core.env.OCW_SANDBOX_URL !== null,
+      unattended: p.unattended === true,
+    },
     core.env,
     opts.audience,
   );
@@ -872,6 +893,7 @@ export async function turnPolicy(
     messageId: p.messageId,
     tools: turn.tools,
     toolFlags: turn.toolFlags,
+    tainted: p.taintedAtStart === true,
     ...(sticky ? { memberData: true } : {}),
   });
   return { deliver: true, turn };

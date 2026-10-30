@@ -129,7 +129,9 @@ export {
   mirrorCardClosed,
   mirrorCardDecision,
   mirrorCardUsed,
+  PlatformCardUpdate,
   patchCard,
+  updatePlatformCard,
   withCards,
 } from "./card-actions";
 export { agentFactsOf, authorOf, type Directory, type DirectoryEntry, loadDirectory } from "./directory";
