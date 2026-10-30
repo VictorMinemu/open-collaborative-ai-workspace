@@ -52,6 +52,9 @@ export const MODULE_CATALOG: Record<ModuleId, ModuleDefinition> = {
       "bot.tool.use",
       "connector.connect",
       "vault.use",
+      // Phase 07.6 (07.6-01, P-05): automations live under Bots, so Bots off also stops creating them and webhooks.
+      "automation.create",
+      "automation.webhook",
     ],
   },
   // Phase 07.2 (07.2-01): every memory grain (read, write, promote); new memory grains keep the `memory.` prefix.
