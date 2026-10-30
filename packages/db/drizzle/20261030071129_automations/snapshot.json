@@ -26219,7 +26219,7 @@
       "table": "ai_usage_daily"
     },
     {
-      "value": "(\"kind\" in ('chat','title') and \"generation_id\" is not null and \"conversation_id\" is not null)\n        or (\"kind\" in ('digest','session_summary') and \"subject_id\" is not null)",
+      "value": "(\"kind\" in ('chat','title') and \"generation_id\" is not null and \"conversation_id\" is not null)\n        or (\"kind\" in ('digest','session_summary') and \"subject_id\" is not null and \"generation_id\" is null)",
       "name": "ai_usage_records_kind_check",
       "entityType": "checks",
       "schema": "app",

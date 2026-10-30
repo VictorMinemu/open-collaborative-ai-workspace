@@ -383,5 +383,5 @@ ALTER TABLE "app"."bot_policies" ADD CONSTRAINT "bot_policies_max_runs_per_day_c
 ALTER TABLE "app"."message_cards" ADD CONSTRAINT "message_cards_status_label_len_check" CHECK ("status_label" is null or char_length("status_label") between 1 and 24);--> statement-breakpoint
 ALTER TABLE "app"."message_cards" ADD CONSTRAINT "message_cards_notices_check" CHECK (jsonb_typeof("notices") = 'array' and jsonb_array_length("notices") <= 3);--> statement-breakpoint
 ALTER TABLE "app"."ai_usage_records" DROP CONSTRAINT "ai_usage_records_kind_check", ADD CONSTRAINT "ai_usage_records_kind_check" CHECK (("kind" in ('chat','title') and "generation_id" is not null and "conversation_id" is not null)
-        or ("kind" in ('digest','session_summary') and "subject_id" is not null));--> statement-breakpoint
+        or ("kind" in ('digest','session_summary') and "subject_id" is not null and "generation_id" is null));--> statement-breakpoint
 ALTER TABLE "app"."secrets" DROP CONSTRAINT "secrets_kind_check", ADD CONSTRAINT "secrets_kind_check" CHECK ("kind" in ('provider_api_key','mcp_credential','user_model_credential','connector_credential','vault_item','browser_session','webhook_secret'));

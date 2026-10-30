@@ -1782,11 +1782,14 @@ export const aiUsageRecords = appSchema.table(
       .where(sql`subject_id is not null`),
     index("ai_usage_records_org_time_idx").on(t.organizationId, t.createdAt),
     index("ai_usage_records_requester_time_idx").on(t.organizationId, t.requesterUserId, t.createdAt),
-    /** Phase 07.6: two shapes. Chat and title records keep their generation and conversation (unchanged). */
+    /**
+     * Phase 07.6 (P-16): two shapes. Chat and title records keep their generation and conversation (unchanged); the
+     * new kinds carry a subject and no generation.
+     */
     check(
       "ai_usage_records_kind_check",
       sql`(${t.kind} in ('chat','title') and ${t.generationId} is not null and ${t.conversationId} is not null)
-        or (${t.kind} in ('digest','session_summary') and ${t.subjectId} is not null)`,
+        or (${t.kind} in ('digest','session_summary') and ${t.subjectId} is not null and ${t.generationId} is null)`,
     ),
   ],
 );
