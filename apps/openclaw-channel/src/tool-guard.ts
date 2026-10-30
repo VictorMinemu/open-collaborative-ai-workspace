@@ -410,17 +410,20 @@ export function createToolGuard(
         messageId?: string;
         connectorTools?: string[];
         requesterName?: string;
+        /** 07.6: the turn read outside content before its first call (a webhook or mail run): tainted from the start. */
+        tainted?: boolean;
       },
       signal?: AbortSignal,
     ): void {
       const key = keyOf(sessionKey);
+      const { tainted, ...rest } = t;
       state.turns.set(key, {
-        ...t,
+        ...rest,
         connectorTools: t.connectorTools ?? [],
         calls: 0,
         webCalls: 0,
         sandboxCalls: 0,
-        tainted: false,
+        tainted: tainted === true,
       });
       signal?.addEventListener(
         "abort",

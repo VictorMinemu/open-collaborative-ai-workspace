@@ -63,6 +63,11 @@ export const AgentChannelEventTypes = {
   pluginUninstall: "plugin.uninstall.v1",
   /** Phase 6 (AGENT-04, P-11): a reader approved or denied one of the agent's Agent Cards. */
   cardAction: "agent.card_action.v1",
+  /**
+   * Phase 07.6 (D-03): an automation run, built like a mention on the run's anchor message (author = the run-as human,
+   * text = a server sentence), plus the standing order and, for webhook and mail runs, the outside content apart.
+   */
+  automationRun: "agent.automation_run.v1",
 } as const;
 export const cellTopic = (cellId: string) => `cell:${cellId}`;
 
@@ -489,6 +494,55 @@ export const AgentCardActionEvent = AgentMentionEvent.omit({ type: true }).exten
   }),
 });
 export type AgentCardActionEvent = z.infer<typeof AgentCardActionEvent>;
+
+/** Phase 07.6: the contracts' `AUTOMATION_LIMITS` the plugin checks or bounds locally (parity: plugin-contract.test.ts). */
+export const AUTOMATION_LIMITS = {
+  nameMax: 120,
+  instructionsMax: 4000,
+  maxRunsPerDayCeiling: 288,
+  mailTextMaxChars: 32_768,
+  pointerMax: 200,
+  cronMax: 100,
+} as const;
+/** The inbound title bound (contracts: `AGENT_CARD_TITLE_MAX`). */
+export const AUTOMATION_INBOUND_TITLE_MAX = 200;
+
+/** `ocw_record_update`: at most this many field changes per call (contracts `AgentChannelRecordUpdate`). */
+export const RECORD_UPDATE_MAX_CHANGES = 20;
+/** The longest string value of one `ocw_record_update` change. */
+export const RECORD_UPDATE_VALUE_MAX = 500;
+
+/**
+ * Phase 07.6 (D-03, C-01): the outside content that started a run (a webhook payload or a mail), composed by the API.
+ * Untrusted: the mapper puts it in its own `external` block, never in the message text or the standing order. A
+ * malformed value fails the event (it is skipped), so outside content never arrives unlabelled.
+ */
+export const AgentAutomationRunInbound = z.object({
+  source: z.enum(["webhook", "mail"]),
+  title: z.string().max(AUTOMATION_INBOUND_TITLE_MAX),
+  text: z.string().max(AUTOMATION_LIMITS.mailTextMaxChars),
+  from: z.string().max(320).nullable(),
+  receivedAt: z.string(),
+});
+export type AgentAutomationRunInbound = z.infer<typeof AgentAutomationRunInbound>;
+
+/**
+ * `agent.automation_run.v1` (07.6 D-03, P-22): built by the API like a mention of the agent on the run's anchor message:
+ * `message.author` is the run-as human, `message.text` a server sentence and `turn` is computed for that human
+ * (unattended: never a browser tool, D-12). `trigger` stays a string so a newer trigger never drops the event.
+ */
+export const AgentAutomationRunEvent = AgentMentionEvent.omit({ type: true }).extend({
+  type: z.literal(AgentChannelEventTypes.automationRun),
+  automationRun: z.object({
+    automationId: Id,
+    runId: Id,
+    name: z.string().max(AUTOMATION_LIMITS.nameMax),
+    trigger: z.string().min(1).max(32),
+    instructions: z.string().max(AUTOMATION_LIMITS.instructionsMax),
+    inbound: AgentAutomationRunInbound.nullable(),
+  }),
+});
+export type AgentAutomationRunEvent = z.infer<typeof AgentAutomationRunEvent>;
 
 export const CellConfigChangedEvent = z.object({
   type: z.literal(AgentChannelEventTypes.configChanged),

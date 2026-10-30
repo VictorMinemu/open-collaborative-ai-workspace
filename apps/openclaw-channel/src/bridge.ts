@@ -1,4 +1,6 @@
 import {
+  AgentAutomationRunEvent,
+  type AgentAutomationRunEvent as AgentAutomationRunEventType,
   AgentCardActionEvent,
   type AgentCardActionEvent as AgentCardActionEventType,
   AgentChannelEventTypes,
@@ -17,7 +19,13 @@ import type { AgentChannelClient } from "./api-client.js";
 import { sleep } from "./backoff.js";
 import type { DurableFrame, EventStreamLogger } from "./event-stream.js";
 import { handleMcpProbe, type probeMcpServer } from "./mcp-probe.js";
-import { type MappedMention, mapCardAction, mapMention, replyIdempotencyKey } from "./mention-mapper.js";
+import {
+  type MappedMention,
+  mapAutomationRun,
+  mapCardAction,
+  mapMention,
+  replyIdempotencyKey,
+} from "./mention-mapper.js";
 import type { PluginInstaller } from "./plugin-installer.js";
 import type { AgentProvisioningResult } from "./reconciler.js";
 import type { SubscriptionAuth } from "./subscription-auth.js";
@@ -211,6 +219,14 @@ export function createBridge(opts: BridgeOptions) {
     await runTurn(event, "card action", (agent) => mapCardAction(event, agent));
   }
 
+  /**
+   * An automation run (07.6 D-03): a turn like a mention of the agent on the run's anchor; the reply carries the anchor
+   * as `inReplyToMessageId` and the run's event id (the API's trigger rule, D-08), keyed `evt:<eventId>` like any reply.
+   */
+  async function handleAutomationRun(event: AgentAutomationRunEventType): Promise<void> {
+    await runTurn(event, "automation run", (agent) => mapAutomationRun(event, agent));
+  }
+
   async function runTurn(
     event: { eventId: string; agent: { id: string } },
     label: string,
@@ -332,6 +348,18 @@ export function createBridge(opts: BridgeOptions) {
         await handleCardAction(parsed.data);
         return;
       }
+      case AgentChannelEventTypes.automationRun: {
+        // Untrusted until parsed; the warning names the seq and the field path only (never outside content).
+        const parsed = AgentAutomationRunEvent.safeParse(frame.data);
+        if (!parsed.success) {
+          log.warn?.(
+            `seq=${frame.seq}: invalid ${frame.type} payload; skipped (${parsed.error.issues[0]?.path.join(".") || "?"})`,
+          );
+          return;
+        }
+        await handleAutomationRun(parsed.data);
+        return;
+      }
       case AgentChannelEventTypes.configChanged:
         await refreshCell();
         return;
@@ -420,6 +448,7 @@ export function createBridge(opts: BridgeOptions) {
     handleFrame,
     handleMention,
     handleCardAction,
+    handleAutomationRun,
     agents,
     snapshot: () => lastSnapshot,
   };
