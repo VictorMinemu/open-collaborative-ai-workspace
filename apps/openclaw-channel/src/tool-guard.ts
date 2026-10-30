@@ -13,6 +13,8 @@ import {
   type TurnToolFlags,
 } from "./agent-channel-protocol.js";
 import type { AgentChannelClient } from "./api-client.js";
+// automation-tool.ts imports from this module too; the sentence is only called while a call runs (see the note there).
+import { automationTaintedSentence } from "./automation-tool.js";
 // connector-tools.ts imports from this module too; its sentences are only read while a call runs.
 import { REFUSAL_SENTENCE } from "./connector-tools.js";
 import { openClawAgentIdFor } from "./mention-mapper.js";
@@ -111,19 +113,23 @@ const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
   "ocw_http_request",
   "ocw_work_zone_projects",
   "ocw_start_work_zone",
+  // 07.6: `/automations/propose` re-decides the turn, the tool on it and the taint itself.
+  "ocw_automation_propose",
 ]);
 /**
  * Always side-effecting, whatever flags a turn carries: writing memory or changing shared board work after untrusted
  * content is exactly the injection the taint rule exists for (D-08, T-03.1-07-02, 07.1-13, T-07.2-07-02). A memory
  * proposal is not here: a person approves it before anything is written, so a tainted turn may still propose (flagged by
  * the API). A Work Zone proposal is (07.5 D-03, APPROVE-04): it would run code on a member's device, so a turn that read
- * untrusted content never proposes one, even with a person's click still to come.
+ * untrusted content never proposes one, even with a person's click still to come. An automation proposal is too (07.6
+ * D-02): outside content must never schedule work that runs as a person, whatever a turn's approval flag says.
  */
 const ALWAYS_SIDE_EFFECTING: ReadonlySet<string> = new Set([
   "ocw_memory_save",
   "ocw_memory_write",
   "ocw_board_card",
   "ocw_start_work_zone",
+  "ocw_automation_propose",
 ]);
 /** Unknown flags are treated as the most dangerous combination. */
 const UNKNOWN_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
@@ -507,6 +513,8 @@ export function createToolGuard(
       if (t.tainted && flags.sideEffecting && !approval) {
         // 07.5-10: the proposal's refusal is the UI-SPEC sentence the model relays (R10).
         if (tool === "ocw_start_work_zone") return block(workZoneTaintedSentence(t.requesterName));
+        // 07.6: the UI-SPEC's model-facing sentence for a proposal after outside content.
+        if (tool === "ocw_automation_propose") return block(automationTaintedSentence(t.requesterName));
         // 07.8: `ocw_sandbox_share` (and an act the API flags) reads the 07.4 sentence its route would answer.
         if (confined) return block(REFUSAL_SENTENCE.tainted);
         return block(

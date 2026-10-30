@@ -38,6 +38,11 @@
  *                                (ocw_work_zone_projects, 07.5: the projects the turn's human may start a session on)
  *   POST /work-zone/proposals  ← AgentChannelWorkZonePropose → `{approvalId, created}` or 200 `{refused}`
  *                                (ocw_start_work_zone, 07.5: a proposal the turn's human starts; never a mode)
+ *   POST /automations/propose  ← AgentChannelAutomationPropose → `{ok, approvalId?|code?, sentence}` (ocw_automation_propose,
+ *                                07.6: a scheduled automation as a card its person confirms; a refusal may come with a
+ *                                4xx status and the same body)
+ *   POST /records/update       ← AgentChannelRecordUpdate → `{ok, code, sentence}` (ocw_record_update, 07.6: compare-and-set
+ *                                on the watched record of the turn's card; 409 `record_changed` with the same body)
  *   POST /mcp/probe-results    ← AgentChannelMcpProbeResult (the tools an `mcp.probe` discovered; D-13)
  *   POST /plugins/report       ← AgentChannelPluginReport (a marketplace install / uninstall outcome; D-14)
  *   POST /plugins/verify-install, GET /plugins: used by infra/openclaw (install gate, boot render), not here
@@ -1347,6 +1352,60 @@ export const AgentChannelWorkZoneProposeResponse = z.union([
   z.object({ approvalId: Id, created: z.boolean() }),
 ]);
 export type AgentChannelWorkZoneProposeResponse = z.infer<typeof AgentChannelWorkZoneProposeResponse>;
+
+// ---------------------------------------------------------------- automations and watched records (07.6, mirror of
+// contracts agent-channel.ts). Bodies carry only the turn's event and agent with the intent: the API derives the
+// conversation, the person (run-as) and the record from the stored turn and computes every hash itself (D-03, D-04).
+
+/** `POST /automations/propose` (`ocw_automation_propose`): never a conversation id, a person or a webhook/mail trigger. */
+export type AgentChannelAutomationPropose = {
+  eventId: string;
+  agentId: string;
+  name: string;
+  instructions: string;
+  schedule: { cron: string; timeZone: string };
+  /** `here`: the turn's conversation (its thread); `dm`: the person's DM with this bot. */
+  target: { kind: "here" } | { kind: "dm" };
+  maxRunsPerDay?: number;
+};
+
+/** The model reads `sentence` (composed by the API); `code` is the refusal code. */
+export const AgentChannelAutomationProposeResponse = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), approvalId: Id, sentence: z.string().min(1).max(500) }),
+  z.object({ ok: z.literal(false), code: z.string().min(1).max(64), sentence: z.string().min(1).max(500) }),
+]);
+export type AgentChannelAutomationProposeResponse = z.infer<typeof AgentChannelAutomationProposeResponse>;
+
+/** One field change of `ocw_record_update`: an RFC 6901 pointer (never `""`) → a scalar value. */
+export type RecordChangeValue = string | number | boolean | null;
+
+/** `POST /records/update` (`ocw_record_update`): never a record id or a hash (the API binds the record to the thread). */
+export type AgentChannelRecordUpdate = {
+  eventId: string;
+  agentId: string;
+  changes: Record<string, RecordChangeValue>;
+};
+
+export const AgentChannelRecordUpdateResponse = z.object({
+  ok: z.boolean(),
+  code: z.string().min(1).max(64).nullable(),
+  sentence: z.string().min(1).max(500),
+});
+export type AgentChannelRecordUpdateResponse = z.infer<typeof AgentChannelRecordUpdateResponse>;
+
+/**
+ * A refusal answered with a non-2xx status whose body still carries the server's sentence (`{ok: false, code,
+ * sentence}`, 403 `tainted`, 409 `record_changed`, …). Anything else in an error body is never read.
+ */
+export const AgentChannelSentenceAnswer = z.object({
+  ok: z.literal(false),
+  code: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]{0,63}$/u)
+    .nullable(),
+  sentence: z.string().min(1).max(500),
+});
+export type AgentChannelSentenceAnswer = z.infer<typeof AgentChannelSentenceAnswer>;
 
 // ---------------------------------------------------------------- confined sandbox tools (07.8, mirror of contracts
 // sandbox.ts and bot-capabilities.ts; parity test in sandbox-tools.test.ts)

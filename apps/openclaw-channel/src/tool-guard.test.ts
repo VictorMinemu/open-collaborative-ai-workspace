@@ -327,6 +327,65 @@ describe("tool guard under abuse (Task 3)", () => {
     expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
   });
 
+  describe("ocw_automation_propose (07.6 AUTO-03, D-02)", () => {
+    const PROPOSE = { untrustedOutput: false, sideEffecting: true };
+    const autoTurn = (flags: TurnContext["toolFlags"][string] = PROPOSE) =>
+      turn({
+        tools: ["web_search", "ocw_automation_propose"],
+        toolFlags: { web_search: WEB, ocw_automation_propose: flags },
+      });
+    const CALL = {
+      name: "Weekly",
+      instructions: "Post it.",
+      cron: "0 17 * * 5",
+      timeZone: "UTC",
+      deliverTo: "here",
+    };
+
+    it("is validated by its own route: never sent to /tool-calls, still counted locally", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: autoTurn() });
+      expect(await g.beforeToolCall(call("ocw_automation_propose", CALL), ctx())).toBeUndefined();
+      expect(fake.requests).toHaveLength(0);
+      expect(g.activeTurn(SESSION)?.calls).toBe(1);
+    });
+
+    it("stays side-effecting whatever the turn's flags say, and an approval flag never lifts the taint block", async () => {
+      for (const flags of [
+        { untrustedOutput: false, sideEffecting: false },
+        { untrustedOutput: false, sideEffecting: true, approval: "always" as const },
+      ]) {
+        const fake = fakeClient();
+        const g = createToolGuard({ client: () => fake.client });
+        g.beginTurn(SESSION, {
+          eventId: "evt-1",
+          agentId: "a1",
+          turn: autoTurn(flags),
+          requesterName: "Ana Pérez",
+        });
+        expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+        expect(await g.beforeToolCall(call("ocw_automation_propose", CALL), ctx())).toEqual({
+          block: true,
+          blockReason:
+            "I can't propose an automation after reading outside content in this turn. Tell Ana Pérez to ask again in a new message.",
+        });
+        expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
+      }
+    });
+
+    it("07.6: a turn begun tainted (a webhook or mail run) refuses it before any call", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: autoTurn(), tainted: true });
+      const r = await g.beforeToolCall(call("ocw_automation_propose", CALL), ctx());
+      expect(r?.block).toBe(true);
+      expect(fake.requests).toHaveLength(0);
+      // A read-only tool still runs on such a turn.
+      expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+    });
+  });
+
   describe("Work Zone proposal tools (07.5-10, D-03, APPROVE-04)", () => {
     const LIST = { untrustedOutput: false, sideEffecting: false };
     const START = { untrustedOutput: false, sideEffecting: true };
