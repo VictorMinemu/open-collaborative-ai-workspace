@@ -111,6 +111,7 @@ const HEAD_ONLY = [
   "20261022213335_browser_takeover_abandoned",
   "20261023003251_work_zone_visibility",
   "20261028214642_runtime_updates",
+  "20261030071129_automations",
   "20261030071644_bots_off_automation_backfill",
 ];
 /** Tables the seed fills; each must keep its exact row count. */

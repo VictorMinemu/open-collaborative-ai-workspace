@@ -605,7 +605,106 @@ async function seedOrg(c: pg.Client, org: string) {
     "insert into app.device_runtime_updates (organization_id, device_id, runtime, run_id, trigger, state, from_version, to_version, candidate, method, started_at, finished_at) values ($1, $2, 'claude-code', $3, 'automatic', 'succeeded', '2.1.289', '2.1.290', '2.1.290', 'native', now(), now())",
     [org, device, randomUUID()],
   );
+
+  // Phase 07.6 (D-01, D-02, D-04, D-06, D-07): one row per new table. A scheduled automation posting to the channel, a
+  // webhook automation filing board cards, a mail automation answering in a thread and the personal digest; the
+  // endpoint (its sealed `webhook_secret`), the mailbox (the organization key), one inbound item per source, a scheduled
+  // and an inbound run, a pending draft, a watched record on the board card with one change, the seeded session's memory
+  // state (proposed to the team project) and a preference. The usage kinds are covered by automations-schema.int.test.ts.
+  const scheduled = randomUUID();
+  const hook = randomUUID();
+  const mail = randomUUID();
+  const digest = randomUUID();
+  await q(
+    "insert into app.automations (id, organization_id, name, agent_id, run_as_user_id, created_by, instructions, trigger_kind, schedule_cron, time_zone, target_kind, conversation_id, next_run_at) values ($1, $2, 'Weekly sales report', $3, $4, $4, 'Summarise the week', 'schedule', '0 17 * * 5', 'Europe/Madrid', 'channel', $5, now() + interval '1 day')",
+    [scheduled, org, agent, user, conv],
+  );
+  await q(
+    "insert into app.automations (id, organization_id, name, agent_id, run_as_user_id, created_by, trigger_kind, target_kind, conversation_id, board_column_id, inbound_action) values ($1, $2, 'Orders to cards', $3, $4, $4, 'webhook', 'board', $5, $6, 'board_card')",
+    [hook, org, agent, user, board, column],
+  );
+  await q(
+    "insert into app.automations (id, organization_id, name, agent_id, run_as_user_id, created_by, trigger_kind, target_kind, conversation_id, thread_root_message_id, inbound_action, inbound_ask_bot) values ($1, $2, 'Support inbox', $3, $4, $4, 'mail', 'thread', $5, $6, 'post', false)",
+    [mail, org, agent, user, conv, msg],
+  );
+  await q(
+    `insert into app.automations (id, organization_id, name, agent_id, run_as_user_id, created_by, action_kind, trigger_kind, schedule_cron, time_zone, target_kind, config) values ($1, $2, 'Daily digest', $3, $4, $4, 'digest', 'schedule', '0 8 * * 1-5', 'Europe/Madrid', 'dm', '{"sections":["mentions"]}')`,
+    [digest, org, personal, user],
+  );
+  const hookSecret = randomUUID();
+  await q(
+    "insert into app.secrets (id, organization_id, name, kind, ciphertext, iv, tag) values ($1, $2, 'hook', 'webhook_secret', 'c', 'i', 't')",
+    [hookSecret, org],
+  );
+  const endpoint = randomUUID();
+  await q(
+    "insert into app.webhook_endpoints (id, organization_id, automation_id, public_id, secret_id) values ($1, $2, $3, $4, $5)",
+    // 26 hex characters are valid Crockford base32.
+    [endpoint, org, hook, endpoint.replace(/-/g, "").slice(0, 26), hookSecret],
+  );
+  const mailbox = randomUUID();
+  await q(
+    "insert into app.mailboxes (id, organization_id, automation_id, owner_user_id, vault_item_id, host, port, folder, poll_interval_minutes) values ($1, $2, $3, $4, $5, 'imap.example.test', 993, 'INBOX', 5)",
+    [mailbox, org, mail, user, orgVaultItem],
+  );
+  const hookEvent = randomUUID();
+  await q(
+    `insert into app.automation_events (id, organization_id, source, webhook_endpoint_id, external_id, body_json, result) values ($1, $2, 'webhook', $3, 'msg_2Lh9', '{"order":"SO-1001"}', 'accepted')`,
+    [hookEvent, org, endpoint],
+  );
+  await q(
+    "insert into app.automation_events (organization_id, source, mailbox_id, external_id, thread_key, subject, sender, body_text, result) values ($1, 'mail', $2, '<a1@example.test>', '<a1@example.test>', 'Broken pump', 'ana@example.test', 'The pump is broken', 'accepted')",
+    [org, mailbox],
+  );
+  await q(
+    "insert into app.automation_runs (organization_id, automation_id, trigger, scheduled_for, status, anchor_message_id, delivered_at) values ($1, $2, 'schedule', now() - interval '1 day', 'delivered', $3, now())",
+    [org, scheduled, msg],
+  );
+  await q(
+    "insert into app.automation_runs (organization_id, automation_id, trigger, inbound_event_id, status, board_card_message_id, tainted) values ($1, $2, 'webhook', $3, 'queued', $4, true)",
+    [org, hook, hookEvent, cardRoot],
+  );
+  await q(
+    "insert into app.automation_drafts (organization_id, agent_id, run_as_user_id, event_id, name, instructions, schedule_cron, time_zone, target_kind, conversation_id, max_runs_per_day) values ($1, $2, $3, $4, 'Monday standup', 'Ask for blockers', '0 9 * * 1', 'Europe/Madrid', 'channel', $5, 1)",
+    [org, agent, user, eventId, conv],
+  );
+  const watched = randomUUID();
+  await q(
+    `insert into app.watched_records (id, organization_id, card_message_id, conversation_id, agent_id, mcp_server_id, external_ref, read_tool, id_arg, fields, snapshot, snapshot_hash, check_as_user_id, check_interval_minutes, created_by) values ($1, $2, $3, $4, $5, $6, 'SO-1001', 'get_order', 'id', '[{"pointer":"/status","label":"Status"}]', '{"/status":"open"}', $7, $8, 60, $8)`,
+    [watched, org, cardRoot, board, agent, mcp, "b".repeat(64), user],
+  );
+  await q(
+    `insert into app.watched_record_changes (organization_id, watched_record_id, source, before, after, before_hash, after_hash) values ($1, $2, 'schedule', '{"/status":"new"}', '{"/status":"open"}', $3, $4)`,
+    [org, watched, "a".repeat(64), "b".repeat(64)],
+  );
+  await q(
+    "insert into app.work_session_memory (work_session_id, organization_id, unit_id, status, approval_id, summarized_seq) values ($1, $2, $3, 'proposed', $4, 12)",
+    [ws, org, projectUnit, randomUUID()],
+  );
+  await q(
+    "insert into app.work_memory_prefs (organization_id, user_id, auto_propose) values ($1, $2, true)",
+    [org, user],
+  );
+  // The platform-owned card labels (UI-SPEC R1) on the seeded card.
+  await q(
+    `update app.message_cards set status_label = 'Received', notices = '[{"tone":"warning","text":"From outside the workspace"}]' where message_id = $1`,
+    [cardMsg],
+  );
 }
+
+/** Phase 07.6: the ten automation, inbound, watched-record and Work Zone memory tables. */
+const AUTOMATION_TABLES = [
+  "app.automations",
+  "app.automation_runs",
+  "app.automation_drafts",
+  "app.webhook_endpoints",
+  "app.mailboxes",
+  "app.automation_events",
+  "app.watched_records",
+  "app.watched_record_changes",
+  "app.work_session_memory",
+  "app.work_memory_prefs",
+] as const;
 
 const SANDBOX_TABLES = [
   "app.sandbox_policies",
@@ -2803,6 +2902,65 @@ describe("tenant isolation (RLS)", () => {
       ).rows[0].n;
     });
     expect(orgGone).toBe(0);
+  });
+
+  it("Phase 07.6: the ten automation, inbound, watched-record and Work Zone memory tables are org-scoped, forced, seeded and invisible and unwritable across tenants (C-02)", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    for (const tbl of AUTOMATION_TABLES) {
+      // Tenant isolation, plus the RESTRICTIVE audience backstop on work_session_memory (a session's memory state
+      // follows its session, as work_prompts and work_approvals do).
+      const backstop = tbl === "app.work_session_memory";
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: backstop ? 2 : 1 });
+      const seeded = await migrator.query(
+        `select count(*)::int as n from ${tbl} where organization_id = $1`,
+        [B],
+      );
+      expect(seeded.rows[0].n, `${tbl} has B rows`).toBeGreaterThan(0);
+      const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
+      expect(own.rows[0].n, `${tbl} seeded for A`).toBeGreaterThan(0);
+      const cross = await inTenant(A, () =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [B]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant select`).toBe(0);
+      // UPDATE / DELETE of B's rows from A affect 0 rows (watched_record_changes is append-only: not even granted).
+      for (const stmt of [
+        `update ${tbl} set organization_id = organization_id where organization_id = $1`,
+        `delete from ${tbl} where organization_id = $1`,
+      ]) {
+        const n = await inTenant(A, () =>
+          app.query(stmt, [B]).then(
+            (res) => res.rowCount,
+            (err: Error) => (/permission denied/.test(err.message) ? 0 : Promise.reject(err)),
+          ),
+        );
+        expect(n, `${tbl}: ${stmt}`).toBe(0);
+      }
+      // INSERT of a copy of B's row while in A's context is refused by the tenant policy.
+      const row = await migrator.query(
+        `select row_to_json(t) as j from ${tbl} t where organization_id = $1 limit 1`,
+        [B],
+      );
+      await expect(
+        inTenant(A, () =>
+          app.query(`insert into ${tbl} select * from json_populate_record(null::${tbl}, $1::json)`, [
+            JSON.stringify(row.rows[0].j),
+          ]),
+        ),
+        `${tbl} cross-tenant insert`,
+      ).rejects.toThrow(/row-level security/);
+      // Moving one of A's own rows into B is refused by the tenant policy (or first by a composite foreign key, which
+      // carries the organization and so finds no parent in B), or not granted at all (append-only changes).
+      await expect(
+        inTenant(A, () =>
+          app.query(`update ${tbl} set organization_id = $1 where organization_id = $2`, [B, A]),
+        ),
+        `${tbl} cross-tenant move`,
+      ).rejects.toThrow(/row-level security|violates foreign key constraint|permission denied/);
+      const still = await migrator.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [
+        B,
+      ]);
+      expect(still.rows[0].n, `${tbl} B rows intact`).toBe(seeded.rows[0].n);
+    }
   });
 
   it("Phase 07.11 schema constraints: the update history is org-scoped and checked, the policy level too (D-02, D-06, PD-04)", async () => {
