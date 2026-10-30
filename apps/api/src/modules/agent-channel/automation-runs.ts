@@ -51,8 +51,8 @@ type StoredAutomationRun = Omit<AgentAutomationRunEvent, "seq">;
 export const automationInactive = () =>
   new HttpError(409, "automation_inactive", "This automation no longer exists");
 
-/** The kinds a run may be delivered in (a channel thread or a DM; never an AI chat). */
-const RUN_KINDS = ["channel", "dm", "group"] as const;
+/** The kinds a run may be delivered in: a channel (its thread, a board card's thread) or a DM; never an AI chat. */
+const RUN_KINDS = ["channel", "dm"] as const;
 
 /**
  * The server's sentence for a run (the message the bot reads, and the run card's summary): who it is for and what
