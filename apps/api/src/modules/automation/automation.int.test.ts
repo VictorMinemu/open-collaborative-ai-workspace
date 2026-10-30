@@ -26,7 +26,6 @@ let eve: TestClient;
 let orgA: string;
 let anaId: string;
 let victorId: string;
-let samId: string;
 let scoutId: string;
 let personalBotId: string;
 let oldBotId: string;
@@ -139,7 +138,7 @@ beforeAll(async () => {
     "Víctor Ruiz",
     "standard",
   ));
-  ({ client: sam, userId: samId } = await invite(stack, ana, "sam@example.test", "Sam Lee", "standard"));
+  ({ client: sam } = await invite(stack, ana, "sam@example.test", "Sam Lee", "standard"));
   ({ client: marta } = await invite(stack, ana, "marta@example.test", "Marta Gil", "lead"));
   const { client: eveClient, userId: eveId } = await invite(
     stack,
@@ -323,5 +322,385 @@ describe("trigger seams (Task 2): webhook and mail triggers go through their ada
     );
     expect(Number((await su.query("select count(*) from app.automations")).rows[0].count)).toBe(countBefore);
     expect(await audits("automation.created")).toHaveLength(countBefore);
+  });
+});
+
+describe("governance (Task 4, D-07, P-04, R12): managers pause and delete, never edit, resume or run", () => {
+  let id: string;
+  const due = async () =>
+    (await su.query("select id from app.due_automations(1000, now() + interval '30 days')")).rows.map(
+      (r) => r.id as string,
+    );
+
+  beforeAll(async () => {
+    id = (await ok(victor.request("POST", "/api/v1/automations", weekly({ name: "Pipeline review" })), 201))
+      .automation.id;
+  });
+
+  it("Ana lists everyone's automations with who they run as; Sam may not ask for everyone's", async () => {
+    const all = await ok(ana.request("GET", "/api/v1/automations?scope=all"));
+    expect(all.canManage).toBe(true);
+    const row = (all.automations as Json[]).find((a) => a.id === id);
+    expect(row?.runAs).toEqual({ id: victorId, displayName: "Víctor Ruiz" });
+    expect(row?.viewerCan).toEqual(["pause", "delete"]);
+    expect((await ok(ana.request("GET", "/api/v1/automations"))).automations).toEqual([]);
+    await fails(sam.request("GET", "/api/v1/automations?scope=all"), 403, "not_allowed");
+  });
+
+  it("Ana pauses it (audited as her, off the due list) but gets 403 on edit, resume and Run now", async () => {
+    expect(await due()).toContain(id);
+    const paused = await ok(ana.request("POST", `/api/v1/automations/${id}/pause`));
+    expect(paused.status).toBe("paused");
+    expect(paused.pausedBy).toEqual({ id: anaId, displayName: "Ana Díaz" });
+    expect(paused.nextRunAt).not.toBeNull();
+    expect(await due()).not.toContain(id);
+    const [audit] = await audits("automation.paused", id);
+    expect(audit!.user_id).toBe(anaId);
+    expect(audit!.metadata).toEqual({ automationId: id, runAsUserId: victorId, previousStatus: "active" });
+
+    await fails(ana.request("POST", `/api/v1/automations/${id}/resume`), 403, "not_allowed");
+    await fails(
+      ana.request("PATCH", `/api/v1/automations/${id}`, {
+        expectedVersion: paused.version,
+        name: "Mine now",
+      }),
+      403,
+      "not_allowed",
+    );
+    await fails(ana.request("POST", `/api/v1/automations/${id}/run`), 403, "not_allowed");
+    await fails(victor.request("POST", `/api/v1/automations/${id}/run`), 409, "automation_inactive");
+  });
+
+  it("only Víctor resumes it, which resets the breaker and puts it back on the due list", async () => {
+    await su.query("update app.automations set consecutive_failures = 2 where id = $1", [id]);
+    const resumed = await ok(victor.request("POST", `/api/v1/automations/${id}/resume`));
+    expect(resumed.status).toBe("active");
+    expect(resumed.consecutiveFailures).toBe(0);
+    expect(resumed.pausedBy).toBeNull();
+    expect(await due()).toContain(id);
+    const [audit] = await audits("automation.resumed", id);
+    expect(audit!.user_id).toBe(victorId);
+    expect(audit!.metadata).toEqual({ automationId: id, previousStatus: "paused" });
+  });
+
+  it("Sam, another member, gets 404 on every route of Víctor's automation", async () => {
+    await fails(sam.request("GET", `/api/v1/automations/${id}`), 404);
+    await fails(sam.request("PATCH", `/api/v1/automations/${id}`, { expectedVersion: 1, name: "x" }), 404);
+    await fails(sam.request("POST", `/api/v1/automations/${id}/pause`), 404);
+    await fails(sam.request("POST", `/api/v1/automations/${id}/resume`), 404);
+    await fails(sam.request("POST", `/api/v1/automations/${id}/run`), 404);
+    await fails(sam.request("GET", `/api/v1/automations/${id}/runs`), 404);
+    await fails(sam.request("DELETE", `/api/v1/automations/${id}`), 404);
+    await fails(eve.request("DELETE", `/api/v1/automations/${id}`), 404);
+  });
+
+  it("Víctor's edits check the version; a new schedule recomputes the next run, a rename keeps it", async () => {
+    const current = await ok(victor.request("GET", `/api/v1/automations/${id}`));
+    await fails(
+      victor.request("PATCH", `/api/v1/automations/${id}`, { expectedVersion: 1, name: "Stale" }),
+      409,
+      "version",
+    );
+    const rescheduled = (
+      await ok(
+        victor.request("PATCH", `/api/v1/automations/${id}`, {
+          expectedVersion: current.version,
+          trigger: { kind: "schedule", schedule: { cron: "0 9 * * 1", timeZone: "Australia/Sydney" } },
+        }),
+      )
+    ).automation as Json;
+    expect(rescheduled.version).toBe(current.version + 1);
+    expect(rescheduled.nextRunAt).not.toBe(current.nextRunAt);
+    expect(
+      new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Australia/Sydney",
+        weekday: "short",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      }).format(new Date(rescheduled.nextRunAt)),
+    ).toBe("Mon 09:00");
+    const renamed = (
+      await ok(
+        victor.request("PATCH", `/api/v1/automations/${id}`, {
+          expectedVersion: rescheduled.version,
+          name: "Pipeline review (APAC)",
+        }),
+      )
+    ).automation as Json;
+    expect(renamed.nextRunAt).toBe(rescheduled.nextRunAt);
+    const updates = await audits("automation.updated", id);
+    expect(updates.map((u) => u.metadata.changed)).toEqual([["trigger"], ["name"]]);
+    expect(JSON.stringify(updates)).not.toMatch(/APAC|Pipeline/);
+    await fails(
+      victor.request("PATCH", `/api/v1/automations/${id}`, {
+        expectedVersion: renamed.version,
+        target: { kind: "channel", conversationId: ops },
+      }),
+      400,
+      "agent_not_member",
+    );
+  });
+
+  it("Run now queues a manual run and exactly one ids-only automation.fire job in the same transaction", async () => {
+    const { runId } = await ok(victor.request("POST", `/api/v1/automations/${id}/run`), 202);
+    const run = (await su.query("select * from app.automation_runs where id = $1", [runId])).rows[0];
+    expect(run).toMatchObject({
+      automation_id: id,
+      trigger: "manual",
+      status: "queued",
+      scheduled_for: null,
+    });
+    const jobs = (
+      await su.query("select data from pgboss.job where name = 'automation.fire' and data->>'runId' = $1", [
+        runId,
+      ])
+    ).rows;
+    expect(jobs.map((j) => j.data)).toEqual([{ organizationId: orgA, runId }]);
+    const [audit] = await audits("automation.run_started", id);
+    expect(audit!.metadata).toEqual({ automationId: id, runId, trigger: "manual" });
+    const runEvents = (
+      await su.query(
+        "select payload from app.stream_events where stream_id = $1 and type = 'automation_run.updated'",
+        [`user:${victorId}`],
+      )
+    ).rows.map((r) => r.payload);
+    expect(runEvents).toContainEqual({ automationId: id, runId });
+  });
+
+  it("lists runs newest first, 30 a page with a cursor; at the daily budget Run now records a skipped run", async () => {
+    for (let i = 1; i <= 31; i++) {
+      await su.query(
+        `insert into app.automation_runs (organization_id, automation_id, trigger, status, created_at)
+         values ($1, $2, 'manual', 'answered', now() - make_interval(secs => $3))`,
+        [orgA, id, i],
+      );
+    }
+    const first = await ok(victor.request("GET", `/api/v1/automations/${id}/runs`));
+    expect(first.runs).toHaveLength(30);
+    const times = (first.runs as Json[]).map((r) => Date.parse(r.createdAt));
+    expect([...times].sort((a, b) => b - a)).toEqual(times);
+    expect(first.runs[0].status).toBe("queued");
+    expect(first.nextCursor).toBe(first.runs[29].id);
+    const second = await ok(
+      victor.request("GET", `/api/v1/automations/${id}/runs?before=${first.nextCursor}`),
+    );
+    expect(second.runs).toHaveLength(2);
+    expect(second.nextCursor).toBeNull();
+    const managerView = await ok(ana.request("GET", `/api/v1/automations/${id}/runs`));
+    expect(managerView.runs).toHaveLength(30);
+    await fails(eve.request("GET", `/api/v1/automations/${id}/runs`), 404);
+
+    const jobsBefore = Number(
+      (await su.query("select count(*) from pgboss.job where name = 'automation.fire'")).rows[0].count,
+    );
+    const { runId } = await ok(victor.request("POST", `/api/v1/automations/${id}/run`), 202);
+    expect(
+      (await su.query("select status, reason from app.automation_runs where id = $1", [runId])).rows,
+    ).toEqual([{ status: "skipped", reason: "runs_per_day" }]);
+    expect(
+      Number(
+        (await su.query("select count(*) from pgboss.job where name = 'automation.fire'")).rows[0].count,
+      ),
+    ).toBe(jobsBefore);
+  });
+
+  it("Ana deletes it: 204, audited as her with whose it was, announced to Víctor, gone with its runs", async () => {
+    const res = await ana.request("DELETE", `/api/v1/automations/${id}`);
+    expect(res.status).toBe(204);
+    const [audit] = await audits("automation.deleted", id);
+    expect(audit!.user_id).toBe(anaId);
+    expect(audit!.metadata).toMatchObject({
+      automationId: id,
+      runAsUserId: victorId,
+      triggerKind: "schedule",
+    });
+    await fails(victor.request("GET", `/api/v1/automations/${id}`), 404);
+    expect(
+      Number(
+        (await su.query("select count(*) from app.automation_runs where automation_id = $1", [id])).rows[0]
+          .count,
+      ),
+    ).toBe(0);
+    expect((await userEvents(victorId, id)).length).toBeGreaterThanOrEqual(5);
+  });
+});
+
+describe("targets are decided for the creator and the bot (Task 4, P-08)", () => {
+  it("refuses a bot outside the target, a target the creator can't post in and a disabled bot", async () => {
+    await fails(
+      victor.request(
+        "POST",
+        "/api/v1/automations",
+        weekly({ target: { kind: "channel", conversationId: ops } }),
+      ),
+      400,
+      "agent_not_member",
+    );
+    await fails(
+      victor.request(
+        "POST",
+        "/api/v1/automations",
+        weekly({ target: { kind: "channel", conversationId: announcements } }),
+      ),
+      400,
+      "target_not_postable",
+    );
+    await fails(
+      victor.request("POST", "/api/v1/automations", weekly({ agentId: oldBotId })),
+      400,
+      "agent_unavailable",
+    );
+    // Someone else's personal bot reads exactly like an unavailable one.
+    await fails(
+      sam.request("POST", "/api/v1/automations", weekly({ agentId: personalBotId, target: { kind: "dm" } })),
+      400,
+      "agent_unavailable",
+    );
+  });
+
+  it("a personal bot delivers only to its owner's DM", async () => {
+    await fails(
+      victor.request("POST", "/api/v1/automations", weekly({ agentId: personalBotId })),
+      400,
+      "personal_bot_target",
+    );
+    const dm = await ok(
+      victor.request(
+        "POST",
+        "/api/v1/automations",
+        weekly({ name: "Morning plan", agentId: personalBotId, target: { kind: "dm" } }),
+      ),
+      201,
+    );
+    expect(dm.automation.target.kind).toBe("dm");
+    expect(dm.automation.target.label).toMatch(/^Your DM with /);
+    expect(dm.automation.agent.personal).toBe(true);
+  });
+
+  it("a board target needs a column of that board; a targeted column can't be deleted (409)", async () => {
+    await fails(
+      victor.request(
+        "POST",
+        "/api/v1/automations",
+        weekly({ target: { kind: "board", conversationId: orders, columnId: intakeColumn } }),
+      ),
+      400,
+      "target_not_postable",
+    );
+    await fails(
+      victor.request(
+        "POST",
+        "/api/v1/automations",
+        weekly({ target: { kind: "channel", conversationId: orders } }),
+      ),
+      400,
+      "target_not_postable",
+    );
+    const board = await ok(
+      victor.request(
+        "POST",
+        "/api/v1/automations",
+        weekly({
+          name: "Order intake",
+          target: { kind: "board", conversationId: orders, columnId: ordersColumn },
+        }),
+      ),
+      201,
+    );
+    expect(board.automation.target).toMatchObject({
+      kind: "board",
+      conversationId: orders,
+      columnId: ordersColumn,
+    });
+    expect(board.automation.target.label).toMatch(/^orders board · /);
+    await fails(
+      ana.request("DELETE", `/api/v1/boards/${orders}/columns/${ordersColumn}`),
+      409,
+      "board_column_has_automations",
+    );
+  });
+
+  it("target options list the bot's places with the reason a place can't be picked, boards with columns", async () => {
+    const opts = await ok(victor.request("GET", `/api/v1/automations/target-options?agentId=${scoutId}`));
+    const byId = new Map((opts.conversations as Json[]).map((c) => [c.conversationId, c]));
+    expect(byId.get(sales)).toMatchObject({
+      name: "sales",
+      layout: "text",
+      disabledReason: null,
+      columns: [],
+    });
+    expect(byId.get(ops)?.disabledReason).toBe("agent_not_member");
+    expect(byId.get(announcements)?.disabledReason).toBe("target_not_postable");
+    expect(byId.get(orders)?.layout).toBe("board");
+    expect(byId.get(orders)?.disabledReason).toBeNull();
+    expect(((byId.get(orders)?.columns ?? []) as Json[]).map((c) => c.id)).toContain(ordersColumn);
+    expect(
+      (await ok(victor.request("GET", `/api/v1/automations/target-options?agentId=${personalBotId}`)))
+        .conversations,
+    ).toEqual([]);
+    await fails(sam.request("GET", `/api/v1/automations/target-options?agentId=${personalBotId}`), 404);
+  });
+});
+
+describe("caps and webhook rights (Task 4, P-09)", () => {
+  it("refuses a webhook trigger without automation.webhook and runs per day above the workspace cap", async () => {
+    await fails(
+      sam.request("POST", "/api/v1/automations", {
+        ...weekly({ target: { kind: "dm" } }),
+        trigger: { kind: "webhook" },
+        inbound: { action: "post", askBot: true, config: {} },
+      }),
+      403,
+      "webhook_not_allowed",
+    );
+    const tooMany = await fails(
+      sam.request("POST", "/api/v1/automations", weekly({ target: { kind: "dm" }, maxRunsPerDay: 97 })),
+      400,
+    );
+    expect(tooMany.error.details).toEqual({ max: 96 });
+  });
+
+  it("the 11th automation of one person is refused with 409 automation_cap", async () => {
+    for (let i = 1; i <= 10; i++) {
+      await ok(
+        sam.request("POST", "/api/v1/automations", weekly({ name: `Sam ${i}`, target: { kind: "dm" } })),
+        201,
+      );
+    }
+    await fails(
+      sam.request("POST", "/api/v1/automations", weekly({ name: "Sam 11", target: { kind: "dm" } })),
+      409,
+      "automation_cap",
+    );
+    expect((await ok(sam.request("GET", "/api/v1/automations"))).usage).toEqual({ used: 10, max: 10 });
+  });
+
+  it("options tell who may create and add webhooks, with the caps and the usable bots", async () => {
+    const samOpts = await ok(sam.request("GET", "/api/v1/automations/options"));
+    expect(samOpts.canCreate).toBe(true);
+    expect(samOpts.canWebhook).toBe(false);
+    expect(samOpts.caps).toEqual({
+      maxAutomationsPerUser: 10,
+      used: 10,
+      minScheduleMinutes: 15,
+      maxInboundPerHour: 30,
+      maxRunsPerDayCap: 96,
+    });
+    const samBots = new Map((samOpts.bots as Json[]).map((b) => [b.id, b]));
+    expect(samBots.get(scoutId)).toEqual({
+      id: scoutId,
+      displayName: "Scout",
+      personal: false,
+      unitName: null,
+      ready: true,
+    });
+    expect(samBots.has(oldBotId)).toBe(false);
+    expect(samBots.has(personalBotId)).toBe(false);
+    expect(samOpts.botDailyLimit[scoutId]).toBe(100);
+
+    expect((await ok(marta.request("GET", "/api/v1/automations/options"))).canWebhook).toBe(true);
+    const victorBots = (await ok(victor.request("GET", "/api/v1/automations/options"))).bots as Json[];
+    expect(victorBots.find((b) => b.id === personalBotId)?.personal).toBe(true);
   });
 });

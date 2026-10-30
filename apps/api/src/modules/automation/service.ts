@@ -1,10 +1,17 @@
 import {
+  AUTOMATION_LIMITS,
   type Automation,
   type AutomationActionKind,
+  type AutomationInbound,
   type AutomationList,
   type AutomationListQuery,
+  type AutomationOptions,
+  type AutomationRun,
+  type AutomationRunList,
+  type AutomationRunListQuery,
   type AutomationRunReason,
   type AutomationTarget,
+  type AutomationTargetOptions,
   type AutomationTargetView,
   type AutomationViewerAction,
   type CreateAutomationRequest,
@@ -13,6 +20,7 @@ import {
   type InboundConfig,
   type SchedulePreviewRequest,
   type SchedulePreviewResponse,
+  type UpdateAutomationRequest,
 } from "@ocw/contracts";
 import {
   agents,
@@ -21,13 +29,15 @@ import {
   boardColumns,
   botPolicies,
   conversations,
+  messages,
   orgMembers,
   type Tx,
   tenantOf,
 } from "@ocw/db";
-import { and, count, desc, eq, gte, inArray, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, inArray, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { HttpError } from "../../lib/errors";
+import { effectiveDailyLimit, loadPolicy, readCapabilities } from "../bot-capabilities";
 import type { ConversationAccess } from "../chat";
 import type { PermissionService } from "../organization";
 import {
@@ -35,8 +45,10 @@ import {
   canCreate,
   canManage,
   canWebhook,
+  decideConversation,
   decideTarget,
   type TargetCode,
+  usableBots,
 } from "./access";
 import {
   type ActionKindHandler,
@@ -81,8 +93,26 @@ export interface AutomationService {
     input: CreateAutomationRequest,
     opts?: { actionKind?: AutomationActionKind; config?: Record<string, unknown> },
   ): Promise<CreateAutomationResponse>;
+  /** The owner only (a manager gets 403, P-04); re-decides the target and the trigger entity in the same tx. */
+  update(
+    tx: Tx,
+    actor: AutomationActor,
+    id: string,
+    input: UpdateAutomationRequest,
+  ): Promise<CreateAutomationResponse>;
+  /** The owner or an `automation.manage` holder; the trigger entity goes first (R3). */
+  remove(tx: Tx, actor: AutomationActor, id: string): Promise<void>;
+  /** The owner or an `automation.manage` holder (`pausedBy` records who). */
+  pause(tx: Tx, actor: AutomationActor, id: string): Promise<Automation>;
+  /** The owner only: resuming restarts runs as them (P-04, D-09). Resets the breaker. */
+  resume(tx: Tx, actor: AutomationActor, id: string): Promise<Automation>;
+  /** "Run now" (owner only, active only): a `manual` run and its `automation.fire` job in this transaction. */
+  runNow(tx: Tx, actor: AutomationActor, id: string): Promise<{ runId: string }>;
   get(tx: Tx, actor: AutomationActor, id: string): Promise<Automation>;
   list(tx: Tx, actor: AutomationActor, q: AutomationListQuery): Promise<AutomationList>;
+  runs(tx: Tx, actor: AutomationActor, id: string, q: AutomationRunListQuery): Promise<AutomationRunList>;
+  options(tx: Tx, actor: AutomationActor): Promise<AutomationOptions>;
+  targetOptions(tx: Tx, actor: AutomationActor, agentId: string): Promise<AutomationTargetOptions>;
   preview(tx: Tx, input: SchedulePreviewRequest): Promise<SchedulePreviewResponse>;
   caps(tx: Tx): Promise<AutomationCaps>;
   toDto(tx: Tx, row: AutomationRow, viewer: AutomationActor): Promise<Automation>;
@@ -108,6 +138,10 @@ export function targetError(code: TargetCode): HttpError {
 
 const notAllowed = () => new HttpError(403, "not_allowed", "You can't create automations. Ask an admin.");
 const notFound = () => new HttpError(404, "not_found", NOT_FOUND);
+const runsPerDayError = (max: number) =>
+  new HttpError(400, "bad_request", `Use a whole number from 1 to ${max}`, { max });
+const versionConflict = () =>
+  new HttpError(409, "version", "This automation changed while you were editing. Reload it.");
 
 /** The columns of a target (stable ids only, principle 11). */
 export function targetColumns(target: AutomationTarget, conversationId: string | null) {
@@ -142,6 +176,12 @@ export function targetOf(row: AutomationRow): AutomationTarget {
 }
 
 const iso = (v: string | null) => (v === null ? null : new Date(v).toISOString());
+
+/** The stored inbound rule in its request form (null for a schedule). */
+function inboundOf(row: AutomationRow): AutomationInbound | null {
+  if (row.inboundAction === null) return null;
+  return { action: row.inboundAction, askBot: row.inboundAskBot, config: row.inboundConfig as InboundConfig };
+}
 
 const utcMidnight = (now = new Date()) =>
   new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
@@ -196,6 +236,39 @@ export function createAutomationService(
     const manage = await canManage(perms, tx, actor);
     if (!owner && !manage) throw notFound();
     return { row, owner };
+  }
+
+  /** `visible`, then the owner alone: a manager is told 403 (they govern, never act as someone else, P-04). */
+  async function owned(tx: Tx, actor: AutomationActor, id: string, message: string) {
+    const { row, owner } = await visible(tx, actor, id);
+    if (!owner) throw new HttpError(403, "not_allowed", message);
+    if (!(await canCreate(perms, tx, actor))) throw notAllowed();
+    return row;
+  }
+
+  /** The row locked for this transaction (every mutation serialises on it). */
+  async function locked(tx: Tx, id: string): Promise<AutomationRow> {
+    const [row] = await tx.select().from(automations).where(eq(automations.id, id)).for("update");
+    if (!row) throw notFound();
+    return row;
+  }
+
+  /** Writes `changes` with `version + 1` and returns the new row. */
+  async function bump(tx: Tx, row: AutomationRow, changes: Partial<typeof automations.$inferInsert>) {
+    const [after] = await tx
+      .update(automations)
+      .set({ ...changes, version: row.version + 1, updatedAt: sql`now()` })
+      .where(and(eq(automations.id, row.id), eq(automations.version, row.version)))
+      .returning();
+    if (!after) throw versionConflict();
+    return after;
+  }
+
+  async function announceRun(tx: Tx, row: Pick<AutomationRow, "id" | "runAsUserId">, runId: string) {
+    await core.realtime.appendEvent(tx, `user:${row.runAsUserId}`, EventTypes.automationRunUpdated, {
+      automationId: row.id,
+      runId,
+    });
   }
 
   async function announce(tx: Tx, row: Pick<AutomationRow, "id" | "runAsUserId">) {
@@ -356,14 +429,7 @@ export function createAutomationService(
           mailbox: row.triggerKind === "mail" ? await mailTrigger.view(tx, row, triggerDeps) : null,
         },
         target: { ...target, label } as AutomationTargetView,
-        inbound:
-          row.inboundAction === null
-            ? null
-            : {
-                action: row.inboundAction,
-                askBot: row.inboundAskBot,
-                config: row.inboundConfig as InboundConfig,
-              },
+        inbound: inboundOf(row),
         maxRunsPerDay: row.maxRunsPerDay,
         status: row.status,
         pausedBy: row.pausedBy
@@ -440,11 +506,7 @@ export function createAutomationService(
           );
         }
       }
-      if (input.maxRunsPerDay > caps.maxRunsPerDayCap) {
-        throw new HttpError(400, "bad_request", `Use a whole number from 1 to ${caps.maxRunsPerDayCap}`, {
-          max: caps.maxRunsPerDayCap,
-        });
-      }
+      if (input.maxRunsPerDay > caps.maxRunsPerDayCap) throw runsPerDayError(caps.maxRunsPerDayCap);
       let nextRunAt: string | null = null;
       if (trigger.kind === "schedule") {
         const check = validateSchedule(trigger.schedule, caps.minScheduleMinutes);
@@ -533,6 +595,360 @@ export function createAutomationService(
         usage: { used: await ownCount(tx, actor.userId), max: caps.maxAutomationsPerUser },
         canManage: manage,
       };
+    },
+
+    async update(tx, actor, id, input) {
+      await owned(tx, actor, id, "Only its owner can edit an automation");
+      const before = await locked(tx, id);
+      if (before.version !== input.expectedVersion) throw versionConflict();
+      if (before.actionKind === "digest") {
+        throw new HttpError(400, "bad_request", "Change the digest in its own settings");
+      }
+      const trigger = input.trigger;
+      const kind = trigger?.kind ?? before.triggerKind;
+      if (
+        trigger?.kind === "webhook" &&
+        before.triggerKind !== "webhook" &&
+        !(await canWebhook(perms, tx, actor))
+      ) {
+        throw new HttpError(403, "webhook_not_allowed", "Only team leads and admins can create webhooks.");
+      }
+      const caps = await loadCaps(tx);
+      if (input.maxRunsPerDay !== undefined && input.maxRunsPerDay > caps.maxRunsPerDayCap) {
+        throw runsPerDayError(caps.maxRunsPerDayCap);
+      }
+      let schedule = { cron: before.scheduleCron, timeZone: before.timeZone, nextRunAt: before.nextRunAt };
+      if (trigger?.kind === "schedule") {
+        const check = validateSchedule(trigger.schedule, caps.minScheduleMinutes);
+        if (!check.ok) throw scheduleError(check.code, caps.minScheduleMinutes);
+        const same =
+          before.triggerKind === "schedule" &&
+          before.scheduleCron === trigger.schedule.cron &&
+          before.timeZone === trigger.schedule.timeZone;
+        schedule = {
+          ...trigger.schedule,
+          // A changed schedule starts from now; an unchanged one keeps its grid.
+          nextRunAt: same ? before.nextRunAt : firstRunAt(trigger.schedule).toISOString(),
+        };
+      } else if (trigger) {
+        schedule = { cron: null, timeZone: null, nextRunAt: null };
+      }
+      // The inbound rule follows the trigger: kept while the kind stays, required for webhook and mail, none otherwise.
+      const inbound =
+        input.inbound !== undefined ? input.inbound : kind === before.triggerKind ? inboundOf(before) : null;
+      if (kind === "schedule" && inbound)
+        throw new HttpError(400, "bad_request", "A schedule has no inbound rule");
+      if (kind !== "schedule" && !inbound) {
+        throw new HttpError(400, "bad_request", "A webhook or mail trigger needs an inbound rule");
+      }
+      const target = input.target ?? targetOf(before);
+      if (inbound?.action === "board_card" && target.kind !== "board") {
+        throw new HttpError(400, "bad_request", "A board card needs a board target");
+      }
+      const agentId = input.agentId ?? before.agentId;
+      // Every save re-decides the target for the owner and the bot (P-08), whatever changed.
+      const decided = await decideTarget(tx, perms, { agentId, userId: actor.userId, target });
+      if (!decided.ok) throw targetError(decided.code);
+
+      const after = await bump(tx, before, {
+        name: input.name ?? before.name,
+        agentId,
+        instructions: input.instructions ?? before.instructions,
+        triggerKind: kind,
+        scheduleCron: schedule.cron,
+        timeZone: schedule.timeZone,
+        nextRunAt: schedule.nextRunAt,
+        ...targetColumns(target, decided.conversationId),
+        inboundAction: inbound?.action ?? null,
+        inboundAskBot: inbound?.askBot ?? true,
+        inboundConfig: inbound?.config ?? {},
+        maxRunsPerDay: input.maxRunsPerDay ?? before.maxRunsPerDay,
+      });
+      // R3: the trigger's entity changes with the automation, in this transaction.
+      let made: { webhookSecret?: string } = {};
+      if (trigger && trigger.kind !== before.triggerKind) {
+        if (before.triggerKind !== "schedule")
+          await adapterOf(before.triggerKind).onDelete(tx, before, triggerDeps);
+        if (trigger.kind !== "schedule")
+          made = await adapterOf(trigger.kind).onCreate(tx, after, trigger, triggerDeps);
+      } else if (trigger && trigger.kind !== "schedule") {
+        made = await adapterOf(trigger.kind).onUpdate(tx, before, after, trigger, triggerDeps);
+      }
+      const { expectedVersion: _version, ...changes } = input;
+      await core.audit.record(tx, {
+        action: "automation.updated",
+        resourceType: "automation",
+        resourceId: after.id,
+        userId: actor.userId,
+        agentId: after.agentId,
+        metadata: {
+          automationId: after.id,
+          agentId: after.agentId,
+          triggerKind: after.triggerKind,
+          targetKind: after.targetKind,
+          conversationId: after.conversationId,
+          // Which fields changed (their names only, never their values).
+          changed: Object.keys(changes)
+            .filter((k) => changes[k as keyof typeof changes] !== undefined)
+            .sort(),
+          version: after.version,
+        },
+      });
+      await announce(tx, after);
+      return {
+        automation: await service.toDto(tx, after, actor),
+        ...(made.webhookSecret ? { webhookSecret: made.webhookSecret } : {}),
+      };
+    },
+
+    async remove(tx, actor, id) {
+      await visible(tx, actor, id);
+      const row = await locked(tx, id);
+      // R3: the endpoint (tombstoned, 410) or mailbox goes with it, first, in this transaction.
+      if (row.triggerKind !== "schedule") await adapterOf(row.triggerKind).onDelete(tx, row, triggerDeps);
+      await core.audit.record(tx, {
+        action: "automation.deleted",
+        resourceType: "automation",
+        resourceId: row.id,
+        userId: actor.userId,
+        agentId: row.agentId,
+        metadata: {
+          automationId: row.id,
+          runAsUserId: row.runAsUserId,
+          agentId: row.agentId,
+          actionKind: row.actionKind,
+          triggerKind: row.triggerKind,
+        },
+      });
+      await tx.delete(automations).where(eq(automations.id, row.id));
+      await announce(tx, row);
+    },
+
+    async pause(tx, actor, id) {
+      await visible(tx, actor, id);
+      const row = await locked(tx, id);
+      if (row.status === "paused") return service.toDto(tx, row, actor);
+      // Pausing changes nothing else: `due_automations` returns active automations only.
+      const after = await bump(tx, row, {
+        status: "paused",
+        pausedBy: actor.userId,
+        pausedAt: new Date().toISOString(),
+        pausedReason: null,
+      });
+      await core.audit.record(tx, {
+        action: "automation.paused",
+        resourceType: "automation",
+        resourceId: row.id,
+        userId: actor.userId,
+        agentId: row.agentId,
+        metadata: { automationId: row.id, runAsUserId: row.runAsUserId, previousStatus: row.status },
+      });
+      await announce(tx, after);
+      return service.toDto(tx, after, actor);
+    },
+
+    async resume(tx, actor, id) {
+      await owned(tx, actor, id, "Only its owner can resume an automation");
+      const row = await locked(tx, id);
+      if (row.status === "active") return service.toDto(tx, row, actor);
+      const after = await bump(tx, row, {
+        status: "active",
+        pausedBy: null,
+        pausedAt: null,
+        pausedReason: null,
+        consecutiveFailures: 0,
+        // The instants missed while paused are not run: the next one is after now.
+        nextRunAt:
+          row.triggerKind === "schedule"
+            ? firstRunAt({ cron: row.scheduleCron as string, timeZone: row.timeZone as string }).toISOString()
+            : null,
+      });
+      await core.audit.record(tx, {
+        action: "automation.resumed",
+        resourceType: "automation",
+        resourceId: row.id,
+        userId: actor.userId,
+        agentId: row.agentId,
+        metadata: { automationId: row.id, previousStatus: row.status },
+      });
+      await announce(tx, after);
+      return service.toDto(tx, after, actor);
+    },
+
+    async runNow(tx, actor, id) {
+      await owned(tx, actor, id, "Only its owner can run an automation");
+      const row = await locked(tx, id);
+      if (row.status !== "active") {
+        throw new HttpError(409, "automation_inactive", "Resume the automation to run it");
+      }
+      // The same daily budget as scheduled runs (P-09), counted under the row lock.
+      const [today] = await tx
+        .select({ n: count() })
+        .from(automationRuns)
+        .where(
+          and(
+            eq(automationRuns.automationId, row.id),
+            ne(automationRuns.status, "skipped"),
+            gte(automationRuns.createdAt, utcMidnight()),
+          ),
+        );
+      const overBudget = Number(today?.n ?? 0) >= row.maxRunsPerDay;
+      const [run] = await tx
+        .insert(automationRuns)
+        .values({
+          organizationId: row.organizationId,
+          automationId: row.id,
+          trigger: "manual",
+          status: overBudget ? "skipped" : "queued",
+          reason: overBudget ? "runs_per_day" : null,
+        })
+        .returning({ id: automationRuns.id });
+      const runId = (run as { id: string }).id;
+      if (overBudget) {
+        await core.audit.record(tx, {
+          action: "automation.run_skipped",
+          resourceType: "automation",
+          resourceId: row.id,
+          userId: actor.userId,
+          agentId: row.agentId,
+          metadata: { automationId: row.id, runId, trigger: "manual", reason: "runs_per_day" },
+        });
+      } else {
+        // Ids only (Pitfall 7); the job exists only if this transaction commits.
+        await core.jobs.sendInTx(tx, "automation.fire", { organizationId: row.organizationId, runId });
+        await core.audit.record(tx, {
+          action: "automation.run_started",
+          resourceType: "automation",
+          resourceId: row.id,
+          userId: actor.userId,
+          agentId: row.agentId,
+          metadata: { automationId: row.id, runId, trigger: "manual" },
+        });
+      }
+      await announceRun(tx, row, runId);
+      return { runId };
+    },
+
+    async runs(tx, actor, id, q) {
+      const { row } = await visible(tx, actor, id);
+      let cursor: { createdAt: string; id: string } | undefined;
+      if (q.before) {
+        const [c] = await tx
+          .select({ createdAt: automationRuns.createdAt, id: automationRuns.id })
+          .from(automationRuns)
+          .where(and(eq(automationRuns.id, q.before), eq(automationRuns.automationId, row.id)))
+          .limit(1);
+        if (!c) throw new HttpError(400, "bad_request", "Unknown cursor");
+        cursor = c;
+      }
+      const page = AUTOMATION_LIMITS.runsPage;
+      const rows = await tx
+        .select({
+          run: automationRuns,
+          anchorConversationId: messages.conversationId,
+          anchorThreadId: messages.threadId,
+        })
+        .from(automationRuns)
+        .leftJoin(messages, eq(messages.id, automationRuns.anchorMessageId))
+        .where(
+          and(
+            eq(automationRuns.automationId, row.id),
+            cursor
+              ? sql`(${automationRuns.createdAt}, ${automationRuns.id}) < (${cursor.createdAt}::timestamptz, ${cursor.id}::uuid)`
+              : undefined,
+          ),
+        )
+        .orderBy(desc(automationRuns.createdAt), desc(automationRuns.id))
+        .limit(page + 1);
+      const shown = rows.slice(0, page);
+      return {
+        runs: shown.map(
+          ({ run, anchorConversationId, anchorThreadId }): AutomationRun => ({
+            id: run.id,
+            trigger: run.trigger,
+            status: run.status,
+            reason: (run.reason as AutomationRunReason | null) ?? null,
+            scheduledFor: iso(run.scheduledFor),
+            createdAt: new Date(run.createdAt).toISOString(),
+            answeredAt: iso(run.answeredAt),
+            tainted: run.tainted,
+            anchor:
+              run.anchorMessageId && anchorConversationId
+                ? {
+                    conversationId: anchorConversationId,
+                    messageId: run.anchorMessageId,
+                    threadRootId: anchorThreadId ?? run.anchorMessageId,
+                  }
+                : null,
+          }),
+        ),
+        nextCursor: rows.length > page ? (shown[shown.length - 1]?.run.id ?? null) : null,
+      };
+    },
+
+    async options(tx, actor) {
+      const create = await canCreate(perms, tx, actor);
+      const webhook = create && (await canWebhook(perms, tx, actor));
+      const caps = await loadCaps(tx);
+      const bots = create ? await usableBots(tx, perms, actor.userId) : [];
+      const policy = await loadPolicy(tx);
+      return {
+        canCreate: create,
+        canWebhook: webhook,
+        bots: bots.map(({ row: _row, ...b }) => b),
+        caps: {
+          maxAutomationsPerUser: caps.maxAutomationsPerUser,
+          used: await ownCount(tx, actor.userId),
+          minScheduleMinutes: caps.minScheduleMinutes,
+          maxInboundPerHour: caps.maxInboundPerHour,
+          maxRunsPerDayCap: caps.maxRunsPerDayCap,
+        },
+        botDailyLimit: Object.fromEntries(
+          bots.map((b) => [b.id, effectiveDailyLimit(b.row.scope, readCapabilities(b.row), policy)]),
+        ),
+      };
+    },
+
+    async targetOptions(tx, actor, agentId) {
+      if (!(await canCreate(perms, tx, actor))) throw notAllowed();
+      const bot = (await usableBots(tx, perms, actor.userId)).find((b) => b.id === agentId);
+      if (!bot) throw new HttpError(404, "not_found", "Bot not found");
+      // A personal bot delivers only to its owner's DM (P-08): no conversation to offer.
+      if (bot.personal) return { conversations: [] };
+      const ids = await access.readableIds(tx, actor.userId, { kinds: ["channel"] });
+      if (ids.length === 0) return { conversations: [] };
+      const convs = await tx
+        .select()
+        .from(conversations)
+        .where(inArray(conversations.id, ids))
+        .orderBy(asc(conversations.name), asc(conversations.id));
+      const boardIds = convs.filter((c) => c.layout === "board").map((c) => c.id);
+      const columns =
+        boardIds.length === 0
+          ? []
+          : await tx
+              .select({
+                id: boardColumns.id,
+                conversationId: boardColumns.conversationId,
+                name: boardColumns.name,
+                category: boardColumns.category,
+              })
+              .from(boardColumns)
+              .where(inArray(boardColumns.conversationId, boardIds))
+              .orderBy(sql`${boardColumns.rank} collate "C"`, asc(boardColumns.id));
+      const out: AutomationTargetOptions["conversations"] = [];
+      for (const conv of convs) {
+        out.push({
+          conversationId: conv.id,
+          name: conv.name ?? "",
+          layout: conv.layout,
+          disabledReason: await decideConversation(tx, perms, { agentId, userId: actor.userId, conv }),
+          columns: columns
+            .filter((c) => c.conversationId === conv.id)
+            .map(({ id, name, category }) => ({ id, name, category })),
+        });
+      }
+      return { conversations: out };
     },
   };
   return service;

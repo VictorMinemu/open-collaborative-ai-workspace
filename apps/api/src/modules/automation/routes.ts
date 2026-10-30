@@ -2,11 +2,18 @@ import {
   Automation,
   AutomationList,
   AutomationListQuery,
+  AutomationOptions,
+  AutomationRunList,
+  AutomationRunListQuery,
+  AutomationTargetOptions,
+  AutomationTargetOptionsQuery,
   CreateAutomationRequest,
   CreateAutomationResponse,
   IdParams,
+  RunAutomationResponse,
   SchedulePreviewRequest,
   SchedulePreviewResponse,
+  UpdateAutomationRequest,
 } from "@ocw/contracts";
 import type { FastifyRequest } from "fastify";
 import { type App, authOf, type Core, tenant } from "../../core";
@@ -76,6 +83,91 @@ export function registerAutomationRoutes(
     async (req, reply) => {
       reply.header("cache-control", "no-store");
       return core.db.withTenant(tenant(req), (tx) => service.get(tx, actorOf(req), req.params.id));
+    },
+  );
+
+  app.get(
+    "/automations/options",
+    { ...user, schema: { tags, response: { 200: AutomationOptions } } },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return core.db.withTenant(tenant(req), (tx) => service.options(tx, actorOf(req)));
+    },
+  );
+
+  app.get(
+    "/automations/target-options",
+    {
+      ...user,
+      schema: { tags, querystring: AutomationTargetOptionsQuery, response: { 200: AutomationTargetOptions } },
+    },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return core.db.withTenant(tenant(req), (tx) =>
+        service.targetOptions(tx, actorOf(req), req.query.agentId),
+      );
+    },
+  );
+
+  app.patch(
+    "/automations/:id",
+    {
+      ...user,
+      schema: {
+        tags,
+        params: IdParams,
+        body: UpdateAutomationRequest,
+        response: { 200: CreateAutomationResponse },
+      },
+    },
+    async (req) =>
+      core.db.withTenant(tenant(req), (tx) => service.update(tx, actorOf(req), req.params.id, req.body)),
+  );
+
+  app.delete("/automations/:id", { ...user, schema: { tags, params: IdParams } }, async (req, reply) => {
+    await core.db.withTenant(tenant(req), (tx) => service.remove(tx, actorOf(req), req.params.id));
+    return reply.code(204).send();
+  });
+
+  app.post(
+    "/automations/:id/pause",
+    { ...user, schema: { tags, params: IdParams, response: { 200: Automation } } },
+    async (req) => core.db.withTenant(tenant(req), (tx) => service.pause(tx, actorOf(req), req.params.id)),
+  );
+
+  app.post(
+    "/automations/:id/resume",
+    { ...user, schema: { tags, params: IdParams, response: { 200: Automation } } },
+    async (req) => core.db.withTenant(tenant(req), (tx) => service.resume(tx, actorOf(req), req.params.id)),
+  );
+
+  app.post(
+    "/automations/:id/run",
+    { ...user, schema: { tags, params: IdParams, response: { 202: RunAutomationResponse } } },
+    async (req, reply) => {
+      const run = await core.db.withTenant(tenant(req), (tx) =>
+        service.runNow(tx, actorOf(req), req.params.id),
+      );
+      return reply.code(202).send(run);
+    },
+  );
+
+  app.get(
+    "/automations/:id/runs",
+    {
+      ...user,
+      schema: {
+        tags,
+        params: IdParams,
+        querystring: AutomationRunListQuery,
+        response: { 200: AutomationRunList },
+      },
+    },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return core.db.withTenant(tenant(req), (tx) =>
+        service.runs(tx, actorOf(req), req.params.id, req.query),
+      );
     },
   );
 }
