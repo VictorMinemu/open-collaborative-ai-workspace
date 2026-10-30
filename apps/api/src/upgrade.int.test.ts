@@ -79,6 +79,11 @@ const BACKFILL_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
   "../../../packages/db/drizzle/20261014042429_bots_off_connector_vault_backfill/migration.sql",
 );
+/** Phase 07.6 (07.6-01, P-05): the same completion for the two automation grains that joined the Bots module (7 → 9). */
+const AUTOMATION_BACKFILL_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../packages/db/drizzle/20261030071644_bots_off_automation_backfill/migration.sql",
+);
 /** The seed's fixed test key (32 bytes of 0x07) and plaintext; see packages/db/test/upgrade/seed-phase-5.sql. */
 const TEST_KEY_B64 = Buffer.alloc(32, 7).toString("base64");
 const SECRET_PLAINTEXT = "sk-upgrade-baseline-fake-provider-key";
@@ -106,6 +111,7 @@ const HEAD_ONLY = [
   "20261022213335_browser_takeover_abandoned",
   "20261023003251_work_zone_visibility",
   "20261028214642_runtime_updates",
+  "20261030071644_bots_off_automation_backfill",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -428,21 +434,24 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       }
     });
 
-    it("completes the old Bots-off rule sets, so Bots reads off and denies connections and keys; a custom set is untouched (WINDOWS #177)", async () => {
+    it("completes the old Bots-off rule sets, so Bots reads off and denies connections, keys and automations; a custom set is untouched (WINDOWS #177, 07.6-01)", async () => {
       const db = createTenantDb(urls.app, { max: 1 });
       try {
         const view = (organizationId: string, userId: string) =>
           db.withTenant({ organizationId }, async (tx) => {
             const rules = await loadRules(tx);
             const facts = await loadPrincipalFacts(tx, { kind: "user", userId });
-            const allowed = (p: "connector.connect" | "vault.use" | "bot.read") =>
-              decide(facts, orgResource(), rules, p).allowed;
+            const allowed = (
+              p: "connector.connect" | "vault.use" | "bot.read" | "automation.create" | "automation.webhook",
+            ) => decide(facts, orgResource(), rules, p).allowed;
             return {
               everyone: moduleStateOf(rules, "bots", null, { kind: "everyone" }),
               person: moduleStateOf(rules, "bots", null, { kind: "user", userId }),
               connect: allowed("connector.connect"),
               vault: allowed("vault.use"),
               botRead: allowed("bot.read"),
+              automation: allowed("automation.create"),
+              webhook: allowed("automation.webhook"),
               rows: rules.length,
             };
           });
@@ -452,8 +461,10 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
           connect: false,
           vault: false,
           botRead: false,
-          // 5 + 1 duplicate per subject at N-1, plus the 2 added for each of the two subjects.
-          rows: 16,
+          automation: false,
+          webhook: false,
+          // 5 + 1 duplicate per subject at N-1, plus the 2 added by 07.4-14 and the 2 added by 07.6-01 for each subject.
+          rows: 20,
         });
         expect(await view(ORG_B, BEA_ADMIN)).toEqual({
           everyone: "custom",
@@ -461,6 +472,9 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
           connect: true,
           vault: true,
           botRead: false,
+          // Bea is an admin: the custom set leaves her automation grains as they were.
+          automation: true,
+          webhook: true,
           rows: 3,
         });
         // Idempotent: running the backfill again adds nothing.
@@ -471,7 +485,37 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
             (await c.query("select count(*)::int as n from app.permission_rules")).rows[0].n as number;
           const before = await n();
           await c.query(readFileSync(BACKFILL_DIR, "utf8"));
+          await c.query(readFileSync(AUTOMATION_BACKFILL_DIR, "utf8"));
           expect(await n()).toBe(before);
+          const automations = await c.query(
+            "select organization_id, subject_kind, permission, created_by from app.permission_rules where permission like 'automation.%' order by subject_kind, permission",
+          );
+          expect(automations.rows).toEqual([
+            {
+              organization_id: ORG_A,
+              subject_kind: "everyone",
+              permission: "automation.create",
+              created_by: null,
+            },
+            {
+              organization_id: ORG_A,
+              subject_kind: "everyone",
+              permission: "automation.webhook",
+              created_by: null,
+            },
+            {
+              organization_id: ORG_A,
+              subject_kind: "user",
+              permission: "automation.create",
+              created_by: null,
+            },
+            {
+              organization_id: ORG_A,
+              subject_kind: "user",
+              permission: "automation.webhook",
+              created_by: null,
+            },
+          ]);
           const added = await c.query(
             "select subject_kind, permission, created_by from app.permission_rules where permission in ('connector.connect', 'vault.use') order by subject_kind, permission",
           );

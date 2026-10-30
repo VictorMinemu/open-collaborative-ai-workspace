@@ -34,6 +34,7 @@ import {
   UpdateAutomationRequest,
   WebhookEndpoint,
 } from "./automations";
+import { BUILTIN_TOOLS, isDangerousToolName } from "./bot-capabilities";
 
 const ID = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const ID2 = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e60";
@@ -624,5 +625,14 @@ describe("natural-language proposals from the bot (AUTO-03, D-03, C-01)", () => 
     const refused = { ok: false, code: "automation_cap", sentence: "Cap reached." };
     expect(AgentChannelAutomationProposeResponse.parse(refused).ok).toBe(false);
     expect(AgentChannelAutomationProposeResponse.safeParse({ ok: true, sentence: "x" }).success).toBe(false);
+  });
+});
+
+describe("built-in tool names (07.6-01; offered by 07.6-12 and 07.6-14)", () => {
+  it("fixes ocw_automation_propose and ocw_record_update as built-ins, never refused as dangerous", () => {
+    expect(BUILTIN_TOOLS.automationPropose).toBe("ocw_automation_propose");
+    expect(BUILTIN_TOOLS.recordUpdate).toBe("ocw_record_update");
+    expect(isDangerousToolName(BUILTIN_TOOLS.automationPropose)).toBe(false);
+    expect(isDangerousToolName(BUILTIN_TOOLS.recordUpdate)).toBe(false);
   });
 });

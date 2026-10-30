@@ -93,6 +93,12 @@ export const Permission = z.enum([
   // Phase 07.11 (07.11-01, D-11): see a device's runtime versions, install method and update history, and press
   // "Update now". The device owner (relation) and admins (role) only; relation-only non-delegable.
   "device.maintain",
+  // Phase 07.6 (07.6-01, D-07, P-05): automations run as their creator (agents gain nothing), webhooks for leads and
+  // admins by default, everyone's automations for admins; watching an outside record from a board card.
+  "automation.create",
+  "automation.webhook",
+  "automation.manage",
+  "record.watch",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -174,6 +180,10 @@ export const PERMISSION_SURFACE: Record<Permission, PermissionSurface> = {
   "browser.control": "bots",
   "work_session.visibility": "workzone",
   "work_project.manage": "team",
+  "automation.create": "bots",
+  "automation.webhook": "bots",
+  "automation.manage": "admin",
+  "record.watch": "chat",
 };
 
 export const ROLE_SURFACES: Record<OrgRole, PermissionSurface[]> = {
@@ -214,6 +224,9 @@ const STANDARD: readonly Permission[] = [
   "browser.use",
   "browser.watch",
   "browser.control",
+  // Phase 07.6 (D-07): your own automations, run as you; watching a record you can read from a board card.
+  "automation.create",
+  "record.watch",
 ];
 const DEVELOPER: readonly Permission[] = [
   ...STANDARD,
@@ -225,7 +238,13 @@ const DEVELOPER: readonly Permission[] = [
   "work_session.interrupt",
   "work_session.configure",
 ];
-const LEAD: readonly Permission[] = [...DEVELOPER, "invitation.read", "invitation.create"];
+// Phase 07.6 (D-07): webhook endpoints are a lead and admin default; an allow rule may grant them to others.
+const LEAD: readonly Permission[] = [
+  ...DEVELOPER,
+  "invitation.read",
+  "invitation.create",
+  "automation.webhook",
+];
 const ADMIN: readonly Permission[] = [
   ...LEAD,
   "member.manage",
@@ -258,6 +277,7 @@ const ADMIN: readonly Permission[] = [
   "tool_approval.manage",
   "work_session.visibility",
   "work_project.manage",
+  "automation.manage",
 ];
 
 /**
@@ -481,6 +501,10 @@ export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
   "browser.control": "Take control of a bot's browser to sign in yourself",
   "work_session.visibility": "Change who can see a Work Zone session",
   "work_project.manage": "Create team projects, assign their teams, link repositories and set their default",
+  "automation.create": "Create and run your own automations",
+  "automation.webhook": "Create webhook endpoints that other apps can call",
+  "automation.manage": "See, pause and delete everyone's automations",
+  "record.watch": "Watch an external record from a board card",
 };
 
 // ---------------------------------------------------------------- tokens (AUTH-06)

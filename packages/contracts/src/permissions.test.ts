@@ -25,11 +25,56 @@ const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const now = 1_790_000_000;
 
 describe("permission vocabulary", () => {
-  it("has exactly the 73 agreed permissions", () => {
+  it("has exactly the 77 agreed permissions", () => {
     // 64 through 07.4; 07.5-01 appended `tool_approval.manage`; 07.8-30 appended the five sandbox and browser grains;
-    // 07.9-01 appended `work_session.visibility` and `work_project.manage`; 07.11-01 appended `device.maintain`.
-    expect(Permission.options).toHaveLength(73);
-    expect(new Set(Permission.options).size).toBe(73);
+    // 07.9-01 appended `work_session.visibility` and `work_project.manage`; 07.11-01 appended `device.maintain`;
+    // 07.6-01 appended the three automation grains and `record.watch`.
+    expect(Permission.options).toHaveLength(77);
+    expect(new Set(Permission.options).size).toBe(77);
+  });
+
+  it("Phase 07.6 automation and watched-record grains exist exactly as 07.6-01 defines them (D-07, P-04, P-05)", () => {
+    const grains = ["automation.create", "automation.webhook", "automation.manage", "record.watch"] as const;
+    // Appended at the end, never renamed (positions 73–76).
+    expect(Permission.options.slice(73, 77)).toEqual([...grains]);
+    expect(PERMISSION_SURFACE["automation.create"]).toBe("bots");
+    expect(PERMISSION_SURFACE["automation.webhook"]).toBe("bots");
+    expect(PERMISSION_SURFACE["automation.manage"]).toBe("admin");
+    expect(PERMISSION_SURFACE["record.watch"]).toBe("chat");
+    // D-07 defaults: every role creates its own; webhooks for leads and admins; managing everyone's for admins.
+    const holders = (p: Permission) => OrgRole.options.filter((role) => ROLE_PERMISSIONS[role].includes(p));
+    expect(holders("automation.create")).toEqual(["standard", "developer", "lead", "admin"]);
+    expect(holders("automation.webhook")).toEqual(["lead", "admin"]);
+    expect(holders("automation.manage")).toEqual(["admin"]);
+    expect(holders("record.watch")).toEqual(["standard", "developer", "lead", "admin"]);
+    for (const p of grains) {
+      // Agents act only through the run-as human (D-07); no unit lead grant.
+      expect(AGENT_PERMISSIONS, p).not.toContain(p);
+      expect(LEAD_PERMISSIONS, p).not.toContain(p);
+      expect(PermissionPattern.safeParse(p).success, p).toBe(true);
+    }
+    // Webhooks are grantable by an allow rule (D-07); managing everyone's automations is an admin-surface grain, which
+    // the existing rule keeps non-delegable (no allow rule confers it).
+    for (const p of ["automation.create", "automation.webhook", "record.watch"] as const) {
+      expect(NON_DELEGABLE_PERMISSIONS, p).not.toContain(p);
+    }
+    expect(NON_DELEGABLE_PERMISSIONS).toContain("automation.manage");
+    expect(PermissionPattern.safeParse("automation.*").success).toBe(true);
+    expect(PERMISSION_DESCRIPTIONS["automation.create"]).toBe("Create and run your own automations");
+    expect(PERMISSION_DESCRIPTIONS["automation.webhook"]).toBe(
+      "Create webhook endpoints that other apps can call",
+    );
+    expect(PERMISSION_DESCRIPTIONS["automation.manage"]).toBe("See, pause and delete everyone's automations");
+    expect(PERMISSION_DESCRIPTIONS["record.watch"]).toBe("Watch an external record from a board card");
+    // P-05: the bots-surface grains join the Bots module (a Bots-off rule also hides automations); the others none.
+    const modulesOf = (p: Permission) =>
+      ModuleId.options.filter((m) =>
+        MODULE_CATALOG[m].patterns.some((pattern) => permissionMatches(pattern, p)),
+      );
+    expect(modulesOf("automation.create")).toEqual(["bots"]);
+    expect(modulesOf("automation.webhook")).toEqual(["bots"]);
+    expect(modulesOf("automation.manage")).toEqual([]);
+    expect(modulesOf("record.watch")).toEqual([]);
   });
 
   it("Phase 07.9 session visibility and team project grains exist exactly as 07.9-01 defines them (D-04, D-10, D-13)", () => {
@@ -356,7 +401,8 @@ describe("permission vocabulary", () => {
   });
 
   it("Phase 07.11 device.maintain: Work Zone surface, admins by role, owners by relation, never delegable (D-11)", () => {
-    expect(Permission.options.slice(72)).toEqual(["device.maintain"]);
+    // Position 72; 07.6-01 appended four grains after it.
+    expect(Permission.options.slice(72, 73)).toEqual(["device.maintain"]);
     expect(PERMISSION_SURFACE["device.maintain"]).toBe("workzone");
     for (const role of OrgRole.options) {
       if (role === "admin") expect(ROLE_PERMISSIONS[role]).toContain("device.maintain");
