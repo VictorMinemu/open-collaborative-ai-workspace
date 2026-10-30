@@ -758,3 +758,8 @@ DROP POLICY IF EXISTS audience_backstop ON app.work_session_grants;
 CREATE POLICY audience_backstop ON app.work_session_grants AS RESTRICTIVE FOR ALL
   USING (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_session_grants.work_session_id))
   WITH CHECK (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_session_grants.work_session_id));
+-- Phase 07.6 (D-11): a session's memory summary state follows its session, as its prompts and approvals do.
+DROP POLICY IF EXISTS audience_backstop ON app.work_session_memory;
+CREATE POLICY audience_backstop ON app.work_session_memory AS RESTRICTIVE FOR ALL
+  USING (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_session_memory.work_session_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_session_memory.work_session_id));
