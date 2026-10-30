@@ -349,7 +349,8 @@ export function createBridge(opts: BridgeOptions) {
         return;
       }
       case AgentChannelEventTypes.automationRun: {
-        // Untrusted until parsed; the warning names the seq and the field path only (never outside content).
+        // agent.automation_run.v1 (07.6): untrusted until parsed; the warning names the seq and the field path only
+        // (never outside content).
         const parsed = AgentAutomationRunEvent.safeParse(frame.data);
         if (!parsed.success) {
           log.warn?.(
