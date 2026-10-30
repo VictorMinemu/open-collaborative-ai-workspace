@@ -9,6 +9,9 @@ import {
 } from "@ocw/contracts";
 import { agents, conversationMembers, conversations, orgMembers, type Tx, tenantOf } from "@ocw/db";
 import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { conflict, forbidden, notFound } from "../../lib/errors";
+import { agentResource, type PermissionService } from "../organization";
+import { agentFactsOf, loadDirectory } from "./directory";
 import { type ChatDeps, type ConversationRow, iso, notifyListChanged, unreadCountsFor } from "./service";
 
 /**
@@ -111,6 +114,44 @@ export function ensureDm(
     ],
     audit: { agentId: p.agentId, metadata: { kind: "dm", counterpart: { kind: "agent", id: p.agentId } } },
   });
+}
+
+/**
+ * Phase 07.6 (P-08): the 1:1 DM of a person with a bot, for a server-side delivery (an automation run, a digest), created
+ * on first use under the participant rules of `POST /dms`: the person is an active member, the bot is live and not
+ * disabled (`agent_unavailable`), a personal bot only ever chats with its owner (`personal_bot_target`), and the
+ * resolver lets the person use the bot (`bot.read`, otherwise `bot_not_readable`). Throws the HTTP refusal; the
+ * caller (a job, no request) turns it into a run reason. Audits `dm.created` on creation like the route.
+ */
+export async function ensureAgentDm(
+  tx: Tx,
+  deps: ChatDeps & { perms: Pick<PermissionService, "decide"> },
+  p: { agentId: string; userId: string },
+): Promise<{ conversationId: string; created: boolean }> {
+  const dir = await loadDirectory(tx);
+  const bot = dir.agents.get(p.agentId);
+  if (!bot || bot.deleted || bot.status === "disabled") {
+    throw conflict("This bot is not available", "agent_unavailable");
+  }
+  if (bot.scope === "personal" && bot.ownerUserId !== p.userId) {
+    throw conflict("A personal bot only chats with its owner", "personal_bot_target");
+  }
+  const [member] = await tx
+    .select({ deactivatedAt: orgMembers.deactivatedAt })
+    .from(orgMembers)
+    .where(eq(orgMembers.userId, p.userId))
+    .limit(1);
+  if (!member) throw notFound("Member not found", "member_not_found");
+  if (member.deactivatedAt) throw conflict("This member is deactivated", "member_deactivated");
+  const reading = await deps.perms.decide(
+    tx,
+    { kind: "user", userId: p.userId },
+    "bot.read",
+    agentResource(agentFactsOf(bot), p.userId),
+  );
+  if (!reading.allowed) throw forbidden("This person may not use this bot", "bot_not_readable");
+  const { conv, created } = await ensureDm(tx, deps, p);
+  return { conversationId: conv.id, created };
 }
 
 /**

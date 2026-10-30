@@ -37,7 +37,13 @@ import { finishActivity } from "./activity";
 import { cellOf, createCellAuth } from "./auth";
 import { registerBoardAgentRoutes } from "./board";
 import { type BrowserBudgets, registerBrowserRoutes } from "./browser";
-import { noTrigger, registerCardActionHandler, registerCardRoutes, resolveReplyTarget } from "./cards";
+import {
+  postForTurn,
+  registerCardActionHandler,
+  registerCardRoutes,
+  replyTargetOrThrow,
+  resolveReplyTarget,
+} from "./cards";
 import { registerConnectorRoutes } from "./connectors";
 import { registerCellGateway } from "./gateway";
 import { registerHttpRequestRoutes } from "./http-requests";
@@ -53,6 +59,15 @@ import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerWorkZoneRoutes } from "./work-zone";
 
 export { currentPhrase } from "./activity";
+export {
+  type DeliverAutomationRunInput,
+  type DeliverAutomationRunResult,
+  deliverAutomationRun,
+  inboundRooted,
+  markRunAnswered,
+  runAnchorTrigger,
+  runSentence,
+} from "./automation-runs";
 export type { BrowserBudgets } from "./browser";
 export { emitCardAction } from "./cards";
 export { conversationAudience } from "./memory-files";
@@ -370,13 +385,14 @@ export function createAgentChannelModule(
               const body = req.body;
 
               // The post must answer a live turn of this bot here (403 `no_trigger`, audited, otherwise).
-              const check = await core.db.withTenant(ctx, (tx) =>
-                resolveReplyTarget(tx, core, body, {
-                  route: "messages",
-                  sessionId: `cell:${cell.credentialId}`,
-                }),
+              const check = replyTargetOrThrow(
+                await core.db.withTenant(ctx, (tx) =>
+                  resolveReplyTarget(tx, core, body, {
+                    route: "messages",
+                    sessionId: `cell:${cell.credentialId}`,
+                  }),
+                ),
               );
-              if (!check) throw noTrigger();
               // The turn the post answers, as resolved above (its agent and conversation were checked).
               const turnEventId = body.eventId ?? null;
 
@@ -386,8 +402,11 @@ export function createAgentChannelModule(
                 // answers (agent ∩ human: the turn's human and a replied-to human must still read the channel),
                 // then stores the message and audits `agent.message.posted` (actor = agent) in its own tx. The
                 // tenant user is the turn's human, so that audit row carries user_id = who asked.
-                result = await core.chatAgent.postAgentMessage(
+                // A run anchor's first reply also marks the run answered, in the post's transaction (07.6, P-03).
+                result = await postForTurn(
+                  core,
                   { organizationId: cell.organizationId, userId: check.onBehalfOf },
+                  check,
                   {
                     agentId: body.agentId,
                     conversationId: body.conversationId,

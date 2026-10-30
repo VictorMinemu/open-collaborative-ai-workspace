@@ -113,6 +113,27 @@ export interface CardActionPayload extends MentionPayload {
   };
 }
 
+/**
+ * `agent.automation_run.v1` (07.6-06, D-03): built like a mention of the bot on the run's anchor (the platform's run
+ * card), authored by the run-as person; the standing order and any outside content travel in their own block.
+ */
+export interface AutomationRunPayload extends MentionPayload {
+  automationRun: {
+    automationId: string;
+    runId: string;
+    name: string;
+    trigger: "schedule" | "webhook" | "mail" | "manual";
+    instructions: string;
+    inbound: {
+      source: "webhook" | "mail";
+      title: string;
+      text: string;
+      from: string | null;
+      receivedAt: string;
+    } | null;
+  };
+}
+
 /** Subscription sign-in emulation (provider.auth.* commands), against a fake device-auth server. */
 export interface FakeDeviceAuthOptions {
   /** Base URL of e2e/support/fake-device-auth-server.ts (stands in for https://auth.openai.com). */
@@ -433,6 +454,11 @@ export class FakeCellPlugin {
     return res.body;
   }
 
+  /** Answers an automation run (07.6-06) on its anchor, for its turn, like the real plugin's reply to a run. */
+  replyToRun(run: AutomationRunPayload, text: string) {
+    return this.reply(run, text);
+  }
+
   /**
    * Posts a typed Agent Card (06-13, `POST /agent-channel/v1/cards`) as `input.agentId`, like the real plugin's card
    * tool: the card lands where the agent may post, for a delivered turn (`eventId`, or the message it was delivered
@@ -521,6 +547,18 @@ export class FakeCellPlugin {
             turnToolsSuffix(m) +
             turnContextSuffix(m),
         );
+      }
+      if (type === "agent.automation_run.v1" && this.opts.autoReply) {
+        // A run is answered like a mention (07.6-06): on the anchor (`inReplyToMessageId` = the event's message) for its
+        // turn (`eventId`); the anchor is in the thread the event names (flat in a DM). Only the persona's own calls run:
+        // the server sentence carries no directives, and outside content is never read as one.
+        const r = data as unknown as AutomationRunPayload;
+        const calls = this.opts.toolCallsFor?.(r) ?? [];
+        const body =
+          calls.length > 0
+            ? (await this.simulateToolCalls(r, calls)).join("\n")
+            : (this.opts.replyText ?? identityReply)(r);
+        await this.replyToRun(r, body + turnToolsSuffix(r) + turnContextSuffix(r));
       }
       if (type === "agent.card_action.v1" && this.opts.autoReply) {
         // An approved grant (07.5 D-02): call the granted tool once, with exactly the granted arguments.
