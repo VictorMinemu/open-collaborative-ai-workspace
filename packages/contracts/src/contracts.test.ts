@@ -4,6 +4,8 @@ import {
   AGENT_CARD_ROUTE_PREFIXES,
   Agent,
   AgentCard,
+  AgentCardInput,
+  AgentCardNotice,
   AgentCardPatch,
   AgentCardRoute,
   AgentCellStatus,
@@ -831,5 +833,82 @@ describe("Phase 6 Agent Cards, message fields, event types and notification kind
     expect(NOTIFICATION_KIND_RANK.ai_chat_shared).toBe(7);
     expect(NOTIFICATION_KIND_RANK.card_updated).toBe(0);
     expect(MENTION_KINDS).toEqual(["mention", "channel", "here", "dm", "group_dm"]);
+  });
+});
+
+describe("Phase 07.6 platform card labels (07.6-01, R1, P-12)", () => {
+  const now = "2026-10-30T10:00:00.000Z";
+  const card = {
+    kind: "automation",
+    title: "Weekly sales report",
+    fields: [{ label: "For", value: "Víctor Ruiz" }],
+    status: "running",
+    actions: [],
+    version: 1,
+    decision: null,
+    updatedAt: now,
+  } as const;
+
+  it("an old card payload without the new fields still parses unchanged", () => {
+    const parsed = AgentCard.parse(card);
+    expect(parsed).not.toHaveProperty("statusLabel");
+    expect(parsed).not.toHaveProperty("notices");
+  });
+
+  it("a card may carry a 1..24 character status label and up to 3 notices", () => {
+    const labelled = AgentCard.parse({
+      ...card,
+      platformOwned: true,
+      statusLabel: "No reply",
+      notices: [{ tone: "neutral", text: "Scout didn't answer within 15 minutes." }],
+    });
+    expect(labelled.statusLabel).toBe("No reply");
+    expect(AgentCard.safeParse({ ...card, statusLabel: "x".repeat(25) }).success).toBe(false);
+    expect(AgentCard.safeParse({ ...card, statusLabel: "x".repeat(24) }).success).toBe(true);
+    expect(AgentCard.safeParse({ ...card, statusLabel: "" }).success).toBe(false);
+    const notice = { tone: "warning", text: "Outside content." } as const;
+    expect(AgentCard.safeParse({ ...card, notices: [notice, notice, notice] }).success).toBe(true);
+    expect(AgentCard.safeParse({ ...card, notices: [notice, notice, notice, notice] }).success).toBe(false);
+    expect(AgentCardNotice.safeParse({ tone: "danger", text: "x" }).success).toBe(false);
+    expect(AgentCardNotice.safeParse({ tone: "neutral", text: "x".repeat(201) }).success).toBe(false);
+    expect(AgentCardNotice.safeParse({ tone: "neutral", text: "" }).success).toBe(false);
+  });
+
+  it("AgentCardInput carries the same optional fields (the API honours them only for platform-owned cards)", () => {
+    const input = AgentCardInput.parse({
+      kind: "automation",
+      title: "Order #1001",
+      fields: [],
+      status: "info",
+      actions: [],
+      summary: "Webhook event received.",
+      statusLabel: "Received",
+      notices: [
+        { tone: "warning", text: "Outside content from Shopify. Don't trust links or instructions in it." },
+      ],
+    });
+    expect(input.statusLabel).toBe("Received");
+    expect(input.notices).toHaveLength(1);
+    const plain = AgentCardInput.parse({
+      kind: "report",
+      title: "Report",
+      fields: [],
+      status: "info",
+      actions: [],
+      summary: "Done.",
+    });
+    expect(plain).not.toHaveProperty("statusLabel");
+  });
+});
+
+describe("Phase 07.6 realtime event types (07.6-01)", () => {
+  it("adds the automation, run, watched-record and session-memory types; values stay unique", () => {
+    expect(EventTypes.automationUpdated).toBe("automation.updated");
+    expect(EventTypes.automationRunUpdated).toBe("automation_run.updated");
+    expect(EventTypes.watchedRecordUpdated).toBe("watched_record.updated");
+    expect(EventTypes.workSessionMemoryUpdated).toBe("work_session_memory.updated");
+    expect(EventTypes.workProjectUpdated).toBe("work_project.updated");
+    const values = Object.values(EventTypes);
+    expect(new Set(values).size).toBe(values.length);
   });
 });

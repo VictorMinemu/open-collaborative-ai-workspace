@@ -1,19 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { AgentAutomationRunEvent, AgentChannelEventTypes } from "./agent-channel";
+import {
+  AgentAutomationRunEvent,
+  AgentChannelAutomationPropose,
+  AgentChannelAutomationProposeResponse,
+  AgentChannelEventTypes,
+} from "./agent-channel";
 import {
   AUTOMATION_LIMITS,
   Automation,
   AutomationList,
+  AutomationOptions,
   AutomationRun,
+  AutomationRunUpdatedEvent,
   AutomationSchedule,
   AutomationTarget,
+  AutomationTargetOptions,
+  AutomationUpdatedEvent,
   CreateAutomationRequest,
   CreateAutomationResponse,
+  DigestPreview,
+  DigestSettings,
+  DigestTestResponse,
+  DigestView,
   digestCron,
   JsonPointer,
+  Mailbox,
+  MailboxConfigInput,
+  MailboxTestRequest,
+  MailboxTestResult,
+  RotateWebhookSecretResponse,
   resolveJsonPointer,
   SchedulePreviewResponse,
   UpdateAutomationRequest,
+  WebhookEndpoint,
 } from "./automations";
 
 const ID = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
@@ -375,5 +394,235 @@ describe("agent.automation_run.v1 (D-03, C-01)", () => {
         automationRun: { ...run, trigger: "mail", inbound: { ...mail, source: "chat" } },
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("webhook endpoints (D-02, R4)", () => {
+  const endpoint = {
+    publicId: "0123456789ABCDEFGHJKMNPQRS",
+    url: "https://ocw.example.com/api/v1/hooks/0123456789ABCDEFGHJKMNPQRS",
+    secretSetAt: NOW,
+    previousValidUntil: null,
+    lastRejectedAt: NOW,
+    lastRejectedReason: "signature",
+    deliveries: [
+      {
+        id: ID,
+        receivedAt: NOW,
+        result: "accepted",
+        reason: null,
+        duplicateCount: 1,
+        link: { conversationId: ID, messageId: ID2, threadRootId: null, cardNumber: "ORD-12" },
+      },
+    ],
+    lastPayload: { order: { id: 450789 } },
+  };
+
+  it("carries the latest rejection reason from a closed set and at most 10 deliveries", () => {
+    expect(WebhookEndpoint.parse(endpoint).lastRejectedReason).toBe("signature");
+    expect(WebhookEndpoint.safeParse({ ...endpoint, lastRejectedReason: "other" }).success).toBe(false);
+    const clean = WebhookEndpoint.parse({ ...endpoint, lastRejectedAt: null, lastRejectedReason: null });
+    expect(clean.lastRejectedAt).toBe(null);
+    const many = Array(11).fill(endpoint.deliveries[0]);
+    expect(WebhookEndpoint.safeParse({ ...endpoint, deliveries: many }).success).toBe(false);
+    const rejected = [{ ...endpoint.deliveries[0], result: "rejected" }];
+    expect(WebhookEndpoint.safeParse({ ...endpoint, deliveries: rejected }).success).toBe(false);
+    // The endpoint view never carries a secret.
+    expect(WebhookEndpoint.parse({ ...endpoint, secret: "whsec_x" })).not.toHaveProperty("secret");
+  });
+
+  it("a rotation returns the new secret once and the old one's grace end", () => {
+    const rotated = RotateWebhookSecretResponse.parse({
+      secret: `whsec_${"B".repeat(44)}`,
+      previousValidUntil: NOW,
+    });
+    expect(rotated.secret).toMatch(/^whsec_/);
+    expect(RotateWebhookSecretResponse.safeParse({ secret: "plain", previousValidUntil: NOW }).success).toBe(
+      false,
+    );
+  });
+});
+
+describe("mailboxes (D-02, R8)", () => {
+  const box = { vaultItemId: ID, host: "IMAP.Example.com", pollIntervalMinutes: 10 };
+
+  it("defaults port 993 and INBOX, lowercases the host and refuses other poll intervals", () => {
+    expect(MailboxConfigInput.parse(box)).toEqual({
+      vaultItemId: ID,
+      host: "imap.example.com",
+      port: 993,
+      folder: "INBOX",
+      pollIntervalMinutes: 10,
+    });
+    expect(MailboxConfigInput.safeParse({ ...box, pollIntervalMinutes: 7 }).success).toBe(false);
+    expect(MailboxConfigInput.safeParse({ ...box, port: 0 }).success).toBe(false);
+    expect(MailboxConfigInput.safeParse({ ...box, host: "imap example.com" }).success).toBe(false);
+    expect(MailboxConfigInput.safeParse({ ...box, host: "https://imap.example.com" }).success).toBe(false);
+    expect(MailboxConfigInput.safeParse({ ...box, folder: "x".repeat(201) }).success).toBe(false);
+  });
+
+  it("names a Keychain item only: a credential field is refused, not stripped (T-07.6-01-04)", () => {
+    const test = { vaultItemId: ID, host: "imap.example.com" };
+    for (const key of ["username", "password", "token", "user"]) {
+      expect(MailboxConfigInput.safeParse({ ...box, [key]: "x" }).success, key).toBe(false);
+      expect(MailboxTestRequest.safeParse({ ...test, [key]: "x" }).success, key).toBe(false);
+    }
+    expect(MailboxConfigInput.safeParse({ ...box, vaultItemId: undefined }).success).toBe(false);
+    expect(MailboxTestRequest.parse(test)).toEqual({ ...test, port: 993, folder: "INBOX" });
+  });
+
+  it("test results are a message count or a fixed code; the view names the item, never its secret", () => {
+    expect(MailboxTestResult.parse({ ok: false, code: "certificate" })).toEqual({
+      ok: false,
+      code: "certificate",
+    });
+    expect(MailboxTestResult.parse({ ok: true, messages: 3 })).toEqual({ ok: true, messages: 3 });
+    expect(
+      MailboxTestResult.safeParse({ ok: false, code: "wrong password for ana@example.com" }).success,
+    ).toBe(false);
+    const view = Mailbox.parse({
+      ...MailboxConfigInput.parse(box),
+      vaultItemName: "Orders mailbox",
+      status: "auth_failed",
+      lastPolledAt: NOW,
+      lastNewCount: 0,
+      lastErrorCode: "auth_failed",
+    });
+    expect(view.status).toBe("auth_failed");
+    expect(Mailbox.parse({ ...view, password: "x" })).not.toHaveProperty("password");
+  });
+});
+
+describe("personal digest (D-05, R6, P-14)", () => {
+  const settings = {
+    enabled: true,
+    days: ["mon", "fri"],
+    time: "08:30",
+    timeZone: "Europe/Madrid",
+    sections: ["decisions", "mentions"],
+    agentId: ID,
+  };
+
+  it("defaults skip-empty on and the metered summary off", () => {
+    const parsed = DigestSettings.parse(settings);
+    expect(parsed.skipEmpty).toBe(true);
+    expect(parsed.summary).toEqual({ enabled: false, modelRef: null });
+  });
+
+  it("refuses no day, duplicate days or sections, a bad time and an unknown section", () => {
+    expect(DigestSettings.safeParse({ ...settings, days: [] }).success).toBe(false);
+    expect(DigestSettings.safeParse({ ...settings, days: ["mon", "mon"] }).success).toBe(false);
+    expect(DigestSettings.safeParse({ ...settings, sections: ["mentions", "mentions"] }).success).toBe(false);
+    expect(DigestSettings.safeParse({ ...settings, sections: [] }).success).toBe(false);
+    expect(DigestSettings.safeParse({ ...settings, sections: ["everything"] }).success).toBe(false);
+    expect(DigestSettings.safeParse({ ...settings, time: "25:00" }).success).toBe(false);
+    expect(DigestSettings.safeParse({ ...settings, time: "8:30" }).success).toBe(false);
+    expect(DigestSettings.safeParse({ ...settings, timeZone: "Mars/Olympus" }).success).toBe(false);
+  });
+
+  it("an opt-in summary names a model reference", () => {
+    const withModel = DigestSettings.parse({
+      ...settings,
+      summary: { enabled: true, modelRef: { backend: "mock", provider: "mock", modelId: "mock-1" } },
+    });
+    expect(withModel.summary.modelRef?.modelId).toBe("mock-1");
+  });
+
+  it("view, preview and test DTOs parse", () => {
+    const view = DigestView.parse({
+      settings: null,
+      automationId: null,
+      nextRunAt: null,
+      lastSentAt: null,
+      bots: [{ id: ID, displayName: "My bot", personal: true, unitName: null }],
+    });
+    expect(view.settings).toBe(null);
+    expect(DigestPreview.parse({ markdown: "", empty: true }).empty).toBe(true);
+    expect(DigestTestResponse.parse({ conversationId: ID, messageId: ID2 }).messageId).toBe(ID2);
+  });
+});
+
+describe("editor options and events (R12, R13)", () => {
+  it("options carry bots, caps and per-bot daily limits by bot id", () => {
+    const options = AutomationOptions.parse({
+      canCreate: true,
+      canWebhook: false,
+      bots: [{ id: ID, displayName: "Scout", personal: false, unitName: "Sales", ready: true }],
+      caps: {
+        maxAutomationsPerUser: 10,
+        used: 1,
+        minScheduleMinutes: 15,
+        maxInboundPerHour: 30,
+        maxRunsPerDayCap: 96,
+      },
+      botDailyLimit: { [ID]: 50, [ID2]: null },
+    });
+    expect(options.botDailyLimit[ID2]).toBe(null);
+    expect(AutomationOptions.safeParse({ ...options, botDailyLimit: { scout: 5 } }).success).toBe(false);
+  });
+
+  it("target options list conversations with a disabled reason and board columns", () => {
+    const options = AutomationTargetOptions.parse({
+      conversations: [
+        { conversationId: ID, name: "sales", layout: "text", disabledReason: null, columns: [] },
+        {
+          conversationId: ID2,
+          name: "orders",
+          layout: "board",
+          disabledReason: "agent_not_member",
+          columns: [{ id: ID, name: "Intake", category: "backlog" }],
+        },
+      ],
+    });
+    expect(options.conversations[1]?.columns[0]?.category).toBe("backlog");
+  });
+
+  it("realtime payloads are ids only", () => {
+    expect(AutomationUpdatedEvent.parse({ automationId: ID })).toEqual({ automationId: ID });
+    expect(AutomationUpdatedEvent.safeParse({ automationId: ID, name: "Weekly" }).success).toBe(false);
+    expect(AutomationRunUpdatedEvent.parse({ automationId: ID, runId: ID2 }).runId).toBe(ID2);
+    expect(
+      AutomationRunUpdatedEvent.safeParse({ automationId: ID, runId: ID2, status: "failed" }).success,
+    ).toBe(false);
+  });
+});
+
+describe("natural-language proposals from the bot (AUTO-03, D-03, C-01)", () => {
+  const propose = {
+    eventId: ID,
+    agentId: ID2,
+    name: "Morning briefing",
+    instructions: "Tell me what changed overnight.",
+    schedule: { cron: "0 8 * * 1-5", timeZone: "Europe/Madrid" },
+    target: { kind: "here" },
+  };
+
+  it("carries only the event, the agent and the intent; the target is here or the DM", () => {
+    expect(AgentChannelAutomationPropose.parse(propose).target).toEqual({ kind: "here" });
+    const dm = AgentChannelAutomationPropose.parse({ ...propose, target: { kind: "dm" }, maxRunsPerDay: 2 });
+    expect(dm.maxRunsPerDay).toBe(2);
+    const channel = { ...propose, target: { kind: "channel", conversationId: ID } };
+    expect(AgentChannelAutomationPropose.safeParse(channel).success).toBe(false);
+    const hereWithId = { ...propose, target: { kind: "here", conversationId: ID } };
+    expect(AgentChannelAutomationPropose.safeParse(hereWithId).success).toBe(false);
+    // Never a conversation, a person or a run-as of the model's choosing (T-07.6-01-01).
+    for (const key of ["conversationId", "userId", "runAsUserId", "organizationId"]) {
+      expect(AgentChannelAutomationPropose.safeParse({ ...propose, [key]: ID }).success, key).toBe(false);
+    }
+    expect(AgentChannelAutomationPropose.safeParse({ ...propose, instructions: "" }).success).toBe(false);
+    const badCron = { ...propose, schedule: { cron: "0 8 * *", timeZone: "UTC" } };
+    expect(AgentChannelAutomationPropose.safeParse(badCron).success).toBe(false);
+  });
+
+  it("answers an approval id or a code, always with a sentence", () => {
+    const ok = AgentChannelAutomationProposeResponse.parse({
+      ok: true,
+      approvalId: ID,
+      sentence: "Proposed.",
+    });
+    expect(ok.ok).toBe(true);
+    const refused = { ok: false, code: "automation_cap", sentence: "Cap reached." };
+    expect(AgentChannelAutomationProposeResponse.parse(refused).ok).toBe(false);
+    expect(AgentChannelAutomationProposeResponse.safeParse({ ok: true, sentence: "x" }).success).toBe(false);
   });
 });

@@ -14,7 +14,7 @@ import {
   BrowserHost,
 } from "./agent-cards";
 import { APPROVAL_NOTE_MAX, ApprovalNote } from "./approvals";
-import { AUTOMATION_LIMITS, AutomationRunTrigger } from "./automations";
+import { AUTOMATION_LIMITS, AutomationRunTrigger, AutomationSchedule, JsonPointer } from "./automations";
 import {
   BOARD_CARD_DESCRIPTION_MAX,
   BOARD_MAX_COLUMNS,
@@ -1104,3 +1104,64 @@ export const AgentChannelHttpResponse = z.object({
   redirectHost: z.string().max(253).nullable(),
 });
 export type AgentChannelHttpResponse = z.infer<typeof AgentChannelHttpResponse>;
+
+// ---------------------------------------------------------------- automations and watched records (Phase 07.6)
+//
+// Agent-side bodies carry only `eventId`, `agentId` and the intent (D-03, D-04, C-01): the API derives the
+// conversation, the human (run-as) and the record from the turn, and computes every hash itself. Strict, so a field
+// the model invents (a conversation, a person, a hash) is refused rather than silently dropped.
+
+/** `POST /agent-channel/v1/automations/propose`: a natural-language automation as a card the person confirms. */
+export const AgentChannelAutomationPropose = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  name: z.string().trim().min(1).max(AUTOMATION_LIMITS.nameMax),
+  instructions: z.string().trim().min(1).max(AUTOMATION_LIMITS.instructionsMax),
+  schedule: AutomationSchedule,
+  /** `here`: the turn's conversation (its thread); `dm`: the person's DM with this bot. Never another target. */
+  target: z.discriminatedUnion("kind", [
+    z.strictObject({ kind: z.literal("here") }),
+    z.strictObject({ kind: z.literal("dm") }),
+  ]),
+  maxRunsPerDay: z.number().int().min(1).max(AUTOMATION_LIMITS.maxRunsPerDayCeiling).optional(),
+});
+export type AgentChannelAutomationPropose = z.infer<typeof AgentChannelAutomationPropose>;
+
+/** The model reads `sentence`; `code` is an `AutomationErrorCode` or a refusal code. */
+export const AgentChannelAutomationProposeResponse = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), approvalId: Id, sentence: z.string().max(500) }),
+  z.object({ ok: z.literal(false), code: z.string().max(64), sentence: z.string().max(500) }),
+]);
+export type AgentChannelAutomationProposeResponse = z.infer<typeof AgentChannelAutomationProposeResponse>;
+
+const RECORD_UPDATE_MAX_CHANGES = 20;
+
+/**
+ * `POST /agent-channel/v1/records/update`: change fields of the watched record of the turn's card. The API re-reads,
+ * compares with the last seen hash and writes only when nothing changed elsewhere (409 conflict card otherwise).
+ */
+export const AgentChannelRecordUpdate = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  changes: z
+    .record(
+      JsonPointer.refine((p) => p !== "", { message: "a field, not the whole record" }),
+      z.union([z.string().max(500), z.number(), z.boolean(), z.null()]),
+    )
+    .refine(
+      (c) => {
+        const n = Object.keys(c).length;
+        return n >= 1 && n <= RECORD_UPDATE_MAX_CHANGES;
+      },
+      { message: "1 to 20 field changes" },
+    ),
+});
+export type AgentChannelRecordUpdate = z.infer<typeof AgentChannelRecordUpdate>;
+
+export const AgentChannelRecordUpdateResponse = z.object({
+  ok: z.boolean(),
+  /** A `WatchedErrorCode`, an approval refusal or null on success. */
+  code: z.string().max(64).nullable(),
+  sentence: z.string().max(500),
+});
+export type AgentChannelRecordUpdateResponse = z.infer<typeof AgentChannelRecordUpdateResponse>;

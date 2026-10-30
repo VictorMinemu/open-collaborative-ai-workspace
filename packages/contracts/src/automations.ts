@@ -1,11 +1,13 @@
 import { z } from "zod";
+import { ModelRef } from "./ai-generation";
+import { BoardColumnCategory } from "./board";
 import { Id, IsoDateTime } from "./common";
 
 /**
  * Automations (Phase 07.6, AUTO-01 … AUTO-03, PRD §73-75, D-01, D-02, D-07). An automation is a standing order: a bot,
  * instructions, a trigger (a schedule in an IANA zone, a signed webhook or a mailbox), a delivery target named by
  * stable ids, the person it runs as (always its creator, P-04), a daily budget and its runs. Leaf module: it imports
- * `common` only (plus `ai-generation` for the digest model), so `agent-channel.ts` can reuse its schedule and run
+ * `common`, `board` (column categories) and `ai-generation` (the digest model) only, so `agent-channel.ts` can reuse its schedule and run
  * kinds without a cycle.
  *
  * Validation here is shape only: the cron's meaning, the minimum interval, caps and every permission are the API's.
@@ -504,3 +506,184 @@ export function digestCron(days: readonly Weekday[], time: string): string {
   const dow = [...new Set(days.map((d) => CRON_DAY[Weekday.parse(d)]))].sort((a, b) => a - b);
   return `${minute} ${hour} * * ${dow.join(",")}`;
 }
+
+export const DigestSection = z.enum(["decisions", "follows", "mentions", "work_zone"]);
+export type DigestSection = z.infer<typeof DigestSection>;
+
+const unique = <T>(values: readonly T[]) => new Set(values).size === values.length;
+
+/**
+ * The person's digest (R6). The server derives the cron from `days` + `time` (`digestCron`) and computes it in
+ * `timeZone` (the browser's, sent on save); sections are re-checked against the reader's access at send time.
+ */
+export const DigestSettings = z.object({
+  enabled: z.boolean(),
+  days: z.array(Weekday).min(1).max(7).refine(unique, { message: "days must be unique" }),
+  time: ClockTime,
+  timeZone: AutomationTimeZone,
+  sections: z
+    .array(DigestSection)
+    .min(1)
+    .max(DigestSection.options.length)
+    .refine(unique, { message: "sections must be unique" }),
+  skipEmpty: z.boolean().default(true),
+  /** A bot the person can DM; their personal bot is preselected. */
+  agentId: Id,
+  /** The AI summary is opt-in and metered (usage kind `digest`); null model = the organization's default. */
+  summary: z
+    .object({ enabled: z.boolean().default(false), modelRef: ModelRef.nullable().default(null) })
+    .default({ enabled: false, modelRef: null }),
+});
+export type DigestSettings = z.infer<typeof DigestSettings>;
+
+const DigestBot = z.object({
+  id: Id,
+  displayName: z.string(),
+  personal: z.boolean(),
+  unitName: z.string().nullable(),
+});
+
+/** `GET /digest`: the caller's own digest (none yet = `settings: null`). */
+export const DigestView = z.object({
+  settings: DigestSettings.nullable(),
+  automationId: Id.nullable(),
+  nextRunAt: IsoDateTime.nullable(),
+  lastSentAt: IsoDateTime.nullable(),
+  bots: z.array(DigestBot),
+});
+export type DigestView = z.infer<typeof DigestView>;
+
+/** `POST /digest/preview`: unsaved settings in, the exact Markdown the bot would send now out. */
+export const DigestPreviewRequest = DigestSettings;
+export type DigestPreviewRequest = z.infer<typeof DigestPreviewRequest>;
+
+export const DigestPreview = z.object({
+  markdown: z.string().max(AUTOMATION_LIMITS.mailTextMaxChars),
+  empty: z.boolean(),
+});
+export type DigestPreview = z.infer<typeof DigestPreview>;
+
+/** `POST /digest/test`: where the test digest was posted (the person's DM with the chosen bot). */
+export const DigestTestResponse = z.object({ conversationId: Id, messageId: Id });
+export type DigestTestResponse = z.infer<typeof DigestTestResponse>;
+
+// ---------------------------------------------------------------- webhook endpoints (D-02, R3, R4)
+
+export const WebhookRejectReason = z.enum(["signature", "timestamp", "too_large", "rate_limited"]);
+export type WebhookRejectReason = z.infer<typeof WebhookRejectReason>;
+
+/** One accepted or duplicate event (`automation_events`); rejected requests leave no row, only the endpoint's line. */
+export const WebhookDelivery = z.object({
+  id: Id,
+  receivedAt: IsoDateTime,
+  result: z.enum(["accepted", "duplicate", "not_run"]),
+  /** Why an accepted event did not run (an `AutomationRunReason` or an inbound code). */
+  reason: z.string().max(64).nullable(),
+  duplicateCount: z.number().int().nonnegative(),
+  link: z
+    .object({
+      conversationId: Id,
+      messageId: Id,
+      threadRootId: Id.nullable(),
+      cardNumber: z.string().max(32).nullable(),
+    })
+    .nullable(),
+});
+export type WebhookDelivery = z.infer<typeof WebhookDelivery>;
+
+/** `GET /automations/:id/webhook`: never the secret (it is shown once, on create and on rotate). */
+export const WebhookEndpoint = z.object({
+  publicId: WebhookPublicId,
+  url: z.string().max(2048),
+  secretSetAt: IsoDateTime,
+  /** The previous secret still verifies until then (24 h after a rotation). */
+  previousValidUntil: IsoDateTime.nullable(),
+  lastRejectedAt: IsoDateTime.nullable(),
+  lastRejectedReason: WebhookRejectReason.nullable(),
+  deliveries: z.array(WebhookDelivery).max(10),
+  /** The latest accepted payload (parsed JSON), to pick pointers from; untrusted, rendered as text only. */
+  lastPayload: z.unknown().nullable(),
+});
+export type WebhookEndpoint = z.infer<typeof WebhookEndpoint>;
+
+export const RotateWebhookSecretResponse = z.object({
+  secret: WebhookSecret,
+  previousValidUntil: IsoDateTime,
+});
+export type RotateWebhookSecretResponse = z.infer<typeof RotateWebhookSecretResponse>;
+
+// ---------------------------------------------------------------- mailbox test (R8)
+
+/** `POST /mailboxes/test`: try the connection without saving (strict like the config: no credential field). */
+export const MailboxTestRequest = MailboxConfigInput.omit({ pollIntervalMinutes: true });
+export type MailboxTestRequest = z.infer<typeof MailboxTestRequest>;
+
+export const MailboxTestResult = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), messages: z.number().int().nonnegative() }),
+  z.object({
+    ok: z.literal(false),
+    code: z.enum([
+      "auth_failed",
+      "unreachable",
+      "host_not_allowed",
+      "folder_missing",
+      "certificate",
+      "unknown",
+    ]),
+  }),
+]);
+export type MailboxTestResult = z.infer<typeof MailboxTestResult>;
+
+// ---------------------------------------------------------------- editor options (R12, R13)
+
+/** `GET /automations/options`: what the caller may create, with which bots, within which caps. */
+export const AutomationOptions = z.object({
+  canCreate: z.boolean(),
+  canWebhook: z.boolean(),
+  bots: z.array(
+    z.object({
+      id: Id,
+      displayName: z.string(),
+      personal: z.boolean(),
+      unitName: z.string().nullable(),
+      /** The bot's cell is configured and running (a run would be delivered). */
+      ready: z.boolean(),
+    }),
+  ),
+  caps: z.object({
+    maxAutomationsPerUser: z.number().int().nonnegative(),
+    used: z.number().int().nonnegative(),
+    minScheduleMinutes: z.number().int().positive(),
+    maxInboundPerHour: z.number().int().nonnegative(),
+    maxRunsPerDayCap: z.number().int().positive(),
+  }),
+  /** Per bot id: its daily turn limit, null when unlimited. */
+  botDailyLimit: z.record(Id, z.number().int().nonnegative().nullable()),
+});
+export type AutomationOptions = z.infer<typeof AutomationOptions>;
+
+export const AutomationTargetOptionsQuery = z.object({ agentId: Id });
+export type AutomationTargetOptionsQuery = z.infer<typeof AutomationTargetOptionsQuery>;
+
+export const AutomationTargetOptions = z.object({
+  conversations: z.array(
+    z.object({
+      conversationId: Id,
+      name: z.string(),
+      layout: z.enum(["text", "board"]),
+      disabledReason: z.enum(["agent_not_member", "target_not_postable"]).nullable(),
+      columns: z.array(z.object({ id: Id, name: z.string(), category: BoardColumnCategory })),
+    }),
+  ),
+});
+export type AutomationTargetOptions = z.infer<typeof AutomationTargetOptions>;
+
+// ---------------------------------------------------------------- realtime (ids only, on `user:<runAs>`)
+
+/** `automation.updated` on `user:<runAs>` (and managers' lists refetch). */
+export const AutomationUpdatedEvent = z.strictObject({ automationId: Id });
+export type AutomationUpdatedEvent = z.infer<typeof AutomationUpdatedEvent>;
+
+/** `automation_run.updated` on `user:<runAs>` for every run status change. */
+export const AutomationRunUpdatedEvent = z.strictObject({ automationId: Id, runId: Id });
+export type AutomationRunUpdatedEvent = z.infer<typeof AutomationRunUpdatedEvent>;
