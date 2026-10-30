@@ -10,8 +10,11 @@ import { type GreenMail, startGreenMail } from "./testing-mail";
 function imapSession(host: string, port: number) {
   let socket: Socket | undefined;
   let buffer = "";
-  let waiter: { test: (b: string) => boolean; resolve: (b: string) => void; reject: (e: Error) => void } | null =
-    null;
+  let waiter: {
+    test: (b: string) => boolean;
+    resolve: (b: string) => void;
+    reject: (e: Error) => void;
+  } | null = null;
   const check = () => {
     if (waiter?.test(buffer)) {
       const w = waiter;
