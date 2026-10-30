@@ -15,6 +15,8 @@ export function createFakeModelServer(opts?: {
   /** Mounts the fake sandboxd at `/__sandboxd` behind this bearer (default FAKE_SANDBOX_TOKEN; "" = not mounted). */
   sandboxToken?: string;
   mcpToken?: string;
+  /** The bearer `/erp-mcp` requires (default OCW_FAKE_ERP_TOKEN, else `e2e-erp-token`). */
+  erpToken?: string;
   clawhubArtifactDir?: string;
   onRequest?: (request: FakeModelRequest) => void;
 }): Server;

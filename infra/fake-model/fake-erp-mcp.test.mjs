@@ -141,7 +141,10 @@ describe("fake ERP MCP (07.6-04, D-04 / A6)", () => {
 
   it("add_note appends to the record's notes without bumping updated_at", async () => {
     const before = (await call("get_record", { id: "SO-10442" })).structuredContent;
-    const r = await call("add_note", { id: "SO-10442", text: "Updated from OCW by Archie for Ana: delivery_date" });
+    const r = await call("add_note", {
+      id: "SO-10442",
+      text: "Updated from OCW by Archie for Ana: delivery_date",
+    });
     assert.deepEqual(r.structuredContent, { ok: true });
     await call("add_note", { id: "SO-10442", text: "second" });
     const after = (await call("get_record", { id: "SO-10442" })).structuredContent;
