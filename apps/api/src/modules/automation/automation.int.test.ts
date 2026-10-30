@@ -284,3 +284,44 @@ describe("Víctor creates a weekly automation through REST (Task 1, tracer)", ()
     ).toEqual({ ok: false, code: "invalid_cron" });
   });
 });
+
+describe("trigger seams (Task 2): webhook and mail triggers go through their adapters", () => {
+  it("refuses a lead's webhook trigger and a mail trigger with 400 trigger_unavailable, leaving nothing", async () => {
+    const countBefore = Number((await su.query("select count(*) from app.automations")).rows[0].count);
+    await fails(
+      marta.request("POST", "/api/v1/automations", {
+        name: "Shopify orders",
+        agentId: scoutId,
+        instructions: "Read each order and flag the risky ones.",
+        trigger: { kind: "webhook" },
+        target: { kind: "dm" },
+        inbound: { action: "post", askBot: true, config: { titlePointer: "/order/name" } },
+      }),
+      400,
+      "trigger_unavailable",
+    );
+    await fails(
+      victor.request("POST", "/api/v1/automations", {
+        name: "Supplier inbox",
+        agentId: scoutId,
+        instructions: "Read each supplier mail and summarise it.",
+        trigger: {
+          kind: "mail",
+          mailbox: {
+            vaultItemId: randomUUID(),
+            host: "imap.example.test",
+            port: 993,
+            folder: "INBOX",
+            pollIntervalMinutes: 10,
+          },
+        },
+        target: { kind: "channel", conversationId: sales },
+        inbound: { action: "post", askBot: true, config: {} },
+      }),
+      400,
+      "trigger_unavailable",
+    );
+    expect(Number((await su.query("select count(*) from app.automations")).rows[0].count)).toBe(countBefore);
+    expect(await audits("automation.created")).toHaveLength(countBefore);
+  });
+});

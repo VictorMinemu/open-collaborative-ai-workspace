@@ -38,8 +38,16 @@ import {
   decideTarget,
   type TargetCode,
 } from "./access";
-import { type ActionKindHandler, type AutomationRow, createActionRegistry } from "./actions";
+import {
+  type ActionKindHandler,
+  type AutomationRow,
+  createActionRegistry,
+  type TriggerAdapter,
+  type TriggerDeps,
+} from "./actions";
+import { mailTrigger } from "./mailboxes";
 import { firstRunAt, nextRuns, validateSchedule } from "./schedule";
+import { webhookTrigger } from "./webhooks";
 
 /**
  * The automation entity (D-01, D-07; PRD §73-75): a standing order run as its creator, with a trigger, a target by
@@ -144,6 +152,10 @@ export function createAutomationService(
   access: ConversationAccess,
 ): AutomationService {
   const kinds = createActionRegistry();
+  const triggerDeps: TriggerDeps = { core, perms };
+  /** R3: the endpoint or mailbox behind a webhook or mail trigger lives and dies with its automation, in its tx. */
+  const adapterOf = (kind: "webhook" | "mail"): TriggerAdapter<unknown> =>
+    kind === "webhook" ? webhookTrigger : mailTrigger;
 
   async function loadCaps(tx: Tx): Promise<AutomationCaps> {
     const [row] = await tx
@@ -180,7 +192,9 @@ export function createAutomationService(
     const row = await loadRow(tx, id);
     if (!row) throw notFound();
     const owner = row.runAsUserId === actor.userId;
-    if (!owner && !(await canManage(perms, tx, actor))) throw notFound();
+    // Decided for everyone (the owner too), so every answer carries a resolver decision.
+    const manage = await canManage(perms, tx, actor);
+    if (!owner && !manage) throw notFound();
     return { row, owner };
   }
 
@@ -338,8 +352,8 @@ export function createAutomationService(
             row.triggerKind === "schedule"
               ? { cron: row.scheduleCron as string, timeZone: row.timeZone as string }
               : null,
-          webhook: null,
-          mailbox: null,
+          webhook: row.triggerKind === "webhook" ? await webhookTrigger.view(tx, row, triggerDeps) : null,
+          mailbox: row.triggerKind === "mail" ? await mailTrigger.view(tx, row, triggerDeps) : null,
         },
         target: { ...target, label } as AutomationTargetView,
         inbound:
@@ -446,9 +460,6 @@ export function createAutomationService(
         target: input.target,
       });
       if (!decided.ok) throw targetError(decided.code);
-      if (trigger.kind !== "schedule") {
-        throw new HttpError(400, "trigger_unavailable", "This trigger isn't available yet");
-      }
 
       const [row] = await tx
         .insert(automations)
@@ -462,15 +473,23 @@ export function createAutomationService(
           actionKind,
           instructions: actionKind === "digest" ? "" : input.instructions,
           triggerKind: trigger.kind,
-          scheduleCron: trigger.schedule.cron,
-          timeZone: trigger.schedule.timeZone,
+          scheduleCron: trigger.kind === "schedule" ? trigger.schedule.cron : null,
+          timeZone: trigger.kind === "schedule" ? trigger.schedule.timeZone : null,
           ...targetColumns(input.target, decided.conversationId),
+          inboundAction: input.inbound?.action ?? null,
+          inboundAskBot: input.inbound?.askBot ?? true,
+          inboundConfig: input.inbound?.config ?? {},
           config: opts.config ?? {},
           maxRunsPerDay: input.maxRunsPerDay,
           nextRunAt,
         })
         .returning();
       const created = row as AutomationRow;
+      // The trigger's own entity, in this transaction: a refusal there leaves no automation behind.
+      const made =
+        trigger.kind === "schedule"
+          ? {}
+          : await adapterOf(trigger.kind).onCreate(tx, created, trigger, triggerDeps);
       await core.audit.record(tx, {
         action: "automation.created",
         resourceType: "automation",
@@ -487,7 +506,10 @@ export function createAutomationService(
         },
       });
       await announce(tx, created);
-      return { automation: await service.toDto(tx, created, actor) };
+      return {
+        automation: await service.toDto(tx, created, actor),
+        ...(made.webhookSecret ? { webhookSecret: made.webhookSecret } : {}),
+      };
     },
 
     async get(tx, actor, id) {
