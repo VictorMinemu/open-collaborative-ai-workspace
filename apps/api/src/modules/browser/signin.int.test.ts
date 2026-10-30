@@ -531,6 +531,8 @@ describe("a sign-in signal, not just a cookie (07.8-28, WINDOWS #284)", () => {
       sam.close();
     }
     expect(await contextRow(contextId)).toMatchObject({ end_reason: "crashed" });
+    // sandboxd closes the page only after the row has ended (signin.ts), so that close can still be in flight here.
+    await until(async () => fakeContext(contextId) === undefined);
     expect(fakeContext(contextId)).toBeUndefined();
     const audited = await auditsOf(["browser.closed", "browser.signin_decided"], since);
     expect(
