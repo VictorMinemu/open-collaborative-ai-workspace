@@ -138,6 +138,7 @@ export { agentFactsOf, authorOf, type Directory, type DirectoryEntry, loadDirect
 export {
   dmAgentOf,
   dmKey,
+  ensureAgentDm,
   ensureDm,
   ensureGroup,
   ensureHumanDm,

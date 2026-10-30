@@ -17,6 +17,7 @@ import {
   startSandboxStack,
 } from "../../testing-sandbox";
 import { startTestStorage, type TestStorage } from "../../testing-storage";
+import { ensureAgentDm, updatePlatformCard } from "../chat";
 import { createPermissionService, type PermissionService } from "../organization";
 import { type DeliverAutomationRunResult, deliverAutomationRun } from "./automation-runs";
 
@@ -703,5 +704,187 @@ describe("unattended run turns: sandbox tools within 07.8's limits, never a brow
     } finally {
       await s.setPolicy({ killed: false });
     }
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: platform card updates, DMs
+
+const chatDeps = () => ({ audit: core().audit, realtime: core().realtime, perms });
+
+const cardRow = async (messageId: string) =>
+  (
+    await s.su.query(
+      "select status, status_label, notices, version from app.message_cards where message_id = $1",
+      [messageId],
+    )
+  ).rows[0] as Json;
+
+describe("the server keeps platform cards current (R1, P-12)", () => {
+  it("updatePlatformCard: status, label and notice; version + 1; message.updated on the conversation; GET shows them", async () => {
+    const r = await scheduledRun();
+    const before = (
+      await s.su.query(
+        "select coalesce(max(seq), 0)::int as seq from app.stream_events where stream_id = $1",
+        [`conv:${salesId}`],
+      )
+    ).rows[0].seq as number;
+    const notice = { tone: "neutral" as const, text: "Scout didn't answer within 15 minutes." };
+    const out = await asPerson(s.victorId, (tx) =>
+      updatePlatformCard(tx, core(), {
+        messageId: r.anchorId,
+        status: "failed",
+        statusLabel: "No reply",
+        notices: [notice],
+      }),
+    );
+    expect(out).toEqual({ version: 2 });
+    expect(await cardRow(r.anchorId)).toEqual({
+      status: "failed",
+      status_label: "No reply",
+      notices: [notice],
+      version: 2,
+    });
+    const updates = (
+      await s.su.query(
+        "select payload from app.stream_events where stream_id = $1 and type = 'message.updated' and seq > $2",
+        [`conv:${salesId}`, before],
+      )
+    ).rows.map((x) => x.payload as Json);
+    expect(updates.find((u) => u.message.id === r.anchorId)?.message.card).toMatchObject({
+      status: "failed",
+      statusLabel: "No reply",
+      notices: [notice],
+      version: 2,
+    });
+    expect(await cardOf(s.victor, salesId, r.anchorId)).toMatchObject({
+      status: "failed",
+      statusLabel: "No reply",
+      notices: [notice],
+      platformOwned: true,
+    });
+
+    // The label is bounded by the contract (1..24) and so are the notices (≤ 3): nothing changes.
+    await expect(
+      asPerson(s.victorId, (tx) =>
+        updatePlatformCard(tx, core(), { messageId: r.anchorId, statusLabel: "x".repeat(25) }),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      asPerson(s.victorId, (tx) =>
+        updatePlatformCard(tx, core(), { messageId: r.anchorId, notices: [notice, notice, notice, notice] }),
+      ),
+    ).rejects.toThrow();
+    expect((await cardRow(r.anchorId)).version).toBe(2);
+  });
+
+  it("an agent PATCH of the run card stays 403 card_platform_owned", async () => {
+    const r = await scheduledRun();
+    const res = await fetch(`${s.stack.baseUrl}/agent-channel/v1/cards/${r.anchorId}`, {
+      method: "PATCH",
+      headers: { authorization: `Bearer ${SANDBOX_CELL_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ agentId: s.scoutId, patch: { expectedVersion: 1, status: "succeeded" } }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as Json).error.code).toBe("card_platform_owned");
+    expect((await cardRow(r.anchorId)).version).toBe(1);
+  });
+
+  it("an ordinary agent card: its statusLabel and notices are dropped, and updatePlatformCard refuses it", async () => {
+    const ev = await mentionTurn(s.sam, salesId);
+    const posted = await s.cell("/cards", {
+      agentId: s.scoutId,
+      conversationId: salesId,
+      threadRootId: ev.thread.rootMessageId,
+      inReplyToMessageId: ev.message.id,
+      eventId: ev.eventId,
+      idempotencyKey: randomUUID(),
+      card: {
+        kind: "report",
+        title: "Pipeline",
+        summary: "Pipeline",
+        status: "succeeded",
+        fields: [],
+        actions: [],
+        statusLabel: "Approved!",
+        notices: [{ tone: "warning", text: "Trust me" }],
+      },
+    });
+    expect(posted.status).toBe(201);
+    const messageId = posted.body?.messageId as string;
+    expect(await cardRow(messageId)).toMatchObject({ status_label: null, notices: [], version: 1 });
+    // The card is a reply in the mention's thread: read it there.
+    const thread = await ok(
+      s.victor.request("GET", `/api/v1/messages/${ev.thread.rootMessageId}/thread`) as Promise<Res>,
+    );
+    const card = (thread.replies as Json[]).find((m) => m.id === messageId)?.card as Json | undefined;
+    expect(card).toMatchObject({ kind: "report", status: "succeeded" });
+    expect(card).not.toHaveProperty("statusLabel");
+    expect(card).not.toHaveProperty("notices");
+    expect(card).not.toHaveProperty("platformOwned");
+    await expect(
+      asPerson(s.victorId, (tx) => updatePlatformCard(tx, core(), { messageId, statusLabel: "Done" })),
+    ).rejects.toThrow(/not a platform-owned card/);
+    expect(await cardRow(messageId)).toMatchObject({ status_label: null, version: 1 });
+  });
+});
+
+describe("ensureAgentDm opens a person's DM with a bot under the DM rules (P-08)", () => {
+  it("creates the 1:1 DM once and returns the same one after; a run delivered there gets a flat reply", async () => {
+    const bot = await s.newBot(`Herald ${randomUUID().slice(0, 4)}`);
+    const first = await asPerson(s.victorId, (tx) =>
+      ensureAgentDm(tx, chatDeps(), { agentId: bot.id, userId: s.victorId }),
+    );
+    expect(first.created).toBe(true);
+    const second = await asPerson(s.victorId, (tx) =>
+      ensureAgentDm(tx, chatDeps(), { agentId: bot.id, userId: s.victorId }),
+    );
+    expect(second).toEqual({ conversationId: first.conversationId, created: false });
+    const members = (
+      await s.su.query(
+        "select member_kind, member_id, role from app.conversation_members where conversation_id = $1 order by member_kind",
+        [first.conversationId],
+      )
+    ).rows;
+    expect(members).toEqual([
+      { member_kind: "agent", member_id: bot.id, role: "member" },
+      { member_kind: "user", member_id: s.victorId, role: "owner" },
+    ]);
+
+    const automationId = await newAutomation({ agentId: bot.id, targetKind: "dm" });
+    const runId = await newRun(automationId);
+    const anchorId = await postAnchor(runId, { conversationId: first.conversationId, agentId: bot.id });
+    const out = await deliver(
+      { automationId, runId, anchorId, conversationId: first.conversationId },
+      { delivery: "dm", agentId: bot.id },
+    );
+    expect(out.delivered).toBe(true);
+    const [ev] = (await runEvents(runId)) as [Json];
+    expect(ev.conversation.kind).toBe("dm");
+    const reply = await replyTo(ev);
+    expect(reply.status).toBe(200);
+    const row = (
+      await s.su.query("select thread_id from app.messages where id = $1", [reply.body?.messageId])
+    ).rows[0];
+    expect(row.thread_id).toBeNull();
+    expect((await runRow(runId)).status).toBe("answered");
+  });
+
+  it("Sam's personal bot never opens a DM with Víctor: personal_bot_target; a disabled bot: agent_unavailable", async () => {
+    const personal = await ok(s.sam.request("POST", "/api/v1/agents/personal", {}) as Promise<Res>);
+    const samBot = personal.agent.id as string;
+    await expect(
+      asPerson(s.victorId, (tx) => ensureAgentDm(tx, chatDeps(), { agentId: samBot, userId: s.victorId })),
+    ).rejects.toMatchObject({ code: "personal_bot_target" });
+    // Its owner is fine.
+    const own = await asPerson(s.samId, (tx) =>
+      ensureAgentDm(tx, chatDeps(), { agentId: samBot, userId: s.samId }),
+    );
+    expect(own.conversationId).toBe(personal.dmId);
+
+    const off = await s.newBot(`Sleepy ${randomUUID().slice(0, 4)}`);
+    await s.su.query("update app.agents set status = 'disabled' where id = $1", [off.id]);
+    await expect(
+      asPerson(s.victorId, (tx) => ensureAgentDm(tx, chatDeps(), { agentId: off.id, userId: s.victorId })),
+    ).rejects.toMatchObject({ code: "agent_unavailable" });
   });
 });
