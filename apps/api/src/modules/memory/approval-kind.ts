@@ -77,6 +77,8 @@ const FINDING_NAME: Partial<Record<SensitiveFindingKind, string>> = {
 const EXTENDED_UNAVAILABLE = "Extended scan unavailable — review the text yourself";
 const EXTENDED_PARTIAL = "Extended scan incomplete — review the text yourself";
 const GONE_COPY = "This memory no longer exists.";
+/** Who asked, for a system-origin proposal (07.6: a Work Zone session summary made for its owner). */
+const SYSTEM_REQUESTER = "Work Zone";
 
 /** "{Create|Rewrite|Append to} {path}", at most 200 characters (a long path keeps its end). */
 export function proposalTitle(op: MemoryProposalOp, path: string): string {
@@ -173,7 +175,9 @@ async function names(tx: Tx, p: Pick<ProposalRow, "requestedByAgentId" | "reques
         .where(eq(orgMembers.userId, p.requestedForUserId))
         .limit(1)
     : [];
-  return { bot: bot?.name ?? "Deleted bot", person: person?.name ?? "Former member" };
+  // 07.6 (ADR-0023 decision 18): a proposal the platform made for a person (a Work Zone session summary) has no bot.
+  const asker = p.requestedByAgentId ? (bot?.name ?? "Deleted bot") : SYSTEM_REQUESTER;
+  return { bot: asker, person: person?.name ?? "Former member" };
 }
 
 const storedFindings = (p: ProposalRow) =>
