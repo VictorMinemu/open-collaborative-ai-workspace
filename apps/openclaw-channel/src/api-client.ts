@@ -34,6 +34,8 @@ import {
   type AgentChannelPostMessage,
   AgentChannelPostMessageResponse,
   type AgentChannelProviderAuthReport,
+  type AgentChannelRecordUpdate,
+  AgentChannelRecordUpdateResponse,
   type AgentChannelRuntimeReport,
   AgentChannelSentenceAnswer,
   type AgentChannelStatusReport,
@@ -496,6 +498,26 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
       } catch (error) {
         const answer = error instanceof AgentChannelHttpError ? error.answer : undefined;
         if (answer?.code) return { ok: false, code: answer.code, sentence: answer.sentence };
+        throw error;
+      }
+    },
+    /**
+     * `ocw_record_update` (07.6 AUTO-04): compare-and-set on the watched record of the turn's card. One attempt (a write;
+     * the API reads and writes through the record's connector, so the budget is a connector call's). A refusal answered
+     * with a 4xx that still carries `{ok: false, code, sentence}` (409 `record_changed`, 403 `tainted`, …) resolves to
+     * that refusal; any other failure throws. Never logs the changes.
+     */
+    async updateRecord(
+      req: AgentChannelRecordUpdate,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelRecordUpdateResponse> {
+      try {
+        return AgentChannelRecordUpdateResponse.parse(
+          await request("POST", "/records/update", req, signal, 1, CONNECTOR_REQUEST_TIMEOUT_MS),
+        );
+      } catch (error) {
+        const answer = error instanceof AgentChannelHttpError ? error.answer : undefined;
+        if (answer) return { ok: false, code: answer.code, sentence: answer.sentence };
         throw error;
       }
     },

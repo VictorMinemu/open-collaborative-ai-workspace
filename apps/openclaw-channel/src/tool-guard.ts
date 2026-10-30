@@ -18,6 +18,8 @@ import { automationTaintedSentence } from "./automation-tool.js";
 // connector-tools.ts imports from this module too; its sentences are only read while a call runs.
 import { REFUSAL_SENTENCE } from "./connector-tools.js";
 import { openClawAgentIdFor } from "./mention-mapper.js";
+// record-tool.ts imports from this module too; the sentence is only called while a call runs (see the note there).
+import { recordTaintedSentence } from "./record-tool.js";
 // work-zone-tools.ts imports from this module too; the sentence is only called while a call runs (see the note there).
 import { workZoneTaintedSentence } from "./work-zone-tools.js";
 
@@ -29,8 +31,9 @@ import { workZoneTaintedSentence } from "./work-zone-tools.js";
  *   - blocks tools outside `turn.tools`, over the per-turn caps, or side-effecting after untrusted output
  *     (taint) — locally first, which saves a round trip,
  *   - asks `POST /agent-channel/v1/tool-calls` for every call except `ocw_memory_save`, `ocw_memory_write`,
- *     `ocw_memory_propose`, `ocw_board_card` and the connector and keychain tools (validated by their own routes,
- *     `SELF_VALIDATED_TOOLS`) and blocks on a denial, an error or a
+ *     `ocw_memory_propose`, `ocw_board_card`, the connector and keychain tools, the Work Zone tools and the 07.6
+ *     `ocw_automation_propose` / `ocw_record_update` (validated by their own routes, `SELF_VALIDATED_TOOLS`) and blocks
+ *     on a denial, an error or a
  *     timeout (fail closed, under OpenClaw's 15 s budget),
  *   - reports each allowed call's outcome (status, result count, provider, duration; never content).
  * Per-tool approvals (07.5 D-01, D-02, D-04): for a tool whose turn flags carry `approval` (and only for those) the
@@ -113,9 +116,16 @@ const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
   "ocw_http_request",
   "ocw_work_zone_projects",
   "ocw_start_work_zone",
-  // 07.6: `/automations/propose` re-decides the turn, the tool on it and the taint itself.
+  // 07.6: `/automations/propose` and `/records/update` re-decide the turn, the tool on it, the taint and (for a record
+  // update) the 07.5 approval themselves.
   "ocw_automation_propose",
+  "ocw_record_update",
 ]);
+/**
+ * 07.6 (D-04, D-07): side-effecting whatever flags a turn carries, but, unlike `ALWAYS_SIDE_EFFECTING`, a turn's 07.5
+ * approval policy still lets a tainted turn's call reach its route, which decides (a person may approve the write).
+ */
+const SIDE_EFFECTING_WITH_APPROVAL: ReadonlySet<string> = new Set(["ocw_record_update"]);
 /**
  * Always side-effecting, whatever flags a turn carries: writing memory or changing shared board work after untrusted
  * content is exactly the injection the taint rule exists for (D-08, T-03.1-07-02, 07.1-13, T-07.2-07-02). A memory
@@ -489,7 +499,10 @@ export function createToolGuard(
       if (!t.turn.tools.includes(tool)) return block(`Tool ${tool} is not allowed on this turn.`);
       const delivered = callFlags(t, tool, event.params);
       if ("block" in delivered) return delivered;
-      const flags = ALWAYS_SIDE_EFFECTING.has(tool) ? { ...delivered, sideEffecting: true } : delivered;
+      const flags =
+        ALWAYS_SIDE_EFFECTING.has(tool) || SIDE_EFFECTING_WITH_APPROVAL.has(tool)
+          ? { ...delivered, sideEffecting: true }
+          : delivered;
       const web = WEB_TOOLS.has(tool);
       // 07.8: the confined tools have their own budget (D-11 F-7); the API counts and refuses `budget_exhausted` too.
       const confined = isConfinedTool(tool);
@@ -515,6 +528,7 @@ export function createToolGuard(
         if (tool === "ocw_start_work_zone") return block(workZoneTaintedSentence(t.requesterName));
         // 07.6: the UI-SPEC's model-facing sentence for a proposal after outside content.
         if (tool === "ocw_automation_propose") return block(automationTaintedSentence(t.requesterName));
+        if (tool === "ocw_record_update") return block(recordTaintedSentence(t.requesterName));
         // 07.8: `ocw_sandbox_share` (and an act the API flags) reads the 07.4 sentence its route would answer.
         if (confined) return block(REFUSAL_SENTENCE.tainted);
         return block(

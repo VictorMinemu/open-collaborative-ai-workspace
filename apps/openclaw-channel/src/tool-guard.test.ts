@@ -386,6 +386,56 @@ describe("tool guard under abuse (Task 3)", () => {
     });
   });
 
+  describe("ocw_record_update (07.6 AUTO-04, D-04)", () => {
+    const RECORD = { untrustedOutput: true, sideEffecting: true };
+    const recordTurn = (flags: TurnContext["toolFlags"][string] = RECORD) =>
+      turn({
+        tools: ["web_search", "ocw_record_update"],
+        toolFlags: { web_search: WEB, ocw_record_update: flags },
+      });
+    const CHANGES = { changes: { "/status": "Shipped" } };
+
+    it("is validated by its own route: never sent to /tool-calls; once it ran, the turn is tainted (it read the record)", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: recordTurn() });
+      expect(await g.beforeToolCall(call("ocw_record_update", CHANGES), ctx())).toBeUndefined();
+      expect(fake.requests).toHaveLength(0);
+      expect(g.activeTurn(SESSION)?.calls).toBe(1);
+      expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+    });
+
+    it("is side-effecting whatever the flags say: refused after outside content with the record sentence", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        turn: recordTurn({ untrustedOutput: false, sideEffecting: false }),
+        requesterName: "Víctor Ruiz",
+      });
+      expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+      expect(await g.beforeToolCall(call("ocw_record_update", CHANGES), ctx())).toEqual({
+        block: true,
+        blockReason:
+          "I can't update the record after reading outside content in this turn. Tell Víctor Ruiz to ask again in a new message.",
+      });
+    });
+
+    it("a 07.5 approval flag lets a tainted turn's call through to the route, which decides (never /tool-calls)", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        turn: recordTurn({ ...RECORD, approval: "when_tainted" }),
+        tainted: true,
+      });
+      expect(await g.beforeToolCall(call("ocw_record_update", CHANGES), ctx())).toBeUndefined();
+      expect(fake.requests).toHaveLength(0);
+    });
+  });
+
   describe("Work Zone proposal tools (07.5-10, D-03, APPROVE-04)", () => {
     const LIST = { untrustedOutput: false, sideEffecting: false };
     const START = { untrustedOutput: false, sideEffecting: true };

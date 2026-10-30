@@ -1371,8 +1371,8 @@ export type AgentChannelAutomationPropose = {
 
 /** The model reads `sentence` (composed by the API); `code` is the refusal code. */
 export const AgentChannelAutomationProposeResponse = z.discriminatedUnion("ok", [
-  z.object({ ok: z.literal(true), approvalId: Id, sentence: z.string().min(1).max(500) }),
-  z.object({ ok: z.literal(false), code: z.string().min(1).max(64), sentence: z.string().min(1).max(500) }),
+  z.object({ ok: z.literal(true), approvalId: Id, sentence: z.string().max(500) }),
+  z.object({ ok: z.literal(false), code: z.string().max(64), sentence: z.string().max(500) }),
 ]);
 export type AgentChannelAutomationProposeResponse = z.infer<typeof AgentChannelAutomationProposeResponse>;
 
@@ -1388,8 +1388,8 @@ export type AgentChannelRecordUpdate = {
 
 export const AgentChannelRecordUpdateResponse = z.object({
   ok: z.boolean(),
-  code: z.string().min(1).max(64).nullable(),
-  sentence: z.string().min(1).max(500),
+  code: z.string().max(64).nullable(),
+  sentence: z.string().max(500),
 });
 export type AgentChannelRecordUpdateResponse = z.infer<typeof AgentChannelRecordUpdateResponse>;
 

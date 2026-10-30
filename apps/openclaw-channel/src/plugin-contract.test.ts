@@ -16,6 +16,8 @@ import {
   AgentAutomationRunEvent,
   AgentCardActionEvent,
   AgentChannelApprovalRefusalDetails,
+  AgentChannelAutomationProposeResponse,
+  AgentChannelRecordUpdateResponse,
   AgentChannelToolCallDecision,
   AgentChannelWorkZoneProjectsResponse,
   AgentChannelWorkZoneProposeResponse,
@@ -25,6 +27,7 @@ import {
   type CellMcpServer,
   type CellProvider,
   type CellSnapshot,
+  RECORD_UPDATE_MAX_CHANGES,
   TOOL_APPROVAL_LIMITS,
   TOOL_APPROVAL_REFUSALS,
   TurnToolFlags,
@@ -33,6 +36,7 @@ import {
   WORK_ZONE_RUNTIMES,
 } from "./agent-channel-protocol.js";
 import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
+import { AUTOMATION_PROPOSE_TOOL, automationProposalOf } from "./automation-tool.js";
 import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
 import { MEMBER_ACCOUNT, NEEDS_RECONNECT, NOT_CONNECTED, REFUSAL_SENTENCE } from "./connector-tools.js";
 import { createMemoryCursorStore } from "./cursor-store.js";
@@ -47,6 +51,7 @@ import {
   type RunCli,
 } from "./plugin-installer.js";
 import { planReconcile } from "./reconciler.js";
+import { RECORD_UPDATE_TOOL, recordUpdateOf } from "./record-tool.js";
 import { registerCapabilities } from "./register-capabilities.js";
 import { registerFull } from "./register-full.js";
 import {
@@ -1425,6 +1430,195 @@ describe("automation mirror parity (07.6: plugin ↔ packages/contracts automati
   });
 });
 
+describe("the two 07.6 tools (AUTO-03, AUTO-04): offered per turn, mirrored from the contracts, over HTTP", () => {
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean } };
+  const U = (n: number) => `0199a6f0-0000-7000-8000-${String(n).padStart(12, "0")}`;
+  const PROPOSE = { untrustedOutput: false, sideEffecting: true };
+  const RECORD = { untrustedOutput: true, sideEffecting: true };
+  type Factory = (ctx: Record<string, unknown>) => {
+    name: string;
+    execute: (id: string, p: unknown) => Promise<{ content: Array<{ text: string }>; details: unknown }>;
+  };
+  const text = (r: { content: Array<{ text: string }> }) => r.content.map((c) => c.text).join("");
+
+  it("the bot's entry configures both; a turn's run may use each only when the turn offers it", () => {
+    const bot: CellAgent = { ...structuredClone(ARCHIE), capabilities: { tools: ["ocw_agent_card"] } };
+    const entry = planReconcile({}, { agents: [bot], providers: [FAKE] }).upsertAgents[
+      openClawAgentIdFor(ARCHIE.id)
+    ];
+    expect(entry?.tools).toMatchObject({
+      alsoAllow: expect.arrayContaining([AUTOMATION_PROPOSE_TOOL, RECORD_UPDATE_TOOL]),
+    });
+    const base = { memory: [], now: null, maxToolCalls: 8, maxWebCalls: 5 };
+    const asTurn = (tools: string[]) =>
+      mapMention(
+        {
+          ...mention(1),
+          seq: 1,
+          type: "agent.mention.v1",
+          organizationId: "o",
+          cellId: "c",
+          turn: {
+            ...base,
+            tools,
+            toolFlags: { [AUTOMATION_PROPOSE_TOOL]: PROPOSE, [RECORD_UPDATE_TOOL]: RECORD },
+          },
+        },
+        bot,
+      ).allowedTools;
+    expect(asTurn(["ocw_agent_card"])).toEqual(["ocw_agent_card"]);
+    expect(asTurn(["ocw_agent_card", AUTOMATION_PROPOSE_TOOL])).toEqual([
+      "ocw_agent_card",
+      AUTOMATION_PROPOSE_TOOL,
+    ]);
+    expect(asTurn(["ocw_agent_card", RECORD_UPDATE_TOOL])).toEqual(["ocw_agent_card", RECORD_UPDATE_TOOL]);
+    // A bot the API serves no delivered-turn tools never configures them (nothing widened).
+    const bare: CellAgent = { ...structuredClone(ARCHIE), capabilities: { tools: ["web_search"] } };
+    const bareEntry = planReconcile({}, { agents: [bare], providers: [FAKE] }).upsertAgents[
+      openClawAgentIdFor(ARCHIE.id)
+    ];
+    expect(bareEntry?.tools).toMatchObject({ alsoAllow: ["web_search"] });
+  });
+
+  it("the tool names, the bodies the tools build and the answers are the contracts'", async () => {
+    const caps = (await import(contracts("bot-capabilities.ts"))) as {
+      BUILTIN_TOOLS: Record<string, string>;
+    };
+    const ac = (await import(contracts("agent-channel.ts"))) as Record<string, Schema>;
+    expect(AUTOMATION_PROPOSE_TOOL).toBe(caps.BUILTIN_TOOLS.automationPropose);
+    expect(RECORD_UPDATE_TOOL).toBe(caps.BUILTIN_TOOLS.recordUpdate);
+    const turnIds = { eventId: U(1), agentId: U(2) };
+    for (const params of [
+      {
+        name: "Weekly sales report",
+        instructions: "Post it.",
+        cron: "0 17 * * 5",
+        timeZone: "Europe/Madrid",
+        deliverTo: "here",
+      },
+      {
+        name: "Daily",
+        instructions: "Check.",
+        cron: "30 8 * * 1-5",
+        timeZone: "UTC",
+        deliverTo: "dm",
+        maxRunsPerDay: 288,
+      },
+    ]) {
+      const built = automationProposalOf(turnIds, params);
+      if ("error" in built) throw new Error(built.error);
+      expect(ac.AgentChannelAutomationPropose?.safeParse(built.body).success).toBe(true);
+    }
+    const many = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`/f${i}`, i]));
+    const twenty = recordUpdateOf(turnIds, { changes: many(RECORD_UPDATE_MAX_CHANGES) });
+    if ("error" in twenty) throw new Error(twenty.error);
+    expect(ac.AgentChannelRecordUpdate?.safeParse(twenty.body).success).toBe(true);
+    // The contract refuses what the tool refuses locally.
+    expect(ac.AgentChannelRecordUpdate?.safeParse({ ...turnIds, changes: many(21) }).success).toBe(false);
+    expect("error" in recordUpdateOf(turnIds, { changes: many(21) })).toBe(true);
+    expect(
+      ac.AgentChannelRecordUpdate?.safeParse({ ...turnIds, changes: { "/s": "x".repeat(501) } }).success,
+    ).toBe(false);
+    expect("error" in recordUpdateOf(turnIds, { changes: { "/s": "x".repeat(501) } })).toBe(true);
+    for (const answer of [
+      { ok: true, approvalId: U(9), sentence: "I posted a card proposing “Weekly sales report”." },
+      { ok: false, code: "automation_cap", sentence: "Ana already has 20 automations." },
+    ]) {
+      expect(ac.AgentChannelAutomationProposeResponse?.safeParse(answer).success).toBe(true);
+      expect(AgentChannelAutomationProposeResponse.parse(answer)).toEqual(answer);
+    }
+    for (const answer of [
+      { ok: true, code: null, sentence: "Updated SO-10442 in ERP." },
+      { ok: false, code: "record_changed", sentence: "The record changed in ERP since the last check." },
+    ]) {
+      expect(ac.AgentChannelRecordUpdateResponse?.safeParse(answer).success).toBe(true);
+      expect(AgentChannelRecordUpdateResponse.parse(answer)).toEqual(answer);
+    }
+  });
+
+  it("registerFull → the real client → the fake API: only the turn's ids and the intent travel; refusals are sentences", async () => {
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const guard = createToolGuard({ client: () => client });
+    const registered: Factory[] = [];
+    registerFull(
+      { on: () => undefined, registerTool: (f: Factory) => registered.push(f) } as never,
+      guard,
+      () => client,
+    );
+    guard.beginTurn("s-auto", {
+      eventId: "evt-a1",
+      agentId: ARCHIE.id,
+      turn: {
+        tools: [AUTOMATION_PROPOSE_TOOL, RECORD_UPDATE_TOOL],
+        toolFlags: { [AUTOMATION_PROPOSE_TOOL]: PROPOSE, [RECORD_UPDATE_TOOL]: RECORD },
+        memory: [],
+        now: null,
+        maxToolCalls: 8,
+        maxWebCalls: 5,
+      },
+      conversationId: "conv-1",
+      threadRootId: "card-1",
+      requesterName: "Víctor",
+    });
+    const tool = (name: string) => {
+      const found = registered.map((f) => f({ sessionKey: "s-auto" })).find((t) => t.name === name);
+      if (!found) throw new Error(`${name} was not registered`);
+      return found;
+    };
+    const proposal = {
+      name: "Weekly sales report",
+      instructions: "Post the total.",
+      cron: "0 17 * * 5",
+      timeZone: "Europe/Madrid",
+      deliverTo: "here",
+    };
+    expect(text(await tool(AUTOMATION_PROPOSE_TOOL).execute("tc-1", proposal))).toBe(
+      "I posted a card proposing “Weekly sales report”. The person has to confirm it. Tell them in one short sentence, without repeating the details.",
+    );
+    expect(text(await tool(RECORD_UPDATE_TOOL).execute("tc-2", { changes: { "/status": "Shipped" } }))).toBe(
+      "Updated SO-10442 in ERP.",
+    );
+    expect(api.automations.proposals).toEqual([
+      {
+        eventId: "evt-a1",
+        agentId: ARCHIE.id,
+        name: "Weekly sales report",
+        instructions: "Post the total.",
+        schedule: { cron: "0 17 * * 5", timeZone: "Europe/Madrid" },
+        target: { kind: "here" },
+      },
+    ]);
+    expect(api.automations.recordUpdates).toEqual([
+      { eventId: "evt-a1", agentId: ARCHIE.id, changes: { "/status": "Shipped" } },
+    ]);
+    // The 409 conflict and the 403 refusal carry the server's sentence in their body: that is what the model reads.
+    await fetch(`${api.url}/__test/automations`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        propose: {
+          status: 409,
+          code: "automation_cap",
+          sentence: "Víctor already has 20 automations. Ask them to delete one first.",
+        },
+        record: {
+          status: 409,
+          code: "record_changed",
+          sentence: "The record changed in ERP since the last check, so nothing was written.",
+        },
+      }),
+    });
+    expect(text(await tool(AUTOMATION_PROPOSE_TOOL).execute("tc-3", proposal))).toBe(
+      "Víctor already has 20 automations. Ask them to delete one first.",
+    );
+    const conflict = await tool(RECORD_UPDATE_TOOL).execute("tc-4", { changes: { "/status": "Shipped" } });
+    expect(text(conflict)).toBe("The record changed in ERP since the last check, so nothing was written.");
+    expect(conflict.details).toEqual({ ok: false, code: "record_changed" });
+  });
+});
+
 /** Every tool the plugin owns, in registration order (manifest `contracts.tools` and `registerFull`). */
 const PLUGIN_TOOLS = [
   "ocw_memory_save",
@@ -1454,12 +1648,14 @@ const PLUGIN_TOOLS = [
   "ocw_browser_wait",
   "ocw_browser_signin",
   "ocw_browser_close",
+  "ocw_automation_propose",
+  "ocw_record_update",
 ];
 
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
   const MEMORY = { untrustedOutput: false, sideEffecting: true };
 
-  it("the manifest declares ocw_memory_save, the four memory file tools, ocw_agent_card, ocw_board_card, the connector tools, the two Work Zone tools and the fifteen confined tools in contracts.tools (OpenClaw discovers tool ownership there; 07.8: ocw_browser_screenshot is declared, spike ii reached the model)", () => {
+  it("the manifest declares ocw_memory_save, the four memory file tools, ocw_agent_card, ocw_board_card, the connector tools, the two Work Zone tools, the fifteen confined tools and the two 07.6 tools in contracts.tools (OpenClaw discovers tool ownership there; 07.8: ocw_browser_screenshot is declared, spike ii reached the model)", () => {
     const manifest = JSON.parse(
       readFileSync(path.join(import.meta.dirname, "..", "openclaw.plugin.json"), "utf8"),
     ) as { contracts?: { tools?: string[] } };
@@ -1545,6 +1741,8 @@ describe("board tool (07.1-13, BOARD-02): a board turn → ocw_board_card → PO
         "ocw_board_card",
         "ocw_work_zone_projects",
         "ocw_start_work_zone",
+        "ocw_automation_propose",
+        "ocw_record_update",
       ],
     });
     const boardTurn = {
