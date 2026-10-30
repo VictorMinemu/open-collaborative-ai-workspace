@@ -22,6 +22,7 @@ import type { ApiModule, App, Core } from "./core";
 import { createChatAgentBridge } from "./lib/chat-agent-bridge";
 import { createChatEvents } from "./lib/chat-events";
 import { HttpError } from "./lib/errors";
+import { createJobs } from "./lib/jobs";
 import { RedisBus } from "./lib/redis";
 import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
 import { createAgentModule } from "./modules/agent";
@@ -158,6 +159,13 @@ export async function buildApp(
   const chatEvents = createChatEvents();
   // Organization-level online set (@here, CHAT-08): maintained by the realtime gateway, read by notifications.
   const online = createOnlineSet(bus);
+  // Phase 07.6 (AUTO-01, D-07): pg-boss as ocw_app, no DDL. Created before the modules so their `register` can call
+  // `work` / `schedule`; started on ready (after every module registered); stopped before the pool closes.
+  const jobs = createJobs({
+    connectionString: env.DATABASE_URL,
+    workers: env.OCW_JOBS_WORKER === "on",
+    log: app.log,
+  });
   const core: Core = {
     env,
     log: app.log,
@@ -170,6 +178,7 @@ export async function buildApp(
     secrets,
     chatAgent,
     chatEvents,
+    jobs,
   };
 
   const allowedOrigins = new Set([
@@ -364,6 +373,11 @@ export async function buildApp(
       prefix: m.prefix ?? "/api/v1",
     });
   }
+  // On ready, every module's `register` has run. A JobsSchemaError (the migrate service has not run for this release)
+  // fails `listen` / `ready`; main.ts prints it and exits.
+  app.addHook("onReady", async () => {
+    await jobs.start();
+  });
 
   return {
     app,
@@ -378,6 +392,8 @@ export async function buildApp(
     browser,
     async close() {
       await app.close();
+      // In-flight handlers finish (up to 8 s, inside closeWithGrace's 10 s) before the pool they use closes.
+      await jobs.stop();
       for (const m of modules) await m.close?.();
       await Promise.allSettled([db.close(), authPool.end(), bus.close()]);
     },

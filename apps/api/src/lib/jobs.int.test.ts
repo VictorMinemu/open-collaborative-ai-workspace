@@ -272,12 +272,15 @@ describe("job runtime (pg-boss, 07.6-03)", () => {
     });
 
     it("refuses to start when a catalog queue is missing", async () => {
-      await query(tdb.superuserUrl, "delete from pgboss.queue where name = 'maintenance.daily'");
+      await query(
+        tdb.superuserUrl,
+        "delete from pgboss.job where name = 'watched.tick'; delete from pgboss.queue where name = 'watched.tick'",
+      );
       try {
         const { jobs } = jobsFor(tdb.appUrl, false);
         const err = await jobs.start().catch((e: unknown) => e);
         expect(err).toBeInstanceOf(JobsSchemaError);
-        expect((err as Error).message).toMatch(/maintenance\.daily/);
+        expect((err as Error).message).toMatch(/missing job queues: watched\.tick/);
       } finally {
         await installJobSchema(tdb.migratorUrl, () => {});
       }
@@ -295,6 +298,12 @@ describe("job runtime (pg-boss, 07.6-03)", () => {
       await again.start();
       await again.stop();
       expect(await appDdl()).toEqual([]);
+      // The trigger does see DDL: the migrator's reinstall is recorded.
+      const migrator = await query(
+        tdb.superuserUrl,
+        "select 1 from public.ocw_test_ddl_log where role = 'ocw_migrator'",
+      );
+      expect(migrator.length).toBeGreaterThan(0);
     });
   });
 });
