@@ -35,13 +35,14 @@ export { registerGrantRoutes } from "./grants";
 export { consumeGeneration, usageToday } from "./limits";
 /** For agent-channel and bot-capabilities (06-10, P-10): a persona's roster and audience in an AI chat. */
 export { audienceOf, participantsOf, registerMemberRoutes } from "./members";
+/** Phase 07.6 (P-16): model calls that are not chat generations (digests, Work Zone session summaries). */
+export { runOneShot } from "./one-shot";
 export { loadPreferences, registerPreferenceRoutes } from "./prefs";
 export { type AfterFinalize, createRunLoop, type RunLoop } from "./run-loop";
 export { registerShareRoutes, snapshotOf } from "./shares";
 export { createGenerationSweeper, type GenerationSweeper } from "./sweeper";
 export { createTitler, heuristicTitle, pickTitleModel, type Titler } from "./titles";
 export { toolStates, webAllowed } from "./tools-state";
-/** Phase 07.6 (P-16): model calls that are not chat generations (digests, Work Zone session summaries). */
 export { backendClassOf, type ReportedUsage, recordStandaloneUsage } from "./usage";
 export { searxngWebSearchTool } from "./web-tools";
 
