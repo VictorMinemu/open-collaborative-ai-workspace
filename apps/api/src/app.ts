@@ -31,24 +31,33 @@ import { createAiChatModule } from "./modules/ai-chat";
 import { type ApprovalService, createApprovalModule } from "./modules/approval";
 import { createArtifactModule, type ObjectStorage } from "./modules/artifact";
 import { createAuditService } from "./modules/audit";
+import { createAutomationModule } from "./modules/automation";
 import { createBotCapabilitiesModule, loadCatalog } from "./modules/bot-capabilities";
 import { type BrowserModule, createBrowserModule } from "./modules/browser";
 import { createChatModule, createConversationAccess } from "./modules/chat";
 import { createConnectorsModule } from "./modules/connectors";
 import { createDeviceModule, type DeviceHub } from "./modules/device";
+import { createDigestModule } from "./modules/digest";
 import { createAuth, createIdentityModule, IdentityService } from "./modules/identity";
 import { createKeychainModule } from "./modules/keychain";
 import { createMcpModule } from "./modules/mcp";
 import { createMemoryModule, createMemoryService, type MemoryService } from "./modules/memory";
 import { createModelGateway, createModelGatewayModule } from "./modules/model-gateway";
 import { createNotificationModule } from "./modules/notification";
-import { AuthzDeniedError, createOrganizationModule, recordAuthzDenial } from "./modules/organization";
+import {
+  AuthzDeniedError,
+  createOrganizationModule,
+  createPermissionService,
+  recordAuthzDenial,
+} from "./modules/organization";
 import { createPluginsModule } from "./modules/plugins";
 import { createOnlineSet, createRealtimeModule, createRealtimeService } from "./modules/realtime";
 import { createSandboxModule, pushPolicy, type SandboxModule } from "./modules/sandbox";
 import { createSearchModule } from "./modules/search";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createToolApprovalModule, type ToolApprovalService } from "./modules/tool-approval";
+import { createWatchedModule } from "./modules/watched";
+import { createWorkMemoryModule } from "./modules/work-memory";
 import { createWorkSessionAttachmentScope, createWorkSessionModule } from "./modules/work-session";
 import { stripQueryStrings } from "./telemetry/redact";
 import { API_VERSION } from "./version";
@@ -74,6 +83,8 @@ export interface BuiltApp {
   sandbox: SandboxModule;
   /** Bot browsers (07.8-14): the context module and its `browser` events handler (tests drive their own consumers). */
   browser: BrowserModule;
+  /** The registered modules' names, in registration order (wiring tests). */
+  moduleNames: readonly string[];
   close(): Promise<void>;
 }
 
@@ -321,6 +332,10 @@ export async function buildApp(
     allowedOrigins,
     activityPhrase: currentPhrase,
   });
+  // Phase 07.6 (ADR-0028): automations first, because the digest registers its action kind on their service. One
+  // permission service for the four modules (stateless). Their jobs run on `core.jobs`.
+  const perms = createPermissionService(core);
+  const automation = createAutomationModule(core, { perms, approvals: approvals.service, modelGateway });
   const modules: ApiModule[] = [
     createIdentityModule({
       identity,
@@ -367,6 +382,17 @@ export async function buildApp(
     toolApproval.module, // Phase 07.5: approval policies per tool (APPROVE-01)
     sandbox.module, // Phase 07.8: kill switch, settings, files, the events consumer (05, 11); packages from 18
     browser.module, // Phase 07.8-14: browser contexts (the bots' routes are the Agent Channel's)
+    automation.module, // Phase 07.6: automations (AUTO-01 … AUTO-03)
+    createWatchedModule(core, { perms }), // Phase 07.6: watched records (AUTO-04)
+    // Phase 07.6: the personal digest (AUTO-05), a `digest` automation
+    createDigestModule(core, {
+      perms,
+      approvals: approvals.service,
+      modelGateway,
+      automation: automation.service,
+    }),
+    // Phase 07.6: Work Zone → project memory (AUTO-06)
+    createWorkMemoryModule(core, { perms, approvals: approvals.service, memory, modelGateway }),
   ];
   for (const m of modules) {
     await app.register(async (scope) => m.register(scope as unknown as App), {
@@ -390,6 +416,7 @@ export async function buildApp(
     toolApprovals: toolApproval.service,
     sandbox,
     browser,
+    moduleNames: modules.map((m) => m.name),
     async close() {
       await app.close();
       // In-flight handlers finish (up to 8 s, inside closeWithGrace's 10 s) before the pool they use closes.
