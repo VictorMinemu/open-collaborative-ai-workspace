@@ -214,10 +214,11 @@ async function decide(
       await deps.toolApproval.approvalForCall(tx, {
         turn: { eventId: turn.eventId, agentId: turn.agentId },
         tool: TOOL,
+        // The connector by its stable id (LO-01, principle 11): the approval review shows its name.
         args: {
           watch: w.id,
           record: w.externalRef,
-          connector: server.name,
+          connector: server.id,
           base: w.snapshotHash,
           changes: body.changes,
         },

@@ -743,6 +743,69 @@ describe("governed like any side effect: taint and 07.5 approvals", () => {
     }
   });
 
+  it("LO-01: the approved action names the connector by id; a rename keeps the grant, the review shows the name", async () => {
+    ({ card } = await freshWatch("EXP-0062 Connector renamed while waiting"));
+    await s.su.query(
+      `insert into app.tool_approval_policies
+         (organization_id, scope_unit_id, tool_pattern, mode, approver_kind, approver_user_ids, created_by, updated_by)
+       values ($1, null, $2, 'always', 'requester', '{}', $3, $3)`,
+      [s.orgA, TOOL, s.victorId],
+    );
+    try {
+      const { eventId } = await mention(s.victor, card.messageId);
+      expect((await update(eventId, { "/status": "Shipped" })).body.code).toBe("approval_required");
+      const [request] = (
+        await s.su.query(
+          "select id, action_hash, card_message_id, resource_id from app.approval_requests where kind = 'tool.call' and organization_id = $1 order by created_at desc limit 1",
+          [s.orgA],
+        )
+      ).rows as Json[];
+      const stored = (
+        await s.su.query("select arguments_canonical from app.tool_call_approvals where id = $1", [
+          request?.resource_id,
+        ])
+      ).rows[0] as Json;
+      const args = JSON.parse(stored.arguments_canonical as string) as Json;
+      expect(args).toMatchObject({ connector: erpConnector.id, record: "SO-10442" });
+      expect(Object.values(args)).not.toContain("ERP");
+
+      // The review reads as people read it: the record, the connector's name and the changes (ids stay in All
+      // arguments).
+      const review = await ok(s.victor.request("GET", `/api/v1/approvals/${request?.id}`));
+      expect((review.view.preview as Json[]).map((f) => [f.label, f.value])).toEqual([
+        ["Changes", '{"/status":"Shipped"}'],
+        ["Connector", "ERP"],
+        ["Record", "SO-10442"],
+      ]);
+
+      // The admin renames the connector while the request waits: the same connector, so the grant still serves.
+      await ok(
+        s.victor.request("PATCH", `/api/v1/mcp-servers/${erpConnector.id}`, { name: "ERP production" }),
+      );
+      await ok(
+        s.victor.request("POST", `/api/v1/approvals/${request?.id}/decision`, {
+          outcome: "approved",
+          actionHash: request?.action_hash,
+        }),
+      );
+      const rerun = await eventually(async () => {
+        const rows = (
+          await s.su.query(
+            "select payload from app.stream_events where type = 'agent.card_action.v1' and payload->'cardAction'->>'messageId' = $1",
+            [request?.card_message_id],
+          )
+        ).rows;
+        return rows.length > 0 ? (rows[0].payload as Json) : undefined;
+      });
+      const done = await update(rerun.eventId, { "/status": "Shipped" });
+      expect(done.status, JSON.stringify(done.body)).toBe(200);
+      expect(record().status).toBe("Shipped");
+    } finally {
+      await ok(s.victor.request("PATCH", `/api/v1/mcp-servers/${erpConnector.id}`, { name: "ERP" }));
+      await s.su.query("delete from app.tool_approval_policies where organization_id = $1", [s.orgA]);
+    }
+  });
+
   it("HI-02: approved after a reported outside change: the grant does not serve the call, nothing is written", async () => {
     let watched: Json;
     ({ card, watched } = await freshWatch("EXP-0061 Approved too late"));

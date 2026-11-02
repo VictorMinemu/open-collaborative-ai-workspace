@@ -3,6 +3,7 @@ import {
   type ApprovalHeadline,
   type ApprovalOrigin,
   type ApprovalToolSourceKind,
+  BUILTIN_TOOLS,
   canonicalJson,
   isAgentCardRoute,
   TOOL_APPROVAL_LIMITS,
@@ -332,6 +333,26 @@ export function parseArgs(t: Pick<ToolCallRow, "argumentsCanonical">): Record<st
   return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/**
+ * The arguments a person reads in the preview (display only; the hash and "All arguments" keep the stored ones). An
+ * `ocw_record_update` names its connector by stable id and binds the watch and the snapshot it was asked against
+ * (07.6 review LO-01, HI-02): people read the record, the connector's current name and the changes.
+ */
+export async function previewArgsOf(
+  tx: Tx,
+  t: Pick<ToolCallRow, "tool">,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (t.tool !== BUILTIN_TOOLS.recordUpdate) return args;
+  const id = typeof args.connector === "string" && UUID.test(args.connector) ? args.connector : null;
+  const [server] = id
+    ? await tx.select({ name: mcpServers.name }).from(mcpServers).where(eq(mcpServers.id, id)).limit(1)
+    : [];
+  return { record: args.record, connector: server?.name ?? "Removed connector", changes: args.changes };
+}
+
 /** An HTTP call's method and host, for its title (the host is the stored target; never a path or query). */
 /**
  * The call's target as a person reads it, or null (WINDOWS #221). For an MCP server or a connector the stored target is
@@ -551,7 +572,9 @@ export function createToolCallKind(deps: ToolCallKindDeps): ApprovalKind {
       if (!t) return { type: "fields", title: "This action no longer exists.", fields: [] };
       const source = await sourceOf(tx, t);
       const args = parseArgs(t);
-      const preview = isSandboxExecAfterSignIn(t.tool, args) ? sandboxExecPreview(args) : orderPreview(args);
+      const preview = isSandboxExecAfterSignIn(t.tool, args)
+        ? sandboxExecPreview(args)
+        : orderPreview(await previewArgsOf(tx, t, args));
       const all = argumentsDisplay(args);
       // The rule that applies (shown as the policy) and the one that names the deciders differ only under the floor.
       const rule = await currentRule(tx, t);
