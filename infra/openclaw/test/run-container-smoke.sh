@@ -64,11 +64,15 @@
 # content reaches the model only inside its labelled untrusted block, the turn starts tainted, and the side-effecting
 # tool a directive in that mail aims at never reaches `/tool-calls` (blocked in the cell). The rendered config keeps
 # OpenClaw's cron, webhook ingress and `sessions_send` off.
+# Scenario automation-tools (07.6-24 / AUTO-03, AUTO-04, D-03, D-04): a DM turn's `ocw_automation_propose` and a board
+# thread turn's `ocw_record_update` run in OpenClaw and reach `/automations/propose` and `/records/update` with exactly
+# the contract's keys (never `/tool-calls`); the replies relay the API's sentences; a DM turn that read web output
+# first makes no proposal.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
 #                            dm-isolation, memory, memory-files, card, board, connectors, mcp, approval, work_zone,
-#                            marketplace, breaker, bot_sandbox, bot_browser, automation
+#                            marketplace, breaker, bot_sandbox, bot_browser, automation, automation-tools
 #                            and sandbox (runs when it is listed, with SMOKE_BUILD=1, or when ocw-mcp-sandbox:local
 #                            exists; otherwise it prints "SKIP sandbox (image not built)")
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
@@ -810,6 +814,104 @@ const ok =
   agents.every((a) => (a.tools?.deny ?? []).includes("group:sessions")) &&
   !offered.some((t) => ["cron", "sessions_send", "group:automation", "group:sessions"].includes(t));
 if (!ok) { console.log("FAIL: OpenClaw cron, webhooks or sessions_send are reachable in the rendered config"); process.exit(1); }
+'
+fi
+
+if want automation-tools; then
+echo "== [automation-tools] a DM turn offering ocw_automation_propose: the plugin tool posts the contract's keys to /automations/propose"
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-automation-tools.json" 0199a6f0-0000-7000-8000-00000000d763)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e763";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d763");
+if (!m) { console.log("FAIL: no reply to the proposal turn"); process.exit(1); }
+const proposals = s.automations.proposals.filter((b) => b.eventId === EV);
+const gated = s.toolCalls.filter((c) => c.eventId === EV);
+const p = proposals[0];
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   proposals  :", JSON.stringify(proposals));
+const ok =
+  proposals.length === 1 &&
+  Object.keys(p).sort().join() === "agentId,eventId,instructions,maxRunsPerDay,name,schedule,target" &&
+  p.agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
+  p.name === "Weekly sales report" && p.instructions === "Summarise this week'"'"'s closed deals per rep." &&
+  JSON.stringify(p.schedule) === JSON.stringify({ cron: "0 17 * * 5", timeZone: "Europe/Madrid" }) &&
+  JSON.stringify(p.target) === JSON.stringify({ kind: "here" }) && p.maxRunsPerDay === 2 &&
+  // The model relays the API sentence; validated by its own route, never /tool-calls.
+  m.text.includes("Tool ocw_automation_propose said: I posted a card proposing “Weekly sales report”. The person has to confirm it.") &&
+  /\[tools: 1 \| ocw_automation_propose\]/.test(m.text) &&
+  gated.length === 0;
+if (!ok) { console.log("FAIL: expected one proposal with exactly the contract keys and the API sentence in the reply"); process.exit(1); }
+'
+
+echo "== [automation-tools] a board thread turn offering ocw_record_update: the plugin tool posts the contract's keys to /records/update"
+RECORD="$SECRETS/mention-record-update.json"
+node -e '
+const fs = require("fs");
+const e = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+e.eventId = "0199a6f0-0000-7000-8000-00000000e764";
+e.conversation = { id: "0199a6f0-0000-7000-8000-00000000c764", kind: "channel", name: "orders" };
+// The watched card is the thread root; the person asks in its thread.
+e.thread = { rootMessageId: "0199a6f0-0000-7000-8000-00000000d740" };
+const changes = { changes: { "/status": "shipped", "/eta": "2026-11-07" } };
+e.message = { ...e.message, id: "0199a6f0-0000-7000-8000-00000000d764", text: `@archie mark SO-10442 shipped [[call ocw_record_update ${JSON.stringify(changes)}]]` };
+e.threadHistory = [{ id: "0199a6f0-0000-7000-8000-00000000d740", author: e.message.author, text: "SO-10442 (watched)", createdAt: "2026-10-30T08:00:00.000Z" }];
+e.turn = { ...e.turn, tools: ["ocw_record_update"], toolFlags: { ocw_record_update: { untrustedOutput: false, sideEffecting: true } } };
+fs.writeFileSync(process.argv[2], JSON.stringify(e));
+' "$ROOT/infra/openclaw/test/mention-automation-tools.json" "$RECORD"
+STATE="$(inject_and_wait "$RECORD" 0199a6f0-0000-7000-8000-00000000d764)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e764";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d764");
+if (!m) { console.log("FAIL: no reply to the record update turn"); process.exit(1); }
+const updates = s.automations.recordUpdates.filter((b) => b.eventId === EV);
+const gated = s.toolCalls.filter((c) => c.eventId === EV);
+const u = updates[0];
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   updates    :", JSON.stringify(updates));
+const ok =
+  updates.length === 1 &&
+  Object.keys(u).sort().join() === "agentId,changes,eventId" &&
+  u.agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
+  JSON.stringify(u.changes) === JSON.stringify({ "/status": "shipped", "/eta": "2026-11-07" }) &&
+  m.threadRootMessageId === "0199a6f0-0000-7000-8000-00000000d740" &&
+  m.text.includes("Tool ocw_record_update said: Updated SO-10442 in ERP.") &&
+  /\[tools: 1 \| ocw_record_update\]/.test(m.text) &&
+  gated.length === 0;
+if (!ok) { console.log("FAIL: expected one record update with exactly the contract keys and the API sentence in the reply"); process.exit(1); }
+'
+
+echo "== [automation-tools] the DM turn after reading web output (tainted): no proposal leaves the cell"
+TAINTED="$SECRETS/mention-automation-tainted.json"
+node -e '
+const fs = require("fs");
+const e = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+e.eventId = "0199a6f0-0000-7000-8000-00000000e765";
+e.thread = { rootMessageId: "0199a6f0-0000-7000-8000-00000000d765" };
+e.message = { ...e.message, id: "0199a6f0-0000-7000-8000-00000000d765", text: `[[call web_search {"query":"ocw smoke"}]] ${e.message.text}` };
+e.turn = {
+  ...e.turn,
+  tools: ["web_search", "ocw_automation_propose"],
+  toolFlags: { ...e.turn.toolFlags, web_search: { untrustedOutput: true, sideEffecting: false } },
+};
+fs.writeFileSync(process.argv[2], JSON.stringify(e));
+' "$ROOT/infra/openclaw/test/mention-automation-tools.json" "$TAINTED"
+STATE="$(inject_and_wait "$TAINTED" 0199a6f0-0000-7000-8000-00000000d765)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e765";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d765");
+if (!m) { console.log("FAIL: no reply to the tainted proposal turn"); process.exit(1); }
+const proposals = s.automations.proposals.filter((b) => b.eventId === EV);
+const gated = s.toolCalls.filter((c) => c.eventId === EV);
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   tool calls :", JSON.stringify(gated.map((c) => c.tool)), "proposals", proposals.length);
+const ok =
+  proposals.length === 0 &&
+  gated.length === 1 && gated[0].tool === "web_search" && gated[0].allowed === true &&
+  m.text.includes("Tool ocw_automation_propose said: I can'"'"'t propose an automation after reading outside content in this turn.");
+if (!ok) { console.log("FAIL: a turn that read web output proposed an automation"); process.exit(1); }
 '
 fi
 

@@ -1,0 +1,28 @@
+{
+  "eventId": "0199a6f0-0000-7000-8000-00000000e763",
+  "agent": { "id": "0199a6f0-0000-7000-8000-00000000a001", "handle": "archie", "displayName": "Archie" },
+  "conversation": { "id": "0199a6f0-0000-7000-8000-00000000c763", "kind": "dm", "name": null },
+  "thread": { "rootMessageId": "0199a6f0-0000-7000-8000-00000000d763" },
+  "message": {
+    "id": "0199a6f0-0000-7000-8000-00000000d763",
+    "text": "every Friday at 17:00 post the sales summary here [[call ocw_automation_propose {\"name\":\"Weekly sales report\",\"instructions\":\"Summarise this week's closed deals per rep.\",\"cron\":\"0 17 * * 5\",\"timeZone\":\"Europe/Madrid\",\"deliverTo\":\"here\",\"maxRunsPerDay\":2}]]",
+    "createdAt": "2026-10-30T09:00:00.000Z",
+    "author": { "kind": "user", "id": "0199a6f0-0000-7000-8000-0000000000f1", "displayName": "Víctor Ruiz" },
+    "mentions": [{ "kind": "agent", "id": "0199a6f0-0000-7000-8000-00000000a001" }]
+  },
+  "threadHistory": [],
+  "roster": [
+    { "kind": "user", "id": "0199a6f0-0000-7000-8000-0000000000f1", "displayName": "Víctor Ruiz", "role": "owner" },
+    { "kind": "agent", "id": "0199a6f0-0000-7000-8000-00000000a001", "displayName": "Archie", "handle": "archie" }
+  ],
+  "turn": {
+    "tools": ["ocw_automation_propose"],
+    "toolFlags": {
+      "ocw_automation_propose": { "untrustedOutput": false, "sideEffecting": true }
+    },
+    "memory": [],
+    "now": null,
+    "maxToolCalls": 8,
+    "maxWebCalls": 5
+  }
+}
