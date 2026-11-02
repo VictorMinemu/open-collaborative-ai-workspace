@@ -332,9 +332,11 @@ describe("AI chat payloads", () => {
             backend: "org_key",
             costMicrosUsd: 10,
             estimatedGenerations: 0,
+            estimatedRecords: 0,
+            kind: "digest",
           },
         ],
-        totals: { ...totals, costMicrosUsd: null, estimatedGenerations: 0 },
+        totals: { ...totals, costMicrosUsd: null, estimatedGenerations: 0, estimatedRecords: 0 },
       }).rows,
     ).toHaveLength(1);
     expect(
