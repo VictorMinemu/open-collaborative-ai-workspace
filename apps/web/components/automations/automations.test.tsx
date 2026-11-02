@@ -7,6 +7,7 @@ import { ApiRequestError } from "@/lib/api";
 import {
   automationErrorText,
   automationKeys,
+  baseVersionAfter,
   cronToSchedule,
   defaultSchedule,
   nextRelative,
@@ -52,6 +53,17 @@ const text = (html: string) =>
     .replace(/&amp;/g, "&")
     .replace(/\s+/g, " ")
     .trim();
+
+describe("the editor's base version after its own Pause / Resume (07.6 review C ME-04)", () => {
+  it("advances when the form was loaded from the version the action changed, never over a version saved meanwhile", () => {
+    // Loaded at 4, Resume answers 5: a later save sends 5 (no false 409, no lost edits).
+    expect(baseVersionAfter(4, 4, 5)).toBe(5);
+    // Loaded at 3 while the server was at 4 (changed meanwhile): the base stays, so the save is still a real 409.
+    expect(baseVersionAfter(3, 4, 5)).toBe(3);
+    // Nothing loaded yet: nothing to advance.
+    expect(baseVersionAfter(null, 4, 5)).toBeNull();
+  });
+});
 
 describe("schedule presets ↔ cron (UI-SPEC Surface 2)", () => {
   it("every preset makes its cron", () => {

@@ -576,6 +576,15 @@ export function runOpenHref(run: AutomationRun, a: Pick<Automation, "target">): 
   );
 }
 
+/**
+ * The editor's base version after its own Pause or Resume (which bump the version, 07.6 review C ME-04): the new one
+ * when the form was loaded from the version the action started from, so the next save sends it (no false "changed
+ * while you were editing"); unchanged otherwise, so a change made meanwhile still answers 409.
+ */
+export function baseVersionAfter(base: number | null, before: number, after: number): number | null {
+  return base !== null && base === before ? after : base;
+}
+
 /** `Resumed “{name}”. Next run {when}.` (no next run for an inbound trigger). */
 export function resumedText(a: Automation): string {
   const zone = a.trigger.schedule?.timeZone;
