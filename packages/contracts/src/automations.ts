@@ -342,7 +342,9 @@ export type MailboxStatus = z.infer<typeof MailboxStatus>;
 
 export const Mailbox = z.object({
   ...mailboxConfigShape,
-  /** The Keychain item's display name (never its username or secret). */
+  /** Null once the Keychain item was deleted (the mailbox then waits with `auth_failed`, `key_not_usable`). */
+  vaultItemId: Id.nullable(),
+  /** The Keychain item's display name (never its username or secret); empty when the viewer cannot see the item. */
   vaultItemName: z.string().max(200),
   status: MailboxStatus,
   lastPolledAt: IsoDateTime.nullable(),
