@@ -4,15 +4,18 @@ import { type BuildInput, buildModelMessages } from "./build-model-messages";
 import type { ReportedUsage } from "./usage";
 
 /**
- * One model call that is not a chat answer (Phase 07.6, ADR-0018): a Work Zone session's memory summary. Like the title
+ * One model call that is not a chat answer (Phase 07.6, ADR-0018): a Work Zone session's memory summary, or a person's
+ * digest summary (07.6-13, opt-in, metered by the digest module). Like the title
  * call (titles.ts), it is one of the three doors to the AI SDK (guard.test.ts): the prompt comes only from
  * `buildModelMessages` (a non-chat purpose), the model only from the gateway (`ResolvedModel`, never a string id), no
- * tools, no retries, under a deadline and outside any transaction. The caller meters it (`recordStandaloneUsage`).
+ * tools, no retries, under a deadline. A session summary calls it outside any transaction; a digest summary inside its
+ * run's fire transaction (the runner's, which holds only that run's and that digest's rows, on a serial worker), under a
+ * shorter deadline. The caller meters it (`recordStandaloneUsage`).
  * Errors carry no prompt text out of here: the SDK's default error handler is silenced (P-10).
  */
 export async function runOneShot(
   resolved: ResolvedModel,
-  build: BuildInput & { purpose: "session_summary" },
+  build: BuildInput & { purpose: "session_summary" | "digest_summary" },
   opts: { timeoutMs: number; signal?: AbortSignal },
 ): Promise<{ text: string; usage: ReportedUsage | null; promptText: string }> {
   // A string id would route through the metered Vercel AI Gateway (P-04): never.

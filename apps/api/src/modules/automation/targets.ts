@@ -116,6 +116,12 @@ export function reasonSentence(
       return "Paused when it was due.";
     case "delivery_failed":
       return `${ctx.bot} couldn't be reached for this run.`;
+    case "nothing_new":
+      return "Nothing new.";
+    case "summary_skipped_limit":
+      return "Sent without the AI summary: your AI chat limit was reached.";
+    case "summary_failed":
+      return "Sent without the AI summary: it couldn't be written.";
   }
 }
 
