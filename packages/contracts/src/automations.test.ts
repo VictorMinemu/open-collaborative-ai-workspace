@@ -157,6 +157,8 @@ describe("schedules (P-07)", () => {
       "0 9 1,15 * *",
       "0 9 * JAN MON-FRI",
       " 0 9 * * * ",
+      // The editor's "Every month · Last day" preset (07.6-15); the API's cron-parser reads `L` as the month's last day.
+      "45 23 L * *",
     ]) {
       expect(AutomationSchedule.safeParse({ cron, timeZone: "UTC" }).success, cron).toBe(true);
     }
@@ -165,6 +167,7 @@ describe("schedules (P-07)", () => {
       "0 17 * *",
       "0 17 * * 5 2026",
       "0 17 ? * 5",
+      "0 17 LL * 5",
       "0 17 * * 5; rm -rf",
       "@weekly",
       "x".repeat(101),

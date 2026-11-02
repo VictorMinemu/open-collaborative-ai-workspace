@@ -157,11 +157,12 @@ export function resolveJsonPointer(value: unknown, pointer: string): unknown | u
 
 // ---------------------------------------------------------------- schedules (P-07)
 
-const CRON_FIELD_RE = /^(?:[0-9*,/-]|[A-Za-z]{3})+$/;
+const CRON_FIELD_RE = /^(?:(?:[0-9*,/-]|[A-Za-z]{3})+|L)$/;
 
 /**
  * Five whitespace-separated cron fields of the characters cron allows (digits, `*`, `,`, `-`, `/`, three-letter month
- * and day names). Its meaning and the minimum interval are decided by the API with the same code path as the preview.
+ * and day names), or a lone `L` (the month's last day: the editor's "Every month · Last day", 07.6-15). Its meaning and
+ * the minimum interval are decided by the API with the same code path as the preview.
  */
 export const CronExpression = z
   .string()
