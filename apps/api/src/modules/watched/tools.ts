@@ -74,7 +74,7 @@ export async function refuseTools(
     }
   }
   const read = byName.get(p.readTool);
-  if (!read || read.readOnly !== true || read.destructive === true) {
+  if (read?.readOnly !== true || read.destructive === true) {
     return { code: "read_tool_not_read_only", tool: p.readTool };
   }
   return null;

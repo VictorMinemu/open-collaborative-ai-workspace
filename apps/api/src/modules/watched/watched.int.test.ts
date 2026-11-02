@@ -16,7 +16,7 @@ import {
   ok,
   startConnectorsStack,
 } from "../../testing-connectors";
-import { callTool } from "../connectors";
+import { callTool, markNeedsReconnect } from "../connectors";
 import { replaceServerTools } from "../mcp";
 
 /**
@@ -367,6 +367,13 @@ describe("a watch names only read-only, non-dangerous tools the admin granted to
       [s.orgA, opsId, erpConnector.id, `${erpConnector.safeName}__run_shell`],
     );
     await fails(link({ readTool: "run_shell" }), 400, "tool_not_allowed");
+    // The capabilities route would never accept that grant; remove the forged rows so later grants stay valid.
+    await s.su.query("delete from app.bot_tool_grants where tool_name = $1", [
+      `${erpConnector.safeName}__run_shell`,
+    ]);
+    await s.su.query("delete from app.mcp_server_tools where server_id = $1 and name = 'run_shell'", [
+      erpConnector.id,
+    ]);
   });
 
   it("a write or note tool not granted to the bot is 400 tool_not_allowed; granted ones pass", async () => {
@@ -438,5 +445,466 @@ describe("a watch names only read-only, non-dangerous tools the admin granted to
     expect(await drain("watched.check")).toBe(1);
     expect((await row(other.watchedId)).last_status).toBe("ok");
     expect(erp.state.calls.length).toBe(calls + 1);
+  });
+});
+
+// ---------------------------------------------------------------- Task 3
+
+/** Created `watched.check` jobs of one watch (ids and source only). */
+const queued = async (watchedRecordId: string) =>
+  (
+    await s.su.query(
+      "select data->>'source' as source from pgboss.job where name = 'watched.check' and state = 'created' and data->>'watchedRecordId' = $1",
+      [watchedRecordId],
+    )
+  ).rows.map((r) => r.source as string);
+
+/** pg-boss singletons are one-minute slots: keep a "within 60 s" pair away from a slot's edge. */
+async function awayFromSlotEdge(): Promise<void> {
+  const into = Date.now() % 60_000;
+  if (into > 50_000) await new Promise((r) => setTimeout(r, 60_000 - into + 500));
+}
+
+const reply = (as: ConnectorsStack["victor"], rootId: string, body: string) =>
+  ok(as.request("POST", `/api/v1/conversations/${ordersId}/messages`, { body, threadRootId: rootId }));
+
+async function forceCheck(watchedRecordId: string): Promise<void> {
+  await s.su.query(
+    "update app.watched_records set next_check_at = now() - interval '1 minute' where id = $1",
+    [watchedRecordId],
+  );
+  await tick();
+  expect(await drain("watched.check")).toBe(1);
+}
+
+/** Links a fresh card and drains its silent baseline. */
+async function watchFresh(description: string, extra: Json = {}): Promise<{ card: Json; watched: Json }> {
+  const c = await humanCard(ordersId, description);
+  const w = await ok(s.victor.request("POST", "/api/v1/watched-records", linkBody(c.messageId, extra)), 201);
+  await drain("watched.check");
+  expect((await row(w.id)).snapshot_hash).toMatch(/^[0-9a-f]{64}$/u);
+  return { card: c, watched: w };
+}
+
+describe("checks on access: a person's reply in the thread and the thread being opened", () => {
+  let c: Json;
+  let w: Json;
+
+  beforeAll(async () => {
+    ({ card: c, watched: w } = await watchFresh("EXP-0044 Rush order"));
+  });
+
+  it("Sam's reply enqueues one access check (two replies within 60 s → one job); drained → 'when the thread was opened'", async () => {
+    await mutate("SO-10442", { status: "Delivered" });
+    await awayFromSlotEdge();
+    await reply(s.sam, c.messageId, "Any news on this one?");
+    await reply(s.sam, c.messageId, "Pinging again");
+    expect(await queued(w.id)).toEqual(["access"]);
+    expect(await drain("watched.check")).toBe(1);
+    const cards = ((await thread(c.messageId)).replies as Json[]).filter((m) => m.card);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]?.card.fields[0]).toEqual({ label: "Status", value: "Shipped → Delivered" });
+    expect(cards[0]?.card.fields.at(-1).value).toMatch(/ · when the thread was opened$/u);
+    const changes = (
+      await s.su.query("select source from app.watched_record_changes where watched_record_id = $1", [w.id])
+    ).rows;
+    expect(changes).toEqual([{ source: "access" }]);
+  });
+
+  it("a bot's message in the thread enqueues nothing", async () => {
+    await core().chatAgent.postAgentMessage(
+      { organizationId: s.orgA, userId: s.victorId },
+      {
+        agentId: opsId,
+        conversationId: ordersId,
+        threadRootId: c.messageId,
+        body: "I'll look into it.",
+        idempotencyKey: `bot-${randomUUID()}`,
+      },
+    );
+    expect(await queued(w.id)).toEqual([]);
+  });
+
+  it("POST /:id/check {access} (the strip on open) → 202, again within 60 s → 429 check_rate_limited", async () => {
+    await awayFromSlotEdge();
+    expect(
+      await ok(s.sam.request("POST", `/api/v1/watched-records/${w.id}/check`, { source: "access" }), 202),
+    ).toEqual({ ok: true });
+    await fails(
+      s.sam.request("POST", `/api/v1/watched-records/${w.id}/check`, { source: "access" }),
+      429,
+      "check_rate_limited",
+    );
+    expect(await queued(w.id)).toEqual(["access"]);
+    expect(await drain("watched.check")).toBe(1);
+    // Nothing changed since: no second card.
+    expect(((await thread(c.messageId)).replies as Json[]).filter((m) => m.card)).toHaveLength(1);
+  });
+
+  it("Check now (manual) needs post rights: Alex, who reads but is not in #orders, gets 403", async () => {
+    await fails(s.alex.request("POST", `/api/v1/watched-records/${w.id}/check`, { source: "manual" }), 403);
+    const list = await ok(s.alex.request("GET", `/api/v1/watched-records?conversationId=${ordersId}`));
+    expect((list.records as Json[]).find((r) => r.id === w.id)?.viewerCan).toEqual([]);
+  });
+});
+
+describe("preview (R9): read once, nothing stored", () => {
+  const body = (extra: Json = {}) => ({
+    conversationId: ordersId,
+    mcpServerId: erpConnector.id,
+    externalRef: "SO-10442",
+    readTool: "get_record",
+    idArg: "id",
+    ...extra,
+  });
+
+  it("answers every top-level field with a suggested label; stores nothing; audited without values", async () => {
+    const before = (await s.su.query("select count(*)::int as n from app.watched_records")).rows[0].n;
+    const p = await ok(s.victor.request("POST", "/api/v1/watched-records/preview", body()));
+    expect(p.values).toEqual(
+      expect.arrayContaining([
+        { pointer: "/status", value: "Delivered", suggestedLabel: "Status" },
+        { pointer: "/delivery_date", value: "2026-10-16", suggestedLabel: "Delivery date" },
+        { pointer: "/total", value: "1250.00", suggestedLabel: "Total" },
+        { pointer: "/customer", value: "Globex S.L.", suggestedLabel: "Customer" },
+      ]),
+    );
+    // The fake ERP types money as text, so nothing gets the number hint (Pitfall 9).
+    expect(p.numberHints).toEqual([]);
+    expect((await s.su.query("select count(*)::int as n from app.watched_records")).rows[0].n).toBe(before);
+    const audit = (await auditRows(s, s.orgA, ["watched_record.previewed"])).at(-1);
+    expect(audit?.metadata).toEqual({ conversationId: ordersId, mcpServerId: erpConnector.id, code: null });
+    expect(JSON.stringify(audit)).not.toMatch(/Delivered|Globex/u);
+  });
+
+  it("an unknown id → 404 record_not_found; a destructive read tool → 400; Alex (no post rights) → 403", async () => {
+    await fails(
+      s.victor.request("POST", "/api/v1/watched-records/preview", body({ externalRef: "SO-99999" })),
+      404,
+      "record_not_found",
+    );
+    await fails(
+      s.victor.request("POST", "/api/v1/watched-records/preview", body({ readTool: "update_record" })),
+      400,
+      "read_tool_not_read_only",
+    );
+    await fails(s.alex.request("POST", "/api/v1/watched-records/preview", body()), 403);
+  });
+});
+
+describe("audience: a per-member connector needs the linker's share in the board (Pitfall 8)", () => {
+  let personal: Json;
+  let c: Json;
+  let w: Json;
+  let shareId = "";
+
+  const share = async () =>
+    (
+      await ok(
+        s.victor.request("POST", "/api/v1/member-account-shares", {
+          conversationId: ordersId,
+          resourceKind: "connector",
+          resourceId: personal.id,
+        }),
+        201,
+      )
+    ).id as string;
+
+  const reconnectCards = async () =>
+    (
+      await s.su.query(
+        `select m.conversation_id, c.kind, mc.title, mc.platform_owned from app.messages m
+           join app.conversations c on c.id = m.conversation_id
+           join app.message_cards mc on mc.message_id = m.id
+          where m.author_kind = 'agent' and m.author_id = $1 and mc.title like 'Reconnect ERP personal%'`,
+        [opsId],
+      )
+    ).rows as Json[];
+
+  beforeAll(async () => {
+    personal = await ok(
+      s.victor.request("POST", "/api/v1/mcp-servers", {
+        name: "ERP personal",
+        transport: "streamable-http",
+        url: erpUrl,
+        authMode: "per_member_secret",
+        memberHeaderName: "Authorization",
+        memberHeaderPrefix: "Bearer ",
+      }),
+    );
+    // Víctor connects his own key; the first connection probes the tools API-side.
+    await ok(s.victor.request("PUT", `/api/v1/connectors/${personal.id}/secret`, { value: ERP_TOKEN }));
+    const tools = (
+      await s.su.query(
+        "select name, read_only from app.mcp_server_tools where server_id = $1 order by name",
+        [personal.id],
+      )
+    ).rows;
+    expect(tools).toContainEqual({ name: "get_record", read_only: true });
+    const caps = await ok(s.victor.request("GET", `/api/v1/agents/${opsId}/capabilities`));
+    await ok(
+      s.victor.request("PATCH", `/api/v1/agents/${opsId}/capabilities`, {
+        tools: [
+          ...(caps.tools as Json[])
+            .filter((t) => t.granted)
+            .map((t) => ({ sourceKind: t.sourceKind, sourceId: t.sourceId, tool: t.tool })),
+          { sourceKind: "mcp", sourceId: personal.id, tool: `${personal.safeName}__get_record` },
+        ],
+      }),
+    );
+    c = await humanCard(ordersId, "EXP-0045 Order read with Víctor's account");
+  });
+
+  it("without a share for #orders: link 409 member_account, preview 409 member_account", async () => {
+    await fails(
+      s.victor.request(
+        "POST",
+        "/api/v1/watched-records",
+        linkBody(c.messageId, { mcpServerId: personal.id }),
+      ),
+      409,
+      "member_account",
+    );
+    await fails(
+      s.victor.request("POST", "/api/v1/watched-records/preview", {
+        conversationId: ordersId,
+        mcpServerId: personal.id,
+        externalRef: "SO-10442",
+        readTool: "get_record",
+        idArg: "id",
+      }),
+      409,
+      "member_account",
+    );
+  });
+
+  it("after allowing ERP personal in #orders: 201, per_member, the baseline is read with Víctor's key", async () => {
+    shareId = await share();
+    w = await ok(
+      s.victor.request(
+        "POST",
+        "/api/v1/watched-records",
+        linkBody(c.messageId, { mcpServerId: personal.id }),
+      ),
+      201,
+    );
+    expect(w.connector).toMatchObject({ id: personal.id, authMode: "per_member" });
+    expect(await drain("watched.check")).toBe(1);
+    const r = await row(w.id);
+    expect(r).toMatchObject({ last_status: "ok", check_as_user_id: s.victorId });
+    expect(r.snapshot_hash).toMatch(/^[0-9a-f]{64}$/u);
+  });
+
+  it("revoking the share pauses the next check (not_connected, share_revoked): no read, nothing in the thread", async () => {
+    expect((await s.victor.request("DELETE", `/api/v1/member-account-shares/${shareId}`)).status).toBe(204);
+    await mutate("SO-10442", { status: "Returned" });
+    const calls = erp.state.calls.length;
+    await forceCheck(w.id);
+    expect(erp.state.calls.length).toBe(calls);
+    expect((await row(w.id)).last_status).toBe("not_connected");
+    expect((await thread(c.messageId)).replies).toEqual([]);
+    const paused = (await auditRows(s, s.orgA, ["watched_record.paused"])).filter(
+      (a) => a.resource_id === w.id,
+    );
+    expect(paused.at(-1)?.metadata).toMatchObject({ status: "not_connected", code: "share_revoked" });
+    expect(await reconnectCards()).toEqual([]);
+  });
+
+  it("allowed again: the next check resumes and reports the change", async () => {
+    shareId = await share();
+    await forceCheck(w.id);
+    expect((await row(w.id)).last_status).toBe("changed");
+    const replies = (await thread(c.messageId)).replies as Json[];
+    expect(replies).toHaveLength(1);
+    expect(replies[0]?.card.title).toBe("SO-10442 changed in ERP personal");
+  });
+
+  it("Víctor's connection needs reconnecting: paused, a Reconnect card only in his DM with the bot, none in the thread", async () => {
+    await markNeedsReconnect(core(), {
+      organizationId: s.orgA,
+      userId: s.victorId,
+      serverId: personal.id,
+      code: "upstream_unauthorized",
+    });
+    await forceCheck(w.id);
+    expect((await row(w.id)).last_status).toBe("not_connected");
+    expect((await thread(c.messageId)).replies).toHaveLength(1);
+    const notices = await reconnectCards();
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({
+      kind: "dm",
+      platform_owned: true,
+      title: "Reconnect ERP personal to keep watching SO-10442",
+    });
+    const members = (
+      await s.su.query(
+        "select member_kind, member_id from app.conversation_members where conversation_id = $1 order by member_kind",
+        [notices[0]?.conversation_id],
+      )
+    ).rows;
+    expect(members).toEqual([
+      { member_kind: "agent", member_id: opsId },
+      { member_kind: "user", member_id: s.victorId },
+    ]);
+    // A second paused check tells him nothing new.
+    await forceCheck(w.id);
+    expect(await reconnectCards()).toHaveLength(1);
+  });
+
+  it("after reconnecting, the next check resumes", async () => {
+    await ok(s.victor.request("PUT", `/api/v1/connectors/${personal.id}/secret`, { value: ERP_TOKEN }));
+    await forceCheck(w.id);
+    expect((await row(w.id)).last_status).toBe("ok");
+  });
+});
+
+describe("edit, unlink, refusals and cross-tenant", () => {
+  let c: Json;
+  let w: Json;
+
+  beforeAll(async () => {
+    ({ card: c, watched: w } = await watchFresh("EXP-0046 Order to edit", { externalRef: "SO-10443" }));
+  });
+
+  it("PATCH fields and interval at the version seen: 200, version + 1, a new silent baseline", async () => {
+    const updated = await ok(
+      s.victor.request("PATCH", `/api/v1/watched-records/${w.id}`, {
+        expectedVersion: w.version,
+        fields: [{ pointer: "/customer", label: "Customer" }],
+        checkIntervalMinutes: 15,
+      }),
+    );
+    expect(updated).toMatchObject({
+      version: w.version + 1,
+      checkIntervalMinutes: 15,
+      fields: [{ pointer: "/customer", label: "Customer" }],
+    });
+    expect((await row(w.id)).snapshot_hash).toBeNull();
+    expect(await drain("watched.check")).toBe(1);
+    expect((await row(w.id)).snapshot).toEqual({ "/customer": "Initech S.A." });
+    expect((await thread(c.messageId)).replies).toEqual([]);
+    const audit = (await auditRows(s, s.orgA, ["watched_record.updated"])).at(-1);
+    expect(audit?.metadata).toMatchObject({ changed: ["fields", "checkIntervalMinutes"], fieldCount: 1 });
+    await fails(
+      s.victor.request("PATCH", `/api/v1/watched-records/${w.id}`, {
+        expectedVersion: w.version,
+        checkIntervalMinutes: 60,
+      }),
+      409,
+      "version_conflict",
+    );
+    w = updated;
+  });
+
+  it("a lone surrogate in the record marks the check error (lone_surrogate) and posts nothing", async () => {
+    await mutate("SO-10443", { customer: "\ud800" });
+    await forceCheck(w.id);
+    expect((await row(w.id)).last_status).toBe("error");
+    const failed = (await auditRows(s, s.orgA, ["watched_record.check_failed"])).filter(
+      (a) => a.resource_id === w.id,
+    );
+    expect(failed.at(-1)?.metadata).toMatchObject({ status: "error", code: "lone_surrogate" });
+    expect((await thread(c.messageId)).replies).toEqual([]);
+    await mutate("SO-10443", { customer: "Initech S.A." });
+    await forceCheck(w.id);
+    expect((await row(w.id)).last_status).toBe("ok");
+    expect((await thread(c.messageId)).replies).toEqual([]);
+  });
+
+  it("Alex reads #orders but cannot post there: link, PATCH and DELETE are 403", async () => {
+    const mine = await humanCard(ordersId, "EXP-0047 Alex can't watch this");
+    await fails(s.alex.request("POST", "/api/v1/watched-records", linkBody(mine.messageId)), 403);
+    await fails(
+      s.alex.request("PATCH", `/api/v1/watched-records/${w.id}`, {
+        expectedVersion: w.version,
+        checkIntervalMinutes: 60,
+      }),
+      403,
+    );
+    await fails(s.alex.request("DELETE", `/api/v1/watched-records/${w.id}`), 403);
+  });
+
+  it("a non-board message is 400 not_a_board_card; a bot outside #orders is 400 agent_not_member", async () => {
+    const replyMsg = await reply(s.victor, c.messageId, "a reply, not a card");
+    await fails(
+      s.victor.request("POST", "/api/v1/watched-records", linkBody(replyMsg.id)),
+      400,
+      "not_a_board_card",
+    );
+    const text = await ok(s.victor.request("POST", "/api/v1/channels", { name: "orders-chat" }));
+    const plain = await ok(
+      s.victor.request("POST", `/api/v1/conversations/${text.id}/messages`, { body: "hello" }),
+    );
+    await fails(
+      s.victor.request("POST", "/api/v1/watched-records", linkBody(plain.id)),
+      400,
+      "not_a_board_card",
+    );
+    const stranger = (
+      await ok(
+        s.victor.request("POST", "/api/v1/agents", {
+          name: "Stranger",
+          username: "stranger",
+          instructions: "Not on the board.",
+          modelProvider: "mock",
+          modelId: "mock-1",
+        }),
+      )
+    ).id as string;
+    const fresh = await humanCard(ordersId, "EXP-0048 Card for a stranger bot");
+    await fails(
+      s.victor.request("POST", "/api/v1/watched-records", linkBody(fresh.messageId, { agentId: stranger })),
+      400,
+      "agent_not_member",
+    );
+  });
+
+  it("organization B gets 404 on every route, and a forged job finds nothing", async () => {
+    await fails(s.eve.request("GET", `/api/v1/watched-records?conversationId=${ordersId}`), 404);
+    await fails(s.eve.request("POST", "/api/v1/watched-records", linkBody(c.messageId)), 404);
+    await fails(
+      s.eve.request("PATCH", `/api/v1/watched-records/${w.id}`, {
+        expectedVersion: w.version,
+        checkIntervalMinutes: 60,
+      }),
+      404,
+    );
+    await fails(s.eve.request("DELETE", `/api/v1/watched-records/${w.id}`), 404);
+    await fails(s.eve.request("POST", `/api/v1/watched-records/${w.id}/check`, { source: "access" }), 404);
+    await fails(
+      s.eve.request("POST", "/api/v1/watched-records/preview", {
+        conversationId: ordersId,
+        mcpServerId: erpConnector.id,
+        externalRef: "SO-10442",
+        readTool: "get_record",
+        idArg: "id",
+      }),
+      404,
+    );
+    // The reply posted in the previous test queued an access check of its own: run it first.
+    await drain("watched.check");
+    await core().db.withTenant({ organizationId: s.orgB }, (tx) =>
+      core().jobs.sendInTx(tx, "watched.check", {
+        organizationId: s.orgB,
+        watchedRecordId: w.id,
+        source: "manual",
+      }),
+    );
+    const checkedAt = (await row(w.id)).checked_at;
+    expect(await drain("watched.check")).toBe(1);
+    expect((await row(w.id)).checked_at).toEqual(checkedAt);
+  });
+
+  it("DELETE unlinks (204, audited); past change cards stay in the thread", async () => {
+    expect((await s.victor.request("DELETE", `/api/v1/watched-records/${w.id}`)).status).toBe(204);
+    expect(await row(w.id)).toBeUndefined();
+    const audit = (await auditRows(s, s.orgA, ["watched_record.unlinked"])).at(-1);
+    expect(audit).toMatchObject({ resource_id: w.id });
+    expect(audit?.metadata).toMatchObject({ conversationId: ordersId, cardMessageId: c.messageId });
+    // The tracer's watch: unlinked, its change card stays.
+    const list = await ok(s.victor.request("GET", `/api/v1/watched-records?conversationId=${ordersId}`));
+    const tracer = (list.records as Json[]).find((r) => r.cardMessageId === card.messageId) as Json;
+    expect((await s.victor.request("DELETE", `/api/v1/watched-records/${tracer.id}`)).status).toBe(204);
+    expect(((await thread(card.messageId)).replies as Json[]).filter((m) => m.card)).toHaveLength(1);
   });
 });
