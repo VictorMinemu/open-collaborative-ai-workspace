@@ -175,7 +175,7 @@ async function messageOf(
   return list.find((m) => m.id === messageId);
 }
 
-const _cardRow = async (messageId: string) =>
+const cardRow = async (messageId: string) =>
   (
     await s.su.query(
       "select kind, title, status, status_label, platform_owned, fields, notices from app.message_cards where message_id = $1",
@@ -322,5 +322,226 @@ describe("a mail lands in #purchasing as a Received card and Scout reads it in a
     expect(posted.n).toBe(2);
     expect(await runsOf(src.automationId)).toHaveLength(1);
     expect((await eventRow(eventId)).message_id).toBe(cardId);
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: every action and follow-up
+
+/** A private board channel with Scout in it and an `Intake` column; its id and the column's. */
+async function intakeBoard(name: string): Promise<{ boardId: string; intake: string }> {
+  const boardId = (
+    await ok(
+      s.victor.request("POST", "/api/v1/channels", {
+        name,
+        visibility: "private",
+        layout: "board",
+      }) as Promise<Res>,
+    )
+  ).id as string;
+  await ok(
+    s.victor.request("POST", `/api/v1/channels/${boardId}/members`, {
+      kind: "agent",
+      id: s.scoutId,
+    }) as Promise<Res>,
+  );
+  const created = await s.victor.request("POST", `/api/v1/boards/${boardId}/columns`, {
+    name: "Intake",
+    category: "backlog",
+  });
+  expect([200, 201], JSON.stringify(created.body)).toContain(created.status);
+  const columns = (await ok(s.victor.request("GET", `/api/v1/boards/${boardId}`) as Promise<Res>))
+    .columns as Json[];
+  const intake = columns.find((c) => c.name === "Intake")?.id as string;
+  expect(intake).toBeTruthy();
+  return { boardId, intake };
+}
+
+const dmsWith = async (userId: string, agentId: string) =>
+  (
+    await s.su.query(
+      `select c.id from app.conversations c
+       where c.kind = 'dm'
+         and exists (select 1 from app.conversation_members m where m.conversation_id = c.id and m.member_kind = 'user' and m.member_id = $1)
+         and exists (select 1 from app.conversation_members m where m.conversation_id = c.id and m.member_kind = 'agent' and m.member_id = $2)`,
+      [userId, agentId],
+    )
+  ).rows.map((r) => r.id as string);
+
+const ORDER_CONFIG = {
+  titlePointer: "/order/name",
+  bodyPointer: "/order/note",
+  threadKeyPointer: "/order/id",
+};
+const order = (note: string) => ({ order: { name: "#1001", id: 450789, note } });
+
+describe("every action lands right and follow-ups keep their conversation (P-11, R2)", () => {
+  it("board: a card “#1001” in Intake by Scout for Víctor, the inbound card its first reply, Scout's turn in its thread; the same /order/id follows up in it", async () => {
+    const { boardId, intake } = await intakeBoard("orders");
+    const src = await inboundAutomation({
+      kind: "webhook",
+      name: "Shop orders",
+      target: { kind: "board", conversationId: boardId, columnId: intake },
+      action: "board_card",
+      config: ORDER_CONFIG,
+    });
+    const first = await receive(src, { bodyJson: order("Deliver before noon") });
+    await drainInbound();
+    const event = await eventRow(first);
+    const boardCardId = event.board_card_message_id as string;
+    expect(boardCardId).toBeTruthy();
+    expect(event).toMatchObject({ result: "accepted", thread_key: "450789" });
+
+    const boardCard = (
+      await s.su.query(
+        "select column_id, title, description, external_ref from app.board_cards where message_id = $1",
+        [boardCardId],
+      )
+    ).rows[0] as Json;
+    expect(boardCard).toEqual({
+      column_id: intake,
+      title: "#1001",
+      description: fence("Deliver before noon"),
+      external_ref: "450789",
+    });
+    expect(await messageRow(boardCardId)).toMatchObject({
+      author_kind: "agent",
+      author_id: s.scoutId,
+      thread_id: null,
+    });
+    const created = (
+      await s.su.query(
+        "select actor_kind, actor_id, user_id from app.audit_events where action = 'board.card.created' and resource_id = $1",
+        [boardCardId],
+      )
+    ).rows as Json[];
+    expect(created).toEqual([{ actor_kind: "agent", actor_id: s.scoutId, user_id: s.victorId }]);
+
+    // The inbound card is the card's first (and, for a short text, only) reply.
+    const replies = await repliesOf(boardCardId);
+    expect(replies.map((r) => r.id)).toEqual([event.message_id]);
+    expect(await cardRow(event.message_id)).toMatchObject({
+      kind: "automation",
+      title: "#1001",
+      status_label: "Received",
+      platform_owned: true,
+    });
+    const [run] = (await runsOf(src.automationId)) as [Json];
+    expect(run).toMatchObject({ trigger: "webhook", tainted: true, board_card_message_id: boardCardId });
+    await drainFire();
+    const [ev] = (await runEvents(run.id)) as [Json];
+    expect(ev.thread.rootMessageId).toBe(boardCardId);
+    expect(ev.message.id).toBe(event.message_id);
+    expect(ev.automationRun.inbound).toMatchObject({ source: "webhook", title: "#1001", from: null });
+    expect((await turnRow(ev.eventId)).tainted).toBe(true);
+
+    // The same /order/id again: a Follow-up card in the same card thread, no second board card.
+    const second = await receive(src, { bodyJson: order("Actually, deliver after 3 PM") });
+    await drainInbound();
+    const followUp = await eventRow(second);
+    expect(followUp).toMatchObject({ result: "accepted", board_card_message_id: boardCardId });
+    expect(await messageRow(followUp.message_id)).toMatchObject({ thread_id: boardCardId });
+    expect((await cardRow(followUp.message_id)).title).toBe("Follow-up: #1001");
+    const cards = (
+      await s.su.query("select count(*)::int as n from app.board_cards where conversation_id = $1", [boardId])
+    ).rows[0] as Json;
+    expect(cards.n).toBe(1);
+  });
+
+  it("mail follow-up: a mail whose References names the first mail continues its thread", async () => {
+    const src = await inboundAutomation({ askBot: false });
+    const first = await receive(src, {
+      externalId: "<m1@shop.example>",
+      threadKey: "<m1@shop.example>",
+      subject: "Order #1002",
+      sender: "orders@shop.example",
+      bodyText: "Two boxes, please.",
+    });
+    await drainInbound();
+    const rootId = (await eventRow(first)).message_id as string;
+    expect(await messageRow(rootId)).toMatchObject({ conversation_id: purchasingId, thread_id: null });
+
+    // 11 stores the first References id as the key.
+    const reply = await receive(src, {
+      externalId: "<m2@shop.example>",
+      threadKey: "<m1@shop.example>",
+      subject: "Re: Order #1002",
+      sender: "orders@shop.example",
+      bodyText: "Make it three.",
+    });
+    await drainInbound();
+    const followUp = await eventRow(reply);
+    expect(await messageRow(followUp.message_id)).toMatchObject({
+      conversation_id: purchasingId,
+      thread_id: rootId,
+    });
+    expect((await cardRow(followUp.message_id)).title).toBe("Follow-up: Re: Order #1002");
+
+    // An unrelated mail starts its own thread.
+    const other = await receive(src, {
+      externalId: "<m3@shop.example>",
+      threadKey: "<m3@shop.example>",
+      subject: "Order #1003",
+      bodyText: "One box.",
+    });
+    await drainInbound();
+    expect(await messageRow((await eventRow(other)).message_id)).toMatchObject({ thread_id: null });
+  });
+
+  it("DM target: the card is a message in Víctor's DM with Scout, the full text flat after it, the turn in the DM", async () => {
+    const src = await inboundAutomation({ target: { kind: "dm" } });
+    const eventId = await receive(src, {
+      subject: "Invoice 77",
+      sender: "billing@vendor.example",
+      bodyText: BODY,
+    });
+    await drainInbound();
+    const dms = await dmsWith(s.victorId, s.scoutId);
+    expect(dms).toHaveLength(1);
+    const cardId = (await eventRow(eventId)).message_id as string;
+    expect(await messageRow(cardId)).toMatchObject({ conversation_id: dms[0], thread_id: null });
+    const after = (
+      await s.su.query("select body, thread_id from app.messages where client_message_id = $1", [
+        `inbound:${eventId}:full`,
+      ])
+    ).rows[0] as Json;
+    expect(after).toEqual({ body: `Full message\n\n${fence(BODY)}`, thread_id: null });
+    const [run] = (await runsOf(src.automationId)) as [Json];
+    await drainFire();
+    const [ev] = (await runEvents(run.id)) as [Json];
+    expect(ev.conversation).toMatchObject({ id: dms[0], kind: "dm" });
+    expect((await turnRow(ev.eventId)).tainted).toBe(true);
+  });
+
+  it("thread target: the card is a reply in the chosen thread", async () => {
+    const root = (
+      await ok(
+        s.victor.request("POST", `/api/v1/conversations/${purchasingId}/messages`, {
+          body: "Supplier mail goes here",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    const src = await inboundAutomation({
+      target: { kind: "thread", conversationId: purchasingId, threadRootMessageId: root },
+      askBot: false,
+    });
+    const eventId = await receive(src, { subject: "Order #1004", bodyText: "Pallets." });
+    await drainInbound();
+    expect(await messageRow((await eventRow(eventId)).message_id)).toMatchObject({ thread_id: root });
+  });
+
+  it("askBot off: the item is posted, and there is no run and no cell event", async () => {
+    const src = await inboundAutomation({ askBot: false });
+    const eventId = await receive(src, { subject: "FYI", bodyText: "Prices go up in November." });
+    await drainInbound();
+    const event = await eventRow(eventId);
+    expect(event.message_id).toBeTruthy();
+    expect(await runsOf(src.automationId)).toEqual([]);
+    const cellEvents = (
+      await s.su.query(
+        "select count(*)::int as n from app.stream_events where stream_id = $1 and payload->'automationRun'->>'automationId' = $2",
+        [`cell:${s.orgA}`, src.automationId],
+      )
+    ).rows[0] as Json;
+    expect(cellEvents.n).toBe(0);
   });
 });
