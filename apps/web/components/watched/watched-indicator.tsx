@@ -26,7 +26,7 @@ export function WatchedIndicatorView({ watch, now }: { watch: WatchedRecord; now
   const state = watchState(watch, now ?? Date.now());
   const icon = "size-3.5 shrink-0";
   return (
-    <span data-testid="watched-indicator" data-state={state} className="inline-flex items-center gap-1">
+    <span data-testid="watched-indicator" data-state={state} className="mr-1 inline-flex items-center gap-1">
       {state === "paused" ? (
         <EyeOff aria-hidden className={icon} />
       ) : state === "failed" ? (

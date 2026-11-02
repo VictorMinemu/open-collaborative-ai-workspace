@@ -185,7 +185,7 @@ function WatchedRow({
       data-state={state}
     >
       <p
-        className="flex min-w-0 flex-1 basis-56 items-center gap-1.5 text-muted-foreground"
+        className="flex min-w-0 flex-1 basis-72 items-center gap-1.5 text-muted-foreground"
         data-testid="watch-line"
       >
         <Icon aria-hidden className="size-3.5 shrink-0" />
