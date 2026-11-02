@@ -259,7 +259,7 @@ describe("ocw restore", () => {
       at((s) => s === "stop api web openclaw"),
       at((s) => s === "up -d --wait postgres redis garage"),
       at((s) => s === "run --rm migrate"),
-      at((s) => s.includes("DROP SCHEMA IF EXISTS app, auth, drizzle CASCADE")),
+      at((s) => s.includes("DROP SCHEMA IF EXISTS app, auth, drizzle, pgboss CASCADE")),
       at((s) => s.includes("pg_restore")),
       seq.lastIndexOf("run --rm migrate"),
       at((s) => s.includes("object-store.ts import /backup --delete-extra")),
