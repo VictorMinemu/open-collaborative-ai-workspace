@@ -181,6 +181,27 @@ describe("composeDigest (UI-SPEC Digest DM headings)", () => {
     expect(escapeMarkdown("x".repeat(300), 100)).toHaveLength(100);
   });
 
+  it("neutralises GFM autolink literals: a bare URL, a www. host or an e-mail never becomes a link (07.6 review C LO-02)", () => {
+    const out = composeDigest({
+      date: MONDAY,
+      timeZone: "UTC",
+      sections: [...ALL],
+      summary: "Urgent: reset at https://evil.example or www.evil.example, or mail it@evil.example",
+      items: { decisions: [item("Open HTTP://evil.example/x now", `/approvals/${ID}`)] },
+    });
+    // GFM turns `https://…`, `www.…` and `name@host` into links (the web's safeUrl keeps http, https and mailto).
+    expect(out.markdown).not.toMatch(/https?:\/\//iu);
+    expect(out.markdown).not.toMatch(/(^|[^\w])www\./iu);
+    expect(out.markdown).not.toMatch(/(^|[^\\])@/u);
+    expect(links(out.markdown)).toEqual([`/approvals/${ID}`, "/settings/digest"]);
+    expect(escapeMarkdown("https://evil.example", 100)).toBe("https\\://evil.example");
+    expect(escapeMarkdown("HTTP://evil.example", 100)).toBe("HTTP\\://evil.example");
+    expect(escapeMarkdown("www.evil.example", 100)).toBe("www\\.evil.example");
+    expect(escapeMarkdown("it@evil.example", 100)).toBe("it\\@evil.example");
+    // Plain words keep their text.
+    expect(escapeMarkdown("awww.ok and http without slashes", 100)).toBe("awww.ok and http without slashes");
+  });
+
   it("the summary goes on top of the list as one plain paragraph", () => {
     const out = composeDigest({
       date: MONDAY,
