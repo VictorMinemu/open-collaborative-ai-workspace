@@ -206,12 +206,9 @@ async function publicHooks(raw: unknown, core: Core): Promise<void> {
             await markRejected(tx, ep.id, verified.reason);
             return { kind: "rejected" };
           }
-          // jsonb refuses U+0000; such a body (or an oversized id) is the sender's mistake, not a server error.
-          if (
-            verified.payload === undefined ||
-            verified.id.length > EXTERNAL_ID_MAX ||
-            body.includes("\\u0000")
-          ) {
+          // A body that is not storable JSON (jsonb refuses U+0000 and lone surrogates: `parseJson` gives undefined) or
+          // an oversized id is the sender's mistake, not a server error.
+          if (verified.payload === undefined || verified.id.length > EXTERNAL_ID_MAX) {
             return { kind: "invalid" };
           }
           const [event] = await tx

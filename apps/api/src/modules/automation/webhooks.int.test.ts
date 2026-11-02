@@ -362,6 +362,22 @@ describe("forgery and replay fail (Task 2, D-02, D-07, Pitfall 4)", () => {
     expect(await eventsOf((await endpointRow(second.publicId)).id)).toHaveLength(1);
   });
 
+  it("a signed body with a lone surrogate answers 400, never a 500 the sender retries forever; a 64-bit id is kept exact (07.6 review A LO-04)", async () => {
+    const hook = await createHook({ name: "Odd orders" });
+    const row = await endpointRow(hook.publicId);
+    const lone = '{"order":{"note":"\\ud800"}}';
+    const refused = await post(hook.publicId, lone, signedHeaders(hook.secret, lone));
+    expect(refused).toEqual({
+      status: 400,
+      body: { error: { code: "invalid_payload", message: "The body must be JSON" } },
+    });
+    const big = '{"order":{"id":9007199254740993}}';
+    expect((await post(hook.publicId, big, signedHeaders(hook.secret, big))).status).toBe(202);
+    const events = await eventsOf(row.id);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.body_json).toEqual({ order: { id: "9007199254740993" } });
+  });
+
   it("rotation issues a new secret once and keeps the previous one valid for 24 hours", async () => {
     const hook = await createHook({ name: "Rotated orders" });
     const row = await endpointRow(hook.publicId);

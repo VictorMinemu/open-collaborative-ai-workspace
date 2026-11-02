@@ -16,7 +16,7 @@ export type WebhookVerification =
       ok: true;
       /** The `webhook-id` header: the idempotency key of the delivery. */
       id: string;
-      /** The parsed JSON body, `undefined` when the verified body is empty or not JSON. */
+      /** The parsed JSON body, `undefined` when the verified body is empty, not JSON or not storable (`parseJson`). */
       payload: unknown;
     }
   | { ok: false; reason: WebhookRejection };
@@ -52,13 +52,53 @@ export function verifyStandardWebhook(
   return { ok: false, reason: "signature" };
 }
 
+/**
+ * The verified body as storable JSON (07.6 review A LO-04), or `undefined` (the route answers 400, like a non-JSON body):
+ * - an integer beyond 2^53 keeps its exact digits as a string (the reviver reads the source text), so a 64-bit order
+ *   or ticket id never rounds onto another one and merges two threads;
+ * - a lone surrogate or U+0000 in any string or key is refused: PostgreSQL `jsonb` rejects both, and a 500 would be
+ *   retried by the sender forever.
+ */
 function parseJson(raw: Buffer): unknown {
   if (raw.length === 0) return undefined;
   try {
-    return JSON.parse(raw.toString("utf8"));
+    const value: unknown = JSON.parse(raw.toString("utf8"), exactIntegers as Reviver);
+    return storable(value) ? value : undefined;
   } catch {
     return undefined;
   }
+}
+
+type Reviver = (this: unknown, key: string, value: unknown) => unknown;
+
+/** `JSON.parse`'s reviver with the source text of a primitive (Node 22+). */
+function exactIntegers(_key: string, value: unknown, context?: { source?: string }): unknown {
+  if (typeof value !== "number" || Number.isSafeInteger(value)) return value;
+  const source = context?.source;
+  return source && /^-?\d+$/.test(source) ? source : value;
+}
+
+/** A lone surrogate (a `u`-mode class matches only unpaired halves) or U+0000. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: U+0000 is exactly what jsonb refuses.
+const UNSTORABLE = /[\uD800-\uDFFF\u0000]/u;
+
+/** True when no string or key of `value` holds a character `jsonb` refuses. Iterative: any nesting depth. */
+function storable(value: unknown): boolean {
+  const stack: unknown[] = [value];
+  while (stack.length > 0) {
+    const v = stack.pop();
+    if (typeof v === "string") {
+      if (UNSTORABLE.test(v)) return false;
+    } else if (Array.isArray(v)) {
+      for (const child of v) stack.push(child);
+    } else if (v !== null && typeof v === "object") {
+      for (const [k, child] of Object.entries(v)) {
+        if (UNSTORABLE.test(k)) return false;
+        stack.push(child);
+      }
+    }
+  }
+  return true;
 }
 
 /** A new signing secret: `whsec_` + base64 of 32 random bytes (Standard Webhooks' format). */
