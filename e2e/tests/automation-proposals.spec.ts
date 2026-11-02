@@ -117,6 +117,7 @@ const toast = (page: Page, text: string | RegExp) =>
 /** Named controls, no sideways scroll, 44 px targets below 1024 and no serious axe finding, in light and dark. */
 async function review(page: Page, selector: string, name: string, w: string): Promise<void> {
   await expect(page.getByRole("listbox")).toHaveCount(0);
+  await expectPillClear(page.locator(selector).last());
   for (const theme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: theme });
     await expectNoSeriousA11y(page, selector);
@@ -126,7 +127,24 @@ async function review(page: Page, selector: string, name: string, w: string): Pr
   }
   await page.emulateMedia({ colorScheme: "light" });
   await page.locator(selector).last().scrollIntoViewIfNeeded();
+  // After a decision the focus rests on the decided line, which reveals the message's hover toolbar: not under review.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   await captureReview(page, `${name}-${w}`);
+}
+
+/** A card's status pill never covers the workspace badge (a long pill drops under it on a narrow card). */
+async function expectPillClear(card: Locator): Promise<void> {
+  if ((await card.getByTestId("agent-card-workspace").count()) === 0) return; // not a card (the editor)
+  const pill = await card.getByTestId("agent-card-status").boundingBox();
+  const badge = await card.getByTestId("agent-card-workspace").boundingBox();
+  expect(pill && badge, "the pill and the badge").toBeTruthy();
+  if (!pill || !badge) return;
+  const apart =
+    pill.x >= badge.x + badge.width ||
+    badge.x >= pill.x + pill.width ||
+    pill.y >= badge.y + badge.height ||
+    badge.y >= pill.y + pill.height;
+  expect(apart, "the status pill does not cover the workspace badge").toBe(true);
 }
 
 /** The pending card's footer at 390: Edit full width, then Create automation and Discard side by side, 44 px. */
@@ -143,7 +161,11 @@ async function expectPhoneFooter(card: Locator): Promise<void> {
   expect(Math.abs(create.y - discard.y), "Create automation and Discard share a row").toBeLessThan(1);
   expect(create.height).toBeGreaterThanOrEqual(43.5);
   expect(discard.height).toBeGreaterThanOrEqual(43.5);
-  expect(Math.abs(create.width - discard.width), "two equal halves").toBeLessThan(2);
+  // flex-1 each: together they fill the row (Create automation keeps its full label, so it may be the wider one).
+  expect(Math.abs(create.x - edit.x), "the row starts under Edit").toBeLessThan(1);
+  expect(Math.abs(discard.x + discard.width - (edit.x + edit.width)), "the row ends under Edit").toBeLessThan(
+    1,
+  );
 }
 
 test("Scout proposes “Weekly sales report” to Ana in their DM; Ana edits the time and saves; the card says Created with changes", async ({
