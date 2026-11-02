@@ -4,11 +4,13 @@ import {
   type AutomationRunStatus,
   EventTypes,
 } from "@ocw/contracts";
-import { agents, automations, type Tx } from "@ocw/db";
-import { and, eq, sql } from "drizzle-orm";
+import { automationRuns, automations, orgMembers, type Tx } from "@ocw/db";
+import { and, count, eq, gte, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { PermissionService } from "../organization";
+import { canCreate, decideTarget, type TargetCode } from "./access";
 import type { AutomationRow, RunRow } from "./actions";
+import { targetOf } from "./service";
 
 /**
  * The fire-time decision and the budgets of an automation run (07.6-09; D-07, P-09, Pitfall 1). Nothing decided when the
@@ -52,23 +54,113 @@ export function breakerStep(
   return { consecutive: next, trip: next === AUTOMATION_LIMITS.breakerFailures };
 }
 
+const PARTS = (timeZone: string) =>
+  new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+
+/** The zone's offset from UTC at `at`, in milliseconds (positive east of Greenwich). */
+function offsetMs(at: Date, timeZone: string): number {
+  const parts = Object.fromEntries(
+    PARTS(timeZone)
+      .formatToParts(at)
+      .map((p) => [p.type, p.value]),
+  );
+  const wall = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour),
+    Number(parts.minute),
+    Number(parts.second),
+  );
+  return wall - Math.floor(at.getTime() / 1000) * 1000;
+}
+
+/**
+ * The instant the local day of `now` began in `timeZone` (the automation's day: a run at 23:30 in Madrid counts for
+ * that Madrid day). The offset at midnight is used, so a DST change later that day does not move the start.
+ */
+export function localDayStart(now: Date, timeZone: string): Date {
+  const off = offsetMs(now, timeZone);
+  const local = new Date(now.getTime() + off);
+  const midnight = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate());
+  const atMidnight = offsetMs(new Date(midnight - off), timeZone);
+  return new Date(midnight - atMidnight);
+}
+
+/** Runs of `a` that count against its daily budget today (in its zone): every run but skipped ones and `exceptRunId`. */
+export async function runsToday(tx: Tx, a: AutomationRow, now: Date, exceptRunId?: string): Promise<number> {
+  const since = localDayStart(now, a.timeZone ?? "UTC").toISOString();
+  const [r] = await tx
+    .select({ n: count() })
+    .from(automationRuns)
+    .where(
+      and(
+        eq(automationRuns.automationId, a.id),
+        ne(automationRuns.status, "skipped"),
+        gte(automationRuns.createdAt, since),
+        exceptRunId ? ne(automationRuns.id, exceptRunId) : undefined,
+      ),
+    );
+  return Number(r?.n ?? 0);
+}
+
+const TARGET_REASONS: Record<TargetCode, AutomationRunReason> = {
+  agent_not_member: "agent_not_member",
+  target_not_postable: "target_not_postable",
+  // A personal bot's automation may only reach its owner's DM; anything else cannot be posted.
+  personal_bot_target: "target_not_postable",
+  bot_not_readable: "bot_not_readable",
+  // Disabled or deleted: the bot is off either way.
+  agent_unavailable: "agent_disabled",
+};
+
 export type FireDecision = { ok: true } | { ok: false; reason: AutomationRunReason };
 
-/** Whether `run` of `a` may fire now (07.6-09 Task 1: the automation is active and its bot is live). */
+/**
+ * Whether `run` of `a` may fire now, decided again at every fire (D-07, P-09; T-07.6-09-01, -02). Called inside the
+ * fire transaction, opened as the run-as person, with the run and the automation rows locked. In order:
+ * 1. the automation is still active (a paused or needs-attention automation skips its queued runs: `paused`);
+ * 2. the run-as person is still an active member and still holds `automation.create` (`run_as_not_allowed`);
+ * 3. the target, for the person and the bot together (`decideTarget`, the save-time decision run again): the bot is
+ *    live (`agent_disabled`) and the person may see it (`bot_not_readable`); a personal bot only to its owner's DM; the
+ *    conversation is a live channel the person reads and may post in, the bot is a member (`agent_not_member`) and may
+ *    post there, the bot acting for the person may read it; the board column and the thread root still exist
+ *    (`target_not_postable` otherwise);
+ * 4. the automation's own daily budget in its zone (`runs_per_day`), counted under its row lock.
+ * The bot's daily limit is decided by the delivery itself (`turnPolicy` meters the turn: `agent_daily_limit`).
+ */
 export async function decideFire(
   tx: Tx,
-  _perms: PermissionService,
+  perms: PermissionService,
   a: AutomationRow,
-  _run: RunRow,
-  _now: Date,
+  run: RunRow,
+  now: Date,
 ): Promise<FireDecision> {
   if (a.status !== "active") return { ok: false, reason: "paused" };
-  const [bot] = await tx
-    .select({ status: agents.status, deletedAt: agents.deletedAt })
-    .from(agents)
-    .where(eq(agents.id, a.agentId))
+  const [member] = await tx
+    .select({ deactivatedAt: orgMembers.deactivatedAt })
+    .from(orgMembers)
+    .where(eq(orgMembers.userId, a.runAsUserId))
     .limit(1);
-  if (!bot || bot.deletedAt || bot.status === "disabled") return { ok: false, reason: "agent_disabled" };
+  if (!member || member.deactivatedAt) return { ok: false, reason: "run_as_not_allowed" };
+  if (!(await canCreate(perms, tx, { userId: a.runAsUserId })))
+    return { ok: false, reason: "run_as_not_allowed" };
+  const target = await decideTarget(tx, perms, {
+    agentId: a.agentId,
+    userId: a.runAsUserId,
+    target: targetOf(a),
+  });
+  if (!target.ok) return { ok: false, reason: TARGET_REASONS[target.code] };
+  if ((await runsToday(tx, a, now, run.id)) >= a.maxRunsPerDay) return { ok: false, reason: "runs_per_day" };
   return { ok: true };
 }
 

@@ -28,14 +28,6 @@ const ORDER = "Summarise this week's closed deals and post the totals per rep.";
 const core = () => s.stack.built.core;
 const drain = () => core().jobs.drain("automation.fire");
 
-async function fails(res: Promise<Res> | Res, status: number, code?: string): Promise<Json> {
-  const r = await res;
-  expect(r.status, JSON.stringify(r.body)).toBe(status);
-  if (code) expect(r.body?.error?.code, JSON.stringify(r.body)).toBe(code);
-  return (r.body ?? {}) as Json;
-}
-void fails;
-
 /** Víctor's automation through 05's REST resource (run as him, D-07). */
 async function createAutomation(extra: Json = {}): Promise<string> {
   const body = {
@@ -366,5 +358,245 @@ describe("tick → run → fire → anchor → turn → reply → answered (AUTO
     } finally {
       await s.setPolicy({ killed: false });
     }
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: re-decided and budgeted
+
+/** A private channel of Víctor's with these bots as members. */
+async function channelWith(name: string, botIds: readonly string[]): Promise<string> {
+  const id = (
+    await ok(
+      s.victor.request("POST", "/api/v1/channels", {
+        name: `${name}-${randomUUID().slice(0, 6)}`,
+        visibility: "private",
+      }) as Promise<Res>,
+    )
+  ).id as string;
+  for (const botId of botIds) {
+    await ok(
+      s.victor.request("POST", `/api/v1/channels/${id}/members`, {
+        kind: "agent",
+        id: botId,
+      }) as Promise<Res>,
+    );
+  }
+  return id;
+}
+
+/** A permission rule for one person (removed by the caller). */
+async function denyFor(userId: string, permission: string): Promise<string> {
+  return (
+    await ok(
+      s.victor.request("POST", "/api/v1/permission-rules", {
+        subjectKind: "user",
+        subjectId: userId,
+        permission,
+        effect: "deny",
+      }) as Promise<Res>,
+    )
+  ).id as string;
+}
+
+const dropRule = async (id: string) => {
+  const res = await s.victor.request("DELETE", `/api/v1/permission-rules/${id}`);
+  expect([200, 204]).toContain(res.status);
+};
+
+/** Asserts `runId` was skipped for `reason` with nothing posted and nothing delivered, and audited. */
+async function expectSkipped(runId: string, reason: string) {
+  expect(await runRow(runId)).toMatchObject({ status: "skipped", reason, anchor_message_id: null });
+  expect(await anchorsOf(runId)).toEqual([]);
+  expect(await runEvents(runId)).toEqual([]);
+  const [audit] = (await auditOf("automation.run_skipped", runId)) as [Json];
+  expect(audit.metadata).toMatchObject({ runId, reason });
+  expect(audit.user_id).toBe(s.victorId);
+}
+
+describe("every fire re-decides: skip reasons, budgets (D-07, P-09, T-07.6-09-01)", () => {
+  it("Scout removed from the channel → skipped agent_not_member: no card, no event, audited", async () => {
+    const channel = await channelWith("deals", [s.scoutId]);
+    const automationId = await createAutomation({ target: { kind: "channel", conversationId: channel } });
+    const runId = await runNow(automationId);
+    await s.su.query(
+      "delete from app.conversation_members where conversation_id = $1 and member_kind = 'agent' and member_id = $2",
+      [channel, s.scoutId],
+    );
+    expect(await drain()).toBe(1);
+    await expectSkipped(runId, "agent_not_member");
+    expect(await runUpdates(s.victorId, runId)).toBeGreaterThanOrEqual(2);
+  });
+
+  it("Víctor loses his post rights → target_not_postable; his automation.create denied → run_as_not_allowed", async () => {
+    const automationId = await createAutomation();
+    const posting = await runNow(automationId);
+    const noPost = await denyFor(s.victorId, "channel.post");
+    try {
+      expect(await drain()).toBe(1);
+    } finally {
+      await dropRule(noPost);
+    }
+    await expectSkipped(posting, "target_not_postable");
+
+    const creating = await runNow(automationId);
+    const noCreate = await denyFor(s.victorId, "automation.create");
+    try {
+      expect(await drain()).toBe(1);
+    } finally {
+      await dropRule(noCreate);
+    }
+    await expectSkipped(creating, "run_as_not_allowed");
+  });
+
+  it("the bot turned off → agent_disabled", async () => {
+    const pixel = await s.newBot("Pixel");
+    const channel = await channelWith("pixel", [pixel.id]);
+    const automationId = await createAutomation({
+      agentId: pixel.id,
+      target: { kind: "channel", conversationId: channel },
+    });
+    const runId = await runNow(automationId);
+    await s.su.query("update app.agents set status = 'disabled' where id = $1", [pixel.id]);
+    expect(await drain()).toBe(1);
+    await expectSkipped(runId, "agent_disabled");
+  });
+
+  it("max_runs_per_day 2: the third run today → runs_per_day (counted at fire, under the row lock)", async () => {
+    const automationId = await createAutomation({ maxRunsPerDay: 2 });
+    await runNow(automationId);
+    await runNow(automationId);
+    expect(await drain()).toBe(2);
+    await makeDue(automationId);
+    expect((await tickOnce(core())).fired).toBe(1);
+    const scheduled = (await runsOf(automationId)).find((r) => r.trigger === "schedule") as Json;
+    expect(await drain()).toBe(1);
+    await expectSkipped(scheduled.id, "runs_per_day");
+  });
+
+  it("the bot's daily limit (from delivery) → the run fails and its card says Failed with the reason", async () => {
+    const ledger = await s.newBot("Ledger");
+    const channel = await channelWith("ledger", [ledger.id]);
+    const automationId = await createAutomation({
+      agentId: ledger.id,
+      target: { kind: "channel", conversationId: channel },
+    });
+    await s.su.query(
+      `insert into app.agent_usage_daily (organization_id, agent_id, day, turns)
+       values ($1, $2, (now() at time zone 'utc')::date, 100000)
+       on conflict (organization_id, agent_id, day) do update set turns = 100000`,
+      [s.orgA, ledger.id],
+    );
+    const runId = await runNow(automationId);
+    expect(await drain()).toBe(1);
+    const run = await runRow(runId);
+    expect(run).toMatchObject({ status: "failed", reason: "agent_daily_limit" });
+    expect(await runEvents(runId)).toEqual([]);
+    const [anchor] = (await anchorsOf(runId)) as [Json];
+    expect(run.anchor_message_id).toBe(anchor.id);
+    expect(await cardOf(channel, anchor.id)).toMatchObject({
+      status: "failed",
+      statusLabel: "Failed",
+      notices: [{ tone: "neutral", text: "Ledger's daily limit was reached." }],
+    });
+    expect((await auditOf("automation.run_failed", runId))[0]?.metadata).toMatchObject({
+      reason: "agent_daily_limit",
+    });
+  });
+
+  it("no answer within 15 minutes → no_reply and its card says so; three in a row → needs attention until resumed", async () => {
+    const automationId = await createAutomation();
+    const first = await runNow(automationId);
+    expect(await drain()).toBe(1);
+    expect((await runRow(first)).status).toBe("delivered");
+    // Not yet: 14 minutes.
+    await tickOnce(core(), new Date(Date.now() + 14 * 60_000));
+    expect((await runRow(first)).status).toBe("delivered");
+    expect((await tickOnce(core(), new Date(Date.now() + 16 * 60_000))).noReply).toBeGreaterThanOrEqual(1);
+    expect(await runRow(first)).toMatchObject({ status: "no_reply", reason: "no_reply" });
+    const [anchor] = (await anchorsOf(first)) as [Json];
+    expect(await cardOf(salesId, anchor.id)).toMatchObject({
+      status: "failed",
+      statusLabel: "No reply",
+      notices: [{ tone: "neutral", text: "Scout didn't answer within 15 minutes." }],
+    });
+    expect(await auditOf("automation.run_no_reply", first)).toHaveLength(1);
+    expect(await automationRow(automationId)).toMatchObject({ status: "active", consecutive_failures: 1 });
+
+    await runNow(automationId);
+    await runNow(automationId);
+    expect(await drain()).toBe(2);
+    await tickOnce(core(), new Date(Date.now() + 16 * 60_000));
+    const row = await automationRow(automationId);
+    expect(row).toMatchObject({
+      status: "needs_attention",
+      paused_reason: "no_reply",
+      consecutive_failures: 3,
+    });
+    expect(row.paused_by).toBeNull();
+    const audit = (
+      await s.su.query(
+        "select metadata from app.audit_events where action = 'automation.needs_attention' and resource_id = $1",
+        [automationId],
+      )
+    ).rows as Json[];
+    expect(audit).toHaveLength(1);
+    expect(audit[0]?.metadata).toMatchObject({ automationId, failures: 3, reason: "no_reply" });
+    const announced = (
+      await s.su.query(
+        "select count(*)::int as n from app.stream_events where stream_id = $1 and type = 'automation.updated' and payload->>'automationId' = $2",
+        [`user:${s.victorId}`, automationId],
+      )
+    ).rows[0] as Json;
+    expect(announced.n).toBeGreaterThanOrEqual(2); // created, then paused by the breaker
+    // No longer due, whatever its next instant says.
+    await makeDue(automationId);
+    const due = (await s.su.query("select id from app.due_automations(1000, now())")).rows.map((r) => r.id);
+    expect(due).not.toContain(automationId);
+    expect(
+      (await ok(s.victor.request("GET", `/api/v1/automations/${automationId}`) as Promise<Res>)).status,
+    ).toBe("needs_attention");
+
+    const resumed = await ok(
+      s.victor.request("POST", `/api/v1/automations/${automationId}/resume`) as Promise<Res>,
+    );
+    expect(resumed).toMatchObject({ status: "active", consecutiveFailures: 0 });
+  });
+
+  it("a missed instant 5 hours old fires once and moves past now; one 7 hours old is skipped as missed, no catch-up burst", async () => {
+    const recent = await createAutomation();
+    await makeDue(recent, 5 * 3_600_000);
+    const now = new Date();
+    expect((await tickOnce(core(), now)).fired).toBe(1);
+    expect(await runsOf(recent)).toMatchObject([{ status: "queued", trigger: "schedule" }]);
+    expect(new Date((await automationRow(recent)).next_run_at).getTime()).toBeGreaterThan(now.getTime());
+    expect(await drain()).toBe(1);
+    expect((await tickOnce(core(), now)).fired).toBe(0);
+
+    const old = await createAutomation();
+    await makeDue(old, 7 * 3_600_000);
+    const tick = await tickOnce(core(), now);
+    expect(tick).toMatchObject({ fired: 0, skipped: 1 });
+    const runs = await runsOf(old);
+    expect(runs).toHaveLength(1);
+    await expectSkipped((runs[0] as Json).id, "missed");
+    expect(new Date((await automationRow(old)).next_run_at).getTime()).toBeGreaterThan(now.getTime());
+    const jobs = (
+      await s.su.query(
+        "select count(*)::int as n from pgboss.job where name = 'automation.fire' and data->>'runId' = $1",
+        [(runs[0] as Json).id],
+      )
+    ).rows[0] as Json;
+    expect(jobs.n).toBe(0);
+    expect((await tickOnce(core(), now)).skipped).toBe(0);
+  });
+
+  it("a paused automation's queued manual run is skipped as paused when its job runs", async () => {
+    const automationId = await createAutomation();
+    const runId = await runNow(automationId);
+    await ok(s.victor.request("POST", `/api/v1/automations/${automationId}/pause`) as Promise<Res>);
+    expect(await drain()).toBe(1);
+    await expectSkipped(runId, "paused");
+    // A budget skip is not a failure: the breaker's streak is untouched.
+    expect((await automationRow(automationId)).consecutive_failures).toBe(0);
   });
 });
