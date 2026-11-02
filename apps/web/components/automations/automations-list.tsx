@@ -249,7 +249,8 @@ export function AutomationsPage() {
         onClose={() => go({})}
         onCreated={(a, opts) => {
           go(opts?.keepOpen ? { edit: a.id } : {});
-          setFresh(a.id);
+          // A kept-open sheet (a new webhook's secret reveal) keeps the focus: the row is not focused behind it.
+          if (!opts?.keepOpen) setFresh(a.id);
         }}
         onOpenRuns={(id) => go({ edit: id, tab: "runs" })}
       />
