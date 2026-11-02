@@ -627,6 +627,39 @@ describe("storms and stale content are contained (P-09, Pitfalls 1–3)", () => 
     }
   });
 
+  it("a webhook whose run-as person lost automation.webhook records not_run run_as_not_allowed and posts nothing (07.6 review A MD-05)", async () => {
+    const src = await inboundAutomation({ kind: "webhook", name: "Revoked hook" });
+    const rule = (
+      await ok(
+        s.victor.request("POST", "/api/v1/permission-rules", {
+          subjectKind: "user",
+          subjectId: s.victorId,
+          permission: "automation.webhook",
+          effect: "deny",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    try {
+      const eventId = await receive(src, { bodyJson: { order: { id: 4001 } } });
+      await drainInbound();
+      expect(await eventRow(eventId)).toMatchObject({
+        result: "not_run",
+        reason: "run_as_not_allowed",
+        message_id: null,
+      });
+      expect(await postedIn(purchasingId, [eventId])).toBe(0);
+      expect(await runsOf(src.automationId)).toEqual([]);
+    } finally {
+      const res = await s.victor.request("DELETE", `/api/v1/permission-rules/${rule}`);
+      expect([200, 204]).toContain(res.status);
+    }
+    // A mail automation never needed the webhook right.
+    const mail = await inboundAutomation({ name: "Still mail", askBot: false });
+    const mailEvent = await receive(mail, { subject: "Fine", bodyText: "Hello" });
+    await drainInbound();
+    expect((await eventRow(mailEvent)).result).toBe("accepted");
+  });
+
   it("a paused automation records the item not_run “paused” and posts nothing", async () => {
     const src = await inboundAutomation();
     await s.su.query(
