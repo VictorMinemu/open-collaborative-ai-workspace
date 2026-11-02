@@ -406,6 +406,8 @@ interface Prepared {
   owner: string;
   unitId: string;
   scopeId: string;
+  /** The memory file's path, decided (and checked) before the model call. */
+  path: string;
   repoName: string | null;
   resolved: ResolvedModel;
   input: SessionInput;
@@ -475,7 +477,10 @@ async function fail(
   await announceAfterCommit(core, perms, tx, s);
 }
 
-/** Phase 1, in the owner's transaction: every check, the claim (`writing`), the cap and the model. */
+/**
+ * Phase 1, in the owner's transaction: every check, the claim (`writing`), the model, whether the proposal may land in
+ * the unit's memory for the owner (before anything is billed, 07.6 review C LO-05), then the cap.
+ */
 async function prepare(
   core: Core,
   deps: SummaryDeps,
@@ -543,6 +548,16 @@ async function prepare(
     await fail(core, deps.perms, tx, s, owner, unit.unitId, "model_unavailable");
     return null;
   }
+  // The proposal's scope and path, checked as `propose` will check them (an owner without read on the project's memory,
+  // e.g. the Memory module off for them, is refused here, before the cap is counted or the model called).
+  const scope = await deps.memory.ensureScope(tx, { kind: "unit", unitId: unit.unitId });
+  const path = summaryPath(s.title, new Date());
+  if (
+    !(await deps.memory.systemProposalAllowed(tx, { requestedForUserId: owner, scopeId: scope.id, path }))
+  ) {
+    await fail(core, deps.perms, tx, s, owner, unit.unitId, "memory_denied");
+    return null;
+  }
   // The owner's AI chat cap, counted before any model call; a refusal bills nothing.
   const policy = await loadAiChatPolicy(tx);
   const counted = await consumeGeneration(tx, {
@@ -554,7 +569,6 @@ async function prepare(
     await fail(core, deps.perms, tx, s, owner, unit.unitId, "limit_reached");
     return null;
   }
-  const scope = await deps.memory.ensureScope(tx, { kind: "unit", unitId: unit.unitId });
   const [repo] = await tx
     .select({ name: projects.name })
     .from(projects)
@@ -566,6 +580,7 @@ async function prepare(
     owner,
     unitId: unit.unitId,
     scopeId: scope.id,
+    path,
     repoName: repo?.name ?? null,
     resolved,
     input,
@@ -632,7 +647,7 @@ export async function summarizeSession(
       tainted: prepared.input.usedTools,
     },
     scope: prepared.scopeId,
-    path: summaryPath(s.title, now),
+    path: prepared.path,
     op: "create",
     content: summaryFile(s.title, out.text, prepared.repoName, now),
   };

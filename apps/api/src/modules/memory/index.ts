@@ -31,6 +31,7 @@ import {
   createMemoryProposal,
   type ProposalPrescan,
   prescanProposal,
+  systemProposalAllowed,
 } from "./proposals";
 import { registerMemoryRoutes } from "./routes";
 import {
@@ -145,6 +146,14 @@ export interface MemoryService {
     input: CreateMemoryProposalInput,
     prescan: ProposalPrescan,
   ): Promise<CreateMemoryProposalResult>;
+  /**
+   * Whether a system proposal for a person may go to a shared scope at a path (the check `propose` makes for the system
+   * origin; nothing created or written). Checked before a paid model call (07.6 review C LO-05).
+   */
+  systemProposalAllowed(
+    tx: Tx,
+    a: { requestedForUserId: string; scopeId: string; path: string },
+  ): Promise<boolean>;
 }
 
 export function createMemoryService(core: Core, deps: { approvals: ApprovalService }): MemoryService {
@@ -253,6 +262,7 @@ export function createMemoryService(core: Core, deps: { approvals: ApprovalServi
     prescan: (organizationId, input) => prescanProposal(core.db, { perms, scanner }, organizationId, input),
     propose: (tx, input, prescan) =>
       createMemoryProposal(tx, { core, perms, approvals: deps.approvals, scans }, input, prescan),
+    systemProposalAllowed: (tx, a) => systemProposalAllowed(tx, perms, a),
   };
 }
 

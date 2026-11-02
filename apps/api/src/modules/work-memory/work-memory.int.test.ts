@@ -667,7 +667,7 @@ describe("consent, cost, repetition and audience", () => {
 
 // ---------------------------------------------------------------- 07.6 review C fixes
 
-describe("recovery and taint of a session summary (07.6 review C ME-01, LO-04)", () => {
+describe("recovery, taint and the memory check before billing (07.6 review C ME-01, LO-04, LO-05)", () => {
   /** A finished session of Ana in Billing with one edited file (automatic proposals are off for her here). */
   async function finished(title: string): Promise<string> {
     const id = await startSession(ana, device, billingRepo, { title });
@@ -746,6 +746,37 @@ describe("recovery and taint of a session summary (07.6 review C ME-01, LO-04)",
       )
     ).rows[0]?.id as string;
     expect(await taintOf(s2)).toBe(false);
+  });
+
+  it("an owner who may not read the project's memory is never billed: no model call, failed memory_denied", async () => {
+    const s = await finished("No memory for Ana");
+    const rule = await ok(
+      admin.request("POST", "/api/v1/permission-rules", {
+        subjectKind: "user",
+        subjectId: anaId,
+        permission: "memory.read",
+        effect: "deny",
+      }),
+    );
+    const daily = async () =>
+      (
+        await su.query(
+          "select coalesce(sum(generations), 0)::int as n from app.ai_usage_daily where user_id = $1",
+          [anaId],
+        )
+      ).rows[0]?.n as number;
+    try {
+      const before = { calls: summaryRequests().length, generations: await daily() };
+      expect((await propose(ana, s)).status).toBe(202);
+      expect(await drain()).toBe(1);
+      expect(summaryRequests()).toHaveLength(before.calls);
+      expect(await daily()).toBe(before.generations);
+      expect(await usageRows([s])).toEqual([]);
+      expect(await ok(memoryOf(ana, s))).toMatchObject({ status: "failed" });
+      expect(await errorCodeOf(s)).toBe("memory_denied");
+    } finally {
+      await ok(admin.request("DELETE", `/api/v1/permission-rules/${rule.id}`));
+    }
   });
 });
 
