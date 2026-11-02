@@ -2,6 +2,7 @@
 
 import {
   DigestPreview,
+  type DigestSaveRequest,
   type DigestSettings,
   DigestTestResponse,
   DigestView,
@@ -58,7 +59,7 @@ export function useDigest() {
 export function useSaveDigest() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: DigestSettings) => api.put("/api/v1/digest", { body, schema: DigestView }),
+    mutationFn: (body: DigestSaveRequest) => api.put("/api/v1/digest", { body, schema: DigestView }),
     onSuccess: (view) => qc.setQueryData(digestKeys.view, view),
   });
 }

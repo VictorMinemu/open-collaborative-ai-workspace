@@ -1,7 +1,7 @@
 import {
   DigestPreview,
   DigestPreviewRequest,
-  DigestSettings,
+  DigestSaveRequest,
   DigestTestResponse,
   DigestView,
 } from "@ocw/contracts";
@@ -37,7 +37,7 @@ export function registerDigestRoutes(app: App, core: Core, digest: DigestService
 
   app.put(
     "/digest",
-    { ...user, schema: { tags, body: DigestSettings, response: { 200: DigestView } } },
+    { ...user, schema: { tags, body: DigestSaveRequest, response: { 200: DigestView } } },
     async (req) => core.db.withTenant(tenant(req), (tx) => digest.save(tx, actorOf(req), req.body)),
   );
 

@@ -2,6 +2,7 @@ import {
   type AiModelOption,
   AutomationTimeZone,
   ClockTime,
+  type DigestSaveRequest,
   DigestSection,
   type DigestSettings,
   type DigestView,
@@ -44,6 +45,9 @@ export const DIGEST_COPY = {
   previewEmpty: "Nothing new right now. With “Skip it when there's nothing new” on, no digest would be sent.",
   previewError: "Couldn't build a preview. Try again.",
   loadError: "Couldn't load your digest.",
+  changedElsewhere:
+    "Your digest changed since you opened it. Reload to see it; your changes here aren't saved.",
+  reload: "Reload",
   saved: (next: string) => `Digest saved. Next one ${next}.`,
   turnedOff: "Digest turned off.",
   sent: (bot: string) => `Sent to your DM with ${bot}.`,
@@ -180,6 +184,35 @@ export function isDirty(form: DigestForm, view: Pick<DigestView, "settings">): b
   if (!view.settings) return true;
   return canonical(toSettings(form)) !== canonical(view.settings);
 }
+
+/** The saved digest the form was taken from: its settings and version (null = none saved yet). */
+export interface DigestBase {
+  settings: DigestView["settings"];
+  version: number | null;
+}
+
+/** `PUT /digest`: the form's settings and the version they were edited from (07.6 review C LO-06). */
+export function saveRequest(form: DigestForm, base: DigestBase | null): DigestSaveRequest {
+  return { ...toSettings(form), expectedVersion: base?.version ?? null };
+}
+
+/**
+ * Whether a fresh view replaces the form (and its base): on the first load, and when the digest changed elsewhere (a
+ * pause from the automations list, another tab) while the form holds no unsaved change. A form with changes keeps its
+ * base version, so saving it over a newer digest is a 409 instead of silently undoing that change.
+ */
+export function shouldResync(
+  form: DigestForm | null,
+  base: DigestBase | null,
+  view: Pick<DigestView, "settings" | "version">,
+): boolean {
+  if (!form || !base) return true;
+  if (base.version === view.version && canonicalOrNull(base.settings) === canonicalOrNull(view.settings))
+    return false;
+  return !isDirty(form, { settings: base.settings });
+}
+
+const canonicalOrNull = (s: DigestSettings | null) => (s ? canonical(s) : null);
 
 /** Why Save is disabled: null = enabled, "" = nothing to say (no change, or a field shows its own error). */
 export function saveBlocker(errors: DigestErrors, dirty: boolean): string | null {

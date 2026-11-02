@@ -11,6 +11,8 @@ import {
   formFromView,
   isDirty,
   saveBlocker,
+  saveRequest,
+  shouldResync,
   summaryNotice,
   testBlocker,
   toSettings,
@@ -61,6 +63,7 @@ const BOTS: DigestView["bots"] = [
 
 const view = (over: Partial<DigestView> = {}): DigestView => ({
   settings: null,
+  version: null,
   automationId: null,
   nextRunAt: null,
   lastSentAt: null,
@@ -161,6 +164,25 @@ describe("the digest form (R6)", () => {
     expect(validateDigest(form({ agentId: null }), []).bot).toBe("Pick a bot to deliver it.");
     // A bot that is no longer listed (deleted, no longer readable) is no choice at all.
     expect(validateDigest(form({ agentId: OPS }), BOTS.slice(0, 1)).bot).toBe("Pick a bot to deliver it.");
+  });
+
+  it("saves from the version the form was taken from; a newer digest refreshes only an untouched form (07.6 review C LO-06)", () => {
+    const saved = toSettings(form());
+    const base = { settings: saved, version: 3 };
+    // The request carries the base version (null: no digest yet), never the latest one in the cache.
+    expect(saveRequest(form({ time: "07:00" }), base)).toEqual({
+      ...toSettings(form({ time: "07:00" })),
+      expectedVersion: 3,
+    });
+    expect(saveRequest(form(), null).expectedVersion).toBeNull();
+    // A pause from the automations list (version 4): an untouched form follows it...
+    const paused = view({ settings: { ...saved, enabled: false }, version: 4 });
+    expect(shouldResync(form(), base, paused)).toBe(true);
+    // ...a form with unsaved changes keeps its base, so its save is a 409 instead of undoing the pause.
+    expect(shouldResync(form({ time: "07:00" }), base, paused)).toBe(false);
+    // The same digest at the same version: nothing to do; the first load always syncs.
+    expect(shouldResync(form(), base, view({ settings: saved, version: 3 }))).toBe(false);
+    expect(shouldResync(null, null, paused)).toBe(true);
   });
 
   it("Save needs a change and a valid form; Send a test now needs the saved digest ('Save first.')", () => {

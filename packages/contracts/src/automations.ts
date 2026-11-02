@@ -632,9 +632,21 @@ const DigestBot = z.object({
   unitName: z.string().nullable(),
 });
 
-/** `GET /digest`: the caller's own digest (none yet = `settings: null`). */
+/**
+ * `PUT /digest`: the settings and the version of the digest they were edited from (`DigestView.version`; null = "I
+ * have no digest yet"). A different current version is 409 `version` (a pause from the automations list or another
+ * tab is never silently undone, 07.6 review C LO-06). Omitted: last write wins (API clients that do not read first).
+ */
+export const DigestSaveRequest = DigestSettings.extend({
+  expectedVersion: z.number().int().positive().nullable().optional(),
+});
+export type DigestSaveRequest = z.infer<typeof DigestSaveRequest>;
+
+/** `GET /digest`: the caller's own digest (none yet = `settings: null`, `version: null`). */
 export const DigestView = z.object({
   settings: DigestSettings.nullable(),
+  /** The digest automation's version, sent back as `DigestSaveRequest.expectedVersion`. */
+  version: z.number().int().positive().nullable(),
   automationId: Id.nullable(),
   nextRunAt: IsoDateTime.nullable(),
   lastSentAt: IsoDateTime.nullable(),

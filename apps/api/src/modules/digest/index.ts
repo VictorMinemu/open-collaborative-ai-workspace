@@ -1,5 +1,6 @@
 import {
   type DigestPreview,
+  type DigestSaveRequest,
   DigestSection,
   type DigestSettings,
   type DigestTestResponse,
@@ -129,7 +130,7 @@ const sameRef = (a: ModelRef, b: ModelRef) =>
 
 export interface DigestService {
   view(tx: Tx, actor: AutomationActor): Promise<DigestView>;
-  save(tx: Tx, actor: AutomationActor, settings: DigestSettings): Promise<DigestView>;
+  save(tx: Tx, actor: AutomationActor, settings: DigestSaveRequest): Promise<DigestView>;
   preview(tx: Tx, actor: AutomationActor, settings: DigestSettings): Promise<DigestPreview>;
   /** Sends the saved digest now; opens its own short transactions (the summary's model call runs between them). */
   test(ctx: TenantCtx, actor: AutomationActor): Promise<DigestTestResponse>;
@@ -491,6 +492,7 @@ export function createDigestService(core: Core, deps: DigestDeps): DigestService
       const last = row ? await lastSent(tx, row.id) : null;
       return {
         settings: row ? settingsOf(row) : null,
+        version: row?.version ?? null,
         automationId: row?.id ?? null,
         nextRunAt: row?.status === "active" && row.nextRunAt ? new Date(row.nextRunAt).toISOString() : null,
         lastSentAt: last ? last.toISOString() : null,
@@ -523,6 +525,11 @@ export function createDigestService(core: Core, deps: DigestDeps): DigestService
       // One digest per person (P-14): two first saves at once serialise here, then find the row.
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`digest:${userId}`}, 0))`);
       const before = await own(tx, userId, true);
+      // Saved from the version the person edited (LO-06): anything else changed it since (a pause from the automations
+      // list, another tab), and saving would silently undo that. Omitted by an API client: last write wins.
+      if (s.expectedVersion !== undefined && s.expectedVersion !== (before?.version ?? null)) {
+        throw new HttpError(409, "version", "Your digest changed since you opened it. Reload it.");
+      }
       let id: string;
       if (!before) {
         const created = await automation.create(
@@ -578,10 +585,10 @@ export function createDigestService(core: Core, deps: DigestDeps): DigestService
             version: before.version + 1,
             updatedAt: sql`now()`,
           })
-          .where(and(eq(automations.id, before.id), eq(automations.version, before.version)))
+          .where(eq(automations.id, before.id))
           .returning();
-        if (!after)
-          throw new HttpError(409, "version", "Your digest changed while you were saving. Reload it.");
+        // Locked above (FOR UPDATE): the row is there and at `before.version`.
+        if (!after) throw new Error("the locked digest row was not updated");
         await automation.announce(tx, after);
       }
       await core.audit.record(tx, {

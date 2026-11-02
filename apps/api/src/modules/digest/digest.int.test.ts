@@ -454,6 +454,29 @@ describe("Víctor saves a weekday 08:00 Madrid digest and receives it in his DM 
     await su.query("update app.automations set max_runs_per_day = 50 where id = $1", [digestId]);
   });
 
+  it("a save carries the version it was edited from: a pause made meanwhile is 409 version, never silently undone (07.6 review C LO-06)", async () => {
+    const opened = await view();
+    expect(opened.version).toBe(((await digestRow())[0] as Json).version);
+    // Paused from the automations list while the settings page still holds an edit.
+    await ok(victor.request("POST", `/api/v1/automations/${digestId}/pause`, {}));
+    expect(
+      await errorOf(save({ ...settings({ time: "07:00" }), expectedVersion: opened.version }), 409),
+    ).toBe("version");
+    expect((await digestRow())[0]).toMatchObject({ status: "paused", schedule_cron: "0 8 * * 1,2,3,4,5" });
+
+    // From the version it reads now, the save goes through (and turns it back on).
+    const fresh = await view();
+    expect(fresh.version).toBe((opened.version ?? 0) + 1);
+    const saved = DigestView.parse(await ok(save({ ...settings(), expectedVersion: fresh.version })));
+    expect(saved.version).toBe((fresh.version ?? 0) + 1);
+    expect((await digestRow())[0]).toMatchObject({ status: "active" });
+    // "No digest yet" (null) when one exists is a conflict too.
+    expect(await errorOf(save({ ...settings(), expectedVersion: null }), 409)).toBe("version");
+    // Sam has none: his first save says null.
+    const first = await view(sam);
+    expect(first.version).toBeNull();
+  });
+
   it("on schedule the runner sends one DM from Scout with the four sections, counts and relative links; answered; audited with counts only", async () => {
     const approvalId = await pendingApproval("Append to clients/acme.md");
     const cardId = await postCard(salesId, "Q3 pipeline report");
