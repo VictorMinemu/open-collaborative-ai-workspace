@@ -3,8 +3,9 @@ import { and, eq, inArray, or } from "drizzle-orm";
 
 /**
  * Phase 07.6 (D-02, D-07, P-11, Pitfall 3): whether outside content is the root of a thread, or among the other messages
- * a turn reads. Inbound content is what the platform posted for a webhook or mail item (`automation_events.message_id`),
- * the board card it filed one as (`automation_events.board_card_message_id`), and the anchor of a run that started
+ * a turn reads. Inbound content is what the platform posted for a webhook or mail item (`automation_events.message_id`,
+ * and its full-text reply, `full_message_id`), the board card it filed one as (`automation_events.board_card_message_id`),
+ * and the anchor of a run that started
  * tainted (`automation_runs.tainted`: the bot's answer there was written from outside text). A turn that reads any of
  * them starts tainted, so a person asking the bot in such a thread never gets a side-effecting turn whose history holds
  * injected text. Ids only; RLS keeps both tables to the transaction's organization. A leaf module, so the mention
@@ -19,7 +20,14 @@ export async function inboundRooted(
   const [event] = await tx
     .select({ id: automationEvents.id })
     .from(automationEvents)
-    .where(or(inArray(automationEvents.messageId, ids), inArray(automationEvents.boardCardMessageId, ids)))
+    .where(
+      or(
+        inArray(automationEvents.messageId, ids),
+        inArray(automationEvents.boardCardMessageId, ids),
+        // The full-text reply after the card (07.6 review A LO-05): a window holding only it is inbound too.
+        inArray(automationEvents.fullMessageId, ids),
+      ),
+    )
     .limit(1);
   if (event) return true;
   const [run] = await tx

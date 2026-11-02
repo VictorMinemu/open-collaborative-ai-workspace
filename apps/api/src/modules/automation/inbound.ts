@@ -201,6 +201,8 @@ interface Posted {
   messageId: string;
   /** The board card the item was filed as (or followed up in). */
   boardCardMessageId: string | null;
+  /** The full-text reply after the card, when the card's field cut the text (outside content too, LO-05). */
+  fullMessageId: string | null;
 }
 
 /** Posts the item where the automation delivers (the platform's post, as the bot for the run-as person). */
@@ -230,11 +232,15 @@ async function postItem(
     });
 
   /** The card, then (when the card's field cut it) the full text, in `threadRootId`'s thread. */
-  const cardAndText = async (conversationId: string, threadRootId: string | null, fullText: boolean) => {
+  const cardAndText = async (
+    conversationId: string,
+    threadRootId: string | null,
+    fullText: boolean,
+  ): Promise<{ messageId: string; fullMessageId: string | null }> => {
     const posted = await post(conversationId, threadRootId, card.summary, true);
     const reply = fullText ? fullTextReply(text) : null;
-    if (reply) await post(conversationId, threadRootId ?? posted.messageId, reply, false);
-    return posted.messageId;
+    const full = reply ? await post(conversationId, threadRootId ?? posted.messageId, reply, false) : null;
+    return { messageId: posted.messageId, fullMessageId: full?.messageId ?? null };
   };
 
   switch (a.targetKind) {
@@ -245,18 +251,18 @@ async function postItem(
         { agentId: a.agentId, userId: a.runAsUserId },
       );
       // DMs are flat: the card is a message, the full text the next one.
-      return { messageId: await cardAndText(dm.conversationId, null, true), boardCardMessageId: null };
+      return { ...(await cardAndText(dm.conversationId, null, true)), boardCardMessageId: null };
     }
     case "thread":
       return {
-        messageId: await cardAndText(a.conversationId as string, a.threadRootMessageId as string, true),
+        ...(await cardAndText(a.conversationId as string, a.threadRootMessageId as string, true)),
         boardCardMessageId: null,
       };
     case "board": {
       const conversationId = a.conversationId as string;
       if (previous) {
         return {
-          messageId: await cardAndText(conversationId, previous.rootId, true),
+          ...(await cardAndText(conversationId, previous.rootId, true)),
           boardCardMessageId: previous.rootId,
         };
       }
@@ -304,12 +310,12 @@ async function postItem(
           .where(eq(boardCards.messageId, boardCardMessageId));
       }
       // The inbound card is the card's first reply; the description already holds the text unless it was cut.
-      return { messageId: await cardAndText(conversationId, boardCardMessageId, cut), boardCardMessageId };
+      return { ...(await cardAndText(conversationId, boardCardMessageId, cut)), boardCardMessageId };
     }
     default: {
       const conversationId = a.conversationId as string;
       return {
-        messageId: await cardAndText(conversationId, previous?.rootId ?? null, true),
+        ...(await cardAndText(conversationId, previous?.rootId ?? null, true)),
         boardCardMessageId: null,
       };
     }
@@ -363,6 +369,7 @@ async function handleInbound(
       threadKey: key,
       messageId: posted.messageId,
       boardCardMessageId: posted.boardCardMessageId,
+      fullMessageId: posted.fullMessageId,
     })
     .where(eq(automationEvents.id, e.id));
   if (!a.inboundAskBot) return;

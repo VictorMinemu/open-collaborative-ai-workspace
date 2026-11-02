@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
 import { startTestStorage, type TestStorage } from "../../testing-storage";
+import { inboundRooted } from "../agent-channel/inbound-origin";
 
 /**
  * 07.6-21 (AUTO-02; D-02, D-07, P-09, P-11; Pattern 6, Pitfalls 2 and 3): inbound items. Every webhook or mail item
@@ -510,6 +511,29 @@ describe("every action lands right and follow-ups keep their conversation (P-11,
     const [ev] = (await runEvents(run.id)) as [Json];
     expect(ev.conversation).toMatchObject({ id: dms[0], kind: "dm" });
     expect((await turnRow(ev.eventId)).tainted).toBe(true);
+  });
+
+  it("the full-text reply is outside content too: a turn whose window holds only it starts tainted (07.6 review A LO-05)", async () => {
+    const src = await inboundAutomation({ target: { kind: "dm" }, askBot: false });
+    const eventId = await receive(src, {
+      subject: "Invoice 78",
+      sender: "billing@vendor.example",
+      bodyText: BODY,
+    });
+    await drainInbound();
+    const full = (
+      await s.su.query("select id from app.messages where client_message_id = $1", [
+        `inbound:${eventId}:full`,
+      ])
+    ).rows[0]?.id as string;
+    expect(full).toBeTruthy();
+    expect((await eventRow(eventId)).full_message_id).toBe(full);
+    // A DM window whose oldest row is the full text (the card just outside it): still inbound-rooted.
+    const later = randomUUID();
+    const rooted = await core().db.withTenant({ organizationId: s.orgA }, (tx) =>
+      inboundRooted(tx, later, [full]),
+    );
+    expect(rooted).toBe(true);
   });
 
   it("thread target: the card is a reply in the chosen thread", async () => {
