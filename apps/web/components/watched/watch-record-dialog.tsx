@@ -52,7 +52,8 @@ import {
  * a record read through a 07.4 connector. Connector (only those the API offers for this board: a read-only tool one of
  * the board's bots may use), Record ID + Find (reads it once, nothing stored), the fields to watch with their current
  * values, how often, which bot reports, and Advanced tools. A per-member connector without the viewer's share on this
- * board shows the amber notice with the Allow link to the 07.4 shared-use dialog, and Start watching stays
+ * board shows the amber notice with the Allow link to the 07.4 shared-use dialog
+ * (`/settings/connections?share=<board>&connector=<id>`, `shareHref`), and Start watching stays
  * `aria-disabled` with that notice as its description: the API's 409 `member_account` is the authority either way.
  * Every record value is plain text (React text nodes, truncated with a Tooltip). Edit mode keeps Connector and Record
  * ID read-only and offers Stop watching…
