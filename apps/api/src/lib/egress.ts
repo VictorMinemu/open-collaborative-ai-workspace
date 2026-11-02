@@ -84,6 +84,28 @@ export interface Egress {
 
 export type EgressLookup = (host: string) => Promise<Array<{ address: string; family: 4 | 6 }>>;
 
+/** The policy of a non-HTTP connection (07.6-11, IMAP): the port it will connect to and the admin's private hosts. */
+export interface EgressAddressPolicy {
+  port: number;
+  /** Exact `host:port` entries admitted to RFC 1918 / CGNAT / ULA addresses (never loopback or link-local). */
+  privateAllow?: readonly string[];
+  /** Default 15000: bounds the lookup. */
+  timeoutMs?: number;
+}
+
+/** The single address a non-HTTP client must connect to (pinned), after the same checks as `fetch`. */
+export interface ResolvedEgressAddress {
+  address: string;
+  family: 4 | 6;
+  /** True only for an `OCW_EGRESS_TEST_HOSTS` name answered with its mapped loopback address. */
+  testHost: boolean;
+}
+
+/** The resolver half of the guard, for clients that open their own sockets (IMAP). */
+export interface EgressResolver {
+  resolve(host: string, policy: EgressAddressPolicy): Promise<ResolvedEgressAddress>;
+}
+
 export interface CreateEgressOptions {
   platformHosts: readonly string[];
   testHosts?: ReadonlyMap<string, string>;
@@ -200,7 +222,7 @@ function findRefusal(err: unknown): EgressRefusedError | null {
 
 const isTimeout = (err: unknown) => (err as { name?: string } | null)?.name === "TimeoutError";
 
-export function createEgress(opts: CreateEgressOptions): Egress {
+export function createEgress(opts: CreateEgressOptions): Egress & EgressResolver {
   const testHosts = new Map<string, string>();
   for (const [name, address] of opts.testHosts ?? [])
     testHosts.set(normalizeHost(name), normalizeHost(address));
@@ -251,6 +273,26 @@ export function createEgress(opts: CreateEgressOptions): Egress {
     }
   }
 
+  /** Host-level checks shared by `fetch` and `resolve`: platform names, refused names, the private allowance. */
+  function targetOf(
+    host: string,
+    port: string,
+    privateAllow: readonly string[] | undefined,
+  ): { target: Target; allowed: Set<string>; isTest: boolean } {
+    const target: Target = { host, port, hostPort: formatHostPort(host, port) };
+    if (platform.names.has(host) || platform.hostPorts.has(target.hostPort)) {
+      throw new EgressRefusedError("platform_host", host);
+    }
+    const isTest = testHosts.has(host);
+    if (!isTest && isRefusedName(host)) throw new EgressRefusedError("private_address", host);
+    const allowed = new Set<string>();
+    for (const entry of privateAllow ?? []) {
+      const hp = parseHostPort(entry);
+      if (hp) allowed.add(formatHostPort(hp.host, hp.port));
+    }
+    return { target, allowed, isTest };
+  }
+
   /** URL-level checks, before any resolution or connection. */
   function precheck(raw: string, policy: EgressPolicy): { url: URL; target: Target; allowed: Set<string> } {
     let url: URL;
@@ -266,17 +308,7 @@ export function createEgress(opts: CreateEgressOptions): Egress {
     if (!host) throw new EgressRefusedError("bad_url", null);
     if (url.username || url.password) throw new EgressRefusedError("userinfo", host);
     const port = url.port || (DEFAULT_PORTS[url.protocol] as string);
-    const target: Target = { host, port, hostPort: formatHostPort(host, port) };
-    if (platform.names.has(host) || platform.hostPorts.has(target.hostPort)) {
-      throw new EgressRefusedError("platform_host", host);
-    }
-    const isTest = testHosts.has(host);
-    if (!isTest && isRefusedName(host)) throw new EgressRefusedError("private_address", host);
-    const allowed = new Set<string>();
-    for (const entry of policy.privateAllow ?? []) {
-      const hp = parseHostPort(entry);
-      if (hp) allowed.add(formatHostPort(hp.host, hp.port));
-    }
+    const { target, allowed, isTest } = targetOf(host, port, policy.privateAllow);
     if (
       url.protocol === "http:" &&
       policy.requireHttps !== false &&
@@ -288,29 +320,37 @@ export function createEgress(opts: CreateEgressOptions): Egress {
     return { url, target, allowed };
   }
 
+  /** Resolves the target once and checks EVERY answer; the first one is the only address used (pinning). */
+  async function resolveChecked(
+    target: Target,
+    allowed: ReadonlySet<string>,
+  ): Promise<{ address: string; family: 4 | 6 }> {
+    let answer: Array<{ address: string; family: 4 | 6 }>;
+    try {
+      answer = await lookup(target.host);
+    } catch {
+      throw new EgressRefusedError("dns_failed", target.host);
+    }
+    if (answer.length === 0) throw new EgressRefusedError("dns_failed", target.host);
+    for (const a of answer) await checkAddress(target, a.address, allowed);
+    const first = answer[0] as { address: string; family: 4 | 6 };
+    return {
+      address: normalizeHost(first.address),
+      family: isIP(normalizeHost(first.address)) === 6 ? 6 : 4,
+    };
+  }
+
   /** The connector's lookup: resolve once, check every address, hand back the first one only (pinning). */
   function pinnedLookup(target: Target, allowed: ReadonlySet<string>, timeoutMs: number): LookupFunction {
     return (hostname, options, callback) => {
-      const resolveChecked = async (): Promise<{ address: string; family: 4 | 6 }> => {
+      const resolveTarget = async (): Promise<{ address: string; family: 4 | 6 }> => {
         if (normalizeHost(hostname) !== target.host) throw new EgressRefusedError("bad_url", target.host);
-        let answer: Array<{ address: string; family: 4 | 6 }>;
-        try {
-          answer = await lookup(target.host);
-        } catch {
-          throw new EgressRefusedError("dns_failed", target.host);
-        }
-        if (answer.length === 0) throw new EgressRefusedError("dns_failed", target.host);
-        for (const a of answer) await checkAddress(target, a.address, allowed);
-        const first = answer[0] as { address: string; family: 4 | 6 };
-        return {
-          address: normalizeHost(first.address),
-          family: isIP(normalizeHost(first.address)) === 6 ? 6 : 4,
-        };
+        return resolveChecked(target, allowed);
       };
       const timer = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new EgressRefusedError("timeout", target.host)), timeoutMs).unref(),
       );
-      Promise.race([resolveChecked(), timer]).then(
+      Promise.race([resolveTarget(), timer]).then(
         (pinned) => {
           if ((options as { all?: boolean }).all) {
             const list: LookupAddress[] = [{ address: pinned.address, family: pinned.family }];
@@ -422,8 +462,39 @@ export function createEgress(opts: CreateEgressOptions): Egress {
     return guardBody(res, target.host, maxBytes);
   }
 
+  /** `resolve`: the address a non-HTTP client connects to, after exactly the checks `fetch` applies. */
+  async function resolveAddress(
+    rawHost: string,
+    policy: EgressAddressPolicy,
+  ): Promise<ResolvedEgressAddress> {
+    const host = normalizeHost(rawHost);
+    if (!host || !Number.isInteger(policy.port) || policy.port < 1 || policy.port > 65_535) {
+      throw new EgressRefusedError("bad_url", host || null);
+    }
+    const { target, allowed } = targetOf(host, String(policy.port), policy.privateAllow);
+    const timeoutMs = policy.timeoutMs ?? EGRESS_DEFAULT_TIMEOUT_MS;
+    let pinned: { address: string; family: 4 | 6 };
+    if (isIP(host)) {
+      await checkAddress(target, host, allowed);
+      pinned = { address: host, family: isIP(host) === 6 ? 6 : 4 };
+    } else {
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new EgressRefusedError("timeout", host)), timeoutMs);
+        timer.unref();
+      });
+      try {
+        pinned = await Promise.race([resolveChecked(target, allowed), timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    return { ...pinned, testHost: testHosts.get(host) === pinned.address };
+  }
+
   return {
     fetch: guardedFetch,
+    resolve: resolveAddress,
     bound(policy) {
       return ((input: string | URL | Request, init?: RequestInit) =>
         guardedFetch(input, init, policy)) as typeof fetch;
@@ -431,16 +502,30 @@ export function createEgress(opts: CreateEgressOptions): Egress {
   };
 }
 
-const memo = new WeakMap<Env, Egress>();
+const memo = new WeakMap<Env, Egress & EgressResolver>();
 
 /** The egress guard for this API process: platform hosts and test hosts from env; one instance per env object. */
-export function egressFor(env: Env): Egress {
+export function egressFor(env: Env): Egress & EgressResolver {
   let egress = memo.get(env);
   if (!egress) {
     egress = createEgress({ platformHosts: platformHostsFromEnv(env), testHosts: env.OCW_EGRESS_TEST_HOSTS });
     memo.set(env, egress);
   }
   return egress;
+}
+
+/**
+ * The pinned address for a non-HTTP connection to `host:port` (07.6-11: IMAP), with the same refusals as `fetch`:
+ * platform hosts, refused names and addresses, private addresses unless the exact `host:port` is in `privateAllow`,
+ * test hosts only for their mapped loopback address. The caller connects to `address` (never re-resolving `host`) and
+ * verifies TLS against `host`. Throws `EgressRefusedError`.
+ */
+export async function resolveEgressAddress(
+  egress: EgressResolver,
+  host: string,
+  policy: EgressAddressPolicy,
+): Promise<ResolvedEgressAddress> {
+  return egress.resolve(host, policy);
 }
 
 /**

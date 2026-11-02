@@ -307,7 +307,7 @@ describe("trigger seams (Task 2): webhook and mail triggers go through their ada
         inbound: { action: "post", askBot: true, config: {} },
       }),
       400,
-      "trigger_unavailable",
+      "mailbox_key_not_usable", // 07.6-11: through the mail adapter (an unknown key), still leaving nothing
     );
     expect(Number((await su.query("select count(*) from app.automations")).rows[0].count)).toBe(countBefore);
     expect(await audits("automation.created")).toHaveLength(countBefore);
