@@ -165,6 +165,7 @@ const LinkExtras = AgentCardApprovalLink.pick({
   resultRoute: true,
   blocked: true,
   browser: true,
+  edited: true,
 });
 
 /** The pending `total` of a kinds-filtered inbox is capped here (nav badges and tab counts show "99+"). */

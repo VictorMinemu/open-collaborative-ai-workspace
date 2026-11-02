@@ -85,15 +85,24 @@ export interface ApprovalCardContent {
   labels?: { approve?: string; deny?: string; open?: string };
   /**
    * 07.5 (UI-SPEC Surface 3): the card's kind. Default `approval`; a Work Zone proposal is a `work_zone` card (its header
-   * reads "Work Zone"). Only these two: the service still owns the status and the decision actions.
+   * reads "Work Zone"); 07.6 (Surface 5): a bot's automation proposal is an `automation` card. The service still owns
+   * the status and the decision actions.
    */
-  cardKind?: "approval" | "work_zone";
+  cardKind?: "approval" | "work_zone" | "automation";
 }
 
 /** The kind-composed fields of a card's approval link (`ApprovalKind.link`). */
 export type ApprovalCardLink = Pick<
   AgentCardApprovalLink,
-  "display" | "useBy" | "waitingFor" | "actionFields" | "deviceId" | "resultRoute" | "blocked" | "browser"
+  | "display"
+  | "useBy"
+  | "waitingFor"
+  | "actionFields"
+  | "deviceId"
+  | "resultRoute"
+  | "blocked"
+  | "browser"
+  | "edited"
 >;
 
 /** What a grant kind adds to the re-run turn of a decision (`ApprovalKind.cardTurn`). */

@@ -37,6 +37,7 @@ import {
 import { and, asc, count, desc, eq, gte, inArray, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { HttpError } from "../../lib/errors";
+import type { ApprovalService } from "../approval";
 import { effectiveDailyLimit, loadPolicy, readCapabilities } from "../bot-capabilities";
 import type { ConversationAccess } from "../chat";
 import type { PermissionService } from "../organization";
@@ -87,12 +88,24 @@ export interface AutomationService {
   /** Each action kind registers once: `agent_turn` (09), `digest` (13). */
   registerActionKind(kind: AutomationActionKind, handler: ActionKindHandler): void;
   actionKind(kind: AutomationActionKind): ActionKindHandler | null;
+  /**
+   * Creates an automation run as `actor`. With `input.fromApprovalId` (R5, 07.6-12) the form was opened from a bot's
+   * proposal: it must be a pending `automation.create` request made for the caller (400 `approval_not_found` for anyone
+   * else's, 409 once decided or expired); the automation is created from the body (the person's edits) and the proposal
+   * closes as applied with `edited` in the same transaction. `fromApproval` is the approval kind's own apply.
+   */
   create(
     tx: Tx,
     actor: AutomationActor,
     input: CreateAutomationRequest,
-    opts?: { actionKind?: AutomationActionKind; config?: Record<string, unknown> },
+    opts?: {
+      actionKind?: AutomationActionKind;
+      config?: Record<string, unknown>;
+      fromApproval?: { approvalId: string; edited: boolean };
+    },
   ): Promise<CreateAutomationResponse>;
+  /** The person's own automations against the cap (digests excluded, P-14). */
+  ownCount(tx: Tx, userId: string): Promise<number>;
   /** The owner only (a manager gets 403, P-04); re-decides the target and the trigger entity in the same tx. */
   update(
     tx: Tx,
@@ -190,6 +203,8 @@ export function createAutomationService(
   core: Core,
   perms: PermissionService,
   access: ConversationAccess,
+  /** The proposals an edited form closes (R5, 07.6-12); absent = `fromApprovalId` is always `approval_not_found`. */
+  _approvals?: ApprovalService,
 ): AutomationService {
   const kinds = createActionRegistry();
   const triggerDeps: TriggerDeps = { core, perms };
@@ -465,6 +480,7 @@ export function createAutomationService(
 
     caps: loadCaps,
     announce,
+    ownCount,
 
     async toDto(tx, row, viewer) {
       const [dto] = await toDtos(tx, [row], viewer);
@@ -485,7 +501,7 @@ export function createAutomationService(
     async create(tx, actor, input, opts = {}) {
       const actionKind = opts.actionKind ?? "agent_turn";
       if (!(await canCreate(perms, tx, actor))) throw notAllowed();
-      // "Created with changes" from a bot's proposal is 07.6-12's (the approval kind); until then no draft exists.
+      // "Created with changes" from a bot's proposal: the edit path lands with Task 3 of 07.6-12.
       if (input.fromApprovalId) throw new HttpError(400, "approval_not_found", "That proposal was not found");
       const trigger = input.trigger;
       if (trigger.kind === "webhook" && !(await canWebhook(perms, tx, actor))) {
@@ -565,6 +581,10 @@ export function createAutomationService(
           triggerKind: created.triggerKind,
           targetKind: created.targetKind,
           conversationId: created.conversationId,
+          // A bot's proposal it came from (07.6-12): confirmed as proposed, or saved with the person's changes.
+          ...(opts.fromApproval
+            ? { approvalId: opts.fromApproval.approvalId, edited: opts.fromApproval.edited }
+            : {}),
         },
       });
       await announce(tx, created);

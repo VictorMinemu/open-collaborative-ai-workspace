@@ -26,6 +26,7 @@ import { randomToken, sha256Hex } from "../../lib/crypto";
 import { HttpError, notFound } from "../../lib/errors";
 import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgent } from "../agent";
 import { linkTurnAttachments } from "../artifact";
+import type { AutomationProposals } from "../automation";
 import { cellAgentCapabilities, loadPolicy } from "../bot-capabilities";
 import { cellMcpServers } from "../mcp";
 import type { MemoryService } from "../memory";
@@ -35,6 +36,7 @@ import type { SandboxdClient } from "../sandbox";
 import type { WorkZoneProposalService } from "../work-session";
 import { finishActivity } from "./activity";
 import { cellOf, createCellAuth } from "./auth";
+import { registerAutomationProposalRoutes } from "./automation-proposals";
 import { registerBoardAgentRoutes } from "./board";
 import { type BrowserBudgets, registerBrowserRoutes } from "./browser";
 import {
@@ -136,6 +138,11 @@ export function createAgentChannelModule(
     memory: MemoryService;
     /** Work Zone proposals (07.5-08): the work-session module's service; absent = the two routes are not served. */
     workZone?: WorkZoneProposalService | null;
+    /**
+     * Natural-language automations (07.6-12): the automation module's proposal entry point; absent = the
+     * `/automations/propose` route is not served.
+     */
+    automations?: AutomationProposals | null;
     /**
      * Per-tool approvals (07.5-11, D-04): the tool-approval service's one decision, asked by every agent-action route
      * (`/tool-calls`, `/connectors/call`, `/http-requests`) inside its claim transaction.
@@ -530,6 +537,8 @@ export function createAgentChannelModule(
           registerMemoryFileRoutes(scope, { core, perms, memory: opts.memory });
           // Work Zone proposals (07.5-08, D-03): the projects a turn's human may use, and a session proposed as a card.
           if (opts.workZone) registerWorkZoneRoutes(scope, core, opts.workZone);
+          // Natural-language automations (07.6-12, D-02, D-03): a proposal card only the turn's person confirms.
+          if (opts.automations) registerAutomationProposalRoutes(scope, core, opts.automations);
           // Bot sandboxes (07.8-05, D-02 (b), D-09): every `ocw_sandbox_*` call decided, approved, counted, capped and
           // audited by the API before sandboxd runs it.
           registerSandboxRoutes(scope, core, {

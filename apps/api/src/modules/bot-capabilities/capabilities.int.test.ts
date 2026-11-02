@@ -477,7 +477,12 @@ describe("per-turn policy (D-07, SC4)", () => {
    * `work_session.create` (Sam is a developer, the admin an admin). Never in the cell-wide view (no human).
    */
   const WORK_ZONE = ["ocw_work_zone_projects", "ocw_start_work_zone"];
-  const DM_TURN = [...DM_TOOLS, ...WORK_ZONE];
+  /**
+   * 07.6-12: natural-language automations, after the other built-ins, on every turn whose human holds
+   * `automation.create` in their DM with the bot or a channel they may post in. Never in the cell-wide view.
+   */
+  const AUTOMATIONS = ["ocw_automation_propose"];
+  const DM_TURN = [...DM_TOOLS, ...WORK_ZONE, ...AUTOMATIONS];
 
   it("Sam's DM message carries the effective turn and an agent_turns row in the same transaction", async () => {
     await ok(sam.request("PATCH", `/api/v1/agents/${samBotId}/capabilities`, { tools: [] }));
@@ -497,6 +502,7 @@ describe("per-turn policy (D-07, SC4)", () => {
         ocw_agent_card: { untrustedOutput: false, sideEffecting: false },
         ocw_work_zone_projects: { untrustedOutput: false, sideEffecting: false },
         ocw_start_work_zone: { untrustedOutput: false, sideEffecting: true },
+        ocw_automation_propose: { untrustedOutput: false, sideEffecting: true },
       },
       memory: [],
       maxToolCalls: 8,
@@ -545,10 +551,10 @@ describe("per-turn policy (D-07, SC4)", () => {
     try {
       const messageId = await say(sam, samDmId, "And now?");
       const ev = await lastMention(samBotId, messageId);
-      expect(ev.turn.tools).toEqual([...DM_MEMORY, "ocw_agent_card", ...WORK_ZONE]);
+      expect(ev.turn.tools).toEqual([...DM_MEMORY, "ocw_agent_card", ...WORK_ZONE, ...AUTOMATIONS]);
       // jsonb orders object keys by length: compare as a set.
       expect(Object.keys(ev.turn.toolFlags).sort()).toEqual(
-        [...DM_MEMORY, "ocw_agent_card", ...WORK_ZONE].sort(),
+        [...DM_MEMORY, "ocw_agent_card", ...WORK_ZONE, ...AUTOMATIONS].sort(),
       );
     } finally {
       await ok(
@@ -583,6 +589,7 @@ describe("per-turn policy (D-07, SC4)", () => {
       ...SHARED_MEMORY,
       "ocw_agent_card",
       ...WORK_ZONE,
+      ...AUTOMATIONS,
     ]);
     expect(evAdmin.conversation.kind).toBe("channel");
 
@@ -590,11 +597,14 @@ describe("per-turn policy (D-07, SC4)", () => {
     try {
       const fromSam = await say(sam, channelId, "@archie and for me?", mention);
       const evSam = await lastMention(teamBotId, fromSam);
-      expect(evSam.turn.tools).toEqual([...SHARED_MEMORY, "ocw_agent_card", ...WORK_ZONE]);
+      expect(evSam.turn.tools).toEqual([...SHARED_MEMORY, "ocw_agent_card", ...WORK_ZONE, ...AUTOMATIONS]);
       const row = (
         await su.query("select tools, user_id from app.agent_turns where event_id = $1", [evSam.eventId])
       ).rows[0];
-      expect(row).toEqual({ tools: [...SHARED_MEMORY, "ocw_agent_card", ...WORK_ZONE], user_id: samId });
+      expect(row).toEqual({
+        tools: [...SHARED_MEMORY, "ocw_agent_card", ...WORK_ZONE, ...AUTOMATIONS],
+        user_id: samId,
+      });
 
       const again = await say(admin, channelId, "@archie still there?", mention);
       expect((await lastMention(teamBotId, again)).turn.tools).toEqual([
@@ -603,6 +613,7 @@ describe("per-turn policy (D-07, SC4)", () => {
         ...SHARED_MEMORY,
         "ocw_agent_card",
         ...WORK_ZONE,
+        ...AUTOMATIONS,
       ]);
     } finally {
       await drop();
@@ -664,8 +675,16 @@ describe("per-turn policy (D-07, SC4)", () => {
     );
     const dmId = (await ok(admin.request("POST", `/api/v1/agents/${mute.id}/dm`))).dmId as string;
     const inDm = await say(admin, dmId, "hello");
-    expect((await lastMention(mute.id, inDm)).turn.tools).toEqual(["ocw_agent_card", ...WORK_ZONE]);
+    expect((await lastMention(mute.id, inDm)).turn.tools).toEqual([
+      "ocw_agent_card",
+      ...WORK_ZONE,
+      ...AUTOMATIONS,
+    ]);
     const inChannel = await say(admin, channelId, "@mute hello", [{ kind: "agent", id: mute.id }]);
-    expect((await lastMention(mute.id, inChannel)).turn.tools).toEqual(["ocw_agent_card", ...WORK_ZONE]);
+    expect((await lastMention(mute.id, inChannel)).turn.tools).toEqual([
+      "ocw_agent_card",
+      ...WORK_ZONE,
+      ...AUTOMATIONS,
+    ]);
   });
 });

@@ -645,7 +645,7 @@ describe("mention → delivery → reply", () => {
     );
     expect(row.rows[0]).toMatchObject({ author_kind: "agent", author_id: agentId, thread_id: rootId });
     expect(row.rows[0].body).toBe(
-      `Asked by ${ADMIN.name} (${adminId}). Thread participants: Alex, ${ADMIN.name}. [turn tools: ocw_agent_card,ocw_start_work_zone,ocw_work_zone_projects] [memory: 0] [now: UTC]`,
+      `Asked by ${ADMIN.name} (${adminId}). Thread participants: Alex, ${ADMIN.name}. [turn tools: ocw_agent_card,ocw_automation_propose,ocw_start_work_zone,ocw_work_zone_projects] [memory: 0] [now: UTC]`,
     );
 
     const audit = await su.query(
