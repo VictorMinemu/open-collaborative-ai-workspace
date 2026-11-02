@@ -625,6 +625,69 @@ describe("consent, cost, repetition and audience", () => {
   });
 });
 
+// ---------------------------------------------------------------- 07.6 review C fixes
+
+describe("a session summary never stays in `writing` (07.6 review C ME-01)", () => {
+  /** A finished session of Ana in Billing with one edited file (automatic proposals are off for her here). */
+  async function finished(title: string): Promise<string> {
+    const id = await startSession(ana, device, billingRepo, { title });
+    await turn(ana, id, `Work on ${title}`, "Done.");
+    await complete(ana, id);
+    await drain();
+    return id;
+  }
+
+  const errorCodeOf = async (id: string) =>
+    (await su.query("select error_code from app.work_session_memory where work_session_id = $1", [id]))
+      .rows[0]?.error_code as string | undefined;
+
+  it("a summary stuck in `writing` by a dead job reads as failed after 10 minutes and Propose enqueues it again", async () => {
+    const s = await finished("Stuck summary");
+    await su.query(
+      `insert into app.work_session_memory (work_session_id, organization_id, unit_id, status, auto, updated_at)
+       values ($1, $2, $3, 'writing', false, now())`,
+      [s, orgId, billing.unitId],
+    );
+    // A fresh claim: a summary is being written; Propose says so instead of a 202 that enqueues nothing.
+    expect(await ok(memoryOf(ana, s))).toMatchObject({ status: "writing" });
+    const busy = await propose(ana, s);
+    expect(busy.status).toBe(409);
+    expect(errorCode(busy)).toBe("summary_in_progress");
+    expect(await drain()).toBe(0);
+
+    await su.query(
+      "update app.work_session_memory set updated_at = now() - interval '11 minutes' where work_session_id = $1",
+      [s],
+    );
+    expect(await ok(memoryOf(ana, s))).toMatchObject({ status: "failed" });
+    const before = summaryRequests().length;
+    expect((await propose(ana, s)).status).toBe(202);
+    expect(await drain()).toBe(1);
+    expect(summaryRequests()).toHaveLength(before + 1);
+    expect(await ok(memoryOf(ana, s))).toMatchObject({ status: "pending" });
+  });
+
+  it("a proposal step that throws leaves the summary failed (the call billed once); Propose works again", async () => {
+    const s = await finished("Throwing proposal");
+    const before = summaryRequests().length;
+    const spy = vi.spyOn(stack.built.memory, "propose").mockRejectedValueOnce(new Error("boom"));
+    try {
+      expect((await propose(ana, s)).status).toBe(202);
+      expect(await drain()).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(summaryRequests()).toHaveLength(before + 1);
+    expect(await ok(memoryOf(ana, s))).toMatchObject({ status: "failed" });
+    expect(await errorCodeOf(s)).toBe("propose_error");
+    expect(await usageRows([s])).toHaveLength(1);
+
+    expect((await propose(ana, s)).status).toBe(202);
+    expect(await drain()).toBe(1);
+    expect(await ok(memoryOf(ana, s))).toMatchObject({ status: "pending" });
+  });
+});
+
 // ---------------------------------------------------------------- Task 3: usage reports
 
 describe("usage reports show digest and session-summary spend as their own rows (P-16)", () => {

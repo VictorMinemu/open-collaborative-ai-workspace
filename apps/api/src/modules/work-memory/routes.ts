@@ -17,7 +17,7 @@ import type { ModelGateway } from "../model-gateway";
 import { AuthzDeniedError, type PermissionService } from "../organization";
 import { projectNamedFor, sessionFacts, type ViewerFilter } from "../work-session";
 import { canMapFor, unitForSession } from "./session-unit";
-import { coveredSeq, hasNewWork, nothingNew, summaryModelFor } from "./summarize";
+import { coveredSeq, hasNewWork, nothingNew, summaryModelFor, writingIsStale } from "./summarize";
 
 /**
  * Work Zone → memory routes (Phase 07.6, AUTO-06, D-06, D-07, D-10, D-11; UI-SPEC R7, surface 9).
@@ -94,10 +94,11 @@ async function summaryFor(
   let decidedBy: SessionMemorySummary["decidedBy"] = null;
   let decisionNote: string | null = null;
   const proposalId = mem?.approvalId ?? null;
-  if (mem?.status === "writing") {
+  if (mem?.status === "writing" && !writingIsStale(mem.updatedAt)) {
     status = "writing";
     unit = (await unitName(mem.unitId)) ?? unit;
-  } else if (mem?.status === "failed") {
+  } else if (mem?.status === "failed" || mem?.status === "writing") {
+    // A `writing` claim older than 10 minutes is a job that died (ME-01): it reads as failed, so Try again shows.
     // A failure is shown while the session can still be summarized there; unlinked since, it reads as unmapped.
     if (now) status = "failed";
   } else if (mem?.status === "proposed" && covered && mem.approvalId) {
@@ -200,7 +201,10 @@ export function registerWorkMemoryRoutes(app: App, deps: WorkMemoryRouteDeps): v
           .from(workSessionMemory)
           .where(eq(workSessionMemory.workSessionId, s.id))
           .limit(1);
-        if (mem?.status === "writing") return;
+        // A summary being written answers so (never a 202 that enqueues nothing); a dead job's claim is taken over.
+        if (mem?.status === "writing" && !writingIsStale(mem.updatedAt)) {
+          throw conflict("A summary is already being written", "summary_in_progress");
+        }
         if (!(await hasNewWork(tx, s.id, await coveredSeq(tx, mem)))) {
           throw conflict("Already proposed. Nothing new since then.", "nothing_new");
         }

@@ -49,8 +49,14 @@ export const SUMMARY_INPUT_MAX_CHARS = 24_000;
 const LINE_MAX_CHARS = 4_000;
 /** The model call's deadline. */
 const SUMMARY_TIMEOUT_MS = 60_000;
-/** A `writing` state older than this is a job that died: another run may take over. */
-const STALE_WRITING = "10 minutes";
+/** A `writing` state older than this is a job that died: another run may take over (and the strip offers Try again). */
+export const STALE_WRITING_MS = 10 * 60_000;
+const STALE_WRITING = `${STALE_WRITING_MS / 60_000} minutes`;
+
+/** Whether a `writing` claim last touched at `updatedAt` belongs to a job that died (07.6 review C ME-01). */
+export function writingIsStale(updatedAt: string | Date, now: number = Date.now()): boolean {
+  return new Date(updatedAt).getTime() < now - STALE_WRITING_MS;
+}
 const SUMMARY_TITLE_MAX = 120;
 
 // ---------------------------------------------------------------- repo-relative text (principle 7)
@@ -632,44 +638,60 @@ export async function summarizeSession(
     }
   }
 
-  await core.db.withTenant({ organizationId, userId: owner }, async (tx) => {
-    // Every model call that answered is billed to the owner, whatever happens to the proposal.
-    const [billedBefore] = await tx
-      .select({ id: aiUsageRecords.id })
-      .from(aiUsageRecords)
-      .where(and(eq(aiUsageRecords.subjectId, s.id), eq(aiUsageRecords.kind, "session_summary")))
-      .limit(1);
-    await recordStandaloneUsage(tx, {
-      kind: "session_summary",
-      subjectId: summarySubjectId(s.id, billedBefore === undefined, job.jobId),
-      requesterUserId: owner,
-      model: prepared.resolved.ref,
-      reported: out.usage,
-      promptText: out.promptText,
-      outputText: out.text,
+  const ctx = { organizationId, userId: owner };
+  try {
+    // Every model call that answered is billed to the owner, whatever happens to the proposal: its own transaction.
+    await core.db.withTenant(ctx, async (tx) => {
+      const [billedBefore] = await tx
+        .select({ id: aiUsageRecords.id })
+        .from(aiUsageRecords)
+        .where(and(eq(aiUsageRecords.subjectId, s.id), eq(aiUsageRecords.kind, "session_summary")))
+        .limit(1);
+      await recordStandaloneUsage(tx, {
+        kind: "session_summary",
+        subjectId: summarySubjectId(s.id, billedBefore === undefined, job.jobId),
+        requesterUserId: owner,
+        model: prepared.resolved.ref,
+        reported: out.usage,
+        promptText: out.promptText,
+        outputText: out.text,
+      });
     });
-    if (!out.text.trim()) return fail(core, deps.perms, tx, s, owner, prepared.unitId, "empty_summary");
-    const result = await deps.memory.propose(tx, proposal, prescan);
-    if ("refused" in result) return fail(core, deps.perms, tx, s, owner, prepared.unitId, result.refused);
-    await setState(tx, s.id, {
-      status: "proposed",
-      unitId: prepared.unitId,
-      approvalId: result.approvalId,
-      summarizedSeq: prepared.input.lastSeq,
-      auto: prepared.auto,
-      errorCode: null,
+    await core.db.withTenant(ctx, async (tx) => {
+      if (!out.text.trim()) return fail(core, deps.perms, tx, s, owner, prepared.unitId, "empty_summary");
+      const result = await deps.memory.propose(tx, proposal, prescan);
+      if ("refused" in result) return fail(core, deps.perms, tx, s, owner, prepared.unitId, result.refused);
+      await setState(tx, s.id, {
+        status: "proposed",
+        unitId: prepared.unitId,
+        approvalId: result.approvalId,
+        summarizedSeq: prepared.input.lastSeq,
+        auto: prepared.auto,
+        errorCode: null,
+      });
+      await core.audit.record(tx, {
+        action: "work_session.summary_proposed",
+        resourceType: "work_session",
+        resourceId: s.id,
+        actorKind: "system",
+        actorId: null,
+        userId: owner,
+        sessionId: s.id,
+        deviceId: s.deviceId,
+        metadata: { approvalId: result.approvalId, unitId: prepared.unitId, auto: prepared.auto },
+      });
+      await announceAfterCommit(core, deps.perms, tx, s);
     });
-    await core.audit.record(tx, {
-      action: "work_session.summary_proposed",
-      resourceType: "work_session",
-      resourceId: s.id,
-      actorKind: "system",
-      actorId: null,
-      userId: owner,
-      sessionId: s.id,
-      deviceId: s.deviceId,
-      metadata: { approvalId: result.approvalId, unitId: prepared.unitId, auto: prepared.auto },
-    });
-    await announceAfterCommit(core, deps.perms, tx, s);
-  });
+  } catch (err) {
+    // 07.6 review C ME-01: never leave the claim in `writing` (a retry could not take it for 10 minutes and the strip
+    // would spin). Failed in a fresh transaction; not rethrown, so a deterministic error is not re-billed by retries
+    // (the owner's Try again proposes once more). If even this fails, the job is retried and the stale claim recovers.
+    core.log.warn(
+      { workSessionId, code: (err as { code?: string; name?: string })?.code ?? (err as Error)?.name },
+      "work session summary proposal failed",
+    );
+    await core.db.withTenant(ctx, (tx) =>
+      fail(core, deps.perms, tx, s, owner, prepared.unitId, "propose_error"),
+    );
+  }
 }
