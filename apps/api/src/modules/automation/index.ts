@@ -1,6 +1,7 @@
 import type { ApiModule, Core } from "../../core";
 import type { ApprovalService } from "../approval";
 import { createConversationAccess } from "../chat";
+import type { MemoryService } from "../memory";
 import type { ModelGateway } from "../model-gateway";
 import type { PermissionService } from "../organization";
 import type { AutomationSeamDeps } from "./actions";
@@ -43,6 +44,8 @@ export interface AutomationDeps {
   perms: PermissionService;
   approvals: ApprovalService;
   modelGateway: ModelGateway;
+  /** The bot's memory in run turns (09's runner hands it to `deliverAutomationRun`). */
+  memory?: MemoryService;
 }
 
 export function createAutomationModule(

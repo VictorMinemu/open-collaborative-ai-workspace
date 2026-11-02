@@ -31,6 +31,7 @@ import {
   RotateWebhookSecretResponse,
   resolveJsonPointer,
   SchedulePreviewResponse,
+  scheduleSummary,
   UpdateAutomationRequest,
   WebhookEndpoint,
 } from "./automations";
@@ -634,5 +635,29 @@ describe("built-in tool names (07.6-01; offered by 07.6-12 and 07.6-14)", () => 
     expect(BUILTIN_TOOLS.recordUpdate).toBe("ocw_record_update");
     expect(isDangerousToolName(BUILTIN_TOOLS.automationPropose)).toBe(false);
     expect(isDangerousToolName(BUILTIN_TOOLS.recordUpdate)).toBe(false);
+  });
+});
+
+describe("scheduleSummary (UI-SPEC trigger summaries, shared by the run card and the web)", () => {
+  it("names every preset in words", () => {
+    expect(scheduleSummary("15 * * * *")).toBe("Every hour at :15");
+    expect(scheduleSummary("0 * * * *")).toBe("Every hour at :00");
+    expect(scheduleSummary("30 8 * * *")).toBe("Every day at 8:30 AM");
+    expect(scheduleSummary("0 9 * * 1-5")).toBe("Weekdays at 9:00 AM");
+    expect(scheduleSummary("0 17 * * 5")).toBe("Fridays at 5:00 PM");
+    expect(scheduleSummary("0 9 * * 1,4")).toBe("Mondays and Thursdays at 9:00 AM");
+    expect(scheduleSummary("0 12 * * 0,1,3")).toBe("Mondays, Wednesdays and Sundays at 12:00 PM");
+    expect(scheduleSummary("0 0 * * 7")).toBe("Sundays at 12:00 AM");
+    expect(scheduleSummary("0 18 3 * *")).toBe("Monthly on day 3 at 6:00 PM");
+    expect(scheduleSummary("45 23 L * *")).toBe("Monthly on the last day at 11:45 PM");
+  });
+
+  it("anything else is a custom schedule with its cron", () => {
+    expect(scheduleSummary("*/20 * * * *")).toBe("Custom schedule (*/20 * * * *)");
+    expect(scheduleSummary("0 9 * 1 *")).toBe("Custom schedule (0 9 * 1 *)");
+    expect(scheduleSummary("0 9 29 * *")).toBe("Custom schedule (0 9 29 * *)");
+    expect(scheduleSummary("0 9-17 * * 1-5")).toBe("Custom schedule (0 9-17 * * 1-5)");
+    expect(scheduleSummary("0 25 * * *")).toBe("Custom schedule (0 25 * * *)");
+    expect(scheduleSummary("not a cron")).toBe("Custom schedule (not a cron)");
   });
 });

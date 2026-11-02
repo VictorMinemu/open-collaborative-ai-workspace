@@ -2,6 +2,7 @@ import type { AutomationActionKind, AutomationRunReason, AutomationTriggerInput 
 import type { automationRuns, automations, Tx } from "@ocw/db";
 import type { Core } from "../../core";
 import type { ApprovalService } from "../approval";
+import type { MemoryService } from "../memory";
 import type { ModelGateway } from "../model-gateway";
 import type { PermissionService } from "../organization";
 import type { AutomationService } from "./service";
@@ -46,6 +47,8 @@ export interface AutomationSeamDeps {
   perms: PermissionService;
   approvals: ApprovalService;
   modelGateway: ModelGateway;
+  /** Memory files of the bot's run turns (07.2-11), like any turn; absent = run turns carry no memory. */
+  memory?: MemoryService;
   service: AutomationService;
 }
 

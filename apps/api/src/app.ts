@@ -335,7 +335,12 @@ export async function buildApp(
   // Phase 07.6 (ADR-0028): automations first, because the digest registers its action kind on their service. One
   // permission service for the four modules (stateless). Their jobs run on `core.jobs`.
   const perms = createPermissionService(core);
-  const automation = createAutomationModule(core, { perms, approvals: approvals.service, modelGateway });
+  const automation = createAutomationModule(core, {
+    perms,
+    approvals: approvals.service,
+    modelGateway,
+    memory,
+  });
   const modules: ApiModule[] = [
     createIdentityModule({
       identity,

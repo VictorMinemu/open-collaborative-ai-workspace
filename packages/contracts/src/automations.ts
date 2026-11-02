@@ -210,6 +210,50 @@ export type AutomationTimeZone = z.infer<typeof AutomationTimeZone>;
 export const AutomationSchedule = z.object({ cron: CronExpression, timeZone: AutomationTimeZone });
 export type AutomationSchedule = z.infer<typeof AutomationSchedule>;
 
+const WEEKDAY_PLURALS = ["Sundays", "Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays"];
+const MINUTE_RE = /^(?:[0-9]|[1-5][0-9])$/;
+const HOUR_RE = /^(?:[0-9]|1[0-9]|2[0-3])$/;
+
+function clock(hour: number, minute: number): string {
+  const h12 = hour % 12 === 0 ? 12 : hour % 12;
+  return `${h12}:${String(minute).padStart(2, "0")} ${hour < 12 ? "AM" : "PM"}`;
+}
+
+function listWords(words: readonly string[]): string {
+  if (words.length <= 1) return words.join("");
+  return `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
+}
+
+/**
+ * The words of a schedule (UI-SPEC § Copy › Trigger summaries), from its cron with the editor's presets: `Every hour at
+ * :15`, `Every day at 8:30 AM`, `Weekdays at 9:00 AM`, `Fridays at 5:00 PM` / `Mondays and Thursdays at 9:00 AM`,
+ * `Monthly on day 3 at 6:00 PM` / `Monthly on the last day at 11:45 PM`; any other cron is `Custom schedule ({cron})`.
+ * The run card (07.6-09) and the web (07.6-15) share it, so a card and the list never word one schedule two ways.
+ */
+export function scheduleSummary(cron: string): string {
+  const custom = `Custom schedule (${cron.trim()})`;
+  const f = cron.trim().split(/\s+/);
+  if (f.length !== 5) return custom;
+  const [min, hour, dom, month, dow] = f as [string, string, string, string, string];
+  if (!MINUTE_RE.test(min) || month !== "*") return custom;
+  const minute = Number(min);
+  if (hour === "*" && dom === "*" && dow === "*") return `Every hour at :${String(minute).padStart(2, "0")}`;
+  if (!HOUR_RE.test(hour)) return custom;
+  const at = clock(Number(hour), minute);
+  if (dom === "*" && dow === "*") return `Every day at ${at}`;
+  if (dom === "*" && dow === "1-5") return `Weekdays at ${at}`;
+  if (dom === "*" && /^[0-7](?:,[0-7])*$/.test(dow)) {
+    // Monday first, Sunday (0 or 7) last, each day once.
+    const days = [...new Set(dow.split(",").map((d) => Number(d) % 7))].sort(
+      (a, b) => ((a + 6) % 7) - ((b + 6) % 7),
+    );
+    return `${listWords(days.map((d) => WEEKDAY_PLURALS[d] as string))} at ${at}`;
+  }
+  if (dow === "*" && dom === "L") return `Monthly on the last day at ${at}`;
+  if (dow === "*" && /^(?:[1-9]|1[0-9]|2[0-8])$/.test(dom)) return `Monthly on day ${dom} at ${at}`;
+  return custom;
+}
+
 // ---------------------------------------------------------------- targets (P-08, R2; stable ids only)
 
 const ChannelTarget = z.object({ kind: z.literal("channel"), conversationId: Id });
