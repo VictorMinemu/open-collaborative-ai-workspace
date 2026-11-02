@@ -59,7 +59,9 @@ export type ReadOutcome =
   | { ok: true; record: unknown }
   | { ok: false; status: Extract<WatchedStatus, "not_connected" | "unreachable" | "error">; code: string };
 
-const fail = (status: Extract<ReadOutcome, { ok: false }>["status"], code: string): ReadOutcome => ({
+type ReadFailure = Extract<ReadOutcome, { ok: false }>;
+
+const fail = (status: ReadFailure["status"], code: string): ReadFailure => ({
   ok: false,
   status,
   code,
@@ -72,7 +74,7 @@ function targetOf(server: ServerRow) {
   };
 }
 
-function upstreamFailure(err: unknown): ReadOutcome {
+function upstreamFailure(err: unknown): ReadFailure {
   if (err instanceof ConnectorTokenUnavailableError) return fail("unreachable", "token_unavailable");
   if (err instanceof McpUpstreamError) {
     if (err.code === "timeout" || err.code === "upstream_error") return fail("unreachable", err.code);
@@ -82,7 +84,7 @@ function upstreamFailure(err: unknown): ReadOutcome {
 }
 
 /** The tool's text as JSON (structured content when the server sent only that); never a partial document. */
-function parseResult(result: { content: string; truncated: boolean; isError: boolean }): ReadOutcome {
+export function parseResult(result: { content: string; truncated: boolean; isError: boolean }): ReadOutcome {
   if (result.isError) {
     return fail(
       "error",
@@ -97,28 +99,33 @@ function parseResult(result: { content: string; truncated: boolean; isError: boo
   }
 }
 
+/** A connector tool's raw answer (or why it could not be called). */
+export type CallOutcome =
+  | { ok: true; result: { content: string; truncated: boolean; isError: boolean } }
+  | Extract<ReadOutcome, { ok: false }>;
+
 /**
- * Reads one record through a connector as `userId` (the linker for checks, the caller for previews): an org-secret
- * server with the workspace's headers; a per-member one with that member's own credential (one forced refresh on a 401,
- * then `needs_reconnect`). Only 07.4's `callTool` through the egress guard (T-07.6-07-03). The share rule is the
- * caller's (checked before).
+ * Calls one tool of a connector as `userId` (the linker for checks, the caller for previews, the requester for 07.6-14's
+ * compare-and-set): an org-secret server with the workspace's headers; a per-member one with that member's own
+ * credential (one forced refresh on a 401, then `needs_reconnect`). Only 07.4's `callTool` through the egress guard
+ * (T-07.6-07-03). The tool and share rules are the caller's (checked before).
  */
-export async function readWith(
+export async function callWith(
   core: Core,
   p: {
     organizationId: string;
     userId: string;
     server: ServerRow;
-    readTool: string;
-    idArg: string;
-    externalRef: string;
+    tool: string;
+    arguments: Record<string, unknown>;
+    timeoutMs?: number;
   },
-): Promise<ReadOutcome> {
-  const call = { name: p.readTool, arguments: { [p.idArg]: p.externalRef } };
+): Promise<CallOutcome> {
+  const call = { name: p.tool, arguments: p.arguments };
   const target = targetOf(p.server);
   const egress = egressFor(core.env);
   const run = (auth: McpAuth, redact: readonly string[]) =>
-    callTool(egress, target, auth, call, { timeoutMs: READ_TIMEOUT_MS, redact });
+    callTool(egress, target, auth, call, { timeoutMs: p.timeoutMs ?? READ_TIMEOUT_MS, redact });
 
   if (p.server.authMode === "org_secret") {
     const headers = await core.db.withTenant({ organizationId: p.organizationId, userId: p.userId }, (tx) =>
@@ -126,7 +133,7 @@ export async function readWith(
     );
     if (!headers) return fail("error", "connector_unavailable");
     try {
-      return parseResult(await run({ headerName: "", headerValue: "", extraHeaders: headers }, []));
+      return { ok: true, result: await run({ headerName: "", headerValue: "", extraHeaders: headers }, []) };
     } catch (err) {
       return upstreamFailure(err);
     }
@@ -158,10 +165,34 @@ export async function readWith(
     await core.db.withTenant({ organizationId: p.organizationId, userId: p.userId }, (tx) =>
       touchConnection(tx, { userId: p.userId, serverId: p.server.id }),
     );
-    return parseResult(result);
+    return { ok: true, result };
   } catch (err) {
     return upstreamFailure(err);
   }
+}
+
+/** Reads one record through a connector as `userId`: `callWith` on the read tool, its answer parsed as JSON. */
+export async function readWith(
+  core: Core,
+  p: {
+    organizationId: string;
+    userId: string;
+    server: ServerRow;
+    readTool: string;
+    idArg: string;
+    externalRef: string;
+    timeoutMs?: number;
+  },
+): Promise<ReadOutcome> {
+  const called = await callWith(core, {
+    organizationId: p.organizationId,
+    userId: p.userId,
+    server: p.server,
+    tool: p.readTool,
+    arguments: { [p.idArg]: p.externalRef },
+    ...(p.timeoutMs !== undefined ? { timeoutMs: p.timeoutMs } : {}),
+  });
+  return called.ok ? parseResult(called.result) : called;
 }
 
 /** A watch's read: the share rule first for per-member connectors (Pitfall 8), then the connector. */

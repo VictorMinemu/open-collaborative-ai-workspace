@@ -57,7 +57,7 @@ import { createSandboxModule, pushPolicy, type SandboxModule } from "./modules/s
 import { createSearchModule } from "./modules/search";
 import { createSecretsModule, createSecretsService } from "./modules/secrets";
 import { createToolApprovalModule, type ToolApprovalService } from "./modules/tool-approval";
-import { createWatchedModule } from "./modules/watched";
+import { createRecordWrites, createWatchedModule } from "./modules/watched";
 import { createWorkMemoryModule } from "./modules/work-memory";
 import { createWorkSessionAttachmentScope, createWorkSessionModule } from "./modules/work-session";
 import { stripQueryStrings } from "./telemetry/redact";
@@ -380,6 +380,7 @@ export async function buildApp(
       memory,
       workZone: workSession.proposals, // 07.5-08: Work Zone proposals (D-03)
       automations: automation.proposals, // 07.6-12: natural-language automation proposals (AUTO-03)
+      records: createRecordWrites(core), // 07.6-14: compare-and-set writes to watched records (AUTO-04)
       toolApproval: toolApproval.service, // 07.5-11: the approval decision of every agent action (D-04)
       sandbox, // 07.8-05: the sandboxd client of the bots' sandbox routes
       ...(opts.browserBudgetsMs ? { browserBudgets: opts.browserBudgetsMs } : {}),

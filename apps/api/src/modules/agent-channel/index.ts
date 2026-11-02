@@ -33,6 +33,8 @@ import type { MemoryService } from "../memory";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
 import { cellApprovedPlugins } from "../plugins";
 import type { SandboxdClient } from "../sandbox";
+// Types only: the watched module reaches modules that import this one (a value import would be a cycle).
+import type { RecordWrites } from "../watched";
 import type { WorkZoneProposalService } from "../work-session";
 import { finishActivity } from "./activity";
 import { cellOf, createCellAuth } from "./auth";
@@ -56,6 +58,7 @@ import { registerMentionHandler } from "./mentions";
 import { registerPluginCellRoutes } from "./plugins";
 import { createCellPresence } from "./presence";
 import { createProviderAuth } from "./provider-auth";
+import { registerRecordRoutes } from "./records";
 import { registerSandboxRoutes } from "./sandbox";
 import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerWorkZoneRoutes } from "./work-zone";
@@ -143,6 +146,11 @@ export function createAgentChannelModule(
      * `/automations/propose` route is not served.
      */
     automations?: AutomationProposals | null;
+    /**
+     * Watched-record writes (07.6-14): the watched module's compare-and-set; absent = the `/records/update` route is not
+     * served.
+     */
+    records?: RecordWrites | null;
     /**
      * Per-tool approvals (07.5-11, D-04): the tool-approval service's one decision, asked by every agent-action route
      * (`/tool-calls`, `/connectors/call`, `/http-requests`) inside its claim transaction.
@@ -539,6 +547,11 @@ export function createAgentChannelModule(
           if (opts.workZone) registerWorkZoneRoutes(scope, core, opts.workZone);
           // Natural-language automations (07.6-12, D-02, D-03): a proposal card only the turn's person confirms.
           if (opts.automations) registerAutomationProposalRoutes(scope, core, opts.automations);
+          // Watched-record writes (07.6-14, D-04, D-07): compare-and-set on the watched record of the turn's card thread,
+          // governed like any side effect (taint, 07.5 approvals).
+          if (opts.records) {
+            registerRecordRoutes(scope, core, { toolApproval: opts.toolApproval, records: opts.records });
+          }
           // Bot sandboxes (07.8-05, D-02 (b), D-09): every `ocw_sandbox_*` call decided, approved, counted, capped and
           // audited by the API before sandboxd runs it.
           registerSandboxRoutes(scope, core, {

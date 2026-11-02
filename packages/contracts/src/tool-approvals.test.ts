@@ -516,6 +516,13 @@ describe("approvable tools and patterns (D-01, P-04)", () => {
     }
   });
 
+  it("Phase 07.6-14: ocw_record_update is approvable (a write to an outside record); ocw_automation_propose is not", () => {
+    expect(isApprovableTool("ocw_record_update")).toBe(true);
+    expect(ToolPattern.safeParse("ocw_record_update").success).toBe(true);
+    expect(isApprovableTool("OCW_RECORD_UPDATE")).toBe(false);
+    expect(isApprovableTool("ocw_automation_propose")).toBe(false);
+  });
+
   it("Phase 07.8: every confined sandbox and browser tool is approvable except sign-in and close (SBX-04, D-12)", () => {
     for (const t of [
       "ocw_sandbox_exec",

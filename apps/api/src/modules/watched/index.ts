@@ -8,7 +8,16 @@ import { registerWatchedJobs } from "./check";
 import { registerWatchedRoutes } from "./routes";
 
 export { changeCard, conflictCard } from "./cards";
-export { checkWatchedRecord, readRecord, readWith, watchedTick } from "./check";
+export { callWith, checkWatchedRecord, readRecord, readWith, watchedTick } from "./check";
+export {
+  type CasRefusal,
+  type CasResult,
+  type CompareAndSetInput,
+  compareAndSet,
+  createRecordWrites,
+  type RecordChanges,
+  type RecordWrites,
+} from "./write";
 
 /**
  * Phase 07.6 (AUTO-04, D-04, ADR-0028): watched records. A board card linked to an external record through a 07.4
@@ -19,6 +28,8 @@ export { checkWatchedRecord, readRecord, readWith, watchedTick } from "./check";
  * `/watched-records`, PATCH and DELETE `/watched-records/:id`, POST `/watched-records/:id/check`.
  * Jobs: `watched.tick` (every five minutes, UTC) and `watched.check`. Observer: a person's reply in a watched card's
  * thread enqueues an access check (one per minute per watch).
+ * Writes (07.6-14): `compareAndSet` (`write.ts`), reached only from the Agent Channel route `POST /records/update`
+ * (`ocw_record_update`) through `createRecordWrites`, injected into the agent-channel module (no module cycle).
  */
 export interface WatchedDeps {
   perms: PermissionService;
