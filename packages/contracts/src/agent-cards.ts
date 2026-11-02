@@ -153,6 +153,11 @@ export const AgentCardApprovalLink = z.object({
   blocked: WorkZoneStartBlock.nullable().optional(),
   /** Phase 07.8: a browser action's page (`ocw_browser_act` / D-13 `ocw_browser_open`); absent on every other card. */
   browser: AgentCardBrowserAction.nullable().optional(),
+  /**
+   * Phase 07.6 (R5): an automation proposal the person created from the editor with their own changes, so the card reads
+   * "Created with changes" (`automation.create` only; absent on every other card).
+   */
+  edited: z.boolean().optional(),
 });
 export type AgentCardApprovalLink = z.infer<typeof AgentCardApprovalLink>;
 

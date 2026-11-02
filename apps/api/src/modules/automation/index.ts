@@ -5,7 +5,7 @@ import type { MemoryService } from "../memory";
 import type { ModelGateway } from "../model-gateway";
 import type { PermissionService } from "../organization";
 import type { AutomationSeamDeps } from "./actions";
-import { registerAutomationApprovalKind } from "./approval-kind";
+import { type AutomationProposals, registerAutomationApprovalKind } from "./approval-kind";
 import { registerInbound } from "./inbound";
 import { registerMailboxRoutes } from "./mailboxes";
 import { registerAutomationRoutes } from "./routes";
@@ -30,6 +30,12 @@ export type {
   TriggerAdapter,
   TriggerDeps,
 } from "./actions";
+export {
+  AUTOMATION_CREATE_KIND,
+  type AutomationProposals,
+  type ProposalRefusal,
+  type ProposingTurn,
+} from "./approval-kind";
 export { firstRunAt, missedPolicy, nextRunAfter, nextRuns, validateSchedule } from "./schedule";
 export {
   type AutomationCaps,
@@ -51,14 +57,15 @@ export interface AutomationDeps {
 export function createAutomationModule(
   core: Core,
   deps: AutomationDeps,
-): { module: ApiModule; service: AutomationService } {
-  const service = createAutomationService(core, deps.perms, createConversationAccess(core));
+): { module: ApiModule; service: AutomationService; proposals: AutomationProposals } {
+  const service = createAutomationService(core, deps.perms, createConversationAccess(core), deps.approvals);
   const seams: AutomationSeamDeps = { ...deps, service };
   // Each seam is wired here once; its plan fills its own file (09 runner, 10 webhooks, 11 mailboxes, 12 the approval
-  // kind, 21 inbound) and never edits this index (P-01).
-  registerAutomationApprovalKind(deps.approvals, service);
+  // kind, 21 inbound) and never edits this index (P-01). 12 also returns the proposal entry point the Agent Channel serves.
+  const proposals = registerAutomationApprovalKind(deps.approvals, service, { core, perms: deps.perms });
   return {
     service,
+    proposals,
     module: {
       name: "automation",
       register(app) {

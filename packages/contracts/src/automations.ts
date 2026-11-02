@@ -483,6 +483,36 @@ export const CreateAutomationResponse = z.object({
 });
 export type CreateAutomationResponse = z.infer<typeof CreateAutomationResponse>;
 
+/**
+ * The approval view of a bot's natural-language proposal (`automation.create`, plan 07.6-12, R5): what the review shows
+ * (`title`, `fields`, the card's words) and the stored draft in request form, so the editor opened with
+ * `?draft=<approvalId>` starts from exactly what the bot proposed. Shown only to whoever may see the approval (the
+ * run-as person, the decider): the instructions are theirs.
+ */
+export const AutomationDraftView = z.object({
+  type: z.literal("automation_draft"),
+  title: z.string().trim().min(1).max(200),
+  fields: z
+    .array(z.object({ label: z.string().trim().min(1).max(60), value: z.string().trim().min(1).max(500) }))
+    .max(12),
+  draft: z.object({
+    name: AutomationName,
+    agent: z.object({ id: Id, displayName: z.string().max(200) }),
+    runAs: z.object({ id: Id, displayName: z.string().max(200) }),
+    instructions: AutomationInstructions,
+    schedule: AutomationSchedule,
+    /** A channel, a thread or the person's DM: a proposal never targets a board, a webhook or a mailbox (D-02). */
+    target: AutomationTargetView,
+    maxRunsPerDay: MaxRunsPerDay,
+    status: z.enum(["pending", "applied", "discarded", "expired"]),
+    /** The automation it created (applied only). */
+    automationId: Id.nullable(),
+    /** Applied from the editor with the person's changes ("Created with changes"). */
+    edited: z.boolean(),
+  }),
+});
+export type AutomationDraftView = z.infer<typeof AutomationDraftView>;
+
 /** `GET /automations?scope=`: `all` (everyone's) needs `automation.manage` (R12). */
 export const AutomationListQuery = z.object({ scope: z.enum(["mine", "all"]).default("mine") });
 export type AutomationListQuery = z.infer<typeof AutomationListQuery>;

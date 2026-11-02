@@ -196,6 +196,7 @@ export type LinkedCardInfo = LinkedCardBase &
       | "resultRoute"
       | "blocked"
       | "browser"
+      | "edited"
     >
   >;
 

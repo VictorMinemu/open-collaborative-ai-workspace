@@ -680,7 +680,13 @@ describe("probe results become policy-capped bot capabilities (BOT-10, SC6)", ()
     const first = await say(admin, channelId, "@scribe note this", mention);
     const turn = await turnFor(teamBotId, first);
     // 07.5-08: the admin may start Work Zone sessions, so the Work Zone proposal tools follow the card tool.
-    expect(turn.tools).toEqual(["ocw_agent_card", "ocw_work_zone_projects", "ocw_start_work_zone", noteName]);
+    expect(turn.tools).toEqual([
+      "ocw_agent_card",
+      "ocw_work_zone_projects",
+      "ocw_start_work_zone",
+      "ocw_automation_propose",
+      noteName,
+    ]);
     expect(turn.toolFlags[noteName]).toEqual({ untrustedOutput: true, sideEffecting: true });
 
     await ok(admin.request("PATCH", `/api/v1/mcp-servers/${notes.id}`, { trustedChaining: true }));

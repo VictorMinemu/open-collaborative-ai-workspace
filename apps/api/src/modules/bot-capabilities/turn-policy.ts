@@ -30,10 +30,17 @@ import {
 import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import type { Env } from "../../config/env";
 import type { Core } from "../../core";
+import { channelFacts } from "../chat";
 // Types only: the memory service is injected by the caller (a value import would be a module cycle).
 import { type EffectiveVaultItem, effectiveVaultItems, unitAudienceAllows } from "../keychain";
 import type { MemoryAudience, MemoryService } from "../memory";
-import { agentResource, orgResource, type PermissionService, type PrincipalRef } from "../organization";
+import {
+  agentResource,
+  channelResource,
+  orgResource,
+  type PermissionService,
+  type PrincipalRef,
+} from "../organization";
 import { sandboxAvailable } from "../sandbox";
 import { approvalModesFor } from "../tool-approval";
 import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
@@ -130,6 +137,11 @@ const WORK_ZONE_PROJECTS_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEf
  * content can never propose a session (the proposal route claims it as side-effecting whatever the turn says).
  */
 const START_WORK_ZONE_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
+/**
+ * `ocw_automation_propose` (07.6-12, D-02, D-03): trusted answer, always side-effecting: a turn that read outside content
+ * never proposes an automation (the route refuses it 403 `tainted`, the plugin before it).
+ */
+const AUTOMATION_PROPOSE_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
 
 /**
  * The sandbox tools a turn is offered (07.8-05, D-12, P-05, P-06): every `ocw_sandbox_*` tool, `ocw_sandbox_import`
@@ -217,6 +229,11 @@ function assemble(
   keys = false,
   /** The turn's human holds `work_session.create` (07.5-08); never in the cell-wide view (no human). */
   workZone = false,
+  /**
+   * The turn's human may propose automations here (07.6-12): `automation.create`, their one-person DM with the bot or a
+   * channel they may post in, and a turn that does not start tainted; never in the cell-wide view (no human).
+   */
+  automations = false,
 ): TurnTools {
   const tools: string[] = [];
   const toolFlags: Record<string, TurnToolFlags> = {};
@@ -251,6 +268,9 @@ function assemble(
   }
   // Board cards (07.1-10, D-07): only on a board channel's turns; every other turn keeps exactly its tool list.
   if (board && conversationKind === "channel") add(BUILTIN_TOOLS.boardCard, BOARD_FLAGS);
+  // Natural-language automations (07.6-12, D-02, D-07): a proposal card only this human confirms; the route re-decides
+  // everything and refuses a tainted turn.
+  if (automations) add(BUILTIN_TOOLS.automationPropose, AUTOMATION_PROPOSE_FLAGS);
   // Per-member connectors and keys (07.4-11, D-04, D-07, C-01). A turn carries the per-member tools under their logical
   // `<safe>__<tool>` names (for the gate) plus the static tools that reach them; the cell-wide view (null kind) carries
   // the static names only, never a logical per-member name (they are not OpenClaw tools).
@@ -328,6 +348,8 @@ async function computeTurn(
      * live control) is neither offered nor listed as withheld; the sandbox family is decided exactly as for any turn.
      */
     unattended?: boolean;
+    /** Phase 07.6 (D-02): the turn starts tainted, so it is never offered `ocw_automation_propose`. */
+    tainted?: boolean;
   },
   env: SearchEnv,
   audience?: TurnAudience | null,
@@ -346,6 +368,7 @@ async function computeTurn(
   const workZone = (
     await perms.decide(tx, { kind: "user", userId: p.humanUserId }, "work_session.create", orgResource())
   ).allowed;
+  const automations = await mayProposeAutomations(tx, perms, p);
   const effective = effectiveCapabilities({
     scope: row.scope,
     caps,
@@ -485,6 +508,7 @@ async function computeTurn(
     p.board === true,
     usable.length > 0,
     workZone,
+    automations,
   );
   // Bot sandboxes (07.8-05, D-09, D-12, P-05) and browsers (07.8-14): offered only when the resolver grants
   // `sandbox.use` / `browser.use` to the bot acting for this human (07.3 module denies included), the organization
@@ -557,6 +581,29 @@ async function computeTurn(
     sandboxOffered,
     ...assembled,
   };
+}
+
+/**
+ * Whether the turn's human may propose automations here (07.6-12, D-02, D-07): they hold `automation.create`, the turn
+ * does not start tainted, and it is their one-person DM with the bot (`dm`) or a channel they may post in (a proposal
+ * there delivers to that channel or its thread). Group DMs, shared DMs, AI chats and Work Zone sessions never offer it.
+ */
+async function mayProposeAutomations(
+  tx: Tx,
+  perms: PermissionService,
+  p: { humanUserId: string; conversationKind: string; conversationId?: string | null; tainted?: boolean },
+): Promise<boolean> {
+  if (p.tainted) return false;
+  if (p.conversationKind !== "dm" && p.conversationKind !== "channel") return false;
+  const human = { kind: "user", userId: p.humanUserId } as const;
+  if (!(await perms.decide(tx, human, "automation.create", orgResource())).allowed) return false;
+  if (p.conversationKind === "dm") return true;
+  // A channel's post right needs the channel: without it, fail closed.
+  if (!p.conversationId) return false;
+  const [conv] = await tx.select().from(conversations).where(eq(conversations.id, p.conversationId)).limit(1);
+  if (conv?.kind !== "channel" || conv.archivedAt !== null) return false;
+  const facts = await channelFacts(tx, conv, { kind: "user", id: p.humanUserId });
+  return (await perms.decide(tx, human, "channel.post", channelResource(facts))).allowed;
 }
 
 /**
@@ -832,6 +879,7 @@ export async function turnPolicy(
       board,
       sandbox: core.env.OCW_SANDBOX_URL !== null,
       unattended: p.unattended === true,
+      tainted: p.taintedAtStart === true,
     },
     core.env,
     opts.audience,
