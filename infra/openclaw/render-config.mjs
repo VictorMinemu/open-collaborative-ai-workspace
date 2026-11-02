@@ -198,6 +198,11 @@ export function renderConfig(env, opts = {}) {
       },
     },
     channels: { ocw: { enabled: true } },
+    // 07.6 (C-01, ADR-0028): automations live in the Control Plane (pg-boss schedules, signed webhooks, IMAP), which
+    // decides, audits and delivers each run as a turn. OpenClaw's own scheduler and webhook ingress stay off, pinned
+    // rather than left to its defaults (cron is on by default); `cron` and `sessions_send` are denied tools as well.
+    cron: { enabled: false },
+    hooks: { enabled: false },
     // MCP servers (D-13) are rendered by the plugin from GET /cell (only servers with a tool some bot may use).
     // MCP runtimes are per session (each DM, each thread): evict idle ones after 10 minutes (Pitfall P-B3).
     mcp: { sessionIdleTtlMs: 600000 },
