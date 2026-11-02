@@ -3,8 +3,7 @@ import { automationRuns, automations, messageCards, type Tx } from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { JobData } from "../../lib/jobs";
-import { deliverAutomationRun } from "../agent-channel";
-import { updatePlatformCard } from "../chat";
+import { deliverAutomationRun, updatePlatformCardNotified } from "../agent-channel";
 import type { ActionKindHandler, AutomationRow, AutomationSeamDeps, FireResult, RunRow } from "./actions";
 import { decideFire, outcomeOf, recordOutcome } from "./budget";
 import { inboundDelivery } from "./inbound";
@@ -197,7 +196,7 @@ async function settleCard(
   const kept = ((card.notices ?? []) as Array<{ tone: "warning" | "neutral"; text: string }>).filter(
     (n) => n.tone === "warning",
   );
-  await updatePlatformCard(tx, core, {
+  await updatePlatformCardNotified(tx, core, {
     messageId: anchorMessageId,
     status: "failed",
     statusLabel: label,

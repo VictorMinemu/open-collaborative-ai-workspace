@@ -13,7 +13,6 @@ import {
   type AfterCommit,
   agentTurns,
   conversations,
-  messageCardFollows,
   messageCards,
   messages,
   type Tx,
@@ -26,10 +25,10 @@ import { badRequest, HttpError, notFound } from "../../lib/errors";
 import { findAgent } from "../agent";
 import { createConversationAccess, patchCard } from "../chat";
 import type { MemoryService } from "../memory";
-import { notifyUsers } from "../notification";
 import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
 import { cellOf } from "./auth";
 import { automationInactive, markRunAnswered, runAnchorTrigger } from "./automation-runs";
+import { notifyCardFollowers } from "./card-followers";
 import { buildMentionEvents } from "./mentions";
 
 /**
@@ -465,20 +464,10 @@ export function registerCardRoutes(app: App, ctx: { core: Core }): void {
         });
         // Followers hear about status changes only (a fields, title or summary change notifies nobody).
         if (before.status !== after.status) {
-          const followers = await tx
-            .select({ userId: messageCardFollows.userId })
-            .from(messageCardFollows)
-            .where(eq(messageCardFollows.messageId, after.messageId));
-          await notifyUsers(
+          await notifyCardFollowers(
             tx,
             { core, access },
-            {
-              kind: "card_updated",
-              conversationId: after.conversationId,
-              messageId: after.messageId,
-              actor: { kind: "agent", id: agentId },
-              userIds: followers.map((f) => f.userId),
-            },
+            { conversationId: after.conversationId, messageId: after.messageId, agentId },
           );
         }
         return { messageId: after.messageId, version: after.version };

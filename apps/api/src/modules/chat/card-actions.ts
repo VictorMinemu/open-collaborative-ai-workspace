@@ -388,7 +388,9 @@ export type PlatformCardUpdate = z.infer<typeof PlatformCardUpdate>;
  * card's notices), in the caller's transaction: the card row is locked, only a platform-owned card changes (any other
  * card throws, nothing written; an agent's card is the agent's alone), the values are bounded by the contract (label
  * 1..24, at most three notices), and the version goes up by one with the same `message.updated` every reader gets from
- * `patchCard`. `statusLabel: null` clears the label. A tombstoned message's card is left as it is.
+ * `patchCard`. `statusLabel: null` clears the label. A tombstoned message's card is left as it is. Callers go through
+ * agent-channel's `updatePlatformCardNotified`, which also tells the card's followers about a status change (chat
+ * cannot import notification).
  */
 export async function updatePlatformCard(
   tx: Tx,

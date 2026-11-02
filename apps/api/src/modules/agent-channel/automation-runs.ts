@@ -28,9 +28,10 @@ import type { Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import { HttpError } from "../../lib/errors";
 import { findAgent } from "../agent";
-import { createConversationAccess, updatePlatformCard } from "../chat";
+import { createConversationAccess } from "../chat";
 import type { MemoryService } from "../memory";
 import { memberDirectory, type PermissionService } from "../organization";
+import { updatePlatformCardNotified } from "./card-followers";
 import { buildMentionEvents } from "./mentions";
 
 export { inboundRooted } from "./inbound-origin";
@@ -330,7 +331,7 @@ export async function markRunAnswered(tx: Tx, deps: { core: Core }, runId: strin
       .where(eq(messageCards.messageId, run.anchorMessageId))
       .limit(1);
     if (card?.platformOwned) {
-      await updatePlatformCard(tx, deps.core, {
+      await updatePlatformCardNotified(tx, deps.core, {
         messageId: run.anchorMessageId,
         status: "succeeded",
         statusLabel: "Done",

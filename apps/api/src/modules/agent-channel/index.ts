@@ -74,6 +74,7 @@ export {
   runSentence,
 } from "./automation-runs";
 export type { BrowserBudgets } from "./browser";
+export { notifyCardFollowers, updatePlatformCardNotified } from "./card-followers";
 export { emitCardAction } from "./cards";
 export { conversationAudience } from "./memory-files";
 export { buildMentionEvents } from "./mentions";

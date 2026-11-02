@@ -21,6 +21,7 @@ import { startTestStorage, type TestStorage } from "../../testing-storage";
 import { ensureAgentDm, updatePlatformCard } from "../chat";
 import { createPermissionService, type PermissionService } from "../organization";
 import { type DeliverAutomationRunResult, deliverAutomationRun } from "./automation-runs";
+import { updatePlatformCardNotified } from "./card-followers";
 
 /**
  * 07.6-06 (AUTO-01, AUTO-02; D-02, D-03, D-07, D-08, D-12; P-03, P-08, P-11, P-12, P-22): the proactive-delivery
@@ -777,6 +778,37 @@ describe("the server keeps platform cards current (R1, P-12)", () => {
       ),
     ).rejects.toThrow();
     expect((await cardRow(r.anchorId)).version).toBe(2);
+  });
+
+  it("LO-03: a run card's followers hear when it finishes (card_updated by the bot), like any agent card's", async () => {
+    const r = await scheduledRun();
+    expect((await s.sam.request("POST", `/api/v1/cards/${r.anchorId}/follow`)).status).toBe(204);
+    const notificationsOf = async () =>
+      (
+        await s.su.query(
+          "select user_id, kind, actor_kind, actor_id from app.notifications where message_id = $1 and kind = 'card_updated'",
+          [r.anchorId],
+        )
+      ).rows as Json[];
+    expect((await deliver(r)).delivered).toBe(true);
+    const [ev] = await runEvents(r.runId);
+    expect((await replyTo(ev as Json)).status).toBe(200);
+    expect(await cardOf(s.victor, salesId, r.anchorId)).toMatchObject({
+      status: "succeeded",
+      statusLabel: "Done",
+    });
+    expect(await notificationsOf()).toEqual([
+      { user_id: s.samId, kind: "card_updated", actor_kind: "agent", actor_id: s.scoutId },
+    ]);
+
+    // A change that keeps the status (notices only) notifies nobody, as with an agent's own patch.
+    await asPerson(s.victorId, (tx) =>
+      updatePlatformCardNotified(tx, core(), {
+        messageId: r.anchorId,
+        notices: [{ tone: "neutral", text: "Report attached." }],
+      }),
+    );
+    expect(await notificationsOf()).toHaveLength(1);
   });
 
   it("an agent PATCH of the run card stays 403 card_platform_owned", async () => {
