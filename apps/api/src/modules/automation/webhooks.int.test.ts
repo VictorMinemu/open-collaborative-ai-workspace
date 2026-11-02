@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { Webhook } from "standardwebhooks";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../app";
 import type { TestClient } from "../../testing";
 import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
 import { invite } from "../../testing-workzone";
+import { newPublicId } from "./webhook-verify";
 
 /**
  * 07.6-10 (AUTO-02; D-02, D-07, R3, R4, P-10; Pitfall 4): signed webhooks as an automation trigger. Ana Díaz (lead,
@@ -361,6 +362,22 @@ describe("forgery and replay fail (Task 2, D-02, D-07, Pitfall 4)", () => {
     expect(await eventsOf((await endpointRow(second.publicId)).id)).toHaveLength(1);
   });
 
+  it("a signed body with a lone surrogate answers 400, never a 500 the sender retries forever; a 64-bit id is kept exact (07.6 review A LO-04)", async () => {
+    const hook = await createHook({ name: "Odd orders" });
+    const row = await endpointRow(hook.publicId);
+    const lone = '{"order":{"note":"\\ud800"}}';
+    const refused = await post(hook.publicId, lone, signedHeaders(hook.secret, lone));
+    expect(refused).toEqual({
+      status: 400,
+      body: { error: { code: "invalid_payload", message: "The body must be JSON" } },
+    });
+    const big = '{"order":{"id":9007199254740993}}';
+    expect((await post(hook.publicId, big, signedHeaders(hook.secret, big))).status).toBe(202);
+    const events = await eventsOf(row.id);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.body_json).toEqual({ order: { id: "9007199254740993" } });
+  });
+
   it("rotation issues a new secret once and keeps the previous one valid for 24 hours", async () => {
     const hook = await createHook({ name: "Rotated orders" });
     const row = await endpointRow(hook.publicId);
@@ -469,6 +486,39 @@ describe("limits hold (Task 3, D-07, R4, T-07.6-10-03)", () => {
     expect(ttl).toBeGreaterThan(0);
     expect(ttl).toBeLessThanOrEqual(60_000);
   });
+
+  /** One unsigned request from `ip` to a well-formed id (in-process, so each test has its own client address). */
+  const knock = async (publicId: string, ip: string) =>
+    (
+      await s.stack.built.app.inject({
+        method: "POST",
+        url: `/api/v1/hooks/${publicId}`,
+        headers: { "content-type": "application/json" },
+        payload: "{}",
+        remoteAddress: ip,
+      })
+    ).statusCode;
+  const randomPublicId = () => newPublicId();
+
+  it("a rate-limited flood costs no database query per rejected request (07.6 review A LO-03)", async () => {
+    const id = randomPublicId();
+    for (let i = 0; i < 60; i++) expect(await knock(id, "198.51.100.31")).toBe(404);
+    const queries = vi.spyOn(core().db.pool, "query");
+    try {
+      for (let i = 0; i < 10; i++) expect(await knock(id, "198.51.100.31")).toBe(429);
+      // At most the first rejection of the minute looks the id up; the other nine stop at Redis.
+      expect(queries.mock.calls.length).toBeLessThanOrEqual(1);
+    } finally {
+      queries.mockRestore();
+    }
+  });
+
+  it("one sender minting random ids is limited per address: the 601st request in a minute answers 429 (LO-03)", async () => {
+    for (let i = 0; i < 600; i++) expect(await knock(randomPublicId(), "198.51.100.32")).toBe(404);
+    expect(await knock(randomPublicId(), "198.51.100.32")).toBe(429);
+    // Another sender is unaffected.
+    expect(await knock(randomPublicId(), "198.51.100.33")).toBe(404);
+  }, 60_000);
 });
 
 describe("lifecycle and permissions (Task 3, R3, P-09, P-10)", () => {

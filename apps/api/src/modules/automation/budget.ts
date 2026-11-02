@@ -8,7 +8,7 @@ import { automationRuns, automations, orgMembers, type Tx } from "@ocw/db";
 import { and, count, eq, gte, ne, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { PermissionService } from "../organization";
-import { canCreate, decideTarget, type TargetCode } from "./access";
+import { canCreate, canWebhook, decideTarget, type TargetCode } from "./access";
 import type { AutomationRow, RunRow } from "./actions";
 import { targetOf } from "./service";
 
@@ -129,7 +129,8 @@ export type FireDecision = { ok: true } | { ok: false; reason: AutomationRunReas
  * Whether `run` of `a` may fire now, decided again at every fire (D-07, P-09; T-07.6-09-01, -02). Called inside the
  * fire transaction, opened as the run-as person, with the run and the automation rows locked. In order:
  * 1. the automation is still active (a paused or needs-attention automation skips its queued runs: `paused`);
- * 2. the run-as person is still an active member and still holds `automation.create` (`run_as_not_allowed`);
+ * 2. the run-as person is still an active member and still holds `automation.create`, and `automation.webhook` for a
+ *    webhook automation (`run_as_not_allowed`);
  * 3. the target, for the person and the bot together (`decideTarget`, the save-time decision run again): the bot is
  *    live (`agent_disabled`) and the person may see it (`bot_not_readable`); a personal bot only to its owner's DM; the
  *    conversation is a live channel the person reads and may post in, the bot is a member (`agent_not_member`) and may
@@ -169,6 +170,10 @@ export async function decideAccess(
     .limit(1);
   if (!member || member.deactivatedAt) return { ok: false, reason: "run_as_not_allowed" };
   if (!(await canCreate(perms, tx, { userId: a.runAsUserId })))
+    return { ok: false, reason: "run_as_not_allowed" };
+  // D-07: only leads and admins hold webhook endpoints, and that is decided again for every delivery and run, so a
+  // person who lost the right (demoted, or a unit rule) has no live public URL posting as the bot (07.6 review A MD-05).
+  if (a.triggerKind === "webhook" && !(await canWebhook(perms, tx, { userId: a.runAsUserId })))
     return { ok: false, reason: "run_as_not_allowed" };
   const target = await decideTarget(tx, perms, {
     agentId: a.agentId,

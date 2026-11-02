@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { createServer, type Server } from "node:net";
+import { createServer, type Server, type Socket } from "node:net";
 import { networkInterfaces } from "node:os";
 import { ImapFlow } from "imapflow";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { classifyAddress } from "../../lib/egress";
 import { type GreenMail, type GreenMailUser, startGreenMail } from "../../testing-mail";
 import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
@@ -23,6 +23,21 @@ vi.mock("node:dns/promises", async (importOriginal) => {
     return (real.lookup as (h: string, o?: unknown) => Promise<unknown>)(host, opts);
   }) as typeof real.lookup;
   return { ...real, default: { ...real, lookup }, lookup };
+});
+
+/**
+ * The real parser, except that a mail whose subject holds `POISON` gets a U+0000 put back into its body after parsing:
+ * it stands for any value the database still refuses once the parser has done its part (07.6 review A CR-01).
+ */
+vi.mock("./mail-parse", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./mail-parse")>();
+  return {
+    ...real,
+    parseMail: async (...args: Parameters<typeof real.parseMail>) => {
+      const m = await real.parseMail(...args);
+      return m.subject.includes("POISON") ? { ...m, text: `${m.text}\u0000` } : m;
+    },
+  };
 });
 
 /**
@@ -48,6 +63,7 @@ const ADDRESSES = [
   "unreach@acme.test",
   "paused@acme.test",
   "gone@acme.test",
+  "poison@acme.test",
 ];
 
 const core = () => s.stack.built.core;
@@ -108,16 +124,27 @@ const mailbox = (vaultItemId: string, extra: Json = {}) => ({
   ...extra,
 });
 
-/** Víctor's mail automation into #purchasing (the Received card and a read-only turn for Scout). */
-function createMailAutomation(vaultItemId: string, extra: Json = {}, as = s.victor) {
-  return as.request("POST", "/api/v1/automations", {
+/**
+ * Víctor's mail automation into #purchasing (the Received card and a read-only turn for Scout). A save answers before
+ * its baseline poll ends (MD-04); this waits for it, so a test sees the mailbox as the first poll left it.
+ */
+async function createMailAutomation(vaultItemId: string, extra: Json = {}, as = s.victor): Promise<Res> {
+  const res = (await as.request("POST", "/api/v1/automations", {
     name: `Supplier inbox ${randomUUID().slice(0, 6)}`,
     agentId: s.scoutId,
     instructions: "Read new supplier orders and tell me what needs doing today.",
     trigger: { kind: "mail", mailbox: mailbox(vaultItemId, extra) },
     target: { kind: "channel", conversationId: purchasingId },
     inbound: { action: "post", askBot: true, config: {} },
-  }) as Promise<Res>;
+  })) as Res;
+  if (res.status === 201) {
+    const automationId = (res.body as Json).automation.id as string;
+    await vi.waitFor(async () => expect((await mailboxRow(automationId))?.last_polled_at).toBeTruthy(), {
+      timeout: 15_000,
+      interval: 50,
+    });
+  }
+  return res;
 }
 
 /** Makes the mailbox due, runs one tick and drains its poll job. */
@@ -425,6 +452,45 @@ describe("each mail is processed once, conversations stay threaded, automated ma
     expect(again[0]).toMatchObject({ external_id: events[0]?.external_id, duplicate_count: 1 });
   });
 
+  it("a mail with U+0000 (quoted-printable =00) is stored clean; one the database still refuses is skipped, the cursor advances and the code says so (CR-01)", async () => {
+    const { automationId, mailboxId } = await automationOn("poison@acme.test");
+    const qp = (subject: string, body: string) =>
+      [
+        "From: =?utf-8?Q?Sho=00p?= <orders@shop.example>",
+        "To: poison@acme.test",
+        `Subject: ${subject}`,
+        "Content-Type: text/plain; charset=utf-8",
+        "Content-Transfer-Encoding: quoted-printable",
+        "",
+        body,
+        "",
+      ].join("\r\n");
+    await appendTo("poison@acme.test", "INBOX", qp("=?utf-8?Q?Order=00_3001?=", "Deliver=00 order 3001."));
+    await appendTo("poison@acme.test", "INBOX", qp("POISON 3002", "Deliver order 3002."));
+    await appendTo("poison@acme.test", "INBOX", qp("Order 3003", "Deliver order 3003."));
+    await pollNow(mailboxId);
+
+    const events = await eventsOf(mailboxId);
+    expect(events.map((e) => e.subject)).toEqual(["Order 3001", "Order 3003"]);
+    expect(events[0]).toMatchObject({
+      body_text: "Deliver order 3001.",
+      sender: "Shop <orders@shop.example>",
+    });
+    const row = await mailboxRow(automationId);
+    // The cursor is past all three: the refused mail never blocks the mailbox again.
+    expect(Number(row?.last_uid)).toBe(3);
+    expect(row).toMatchObject({ status: "active", last_error_code: "mail_not_stored", last_new_count: 2 });
+    expect((await audits("mail.received", mailboxId)).map((a) => a.metadata)).toEqual([
+      { mailboxId, automationId, count: 2, skipped: 0, duplicates: 0, notStored: 1 },
+    ]);
+
+    // The next good poll clears the code.
+    await appendTo("poison@acme.test", "INBOX", qp("Order 3004", "Deliver order 3004."));
+    await pollNow(mailboxId);
+    expect(await eventsOf(mailboxId)).toHaveLength(3);
+    expect(await mailboxRow(automationId)).toMatchObject({ last_error_code: null, status: "active" });
+  });
+
   it("a changed UIDVALIDITY (the folder recreated) resets the cursor to the newest message without reprocessing", async () => {
     await asMailUser("validity@acme.test", async (c) => {
       await c.mailboxCreate("Orders");
@@ -491,6 +557,39 @@ describe("connections fail safely and visibly: fixed codes, verified TLS, no pri
     port: gm.imapPort,
     folder: "INBOX",
     ...extra,
+  });
+
+  // Each test starts with a fresh per-person budget for the test route (6 a minute, MD-03).
+  beforeEach(async () => {
+    const redis = core().bus.pub;
+    for await (const keys of redis.scanIterator({ MATCH: "ocw:rl:*mbx-test:*", COUNT: 100 })) {
+      if (keys.length > 0) await redis.del(keys);
+    }
+  });
+
+  it("POST /mailboxes/test: 6 a minute per person and one at a time, so it is no port probe or lockout tool (07.6 review A MD-03)", async () => {
+    const sockets = new Set<Socket>();
+    const silent: Server = createServer((socket) => {
+      sockets.add(socket);
+    });
+    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve));
+    const port = (silent.address() as { port: number }).port;
+    const key = await mailKey("tester@acme.test", { hosts: [`greenmail:${port}`] });
+    const body = testBody(key, { port });
+    // A server that accepts and never greets holds the first test…
+    const first = tryIt(body);
+    await vi.waitFor(() => expect(sockets.size).toBe(1), { timeout: 5_000, interval: 20 });
+    // …and a second one from the same person is refused while it runs.
+    const second = await tryIt(body);
+    expect(second.status).toBe(409);
+    expect(codeOf(second)).toBe("mailbox_test_in_progress");
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => silent.close(() => resolve()));
+    expect(await ok(first)).toEqual({ ok: false, code: "unreachable" });
+    // Four more (a closed port answers at once) reach the budget of six; the seventh waits for the next minute.
+    for (let i = 0; i < 4; i++) expect(await ok(tryIt(body))).toEqual({ ok: false, code: "unreachable" });
+    const seventh = await tryIt(body);
+    expect(seventh.status).toBe(429);
   });
 
   it("POST /mailboxes/test: the message count, nothing saved, audited without the password", async () => {
@@ -616,6 +715,41 @@ describe("connections fail safely and visibly: fixed codes, verified TLS, no pri
     expect(notHis.status).toBe(400);
     expect(codeOf(notHis)).toBe("mailbox_key_not_usable");
     expect(await count()).toBe(before);
+  });
+
+  it("saving answers before the mail server does: the baseline poll runs after the response (07.6 review A MD-04)", async () => {
+    const sockets = new Set<Socket>();
+    const silent: Server = createServer((socket) => {
+      sockets.add(socket);
+    });
+    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve));
+    const port = (silent.address() as { port: number }).port;
+    try {
+      const key = await mailKey("tester@acme.test", { hosts: [`greenmail:${port}`] });
+      const started = Date.now();
+      const res = await s.victor.request("POST", "/api/v1/automations", {
+        name: `Silent inbox ${randomUUID().slice(0, 6)}`,
+        agentId: s.scoutId,
+        instructions: "Read new supplier orders.",
+        trigger: { kind: "mail", mailbox: mailbox(key, { port }) },
+        target: { kind: "channel", conversationId: purchasingId },
+        inbound: { action: "post", askBot: true, config: {} },
+      });
+      expect(res.status).toBe(201);
+      // The server never greets: the old after-commit baseline held the response for its 10 s greeting timeout.
+      expect(Date.now() - started).toBeLessThan(3_000);
+      const automationId = (res.body as Json).automation.id as string;
+      // The baseline is still talking to the server; ending its socket ends it, recorded like any poll.
+      await vi.waitFor(() => expect(sockets.size).toBe(1), { timeout: 5_000, interval: 20 });
+      for (const socket of sockets) socket.destroy();
+      await vi.waitFor(
+        async () => expect(await mailboxRow(automationId)).toMatchObject({ status: "unreachable" }),
+        { timeout: 15_000, interval: 100 },
+      );
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => silent.close(() => resolve()));
+    }
   });
 
   it("a wrong password at poll: auth_failed, backs off 30 minutes, audited once; a new password in Keychain resumes it", async () => {

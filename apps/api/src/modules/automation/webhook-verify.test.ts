@@ -137,3 +137,36 @@ describe("secrets and public ids", () => {
     expect(normalizePublicId(`${id}/../x`)).toBeNull();
   });
 });
+
+describe("verified JSON is stored exactly or refused (07.6 review A LO-04)", () => {
+  const payloadOf = (text: string) => {
+    const body = Buffer.from(text);
+    const v = verifyStandardWebhook(body, signed({ body }), [SECRET]);
+    if (!v.ok) throw new Error("not verified");
+    return v.payload;
+  };
+
+  it("an integer beyond 2^53 keeps its exact digits (as a string), so two 64-bit ids never merge", () => {
+    expect(
+      payloadOf('{"order":{"id":9007199254740993,"other":9007199254740992,"n":-12345678901234567890}}'),
+    ).toEqual({ order: { id: "9007199254740993", other: "9007199254740992", n: "-12345678901234567890" } });
+    // Safe integers, decimals and exponents stay numbers.
+    expect(payloadOf('{"a":450789,"b":1.5,"c":1e30,"d":[9007199254740991]}')).toEqual({
+      a: 450789,
+      b: 1.5,
+      c: 1e30,
+      d: [9007199254740991],
+    });
+  });
+
+  it("a lone surrogate or U+0000 anywhere (a value or a key) is no storable JSON: refused like a non-JSON body", () => {
+    expect(payloadOf('{"note":"\\ud800"}')).toBeUndefined();
+    expect(payloadOf('{"\\udc00":1}')).toBeUndefined();
+    expect(payloadOf('{"a":["ok","x\\u0000"]}')).toBeUndefined();
+    // A pair is one character (an emoji), and an escaped backslash before "u0000" is just text.
+    expect(payloadOf('{"note":"\\ud83d\\ude00","path":"C:\\\\u0000"}')).toEqual({
+      note: "😀",
+      path: "C:\\u0000",
+    });
+  });
+});

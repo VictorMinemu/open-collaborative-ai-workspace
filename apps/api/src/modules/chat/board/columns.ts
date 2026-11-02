@@ -253,7 +253,14 @@ export function registerColumnRoutes(app: App, ctx: BoardGuardCtx & { deps: Chat
         }
         if (columns.length === 1) throw conflict("A board keeps at least one column", "board_last_column");
         // Phase 07.6 (07.6-02/05): an automation delivering to this column holds it (the FK is NO ACTION); say so
-        // before the database refuses.
+        // before the database refuses. The column's row lock first (07.6 review A HI-03): a save pointing an
+        // automation at this column holds the column's key until it commits, so the count below sees it (409)
+        // instead of the delete failing on the foreign key (500); a save that comes later waits for this delete.
+        await tx
+          .select({ id: boardColumns.id })
+          .from(boardColumns)
+          .where(eq(boardColumns.id, column.id))
+          .for("update");
         const [targeted] = await tx
           .select({ n: count() })
           .from(automations)

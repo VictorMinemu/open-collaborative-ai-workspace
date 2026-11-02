@@ -27,7 +27,12 @@ import { createConversationAccess, patchCard } from "../chat";
 import type { MemoryService } from "../memory";
 import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
 import { cellOf } from "./auth";
-import { automationInactive, markRunAnswered, runAnchorTrigger } from "./automation-runs";
+import {
+  automationInactive,
+  lockRunAndAutomation,
+  markRunAnswered,
+  runAnchorTrigger,
+} from "./automation-runs";
 import { notifyCardFollowers } from "./card-followers";
 import { buildMentionEvents } from "./mentions";
 
@@ -88,6 +93,9 @@ export async function postForTurn(
   const { runId } = target;
   if (!runId) return core.chatAgent.postAgentMessage(ctx, input);
   return core.db.withTenant(ctx, async (tx) => {
+    // The run and its automation before the post takes any stream (07.6 review A MD-01): the lock order of every
+    // writer of both rows, so this never deadlocks with a fire of the same automation in the same conversation.
+    await lockRunAndAutomation(tx, runId);
     const result = await core.chatAgent.postAgentMessageIn(tx, input);
     if (result.created) await markRunAnswered(tx, { core }, runId);
     return result;

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { invite } from "../../testing-workzone";
 
@@ -608,6 +608,86 @@ describe("targets are decided for the creator and the bot (Task 4, P-08)", () =>
       409,
       "board_column_has_automations",
     );
+  });
+
+  it("a column an automation is moved to while it is being deleted is still 409, never a 500 (07.6 review A HI-03)", async () => {
+    await ok(
+      ana.request("POST", `/api/v1/boards/${orders}/columns`, { name: "Racing", category: "started" }),
+    );
+    const racing = ((await ok(ana.request("GET", `/api/v1/boards/${orders}`))).columns as Json[]).find(
+      (c) => c.name === "Racing",
+    )?.id as string;
+    const made = await ok(
+      victor.request(
+        "POST",
+        "/api/v1/automations",
+        weekly({
+          name: "Racing intake",
+          target: { kind: "board", conversationId: orders, columnId: ordersColumn },
+        }),
+      ),
+      201,
+    );
+    // Another session points the automation at the column and has not committed yet (it holds the column's key).
+    const other = new pg.Client({ connectionString: stack.db.superuserUrl });
+    await other.connect();
+    try {
+      await other.query("begin");
+      await other.query("update app.automations set board_column_id = $2 where id = $1", [
+        made.automation.id,
+        racing,
+      ]);
+      const deleting = ana.request("DELETE", `/api/v1/boards/${orders}/columns/${racing}`);
+      // The delete is waiting on that session's lock before the other one commits.
+      await vi.waitFor(
+        async () => {
+          const waiting = await su.query(
+            "select 1 from pg_stat_activity where wait_event_type = 'Lock' and datname = current_database()",
+          );
+          expect(waiting.rowCount).toBeGreaterThan(0);
+        },
+        { timeout: 10_000, interval: 50 },
+      );
+      await other.query("commit");
+      await fails(deleting, 409, "board_column_has_automations");
+    } finally {
+      await other.end();
+    }
+    await ok(victor.request("DELETE", `/api/v1/automations/${made.automation.id}`), 204);
+    await ok(ana.request("DELETE", `/api/v1/boards/${orders}/columns/${racing}`));
+  });
+
+  it("saving an automation into a column that is deleted meanwhile is 400 target_not_postable, never a 500 (HI-03)", async () => {
+    await ok(
+      ana.request("POST", `/api/v1/boards/${orders}/columns`, { name: "Leaving", category: "started" }),
+    );
+    const leaving = ((await ok(ana.request("GET", `/api/v1/boards/${orders}`))).columns as Json[]).find(
+      (c) => c.name === "Leaving",
+    )?.id as string;
+    const other = new pg.Client({ connectionString: stack.db.superuserUrl });
+    await other.connect();
+    try {
+      await other.query("begin");
+      await other.query("delete from app.board_columns where id = $1", [leaving]);
+      const saving = victor.request(
+        "POST",
+        "/api/v1/automations",
+        weekly({ name: "Too late", target: { kind: "board", conversationId: orders, columnId: leaving } }),
+      );
+      await vi.waitFor(
+        async () => {
+          const waiting = await su.query(
+            "select 1 from pg_stat_activity where wait_event_type = 'Lock' and datname = current_database()",
+          );
+          expect(waiting.rowCount).toBeGreaterThan(0);
+        },
+        { timeout: 10_000, interval: 50 },
+      );
+      await other.query("commit");
+      await fails(saving, 400, "target_not_postable");
+    } finally {
+      await other.end();
+    }
   });
 
   it("target options list the bot's places with the reason a place can't be picked, boards with columns", async () => {

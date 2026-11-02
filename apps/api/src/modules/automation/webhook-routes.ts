@@ -23,6 +23,13 @@ const HOUR_MS = 3_600_000;
 const EXTERNAL_ID_MAX = 998;
 /** One rate-limit rejection recorded per endpoint and minute: a flood never becomes a flood of writes. */
 const RATE_RECORD_MS = 60_000;
+/**
+ * Requests per sender address and minute across every webhook URL (07.6 review A LO-03): the per-URL limit alone let
+ * one unauthenticated sender mint a fresh 60/min bucket per random id. Far above any real sender's need.
+ */
+const WEBHOOK_PER_IP_PER_MINUTE = 600;
+
+const rateLimited = () => Object.assign(new Error("rate limited"), { statusCode: 429 });
 
 const actorOf = (req: FastifyRequest): AutomationActor => ({ userId: authOf(req).userId, req });
 
@@ -76,16 +83,17 @@ const publicIdOf = (req: FastifyRequest) =>
 
 /** Records the latest rejection on the endpoint (R4): the reason and the time, never a body or a header. */
 async function recordRejection(core: Core, publicId: string, reason: WebhookRejectReason): Promise<void> {
+  if (publicId === "invalid") return;
   try {
-    const found = await lookup(core, publicId);
-    if (!found?.active) return;
     if (reason === "rate_limited") {
-      const first = await core.bus.pub.set(`ocw:rl-rec:${found.endpoint_id}`, "1", {
-        PX: RATE_RECORD_MS,
-        NX: true,
-      });
+      // The once-a-minute gate before any database work (07.6 review A LO-03): a flood of 429s costs one Redis
+      // command each, not a query. Without Redis nothing is recorded (the rejection itself still holds).
+      if (!core.bus.pub.isReady) return;
+      const first = await core.bus.pub.set(`ocw:rl-rec:${publicId}`, "1", { PX: RATE_RECORD_MS, NX: true });
       if (first !== "OK") return;
     }
+    const found = await lookup(core, publicId);
+    if (!found?.active) return;
     await core.db.withTenant({ organizationId: found.organization_id }, (tx) =>
       markRejected(tx, found.endpoint_id, reason),
     );
@@ -105,7 +113,8 @@ type Outcome = { kind: "accepted" | "duplicate" | "gone" | "invalid" } | { kind:
 /**
  * The public route (`authz: "public"`), checked in this order:
  *
- * 1. Rate limit, before anything else (`onRequest`): 60 a minute per URL, counted in Redis across replicas → 429.
+ * 1. Rate limit, before anything else (`onRequest`): 600 a minute per sender address, and 60 a minute per URL,
+ *    counted in Redis across replicas → 429.
  * 2. Body size while it is read (raw bytes, any content type): over 64 KiB → 413.
  * 3. The public id: malformed or unknown → 404; tombstoned or unlinked → 410.
  * 4. In the endpoint's organization: the signature over the exact bytes with the current secret, then the previous one
@@ -144,17 +153,30 @@ async function publicHooks(raw: unknown, core: Core): Promise<void> {
     return reply.status(500).send({ error: { code: "internal", message: "Something went wrong" } });
   });
 
+  // A coarse limit per sender address in front of the per-URL one (LO-03). `createRateLimit`, not `rateLimit()`: the
+  // plugin runs one `rateLimit` hook per request, so a second hook would silently skip the per-URL limit.
+  const senderLimit = scope.createRateLimit({
+    max: WEBHOOK_PER_IP_PER_MINUTE,
+    timeWindow: 60_000,
+    keyGenerator: (req: FastifyRequest) => `hook-ip:${req.ip}`,
+  });
+  const perSender = async (req: FastifyRequest) => {
+    const verdict = await senderLimit(req);
+    if (!verdict.isAllowed && verdict.isExceeded) throw rateLimited();
+  };
+
   scope.post(
     "/hooks/:publicId",
     {
       bodyLimit: AUTOMATION_LIMITS.webhookBodyMaxBytes,
+      onRequest: perSender,
       config: {
         authz: "public",
         rateLimit: {
           max: AUTOMATION_LIMITS.webhookPerMinute,
           timeWindow: 60_000,
           keyGenerator: (req: FastifyRequest) => `hook:${publicIdOf(req)}`,
-          errorResponseBuilder: () => Object.assign(new Error("rate limited"), { statusCode: 429 }),
+          errorResponseBuilder: rateLimited,
         },
       },
       schema: { tags, params: z.object({ publicId: z.string().max(64) }) },
@@ -184,12 +206,9 @@ async function publicHooks(raw: unknown, core: Core): Promise<void> {
             await markRejected(tx, ep.id, verified.reason);
             return { kind: "rejected" };
           }
-          // jsonb refuses U+0000; such a body (or an oversized id) is the sender's mistake, not a server error.
-          if (
-            verified.payload === undefined ||
-            verified.id.length > EXTERNAL_ID_MAX ||
-            body.includes("\\u0000")
-          ) {
+          // A body that is not storable JSON (jsonb refuses U+0000 and lone surrogates: `parseJson` gives undefined) or
+          // an oversized id is the sender's mistake, not a server error.
+          if (verified.payload === undefined || verified.id.length > EXTERNAL_ID_MAX) {
             return { kind: "invalid" };
           }
           const [event] = await tx

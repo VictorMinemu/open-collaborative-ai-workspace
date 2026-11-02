@@ -58,7 +58,7 @@ const MINUTE_MS = 60_000;
 
 /** How a poll ended, as the row and the audit record it. */
 type PollOutcome =
-  | { ok: true; read: ReadResult; count: number; skipped: number; duplicates: number }
+  | { ok: true; read: ReadResult; count: number; skipped: number; duplicates: number; notStored: number }
   | { ok: false; status: "auth_failed" | "unreachable"; code: string };
 
 // ---------------------------------------------------------------- the Keychain side
@@ -125,10 +125,22 @@ async function rowOf(tx: Tx, automationId: string, lock = false): Promise<Mailbo
 
 const inMinutes = (now: Date, minutes: number) => new Date(now.getTime() + minutes * MINUTE_MS).toISOString();
 
-/** After the save commits: the first poll sets the cursor to the newest message (only new mail is read). */
+/**
+ * After the save commits: the first poll sets the cursor to the newest message (only new mail is read). It starts at
+ * commit but is never awaited (07.6 review A MD-04): the save answers, and its realtime publishes go out, without
+ * waiting for a third-party server; the session is bounded by `IMAP_SESSION_MS`. Its outcome lands on the row like any
+ * poll's; if it never runs (the process stops), the first scheduled poll takes the baseline instead.
+ */
 function baselineAfterCommit(core: Core, perms: PermissionService, tx: Tx, mailboxId: string) {
   const { organizationId } = tenantOf(tx);
-  tenantOf(tx).afterCommit(() => pollMailbox(core, perms, { organizationId, mailboxId }));
+  tenantOf(tx).afterCommit(() => {
+    void pollMailbox(core, perms, { organizationId, mailboxId }).catch((err: unknown) =>
+      core.log.warn(
+        { mailboxId, err: { name: (err as Error)?.name, code: (err as { code?: unknown })?.code } },
+        "mailbox baseline failed",
+      ),
+    );
+  });
 }
 
 /** The mail trigger the automation service calls in the automation's own transaction (`service.ts`, R3). */
@@ -279,7 +291,12 @@ interface PollOptions {
   now?: Date;
   egress?: EgressResolver;
   createClient?: ImapClientFactory;
+  /** The job's signal: the IMAP session ends when pg-boss gives up on the job (HI-01). */
+  signal?: AbortSignal;
 }
+
+/** How many mailboxes one worker polls at once: one slow server never holds every other organization's mail. */
+const POLL_CONCURRENCY = 6;
 
 /** Where a failure leaves the row: sign-in problems wait (30 minutes or a Keychain change), the rest keeps trying. */
 function failureOf(code: MailboxErrorCode | "key_not_usable" | "host_not_allowed"): PollOutcome {
@@ -341,146 +358,183 @@ export async function pollMailbox(
         targetOf(m, check.creds),
         (client, box) => readNewMail(client, box, { uidValidity: m.uidValidity, lastUid: m.lastUid }),
         opts.createClient,
+        opts.signal ? { signal: opts.signal } : {},
       );
       const address = check.creds.username.includes("@") ? check.creds.username : "";
       parsed = [];
       for (const fetched of read.mails) {
         parsed.push({ uid: fetched.uid, mail: await parseMail(fetched.source, { mailboxAddress: address }) });
       }
-      outcome = { ok: true, read, count: 0, skipped: 0, duplicates: 0 };
+      outcome = { ok: true, read, count: 0, skipped: 0, duplicates: 0, notStored: 0 };
     } catch (err) {
+      // Shutdown or pg-boss giving up is not the server's failure: nothing is recorded and the job ends.
+      if (opts.signal?.aborted) throw err;
       outcome = failureOf(mailErrorCode(err));
     }
   }
 
-  await core.db.withTenant(ctx, async (tx) => {
-    const [cur] = await tx
-      .select()
-      .from(mailboxes)
-      .where(eq(mailboxes.id, data.mailboxId))
-      .for("update")
-      .limit(1);
-    if (!cur) return;
-    // A save changed the mailbox while this poll ran: its result belongs to the old one.
-    const sameMailbox =
-      cur.vaultItemId === m.vaultItemId &&
-      cur.host === m.host &&
-      cur.port === m.port &&
-      cur.folder === m.folder &&
-      cur.uidValidity === m.uidValidity;
-    if (!sameMailbox) return;
+  try {
+    await core.db.withTenant(ctx, async (tx) => {
+      const [cur] = await tx
+        .select()
+        .from(mailboxes)
+        .where(eq(mailboxes.id, data.mailboxId))
+        .for("update")
+        .limit(1);
+      if (!cur) return;
+      // A save changed the mailbox while this poll ran: its result belongs to the old one.
+      const sameMailbox =
+        cur.vaultItemId === m.vaultItemId &&
+        cur.host === m.host &&
+        cur.port === m.port &&
+        cur.folder === m.folder &&
+        cur.uidValidity === m.uidValidity;
+      if (!sameMailbox) return;
 
-    if (!outcome.ok) {
-      const backoff =
-        outcome.status === "auth_failed"
-          ? Math.max(AUTH_BACKOFF_MINUTES, cur.pollIntervalMinutes)
-          : cur.pollIntervalMinutes;
+      if (!outcome.ok) {
+        const backoff =
+          outcome.status === "auth_failed"
+            ? Math.max(AUTH_BACKOFF_MINUTES, cur.pollIntervalMinutes)
+            : cur.pollIntervalMinutes;
+        await tx
+          .update(mailboxes)
+          .set({
+            status: outcome.status,
+            lastErrorCode: outcome.code,
+            lastPolledAt: now.toISOString(),
+            nextPollAt: inMinutes(now, backoff),
+            updatedAt: now.toISOString(),
+          })
+          .where(eq(mailboxes.id, cur.id));
+        if (cur.status !== outcome.status || cur.lastErrorCode !== outcome.code) {
+          await core.audit.record(tx, {
+            action: "mailbox.poll_failed",
+            resourceType: "mailbox",
+            resourceId: cur.id,
+            result: "error",
+            actorKind: "system",
+            userId: owner,
+            metadata: {
+              mailboxId: cur.id,
+              automationId: cur.automationId,
+              host: cur.host,
+              port: cur.port,
+              status: outcome.status,
+              code: outcome.code,
+            },
+          });
+        }
+        return;
+      }
+
+      const { read } = outcome;
+      for (const { uid, mail } of parsed) {
+        if (mail.skipReason) {
+          outcome.skipped++;
+          continue;
+        }
+        // Each mail in its own savepoint: one the database refuses (the parser already strips U+0000) is skipped and
+        // counted, and the cursor still moves past it, so it can never hold the mailbox (07.6 review A CR-01).
+        let stored: { id: string; inserted: boolean } | undefined;
+        try {
+          stored = await tx.transaction(async (sp) => {
+            const [row] = await sp
+              .insert(automationEvents)
+              .values({
+                organizationId: cur.organizationId,
+                source: "mail",
+                mailboxId: cur.id,
+                externalId: mail.messageId ?? uidKey(read.uidValidity, uid),
+                threadKey: mail.threadKey,
+                subject: mail.subject || null,
+                sender: mail.from,
+                bodyText: mail.text,
+                result: "accepted",
+                receivedAt: now.toISOString(),
+              })
+              .onConflictDoUpdate({
+                target: [automationEvents.mailboxId, automationEvents.externalId],
+                set: {
+                  duplicateCount: sql`${automationEvents.duplicateCount} + 1`,
+                  lastDuplicateAt: now.toISOString(),
+                },
+              })
+              .returning({ id: automationEvents.id, inserted: sql<boolean>`(xmax = 0)` });
+            return row;
+          });
+        } catch (err) {
+          outcome.notStored++;
+          // The code only: a database error's detail can quote the refused value.
+          core.log.warn(
+            { mailboxId: cur.id, uid, code: (err as { code?: unknown })?.code },
+            "a polled mail could not be stored; skipped",
+          );
+          continue;
+        }
+        if (!stored) continue;
+        if (!stored.inserted) {
+          outcome.duplicates++;
+          continue;
+        }
+        outcome.count++;
+        // Ids only; 21 decides paused, the hourly cap and access, then posts it (`inbound.ts`).
+        await core.jobs.sendInTx(tx, "automation.inbound", {
+          organizationId: cur.organizationId,
+          eventId: stored.id,
+        });
+      }
+      // A concurrent poll that read further keeps its cursor (a baseline always takes the newest message).
       await tx
         .update(mailboxes)
         .set({
-          status: outcome.status,
-          lastErrorCode: outcome.code,
+          uidValidity: read.uidValidity,
+          lastUid: read.baseline ? read.lastUid : Math.max(read.lastUid, cur.lastUid ?? 0),
+          status: "active",
+          // The mailbox works; a mail it had to skip is said on the row until the next clean poll.
+          lastErrorCode: outcome.notStored > 0 ? "mail_not_stored" : null,
           lastPolledAt: now.toISOString(),
-          nextPollAt: inMinutes(now, backoff),
+          lastNewCount: outcome.count,
+          // A backlog beyond this poll's cap continues at the next tick.
+          nextPollAt: read.more ? now.toISOString() : inMinutes(now, cur.pollIntervalMinutes),
           updatedAt: now.toISOString(),
         })
         .where(eq(mailboxes.id, cur.id));
-      if (cur.status !== outcome.status || cur.lastErrorCode !== outcome.code) {
+      if (outcome.count + outcome.skipped + outcome.duplicates + outcome.notStored > 0) {
         await core.audit.record(tx, {
-          action: "mailbox.poll_failed",
+          action: "mail.received",
           resourceType: "mailbox",
           resourceId: cur.id,
-          result: "error",
           actorKind: "system",
           userId: owner,
           metadata: {
             mailboxId: cur.id,
             automationId: cur.automationId,
-            host: cur.host,
-            port: cur.port,
-            status: outcome.status,
-            code: outcome.code,
+            count: outcome.count,
+            skipped: outcome.skipped,
+            duplicates: outcome.duplicates,
+            ...(outcome.notStored > 0 ? { notStored: outcome.notStored } : {}),
           },
         });
       }
-      return;
-    }
-
-    const { read } = outcome;
-    for (const { uid, mail } of parsed) {
-      if (mail.skipReason) {
-        outcome.skipped++;
-        continue;
+      if (read.validityChanged) {
+        core.log.info(
+          { mailboxId: cur.id },
+          "mailbox UIDVALIDITY changed; cursor reset to the newest message",
+        );
       }
-      const [stored] = await tx
-        .insert(automationEvents)
-        .values({
-          organizationId: cur.organizationId,
-          source: "mail",
-          mailboxId: cur.id,
-          externalId: mail.messageId ?? uidKey(read.uidValidity, uid),
-          threadKey: mail.threadKey,
-          subject: mail.subject || null,
-          sender: mail.from,
-          bodyText: mail.text,
-          result: "accepted",
-          receivedAt: now.toISOString(),
-        })
-        .onConflictDoUpdate({
-          target: [automationEvents.mailboxId, automationEvents.externalId],
-          set: {
-            duplicateCount: sql`${automationEvents.duplicateCount} + 1`,
-            lastDuplicateAt: now.toISOString(),
-          },
-        })
-        .returning({ id: automationEvents.id, inserted: sql<boolean>`(xmax = 0)` });
-      if (!stored) continue;
-      if (!stored.inserted) {
-        outcome.duplicates++;
-        continue;
-      }
-      outcome.count++;
-      // Ids only; 21 decides paused, the hourly cap and access, then posts it (`inbound.ts`).
-      await core.jobs.sendInTx(tx, "automation.inbound", {
-        organizationId: cur.organizationId,
-        eventId: stored.id,
-      });
-    }
-    // A concurrent poll that read further keeps its cursor (a baseline always takes the newest message).
-    await tx
-      .update(mailboxes)
-      .set({
-        uidValidity: read.uidValidity,
-        lastUid: read.baseline ? read.lastUid : Math.max(read.lastUid, cur.lastUid ?? 0),
-        status: "active",
-        lastErrorCode: null,
-        lastPolledAt: now.toISOString(),
-        lastNewCount: outcome.count,
-        // A backlog beyond this poll's cap continues at the next tick.
-        nextPollAt: read.more ? now.toISOString() : inMinutes(now, cur.pollIntervalMinutes),
-        updatedAt: now.toISOString(),
-      })
-      .where(eq(mailboxes.id, cur.id));
-    if (outcome.count + outcome.skipped + outcome.duplicates > 0) {
-      await core.audit.record(tx, {
-        action: "mail.received",
-        resourceType: "mailbox",
-        resourceId: cur.id,
-        actorKind: "system",
-        userId: owner,
-        metadata: {
-          mailboxId: cur.id,
-          automationId: cur.automationId,
-          count: outcome.count,
-          skipped: outcome.skipped,
-          duplicates: outcome.duplicates,
-        },
-      });
-    }
-    if (read.validityChanged) {
-      core.log.info({ mailboxId: cur.id }, "mailbox UIDVALIDITY changed; cursor reset to the newest message");
-    }
-  });
+    });
+  } catch (err) {
+    // Nothing of this poll was kept (the job is retried); the row says so instead of looking healthy (CR-01).
+    await core.db
+      .withTenant(ctx, (tx) =>
+        tx
+          .update(mailboxes)
+          .set({ lastErrorCode: "poll_failed", updatedAt: new Date().toISOString() })
+          .where(eq(mailboxes.id, data.mailboxId)),
+      )
+      .catch(() => {});
+    throw err;
+  }
 }
 
 /**
@@ -536,6 +590,38 @@ export async function testMailbox(
   opts: { egress?: EgressResolver; createClient?: ImapClientFactory } = {},
 ): Promise<MailboxTestResult> {
   const userId = authOf(req).userId;
+  // One test at a time per person (07.6 review A MD-03): each one holds a socket to an outside host for up to a
+  // minute, so a person cannot fan them out as a port probe or hammer a shared mailbox's sign-in.
+  const slot = `${tenant(req).organizationId}:${userId}`;
+  if (testsInFlight.has(slot)) {
+    throw new HttpError(
+      409,
+      "mailbox_test_in_progress",
+      "A connection test is already running. Wait for it.",
+    );
+  }
+  testsInFlight.add(slot);
+  try {
+    return await runMailboxTest(core, perms, req, userId, body, opts);
+  } finally {
+    testsInFlight.delete(slot);
+  }
+}
+
+/** People with a connection test running in this instance (the route also has a per-person rate limit). */
+const testsInFlight = new Set<string>();
+
+/** Tests per person and minute on `POST /mailboxes/test` (MD-03). */
+const MAILBOX_TESTS_PER_MINUTE = 6;
+
+async function runMailboxTest(
+  core: Core,
+  perms: PermissionService,
+  req: FastifyRequest,
+  userId: string,
+  body: MailboxTestRequest,
+  opts: { egress?: EgressResolver; createClient?: ImapClientFactory },
+): Promise<MailboxTestResult> {
   const check = await core.db.withTenant(tenant(req), async (tx) => {
     if (!(await canCreate(perms, tx, { userId, req }))) {
       throw new HttpError(403, "not_allowed", "You can't create automations. Ask an admin.");
@@ -575,10 +661,20 @@ export async function testMailbox(
 export function registerMailboxRoutes(app: App, core: Core, deps: AutomationSeamDeps): void {
   const user = { config: { authz: "user" as const }, preHandler: [core.identity.requireUser] };
   const tags = ["automations"];
+  // Per person, checked after requireUser so the key is the user (MD-03): six connection tests a minute.
+  const testLimit = app.rateLimit({
+    max: MAILBOX_TESTS_PER_MINUTE,
+    timeWindow: "1 minute",
+    keyGenerator: (req: FastifyRequest) => `mbx-test:${req.auth?.userId ?? req.ip}`,
+  });
 
   app.post(
     "/mailboxes/test",
-    { ...user, schema: { tags, body: MailboxTestRequest, response: { 200: MailboxTestResult } } },
+    {
+      ...user,
+      preHandler: [core.identity.requireUser, testLimit],
+      schema: { tags, body: MailboxTestRequest, response: { 200: MailboxTestResult } },
+    },
     async (req, reply) => {
       reply.header("cache-control", "no-store");
       return testMailbox(core, deps.perms, req, req.body);
@@ -603,5 +699,7 @@ export function registerMailboxRoutes(app: App, core: Core, deps: AutomationSeam
     const queued = await mailboxTick(core);
     if (queued > 0) core.log.info({ queued }, "mailbox tick");
   });
-  core.jobs.work("mailbox.poll", (data) => pollMailbox(core, deps.perms, data));
+  core.jobs.work("mailbox.poll", (data, ctx) => pollMailbox(core, deps.perms, data, { signal: ctx.signal }), {
+    localConcurrency: POLL_CONCURRENCY,
+  });
 }

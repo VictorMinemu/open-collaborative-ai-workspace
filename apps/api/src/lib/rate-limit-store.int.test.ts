@@ -94,3 +94,43 @@ describe("RedisRateLimitStore", () => {
     expect(await client.exists(`${RATE_LIMIT_PREFIX}fn:search:u1`)).toBe(1);
   });
 });
+
+describe("RedisRateLimitStore without Redis (07.6 review A HI-02)", () => {
+  it("a client that is gone counts in this instance's memory: the limit still holds, nothing hangs or throws", async () => {
+    const gone = createClient({ url: redis.getConnectionUrl() });
+    await gone.connect();
+    gone.destroy();
+    const store = new RedisRateLimitStore({ client: gone, prefix: RATE_LIMIT_PREFIX, timeWindow: 400 }).child(
+      route("/api/auth/sign-in/email", 400),
+    );
+    const started = Date.now();
+    const hits = [];
+    for (let i = 0; i < 4; i++) hits.push(await incr(store, "ip:1", 400));
+    expect(hits.map((h) => h.current)).toEqual([1, 2, 3, 4]);
+    expect(hits[0]?.ttl).toBeGreaterThan(300);
+    expect(await read(store, "ip:1")).toMatchObject({ current: 4 });
+    expect((await incr(store, "ip:2", 400)).current).toBe(1);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // The window still ends.
+    await new Promise((r) => setTimeout(r, 450));
+    expect((await incr(store, "ip:1", 400)).current).toBe(1);
+  });
+
+  it("a Redis that stops answering is given a short time, then the hit is counted in memory", async () => {
+    const admin = createClient({ url: redis.getConnectionUrl() });
+    await admin.connect();
+    const store = replica().child(route("/api/v1/devices/token"));
+    try {
+      // Writes held for 3 s (every hit is an INCR): what a stalled or overloaded Redis looks like to the API.
+      await admin.sendCommand(["CLIENT", "PAUSE", "3000", "WRITE"]);
+      const started = Date.now();
+      const first = await incr(store, "dev:1");
+      const second = await incr(store, "dev:1");
+      expect([first.current, second.current]).toEqual([1, 2]);
+      expect(Date.now() - started).toBeLessThan(1_500);
+    } finally {
+      await admin.sendCommand(["CLIENT", "UNPAUSE"]);
+      await admin.quit();
+    }
+  });
+});

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
 import { startTestStorage, type TestStorage } from "../../testing-storage";
+import { inboundRooted } from "../agent-channel/inbound-origin";
 
 /**
  * 07.6-21 (AUTO-02; D-02, D-07, P-09, P-11; Pattern 6, Pitfalls 2 and 3): inbound items. Every webhook or mail item
@@ -512,6 +513,29 @@ describe("every action lands right and follow-ups keep their conversation (P-11,
     expect((await turnRow(ev.eventId)).tainted).toBe(true);
   });
 
+  it("the full-text reply is outside content too: a turn whose window holds only it starts tainted (07.6 review A LO-05)", async () => {
+    const src = await inboundAutomation({ target: { kind: "dm" }, askBot: false });
+    const eventId = await receive(src, {
+      subject: "Invoice 78",
+      sender: "billing@vendor.example",
+      bodyText: BODY,
+    });
+    await drainInbound();
+    const full = (
+      await s.su.query("select id from app.messages where client_message_id = $1", [
+        `inbound:${eventId}:full`,
+      ])
+    ).rows[0]?.id as string;
+    expect(full).toBeTruthy();
+    expect((await eventRow(eventId)).full_message_id).toBe(full);
+    // A DM window whose oldest row is the full text (the card just outside it): still inbound-rooted.
+    const later = randomUUID();
+    const rooted = await core().db.withTenant({ organizationId: s.orgA }, (tx) =>
+      inboundRooted(tx, later, [full]),
+    );
+    expect(rooted).toBe(true);
+  });
+
   it("thread target: the card is a reply in the chosen thread", async () => {
     const root = (
       await ok(
@@ -594,6 +618,70 @@ describe("storms and stale content are contained (P-09, Pitfalls 1–3)", () => 
     expect(capped).toEqual([{ result: "not_run", reason: "hourly_cap", message_id: null }]);
     expect(await postedIn(storm, ids)).toBe(30);
     expect(await runsOf(src.automationId)).toEqual([]);
+  });
+
+  it("a deadlock while posting retries the item instead of dropping it as not_run (07.6 review A MD-02)", async () => {
+    const tag = `ocw_flaky_${randomUUID().replaceAll("-", "")}`;
+    const subject = `Deadlocked ${randomUUID().slice(0, 6)}`;
+    // The post's own update of the event (it records the card) fails once with 40P01: a real PostgreSQL error.
+    await s.su.query(`
+      create sequence public.${tag};
+      create function public.${tag}() returns trigger language plpgsql security definer
+        set search_path = pg_catalog, public as $$
+      begin
+        if new.subject = '${subject}' and new.message_id is distinct from old.message_id
+           and nextval('public.${tag}') <= 1 then
+          raise exception 'injected deadlock' using errcode = '40P01';
+        end if;
+        return new;
+      end $$;
+      create trigger ${tag} before update on app.automation_events for each row execute function public.${tag}();`);
+    try {
+      const src = await inboundAutomation({ askBot: false });
+      const eventId = await receive(src, { subject, bodyText: "Retry me." });
+      await drainInbound();
+      const row = await eventRow(eventId);
+      expect(row).toMatchObject({ result: "accepted", reason: null });
+      expect(row.message_id).toBeTruthy();
+      expect(await postedIn(purchasingId, [eventId])).toBe(1);
+    } finally {
+      await s.su.query(
+        `drop trigger ${tag} on app.automation_events; drop function public.${tag}(); drop sequence public.${tag};`,
+      );
+    }
+  });
+
+  it("a webhook whose run-as person lost automation.webhook records not_run run_as_not_allowed and posts nothing (07.6 review A MD-05)", async () => {
+    const src = await inboundAutomation({ kind: "webhook", name: "Revoked hook" });
+    const rule = (
+      await ok(
+        s.victor.request("POST", "/api/v1/permission-rules", {
+          subjectKind: "user",
+          subjectId: s.victorId,
+          permission: "automation.webhook",
+          effect: "deny",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    try {
+      const eventId = await receive(src, { bodyJson: { order: { id: 4001 } } });
+      await drainInbound();
+      expect(await eventRow(eventId)).toMatchObject({
+        result: "not_run",
+        reason: "run_as_not_allowed",
+        message_id: null,
+      });
+      expect(await postedIn(purchasingId, [eventId])).toBe(0);
+      expect(await runsOf(src.automationId)).toEqual([]);
+    } finally {
+      const res = await s.victor.request("DELETE", `/api/v1/permission-rules/${rule}`);
+      expect([200, 204]).toContain(res.status);
+    }
+    // A mail automation never needed the webhook right.
+    const mail = await inboundAutomation({ name: "Still mail", askBot: false });
+    const mailEvent = await receive(mail, { subject: "Fine", bodyText: "Hello" });
+    await drainInbound();
+    expect((await eventRow(mailEvent)).result).toBe("accepted");
   });
 
   it("a paused automation records the item not_run “paused” and posts nothing", async () => {
@@ -699,22 +787,51 @@ describe("storms and stale content are contained (P-09, Pitfalls 1–3)", () => 
     expect(await core().jobs.drain("maintenance.daily")).toBe(1);
 
     const purged = await eventRow(old);
+    expect(before.thread_key).toBeTruthy();
     expect(purged).toMatchObject({
       subject: null,
       sender: null,
       body_text: null,
       body_json: null,
+      // A thread key is payload-derived (an e-mail address, a customer id): it goes with the content (LO-01).
+      thread_key: null,
       id: old,
       result: "accepted",
       message_id: before.message_id,
       external_id: before.external_id,
     });
     expect(purged.content_purged_at).not.toBeNull();
+    // The schema holds it too: a purged row cannot carry a thread key again.
+    await expect(
+      s.su.query("update app.automation_events set thread_key = 'x' where id = $1", [old]),
+    ).rejects.toThrow(/automation_events_purged_check/);
     expect(await eventRow(recent)).toMatchObject({
       subject: "Recent order",
       sender: "orders@shop.example",
       body_text: "New",
       content_purged_at: null,
     });
+  });
+});
+
+describe("the mention path's inbound lookup is indexed (07.6 review A MD-07)", () => {
+  it("message_id OR board_card_message_id is answered from indexes, never a scan of every event", async () => {
+    const ids = [randomUUID(), randomUUID()];
+    await s.su.query("begin");
+    try {
+      await s.su.query("set local enable_seqscan = off");
+      const plan = (
+        await s.su.query(
+          "explain select id from app.automation_events where message_id = any($1::uuid[]) or board_card_message_id = any($1::uuid[]) limit 1",
+          [ids],
+        )
+      ).rows
+        .map((r) => r["QUERY PLAN"] as string)
+        .join("\n");
+      expect(plan).not.toMatch(/Seq Scan on automation_events/);
+      expect(plan).toMatch(/automation_events_board_card_idx/);
+    } finally {
+      await s.su.query("rollback");
+    }
   });
 });

@@ -19,7 +19,7 @@ import {
 } from "@ocw/db";
 import { and, asc, count, eq, gte, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import type { Core } from "../../core";
-import type { JobData } from "../../lib/jobs";
+import { type JobContext, type JobData, lastAttempt } from "../../lib/jobs";
 import { createBoardCard, ensureAgentDm } from "../chat";
 import type { AutomationRow, AutomationSeamDeps, RunRow } from "./actions";
 import { decideAccess } from "./budget";
@@ -33,7 +33,7 @@ import {
   inboundTitle,
   threadKeyOf,
 } from "./inbound-card";
-import { refusalReason } from "./targets";
+import { isRefusal, refusalReason } from "./targets";
 
 /**
  * Inbound items (07.6-21; AUTO-02, D-02, D-07, P-09, P-11; research Pattern 6, Pitfalls 2 and 3). A webhook delivery or
@@ -201,6 +201,8 @@ interface Posted {
   messageId: string;
   /** The board card the item was filed as (or followed up in). */
   boardCardMessageId: string | null;
+  /** The full-text reply after the card, when the card's field cut the text (outside content too, LO-05). */
+  fullMessageId: string | null;
 }
 
 /** Posts the item where the automation delivers (the platform's post, as the bot for the run-as person). */
@@ -230,11 +232,15 @@ async function postItem(
     });
 
   /** The card, then (when the card's field cut it) the full text, in `threadRootId`'s thread. */
-  const cardAndText = async (conversationId: string, threadRootId: string | null, fullText: boolean) => {
+  const cardAndText = async (
+    conversationId: string,
+    threadRootId: string | null,
+    fullText: boolean,
+  ): Promise<{ messageId: string; fullMessageId: string | null }> => {
     const posted = await post(conversationId, threadRootId, card.summary, true);
     const reply = fullText ? fullTextReply(text) : null;
-    if (reply) await post(conversationId, threadRootId ?? posted.messageId, reply, false);
-    return posted.messageId;
+    const full = reply ? await post(conversationId, threadRootId ?? posted.messageId, reply, false) : null;
+    return { messageId: posted.messageId, fullMessageId: full?.messageId ?? null };
   };
 
   switch (a.targetKind) {
@@ -245,18 +251,18 @@ async function postItem(
         { agentId: a.agentId, userId: a.runAsUserId },
       );
       // DMs are flat: the card is a message, the full text the next one.
-      return { messageId: await cardAndText(dm.conversationId, null, true), boardCardMessageId: null };
+      return { ...(await cardAndText(dm.conversationId, null, true)), boardCardMessageId: null };
     }
     case "thread":
       return {
-        messageId: await cardAndText(a.conversationId as string, a.threadRootMessageId as string, true),
+        ...(await cardAndText(a.conversationId as string, a.threadRootMessageId as string, true)),
         boardCardMessageId: null,
       };
     case "board": {
       const conversationId = a.conversationId as string;
       if (previous) {
         return {
-          messageId: await cardAndText(conversationId, previous.rootId, true),
+          ...(await cardAndText(conversationId, previous.rootId, true)),
           boardCardMessageId: previous.rootId,
         };
       }
@@ -304,12 +310,12 @@ async function postItem(
           .where(eq(boardCards.messageId, boardCardMessageId));
       }
       // The inbound card is the card's first reply; the description already holds the text unless it was cut.
-      return { messageId: await cardAndText(conversationId, boardCardMessageId, cut), boardCardMessageId };
+      return { ...(await cardAndText(conversationId, boardCardMessageId, cut)), boardCardMessageId };
     }
     default: {
       const conversationId = a.conversationId as string;
       return {
-        messageId: await cardAndText(conversationId, previous?.rootId ?? null, true),
+        ...(await cardAndText(conversationId, previous?.rootId ?? null, true)),
         boardCardMessageId: null,
       };
     }
@@ -363,6 +369,7 @@ async function handleInbound(
       threadKey: key,
       messageId: posted.messageId,
       boardCardMessageId: posted.boardCardMessageId,
+      fullMessageId: posted.fullMessageId,
     })
     .where(eq(automationEvents.id, e.id));
   if (!a.inboundAskBot) return;
@@ -402,14 +409,16 @@ async function handleInbound(
 /**
  * The `automation.inbound` job: one stored item becomes its post (and maybe its run). Only ids come in; every read is
  * the job organization's (`withTenant`), so a forged cross-tenant id finds nothing. A post refused by chat's own checks
- * (decided again in the post) is recorded `not_run` with the reason in a fresh transaction; a database failure is
- * thrown, so the job is retried and handles the item only while it is still unhandled.
+ * (decided again in the post) is recorded `not_run` with the reason in a fresh transaction; any other failure is
+ * thrown, so the job is retried and handles the item only while it is still unhandled, and only the last attempt
+ * records it `not_run` (`delivery_failed`).
  */
 export async function processInbound(
   core: Core,
   deps: AutomationSeamDeps,
   data: JobData<"automation.inbound">,
   now: Date = new Date(),
+  attempt?: Pick<JobContext, "retryCount" | "retryLimit">,
 ): Promise<void> {
   const { organizationId, eventId } = data;
   const runAs = await core.db.withTenant({ organizationId }, async (tx) => {
@@ -440,6 +449,9 @@ export async function processInbound(
       { eventId, err: { name: (err as Error)?.name, code: (err as { code?: unknown })?.code } },
       "automation inbound failed",
     );
+    // A transient failure (deadlock, serialization, connection) is retried; the item is dropped as `not_run` only for
+    // a refusal or on the job's last attempt (07.6 review A MD-02).
+    if (!isRefusal(err) && !lastAttempt(attempt)) throw err;
     await core.db.withTenant({ organizationId, userId: runAs }, async (tx) => {
       const [e] = await tx
         .select()
@@ -516,8 +528,9 @@ export async function inboundDelivery(
 }
 
 /**
- * The 30-day retention (Pitfall 3, `AUTOMATION_LIMITS.eventRetentionDays`): the subject, sender and bodies of older
- * items are cleared and `content_purged_at` set; ids, results, reasons and links stay. Ids come from the definer
+ * The 30-day retention (Pitfall 3, `AUTOMATION_LIMITS.eventRetentionDays`): the subject, sender, bodies and thread key
+ * of older items are cleared and `content_purged_at` set; ids, results, reasons and links stay (a later item can no
+ * longer follow up on a purged one: it starts its own thread). Ids come from the definer
  * function `app.expired_automation_events`; each organization's batch is cleared in its own `withTenant`.
  */
 export async function purgeInbound(core: Core, now: Date = new Date()): Promise<number> {
@@ -541,6 +554,8 @@ export async function purgeInbound(core: Core, now: Date = new Date()): Promise<
               sender: null,
               bodyText: null,
               bodyJson: sql`null`,
+              // Payload-derived (an e-mail address, a customer id): outside content like the rest (LO-01).
+              threadKey: null,
               contentPurgedAt: now.toISOString(),
             })
             .where(and(inArray(automationEvents.id, ids), isNull(automationEvents.contentPurgedAt)))
@@ -564,7 +579,10 @@ export async function purgeInbound(core: Core, now: Date = new Date()): Promise<
  * the daily content purge (03:17 UTC, once across replicas). Tests drain `automation.inbound` and call `purgeInbound`.
  */
 export function registerInbound(core: Core, deps: AutomationSeamDeps): void {
-  core.jobs.work("automation.inbound", (data) => processInbound(core, deps, data));
+  // Two items at a time per worker (MD-06): items of one automation still go one by one under its row lock.
+  core.jobs.work("automation.inbound", (data, ctx) => processInbound(core, deps, data, new Date(), ctx), {
+    localConcurrency: 2,
+  });
   core.jobs.schedule("maintenance.daily", "17 3 * * *");
   core.jobs.work("maintenance.daily", async () => {
     const purged = await purgeInbound(core);

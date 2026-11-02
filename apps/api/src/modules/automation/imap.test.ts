@@ -2,6 +2,7 @@ import type { ImapFlowOptions, MailboxObject } from "imapflow";
 import { describe, expect, it, vi } from "vitest";
 import { EgressRefusedError, type EgressResolver } from "../../lib/egress";
 import {
+  IMAP_SESSION_MS,
   type ImapClient,
   imapOptionsFor,
   mailErrorCode,
@@ -138,6 +139,8 @@ function spyClient(
     mailbox?: MailboxObject;
     uids?: number[];
     connectError?: unknown;
+    /** The server never answers the connection (nor anything after it). */
+    hang?: boolean;
     lockError?: unknown;
     sources?: Record<number, string>;
   } = {},
@@ -154,6 +157,7 @@ function spyClient(
     }),
     async connect() {
       record("connect");
+      if (p.hang) await new Promise(() => {});
       if (p.connectError) throw p.connectError;
     },
     async logout() {
@@ -266,6 +270,55 @@ describe("withMailbox: pinned, read-only, always logged out", () => {
       code: "auth_failed",
     });
     expect(auth.calls.at(-1)?.name).toBe("logout");
+  });
+});
+
+describe("withMailbox: one overall deadline and the job's signal (07.6 review A HI-01)", () => {
+  it("a session is bounded by one minute overall, not only by idle-socket timeouts", () => {
+    expect(IMAP_SESSION_MS).toBe(60_000);
+  });
+
+  it("a server that never finishes ends at the deadline as unreachable, and its socket is closed", async () => {
+    const spy = spyClient({ hang: true });
+    const started = Date.now();
+    expect(await tryMailbox(egress().resolver, target, () => spy.client, { deadlineMs: 50 })).toEqual({
+      ok: false,
+      code: "unreachable",
+    });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(spy.calls.map((c) => c.name)).toContain("close");
+  });
+
+  it("an aborted job signal ends the session at once (pg-boss can reclaim the worker)", async () => {
+    const spy = spyClient({ hang: true });
+    const job = new AbortController();
+    const session = withMailbox(
+      egress().resolver,
+      target,
+      async () => 1,
+      () => spy.client,
+      {
+        signal: job.signal,
+      },
+    );
+    setTimeout(() => job.abort(), 10);
+    const err = await session.then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeTruthy();
+    expect(mailErrorCode(err)).toBe("unreachable");
+    expect(spy.calls.map((c) => c.name)).toContain("close");
+  });
+
+  it("an already aborted signal connects nothing", async () => {
+    const factory = vi.fn();
+    const job = new AbortController();
+    job.abort();
+    await expect(
+      withMailbox(egress().resolver, target, async () => 1, factory, { signal: job.signal }),
+    ).rejects.toBeTruthy();
+    expect(factory).not.toHaveBeenCalled();
   });
 });
 

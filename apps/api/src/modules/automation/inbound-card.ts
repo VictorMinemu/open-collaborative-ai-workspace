@@ -14,7 +14,8 @@ import {
  * What the platform (never a model) posts for an inbound item (07.6-21; D-02, P-11, UI-SPEC Surface 8b, Pitfall 3).
  * Every value is plain text composed here from the stored event: the title, the From/Received/Via/Message fields, the
  * amber "Outside content" notice (always first) and the full text as a fenced ```` ```text ```` block, so the safe
- * `<Markdown>` shows it preformatted (no links, no formatting, no images). Mention tokens in outside text are defused
+ * `<Markdown>` shows it preformatted (no links, no formatting, no images); the one-line summary (the message body) is
+ * escaped as inert Markdown (`inertMarkdown`). Mention tokens in outside text are defused
  * (a word joiner before the `@`), so a mail can never ping a colleague or a bot through the platform's own post.
  */
 
@@ -64,6 +65,16 @@ export function defuseMentions(text: string): string {
 function oneLine(text: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are exactly what is removed here.
   return text.replace(/[\u0000-\u001f\u007f\s]+/gu, " ").trim();
+}
+
+/**
+ * One line of text as inert Markdown (07.6 review A LO-02): every character that starts a link, an image, emphasis,
+ * code, strikethrough, HTML or an entity is backslash-escaped, so `[Reset your password](https://…)` in a subject shows
+ * as typed and never as a link in a post by the bot. `#`, `!`, `|` and `{}` are left alone: mid-line (the text always
+ * follows a prefix on one line) they format nothing.
+ */
+export function inertMarkdown(text: string): string {
+  return text.replace(/[\\`*_[\]()<>~&]/g, "\\$&");
 }
 
 const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
@@ -177,7 +188,10 @@ export function inboundCard(e: InboundItem, a: InboundAutomationRef, followUp = 
   return {
     kind: "automation",
     title,
-    summary: defuseMentions(`Outside content received from ${inboundSource(e, a.name)}: ${title}.`),
+    // The message body is rendered as Markdown where the card is not (pinned and saved views): inert text there.
+    summary: defuseMentions(
+      `Outside content received from ${inertMarkdown(inboundSource(e, a.name))}: ${inertMarkdown(title)}.`,
+    ),
     status: "info",
     statusLabel: "Received",
     fields,

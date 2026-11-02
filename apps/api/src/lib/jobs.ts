@@ -58,7 +58,16 @@ export interface JobContext {
   /** Aborted when pg-boss gives up on the job (expiry or shutdown past the grace period). */
   signal: AbortSignal;
   jobId: string;
+  /** This attempt (0 for the first). A handler that throws is retried while `retryCount < retryLimit`. */
+  retryCount: number;
+  /** The queue's retries after the first attempt (pg-boss's `retryLimit`, 2 by default). */
+  retryLimit: number;
 }
+
+/** True on a job's last attempt: a handler that throws now is not retried (07.6 review A MD-02). */
+export const lastAttempt = (ctx: Pick<JobContext, "retryCount" | "retryLimit"> | undefined): boolean =>
+  !ctx || ctx.retryCount >= ctx.retryLimit;
+
 export type JobHandler<Q extends QueueName> = (data: JobData<Q>, ctx: JobContext) => Promise<void>;
 
 export interface SendOptions {
@@ -75,8 +84,16 @@ export interface Jobs {
     data: JobData<Q>,
     opts?: SendOptions,
   ): Promise<string | null>;
-  /** Registers the queue's handler (call during module registration); it runs only when workers are on. */
-  work<Q extends QueueName>(queue: Q, handler: JobHandler<Q>, opts?: { batchSize?: number }): void;
+  /**
+   * Registers the queue's handler (call during module registration); it runs only when workers are on.
+   * `localConcurrency` is how many jobs of this queue one instance runs at once (default 1): a queue whose jobs wait on
+   * the network (a mail server, a model) needs more than one, so one slow job never holds every tenant's.
+   */
+  work<Q extends QueueName>(
+    queue: Q,
+    handler: JobHandler<Q>,
+    opts?: { batchSize?: number; localConcurrency?: number },
+  ): void;
   /** A global tick in UTC, applied at `start()` when workers are on. Per-automation schedules live in `app`. */
   schedule(queue: TickQueue, cron: string): void;
   /** Test helper: fetches and runs every available job of `queue` in-process, completing or failing each. */
@@ -120,8 +137,11 @@ export function createJobs(opts: {
   boss.on("error", (err) => log.error({ err }, "jobs: pg-boss error"));
   boss.on("warning", (w) => log.warn({ warning: w }, "jobs: pg-boss warning"));
 
-  // biome-ignore lint/suspicious/noExplicitAny: one registry for every queue; each entry is typed at `work()`.
-  const handlers = new Map<QueueName, { handler: JobHandler<any>; batchSize: number }>();
+  const handlers = new Map<
+    QueueName,
+    // biome-ignore lint/suspicious/noExplicitAny: one registry for every queue; each entry is typed at `work()`.
+    { handler: JobHandler<any>; batchSize: number; localConcurrency: number }
+  >();
   const ticks = new Map<TickQueue, string>();
   let started = false;
 
@@ -135,9 +155,20 @@ export function createJobs(opts: {
     const entry = handlers.get(queue);
     if (!entry) return;
     const schema = schemaOf(queue);
-    await boss.work(queue, { batchSize: entry.batchSize }, async (batch) => {
+    const opts = {
+      batchSize: entry.batchSize,
+      localConcurrency: entry.localConcurrency,
+      // The retry count and limit, so a handler knows its last attempt (MD-02).
+      includeMetadata: true as const,
+    };
+    await boss.work(queue, opts, async (batch) => {
       for (const job of batch) {
-        await entry.handler(schema.parse(job.data), { signal: job.signal, jobId: job.id });
+        await entry.handler(schema.parse(job.data), {
+          signal: job.signal,
+          jobId: job.id,
+          retryCount: job.retryCount,
+          retryLimit: job.retryLimit,
+        });
       }
     });
   }
@@ -156,7 +187,11 @@ export function createJobs(opts: {
     work(queue, handler, workOpts = {}) {
       schemaOf(queue);
       if (handlers.has(queue)) throw new Error(`job queue ${queue} already has a handler`);
-      handlers.set(queue, { handler, batchSize: workOpts.batchSize ?? 1 });
+      handlers.set(queue, {
+        handler,
+        batchSize: workOpts.batchSize ?? 1,
+        localConcurrency: Math.max(1, workOpts.localConcurrency ?? 1),
+      });
       if (started && workers)
         void attach(queue).catch((err) => log.error({ err, queue }, "jobs: work failed"));
     },
@@ -177,13 +212,15 @@ export function createJobs(opts: {
       const max = drainOpts.max ?? 100;
       let ran = 0;
       while (ran < max) {
-        const [job] = await boss.fetch<object>(queue, { batchSize: 1 });
+        const [job] = await boss.fetch<object>(queue, { batchSize: 1, includeMetadata: true });
         if (!job) break;
         ran++;
         try {
           await entry.handler(schema.parse(job.data), {
             signal: job.signal ?? new AbortController().signal,
             jobId: job.id,
+            retryCount: job.retryCount,
+            retryLimit: job.retryLimit,
           });
           await boss.complete(queue, job);
         } catch (err) {

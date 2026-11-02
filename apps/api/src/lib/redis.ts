@@ -75,7 +75,15 @@ export class RedisBus {
     await this.pub.ping();
   }
 
+  /** Graceful when Redis answers; a client that is down (or does not answer in 2 s) is dropped, never waited for. */
   async close(): Promise<void> {
-    await Promise.allSettled([this.sub.quit(), this.pub.quit()]);
+    await Promise.allSettled([endClient(this.sub), endClient(this.pub)]);
   }
+}
+
+async function endClient(client: RedisClient): Promise<void> {
+  if (client.isReady) {
+    await Promise.race([client.close(), new Promise((r) => setTimeout(r, 2_000))]).catch(() => {});
+  }
+  if (client.isOpen) client.destroy();
 }

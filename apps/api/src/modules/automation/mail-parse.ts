@@ -30,9 +30,22 @@ export interface ParsedMail {
 const ID_MAX = 998;
 const SUBJECT_MAX = 500;
 const SENDER_MAX = 320;
-/** One `<…>` message id (RFC 5322 msg-id, loosely): no spaces, no brackets inside. */
-const MSG_ID = /<[^<>\s]{1,996}>/g;
-const ONE_ID = /^\s*(<[^<>\s]{1,996}>)\s*$/;
+/**
+ * One `<…>` message id (RFC 5322 msg-id, loosely): no spaces, no brackets and no control characters inside. An id with
+ * a control character is no id at all (the caller keys the mail by its UID hash instead): PostgreSQL `text` refuses
+ * U+0000, and a key is never worth a poisoned row (07.6 review A CR-01).
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are exactly what an id may not hold.
+const MSG_ID = /<[^<>\s\u0000-\u001f\u007f]{1,996}>/g;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: as above.
+const ONE_ID = /^\s*(<[^<>\s\u0000-\u001f\u007f]{1,996}>)\s*$/;
+
+/**
+ * Removes U+0000, which postal-mime decodes from a quoted-printable `=00`, a base64 NUL or a raw 0x00 byte, and which
+ * PostgreSQL `text` refuses (`22021`): one such mail would otherwise fail its poll's insert forever. Every string that
+ * leaves this file for a column goes through it.
+ */
+const noNul = (s: string): string => (s.includes("\u0000") ? s.replaceAll("\u0000", "") : s);
 
 const header = (headers: Array<{ key: string; value: string }>, key: string): string[] =>
   headers.filter((h) => h.key === key).map((h) => h.value);
@@ -206,13 +219,15 @@ export async function parseMail(source: Buffer, ctx: { mailboxAddress: string })
   const headers = email.headers ?? [];
   const messageId = ONE_ID.exec(email.messageId ?? "")?.[1]?.slice(0, ID_MAX) ?? null;
   const from = email.from && "address" in email.from && email.from.address ? email.from : null;
-  const fromAddress = from?.address ? from.address.trim().slice(0, SENDER_MAX) : null;
-  const name = from?.name?.replace(/[\r\n]+/g, " ").trim() ?? "";
+  const fromAddress = from?.address ? noNul(from.address).trim().slice(0, SENDER_MAX) || null : null;
+  const name = noNul(from?.name ?? "")
+    .replace(/[\r\n]+/g, " ")
+    .trim();
   const sender = fromAddress ? (name ? `${name} <${fromAddress}>` : fromAddress).slice(0, SENDER_MAX) : null;
-  const body = email.text?.trim() ? email.text : email.html ? htmlToText(email.html) : "";
+  const body = noNul(email.text?.trim() ? email.text : email.html ? htmlToText(email.html) : "");
   return {
     messageId,
-    subject: (email.subject ?? "")
+    subject: noNul(email.subject ?? "")
       .replace(/[\r\n]+/g, " ")
       .trim()
       .slice(0, SUBJECT_MAX),

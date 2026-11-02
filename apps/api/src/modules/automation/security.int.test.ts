@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Webhook } from "standardwebhooks";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createFakeErpMcp,
   FAKE_ERP_TOOLS,
@@ -383,6 +383,14 @@ async function exercise(o: Org): Promise<void> {
   o.mailboxId = (
     await s.su.query("select id from app.mailboxes where automation_id = $1", [o.mailAutomationId])
   ).rows[0]?.id as string;
+  // The save answers before its baseline poll ends (MD-04): only mail after the baseline is new.
+  await vi.waitFor(
+    async () => {
+      const r = await s.su.query("select last_polled_at from app.mailboxes where id = $1", [o.mailboxId]);
+      expect(r.rows[0]?.last_polled_at).toBeTruthy();
+    },
+    { timeout: 15_000, interval: 50 },
+  );
   await gm.sendMail({
     from: "Shop Orders <orders@shop.example>",
     to: MAIL[k],

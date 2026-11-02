@@ -2,7 +2,7 @@ import { AUTOMATION_LIMITS, type AutomationRunReason, EventTypes } from "@ocw/co
 import { automationRuns, automations, messageCards, type Tx } from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
 import type { Core } from "../../core";
-import type { JobData } from "../../lib/jobs";
+import { type JobContext, type JobData, lastAttempt } from "../../lib/jobs";
 import { deliverAutomationRun, updatePlatformCardNotified } from "../agent-channel";
 import type {
   ActionKindHandler,
@@ -15,7 +15,7 @@ import type {
 import { decideFire, outcomeOf, recordOutcome } from "./budget";
 import { inboundDelivery } from "./inbound";
 import { missedPolicy, nextRunAfter } from "./schedule";
-import { postAnchor, reasonSentence, refusalReason, runCardFields, runPeople } from "./targets";
+import { isRefusal, postAnchor, reasonSentence, refusalReason, runCardFields, runPeople } from "./targets";
 
 /**
  * The runner (07.6-09; AUTO-01, D-01, D-03, D-07, D-12, P-07, P-09; Pitfalls 1 and 6). Scheduled automations run
@@ -39,6 +39,12 @@ import { postAnchor, reasonSentence, refusalReason, runCardFields, runPeople } f
 /** How many due automations and stale runs one tick handles (the rest wait for the next minute). */
 const TICK_BATCH = 500;
 const NO_REPLY_MS = AUTOMATION_LIMITS.noReplyMinutes * 60_000;
+/**
+ * Fires one worker runs at once (07.6 review A MD-06): a slow fire (a digest's summary, a slow post) no longer holds
+ * every other organization's runs; each fire still locks its run and automation, so one run never fires twice. Kept
+ * small: a fire holds one of the tenant pool's 10 connections for its transaction.
+ */
+const FIRE_CONCURRENCY = 3;
 
 export interface TickResult {
   /** Runs queued (fire jobs enqueued). */
@@ -144,7 +150,9 @@ async function markNoReply(
     const [run] = await tx.select().from(automationRuns).where(eq(automationRuns.id, runId)).for("update");
     if (run?.status !== "delivered" || !run.deliveredAt) return false;
     if (new Date(run.deliveredAt).getTime() >= before.getTime()) return false;
-    const [a] = await tx.select().from(automations).where(eq(automations.id, run.automationId)).limit(1);
+    // Run, then its automation, then any stream: the one lock order of every writer (fire, tick, reply), so the
+    // breaker's update below never waits on a fire while this holds the conversation's stream (07.6 review A MD-01).
+    const [a] = await tx.select().from(automations).where(eq(automations.id, run.automationId)).for("update");
     if (!a) return false;
     await tx
       .update(automationRuns)
@@ -312,6 +320,7 @@ export async function fireRun(
   deps: AutomationSeamDeps,
   data: JobData<"automation.fire">,
   now: Date = new Date(),
+  attempt?: Pick<JobContext, "retryCount" | "retryLimit">,
 ): Promise<void> {
   const { organizationId, runId } = data;
   const head = await core.db.withTenant({ organizationId }, async (tx) => {
@@ -339,6 +348,7 @@ export async function fireRun(
       await settleRun(core, tx, a, run, result);
     });
 
+  let afterStarted = false;
   try {
     const after = await core.db.withTenant({ organizationId, userId: head.runAs }, async (tx) => {
       // Run first, then its automation: the order of every other writer of both rows (the reply, the no-reply sweep).
@@ -368,17 +378,21 @@ export async function fireRun(
     });
     // The kind's work outside any transaction (HI-01): the fire transaction has committed and released both rows.
     if (after) {
+      afterStarted = true;
       const late: SettledFireResult | null = await after();
       if (late && (late.status === "skipped" || late.status === "failed")) await settleQueued(late);
     }
   } catch (err) {
-    // The post itself was refused (chat's own checks, decided again in the post) or failed: nothing of that transaction
-    // stays. The run is settled as failed in a fresh transaction so it does not wait forever; if even that fails (the
-    // database is down) the job is retried, and fires only while the run is still queued.
+    // Nothing of that transaction stays. A refusal (chat's own checks, decided again in the post) is the run's real
+    // outcome: settled failed with its reason. Anything else (a deadlock, a serialization failure, a dropped
+    // connection) is the database's, not the automation's: the job is retried, and only its last attempt settles the
+    // run `delivery_failed` for the breaker (07.6 review A MD-02). The run fires only while it is still queued.
     core.log.warn(
       { runId, err: { name: (err as Error)?.name, code: (err as { code?: unknown })?.code } },
       "automation fire failed",
     );
+    // Once the kind's outside work has started (a billed model call), a retry would repeat it: settle instead.
+    if (!afterStarted && !isRefusal(err) && !lastAttempt(attempt)) throw err;
     await settleQueued({ status: "failed", reason: refusalReason(err) });
   }
 }
@@ -450,5 +464,7 @@ export function registerRunner(core: Core, deps: AutomationSeamDeps): void {
     const out = await tickOnce(core);
     if (out.fired + out.skipped + out.noReply > 0) core.log.info(out, "automation tick");
   });
-  core.jobs.work("automation.fire", (data) => fireRun(core, deps, data));
+  core.jobs.work("automation.fire", (data, ctx) => fireRun(core, deps, data, new Date(), ctx), {
+    localConcurrency: FIRE_CONCURRENCY,
+  });
 }
