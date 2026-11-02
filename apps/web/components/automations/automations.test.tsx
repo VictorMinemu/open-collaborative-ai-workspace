@@ -7,9 +7,11 @@ import { ApiRequestError } from "@/lib/api";
 import {
   automationErrorText,
   automationKeys,
+  baseVersionAfter,
   cronToSchedule,
   defaultSchedule,
   nextRelative,
+  rowOpenTarget,
   runOpenHref,
   runReasonSentence,
   type ScheduleValue,
@@ -52,6 +54,39 @@ const text = (html: string) =>
     .replace(/&amp;/g, "&")
     .replace(/\s+/g, " ")
     .trim();
+
+describe("the editor's base version after its own Pause / Resume (07.6 review C ME-04)", () => {
+  it("advances when the form was loaded from the version the action changed, never over a version saved meanwhile", () => {
+    // Loaded at 4, Resume answers 5: a later save sends 5 (no false 409, no lost edits).
+    expect(baseVersionAfter(4, 4, 5)).toBe(5);
+    // Loaded at 3 while the server was at 4 (changed meanwhile): the base stays, so the save is still a real 409.
+    expect(baseVersionAfter(3, 4, 5)).toBe(3);
+    // Nothing loaded yet: nothing to advance.
+    expect(baseVersionAfter(null, 4, 5)).toBeNull();
+  });
+});
+
+describe("where a row opens (07.6 review C LO-03)", () => {
+  const ME = "01a11635-d6e7-7c87-9f17-0000000000a1";
+  const LENA = "01a11635-d6e7-7c87-9f17-0000000000a2";
+  const row = (actionKind: "agent_turn" | "digest", runAs: string) => ({
+    id: "01a11635-d6e7-7c87-9f17-0000000000c1",
+    actionKind,
+    runAs: { id: runAs },
+  });
+  it("my digest opens my Settings › Digest; Lena's digest opens its runs, never my own settings", () => {
+    expect(rowOpenTarget(row("digest", ME), ME)).toEqual({ kind: "digest_settings" });
+    expect(rowOpenTarget(row("digest", LENA), ME)).toEqual({
+      kind: "editor",
+      id: "01a11635-d6e7-7c87-9f17-0000000000c1",
+      tab: "runs",
+    });
+    expect(rowOpenTarget(row("agent_turn", LENA), ME)).toEqual({
+      kind: "editor",
+      id: "01a11635-d6e7-7c87-9f17-0000000000c1",
+    });
+  });
+});
 
 describe("schedule presets ↔ cron (UI-SPEC Surface 2)", () => {
   it("every preset makes its cron", () => {

@@ -1,7 +1,7 @@
 import {
   DigestPreview,
   DigestPreviewRequest,
-  DigestSettings,
+  DigestSaveRequest,
   DigestTestResponse,
   DigestView,
 } from "@ocw/contracts";
@@ -23,6 +23,12 @@ const actorOf = (req: FastifyRequest): AutomationActor => ({ userId: authOf(req)
  */
 export function registerDigestRoutes(app: App, core: Core, digest: DigestService) {
   const user = { config: { authz: "user" as const }, preHandler: [core.identity.requireUser] };
+  // A few test sends a minute per person (HI-01), counted after requireUser so the key is the person, not the IP.
+  const testLimit = app.rateLimit({
+    max: 3,
+    timeWindow: "1 minute",
+    keyGenerator: (req: FastifyRequest) => `digest-test:${req.auth?.userId ?? req.ip}`,
+  });
 
   app.get("/digest", { ...user, schema: { tags, response: { 200: DigestView } } }, async (req, reply) => {
     reply.header("cache-control", "no-store");
@@ -31,7 +37,7 @@ export function registerDigestRoutes(app: App, core: Core, digest: DigestService
 
   app.put(
     "/digest",
-    { ...user, schema: { tags, body: DigestSettings, response: { 200: DigestView } } },
+    { ...user, schema: { tags, body: DigestSaveRequest, response: { 200: DigestView } } },
     async (req) => core.db.withTenant(tenant(req), (tx) => digest.save(tx, actorOf(req), req.body)),
   );
 
@@ -46,7 +52,12 @@ export function registerDigestRoutes(app: App, core: Core, digest: DigestService
 
   app.post(
     "/digest/test",
-    { ...user, schema: { tags, response: { 200: DigestTestResponse } } },
-    async (req) => core.db.withTenant(tenant(req), (tx) => digest.test(tx, actorOf(req))),
+    {
+      ...user,
+      preHandler: [core.identity.requireUser, testLimit],
+      schema: { tags, response: { 200: DigestTestResponse } },
+    },
+    // The service opens its own short transactions: the summary's model call runs outside any of them.
+    async (req) => digest.test(tenant(req), actorOf(req)),
   );
 }

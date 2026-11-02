@@ -596,14 +596,54 @@ describe("consent, cost, repetition and audience", () => {
     expect(await ok(memoryOf(marta, s6))).toMatchObject({ unit: { id: billing.unitId, name: "Billing" } });
 
     await ok(admin.request("DELETE", `/api/v1/units/${billing.unitId}/members/${anaId}`));
-    try {
+    /** Ana's view in `status`: no project, no decider, no note (07.6 review C ME-02). */
+    const hidden = async (status: string) => {
       const m = await ok(memoryOf(ana, s6));
-      expect(m).toMatchObject({ status: "none", unit: null, canPropose: false });
-      for (const secret of ["Billing", billing.unitId]) {
-        expect(JSON.stringify(m), `memory carried "${secret}"`).not.toContain(secret);
+      expect(m).toMatchObject({ status, unit: null, decidedBy: null, decisionNote: null, canPropose: false });
+      for (const secret of ["Billing", billing.unitId, "Marta", martaId, "billing lead note"]) {
+        expect(JSON.stringify(m), `memory carried "${secret}" (${status})`).not.toContain(secret);
       }
+    };
+    const decide = async (outcome: "approved" | "denied") => {
+      const id = (await ok(memoryOf(marta, s6))).proposalId as string;
+      const detail = await ok(marta.request("GET", `/api/v1/approvals/${id}`));
+      await ok(
+        marta.request("POST", `/api/v1/approvals/${id}/decision`, {
+          outcome,
+          actionHash: detail.actionHash,
+          note: "billing lead note",
+        }),
+      );
+    };
+    try {
+      await hidden("none");
       // The creator still reads it named (D-12).
       expect(await ok(memoryOf(marta, s6))).toMatchObject({ unit: { id: billing.unitId, name: "Billing" } });
+
+      // Pending, then applied by Marta (a lead may decide her own session's summary, ADR-0023 §15).
+      expect((await propose(marta, s6)).status).toBe(202);
+      expect(await drain()).toBe(1);
+      await hidden("pending");
+      await decide("approved");
+      expect(await ok(memoryOf(marta, s6))).toMatchObject({
+        status: "applied",
+        decidedBy: { id: martaId, displayName: "Marta" },
+      });
+      await hidden("applied");
+
+      // New work, proposed again, denied.
+      await restartWithTurn(marta, s6, "Check the totals too");
+      await complete(marta, s6);
+      await drain();
+      expect((await propose(marta, s6)).status).toBe(202);
+      expect(await drain()).toBe(1);
+      await decide("denied");
+      expect(await ok(memoryOf(marta, s6))).toMatchObject({
+        status: "denied",
+        decidedBy: { id: martaId, displayName: "Marta" },
+        decisionNote: "billing lead note",
+      });
+      await hidden("denied");
     } finally {
       await ok(
         admin.request("POST", `/api/v1/units/${billing.unitId}/members`, { userId: anaId, role: "member" }),
@@ -625,6 +665,121 @@ describe("consent, cost, repetition and audience", () => {
   });
 });
 
+// ---------------------------------------------------------------- 07.6 review C fixes
+
+describe("recovery, taint and the memory check before billing (07.6 review C ME-01, LO-04, LO-05)", () => {
+  /** A finished session of Ana in Billing with one edited file (automatic proposals are off for her here). */
+  async function finished(title: string): Promise<string> {
+    const id = await startSession(ana, device, billingRepo, { title });
+    await turn(ana, id, `Work on ${title}`, "Done.");
+    await complete(ana, id);
+    await drain();
+    return id;
+  }
+
+  const errorCodeOf = async (id: string) =>
+    (await su.query("select error_code from app.work_session_memory where work_session_id = $1", [id]))
+      .rows[0]?.error_code as string | undefined;
+
+  it("a summary stuck in `writing` by a dead job reads as failed after 10 minutes and Propose enqueues it again", async () => {
+    const s = await finished("Stuck summary");
+    await su.query(
+      `insert into app.work_session_memory (work_session_id, organization_id, unit_id, status, auto, updated_at)
+       values ($1, $2, $3, 'writing', false, now())`,
+      [s, orgId, billing.unitId],
+    );
+    // A fresh claim: a summary is being written; Propose says so instead of a 202 that enqueues nothing.
+    expect(await ok(memoryOf(ana, s))).toMatchObject({ status: "writing" });
+    const busy = await propose(ana, s);
+    expect(busy.status).toBe(409);
+    expect(errorCode(busy)).toBe("summary_in_progress");
+    expect(await drain()).toBe(0);
+
+    await su.query(
+      "update app.work_session_memory set updated_at = now() - interval '11 minutes' where work_session_id = $1",
+      [s],
+    );
+    expect(await ok(memoryOf(ana, s))).toMatchObject({ status: "failed" });
+    const before = summaryRequests().length;
+    expect((await propose(ana, s)).status).toBe(202);
+    expect(await drain()).toBe(1);
+    expect(summaryRequests()).toHaveLength(before + 1);
+    expect(await ok(memoryOf(ana, s))).toMatchObject({ status: "pending" });
+  });
+
+  it("a proposal step that throws leaves the summary failed (the call billed once); Propose works again", async () => {
+    const s = await finished("Throwing proposal");
+    const before = summaryRequests().length;
+    const spy = vi.spyOn(stack.built.memory, "propose").mockRejectedValueOnce(new Error("boom"));
+    try {
+      expect((await propose(ana, s)).status).toBe(202);
+      expect(await drain()).toBe(1);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(summaryRequests()).toHaveLength(before + 1);
+    expect(await ok(memoryOf(ana, s))).toMatchObject({ status: "failed" });
+    expect(await errorCodeOf(s)).toBe("propose_error");
+    expect(await usageRows([s])).toHaveLength(1);
+
+    expect((await propose(ana, s)).status).toBe(202);
+    expect(await drain()).toBe(1);
+    expect(await ok(memoryOf(ana, s))).toMatchObject({ status: "pending" });
+  });
+
+  it("a summary over tool output is flagged as untrusted for its approver; one without tools is not", async () => {
+    const taintOf = async (sessionId: string) => {
+      const approvalId = (await ok(memoryOf(ana, sessionId))).proposalId as string;
+      const r = await su.query(
+        `select p.tainted from app.memory_proposals p join app.approval_requests a on a.resource_id = p.id
+          where a.id = $1`,
+        [approvalId],
+      );
+      return r.rows[0]?.tainted as boolean;
+    };
+    // s1's transcript has an Edit tool call; s2's last proposal covers only a restart with a prompt and an answer.
+    expect(await taintOf(s1)).toBe(true);
+    const s2 = (
+      await su.query(
+        "select id from app.work_sessions where title = 'Tax rounding' and created_by = $1 limit 1",
+        [anaId],
+      )
+    ).rows[0]?.id as string;
+    expect(await taintOf(s2)).toBe(false);
+  });
+
+  it("an owner who may not read the project's memory is never billed: no model call, failed memory_denied", async () => {
+    const s = await finished("No memory for Ana");
+    const rule = await ok(
+      admin.request("POST", "/api/v1/permission-rules", {
+        subjectKind: "user",
+        subjectId: anaId,
+        permission: "memory.read",
+        effect: "deny",
+      }),
+    );
+    const daily = async () =>
+      (
+        await su.query(
+          "select coalesce(sum(generations), 0)::int as n from app.ai_usage_daily where user_id = $1",
+          [anaId],
+        )
+      ).rows[0]?.n as number;
+    try {
+      const before = { calls: summaryRequests().length, generations: await daily() };
+      expect((await propose(ana, s)).status).toBe(202);
+      expect(await drain()).toBe(1);
+      expect(summaryRequests()).toHaveLength(before.calls);
+      expect(await daily()).toBe(before.generations);
+      expect(await usageRows([s])).toEqual([]);
+      expect(await ok(memoryOf(ana, s))).toMatchObject({ status: "failed" });
+      expect(await errorCodeOf(s)).toBe("memory_denied");
+    } finally {
+      await ok(admin.request("DELETE", `/api/v1/permission-rules/${rule.id}`));
+    }
+  });
+});
+
 // ---------------------------------------------------------------- Task 3: usage reports
 
 describe("usage reports show digest and session-summary spend as their own rows (P-16)", () => {
@@ -635,11 +790,20 @@ describe("usage reports show digest and session-summary spend as their own rows 
        values ($1, 'digest', $2, $3, 'mock', 'mock', 'mock-model', 40, 10, false, 0)`,
       [orgId, anaId, randomUUID()],
     );
+    // An estimated digest (the model stopped before reporting usage): its row's cost is approximate, never an answer.
+    await su.query(
+      `insert into app.ai_usage_records
+         (organization_id, kind, requester_user_id, subject_id, backend, provider, model_id, input_tokens, output_tokens, estimated, cost_micros_usd)
+       values ($1, 'digest', $2, $3, 'mock', 'mock', 'mock-model', 0, 0, true, 0)`,
+      [orgId, anaId, randomUUID()],
+    );
     const r = await ok(admin.request("GET", "/api/v1/ai-usage/report?groupBy=model&days=30"));
     const rows = r.rows as Json[];
     const summaries = rows.find((x) => (x.key as string).endsWith(" · session summaries"));
     const digests = rows.find((x) => (x.key as string).endsWith(" · digests"));
-    expect(summaries).toMatchObject({ generations: 0, estimatedGenerations: 0 });
+    expect(summaries).toMatchObject({ kind: "session_summary", generations: 0, estimatedGenerations: 0 });
+    expect(digests).toMatchObject({ kind: "digest", estimatedGenerations: 0, estimatedRecords: 1 });
+    expect(r.totals.estimatedRecords).toBeGreaterThanOrEqual(1);
     expect(summaries?.label).toMatch(/ · session summaries$/);
     expect(digests).toMatchObject({ generations: 0, inputTokens: 40, outputTokens: 10 });
     expect(digests?.label).toMatch(/ · digests$/);

@@ -49,7 +49,14 @@ import { ensureToolScope, type LoadedScope, liveFileCount, loadScope, resolveToo
  */
 export type MemoryProposalOrigin =
   | { kind: "agent_turn"; eventId: string; agentId: string }
-  | { kind: "system"; source: "work_session"; workSessionId: string; requestedForUserId: string };
+  | {
+      kind: "system";
+      source: "work_session";
+      workSessionId: string;
+      requestedForUserId: string;
+      /** The content came from untrusted input (a session's tool output): the approver sees the warning. */
+      tainted: boolean;
+    };
 
 export interface CreateMemoryProposalInput {
   origin: MemoryProposalOrigin;
@@ -408,6 +415,25 @@ async function systemScope(
 }
 
 /**
+ * Whether a system proposal for `requestedForUserId` may go to `scopeId` at `path`: the scope check `propose` makes
+ * for the system origin, through the person's lens, nothing created or written. A caller about to pay for a model call
+ * checks it first (07.6 review C LO-05).
+ */
+export async function systemProposalAllowed(
+  tx: Tx,
+  perms: PermissionService,
+  a: { requestedForUserId: string; scopeId: string; path: string },
+): Promise<boolean> {
+  const parsed = parseMemoryPath(a.path);
+  if (!parsed.ok) return false;
+  return withPersonalOwner(
+    tx,
+    a.requestedForUserId,
+    async () => (await systemScope(tx, perms, a.requestedForUserId, a.scopeId, parsed.path)) !== null,
+  );
+}
+
+/**
  * A proposal the platform makes for a person (07.6, AUTO-06: a Work Zone session's summary for its owner). The same
  * checks as an agent's, minus what only a turn has (the turn, its tool-call cap, the DM rule): an existing shared scope
  * the person may read (`denied`); the op against the live file (`version_conflict` / `not_found`); the pending cap per
@@ -508,7 +534,7 @@ async function createSystemProposal(
           contentSha256: sha256Hex(input.content),
           findings: scan.findings as unknown as Array<Record<string, unknown>>,
           readerCount,
-          tainted: false,
+          tainted: origin.tainted,
           reason,
           requestedByAgentId: null,
           requestedForUserId: human,

@@ -105,6 +105,7 @@ function addTotals(a: Totals, b: Totals): Totals {
     inputTokens: a.inputTokens + b.inputTokens,
     outputTokens: a.outputTokens + b.outputTokens,
     estimatedGenerations: a.estimatedGenerations + b.estimatedGenerations,
+    estimatedRecords: a.estimatedRecords + b.estimatedRecords,
     costMicrosUsd:
       a.costMicrosUsd === null && b.costMicrosUsd === null
         ? null
@@ -117,6 +118,7 @@ const ZERO: Totals = {
   inputTokens: 0,
   outputTokens: 0,
   estimatedGenerations: 0,
+  estimatedRecords: 0,
   costMicrosUsd: null,
 };
 
@@ -156,6 +158,7 @@ export async function usageReport(
     estimatedGenerations: sql<number>`count(*) filter (where ${r.kind} = 'chat' and ${r.estimated})`.mapWith(
       Number,
     ),
+    estimatedRecords: sql<number>`count(*) filter (where ${r.estimated})`.mapWith(Number),
     inputTokens: sql<number>`coalesce(sum(${r.inputTokens}), 0)`.mapWith(Number),
     outputTokens: sql<number>`coalesce(sum(${r.outputTokens}), 0)`.mapWith(Number),
     costMicrosUsd: sql<string | null>`sum(${r.costMicrosUsd})`,
@@ -186,6 +189,7 @@ export async function usageReport(
       backend: null,
       generations: a.generations,
       estimatedGenerations: a.estimatedGenerations,
+      estimatedRecords: a.estimatedRecords,
       inputTokens: a.inputTokens,
       outputTokens: a.outputTokens,
       costMicrosUsd: cost(a.costMicrosUsd),
@@ -205,6 +209,7 @@ export async function usageReport(
         kind: a.kind,
         generations: a.generations,
         estimatedGenerations: a.estimatedGenerations,
+        estimatedRecords: a.estimatedRecords,
         inputTokens: a.inputTokens,
         outputTokens: a.outputTokens,
         costMicrosUsd: cost(a.costMicrosUsd),

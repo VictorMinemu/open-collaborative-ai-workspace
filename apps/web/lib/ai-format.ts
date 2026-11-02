@@ -1,4 +1,4 @@
-import type { AiGeneration, AiQueueState } from "@ocw/contracts";
+import type { AiGeneration, AiQueueState, AiUsageKind } from "@ocw/contracts";
 
 /**
  * Usage formatting for AI chats (05-08, AICHAT-07, P-11): token counts, costs and the answer footer. Pure, so the
@@ -13,6 +13,25 @@ export function formatTokens(n: number): string {
   const k = Math.round(n / 100) / 10;
   if (k < 1000) return `${trim(k.toFixed(1))}k`;
   return `${trim((Math.round(n / 10_000) / 100).toFixed(2))}M`;
+}
+
+const KIND_TEXT: Record<Exclude<AiUsageKind, "chat">, string> = {
+  title: "Chat titles",
+  digest: "Digest summaries",
+  session_summary: "Session summaries",
+};
+
+/**
+ * What a usage report row adds up when it is not chat answers (by model, 07.6 review C LO-01): its kind's name, shown
+ * instead of "0 answers". Null: a chat row or a person's row, which count answers.
+ */
+export function usageRowKindText(row: { kind?: AiUsageKind }): string | null {
+  return row.kind && row.kind !== "chat" ? KIND_TEXT[row.kind] : null;
+}
+
+/** Whether a usage row's (or total's) cost is approximate (`~`): some of its records were estimated, any kind. */
+export function usageCostEstimated(row: { costMicrosUsd: number | null; estimatedRecords: number }): boolean {
+  return row.estimatedRecords > 0 && (row.costMicrosUsd ?? 0) > 0;
 }
 
 /** null → "—" (no price for this model); 4000 → "$0.004"; estimated → "~$0.004". */

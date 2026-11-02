@@ -41,6 +41,7 @@ import { errorMessage, isApiError } from "@/lib/api";
 import {
   type AutomationDraftDefaults,
   automationErrorText,
+  baseVersionAfter,
   cronToSchedule,
   defaultSchedule,
   formatRunInstant,
@@ -497,14 +498,21 @@ export function AutomationEditorSheet({
     setErrors({});
   }
 
+  // Pause and Resume bump the version: the form's base follows when it was loaded from the version they changed.
   const doPause = (a: Automation) =>
     pause.mutate(a.id, {
-      onSuccess: () => toast(`Paused “${a.name}”.`),
+      onSuccess: (r) => {
+        setBaseVersion((v) => baseVersionAfter(v, a.version, r.version));
+        toast(`Paused “${a.name}”.`);
+      },
       onError: (err) => toast.error(errorMessage(err)),
     });
   const doResume = (a: Automation) =>
     resume.mutate(a.id, {
-      onSuccess: (r) => toast(resumedText(r)),
+      onSuccess: (r) => {
+        setBaseVersion((v) => baseVersionAfter(v, a.version, r.version));
+        toast(resumedText(r));
+      },
       onError: (err) => toast.error(errorMessage(err)),
     });
   const doRun = (a: Automation) =>

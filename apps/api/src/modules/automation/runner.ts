@@ -4,7 +4,14 @@ import { and, eq, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { JobData } from "../../lib/jobs";
 import { deliverAutomationRun, updatePlatformCardNotified } from "../agent-channel";
-import type { ActionKindHandler, AutomationRow, AutomationSeamDeps, FireResult, RunRow } from "./actions";
+import type {
+  ActionKindHandler,
+  AutomationRow,
+  AutomationSeamDeps,
+  FireResult,
+  RunRow,
+  SettledFireResult,
+} from "./actions";
 import { decideFire, outcomeOf, recordOutcome } from "./budget";
 import { inboundDelivery } from "./inbound";
 import { missedPolicy, nextRunAfter } from "./schedule";
@@ -318,9 +325,9 @@ export async function fireRun(
   });
   if (head?.status !== "queued") return;
 
-  try {
-    await core.db.withTenant({ organizationId, userId: head.runAs }, async (tx) => {
-      // Run first, then its automation: the order of every other writer of both rows (the reply, the no-reply sweep).
+  /** Settles the run (still queued) in a fresh transaction: a refusal after the fire transaction, or a late result. */
+  const settleQueued = (result: { status: "skipped" | "failed"; reason: AutomationRunReason }) =>
+    core.db.withTenant({ organizationId, userId: head.runAs }, async (tx) => {
       const [run] = await tx.select().from(automationRuns).where(eq(automationRuns.id, runId)).for("update");
       if (run?.status !== "queued") return;
       const [a] = await tx
@@ -329,20 +336,41 @@ export async function fireRun(
         .where(eq(automations.id, run.automationId))
         .for("update");
       if (!a) return;
+      await settleRun(core, tx, a, run, result);
+    });
+
+  try {
+    const after = await core.db.withTenant({ organizationId, userId: head.runAs }, async (tx) => {
+      // Run first, then its automation: the order of every other writer of both rows (the reply, the no-reply sweep).
+      const [run] = await tx.select().from(automationRuns).where(eq(automationRuns.id, runId)).for("update");
+      if (run?.status !== "queued") return null;
+      const [a] = await tx
+        .select()
+        .from(automations)
+        .where(eq(automations.id, run.automationId))
+        .for("update");
+      if (!a) return null;
       const decision = await decideFire(tx, deps.perms, a, run, now);
       if (!decision.ok) {
         await settleRun(core, tx, a, run, { status: "skipped", reason: decision.reason });
-        return;
+        return null;
       }
       await tx.update(automations).set({ lastRunAt: sql`now()` }).where(eq(automations.id, a.id));
       const handler = deps.service.actionKind(a.actionKind);
       const result: FireResult = handler
         ? await handler.fire(tx, { run, automation: a })
         : { status: "failed", reason: "delivery_failed" };
+      if (result.status === "continue") return result.after;
       if (result.status === "skipped" || result.status === "failed") {
         await settleRun(core, tx, a, run, result);
       }
+      return null;
     });
+    // The kind's work outside any transaction (HI-01): the fire transaction has committed and released both rows.
+    if (after) {
+      const late: SettledFireResult | null = await after();
+      if (late && (late.status === "skipped" || late.status === "failed")) await settleQueued(late);
+    }
   } catch (err) {
     // The post itself was refused (chat's own checks, decided again in the post) or failed: nothing of that transaction
     // stays. The run is settled as failed in a fresh transaction so it does not wait forever; if even that fails (the
@@ -351,17 +379,7 @@ export async function fireRun(
       { runId, err: { name: (err as Error)?.name, code: (err as { code?: unknown })?.code } },
       "automation fire failed",
     );
-    await core.db.withTenant({ organizationId, userId: head.runAs }, async (tx) => {
-      const [run] = await tx.select().from(automationRuns).where(eq(automationRuns.id, runId)).for("update");
-      if (run?.status !== "queued") return;
-      const [a] = await tx
-        .select()
-        .from(automations)
-        .where(eq(automations.id, run.automationId))
-        .for("update");
-      if (!a) return;
-      await settleRun(core, tx, a, run, { status: "failed", reason: refusalReason(err) });
-    });
+    await settleQueued({ status: "failed", reason: refusalReason(err) });
   }
 }
 

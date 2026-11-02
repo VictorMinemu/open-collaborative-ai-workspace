@@ -19,6 +19,7 @@ import {
   CreateAutomationRequest,
   CreateAutomationResponse,
   DigestPreview,
+  DigestSaveRequest,
   DigestSettings,
   DigestTestResponse,
   DigestView,
@@ -536,12 +537,26 @@ describe("personal digest (D-05, R6, P-14)", () => {
   it("view, preview and test DTOs parse", () => {
     const view = DigestView.parse({
       settings: null,
+      version: null,
       automationId: null,
       nextRunAt: null,
       lastSentAt: null,
       bots: [{ id: ID, displayName: "My bot", personal: true, unitName: null }],
     });
     expect(view.settings).toBe(null);
+    // 07.6 review C LO-06: the save carries the version it was edited from (null: none yet; omitted: last write wins).
+    const settings = {
+      enabled: true,
+      days: ["mon"],
+      time: "08:00",
+      timeZone: "UTC",
+      sections: ["mentions"],
+      agentId: ID,
+    };
+    expect(DigestSaveRequest.parse({ ...settings, expectedVersion: 3 }).expectedVersion).toBe(3);
+    expect(DigestSaveRequest.parse({ ...settings, expectedVersion: null }).expectedVersion).toBeNull();
+    expect(DigestSaveRequest.parse(settings).expectedVersion).toBeUndefined();
+    expect(DigestSaveRequest.safeParse({ ...settings, expectedVersion: 0 }).success).toBe(false);
     expect(DigestPreview.parse({ markdown: "", empty: true }).empty).toBe(true);
     expect(DigestTestResponse.parse({ conversationId: ID, messageId: ID2 }).messageId).toBe(ID2);
   });

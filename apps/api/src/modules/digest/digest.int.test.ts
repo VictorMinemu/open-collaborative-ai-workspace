@@ -278,7 +278,21 @@ async function moveToOrgB(userId: string): Promise<void> {
   await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, userId]);
 }
 
+/**
+ * Called (and awaited) when the API sends a digest summary to the model, before the request goes out (HI-01: proves
+ * what the database holds while the model writes). The gateway captures `fetch` when the stack is built, so the spy
+ * is installed first.
+ */
+let onDigestModelCall: (() => Promise<void>) | null = null;
+
 beforeAll(async () => {
+  const realFetch = globalThis.fetch;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    if (onDigestModelCall && typeof init?.body === "string" && init.body.includes("<digest>")) {
+      await onDigestModelCall();
+    }
+    return realFetch(input, init);
+  });
   stack = await startAiStack();
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
@@ -438,6 +452,29 @@ describe("Víctor saves a weekday 08:00 Madrid digest and receives it in his DM 
     expect(audits.rows).toHaveLength(4);
     // Tests below send several digests in a day.
     await su.query("update app.automations set max_runs_per_day = 50 where id = $1", [digestId]);
+  });
+
+  it("a save carries the version it was edited from: a pause made meanwhile is 409 version, never silently undone (07.6 review C LO-06)", async () => {
+    const opened = await view();
+    expect(opened.version).toBe(((await digestRow())[0] as Json).version);
+    // Paused from the automations list while the settings page still holds an edit.
+    await ok(victor.request("POST", `/api/v1/automations/${digestId}/pause`, {}));
+    expect(
+      await errorOf(save({ ...settings({ time: "07:00" }), expectedVersion: opened.version }), 409),
+    ).toBe("version");
+    expect((await digestRow())[0]).toMatchObject({ status: "paused", schedule_cron: "0 8 * * 1,2,3,4,5" });
+
+    // From the version it reads now, the save goes through (and turns it back on).
+    const fresh = await view();
+    expect(fresh.version).toBe((opened.version ?? 0) + 1);
+    const saved = DigestView.parse(await ok(save({ ...settings(), expectedVersion: fresh.version })));
+    expect(saved.version).toBe((fresh.version ?? 0) + 1);
+    expect((await digestRow())[0]).toMatchObject({ status: "active" });
+    // "No digest yet" (null) when one exists is a conflict too.
+    expect(await errorOf(save({ ...settings(), expectedVersion: null }), 409)).toBe("version");
+    // Sam has none: his first save says null.
+    const first = await view(sam);
+    expect(first.version).toBeNull();
   });
 
   it("on schedule the runner sends one DM from Scout with the four sections, counts and relative links; answered; audited with counts only", async () => {
@@ -799,6 +836,23 @@ describe("preview and test send (R6)", () => {
     expect(audit.rows[0]).toMatchObject({ actor_kind: "user", user_id: victorId });
     expect(await errorOf(sam.request("POST", "/api/v1/digest/test"), 409)).toBe("not_saved");
   });
+
+  it("a second test while one is still on its way is 409 test_in_progress at once, never a wait on the row (HI-01)", async () => {
+    const inFlight = (
+      await su.query(
+        `insert into app.automation_runs (organization_id, automation_id, trigger, status)
+         values ($1, $2, 'manual', 'queued') returning id`,
+        [orgId, digestId],
+      )
+    ).rows[0].id as string;
+    try {
+      const messages = await countOf("app.messages");
+      expect(await errorOf(victor.request("POST", "/api/v1/digest/test"), 409)).toBe("test_in_progress");
+      expect(await countOf("app.messages")).toBe(messages);
+    } finally {
+      await su.query("delete from app.automation_runs where id = $1", [inFlight]);
+    }
+  });
 });
 
 describe("the optional AI summary is the person's, metered, and sees only the list (P-16, T-07.6-13-02/03)", () => {
@@ -878,6 +932,58 @@ describe("the optional AI summary is the person's, metered, and sees only the li
         [orgId],
       );
     }
+  });
+
+  it("the model call holds no lock and no transaction: the digest and its run are free while the model writes (HI-01)", async () => {
+    await ok(save(settings({ summary: { enabled: true, modelRef: null } })));
+    await mention(sam, salesId, "@victor while the model writes");
+    const seen: Json[] = [];
+    onDigestModelCall = async () => {
+      const rows = async (q: string) => (await su.query(q, [digestId])).rows.length;
+      seen.push({
+        automationFree: await rows("select id from app.automations where id = $1 for update skip locked"),
+        queued: await rows(
+          "select id from app.automation_runs where automation_id = $1 and status = 'queued'",
+        ),
+        queuedFree: await rows(
+          "select id from app.automation_runs where automation_id = $1 and status = 'queued' for update skip locked",
+        ),
+      });
+    };
+    let run: Json;
+    try {
+      run = await fireDigest();
+    } finally {
+      onDigestModelCall = null;
+    }
+    expect(seen).toEqual([{ automationFree: 1, queued: 1, queuedFree: 1 }]);
+    expect(run).toMatchObject({ status: "answered", reason: null });
+    expect(await usageOf(run.id)).toHaveLength(1);
+  });
+
+  it("a post refused after the model answered still bills that call once; the run fails (HI-01, ADR-0018)", async () => {
+    await mention(sam, salesId, "@victor refused post");
+    const before = stack.fake.requests().length;
+    const post = vi
+      .spyOn(core().chatAgent, "postAgentMessageIn")
+      .mockRejectedValueOnce(new Error("refused by chat"));
+    let run: Json;
+    try {
+      run = await fireDigest();
+    } finally {
+      post.mockRestore();
+    }
+    expect(stack.fake.requests().length).toBe(before + 1);
+    expect(run).toMatchObject({ status: "failed", reason: "delivery_failed", anchor_message_id: null });
+    expect(await usageOf(run.id)).toEqual([
+      {
+        kind: "digest",
+        subject_id: run.id,
+        requester_user_id: victorId,
+        generation_id: null,
+        conversation_id: null,
+      },
+    ]);
   });
 
   it("summary off: no model call", async () => {

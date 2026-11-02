@@ -49,8 +49,14 @@ export const SUMMARY_INPUT_MAX_CHARS = 24_000;
 const LINE_MAX_CHARS = 4_000;
 /** The model call's deadline. */
 const SUMMARY_TIMEOUT_MS = 60_000;
-/** A `writing` state older than this is a job that died: another run may take over. */
-const STALE_WRITING = "10 minutes";
+/** A `writing` state older than this is a job that died: another run may take over (and the strip offers Try again). */
+export const STALE_WRITING_MS = 10 * 60_000;
+const STALE_WRITING = `${STALE_WRITING_MS / 60_000} minutes`;
+
+/** Whether a `writing` claim last touched at `updatedAt` belongs to a job that died (07.6 review C ME-01). */
+export function writingIsStale(updatedAt: string | Date, now: number = Date.now()): boolean {
+  return new Date(updatedAt).getTime() < now - STALE_WRITING_MS;
+}
 const SUMMARY_TITLE_MAX = 120;
 
 // ---------------------------------------------------------------- repo-relative text (principle 7)
@@ -101,6 +107,11 @@ export interface SessionInput {
   lastSeq: number;
   /** Nothing happened after `sinceSeq`. */
   empty: boolean;
+  /**
+   * A tool ran in the covered range: its output (files, web pages, MCP results) shaped what the session said, so the
+   * proposal is tainted like an agent turn that read untrusted content (07.6 review C LO-04).
+   */
+  usedTools: boolean;
 }
 
 const cap = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
@@ -140,7 +151,8 @@ export function buildSessionInput(
 ): SessionInput {
   const since = o.sinceSeq ?? 0;
   const fresh = [...rows].filter((r) => r.seq > since).sort((a, b) => a.seq - b.seq);
-  if (fresh.length === 0) return { text: "", lastSeq: since, empty: true };
+  if (fresh.length === 0) return { text: "", lastSeq: since, empty: true, usedTools: false };
+  const usedTools = fresh.some((r) => r.kind === "tool");
   const lastSeq = fresh[fresh.length - 1]?.seq ?? since;
   const lastChanges = fresh.filter((r) => r.kind === "changes").at(-1);
   const head = [`Session: ${cap(toRepoRelative(o.title, o.repoName), SUMMARY_TITLE_MAX)}`];
@@ -161,7 +173,7 @@ export function buildSessionInput(
     kept.unshift(line);
     used += line.length + 2;
   }
-  return { text: [headText, ...kept].join("\n\n"), lastSeq, empty: false };
+  return { text: [headText, ...kept].join("\n\n"), lastSeq, empty: false, usedTools };
 }
 
 /** The stream events a summary reads (and that count as new work): prompts that ran, messages, tools, changes. */
@@ -230,7 +242,7 @@ export async function collectSessionInput(
     .innerJoin(projects, eq(projects.id, workSessions.projectId))
     .where(eq(workSessions.id, sessionId))
     .limit(1);
-  if (!s) return { text: "", lastSeq: sinceSeq ?? 0, empty: true };
+  if (!s) return { text: "", lastSeq: sinceSeq ?? 0, empty: true, usedTools: false };
   const events = await tx
     .select({ seq: streamEvents.seq, type: streamEvents.type, payload: streamEvents.payload })
     .from(streamEvents)
@@ -394,6 +406,8 @@ interface Prepared {
   owner: string;
   unitId: string;
   scopeId: string;
+  /** The memory file's path, decided (and checked) before the model call. */
+  path: string;
   repoName: string | null;
   resolved: ResolvedModel;
   input: SessionInput;
@@ -463,7 +477,10 @@ async function fail(
   await announceAfterCommit(core, perms, tx, s);
 }
 
-/** Phase 1, in the owner's transaction: every check, the claim (`writing`), the cap and the model. */
+/**
+ * Phase 1, in the owner's transaction: every check, the claim (`writing`), the model, whether the proposal may land in
+ * the unit's memory for the owner (before anything is billed, 07.6 review C LO-05), then the cap.
+ */
 async function prepare(
   core: Core,
   deps: SummaryDeps,
@@ -531,6 +548,16 @@ async function prepare(
     await fail(core, deps.perms, tx, s, owner, unit.unitId, "model_unavailable");
     return null;
   }
+  // The proposal's scope and path, checked as `propose` will check them (an owner without read on the project's memory,
+  // e.g. the Memory module off for them, is refused here, before the cap is counted or the model called).
+  const scope = await deps.memory.ensureScope(tx, { kind: "unit", unitId: unit.unitId });
+  const path = summaryPath(s.title, new Date());
+  if (
+    !(await deps.memory.systemProposalAllowed(tx, { requestedForUserId: owner, scopeId: scope.id, path }))
+  ) {
+    await fail(core, deps.perms, tx, s, owner, unit.unitId, "memory_denied");
+    return null;
+  }
   // The owner's AI chat cap, counted before any model call; a refusal bills nothing.
   const policy = await loadAiChatPolicy(tx);
   const counted = await consumeGeneration(tx, {
@@ -542,7 +569,6 @@ async function prepare(
     await fail(core, deps.perms, tx, s, owner, unit.unitId, "limit_reached");
     return null;
   }
-  const scope = await deps.memory.ensureScope(tx, { kind: "unit", unitId: unit.unitId });
   const [repo] = await tx
     .select({ name: projects.name })
     .from(projects)
@@ -554,6 +580,7 @@ async function prepare(
     owner,
     unitId: unit.unitId,
     scopeId: scope.id,
+    path,
     repoName: repo?.name ?? null,
     resolved,
     input,
@@ -612,9 +639,15 @@ export async function summarizeSession(
 
   const now = new Date();
   const proposal: CreateMemoryProposalInput = {
-    origin: { kind: "system", source: "work_session", workSessionId, requestedForUserId: owner },
+    origin: {
+      kind: "system",
+      source: "work_session",
+      workSessionId,
+      requestedForUserId: owner,
+      tainted: prepared.input.usedTools,
+    },
     scope: prepared.scopeId,
-    path: summaryPath(s.title, now),
+    path: prepared.path,
     op: "create",
     content: summaryFile(s.title, out.text, prepared.repoName, now),
   };
@@ -632,44 +665,60 @@ export async function summarizeSession(
     }
   }
 
-  await core.db.withTenant({ organizationId, userId: owner }, async (tx) => {
-    // Every model call that answered is billed to the owner, whatever happens to the proposal.
-    const [billedBefore] = await tx
-      .select({ id: aiUsageRecords.id })
-      .from(aiUsageRecords)
-      .where(and(eq(aiUsageRecords.subjectId, s.id), eq(aiUsageRecords.kind, "session_summary")))
-      .limit(1);
-    await recordStandaloneUsage(tx, {
-      kind: "session_summary",
-      subjectId: summarySubjectId(s.id, billedBefore === undefined, job.jobId),
-      requesterUserId: owner,
-      model: prepared.resolved.ref,
-      reported: out.usage,
-      promptText: out.promptText,
-      outputText: out.text,
+  const ctx = { organizationId, userId: owner };
+  try {
+    // Every model call that answered is billed to the owner, whatever happens to the proposal: its own transaction.
+    await core.db.withTenant(ctx, async (tx) => {
+      const [billedBefore] = await tx
+        .select({ id: aiUsageRecords.id })
+        .from(aiUsageRecords)
+        .where(and(eq(aiUsageRecords.subjectId, s.id), eq(aiUsageRecords.kind, "session_summary")))
+        .limit(1);
+      await recordStandaloneUsage(tx, {
+        kind: "session_summary",
+        subjectId: summarySubjectId(s.id, billedBefore === undefined, job.jobId),
+        requesterUserId: owner,
+        model: prepared.resolved.ref,
+        reported: out.usage,
+        promptText: out.promptText,
+        outputText: out.text,
+      });
     });
-    if (!out.text.trim()) return fail(core, deps.perms, tx, s, owner, prepared.unitId, "empty_summary");
-    const result = await deps.memory.propose(tx, proposal, prescan);
-    if ("refused" in result) return fail(core, deps.perms, tx, s, owner, prepared.unitId, result.refused);
-    await setState(tx, s.id, {
-      status: "proposed",
-      unitId: prepared.unitId,
-      approvalId: result.approvalId,
-      summarizedSeq: prepared.input.lastSeq,
-      auto: prepared.auto,
-      errorCode: null,
+    await core.db.withTenant(ctx, async (tx) => {
+      if (!out.text.trim()) return fail(core, deps.perms, tx, s, owner, prepared.unitId, "empty_summary");
+      const result = await deps.memory.propose(tx, proposal, prescan);
+      if ("refused" in result) return fail(core, deps.perms, tx, s, owner, prepared.unitId, result.refused);
+      await setState(tx, s.id, {
+        status: "proposed",
+        unitId: prepared.unitId,
+        approvalId: result.approvalId,
+        summarizedSeq: prepared.input.lastSeq,
+        auto: prepared.auto,
+        errorCode: null,
+      });
+      await core.audit.record(tx, {
+        action: "work_session.summary_proposed",
+        resourceType: "work_session",
+        resourceId: s.id,
+        actorKind: "system",
+        actorId: null,
+        userId: owner,
+        sessionId: s.id,
+        deviceId: s.deviceId,
+        metadata: { approvalId: result.approvalId, unitId: prepared.unitId, auto: prepared.auto },
+      });
+      await announceAfterCommit(core, deps.perms, tx, s);
     });
-    await core.audit.record(tx, {
-      action: "work_session.summary_proposed",
-      resourceType: "work_session",
-      resourceId: s.id,
-      actorKind: "system",
-      actorId: null,
-      userId: owner,
-      sessionId: s.id,
-      deviceId: s.deviceId,
-      metadata: { approvalId: result.approvalId, unitId: prepared.unitId, auto: prepared.auto },
-    });
-    await announceAfterCommit(core, deps.perms, tx, s);
-  });
+  } catch (err) {
+    // 07.6 review C ME-01: never leave the claim in `writing` (a retry could not take it for 10 minutes and the strip
+    // would spin). Failed in a fresh transaction; not rethrown, so a deterministic error is not re-billed by retries
+    // (the owner's Try again proposes once more). If even this fails, the job is retried and the stale claim recovers.
+    core.log.warn(
+      { workSessionId, code: (err as { code?: string; name?: string })?.code ?? (err as Error)?.name },
+      "work session summary proposal failed",
+    );
+    await core.db.withTenant(ctx, (tx) =>
+      fail(core, deps.perms, tx, s, owner, prepared.unitId, "propose_error"),
+    );
+  }
 }

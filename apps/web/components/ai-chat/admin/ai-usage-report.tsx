@@ -6,7 +6,7 @@ import { type ReactNode, useState } from "react";
 import { MeteredBadge } from "@/components/bots/provider-bits";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatCostMicros, formatTokens } from "@/lib/ai-format";
+import { formatCostMicros, formatTokens, usageCostEstimated, usageRowKindText } from "@/lib/ai-format";
 import { type UsageGrouping, type UsageWindow, useAiUsageReport } from "@/lib/ai-usage-queries";
 import { useCan } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
@@ -129,7 +129,6 @@ const shortDay = (day: string) =>
     day: "numeric",
     timeZone: "UTC",
   });
-const isTitles = (row: AiUsageReportRow) => row.key.endsWith(" · titles");
 const plural = (n: number, one: string, many = `${one}s`) =>
   `${n.toLocaleString("en-US")} ${n === 1 ? one : many}`;
 
@@ -145,12 +144,9 @@ export function BackendTag({ backend }: { backend: AiUsageReportRow["backend"] }
 }
 
 /** "~$0.12" (some counts estimated), "$0", "Not billed" on a member's plan, "—" when nothing is priced. */
-function costText(
-  row: { costMicrosUsd: number | null; estimatedGenerations: number },
-  backend?: string | null,
-) {
+function costText(row: { costMicrosUsd: number | null; estimatedRecords: number }, backend?: string | null) {
   if (backend === "chatgpt_plan") return "Not billed";
-  return formatCostMicros(row.costMicrosUsd, row.estimatedGenerations > 0 && (row.costMicrosUsd ?? 0) > 0);
+  return formatCostMicros(row.costMicrosUsd, usageCostEstimated(row));
 }
 
 /** A thin single-hue bar: the row's share of the organization's cost in the period. */
@@ -206,8 +202,8 @@ function ReportBody({ report, days, stale }: { report: Report; days: UsageWindow
               <span className="hidden sm:inline">Organization cost</span>
             </>
           }
-          value={formatCostMicros(t.costMicrosUsd ?? 0, t.estimatedGenerations > 0 && totalCost > 0)}
-          detail={t.estimatedGenerations > 0 ? `${t.estimatedGenerations} estimated` : "API keys"}
+          value={formatCostMicros(t.costMicrosUsd ?? 0, t.estimatedRecords > 0 && totalCost > 0)}
+          detail={t.estimatedRecords > 0 ? `${t.estimatedRecords} estimated` : "API keys"}
         />
       </dl>
 
@@ -240,7 +236,7 @@ function ReportBody({ report, days, stale }: { report: Report; days: UsageWindow
                   </span>
                 </th>
                 <Td testId="ai-usage-answers">
-                  {isTitles(row) ? "—" : row.generations.toLocaleString("en-US")}
+                  {usageRowKindText(row) ? "—" : row.generations.toLocaleString("en-US")}
                 </Td>
                 <Td testId="ai-usage-input" title={`${row.inputTokens.toLocaleString("en-US")} input tokens`}>
                   {formatTokens(row.inputTokens)}
@@ -303,9 +299,7 @@ function ReportBody({ report, days, stale }: { report: Report; days: UsageWindow
               </span>
             </div>
             <p className="text-muted-foreground text-xs tabular-nums">
-              {isTitles(row) ? (
-                "Chat titles"
-              ) : (
+              {usageRowKindText(row) ?? (
                 <span data-testid="ai-usage-answers">{plural(row.generations, "answer")}</span>
               )}
               {" · "}
@@ -333,7 +327,7 @@ function ReportBody({ report, days, stale }: { report: Report; days: UsageWindow
         {t.estimatedGenerations > 0
           ? `${plural(t.estimatedGenerations, "answer")} of ${t.generations.toLocaleString("en-US")} ${t.estimatedGenerations === 1 ? "was" : "were"} estimated (~): stopped, interrupted or failed before the provider reported usage; a failed answer's estimate errs high. `
           : ""}
-        Days are UTC. Title generation counts tokens and cost, not answers.
+        Days are UTC. Titles, digest summaries and session summaries count tokens and cost, not answers.
       </p>
     </div>
   );

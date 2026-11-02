@@ -1,5 +1,6 @@
 import {
   type DigestPreview,
+  type DigestSaveRequest,
   DigestSection,
   type DigestSettings,
   type DigestTestResponse,
@@ -9,7 +10,7 @@ import {
   ModelRef,
   type Weekday,
 } from "@ocw/contracts";
-import { automationRuns, automations, type Tx } from "@ocw/db";
+import { automationRuns, automations, type TenantCtx, type Tx } from "@ocw/db";
 import { and, count, desc, eq, gte, isNotNull, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { ApiModule, Core } from "../../core";
@@ -31,6 +32,8 @@ import {
   decideTarget,
   firstRunAt,
   type RunRow,
+  refusalReason,
+  type SettledFireResult,
   usableBots,
   validateSchedule,
 } from "../automation";
@@ -59,6 +62,11 @@ import { registerDigestRoutes } from "./routes";
  * model sees only the composed list), and posts it in the person's DM as the bot. Never a cell turn: the platform
  * posts the message itself, so the bot's model never reads it.
  *
+ * With a summary, a send has three phases like a Work Zone summary (07.6 review C HI-01): compose, count the cap and
+ * claim the run in a short transaction (the run stays `queued`); the model call with no transaction open; then the
+ * usage record committed on its own (billed whatever happens next) and the post in a second short transaction that
+ * re-locks the run. A test send is one at a time per person (a try-lock, then a still-queued test answers 409).
+ *
  * Audit (ids, codes and counts only): `digest.saved`, `digest.sent` (section counts, summary state); the automation
  * service's own `automation.created` / `automation.paused` on the first save; the runner's `automation.run_skipped`
  * (`nothing_new`) and `automation.run_failed`.
@@ -82,8 +90,10 @@ type DigestConfig = z.infer<typeof DigestConfig>;
 const DIGEST_RUNS_PER_DAY = 5;
 /** "Since the last digest": without one, the last 24 hours. */
 const FIRST_WINDOW_MS = 24 * 60 * 60 * 1000;
-/** The summary call's deadline (it runs inside the fire transaction). */
+/** The summary call's deadline (outside any transaction). */
 const SUMMARY_TIMEOUT_MS = 20_000;
+/** A test run still `queued` after this is a send that died: it no longer blocks the next test. */
+const TEST_IN_FLIGHT_MS = 2 * 60_000;
 const DIGEST_NAME = "Digest";
 
 const WEEKDAYS: readonly Weekday[] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
@@ -104,6 +114,8 @@ export function scheduleOfCron(cron: string): { days: Weekday[]; time: string } 
 const notAllowed = () => new HttpError(403, "not_allowed", "You can't have a digest. Ask an admin.");
 const botNotReadable = () =>
   new HttpError(400, "bot_not_readable", "Pick a bot you can message to deliver it.");
+const testInProgress = () =>
+  new HttpError(409, "test_in_progress", "A test digest is already on its way. Try again in a moment.");
 
 function configOf(a: AutomationRow): DigestConfig {
   const parsed = DigestConfig.safeParse(a.config);
@@ -118,16 +130,32 @@ const sameRef = (a: ModelRef, b: ModelRef) =>
 
 export interface DigestService {
   view(tx: Tx, actor: AutomationActor): Promise<DigestView>;
-  save(tx: Tx, actor: AutomationActor, settings: DigestSettings): Promise<DigestView>;
+  save(tx: Tx, actor: AutomationActor, settings: DigestSaveRequest): Promise<DigestView>;
   preview(tx: Tx, actor: AutomationActor, settings: DigestSettings): Promise<DigestPreview>;
-  test(tx: Tx, actor: AutomationActor): Promise<DigestTestResponse>;
+  /** Sends the saved digest now; opens its own short transactions (the summary's model call runs between them). */
+  test(ctx: TenantCtx, actor: AutomationActor): Promise<DigestTestResponse>;
   /** The `digest` action kind the runner fires. */
   action: ActionKindHandler;
 }
 
-type SendResult =
-  | { sent: false }
-  | { sent: true; conversationId: string; messageId: string; summary: "off" | "added" | "skipped" };
+type Sent = { conversationId: string; messageId: string; summary: "off" | "added" | "skipped" };
+type SummaryNote = "summary_skipped_limit" | "summary_failed";
+
+/** A run composed and claimed, whose summary the model writes next (outside any transaction). */
+interface PendingSummary {
+  a: AutomationRow;
+  run: RunRow;
+  resolved: ResolvedModel;
+  list: { markdown: string; empty: boolean };
+  items: DigestItems;
+  counts: Record<DigestSection, number>;
+  sections: readonly DigestSection[];
+  timeZone: string;
+  now: Date;
+}
+
+/** Phase 1's outcome: nothing to send, sent already (no model call), or the summary to write. */
+type Begun = { kind: "skip" } | { kind: "sent"; sent: Sent } | { kind: "summary"; pending: PendingSummary };
 
 export function createDigestService(core: Core, deps: DigestDeps): DigestService {
   const { perms, automation, modelGateway } = deps;
@@ -188,14 +216,14 @@ export function createDigestService(core: Core, deps: DigestDeps): DigestService
   }
 
   /**
-   * The optional AI summary (P-16): the person's chosen model (or their default) through the gateway, on their
-   * credential, counted against their AI chat cap before any call, billed as one `digest` usage record whose subject is
-   * the run. The model sees only `list` (the composed Markdown), never a message body.
+   * The optional AI summary's phase 1 (P-16), in the person's transaction: the person's chosen model (or their
+   * default) through the gateway, on their credential, counted against their AI chat cap before any call. No model call
+   * here: the caller makes it after this transaction commits.
    */
-  async function summarize(
+  async function claimSummary(
     tx: Tx,
-    p: { userId: string; modelRef: ModelRef | null; runId: string; list: string },
-  ): Promise<{ text: string } | { skipped: "summary_skipped_limit" | "summary_failed" }> {
+    p: { userId: string; modelRef: ModelRef | null },
+  ): Promise<{ resolved: ResolvedModel } | { skipped: SummaryNote }> {
     const models = await modelGateway.listModels(tx, p.userId);
     const ref = p.modelRef
       ? models.models.find((m) => m.available && sameRef(m.ref, p.modelRef as ModelRef))?.ref
@@ -213,72 +241,169 @@ export function createDigestService(core: Core, deps: DigestDeps): DigestService
       policy: await loadAiChatPolicy(tx),
     });
     if (!counted.ok) return { skipped: "summary_skipped_limit" };
-    let out: Awaited<ReturnType<typeof runOneShot>>;
-    try {
-      out = await runOneShot(resolved, summaryInput(p.list), { timeoutMs: SUMMARY_TIMEOUT_MS });
-    } catch (err) {
-      const code =
-        err instanceof DOMException ? "model_timeout" : (modelGateway.classify(err).code ?? "error");
-      core.log.warn({ runId: p.runId, code }, "digest summary failed");
-      return { skipped: "summary_failed" };
-    }
-    // Every call that answered is billed to the person, once per run.
-    await recordStandaloneUsage(tx, {
-      kind: "digest",
-      subjectId: p.runId,
-      requesterUserId: p.userId,
-      model: resolved.ref,
-      reported: out.usage,
-      promptText: out.promptText,
-      outputText: out.text,
-    });
-    const text = out.text.trim();
-    return text ? { text } : { skipped: "summary_failed" };
+    return { resolved };
   }
 
   /**
-   * Composes and posts one run of `a` (in the person's transaction, the run row queued). `force` (a test) sends even
-   * when there is nothing new. Marks the run answered, audits `digest.sent` and tells the person.
+   * Phase 1 of one run of `a` (in the person's transaction, the run row queued): composes it, then either skips it
+   * (nothing new and skip-empty on; `force`, a test, always sends), posts it now (no summary, or the summary refused
+   * before any model call), or returns the claimed summary for `finish` to write outside the transaction.
    */
-  async function send(
+  async function begin(
     tx: Tx,
     a: AutomationRow,
     run: RunRow,
     opts: { force: boolean; now: Date },
-  ): Promise<SendResult> {
+  ): Promise<Begun> {
     const cfg = configOf(a);
     const userId = a.runAsUserId;
     const since = (await lastSent(tx, a.id, run.id)) ?? new Date(opts.now.getTime() - FIRST_WINDOW_MS);
     const { items, counts } = await collect(tx, userId, cfg.sections, since);
     const timeZone = a.timeZone ?? "UTC";
     const list = composeDigest({ date: opts.now, timeZone, sections: cfg.sections, items });
-    if (list.empty && cfg.skipEmpty && !opts.force) return { sent: false };
+    if (list.empty && cfg.skipEmpty && !opts.force) return { kind: "skip" };
 
-    let message = list;
-    let summary: "off" | "added" | "skipped" = "off";
-    let note: "summary_skipped_limit" | "summary_failed" | null = null;
+    let note: SummaryNote | null = null;
     if (cfg.summary.enabled && !list.empty) {
-      const out = await summarize(tx, {
-        userId,
-        modelRef: cfg.summary.modelRef,
-        runId: run.id,
-        list: list.markdown,
-      });
-      if ("text" in out) {
-        message = composeDigest({
-          date: opts.now,
-          timeZone,
-          sections: cfg.sections,
-          items,
-          summary: out.text,
-        });
-        summary = "added";
-      } else {
-        summary = "skipped";
-        note = out.skipped;
+      const claimed = await claimSummary(tx, { userId, modelRef: cfg.summary.modelRef });
+      if ("resolved" in claimed) {
+        return {
+          kind: "summary",
+          pending: {
+            a,
+            run,
+            resolved: claimed.resolved,
+            list,
+            items,
+            counts,
+            sections: cfg.sections,
+            timeZone,
+            now: opts.now,
+          },
+        };
       }
+      note = claimed.skipped;
     }
+    const sent = await deliver(tx, a, run, {
+      message: list.markdown,
+      empty: list.empty,
+      counts,
+      summary: note ? "skipped" : "off",
+      note,
+      now: opts.now,
+    });
+    return { kind: "sent", sent };
+  }
 
+  /**
+   * Phases 2 and 3 of a run with a summary, with no transaction open on entry: the model call under its deadline (the
+   * model sees only the composed list, never a message body); the usage record in its own transaction, so every call
+   * that answered is billed to the person once per run whatever happens to the post (ADR-0018); then the post in a
+   * short transaction that re-locks the run. Null: the run was settled meanwhile (nothing posted). Throws when the post
+   * is refused (the caller fails the run).
+   */
+  async function finish(p: PendingSummary): Promise<Sent | null> {
+    const userId = p.a.runAsUserId;
+    const ctx = { organizationId: p.a.organizationId, userId };
+    let out: Awaited<ReturnType<typeof runOneShot>> | null = null;
+    try {
+      out = await runOneShot(p.resolved, summaryInput(p.list.markdown), { timeoutMs: SUMMARY_TIMEOUT_MS });
+    } catch (err) {
+      // The digest still goes out, without its summary.
+      const code =
+        err instanceof DOMException ? "model_timeout" : (modelGateway.classify(err).code ?? "error");
+      core.log.warn({ runId: p.run.id, code }, "digest summary failed");
+    }
+    if (out) {
+      const answered = out;
+      // A failure to record it fails the run (thrown): never a summary posted without its usage record.
+      await core.db.withTenant(ctx, (tx) =>
+        recordStandaloneUsage(tx, {
+          kind: "digest",
+          subjectId: p.run.id,
+          requesterUserId: userId,
+          model: p.resolved.ref,
+          reported: answered.usage,
+          promptText: answered.promptText,
+          outputText: answered.text,
+        }),
+      );
+    }
+    const text = out?.text.trim() ?? "";
+    const message = text
+      ? composeDigest({
+          date: p.now,
+          timeZone: p.timeZone,
+          sections: p.sections,
+          items: p.items,
+          summary: text,
+        }).markdown
+      : p.list.markdown;
+    return core.db.withTenant(ctx, async (tx) => {
+      // Run first, then its automation (the runner's lock order). Settled meanwhile, or the digest deleted: no post.
+      const [run] = await tx
+        .select()
+        .from(automationRuns)
+        .where(eq(automationRuns.id, p.run.id))
+        .for("update");
+      if (run?.status !== "queued") return null;
+      const [a] = await tx.select().from(automations).where(eq(automations.id, p.a.id)).for("update");
+      if (!a) return null;
+      return deliver(tx, p.a, run, {
+        message,
+        empty: p.list.empty,
+        counts: p.counts,
+        summary: text ? "added" : "skipped",
+        note: text ? null : "summary_failed",
+        now: p.now,
+      });
+    });
+  }
+
+  /** Fails a test run that `finish` could not send (fresh transaction; the run is left as it is once settled). */
+  async function failTest(ctx: TenantCtx, p: PendingSummary, err: unknown): Promise<void> {
+    await core.db.withTenant(ctx, async (tx) => {
+      const reason = refusalReason(err);
+      const [failed] = await tx
+        .update(automationRuns)
+        .set({ status: "failed", reason, updatedAt: sql`now()` })
+        .where(and(eq(automationRuns.id, p.run.id), eq(automationRuns.status, "queued")))
+        .returning({ id: automationRuns.id });
+      if (!failed) return;
+      await core.audit.record(tx, {
+        action: "automation.run_failed",
+        resourceType: "automation_run",
+        resourceId: p.run.id,
+        userId: p.a.runAsUserId,
+        agentId: p.a.agentId,
+        metadata: { automationId: p.a.id, runId: p.run.id, trigger: p.run.trigger, reason },
+      });
+      await core.realtime.appendEvent(tx, `user:${p.a.runAsUserId}`, EventTypes.automationRunUpdated, {
+        automationId: p.a.id,
+        runId: p.run.id,
+      });
+    });
+  }
+
+  /**
+   * Posts a composed run of `a` in the person's DM as the bot (in the person's transaction, the run row queued and
+   * locked). Marks the run answered, audits `digest.sent` and tells the person.
+   */
+  async function deliver(
+    tx: Tx,
+    a: AutomationRow,
+    run: RunRow,
+    m: {
+      message: string;
+      empty: boolean;
+      counts: Record<DigestSection, number>;
+      summary: Sent["summary"];
+      note: SummaryNote | null;
+      now: Date;
+    },
+  ): Promise<Sent> {
+    const userId = a.runAsUserId;
+    const { summary, note, counts } = m;
     const dm = await ensureAgentDm(
       tx,
       { audit: core.audit, realtime: core.realtime, perms },
@@ -289,11 +414,11 @@ export function createDigestService(core: Core, deps: DigestDeps): DigestService
       agentId: a.agentId,
       conversationId: dm.conversationId,
       threadRootId: null,
-      body: message.markdown,
+      body: m.message,
       idempotencyKey: digestMessageKey(run.id),
       onBehalfOfUserId: userId,
     });
-    const at = opts.now.toISOString();
+    const at = m.now.toISOString();
     await tx
       .update(automationRuns)
       .set({
@@ -321,7 +446,7 @@ export function createDigestService(core: Core, deps: DigestDeps): DigestService
         conversationId: dm.conversationId,
         messageId: posted.messageId,
         counts,
-        empty: list.empty,
+        empty: m.empty,
         summary,
         ...(note ? { reason: note } : {}),
       },
@@ -330,7 +455,7 @@ export function createDigestService(core: Core, deps: DigestDeps): DigestService
       automationId: a.id,
       runId: run.id,
     });
-    return { sent: true, conversationId: dm.conversationId, messageId: posted.messageId, summary };
+    return { conversationId: dm.conversationId, messageId: posted.messageId, summary };
   }
 
   function settingsOf(a: AutomationRow): DigestSettings {
@@ -370,6 +495,7 @@ export function createDigestService(core: Core, deps: DigestDeps): DigestService
       const last = row ? await lastSent(tx, row.id) : null;
       return {
         settings: row ? settingsOf(row) : null,
+        version: row?.version ?? null,
         automationId: row?.id ?? null,
         nextRunAt: row?.status === "active" && row.nextRunAt ? new Date(row.nextRunAt).toISOString() : null,
         lastSentAt: last ? last.toISOString() : null,
@@ -402,6 +528,11 @@ export function createDigestService(core: Core, deps: DigestDeps): DigestService
       // One digest per person (P-14): two first saves at once serialise here, then find the row.
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`digest:${userId}`}, 0))`);
       const before = await own(tx, userId, true);
+      // Saved from the version the person edited (LO-06): anything else changed it since (a pause from the automations
+      // list, another tab), and saving would silently undo that. Omitted by an API client: last write wins.
+      if (s.expectedVersion !== undefined && s.expectedVersion !== (before?.version ?? null)) {
+        throw new HttpError(409, "version", "Your digest changed since you opened it. Reload it.");
+      }
       let id: string;
       if (!before) {
         const created = await automation.create(
@@ -457,10 +588,10 @@ export function createDigestService(core: Core, deps: DigestDeps): DigestService
             version: before.version + 1,
             updatedAt: sql`now()`,
           })
-          .where(and(eq(automations.id, before.id), eq(automations.version, before.version)))
+          .where(eq(automations.id, before.id))
           .returning();
-        if (!after)
-          throw new HttpError(409, "version", "Your digest changed while you were saving. Reload it.");
+        // Locked above (FOR UPDATE): the row is there and at `before.version`.
+        if (!after) throw new Error("the locked digest row was not updated");
         await automation.announce(tx, after);
       }
       await core.audit.record(tx, {
@@ -492,48 +623,93 @@ export function createDigestService(core: Core, deps: DigestDeps): DigestService
       return composeDigest({ date: now, timeZone: s.timeZone, sections: s.sections, items });
     },
 
-    async test(tx, actor) {
-      await allowed(tx, actor);
-      const a = await own(tx, actor.userId, true);
-      if (!a) throw new HttpError(409, "not_saved", "Save your digest first.");
-      const target = await decideTarget(tx, perms, {
-        agentId: a.agentId,
-        userId: actor.userId,
-        target: { kind: "dm" },
+    async test(ctx, actor) {
+      const begun = await core.db.withTenant(ctx, async (tx) => {
+        await allowed(tx, actor);
+        // One test at a time per person: a concurrent one is refused now, never queued on the digest's row lock.
+        const lock = await tx.execute(
+          sql`select pg_try_advisory_xact_lock(hashtextextended(${`digest:test:${actor.userId}`}, 0)) as ok`,
+        );
+        if (!(lock.rows[0] as { ok?: boolean } | undefined)?.ok) throw testInProgress();
+        const a = await own(tx, actor.userId, true);
+        if (!a) throw new HttpError(409, "not_saved", "Save your digest first.");
+        const target = await decideTarget(tx, perms, {
+          agentId: a.agentId,
+          userId: actor.userId,
+          target: { kind: "dm" },
+        });
+        if (!target.ok) throw botNotReadable();
+        // A test whose summary is still being written (its run committed `queued`) finishes first.
+        const [inFlight] = await tx
+          .select({ id: automationRuns.id })
+          .from(automationRuns)
+          .where(
+            and(
+              eq(automationRuns.automationId, a.id),
+              eq(automationRuns.trigger, "manual"),
+              eq(automationRuns.status, "queued"),
+              gte(automationRuns.createdAt, new Date(Date.now() - TEST_IN_FLIGHT_MS).toISOString()),
+            ),
+          )
+          .limit(1);
+        if (inFlight) throw testInProgress();
+        // The same daily budget as its scheduled runs.
+        const [today] = await tx
+          .select({ n: count() })
+          .from(automationRuns)
+          .where(
+            and(
+              eq(automationRuns.automationId, a.id),
+              ne(automationRuns.status, "skipped"),
+              gte(automationRuns.createdAt, new Date(Date.now() - FIRST_WINDOW_MS).toISOString()),
+            ),
+          );
+        if (Number(today?.n ?? 0) >= a.maxRunsPerDay) {
+          throw new HttpError(
+            429,
+            "runs_per_day",
+            "You've sent enough test digests today. Try again tomorrow.",
+          );
+        }
+        const [run] = await tx
+          .insert(automationRuns)
+          .values({
+            organizationId: a.organizationId,
+            automationId: a.id,
+            trigger: "manual",
+            status: "queued",
+          })
+          .returning();
+        return begin(tx, a, run as RunRow, { force: true, now: new Date() });
       });
-      if (!target.ok) throw botNotReadable();
-      // The same daily budget as its scheduled runs.
-      const [today] = await tx
-        .select({ n: count() })
-        .from(automationRuns)
-        .where(
-          and(
-            eq(automationRuns.automationId, a.id),
-            ne(automationRuns.status, "skipped"),
-            gte(automationRuns.createdAt, new Date(Date.now() - FIRST_WINDOW_MS).toISOString()),
-          ),
-        );
-      if (Number(today?.n ?? 0) >= a.maxRunsPerDay) {
-        throw new HttpError(
-          429,
-          "runs_per_day",
-          "You've sent enough test digests today. Try again tomorrow.",
-        );
+      if (begun.kind === "skip") throw new Error("a forced digest is always sent");
+      if (begun.kind === "sent") {
+        return { conversationId: begun.sent.conversationId, messageId: begun.sent.messageId };
       }
-      const [run] = await tx
-        .insert(automationRuns)
-        .values({ organizationId: a.organizationId, automationId: a.id, trigger: "manual", status: "queued" })
-        .returning();
-      const out = await send(tx, a, run as RunRow, { force: true, now: new Date() });
-      if (!out.sent) throw new Error("a forced digest is always sent");
-      return { conversationId: out.conversationId, messageId: out.messageId };
+      let sent: Sent | null;
+      try {
+        sent = await finish(begun.pending);
+      } catch (err) {
+        await failTest(ctx, begun.pending, err);
+        throw err;
+      }
+      if (!sent) throw new HttpError(409, "test_in_progress", "This test digest was settled meanwhile.");
+      return { conversationId: sent.conversationId, messageId: sent.messageId };
     },
 
     action: {
       async fire(tx, { run, automation: a }) {
-        const out = await send(tx, a, run, { force: false, now: new Date() });
-        if (!out.sent) return { status: "skipped", reason: "nothing_new" };
-        return { status: "answered", anchorMessageId: out.messageId };
+        const begun = await begin(tx, a, run, { force: false, now: new Date() });
+        if (begun.kind === "skip") return { status: "skipped", reason: "nothing_new" };
+        if (begun.kind === "sent") return { status: "answered", anchorMessageId: begun.sent.messageId };
+        // The model call after the runner's transaction commits (HI-01); the runner records a refused post.
+        return {
+          status: "continue",
+          after: async (): Promise<SettledFireResult | null> => {
+            const sent = await finish(begun.pending);
+            return sent ? { status: "answered", anchorMessageId: sent.messageId } : null;
+          },
+        };
       },
     },
   };

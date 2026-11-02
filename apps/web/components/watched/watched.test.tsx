@@ -21,7 +21,7 @@ import {
   watchRefusal,
   watchState,
 } from "@/lib/watched-queries";
-import { defaultConnector, FieldsBox, readTools, writeTools } from "./watch-record-dialog";
+import { defaultConnector, FieldsBox, readTools, watchUpdateBody, writeTools } from "./watch-record-dialog";
 import { WatchStripRow } from "./watch-strip-row";
 import { WatchedIndicatorView } from "./watched-indicator";
 
@@ -267,6 +267,41 @@ describe("watch dialog rules (UI-SPEC 7a)", () => {
     );
     expect(shareNotice("ERP", "orders", 1)).toContain("(1 person)");
     expect(shareHref(BOARD, ID)).toBe(`/settings/connections?share=${BOARD}&connector=${ID}`);
+  });
+
+  it("an edit is diffed against the watch as the dialog opened it, at that version (07.6 review C ME-03)", () => {
+    const opened = watch({ version: 3 });
+    const form = {
+      fields: opened.fields,
+      interval: opened.checkIntervalMinutes,
+      agentId: opened.agent.id,
+      writeTool: "",
+      noteTool: "",
+    };
+    // Nothing changed: nothing to send.
+    expect(watchUpdateBody(opened, form)).toBeNull();
+    // One field changed: only that field, with the version the editor saw (never a newer one from a refetch, whose
+    // other changes the form would otherwise silently revert; the API answers 409 instead).
+    expect(watchUpdateBody(opened, { ...form, interval: 15 })).toEqual({
+      expectedVersion: 3,
+      checkIntervalMinutes: 15,
+    });
+    expect(
+      watchUpdateBody(opened, {
+        ...form,
+        fields: [...opened.fields, { pointer: "/total", label: "Total" }],
+        writeTool: "update_record",
+      }),
+    ).toEqual({
+      expectedVersion: 3,
+      fields: [...opened.fields, { pointer: "/total", label: "Total" }],
+      writeTool: "update_record",
+    });
+    const ctx = { connector: "ERP", recordId: "SO-1", channel: "orders" };
+    expect(watchRefusal(new ApiRequestError(409, "version_conflict", "x"), ctx)).toEqual({
+      at: "form",
+      text: "This watch changed since you opened it. Close it and open it again to see the changes.",
+    });
   });
 
   it("refusals in words, each where it belongs; never the connector's own text", () => {

@@ -40,6 +40,7 @@ import {
   browserTimeZone,
   DAY_LABELS,
   DIGEST_COPY,
+  type DigestBase,
   type DigestErrors,
   type DigestForm,
   formatNext,
@@ -48,6 +49,8 @@ import {
   isDirty,
   SECTIONS,
   saveBlocker,
+  saveRequest,
+  shouldResync,
   statusLine,
   summaryNotice,
   testBlocker,
@@ -586,21 +589,16 @@ export function DigestSettings() {
   const [form, setForm] = useState<DigestForm | null>(null);
   const [zoneTouched, setZoneTouched] = useState(false);
   const [preview, setPreview] = useState<DigestPreviewState>({ state: "idle" });
-  // The saved settings the form was last taken from: a live refetch (a pause from the automations list) refreshes an
-  // untouched form, never one with the person's unsaved changes.
-  const syncedFrom = useRef<string | null>(null);
+  // The saved digest the form was last taken from (settings and version): a live refetch (a pause from the automations
+  // list) refreshes an untouched form, never one with the person's unsaved changes, whose save then carries the version
+  // they edited (a 409 instead of silently undoing the pause; 07.6 review C LO-06).
+  const syncedFrom = useRef<DigestBase | null>(null);
 
   const view = digest.data;
   useEffect(() => {
     if (!view) return;
-    const key = JSON.stringify(view.settings);
-    if (form) {
-      if (syncedFrom.current === key) return;
-      const before =
-        syncedFrom.current === null ? null : (JSON.parse(syncedFrom.current) as DigestView["settings"]);
-      if (isDirty(form, { settings: before })) return;
-    }
-    syncedFrom.current = key;
+    if (!shouldResync(form, syncedFrom.current, view)) return;
+    syncedFrom.current = { settings: view.settings, version: view.version };
     setForm(formFromView(view, browserTimeZone()));
   }, [view, form]);
 
@@ -643,16 +641,35 @@ export function DigestSettings() {
       setZoneTouched(true);
       return;
     }
-    save.mutate(toSettings(form), {
+    save.mutate(saveRequest(form, syncedFrom.current), {
       onSuccess: (next) => {
-        syncedFrom.current = JSON.stringify(next.settings);
+        syncedFrom.current = { settings: next.settings, version: next.version };
         setForm(formFromView(next, form.timeZone));
         if (!next.settings?.enabled) toast.success(DIGEST_COPY.turnedOff);
         else if (next.nextRunAt && next.settings)
           toast.success(DIGEST_COPY.saved(formatNext(next.nextRunAt, next.settings.timeZone)));
         else toast.success("Digest saved.");
       },
-      onError: (err) => toast.error("Couldn't save your digest", { description: errorMessage(err) }),
+      onError: (err) => {
+        if (isApiError(err, 409) && err.code === "version") {
+          // Changed elsewhere since it was opened: Reload takes the saved digest (the edits here are not saved).
+          toast.error(DIGEST_COPY.changedElsewhere, {
+            action: {
+              label: DIGEST_COPY.reload,
+              onClick: () => {
+                syncedFrom.current = null;
+                void digest.refetch().then((r) => {
+                  if (!r.data) return;
+                  syncedFrom.current = { settings: r.data.settings, version: r.data.version };
+                  setForm(formFromView(r.data, browserTimeZone()));
+                });
+              },
+            },
+          });
+          return;
+        }
+        toast.error("Couldn't save your digest", { description: errorMessage(err) });
+      },
     });
   };
 

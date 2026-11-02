@@ -27,6 +27,7 @@ export type {
   AutomationSeamDeps,
   FireResult,
   RunRow,
+  SettledFireResult,
   TriggerAdapter,
   TriggerDeps,
 } from "./actions";
@@ -43,6 +44,7 @@ export {
   DEFAULT_AUTOMATION_CAPS,
   targetOf,
 } from "./service";
+export { refusalReason } from "./targets";
 
 export type AutomationActionKind = "agent_turn" | "digest";
 

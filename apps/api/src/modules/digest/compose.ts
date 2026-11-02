@@ -7,7 +7,8 @@ import { AUTOMATION_LIMITS, type DigestSection } from "@ocw/contracts";
  * Every link is a same-origin relative path built from ids (`/approvals/<id>`, `/chat/<id>?m=<id>`, `/work-zone/<id>`,
  * `/settings/digest`), so the web's `safeUrl` keeps it and it says nothing to someone who cannot open it. Every text
  * that came from a person, a bot or a model (titles, names, the summary) is flattened to one line, cut and escaped, so
- * it can never open a link, an image, a heading or HTML in the message.
+ * it can never open a link (GFM's bare `https://…`, `www.…` and e-mail autolinks included), an image, a heading or
+ * HTML in the message.
  */
 
 /** One line of a section. */
@@ -47,12 +48,18 @@ export const NOTHING_NEW = "Nothing new since your last digest.";
 
 /**
  * One line of untrusted text as inert Markdown: whitespace (newlines included) collapsed, cut to `max` characters, and
- * every character that could start Markdown or HTML escaped with a backslash.
+ * every character that could start Markdown or HTML escaped with a backslash. GFM's autolink literals are broken the
+ * same way (07.6 review C LO-02: the web's `safeUrl` keeps http, https and mailto, so a bare `https://…`, `www.…` or
+ * `name@host` would otherwise be a clickable link in a message the person's bot posts); they still read as typed.
  */
 export function escapeMarkdown(text: string, max: number): string {
   const flat = text.replace(/\s+/g, " ").trim();
   const cut = flat.length > max ? `${flat.slice(0, max - 1).trimEnd()}…` : flat;
-  return cut.replace(/[\\`*_{}[\]()<>#!|~&]/g, "\\$&");
+  return cut
+    .replace(/[\\`*_{}[\]()<>#!|~&]/g, "\\$&")
+    .replace(/\b(https?):(?=\/\/)/gi, "$1\\:")
+    .replace(/\b(www)\./gi, "$1\\.")
+    .replace(/@/g, "\\@");
 }
 
 /** A same-origin relative path: `/` then anything but a second slash or a backslash (never `//host`, never a scheme). */

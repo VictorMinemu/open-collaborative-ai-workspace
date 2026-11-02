@@ -10,6 +10,8 @@ import {
   limitNoticeText,
   payerLabel,
   queueText,
+  usageCostEstimated,
+  usageRowKindText,
   usageTitle,
 } from "./ai-format";
 
@@ -68,6 +70,24 @@ describe("formatCostMicros", () => {
     expect(formatCostMicros(345_000, false)).toBe("$0.35");
     expect(formatCostMicros(12_345_678, false)).toBe("$12.35");
     expect(formatCostMicros(0, false)).toBe("$0");
+  });
+});
+
+describe("usage report rows by kind (07.6 review C LO-01)", () => {
+  it("titles, digests and session summaries are named, never '0 answers'; chat and people rows count answers", () => {
+    expect(usageRowKindText({ kind: "title" })).toBe("Chat titles");
+    expect(usageRowKindText({ kind: "digest" })).toBe("Digest summaries");
+    expect(usageRowKindText({ kind: "session_summary" })).toBe("Session summaries");
+    expect(usageRowKindText({ kind: "chat" })).toBeNull();
+    expect(usageRowKindText({})).toBeNull();
+  });
+
+  it("a cost is approximate (~) when any of its records was estimated, whatever the kind", () => {
+    expect(usageCostEstimated({ costMicrosUsd: 4000, estimatedRecords: 1 })).toBe(true);
+    expect(usageCostEstimated({ costMicrosUsd: 4000, estimatedRecords: 0 })).toBe(false);
+    // Nothing billed: nothing to approximate.
+    expect(usageCostEstimated({ costMicrosUsd: 0, estimatedRecords: 2 })).toBe(false);
+    expect(usageCostEstimated({ costMicrosUsd: null, estimatedRecords: 2 })).toBe(false);
   });
 });
 
