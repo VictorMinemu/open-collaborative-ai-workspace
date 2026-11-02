@@ -124,16 +124,27 @@ const mailbox = (vaultItemId: string, extra: Json = {}) => ({
   ...extra,
 });
 
-/** Víctor's mail automation into #purchasing (the Received card and a read-only turn for Scout). */
-function createMailAutomation(vaultItemId: string, extra: Json = {}, as = s.victor) {
-  return as.request("POST", "/api/v1/automations", {
+/**
+ * Víctor's mail automation into #purchasing (the Received card and a read-only turn for Scout). A save answers before
+ * its baseline poll ends (MD-04); this waits for it, so a test sees the mailbox as the first poll left it.
+ */
+async function createMailAutomation(vaultItemId: string, extra: Json = {}, as = s.victor): Promise<Res> {
+  const res = (await as.request("POST", "/api/v1/automations", {
     name: `Supplier inbox ${randomUUID().slice(0, 6)}`,
     agentId: s.scoutId,
     instructions: "Read new supplier orders and tell me what needs doing today.",
     trigger: { kind: "mail", mailbox: mailbox(vaultItemId, extra) },
     target: { kind: "channel", conversationId: purchasingId },
     inbound: { action: "post", askBot: true, config: {} },
-  }) as Promise<Res>;
+  })) as Res;
+  if (res.status === 201) {
+    const automationId = (res.body as Json).automation.id as string;
+    await vi.waitFor(async () => expect((await mailboxRow(automationId))?.last_polled_at).toBeTruthy(), {
+      timeout: 15_000,
+      interval: 50,
+    });
+  }
+  return res;
 }
 
 /** Makes the mailbox due, runs one tick and drains its poll job. */
@@ -704,6 +715,41 @@ describe("connections fail safely and visibly: fixed codes, verified TLS, no pri
     expect(notHis.status).toBe(400);
     expect(codeOf(notHis)).toBe("mailbox_key_not_usable");
     expect(await count()).toBe(before);
+  });
+
+  it("saving answers before the mail server does: the baseline poll runs after the response (07.6 review A MD-04)", async () => {
+    const sockets = new Set<Socket>();
+    const silent: Server = createServer((socket) => {
+      sockets.add(socket);
+    });
+    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve));
+    const port = (silent.address() as { port: number }).port;
+    try {
+      const key = await mailKey("tester@acme.test", { hosts: [`greenmail:${port}`] });
+      const started = Date.now();
+      const res = await s.victor.request("POST", "/api/v1/automations", {
+        name: `Silent inbox ${randomUUID().slice(0, 6)}`,
+        agentId: s.scoutId,
+        instructions: "Read new supplier orders.",
+        trigger: { kind: "mail", mailbox: mailbox(key, { port }) },
+        target: { kind: "channel", conversationId: purchasingId },
+        inbound: { action: "post", askBot: true, config: {} },
+      });
+      expect(res.status).toBe(201);
+      // The server never greets: the old after-commit baseline held the response for its 10 s greeting timeout.
+      expect(Date.now() - started).toBeLessThan(3_000);
+      const automationId = (res.body as Json).automation.id as string;
+      // The baseline is still talking to the server; ending its socket ends it, recorded like any poll.
+      await vi.waitFor(() => expect(sockets.size).toBe(1), { timeout: 5_000, interval: 20 });
+      for (const socket of sockets) socket.destroy();
+      await vi.waitFor(
+        async () => expect(await mailboxRow(automationId)).toMatchObject({ status: "unreachable" }),
+        { timeout: 15_000, interval: 100 },
+      );
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => silent.close(() => resolve()));
+    }
   });
 
   it("a wrong password at poll: auth_failed, backs off 30 minutes, audited once; a new password in Keychain resumes it", async () => {

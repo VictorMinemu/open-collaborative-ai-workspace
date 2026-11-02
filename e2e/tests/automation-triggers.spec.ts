@@ -501,6 +501,19 @@ test("mail through Keychain: test, save, a mail arrives as a Received card; fail
     };
     const mailId = list.automations.find((a) => a.name === "Supplier inbox")?.id ?? "";
     expect(mailId).not.toBe("");
+    // The save answers before its baseline poll ends (07.6 review A MD-04): mail is new once the baseline is taken.
+    await expect
+      .poll(
+        async () =>
+          (
+            await asSuperuser(
+              "select 1 from app.mailboxes where automation_id = $1 and last_polled_at is not null",
+              [mailId],
+            )
+          ).rowCount,
+        { timeout: 30_000, intervals: [250], message: "the mailbox baseline was taken" },
+      )
+      .toBe(1);
 
     // ---- a mail arrives: polled on the next tick (the e2e moves the next poll to now)
     const body = `Hello, please deliver order 1001 before noon. ${MAIL_CANARY} ${"Details follow. ".repeat(40)}`;

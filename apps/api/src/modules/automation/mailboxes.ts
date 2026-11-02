@@ -125,10 +125,22 @@ async function rowOf(tx: Tx, automationId: string, lock = false): Promise<Mailbo
 
 const inMinutes = (now: Date, minutes: number) => new Date(now.getTime() + minutes * MINUTE_MS).toISOString();
 
-/** After the save commits: the first poll sets the cursor to the newest message (only new mail is read). */
+/**
+ * After the save commits: the first poll sets the cursor to the newest message (only new mail is read). It starts at
+ * commit but is never awaited (07.6 review A MD-04): the save answers, and its realtime publishes go out, without
+ * waiting for a third-party server; the session is bounded by `IMAP_SESSION_MS`. Its outcome lands on the row like any
+ * poll's; if it never runs (the process stops), the first scheduled poll takes the baseline instead.
+ */
 function baselineAfterCommit(core: Core, perms: PermissionService, tx: Tx, mailboxId: string) {
   const { organizationId } = tenantOf(tx);
-  tenantOf(tx).afterCommit(() => pollMailbox(core, perms, { organizationId, mailboxId }));
+  tenantOf(tx).afterCommit(() => {
+    void pollMailbox(core, perms, { organizationId, mailboxId }).catch((err: unknown) =>
+      core.log.warn(
+        { mailboxId, err: { name: (err as Error)?.name, code: (err as { code?: unknown })?.code } },
+        "mailbox baseline failed",
+      ),
+    );
+  });
 }
 
 /** The mail trigger the automation service calls in the automation's own transaction (`service.ts`, R3). */
