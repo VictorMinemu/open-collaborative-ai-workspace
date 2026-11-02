@@ -13,6 +13,7 @@ export {
   type McpReadOptions,
   mcpReadOptions,
   oauthClientsOf,
+  orgSecretHeaders,
   probeMcpServer,
   recordProbeResult,
   replaceServerTools,
