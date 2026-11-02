@@ -223,11 +223,18 @@ async function channel(name: string, members: Array<{ kind: string; id: string }
 
 /** A session brought to `status` now (`waiting_approval` or ended), after the device's own events have landed. */
 async function setStatus(sessionId: string, status: string): Promise<void> {
-  await settled(stack, orgId);
-  await su.query("update app.work_sessions set status = $2, updated_at = now() where id = $1", [
-    sessionId,
-    status,
-  ]);
+  // The device's start acknowledgement may still land after the session showed idle: set it until it stays.
+  await eventually(async () => {
+    await settled(stack, orgId);
+    await su.query("update app.work_sessions set status = $2, updated_at = now() where id = $1", [
+      sessionId,
+      status,
+    ]);
+    await new Promise((r) => setTimeout(r, 150));
+    await settled(stack, orgId);
+    const now = await su.query("select status from app.work_sessions where id = $1", [sessionId]);
+    return now.rows[0]?.status === status;
+  });
 }
 
 async function connect(
@@ -725,5 +732,161 @@ describe("bot choice rules (D-07, T-07.6-13-04)", () => {
 
   it("a member with no bot gets bots: [] (the UI shows the create-bot box) and never another organization's digest", async () => {
     expect(await view(eve)).toMatchObject({ settings: null, automationId: null, bots: [] });
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: preview, test send, AI summary
+
+const countOf = async (sql: string, params: unknown[] = []) =>
+  Number((await su.query(`select count(*)::int as n from ${sql}`, params)).rows[0].n);
+
+const usageOf = async (subjectId: string) =>
+  (
+    await su.query(
+      "select kind, subject_id, requester_user_id, generation_id, conversation_id from app.ai_usage_records where subject_id = $1",
+      [subjectId],
+    )
+  ).rows as Json[];
+
+describe("preview and test send (R6)", () => {
+  it("preview renders the exact message for unsaved settings and stores, sends and bills nothing", async () => {
+    const mentionId = await mention(sam, salesId, "@victor preview me");
+    const before = {
+      runs: await countOf("app.automation_runs where automation_id = $1", [digestId]),
+      messages: await countOf("app.messages"),
+      usage: await countOf("app.ai_usage_records"),
+      models: stack.fake.requests().length,
+    };
+    const row = (await digestRow())[0] as Json;
+    // Unsaved: other sections, another zone, the summary switched on (a preview never calls a model).
+    const unsaved = await preview(
+      settings({
+        sections: ["mentions"],
+        timeZone: "America/New_York",
+        summary: { enabled: true, modelRef: null },
+      }),
+    );
+    expect(unsaved.markdown).toContain(`(/chat/${salesId}?m=${mentionId})`);
+    expect(unsaved.markdown).not.toContain("Work Zone");
+    expect(await countOf("app.automation_runs where automation_id = $1", [digestId])).toBe(before.runs);
+    expect(await countOf("app.messages")).toBe(before.messages);
+    expect(await countOf("app.ai_usage_records")).toBe(before.usage);
+    expect(stack.fake.requests().length).toBe(before.models);
+    expect((await digestRow())[0]).toMatchObject({ version: row.version, config: row.config });
+
+    // The saved settings' preview is exactly what "Send a test now" posts.
+    const exact = await preview(settings());
+    const sent = await ok(victor.request("POST", "/api/v1/digest/test"));
+    const msg = await messageById(sent.messageId);
+    expect(msg.conversation_id).toBe(sent.conversationId);
+    expect(msg).toMatchObject({ author_kind: "agent", author_id: scoutId });
+    expect(msg.body).toBe(exact.markdown);
+    expect(exact.empty).toBe(false);
+  });
+
+  it("Send a test now sends the saved digest to the DM even with nothing new; 409 not_saved without settings", async () => {
+    const sent = await ok(victor.request("POST", "/api/v1/digest/test"));
+    const msg = await messageById(sent.messageId);
+    expect(msg.body).toContain("Nothing new since your last digest.");
+    const run = (
+      await su.query("select * from app.automation_runs where anchor_message_id = $1", [sent.messageId])
+    ).rows[0] as Json;
+    expect(run).toMatchObject({ trigger: "manual", status: "answered", automation_id: digestId });
+    const audit = await su.query(
+      "select actor_kind, user_id from app.audit_events where action = 'digest.sent' and resource_id = $1",
+      [run.id],
+    );
+    expect(audit.rows[0]).toMatchObject({ actor_kind: "user", user_id: victorId });
+    expect(await errorOf(sam.request("POST", "/api/v1/digest/test"), 409)).toBe("not_saved");
+  });
+});
+
+describe("the optional AI summary is the person's, metered, and sees only the list (P-16, T-07.6-13-02/03)", () => {
+  it("a model that is not one of his AI chat models is refused at save", async () => {
+    const bogus = { backend: "org_key", provider: "openai", modelId: "not-a-model" };
+    expect(await errorOf(save(settings({ summary: { enabled: true, modelRef: bogus } })), 400)).toBe(
+      "model_unavailable",
+    );
+  });
+
+  it("summary on: one model call with the composed list only, the summary on top, one digest usage row for the run", async () => {
+    await ok(save(settings({ summary: { enabled: true, modelRef: null } })));
+    const secret = "SECRET-BODY-7781";
+    await mention(sam, salesId, `@victor ${secret}`);
+    const before = stack.fake.requests().length;
+    const run = await fireDigest();
+    expect(run).toMatchObject({ status: "answered", reason: null });
+    const calls = stack.fake.requests().slice(before);
+    expect(calls).toHaveLength(1);
+    const prompt = JSON.stringify(calls[0]?.body);
+    expect(prompt).toContain("<digest>");
+    expect(prompt).toContain("Unread mentions (1)");
+    expect(prompt).toContain("at most three sentences");
+    // Never a message body: the digest itself names the mention, never its text.
+    expect(prompt).not.toContain(secret);
+
+    const body = (await messageById(run.anchor_message_id)).body as string;
+    expect(body).not.toContain(secret);
+    const parts = body.split("\n\n");
+    expect(parts[0]).toMatch(/^### Your digest · /u);
+    expect(parts[1]?.length).toBeGreaterThan(0);
+    expect(parts[1]?.startsWith("**")).toBe(false);
+    expect(parts[2]?.startsWith("**Unread mentions (1)**")).toBe(true);
+    // Escaped plain text: the model cannot add a link (only the list's and the footer's).
+    expect([...(parts[1] ?? "").matchAll(/\]\(/g)]).toHaveLength(0);
+
+    expect(await usageOf(run.id)).toEqual([
+      {
+        kind: "digest",
+        subject_id: run.id,
+        requester_user_id: victorId,
+        generation_id: null,
+        conversation_id: null,
+      },
+    ]);
+    const audit = await su.query(
+      "select metadata from app.audit_events where action = 'digest.sent' and resource_id = $1",
+      [run.id],
+    );
+    expect(audit.rows[0]?.metadata).toMatchObject({ summary: "added" });
+  });
+
+  it("at his AI chat cap the digest goes without a summary (run reason summary_skipped_limit), nothing generated or billed", async () => {
+    await su.query(
+      `insert into app.ai_chat_policies (organization_id, org_key_daily_generations) values ($1, 1)
+       on conflict (organization_id) do update set org_key_daily_generations = 1`,
+      [orgId],
+    );
+    await su.query(
+      `insert into app.ai_usage_daily (organization_id, user_id, day, backend_class, generations)
+       values ($1, $2, (now() at time zone 'utc')::date, 'org_key', 1)
+       on conflict (organization_id, user_id, day, backend_class) do update set generations = 1`,
+      [orgId, victorId],
+    );
+    try {
+      await mention(sam, salesId, "@victor capped");
+      const before = stack.fake.requests().length;
+      const run = await fireDigest();
+      expect(run).toMatchObject({ status: "answered", reason: "summary_skipped_limit" });
+      expect(stack.fake.requests().length).toBe(before);
+      const parts = ((await messageById(run.anchor_message_id)).body as string).split("\n\n");
+      expect(parts[1]?.startsWith("**Unread mentions (1)**")).toBe(true);
+      expect(await usageOf(run.id)).toEqual([]);
+    } finally {
+      await su.query(
+        "update app.ai_chat_policies set org_key_daily_generations = 200 where organization_id = $1",
+        [orgId],
+      );
+    }
+  });
+
+  it("summary off: no model call", async () => {
+    await ok(save(settings()));
+    await mention(sam, salesId, "@victor no summary");
+    const before = stack.fake.requests().length;
+    const run = await fireDigest();
+    expect(run).toMatchObject({ status: "answered", reason: null });
+    expect(stack.fake.requests().length).toBe(before);
+    expect(await usageOf(run.id)).toEqual([]);
   });
 });
