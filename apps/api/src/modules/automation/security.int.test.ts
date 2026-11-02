@@ -765,6 +765,11 @@ const CASES: Record<string, Case> = {
     expect([200, 403, 404], JSON.stringify(r.body)).toContain(r.status);
     expectNothingOf(a, r);
   },
+  "GET /api/v1/watched-records/options": async (a) => {
+    const r = await req(eve(), "GET", `/api/v1/watched-records/options?conversationId=${a.boardId}`);
+    expect([403, 404], JSON.stringify(r.body)).toContain(r.status);
+    expectNothingOf(a, r);
+  },
   "POST /api/v1/watched-records": own("POST", "/api/v1/watched-records", watchBody, [400, 403, 404]),
   "POST /api/v1/watched-records/preview": own(
     "POST",
