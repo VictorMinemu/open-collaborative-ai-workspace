@@ -33,6 +33,12 @@ import { isRefusal, postAnchor, reasonSentence, refusalReason, runCardFields, ru
 /** How many due automations and stale runs one tick handles (the rest wait for the next minute). */
 const TICK_BATCH = 500;
 const NO_REPLY_MS = AUTOMATION_LIMITS.noReplyMinutes * 60_000;
+/**
+ * Fires one worker runs at once (07.6 review A MD-06): a slow fire (a digest's summary, a slow post) no longer holds
+ * every other organization's runs; each fire still locks its run and automation, so one run never fires twice. Kept
+ * small: a fire holds one of the tenant pool's 10 connections for its transaction.
+ */
+const FIRE_CONCURRENCY = 3;
 
 export interface TickResult {
   /** Runs queued (fire jobs enqueued). */
@@ -438,5 +444,7 @@ export function registerRunner(core: Core, deps: AutomationSeamDeps): void {
     const out = await tickOnce(core);
     if (out.fired + out.skipped + out.noReply > 0) core.log.info(out, "automation tick");
   });
-  core.jobs.work("automation.fire", (data, ctx) => fireRun(core, deps, data, new Date(), ctx));
+  core.jobs.work("automation.fire", (data, ctx) => fireRun(core, deps, data, new Date(), ctx), {
+    localConcurrency: FIRE_CONCURRENCY,
+  });
 }

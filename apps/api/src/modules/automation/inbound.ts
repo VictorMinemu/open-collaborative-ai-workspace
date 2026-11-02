@@ -569,7 +569,10 @@ export async function purgeInbound(core: Core, now: Date = new Date()): Promise<
  * the daily content purge (03:17 UTC, once across replicas). Tests drain `automation.inbound` and call `purgeInbound`.
  */
 export function registerInbound(core: Core, deps: AutomationSeamDeps): void {
-  core.jobs.work("automation.inbound", (data, ctx) => processInbound(core, deps, data, new Date(), ctx));
+  // Two items at a time per worker (MD-06): items of one automation still go one by one under its row lock.
+  core.jobs.work("automation.inbound", (data, ctx) => processInbound(core, deps, data, new Date(), ctx), {
+    localConcurrency: 2,
+  });
   core.jobs.schedule("maintenance.daily", "17 3 * * *");
   core.jobs.work("maintenance.daily", async () => {
     const purged = await purgeInbound(core);
