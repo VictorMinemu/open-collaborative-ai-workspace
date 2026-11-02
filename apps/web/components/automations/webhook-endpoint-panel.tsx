@@ -41,7 +41,9 @@ const TOUCH = "max-md:h-11";
 /**
  * The webhook of a saved automation (07.6-18, D-07, R3, R4, UI-SPEC Surface 3): the endpoint URL with copy, the
  * locked secret line (`Set {date} · shown once`) with Rotate for the owner, the 24 h grace line, How to send events,
- * the payload mapping with live values from the last delivery, the last deliveries and the latest rejection. The
+ * the payload mapping with live values from the last delivery, the last deliveries and the latest rejection (the amber
+ * `Last rejected 12 minutes ago: the signature didn't match. Check that the sender uses the current secret.`, worded by
+ * `rejectionNotice`, shown only when newer than the last request that got through). The
  * secret is never part of this panel's data: a rotation's new secret goes straight into the reveal dialog's state and
  * is dropped on Done.
  */
