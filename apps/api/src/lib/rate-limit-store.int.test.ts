@@ -1,0 +1,87 @@
+import { RedisContainer, type StartedRedisContainer } from "@testcontainers/redis";
+import { createClient } from "redis";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { RATE_LIMIT_PREFIX, type RedisRateLimitStore, redisRateLimitStore } from "./rate-limit-store";
+
+/**
+ * 07.6-10 (T-07.6-10-03): `@fastify/rate-limit`'s store over node-redis. Counters are atomic, the window starts at the
+ * first hit and is never extended, it resets after the window, routes are namespaced and two API replicas (two stores
+ * on one Redis) share one counter. Real Redis 8 (testcontainers).
+ */
+
+let redis: StartedRedisContainer;
+let client: ReturnType<typeof createClient>;
+
+beforeAll(async () => {
+  redis = await new RedisContainer("redis:8").start();
+  client = createClient({ url: redis.getConnectionUrl() });
+  await client.connect();
+}, 120_000);
+
+afterAll(async () => {
+  await client?.quit();
+  await redis?.stop();
+});
+
+const incr = (store: RedisRateLimitStore, key: string, window?: number) =>
+  new Promise<{ current: number; ttl: number }>((resolve, reject) =>
+    store.incr(key, (err, res) => (err ? reject(err) : resolve(res)), window),
+  );
+
+const read = (store: RedisRateLimitStore, key: string) =>
+  new Promise<{ current: number; ttl: number }>((resolve, reject) =>
+    store.read(key, (err, res) => (err ? reject(err) : resolve(res))),
+  );
+
+const route = (url: string, timeWindow = 60_000) => ({ timeWindow, routeInfo: { method: "POST", url } });
+
+describe("RedisRateLimitStore", () => {
+  it("counts 100 concurrent hits atomically and sets the window once", async () => {
+    const Store = redisRateLimitStore(client);
+    const store = new Store({ timeWindow: 60_000 }).child(route("/api/v1/hooks/:publicId"));
+    const results = await Promise.all(Array.from({ length: 100 }, () => incr(store, "hook:A")));
+    expect(results.map((r) => r.current).sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 100 }, (_, i) => i + 1),
+    );
+    for (const r of results) {
+      expect(r.ttl).toBeGreaterThan(55_000);
+      expect(r.ttl).toBeLessThanOrEqual(60_000);
+    }
+    const key = `${RATE_LIMIT_PREFIX}POST/api/v1/hooks/:publicId:hook:A`;
+    expect(await client.get(key)).toBe("100");
+    const ttl = await client.pTTL(key);
+    expect(ttl).toBeGreaterThan(55_000);
+    expect(ttl).toBeLessThanOrEqual(60_000);
+    expect(await read(store, "hook:A")).toMatchObject({ current: 100 });
+  });
+
+  it("never extends the window and resets after it", async () => {
+    const store = new (redisRateLimitStore(client))({ timeWindow: 400 }).child(route("/short", 400));
+    const first = await incr(store, "k", 400);
+    expect(first.current).toBe(1);
+    await new Promise((r) => setTimeout(r, 200));
+    const second = await incr(store, "k", 400);
+    expect(second.current).toBe(2);
+    expect(second.ttl).toBeLessThanOrEqual(first.ttl - 150);
+    await new Promise((r) => setTimeout(r, 300));
+    expect((await incr(store, "k", 400)).current).toBe(1);
+    expect(await read(store, "missing")).toEqual({ current: 0, ttl: 0 });
+  });
+
+  it("keeps routes apart and shares one counter across replicas", async () => {
+    const replicaA = new (redisRateLimitStore(client))({ timeWindow: 60_000 });
+    const replicaB = new (redisRateLimitStore(client))({ timeWindow: 60_000 });
+    const hookA = replicaA.child(route("/api/v1/hooks/:publicId"));
+    const hookB = replicaB.child(route("/api/v1/hooks/:publicId"));
+    const signIn = replicaA.child(route("/api/auth/sign-in/email"));
+    for (let i = 0; i < 40; i++) await incr(hookA, "hook:SHARED");
+    let last = { current: 0, ttl: 0 };
+    for (let i = 0; i < 21; i++) last = await incr(hookB, "hook:SHARED");
+    expect(last.current).toBe(61);
+    expect((await incr(signIn, "hook:SHARED")).current).toBe(1);
+    // Limiters made with app.rateLimit() carry no route: they share a namespace and keep their key prefixes apart.
+    const fnA = replicaA.child({ timeWindow: 60_000, routeInfo: {} });
+    expect((await incr(fnA, "search:u1")).current).toBe(1);
+    expect(await client.exists(`${RATE_LIMIT_PREFIX}fn:search:u1`)).toBe(1);
+  });
+});

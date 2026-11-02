@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Webhook } from "standardwebhooks";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { buildApp } from "../../app";
 import type { TestClient } from "../../testing";
 import { type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
 import { invite } from "../../testing-workzone";
@@ -119,6 +120,12 @@ const runsOf = async (automationId: string) =>
 beforeAll(async () => {
   s = await startSandboxStack();
   await s.setPolicy({ enabled: true });
+  // Ana owns many webhook automations across this file.
+  await s.su.query(
+    `insert into app.bot_policies (organization_id, max_automations_per_user) values ($1, 1000)
+     on conflict (organization_id) do update set max_automations_per_user = 1000`,
+    [s.orgA],
+  );
   ({ client: ana, userId: anaId } = await invite(s.stack, s.victor, "ana@example.test", "Ana Díaz", "lead"));
   ordersId = (
     await ok(
@@ -404,5 +411,184 @@ describe("forgery and replay fail (Task 2, D-02, D-07, Pitfall 4)", () => {
       ana.request("GET", `/api/v1/automations/${hook.id}/webhook`) as Promise<Res>,
     )) as Json;
     expect(expired.previousValidUntil).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: limits and lifecycle
+
+describe("limits hold (Task 3, D-07, R4, T-07.6-10-03)", () => {
+  it("a 70 KiB signed body answers 413 and records `too_large`", async () => {
+    const hook = await createHook({ name: "Large orders" });
+    const row = await endpointRow(hook.publicId);
+    const body = JSON.stringify({ order: { name: "#1001", note: "x".repeat(70 * 1024) } });
+    const res = await post(hook.publicId, body, signedHeaders(hook.secret, body));
+    expect(res.status).toBe(413);
+    expect(res.body).toEqual({ error: { code: "payload_too_large", message: "The body is over 64 KB" } });
+    expect((await endpointRow(hook.publicId)).last_rejected_reason).toBe("too_large");
+    expect(await eventsOf(row.id)).toEqual([]);
+  });
+
+  it("the 61st request in a minute to one URL answers 429 across two API replicas; another URL is unaffected", async () => {
+    const hook = await createHook({ name: "Busy orders" });
+    const other = await createHook({ name: "Quiet orders" });
+    // Paused: requests are still accepted (the inbound worker records `not_run`), so the 60 items stay cheap.
+    await ok(ana.request("POST", `/api/v1/automations/${hook.id}/pause`) as Promise<Res>);
+    // A second API replica on the same database and Redis.
+    const replica = await buildApp(s.stack.env, { logger: false });
+    try {
+      await replica.app.ready();
+      const viaReplica = async (payload: unknown) => {
+        const body = JSON.stringify(payload);
+        const res = await replica.app.inject({
+          method: "POST",
+          url: `/api/v1/hooks/${hook.publicId}`,
+          headers: signedHeaders(hook.secret, body),
+          payload: body,
+        });
+        return res.statusCode;
+      };
+      for (let i = 0; i < 40; i++) expect((await send(hook, { order: { id: i } })).status).toBe(202);
+      for (let i = 40; i < 60; i++) expect(await viaReplica({ order: { id: i } })).toBe(202);
+      expect(await viaReplica({ order: { id: 60 } })).toBe(429);
+      const limited = await send(hook, { order: { id: 61 } });
+      expect(limited).toEqual({
+        status: 429,
+        body: { error: { code: "rate_limited", message: "Too many requests" } },
+      });
+    } finally {
+      await replica.close();
+    }
+    expect((await endpointRow(hook.publicId)).last_rejected_reason).toBe("rate_limited");
+    expect(await eventsOf((await endpointRow(hook.publicId)).id)).toHaveLength(60);
+    expect((await send(other)).status).toBe(202);
+
+    // The counter lives in Redis under the route's namespace, with the one-minute window.
+    const key = `ocw:rl:POST/api/v1/hooks/:publicId:hook:${hook.publicId}`;
+    expect(await core().bus.pub.get(key)).toBe("62");
+    const ttl = await core().bus.pub.pTTL(key);
+    expect(ttl).toBeGreaterThan(0);
+    expect(ttl).toBeLessThanOrEqual(60_000);
+  });
+});
+
+describe("lifecycle and permissions (Task 3, R3, P-09, P-10)", () => {
+  it("deleting the automation makes its URL answer 410 and removes its secrets; an unknown id is 404", async () => {
+    const hook = await createHook({ name: "Short-lived orders" });
+    const row = await endpointRow(hook.publicId);
+    const rotated = await ok(
+      ana.request("POST", `/api/v1/automations/${hook.id}/webhook/rotate`) as Promise<Res>,
+    );
+    expect(rotated.secret).toBeTruthy();
+    const secretIds = [
+      (await endpointRow(hook.publicId)).secret_id,
+      (await endpointRow(hook.publicId)).previous_secret_id,
+    ];
+    const res = await ana.request("DELETE", `/api/v1/automations/${hook.id}`);
+    expect(res.status).toBe(204);
+    expect(await send(hook)).toEqual({
+      status: 410,
+      body: { error: { code: "gone", message: "This webhook no longer exists" } },
+    });
+    const tomb = await endpointRow(hook.publicId);
+    expect(tomb).toMatchObject({ automation_id: null, secret_id: null, previous_secret_id: null });
+    expect(tomb.deleted_at).toBeTruthy();
+    expect(
+      (await s.su.query("select id from app.secrets where id = any($1::uuid[])", [secretIds])).rows,
+    ).toEqual([]);
+    expect(await audits("webhook_endpoint.deleted", row.id)).toHaveLength(1);
+
+    expect((await send({ ...hook, publicId: "7QK2M9XW4R7QK2M9XW4R7QK2M9" })).status).toBe(404);
+    expect((await send({ ...hook, publicId: "not-a-hook" })).status).toBe(404);
+  });
+
+  it("changing the trigger to a schedule retires the old URL (410)", async () => {
+    const hook = await createHook({ name: "Switched orders" });
+    const current = await ok(ana.request("GET", `/api/v1/automations/${hook.id}`) as Promise<Res>);
+    const updated = await ok(
+      ana.request("PATCH", `/api/v1/automations/${hook.id}`, {
+        expectedVersion: current.version,
+        trigger: { kind: "schedule", schedule: { cron: "0 17 * * 5", timeZone: "Europe/Madrid" } },
+        inbound: null,
+      }) as Promise<Res>,
+    );
+    expect(updated.automation.trigger.webhook).toBeNull();
+    expect((await send(hook)).status).toBe(410);
+    await ok(ana.request("DELETE", `/api/v1/automations/${hook.id}`) as Promise<Res>, 204);
+  });
+
+  it("a paused automation still accepts (202); the inbound worker records `not_run`, `paused` and posts nothing", async () => {
+    const hook = await createHook({ name: "Paused orders" });
+    const row = await endpointRow(hook.publicId);
+    await ok(ana.request("POST", `/api/v1/automations/${hook.id}/pause`) as Promise<Res>);
+    expect((await send(hook)).status).toBe(202);
+    expect(await drainInbound()).toBeGreaterThanOrEqual(1);
+    const [event] = (await eventsOf(row.id)) as [Json];
+    expect(event).toMatchObject({ result: "not_run", reason: "paused", message_id: null });
+    const endpoint = (await ok(
+      ana.request("GET", `/api/v1/automations/${hook.id}/webhook`) as Promise<Res>,
+    )) as Json;
+    expect(endpoint.deliveries).toEqual([
+      expect.objectContaining({ id: event.id, result: "not_run", reason: "paused", link: null }),
+    ]);
+  });
+
+  it("Sam cannot create, read or rotate a webhook; Víctor (admin) reads it without the payload and cannot rotate", async () => {
+    const created = await s.sam.request("POST", "/api/v1/automations", {
+      name: "Sam's hook",
+      agentId: s.scoutId,
+      instructions: "Read each order.",
+      trigger: { kind: "webhook" },
+      target: { kind: "dm" },
+      inbound: { action: "post", askBot: true, config: {} },
+    });
+    expect(created.status).toBe(403);
+    expect((created.body?.error as Json).code).toBe("webhook_not_allowed");
+
+    const hook = await createHook({ name: "Governed orders" });
+    expect((await send(hook)).status).toBe(202);
+    expect((await s.sam.request("GET", `/api/v1/automations/${hook.id}/webhook`)).status).toBe(404);
+    expect((await s.sam.request("POST", `/api/v1/automations/${hook.id}/webhook/rotate`)).status).toBe(404);
+
+    const managerView = (await ok(
+      s.victor.request("GET", `/api/v1/automations/${hook.id}/webhook`) as Promise<Res>,
+    )) as Json;
+    expect(managerView.publicId).toBe(hook.publicId);
+    expect(managerView.lastPayload).toBeNull();
+    expect(managerView.deliveries).toHaveLength(1);
+    expect(JSON.stringify(managerView)).not.toContain(hook.secret);
+    const rotate = await s.victor.request("POST", `/api/v1/automations/${hook.id}/webhook/rotate`);
+    expect(rotate.status).toBe(403);
+    expect((rotate.body?.error as Json).code).toBe("not_allowed");
+    // Eve (another organization) sees nothing.
+    expect((await s.eve.request("GET", `/api/v1/automations/${hook.id}/webhook`)).status).toBe(404);
+  });
+
+  it("a canary in a body and a header never reaches the API logs, the audit rows or the job data", async () => {
+    const CANARY = `canary-${randomUUID()}`;
+    const hook = await createHook({ name: "Canary orders" });
+    const body = JSON.stringify({ order: { name: CANARY, note: CANARY } });
+    const headers = { ...signedHeaders(hook.secret, body), "x-canary": CANARY, "user-agent": CANARY };
+    expect((await post(hook.publicId, body, headers)).status).toBe(202);
+    // Rejected (bad signature), too large and repeated requests carry it too.
+    expect((await post(hook.publicId, body, { ...headers, "webhook-signature": "v1,AAAA" })).status).toBe(
+      401,
+    );
+    const big = JSON.stringify({ note: CANARY.repeat(3000) });
+    expect(
+      (await post(hook.publicId, big, { ...signedHeaders(hook.secret, big), "x-canary": CANARY })).status,
+    ).toBe(413);
+    expect((await post(hook.publicId, body, headers)).status).toBe(200);
+    expect(await drainInbound()).toBeGreaterThanOrEqual(1);
+
+    expect(s.logs.join("\n")).not.toContain(CANARY);
+    const audit = await s.su.query(
+      "select count(*)::int as n from app.audit_events where metadata::text like $1",
+      [`%${CANARY}%`],
+    );
+    expect(audit.rows[0].n).toBe(0);
+    const jobs = await s.su.query("select count(*)::int as n from pgboss.job where data::text like $1", [
+      `%${CANARY}%`,
+    ]);
+    expect(jobs.rows[0].n).toBe(0);
   });
 });
