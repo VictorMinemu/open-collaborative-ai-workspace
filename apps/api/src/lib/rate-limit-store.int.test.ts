@@ -1,7 +1,8 @@
 import { RedisContainer, type StartedRedisContainer } from "@testcontainers/redis";
 import { createClient } from "redis";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { RATE_LIMIT_PREFIX, type RedisRateLimitStore, redisRateLimitStore } from "./rate-limit-store";
+import { RATE_LIMIT_PREFIX, RedisRateLimitStore, redisRateLimitStore } from "./rate-limit-store";
+import type { RedisClient } from "./redis";
 
 /**
  * 07.6-10 (T-07.6-10-03): `@fastify/rate-limit`'s store over node-redis. Counters are atomic, the window starts at the
@@ -10,7 +11,7 @@ import { RATE_LIMIT_PREFIX, type RedisRateLimitStore, redisRateLimitStore } from
  */
 
 let redis: StartedRedisContainer;
-let client: ReturnType<typeof createClient>;
+let client: RedisClient;
 
 beforeAll(async () => {
   redis = await new RedisContainer("redis:8").start();
@@ -22,6 +23,10 @@ afterAll(async () => {
   await client?.quit();
   await redis?.stop();
 });
+
+/** One replica's root store, as the plugin builds it from its global options. */
+const replica = (timeWindow = 60_000) =>
+  new RedisRateLimitStore({ client, prefix: RATE_LIMIT_PREFIX, timeWindow });
 
 const incr = (store: RedisRateLimitStore, key: string, window?: number) =>
   new Promise<{ current: number; ttl: number }>((resolve, reject) =>
@@ -36,9 +41,13 @@ const read = (store: RedisRateLimitStore, key: string) =>
 const route = (url: string, timeWindow = 60_000) => ({ timeWindow, routeInfo: { method: "POST", url } });
 
 describe("RedisRateLimitStore", () => {
-  it("counts 100 concurrent hits atomically and sets the window once", async () => {
+  it("is what the plugin constructs from the factory, bound to the API's client", () => {
     const Store = redisRateLimitStore(client);
-    const store = new Store({ timeWindow: 60_000 }).child(route("/api/v1/hooks/:publicId"));
+    expect(new Store({ timeWindow: 60_000 })).toBeInstanceOf(RedisRateLimitStore);
+  });
+
+  it("counts 100 concurrent hits atomically and sets the window once", async () => {
+    const store = replica().child(route("/api/v1/hooks/:publicId"));
     const results = await Promise.all(Array.from({ length: 100 }, () => incr(store, "hook:A")));
     expect(results.map((r) => r.current).sort((a, b) => a - b)).toEqual(
       Array.from({ length: 100 }, (_, i) => i + 1),
@@ -56,7 +65,7 @@ describe("RedisRateLimitStore", () => {
   });
 
   it("never extends the window and resets after it", async () => {
-    const store = new (redisRateLimitStore(client))({ timeWindow: 400 }).child(route("/short", 400));
+    const store = replica(400).child(route("/short", 400));
     const first = await incr(store, "k", 400);
     expect(first.current).toBe(1);
     await new Promise((r) => setTimeout(r, 200));
@@ -69,8 +78,8 @@ describe("RedisRateLimitStore", () => {
   });
 
   it("keeps routes apart and shares one counter across replicas", async () => {
-    const replicaA = new (redisRateLimitStore(client))({ timeWindow: 60_000 });
-    const replicaB = new (redisRateLimitStore(client))({ timeWindow: 60_000 });
+    const replicaA = replica();
+    const replicaB = replica();
     const hookA = replicaA.child(route("/api/v1/hooks/:publicId"));
     const hookB = replicaB.child(route("/api/v1/hooks/:publicId"));
     const signIn = replicaA.child(route("/api/auth/sign-in/email"));
