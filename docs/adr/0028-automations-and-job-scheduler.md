@@ -169,9 +169,10 @@ effects; and writes to an external system that must never overwrite a change som
 - **Secrets.** `whsec_…` shown once at create and at rotation, sealed with the endpoint's AAD. Rotation keeps **one**
   previous secret for 24 hours; a second rotation inside the grace retires the oldest at once.
 - **Rate limits in Redis, everywhere.** `@fastify/rate-limit` takes one store per app, so every rate-limited route
-  (identity's included, numbers unchanged) now counts in Redis and holds across replicas. A Redis failure **fails the
-  request closed** (`skipOnError: false`), where the in-memory store never failed. Rejections are recorded at most once
-  per endpoint and minute.
+  (identity's included, numbers unchanged) now counts in Redis and holds across replicas. When Redis does not answer
+  (client not ready, or a command over 250 ms) the request is counted in the instance's own memory instead: the limits
+  still apply, per replica, and sign-in, password reset, device tokens and pairing keep working (07.6 review A HI-02).
+  Rejections are recorded at most once per endpoint and minute.
 - **Logging.** No body, header value or secret reaches a log, an audit row, an error or a job; the scope's error
   handler logs only error codes (canary-tested).
 
@@ -288,8 +289,8 @@ approval and memory events and `bot.tool_call`. A route-coverage guard and a can
   rest. The release gate (`pnpm gate:compose --with-sandbox`) proves on the release images that migrate installs the
   schema, the API boots as `ocw_app`, an automation's Run now delivers its run card, and the `pgboss` schema survives
   the backup round trip. `docs/self-hosting/automations.md` is the operator's page; `OCW_JOBS_WORKER` is the one new knob.
-- **Redis is now on the path of every rate-limited request.** If Redis is down, those routes refuse instead of letting
-  requests through.
+- **Redis is now on the path of every rate-limited request.** If Redis is down, each replica counts in its own memory
+  until it is back, so a deployment with N replicas allows up to N times a limit meanwhile; nothing refuses or hangs.
 - **Limits and retention.** The caps of § 2, 64 KiB webhook bodies, 60 webhook calls a minute per URL, 30 inbound items
   an hour per automation, 30 days of inbound content, two days of finished jobs.
 - **Model spend is opt-in** (digest summary, automatic session summaries) and always billed to the person who benefits.

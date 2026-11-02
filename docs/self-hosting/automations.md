@@ -37,8 +37,8 @@ https://ocw.example.com/api/v1/hooks/<26-character id>
   `webhook-signature`). Requests more than 5 minutes off the server clock are refused, so keep NTP on.
 - Answers the sender sees: `202` accepted, `200` duplicate (same `webhook-id`), `401` bad signature or timestamp, `404`
   unknown URL, `410` deleted (tell the sender to stop), `413` over 64 KiB, `429` over 60 calls a minute for that URL.
-- Rate limits are counted in Redis for every replica. If Redis is down, rate-limited routes (sign-in included) refuse
-  requests until it is back.
+- Rate limits are counted in Redis for every replica. If Redis is down, each replica counts in its own memory until
+  it is back: limits still apply and sign-in keeps working.
 - Rotating a secret keeps the previous one valid for 24 hours.
 
 ## Mailboxes (IMAP)
