@@ -198,6 +198,8 @@ export function useSaveAutomation() {
   const qc = useQueryClient();
   const invalidate = useInvalidateAutomations();
   return useMutation({
+    // A webhook's create response carries its secret once: the editor resets the mutation, and gcTime 0 drops it.
+    gcTime: 0,
     mutationFn: (input: SaveAutomationInput) =>
       input.id
         ? api.patch(`${BASE}/${encodeURIComponent(input.id)}`, {
@@ -624,6 +626,14 @@ export function automationErrorText(
       return "You can't create automations. Ask an admin.";
     case "webhook_not_allowed":
       return "Only team leads and admins can create webhooks.";
+    case "mailbox_host_not_allowed": {
+      const d = (err.details ?? {}) as { host?: unknown; key?: unknown };
+      const host = typeof d.host === "string" ? d.host : "this server";
+      const key = typeof d.key === "string" ? d.key : "the key";
+      return `Add ${host} to the allowed hosts of “${key}” in Keychain.`;
+    }
+    case "mailbox_key_not_usable":
+      return "Choose a username and password key from your Keychain.";
     case "approval_expired":
       return "This proposal expired. Create the automation without it.";
     case "approval_already_decided":

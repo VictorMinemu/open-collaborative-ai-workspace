@@ -461,7 +461,9 @@ describe("the mailbox (UI-SPEC Surface 4, R8)", () => {
     expect(mailboxTestText({ ok: false, code: "auth_failed" }, ctx)).toBe(
       "Sign-in failed. Check the username and app password in Keychain.",
     );
-    expect(mailboxTestText({ ok: false, code: "unreachable" }, ctx)).toBe("Couldn't reach imap.acme.com:993.");
+    expect(mailboxTestText({ ok: false, code: "unreachable" }, ctx)).toBe(
+      "Couldn't reach imap.acme.com:993.",
+    );
     expect(mailboxTestText({ ok: false, code: "host_not_allowed" }, ctx)).toBe(
       "imap.acme.com isn't an allowed host for “Ops mailbox”.",
     );

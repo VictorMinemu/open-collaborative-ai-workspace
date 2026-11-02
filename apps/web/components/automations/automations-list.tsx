@@ -247,8 +247,8 @@ export function AutomationsPage() {
           editId ? go(t === "runs" ? { edit: editId, tab: "runs" } : { edit: editId }) : undefined
         }
         onClose={() => go({})}
-        onCreated={(a) => {
-          go({});
+        onCreated={(a, opts) => {
+          go(opts?.keepOpen ? { edit: a.id } : {});
           setFresh(a.id);
         }}
         onOpenRuns={(id) => go({ edit: id, tab: "runs" })}
