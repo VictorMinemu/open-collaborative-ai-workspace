@@ -13,7 +13,7 @@ import type { Core } from "../../core";
 import { CanonicalHashError, canonicalHash } from "../../lib/canonical-json";
 import { activeShare, connectionStatusFor } from "../connectors";
 import { changedFields, conflictCard } from "./cards";
-import { type CallOutcome, callWith, type ReadOutcome, readWith } from "./check";
+import { type CallOutcome, callWith, type ReadOutcome, readRecord } from "./check";
 import { emitUpdated, type ServerRow, type WatchedRow } from "./service";
 import { refuseTools } from "./tools";
 
@@ -27,7 +27,11 @@ import { refuseTools } from "./tools";
  *   2. takes the record's write lease (`write_lease_until`, only while the snapshot is still the one the route decided
  *      on and no other write holds a live lease: a second write at the same time is refused `write_in_progress`, never
  *      run over the first; review HI-01), held until the write ends; then re-reads the record and compares its hash
- *      with the stored snapshot: on a mismatch NOTHING is written, a Not saved card with before → after goes to the
+ *      with the stored snapshot. Every comparison read (before and after the write) uses the account the checks read
+ *      with (the linker's, under their share: `readRecord`), so a requester whose own account sees another projection
+ *      of the record never reads as a change (review LO-02); only the write and the note use the requester's account.
+ *      The checks' account unavailable is `watch_paused`. On a mismatch NOTHING is written, a Not saved card with
+ *      before → after goes to the
  *      card's thread, and the snapshot moves to the new values (a change made elsewhere is never overwritten);
  *   3. marks the write in progress (`last_written_hash` = the expected result, only while the snapshot is still the
  *      one compared: a check that ran in between and moved it is a conflict too), then calls the write tool with
@@ -53,6 +57,7 @@ export type CasRefusal =
   | "tool_not_allowed"
   | "not_checked"
   | "write_in_progress"
+  | "watch_paused"
   | "connector_error";
 
 export type CasResult =
@@ -130,7 +135,7 @@ export function takesExpectedUpdatedAt(inputSchema: Record<string, unknown> | nu
 
 /** The outside calls and the bookkeeping of one compare-and-set (the DB side in `compareAndSet`, fakes in tests). */
 export interface CasIo {
-  /** The record, read with the requester's connection. */
+  /** The record, read with the account the checks read it with (LO-02). */
   read(): Promise<ReadOutcome>;
   /** The write tool with these arguments. */
   write(args: Record<string, unknown>): Promise<CallOutcome>;
@@ -165,8 +170,17 @@ export interface CasRow {
 }
 
 const refused = (code: CasRefusal): CasResult => ({ kind: "refused", code });
+/** The comparison read's code when the checks' account (the linker's) is unavailable to another requester. */
+export const WATCH_PAUSED = "watch_paused";
+
 const readRefusal = (r: Extract<ReadOutcome, { ok: false }>): CasResult =>
-  refused(r.status === "not_connected" ? "not_connected" : "connector_error");
+  refused(
+    r.code === WATCH_PAUSED
+      ? "watch_paused"
+      : r.status === "not_connected"
+        ? "not_connected"
+        : "connector_error",
+  );
 
 function hashOf(record: unknown, fields: readonly WatchedField[]) {
   const projection = projectFields(record, fields);
@@ -443,16 +457,15 @@ export async function compareAndSet(core: Core, deps: WriteDeps, p: CompareAndSe
   let held: string | null = null;
 
   const io: CasIo = {
-    read: () =>
-      readWith(core, {
-        organizationId: p.organizationId,
-        userId: p.requesterUserId,
-        server,
-        readTool: w.readTool,
-        idArg: w.idArg,
-        externalRef: w.externalRef,
-        timeoutMs: CALL_TIMEOUT_MS,
-      }),
+    // LO-02: compared with the account the snapshot was read with (the checks' own read: the linker's, under their
+    // share for a per-member connector), never the requester's, which may see another projection of the record.
+    read: async () => {
+      const out = await readRecord(core, w, server, { timeoutMs: CALL_TIMEOUT_MS });
+      if (!out.ok && out.status === "not_connected" && w.checkAsUserId !== p.requesterUserId) {
+        return { ok: false, status: "error", code: WATCH_PAUSED };
+      }
+      return out;
+    },
     write: (args) => call(w.writeTool ?? "", args),
     note: (text) =>
       call(w.noteTool ?? "", {

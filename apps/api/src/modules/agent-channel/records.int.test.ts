@@ -32,6 +32,8 @@ import { replaceServerTools } from "../mcp";
 
 const CELL_TOKEN = "ocw-test-cell-token-records-update-0123456789abcdef";
 const ERP_TOKEN = `erp-token-${randomUUID()}`;
+/** An account of the same ERP that sees a narrower view of the record (see the fake server below). */
+const NARROW_ERP_TOKEN = `erp-token-narrow-${randomUUID()}`;
 const TOOL = "ocw_record_update";
 
 let s: ConnectorsStack;
@@ -182,6 +184,13 @@ beforeAll(async () => {
   erp = createFakeErpMcp({ token: ERP_TOKEN });
   erpServer = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://fake-mcp");
+    // A second account of the same ERP that sees less: the record's total is hidden from it (a per-user projection).
+    if (req.headers.authorization === `Bearer ${NARROW_ERP_TOKEN}`) {
+      req.headers.authorization = `Bearer ${ERP_TOKEN}`;
+      const end = res.end.bind(res) as (chunk?: unknown) => typeof res;
+      res.end = ((chunk?: unknown) =>
+        end(typeof chunk === "string" ? chunk.replaceAll("1250.00", "hidden") : chunk)) as typeof res.end;
+    }
     const serve = (r: typeof req) => {
       if (!erp.handle(r, res, url)) {
         res.writeHead(404);
@@ -964,5 +973,59 @@ describe("per-member connector: written with the requester's own account, only w
       )
     ).rows[0] as Json;
     expect(used.last_used_at).not.toBeNull();
+  });
+
+  it("LO-02: Sam's account sees less than Víctor's: the compare uses the checks' account, the write Sam's; no flip-flop", async () => {
+    // Sam reconnects with an account that sees the record's total as "hidden" (Víctor, the linker, sees 1250.00).
+    await ok(s.sam.request("PUT", `/api/v1/connectors/${personal.id}/secret`, { value: NARROW_ERP_TOKEN }));
+    const { card: c, watched } = await freshWatch("EXP-0063 Order seen differently", {
+      mcpServerId: personal.id,
+    });
+    expect((await row(watched.id)).snapshot).toMatchObject({ "/total": "1250.00" });
+    await s.su.query("update app.connector_connections set last_used_at = null where server_id = $1", [
+      personal.id,
+    ]);
+
+    const { eventId } = await mention(s.sam, c.messageId);
+    const r = await update(eventId, { "/status": "Shipped" });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(record().status).toBe("Shipped");
+    expect(await botReplies(c.messageId)).toEqual([]);
+    const used = (
+      await s.su.query(
+        "select user_id, last_used_at from app.connector_connections where server_id = $1 order by user_id",
+        [personal.id],
+      )
+    ).rows as Json[];
+    // Both accounts were used: Víctor's to compare (as every check reads), Sam's to write.
+    for (const u of used) expect(u.last_used_at, String(u.user_id)).not.toBeNull();
+    const after = await row(watched.id);
+    expect(after.snapshot).toMatchObject({ "/status": "Shipped", "/total": "1250.00" });
+
+    // The next check (Víctor's view) finds the bot's own write: nothing reported.
+    await scheduledCheck(watched.id);
+    expect(await botReplies(c.messageId)).toEqual([]);
+    expect((await row(watched.id)).last_status).toBe("ok");
+  });
+
+  it("LO-02: the linker's account is gone: refused watch_paused, nothing read or written with Sam's account", async () => {
+    const { card: c, watched } = await freshWatch("EXP-0064 Linker disconnected", {
+      mcpServerId: personal.id,
+    });
+    // Víctor, the linker, withdraws ERP personal from #orders: the watch is paused (its checks stop reading).
+    const [share] = (
+      await s.su.query(
+        "select id from app.member_account_shares where user_id = $1 and resource_id = $2 and conversation_id = $3 and revoked_at is null",
+        [s.victorId, personal.id, ordersId],
+      )
+    ).rows as Json[];
+    expect((await s.victor.request("DELETE", `/api/v1/member-account-shares/${share?.id}`)).status).toBe(204);
+    const { eventId } = await mention(s.sam, c.messageId);
+    const before = erp.state.calls.length;
+    const r = await update(eventId, { "/status": "Shipped" });
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe("watch_paused");
+    expect(erp.state.calls.length).toBe(before);
+    expect((await row(watched.id)).snapshot).toMatchObject({ "/status": "Confirmed" });
   });
 });

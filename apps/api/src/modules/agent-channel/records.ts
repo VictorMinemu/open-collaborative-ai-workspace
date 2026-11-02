@@ -88,6 +88,9 @@ const SENTENCES: Record<Code, (n: Names) => string> = {
   write_in_progress: (n) =>
     `Another update of ${RECORD(n)} is being saved right now, so nothing was written. Tell ${n.person}, and ask ` +
     "again in a moment if this update is still needed.",
+  watch_paused: (n) =>
+    `The watch on ${RECORD(n)} is paused: the account it is checked with isn't available in this channel, so ` +
+    `nothing was written. Tell ${n.person} that whoever linked the watch needs to reconnect it or allow it here again.`,
   connector_error: (n) =>
     `${CONNECTOR(n)} didn't answer or refused the update, so nothing was saved. Tell ${n.person} and try again later.`,
   tainted: (n) =>

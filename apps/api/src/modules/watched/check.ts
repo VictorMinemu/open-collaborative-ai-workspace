@@ -197,7 +197,12 @@ export async function readWith(
 }
 
 /** A watch's read: the share rule first for per-member connectors (Pitfall 8), then the connector. */
-export async function readRecord(core: Core, w: WatchedRow, server: ServerRow): Promise<ReadOutcome> {
+export async function readRecord(
+  core: Core,
+  w: WatchedRow,
+  server: ServerRow,
+  opts: { timeoutMs?: number } = {},
+): Promise<ReadOutcome> {
   // Before every call: the read tool is still read-only, not destructive, not a dangerous name and granted to the
   // watch's bot (a re-probe or a revoked grant since the link fails closed; `checkWatchedRecord` audits it).
   const refused = await core.db.withTenant({ organizationId: w.organizationId }, (tx) =>
@@ -224,6 +229,7 @@ export async function readRecord(core: Core, w: WatchedRow, server: ServerRow): 
     readTool: w.readTool,
     idArg: w.idArg,
     externalRef: w.externalRef,
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
   });
 }
 
