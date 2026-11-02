@@ -2335,6 +2335,19 @@ Instructions
 Generate the weekly company report.
 ```
 
+As built in Phase 07.6 (ADR-0028):
+
+- **Triggers:** a schedule (cron in an IANA time zone, presets in the UI), a signed webhook (Standard Webhooks; leads
+  and admins create them), or new mail in an IMAP folder read with a Keychain app password. Webhook and mail content is
+  posted by the platform first and treated as untrusted: the bot's turn on it is read-only unless a person approves a
+  specific action.
+- **Runs as its creator.** An automation always acts as the person who created it (their access, their bot, their
+  budget); admins may pause or delete anyone's automation but never edit, resume or run it as them.
+- **Budget:** runs a day per automation, a minimum interval, inbound items per hour, and a pause after three failed runs
+  in a row ("Needs attention").
+- **The Control Plane is the only scheduler.** Jobs run in PostgreSQL (pg-boss); OpenClaw's own cron and webhooks stay
+  off in the cell.
+
 ---
 
 ### 74. Natural Language Automation Creation
@@ -2357,6 +2370,11 @@ delivery_target
 
 Afterwards it will show a confirmation card.
 
+As built in Phase 07.6 (ADR-0028): the bot proposes through the `ocw_automation_propose` tool, the platform posts an
+approval card, and only the person who asked (who becomes the run-as person) can create it, discard it, or edit it
+first ("Created with changes"). Nothing runs until that person confirms; a bot cannot propose from a turn that read
+outside content.
+
 ---
 
 ### 75. Delivery Targets
@@ -2369,12 +2387,17 @@ AgentDeliveryTarget
 id
 organizationId
 agentId
-type: channel | thread | dm
+type: channel | thread | dm | board
 conversationId
 threadId?
+boardColumnId?   (board: each run adds a card to this column)
 permissions
-createdBy
+createdBy        (= the run-as person)
 ```
+
+As built in Phase 07.6 (ADR-0028): the target is part of the automation (`app.automations`) and is decided again at
+every run: the bot must be a member that may post there and the run-as person must still read it. A personal bot
+delivers only to its owner's DM; a `dm` target is the run-as person's DM with the bot.
 
 Targets will be stored using stable IDs, not names.
 

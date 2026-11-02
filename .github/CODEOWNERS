@@ -108,6 +108,21 @@
 /apps/local-runtime/src/service/                   @VictorMinemu
 /apps/local-runtime/src/doctor.ts                  @VictorMinemu
 /apps/local-runtime/scripts/build-bundle.mjs       @VictorMinemu
+# Phase 07.6 (ADR-0028): the job runtime and its queue catalog, who may see and run automations, the public webhook
+# route and its secrets, the shared rate-limit store, IMAP credentials and TLS, outside content and its taint, the run
+# trigger of the Agent Channel, natural-language proposals, and watched records with their compare-and-set writes.
+/apps/api/src/lib/jobs.ts                          @VictorMinemu
+/packages/db/src/jobs-schema.ts                    @VictorMinemu
+/apps/api/src/lib/rate-limit-store.ts              @VictorMinemu
+/apps/api/src/modules/automation/access.ts         @VictorMinemu
+/apps/api/src/modules/automation/webhook*          @VictorMinemu
+/apps/api/src/modules/automation/imap.ts           @VictorMinemu
+/apps/api/src/modules/automation/mailboxes.ts      @VictorMinemu
+/apps/api/src/modules/automation/inbound.ts        @VictorMinemu
+/apps/api/src/modules/agent-channel/automation-runs.ts      @VictorMinemu
+/apps/api/src/modules/agent-channel/automation-proposals.ts @VictorMinemu
+/apps/api/src/modules/agent-channel/records.ts     @VictorMinemu
+/apps/api/src/modules/watched/                     @VictorMinemu
 
 # The guardrails themselves and the decisions they enforce.
 /.semgrep/                                         @VictorMinemu

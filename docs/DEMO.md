@@ -832,6 +832,61 @@ in `.planning/phases/07.12-headless-work-zone-server/07.12-VALIDATION.md` › Ma
 6. **A safe doctor.** Paste the output of `ocw-runtime doctor` from the Linux VM into a draft issue: it shows no token,
    no service.env value and no absolute path outside the home.
 
+## Automations and watched records (Phase 07.6)
+
+Phase 07.6 (ADR-0028, [self-hosting/automations.md](self-hosting/automations.md)). Bots act without being asked: on a
+schedule, when a signed webhook or a mail arrives, or when a record someone watches changes in an outside system. An
+automation always runs as the person who made it; outside content is posted by the workspace first and never steers a
+bot into changing anything. The demo's bots run through the fake cell (or the compose cell's mock model), so the bot
+side is scripted; everything a person does is real.
+
+1. **A weekly report (Víctor).** Bots › **Automations** › **New automation**: a bot of the team, *Fridays at 5:00 PM*
+   in your zone (the editor lists the next runs), Deliver to `#sales`, the instructions "Summarise this week's closed
+   deals". **Create automation**, then the row's menu › **Run now**: `#sales` shows the run card (*Created by the
+   workspace*, Running → Done once the bot answers in its thread) and the automation's Runs tab lists it. As Sam (not
+   an admin), **Everyone** is not there; as Víctor, Everyone shows Sam's automations with Pause and Delete only.
+2. **A webhook to a board (Marta, a lead).** New automation › When: **Webhook**, Deliver to a board column, *Create a
+   board card*. After **Create automation** the secret shows once: tick the box, copy the URL and secret. Send a signed
+   test (`Send a test event`, or any Standard Webhooks sender): the board gets a card with the payload as its first
+   reply, the amber *Outside content* notice on top, and the bot answers in its thread without changing anything. The
+   Deliveries list shows Accepted; send the same `webhook-id` again: Duplicate. **Rotate secret** keeps the old one for
+   24 hours.
+3. **A mailbox (Marta).** Settings › Keychain › **Add key** › *Username & password* with an app password and the mail
+   server in Allowed hosts. New automation › When: **Mail**, pick the key, folder `INBOX`, **Test connection**
+   (*Connected. INBOX has … messages.*). Send a mail to that address: within the poll interval a card with the mail's
+   full text appears, and the mail is still unread in your mail app.
+4. **Ask a bot (Sam).** In your DM with a bot: "every Monday at 9 send me the open tickets here". The bot posts a
+   proposal card (*Create automation*, *Discard*, *Edit*). **Edit** opens the editor with the draft; change the time to
+   10:00 and save: the card reads *Created with changes*. Nobody else may confirm it.
+5. **Watch a record (Marta).** On a board card's menu › **Watch external record…**: pick the ERP connector, find the
+   record, tick the fields, **Start watching**. Change one field in the ERP: at the next check (or **Check now** in the
+   thread) the card's tile reads *Changed* and the thread shows before → after. Ask the bot to update the record while
+   someone else changed it: the thread shows *Not saved* and nothing was written.
+6. **A digest (Sam).** Settings › **Digest**: weekdays at 09:00, the sections, the bot that sends it (your personal bot
+   first), **Save digest**, then **Send a test now**: the DM lists approvals waiting for you, cards you follow, unread
+   mentions and Work Zone sessions you can see. The AI summary is off until you turn it on (it says who pays).
+7. **A Work Zone summary (Sam).** Link the repository to a team project (Work Zone › Projects › the project ›
+   Settings). On a finished session, **Propose to memory** › **Propose summary**: the strip reads *Writing*, then
+   *Pending*; a lead of the project applies it from **Approvals** and the file appears in the project's memory under
+   `work-zone/`. A session whose repository is linked to no project offers the link instead.
+
+**Owner check** (never run by an agent: it needs your own mailbox and ERP; record the result in
+`.planning/phases/07.6-automations-and-watched-records/07.6-VALIDATION.md` › Manual-Only Verifications and in ADR-0028 ›
+Validation). On your own stack with a real model:
+
+1. **A real mailbox.** Create an app password at your provider, add it to Keychain with the provider's IMAP host in
+   Allowed hosts, and create a mail automation on a folder you can fill (a filter or a label). **Test connection** must
+   read *Connected*. Send yourself a mail into that folder: the card appears within the poll interval with the full
+   text, the mail stays unread at the provider, and an auto-reply or a newsletter in the same folder is skipped.
+2. **Wrong password.** Change the key's password to a wrong one: the automation reads *Sign-in failed*; put the right
+   one back: it reads mail again at once.
+3. **A real ERP MCP.** Register your ERP's MCP server (Settings › MCP servers), watch a real record from a board card,
+   change a watched field in the ERP: the change is reported before → after in the card's thread. Ask the bot to
+   update a field and approve it: the ERP shows the new value and, if the server has a note tool, the note. Change the
+   record in the ERP between the bot's read and its write (or right after asking): the thread reads *Not saved* and
+   the ERP keeps your change.
+4. **From a phone.** Run step 1 of the demo (Run now) and step 4 (confirm a proposal) at 390 px wide.
+
 ## Troubleshooting
 
 | Symptom | Fix |
