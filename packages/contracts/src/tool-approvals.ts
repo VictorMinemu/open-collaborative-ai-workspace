@@ -56,8 +56,11 @@ const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,128}$/;
 /** Every tool of one MCP server or per-member connector (`<safe>__*`, safe name `m` + 8 hex). */
 const SERVER_PATTERN = /^m[0-9a-f]{8}__\*$/;
 const WEB_TOOLS: ReadonlySet<string> = new Set(["web_search", "web_fetch"]);
-/** The one built-in whose calls a person may approve: a keychain HTTP request. */
-const APPROVABLE_BUILTIN = "ocw_http_request";
+/**
+ * The built-ins whose calls a person may approve: a keychain HTTP request, and (07.6-14) a compare-and-set write to a
+ * watched record (`ocw_record_update`, a change in an outside system).
+ */
+const APPROVABLE_BUILTINS: ReadonlySet<string> = new Set(["ocw_http_request", "ocw_record_update"]);
 /**
  * Phase 07.8 (SBX-04, D-12): the confined sandbox and browser tools, by name pattern (no import of 07.8-01's tool
  * tuples). Sign-in and close are never approvable: one asks a person already, the other only ends the page.
@@ -67,7 +70,8 @@ const NEVER_APPROVABLE_CONFINED: ReadonlySet<string> = new Set(["ocw_browser_sig
 
 /**
  * True for a tool a policy may name (P-04): MCP and per-member connector tools (`<safe>__<tool>`), approved plugin
- * tools, `ocw_http_request` and the confined `ocw_sandbox_*` / `ocw_browser_*` tools except sign-in and close
+ * tools, `ocw_http_request`, `ocw_record_update` (07.6-14) and the confined `ocw_sandbox_*` / `ocw_browser_*` tools
+ * except sign-in and close
  * (Phase 07.8). The web tools and every other `ocw_` built-in are never approvable (they have their own gates, or a
  * flow of their own like `ocw_start_work_zone`). Case-insensitive on the `ocw_` prefix, so a look-alike never slips in.
  */
@@ -76,7 +80,9 @@ export function isApprovableTool(name: string): boolean {
   const lower = name.toLowerCase();
   if (WEB_TOOLS.has(lower)) return false;
   if (lower.startsWith("ocw_")) {
-    return name === APPROVABLE_BUILTIN || (CONFINED_TOOL.test(name) && !NEVER_APPROVABLE_CONFINED.has(name));
+    return (
+      APPROVABLE_BUILTINS.has(name) || (CONFINED_TOOL.test(name) && !NEVER_APPROVABLE_CONFINED.has(name))
+    );
   }
   return true;
 }

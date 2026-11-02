@@ -485,3 +485,260 @@ describe("never overwrite: a change made elsewhere is reported and kept, the bot
     expect(record().customer).toBe("Globex S.L.");
   });
 });
+
+// ---------------------------------------------------------------- Task 3: offered only where it works, governed
+
+describe("offered only in a watched card's thread, to the watch's bot", () => {
+  let scoutId = "";
+  let card: Json;
+
+  beforeAll(async () => {
+    scoutId = (
+      await ok(
+        s.victor.request("POST", "/api/v1/agents", {
+          name: "Scout",
+          username: "scout",
+          instructions: "You scout.",
+          modelProvider: "mock",
+          modelId: "mock-1",
+        }),
+      )
+    ).id;
+    await ok(
+      s.victor.request("POST", `/api/v1/channels/${ordersId}/members`, { kind: "agent", id: scoutId }),
+    );
+    ({ card } = await freshWatch("EXP-0048 Offered here"));
+  });
+
+  it("not offered in an unwatched card's thread, on the board itself, in a text channel, or for a watch without an update tool", async () => {
+    const plain = await humanCard("EXP-0049 Not watched");
+    expect((await mention(s.victor, plain.messageId)).turn.tools).not.toContain(TOOL);
+    expect((await mention(s.victor, null)).turn.tools).not.toContain(TOOL);
+
+    const general = (
+      await ok(s.victor.request("POST", "/api/v1/channels", { name: "ops-general", visibility: "public" }))
+    ).id as string;
+    await ok(s.victor.request("POST", `/api/v1/channels/${general}/members`, { kind: "agent", id: opsId }));
+    expect((await mention(s.victor, null, { conversationId: general })).turn.tools).not.toContain(TOOL);
+
+    const { card: readOnly } = await freshWatch("EXP-0050 Watched, read only", {
+      writeTool: undefined,
+      noteTool: undefined,
+    });
+    const t = await mention(s.victor, readOnly.messageId);
+    expect(t.turn.tools).not.toContain(TOOL);
+    // Even a forged call there finds no tool on the turn.
+    const r = await update(t.eventId, { "/status": "Shipped" });
+    expect(r.status).toBe(403);
+    expect(r.body).toMatchObject({ ok: false, code: "not_in_turn" });
+  });
+
+  it("another bot in the watched thread is not offered it; its event used as Ops helper's is 403 no_trigger", async () => {
+    const t = await mention(s.victor, card.messageId, { agentId: scoutId, text: "@scout any news?" });
+    expect(t.turn.tools).not.toContain(TOOL);
+    const r = await update(t.eventId, { "/status": "Shipped" });
+    expect(r.status).toBe(403);
+    expect(r.body.error?.code).toBe("no_trigger");
+    expect(callsOf("update_record")).toEqual([]);
+  });
+
+  it("a forged eventId of organization B is 404 unknown_turn", async () => {
+    const eveBot = (
+      await ok(
+        s.eve.request("POST", "/api/v1/agents", {
+          name: "Evil helper",
+          username: "evilhelper",
+          instructions: "x",
+          modelProvider: "mock",
+          modelId: "mock-1",
+        }),
+      )
+    ).id as string;
+    const forged = randomUUID();
+    await s.su.query(
+      `insert into app.agent_turns (event_id, organization_id, agent_id, user_id, conversation_id, conversation_kind,
+         message_id, tools) values ($1, $2, $3, $4, $5, 'channel', $6, $7)`,
+      [forged, s.orgB, eveBot, s.eveId, randomUUID(), randomUUID(), [TOOL]],
+    );
+    for (const agentId of [eveBot, opsId]) {
+      const r = await update(forged, { "/status": "Shipped" }, agentId);
+      expect(r.status).toBe(404);
+      expect(r.body.error?.code).toBe("unknown_turn");
+    }
+    expect(callsOf("update_record")).toEqual([]);
+  });
+});
+
+describe("governed like any side effect: taint and 07.5 approvals", () => {
+  let card: Json;
+
+  it("a turn that read outside content is refused 403 tainted, nothing read or written", async () => {
+    ({ card } = await freshWatch("EXP-0051 Tainted turn"));
+    const { eventId } = await mention(s.victor, card.messageId);
+    await s.su.query("update app.agent_turns set tainted = true where event_id = $1", [eventId]);
+    const before = erp.state.calls.length;
+    const r = await update(eventId, { "/status": "Shipped" });
+    expect(r.status).toBe(403);
+    expect(r.body).toEqual({
+      ok: false,
+      code: "tainted",
+      sentence:
+        "I can't update the record after reading outside content in this turn. Tell Víctor Ruiz to ask again in a new message.",
+    });
+    expect(erp.state.calls.length).toBe(before);
+    expect(record().status).toBe("Confirmed");
+    const denied = (
+      await s.su.query(
+        "select decision, reason from app.agent_tool_calls where event_id = $1 and tool = $2",
+        [eventId, TOOL],
+      )
+    ).rows;
+    expect(denied).toEqual([{ decision: "denied", reason: "tainted" }]);
+  });
+
+  it("with an `always` rule: an approval card and nothing written; once Víctor approves, the re-run's call writes once", async () => {
+    ({ card } = await freshWatch("EXP-0052 Needs approval"));
+    await s.su.query(
+      `insert into app.tool_approval_policies
+         (organization_id, scope_unit_id, tool_pattern, mode, approver_kind, approver_user_ids, created_by, updated_by)
+       values ($1, null, $2, 'always', 'requester', '{}', $3, $3)`,
+      [s.orgA, TOOL, s.victorId],
+    );
+    try {
+      const { eventId, turn } = await mention(s.victor, card.messageId);
+      expect(turn.toolFlags[TOOL]).toMatchObject({ sideEffecting: true, approval: "always" });
+
+      const r = await update(eventId, { "/status": "Shipped" });
+      expect(r.status).toBe(409);
+      expect(r.body.code).toBe("approval_required");
+      expect(r.body.sentence).toMatch(/^This update needs approval\./u);
+      expect(callsOf("update_record")).toEqual([]);
+      const [request] = (
+        await s.su.query(
+          "select id, action_hash, card_message_id, status from app.approval_requests where kind = 'tool.call' and organization_id = $1 order by created_at desc limit 1",
+          [s.orgA],
+        )
+      ).rows as Json[];
+      expect(request?.status).toBe("pending");
+      // The same call again waits on the same request.
+      const pending = await update(eventId, { "/status": "Shipped" });
+      expect(pending.body.code).toBe("approval_pending");
+
+      await ok(
+        s.victor.request("POST", `/api/v1/approvals/${request?.id}/decision`, {
+          outcome: "approved",
+          actionHash: request?.action_hash,
+        }),
+      );
+      const rerun = await eventually(async () => {
+        const rows = (
+          await s.su.query(
+            "select payload from app.stream_events where type = 'agent.card_action.v1' and payload->'cardAction'->>'messageId' = $1",
+            [request?.card_message_id],
+          )
+        ).rows;
+        return rows.length > 0 ? (rows[0].payload as Json) : undefined;
+      });
+      expect(rerun.cardAction.grant).toMatchObject({ tool: TOOL });
+      expect(rerun.turn.tools).toContain(TOOL);
+
+      // A different change is not what was approved.
+      const other = await update(rerun.eventId, { "/status": "Cancelled" });
+      expect(other.status).toBe(409);
+      expect(other.body.code).toBe("approval_required");
+      expect(callsOf("update_record")).toEqual([]);
+
+      const done = await update(rerun.eventId, { "/status": "Shipped" });
+      expect(done.status, JSON.stringify(done.body)).toBe(200);
+      expect(done.body.sentence).toBe("Updated SO-10442 in ERP.");
+      expect(callsOf("update_record")).toHaveLength(1);
+      expect(record().status).toBe("Shipped");
+      const granted = (
+        await s.su.query(
+          "select decision, approval_id from app.agent_tool_calls where event_id = $1 and tool = $2 and decision = 'allowed'",
+          [rerun.eventId, TOOL],
+        )
+      ).rows;
+      expect(granted).toEqual([{ decision: "allowed", approval_id: request?.id }]);
+    } finally {
+      await s.su.query("delete from app.tool_approval_policies where organization_id = $1", [s.orgA]);
+    }
+  });
+});
+
+describe("per-member connector: written with the requester's own account, only where they allowed it", () => {
+  let personal: Json;
+  let card: Json;
+
+  beforeAll(async () => {
+    erp.reset();
+    personal = await ok(
+      s.victor.request("POST", "/api/v1/mcp-servers", {
+        name: "ERP personal",
+        transport: "streamable-http",
+        url: erpUrl,
+        authMode: "per_member_secret",
+        memberHeaderName: "Authorization",
+        memberHeaderPrefix: "Bearer ",
+      }),
+    );
+    // Víctor connects his key (the first connection probes the tools API-side) and allows it in #orders.
+    await ok(s.victor.request("PUT", `/api/v1/connectors/${personal.id}/secret`, { value: ERP_TOKEN }));
+    await grant(opsId, personal, ["get_record", "update_record", "add_note"]);
+    await ok(
+      s.victor.request("POST", "/api/v1/member-account-shares", {
+        conversationId: ordersId,
+        resourceKind: "connector",
+        resourceId: personal.id,
+      }),
+      201,
+    );
+    ({ card } = await freshWatch("EXP-0053 Order in Víctor's ERP account", { mcpServerId: personal.id }));
+  });
+
+  it("Sam has not connected ERP personal: 409 not_connected, nothing read", async () => {
+    const { eventId } = await mention(s.sam, card.messageId);
+    const before = erp.state.calls.length;
+    const r = await update(eventId, { "/status": "Shipped" });
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe("not_connected");
+    expect(r.body.sentence).toMatch(/^ERP personal uses Sam Lee's own account/u);
+    expect(erp.state.calls.length).toBe(before);
+  });
+
+  it("Sam connected but did not allow it in #orders: 409 member_account; once allowed, written with Sam's account", async () => {
+    await ok(s.sam.request("PUT", `/api/v1/connectors/${personal.id}/secret`, { value: ERP_TOKEN }));
+    await drain("watched.check");
+    const first = await mention(s.sam, card.messageId);
+    const before = erp.state.calls.length;
+    const refused = await update(first.eventId, { "/status": "Shipped" });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe("member_account");
+    expect(erp.state.calls.length).toBe(before);
+
+    await ok(
+      s.sam.request("POST", "/api/v1/member-account-shares", {
+        conversationId: ordersId,
+        resourceKind: "connector",
+        resourceId: personal.id,
+      }),
+      201,
+    );
+    await s.su.query(
+      "update app.connector_connections set last_used_at = null where user_id = $1 and server_id = $2",
+      [s.samId, personal.id],
+    );
+    const second = await mention(s.sam, card.messageId);
+    const r = await update(second.eventId, { "/status": "Shipped" });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(record().status).toBe("Shipped");
+    expect(notes()).toEqual(["Updated from OCW by Ops helper for Sam Lee: Status"]);
+    const used = (
+      await s.su.query(
+        "select last_used_at from app.connector_connections where user_id = $1 and server_id = $2",
+        [s.samId, personal.id],
+      )
+    ).rows[0] as Json;
+    expect(used.last_used_at).not.toBeNull();
+  });
+});
