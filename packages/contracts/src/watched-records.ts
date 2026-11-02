@@ -160,6 +160,49 @@ export const UpdateWatchedRecordRequest = z
   );
 export type UpdateWatchedRecordRequest = z.infer<typeof UpdateWatchedRecordRequest>;
 
+/**
+ * `GET /watched-records/options?conversationId=` (07.6-17, the watch dialog): what the viewer may link on this board,
+ * decided by the API with the link's own rules. Connectors are the remote ones with at least one read-only,
+ * non-destructive tool that a bot of this board was granted; each tool lists the board's bots granted it (the dialog
+ * offers a bot only the tools it may use). A per-member connector carries the viewer's own connection state and
+ * whether the viewer shares it on this board (Pitfall 8); never a header, a secret or another member's state.
+ */
+export const WatchOptionsQuery = z.object({ conversationId: Id });
+export type WatchOptionsQuery = z.infer<typeof WatchOptionsQuery>;
+
+export const WatchOptionTool = z.object({
+  name: ToolName,
+  title: z.string().nullable(),
+  readOnly: z.boolean(),
+  destructive: z.boolean(),
+  /** The tool's first required argument, the default "Record ID argument" (null when the schema names none). */
+  idArg: IdArg.nullable(),
+  /** The board's bots granted this tool. */
+  agentIds: z.array(Id),
+});
+export type WatchOptionTool = z.infer<typeof WatchOptionTool>;
+
+export const WatchOptionConnector = z.object({
+  id: Id,
+  name: z.string(),
+  authMode: z.enum(["org_secret", "per_member"]),
+  /** Per-member connectors: the viewer's own connection; null for organization-secret ones. */
+  connection: z.enum(["connected", "not_connected", "needs_reconnect"]).nullable(),
+  /** The viewer shares this per-member connector on this board (always true for organization-secret ones). */
+  shared: z.boolean(),
+  tools: z.array(WatchOptionTool).max(200),
+});
+export type WatchOptionConnector = z.infer<typeof WatchOptionConnector>;
+
+export const WatchOptions = z.object({
+  /** The board, and how many people read it (the share notice's "{n} people"). */
+  channel: z.object({ id: Id, name: z.string(), readers: z.number().int().nonnegative() }),
+  connectors: z.array(WatchOptionConnector).max(100),
+  /** Bots that are members of the board and may post there and read it for the viewer ("Report with"). */
+  bots: z.array(PersonRef).max(100),
+});
+export type WatchOptions = z.infer<typeof WatchOptions>;
+
 /** `POST /watched-records/:id/check`: `schedule` and `write` checks are the server's own. */
 export const CheckWatchedRecordRequest = z.object({ source: z.enum(["access", "manual"]) });
 export type CheckWatchedRecordRequest = z.infer<typeof CheckWatchedRecordRequest>;

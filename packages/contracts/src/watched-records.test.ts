@@ -12,6 +12,8 @@ import {
   WatchedRecord,
   WatchedRecordList,
   WatchedRecordUpdatedEvent,
+  WatchOptions,
+  WatchOptionsQuery,
 } from "./watched-records";
 
 const ID = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
@@ -197,5 +199,48 @@ describe("ocw_record_update body (D-04, C-01)", () => {
       AgentChannelRecordUpdateResponse.parse({ ok: false, code: "record_changed", sentence: "Changed." })
         .code,
     ).toBe("record_changed");
+  });
+});
+
+describe("watch dialog options (07.6-17, D-07, Pitfall 8)", () => {
+  const tool = {
+    name: "get_record",
+    title: "Get sales order",
+    readOnly: true,
+    destructive: false,
+    idArg: "id",
+    agentIds: [ID],
+  };
+  const erp = {
+    id: ID2,
+    name: "ERP",
+    authMode: "org_secret",
+    connection: null,
+    shared: true,
+    tools: [tool],
+  };
+  const options = {
+    channel: { id: ID, name: "orders", readers: 12 },
+    connectors: [erp],
+    bots: [{ id: ID, displayName: "Ops helper" }],
+  };
+
+  it("parses: connectors with their tools and which board bots may use each, and the board's bots", () => {
+    const parsed = WatchOptions.parse(options);
+    expect(parsed.connectors[0]?.tools[0]?.agentIds).toEqual([ID]);
+    expect(parsed.channel.readers).toBe(12);
+    expect(WatchOptionsQuery.parse({ conversationId: ID }).conversationId).toBe(ID);
+  });
+
+  it("a per-member connector carries the viewer's own connection state, never a secret or a header", () => {
+    const perMember = { ...erp, authMode: "per_member", connection: "needs_reconnect", shared: false };
+    expect(WatchOptions.parse({ ...options, connectors: [perMember] }).connectors[0]?.connection).toBe(
+      "needs_reconnect",
+    );
+    expect(
+      WatchOptions.safeParse({ ...options, connectors: [{ ...perMember, connection: "token" }] }).success,
+    ).toBe(false);
+    const parsed = WatchOptions.parse({ ...options, connectors: [{ ...perMember, headers: ["x"] }] });
+    expect(Object.keys(parsed.connectors[0] ?? {})).not.toContain("headers");
   });
 });

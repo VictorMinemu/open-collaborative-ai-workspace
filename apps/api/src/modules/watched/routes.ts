@@ -10,11 +10,14 @@ import {
   WatchedRecord,
   WatchedRecordList,
   WatchedRecordListQuery,
+  WatchOptions,
+  WatchOptionsQuery,
 } from "@ocw/contracts";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { HttpError } from "../../lib/errors";
 import { previewOf } from "./cards";
 import { readWith } from "./check";
+import { watchOptions } from "./options";
 import {
   getWatched,
   linkWatched,
@@ -47,6 +50,16 @@ export function registerWatchedRoutes(app: App, core: Core, ctx: WatchedCtx): vo
     async (req, reply) => {
       reply.header("cache-control", "no-store");
       return core.db.withTenant(tenant(req), (tx) => listWatched(req, tx, ctx, req.query.conversationId));
+    },
+  );
+
+  // 07.6-17: the watch dialog's options, decided with the link's own rules (posting + `record.watch`).
+  app.get(
+    "/watched-records/options",
+    { ...user, schema: { tags, querystring: WatchOptionsQuery, response: { 200: WatchOptions } } },
+    async (req, reply) => {
+      reply.header("cache-control", "no-store");
+      return core.db.withTenant(tenant(req), (tx) => watchOptions(req, tx, ctx, req.query.conversationId));
     },
   );
 
