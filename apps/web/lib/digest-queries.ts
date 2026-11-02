@@ -16,8 +16,8 @@ import { useTopic } from "./realtime";
 
 /**
  * Settings › Digest (07.6-16, AUTO-05; R6) over the digest API of 07.6-13: `GET|PUT /digest` (the person's one digest
- * and the bots they can DM), `POST /digest/preview` (the unsaved form composed now: stores, sends and bills nothing)
- * and `POST /digest/test` (the saved digest sent now: one of its 5 runs a day, it moves "since the last digest"). The
+ * and the bots they can DM), the preview (the unsaved form composed now: stores, sends and bills nothing) and the
+ * test send (the saved digest sent now: one of its 5 runs a day, it moves "since the last digest"). The
  * view refetches on `automation.updated` / `automation_run.updated` of the person's own `user:` stream (ids only), so
  * the next and last send times follow a pause from the automations list or a run that just went out. Every response
  * is parsed with its contract schema.
