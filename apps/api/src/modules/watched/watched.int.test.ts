@@ -75,6 +75,26 @@ const humanCard = async (boardId: string, description: string) =>
     }),
   );
 
+/** Adds grants of ERP tools to a bot (keeping the ones it has). */
+async function grantErp(agentId: string, tools: string[]): Promise<void> {
+  const caps = await ok(s.victor.request("GET", `/api/v1/agents/${agentId}/capabilities`));
+  const kept = (caps.tools as Json[])
+    .filter((t) => t.granted)
+    .map((t) => ({ sourceKind: t.sourceKind, sourceId: t.sourceId, tool: t.tool }));
+  await ok(
+    s.victor.request("PATCH", `/api/v1/agents/${agentId}/capabilities`, {
+      tools: [
+        ...kept,
+        ...tools.map((t) => ({
+          sourceKind: "mcp",
+          sourceId: erpConnector.id,
+          tool: `${erpConnector.safeName}__${t}`,
+        })),
+      ],
+    }),
+  );
+}
+
 const linkBody = (cardMessageId: string, extra: Json = {}) => ({
   cardMessageId,
   mcpServerId: erpConnector.id,
@@ -145,6 +165,8 @@ beforeAll(async () => {
       })),
     ),
   );
+  // The admin grants Ops helper the ERP's read, update and note tools (the per-bot side of the cell's tool filter).
+  await grantErp(opsId, ["get_record", "update_record", "add_note"]);
   card = await humanCard(ordersId, "EXP-0042 Pump order for Globex");
 }, 240_000);
 
@@ -305,5 +327,116 @@ describe("tracer: SO-10442 changes in the ERP and the card's thread says Status 
       409,
       "already_watched",
     );
+  });
+});
+
+// ---------------------------------------------------------------- tools a watch may name (security fix)
+
+describe("a watch names only read-only, non-dangerous tools the admin granted to its bot", () => {
+  let other: Json;
+
+  beforeAll(async () => {
+    other = await humanCard(ordersId, "EXP-0043 Draft order for Initech");
+  });
+
+  const link = (extra: Json) =>
+    s.victor.request(
+      "POST",
+      "/api/v1/watched-records",
+      linkBody(other.messageId, { externalRef: "SO-10443", ...extra }),
+    );
+
+  it("a destructive tool as the read tool is 400 read_tool_not_read_only", async () => {
+    await fails(link({ readTool: "update_record" }), 400, "read_tool_not_read_only");
+  });
+
+  it("a read tool not granted to the bot is 400 tool_not_allowed", async () => {
+    await fails(link({ readTool: "list_records" }), 400, "tool_not_allowed");
+    await fails(link({ readTool: "__mutate" }), 400, "tool_not_allowed");
+  });
+
+  it("a dangerous-named read-only tool is refused even when granted", async () => {
+    await s.su.query(
+      `insert into app.mcp_server_tools (organization_id, server_id, name, openclaw_name, read_only, destructive)
+       values ($1, $2, 'run_shell', $3, true, false)`,
+      [s.orgA, erpConnector.id, `${erpConnector.safeName}__run_shell`],
+    );
+    await s.su.query(
+      `insert into app.bot_tool_grants (organization_id, agent_id, source_kind, source_id, tool_name)
+       values ($1, $2, 'mcp', $3, $4)`,
+      [s.orgA, opsId, erpConnector.id, `${erpConnector.safeName}__run_shell`],
+    );
+    await fails(link({ readTool: "run_shell" }), 400, "tool_not_allowed");
+  });
+
+  it("a write or note tool not granted to the bot is 400 tool_not_allowed; granted ones pass", async () => {
+    await fails(link({ writeTool: "__mutate" }), 400, "tool_not_allowed");
+    await fails(link({ noteTool: "list_records" }), 400, "tool_not_allowed");
+    await fails(link({ writeTool: "nope" }), 400, "tool_not_found");
+    const w = await ok(link({ writeTool: "update_record", noteTool: "add_note" }), 201);
+    expect(w).toMatchObject({ writeTool: "update_record", noteTool: "add_note" });
+    expect(await drain("watched.check")).toBe(1);
+    expect((await row(w.id)).snapshot_hash).toMatch(/^[0-9a-f]{64}$/u);
+    other.watchedId = w.id;
+    other.version = w.version;
+  });
+
+  it("PATCH to a write tool not granted is 400 tool_not_allowed", async () => {
+    await fails(
+      s.victor.request("PATCH", `/api/v1/watched-records/${other.watchedId}`, {
+        expectedVersion: other.version,
+        writeTool: "__mutate",
+      }),
+      400,
+      "tool_not_allowed",
+    );
+  });
+
+  it("a re-probe that makes the read tool non-read-only fails the next check closed: no call, audited denied", async () => {
+    const calls = erp.state.calls.length;
+    await s.su.query(
+      "update app.mcp_server_tools set read_only = false where server_id = $1 and name = 'get_record'",
+      [erpConnector.id],
+    );
+    try {
+      await s.su.query(
+        "update app.watched_records set next_check_at = now() - interval '1 minute' where id = $1",
+        [other.watchedId],
+      );
+      await tick();
+      expect(await drain("watched.check")).toBe(1);
+      expect(erp.state.calls.length).toBe(calls);
+      expect((await row(other.watchedId)).last_status).toBe("error");
+      const denied = (await auditRows(s, s.orgA, ["watched_record.check_failed"])).filter(
+        (a) => a.resource_id === other.watchedId,
+      );
+      expect(denied.at(-1)?.metadata).toMatchObject({ status: "error", code: "tool_not_allowed" });
+      // Audited at every refused check, not only on the transition.
+      await s.su.query(
+        "update app.watched_records set next_check_at = now() - interval '1 minute' where id = $1",
+        [other.watchedId],
+      );
+      await tick();
+      expect(await drain("watched.check")).toBe(1);
+      expect(
+        (await auditRows(s, s.orgA, ["watched_record.check_failed"])).filter(
+          (a) => a.resource_id === other.watchedId,
+        ),
+      ).toHaveLength(denied.length + 1);
+      expect(erp.state.calls.length).toBe(calls);
+    } finally {
+      await s.su.query(
+        "update app.mcp_server_tools set read_only = true where server_id = $1 and name = 'get_record'",
+        [erpConnector.id],
+      );
+    }
+    await s.su.query(
+      "update app.watched_records set next_check_at = now() - interval '1 minute' where id = $1",
+      [other.watchedId],
+    );
+    await tick();
+    expect(await drain("watched.check")).toBe(1);
+    expect((await row(other.watchedId)).last_status).toBe("ok");
+    expect(erp.state.calls.length).toBe(calls + 1);
   });
 });

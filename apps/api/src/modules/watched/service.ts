@@ -11,7 +11,6 @@ import {
   agents,
   boardCards,
   mcpServers,
-  mcpServerTools,
   messages,
   orgMembers,
   type Tx,
@@ -26,6 +25,7 @@ import { decideConversation } from "../automation";
 import { type ConversationAccess, convTopic, readableBoard, writableBoard } from "../chat";
 import { activeShare } from "../connectors";
 import { channelResource, type PermissionService } from "../organization";
+import { refuseTools, TOOL_REFUSAL_MESSAGES } from "./tools";
 
 /**
  * Watched records, the link side (AUTO-04, D-04, D-07, Pitfall 8). Every decision is the resolver's, on the request:
@@ -101,9 +101,21 @@ async function assertBot(
   if (code) throw badRequest("That bot can't post on this board", "agent_cannot_post");
 }
 
-/** The connector (RLS: this organization's) and that it exposes every named tool. */
-export async function connectorWithTools(tx: Tx, serverId: string, tools: Array<string | null | undefined>) {
-  const [server] = await tx.select().from(mcpServers).where(eq(mcpServers.id, serverId)).limit(1);
+/**
+ * The connector (RLS: this organization's) and the tools the watch names (`tools.ts`): each exists, passes the cell's
+ * dangerous-name denylist and is granted to the bot (`agentId`; null = any live bot, for the preview); the read tool is
+ * recorded read-only and not destructive. 400 with the refusal's code otherwise.
+ */
+export async function connectorWithTools(
+  tx: Tx,
+  p: {
+    serverId: string;
+    agentId: string | null;
+    readTool: string;
+    otherTools?: Array<string | null | undefined>;
+  },
+) {
+  const [server] = await tx.select().from(mcpServers).where(eq(mcpServers.id, p.serverId)).limit(1);
   if (!server) throw notFound("Connector not found", "connector_not_found");
   if (server.transport === "sandboxed-stdio" || !server.url) {
     throw badRequest("Records can be watched only through a remote connector", "connector_unsupported");
@@ -111,19 +123,16 @@ export async function connectorWithTools(tx: Tx, serverId: string, tools: Array<
   if (server.authMode === "org_secret" && !server.orgEnabled) {
     throw conflict("This connector is turned off for the organization", "connector_disabled");
   }
-  const wanted = [...new Set(tools.filter((t): t is string => typeof t === "string" && t !== ""))];
-  if (wanted.length > 0) {
-    const found = await tx
-      .select({ name: mcpServerTools.name })
-      .from(mcpServerTools)
-      .where(and(eq(mcpServerTools.serverId, server.id), inArray(mcpServerTools.name, wanted)));
-    const have = new Set(found.map((f) => f.name));
-    const missing = wanted.find((t) => !have.has(t));
-    if (missing) {
-      throw new HttpError(400, "tool_not_found", `${server.name} has no tool named ${missing}`, {
-        tool: missing,
-      });
-    }
+  const refused = await refuseTools(tx, {
+    serverId: server.id,
+    agentId: p.agentId,
+    readTool: p.readTool,
+    otherTools: p.otherTools ?? [],
+  });
+  if (refused) {
+    throw new HttpError(400, refused.code, TOOL_REFUSAL_MESSAGES[refused.code](refused.tool, server.name), {
+      tool: refused.tool,
+    });
   }
   return server;
 }
@@ -304,11 +313,12 @@ export async function linkWatched(
   if (!isCard) throw badRequest("Only a board card can watch a record", "not_a_board_card");
   await assertWatch(req, tx, ctx, board.facts);
   await assertBot(tx, ctx, { agentId: body.agentId, userId, conv: board.conv });
-  const server = await connectorWithTools(tx, body.mcpServerId, [
-    body.readTool,
-    body.writeTool,
-    body.noteTool,
-  ]);
+  const server = await connectorWithTools(tx, {
+    serverId: body.mcpServerId,
+    agentId: body.agentId,
+    readTool: body.readTool,
+    otherTools: [body.writeTool, body.noteTool],
+  });
   await assertShared(tx, { userId, conversationId: board.conv.id, channelName: board.conv.name, server });
   if (await alreadyWatched(tx, message.id))
     throw conflict("This card already watches a record", "already_watched");
@@ -403,7 +413,16 @@ export async function updateWatched(
     await assertBot(tx, ctx, { agentId: body.agentId, userId: authOf(req).userId, conv: board.conv });
     await assertBot(tx, ctx, { agentId: body.agentId, userId: row.checkAsUserId, conv: board.conv });
   }
-  await connectorWithTools(tx, row.mcpServerId, [body.writeTool, body.noteTool]);
+  // The watch's tools as they will be after the edit, for the bot it will have.
+  await connectorWithTools(tx, {
+    serverId: row.mcpServerId,
+    agentId: body.agentId ?? row.agentId,
+    readTool: row.readTool,
+    otherTools: [
+      body.writeTool === undefined ? row.writeTool : body.writeTool,
+      body.noteTool === undefined ? row.noteTool : body.noteTool,
+    ],
+  });
 
   const changed: string[] = [];
   const set: Partial<typeof watchedRecords.$inferInsert> = {};
@@ -487,7 +506,12 @@ export async function previewGuard(
 ): Promise<{ server: ServerRow; conversationId: string }> {
   const board = await boardFor(req, tx, ctx, body.conversationId, "write");
   await assertWatch(req, tx, ctx, board.facts);
-  const server = await connectorWithTools(tx, body.mcpServerId, [body.readTool]);
+  // No bot is chosen yet: the read tool must be granted to some live bot (the cell's `toolFilter.include`).
+  const server = await connectorWithTools(tx, {
+    serverId: body.mcpServerId,
+    agentId: null,
+    readTool: body.readTool,
+  });
   await assertShared(tx, {
     userId: authOf(req).userId,
     conversationId: board.conv.id,

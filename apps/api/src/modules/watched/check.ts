@@ -26,6 +26,10 @@ import { orgSecretHeaders } from "../mcp";
 import type { PermissionService } from "../organization";
 import { changeCard, changedFields, reconnectCard } from "./cards";
 import { emitUpdated, minutes, type ServerRow, type WatchedRow } from "./service";
+import { refuseTools } from "./tools";
+
+/** The check's code when the read tool is no longer allowed (fails closed, audited `denied` at every check). */
+export const TOOL_NOT_ALLOWED = "tool_not_allowed";
 
 /**
  * Watched-record checks (AUTO-04, D-04, D-07, P-13; Pattern 8, Pitfall 9). A check reads the record through the 07.4
@@ -162,6 +166,12 @@ export async function readWith(
 
 /** A watch's read: the share rule first for per-member connectors (Pitfall 8), then the connector. */
 export async function readRecord(core: Core, w: WatchedRow, server: ServerRow): Promise<ReadOutcome> {
+  // Before every call: the read tool is still read-only, not destructive, not a dangerous name and granted to the
+  // watch's bot (a re-probe or a revoked grant since the link fails closed; `checkWatchedRecord` audits it).
+  const refused = await core.db.withTenant({ organizationId: w.organizationId }, (tx) =>
+    refuseTools(tx, { serverId: server.id, agentId: w.agentId, readTool: w.readTool }),
+  );
+  if (refused) return fail("error", TOOL_NOT_ALLOWED);
   if (server.authMode !== "org_secret") {
     const shared = await core.db.withTenant(
       { organizationId: w.organizationId, userId: w.checkAsUserId },
@@ -274,17 +284,21 @@ export async function checkWatchedRecord(
           .update(watchedRecords)
           .set({ lastStatus: status, ...timing })
           .where(eq(watchedRecords.id, w.id));
-        if (w.lastStatus !== status) {
+        const transition = w.lastStatus !== status;
+        // A refused tool is audited at every check (a call the platform would not make); others once per transition.
+        if (transition || code === TOOL_NOT_ALLOWED) {
           await core.audit.record(tx, {
             action: status === "not_connected" ? "watched_record.paused" : "watched_record.check_failed",
             resourceType: "watched_record",
             resourceId: w.id,
             userId: w.checkAsUserId,
+            result: code === TOOL_NOT_ALLOWED ? "denied" : "error",
             metadata: { ...auditMeta, status, code },
           });
-          // Only the linker can fix their own connection; a revoked share is their own choice (nothing to tell).
-          if (status === "not_connected" && code !== "share_revoked")
-            await tellLinker(core, deps, tx, w, server);
+        }
+        // Only the linker can fix their own connection; a revoked share is their own choice (nothing to tell).
+        if (transition && status === "not_connected" && code !== "share_revoked") {
+          await tellLinker(core, deps, tx, w, server);
         }
         await emitUpdated(core, tx, w);
       };
