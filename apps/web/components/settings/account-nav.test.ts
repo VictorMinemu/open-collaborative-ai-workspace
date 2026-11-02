@@ -13,6 +13,7 @@ describe("Settings › Account entries (07.3 module gating, 07.4 withdrawal: #19
       "profile",
       "security",
       "notifications",
+      "digest",
       "ai-chat",
       "connections",
       "keychain",
@@ -20,7 +21,7 @@ describe("Settings › Account entries (07.3 module gating, 07.4 withdrawal: #19
   });
 
   it("Bots off with nothing of the member's own: Connections and Keychain leave", () => {
-    expect(ids(["connector.connect", "vault.use"], nothingToKeep)).toEqual([
+    expect(ids(["connector.connect", "vault.use", "automation.create"], nothingToKeep)).toEqual([
       "profile",
       "security",
       "notifications",
@@ -29,13 +30,9 @@ describe("Settings › Account entries (07.3 module gating, 07.4 withdrawal: #19
   });
 
   it("Bots off: Keychain stays while the member has keys to manage, so they can find and delete them", () => {
-    expect(ids(["connector.connect", "vault.use"], { connections: false, keychain: true })).toEqual([
-      "profile",
-      "security",
-      "notifications",
-      "ai-chat",
-      "keychain",
-    ]);
+    expect(
+      ids(["connector.connect", "vault.use", "automation.create"], { connections: false, keychain: true }),
+    ).toEqual(["profile", "security", "notifications", "ai-chat", "keychain"]);
   });
 
   it("Bots off: Connections stays while the member has something to withdraw (#196)", () => {
@@ -44,9 +41,17 @@ describe("Settings › Account entries (07.3 module gating, 07.4 withdrawal: #19
     );
   });
 
+  it("Digest sits after Notifications and leaves with automations (Bots off, 07.6-16)", () => {
+    expect(ids([], nothingToKeep).slice(2, 4)).toEqual(["notifications", "digest"]);
+    expect(ids(["automation.create"], nothingToKeep)).not.toContain("digest");
+  });
+
   it("keeping is per entry: keys never bring back AI chat or Connections", () => {
     expect(
-      ids(["ai_chat.use", "connector.connect", "vault.use"], { connections: false, keychain: true }),
+      ids(["ai_chat.use", "connector.connect", "vault.use", "automation.create"], {
+        connections: false,
+        keychain: true,
+      }),
     ).toEqual(["profile", "security", "notifications", "keychain"]);
   });
 });

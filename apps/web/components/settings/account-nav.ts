@@ -1,5 +1,5 @@
 import type { Permission } from "@ocw/contracts";
-import { Bell, KeyRound, Link2, ShieldCheck, Sparkles, UserRound } from "lucide-react";
+import { Bell, KeyRound, Link2, Newspaper, ShieldCheck, Sparkles, UserRound } from "lucide-react";
 import type { SettingsSection } from "./settings-nav";
 
 /**
@@ -10,6 +10,14 @@ export const ACCOUNT_SECTIONS: readonly SettingsSection[] = [
   { id: "profile", label: "Profile", href: "/settings/profile", icon: UserRound },
   { id: "security", label: "Security", href: "/settings/security", icon: ShieldCheck },
   { id: "notifications", label: "Notifications", href: "/settings/notifications", icon: Bell },
+  // Phase 07.6 (07.6-16, UI-SPEC Surface 6): the member's own digest is one of their automations (Bots module).
+  {
+    id: "digest",
+    label: "Digest",
+    href: "/settings/digest",
+    icon: Newspaper,
+    permission: "automation.create",
+  },
   { id: "ai-chat", label: "AI chat", href: "/settings/ai-chat", icon: Sparkles, permission: "ai_chat.use" },
   // Phase 07.4 (UI-SPEC Layout › Navigation): the member's own accounts and keys, both in the Bots module (ADR-0024).
   {
