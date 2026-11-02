@@ -3,7 +3,6 @@
 import {
   AUTOMATION_LIMITS,
   type Automation,
-  type AutomationDraftView,
   type AutomationOptions,
   type AutomationTarget,
   type AutomationTriggerInput,
@@ -39,8 +38,8 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { errorMessage, isApiError } from "@/lib/api";
-import { useApproval } from "@/lib/approval-queries";
 import {
+  type AutomationDraftDefaults,
   automationErrorText,
   cronToSchedule,
   defaultSchedule,
@@ -51,6 +50,7 @@ import {
   scheduleToCron,
   targetName,
   useAutomation,
+  useAutomationDraft,
   useAutomationOptions,
   useDeleteAutomation,
   usePauseAutomation,
@@ -110,16 +110,8 @@ function valuesOf(a: Automation): Values {
   };
 }
 
-function valuesOfDraft(d: AutomationDraftView["draft"]): Values {
-  return {
-    name: d.name,
-    agentId: d.agent.id,
-    instructions: d.instructions,
-    triggerKind: "schedule",
-    schedule: cronToSchedule(d.schedule.cron, d.schedule.timeZone),
-    target: targetValueOf(d.target),
-    maxRunsPerDay: String(d.maxRunsPerDay),
-  };
+function valuesOfDraft(d: AutomationDraftDefaults): Values {
+  return { ...d, triggerKind: "schedule" };
 }
 
 function blank(): Values {
@@ -193,7 +185,7 @@ export function AutomationEditorSheet({
 }) {
   const me = useMe({ enabled: false }).data?.user ?? null;
   const detail = useAutomation(open ? id : null);
-  const draft = useApproval(open && !id ? draftId : null);
+  const draft = useAutomationDraft(open && !id ? draftId : null);
   const options = useAutomationOptions(open);
   const agents = useAgents().data?.agents;
   const save = useSaveAutomation();
@@ -202,8 +194,7 @@ export function AutomationEditorSheet({
   const runNow = useRunNow();
 
   const automation = id ? (detail.data ?? null) : null;
-  const draftView =
-    draft.data?.view.type === "automation_draft" ? (draft.data.view as AutomationDraftView) : null;
+  const draftView = draft?.state === "ready" ? draft : null;
   const own = !!automation && automation.runAs.id === me?.id;
   const mode: Mode = !id
     ? "new"
@@ -225,19 +216,22 @@ export function AutomationEditorSheet({
   const [deleting, setDeleting] = useState(false);
   const keepRef = useRef<HTMLButtonElement>(null);
   const loadedFor = useRef<string | null>(null);
+  // The proposal this sheet just saved: it closes as "no longer open" a moment before the sheet does; never show that.
+  const savedDraft = useRef<string | null>(null);
 
   // A fresh form each time the sheet opens on something else (new, an automation, a draft).
   const key = open ? (id ? `edit:${id}` : draftId ? `draft:${draftId}` : "new") : null;
   useEffect(() => {
     if (!key) {
       loadedFor.current = null;
+      savedDraft.current = null;
       return;
     }
     const source = id ? automation : draftId ? draftView : "blank";
     if (!source || loadedFor.current === key) return;
     loadedFor.current = key;
     const start =
-      source === "blank" ? blank() : "draft" in source ? valuesOfDraft(source.draft) : valuesOf(source);
+      source === "blank" ? blank() : "defaults" in source ? valuesOfDraft(source.defaults) : valuesOf(source);
     setInitial(start);
     setValues(start);
     setErrors({});
@@ -264,8 +258,8 @@ export function AutomationEditorSheet({
     (automation ? { ...automation.agent, unitName: null, ready: true } : null) ??
     (draftView
       ? {
-          ...draftView.draft.agent,
-          personal: draftView.draft.target.kind === "dm",
+          ...draftView.bot,
+          personal: draftView.defaults.target.kind === "dm",
           unitName: null,
           ready: true,
         }
@@ -400,6 +394,7 @@ export function AutomationEditorSheet({
             ? `Created “${a.name}”. First run ${formatRunInstant(a.nextRunAt, zone)}.`
             : `Created “${a.name}”.`,
         );
+        if (body.fromApprovalId) savedDraft.current = body.fromApprovalId;
         loadedFor.current = null;
         onCreated(a);
         return;
@@ -481,7 +476,9 @@ export function AutomationEditorSheet({
           : `“${automation.name}”`
         : "Automation";
   const notFound = !!id && detail.isError;
-  const loading = (!!id && detail.isPending) || (!id && !!draftId && draft.isPending);
+  // A proposal that is no longer pending (decided, expired, not the viewer's) has nothing to edit.
+  const draftGone = draft?.state === "gone" && savedDraft.current !== draftId ? draft : null;
+  const loading = (!!id && detail.isPending) || draft?.state === "loading";
   const noBots = mode === "new" && options.isSuccess && bots.length === 0;
   const id_ = (k: string) => `automation-editor-${k}`;
   const instructionsLength = values.instructions.length;
@@ -569,6 +566,8 @@ export function AutomationEditorSheet({
                   Back to automations
                 </Button>
               </EmptyState>
+            ) : draftGone ? (
+              <DraftGone automationId={draftGone.automationId} onClose={onClose} />
             ) : loading ? (
               <EditorSkeleton />
             ) : tab === "runs" && automation ? (
@@ -576,16 +575,7 @@ export function AutomationEditorSheet({
             ) : (
               <>
                 {draftView && mode === "new" ? (
-                  <p
-                    data-testid="automation-draft-banner"
-                    className="rounded-lg bg-brand-soft px-3 py-2 text-brand-soft-foreground text-sm"
-                  >
-                    From {draftView.draft.agent.displayName}'s proposal in{" "}
-                    {draftView.draft.target.kind === "dm"
-                      ? "your DM"
-                      : draftView.draft.target.label.replace(/^Thread in /, "")}
-                    . Saving creates it and closes the proposal.
-                  </p>
+                  <DraftBanner bot={draftView.botName} conversation={draftView.conversationName} />
                 ) : null}
                 {conflict ? (
                   <div
@@ -805,7 +795,7 @@ export function AutomationEditorSheet({
             )}
           </div>
 
-          {notFound || loading ? null : (
+          {notFound || draftGone || loading ? null : (
             <Footer
               mode={mode}
               tab={tab}
@@ -882,6 +872,50 @@ function EditorSkeleton() {
         </div>
       ))}
     </div>
+  );
+}
+
+/** `?draft=` (UI-SPEC § Copy › Editor banners, R5): whose proposal this is, and that saving closes it. */
+export function DraftBanner({ bot, conversation }: { bot: string; conversation: string }) {
+  return (
+    <p
+      data-testid="automation-draft-banner"
+      className="flex items-start gap-2 rounded-lg bg-brand-soft px-3 py-2 text-brand-soft-foreground text-sm"
+    >
+      <Zap className="mt-0.5 size-4 shrink-0" aria-hidden />
+      <span className="min-w-0">
+        {`From ${bot}'s proposal in ${conversation}. Saving creates it and closes the proposal.`}
+      </span>
+    </p>
+  );
+}
+
+/**
+ * `?draft=` of a proposal that is no longer pending (confirmed, discarded, expired, failed, or not the viewer's): nothing
+ * to edit. Once confirmed, it opens what it created.
+ */
+export function DraftGone({ automationId, onClose }: { automationId: string | null; onClose: () => void }) {
+  return (
+    <EmptyState
+      icon={Zap}
+      title="This proposal is no longer open"
+      description="It was confirmed, discarded or it expired."
+      className="py-10"
+    >
+      <div className="flex flex-wrap justify-center gap-2" data-testid="automation-draft-gone">
+        {automationId ? (
+          <Link
+            href={`/bots/automations?edit=${encodeURIComponent(automationId)}`}
+            className={cn(buttonVariants({ variant: "outline" }), TOUCH)}
+          >
+            Open automation
+          </Link>
+        ) : null}
+        <Button variant="outline" className={TOUCH} onClick={onClose}>
+          Back to automations
+        </Button>
+      </div>
+    </EmptyState>
   );
 }
 

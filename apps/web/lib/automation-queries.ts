@@ -1,7 +1,9 @@
 "use client";
 
 import {
+  type ApprovalDetail,
   type Automation,
+  type AutomationDraftView,
   AutomationList,
   AutomationOptions,
   type AutomationRun,
@@ -11,6 +13,7 @@ import {
   AutomationSchedule,
   Automation as AutomationSchema,
   AutomationTargetOptions,
+  type AutomationTargetView,
   type CreateAutomationRequest,
   CreateAutomationResponse,
   DigestTestResponse,
@@ -22,8 +25,9 @@ import {
   type UpdateAutomationRequest,
 } from "@ocw/contracts";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, errorMessage, isApiError } from "./api";
+import { approvalKeys, useApproval } from "./approval-queries";
 import { permalinkPath } from "./permalink";
 import { useMe } from "./queries";
 import { useTopic } from "./realtime";
@@ -205,9 +209,15 @@ export function useSaveAutomation() {
             schema: CreateAutomationResponse,
           })
         : api.post(BASE, { body: input.body, schema: CreateAutomationResponse }),
-    onSuccess: (res) => {
+    onSuccess: (res, input) => {
       qc.setQueryData(automationKeys.detail(res.automation.id), res.automation);
       invalidate(res.automation.id);
+      // A saved proposal is closed (R5): its draft is read again the next time it opens, never refetched under the
+      // open editor (it would turn into "no longer open" before the sheet closes). Cards follow the live events.
+      const fromApprovalId = input.id === undefined ? input.body.fromApprovalId : undefined;
+      if (fromApprovalId) {
+        void qc.invalidateQueries({ queryKey: approvalKeys.detail(fromApprovalId), refetchType: "none" });
+      }
     },
   });
 }
@@ -631,4 +641,84 @@ export function automationErrorText(
     default:
       return "Couldn't save the automation. Try again.";
   }
+}
+
+// ---------------------------------------------------------------- a bot's proposal (?draft=, R5)
+
+/** A proposal as the editor's form values (the editor's own shape; a proposal is always a schedule). */
+export interface AutomationDraftDefaults {
+  name: string;
+  agentId: string;
+  instructions: string;
+  schedule: ScheduleValue;
+  target: {
+    kind: AutomationTargetView["kind"];
+    conversationId: string;
+    columnId: string;
+    threadRootMessageId: string;
+    label: string;
+  };
+  maxRunsPerDay: string;
+}
+
+export type AutomationDraft =
+  | { state: "loading" }
+  /** Decided, expired, failed, not the caller's or not a proposal: nothing to edit (the approval is the one truth). */
+  | { state: "gone"; automationId: string | null }
+  | {
+      state: "ready";
+      defaults: AutomationDraftDefaults;
+      bot: { id: string; displayName: string };
+      botName: string;
+      /** Where the banner says it was proposed (`#sales`, `your DM`). */
+      conversationName: string;
+    };
+
+/** The banner's conversation: the channel (a thread's too) or the person's DM with the bot. */
+export function draftConversationName(target: AutomationTargetView): string {
+  return target.kind === "dm" ? "your DM" : target.label.replace(/^Thread in /, "");
+}
+
+/**
+ * A proposal's approval detail as the editor's form (R5). Only a pending `automation_draft` opens: a discarded or
+ * expired proposal keeps `pending` in its draft row (07.6-12), so the approval's own status decides first.
+ */
+export function automationDraftOf(detail: ApprovalDetail): Exclude<AutomationDraft, { state: "loading" }> {
+  if (detail.view.type !== "automation_draft") return { state: "gone", automationId: null };
+  const d = (detail.view as AutomationDraftView).draft;
+  if (detail.status !== "pending" || d.status !== "pending")
+    return { state: "gone", automationId: d.automationId };
+  const t = d.target;
+  return {
+    state: "ready",
+    defaults: {
+      name: d.name,
+      agentId: d.agent.id,
+      instructions: d.instructions,
+      schedule: cronToSchedule(d.schedule.cron, d.schedule.timeZone),
+      target: {
+        kind: t.kind,
+        conversationId: "conversationId" in t ? t.conversationId : "",
+        columnId: t.kind === "board" ? t.columnId : "",
+        threadRootMessageId: t.kind === "thread" ? t.threadRootMessageId : "",
+        label: t.label,
+      },
+      maxRunsPerDay: String(d.maxRunsPerDay),
+    },
+    bot: { id: d.agent.id, displayName: d.agent.displayName },
+    botName: d.agent.displayName,
+    conversationName: draftConversationName(t),
+  };
+}
+
+/** `?draft=<approvalId>`: the proposal through `GET /approvals/:id` (404 when it is not the caller's); null without one. */
+export function useAutomationDraft(approvalId: string | null): AutomationDraft | null {
+  const q = useApproval(approvalId);
+  const { data, isPending, isError } = q;
+  return useMemo(() => {
+    if (!approvalId) return null;
+    if (isPending) return { state: "loading" };
+    if (isError || !data) return { state: "gone", automationId: null };
+    return automationDraftOf(data);
+  }, [approvalId, data, isPending, isError]);
 }
