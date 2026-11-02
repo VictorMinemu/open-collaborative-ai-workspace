@@ -37,7 +37,8 @@ const ALLOWED_DIFFERENCES = {
   // 07.6-04: exported only with OCW_E2E_MAIL=1 (opt-in GreenMail, one fixed container name per host, so the two
   // parallel CI viewports cannot share it). CI's mail specs skip; IMAP is proven against GreenMail by the integration
   // tests in verify (mailboxes, inbound, security) and by the phase gate's local e2e run.
-  OCW_EGRESS_TEST_HOSTS: "with OCW_E2E_MAIL=1 the runner adds greenmail=127.0.0.1; CI runs no GreenMail in e2e",
+  OCW_EGRESS_TEST_HOSTS:
+    "with OCW_E2E_MAIL=1 the runner adds greenmail=127.0.0.1; CI runs no GreenMail in e2e",
   OCW_E2E_IMAP_PORT: "OCW_E2E_MAIL=1 only (GreenMail IMAP); CI runs no GreenMail in e2e",
   OCW_E2E_SMTP_PORT: "OCW_E2E_MAIL=1 only (GreenMail SMTP); CI runs no GreenMail in e2e",
 };
