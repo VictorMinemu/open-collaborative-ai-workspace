@@ -23,6 +23,7 @@ import { createChatAgentBridge } from "./lib/chat-agent-bridge";
 import { createChatEvents } from "./lib/chat-events";
 import { HttpError } from "./lib/errors";
 import { createJobs } from "./lib/jobs";
+import { redisRateLimitStore } from "./lib/rate-limit-store";
 import { RedisBus } from "./lib/redis";
 import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
 import { createAgentModule } from "./modules/agent";
@@ -208,7 +209,9 @@ export async function buildApp(
     credentials: true,
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
   });
-  await app.register(rateLimit, { global: false });
+  // 07.6-10: counted in Redis (RedisRateLimitStore), so every limit holds across replicas, the public webhook URL's
+  // 60/min among them; the routes keep their own numbers.
+  await app.register(rateLimit, { global: false, store: redisRateLimitStore(bus.pub) });
   await app.register(websocket, {
     options: {
       maxPayload: 256 * 1024,
