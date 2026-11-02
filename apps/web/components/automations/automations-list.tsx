@@ -209,7 +209,7 @@ export function AutomationsPage() {
             >
               <div
                 aria-hidden
-                className="hidden h-9 grid-cols-[minmax(0,2fr)_minmax(0,1.6fr)_minmax(0,1.2fr)_9rem_2rem] items-center gap-x-4 border-b px-4 font-semibold text-muted-foreground text-xs uppercase tracking-wider sm:px-5 md:grid"
+                className="hidden h-9 grid-cols-[minmax(0,1.8fr)_minmax(0,1.8fr)_minmax(0,1fr)_9rem_2rem] items-center gap-x-4 border-b px-4 font-semibold text-muted-foreground text-xs uppercase tracking-wider sm:px-5 md:grid"
               >
                 <span>Automation</span>
                 <span>When</span>
@@ -342,7 +342,7 @@ export function AutomationRow({
       className={cn(
         "relative grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 px-4 py-3 sm:px-5",
         "[grid-template-areas:'name_menu'_'when_when'_'zone_zone'_'bot_bot'_'result_status'_'reason_reason']",
-        "md:min-h-16 md:grid-cols-[minmax(0,2fr)_minmax(0,1.6fr)_minmax(0,1.2fr)_9rem_2rem] md:items-center md:gap-x-4 md:gap-y-0.5",
+        "md:min-h-16 md:grid-cols-[minmax(0,1.8fr)_minmax(0,1.8fr)_minmax(0,1fr)_9rem_2rem] md:items-center md:gap-x-4 md:gap-y-0.5",
         "md:[grid-template-areas:'name_when_result_status_menu'_'bot_zone_result_status_menu'_'reason_reason_reason_reason_reason']",
         highlight && "ring-2 ring-primary/60 ring-inset motion-safe:transition-shadow",
       )}

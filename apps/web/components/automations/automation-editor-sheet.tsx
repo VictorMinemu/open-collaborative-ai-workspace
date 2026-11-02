@@ -275,9 +275,14 @@ export function AutomationEditorSheet({
   const maxRuns = caps?.maxRunsPerDayCap ?? AUTOMATION_LIMITS.maxRunsPerDayCeiling;
 
   const cron = values.triggerKind === "schedule" ? scheduleToCron(values.schedule) : null;
-  const preview = useSchedulePreview(
+  const livePreview = useSchedulePreview(
     open && !readonly && tab === "settings" && cron ? { cron, timeZone: values.schedule.timeZone } : null,
   );
+  // Read-only (a manager), nothing is edited: the stored next run is the preview (the preview route is a creator's).
+  const preview: typeof livePreview =
+    readonly && automation?.nextRunAt && automation.status === "active"
+      ? { state: "ok", next: [automation.nextRunAt] }
+      : livePreview;
   const dirty = !same(values, initial);
 
   function set(patch: Partial<Values>) {

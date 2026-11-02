@@ -100,10 +100,12 @@ async function pick(page: Page, trigger: Locator, option: string | RegExp): Prom
 
 /** Named controls, no sideways scroll, 44 px targets below 768 and no serious axe finding on `selector`. */
 async function invariants(page: Page, selector: string, label: string): Promise<void> {
+  // A select that just closed is still animating out: measure the settled screen (axe waits for animations first).
+  await expect(page.getByRole("listbox")).toHaveCount(0);
+  await expectNoSeriousA11y(page, selector);
   expect(await unnamedControls(page), `${label}: controls without an accessible name`).toEqual([]);
   await expectNoSidewaysScroll(page, label);
   await expectTouchTargets(page, selector);
-  await expectNoSeriousA11y(page, selector);
 }
 
 /** Axe in light and dark, then the light and dark review screenshots. */
