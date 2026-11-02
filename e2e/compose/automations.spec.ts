@@ -11,7 +11,8 @@ import { ADMIN } from "../tests/env";
  * with its job workers on (`OCW_JOBS_WORKER` defaults to on outside tests), and here the admin creates a team bot and
  * a channel through the public API, schedules a weekly automation into it, presses Run now (`POST …/run`), and within
  * 60 s the channel holds the platform-owned run card and the run is `delivered`. Delivery is the run event recorded
- * for the bot's cell; no cell has to answer, so nothing here depends on a model. The API stays healthy throughout.
+ * for the bot's cell; no cell has to answer. The gate's real cell (mock model) usually answers within a second or two,
+ * so `answered` (which only follows `delivered`) counts too. The API stays healthy throughout.
  *
  * Viewport-independent; it runs on both projects with names of its own, so the gate's "no skipped test" rule holds.
  */
@@ -19,6 +20,9 @@ import { ADMIN } from "../tests/env";
 test.describe.configure({ mode: "serial" });
 
 let admin: APIRequestContext;
+
+/** A delivered run, or one the cell already answered (an answer is only accepted on a delivered run). */
+const DELIVERED = new Set(["delivered", "answered"]);
 
 test.beforeAll(async () => {
   admin = await apiAs(ADMIN);
@@ -65,7 +69,7 @@ test("on the release images, Run now posts the automation's run card and the run
 
   // Run now: enqueued ids-only in the request's transaction, fired by the pg-boss worker on the API image.
   const runId = await runNow(admin, automation.id);
-  const run = await waitRun(admin, automation.id, runId, (r) => r.status === "delivered", 60_000);
+  const run = await waitRun(admin, automation.id, runId, (r) => DELIVERED.has(r.status), 60_000);
   expect(run.trigger).toBe("manual");
   expect(run.anchor?.conversationId).toBe(channel.id);
 
