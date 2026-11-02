@@ -59,6 +59,20 @@ import {
   useSaveAutomation,
   useSchedulePreview,
 } from "@/lib/automation-queries";
+import {
+  EMPTY_INBOUND,
+  EMPTY_MAILBOX,
+  type InboundErrors,
+  type InboundValue,
+  inboundErrors,
+  inboundOf,
+  inboundValueOf,
+  type MailboxErrors,
+  type MailboxValue,
+  mailboxConfigOf,
+  mailboxErrors,
+  mailboxValueOf,
+} from "@/lib/automation-trigger-queries";
 import { useAgents } from "@/lib/bots-queries";
 import { useMe } from "@/lib/queries";
 import { cn } from "@/lib/utils";
@@ -75,11 +89,16 @@ interface Values {
   schedule: ScheduleValue;
   target: TargetValue;
   maxRunsPerDay: string;
+  /** Webhook and mail triggers (07.6-18): What happens + mapping, and the mailbox. */
+  inbound: InboundValue;
+  mailbox: MailboxValue;
 }
 
 type Errors = Partial<Record<"name" | "agent" | "instructions" | "maxRunsPerDay", string>> & {
   schedule?: ScheduleErrors;
   target?: TargetErrors;
+  inbound?: InboundErrors;
+  mailbox?: MailboxErrors;
 };
 
 type Mode = "new" | "edit" | "readonly";
@@ -107,11 +126,13 @@ function valuesOf(a: Automation): Values {
     schedule: a.trigger.schedule ? cronToSchedule(a.trigger.schedule.cron, zone ?? "UTC") : defaultSchedule(),
     target: targetValueOf(a.target),
     maxRunsPerDay: String(a.maxRunsPerDay),
+    inbound: inboundValueOf(a.inbound),
+    mailbox: mailboxValueOf(a.trigger.mailbox),
   };
 }
 
 function valuesOfDraft(d: AutomationDraftDefaults): Values {
-  return { ...d, triggerKind: "schedule" };
+  return { ...d, triggerKind: "schedule", inbound: EMPTY_INBOUND, mailbox: EMPTY_MAILBOX };
 }
 
 function blank(): Values {
@@ -123,6 +144,8 @@ function blank(): Values {
     schedule: defaultSchedule(),
     target: EMPTY_TARGET,
     maxRunsPerDay: String(AUTOMATION_LIMITS.maxRunsPerDayDefault),
+    inbound: EMPTY_INBOUND,
+    mailbox: EMPTY_MAILBOX,
   };
 }
 
@@ -151,8 +174,8 @@ function triggerOf(v: Values): AutomationTriggerInput | null {
     return cron ? { kind: "schedule", schedule: { cron, timeZone: v.schedule.timeZone } } : null;
   }
   if (v.triggerKind === "webhook") return { kind: "webhook" };
-  // A mailbox's settings are 07.6-18's panel; without them a mail trigger cannot be saved yet.
-  return null;
+  const mailbox = mailboxConfigOf(v.mailbox);
+  return mailbox ? { kind: "mail", mailbox } : null;
 }
 
 /**
@@ -180,7 +203,8 @@ export function AutomationEditorSheet({
   runId: string | null;
   onTab: (tab: "settings" | "runs") => void;
   onClose: () => void;
-  onCreated: (a: Automation) => void;
+  /** `keepOpen`: a new webhook stays open on its edit view for the secret reveal (07.6-18). */
+  onCreated: (a: Automation, opts?: { keepOpen?: boolean }) => void;
   onOpenRuns: (id: string) => void;
 }) {
   const me = useMe({ enabled: false }).data?.user ?? null;
@@ -327,6 +351,11 @@ export function AutomationEditorSheet({
         else if (preview.code === "invalid_time_zone") s.timeZone = "Pick a time zone from the list";
       }
       if (Object.keys(s).length > 0) e.schedule = s;
+    } else {
+      const ie = inboundErrors(values.inbound);
+      if (Object.keys(ie).length > 0) e.inbound = ie;
+      const me = values.triggerKind === "mail" ? mailboxErrors(values.mailbox) : {};
+      if (Object.keys(me).length > 0) e.mailbox = me;
     }
     const t: TargetErrors = {};
     const target = targetOf(values.target);
@@ -380,12 +409,12 @@ export function AutomationEditorSheet({
           trigger: ok.trigger,
           target: ok.target,
           maxRunsPerDay: ok.runs,
-          ...(ok.trigger.kind !== "schedule"
-            ? { inbound: { action: "post" as const, askBot: true, config: {} } }
-            : {}),
+          ...(ok.trigger.kind !== "schedule" ? { inbound: inboundOf(values.inbound, ok.target.kind) } : {}),
           ...(draftId && draftView ? { fromApprovalId: draftId } : {}),
         };
         const res = await save.mutateAsync({ body });
+        // A webhook's secret leaves the mutation cache at once (07.6-18): it lives only in this sheet's state.
+        if (res.webhookSecret) save.reset();
         setLastSave(res);
         const a = res.automation;
         const zone = a.trigger.schedule?.timeZone;
@@ -395,6 +424,16 @@ export function AutomationEditorSheet({
             : `Created “${a.name}”.`,
         );
         if (body.fromApprovalId) savedDraft.current = body.fromApprovalId;
+        if (res.webhookSecret) {
+          // The sheet stays open on the new automation: the reveal dialog, then its endpoint panel.
+          const next = valuesOf(a);
+          loadedFor.current = `edit:${a.id}`;
+          setBaseVersion(a.version);
+          setInitial(next);
+          setValues(next);
+          onCreated(a, { keepOpen: true });
+          return;
+        }
         loadedFor.current = null;
         onCreated(a);
         return;
@@ -407,11 +446,21 @@ export function AutomationEditorSheet({
       if (values.agentId !== initial.agentId) body.agentId = values.agentId;
       if (values.instructions.trim() !== initial.instructions.trim())
         body.instructions = values.instructions.trim();
-      if (values.triggerKind !== initial.triggerKind || !same(values.schedule, initial.schedule))
+      if (
+        values.triggerKind !== initial.triggerKind ||
+        !same(values.schedule, initial.schedule) ||
+        (values.triggerKind === "mail" && !same(values.mailbox, initial.mailbox))
+      )
         body.trigger = ok.trigger;
       if (!same(values.target, initial.target) || body.agentId) body.target = ok.target;
+      if (ok.trigger.kind === "schedule") {
+        if (initial.triggerKind !== "schedule") body.inbound = null;
+      } else if (body.trigger || body.target || !same(values.inbound, initial.inbound)) {
+        body.inbound = inboundOf(values.inbound, ok.target.kind);
+      }
       if (values.maxRunsPerDay.trim() !== initial.maxRunsPerDay.trim()) body.maxRunsPerDay = ok.runs;
       const res = await save.mutateAsync({ id: automation.id, body });
+      if (res.webhookSecret) save.reset();
       setLastSave(res);
       const next = valuesOf(res.automation);
       setBaseVersion(res.automation.version);
@@ -710,6 +759,16 @@ export function AutomationEditorSheet({
                       scheduleErrors: errors.schedule ?? {},
                       preview,
                       disabled: readonly,
+                      automation: automation ?? lastSave?.automation ?? null,
+                      inbound: values.inbound,
+                      setInbound: (inbound) => set({ inbound }),
+                      inboundErrors: errors.inbound ?? {},
+                      mailbox: values.mailbox,
+                      setMailbox: (mailbox) => set({ mailbox }),
+                      mailboxErrors: errors.mailbox ?? {},
+                      targetKind: values.target.kind,
+                      botName,
+                      dropSecret: () => setLastSave((s) => (s ? { automation: s.automation } : s)),
                     }}
                     canWebhook={options.data?.canWebhook ?? false}
                     lastSave={lastSave}
