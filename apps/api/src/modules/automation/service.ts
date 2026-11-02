@@ -150,6 +150,29 @@ export function targetError(code: TargetCode): HttpError {
   return new HttpError(400, httpCode, message);
 }
 
+/**
+ * True when a write was refused because its board column was deleted after the target was decided (the column's FK,
+ * 07.6 review A HI-03): the target is not postable any more, not a server error. Drizzle wraps the driver's error.
+ */
+function columnGone(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e && typeof e === "object" && depth < 3; depth++) {
+    const pg = e as { code?: unknown; constraint?: unknown; cause?: unknown };
+    if (pg.code === "23503" && pg.constraint === "automations_board_column_fk") return true;
+    e = pg.cause;
+  }
+  return false;
+}
+
+/** Runs a write, turning a board column that disappeared meanwhile into `target_not_postable` (400). */
+async function writingTarget<T>(write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (err) {
+    if (columnGone(err)) throw targetError("target_not_postable");
+    throw err;
+  }
+}
+
 const notAllowed = () => new HttpError(403, "not_allowed", "You can't create automations. Ask an admin.");
 const notFound = () => new HttpError(404, "not_found", NOT_FOUND);
 const runsPerDayError = (max: number) =>
@@ -271,11 +294,13 @@ export function createAutomationService(
 
   /** Writes `changes` with `version + 1` and returns the new row. */
   async function bump(tx: Tx, row: AutomationRow, changes: Partial<typeof automations.$inferInsert>) {
-    const [after] = await tx
-      .update(automations)
-      .set({ ...changes, version: row.version + 1, updatedAt: sql`now()` })
-      .where(and(eq(automations.id, row.id), eq(automations.version, row.version)))
-      .returning();
+    const [after] = await writingTarget(() =>
+      tx
+        .update(automations)
+        .set({ ...changes, version: row.version + 1, updatedAt: sql`now()` })
+        .where(and(eq(automations.id, row.id), eq(automations.version, row.version)))
+        .returning(),
+    );
     if (!after) throw versionConflict();
     return after;
   }
@@ -561,29 +586,31 @@ export function createAutomationService(
       });
       if (!decided.ok) throw targetError(decided.code);
 
-      const [row] = await tx
-        .insert(automations)
-        .values({
-          organizationId: tenantOf(tx).organizationId,
-          name: input.name,
-          agentId: input.agentId,
-          // P-04, T-07.6-05-01: always the caller (the CHECK in the schema refuses anything else).
-          runAsUserId: actor.userId,
-          createdBy: actor.userId,
-          actionKind,
-          instructions: actionKind === "digest" ? "" : input.instructions,
-          triggerKind: trigger.kind,
-          scheduleCron: trigger.kind === "schedule" ? trigger.schedule.cron : null,
-          timeZone: trigger.kind === "schedule" ? trigger.schedule.timeZone : null,
-          ...targetColumns(input.target, decided.conversationId),
-          inboundAction: input.inbound?.action ?? null,
-          inboundAskBot: input.inbound?.askBot ?? true,
-          inboundConfig: input.inbound?.config ?? {},
-          config: opts.config ?? {},
-          maxRunsPerDay: input.maxRunsPerDay,
-          nextRunAt,
-        })
-        .returning();
+      const [row] = await writingTarget(() =>
+        tx
+          .insert(automations)
+          .values({
+            organizationId: tenantOf(tx).organizationId,
+            name: input.name,
+            agentId: input.agentId,
+            // P-04, T-07.6-05-01: always the caller (the CHECK in the schema refuses anything else).
+            runAsUserId: actor.userId,
+            createdBy: actor.userId,
+            actionKind,
+            instructions: actionKind === "digest" ? "" : input.instructions,
+            triggerKind: trigger.kind,
+            scheduleCron: trigger.kind === "schedule" ? trigger.schedule.cron : null,
+            timeZone: trigger.kind === "schedule" ? trigger.schedule.timeZone : null,
+            ...targetColumns(input.target, decided.conversationId),
+            inboundAction: input.inbound?.action ?? null,
+            inboundAskBot: input.inbound?.askBot ?? true,
+            inboundConfig: input.inbound?.config ?? {},
+            config: opts.config ?? {},
+            maxRunsPerDay: input.maxRunsPerDay,
+            nextRunAt,
+          })
+          .returning(),
+      );
       const created = row as AutomationRow;
       // The trigger's own entity, in this transaction: a refusal there leaves no automation behind.
       const made =
