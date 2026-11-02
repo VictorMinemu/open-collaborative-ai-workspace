@@ -3806,6 +3806,10 @@ export const automationEvents = appSchema.table(
     unique("automation_events_mailbox_external_uq").on(t.mailboxId, t.externalId),
     index("automation_events_thread_idx").on(t.organizationId, t.threadKey),
     index("automation_events_message_idx").on(t.messageId).where(sql`message_id is not null`),
+    // The other half of the mention path's `message_id OR board_card_message_id` lookup (07.6 review A MD-07).
+    index("automation_events_board_card_idx")
+      .on(t.boardCardMessageId)
+      .where(sql`board_card_message_id is not null`),
     index("automation_events_retention_idx").on(t.receivedAt).where(sql`content_purged_at is null`),
     check(
       "automation_events_source_check",

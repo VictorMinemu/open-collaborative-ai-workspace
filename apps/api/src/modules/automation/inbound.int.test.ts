@@ -782,3 +782,25 @@ describe("storms and stale content are contained (P-09, Pitfalls 1–3)", () => 
     });
   });
 });
+
+describe("the mention path's inbound lookup is indexed (07.6 review A MD-07)", () => {
+  it("message_id OR board_card_message_id is answered from indexes, never a scan of every event", async () => {
+    const ids = [randomUUID(), randomUUID()];
+    await s.su.query("begin");
+    try {
+      await s.su.query("set local enable_seqscan = off");
+      const plan = (
+        await s.su.query(
+          "explain select id from app.automation_events where message_id = any($1::uuid[]) or board_card_message_id = any($1::uuid[]) limit 1",
+          [ids],
+        )
+      ).rows
+        .map((r) => r["QUERY PLAN"] as string)
+        .join("\n");
+      expect(plan).not.toMatch(/Seq Scan on automation_events/);
+      expect(plan).toMatch(/automation_events_board_card_idx/);
+    } finally {
+      await s.su.query("rollback");
+    }
+  });
+});
