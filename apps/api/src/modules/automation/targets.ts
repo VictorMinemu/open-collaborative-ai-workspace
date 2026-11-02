@@ -5,11 +5,12 @@ import {
   type AutomationRunTrigger,
   scheduleSummary,
 } from "@ocw/contracts";
-import { agents, conversations, orgMembers, type Tx } from "@ocw/db";
+import { agents, automationRuns, conversations, orgMembers, type Tx } from "@ocw/db";
 import { eq } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { PlatformCardInput } from "../../lib/chat-agent-bridge";
 import { runSentence } from "../agent-channel";
+import { createBoardCard, ensureAgentDm } from "../chat";
 import type { PermissionService } from "../organization";
 import type { AutomationRow, RunRow } from "./actions";
 
@@ -137,6 +138,16 @@ export async function runPeople(tx: Tx, a: AutomationRow): Promise<RunPeople> {
   return { person: person?.name ?? "Former member", bot: bot?.name ?? "The bot", conversation };
 }
 
+/** A board run's card title: `{name} · {date in the automation's zone}` (`Weekly sales report · Oct 9`). */
+export function boardCardTitle(a: AutomationRow, at: Date): string {
+  const date = new Intl.DateTimeFormat("en-US", {
+    timeZone: a.timeZone ?? "UTC",
+    month: "short",
+    day: "numeric",
+  }).format(at);
+  return `${a.name} · ${date}`.slice(0, 200);
+}
+
 export interface RunAnchor {
   /** The run card. */
   anchorMessageId: string;
@@ -195,10 +206,81 @@ export async function postAnchor(
     });
 
   switch (a.targetKind) {
-    case "dm":
-    case "thread":
-    case "board":
-      throw new Error(`target kind ${a.targetKind} is not delivered yet`);
+    case "dm": {
+      const dm = await ensureAgentDm(
+        tx,
+        { audit: core.audit, realtime: core.realtime, perms: deps.perms },
+        { agentId: a.agentId, userId: a.runAsUserId },
+      );
+      const posted = await post(dm.conversationId, null);
+      return {
+        anchorMessageId: posted.messageId,
+        conversationId: dm.conversationId,
+        threadRootId: posted.messageId,
+        delivery: "dm",
+        boardCardMessageId: null,
+      };
+    }
+    case "thread": {
+      const conversationId = a.conversationId as string;
+      const root = a.threadRootMessageId as string;
+      const posted = await post(conversationId, root);
+      return {
+        anchorMessageId: posted.messageId,
+        conversationId,
+        threadRootId: root,
+        delivery: "thread",
+        boardCardMessageId: null,
+      };
+    }
+    case "board": {
+      const conversationId = a.conversationId as string;
+      const [conv] = await tx
+        .select()
+        .from(conversations)
+        .where(eq(conversations.id, conversationId))
+        .limit(1);
+      if (!conv) throw new Error("board target conversation is gone");
+      const author = { kind: "agent" as const, id: a.agentId, onBehalfOfUserId: a.runAsUserId };
+      const made = await createBoardCard(
+        tx,
+        { audit: core.audit, realtime: core.realtime },
+        {
+          conv,
+          author,
+          input: {
+            title: boardCardTitle(a, run.scheduledFor ? new Date(run.scheduledFor) : new Date()),
+            description: "",
+            columnId: a.boardColumnId as string,
+            // Never `run:` (that namespace is the run card's, which 06's reply rule reads).
+            clientMessageId: `board:run:${run.id}`,
+          },
+          clientKind: "agent",
+          perms: deps.perms,
+        },
+      );
+      if (made.created) {
+        // Observers (notifications) as for any agent post; an agent never wakes other agents.
+        await core.chatEvents.messagePosted(tx, {
+          conv: { id: conv.id, kind: "channel", organizationId: conv.organizationId },
+          message: made.result.message,
+          author: { kind: "agent", id: a.agentId },
+          mentions: made.result.row.mentions,
+          mentionAll: null,
+          threadRootId: null,
+        });
+      }
+      const boardCardMessageId = made.result.row.id;
+      await tx.update(automationRuns).set({ boardCardMessageId }).where(eq(automationRuns.id, run.id));
+      const posted = await post(conversationId, boardCardMessageId);
+      return {
+        anchorMessageId: posted.messageId,
+        conversationId,
+        threadRootId: boardCardMessageId,
+        delivery: "thread",
+        boardCardMessageId,
+      };
+    }
     default: {
       const conversationId = a.conversationId as string;
       const posted = await post(conversationId, null);

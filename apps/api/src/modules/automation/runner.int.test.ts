@@ -600,3 +600,222 @@ describe("every fire re-decides: skip reasons, budgets (D-07, P-09, T-07.6-09-01
     expect((await automationRow(automationId)).consecutive_failures).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------- Task 3: every target
+
+const messageRow = async (id: string) =>
+  (await s.su.query("select id, conversation_id, thread_id from app.messages where id = $1", [id]))
+    .rows[0] as Json;
+
+const cardRow = async (messageId: string) =>
+  (
+    await s.su.query(
+      "select kind, status, status_label, platform_owned from app.message_cards where message_id = $1",
+      [messageId],
+    )
+  ).rows[0] as Json;
+
+/** The run's cell event, answered like the plugin; returns the reply's message row. */
+async function answer(runId: string): Promise<Json> {
+  const [ev] = (await runEvents(runId)) as [Json];
+  const res = await replyTo(ev);
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  expect((await runRow(runId)).status).toBe("answered");
+  return messageRow(res.body?.messageId as string);
+}
+
+/** The DMs between `userId` and the bot `agentId`. */
+const dmsWith = async (userId: string, agentId: string) =>
+  (
+    await s.su.query(
+      `select c.id from app.conversations c
+       where c.kind = 'dm'
+         and exists (select 1 from app.conversation_members m where m.conversation_id = c.id and m.member_kind = 'user' and m.member_id = $1)
+         and exists (select 1 from app.conversation_members m where m.conversation_id = c.id and m.member_kind = 'agent' and m.member_id = $2)`,
+      [userId, agentId],
+    )
+  ).rows.map((r) => r.id as string);
+
+describe("every target lands where the UI-SPEC shows it (P-08, R2)", () => {
+  it("thread target: the run card is a reply in the chosen thread, and the bot answers in the same thread", async () => {
+    const root = (
+      await ok(
+        s.victor.request("POST", `/api/v1/conversations/${salesId}/messages`, {
+          body: "Weekly numbers go in this thread",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    const automationId = await createAutomation({
+      target: { kind: "thread", conversationId: salesId, threadRootMessageId: root },
+    });
+    const runId = await runNow(automationId);
+    expect(await drain()).toBe(1);
+    const [anchor] = (await anchorsOf(runId)) as [Json];
+    expect(anchor).toMatchObject({ conversation_id: salesId, thread_id: root });
+    expect(await cardRow(anchor.id)).toMatchObject({
+      kind: "automation",
+      platform_owned: true,
+      status_label: "Running",
+    });
+    const [ev] = (await runEvents(runId)) as [Json];
+    expect(ev.thread.rootMessageId).toBe(root);
+    expect(ev.message.id).toBe(anchor.id);
+    expect(await answer(runId)).toMatchObject({ conversation_id: salesId, thread_id: root });
+    expect(await cardRow(anchor.id)).toMatchObject({ status: "succeeded", status_label: "Done" });
+  });
+
+  it("DM target: the run card is a message in Víctor's DM with Scout (created on the first run), the reply flat after it", async () => {
+    expect(await dmsWith(s.victorId, s.scoutId)).toEqual([]);
+    const automationId = await createAutomation({ target: { kind: "dm" } });
+    const runId = await runNow(automationId);
+    expect(await drain()).toBe(1);
+    const dms = await dmsWith(s.victorId, s.scoutId);
+    expect(dms).toHaveLength(1);
+    const [anchor] = (await anchorsOf(runId)) as [Json];
+    expect(anchor).toMatchObject({ conversation_id: dms[0], thread_id: null });
+    expect((await cardOf(dms[0] as string, anchor.id))?.fields).toContainEqual({
+      label: "For",
+      value: "Víctor Ruiz",
+    });
+    const [ev] = (await runEvents(runId)) as [Json];
+    expect(ev.conversation).toMatchObject({ id: dms[0], kind: "dm" });
+    expect(await answer(runId)).toMatchObject({ conversation_id: dms[0], thread_id: null });
+
+    // The next run reuses the same DM.
+    const again = await runNow(automationId);
+    expect(await drain()).toBe(1);
+    expect(await dmsWith(s.victorId, s.scoutId)).toEqual(dms);
+    expect(((await anchorsOf(again)) as [Json])[0].conversation_id).toBe(dms[0]);
+  });
+
+  it("Víctor's personal bot works the same: its runs land in his DM with it", async () => {
+    const personal = (await ok(s.victor.request("POST", "/api/v1/agents/personal", {}) as Promise<Res>)).agent
+      .id as string;
+    const automationId = await createAutomation({ agentId: personal, target: { kind: "dm" } });
+    const runId = await runNow(automationId);
+    expect(await drain()).toBe(1);
+    const dms = await dmsWith(s.victorId, personal);
+    expect(dms).toHaveLength(1);
+    const [anchor] = (await anchorsOf(runId)) as [Json];
+    expect(anchor).toMatchObject({ conversation_id: dms[0], thread_id: null });
+    const [ev] = (await runEvents(runId)) as [Json];
+    expect(ev.agent.id).toBe(personal);
+    expect(await answer(runId)).toMatchObject({ conversation_id: dms[0], thread_id: null });
+  });
+
+  it("board target: a card “Weekly sales report · {date}” in Intake by Scout for Víctor, the run card its first reply, Scout's turn in its thread", async () => {
+    const orders = (
+      await ok(
+        s.victor.request("POST", "/api/v1/channels", {
+          name: "orders",
+          visibility: "private",
+          layout: "board",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    await ok(
+      s.victor.request("POST", `/api/v1/channels/${orders}/members`, {
+        kind: "agent",
+        id: s.scoutId,
+      }) as Promise<Res>,
+    );
+    const columnRes = await s.victor.request("POST", `/api/v1/boards/${orders}/columns`, {
+      name: "Intake",
+      category: "backlog",
+    });
+    expect([200, 201], JSON.stringify(columnRes.body)).toContain(columnRes.status);
+    const columns = (await ok(s.victor.request("GET", `/api/v1/boards/${orders}`) as Promise<Res>))
+      .columns as Json[];
+    const intake = columns.find((c) => c.name === "Intake")?.id as string;
+    expect(intake).toBeTruthy();
+    const automationId = await createAutomation({
+      target: { kind: "board", conversationId: orders, columnId: intake },
+    });
+    await makeDue(automationId);
+    expect((await tickOnce(core())).fired).toBe(1);
+    expect(await drain()).toBe(1);
+    const [run] = (await runsOf(automationId)) as [Json];
+    const cardMessageId = run.board_card_message_id as string;
+    expect(cardMessageId).toBeTruthy();
+    const date = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Europe/Madrid",
+      month: "short",
+      day: "numeric",
+    }).format(new Date(run.scheduled_for));
+    const boardCard = (
+      await s.su.query("select column_id, title, title_source from app.board_cards where message_id = $1", [
+        cardMessageId,
+      ])
+    ).rows[0] as Json;
+    expect(boardCard).toMatchObject({
+      column_id: intake,
+      title: `Weekly sales report · ${date}`,
+      title_source: "user",
+    });
+    const root = (
+      await s.su.query("select author_kind, author_id, thread_id from app.messages where id = $1", [
+        cardMessageId,
+      ])
+    ).rows[0] as Json;
+    expect(root).toMatchObject({ author_kind: "agent", author_id: s.scoutId, thread_id: null });
+    const created = (
+      await s.su.query(
+        "select actor_kind, actor_id, user_id, metadata from app.audit_events where action = 'board.card.created' and resource_id = $1",
+        [cardMessageId],
+      )
+    ).rows as Json[];
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({ actor_kind: "agent", actor_id: s.scoutId, user_id: s.victorId });
+    const upserted = (
+      await s.su.query(
+        "select count(*)::int as n from app.stream_events where stream_id = $1 and type = 'board.card_upserted' and payload->'card'->>'messageId' = $2",
+        [`conv:${orders}`, cardMessageId],
+      )
+    ).rows[0] as Json;
+    expect(upserted.n).toBeGreaterThanOrEqual(1);
+
+    // The run card is the card's first reply, and Scout's turn is in that card's thread.
+    const [anchor] = (await anchorsOf(run.id)) as [Json];
+    expect(anchor).toMatchObject({ conversation_id: orders, thread_id: cardMessageId });
+    const first = (
+      await s.su.query("select id from app.messages where thread_id = $1 order by created_at, id limit 1", [
+        cardMessageId,
+      ])
+    ).rows[0] as Json;
+    expect(first.id).toBe(anchor.id);
+    expect(await cardRow(anchor.id)).toMatchObject({ kind: "automation", platform_owned: true });
+    const [ev] = (await runEvents(run.id)) as [Json];
+    expect(ev.thread.rootMessageId).toBe(cardMessageId);
+    expect(await answer(run.id)).toMatchObject({ conversation_id: orders, thread_id: cardMessageId });
+
+    // A retried job files no second card.
+    await core().db.withTenant({ organizationId: s.orgA }, (tx) =>
+      core().jobs.sendInTx(tx, "automation.fire", { organizationId: s.orgA, runId: run.id }),
+    );
+    expect(await drain()).toBe(1);
+    const cards = (
+      await s.su.query("select count(*)::int as n from app.board_cards where conversation_id = $1", [orders])
+    ).rows[0] as Json;
+    expect(cards.n).toBe(1);
+
+    // The column gone since the automation was saved (the FK forbids it; forced here) → skipped, nothing filed.
+    await s.su.query("set session_replication_role = replica");
+    try {
+      await s.su.query("delete from app.board_columns where id = $1", [intake]);
+    } finally {
+      await s.su.query("set session_replication_role = origin");
+    }
+    const runId = await runNow(automationId);
+    expect(await drain()).toBe(1);
+    await expectSkipped(runId, "target_not_postable");
+    expect(
+      (
+        (
+          await s.su.query("select count(*)::int as n from app.board_cards where conversation_id = $1", [
+            orders,
+          ])
+        ).rows[0] as Json
+      ).n,
+    ).toBe(1);
+  });
+});
