@@ -624,30 +624,30 @@ sessions feed project memory through the promotion flow
 
 Plans:
 
-- [ ] 07.6-01-PLAN.md — Wave 1: Contracts first for the whole phase.
-- [ ] 07.6-02-PLAN.md — Wave 1: The database half of the phase: one migration, RLS on every table, the ids-only SECURITY DEFINER functions the job
-- [ ] 07.6-03-PLAN.md — Wave 1: The job runtime the whole phase runs on, after a package legitimacy gate, plus the module wiring later plans rely on.
-- [ ] 07.6-04-PLAN.md — Wave 1: The fakes the phase tests against (Wave 0): a mail server for IMAP and a "changed elsewhere" ERP for watched records.
-- [ ] 07.6-05-PLAN.md — Wave 2: The automation entity as a REST resource: CRUD, schedules and time zones, access and target rules, run history, Run
-- [ ] 07.6-06-PLAN.md — Wave 2: The proactive-delivery primitive: an automation run becomes a cell turn bound to an anchor message and a person, with
-- [ ] 07.6-07-PLAN.md — Wave 3: Watched records: link a board card to an external record, hash its watched fields in the API, check on access and on
-- [ ] 07.6-08-PLAN.md — Wave 2: Work Zone sessions feed project memory: the session's unit read from 07.9's linked repositories, the summary job, the system-origin proposal, the per-viewer
-- [ ] 07.6-09-PLAN.md — Wave 3: The phase's API tracer: scheduled automations actually run — tick, fire, re-decision, budgets, breaker, no-reply,
-- [ ] 07.6-10-PLAN.md — Wave 5: Signed webhooks as a trigger: endpoint lifecycle inside the automation, the public route with verification, replay
-- [ ] 07.6-11-PLAN.md — Wave 5: IMAP mail as a trigger: mailbox lifecycle inside the automation, Keychain-only sign-in, pinned TLS connections,
-- [ ] 07.6-12-PLAN.md — Wave 4: Natural-language creation: the bot proposes, the person confirms in a card (or edits it in the editor), the server
-- [ ] 07.6-13-PLAN.md — Wave 4: The personal digest: settings, deterministic sections, DM delivery by the chosen bot, optional metered summary,
-- [ ] 07.6-14-PLAN.md — Wave 5: Compare-and-set writes to watched records through the cell tool, with approvals, conflict reporting and note-back.
-- [ ] 07.6-15-PLAN.md — Wave 5: The automations UI tracer: Bots › Automations list, editor (schedule trigger), run history and the platform-card
-- [ ] 07.6-16-PLAN.md — Wave 5: The digest settings page.
-- [ ] 07.6-17-PLAN.md — Wave 6: Watched records in the browser: link dialog, tile indicator, strip row with Check now, and the change/conflict cards in
-- [ ] 07.6-18-PLAN.md — Wave 6: The trigger UI: webhook and mailbox panels inside the editor, the What happens section, the secret reveal, and the
-- [ ] 07.6-19-PLAN.md — Wave 7: The phase gate: release images, the full suite on one stack, CI, documentation, ADR-0028 and the signed validation.
-- [ ] 07.6-20-PLAN.md — Wave 2: Everything the cell needs for this phase, in one plan: delivering automation runs as turns and the two new tools.
-- [ ] 07.6-21-PLAN.md — Wave 4: Inbound processing: every webhook or mail item becomes a deterministic post (thread, DM or board card) and, if asked,
-- [ ] 07.6-22-PLAN.md — Wave 3: The Work Zone → memory UI: the session memory strip and its dialogs; repository linking stays 07.9's.
-- [ ] 07.6-23-PLAN.md — Wave 6: The natural-language proposal in the browser: the decider-only card, confirm and discard, and Edit → draft editor.
-- [ ] 07.6-24-PLAN.md — Wave 6: Prove the phase's security properties across all modules and the cell side in a real OpenClaw container.
+- [x] 07.6-01-PLAN.md — Wave 1: Contracts first for the whole phase.
+- [x] 07.6-02-PLAN.md — Wave 1: The database half of the phase: one migration, RLS on every table, the ids-only SECURITY DEFINER functions the job
+- [x] 07.6-03-PLAN.md — Wave 1: The job runtime the whole phase runs on, after a package legitimacy gate, plus the module wiring later plans rely on.
+- [x] 07.6-04-PLAN.md — Wave 1: The fakes the phase tests against (Wave 0): a mail server for IMAP and a "changed elsewhere" ERP for watched records.
+- [x] 07.6-05-PLAN.md — Wave 2: The automation entity as a REST resource: CRUD, schedules and time zones, access and target rules, run history, Run
+- [x] 07.6-06-PLAN.md — Wave 2: The proactive-delivery primitive: an automation run becomes a cell turn bound to an anchor message and a person, with
+- [x] 07.6-07-PLAN.md — Wave 3: Watched records: link a board card to an external record, hash its watched fields in the API, check on access and on
+- [x] 07.6-08-PLAN.md — Wave 2: Work Zone sessions feed project memory: the session's unit read from 07.9's linked repositories, the summary job, the system-origin proposal, the per-viewer
+- [x] 07.6-09-PLAN.md — Wave 3: The phase's API tracer: scheduled automations actually run — tick, fire, re-decision, budgets, breaker, no-reply,
+- [x] 07.6-10-PLAN.md — Wave 5: Signed webhooks as a trigger: endpoint lifecycle inside the automation, the public route with verification, replay
+- [x] 07.6-11-PLAN.md — Wave 5: IMAP mail as a trigger: mailbox lifecycle inside the automation, Keychain-only sign-in, pinned TLS connections,
+- [x] 07.6-12-PLAN.md — Wave 4: Natural-language creation: the bot proposes, the person confirms in a card (or edits it in the editor), the server
+- [x] 07.6-13-PLAN.md — Wave 4: The personal digest: settings, deterministic sections, DM delivery by the chosen bot, optional metered summary,
+- [x] 07.6-14-PLAN.md — Wave 5: Compare-and-set writes to watched records through the cell tool, with approvals, conflict reporting and note-back.
+- [x] 07.6-15-PLAN.md — Wave 5: The automations UI tracer: Bots › Automations list, editor (schedule trigger), run history and the platform-card
+- [x] 07.6-16-PLAN.md — Wave 5: The digest settings page.
+- [x] 07.6-17-PLAN.md — Wave 6: Watched records in the browser: link dialog, tile indicator, strip row with Check now, and the change/conflict cards in
+- [x] 07.6-18-PLAN.md — Wave 6: The trigger UI: webhook and mailbox panels inside the editor, the What happens section, the secret reveal, and the
+- [x] 07.6-19-PLAN.md — Wave 7: The phase gate: release images, the full suite on one stack, CI, documentation, ADR-0028 and the signed validation.
+- [x] 07.6-20-PLAN.md — Wave 2: Everything the cell needs for this phase, in one plan: delivering automation runs as turns and the two new tools.
+- [x] 07.6-21-PLAN.md — Wave 4: Inbound processing: every webhook or mail item becomes a deterministic post (thread, DM or board card) and, if asked,
+- [x] 07.6-22-PLAN.md — Wave 3: The Work Zone → memory UI: the session memory strip and its dialogs; repository linking stays 07.9's.
+- [x] 07.6-23-PLAN.md — Wave 6: The natural-language proposal in the browser: the decider-only card, confirm and discard, and Edit → draft editor.
+- [x] 07.6-24-PLAN.md — Wave 6: Prove the phase's security properties across all modules and the cell side in a real OpenClaw container.
 
 ### Phase 07.7: Agent-to-agent collaboration (INSERTED)
 
