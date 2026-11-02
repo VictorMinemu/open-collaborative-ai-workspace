@@ -3,7 +3,7 @@ import { Webhook } from "standardwebhooks";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../app";
 import type { TestClient } from "../../testing";
-import { type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
+import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
 import { invite } from "../../testing-workzone";
 
 /**
@@ -542,7 +542,7 @@ describe("lifecycle and permissions (Task 3, R3, P-09, P-10)", () => {
       inbound: { action: "post", askBot: true, config: {} },
     });
     expect(created.status).toBe(403);
-    expect((created.body?.error as Json).code).toBe("webhook_not_allowed");
+    expect(codeOf(created)).toBe("webhook_not_allowed");
 
     const hook = await createHook({ name: "Governed orders" });
     expect((await send(hook)).status).toBe(202);
@@ -558,7 +558,7 @@ describe("lifecycle and permissions (Task 3, R3, P-09, P-10)", () => {
     expect(JSON.stringify(managerView)).not.toContain(hook.secret);
     const rotate = await s.victor.request("POST", `/api/v1/automations/${hook.id}/webhook/rotate`);
     expect(rotate.status).toBe(403);
-    expect((rotate.body?.error as Json).code).toBe("not_allowed");
+    expect(codeOf(rotate)).toBe("not_allowed");
     // Eve (another organization) sees nothing.
     expect((await s.eve.request("GET", `/api/v1/automations/${hook.id}/webhook`)).status).toBe(404);
   });
