@@ -87,9 +87,10 @@ Then it runs these steps and prints each one:
 1. Stop `api`, `web` and `openclaw`, and start `postgres`, `redis` and `garage`. On brand-new volumes these are
    created.
 2. Run `docker compose run --rm migrate` to create the database roles with the passwords in your current `.env`.
-3. As `ocw_migrator`, `DROP SCHEMA IF EXISTS app, auth, drizzle CASCADE`, then
+3. As `ocw_migrator`, `DROP SCHEMA IF EXISTS app, auth, drizzle, pgboss CASCADE`, then
    `pg_restore --exit-on-error --single-transaction`. Dropping first removes tables a newer migration may have added
-   since the backup.
+   since the backup, and the job queue (`pgboss`) the migrate step just installed; the backup's own queue comes back
+   with it, and step 4 installs it when the backup predates automations.
 4. Run `migrate` again. A backup from an **older release is upgraded** to this one here, and grants and policies are
    re-applied.
 5. Import the objects with their stored content types. Objects that the backup does not hold are removed, so the
