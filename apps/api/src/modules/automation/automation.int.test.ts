@@ -285,20 +285,9 @@ describe("Víctor creates a weekly automation through REST (Task 1, tracer)", ()
 });
 
 describe("trigger seams (Task 2): webhook and mail triggers go through their adapters", () => {
-  it("refuses a lead's webhook trigger and a mail trigger with 400 trigger_unavailable, leaving nothing", async () => {
+  // A lead's webhook trigger now creates its endpoint (07.6-10, webhooks.int.test.ts).
+  it("refuses a mail trigger with 400 trigger_unavailable, leaving nothing", async () => {
     const countBefore = Number((await su.query("select count(*) from app.automations")).rows[0].count);
-    await fails(
-      marta.request("POST", "/api/v1/automations", {
-        name: "Shopify orders",
-        agentId: scoutId,
-        instructions: "Read each order and flag the risky ones.",
-        trigger: { kind: "webhook" },
-        target: { kind: "dm" },
-        inbound: { action: "post", askBot: true, config: { titlePointer: "/order/name" } },
-      }),
-      400,
-      "trigger_unavailable",
-    );
     await fails(
       victor.request("POST", "/api/v1/automations", {
         name: "Supplier inbox",

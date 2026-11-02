@@ -36,6 +36,8 @@ const PUBLIC_ROUTES = [
   // 07.4-10: the OAuth callback checks the member's session against the flow by hand; the CIMD document is public.
   "GET /api/v1/connectors/oauth/callback",
   "GET /api/v1/connectors/oauth/client-metadata.json",
+  // 07.6-10 (D-02, D-07): another app posts signed webhooks; the Standard Webhooks signature is the authentication.
+  "POST /api/v1/hooks/:publicId",
 ].sort();
 
 /** Framework documentation routes (Scalar / Swagger) carry no data and are excluded by prefix. */
