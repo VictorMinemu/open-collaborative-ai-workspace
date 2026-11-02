@@ -790,11 +790,20 @@ describe("usage reports show digest and session-summary spend as their own rows 
        values ($1, 'digest', $2, $3, 'mock', 'mock', 'mock-model', 40, 10, false, 0)`,
       [orgId, anaId, randomUUID()],
     );
+    // An estimated digest (the model stopped before reporting usage): its row's cost is approximate, never an answer.
+    await su.query(
+      `insert into app.ai_usage_records
+         (organization_id, kind, requester_user_id, subject_id, backend, provider, model_id, input_tokens, output_tokens, estimated, cost_micros_usd)
+       values ($1, 'digest', $2, $3, 'mock', 'mock', 'mock-model', 0, 0, true, 0)`,
+      [orgId, anaId, randomUUID()],
+    );
     const r = await ok(admin.request("GET", "/api/v1/ai-usage/report?groupBy=model&days=30"));
     const rows = r.rows as Json[];
     const summaries = rows.find((x) => (x.key as string).endsWith(" · session summaries"));
     const digests = rows.find((x) => (x.key as string).endsWith(" · digests"));
-    expect(summaries).toMatchObject({ generations: 0, estimatedGenerations: 0 });
+    expect(summaries).toMatchObject({ kind: "session_summary", generations: 0, estimatedGenerations: 0 });
+    expect(digests).toMatchObject({ kind: "digest", estimatedGenerations: 0, estimatedRecords: 1 });
+    expect(r.totals.estimatedRecords).toBeGreaterThanOrEqual(1);
     expect(summaries?.label).toMatch(/ · session summaries$/);
     expect(digests).toMatchObject({ generations: 0, inputTokens: 40, outputTokens: 10 });
     expect(digests?.label).toMatch(/ · digests$/);

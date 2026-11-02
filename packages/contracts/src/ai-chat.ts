@@ -578,7 +578,13 @@ export const AiUsageReportRow = BackendTotals.extend({
   /** By model only: the kind the row adds up (a model's titles, digests and session summaries are rows of their own). */
   kind: AiUsageKind.optional(),
   costMicrosUsd: z.number().int().nonnegative().nullable(),
+  /** Chat answers whose usage was estimated (stopped, interrupted, failed before the provider reported it). */
   estimatedGenerations: z.number().int().nonnegative(),
+  /**
+   * Usage records of any kind (titles, digests, session summaries included) whose usage was estimated: the row's cost
+   * is approximate (`~`) when this is above 0 (07.6 review C LO-01).
+   */
+  estimatedRecords: z.number().int().nonnegative(),
 });
 export type AiUsageReportRow = z.infer<typeof AiUsageReportRow>;
 
