@@ -24,7 +24,8 @@ export {
  * connector; the API hashes the watched fields (07.5's `canonicalJson`), checks on access and on schedule
  * (`watched.check` jobs) and reports before → after in the card thread (07.6-07). Writes (compare-and-set) are 07.6-14.
  *
- * Routes (`authz: "user"`): GET `/watched-records?conversationId=`, POST `/watched-records/preview`, POST
+ * Routes (`authz: "user"`): GET `/watched-records?conversationId=`, GET `/watched-records/options?conversationId=`
+ * (the watch dialog's connectors, tools and bots, 07.6-17), POST `/watched-records/preview`, POST
  * `/watched-records`, PATCH and DELETE `/watched-records/:id`, POST `/watched-records/:id/check`.
  * Jobs: `watched.tick` (every five minutes, UTC) and `watched.check`. Observer: a person's reply in a watched card's
  * thread enqueues an access check (one per minute per watch).
