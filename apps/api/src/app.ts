@@ -210,7 +210,8 @@ export async function buildApp(
     methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
   });
   // 07.6-10: counted in Redis (RedisRateLimitStore), so every limit holds across replicas, the public webhook URL's
-  // 60/min among them; the routes keep their own numbers.
+  // 60/min among them; the routes keep their own numbers. While Redis cannot answer (down, reconnecting, or slower
+  // than 250 ms), hits are counted in this instance's memory: sign-in and device tokens keep working, still limited.
   await app.register(rateLimit, { global: false, store: redisRateLimitStore(bus.pub) });
   await app.register(websocket, {
     options: {
