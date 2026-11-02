@@ -58,7 +58,16 @@ export interface JobContext {
   /** Aborted when pg-boss gives up on the job (expiry or shutdown past the grace period). */
   signal: AbortSignal;
   jobId: string;
+  /** This attempt (0 for the first). A handler that throws is retried while `retryCount < retryLimit`. */
+  retryCount: number;
+  /** The queue's retries after the first attempt (pg-boss's `retryLimit`, 2 by default). */
+  retryLimit: number;
 }
+
+/** True on a job's last attempt: a handler that throws now is not retried (07.6 review A MD-02). */
+export const lastAttempt = (ctx: Pick<JobContext, "retryCount" | "retryLimit"> | undefined): boolean =>
+  !ctx || ctx.retryCount >= ctx.retryLimit;
+
 export type JobHandler<Q extends QueueName> = (data: JobData<Q>, ctx: JobContext) => Promise<void>;
 
 export interface SendOptions {
@@ -146,10 +155,20 @@ export function createJobs(opts: {
     const entry = handlers.get(queue);
     if (!entry) return;
     const schema = schemaOf(queue);
-    const opts = { batchSize: entry.batchSize, localConcurrency: entry.localConcurrency };
+    const opts = {
+      batchSize: entry.batchSize,
+      localConcurrency: entry.localConcurrency,
+      // The retry count and limit, so a handler knows its last attempt (MD-02).
+      includeMetadata: true as const,
+    };
     await boss.work(queue, opts, async (batch) => {
       for (const job of batch) {
-        await entry.handler(schema.parse(job.data), { signal: job.signal, jobId: job.id });
+        await entry.handler(schema.parse(job.data), {
+          signal: job.signal,
+          jobId: job.id,
+          retryCount: job.retryCount,
+          retryLimit: job.retryLimit,
+        });
       }
     });
   }
@@ -193,13 +212,15 @@ export function createJobs(opts: {
       const max = drainOpts.max ?? 100;
       let ran = 0;
       while (ran < max) {
-        const [job] = await boss.fetch<object>(queue, { batchSize: 1 });
+        const [job] = await boss.fetch<object>(queue, { batchSize: 1, includeMetadata: true });
         if (!job) break;
         ran++;
         try {
           await entry.handler(schema.parse(job.data), {
             signal: job.signal ?? new AbortController().signal,
             jobId: job.id,
+            retryCount: job.retryCount,
+            retryLimit: job.retryLimit,
           });
           await boss.complete(queue, job);
         } catch (err) {

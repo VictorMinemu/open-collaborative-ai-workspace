@@ -596,6 +596,37 @@ describe("storms and stale content are contained (P-09, Pitfalls 1–3)", () => 
     expect(await runsOf(src.automationId)).toEqual([]);
   });
 
+  it("a deadlock while posting retries the item instead of dropping it as not_run (07.6 review A MD-02)", async () => {
+    const tag = `ocw_flaky_${randomUUID().replaceAll("-", "")}`;
+    const subject = `Deadlocked ${randomUUID().slice(0, 6)}`;
+    // The post's own update of the event (it records the card) fails once with 40P01: a real PostgreSQL error.
+    await s.su.query(`
+      create sequence public.${tag};
+      create function public.${tag}() returns trigger language plpgsql security definer
+        set search_path = pg_catalog, public as $$
+      begin
+        if new.subject = '${subject}' and new.message_id is distinct from old.message_id
+           and nextval('public.${tag}') <= 1 then
+          raise exception 'injected deadlock' using errcode = '40P01';
+        end if;
+        return new;
+      end $$;
+      create trigger ${tag} before update on app.automation_events for each row execute function public.${tag}();`);
+    try {
+      const src = await inboundAutomation({ askBot: false });
+      const eventId = await receive(src, { subject, bodyText: "Retry me." });
+      await drainInbound();
+      const row = await eventRow(eventId);
+      expect(row).toMatchObject({ result: "accepted", reason: null });
+      expect(row.message_id).toBeTruthy();
+      expect(await postedIn(purchasingId, [eventId])).toBe(1);
+    } finally {
+      await s.su.query(
+        `drop trigger ${tag} on app.automation_events; drop function public.${tag}(); drop sequence public.${tag};`,
+      );
+    }
+  });
+
   it("a paused automation records the item not_run “paused” and posts nothing", async () => {
     const src = await inboundAutomation();
     await s.su.query(

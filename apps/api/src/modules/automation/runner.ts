@@ -2,14 +2,14 @@ import { AUTOMATION_LIMITS, type AutomationRunReason, EventTypes } from "@ocw/co
 import { automationRuns, automations, messageCards, type Tx } from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
 import type { Core } from "../../core";
-import type { JobData } from "../../lib/jobs";
+import { type JobContext, type JobData, lastAttempt } from "../../lib/jobs";
 import { deliverAutomationRun } from "../agent-channel";
 import { updatePlatformCard } from "../chat";
 import type { ActionKindHandler, AutomationRow, AutomationSeamDeps, FireResult, RunRow } from "./actions";
 import { decideFire, outcomeOf, recordOutcome } from "./budget";
 import { inboundDelivery } from "./inbound";
 import { missedPolicy, nextRunAfter } from "./schedule";
-import { postAnchor, reasonSentence, refusalReason, runCardFields, runPeople } from "./targets";
+import { isRefusal, postAnchor, reasonSentence, refusalReason, runCardFields, runPeople } from "./targets";
 
 /**
  * The runner (07.6-09; AUTO-01, D-01, D-03, D-07, D-12, P-07, P-09; Pitfalls 1 and 6). Scheduled automations run
@@ -308,6 +308,7 @@ export async function fireRun(
   deps: AutomationSeamDeps,
   data: JobData<"automation.fire">,
   now: Date = new Date(),
+  attempt?: Pick<JobContext, "retryCount" | "retryLimit">,
 ): Promise<void> {
   const { organizationId, runId } = data;
   const head = await core.db.withTenant({ organizationId }, async (tx) => {
@@ -347,13 +348,15 @@ export async function fireRun(
       }
     });
   } catch (err) {
-    // The post itself was refused (chat's own checks, decided again in the post) or failed: nothing of that transaction
-    // stays. The run is settled as failed in a fresh transaction so it does not wait forever; if even that fails (the
-    // database is down) the job is retried, and fires only while the run is still queued.
+    // Nothing of that transaction stays. A refusal (chat's own checks, decided again in the post) is the run's real
+    // outcome: settled failed with its reason. Anything else (a deadlock, a serialization failure, a dropped
+    // connection) is the database's, not the automation's: the job is retried, and only its last attempt settles the
+    // run `delivery_failed` for the breaker (07.6 review A MD-02). The run fires only while it is still queued.
     core.log.warn(
       { runId, err: { name: (err as Error)?.name, code: (err as { code?: unknown })?.code } },
       "automation fire failed",
     );
+    if (!isRefusal(err) && !lastAttempt(attempt)) throw err;
     await core.db.withTenant({ organizationId, userId: head.runAs }, async (tx) => {
       const [run] = await tx.select().from(automationRuns).where(eq(automationRuns.id, runId)).for("update");
       if (run?.status !== "queued") return;
@@ -435,5 +438,5 @@ export function registerRunner(core: Core, deps: AutomationSeamDeps): void {
     const out = await tickOnce(core);
     if (out.fired + out.skipped + out.noReply > 0) core.log.info(out, "automation tick");
   });
-  core.jobs.work("automation.fire", (data) => fireRun(core, deps, data));
+  core.jobs.work("automation.fire", (data, ctx) => fireRun(core, deps, data, new Date(), ctx));
 }

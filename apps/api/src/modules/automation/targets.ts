@@ -302,6 +302,13 @@ export async function postAnchor(
   }
 }
 
+/**
+ * True when `err` is a decision (an HTTP refusal or a permission denial) rather than a failure of the database or the
+ * process: a decision is the run's or the item's real outcome; anything else is retried (07.6 review A MD-02).
+ */
+export const isRefusal = (err: unknown): boolean =>
+  err instanceof HttpError || err instanceof AuthzDeniedError;
+
 /** A refusal thrown while posting a run or an inbound item, as a run reason (codes only). */
 export function refusalReason(err: unknown): AutomationRunReason {
   if (err instanceof AuthzDeniedError) return "target_not_postable";

@@ -19,7 +19,7 @@ import {
 } from "@ocw/db";
 import { and, asc, count, eq, gte, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import type { Core } from "../../core";
-import type { JobData } from "../../lib/jobs";
+import { type JobContext, type JobData, lastAttempt } from "../../lib/jobs";
 import { createBoardCard, ensureAgentDm } from "../chat";
 import type { AutomationRow, AutomationSeamDeps, RunRow } from "./actions";
 import { decideAccess } from "./budget";
@@ -33,7 +33,7 @@ import {
   inboundTitle,
   threadKeyOf,
 } from "./inbound-card";
-import { refusalReason } from "./targets";
+import { isRefusal, refusalReason } from "./targets";
 
 /**
  * Inbound items (07.6-21; AUTO-02, D-02, D-07, P-09, P-11; research Pattern 6, Pitfalls 2 and 3). A webhook delivery or
@@ -402,14 +402,16 @@ async function handleInbound(
 /**
  * The `automation.inbound` job: one stored item becomes its post (and maybe its run). Only ids come in; every read is
  * the job organization's (`withTenant`), so a forged cross-tenant id finds nothing. A post refused by chat's own checks
- * (decided again in the post) is recorded `not_run` with the reason in a fresh transaction; a database failure is
- * thrown, so the job is retried and handles the item only while it is still unhandled.
+ * (decided again in the post) is recorded `not_run` with the reason in a fresh transaction; any other failure is
+ * thrown, so the job is retried and handles the item only while it is still unhandled, and only the last attempt
+ * records it `not_run` (`delivery_failed`).
  */
 export async function processInbound(
   core: Core,
   deps: AutomationSeamDeps,
   data: JobData<"automation.inbound">,
   now: Date = new Date(),
+  attempt?: Pick<JobContext, "retryCount" | "retryLimit">,
 ): Promise<void> {
   const { organizationId, eventId } = data;
   const runAs = await core.db.withTenant({ organizationId }, async (tx) => {
@@ -440,6 +442,9 @@ export async function processInbound(
       { eventId, err: { name: (err as Error)?.name, code: (err as { code?: unknown })?.code } },
       "automation inbound failed",
     );
+    // A transient failure (deadlock, serialization, connection) is retried; the item is dropped as `not_run` only for
+    // a refusal or on the job's last attempt (07.6 review A MD-02).
+    if (!isRefusal(err) && !lastAttempt(attempt)) throw err;
     await core.db.withTenant({ organizationId, userId: runAs }, async (tx) => {
       const [e] = await tx
         .select()
@@ -564,7 +569,7 @@ export async function purgeInbound(core: Core, now: Date = new Date()): Promise<
  * the daily content purge (03:17 UTC, once across replicas). Tests drain `automation.inbound` and call `purgeInbound`.
  */
 export function registerInbound(core: Core, deps: AutomationSeamDeps): void {
-  core.jobs.work("automation.inbound", (data) => processInbound(core, deps, data));
+  core.jobs.work("automation.inbound", (data, ctx) => processInbound(core, deps, data, new Date(), ctx));
   core.jobs.schedule("maintenance.daily", "17 3 * * *");
   core.jobs.work("maintenance.daily", async () => {
     const purged = await purgeInbound(core);

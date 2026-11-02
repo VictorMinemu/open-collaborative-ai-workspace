@@ -878,3 +878,61 @@ describe("every writer of a run and its automation locks run → automation → 
     expect(await runRow(runId)).toMatchObject({ status: "answered" });
   });
 });
+
+// ---------------------------------------------------------------- 07.6 review A MD-02: transient errors retry
+
+describe("a transient database error retries the fire; only real outcomes reach the breaker (07.6 review A MD-02)", () => {
+  /**
+   * The fire's `last_run_at` update of the automation named `name` fails with a serialization failure (40001) for its
+   * first `times` attempts: a real PostgreSQL error through the real stack, nothing mocked.
+   */
+  async function flakyFire(name: string, times: number) {
+    const tag = `ocw_flaky_${randomUUID().replaceAll("-", "")}`;
+    await s.su.query(`
+      create sequence public.${tag};
+      create function public.${tag}() returns trigger language plpgsql security definer
+        set search_path = pg_catalog, public as $$
+      begin
+        if new.name = '${name}' and new.last_run_at is distinct from old.last_run_at
+           and nextval('public.${tag}') <= ${times} then
+          raise exception 'injected transient failure' using errcode = '40001';
+        end if;
+        return new;
+      end $$;
+      create trigger ${tag} before update on app.automations for each row execute function public.${tag}();`);
+    return () =>
+      s.su.query(
+        `drop trigger ${tag} on app.automations; drop function public.${tag}(); drop sequence public.${tag};`,
+      );
+  }
+
+  it("one serialization failure: the job is retried and the run is delivered, the breaker untouched", async () => {
+    const name = `Flaky once ${randomUUID().slice(0, 6)}`;
+    const automationId = await createAutomation({ name });
+    const cleanup = await flakyFire(name, 1);
+    try {
+      const runId = await runNow(automationId);
+      await drain();
+      expect(await runRow(runId)).toMatchObject({ status: "delivered", reason: null });
+      expect(await auditOf("automation.run_failed", runId)).toHaveLength(0);
+      expect(await automationRow(automationId)).toMatchObject({ status: "active", consecutive_failures: 0 });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("failing on every attempt: the last one settles the run failed (delivery_failed) and counts once", async () => {
+    const name = `Flaky always ${randomUUID().slice(0, 6)}`;
+    const automationId = await createAutomation({ name });
+    const cleanup = await flakyFire(name, 1_000);
+    try {
+      const runId = await runNow(automationId);
+      await drain();
+      expect(await runRow(runId)).toMatchObject({ status: "failed", reason: "delivery_failed" });
+      expect(await auditOf("automation.run_failed", runId)).toHaveLength(1);
+      expect(await automationRow(automationId)).toMatchObject({ status: "active", consecutive_failures: 1 });
+    } finally {
+      await cleanup();
+    }
+  });
+});
