@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { Webhook } from "standardwebhooks";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../app";
 import type { TestClient } from "../../testing";
 import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
 import { invite } from "../../testing-workzone";
+import { newPublicId } from "./webhook-verify";
 
 /**
  * 07.6-10 (AUTO-02; D-02, D-07, R3, R4, P-10; Pitfall 4): signed webhooks as an automation trigger. Ana Díaz (lead,
@@ -469,6 +470,39 @@ describe("limits hold (Task 3, D-07, R4, T-07.6-10-03)", () => {
     expect(ttl).toBeGreaterThan(0);
     expect(ttl).toBeLessThanOrEqual(60_000);
   });
+
+  /** One unsigned request from `ip` to a well-formed id (in-process, so each test has its own client address). */
+  const knock = async (publicId: string, ip: string) =>
+    (
+      await s.stack.built.app.inject({
+        method: "POST",
+        url: `/api/v1/hooks/${publicId}`,
+        headers: { "content-type": "application/json" },
+        payload: "{}",
+        remoteAddress: ip,
+      })
+    ).statusCode;
+  const randomPublicId = () => newPublicId();
+
+  it("a rate-limited flood costs no database query per rejected request (07.6 review A LO-03)", async () => {
+    const id = randomPublicId();
+    for (let i = 0; i < 60; i++) expect(await knock(id, "198.51.100.31")).toBe(404);
+    const queries = vi.spyOn(core().db.pool, "query");
+    try {
+      for (let i = 0; i < 10; i++) expect(await knock(id, "198.51.100.31")).toBe(429);
+      // At most the first rejection of the minute looks the id up; the other nine stop at Redis.
+      expect(queries.mock.calls.length).toBeLessThanOrEqual(1);
+    } finally {
+      queries.mockRestore();
+    }
+  });
+
+  it("one sender minting random ids is limited per address: the 601st request in a minute answers 429 (LO-03)", async () => {
+    for (let i = 0; i < 600; i++) expect(await knock(randomPublicId(), "198.51.100.32")).toBe(404);
+    expect(await knock(randomPublicId(), "198.51.100.32")).toBe(429);
+    // Another sender is unaffected.
+    expect(await knock(randomPublicId(), "198.51.100.33")).toBe(404);
+  }, 60_000);
 });
 
 describe("lifecycle and permissions (Task 3, R3, P-09, P-10)", () => {
