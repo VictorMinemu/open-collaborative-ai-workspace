@@ -7,6 +7,7 @@ import {
   type CasRow,
   noteArgOf,
   noteText,
+  type RecordChanges,
   runCompareAndSet,
   takesExpectedUpdatedAt,
   topLevelKey,
@@ -137,12 +138,13 @@ describe("runCompareAndSet", () => {
   });
 
   it("a changes key outside the watched fields, a nested pointer, the id or the guard: field_not_watched, nothing read", async () => {
-    for (const changes of [
+    const cases: RecordChanges[] = [
       { "/customer": "X" },
       { "/status/code": "S" },
       { "/id": "SO-1" },
       { "/expectedUpdatedAt": "x" },
-    ]) {
+    ];
+    for (const changes of cases) {
       const f = fakeIo({ records: [SEEN] });
       const withId = row({
         fields: [...FIELDS, { pointer: "/id", label: "Id" }, { pointer: "/status/code", label: "Code" }],
