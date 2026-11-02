@@ -1,0 +1,51 @@
+{
+  "type": "agent.automation_run.v1",
+  "data": {
+    "eventId": "0199a6f0-0000-7000-8000-00000000e761",
+    "agent": { "id": "0199a6f0-0000-7000-8000-00000000a001", "handle": "archie", "displayName": "Archie" },
+    "conversation": { "id": "0199a6f0-0000-7000-8000-00000000c761", "kind": "channel", "name": "sales" },
+    "thread": { "rootMessageId": "0199a6f0-0000-7000-8000-00000000d761" },
+    "message": {
+      "id": "0199a6f0-0000-7000-8000-00000000d761",
+      "text": "Scheduled task “Weekly sales report” for Víctor Ruiz.",
+      "createdAt": "2026-10-30T16:00:00.000Z",
+      "author": {
+        "kind": "user",
+        "id": "0199a6f0-0000-7000-8000-0000000000f1",
+        "displayName": "Víctor Ruiz"
+      },
+      "mentions": [{ "kind": "agent", "id": "0199a6f0-0000-7000-8000-00000000a001" }]
+    },
+    "threadHistory": [],
+    "roster": [
+      {
+        "kind": "user",
+        "id": "0199a6f0-0000-7000-8000-0000000000f1",
+        "displayName": "Víctor Ruiz",
+        "role": "owner"
+      },
+      {
+        "kind": "agent",
+        "id": "0199a6f0-0000-7000-8000-00000000a001",
+        "displayName": "Archie",
+        "handle": "archie"
+      }
+    ],
+    "turn": {
+      "tools": [],
+      "toolFlags": {},
+      "memory": [],
+      "now": null,
+      "maxToolCalls": 8,
+      "maxWebCalls": 5
+    },
+    "automationRun": {
+      "automationId": "0199a6f0-0000-7000-8000-0000000a7601",
+      "runId": "0199a6f0-0000-7000-8000-0000000b7601",
+      "name": "Weekly sales report",
+      "trigger": "schedule",
+      "instructions": "Every Friday, summarise this week's closed deals for the team.",
+      "inbound": null
+    }
+  }
+}
