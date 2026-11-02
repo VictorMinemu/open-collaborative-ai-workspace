@@ -65,7 +65,7 @@ The minimal stack in `compose.yaml`:
 | `postgres` | PostgreSQL 18, the only database | `127.0.0.1:54329` |
 | `redis` | Realtime fan-out, presence, rate limits | `127.0.0.1:63799` |
 | `garage` | S3-compatible object storage for attachments ([ADR-0015](adr/0015-object-storage-garage.md)) | `127.0.0.1:3900` |
-| `migrate` | One-shot: applies migrations and grants, then exits 0 | none |
+| `migrate` | One-shot: applies migrations and grants and installs the job queue (`pgboss`), then exits 0 | none |
 | `api` | Fastify control plane | `4000` |
 | `web` | Next.js app | `3000` |
 | `openclaw` | The OpenClaw cell for server-side agents | none |
@@ -211,6 +211,14 @@ Local Runtime and its installer (`/api/v1/runtime/install.sh`, shown in Settings
 On the server, `ocw-runtime setup` pairs it with a code you approve in the web, registers repositories and installs a
 systemd or launchd service; `ocw-runtime doctor` checks it. You then share the server with members and teams in
 Settings › Devices. Requirements, sign-ins, the service, proxies and troubleshooting: [SERVER.md](SERVER.md).
+
+## Automations and job workers
+
+Bots' automations (schedules, signed webhooks, mailboxes), watched records, digests and Work Zone summaries run as jobs
+in PostgreSQL, in the `pgboss` schema the `migrate` service installs; no extra service runs. Every API replica runs
+the job workers unless `OCW_JOBS_WORKER=off` is set in `.env` (keep at least one replica on). Webhook URLs, mail app
+passwords through Keychain, limits, retention and troubleshooting:
+[self-hosting/automations.md](self-hosting/automations.md).
 
 ## Keep Claude Code and Codex up to date on devices
 

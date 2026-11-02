@@ -197,6 +197,16 @@ describe("compose.yaml: isolation knobs (D-18)", () => {
       assert.equal(set.OCW_OPENBAO_ADDR, "http://openbao:8200");
     },
   );
+
+  it(
+    "the api passes OCW_JOBS_WORKER through, empty by default (the API reads empty as on; 07.6, ADR-0028)",
+    needsDocker,
+    () => {
+      assert.equal(config(REQUIRED).services.api.environment.OCW_JOBS_WORKER, "");
+      const off = config({ ...REQUIRED, OCW_JOBS_WORKER: "off" }).services.api.environment;
+      assert.equal(off.OCW_JOBS_WORKER, "off");
+    },
+  );
 });
 
 describe("compose.yaml: the `sandbox` profile (07.8-24; D-01, D-11, D-12, principle 10)", () => {
