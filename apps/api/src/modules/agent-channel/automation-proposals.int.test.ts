@@ -31,6 +31,7 @@ let sam: TestClient;
 let orgId: string;
 let anaId: string;
 let samId: string;
+let eve: TestClient;
 let scoutId: string;
 let salesId: string;
 
@@ -177,7 +178,14 @@ beforeAll(async () => {
   ({ client: ana, userId: anaId } = await invite(stack, victor, "ana@example.test", "Ana Pérez", "standard"));
   ({ client: sam, userId: samId } = await invite(stack, victor, "sam@example.test", "Sam Lee", "standard"));
   // Organization B: Eve moves into her own organization as its admin (tenant isolation).
-  const { userId: eveId } = await invite(stack, victor, "eve@example.test", "Eve", "standard");
+  const { client: eveClient, userId: eveId } = await invite(
+    stack,
+    victor,
+    "eve@example.test",
+    "Eve",
+    "standard",
+  );
+  eve = eveClient;
   const orgB = randomUUID();
   await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
     orgB,
@@ -611,6 +619,85 @@ describe("only the right person, only clean turns (Task 2, D-02, D-07, T-07.6-12
       expect(r.status, JSON.stringify(over)).toBe(400);
     }
     expect(await rows("select id from app.automation_drafts where event_id = $1", [eventId])).toEqual([]);
+  });
+});
+
+describe("Edit from the card: the editor's save closes the proposal as Created with changes (Task 3, R5, T-07.6-12-04)", () => {
+  const edited = (approvalId: string, extra: Json = {}) => ({
+    name: "Weekly sales report (Mondays)",
+    agentId: scoutId,
+    instructions: ORDER,
+    trigger: { kind: "schedule", schedule: { cron: "0 9 * * 1", timeZone: "Europe/Madrid" } },
+    target: { kind: "channel", conversationId: salesId },
+    maxRunsPerDay: 24,
+    fromApprovalId: approvalId,
+    ...extra,
+  });
+
+  it("Ana saves her edited version: 201, the approval is applied with edited, the draft too, the card says so", async () => {
+    const p = await proposed({ name: "Weekly sales report (draft)" });
+    const res = await ok(ana.request("POST", "/api/v1/automations", edited(p.approvalId)), 201);
+    const a = res.automation as Json;
+    expect(a).toMatchObject({
+      name: "Weekly sales report (Mondays)",
+      runAs: { id: anaId },
+      trigger: { schedule: { cron: "0 9 * * 1", timeZone: "Europe/Madrid" } },
+    });
+    expect(await requestOf(p.approvalId)).toMatchObject({ status: "applied", decided_by: anaId });
+    expect(await draftOf(p.approvalId)).toMatchObject({
+      status: "applied",
+      automation_id: a.id,
+      edited: true,
+    });
+    expect(await card(ana, p.cardMessageId)).toMatchObject({
+      status: "succeeded",
+      decision: { outcome: "approved", by: { id: anaId } },
+      approval: { status: "applied", edited: true, resultRoute: `/bots/automations?edit=${a.id}` },
+    });
+    const decidedAudit = (await audits("approval.decided")).find((x) => x.resource_id === p.approvalId);
+    expect(decidedAudit?.metadata).toMatchObject({ outcome: "approved", selfApproved: true, edited: true });
+    expect((await audits("automation.created")).find((x) => x.resource_id === a.id)?.metadata).toMatchObject({
+      approvalId: p.approvalId,
+      edited: true,
+    });
+    expect((await cardActionsOf(p.cardMessageId)).map((e) => e.cardAction.outcome)).toEqual(["approved"]);
+  });
+
+  it("Sam using Ana's approval id gets 400 approval_not_found; an already decided one is 409; a refused save closes nothing", async () => {
+    const p = await proposed({ name: "Ana's own" });
+    const bySam = await sam.request("POST", "/api/v1/automations", edited(p.approvalId));
+    expect(bySam.status, JSON.stringify(bySam.body)).toBe(400);
+    expect((bySam.body as Json).error.code).toBe("approval_not_found");
+    expect((await requestOf(p.approvalId)).status).toBe("pending");
+
+    // A save the editor's rules refuse (too frequent) leaves the proposal pending.
+    const tooOften = await ana.request(
+      "POST",
+      "/api/v1/automations",
+      edited(p.approvalId, {
+        trigger: { kind: "schedule", schedule: { cron: "*/5 * * * *", timeZone: "UTC" } },
+      }),
+    );
+    expect(tooOften.status).toBe(400);
+    expect((await requestOf(p.approvalId)).status).toBe("pending");
+    expect(await draftOf(p.approvalId)).toMatchObject({ status: "pending", edited: false });
+
+    // Another organization never sees it: the review is 404, the editor's save is approval_not_found.
+    expect((await eve.request("GET", `/api/v1/approvals/${p.approvalId}`)).status).toBe(404);
+    const byEve = await eve.request("POST", "/api/v1/automations", edited(p.approvalId));
+    expect(byEve.status, JSON.stringify(byEve.body)).toBe(400);
+    expect((byEve.body as Json).error.code).toBe("approval_not_found");
+    expect((await requestOf(p.approvalId)).status).toBe("pending");
+
+    await ok(decide(ana, p.approvalId, { outcome: "denied", actionHash: p.request.action_hash }));
+    const detail = await ok(ana.request("GET", `/api/v1/approvals/${p.approvalId}`));
+    expect(detail.view.draft.status).toBe("discarded");
+    const again = await ana.request("POST", "/api/v1/automations", edited(p.approvalId));
+    expect(again.status).toBe(409);
+    expect((again.body as Json).error.code).toBe("approval_already_decided");
+    expect(
+      (await automationsOf(anaId)).filter((a) => a.name === "Weekly sales report (Mondays)"),
+    ).toHaveLength(1);
   });
 });
 

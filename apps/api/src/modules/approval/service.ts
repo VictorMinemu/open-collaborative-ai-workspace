@@ -97,6 +97,21 @@ export interface ApprovalService {
   ): Promise<{ id: string; actionHash: string; cardMessageId: string | null }>;
   decide(tx: Tx, input: DecideInput): Promise<ApprovalSummary>;
   consumeGrant(tx: Tx, input: { id: string; kind: string; actionHash: string }): Promise<ConsumeGrantResult>;
+  /**
+   * 07.6-12 (R5): the person a pending request was made for did the action themselves, with their own changes, through
+   * the kind's own route (an edited automation saved in the editor), so nobody decides it. Locks the request: 400
+   * `approval_not_found` unless it is a request of `kind` made for `userId` (it never reveals someone else's), 409
+   * `approval_already_decided` / `approval_expired` otherwise. Then locks the decision's streams in the decision's
+   * order, runs `act` (the caller's own action: a refusal throws and rolls everything back), and closes the request as
+   * `applied`, decided by that person: audited (`approval.decided` with `selfApproved` and `edited`, then
+   * `approval.applied`), mirrored on its card as approved (the bot hears it) and announced, like an approved decision.
+   * The kind's `apply` never runs: the person's own action replaced it.
+   */
+  applyOwn<T>(
+    tx: Tx,
+    input: { id: string; kind: string; userId: string },
+    act: (row: ApprovalRow) => Promise<T>,
+  ): Promise<T>;
   get(tx: Tx, id: string, viewerUserId: string): Promise<ApprovalDetail>;
   /**
    * The "gone" path (WINDOWS 144): closes the pending requests among `which` whose kind says their action can never be
@@ -591,6 +606,60 @@ export function createApprovalService(core: Pick<Core, "audit" | "realtime" | "c
       if (used.cardMessageId) await mirrorCardUsed(tx, core, { messageId: used.cardMessageId });
       await announce(tx, kind, used, [used.decidedBy]);
       return { ok: true };
+    },
+
+    async applyOwn(tx, input, act) {
+      const row = await lockRow(tx, input.id);
+      const kind = row ? registry.get(row.kind) : undefined;
+      if (!row || !kind || row.kind !== input.kind || row.requestedForUserId !== input.userId) {
+        throw new HttpError(400, "approval_not_found", "That proposal was not found");
+      }
+      if (row.status !== "pending") {
+        throw conflict("This request was already decided", "approval_already_decided");
+      }
+      if (row.expired) throw conflict("This request expired", "approval_expired");
+      // Stream lock order (#224): the card's conversation, then every `user:` stream, before `act` appends to any.
+      await lockDecisionStreams(tx, kind, row, input.userId);
+      const out = await act(row);
+      const [final] = await tx
+        .update(approvalRequests)
+        .set({
+          status: "applied",
+          decidedBy: input.userId,
+          decidedAt: sql`now()`,
+          consumedAt: sql`now()`,
+          appliedAt: sql`now()`,
+        })
+        .where(and(eq(approvalRequests.id, row.id), eq(approvalRequests.status, "pending")))
+        .returning();
+      if (!final) throw conflict("This request was already decided", "approval_already_decided");
+      await core.audit.record(tx, {
+        action: "approval.decided",
+        resourceType: "approval_request",
+        resourceId: final.id,
+        metadata: { ...auditIds(final), outcome: "approved", selfApproved: true, edited: true },
+      });
+      await core.audit.record(tx, {
+        action: "approval.applied",
+        resourceType: "approval_request",
+        resourceId: final.id,
+        metadata: { ...auditIds(final), edited: true },
+      });
+      const announced = () => announce(tx, kind, final, [input.userId]);
+      if (!final.cardMessageId) await announced();
+      else {
+        const dir = await loadDirectory(tx);
+        await mirrorCardDecision(tx, core, {
+          messageId: final.cardMessageId,
+          outcome: "approved",
+          deciderUserId: input.userId,
+          status: "succeeded",
+          note: null,
+          decidedBy: { id: input.userId, displayName: authorOf(dir, "user", input.userId).displayName },
+          beforeCardAction: announced,
+        });
+      }
+      return out;
     },
 
     async closeGone(tx, which) {

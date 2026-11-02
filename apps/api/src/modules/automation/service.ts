@@ -58,6 +58,7 @@ import {
   type TriggerAdapter,
   type TriggerDeps,
 } from "./actions";
+import { AUTOMATION_CREATE_KIND, closeDraft } from "./approval-kind";
 import { mailTrigger } from "./mailboxes";
 import { firstRunAt, nextRuns, validateSchedule } from "./schedule";
 import { webhookTrigger } from "./webhooks";
@@ -204,7 +205,7 @@ export function createAutomationService(
   perms: PermissionService,
   access: ConversationAccess,
   /** The proposals an edited form closes (R5, 07.6-12); absent = `fromApprovalId` is always `approval_not_found`. */
-  _approvals?: ApprovalService,
+  approvals?: ApprovalService,
 ): AutomationService {
   const kinds = createActionRegistry();
   const triggerDeps: TriggerDeps = { core, perms };
@@ -501,8 +502,29 @@ export function createAutomationService(
     async create(tx, actor, input, opts = {}) {
       const actionKind = opts.actionKind ?? "agent_turn";
       if (!(await canCreate(perms, tx, actor))) throw notAllowed();
-      // "Created with changes" from a bot's proposal: the edit path lands with Task 3 of 07.6-12.
-      if (input.fromApprovalId) throw new HttpError(400, "approval_not_found", "That proposal was not found");
+      // "Created with changes" (R5, T-07.6-12-04): the proposal must be the caller's own and still pending; it closes as
+      // applied with `edited` only once the automation (the caller's edits, under every rule below) exists.
+      if (input.fromApprovalId) {
+        const { fromApprovalId, ...edited } = input;
+        if (!approvals || actionKind !== "agent_turn" || opts.fromApproval) {
+          throw new HttpError(400, "approval_not_found", "That proposal was not found");
+        }
+        return approvals.applyOwn(
+          tx,
+          { id: fromApprovalId, kind: AUTOMATION_CREATE_KIND, userId: actor.userId },
+          async (row) => {
+            const created = await service.create(tx, actor, edited, {
+              fromApproval: { approvalId: row.id, edited: true },
+            });
+            await closeDraft(tx, {
+              draftId: row.resourceId,
+              automationId: created.automation.id,
+              edited: true,
+            });
+            return created;
+          },
+        );
+      }
       const trigger = input.trigger;
       if (trigger.kind === "webhook" && !(await canWebhook(perms, tx, actor))) {
         throw new HttpError(403, "webhook_not_allowed", "Only team leads and admins can create webhooks.");
