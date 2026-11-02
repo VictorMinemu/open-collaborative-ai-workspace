@@ -9,9 +9,10 @@ import { agents, automationRuns, conversations, orgMembers, type Tx } from "@ocw
 import { eq } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { PlatformCardInput } from "../../lib/chat-agent-bridge";
+import { HttpError } from "../../lib/errors";
 import { runSentence } from "../agent-channel";
 import { createBoardCard, ensureAgentDm } from "../chat";
-import type { PermissionService } from "../organization";
+import { AuthzDeniedError, type PermissionService } from "../organization";
 import type { AutomationRow, RunRow } from "./actions";
 
 /**
@@ -292,5 +293,29 @@ export async function postAnchor(
         boardCardMessageId: null,
       };
     }
+  }
+}
+
+/** A refusal thrown while posting a run or an inbound item, as a run reason (codes only). */
+export function refusalReason(err: unknown): AutomationRunReason {
+  if (err instanceof AuthzDeniedError) return "target_not_postable";
+  if (!(err instanceof HttpError)) return "delivery_failed";
+  switch (err.code) {
+    case "agent_unavailable":
+    case "agent_not_found":
+      return "agent_disabled";
+    case "bot_not_readable":
+      return "bot_not_readable";
+    case "member_not_found":
+    case "member_deactivated":
+      return "run_as_not_allowed";
+    case "personal_bot_target":
+    case "channel_archived":
+    case "invalid_column":
+    case "not_a_board":
+    case "not_found":
+      return "target_not_postable";
+    default:
+      return "delivery_failed";
   }
 }

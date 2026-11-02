@@ -145,6 +145,22 @@ export async function decideFire(
   run: RunRow,
   now: Date,
 ): Promise<FireDecision> {
+  const access = await decideAccess(tx, perms, a);
+  if (!access.ok) return access;
+  if ((await runsToday(tx, a, now, run.id)) >= a.maxRunsPerDay) return { ok: false, reason: "runs_per_day" };
+  return { ok: true };
+}
+
+/**
+ * Steps 1 to 3 of `decideFire` (active, run-as person, target), without the daily run budget: what an inbound item
+ * needs before the platform posts it (07.6-21; its own budget is the hourly inbound cap, and the bot's turn after it
+ * goes through `decideFire` like any run).
+ */
+export async function decideAccess(
+  tx: Tx,
+  perms: PermissionService,
+  a: AutomationRow,
+): Promise<FireDecision> {
   if (a.status !== "active") return { ok: false, reason: "paused" };
   const [member] = await tx
     .select({ deactivatedAt: orgMembers.deactivatedAt })
@@ -160,7 +176,6 @@ export async function decideFire(
     target: targetOf(a),
   });
   if (!target.ok) return { ok: false, reason: TARGET_REASONS[target.code] };
-  if ((await runsToday(tx, a, now, run.id)) >= a.maxRunsPerDay) return { ok: false, reason: "runs_per_day" };
   return { ok: true };
 }
 
