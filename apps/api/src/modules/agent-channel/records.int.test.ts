@@ -742,6 +742,65 @@ describe("governed like any side effect: taint and 07.5 approvals", () => {
       await s.su.query("delete from app.tool_approval_policies where organization_id = $1", [s.orgA]);
     }
   });
+
+  it("HI-02: approved after a reported outside change: the grant does not serve the call, nothing is written", async () => {
+    let watched: Json;
+    ({ card, watched } = await freshWatch("EXP-0061 Approved too late"));
+    await s.su.query(
+      `insert into app.tool_approval_policies
+         (organization_id, scope_unit_id, tool_pattern, mode, approver_kind, approver_user_ids, created_by, updated_by)
+       values ($1, null, $2, 'always', 'requester', '{}', $3, $3)`,
+      [s.orgA, TOOL, s.victorId],
+    );
+    try {
+      const { eventId } = await mention(s.victor, card.messageId, {
+        text: "@opshelper move delivery to the 10th",
+      });
+      const asked = await update(eventId, { "/delivery_date": "2026-11-10" });
+      expect(asked.body.code).toBe("approval_required");
+      const [request] = (
+        await s.su.query(
+          "select id, action_hash, card_message_id from app.approval_requests where kind = 'tool.call' and organization_id = $1 order by created_at desc limit 1",
+          [s.orgA],
+        )
+      ).rows as Json[];
+      // The ERP owner moves the date; the next check reports it in the thread and moves the snapshot.
+      const r = record();
+      r.delivery_date = "2026-11-20";
+      r.updated_at = "2026-10-07T08:00:00.000Z";
+      await scheduledCheck(watched.id);
+      expect((await row(watched.id)).snapshot).toMatchObject({ "/delivery_date": "2026-11-20" });
+
+      // A lead approves from the inbox, without the thread in view; the re-run asks for the same change.
+      await ok(
+        s.victor.request("POST", `/api/v1/approvals/${request?.id}/decision`, {
+          outcome: "approved",
+          actionHash: request?.action_hash,
+        }),
+      );
+      const rerun = await eventually(async () => {
+        const rows = (
+          await s.su.query(
+            "select payload from app.stream_events where type = 'agent.card_action.v1' and payload->'cardAction'->>'messageId' = $1",
+            [request?.card_message_id],
+          )
+        ).rows;
+        return rows.length > 0 ? (rows[0].payload as Json) : undefined;
+      });
+      const late = await update(rerun.eventId, { "/delivery_date": "2026-11-10" });
+      expect(late.status).toBe(409);
+      // The approval was for the record as it was: this is a new action, asked for again on the new values.
+      expect(late.body.code).toBe("approval_required");
+      expect(callsOf("update_record")).toEqual([]);
+      expect(record().delivery_date).toBe("2026-11-20");
+      const consumed = (
+        await s.su.query("select consumed_at from app.approval_requests where id = $1", [request?.id])
+      ).rows[0] as Json;
+      expect(consumed.consumed_at).toBeNull();
+    } finally {
+      await s.su.query("delete from app.tool_approval_policies where organization_id = $1", [s.orgA]);
+    }
+  });
 });
 
 describe("per-member connector: written with the requester's own account, only where they allowed it", () => {

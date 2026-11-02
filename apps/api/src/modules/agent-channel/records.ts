@@ -141,6 +141,8 @@ type Decided =
       kind: "go";
       callId: string;
       watchedRecordId: string;
+      /** The snapshot hash the call was decided (and any approval given) against. */
+      base: string | null;
       names: Names;
     };
 
@@ -201,8 +203,10 @@ async function decide(
     if (rule) return refuse(rule, watched);
 
     // 07.5 (D-04, APPROVE-01): with a rule, the caps first (a consumed grant is never given back), then the decision on
-    // exactly this record and these changes (the record is part of the approved action, so a grant for one card never
-    // serves another card's call).
+    // exactly this record and these changes (the watch and the record are part of the approved action, so a grant for
+    // one card never serves another card's call), against the record as it was when asked (`base`, the snapshot hash:
+    // HI-02). A change reported since moves the snapshot, so the same changes are a new action that needs a new
+    // approval on the new values, and the compare-and-set refuses to write against any other base.
     if (deliveredApproval(turn.toolFlags, TOOL) && (await turnAtCap(tx, turn.eventId, false))) {
       return refuse("cap_reached", watched);
     }
@@ -210,7 +214,13 @@ async function decide(
       await deps.toolApproval.approvalForCall(tx, {
         turn: { eventId: turn.eventId, agentId: turn.agentId },
         tool: TOOL,
-        args: { record: w.externalRef, connector: server.name, changes: body.changes },
+        args: {
+          watch: w.id,
+          record: w.externalRef,
+          connector: server.name,
+          base: w.snapshotHash,
+          changes: body.changes,
+        },
         toolCallId: null,
         source: { kind: "builtin", id: null, target: server.safeName },
       }),
@@ -234,7 +244,7 @@ async function decide(
       const code: Code = claim.reason === "tainted" ? "tainted" : "cap_reached";
       return { kind: "answer", answer: answerOf(code, names) };
     }
-    return { kind: "go", callId: claim.callId, watchedRecordId: w.id, names };
+    return { kind: "go", callId: claim.callId, watchedRecordId: w.id, base: w.snapshotHash, names };
   });
 }
 
@@ -309,6 +319,7 @@ export function registerRecordRoutes(
         out = await deps.records.compareAndSet({
           organizationId: cell.organizationId,
           watchedRecordId: decided.watchedRecordId,
+          base: decided.base,
           requesterUserId: found.userId,
           requesterName: decided.names.person,
           agent: { id: body.agentId, displayName: decided.names.bot },

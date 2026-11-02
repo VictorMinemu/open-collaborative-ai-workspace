@@ -350,6 +350,11 @@ export async function preflight(
 export interface CompareAndSetInput {
   organizationId: string;
   watchedRecordId: string;
+  /**
+   * The snapshot hash the route decided on (and any approval was given against, HI-02): the write happens only while
+   * the stored snapshot is still this one (the lease checks it), so a change reported since is a conflict.
+   */
+  base: string | null;
   requesterUserId: string;
   /** The requester's display name (the note-back). */
   requesterName: string;
@@ -656,7 +661,8 @@ export async function compareAndSet(core: Core, deps: WriteDeps, p: CompareAndSe
       writeTool: w.writeTool,
       noteTool: w.noteTool,
       fields,
-      snapshotHash: w.snapshotHash,
+      // The decided base, not the row as re-read here: a snapshot moved in between fails the lease (a conflict).
+      snapshotHash: p.base,
     },
     p.changes,
     {
