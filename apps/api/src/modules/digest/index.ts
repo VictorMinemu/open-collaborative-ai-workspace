@@ -305,28 +305,31 @@ export function createDigestService(core: Core, deps: DigestDeps): DigestService
   async function finish(p: PendingSummary): Promise<Sent | null> {
     const userId = p.a.runAsUserId;
     const ctx = { organizationId: p.a.organizationId, userId };
-    let text = "";
+    let out: Awaited<ReturnType<typeof runOneShot>> | null = null;
     try {
-      const out = await runOneShot(p.resolved, summaryInput(p.list.markdown), {
-        timeoutMs: SUMMARY_TIMEOUT_MS,
-      });
+      out = await runOneShot(p.resolved, summaryInput(p.list.markdown), { timeoutMs: SUMMARY_TIMEOUT_MS });
+    } catch (err) {
+      // The digest still goes out, without its summary.
+      const code =
+        err instanceof DOMException ? "model_timeout" : (modelGateway.classify(err).code ?? "error");
+      core.log.warn({ runId: p.run.id, code }, "digest summary failed");
+    }
+    if (out) {
+      const answered = out;
+      // A failure to record it fails the run (thrown): never a summary posted without its usage record.
       await core.db.withTenant(ctx, (tx) =>
         recordStandaloneUsage(tx, {
           kind: "digest",
           subjectId: p.run.id,
           requesterUserId: userId,
           model: p.resolved.ref,
-          reported: out.usage,
-          promptText: out.promptText,
-          outputText: out.text,
+          reported: answered.usage,
+          promptText: answered.promptText,
+          outputText: answered.text,
         }),
       );
-      text = out.text.trim();
-    } catch (err) {
-      const code =
-        err instanceof DOMException ? "model_timeout" : (modelGateway.classify(err).code ?? "error");
-      core.log.warn({ runId: p.run.id, code }, "digest summary failed");
     }
+    const text = out?.text.trim() ?? "";
     const message = text
       ? composeDigest({
           date: p.now,
