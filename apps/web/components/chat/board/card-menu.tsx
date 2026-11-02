@@ -188,136 +188,125 @@ export function CardMenu({
   const mayWatch = useMayWatch();
   const watched = useCardWatch({ messageId: card.messageId, conversationId: card.conversationId }) !== null;
   const [watchOpen, setWatchOpen] = useState(false);
-  const model = cardMenuModel(card, columns, {
-    canPost,
-    viewerId,
-    canDeleteAny,
-    readOnly,
-    canWatch: mayWatch && !watched,
-  });
+  const canWatch = mayWatch && !watched;
+  const model = cardMenuModel(card, columns, { canPost, viewerId, canDeleteAny, readOnly, canWatch });
   const { moveTo, moveTop, moveBottom, waitingOn } = model;
   const edit = model.editCard && onEdit ? onEdit : null;
   const remove = model.deleteCard && onDelete ? onDelete : null;
   return (
-    <>
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          aria-label="Card actions"
-          data-testid="card-menu"
-          className={cn(
-            buttonVariants({ variant: "ghost", size: "icon-xs" }),
-            "text-muted-foreground data-popup-open:bg-accent data-popup-open:text-foreground max-md:size-11",
-            className,
-          )}
-        >
-          <MoreHorizontal />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" data-testid="card-menu-content">
-          <DropdownMenuItem className={ITEM} onClick={onOpen}>
-            <MessageSquare />
-            Open thread
-          </DropdownMenuItem>
-          {moveTo && moveTop && moveBottom && waitingOn ? (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger className={ITEM}>
-                  <ArrowRightLeft />
-                  Move to…
-                </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent>
-                  <DropdownMenuRadioGroup
-                    value={card.columnId}
-                    onValueChange={(value: string) => {
-                      const intent = moveTo.find((c) => c.columnId === value)?.intent;
-                      if (intent) onMove(intent);
-                    }}
-                  >
-                    {moveTo.map((c) => (
-                      <DropdownMenuRadioItem
-                        key={c.columnId}
-                        value={c.columnId}
-                        closeOnClick
-                        className={ITEM}
-                      >
-                        <CategoryIcon category={c.category} decorative />
-                        <span className="min-w-0 truncate">{c.name}</span>
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
-              <DropdownMenuItem
-                className={ITEM}
-                disabled={moveTop.disabled}
-                onClick={() => onMove(moveTop.intent)}
-              >
-                <ArrowUpToLine />
-                Move to top
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                className={ITEM}
-                disabled={moveBottom.disabled}
-                onClick={() => onMove(moveBottom.intent)}
-              >
-                <ArrowDownToLine />
-                Move to bottom
-              </DropdownMenuItem>
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger className={ITEM}>
-                  <Clock />
-                  Waiting on…
-                </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent>
-                  <DropdownMenuRadioGroup
-                    value={card.waitingOn}
-                    onValueChange={(value: WaitingOn) => {
-                      if (value !== card.waitingOn) onWaitingOn(value);
-                    }}
-                  >
-                    {waitingOn.map((o) => (
-                      <DropdownMenuRadioItem key={o.value} value={o.value} closeOnClick className={ITEM}>
-                        <span aria-hidden className="flex size-4 items-center justify-center">
-                          <WaitingDot state={o.value} />
-                        </span>
-                        {o.label}
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
-              {model.watchRecord ? (
-                <DropdownMenuItem
-                  className={ITEM}
-                  onClick={() => setWatchOpen(true)}
-                  data-testid="card-menu-watch"
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        aria-label="Card actions"
+        data-testid="card-menu"
+        className={cn(
+          buttonVariants({ variant: "ghost", size: "icon-xs" }),
+          "text-muted-foreground data-popup-open:bg-accent data-popup-open:text-foreground max-md:size-11",
+          className,
+        )}
+      >
+        <MoreHorizontal />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" data-testid="card-menu-content">
+        <DropdownMenuItem className={ITEM} onClick={onOpen}>
+          <MessageSquare />
+          Open thread
+        </DropdownMenuItem>
+        {moveTo && moveTop && moveBottom && waitingOn ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger className={ITEM}>
+                <ArrowRightLeft />
+                Move to…
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuRadioGroup
+                  value={card.columnId}
+                  onValueChange={(value: string) => {
+                    const intent = moveTo.find((c) => c.columnId === value)?.intent;
+                    if (intent) onMove(intent);
+                  }}
                 >
-                  <Eye />
-                  Watch external record…
-                </DropdownMenuItem>
-              ) : null}
-            </>
-          ) : null}
-          {edit || remove || extraItems ? (
-            <>
-              <DropdownMenuSeparator />
-              {edit ? (
-                <DropdownMenuItem className={ITEM} onClick={edit}>
-                  <Pencil />
-                  Edit card…
-                </DropdownMenuItem>
-              ) : null}
-              {remove ? (
-                <DropdownMenuItem className={ITEM} variant="destructive" onClick={remove}>
-                  <Trash2 />
-                  Delete card…
-                </DropdownMenuItem>
-              ) : null}
-              {extraItems}
-            </>
-          ) : null}
-        </DropdownMenuContent>
-      </DropdownMenu>
+                  {moveTo.map((c) => (
+                    <DropdownMenuRadioItem key={c.columnId} value={c.columnId} closeOnClick className={ITEM}>
+                      <CategoryIcon category={c.category} decorative />
+                      <span className="min-w-0 truncate">{c.name}</span>
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            <DropdownMenuItem
+              className={ITEM}
+              disabled={moveTop.disabled}
+              onClick={() => onMove(moveTop.intent)}
+            >
+              <ArrowUpToLine />
+              Move to top
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className={ITEM}
+              disabled={moveBottom.disabled}
+              onClick={() => onMove(moveBottom.intent)}
+            >
+              <ArrowDownToLine />
+              Move to bottom
+            </DropdownMenuItem>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger className={ITEM}>
+                <Clock />
+                Waiting on…
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent>
+                <DropdownMenuRadioGroup
+                  value={card.waitingOn}
+                  onValueChange={(value: WaitingOn) => {
+                    if (value !== card.waitingOn) onWaitingOn(value);
+                  }}
+                >
+                  {waitingOn.map((o) => (
+                    <DropdownMenuRadioItem key={o.value} value={o.value} closeOnClick className={ITEM}>
+                      <span aria-hidden className="flex size-4 items-center justify-center">
+                        <WaitingDot state={o.value} />
+                      </span>
+                      {o.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            {model.watchRecord ? (
+              <DropdownMenuItem
+                className={ITEM}
+                onClick={() => setWatchOpen(true)}
+                data-testid="card-menu-watch"
+              >
+                <Eye />
+                Watch external record…
+              </DropdownMenuItem>
+            ) : null}
+          </>
+        ) : null}
+        {edit || remove || extraItems ? (
+          <>
+            <DropdownMenuSeparator />
+            {edit ? (
+              <DropdownMenuItem className={ITEM} onClick={edit}>
+                <Pencil />
+                Edit card…
+              </DropdownMenuItem>
+            ) : null}
+            {remove ? (
+              <DropdownMenuItem className={ITEM} variant="destructive" onClick={remove}>
+                <Trash2 />
+                Delete card…
+              </DropdownMenuItem>
+            ) : null}
+            {extraItems}
+          </>
+        ) : null}
+      </DropdownMenuContent>
+      {/* 07.6-17: the watch dialog owned by this menu (Menu.Root renders no element of its own). */}
       {model.watchRecord && card.conversationId ? (
         <WatchRecordDialog
           open={watchOpen}
@@ -326,6 +315,6 @@ export function CardMenu({
           mode="new"
         />
       ) : null}
-    </>
+    </DropdownMenu>
   );
 }
