@@ -2,15 +2,14 @@ import { AUTOMATION_LIMITS, type AutomationRunReason, EventTypes } from "@ocw/co
 import { automationRuns, automations, messageCards, type Tx } from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
 import type { Core } from "../../core";
-import { HttpError } from "../../lib/errors";
 import type { JobData } from "../../lib/jobs";
 import { deliverAutomationRun } from "../agent-channel";
 import { updatePlatformCard } from "../chat";
-import { AuthzDeniedError } from "../organization";
 import type { ActionKindHandler, AutomationRow, AutomationSeamDeps, FireResult, RunRow } from "./actions";
 import { decideFire, outcomeOf, recordOutcome } from "./budget";
+import { inboundDelivery } from "./inbound";
 import { missedPolicy, nextRunAfter } from "./schedule";
-import { postAnchor, reasonSentence, runCardFields, runPeople } from "./targets";
+import { postAnchor, reasonSentence, refusalReason, runCardFields, runPeople } from "./targets";
 
 /**
  * The runner (07.6-09; AUTO-01, D-01, D-03, D-07, D-12, P-07, P-09; Pitfalls 1 and 6). Scheduled automations run
@@ -297,30 +296,6 @@ async function settleRun(
   await recordOutcome(tx, { core }, a, outcomeOf(result.status, result.reason), result.reason);
 }
 
-/** A refusal thrown while posting the run, as a run reason (codes only). */
-function refusalReason(err: unknown): AutomationRunReason {
-  if (err instanceof AuthzDeniedError) return "target_not_postable";
-  if (!(err instanceof HttpError)) return "delivery_failed";
-  switch (err.code) {
-    case "agent_unavailable":
-    case "agent_not_found":
-      return "agent_disabled";
-    case "bot_not_readable":
-      return "bot_not_readable";
-    case "member_not_found":
-    case "member_deactivated":
-      return "run_as_not_allowed";
-    case "personal_bot_target":
-    case "channel_archived":
-    case "invalid_column":
-    case "not_a_board":
-    case "not_found":
-      return "target_not_postable";
-    default:
-      return "delivery_failed";
-  }
-}
-
 /**
  * Fires one run (the `automation.fire` job): re-decides it as its person, then runs its action kind. Idempotent: a run
  * that is not `queued` any more (already fired, skipped, or gone with its automation) is left as it is. Only ids come
@@ -400,8 +375,22 @@ export async function fireRun(
 export function agentTurnAction(core: Core, deps: AutomationSeamDeps): ActionKindHandler {
   return {
     async fire(tx, { run, automation: a }) {
-      const people = await runPeople(tx, a);
-      const anchor = await postAnchor(tx, { core, perms: deps.perms }, a, run, runCardFields(a, run, people));
+      // A webhook or mail run (07.6-21): its anchor is the inbound card the platform already posted, and its turn is
+      // tainted from the first call with the item only in `automationRun.inbound`. Without its item it never runs.
+      const inbound =
+        run.trigger === "webhook" || run.trigger === "mail" ? await inboundDelivery(tx, a, run) : null;
+      if ((run.trigger === "webhook" || run.trigger === "mail") && !inbound) {
+        return { status: "failed", reason: "target_not_postable" };
+      }
+      const anchor =
+        inbound?.anchor ??
+        (await postAnchor(
+          tx,
+          { core, perms: deps.perms },
+          a,
+          run,
+          runCardFields(a, run, await runPeople(tx, a)),
+        ));
       const out = await deliverAutomationRun(
         tx,
         {
@@ -420,8 +409,8 @@ export function agentTurnAction(core: Core, deps: AutomationSeamDeps): ActionKin
           delivery: anchor.delivery,
           automation: { id: a.id, name: a.name, instructions: a.instructions },
           trigger: run.trigger,
-          inbound: null,
-          taintedAtStart: false,
+          inbound: inbound?.inbound ?? null,
+          taintedAtStart: inbound?.taintedAtStart ?? false,
           timeZone: a.timeZone,
         },
       );
