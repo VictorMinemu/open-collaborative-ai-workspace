@@ -129,8 +129,8 @@ async function pollNow(mailboxId: string): Promise<number> {
 
 const drainInbound = () => core().jobs.drain("automation.inbound", { max: 100 });
 
-/** Flags of every message of `address`'s INBOX, read over raw IMAP by the test (EXAMINE: the read changes nothing). */
-async function flagsOf(address: string): Promise<string[][]> {
+/** The test's own IMAP session as `address` (plain IMAP to the container; never the product's code path). */
+async function asMailUser<T>(address: string, fn: (client: ImapFlow) => Promise<T>): Promise<T> {
   const u = user(address);
   const client = new ImapFlow({
     host: gm.host,
@@ -142,6 +142,15 @@ async function flagsOf(address: string): Promise<string[][]> {
   });
   await client.connect();
   try {
+    return await fn(client);
+  } finally {
+    await client.logout();
+  }
+}
+
+/** Flags of every message of `address`'s INBOX, read over raw IMAP by the test (EXAMINE: the read changes nothing). */
+const flagsOf = (address: string): Promise<string[][]> =>
+  asMailUser(address, async (client) => {
     const lock = await client.getMailboxLock("INBOX", { readOnly: true });
     try {
       const out: string[][] = [];
@@ -150,10 +159,18 @@ async function flagsOf(address: string): Promise<string[][]> {
     } finally {
       lock.release();
     }
-  } finally {
-    await client.logout();
-  }
-}
+  });
+
+/** A raw RFC 5322 message (lets a test leave out the Message-ID, which SMTP clients always add). */
+const rawMail = (headers: Record<string, string>, body: string) =>
+  `${Object.entries(headers)
+    .map(([k, v]) => `${k}: ${v}`)
+    .join("\r\n")}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${body}\r\n`;
+
+const appendTo = (address: string, folder: string, raw: string) =>
+  asMailUser(address, async (client) => {
+    await client.append(folder, raw);
+  });
 
 const send = (
   to: string,
@@ -290,5 +307,153 @@ describe("a mail to ops@acme.test arrives as one item in #purchasing (tracer)", 
     const flags = await flagsOf("ops@acme.test");
     expect(flags).toHaveLength(2);
     for (const f of flags) expect(f).not.toContain("\\Seen");
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: parsing, idempotency, threading, loops
+
+describe("each mail is processed once, conversations stay threaded, automated mail cannot loop", () => {
+  /** A fresh mail automation on `address` (its own Keychain key); returns the automation and mailbox ids. */
+  async function automationOn(address: string, extra: Json = {}) {
+    const vaultItemId = await mailKey(address);
+    const created = await ok(createMailAutomation(vaultItemId, extra), 201);
+    const automationId = created.automation.id as string;
+    const row = await mailboxRow(automationId);
+    return { automationId, mailboxId: row?.id as string, vaultItemId };
+  }
+
+  it("the same mail delivered twice (same Message-ID) is one event; the duplicate is counted", async () => {
+    const { automationId, mailboxId } = await automationOn("dupes@acme.test");
+    await send("dupes@acme.test", { subject: "Order 2001", messageId: "<order-2001@shop.example>" });
+    await send("dupes@acme.test", { subject: "Order 2001", messageId: "<order-2001@shop.example>" });
+    await pollNow(mailboxId);
+    const events = await eventsOf(mailboxId);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ external_id: "<order-2001@shop.example>", duplicate_count: 1 });
+    expect((await audits("mail.received", mailboxId)).map((a) => a.metadata)).toEqual([
+      { mailboxId, automationId, count: 1, skipped: 0, duplicates: 1 },
+    ]);
+    // Polling again reads nothing new.
+    await pollNow(mailboxId);
+    expect(await eventsOf(mailboxId)).toHaveLength(1);
+    expect((await mailboxRow(automationId))?.last_new_count).toBe(0);
+  });
+
+  it("a reply carries the first mail's thread key and 21 posts it as a follow-up in the same thread", async () => {
+    const { mailboxId } = await automationOn("threads@acme.test");
+    await send("threads@acme.test", { subject: "Order 3001", messageId: "<order-3001@shop.example>" });
+    await pollNow(mailboxId);
+    await drainInbound();
+    await send("threads@acme.test", {
+      subject: "Re: Order 3001",
+      text: "Update: the truck is late.",
+      messageId: "<order-3001-re@shop.example>",
+      headers: { "In-Reply-To": "<order-3001@shop.example>" },
+    });
+    await pollNow(mailboxId);
+    await drainInbound();
+    const [first, reply] = await eventsOf(mailboxId);
+    expect(first).toMatchObject({ thread_key: "<order-3001@shop.example>" });
+    expect(reply).toMatchObject({
+      external_id: "<order-3001-re@shop.example>",
+      thread_key: "<order-3001@shop.example>",
+      result: "accepted",
+    });
+    const replyMessage = (
+      await s.su.query("select thread_id, body from app.messages where id = $1", [reply?.message_id])
+    ).rows[0] as Json;
+    expect(replyMessage.thread_id).toBe(first?.message_id);
+    expect(replyMessage.body).toContain("Follow-up");
+  });
+
+  it("auto-replies, bulk mail, mail from the mailbox itself and mail with our own header are skipped and counted", async () => {
+    const { automationId, mailboxId } = await automationOn("loops@acme.test");
+    await send("loops@acme.test", {
+      messageId: "<ooo@shop.example>",
+      headers: { "Auto-Submitted": "auto-replied" },
+    });
+    await send("loops@acme.test", { messageId: "<news@shop.example>", headers: { Precedence: "bulk" } });
+    await gm.sendMail({
+      from: "Ops <loops@acme.test>",
+      to: "loops@acme.test",
+      subject: "Sent by this mailbox",
+      text: "self",
+      messageId: "<self@acme.test>",
+    });
+    await send("loops@acme.test", {
+      messageId: "<own@ocw.example>",
+      headers: { "X-OCW-Automation-Run": randomUUID() },
+    });
+    await send("loops@acme.test", {
+      messageId: "<human@shop.example>",
+      headers: { "Auto-Submitted": "no" },
+    });
+    await pollNow(mailboxId);
+    const events = await eventsOf(mailboxId);
+    expect(events.map((e) => e.external_id)).toEqual(["<human@shop.example>"]);
+    expect((await audits("mail.received", mailboxId)).map((a) => a.metadata)).toEqual([
+      { mailboxId, automationId, count: 1, skipped: 4, duplicates: 0 },
+    ]);
+    // The cursor moved past the skipped mail: nothing is read again.
+    await pollNow(mailboxId);
+    expect(await eventsOf(mailboxId)).toHaveLength(1);
+  });
+
+  it("a mail without a Message-ID is keyed by its UIDVALIDITY:UID hash, idempotent across re-polls", async () => {
+    const { mailboxId } = await automationOn("noid@acme.test");
+    await appendTo(
+      "noid@acme.test",
+      "INBOX",
+      rawMail(
+        { From: "orders@shop.example", To: "noid@acme.test", Subject: "No id" },
+        "An order without an id.",
+      ),
+    );
+    await pollNow(mailboxId);
+    const events = await eventsOf(mailboxId);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.external_id).toMatch(/^uid:[0-9a-f]{64}$/);
+    expect(events[0]?.thread_key).toBeNull();
+    // The cursor goes back one message (a crashed poll that stored but did not advance): the same key, no new event.
+    await s.su.query("update app.mailboxes set last_uid = last_uid - 1 where id = $1", [mailboxId]);
+    await pollNow(mailboxId);
+    const again = await eventsOf(mailboxId);
+    expect(again).toHaveLength(1);
+    expect(again[0]).toMatchObject({ external_id: events[0]?.external_id, duplicate_count: 1 });
+  });
+
+  it("a changed UIDVALIDITY (the folder recreated) resets the cursor to the newest message without reprocessing", async () => {
+    await asMailUser("validity@acme.test", async (c) => {
+      await c.mailboxCreate("Orders");
+    });
+    const { automationId, mailboxId } = await automationOn("validity@acme.test", { folder: "Orders" });
+    const before = await mailboxRow(automationId);
+    expect(before).toMatchObject({ status: "active", last_uid: "0" });
+    await appendTo("validity@acme.test", "Orders", rawMail({ "Message-ID": "<v1@shop.example>" }, "first"));
+    await pollNow(mailboxId);
+    expect((await eventsOf(mailboxId)).map((e) => e.external_id)).toEqual(["<v1@shop.example>"]);
+    const validity = (await mailboxRow(automationId))?.uid_validity as string;
+
+    // GreenMail stamps UIDVALIDITY in seconds: the recreated folder must be at least one second younger.
+    await new Promise((r) => setTimeout(r, 1_100));
+    await asMailUser("validity@acme.test", async (c) => {
+      await c.mailboxDelete("Orders");
+      await c.mailboxCreate("Orders");
+    });
+    for (const id of ["v2", "v3"]) {
+      await appendTo("validity@acme.test", "Orders", rawMail({ "Message-ID": `<${id}@shop.example>` }, id));
+    }
+    await pollNow(mailboxId);
+    const reset = await mailboxRow(automationId);
+    expect(reset?.uid_validity).not.toBe(validity);
+    expect(reset).toMatchObject({ status: "active", last_uid: "2" });
+    expect((await eventsOf(mailboxId)).map((e) => e.external_id)).toEqual(["<v1@shop.example>"]);
+
+    await appendTo("validity@acme.test", "Orders", rawMail({ "Message-ID": "<v4@shop.example>" }, "fourth"));
+    await pollNow(mailboxId);
+    expect((await eventsOf(mailboxId)).map((e) => e.external_id)).toEqual([
+      "<v1@shop.example>",
+      "<v4@shop.example>",
+    ]);
   });
 });
