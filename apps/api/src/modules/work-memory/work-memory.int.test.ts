@@ -667,7 +667,7 @@ describe("consent, cost, repetition and audience", () => {
 
 // ---------------------------------------------------------------- 07.6 review C fixes
 
-describe("a session summary never stays in `writing` (07.6 review C ME-01)", () => {
+describe("recovery and taint of a session summary (07.6 review C ME-01, LO-04)", () => {
   /** A finished session of Ana in Billing with one edited file (automatic proposals are off for her here). */
   async function finished(title: string): Promise<string> {
     const id = await startSession(ana, device, billingRepo, { title });
@@ -725,6 +725,27 @@ describe("a session summary never stays in `writing` (07.6 review C ME-01)", () 
     expect((await propose(ana, s)).status).toBe(202);
     expect(await drain()).toBe(1);
     expect(await ok(memoryOf(ana, s))).toMatchObject({ status: "pending" });
+  });
+
+  it("a summary over tool output is flagged as untrusted for its approver; one without tools is not", async () => {
+    const taintOf = async (sessionId: string) => {
+      const approvalId = (await ok(memoryOf(ana, sessionId))).proposalId as string;
+      const r = await su.query(
+        `select p.tainted from app.memory_proposals p join app.approval_requests a on a.resource_id = p.id
+          where a.id = $1`,
+        [approvalId],
+      );
+      return r.rows[0]?.tainted as boolean;
+    };
+    // s1's transcript has an Edit tool call; s2's last proposal covers only a restart with a prompt and an answer.
+    expect(await taintOf(s1)).toBe(true);
+    const s2 = (
+      await su.query(
+        "select id from app.work_sessions where title = 'Tax rounding' and created_by = $1 limit 1",
+        [anaId],
+      )
+    ).rows[0]?.id as string;
+    expect(await taintOf(s2)).toBe(false);
   });
 });
 

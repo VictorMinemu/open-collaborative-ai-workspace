@@ -49,7 +49,14 @@ import { ensureToolScope, type LoadedScope, liveFileCount, loadScope, resolveToo
  */
 export type MemoryProposalOrigin =
   | { kind: "agent_turn"; eventId: string; agentId: string }
-  | { kind: "system"; source: "work_session"; workSessionId: string; requestedForUserId: string };
+  | {
+      kind: "system";
+      source: "work_session";
+      workSessionId: string;
+      requestedForUserId: string;
+      /** The content came from untrusted input (a session's tool output): the approver sees the warning. */
+      tainted: boolean;
+    };
 
 export interface CreateMemoryProposalInput {
   origin: MemoryProposalOrigin;
@@ -508,7 +515,7 @@ async function createSystemProposal(
           contentSha256: sha256Hex(input.content),
           findings: scan.findings as unknown as Array<Record<string, unknown>>,
           readerCount,
-          tainted: false,
+          tainted: origin.tainted,
           reason,
           requestedByAgentId: null,
           requestedForUserId: human,

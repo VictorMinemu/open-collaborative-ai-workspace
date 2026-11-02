@@ -107,6 +107,11 @@ export interface SessionInput {
   lastSeq: number;
   /** Nothing happened after `sinceSeq`. */
   empty: boolean;
+  /**
+   * A tool ran in the covered range: its output (files, web pages, MCP results) shaped what the session said, so the
+   * proposal is tainted like an agent turn that read untrusted content (07.6 review C LO-04).
+   */
+  usedTools: boolean;
 }
 
 const cap = (s: string, max: number) => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
@@ -146,7 +151,8 @@ export function buildSessionInput(
 ): SessionInput {
   const since = o.sinceSeq ?? 0;
   const fresh = [...rows].filter((r) => r.seq > since).sort((a, b) => a.seq - b.seq);
-  if (fresh.length === 0) return { text: "", lastSeq: since, empty: true };
+  if (fresh.length === 0) return { text: "", lastSeq: since, empty: true, usedTools: false };
+  const usedTools = fresh.some((r) => r.kind === "tool");
   const lastSeq = fresh[fresh.length - 1]?.seq ?? since;
   const lastChanges = fresh.filter((r) => r.kind === "changes").at(-1);
   const head = [`Session: ${cap(toRepoRelative(o.title, o.repoName), SUMMARY_TITLE_MAX)}`];
@@ -167,7 +173,7 @@ export function buildSessionInput(
     kept.unshift(line);
     used += line.length + 2;
   }
-  return { text: [headText, ...kept].join("\n\n"), lastSeq, empty: false };
+  return { text: [headText, ...kept].join("\n\n"), lastSeq, empty: false, usedTools };
 }
 
 /** The stream events a summary reads (and that count as new work): prompts that ran, messages, tools, changes. */
@@ -236,7 +242,7 @@ export async function collectSessionInput(
     .innerJoin(projects, eq(projects.id, workSessions.projectId))
     .where(eq(workSessions.id, sessionId))
     .limit(1);
-  if (!s) return { text: "", lastSeq: sinceSeq ?? 0, empty: true };
+  if (!s) return { text: "", lastSeq: sinceSeq ?? 0, empty: true, usedTools: false };
   const events = await tx
     .select({ seq: streamEvents.seq, type: streamEvents.type, payload: streamEvents.payload })
     .from(streamEvents)
@@ -618,7 +624,13 @@ export async function summarizeSession(
 
   const now = new Date();
   const proposal: CreateMemoryProposalInput = {
-    origin: { kind: "system", source: "work_session", workSessionId, requestedForUserId: owner },
+    origin: {
+      kind: "system",
+      source: "work_session",
+      workSessionId,
+      requestedForUserId: owner,
+      tainted: prepared.input.usedTools,
+    },
     scope: prepared.scopeId,
     path: summaryPath(s.title, now),
     op: "create",

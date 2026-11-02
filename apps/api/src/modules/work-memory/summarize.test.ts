@@ -73,6 +73,12 @@ describe("buildSessionInput", () => {
       ].join("\n\n"),
     );
     expect(input.text).not.toMatch(/\/Users\/|C:\\/);
+    expect(input.usedTools).toBe(true);
+  });
+
+  it("flags a range in which a tool ran (its output is untrusted, 07.6 review C LO-04)", () => {
+    expect(buildSessionInput(rows, { ...base, sinceSeq: 6 }).usedTools).toBe(false);
+    expect(buildSessionInput(rows, { ...base, sinceSeq: 4 }).usedTools).toBe(true);
   });
 
   it("reads only what happened after sinceSeq, and is empty when nothing did", () => {
@@ -81,8 +87,13 @@ describe("buildSessionInput", () => {
     expect(later.text).not.toContain("Prompt:");
     expect(later.text).toContain("Assistant:");
     const none = buildSessionInput(rows, { ...base, sinceSeq: 9 });
-    expect(none).toEqual({ text: "", lastSeq: 9, empty: true });
-    expect(buildSessionInput([], { ...base, sinceSeq: null })).toEqual({ text: "", lastSeq: 0, empty: true });
+    expect(none).toEqual({ text: "", lastSeq: 9, empty: true, usedTools: false });
+    expect(buildSessionInput([], { ...base, sinceSeq: null })).toEqual({
+      text: "",
+      lastSeq: 0,
+      empty: true,
+      usedTools: false,
+    });
   });
 
   it("keeps the newest content within 24 000 characters", () => {
