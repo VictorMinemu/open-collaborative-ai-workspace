@@ -301,6 +301,24 @@ export async function runAnchorTrigger(
 }
 
 /**
+ * Locks a run, then its automation (`FOR UPDATE`): the order every writer of both rows takes them in (the fire, the
+ * tick, the no-reply sweep, the reply), always before any stream append (07.6 review A MD-01).
+ */
+export async function lockRunAndAutomation(tx: Tx, runId: string): Promise<void> {
+  const [run] = await tx
+    .select({ automationId: automationRuns.automationId })
+    .from(automationRuns)
+    .where(eq(automationRuns.id, runId))
+    .for("update");
+  if (!run) return;
+  await tx
+    .select({ id: automations.id })
+    .from(automations)
+    .where(eq(automations.id, run.automationId))
+    .for("update");
+}
+
+/**
  * The first accepted reply to a run's anchor (P-03), in the reply's transaction: `queued | delivered → answered` (once:
  * any other state is left as it is), the automation's failure streak reset (the breaker counts only failures in a
  * row), the run card set to `succeeded` / "Done", `automation_run.updated` to the run-as person and

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { BROWSER_TOOL_NAMES, MAX_SANDBOX_CALLS_PER_TURN, SANDBOX_TOOL_NAMES } from "@ocw/contracts";
+import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { FakeCellPlugin } from "../../../../../e2e/support/fake-cell-plugin";
 import {
@@ -817,5 +818,63 @@ describe("every target lands where the UI-SPEC shows it (P-08, R2)", () => {
         ).rows[0] as Json
       ).n,
     ).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------- 07.6 review A MD-01: one lock order
+
+describe("every writer of a run and its automation locks run → automation → streams (07.6 review A MD-01)", () => {
+  /** Waits until some backend of this database waits on a row lock. */
+  const lockWaiter = () =>
+    waitFor(async () => {
+      const r = await s.su.query(
+        "select 1 from pg_stat_activity where wait_event_type = 'Lock' and datname = current_database()",
+      );
+      return (r.rowCount ?? 0) > 0;
+    });
+
+  /**
+   * Stands in for a fire of another run of the same automation: it holds the automation's row lock, waits until `other`
+   * waits on a lock, then appends to the person's and the conversation's streams (what a fire does next). With one
+   * lock order `other` waits on the automation before touching a stream, so neither side deadlocks.
+   */
+  async function asConcurrentFire(automationId: string, other: () => Promise<unknown>) {
+    const fire = new pg.Client({ connectionString: s.stack.db.superuserUrl });
+    await fire.connect();
+    try {
+      await fire.query("begin");
+      await fire.query("set local lock_timeout = '5s'");
+      await fire.query("select 1 from app.automations where id = $1 for update", [automationId]);
+      const running = other();
+      await lockWaiter();
+      await fire.query("update app.streams set last_seq = last_seq where id = any($1::text[])", [
+        [`user:${s.victorId}`, `conv:${salesId}`],
+      ]);
+      await fire.query("commit");
+      return await running;
+    } finally {
+      await fire.end();
+    }
+  }
+
+  it("the no-reply sweep waits for the automation before any stream, so a concurrent fire never deadlocks with it", async () => {
+    const automationId = await createAutomation();
+    const runId = await runNow(automationId);
+    expect(await drain()).toBe(1);
+    const out = (await asConcurrentFire(automationId, () =>
+      tickOnce(core(), new Date(Date.now() + 16 * 60_000)),
+    )) as Awaited<ReturnType<typeof tickOnce>>;
+    expect(out.noReply).toBeGreaterThanOrEqual(1);
+    expect(await runRow(runId)).toMatchObject({ status: "no_reply" });
+  });
+
+  it("the bot's reply to a run waits for the automation before posting, so a concurrent fire never deadlocks with it", async () => {
+    const automationId = await createAutomation();
+    const runId = await runNow(automationId);
+    expect(await drain()).toBe(1);
+    const [ev] = (await runEvents(runId)) as [Json];
+    const res = (await asConcurrentFire(automationId, () => replyTo(ev))) as Res;
+    expect(res.status).toBe(200);
+    expect(await runRow(runId)).toMatchObject({ status: "answered" });
   });
 });

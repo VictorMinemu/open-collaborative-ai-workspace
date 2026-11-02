@@ -138,7 +138,9 @@ async function markNoReply(
     const [run] = await tx.select().from(automationRuns).where(eq(automationRuns.id, runId)).for("update");
     if (run?.status !== "delivered" || !run.deliveredAt) return false;
     if (new Date(run.deliveredAt).getTime() >= before.getTime()) return false;
-    const [a] = await tx.select().from(automations).where(eq(automations.id, run.automationId)).limit(1);
+    // Run, then its automation, then any stream: the one lock order of every writer (fire, tick, reply), so the
+    // breaker's update below never waits on a fire while this holds the conversation's stream (07.6 review A MD-01).
+    const [a] = await tx.select().from(automations).where(eq(automations.id, run.automationId)).for("update");
     if (!a) return false;
     await tx
       .update(automationRuns)
