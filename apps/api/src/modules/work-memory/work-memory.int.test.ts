@@ -587,6 +587,30 @@ describe("consent, cost, repetition and audience", () => {
     expect(errorCode(refused)).toBe("not_session_owner");
   });
 
+  it("the device owner outside the project reads the state without the project's name or id (07.10 D-14)", async () => {
+    // Marta's session on Ana's MacBook in Billing; then Ana leaves Billing and reads it only as the device owner (D-11).
+    const s6 = await startSession(marta, device, billingRepo, { title: "Marta on the MacBook" });
+    await turn(marta, s6, "Check the invoices", "Checked.");
+    await complete(marta, s6);
+    await drain();
+    expect(await ok(memoryOf(marta, s6))).toMatchObject({ unit: { id: billing.unitId, name: "Billing" } });
+
+    await ok(admin.request("DELETE", `/api/v1/units/${billing.unitId}/members/${anaId}`));
+    try {
+      const m = await ok(memoryOf(ana, s6));
+      expect(m).toMatchObject({ status: "none", unit: null, canPropose: false });
+      for (const secret of ["Billing", billing.unitId]) {
+        expect(JSON.stringify(m), `memory carried "${secret}"`).not.toContain(secret);
+      }
+      // The creator still reads it named (D-12).
+      expect(await ok(memoryOf(marta, s6))).toMatchObject({ unit: { id: billing.unitId, name: "Billing" } });
+    } finally {
+      await ok(
+        admin.request("POST", `/api/v1/units/${billing.unitId}/members`, { userId: anaId, role: "member" }),
+      );
+    }
+  });
+
   it("organization B: every session route is 404 and its preferences are its own", async () => {
     await moveToOrgB(eveId);
     expect((await memoryOf(eve, s1)).status).toBe(404);

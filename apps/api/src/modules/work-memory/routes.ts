@@ -2,6 +2,7 @@ import { MemoryPreferences, SessionMemorySummary } from "@ocw/contracts";
 import {
   approvalRequests,
   orgMembers,
+  orgUnits,
   type Tx,
   workMemoryPrefs,
   workSessionMemory,
@@ -14,7 +15,7 @@ import { type App, authOf, type Core, tenant } from "../../core";
 import { conflict, forbidden } from "../../lib/errors";
 import type { ModelGateway } from "../model-gateway";
 import { AuthzDeniedError, type PermissionService } from "../organization";
-import { sessionFacts } from "../work-session";
+import { projectNamedFor, sessionFacts, type ViewerFilter } from "../work-session";
 import { canMapFor, unitForSession } from "./session-unit";
 import { coveredSeq, hasNewWork, nothingNew, summaryModelFor } from "./summarize";
 
@@ -70,6 +71,7 @@ async function summaryFor(
   deps: WorkMemoryRouteDeps,
   s: SessionRow,
   viewerId: string,
+  filter: ViewerFilter,
 ): Promise<SessionMemorySummary> {
   const [mem] = await tx
     .select()
@@ -128,6 +130,22 @@ async function summaryFor(
     }
   }
 
+  // 07.10 D-14: the team project is named to this viewer exactly as on the session list and detail (the creator, or
+  // whoever may open the project); anyone else who reads the session (the D-11 device owner outside it) gets no unit
+  // and no decision note, which may quote it.
+  if (unit) {
+    const [row] = await tx
+      .select({ path: orgUnits.path })
+      .from(orgUnits)
+      .where(eq(orgUnits.id, unit.id))
+      .limit(1);
+    const project = { id: unit.id, name: unit.name, path: row?.path ?? [] };
+    if (!(await projectNamedFor(tx, { viewerId, createdBy: s.createdBy, project, filter }))) {
+      unit = null;
+      decisionNote = null;
+    }
+  }
+
   const model = isOwner ? await summaryModelFor(tx, deps.gateway, viewerId) : null;
   return {
     status,
@@ -155,7 +173,9 @@ export function registerWorkMemoryRoutes(app: App, deps: WorkMemoryRouteDeps): v
     async (req) =>
       core.db.withTenant(tenant(req), async (tx) => {
         const s = await readable(req, tx, perms, req.params.id);
-        return summaryFor(tx, deps, s, authOf(req).userId);
+        return summaryFor(tx, deps, s, authOf(req).userId, (items, permission, toResource) =>
+          perms.filter(req, tx, items, permission, toResource),
+        );
       }),
   );
 
