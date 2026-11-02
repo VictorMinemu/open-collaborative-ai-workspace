@@ -1213,6 +1213,21 @@ describe("AgentCardView: the automation proposal card (07.6-15, AUTO-03, UI-SPEC
     expect(html).toMatch(/data-testid="agent-card-open"[^>]*>[\s\S]*?Edit/);
   });
 
+  it("short one-line instructions are still the full-width block value (UI-SPEC Surface 5), never a grid cell", () => {
+    const short = "Every Friday, summarise this week's closed deals: total, top 3 accounts, anything stuck.";
+    const base = proposalCard();
+    const html = renderProposal(
+      proposalCard({
+        fields: base.fields.map((f) => (f.label === "Instructions" ? { ...f, value: short } : f)),
+      }),
+    );
+    const escaped = short.replace(/'/g, "&#x27;");
+    const grid = html.slice(html.indexOf('data-testid="agent-card-fields"'));
+    expect(grid.slice(0, grid.indexOf("</dl>"))).not.toContain(escaped);
+    expect(html).toContain('data-testid="agent-card-block-value"');
+    expect(html.slice(html.indexOf('data-testid="agent-card-block-value"'))).toContain(escaped);
+  });
+
   it("pending, for everyone else: only the person it runs as can confirm; no buttons, no Edit", () => {
     const html = renderProposal(proposalCard({ viewerCan: [] }), OTHER);
     expect(textOf(html, "agent-card-automation-readonly")).toBe(

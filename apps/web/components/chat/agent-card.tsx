@@ -1787,8 +1787,10 @@ function AutomationProposalCard({
       : null;
   const showButtons = pending && requester && mayDecide;
   const readonly = pending && known && !showButtons;
-  const inline = card.fields.filter((f) => !isBlock(f.value));
-  const blocks = card.fields.filter((f) => isBlock(f.value));
+  // The standing order is always the full-width block (UI-SPEC Surface 5), however short.
+  const asBlock = (f: AgentCard["fields"][number]) => f.label === "Instructions" || isBlock(f.value);
+  const inline = card.fields.filter((f) => !asBlock(f));
+  const blocks = card.fields.filter(asBlock);
 
   const onDecided = (outcome: "approved" | "denied", decided: AgentCard) => {
     const status = decided.approval?.status;
