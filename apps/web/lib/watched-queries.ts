@@ -332,6 +332,11 @@ export function watchRefusal(
       case "agent_not_member":
       case "agent_cannot_post":
         return { at: "bot", text: `Pick a bot that's a member of #${ctx.channel}` };
+      case "version_conflict":
+        return {
+          at: "form",
+          text: "This watch changed since you opened it. Close it and open it again to see the changes.",
+        };
       default:
         break;
     }

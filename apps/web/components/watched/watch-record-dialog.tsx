@@ -108,13 +108,52 @@ export function defaultConnector(options: WatchOptions | undefined): WatchOption
 
 type Errors = Partial<Record<"recordId" | "fields" | "bot" | "form", string>>;
 
+/** What the edit form holds when it is saved. */
+export interface WatchEditForm {
+  fields: WatchedField[];
+  interval: WatchedCheckInterval;
+  agentId: string;
+  /** "" = none. */
+  writeTool: string;
+  noteTool: string;
+}
+
+/**
+ * `PATCH /watched-records/:id`: only what differs from `opened` (the watch as the dialog opened it), at the version the
+ * editor saw. Never diffed against or versioned by a newer copy from a refetch: that would send the form's stale
+ * values over someone else's change with a version that matches, silently reverting it (07.6 review C ME-03); with
+ * the opened version the API answers 409 instead. Null: nothing changed.
+ */
+export function watchUpdateBody(
+  opened: WatchedRecord,
+  form: WatchEditForm,
+): UpdateWatchedRecordRequest | null {
+  const body: UpdateWatchedRecordRequest = { expectedVersion: opened.version };
+  const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+  if (
+    !same(
+      form.fields.map((f) => f.pointer),
+      opened.fields.map((f) => f.pointer),
+    )
+  )
+    body.fields = form.fields;
+  if (form.interval !== opened.checkIntervalMinutes) body.checkIntervalMinutes = form.interval;
+  if (form.agentId !== opened.agent.id) body.agentId = form.agentId;
+  if ((form.writeTool || null) !== opened.writeTool) body.writeTool = form.writeTool || null;
+  if ((form.noteTool || null) !== opened.noteTool) body.noteTool = form.noteTool || null;
+  return Object.keys(body).length === 1 ? null : body;
+}
+
 function WatchForm({
   card,
   mode = "new",
-  watch = null,
+  watch: live = null,
   onStopWatching,
   onDone,
 }: Omit<WatchRecordDialogProps, "open" | "onOpenChange"> & { onDone: () => void }) {
+  // The watch as the dialog opened it: the form starts from it and saves against its version. The live entry refetches
+  // on every `watched_record.updated` frame; a concurrent edit then surfaces as a 409, never as a silent revert (ME-03).
+  const [watch] = useState(() => live);
   const edit = mode === "edit" && watch !== null;
   const uid = useId();
   const id = (k: string) => `${uid}-${k}`;
@@ -254,20 +293,14 @@ function WatchForm({
       else setErrors({ [r.at]: r.text });
     };
     if (edit && watch) {
-      const body: UpdateWatchedRecordRequest = { expectedVersion: watch.version };
-      const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
-      if (
-        !same(
-          fields.map((f) => f.pointer),
-          watch.fields.map((f) => f.pointer),
-        )
-      )
-        body.fields = fields;
-      if (interval !== watch.checkIntervalMinutes) body.checkIntervalMinutes = interval;
-      if (effectiveAgentId !== watch.agent.id) body.agentId = effectiveAgentId;
-      if ((writeTool || null) !== watch.writeTool) body.writeTool = writeTool || null;
-      if ((noteTool || null) !== watch.noteTool) body.noteTool = noteTool || null;
-      if (Object.keys(body).length === 1) {
+      const body = watchUpdateBody(watch, {
+        fields,
+        interval,
+        agentId: effectiveAgentId,
+        writeTool,
+        noteTool,
+      });
+      if (!body) {
         onDone();
         return;
       }
