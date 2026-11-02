@@ -170,7 +170,9 @@ export async function main(argv, deps = {}) {
   must(run, "up", ["up", "-d", "--wait", "postgres", "redis", "garage"]);
   step("migrate (database roles)");
   must(run, "migrate", ["run", "--rm", "migrate"]);
-  step(`dropping schemas app, auth, drizzle, pgboss and restoring ${DB_DUMP} as ${MIGRATOR} (one transaction)`);
+  step(
+    `dropping schemas app, auth, drizzle, pgboss and restoring ${DB_DUMP} as ${MIGRATOR} (one transaction)`,
+  );
   must(
     run,
     "drop schemas",
