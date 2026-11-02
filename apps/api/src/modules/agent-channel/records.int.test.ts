@@ -313,3 +313,175 @@ describe("tracer: Ops helper sets SO-10442 to Shipped from the card thread and t
     expect(changes.rows[0].n).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------- Task 2: never overwrite
+
+describe("never overwrite: a change made elsewhere is reported and kept, the bot's update refused", () => {
+  /** Runs `hook` on every tool call the fake ERP receives, before it handles it (restored after the test). */
+  function onErpCall(hook: (c: { name: string; arguments: Json }) => void): () => void {
+    const calls = erp.state.calls as Array<{ name: string; arguments: Json }>;
+    const push = calls.push;
+    calls.push = (...items) => {
+      for (const c of items) hook(c);
+      return push.apply(calls, items);
+    };
+    return () => {
+      calls.push = push;
+    };
+  }
+
+  const notSaved = async (rootId: string) => {
+    const replies = await botReplies(rootId);
+    expect(replies).toHaveLength(1);
+    const reply = replies[0] as Json;
+    expect(reply).toMatchObject({ authorId: opsId, threadId: rootId });
+    expect(reply.card).toMatchObject({
+      kind: "report",
+      status: "failed",
+      statusLabel: "Not saved",
+      platformOwned: true,
+      title: "SO-10442 changed in ERP, so Ops helper's update wasn't saved",
+    });
+    return reply.card as Json;
+  };
+
+  it("SO-10442's delivery date changed in the ERP after the check: 409 record_changed, nothing written, a Not saved card, the snapshot moves", async () => {
+    const { card, watched } = await freshWatch("EXP-0043 Pump order changed elsewhere");
+    const mutated = record();
+    mutated.delivery_date = "2026-10-20";
+    mutated.updated_at = "2026-10-05T10:00:00.000Z";
+    const { eventId } = await mention(s.victor, card.messageId);
+
+    const r = await update(eventId, { "/status": "Shipped" });
+    expect(r.status).toBe(409);
+    expect(r.body).toEqual({
+      ok: false,
+      code: "record_changed",
+      sentence:
+        "The record changed in ERP since the last check, so nothing was written. A card with the new values is in the " +
+        "thread. Tell Víctor Ruiz and ask whether to apply the update to the new values.",
+    });
+    expect(callsOf("update_record")).toEqual([]);
+    expect(callsOf("add_note")).toEqual([]);
+    expect(record()).toMatchObject({ status: "Confirmed", delivery_date: "2026-10-20" });
+
+    const c = await notSaved(card.messageId);
+    expect(c.notices).toEqual([
+      { tone: "neutral", text: "Someone changed it in ERP after the last check. Nothing was overwritten." },
+      { tone: "neutral", text: "Ask Ops helper again with the new values." },
+    ]);
+    expect(c.fields[0]).toEqual({ label: "Delivery date", value: "2026-10-14 → 2026-10-20" });
+    expect(c.fields[1]).toMatchObject({ label: "Detected" });
+    expect(c.fields[1].value).toMatch(/ · before an update$/u);
+    expect(c.fields).toHaveLength(2);
+
+    const after = await row(watched.id);
+    expect(after.snapshot).toMatchObject({ "/status": "Confirmed", "/delivery_date": "2026-10-20" });
+    expect(after.last_status).toBe("changed");
+    expect(after.last_written_hash).toBeNull();
+    const changes = (
+      await s.su.query("select source from app.watched_record_changes where watched_record_id = $1", [
+        watched.id,
+      ])
+    ).rows;
+    expect(changes).toEqual([{ source: "write" }]);
+    const refusedAudit = (await auditRows(s, s.orgA, ["watched_record.write_refused"])).filter(
+      (a) => a.resource_id === watched.id,
+    );
+    expect(refusedAudit).toHaveLength(1);
+    expect(refusedAudit[0]?.metadata).toMatchObject({
+      code: "record_changed",
+      by: "snapshot",
+      fieldCount: 1,
+    });
+    expect(JSON.stringify(refusedAudit)).not.toMatch(/SO-10442|2026-10-20|Shipped/u);
+    const toolCall = (
+      await s.su.query("select status from app.agent_tool_calls where event_id = $1 and tool = $2", [
+        eventId,
+        TOOL,
+      ])
+    ).rows;
+    expect(toolCall).toEqual([{ status: "blocked" }]);
+
+    // Asked again, the bot's update applies to the new values (the snapshot is the new baseline).
+    const again = await mention(s.victor, card.messageId);
+    const ok2 = await update(again.eventId, { "/status": "Shipped" });
+    expect(ok2.status, JSON.stringify(ok2.body)).toBe(200);
+    expect(record()).toMatchObject({ status: "Shipped", delivery_date: "2026-10-20" });
+  });
+
+  it("the ERP changes between the re-read and the write (its expectedUpdatedAt guard refuses): the same 409 and Not saved card", async () => {
+    const { card, watched } = await freshWatch("EXP-0044 Pump order raced in the ERP");
+    const { eventId } = await mention(s.victor, card.messageId);
+    const restore = onErpCall((c) => {
+      if (c.name !== "update_record") return;
+      const r = record();
+      r.delivery_date = "2026-10-21";
+      r.updated_at = "2026-10-06T08:00:00.000Z";
+    });
+    let r: { status: number; body: Json };
+    try {
+      r = await update(eventId, { "/status": "Shipped" });
+    } finally {
+      restore();
+    }
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe("record_changed");
+    expect(callsOf("update_record")).toHaveLength(1);
+    expect(record()).toMatchObject({ status: "Confirmed", delivery_date: "2026-10-21" });
+    expect(notes()).toEqual([]);
+
+    const c = await notSaved(card.messageId);
+    expect(c.fields[0]).toEqual({ label: "Delivery date", value: "2026-10-14 → 2026-10-21" });
+    const after = await row(watched.id);
+    expect(after.snapshot).toMatchObject({ "/delivery_date": "2026-10-21" });
+    // The write never happened: the in-progress marker is undone.
+    expect(after.last_written_hash).toBeNull();
+    const refusedAudit = (await auditRows(s, s.orgA, ["watched_record.write_refused"])).filter(
+      (a) => a.resource_id === watched.id,
+    );
+    expect(refusedAudit.at(-1)?.metadata).toMatchObject({ code: "record_changed", by: "erp" });
+  });
+
+  it("the note-back fails: the write stays, the bot hears it was updated, audited note_failed", async () => {
+    const { card, watched } = await freshWatch("EXP-0046 Pump order without notes");
+    const { eventId } = await mention(s.victor, card.messageId);
+    const restore = onErpCall((c) => {
+      if (c.name === "add_note") throw new Error("the ERP's notes are down");
+    });
+    let r: { status: number; body: Json };
+    try {
+      r = await update(eventId, { "/status": "Shipped" });
+    } finally {
+      restore();
+    }
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body).toEqual({ ok: true, code: null, sentence: "Updated SO-10442 in ERP." });
+    expect(record().status).toBe("Shipped");
+    expect(notes()).toEqual([]);
+    const after = await row(watched.id);
+    expect(after.last_written_hash).toBe(after.snapshot_hash);
+    const audits = (
+      await auditRows(s, s.orgA, [
+        "watched_record.written",
+        "watched_record.note_failed",
+        "watched_record.note_written",
+      ])
+    ).filter((a) => a.resource_id === watched.id);
+    expect(audits.map((a) => a.action)).toEqual(["watched_record.written", "watched_record.note_failed"]);
+    expect(audits[1]?.metadata.code).toEqual(expect.any(String));
+  });
+
+  it("a field the watch does not watch, or a nested pointer: 409 field_not_watched, the ERP is never called", async () => {
+    const { card } = await freshWatch("EXP-0047 Pump order, customer untouched");
+    const { eventId } = await mention(s.victor, card.messageId);
+    const before = erp.state.calls.length;
+    for (const changes of [{ "/customer": "Initech" }, { "/status/code": "S" }]) {
+      const r = await update(eventId, changes);
+      expect(r.status).toBe(409);
+      expect(r.body.code).toBe("field_not_watched");
+    }
+    expect(erp.state.calls.length).toBe(before);
+    expect(record().customer).toBe("Globex S.L.");
+  });
+});
