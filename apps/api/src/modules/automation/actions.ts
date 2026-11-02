@@ -13,9 +13,20 @@ export type AutomationRow = typeof automations.$inferSelect;
 export type RunRow = typeof automationRuns.$inferSelect;
 
 /** What firing one run produced: the run card posted (and maybe answered), or a skip / failure with its code. */
-export type FireResult =
+export type SettledFireResult =
   | { status: "delivered" | "answered"; anchorMessageId?: string }
   | { status: "skipped" | "failed"; reason: AutomationRunReason };
+
+/**
+ * A settled result, or `continue`: the kind has more to do after the runner's transaction commits (the run still
+ * `queued`), with no transaction open, e.g. a model call (07.6 review C HI-01: a slow provider must never hold a pooled
+ * connection or the run's and automation's row locks). `after` opens its own short transactions, settles the run itself
+ * when it succeeds, and returns a skip or failure for the runner to record (null: the run was settled meanwhile). If
+ * it throws, the runner fails the run like any other refused fire.
+ */
+export type FireResult =
+  | SettledFireResult
+  | { status: "continue"; after: () => Promise<SettledFireResult | null> };
 
 /**
  * Fires one run of an automation of its kind, inside the runner's transaction (`agent_turn` by 07.6-09, `digest` by

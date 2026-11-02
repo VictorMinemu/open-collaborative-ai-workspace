@@ -8,9 +8,9 @@ import type { ReportedUsage } from "./usage";
  * digest summary (07.6-13, opt-in, metered by the digest module). Like the title
  * call (titles.ts), it is one of the three doors to the AI SDK (guard.test.ts): the prompt comes only from
  * `buildModelMessages` (a non-chat purpose), the model only from the gateway (`ResolvedModel`, never a string id), no
- * tools, no retries, under a deadline. A session summary calls it outside any transaction; a digest summary inside its
- * run's fire transaction (the runner's, which holds only that run's and that digest's rows, on a serial worker), under a
- * shorter deadline. The caller meters it (`recordStandaloneUsage`).
+ * tools, no retries, under a deadline. Both callers call it outside any transaction (a slow provider never holds a
+ * pooled connection or a row lock; 07.6 review C HI-01), a digest summary under a shorter deadline. The caller meters
+ * it (`recordStandaloneUsage`) in its own transaction, before anything that could still fail.
  * Errors carry no prompt text out of here: the SDK's default error handler is silenced (P-10).
  */
 export async function runOneShot(

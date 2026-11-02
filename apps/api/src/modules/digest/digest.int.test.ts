@@ -278,7 +278,21 @@ async function moveToOrgB(userId: string): Promise<void> {
   await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, userId]);
 }
 
+/**
+ * Called (and awaited) when the API sends a digest summary to the model, before the request goes out (HI-01: proves
+ * what the database holds while the model writes). The gateway captures `fetch` when the stack is built, so the spy
+ * is installed first.
+ */
+let onDigestModelCall: (() => Promise<void>) | null = null;
+
 beforeAll(async () => {
+  const realFetch = globalThis.fetch;
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    if (onDigestModelCall && typeof init?.body === "string" && init.body.includes("<digest>")) {
+      await onDigestModelCall();
+    }
+    return realFetch(input, init);
+  });
   stack = await startAiStack();
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
@@ -799,6 +813,23 @@ describe("preview and test send (R6)", () => {
     expect(audit.rows[0]).toMatchObject({ actor_kind: "user", user_id: victorId });
     expect(await errorOf(sam.request("POST", "/api/v1/digest/test"), 409)).toBe("not_saved");
   });
+
+  it("a second test while one is still on its way is 409 test_in_progress at once, never a wait on the row (HI-01)", async () => {
+    const inFlight = (
+      await su.query(
+        `insert into app.automation_runs (organization_id, automation_id, trigger, status)
+         values ($1, $2, 'manual', 'queued') returning id`,
+        [orgId, digestId],
+      )
+    ).rows[0].id as string;
+    try {
+      const messages = await countOf("app.messages");
+      expect(await errorOf(victor.request("POST", "/api/v1/digest/test"), 409)).toBe("test_in_progress");
+      expect(await countOf("app.messages")).toBe(messages);
+    } finally {
+      await su.query("delete from app.automation_runs where id = $1", [inFlight]);
+    }
+  });
 });
 
 describe("the optional AI summary is the person's, metered, and sees only the list (P-16, T-07.6-13-02/03)", () => {
@@ -878,6 +909,58 @@ describe("the optional AI summary is the person's, metered, and sees only the li
         [orgId],
       );
     }
+  });
+
+  it("the model call holds no lock and no transaction: the digest and its run are free while the model writes (HI-01)", async () => {
+    await ok(save(settings({ summary: { enabled: true, modelRef: null } })));
+    await mention(sam, salesId, "@victor while the model writes");
+    const seen: Json[] = [];
+    onDigestModelCall = async () => {
+      const rows = async (q: string) => (await su.query(q, [digestId])).rows.length;
+      seen.push({
+        automationFree: await rows("select id from app.automations where id = $1 for update skip locked"),
+        queued: await rows(
+          "select id from app.automation_runs where automation_id = $1 and status = 'queued'",
+        ),
+        queuedFree: await rows(
+          "select id from app.automation_runs where automation_id = $1 and status = 'queued' for update skip locked",
+        ),
+      });
+    };
+    let run: Json;
+    try {
+      run = await fireDigest();
+    } finally {
+      onDigestModelCall = null;
+    }
+    expect(seen).toEqual([{ automationFree: 1, queued: 1, queuedFree: 1 }]);
+    expect(run).toMatchObject({ status: "answered", reason: null });
+    expect(await usageOf(run.id)).toHaveLength(1);
+  });
+
+  it("a post refused after the model answered still bills that call once; the run fails (HI-01, ADR-0018)", async () => {
+    await mention(sam, salesId, "@victor refused post");
+    const before = stack.fake.requests().length;
+    const post = vi
+      .spyOn(core().chatAgent, "postAgentMessageIn")
+      .mockRejectedValueOnce(new Error("refused by chat"));
+    let run: Json;
+    try {
+      run = await fireDigest();
+    } finally {
+      post.mockRestore();
+    }
+    expect(stack.fake.requests().length).toBe(before + 1);
+    expect(run).toMatchObject({ status: "failed", reason: "delivery_failed", anchor_message_id: null });
+    expect(await usageOf(run.id)).toEqual([
+      {
+        kind: "digest",
+        subject_id: run.id,
+        requester_user_id: victorId,
+        generation_id: null,
+        conversation_id: null,
+      },
+    ]);
   });
 
   it("summary off: no model call", async () => {
