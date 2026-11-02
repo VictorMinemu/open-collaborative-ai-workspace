@@ -279,7 +279,12 @@ interface PollOptions {
   now?: Date;
   egress?: EgressResolver;
   createClient?: ImapClientFactory;
+  /** The job's signal: the IMAP session ends when pg-boss gives up on the job (HI-01). */
+  signal?: AbortSignal;
 }
+
+/** How many mailboxes one worker polls at once: one slow server never holds every other organization's mail. */
+const POLL_CONCURRENCY = 6;
 
 /** Where a failure leaves the row: sign-in problems wait (30 minutes or a Keychain change), the rest keeps trying. */
 function failureOf(code: MailboxErrorCode | "key_not_usable" | "host_not_allowed"): PollOutcome {
@@ -341,6 +346,7 @@ export async function pollMailbox(
         targetOf(m, check.creds),
         (client, box) => readNewMail(client, box, { uidValidity: m.uidValidity, lastUid: m.lastUid }),
         opts.createClient,
+        opts.signal ? { signal: opts.signal } : {},
       );
       const address = check.creds.username.includes("@") ? check.creds.username : "";
       parsed = [];
@@ -349,6 +355,8 @@ export async function pollMailbox(
       }
       outcome = { ok: true, read, count: 0, skipped: 0, duplicates: 0, notStored: 0 };
     } catch (err) {
+      // Shutdown or pg-boss giving up is not the server's failure: nothing is recorded and the job ends.
+      if (opts.signal?.aborted) throw err;
       outcome = failureOf(mailErrorCode(err));
     }
   }
@@ -637,5 +645,7 @@ export function registerMailboxRoutes(app: App, core: Core, deps: AutomationSeam
     const queued = await mailboxTick(core);
     if (queued > 0) core.log.info({ queued }, "mailbox tick");
   });
-  core.jobs.work("mailbox.poll", (data) => pollMailbox(core, deps.perms, data));
+  core.jobs.work("mailbox.poll", (data, ctx) => pollMailbox(core, deps.perms, data, { signal: ctx.signal }), {
+    localConcurrency: POLL_CONCURRENCY,
+  });
 }

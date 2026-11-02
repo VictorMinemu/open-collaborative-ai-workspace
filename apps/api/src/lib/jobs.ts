@@ -75,8 +75,16 @@ export interface Jobs {
     data: JobData<Q>,
     opts?: SendOptions,
   ): Promise<string | null>;
-  /** Registers the queue's handler (call during module registration); it runs only when workers are on. */
-  work<Q extends QueueName>(queue: Q, handler: JobHandler<Q>, opts?: { batchSize?: number }): void;
+  /**
+   * Registers the queue's handler (call during module registration); it runs only when workers are on.
+   * `localConcurrency` is how many jobs of this queue one instance runs at once (default 1): a queue whose jobs wait on
+   * the network (a mail server, a model) needs more than one, so one slow job never holds every tenant's.
+   */
+  work<Q extends QueueName>(
+    queue: Q,
+    handler: JobHandler<Q>,
+    opts?: { batchSize?: number; localConcurrency?: number },
+  ): void;
   /** A global tick in UTC, applied at `start()` when workers are on. Per-automation schedules live in `app`. */
   schedule(queue: TickQueue, cron: string): void;
   /** Test helper: fetches and runs every available job of `queue` in-process, completing or failing each. */
@@ -120,8 +128,11 @@ export function createJobs(opts: {
   boss.on("error", (err) => log.error({ err }, "jobs: pg-boss error"));
   boss.on("warning", (w) => log.warn({ warning: w }, "jobs: pg-boss warning"));
 
-  // biome-ignore lint/suspicious/noExplicitAny: one registry for every queue; each entry is typed at `work()`.
-  const handlers = new Map<QueueName, { handler: JobHandler<any>; batchSize: number }>();
+  const handlers = new Map<
+    QueueName,
+    // biome-ignore lint/suspicious/noExplicitAny: one registry for every queue; each entry is typed at `work()`.
+    { handler: JobHandler<any>; batchSize: number; localConcurrency: number }
+  >();
   const ticks = new Map<TickQueue, string>();
   let started = false;
 
@@ -135,7 +146,8 @@ export function createJobs(opts: {
     const entry = handlers.get(queue);
     if (!entry) return;
     const schema = schemaOf(queue);
-    await boss.work(queue, { batchSize: entry.batchSize }, async (batch) => {
+    const opts = { batchSize: entry.batchSize, localConcurrency: entry.localConcurrency };
+    await boss.work(queue, opts, async (batch) => {
       for (const job of batch) {
         await entry.handler(schema.parse(job.data), { signal: job.signal, jobId: job.id });
       }
@@ -156,7 +168,11 @@ export function createJobs(opts: {
     work(queue, handler, workOpts = {}) {
       schemaOf(queue);
       if (handlers.has(queue)) throw new Error(`job queue ${queue} already has a handler`);
-      handlers.set(queue, { handler, batchSize: workOpts.batchSize ?? 1 });
+      handlers.set(queue, {
+        handler,
+        batchSize: workOpts.batchSize ?? 1,
+        localConcurrency: Math.max(1, workOpts.localConcurrency ?? 1),
+      });
       if (started && workers)
         void attach(queue).catch((err) => log.error({ err, queue }, "jobs: work failed"));
     },

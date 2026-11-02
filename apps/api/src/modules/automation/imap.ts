@@ -22,6 +22,27 @@ export type MailboxErrorCode = Extract<MailboxTestResult, { ok: false }>["code"]
 
 /** Connection budgets (the API waits for the baseline after a save and the test route answers inline). */
 export const IMAP_TIMEOUTS = { connectMs: 10_000, greetingMs: 10_000, socketMs: 30_000 } as const;
+/**
+ * The whole session's deadline (resolve, connect, sign in, EXAMINE, SEARCH, FETCH): the idle-socket timeout alone never
+ * fires against a server that answers one byte every few seconds (07.6 review A HI-01).
+ */
+export const IMAP_SESSION_MS = 60_000;
+
+/** A session ended by its deadline or by the job's signal: `unreachable` (its code is a network timeout's). */
+class SessionAborted extends Error {
+  readonly code = "ETIMEOUT";
+  constructor() {
+    super("mail session ended (deadline or shutdown)");
+    this.name = "SessionAborted";
+  }
+}
+
+export interface SessionOptions {
+  /** The job's signal: pg-boss aborts it when it gives up on the job or shuts down. */
+  signal?: AbortSignal;
+  /** The whole session's deadline (default `IMAP_SESSION_MS`). */
+  deadlineMs?: number;
+}
 /** New mails read per poll; more wait for the next minute's tick. */
 export const MAX_MAILS_PER_POLL = 50;
 /** The IMAPS port a host pattern without a port stands for. */
@@ -175,19 +196,59 @@ const defaultClient: ImapClientFactory = (options) => new ImapFlow(options);
 
 /**
  * Resolves the host through the egress guard, connects to the pinned address, signs in, opens `folder` read-only
- * (EXAMINE) and runs `fn`; the lock is released and the session logged out in every case.
+ * (EXAMINE) and runs `fn`; the lock is released and the session logged out in every case. The whole session ends at
+ * its deadline or when `opts.signal` aborts: the socket is closed and the call rejects as `unreachable`, so a slow or
+ * hostile server never holds a worker (07.6 review A HI-01).
  */
 export async function withMailbox<T>(
   egress: EgressResolver,
   target: MailboxTarget,
   fn: (client: ImapClient, box: MailboxObject) => Promise<T>,
   createClient: ImapClientFactory = defaultClient,
+  opts: SessionOptions = {},
+): Promise<T> {
+  const deadline = AbortSignal.timeout(opts.deadlineMs ?? IMAP_SESSION_MS);
+  const signal = opts.signal ? AbortSignal.any([opts.signal, deadline]) : deadline;
+  if (signal.aborted) throw new SessionAborted();
+  const live: { client: ImapClient | null } = { client: null };
+  let onAbort = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => {
+      reject(new SessionAborted());
+      try {
+        live.client?.close();
+      } catch {
+        // Already closed.
+      }
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  const work = session(egress, target, fn, createClient, live, signal);
+  // Whichever loses the race settles later; neither may become an unhandled rejection.
+  work.catch(() => {});
+  aborted.catch(() => {});
+  try {
+    return await Promise.race([work, aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+async function session<T>(
+  egress: EgressResolver,
+  target: MailboxTarget,
+  fn: (client: ImapClient, box: MailboxObject) => Promise<T>,
+  createClient: ImapClientFactory,
+  live: { client: ImapClient | null },
+  signal: AbortSignal,
 ): Promise<T> {
   const pinned = await resolveEgressAddress(egress, target.host, {
     port: target.port,
     privateAllow: target.privateAllow,
     timeoutMs: IMAP_TIMEOUTS.connectMs,
   });
+  // Ended while resolving: no connection is opened (the abort handler closes only a client it can see).
+  if (signal.aborted) throw new SessionAborted();
   const client = createClient(
     imapOptionsFor({
       pinned,
@@ -198,6 +259,7 @@ export async function withMailbox<T>(
       password: target.password,
     }),
   );
+  live.client = client;
   // ImapFlow also reports socket failures as 'error' events; the awaited call already rejects with them.
   client.on("error", () => {});
   try {
@@ -319,6 +381,7 @@ export async function tryMailbox(
   egress: EgressResolver,
   target: MailboxTarget,
   createClient: ImapClientFactory = defaultClient,
+  opts: SessionOptions = {},
 ): Promise<MailboxTestResult> {
   try {
     return await withMailbox(
@@ -326,6 +389,7 @@ export async function tryMailbox(
       target,
       async (_c, box) => ({ ok: true, messages: box.exists ?? 0 }),
       createClient,
+      opts,
     );
   } catch (err) {
     return { ok: false, code: mailErrorCode(err) };

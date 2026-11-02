@@ -291,6 +291,39 @@ describe("job runtime (pg-boss, 07.6-03)", () => {
       await Promise.all([a.stop(), b.stop()]);
     });
 
+    it("localConcurrency runs that many jobs of one queue at once in one instance (07.6 review A HI-01, MD-06)", async () => {
+      const { jobs } = jobsFor(tdb.appUrl, true);
+      let active = 0;
+      let peak = 0;
+      let release: () => void = () => {};
+      const gate = new Promise<void>((r) => {
+        release = r;
+      });
+      const done: string[] = [];
+      jobs.work(
+        "mailbox.poll",
+        async (data) => {
+          active++;
+          peak = Math.max(peak, active);
+          if (active === 3) release();
+          // A slow server: held until three run side by side (or 10 s, and then the peak says why).
+          await Promise.race([gate, new Promise((r) => setTimeout(r, 10_000))]);
+          active--;
+          done.push(data.mailboxId);
+        },
+        { localConcurrency: 3 },
+      );
+      await jobs.start();
+      const organizationId = randomUUID();
+      await db.withTenant({ organizationId }, async (tx) => {
+        for (let i = 0; i < 3; i++)
+          await jobs.sendInTx(tx, "mailbox.poll", { organizationId, mailboxId: randomUUID() });
+      });
+      await vi.waitFor(() => expect(done).toHaveLength(3), { timeout: 20_000, interval: 100 });
+      expect(peak).toBe(3);
+      await jobs.stop();
+    });
+
     it("a global cron registered by two instances ticks once per interval (pg-boss TestClock)", async () => {
       // TestClock attaches to the schema with DDL (its own clock table and job_now override), which ocw_app can never
       // run: these two instances connect as the schema's owner. Cron coordination does not depend on the role.
