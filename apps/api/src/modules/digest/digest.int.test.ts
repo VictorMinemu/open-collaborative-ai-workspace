@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { DigestView } from "@ocw/contracts";
+import { DigestPreview, DigestView } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { TEST_SETUP_TOKEN, TestClient } from "../../testing";
@@ -11,6 +11,7 @@ import {
   invite,
   linkRepo,
   pairDevice,
+  setAudience,
   settled,
   startSession,
 } from "../../testing-workzone";
@@ -58,6 +59,8 @@ let billing: { unitId: string; parentId: string };
 let billingTeam: string;
 /** The digest automation of Víctor (Task 1). */
 let digestId: string;
+/** The items of the tracer's digest (they must never come back). */
+const tracer: Record<string, string> = {};
 
 const deciders = new Set<string>();
 const core = () => stack.built.core;
@@ -68,6 +71,12 @@ async function ok(res: Promise<Res>, status = 200): Promise<Json> {
   if (r.status !== status) throw new Error(`expected ${status}, got ${r.status}: ${JSON.stringify(r.body)}`);
   return r.body as Json;
 }
+
+const errorOf = async (res: Promise<Res>, status: number) => {
+  const r = await res;
+  expect(r.status, JSON.stringify(r.body)).toBe(status);
+  return (r.body?.error as Json | undefined)?.code as string | undefined;
+};
 
 const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri"];
 const ALL = ["decisions", "follows", "mentions", "work_zone"];
@@ -87,6 +96,8 @@ const settings = (extra: Json = {}): Json => ({
 const view = async (as: TestClient = victor) =>
   DigestView.parse(await ok(as.request("GET", "/api/v1/digest")));
 const save = (body: Json, as: TestClient = victor) => as.request("PUT", "/api/v1/digest", body);
+const preview = async (body: Json = settings(), as: TestClient = victor) =>
+  DigestPreview.parse(await ok(as.request("POST", "/api/v1/digest/preview", body)));
 
 const digestRow = async () =>
   (
@@ -430,6 +441,7 @@ describe("Víctor saves a weekday 08:00 Madrid digest and receives it in his DM 
     const mentionId = await mention(sam, salesId, "@victor the totals look off, can you check?");
     const sessionId = await startSession(victor, victorDevice, victorRepo, { title: "Fix login redirect" });
     await setStatus(sessionId, "waiting_approval");
+    Object.assign(tracer, { approvalId, cardId, mentionId, sessionId });
     const modelCalls = stack.fake.requests().length;
 
     const run = await fireDigest();
@@ -494,5 +506,224 @@ describe("Víctor saves a weekday 08:00 Madrid digest and receives it in his DM 
       expect(text).not.toContain(leaked);
     // His view now says when it was last sent.
     expect((await view()).lastSentAt).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: exact and safe
+
+describe("the digest says exactly what Víctor can see now, once, and nothing when there is nothing (D-05, P-14)", () => {
+  it("nothing new with skip-empty on: nothing is sent and the run is skipped (nothing_new); off: a short Nothing new digest", async () => {
+    const skipped = await fireDigest();
+    expect(skipped).toMatchObject({ status: "skipped", reason: "nothing_new", anchor_message_id: null });
+    const audit = await su.query(
+      "select metadata from app.audit_events where action = 'automation.run_skipped' and resource_id = $1",
+      [skipped.id],
+    );
+    expect(audit.rows[0]?.metadata).toMatchObject({ reason: "nothing_new" });
+    expect(
+      await su.query("select 1 from app.messages where client_message_id = $1", [`digest:${skipped.id}`]),
+    ).toMatchObject({ rowCount: 0 });
+    // A skip with nothing new is not a failure (the breaker is untouched).
+    expect((await digestRow())[0]).toMatchObject({ status: "active", consecutive_failures: 0 });
+
+    await ok(save(settings({ skipEmpty: false })));
+    const sent = await fireDigest();
+    expect(sent).toMatchObject({ status: "answered" });
+    const body = (await messageById(sent.anchor_message_id)).body as string;
+    expect(body).toContain("Nothing new since your last digest.");
+    expect(body).not.toContain("**");
+    await ok(save(settings()));
+  });
+
+  it("only what happened since the last digest is listed: the tracer's items never come back", async () => {
+    const newer = await mention(sam, salesId, "@victor one more thing");
+    const p = await preview();
+    expect(p.empty).toBe(false);
+    expect(p.markdown).toContain(`(/chat/${salesId}?m=${newer})`);
+    expect(p.markdown).not.toContain(tracer.mentionId);
+    expect(p.markdown).not.toContain(tracer.approvalId);
+    expect(p.markdown).not.toContain(tracer.cardId);
+    expect(p.markdown).not.toContain(tracer.sessionId);
+    expect(p.markdown).toContain("**Unread mentions (1)**");
+    // Read in the inbox, it is not "unread" any more.
+    await ok(victor.request("POST", "/api/v1/notifications/read", { all: true }));
+    expect((await preview()).empty).toBe(true);
+  });
+
+  it("access lost before sending: removed from a channel, its followed card and its mention are gone", async () => {
+    const opsId = await channel("ops", [
+      { kind: "user", id: victorId },
+      { kind: "user", id: samId },
+      { kind: "agent", id: scoutId },
+    ]);
+    const cardId = await postCard(opsId, "Incident review");
+    await ok(victor.request("POST", `/api/v1/cards/${cardId}/follow`), 204);
+    await touchCard(cardId);
+    const mentionId = await mention(sam, opsId, "@victor ops needs you");
+    let p = await preview();
+    expect(p.markdown).toContain(`(/chat/${opsId}?m=${cardId})`);
+    expect(p.markdown).toContain(`(/chat/${opsId}?m=${mentionId})`);
+    expect(p.markdown).toContain("Incident review");
+
+    await ok(root.request("DELETE", `/api/v1/channels/${opsId}/members/user/${victorId}`));
+    p = await preview();
+    expect(p.markdown).not.toContain(opsId);
+    expect(p.markdown).not.toContain("Incident review");
+    expect(p.empty).toBe(true);
+  });
+
+  it("an unchecked section is not queried and not shown", async () => {
+    await pendingApproval("Delete the staging database");
+    const list = vi.spyOn(stack.built.approvals, "list");
+    try {
+      const p = await preview(settings({ sections: ["mentions", "follows"] }));
+      expect(list).not.toHaveBeenCalled();
+      expect(p.markdown).not.toContain("Waiting for you");
+      const q = await preview(settings({ sections: ["decisions"] }));
+      expect(list).toHaveBeenCalledTimes(1);
+      expect(q.markdown).toContain("**Waiting for you (1)**");
+      expect(q.markdown).toContain("Delete the staging database");
+    } finally {
+      list.mockRestore();
+    }
+    // A decider who lost the right stops seeing it (07.2's live rule).
+    deciders.delete(victorId);
+    try {
+      expect((await preview(settings({ sections: ["decisions"] }))).empty).toBe(true);
+    } finally {
+      deciders.add(victorId);
+    }
+  });
+});
+
+describe("Work Zone sessions only through app.work_session_access via the resolver (D-11)", () => {
+  const wz = async (body: Json = settings({ sections: ["work_zone"] })) =>
+    linked((await preview(body)).markdown, "/work-zone/");
+
+  it("Ana's ended session in Billing (project audience) is listed and named while Víctor reads it; owner audience hides it", async () => {
+    const s1 = await startSession(ana, anaDevice, billingRepo, { title: "Invoice rounding" });
+    await setStatus(s1, "completed");
+    const p = await preview(settings({ sections: ["work_zone"] }));
+    expect(linked(p.markdown, "/work-zone/")).toContain(s1);
+    expect(p.markdown).toContain(`[Invoice rounding](/work-zone/${s1}) · Billing · Ended`);
+
+    await setAudience(ana, s1, { kind: "owner" });
+    await setStatus(s1, "completed");
+    expect(await wz()).not.toContain(s1);
+    await setAudience(ana, s1, { kind: "project" });
+    await setStatus(s1, "completed");
+    expect(await wz()).toContain(s1);
+    tracer.billingSession = s1;
+  });
+
+  it("a waiting session he reads but may not decide (work_session.approve) is not listed as waiting for him", async () => {
+    const s2 = await startSession(ana, anaDevice, billingRepo, { title: "Pending deploy" });
+    await setStatus(s2, "waiting_approval");
+    // He reads it (the session's own route) …
+    await ok(victor.request("GET", `/api/v1/work-sessions/${s2}`));
+    // … but only Ana (creator, device owner) and admins decide it.
+    expect(await wz()).not.toContain(s2);
+    await setStatus(s2, "completed");
+    expect(await wz()).toContain(s2);
+  });
+
+  it("owner, project, teams and people audiences: the digest's set is the set GET /work-sessions returns to him", async () => {
+    const west = (
+      await ok(
+        root.request("POST", "/api/v1/units", {
+          kind: "team",
+          name: "Billing West",
+          parentId: billing.parentId,
+        }),
+      )
+    ).id as string;
+    await ok(root.request("POST", `/api/v1/units/${west}/members`, { userId: anaId }));
+    await ok(root.request("POST", `/api/v1/work-projects/${billing.unitId}/teams`, { unitId: west }));
+    const audiences: Array<[string, Parameters<typeof setAudience>[2]]> = [
+      ["owner", { kind: "owner" }],
+      ["project", { kind: "project" }],
+      ["teams-east", { kind: "teams", teamIds: [billingTeam] }],
+      ["teams-west", { kind: "teams", teamIds: [west] }],
+      ["people-victor", { kind: "people", userIds: [victorId] }],
+      ["people-ana", { kind: "people", userIds: [anaId] }],
+    ];
+    const made = new Map<string, string>();
+    for (const [name, audience] of audiences) {
+      const id = await startSession(ana, anaDevice, billingRepo, { title: `Audience ${name}` });
+      await setAudience(ana, id, audience);
+      made.set(name, id);
+    }
+    for (const id of made.values()) await setStatus(id, "completed");
+    const fixture = new Set(made.values());
+    const listed = ((await ok(victor.request("GET", "/api/v1/work-sessions"))).sessions as Json[])
+      .map((s) => s.id as string)
+      .filter((id) => fixture.has(id));
+    const digested = (await wz()).filter((id) => fixture.has(id));
+    expect(new Set(digested)).toEqual(new Set(listed));
+    // The rule, as the list states it: he is in the project and in Billing East, not in Billing West.
+    expect(listed).toEqual(
+      expect.arrayContaining([made.get("project"), made.get("teams-east"), made.get("people-victor")]),
+    );
+    for (const hidden of ["owner", "teams-west", "people-ana"])
+      expect(listed).not.toContain(made.get(hidden));
+  });
+
+  it("a session on his own device in a project he is not in is listed (device owner), without the project's name", async () => {
+    const portal = await createTeamProject(stack, root, { name: "Portal", members: [{ userId: samId }] });
+    const other = await connect(victor, "Víctor's Mini", "portal-web");
+    try {
+      await linkRepo(stack, {
+        organizationId: orgId,
+        unitId: portal.unitId,
+        projectId: other.repo,
+        deviceId: other.deviceId,
+        linkedBy: victorId,
+      });
+      await ok(
+        victor.request("PUT", `/api/v1/devices/${other.deviceId}/grants/user/${samId}`, {
+          maxMode: "default",
+        }),
+      );
+      const s3 = await startSession(sam, other.device, other.repo, { title: "Portal checkout" });
+      await setStatus(s3, "completed");
+      const p = await preview(settings({ sections: ["work_zone"] }));
+      expect(linked(p.markdown, "/work-zone/")).toContain(s3);
+      expect(p.markdown).toContain(`[Portal checkout](/work-zone/${s3}) · Ended`);
+      expect(p.markdown).not.toContain("Portal ·");
+    } finally {
+      await other.device.close().catch(() => {});
+    }
+  });
+
+  it("after Víctor leaves the project, its project-audience session is gone from his digest", async () => {
+    const s1 = tracer.billingSession as string;
+    await setStatus(s1, "completed");
+    expect(await wz()).toContain(s1);
+    // Billing East (assigned to the project) opens it to its people too (07.9 D-14): he leaves both.
+    await ok(root.request("DELETE", `/api/v1/units/${billing.unitId}/members/${victorId}`));
+    await ok(root.request("DELETE", `/api/v1/units/${billingTeam}/members/${victorId}`));
+    await setStatus(s1, "completed");
+    expect(await wz()).not.toContain(s1);
+    const listed = ((await ok(victor.request("GET", "/api/v1/work-sessions"))).sessions as Json[]).map(
+      (s) => s.id,
+    );
+    expect(listed).not.toContain(s1);
+  });
+});
+
+describe("bot choice rules (D-07, T-07.6-13-04)", () => {
+  it("only a bot he may DM: a team bot he cannot read or Sam's personal bot is 400 bot_not_readable; his own works", async () => {
+    expect(await errorOf(save(settings({ agentId: ledgerId })), 400)).toBe("bot_not_readable");
+    expect(await errorOf(save(settings({ agentId: samBotId })), 400)).toBe("bot_not_readable");
+    // An unknown id reads the same (no existence leak).
+    expect(await errorOf(save(settings({ agentId: randomUUID() })), 400)).toBe("bot_not_readable");
+    expect((await digestRow())[0]).toMatchObject({ agent_id: scoutId });
+    const personal = DigestView.parse(await ok(save(settings({ agentId: victorBotId }))));
+    expect(personal.settings?.agentId).toBe(victorBotId);
+    await ok(save(settings()));
+  });
+
+  it("a member with no bot gets bots: [] (the UI shows the create-bot box) and never another organization's digest", async () => {
+    expect(await view(eve)).toMatchObject({ settings: null, automationId: null, bots: [] });
   });
 });
