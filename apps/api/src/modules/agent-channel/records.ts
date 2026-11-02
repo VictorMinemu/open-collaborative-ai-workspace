@@ -85,6 +85,9 @@ const SENTENCES: Record<Code, (n: Names) => string> = {
     "it here first.",
   not_checked: (n) =>
     `${RECORD(n)} hasn't been checked yet, so there is nothing to compare with. Try again in a minute.`,
+  write_in_progress: (n) =>
+    `Another update of ${RECORD(n)} is being saved right now, so nothing was written. Tell ${n.person}, and ask ` +
+    "again in a moment if this update is still needed.",
   connector_error: (n) =>
     `${CONNECTOR(n)} didn't answer or refused the update, so nothing was saved. Tell ${n.person} and try again later.`,
   tainted: (n) =>

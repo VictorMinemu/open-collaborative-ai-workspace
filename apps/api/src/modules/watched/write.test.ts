@@ -53,8 +53,11 @@ function fakeIo(p: {
   write?: CallOutcome;
   note?: CallOutcome;
   begin?: boolean;
+  lease?: "ok" | "record_changed" | "write_in_progress";
 }) {
   const log: string[] = [];
+  /** The lease's own trail (kept apart so `log` shows only the record's calls). */
+  const leases: string[] = [];
   const writes: Array<Record<string, unknown>> = [];
   const notes: string[] = [];
   let reads = 0;
@@ -73,6 +76,13 @@ function fakeIo(p: {
       log.push("note");
       notes.push(text);
       return p.note ?? ok();
+    },
+    async lease() {
+      leases.push("lease");
+      return p.lease ?? "ok";
+    },
+    async release() {
+      leases.push("release");
     },
     async begin() {
       log.push("begin");
@@ -93,12 +103,40 @@ function fakeIo(p: {
       log.push(`noted:${isOk}:${code}`);
     },
   };
-  return { io, log, writes, notes };
+  return { io, log, writes, notes, leases };
 }
 
 const OPTS = { botName: "Ops helper", personName: "Víctor Ruiz", expectedUpdatedAt: true };
 
 describe("runCompareAndSet", () => {
+  it("HI-01: another write holds the record's lease: refused write_in_progress before any outside call", async () => {
+    const f = fakeIo({ records: [SEEN], lease: "write_in_progress" });
+    const out = await runCompareAndSet(f.io, row(), { "/status": "Shipped" }, OPTS);
+    expect(out).toEqual({ kind: "refused", code: "write_in_progress" });
+    expect(f.log).toEqual([]);
+    expect(f.leases).toEqual(["lease"]);
+  });
+
+  it("HI-01: the snapshot moved since the route decided: conflict before any outside call", async () => {
+    const f = fakeIo({ records: [SEEN], lease: "record_changed" });
+    const out = await runCompareAndSet(f.io, row(), { "/status": "Shipped" }, OPTS);
+    expect(out).toEqual({ kind: "conflict", recordId: "SO-10442" });
+    expect(f.log).toEqual([]);
+  });
+
+  it("HI-01: the lease is given back after a write, a conflict and a failed write alike", async () => {
+    const written = fakeIo({ records: [SEEN] });
+    await runCompareAndSet(written.io, row(), { "/status": "Shipped" }, OPTS);
+    const conflict = fakeIo({ records: [{ ...SEEN, delivery_date: "2026-10-20" }] });
+    await runCompareAndSet(conflict.io, row(), { "/status": "Shipped" }, OPTS);
+    const failed = fakeIo({
+      records: [SEEN],
+      write: { ok: true, result: { content: "boom", truncated: false, isError: true } },
+    });
+    await runCompareAndSet(failed.io, row(), { "/status": "Shipped" }, OPTS);
+    for (const f of [written, conflict, failed]) expect(f.leases).toEqual(["lease", "release"]);
+  });
+
   it("the record changed since the last check: conflict, and the write tool is never called", async () => {
     const changed = { ...SEEN, delivery_date: "2026-10-20" };
     const f = fakeIo({ records: [changed] });

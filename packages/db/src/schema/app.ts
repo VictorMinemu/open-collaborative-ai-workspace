@@ -4008,6 +4008,11 @@ export const watchedRecords = appSchema.table(
     snapshot: jsonb("snapshot").$type<Record<string, unknown>>(),
     snapshotHash: text("snapshot_hash"),
     lastWrittenHash: text("last_written_hash"),
+    /**
+     * A write in flight (07.6 review HI-01): set atomically by the compare-and-set's `begin` only while no other lease
+     * is live, cleared when the write ends. Bounded, so a crashed API never blocks the record for long.
+     */
+    writeLeaseUntil: ts("write_lease_until"),
     checkAsUserId: uuid("check_as_user_id").notNull(),
     checkIntervalMinutes: integer("check_interval_minutes").notNull().default(60),
     nextCheckAt: ts("next_check_at").notNull().defaultNow(),

@@ -8,7 +8,7 @@ import {
   watchedRecords,
   withSavepoint,
 } from "@ocw/db";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { CanonicalHashError, canonicalHash } from "../../lib/canonical-json";
 import { activeShare, connectionStatusFor } from "../connectors";
@@ -24,9 +24,11 @@ import { refuseTools } from "./tools";
  *
  *   1. re-checks the watch's rules (`preflight`: the watch's bot, its write tool, the tool rule of 07.6-07, the
  *      requester's connection and share for per-member connectors, only watched top-level fields);
- *   2. re-reads the record with the requester's connection and compares its hash with the stored snapshot: on a
- *      mismatch NOTHING is written, a Not saved card with before → after goes to the card's thread, and the snapshot
- *      moves to the new values (a change made elsewhere is never overwritten);
+ *   2. takes the record's write lease (`write_lease_until`, only while the snapshot is still the one the route decided
+ *      on and no other write holds a live lease: a second write at the same time is refused `write_in_progress`, never
+ *      run over the first; review HI-01), held until the write ends; then re-reads the record and compares its hash
+ *      with the stored snapshot: on a mismatch NOTHING is written, a Not saved card with before → after goes to the
+ *      card's thread, and the snapshot moves to the new values (a change made elsewhere is never overwritten);
  *   3. marks the write in progress (`last_written_hash` = the expected result, only while the snapshot is still the
  *      one compared: a check that ran in between and moved it is a conflict too), then calls the write tool with
  *      `{[idArg]: externalRef, …fields}` and, when the record exposes `updated_at` and the tool takes it,
@@ -50,6 +52,7 @@ export type CasRefusal =
   | "field_not_watched"
   | "tool_not_allowed"
   | "not_checked"
+  | "write_in_progress"
   | "connector_error";
 
 export type CasResult =
@@ -59,6 +62,8 @@ export type CasResult =
 
 /** Each outside call of a write (read, write, read, note) gets this long: four fit the cell's 35 s budget. */
 const CALL_TIMEOUT_MS = 8_000;
+/** How long a write lease lasts: past the write and the re-read (2 × 8 s), so a crashed API frees the record soon. */
+const WRITE_LEASE_MS = 40_000;
 /** An ERP's own version guard refusing the write (a stale `expectedUpdatedAt`, an ETag, a 409/412). */
 const ERP_CONFLICT = /conflict|changed since|stale|precondition|version mismatch|modified since/iu;
 /** The note tool's text argument, by the names ERPs use (the first its schema declares; `text` by default). */
@@ -131,6 +136,13 @@ export interface CasIo {
   write(args: Record<string, unknown>): Promise<CallOutcome>;
   /** The note tool with this text (only when the watch has one). */
   note(text: string): Promise<CallOutcome>;
+  /**
+   * Takes the record's write lease, only while the snapshot is still `expected` (else `record_changed`) and no other
+   * write holds a live lease (else `write_in_progress`).
+   */
+  lease(expected: string): Promise<"ok" | "record_changed" | "write_in_progress">;
+  /** Gives the lease back (always, after `lease` returned `ok`). */
+  release(): Promise<void>;
   /** Marks the write in progress: `last_written_hash` = `predicted`, only while the snapshot is still `expected`. */
   begin(expected: string, predicted: string): Promise<boolean>;
   /** Undoes `begin` after a write that did not happen. */
@@ -174,6 +186,28 @@ export async function runCompareAndSet(
   if (w.snapshotHash === null) return refused("not_checked");
   const expected = w.snapshotHash;
 
+  // One write at a time per record (HI-01): another write in flight is never run over, and the outcome of that write
+  // is not reported as a change made elsewhere.
+  const lease = await io.lease(expected);
+  if (lease === "write_in_progress") return refused("write_in_progress");
+  // A check moved the snapshot since the route decided: it reported that change, so this is a conflict too.
+  if (lease === "record_changed") return { kind: "conflict", recordId: w.externalRef };
+  try {
+    return await leasedCompareAndSet(io, w, changes, opts, plan, expected);
+  } finally {
+    await io.release();
+  }
+}
+
+/** Steps 2 to 4, under the record's write lease. */
+async function leasedCompareAndSet(
+  io: CasIo,
+  w: CasRow,
+  changes: RecordChanges,
+  opts: { botName: string; personName: string; expectedUpdatedAt: boolean },
+  plan: Extract<WritePlan, { ok: true }>,
+  expected: string,
+): Promise<CasResult> {
   const before = await io.read();
   if (!before.ok) return readRefusal(before);
   let now: { fields: Record<string, unknown>; hash: string };
@@ -400,6 +434,8 @@ export async function compareAndSet(core: Core, deps: WriteDeps, p: CompareAndSe
       timeoutMs: CALL_TIMEOUT_MS,
     });
   const fieldCount = Object.keys(p.changes).length;
+  /** This write's lease, while held (its expiry doubles as the owner's token: `release` frees only its own). */
+  let held: string | null = null;
 
   const io: CasIo = {
     read: () =>
@@ -418,6 +454,49 @@ export async function compareAndSet(core: Core, deps: WriteDeps, p: CompareAndSe
         [w.idArg]: w.externalRef,
         [noteArgOf(schemas.get(w.noteTool ?? ""), w.idArg)]: text,
       }),
+    lease: (expected) =>
+      core.db.withTenant(ctx, async (tx) => {
+        const until = new Date(Date.now() + WRITE_LEASE_MS).toISOString();
+        const taken = await tx
+          .update(watchedRecords)
+          .set({ writeLeaseUntil: until })
+          .where(
+            and(
+              eq(watchedRecords.id, w.id),
+              eq(watchedRecords.snapshotHash, expected),
+              or(isNull(watchedRecords.writeLeaseUntil), lte(watchedRecords.writeLeaseUntil, sql`now()`)),
+            ),
+          )
+          .returning({ id: watchedRecords.id });
+        if (taken.length > 0) {
+          held = until;
+          return "ok";
+        }
+        const [now] = await tx
+          .select({ snapshotHash: watchedRecords.snapshotHash })
+          .from(watchedRecords)
+          .where(eq(watchedRecords.id, w.id))
+          .limit(1);
+        const code = now && now.snapshotHash === expected ? "write_in_progress" : "record_changed";
+        await record(
+          tx,
+          "watched_record.write_refused",
+          { code, ...(code === "record_changed" ? { by: "check" } : {}), fieldCount },
+          "denied",
+        );
+        return code;
+      }),
+    release: async () => {
+      const mine = held;
+      if (!mine) return;
+      held = null;
+      await core.db.withTenant(ctx, (tx) =>
+        tx
+          .update(watchedRecords)
+          .set({ writeLeaseUntil: null })
+          .where(and(eq(watchedRecords.id, w.id), eq(watchedRecords.writeLeaseUntil, mine))),
+      );
+    },
     begin: (expected, predicted) =>
       core.db.withTenant(ctx, async (tx) => {
         const marked = await tx

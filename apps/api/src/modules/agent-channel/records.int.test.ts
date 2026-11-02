@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { PassThrough } from "node:stream";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   createFakeErpMcp,
@@ -40,6 +41,8 @@ let erpUrl = "";
 let opsId = "";
 let ordersId = "";
 let erpConnector: Json;
+/** When set, the next `update_record` request waits for it BEFORE the ERP applies it (a write in flight). */
+let writeGate: { release: Promise<void>; reached: () => void } | null = null;
 
 const core = () => s.stack.built.core;
 const drain = (queue: "watched.check" | "watched.tick") => core().jobs.drain(queue);
@@ -179,10 +182,29 @@ beforeAll(async () => {
   erp = createFakeErpMcp({ token: ERP_TOKEN });
   erpServer = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://fake-mcp");
-    if (!erp.handle(req, res, url)) {
-      res.writeHead(404);
-      res.end();
-    }
+    const serve = (r: typeof req) => {
+      if (!erp.handle(r, res, url)) {
+        res.writeHead(404);
+        res.end();
+      }
+    };
+    if (!writeGate || req.method !== "POST") return serve(req);
+    // A gate is armed: read the body first, hold an `update_record` call until released, then hand the ERP a copy.
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks);
+      const replay = () => {
+        const copy = Object.assign(new PassThrough(), { headers: req.headers, method: req.method });
+        copy.end(raw);
+        serve(copy as unknown as typeof req);
+      };
+      const gate = writeGate;
+      if (!gate || !raw.includes('"update_record"')) return replay();
+      writeGate = null;
+      gate.reached();
+      void gate.release.then(replay);
+    });
   });
   await new Promise<void>((resolve) => erpServer.listen(0, "127.0.0.1", resolve));
   erpUrl = `http://fake-mcp:${(erpServer.address() as AddressInfo).port}/erp-mcp`;
@@ -441,6 +463,62 @@ describe("never overwrite: a change made elsewhere is reported and kept, the bot
       (a) => a.resource_id === watched.id,
     );
     expect(refusedAudit.at(-1)?.metadata).toMatchObject({ code: "record_changed", by: "erp" });
+  });
+
+  it("HI-01: two updates of one record at once: one is written, the other refused write_in_progress, never both", async () => {
+    const { card, watched } = await freshWatch("EXP-0060 Two people ask at once");
+    const setSchema = (value: Json) =>
+      s.su.query(
+        "update app.mcp_server_tools set input_schema = $2 where server_id = $1 and name = 'update_record'",
+        [erpConnector.id, value],
+      );
+    const schema = (
+      await s.su.query(
+        "select input_schema from app.mcp_server_tools where server_id = $1 and name = 'update_record'",
+        [erpConnector.id],
+      )
+    ).rows[0]?.input_schema as Json;
+    // Without the ERP's own version guard (`expectedUpdatedAt`): only OCW's compare-and-set protects the record.
+    await setSchema({ type: "object", properties: { id: { type: "string" }, status: { type: "string" } } });
+    try {
+      const ana = await mention(s.victor, card.messageId);
+      const luis = await mention(s.sam, card.messageId, { text: "@opshelper put the order on hold" });
+      let release = () => {};
+      let reached = () => {};
+      const atWrite = new Promise<void>((r) => {
+        reached = r;
+      });
+      writeGate = {
+        release: new Promise<void>((r) => {
+          release = r;
+        }),
+        reached,
+      };
+      // Víctor's update reaches the ERP's write and is held there; Sam's arrives while it is in flight.
+      const first = update(ana.eventId, { "/status": "Shipped" });
+      await atWrite;
+      const second = await update(luis.eventId, { "/status": "On hold" });
+      release();
+      const one = await first;
+
+      expect(one.status, JSON.stringify(one.body)).toBe(200);
+      expect(second.status, JSON.stringify(second.body)).toBe(409);
+      expect(second.body.code).toBe("write_in_progress");
+      expect(second.body.sentence).toMatch(/^Another update of SO-10442 is being saved right now/u);
+      expect(callsOf("update_record")).toHaveLength(1);
+      expect(record().status).toBe("Shipped");
+      const after = await row(watched.id);
+      expect(after.snapshot).toMatchObject({ "/status": "Shipped" });
+      // The lease ends with the write.
+      expect(after.write_lease_until).toBeNull();
+      const busy = (await auditRows(s, s.orgA, ["watched_record.write_refused"])).filter(
+        (a) => a.resource_id === watched.id,
+      );
+      expect(busy.map((a) => a.metadata.code)).toContain("write_in_progress");
+    } finally {
+      writeGate = null;
+      await setSchema(schema ?? null);
+    }
   });
 
   it("the note-back fails: the write stays, the bot hears it was updated, audited note_failed", async () => {
