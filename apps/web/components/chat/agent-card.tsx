@@ -2001,8 +2001,9 @@ export function AgentCardView({
         <div
           className={cn(
             "flex min-w-0 items-center justify-between gap-2",
-            // The sign-in pill is long ("Sign-in needed"): on a narrow card it drops under the kind and badge.
-            signIn && "flex-wrap gap-y-1.5",
+            // The sign-in pill is long ("Sign-in needed"), and so is a proposal's ("Created with changes"): on a narrow
+            // card it drops under the kind and badge instead of covering the badge.
+            (signIn || linkedKind === "automation") && "flex-wrap gap-y-1.5",
           )}
         >
           <span
