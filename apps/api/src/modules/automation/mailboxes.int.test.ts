@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { createServer, type Server } from "node:net";
+import { networkInterfaces } from "node:os";
 import { ImapFlow } from "imapflow";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { classifyAddress } from "../../lib/egress";
 import { type GreenMail, type GreenMailUser, startGreenMail } from "../../testing-mail";
-import { type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
+import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
 import { mailboxTick } from "./mailboxes";
 
 /**
@@ -455,5 +458,288 @@ describe("each mail is processed once, conversations stay threaded, automated ma
       "<v1@shop.example>",
       "<v4@shop.example>",
     ]);
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: failures are safe and visible
+
+/** A private (RFC 1918) address of this machine where GreenMail's published ports answer (bridge gateway / LAN). */
+const lanAddress = Object.values(networkInterfaces())
+  .flat()
+  .find((a) => a && a.family === "IPv4" && !a.internal && classifyAddress(a.address) === "private")?.address;
+
+/** A loopback port nothing listens on. */
+async function closedPort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
+const dueIds = async () =>
+  new Set(
+    (await s.su.query("select id from app.due_mailboxes(1000, now())")).rows.map((r) => r.id as string),
+  );
+
+describe("connections fail safely and visibly: fixed codes, verified TLS, no private hosts, clear statuses", () => {
+  const tryIt = (body: Json, as = s.victor) =>
+    as.request("POST", "/api/v1/mailboxes/test", body) as Promise<Res>;
+  const testBody = (vaultItemId: string, extra: Json = {}) => ({
+    vaultItemId,
+    host: "greenmail",
+    port: gm.imapPort,
+    folder: "INBOX",
+    ...extra,
+  });
+
+  it("POST /mailboxes/test: the message count, nothing saved, audited without the password", async () => {
+    for (const n of [1, 2]) await send("tester@acme.test", { messageId: `<t${n}@shop.example>` });
+    const vaultItemId = await mailKey("tester@acme.test");
+    const mailboxesBefore = Number((await s.su.query("select count(*) from app.mailboxes")).rows[0].count);
+    expect(await ok(tryIt(testBody(vaultItemId)))).toEqual({ ok: true, messages: 2 });
+    expect(Number((await s.su.query("select count(*) from app.mailboxes")).rows[0].count)).toBe(
+      mailboxesBefore,
+    );
+    const tested = await audits("mailbox.tested", vaultItemId);
+    expect(tested.at(-1)).toMatchObject({
+      user_id: s.victorId,
+      result: "success",
+      metadata: { vaultItemId, host: "greenmail", port: gm.imapPort, code: null },
+    });
+    expect(JSON.stringify(tested)).not.toContain(user("tester@acme.test").password);
+    const flags = await flagsOf("tester@acme.test");
+    expect(flags).toHaveLength(2);
+    for (const f of flags) expect(f).not.toContain("\\Seen");
+  });
+
+  it("wrong password → auth_failed, missing folder → folder_missing, closed port → unreachable, other port → host_not_allowed", async () => {
+    const dead = await closedPort();
+    const good = await mailKey("tester@acme.test", {
+      hosts: [`greenmail:${gm.imapPort}`, `greenmail:${dead}`],
+    });
+    const wrong = await mailKey("tester@acme.test", { password: "not-the-password" });
+    expect(await ok(tryIt(testBody(wrong)))).toEqual({ ok: false, code: "auth_failed" });
+    expect(await ok(tryIt(testBody(good, { folder: "Nowhere" })))).toEqual({
+      ok: false,
+      code: "folder_missing",
+    });
+    expect(await ok(tryIt(testBody(good, { port: dead })))).toEqual({ ok: false, code: "unreachable" });
+    expect(await ok(tryIt(testBody(good, { port: gm.imapsPort })))).toEqual({
+      ok: false,
+      code: "host_not_allowed",
+    });
+    expect((await audits("mailbox.tested", wrong)).at(-1)).toMatchObject({
+      result: "error",
+      metadata: { code: "auth_failed" },
+    });
+  });
+
+  it("TLS through the production path: a private-network alias admitted by the admin's allowance fails on GreenMail's self-signed certificate; without the allowance it is never reached", async () => {
+    if (!lanAddress)
+      throw new Error("this host has no private IPv4 interface to stand in for a LAN mail server");
+    const alias = "mail-tls.ocw.test";
+    dnsStub.set(alias, lanAddress);
+    const u = user("tester@acme.test");
+    const unitKey = (
+      await ok(
+        s.victor.request("POST", "/api/v1/keychain", {
+          scope: "unit",
+          unitId: null,
+          kind: "basic",
+          name: "LAN mail",
+          allowedHosts: [`${alias}:${gm.imapsPort}`],
+          username: u.login,
+          password: u.password,
+        }) as Promise<Res>,
+        201,
+      )
+    ).id as string;
+    const body = { vaultItemId: unitKey, host: alias, port: gm.imapsPort, folder: "INBOX" };
+    // Not an OCW_EGRESS_TEST_HOSTS name: a private address without the admin's allowance is refused before connecting.
+    expect(await ok(tryIt(body))).toEqual({ ok: false, code: "unreachable" });
+    await ok(
+      s.victor.request("PUT", "/api/v1/keychain/private-hosts", {
+        hosts: [`${alias}:${gm.imapsPort}`],
+      }) as Promise<Res>,
+    );
+    try {
+      // Admitted and connected over implicit TLS: the certificate is checked against the host name and refused.
+      expect(await ok(tryIt(body))).toEqual({ ok: false, code: "certificate" });
+    } finally {
+      await ok(s.victor.request("PUT", "/api/v1/keychain/private-hosts", { hosts: [] }) as Promise<Res>);
+    }
+    expect(await ok(tryIt(body))).toEqual({ ok: false, code: "unreachable" });
+  });
+
+  it("a personal key's host that resolves to a private address is refused with no connection attempted", async () => {
+    if (!lanAddress)
+      throw new Error("this host has no private IPv4 interface to stand in for a LAN mail server");
+    let connections = 0;
+    const lan: Server = createServer((socket) => {
+      connections++;
+      socket.destroy();
+    });
+    await new Promise<void>((resolve) => lan.listen(0, lanAddress, resolve));
+    const port = (lan.address() as { port: number }).port;
+    try {
+      dnsStub.set("imap.lan.ocw.test", lanAddress);
+      const key = await mailKey("tester@acme.test", { hosts: [`imap.lan.ocw.test:${port}`] });
+      expect(await ok(tryIt({ vaultItemId: key, host: "imap.lan.ocw.test", port, folder: "INBOX" }))).toEqual(
+        {
+          ok: false,
+          code: "unreachable",
+        },
+      );
+      expect(connections).toBe(0);
+    } finally {
+      await new Promise<void>((resolve) => lan.close(() => resolve()));
+    }
+  });
+
+  it("another member's personal key is 403; a body with credentials is 400; creating with a host the key does not allow or a key the owner cannot use is 400 and leaves nothing", async () => {
+    const victorKey = await mailKey("tester@acme.test");
+    const asSam = await tryIt(testBody(victorKey), s.sam);
+    expect(asSam.status).toBe(403);
+    expect(codeOf(asSam)).toBe("mailbox_key_not_usable");
+    const withPassword = await tryIt({ ...testBody(victorKey), password: "x" });
+    expect(withPassword.status).toBe(400);
+
+    const count = async () =>
+      Number((await s.su.query("select count(*) from app.automations")).rows[0].count);
+    const before = await count();
+    const wrongHost = await createMailAutomation(victorKey, { port: gm.imapsPort });
+    expect(wrongHost.status).toBe(400);
+    expect(codeOf(wrongHost)).toBe("mailbox_host_not_allowed");
+    const samKey = await mailKey("tester@acme.test", { as: s.sam });
+    const notHis = await createMailAutomation(samKey);
+    expect(notHis.status).toBe(400);
+    expect(codeOf(notHis)).toBe("mailbox_key_not_usable");
+    expect(await count()).toBe(before);
+  });
+
+  it("a wrong password at poll: auth_failed, backs off 30 minutes, audited once; a new password in Keychain resumes it", async () => {
+    const key = await mailKey("status@acme.test", { password: "an-old-password" });
+    const created = await ok(createMailAutomation(key), 201);
+    const automationId = created.automation.id as string;
+    const row = await mailboxRow(automationId);
+    const mailboxId = row?.id as string;
+    expect(row).toMatchObject({ status: "auth_failed", last_error_code: "auth_failed", last_uid: null });
+    expect(new Date(row?.next_poll_at).getTime()).toBeGreaterThanOrEqual(Date.now() + 29 * 60_000);
+    const failed = await audits("mailbox.poll_failed", mailboxId);
+    expect(failed.map((a) => a.metadata)).toEqual([
+      {
+        mailboxId,
+        automationId,
+        host: "greenmail",
+        port: gm.imapPort,
+        status: "auth_failed",
+        code: "auth_failed",
+      },
+    ]);
+    expect(failed[0]).toMatchObject({ actor_kind: "system", user_id: s.victorId, result: "error" });
+    const view = await ok(
+      s.victor.request("GET", `/api/v1/automations/${automationId}/mailbox`) as Promise<Res>,
+    );
+    expect(view).toMatchObject({ status: "auth_failed", lastErrorCode: "auth_failed" });
+    expect(await dueIds()).not.toContain(mailboxId);
+
+    // The owner fixes the password in Keychain: the next tick polls it at once (no 30-minute wait).
+    await ok(
+      s.victor.request("PATCH", `/api/v1/keychain/${key}`, {
+        secret: {
+          kind: "basic",
+          username: user("status@acme.test").login,
+          password: user("status@acme.test").password,
+        },
+      }) as Promise<Res>,
+    );
+    expect(await dueIds()).toContain(mailboxId);
+    await mailboxTick(core());
+    await core().jobs.drain("mailbox.poll", { max: 50 });
+    expect(await mailboxRow(automationId)).toMatchObject({
+      status: "active",
+      last_error_code: null,
+      last_uid: "0",
+    });
+    expect(await dueIds()).not.toContain(mailboxId);
+
+    await send("status@acme.test", { messageId: "<after-fix@shop.example>" });
+    await pollNow(mailboxId);
+    expect((await eventsOf(mailboxId)).map((e) => e.external_id)).toEqual(["<after-fix@shop.example>"]);
+    expect(await audits("mailbox.poll_failed", mailboxId)).toHaveLength(1);
+  });
+
+  it("unreachable keeps trying at the interval and is audited on the change only", async () => {
+    const dead = await closedPort();
+    const key = await mailKey("unreach@acme.test", { hosts: [`greenmail:${dead}`] });
+    const created = await ok(createMailAutomation(key, { port: dead }), 201);
+    const automationId = created.automation.id as string;
+    const row = await mailboxRow(automationId);
+    const mailboxId = row?.id as string;
+    expect(row).toMatchObject({ status: "unreachable", last_error_code: "unreachable" });
+    const next = new Date(row?.next_poll_at).getTime() - Date.now();
+    expect(next).toBeGreaterThan(4 * 60_000);
+    expect(next).toBeLessThanOrEqual(5 * 60_000);
+    await pollNow(mailboxId);
+    expect(await mailboxRow(automationId)).toMatchObject({ status: "unreachable" });
+    expect(await audits("mailbox.poll_failed", mailboxId)).toHaveLength(1);
+    const view = await ok(
+      s.victor.request("GET", `/api/v1/automations/${automationId}/mailbox`) as Promise<Res>,
+    );
+    expect(view).toMatchObject({ status: "unreachable", host: "greenmail", port: dead });
+  });
+
+  it("pausing the automation shows the mailbox paused and stops polling; resuming polls again", async () => {
+    const key = await mailKey("paused@acme.test");
+    const created = await ok(createMailAutomation(key), 201);
+    const automationId = created.automation.id as string;
+    const mailboxId = (await mailboxRow(automationId))?.id as string;
+    await ok(s.victor.request("POST", `/api/v1/automations/${automationId}/pause`) as Promise<Res>);
+    const view = await ok(
+      s.victor.request("GET", `/api/v1/automations/${automationId}/mailbox`) as Promise<Res>,
+    );
+    expect(view.status).toBe("paused");
+    await s.su.query("update app.mailboxes set next_poll_at = now() - interval '1 second' where id = $1", [
+      mailboxId,
+    ]);
+    expect(await dueIds()).not.toContain(mailboxId);
+    // A poll job that was already queued does nothing while paused.
+    await send("paused@acme.test", { messageId: "<while-paused@shop.example>" });
+    await core().db.withTenant({ organizationId: s.orgA }, (tx) =>
+      core().jobs.sendInTx(tx, "mailbox.poll", { organizationId: s.orgA, mailboxId }),
+    );
+    await core().jobs.drain("mailbox.poll", { max: 50 });
+    expect(await eventsOf(mailboxId)).toHaveLength(0);
+
+    await ok(s.victor.request("POST", `/api/v1/automations/${automationId}/resume`) as Promise<Res>);
+    expect(await dueIds()).toContain(mailboxId);
+    await pollNow(mailboxId);
+    expect((await eventsOf(mailboxId)).map((e) => e.external_id)).toEqual(["<while-paused@shop.example>"]);
+    expect(
+      (await ok(s.victor.request("GET", `/api/v1/automations/${automationId}/mailbox`) as Promise<Res>))
+        .status,
+    ).toBe("active");
+  });
+
+  it("deleting the automation deletes its mailbox (audited); a queued poll for it is a no-op", async () => {
+    const key = await mailKey("gone@acme.test");
+    const created = await ok(createMailAutomation(key), 201);
+    const automationId = created.automation.id as string;
+    const mailboxId = (await mailboxRow(automationId))?.id as string;
+    const jobId = await core().db.withTenant({ organizationId: s.orgA }, (tx) =>
+      core().jobs.sendInTx(tx, "mailbox.poll", { organizationId: s.orgA, mailboxId }),
+    );
+    const del = await s.victor.request("DELETE", `/api/v1/automations/${automationId}`);
+    expect(del.status).toBe(204);
+    expect(await mailboxRow(automationId)).toBeUndefined();
+    expect((await audits("mailbox.deleted", mailboxId)).map((a) => a.metadata)).toEqual([
+      { mailboxId, automationId, host: "greenmail", port: gm.imapPort },
+    ]);
+    await core().jobs.drain("mailbox.poll", { max: 50 });
+    const job = (await s.su.query("select state from pgboss.job where id = $1", [jobId])).rows[0] as Json;
+    expect(job.state).toBe("completed");
+    const notFound = await s.victor.request("GET", `/api/v1/automations/${automationId}/mailbox`);
+    expect(notFound.status).toBe(404);
   });
 });

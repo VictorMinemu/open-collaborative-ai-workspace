@@ -746,8 +746,14 @@ describe("ids-only SECURITY DEFINER functions (07.6-02, D-07, P-10)", () => {
     ]);
   });
 
-  it("due_mailboxes: active or unreachable mailboxes of active automations, due by now", async () => {
-    const box = async (o: Org, status: string, nextPollAt: string, automationStatus = "active") => {
+  it("due_mailboxes: active, unreachable and backed-off auth_failed mailboxes of active automations, due by now; auth_failed at once after a key change", async () => {
+    const box = async (
+      o: Org,
+      status: string,
+      nextPollAt: string,
+      automationStatus = "active",
+      updatedAt = ago(60),
+    ) => {
       const a = await automation(migratorQ, o, {
         trigger_kind: "mail",
         schedule_cron: null,
@@ -757,23 +763,43 @@ describe("ids-only SECURITY DEFINER functions (07.6-02, D-07, P-10)", () => {
       });
       return (
         await migrator.query(
-          "insert into app.mailboxes (organization_id, automation_id, owner_user_id, host, status, next_poll_at) values ($1, $2, $3, 'imap.example.test', $4, $5) returning id",
-          [o.id, a, o.ana, status, nextPollAt],
+          "insert into app.mailboxes (organization_id, automation_id, owner_user_id, vault_item_id, host, status, next_poll_at, updated_at) values ($1, $2, $3, $4, 'imap.example.test', $5, $6, $7) returning id",
+          [o.id, a, o.ana, o.vault, status, nextPollAt, updatedAt],
         )
       ).rows[0].id as string;
     };
+    // The keys changed 30 minutes ago (a new password): after the failures dated 60 minutes ago, before the 5-minute one.
+    await migrator.query("update app.vault_items set updated_at = $1 where id = any($2)", [
+      ago(30),
+      [C.vault, D.vault],
+    ]);
     const active = await box(C, "active", ago(10));
     const unreachable = await box(D, "unreachable", ago(5));
-    const authFailed = await box(C, "auth_failed", ago(10));
+    const authBackedOff = await box(C, "auth_failed", ago(8), "active", ago(5));
+    const authKeyChanged = await box(D, "auth_failed", ago(-20), "active", ago(60));
+    const authWaiting = await box(C, "auth_failed", ago(-20), "active", ago(5));
     const paused = await box(D, "paused", ago(10));
     const pausedAutomation = await box(C, "active", ago(10), "paused");
+    const pausedAuthFailed = await box(D, "auth_failed", ago(10), "paused", ago(60));
     const future = await box(D, "active", ago(-10));
-    const mine = new Set([active, unreachable, authFailed, paused, pausedAutomation, future]);
+    const mine = new Set([
+      active,
+      unreachable,
+      authBackedOff,
+      authKeyChanged,
+      authWaiting,
+      paused,
+      pausedAutomation,
+      pausedAuthFailed,
+      future,
+    ]);
     const r = await call("app.due_mailboxes", [1000, now.toISOString()]);
     expect(r.fields).toEqual(["id", "organization_id"]);
     expect(r.rows.filter((row) => mine.has(row.id))).toEqual([
       { id: active, organization_id: C.id },
+      { id: authBackedOff, organization_id: C.id },
       { id: unreachable, organization_id: D.id },
+      { id: authKeyChanged, organization_id: D.id },
     ]);
   });
 

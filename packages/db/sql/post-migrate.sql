@@ -779,8 +779,9 @@ REVOKE TRUNCATE ON app.watched_record_changes FROM ocw_app;
 -- schedule, an instruction, a sender or any inbound content.
 -- - `due_automations`: active scheduled automations whose `next_run_at` has come (the `automation.tick` cron).
 -- - `stale_automation_runs`: runs handed to the cell (`delivered`) and unanswered since before `p_before` (`no_reply`).
--- - `due_mailboxes`: mailboxes to poll now, of active automations; `unreachable` ones are retried, `auth_failed` and
---   `paused` wait for their owner.
+-- - `due_mailboxes`: mailboxes to poll now, of active automations: `active` and `unreachable` ones when due,
+--   `auth_failed` ones after their back-off (`next_poll_at`, 30 minutes) or as soon as their Keychain item changed after
+--   the failure (07.6-11: a new password resumes the mailbox); `paused` ones wait for their owner.
 -- - `due_watched_records`: watched records whose next scheduled check has come.
 -- - `lookup_webhook_endpoint`: the endpoint and organization behind a public id. `active` is false for a tombstoned
 --   (`deleted_at`) or unlinked endpoint, so the route answers 410 instead of 404 (Pitfall 4); an unknown id has no row.
@@ -812,7 +813,13 @@ RETURNS TABLE (id uuid, organization_id uuid)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
   SELECT m.id, m.organization_id FROM app.mailboxes m
   JOIN app.automations a ON a.organization_id = m.organization_id AND a.id = m.automation_id
-  WHERE m.status IN ('active', 'unreachable') AND m.next_poll_at <= p_now AND a.status = 'active'
+  WHERE a.status = 'active' AND (
+    (m.status IN ('active', 'unreachable', 'auth_failed') AND m.next_poll_at <= p_now)
+    OR (m.status = 'auth_failed' AND EXISTS (
+      SELECT 1 FROM app.vault_items v
+      WHERE v.organization_id = m.organization_id AND v.id = m.vault_item_id AND v.updated_at > m.updated_at
+    ))
+  )
   ORDER BY m.next_poll_at, m.id
   LIMIT least(greatest(p_limit, 1), 1000)
 $fn$;
