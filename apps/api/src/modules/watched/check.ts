@@ -37,7 +37,8 @@ export const TOOL_NOT_ALLOWED = "tool_not_allowed";
  * the watched fields, hashes them (`canonicalHash`, RFC 8785) and compares with the snapshot:
  *
  * - no snapshot yet → the baseline, silently;
- * - same hash → nothing; equal to `last_written_hash` → the bot's own write (07.6-14), silently;
+ * - same hash → nothing; equal to `last_written_hash` → the bot's own write (07.6-14), silently, once (the marker is
+ *   cleared whenever the snapshot moves, so a later change back to the same values is reported: review ME-01);
  * - otherwise → a `watched_record_changes` row and a platform-owned change card in the card's thread by the watch's bot,
  *   then the snapshot moves on.
  *
@@ -349,7 +350,16 @@ export async function checkWatchedRecord(
       const quiet = async () => {
         await tx
           .update(watchedRecords)
-          .set({ snapshot: projection.fields, snapshotHash: hash, lastStatus: "ok", ...timing })
+          .set({
+            snapshot: projection.fields,
+            snapshotHash: hash,
+            lastStatus: "ok",
+            ...timing,
+            // ME-01: `last_written_hash` is one-shot. Once the snapshot moves (to the bot's write, observed here, or to
+            // any other state), it no longer stands for the record, so a later change back to those values is
+            // reported. A write still in flight sets it again in `written()`.
+            ...(hash !== w.snapshotHash ? { lastWrittenHash: null } : {}),
+          })
           .where(eq(watchedRecords.id, w.id));
         await emitUpdated(core, tx, w);
       };
@@ -418,6 +428,8 @@ export async function checkWatchedRecord(
           lastStatus: "changed",
           lastChangedAt: now.toISOString(),
           ...timing,
+          // ME-01: a state that is not the bot's write was seen, so its last write no longer stands for the record.
+          lastWrittenHash: null,
         })
         .where(eq(watchedRecords.id, w.id));
       await core.audit.record(tx, {

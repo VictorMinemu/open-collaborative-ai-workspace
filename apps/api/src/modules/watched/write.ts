@@ -609,6 +609,8 @@ export async function compareAndSet(core: Core, deps: WriteDeps, p: CompareAndSe
             lastStatus: "changed",
             lastChangedAt: now.toISOString(),
             checkedAt: now.toISOString(),
+            // ME-01: an outside state was seen, so an earlier write of the bot no longer stands for the record.
+            lastWrittenHash: null,
           })
           .where(eq(watchedRecords.id, w.id));
         await emitUpdated(core, tx, w);

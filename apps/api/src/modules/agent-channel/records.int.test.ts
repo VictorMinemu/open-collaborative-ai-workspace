@@ -334,6 +334,30 @@ describe("tracer: Ops helper sets SO-10442 to Shipped from the card thread and t
     );
     expect(changes.rows[0].n).toBe(0);
   });
+
+  it("ME-01: changed elsewhere and then back to the bot's values: both outside changes are reported", async () => {
+    const titles = async () =>
+      ((await botReplies(card.messageId)) as Json[]).map((m) => (m.card as Json | undefined)?.statusLabel);
+    const outside = async (status: string, at: string) => {
+      const r = record();
+      r.status = status;
+      r.updated_at = at;
+      await scheduledCheck(watched.id);
+    };
+    await outside("Returned", "2026-10-09T08:00:00.000Z");
+    expect(await titles()).toEqual(["Changed"]);
+    expect((await row(watched.id)).last_written_hash).toBeNull();
+    // Someone sets it back to what the bot wrote: a real change made elsewhere, never mistaken for the bot's write.
+    await outside("Shipped", "2026-10-10T08:00:00.000Z");
+    expect(await titles()).toEqual(["Changed", "Changed"]);
+    const last = (await botReplies(card.messageId)).at(-1) as Json;
+    expect(last.card.fields[0]).toEqual({ label: "Status", value: "Returned → Shipped" });
+    const changes = await s.su.query(
+      "select count(*)::int as n from app.watched_record_changes where watched_record_id = $1",
+      [watched.id],
+    );
+    expect(changes.rows[0].n).toBe(2);
+  });
 });
 
 // ---------------------------------------------------------------- Task 2: never overwrite
