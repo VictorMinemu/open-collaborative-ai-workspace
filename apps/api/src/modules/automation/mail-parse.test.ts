@@ -130,3 +130,55 @@ describe("parseMail: loop filters (P-09)", () => {
     expect(await skipOf({ "X-OCW-Automation-Run": "run-1" })).toBe("own_header");
   });
 });
+
+describe("parseMail: values PostgreSQL text refuses (07.6 review A CR-01)", () => {
+  const hasNul = (v: string | null) => v?.includes("\u0000") ?? false;
+
+  it("a quoted-printable =00 in the body, subject and sender name never reaches a text column", async () => {
+    const raw = [
+      "From: =?utf-8?Q?Sho=00p?= <orders@shop.example>",
+      "To: ops@acme.test",
+      "Subject: =?utf-8?Q?Order=00_1001?=",
+      "Message-ID: <nul@x>",
+      "Content-Type: text/plain; charset=utf-8",
+      "Content-Transfer-Encoding: quoted-printable",
+      "",
+      "Please=00 deliver order 1001.",
+    ].join("\r\n");
+    const m = await parseMail(Buffer.from(raw, "utf8"), MAILBOX);
+    expect(hasNul(m.text)).toBe(false);
+    expect(hasNul(m.subject)).toBe(false);
+    expect(hasNul(m.from)).toBe(false);
+    expect(m.text).toBe("Please deliver order 1001.");
+    expect(m.subject).toBe("Order 1001");
+    expect(m.from).toBe("Shop <orders@shop.example>");
+    expect(m.messageId).toBe("<nul@x>");
+  });
+
+  it("a base64 body with a NUL byte is stripped too", async () => {
+    const raw = [
+      "From: orders@shop.example",
+      "Subject: b64",
+      "Content-Type: text/plain; charset=utf-8",
+      "Content-Transfer-Encoding: base64",
+      "",
+      Buffer.from("a\u0000b", "utf8").toString("base64"),
+    ].join("\r\n");
+    expect((await parseMail(Buffer.from(raw, "utf8"), MAILBOX)).text).toBe("ab");
+  });
+
+  it("an id holding a control character is no id (the UID hash keys it), and never a thread key", async () => {
+    const m = await parseMail(
+      Buffer.concat([
+        Buffer.from("From: orders@shop.example\r\nSubject: ids\r\nMessage-ID: <a"),
+        Buffer.from([0]),
+        Buffer.from("b@x>\r\nReferences: <r"),
+        Buffer.from([1]),
+        Buffer.from("s@x>\r\nContent-Type: text/plain\r\n\r\nbody"),
+      ]),
+      MAILBOX,
+    );
+    expect(m.messageId).toBeNull();
+    expect(m.threadKey).toBeNull();
+  });
+});

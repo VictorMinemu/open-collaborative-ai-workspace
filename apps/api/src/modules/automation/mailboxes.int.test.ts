@@ -26,6 +26,21 @@ vi.mock("node:dns/promises", async (importOriginal) => {
 });
 
 /**
+ * The real parser, except that a mail whose subject holds `POISON` gets a U+0000 put back into its body after parsing:
+ * it stands for any value the database still refuses once the parser has done its part (07.6 review A CR-01).
+ */
+vi.mock("./mail-parse", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./mail-parse")>();
+  return {
+    ...real,
+    parseMail: async (...args: Parameters<typeof real.parseMail>) => {
+      const m = await real.parseMail(...args);
+      return m.subject.includes("POISON") ? { ...m, text: `${m.text}\u0000` } : m;
+    },
+  };
+});
+
+/**
  * 07.6-11 (AUTO-02; D-02, D-07, R3, R8, P-09, P-17; research Pattern 5, A3): IMAP mail as an automation trigger against
  * a disposable GreenMail (no real mail server). A mail automation signs in with a Keychain `Username & password` item
  * only, connects to the address the egress guard pinned, reads only new mail read-only, stores each mail once and hands
@@ -48,6 +63,7 @@ const ADDRESSES = [
   "unreach@acme.test",
   "paused@acme.test",
   "gone@acme.test",
+  "poison@acme.test",
 ];
 
 const core = () => s.stack.built.core;
@@ -423,6 +439,45 @@ describe("each mail is processed once, conversations stay threaded, automated ma
     const again = await eventsOf(mailboxId);
     expect(again).toHaveLength(1);
     expect(again[0]).toMatchObject({ external_id: events[0]?.external_id, duplicate_count: 1 });
+  });
+
+  it("a mail with U+0000 (quoted-printable =00) is stored clean; one the database still refuses is skipped, the cursor advances and the code says so (CR-01)", async () => {
+    const { automationId, mailboxId } = await automationOn("poison@acme.test");
+    const qp = (subject: string, body: string) =>
+      [
+        "From: =?utf-8?Q?Sho=00p?= <orders@shop.example>",
+        "To: poison@acme.test",
+        `Subject: ${subject}`,
+        "Content-Type: text/plain; charset=utf-8",
+        "Content-Transfer-Encoding: quoted-printable",
+        "",
+        body,
+        "",
+      ].join("\r\n");
+    await appendTo("poison@acme.test", "INBOX", qp("=?utf-8?Q?Order=00_3001?=", "Deliver=00 order 3001."));
+    await appendTo("poison@acme.test", "INBOX", qp("POISON 3002", "Deliver order 3002."));
+    await appendTo("poison@acme.test", "INBOX", qp("Order 3003", "Deliver order 3003."));
+    await pollNow(mailboxId);
+
+    const events = await eventsOf(mailboxId);
+    expect(events.map((e) => e.subject)).toEqual(["Order 3001", "Order 3003"]);
+    expect(events[0]).toMatchObject({
+      body_text: "Deliver order 3001.",
+      sender: "Shop <orders@shop.example>",
+    });
+    const row = await mailboxRow(automationId);
+    // The cursor is past all three: the refused mail never blocks the mailbox again.
+    expect(Number(row?.last_uid)).toBe(3);
+    expect(row).toMatchObject({ status: "active", last_error_code: "mail_not_stored", last_new_count: 2 });
+    expect((await audits("mail.received", mailboxId)).map((a) => a.metadata)).toEqual([
+      { mailboxId, automationId, count: 2, skipped: 0, duplicates: 0, notStored: 1 },
+    ]);
+
+    // The next good poll clears the code.
+    await appendTo("poison@acme.test", "INBOX", qp("Order 3004", "Deliver order 3004."));
+    await pollNow(mailboxId);
+    expect(await eventsOf(mailboxId)).toHaveLength(3);
+    expect(await mailboxRow(automationId)).toMatchObject({ last_error_code: null, status: "active" });
   });
 
   it("a changed UIDVALIDITY (the folder recreated) resets the cursor to the newest message without reprocessing", async () => {
