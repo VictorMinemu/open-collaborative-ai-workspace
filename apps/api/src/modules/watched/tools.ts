@@ -8,7 +8,7 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
  *
  * - every tool exists on the server, its MCP name and OpenClaw name pass `isDangerousToolName` (the cell's denylist),
  *   and the admin granted it to the watch's bot (`bot_tool_grants`, the per-bot side of the cell's `toolFilter`; the
- *   preview, which has no bot yet, needs a grant on any live bot, exactly the cell's `toolFilter.include`);
+ *   preview, which has no bot yet, needs the grant on a bot that could report on that board, never on just any bot);
  * - the read tool is recorded read-only and not destructive (its MCP annotations, as the last probe recorded them).
  *
  * Checked at link, at edit and preview, and again before every scheduled or on-access read (`readRecord`), so a re-probe
@@ -25,8 +25,11 @@ export async function refuseTools(
   tx: Tx,
   p: {
     serverId: string;
-    /** The watch's bot; null = any live bot (the preview). */
-    agentId: string | null;
+    /**
+     * The watch's bot, or (the preview, which names only its read tool) the board's bots, one of which must hold the
+     * grant. Never "any bot": an empty list grants nothing.
+     */
+    agentId: string | readonly string[];
     readTool: string;
     otherTools?: Array<string | null | undefined>;
   },
@@ -45,22 +48,26 @@ export async function refuseTools(
   const byName = new Map(rows.map((r) => [r.name, r]));
   for (const tool of wanted) if (!byName.has(tool)) return { code: "tool_not_found", tool };
 
-  const grants = await tx
-    .selectDistinct({ toolName: botToolGrants.toolName })
-    .from(botToolGrants)
-    .innerJoin(agents, eq(agents.id, botToolGrants.agentId))
-    .where(
-      and(
-        eq(botToolGrants.sourceKind, "mcp"),
-        eq(botToolGrants.sourceId, p.serverId),
-        inArray(
-          botToolGrants.toolName,
-          rows.map((r) => r.openclawName),
-        ),
-        isNull(agents.deletedAt),
-        ...(p.agentId ? [eq(botToolGrants.agentId, p.agentId)] : []),
-      ),
-    );
+  const agentIds = typeof p.agentId === "string" ? [p.agentId] : [...p.agentId];
+  const grants =
+    agentIds.length === 0
+      ? []
+      : await tx
+          .selectDistinct({ toolName: botToolGrants.toolName })
+          .from(botToolGrants)
+          .innerJoin(agents, eq(agents.id, botToolGrants.agentId))
+          .where(
+            and(
+              eq(botToolGrants.sourceKind, "mcp"),
+              eq(botToolGrants.sourceId, p.serverId),
+              inArray(
+                botToolGrants.toolName,
+                rows.map((r) => r.openclawName),
+              ),
+              isNull(agents.deletedAt),
+              inArray(botToolGrants.agentId, agentIds),
+            ),
+          );
   const granted = new Set(grants.map((g) => g.toolName));
   for (const tool of wanted) {
     const row = byName.get(tool);

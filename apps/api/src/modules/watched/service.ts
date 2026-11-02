@@ -10,6 +10,7 @@ import {
 import {
   agents,
   boardCards,
+  conversationMembers,
   mcpServers,
   messages,
   orgMembers,
@@ -17,7 +18,7 @@ import {
   tenantOf,
   watchedRecords,
 } from "@ocw/db";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { authOf, type Core } from "../../core";
 import { badRequest, conflict, HttpError, notFound } from "../../lib/errors";
@@ -102,15 +103,49 @@ async function assertBot(
 }
 
 /**
+ * The bots that may report on a board for `userId`: live, enabled members of the board that may post there and read it
+ * for them (`decideConversation`, agent ∩ human). The watch dialog offers exactly these (`options.ts`), and the preview
+ * may use a connector's read tool only through a grant one of them holds (CR-01).
+ */
+export async function boardBots(
+  tx: Tx,
+  ctx: Pick<WatchedCtx, "perms">,
+  p: { userId: string; conv: Parameters<typeof decideConversation>[2]["conv"] },
+): Promise<Array<{ id: string; name: string }>> {
+  const members = await tx
+    .select({ id: agents.id, name: agents.name })
+    .from(conversationMembers)
+    .innerJoin(agents, eq(agents.id, conversationMembers.memberId))
+    .where(
+      and(
+        eq(conversationMembers.conversationId, p.conv.id),
+        eq(conversationMembers.memberKind, "agent"),
+        isNull(agents.deletedAt),
+        ne(agents.status, "disabled"),
+      ),
+    )
+    .orderBy(asc(agents.name), asc(agents.id));
+  const bots: Array<{ id: string; name: string }> = [];
+  for (const m of members) {
+    if (
+      (await decideConversation(tx, ctx.perms, { agentId: m.id, userId: p.userId, conv: p.conv })) === null
+    ) {
+      bots.push(m);
+    }
+  }
+  return bots;
+}
+
+/**
  * The connector (RLS: this organization's) and the tools the watch names (`tools.ts`): each exists, passes the cell's
- * dangerous-name denylist and is granted to the bot (`agentId`; null = any live bot, for the preview); the read tool is
- * recorded read-only and not destructive. 400 with the refusal's code otherwise.
+ * dangerous-name denylist and is granted to the bot (`agentId`; for the preview, one of the board's bots from
+ * `boardBots`); the read tool is recorded read-only and not destructive. 400 with the refusal's code otherwise.
  */
 export async function connectorWithTools(
   tx: Tx,
   p: {
     serverId: string;
-    agentId: string | null;
+    agentId: string | readonly string[];
     readTool: string;
     otherTools?: Array<string | null | undefined>;
   },
@@ -504,16 +539,20 @@ export async function previewGuard(
   ctx: WatchedCtx,
   body: { conversationId: string; mcpServerId: string; readTool: string },
 ): Promise<{ server: ServerRow; conversationId: string }> {
+  const userId = authOf(req).userId;
   const board = await boardFor(req, tx, ctx, body.conversationId, "write");
   await assertWatch(req, tx, ctx, board.facts);
-  // No bot is chosen yet: the read tool must be granted to some live bot (the cell's `toolFilter.include`).
+  // No bot is chosen yet: the read tool must be granted to a bot that could report on THIS board for the caller (the
+  // dialog's own bot set), never to just any bot of the organization (CR-01: an org-secret connector's records would
+  // otherwise reach a member with no bot of the board involved). No such bot: 400 `tool_not_allowed`.
+  const bots = await boardBots(tx, ctx, { userId, conv: board.conv });
   const server = await connectorWithTools(tx, {
     serverId: body.mcpServerId,
-    agentId: null,
+    agentId: bots.map((b) => b.id),
     readTool: body.readTool,
   });
   await assertShared(tx, {
-    userId: authOf(req).userId,
+    userId,
     conversationId: board.conv.id,
     channelName: board.conv.name,
     server,

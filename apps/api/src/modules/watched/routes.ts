@@ -13,6 +13,7 @@ import {
   WatchOptions,
   WatchOptionsQuery,
 } from "@ocw/contracts";
+import type { FastifyRequest } from "fastify";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { HttpError } from "../../lib/errors";
 import { previewOf } from "./cards";
@@ -72,11 +73,19 @@ export function registerWatchedRoutes(app: App, core: Core, ctx: WatchedCtx): vo
     },
   );
 
-  // R9: read the record once for the link dialog; nothing is stored. Same rights and audience rule as a link.
+  // R9: read the record once for the link dialog; nothing is stored. Same rights and audience rule as a link, through
+  // a bot of the board (CR-01), and at most 30 reads a minute per person (Redis-counted), so it is no enumeration tool.
+  const previewLimit = app.rateLimit({
+    max: 30,
+    timeWindow: "1 minute",
+    keyGenerator: (req: FastifyRequest) => `watched-preview:${req.auth?.userId ?? req.ip}`,
+  });
   app.post(
     "/watched-records/preview",
     {
       ...user,
+      // After requireUser, so the key is the person, not the IP.
+      preHandler: [core.identity.requireUser, previewLimit],
       schema: { tags, body: PreviewWatchedRecordRequest, response: { 200: PreviewWatchedRecordResponse } },
     },
     async (req, reply) => {

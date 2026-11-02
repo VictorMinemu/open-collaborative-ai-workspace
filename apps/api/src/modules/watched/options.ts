@@ -1,12 +1,11 @@
 import { isDangerousToolName, type WatchOptionConnector, type WatchOptions } from "@ocw/contracts";
-import { agents, botToolGrants, conversationMembers, mcpServers, mcpServerTools, type Tx } from "@ocw/db";
-import { and, asc, eq, inArray, isNull, ne } from "drizzle-orm";
+import { botToolGrants, mcpServers, mcpServerTools, type Tx } from "@ocw/db";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { authOf } from "../../core";
-import { decideConversation } from "../automation";
 import { activeShare, connectionStatusFor, readersOf } from "../connectors";
 import { channelResource } from "../organization";
-import { boardFor, type WatchedCtx } from "./service";
+import { boardBots, boardFor, type WatchedCtx } from "./service";
 
 /**
  * The watch dialog's options (07.6-17, D-07, Pitfall 8): what the viewer may link on one board, decided with the link's
@@ -31,25 +30,10 @@ export async function watchOptions(
   const board = await boardFor(req, tx, ctx, conversationId, "write");
   await ctx.perms.assertCan(req, tx, "record.watch", channelResource(board.facts));
 
-  const members = await tx
-    .select({ id: agents.id, name: agents.name })
-    .from(conversationMembers)
-    .innerJoin(agents, eq(agents.id, conversationMembers.memberId))
-    .where(
-      and(
-        eq(conversationMembers.conversationId, board.conv.id),
-        eq(conversationMembers.memberKind, "agent"),
-        isNull(agents.deletedAt),
-        ne(agents.status, "disabled"),
-      ),
-    )
-    .orderBy(asc(agents.name), asc(agents.id));
-  const bots: WatchOptions["bots"] = [];
-  for (const m of members) {
-    if ((await decideConversation(tx, ctx.perms, { agentId: m.id, userId, conv: board.conv })) === null) {
-      bots.push({ id: m.id, displayName: m.name });
-    }
-  }
+  const bots: WatchOptions["bots"] = (await boardBots(tx, ctx, { userId, conv: board.conv })).map((b) => ({
+    id: b.id,
+    displayName: b.name,
+  }));
   const botIds = bots.map((b) => b.id);
 
   const servers = await tx

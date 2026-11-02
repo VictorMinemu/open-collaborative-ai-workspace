@@ -590,6 +590,47 @@ describe("preview (R9): read once, nothing stored", () => {
     );
     await fails(s.alex.request("POST", "/api/v1/watched-records/preview", body()), 403);
   });
+
+  it("CR-01: a board with no bot granted the read tool is 400 tool_not_allowed and the ERP is never called", async () => {
+    // A bot of the organization holds the grant (Ops helper), but it is not on #scratch: the preview may not use it.
+    const scratch = (
+      await ok(
+        s.victor.request("POST", "/api/v1/channels", {
+          name: "scratch",
+          layout: "board",
+          visibility: "public",
+        }),
+      )
+    ).id as string;
+    const calls = erp.state.calls.length;
+    await fails(
+      s.victor.request("POST", "/api/v1/watched-records/preview", body({ conversationId: scratch })),
+      400,
+      "tool_not_allowed",
+    );
+    // A bot on the board that was never granted the read tool does not open it either.
+    const idle = (
+      await ok(
+        s.victor.request("POST", "/api/v1/agents", {
+          name: "Idle helper",
+          username: "idlehelper",
+          instructions: "You idle.",
+          modelProvider: "mock",
+          modelId: "mock-1",
+        }),
+      )
+    ).id as string;
+    await ok(s.victor.request("POST", `/api/v1/channels/${scratch}/members`, { kind: "agent", id: idle }));
+    await fails(
+      s.victor.request("POST", "/api/v1/watched-records/preview", body({ conversationId: scratch })),
+      400,
+      "tool_not_allowed",
+    );
+    expect(erp.state.calls.length).toBe(calls);
+    // Once the granted bot joins the board, the same preview reads the record.
+    await ok(s.victor.request("POST", `/api/v1/channels/${scratch}/members`, { kind: "agent", id: opsId }));
+    await ok(s.victor.request("POST", "/api/v1/watched-records/preview", body({ conversationId: scratch })));
+  });
 });
 
 describe("audience: a per-member connector needs the linker's share in the board (Pitfall 8)", () => {
