@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { createServer, type Server } from "node:net";
+import { createServer, type Server, type Socket } from "node:net";
 import { networkInterfaces } from "node:os";
 import { ImapFlow } from "imapflow";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { classifyAddress } from "../../lib/egress";
 import { type GreenMail, type GreenMailUser, startGreenMail } from "../../testing-mail";
 import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
@@ -546,6 +546,39 @@ describe("connections fail safely and visibly: fixed codes, verified TLS, no pri
     port: gm.imapPort,
     folder: "INBOX",
     ...extra,
+  });
+
+  // Each test starts with a fresh per-person budget for the test route (6 a minute, MD-03).
+  beforeEach(async () => {
+    const redis = core().bus.pub;
+    for await (const keys of redis.scanIterator({ MATCH: "ocw:rl:*mbx-test:*", COUNT: 100 })) {
+      if (keys.length > 0) await redis.del(keys);
+    }
+  });
+
+  it("POST /mailboxes/test: 6 a minute per person and one at a time, so it is no port probe or lockout tool (07.6 review A MD-03)", async () => {
+    const sockets = new Set<Socket>();
+    const silent: Server = createServer((socket) => {
+      sockets.add(socket);
+    });
+    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve));
+    const port = (silent.address() as { port: number }).port;
+    const key = await mailKey("tester@acme.test", { hosts: [`greenmail:${port}`] });
+    const body = testBody(key, { port });
+    // A server that accepts and never greets holds the first test…
+    const first = tryIt(body);
+    await vi.waitFor(() => expect(sockets.size).toBe(1), { timeout: 5_000, interval: 20 });
+    // …and a second one from the same person is refused while it runs.
+    const second = await tryIt(body);
+    expect(second.status).toBe(409);
+    expect(codeOf(second)).toBe("mailbox_test_in_progress");
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => silent.close(() => resolve()));
+    expect(await ok(first)).toEqual({ ok: false, code: "unreachable" });
+    // Four more (a closed port answers at once) reach the budget of six; the seventh waits for the next minute.
+    for (let i = 0; i < 4; i++) expect(await ok(tryIt(body))).toEqual({ ok: false, code: "unreachable" });
+    const seventh = await tryIt(body);
+    expect(seventh.status).toBe(429);
   });
 
   it("POST /mailboxes/test: the message count, nothing saved, audited without the password", async () => {

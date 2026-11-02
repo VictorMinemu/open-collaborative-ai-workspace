@@ -578,6 +578,38 @@ export async function testMailbox(
   opts: { egress?: EgressResolver; createClient?: ImapClientFactory } = {},
 ): Promise<MailboxTestResult> {
   const userId = authOf(req).userId;
+  // One test at a time per person (07.6 review A MD-03): each one holds a socket to an outside host for up to a
+  // minute, so a person cannot fan them out as a port probe or hammer a shared mailbox's sign-in.
+  const slot = `${tenant(req).organizationId}:${userId}`;
+  if (testsInFlight.has(slot)) {
+    throw new HttpError(
+      409,
+      "mailbox_test_in_progress",
+      "A connection test is already running. Wait for it.",
+    );
+  }
+  testsInFlight.add(slot);
+  try {
+    return await runMailboxTest(core, perms, req, userId, body, opts);
+  } finally {
+    testsInFlight.delete(slot);
+  }
+}
+
+/** People with a connection test running in this instance (the route also has a per-person rate limit). */
+const testsInFlight = new Set<string>();
+
+/** Tests per person and minute on `POST /mailboxes/test` (MD-03). */
+const MAILBOX_TESTS_PER_MINUTE = 6;
+
+async function runMailboxTest(
+  core: Core,
+  perms: PermissionService,
+  req: FastifyRequest,
+  userId: string,
+  body: MailboxTestRequest,
+  opts: { egress?: EgressResolver; createClient?: ImapClientFactory },
+): Promise<MailboxTestResult> {
   const check = await core.db.withTenant(tenant(req), async (tx) => {
     if (!(await canCreate(perms, tx, { userId, req }))) {
       throw new HttpError(403, "not_allowed", "You can't create automations. Ask an admin.");
@@ -617,10 +649,20 @@ export async function testMailbox(
 export function registerMailboxRoutes(app: App, core: Core, deps: AutomationSeamDeps): void {
   const user = { config: { authz: "user" as const }, preHandler: [core.identity.requireUser] };
   const tags = ["automations"];
+  // Per person, checked after requireUser so the key is the user (MD-03): six connection tests a minute.
+  const testLimit = app.rateLimit({
+    max: MAILBOX_TESTS_PER_MINUTE,
+    timeWindow: "1 minute",
+    keyGenerator: (req: FastifyRequest) => `mbx-test:${req.auth?.userId ?? req.ip}`,
+  });
 
   app.post(
     "/mailboxes/test",
-    { ...user, schema: { tags, body: MailboxTestRequest, response: { 200: MailboxTestResult } } },
+    {
+      ...user,
+      preHandler: [core.identity.requireUser, testLimit],
+      schema: { tags, body: MailboxTestRequest, response: { 200: MailboxTestResult } },
+    },
     async (req, reply) => {
       reply.header("cache-control", "no-store");
       return testMailbox(core, deps.perms, req, req.body);
