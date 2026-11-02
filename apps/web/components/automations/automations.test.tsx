@@ -11,6 +11,7 @@ import {
   cronToSchedule,
   defaultSchedule,
   nextRelative,
+  rowOpenTarget,
   runOpenHref,
   runReasonSentence,
   type ScheduleValue,
@@ -62,6 +63,28 @@ describe("the editor's base version after its own Pause / Resume (07.6 review C 
     expect(baseVersionAfter(3, 4, 5)).toBe(3);
     // Nothing loaded yet: nothing to advance.
     expect(baseVersionAfter(null, 4, 5)).toBeNull();
+  });
+});
+
+describe("where a row opens (07.6 review C LO-03)", () => {
+  const ME = "01a11635-d6e7-7c87-9f17-0000000000a1";
+  const LENA = "01a11635-d6e7-7c87-9f17-0000000000a2";
+  const row = (actionKind: "agent_turn" | "digest", runAs: string) => ({
+    id: "01a11635-d6e7-7c87-9f17-0000000000c1",
+    actionKind,
+    runAs: { id: runAs },
+  });
+  it("my digest opens my Settings › Digest; Lena's digest opens its runs, never my own settings", () => {
+    expect(rowOpenTarget(row("digest", ME), ME)).toEqual({ kind: "digest_settings" });
+    expect(rowOpenTarget(row("digest", LENA), ME)).toEqual({
+      kind: "editor",
+      id: "01a11635-d6e7-7c87-9f17-0000000000c1",
+      tab: "runs",
+    });
+    expect(rowOpenTarget(row("agent_turn", LENA), ME)).toEqual({
+      kind: "editor",
+      id: "01a11635-d6e7-7c87-9f17-0000000000c1",
+    });
   });
 });
 

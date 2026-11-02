@@ -577,6 +577,21 @@ export function runOpenHref(run: AutomationRun, a: Pick<Automation, "target">): 
 }
 
 /**
+ * Where a row of the list opens (07.6 review C LO-03): the viewer's own digest is their Settings › Digest; someone
+ * else's digest (a manager in "Everyone's automations") opens read-only on its runs in the editor, never the viewer's
+ * own settings page; any other automation opens in the editor.
+ */
+export function rowOpenTarget(
+  a: Pick<Automation, "id" | "actionKind"> & { runAs: Pick<Automation["runAs"], "id"> },
+  me: string | null,
+): { kind: "digest_settings" } | { kind: "editor"; id: string; tab?: "runs" } {
+  if (a.actionKind !== "digest") return { kind: "editor", id: a.id };
+  return me !== null && a.runAs.id === me
+    ? { kind: "digest_settings" }
+    : { kind: "editor", id: a.id, tab: "runs" };
+}
+
+/**
  * The editor's base version after its own Pause or Resume (which bump the version, 07.6 review C ME-04): the new one
  * when the form was loaded from the version the action started from, so the next save sends it (no false "changed
  * while you were editing"); unchanged otherwise, so a change made meanwhile still answers 409.

@@ -38,6 +38,7 @@ import {
   nextRelative,
   RESULT_TONE,
   resumedText,
+  rowOpenTarget,
   runResult,
   statusWord,
   targetName,
@@ -225,9 +226,11 @@ export function AutomationsPage() {
                     me={me}
                     everyone={scope === "all"}
                     highlight={fresh === a.id}
-                    onOpen={() =>
-                      a.actionKind === "digest" ? router.push("/settings/digest") : go({ edit: a.id })
-                    }
+                    onOpen={() => {
+                      const to = rowOpenTarget(a, me);
+                      if (to.kind === "digest_settings") router.push("/settings/digest");
+                      else go(to.tab ? { edit: to.id, tab: to.tab } : { edit: to.id });
+                    }}
                     onRuns={() => go({ edit: a.id, tab: "runs" })}
                   />
                 ))}
@@ -513,9 +516,10 @@ function RowMenu({
 
   const items: ReactNode[] = [];
   if (digest) {
+    // Settings › Digest is always the viewer's own: someone else's digest opens on its runs (LO-03).
     items.push(
       <DropdownMenuItem key="settings" onClick={onOpen}>
-        Digest settings
+        {own ? "Digest settings" : "Runs"}
       </DropdownMenuItem>,
     );
     if (own) {
