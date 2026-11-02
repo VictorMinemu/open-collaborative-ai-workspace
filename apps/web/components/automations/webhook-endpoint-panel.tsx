@@ -227,6 +227,7 @@ export function WebhookEndpointPanel({
         onChange={onInbound}
         errors={errors}
         payload={e.lastPayload}
+        delivered={e.deliveries.length > 0}
         disabled={disabled}
       />
 

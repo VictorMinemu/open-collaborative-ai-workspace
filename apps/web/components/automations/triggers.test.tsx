@@ -210,6 +210,14 @@ describe("JSON-pointer mapping (UI-SPEC Surface 3)", () => {
       />,
     );
     expect(hostile).not.toContain("<img");
+    // A manager reads deliveries without their payload: no preview, and no "send a test event".
+    const manager = text(
+      render(
+        <InboundMapping value={value} onChange={() => undefined} errors={{}} payload={null} delivered />,
+      ),
+    );
+    expect(manager).toContain("Leave empty to use the whole payload.");
+    expect(manager).not.toContain("Send a test event");
   });
 });
 

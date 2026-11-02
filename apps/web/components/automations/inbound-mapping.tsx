@@ -21,6 +21,7 @@ export function InboundMapping({
   onChange,
   errors,
   payload,
+  delivered = false,
   disabled,
 }: {
   value: InboundValue;
@@ -28,6 +29,8 @@ export function InboundMapping({
   errors: InboundErrors;
   /** The last delivery's parsed body (the owner's), or null when there is none to read. */
   payload: unknown | null;
+  /** Deliveries exist but their payload is not the viewer's to read (a manager) or was cleared: no preview. */
+  delivered?: boolean;
   disabled?: boolean;
 }) {
   const id = useId();
@@ -90,7 +93,9 @@ export function InboundMapping({
       <p id={`${id}-hint`} className="text-muted-foreground text-xs">
         {has
           ? "Values come from the last delivery. Leave empty to use the whole payload."
-          : "Send a test event to preview values."}
+          : delivered
+            ? "Leave empty to use the whole payload."
+            : "Send a test event to preview values."}
       </p>
     </fieldset>
   );
