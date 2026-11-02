@@ -111,7 +111,15 @@ describe("validateSchedule (the save and the preview share it)", () => {
   });
 
   it("the UI presets are all valid at the default 15-minute minimum", () => {
-    for (const cron of ["15 * * * *", "0 9 * * *", "0 9 * * 1-5", "0 17 * * 5", "0 9 1 * *", "0 9 28 * *", "45 23 L * *"]) {
+    for (const cron of [
+      "15 * * * *",
+      "0 9 * * *",
+      "0 9 * * 1-5",
+      "0 17 * * 5",
+      "0 9 1 * *",
+      "0 9 28 * *",
+      "45 23 L * *",
+    ]) {
       expect(validateSchedule({ cron, timeZone: "Europe/Madrid" }, 15, now), cron).toEqual({ ok: true });
     }
   });
