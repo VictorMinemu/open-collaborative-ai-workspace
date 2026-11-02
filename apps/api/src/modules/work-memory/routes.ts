@@ -132,8 +132,8 @@ async function summaryFor(
   }
 
   // 07.10 D-14: the team project is named to this viewer exactly as on the session list and detail (the creator, or
-  // whoever may open the project); anyone else who reads the session (the D-11 device owner outside it) gets no unit
-  // and no decision note, which may quote it.
+  // whoever may open the project); anyone else who reads the session (the D-11 device owner outside it) gets no unit,
+  // no decider and no decision note, which may quote it.
   if (unit) {
     const [row] = await tx
       .select({ path: orgUnits.path })
@@ -144,6 +144,8 @@ async function summaryFor(
     if (!(await projectNamedFor(tx, { viewerId, createdBy: s.createdBy, project, filter }))) {
       unit = null;
       decisionNote = null;
+      // Who decided ties the session to that project's leads (07.6 review C ME-02).
+      decidedBy = null;
     }
   }
 

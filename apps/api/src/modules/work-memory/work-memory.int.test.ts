@@ -596,14 +596,54 @@ describe("consent, cost, repetition and audience", () => {
     expect(await ok(memoryOf(marta, s6))).toMatchObject({ unit: { id: billing.unitId, name: "Billing" } });
 
     await ok(admin.request("DELETE", `/api/v1/units/${billing.unitId}/members/${anaId}`));
-    try {
+    /** Ana's view in `status`: no project, no decider, no note (07.6 review C ME-02). */
+    const hidden = async (status: string) => {
       const m = await ok(memoryOf(ana, s6));
-      expect(m).toMatchObject({ status: "none", unit: null, canPropose: false });
-      for (const secret of ["Billing", billing.unitId]) {
-        expect(JSON.stringify(m), `memory carried "${secret}"`).not.toContain(secret);
+      expect(m).toMatchObject({ status, unit: null, decidedBy: null, decisionNote: null, canPropose: false });
+      for (const secret of ["Billing", billing.unitId, "Marta", martaId, "billing lead note"]) {
+        expect(JSON.stringify(m), `memory carried "${secret}" (${status})`).not.toContain(secret);
       }
+    };
+    const decide = async (outcome: "approved" | "denied") => {
+      const id = (await ok(memoryOf(marta, s6))).proposalId as string;
+      const detail = await ok(marta.request("GET", `/api/v1/approvals/${id}`));
+      await ok(
+        marta.request("POST", `/api/v1/approvals/${id}/decision`, {
+          outcome,
+          actionHash: detail.actionHash,
+          note: "billing lead note",
+        }),
+      );
+    };
+    try {
+      await hidden("none");
       // The creator still reads it named (D-12).
       expect(await ok(memoryOf(marta, s6))).toMatchObject({ unit: { id: billing.unitId, name: "Billing" } });
+
+      // Pending, then applied by Marta (a lead may decide her own session's summary, ADR-0023 §15).
+      expect((await propose(marta, s6)).status).toBe(202);
+      expect(await drain()).toBe(1);
+      await hidden("pending");
+      await decide("approved");
+      expect(await ok(memoryOf(marta, s6))).toMatchObject({
+        status: "applied",
+        decidedBy: { id: martaId, displayName: "Marta" },
+      });
+      await hidden("applied");
+
+      // New work, proposed again, denied.
+      await restartWithTurn(marta, s6, "Check the totals too");
+      await complete(marta, s6);
+      await drain();
+      expect((await propose(marta, s6)).status).toBe(202);
+      expect(await drain()).toBe(1);
+      await decide("denied");
+      expect(await ok(memoryOf(marta, s6))).toMatchObject({
+        status: "denied",
+        decidedBy: { id: martaId, displayName: "Marta" },
+        decisionNote: "billing lead note",
+      });
+      await hidden("denied");
     } finally {
       await ok(
         admin.request("POST", `/api/v1/units/${billing.unitId}/members`, { userId: anaId, role: "member" }),
