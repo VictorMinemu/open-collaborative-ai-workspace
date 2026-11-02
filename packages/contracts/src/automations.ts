@@ -80,6 +80,11 @@ export const AutomationRunReason = z.enum([
   "paused",
   "no_reply",
   "delivery_failed",
+  // The personal digest (07.6-13): skipped with nothing new (skip-empty on); sent without its AI summary at the
+  // person's AI chat cap or when the summary call failed (the run is still answered: the list was delivered).
+  "nothing_new",
+  "summary_skipped_limit",
+  "summary_failed",
 ]);
 export type AutomationRunReason = z.infer<typeof AutomationRunReason>;
 

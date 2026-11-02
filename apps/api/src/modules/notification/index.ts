@@ -13,6 +13,8 @@ export {
   type NotificationDeps,
   notifyUsers,
   unreadCountFor,
+  // 07.6-13: the personal digest lists unread notifications through the inbox's own visibility rule.
+  visible as visibleNotifications,
 } from "./service";
 export { snippetOf } from "./snippet";
 
