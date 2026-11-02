@@ -114,6 +114,7 @@ const HEAD_ONLY = [
   "20261030071129_automations",
   "20261030071644_bots_off_automation_backfill",
   "20261102205627_automation_events_board_card_idx",
+  "20261102205808_automation_events_purge_thread_key",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [

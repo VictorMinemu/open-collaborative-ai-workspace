@@ -3840,7 +3840,7 @@ export const automationEvents = appSchema.table(
     check(
       "automation_events_purged_check",
       sql`${t.contentPurgedAt} is null or (${t.subject} is null and ${t.sender} is null and ${t.bodyText} is null
-        and ${t.bodyJson} is null)`,
+        and ${t.bodyJson} is null and ${t.threadKey} is null)`,
     ),
   ],
 );

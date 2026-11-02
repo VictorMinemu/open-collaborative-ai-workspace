@@ -763,17 +763,24 @@ describe("storms and stale content are contained (P-09, Pitfalls 1–3)", () => 
     expect(await core().jobs.drain("maintenance.daily")).toBe(1);
 
     const purged = await eventRow(old);
+    expect(before.thread_key).toBeTruthy();
     expect(purged).toMatchObject({
       subject: null,
       sender: null,
       body_text: null,
       body_json: null,
+      // A thread key is payload-derived (an e-mail address, a customer id): it goes with the content (LO-01).
+      thread_key: null,
       id: old,
       result: "accepted",
       message_id: before.message_id,
       external_id: before.external_id,
     });
     expect(purged.content_purged_at).not.toBeNull();
+    // The schema holds it too: a purged row cannot carry a thread key again.
+    await expect(
+      s.su.query("update app.automation_events set thread_key = 'x' where id = $1", [old]),
+    ).rejects.toThrow(/automation_events_purged_check/);
     expect(await eventRow(recent)).toMatchObject({
       subject: "Recent order",
       sender: "orders@shop.example",

@@ -521,8 +521,9 @@ export async function inboundDelivery(
 }
 
 /**
- * The 30-day retention (Pitfall 3, `AUTOMATION_LIMITS.eventRetentionDays`): the subject, sender and bodies of older
- * items are cleared and `content_purged_at` set; ids, results, reasons and links stay. Ids come from the definer
+ * The 30-day retention (Pitfall 3, `AUTOMATION_LIMITS.eventRetentionDays`): the subject, sender, bodies and thread key
+ * of older items are cleared and `content_purged_at` set; ids, results, reasons and links stay (a later item can no
+ * longer follow up on a purged one: it starts its own thread). Ids come from the definer
  * function `app.expired_automation_events`; each organization's batch is cleared in its own `withTenant`.
  */
 export async function purgeInbound(core: Core, now: Date = new Date()): Promise<number> {
@@ -546,6 +547,8 @@ export async function purgeInbound(core: Core, now: Date = new Date()): Promise<
               sender: null,
               bodyText: null,
               bodyJson: sql`null`,
+              // Payload-derived (an e-mail address, a customer id): outside content like the rest (LO-01).
+              threadKey: null,
               contentPurgedAt: now.toISOString(),
             })
             .where(and(inArray(automationEvents.id, ids), isNull(automationEvents.contentPurgedAt)))
