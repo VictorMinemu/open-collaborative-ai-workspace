@@ -95,6 +95,12 @@ const inboundJobs = async (eventId: string) =>
     ).rows[0].n,
   );
 
+const allInboundJobs = async () =>
+  Number(
+    (await s.su.query("select count(*)::int as n from pgboss.job where name = 'automation.inbound'")).rows[0]
+      .n,
+  );
+
 const audits = async (action: string, resourceId: string) =>
   (
     await s.su.query(
@@ -115,7 +121,9 @@ beforeAll(async () => {
   await s.setPolicy({ enabled: true });
   ({ client: ana, userId: anaId } = await invite(s.stack, s.victor, "ana@example.test", "Ana Díaz", "lead"));
   ordersId = (
-    await ok(s.victor.request("POST", "/api/v1/channels", { name: "orders", visibility: "private" }) as Promise<Res>)
+    await ok(
+      s.victor.request("POST", "/api/v1/channels", { name: "orders", visibility: "private" }) as Promise<Res>,
+    )
   ).id as string;
   for (const member of [
     { kind: "agent", id: s.scoutId },
@@ -139,12 +147,16 @@ describe("Ana's Shopify orders webhook: a signed POST becomes a card in #orders 
     expect(hook.publicId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
 
     // The secret is in the create response only: never in the automation or the endpoint DTO.
-    const automation = (await ok(ana.request("GET", `/api/v1/automations/${hook.id}`) as Promise<Res>)) as Json;
+    const automation = (await ok(
+      ana.request("GET", `/api/v1/automations/${hook.id}`) as Promise<Res>,
+    )) as Json;
     expect(automation.trigger.webhook).toEqual({
       publicId: hook.publicId,
       url: `${s.stack.env.OCW_PUBLIC_API_URL}/api/v1/hooks/${hook.publicId}`,
     });
-    const endpoint = (await ok(ana.request("GET", `/api/v1/automations/${hook.id}/webhook`) as Promise<Res>)) as Json;
+    const endpoint = (await ok(
+      ana.request("GET", `/api/v1/automations/${hook.id}/webhook`) as Promise<Res>,
+    )) as Json;
     expect(endpoint).toMatchObject({
       publicId: hook.publicId,
       url: `${s.stack.env.OCW_PUBLIC_API_URL}/api/v1/hooks/${hook.publicId}`,
@@ -161,7 +173,8 @@ describe("Ana's Shopify orders webhook: a signed POST becomes a card in #orders 
     // Sealed in the secret store as `webhook_secret`; no column holds the value.
     const row = await endpointRow(hook.publicId);
     expect(row.automation_id).toBe(hook.id);
-    const secret = (await s.su.query("select * from app.secrets where id = $1", [row.secret_id])).rows[0] as Json;
+    const secret = (await s.su.query("select * from app.secrets where id = $1", [row.secret_id]))
+      .rows[0] as Json;
     expect(secret.kind).toBe("webhook_secret");
     const secretBase64 = hook.secret.slice("whsec_".length);
     expect(JSON.stringify(secret)).not.toContain(secretBase64);
@@ -218,7 +231,9 @@ describe("Ana's Shopify orders webhook: a signed POST becomes a card in #orders 
     expect(((await runsOf(hook.id))[0] as Json).status).toBe("delivered");
 
     // The owner sees the delivery and the payload to pick pointers from.
-    const after = (await ok(ana.request("GET", `/api/v1/automations/${hook.id}/webhook`) as Promise<Res>)) as Json;
+    const after = (await ok(
+      ana.request("GET", `/api/v1/automations/${hook.id}/webhook`) as Promise<Res>,
+    )) as Json;
     expect(after.deliveries).toEqual([
       {
         id: event.id,
@@ -226,9 +241,168 @@ describe("Ana's Shopify orders webhook: a signed POST becomes a card in #orders 
         result: "accepted",
         reason: null,
         duplicateCount: 0,
-        link: { conversationId: ordersId, messageId: handled.message_id, threadRootId: null, cardNumber: null },
+        link: {
+          conversationId: ordersId,
+          messageId: handled.message_id,
+          threadRootId: null,
+          cardNumber: null,
+        },
       },
     ]);
     expect(after.lastPayload).toEqual(ORDER);
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: forgery and replay
+
+const REFUSED = { error: { code: "unauthorized", message: "The request isn't signed correctly" } };
+
+describe("forgery and replay fail (Task 2, D-02, D-07, Pitfall 4)", () => {
+  it("a wrong signature answers 401 with a fixed body, records `signature` and leaves no event or job", async () => {
+    const hook = await createHook({ name: "Forged orders" });
+    const row = await endpointRow(hook.publicId);
+    const body = JSON.stringify(ORDER);
+    const forged = signedHeaders(`whsec_${Buffer.alloc(32, 1).toString("base64")}`, body);
+    const jobsBefore = await allInboundJobs();
+    const res = await post(hook.publicId, body, forged);
+    expect(res).toEqual({ status: 401, body: REFUSED });
+    const after = await endpointRow(hook.publicId);
+    expect(after.last_rejected_reason).toBe("signature");
+    expect(Date.parse(after.last_rejected_at)).toBeGreaterThan(Date.now() - 60_000);
+    expect(await eventsOf(row.id)).toEqual([]);
+    expect(await allInboundJobs()).toBe(jobsBefore);
+
+    // A tampered body under a signature made for the original is the same 401.
+    const headers = signedHeaders(hook.secret, body);
+    expect(await post(hook.publicId, body.replace("#1001", "#1002"), headers)).toEqual({
+      status: 401,
+      body: REFUSED,
+    });
+    // Missing headers too.
+    expect(await post(hook.publicId, body, { "content-type": "application/json" })).toEqual({
+      status: 401,
+      body: REFUSED,
+    });
+    expect(await eventsOf(row.id)).toEqual([]);
+
+    // The owner sees why; the sender never does.
+    const endpoint = (await ok(
+      ana.request("GET", `/api/v1/automations/${hook.id}/webhook`) as Promise<Res>,
+    )) as Json;
+    expect(endpoint.lastRejectedReason).toBe("signature");
+    expect(endpoint.deliveries).toEqual([]);
+  });
+
+  it("an old or a future timestamp answers the same 401 and records `timestamp`", async () => {
+    const hook = await createHook({ name: "Late orders" });
+    const row = await endpointRow(hook.publicId);
+    const body = JSON.stringify(ORDER);
+    for (const offset of [-301_000, 301_000]) {
+      const res = await post(
+        hook.publicId,
+        body,
+        signedHeaders(hook.secret, body, { at: new Date(Date.now() + offset) }),
+      );
+      expect(res).toEqual({ status: 401, body: REFUSED });
+      expect((await endpointRow(hook.publicId)).last_rejected_reason).toBe("timestamp");
+    }
+    expect(await eventsOf(row.id)).toEqual([]);
+    // Within the window it is accepted.
+    const fresh = await post(
+      hook.publicId,
+      body,
+      signedHeaders(hook.secret, body, { at: new Date(Date.now() - 240_000) }),
+    );
+    expect(fresh.status).toBe(202);
+  });
+
+  it("a header with two signatures where the second is valid is accepted", async () => {
+    const hook = await createHook({ name: "Multi-signature orders" });
+    const body = JSON.stringify(ORDER);
+    const headers = signedHeaders(hook.secret, body);
+    const other = new Webhook(`whsec_${Buffer.alloc(32, 2).toString("base64")}`).sign(
+      headers["webhook-id"],
+      new Date(Number(headers["webhook-timestamp"]) * 1000),
+      body,
+    );
+    headers["webhook-signature"] = `${other} ${headers["webhook-signature"]}`;
+    expect((await post(hook.publicId, body, headers)).status).toBe(202);
+  });
+
+  it("the same webhook-id twice: 202 then 200, one event with duplicate_count 1 and one job; another URL accepts it", async () => {
+    const hook = await createHook({ name: "Replayed orders" });
+    const row = await endpointRow(hook.publicId);
+    const id = `msg_${randomUUID()}`;
+    expect(await send(hook, ORDER, id)).toEqual({ status: 202, body: { status: "accepted" } });
+    expect(await send(hook, ORDER, id)).toEqual({ status: 200, body: { status: "duplicate" } });
+    const events = await eventsOf(row.id);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ external_id: id, duplicate_count: 1 });
+    expect(events[0]?.last_duplicate_at).toBeTruthy();
+    expect(await inboundJobs(events[0]?.id)).toBe(1);
+
+    const endpoint = (await ok(
+      ana.request("GET", `/api/v1/automations/${hook.id}/webhook`) as Promise<Res>,
+    )) as Json;
+    expect(endpoint.deliveries.map((d: Json) => [d.result, d.duplicateCount])).toEqual([
+      ["duplicate", 1],
+      ["accepted", 1],
+    ]);
+
+    const second = await createHook({ name: "Replayed orders (copy)" });
+    expect((await send(second, ORDER, id)).status).toBe(202);
+    expect(await eventsOf((await endpointRow(second.publicId)).id)).toHaveLength(1);
+  });
+
+  it("rotation issues a new secret once and keeps the previous one valid for 24 hours", async () => {
+    const hook = await createHook({ name: "Rotated orders" });
+    const row = await endpointRow(hook.publicId);
+    const before = Date.now();
+    const rotated = (await ok(
+      ana.request("POST", `/api/v1/automations/${hook.id}/webhook/rotate`) as Promise<Res>,
+    )) as Json;
+    expect(rotated.secret).toMatch(/^whsec_[A-Za-z0-9+/=]{32,120}$/);
+    expect(rotated.secret).not.toBe(hook.secret);
+    const until = Date.parse(rotated.previousValidUntil);
+    expect(until).toBeGreaterThanOrEqual(before + 24 * 3_600_000 - 5_000);
+    expect(until).toBeLessThanOrEqual(Date.now() + 24 * 3_600_000 + 5_000);
+    expect(await audits("webhook_endpoint.secret_rotated", row.id)).toEqual([
+      {
+        actor_kind: "user",
+        user_id: anaId,
+        result: "success",
+        metadata: { endpointId: row.id, automationId: hook.id },
+      },
+    ]);
+
+    const rotatedRow = await endpointRow(hook.publicId);
+    expect(rotatedRow.previous_secret_id).toBe(row.secret_id);
+    expect(rotatedRow.secret_id).not.toBe(row.secret_id);
+    const secretRow = (await s.su.query("select * from app.secrets where id = $1", [rotatedRow.secret_id]))
+      .rows[0] as Json;
+    expect(secretRow.kind).toBe("webhook_secret");
+    expect(JSON.stringify(secretRow)).not.toContain(rotated.secret.slice("whsec_".length));
+
+    const endpoint = (await ok(
+      ana.request("GET", `/api/v1/automations/${hook.id}/webhook`) as Promise<Res>,
+    )) as Json;
+    expect(endpoint.previousValidUntil).toBe(new Date(until).toISOString());
+    expect(JSON.stringify(endpoint)).not.toContain(rotated.secret);
+
+    // Both secrets verify during the grace.
+    expect((await send(hook)).status).toBe(202);
+    expect((await send({ ...hook, secret: rotated.secret })).status).toBe(202);
+
+    // The clock passes the grace: only the new secret verifies.
+    await s.su.query(
+      "update app.webhook_endpoints set previous_valid_until = now() - interval '1 second' where id = $1",
+      [row.id],
+    );
+    expect(await send(hook)).toEqual({ status: 401, body: REFUSED });
+    expect((await send({ ...hook, secret: rotated.secret })).status).toBe(202);
+    const expired = (await ok(
+      ana.request("GET", `/api/v1/automations/${hook.id}/webhook`) as Promise<Res>,
+    )) as Json;
+    expect(expired.previousValidUntil).toBeNull();
   });
 });
