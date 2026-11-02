@@ -113,6 +113,7 @@ const HEAD_ONLY = [
   "20261028214642_runtime_updates",
   "20261030071129_automations",
   "20261030071644_bots_off_automation_backfill",
+  "20261102201704_watched_write_lease",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
