@@ -157,6 +157,8 @@ describe("schedules (P-07)", () => {
       "0 9 1,15 * *",
       "0 9 * JAN MON-FRI",
       " 0 9 * * * ",
+      // The editor's "Every month · Last day" preset (07.6-15); the API's cron-parser reads `L` as the month's last day.
+      "45 23 L * *",
     ]) {
       expect(AutomationSchedule.safeParse({ cron, timeZone: "UTC" }).success, cron).toBe(true);
     }
@@ -165,6 +167,7 @@ describe("schedules (P-07)", () => {
       "0 17 * *",
       "0 17 * * 5 2026",
       "0 17 ? * 5",
+      "0 17 LL * 5",
       "0 17 * * 5; rm -rf",
       "@weekly",
       "x".repeat(101),
@@ -650,6 +653,17 @@ describe("scheduleSummary (UI-SPEC trigger summaries, shared by the run card and
     expect(scheduleSummary("0 0 * * 7")).toBe("Sundays at 12:00 AM");
     expect(scheduleSummary("0 18 3 * *")).toBe("Monthly on day 3 at 6:00 PM");
     expect(scheduleSummary("45 23 L * *")).toBe("Monthly on the last day at 11:45 PM");
+  });
+
+  it("a digest's day list reads as the preset it equals (07.6-15)", () => {
+    expect(scheduleSummary(digestCron(["mon", "tue", "wed", "thu", "fri"], "08:00"))).toBe(
+      "Weekdays at 8:00 AM",
+    );
+    expect(scheduleSummary("0 8 * * 5,4,3,2,1")).toBe("Weekdays at 8:00 AM");
+    expect(scheduleSummary("0 8 * * 0,1,2,3,4,5,6")).toBe("Every day at 8:00 AM");
+    expect(scheduleSummary("0 8 * * 1,2,3,4,5,6")).toBe(
+      "Mondays, Tuesdays, Wednesdays, Thursdays, Fridays and Saturdays at 8:00 AM",
+    );
   });
 
   it("anything else is a custom schedule with its cron", () => {

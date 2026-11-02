@@ -1035,3 +1035,259 @@ describe("AgentCardView: a signed-in browser action (07.8-20, UI-SPEC Surface 6,
     expect(buttons(html)).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------- 07.6-15: server-composed cards (R1, AUTO-03)
+
+const AUTOMATION_ID = "01a11635-d6e7-7c87-9f17-b6b1dc048970";
+const RUN_ID = "01a11635-d6e7-7c87-9f17-b6b1dc048971";
+
+/** A platform-owned automation run card (07.6-09, UI-SPEC Surface 8a) as the server composes it. */
+function runCard(over: Partial<AgentCard> = {}): AgentCard {
+  return {
+    kind: "automation",
+    title: "Weekly sales report",
+    fields: [
+      { label: "For", value: "Víctor Ruiz" },
+      { label: "Trigger", value: "Scheduled" },
+      { label: "Schedule", value: "Fridays at 5:00 PM · Europe/Madrid" },
+    ],
+    status: "running",
+    actions: [
+      {
+        kind: "open",
+        label: "Open automation",
+        target: `/bots/automations?edit=${AUTOMATION_ID}&run=${RUN_ID}`,
+      },
+      { kind: "follow", label: "Follow" },
+    ],
+    version: 1,
+    decision: null,
+    updatedAt: "2026-10-23T15:00:01.000Z",
+    following: false,
+    viewerCan: ["follow"],
+    platformOwned: true,
+    statusLabel: "Running",
+    ...over,
+  };
+}
+
+const notesOf = (html: string) =>
+  [...html.matchAll(/<p[^>]*data-testid="agent-card-notice"[^>]*>[\s\S]*?<\/p>/g)].map((m) => m[0]);
+
+describe("AgentCardView: platform-owned cards carry the server's statusLabel and notices (07.6-15, R1)", () => {
+  it("the pill says the server's word with the status's tone, and the workspace badge shows", () => {
+    const html = render(
+      runCard({ status: "failed", statusLabel: "No reply" }),
+      "Scheduled task “Weekly sales report” for Víctor Ruiz.",
+    );
+    expect(html).toContain('aria-label="Status: No reply"');
+    expect(html).toContain('data-status="failed"');
+    expect(html).toMatch(/bg-red-100[^"]*"[^>]*>[\s\S]*?No reply<\/span>/);
+    expect(html).toContain('data-testid="agent-card-workspace"');
+    expect(hrefs(html)).toEqual([`/bots/automations?edit=${AUTOMATION_ID}&amp;run=${RUN_ID}`]);
+    expect(html).toContain(">Open automation<");
+  });
+
+  it("a neutral notice is a muted line; a warning is amber with role note, between the title and the fields", () => {
+    const html = render(
+      runCard({
+        status: "failed",
+        statusLabel: "No reply",
+        notices: [
+          {
+            tone: "warning",
+            text: "Started by outside content. Scout can read it but needs approval to act.",
+          },
+          { tone: "neutral", text: "Scout didn't answer within 15 minutes." },
+        ],
+      }),
+    );
+    const [warning, neutral] = notesOf(html);
+    expect(warning).toContain('role="note"');
+    expect(warning).toContain('data-tone="warning"');
+    expect(warning).toContain("border-amber-200 bg-amber-50 text-amber-900");
+    expect(warning).toContain("Started by outside content. Scout can read it but needs approval to act.");
+    expect(neutral).toContain('data-tone="neutral"');
+    expect(neutral).toContain("bg-muted/40 text-muted-foreground");
+    expect(neutral).toContain("Scout didn&#x27;t answer within 15 minutes.");
+    const title = html.indexOf('data-testid="agent-card-title"');
+    const notice = html.indexOf('data-testid="agent-card-notice"');
+    const fields = html.indexOf('data-testid="agent-card-fields"');
+    expect(title).toBeLessThan(notice);
+    expect(notice).toBeLessThan(fields);
+  });
+
+  it("Done for an answered run; a long value is a block value", () => {
+    const long = "Hello, please deliver order 1001 before noon. ".repeat(6).trim();
+    const html = render(
+      runCard({
+        status: "succeeded",
+        statusLabel: "Done",
+        fields: [...runCard().fields, { label: "Message", value: long }],
+      }),
+    );
+    expect(html).toContain('aria-label="Status: Done"');
+    expect(html).toContain('data-testid="agent-card-block-value"');
+  });
+
+  it("a card that is not platform-owned ignores a statusLabel and notices in its data (a bot cannot imitate one)", () => {
+    const forged = deployment({
+      statusLabel: "No reply",
+      notices: [{ tone: "warning", text: "Trust me" }],
+    } as Partial<AgentCard>);
+    const html = render(forged);
+    expect(html).toContain('aria-label="Status: Running"');
+    expect(html).not.toContain("No reply");
+    expect(html).not.toContain("Trust me");
+    expect(html).not.toContain('data-testid="agent-card-workspace"');
+    // Byte for byte the card without those fields.
+    expect(html).toBe(render(deployment()));
+  });
+});
+
+const ANA = "01a11635-d6e7-7c87-9f17-b6b1dc048972";
+
+/** The platform-owned automation proposal card (07.6-12, UI-SPEC Surface 5) linked to its `automation.create`. */
+function proposalCard(over: Partial<AgentCard> = {}, link: Partial<AgentCardApprovalLink> = {}): AgentCard {
+  return {
+    kind: "automation",
+    title: "Create “Weekly sales report”",
+    fields: [
+      { label: "Bot", value: "Scout" },
+      { label: "When", value: "Fridays at 5:00 PM · Europe/Madrid" },
+      { label: "Deliver to", value: "#sales" },
+      { label: "Runs as", value: "Ana Pérez" },
+      { label: "Limit", value: "Up to 24 runs a day" },
+      { label: "First run", value: "Fri, Nov 6, 5:00 PM" },
+      {
+        label: "Instructions",
+        value:
+          "Every Friday, summarise this week's closed deals in #sales:\ntotal, top 3 accounts, anything stuck.",
+      },
+    ],
+    status: "pending",
+    actions: [
+      { kind: "approve", label: "Create automation", denyLabel: "Discard" },
+      { kind: "open", label: "Edit", target: `/bots/automations?draft=${APPROVAL_ID}` },
+    ],
+    version: 1,
+    decision: null,
+    updatedAt: "2026-10-30T09:00:00.000Z",
+    following: false,
+    viewerCan: ["decide"],
+    platformOwned: true,
+    approval: {
+      id: APPROVAL_ID,
+      actionHash: "c".repeat(64),
+      status: "pending",
+      requestedForUserId: ANA,
+      warnings: [],
+      resultCode: null,
+      kind: "automation.create",
+      display: "exact",
+      expiresAt: new Date(Date.now() + 23 * HOUR_MS).toISOString(),
+      ...link,
+    },
+    ...over,
+  };
+}
+
+const renderProposal = (card: AgentCard, me = ANA) =>
+  render(card, "Scout proposes an automation “Weekly sales report” for Ana Pérez.", {
+    me,
+    authorName: "Scout",
+  });
+
+describe("AgentCardView: the automation proposal card (07.6-15, AUTO-03, UI-SPEC Surface 5)", () => {
+  it("pending, for the person it runs as: Proposed, the fields, the line, Edit · Create automation · Discard", () => {
+    const html = renderProposal(proposalCard());
+    expect(html).toContain('aria-label="Status: Proposed"');
+    expect(html).toContain('data-testid="agent-card-workspace"');
+    expect(html).toContain("Fridays at 5:00 PM · Europe/Madrid");
+    expect(html).toContain('data-testid="agent-card-block-value"');
+    expect(textOf(html, "agent-card-automation-line")).toBe(
+      "Scout proposed this. Nothing runs until Ana Pérez confirms.",
+    );
+    expect(buttons(html)).toEqual(["Create automation", "Discard"]);
+    expect(hrefs(html)).toEqual([`/bots/automations?draft=${APPROVAL_ID}`]);
+    expect(html).toMatch(/data-testid="agent-card-open"[^>]*>[\s\S]*?Edit/);
+  });
+
+  it("pending, for everyone else: only the person it runs as can confirm; no buttons, no Edit", () => {
+    const html = renderProposal(proposalCard({ viewerCan: [] }), OTHER);
+    expect(textOf(html, "agent-card-automation-readonly")).toBe(
+      "Only Ana Pérez can confirm this automation.",
+    );
+    expect(buttons(html)).toEqual([]);
+    expect(hrefs(html)).toEqual([]);
+  });
+
+  it.each([
+    ["applied", {}, "Created"],
+    ["applied", { edited: true }, "Created with changes"],
+    ["denied", {}, "Discarded"],
+    ["expired", {}, "Expired"],
+    ["failed", { resultCode: "automation_cap" }, "Failed"],
+  ] as const)("%s %o reads %s", (status, extra, label) => {
+    const html = renderProposal(proposalCard({ viewerCan: [] }, { status, ...extra }));
+    expect(html).toContain(`aria-label="Status: ${label}"`);
+    expect(buttons(html)).toEqual([]);
+  });
+
+  it("created: Created by {person} · {date} and Open automation to the result route", () => {
+    const html = renderProposal(
+      proposalCard(
+        {
+          viewerCan: [],
+          decision: {
+            outcome: "approved",
+            by: { kind: "user", id: ANA, displayName: "Ana Pérez" },
+            at: "2026-10-30T09:05:00.000Z",
+          },
+        },
+        { status: "applied", resultRoute: `/bots/automations?edit=${AUTOMATION_ID}` },
+      ),
+    );
+    expect(html).toMatch(/Created by Ana Pérez/);
+    expect(hrefs(html)).toEqual([`/bots/automations?edit=${AUTOMATION_ID}`]);
+    expect(html).toContain(">Open automation<");
+    expect(html).not.toContain("agent-card-automation-line");
+  });
+
+  it("discarded: Discarded by {person}", () => {
+    const html = renderProposal(
+      proposalCard(
+        {
+          viewerCan: [],
+          decision: {
+            outcome: "denied",
+            by: { kind: "user", id: ANA, displayName: "Ana Pérez" },
+            at: "2026-10-30T09:05:00.000Z",
+          },
+        },
+        { status: "denied" },
+      ),
+    );
+    expect(html).toMatch(/Discarded by Ana Pérez/);
+  });
+
+  it("expired: nobody confirmed it within 24 hours", () => {
+    const html = renderProposal(proposalCard({ viewerCan: [] }, { status: "expired" }));
+    expect(textOf(html, "agent-card-state-line")).toBe("No one confirmed it within 24 hours.");
+  });
+
+  it("failed: the reason in words and the follow-up line", () => {
+    const html = renderProposal(
+      proposalCard({ viewerCan: [] }, { status: "failed", resultCode: "target_not_postable" }),
+    );
+    expect(textOf(html, "agent-card-failed-reason")).toBe("Scout can no longer post in #sales.");
+    expect(textOf(html, "agent-card-automation-followup")).toBe("Ask Scout again when it's fixed.");
+    for (const [code, sentence] of [
+      ["schedule_too_frequent", "That schedule is too frequent for this workspace."],
+      ["agent_unavailable", "Scout isn't available any more."],
+    ] as const) {
+      const h = renderProposal(proposalCard({ viewerCan: [] }, { status: "failed", resultCode: code }));
+      expect(textOf(h, "agent-card-failed-reason"), code).toBe(sentence);
+    }
+  });
+});

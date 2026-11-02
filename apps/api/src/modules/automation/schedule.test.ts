@@ -111,9 +111,25 @@ describe("validateSchedule (the save and the preview share it)", () => {
   });
 
   it("the UI presets are all valid at the default 15-minute minimum", () => {
-    for (const cron of ["15 * * * *", "0 9 * * *", "0 9 * * 1-5", "0 17 * * 5", "0 9 1 * *", "0 9 28 * *"]) {
+    for (const cron of [
+      "15 * * * *",
+      "0 9 * * *",
+      "0 9 * * 1-5",
+      "0 17 * * 5",
+      "0 9 1 * *",
+      "0 9 28 * *",
+      "45 23 L * *",
+    ]) {
       expect(validateSchedule({ cron, timeZone: "Europe/Madrid" }, 15, now), cron).toEqual({ ok: true });
     }
+  });
+
+  it("Every month · Last day (07.6-15) runs on each month's last day in the zone", () => {
+    expect(iso(nextRuns(madrid("45 23 L * *"), new Date("2026-10-30T12:00:00Z"), 3))).toEqual([
+      "2026-10-31T22:45:00.000Z", // 23:45 CET on Oct 31
+      "2026-11-30T22:45:00.000Z",
+      "2026-12-31T22:45:00.000Z",
+    ]);
   });
 });
 

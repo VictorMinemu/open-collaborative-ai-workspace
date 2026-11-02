@@ -157,11 +157,12 @@ export function resolveJsonPointer(value: unknown, pointer: string): unknown | u
 
 // ---------------------------------------------------------------- schedules (P-07)
 
-const CRON_FIELD_RE = /^(?:[0-9*,/-]|[A-Za-z]{3})+$/;
+const CRON_FIELD_RE = /^(?:(?:[0-9*,/-]|[A-Za-z]{3})+|L)$/;
 
 /**
  * Five whitespace-separated cron fields of the characters cron allows (digits, `*`, `,`, `-`, `/`, three-letter month
- * and day names). Its meaning and the minimum interval are decided by the API with the same code path as the preview.
+ * and day names), or a lone `L` (the month's last day: the editor's "Every month · Last day", 07.6-15). Its meaning and
+ * the minimum interval are decided by the API with the same code path as the preview.
  */
 export const CronExpression = z
   .string()
@@ -252,6 +253,9 @@ export function scheduleSummary(cron: string): string {
     const days = [...new Set(dow.split(",").map((d) => Number(d) % 7))].sort(
       (a, b) => ((a + 6) % 7) - ((b + 6) % 7),
     );
+    // A digest's days are a list (`digestCron`): Monday to Friday reads as the preset, all seven as every day.
+    if (days.length === 7) return `Every day at ${at}`;
+    if (days.join(",") === "1,2,3,4,5") return `Weekdays at ${at}`;
     return `${listWords(days.map((d) => WEEKDAY_PLURALS[d] as string))} at ${at}`;
   }
   if (dow === "*" && dom === "L") return `Monthly on the last day at ${at}`;
