@@ -52,6 +52,7 @@ import { FullAccessBadge } from "./full-access-badge";
 import { RUNTIMES, StatusChip, StatusDot } from "./meta";
 import { QueuePanel } from "./queue-panel";
 import { SessionFooter } from "./session-footer";
+import { SessionMemoryStrip } from "./session-memory-strip";
 import { projectInitials } from "./session-sidebar";
 import { VisibilityChip } from "./visibility/visibility-chip";
 
@@ -328,6 +329,7 @@ function LoadedSession({
               }
             />
           </div>
+          <SessionMemoryStrip session={session} />
           <div ref={dock} className="grid grid-cols-[minmax(0,1fr)] gap-3 pt-1">
             {pending[0] ? (
               <ApprovalBanner
