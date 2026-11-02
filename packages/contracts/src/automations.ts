@@ -253,6 +253,9 @@ export function scheduleSummary(cron: string): string {
     const days = [...new Set(dow.split(",").map((d) => Number(d) % 7))].sort(
       (a, b) => ((a + 6) % 7) - ((b + 6) % 7),
     );
+    // A digest's days are a list (`digestCron`): Monday to Friday reads as the preset, all seven as every day.
+    if (days.length === 7) return `Every day at ${at}`;
+    if (days.join(",") === "1,2,3,4,5") return `Weekdays at ${at}`;
     return `${listWords(days.map((d) => WEEKDAY_PLURALS[d] as string))} at ${at}`;
   }
   if (dow === "*" && dom === "L") return `Monthly on the last day at ${at}`;

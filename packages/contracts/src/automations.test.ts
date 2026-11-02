@@ -655,6 +655,17 @@ describe("scheduleSummary (UI-SPEC trigger summaries, shared by the run card and
     expect(scheduleSummary("45 23 L * *")).toBe("Monthly on the last day at 11:45 PM");
   });
 
+  it("a digest's day list reads as the preset it equals (07.6-15)", () => {
+    expect(scheduleSummary(digestCron(["mon", "tue", "wed", "thu", "fri"], "08:00"))).toBe(
+      "Weekdays at 8:00 AM",
+    );
+    expect(scheduleSummary("0 8 * * 5,4,3,2,1")).toBe("Weekdays at 8:00 AM");
+    expect(scheduleSummary("0 8 * * 0,1,2,3,4,5,6")).toBe("Every day at 8:00 AM");
+    expect(scheduleSummary("0 8 * * 1,2,3,4,5,6")).toBe(
+      "Mondays, Tuesdays, Wednesdays, Thursdays, Fridays and Saturdays at 8:00 AM",
+    );
+  });
+
   it("anything else is a custom schedule with its cron", () => {
     expect(scheduleSummary("*/20 * * * *")).toBe("Custom schedule (*/20 * * * *)");
     expect(scheduleSummary("0 9 * 1 *")).toBe("Custom schedule (0 9 * 1 *)");
