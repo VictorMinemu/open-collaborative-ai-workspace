@@ -130,6 +130,28 @@ describe("inboundCard", () => {
     const card = inboundCard(mail({ subject: "@channel @sam pay now" }), shop());
     expect(extractMentionHandles(card.summary)).toEqual([]);
   });
+
+  it("a title is inert Markdown in the message body: no link, image, emphasis, code or HTML (07.6 review A LO-02)", () => {
+    const card = inboundCard(
+      mail({
+        subject:
+          "[Reset your password](https://evil.example) ![x](https://evil.example/p.png) **now** `rm` <b>",
+      }),
+      shop({}),
+    );
+    // The card's own title is plain text (rendered as text), so it keeps the characters as they are.
+    expect(card.title).toBe(
+      "[Reset your password](https://evil.example) ![x](https://evil.example/p.png) **now** `rm` <b>",
+    );
+    expect(card.summary).toBe(
+      "Outside content received from Mail · Shop orders: \\[Reset your password\\]\\(https://evil.example\\) " +
+        "!\\[x\\]\\(https://evil.example/p.png\\) \\*\\*now\\*\\* \\`rm\\` \\<b\\>.",
+    );
+    // An owner's automation name is escaped the same way.
+    expect(inboundCard(mail(), { ...shop(), name: "Shop_orders [x](y)" }).summary).toContain(
+      "Mail · Shop\\_orders \\[x\\]\\(y\\):",
+    );
+  });
 });
 
 describe("fullTextReply", () => {
