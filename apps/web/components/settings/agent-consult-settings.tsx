@@ -26,11 +26,11 @@ export const READ_ONLY_NOTE = "Only admins can change this.";
  * what the API already refuses.
  */
 export function AgentConsultSettings() {
-  const canRead = useCan("rule.read");
-  const q = useAgentMessagingSettings(canRead);
+  const mayReadRules = useCan("rule.read");
+  const q = useAgentMessagingSettings(mayReadRules);
   const update = useUpdateAgentMessagingSettings();
   const helperId = useId();
-  if (!canRead) return null;
+  if (!mayReadRules) return null;
 
   // While a change is pending the switch shows where it is going; on error it falls back to the server state.
   const enabled =
