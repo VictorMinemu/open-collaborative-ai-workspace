@@ -324,6 +324,14 @@ describe("agent chains schema (07.7-02)", () => {
     await asApp(A.id, async (q) => {
       await refused(q, "agent_chain_hops_chain_fk", () => hop(q, A, foreign));
     });
+    // CR-B-04: B's message as the question of A's hop fails the question key too (it carries the organization).
+    const foreignQuestion = await question(migratorQ, B, B.a);
+    await asApp(A.id, async (q) => {
+      const c = await chain(q, A);
+      await refused(q, "agent_chain_hops_question_fk", () =>
+        hop(q, A, c, { question_message_id: foreignQuestion }),
+      );
+    });
   });
 
   it("deleting the conversation or the root agent takes the chain and its hops with it", async () => {

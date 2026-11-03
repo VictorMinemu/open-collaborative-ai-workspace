@@ -329,6 +329,8 @@ export const messages = appSchema.table(
     index("messages_conv_seq_idx").on(t.organizationId, t.conversationId, t.seq),
     /** Target of `board_cards_message_fk` (Phase 07.1): a card's root message lives in the card's board channel. */
     unique("messages_id_conversation_uq").on(t.id, t.conversationId),
+    /** Target of composite keys that carry the organization (FKs bypass RLS), e.g. `agent_chain_hops_question_fk`. */
+    unique("messages_org_id_uq").on(t.organizationId, t.id),
     index("messages_thread_idx").on(t.organizationId, t.threadId),
     /** Idempotent posts: the same author + client key (agent idempotencyKey, web clientMessageId) never duplicates. */
     uniqueIndex("messages_author_client_msg_uq")
@@ -820,9 +822,8 @@ export const agentChainHops = appSchema.table(
     refusalReason: text("refusal_reason"),
     sourceEventId: uuid("source_event_id").notNull(),
     targetEventId: uuid("target_event_id"),
-    questionMessageId: uuid("question_message_id")
-      .notNull()
-      .references(() => messages.id, { onDelete: "cascade" }),
+    /** The question message, in the hop's organization (`agent_chain_hops_question_fk`, CR-B-04). */
+    questionMessageId: uuid("question_message_id").notNull(),
     answerMessageId: uuid("answer_message_id"),
     idempotencyKey: text("idempotency_key").notNull(),
     deadlineAt: ts("deadline_at").notNull(),
@@ -858,6 +859,11 @@ export const agentChainHops = appSchema.table(
       name: "agent_chain_hops_parent_fk",
       columns: [t.organizationId, t.chainId, t.parentHopId, t.sourceAgentId, t.rootAgentId],
       foreignColumns: [t.organizationId, t.chainId, t.id, t.targetAgentId, t.sourceAgentId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "agent_chain_hops_question_fk",
+      columns: [t.organizationId, t.questionMessageId],
+      foreignColumns: [messages.organizationId, messages.id],
     }).onDelete("cascade"),
     foreignKey({
       name: "agent_chain_hops_source_fk",
