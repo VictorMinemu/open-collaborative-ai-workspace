@@ -93,6 +93,31 @@ export interface MentionPayload {
       string,
       { untrustedOutput: boolean; sideEffecting: boolean; approval?: "always" | "when_tainted" }
     >;
+    /** 07.7: present only when the turn is offered `ocw_consult_agent` (the bots it may ask here). */
+    consult?: {
+      chainId: string | null;
+      depth: number;
+      targets: Array<{ id: string; handle: string; displayName: string; description: string | null }>;
+    };
+    /** 07.7 D-09: the turn starts tainted (e.g. a consult reply after the consulted bot read web content). */
+    tainted?: boolean;
+  };
+  /** 07.7 D-01: the turn answers a question another bot asked (the asking bot, its chain and this hop's depth). */
+  origin?: Record<string, unknown>;
+}
+
+/**
+ * `agent.consult_reply.v1` (07.7-06): built like a mention of the asking bot in the hop's thread; `message` is the
+ * consulted bot's answer (or the question again when it failed or timed out).
+ */
+export interface ConsultReplyPayload extends MentionPayload {
+  consultReply: {
+    chainId: string;
+    hopId: string;
+    target: { id: string; handle: string; displayName: string };
+    mode: "consult" | "handoff";
+    outcome: "answered" | "failed" | "timed_out";
+    answerMessageId: string | null;
   };
 }
 
@@ -185,7 +210,19 @@ export interface FakeCellOptions {
    * sentence). Off by default, so specs that count a bot's replies are unchanged.
    */
   replyOnDenied?: boolean;
+  /**
+   * Like the real bridge's `finally` (07.7-05/06): after answering a turn that can belong to a consult chain (offered
+   * `ocw_consult_agent`, carrying `origin`, or an `agent.consult_reply.v1`), POST `/turns/:eventId/done` with `replied`
+   * (or `failed` when the reply could not be posted). Other turns report nothing. Off by default.
+   */
+  autoDone?: boolean;
+  /** Never answer (nor report done) for these bot ids: their turns stay open (a Stop or timeout scenario). */
+  holdAgents?: ReadonlySet<string>;
 }
+
+/** 07.7: the consult tool (self-validated by `POST /consultations`, never `/tool-calls`). */
+export const CONSULT_TOOL = "ocw_consult_agent";
+const CONSULT_REPLY_EVENT = "agent.consult_reply.v1";
 
 /**
  * Appended to every simulated reply: ` [turn tools: <sorted turn.tools joined by commas> | none]`. Lets a
@@ -529,24 +566,68 @@ export class FakeCellPlugin {
     });
   }
 
-  private async onEvent(type: string, data: FakeCellEvent["data"]) {
+  /** Every `POST /turns/:eventId/done` this fake cell sent (07.7 `autoDone`), with the status it got. */
+  readonly doneReports: Array<{
+    eventId: string;
+    agentId: string;
+    outcome: "replied" | "failed";
+    status: number;
+  }> = [];
+
+  /**
+   * 07.7 (D-04, P-09): reports a chain turn as done, the real bridge's best-effort `finally` (a failure is recorded,
+   * never thrown).
+   */
+  async turnDone(m: MentionPayload, outcome: "replied" | "failed"): Promise<void> {
+    let status = 0;
+    try {
+      status = (await this.request("POST", `/turns/${m.eventId}/done`, { agentId: m.agent.id, outcome }))
+        .status;
+    } catch {
+      /* unreachable: recorded as status 0 */
+    }
+    this.doneReports.push({ eventId: m.eventId, agentId: m.agent.id, outcome, status });
+  }
+
+  /**
+   * Answers one mention-like turn (a mention, or a consult reply when `directives` is false) and, with `autoDone`,
+   * reports a chain turn done after its reply, like apps/openclaw-channel's bridge (`mayBelongToChain`).
+   */
+  private async answerTurn(m: MentionPayload, type: string, directives: boolean): Promise<void> {
+    if (this.opts.holdAgents?.has(m.agent.id)) return;
+    const chainTurn =
+      (m.turn?.tools ?? []).includes(CONSULT_TOOL) || m.origin !== undefined || type === CONSULT_REPLY_EVENT;
+    let replied = false;
+    try {
+      const calls = [
+        ...(directives ? parseCallDirectives(m.message.text) : []),
+        ...(this.opts.toolCallsFor?.(m) ?? []),
+      ];
+      const body =
+        calls.length > 0
+          ? (await this.simulateToolCalls(m, calls)).join("\n")
+          : (this.opts.replyText ?? identityReply)(m);
+      const links = memberAccountLinks(m);
+      await this.reply(
+        m,
+        body + (links.length > 0 ? `\n${links.join("\n")}` : "") + turnToolsSuffix(m) + turnContextSuffix(m),
+      );
+      replied = true;
+    } finally {
+      if (chainTurn && this.opts.autoDone) await this.turnDone(m, replied ? "replied" : "failed");
+    }
+  }
+
+  async onEvent(type: string, data: FakeCellEvent["data"]) {
     try {
       if (type === "cell.config.changed" && this.opts.autoAck) await this.ackAll();
       if (type === "agent.mention.v1" && this.opts.autoReply) {
-        const m = data as unknown as MentionPayload;
-        const calls = [...parseCallDirectives(m.message.text), ...(this.opts.toolCallsFor?.(m) ?? [])];
-        const body =
-          calls.length > 0
-            ? (await this.simulateToolCalls(m, calls)).join("\n")
-            : (this.opts.replyText ?? identityReply)(m);
-        const links = memberAccountLinks(m);
-        await this.reply(
-          m,
-          body +
-            (links.length > 0 ? `\n${links.join("\n")}` : "") +
-            turnToolsSuffix(m) +
-            turnContextSuffix(m),
-        );
+        await this.answerTurn(data as unknown as MentionPayload, type, true);
+      }
+      if (type === CONSULT_REPLY_EVENT && this.opts.autoReply) {
+        // 07.7-06: the asking bot's return turn, in the hop's thread in reply to the answer (or the question). Answered
+        // like a mention, except that the answer is another bot's text: its `[[call …]]` directives never run.
+        await this.answerTurn(data as unknown as ConsultReplyPayload, type, false);
       }
       if (type === "agent.automation_run.v1" && this.opts.autoReply) {
         // A run is answered like a mention (07.6-06): on the anchor (`inReplyToMessageId` = the event's message) for its
@@ -609,7 +690,8 @@ export class FakeCellPlugin {
    * `ocw_http_request` call `/agent-channel/v1/connectors/list|call` and `/http-requests` (`connectorCall`, 07.4-14);
    * `ocw_work_zone_projects` / `ocw_start_work_zone` call `/agent-channel/v1/work-zone/projects|proposals`
    * (`workZoneCall`, 07.5-12); `ocw_sandbox_*` / `ocw_browser_*` call `/agent-channel/v1/sandbox|browser/<verb>`
-   * (`sandbox` / `browser`, 07.8-08); any other tool asks `/agent-channel/v1/tool-calls` (with the call's `arguments` only when
+   * (`sandbox` / `browser`, 07.8-08); `ocw_consult_agent` calls `/agent-channel/v1/consultations` (`consultCall`,
+   * 07.7-10); any other tool asks `/agent-channel/v1/tool-calls` (with the call's `arguments` only when
    * its delivered flags carry `approval`, 07.5 D-01) and, when allowed, reports a result. One line per call:
    * `Tool <offered name>: allowed | denied (<reason>) | approval_required | approval_pending | approval_denied |
    * approval_used`, `Tool <name>: saved | created | moved | waiting set | read | listed | written | proposed |
@@ -622,6 +704,7 @@ export class FakeCellPlugin {
     const lines: string[] = [];
     const offered = m.turn?.tools ?? [];
     let boardCreates = 0;
+    let consults = 0;
     for (const call of calls) {
       if (isConnectorTool(call.tool)) {
         // The logical connector tool decides `ocw_connector_call` (connectorCall); list and http are offered by name.
@@ -644,6 +727,10 @@ export class FakeCellPlugin {
             ? `Tool ${call.tool}: not available for ${m.message.author.displayName} (${withheld.reason})`
             : `Tool ${call.tool}: not offered`,
         );
+        continue;
+      }
+      if (name === CONSULT_TOOL) {
+        lines.push(`Tool ${call.tool}: ${await this.consultCall(m, call.args, ++consults)}`);
         continue;
       }
       if (isSandboxTool(name)) {
@@ -809,6 +896,40 @@ export class FakeCellPlugin {
       ...(args.body !== undefined ? { body: args.body } : {}),
     });
     return res.status === 200 ? `${res.body.status} ${res.body.body}` : refused(res);
+  }
+
+  /** Every `POST /consultations` the simulated `ocw_consult_agent` made (07.7-10), with the status and body it got. */
+  readonly consultRequests: Array<{ eventId: string; status: number; body: unknown }> = [];
+
+  /**
+   * `ocw_consult_agent` the way apps/openclaw-channel's consult-tool.ts sends it (07.7-05): the target named by the model
+   * (a bot id or `@handle`) must be one of `turn.consult.targets` (else `refused (not_a_target)`, nothing sent); then
+   * `POST /agent-channel/v1/consultations` with only the turn's event and agent, the target's id, the trimmed question,
+   * the mode (default `consult`) and the key `<eventId>:consult:<n>`. Answers the server's sentence, or
+   * `refused (<code>)` (the body's `code`, else the error envelope's, else the HTTP status).
+   */
+  private async consultCall(m: MentionPayload, args: Record<string, unknown>, n: number): Promise<string> {
+    const raw = typeof args.target === "string" ? args.target.trim().replace(/^@/u, "").toLowerCase() : "";
+    const target = (m.turn?.consult?.targets ?? []).find(
+      (t) => raw !== "" && (t.id.toLowerCase() === raw || t.handle.toLowerCase() === raw),
+    );
+    if (!target) return "refused (not_a_target)";
+    const res = await this.request<{
+      ok?: boolean;
+      code?: string;
+      sentence?: string;
+      error?: { code?: string };
+    } | null>("POST", "/consultations", {
+      eventId: m.eventId,
+      agentId: m.agent.id,
+      target: target.id,
+      question: typeof args.question === "string" ? args.question.trim() : "",
+      mode: args.mode === "handoff" ? "handoff" : "consult",
+      idempotencyKey: `${m.eventId}:consult:${n}`,
+    });
+    this.consultRequests.push({ eventId: m.eventId, status: res.status, body: res.body });
+    if (res.status === 200 && res.body?.ok === true) return res.body.sentence ?? "sent";
+    return `refused (${res.body?.code ?? res.body?.error?.code ?? res.status})`;
   }
 
   /** Every grant re-run (07.5 D-02): the card action's event, the granted tool and the lines it produced. */
