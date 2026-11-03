@@ -1750,6 +1750,16 @@ describe("consult (07.7 A2A-01, D-01, D-04, D-08): ocw_consult_agent, the protoc
     };
     expect(ac.AgentConsultReplyEvent.safeParse(timedOut).success).toBe(true);
     expect(AgentConsultReplyEvent.parse(timedOut)).toEqual(timedOut);
+    // CR-B-08: a contradictory hop result fails in both (answered without its answer, a failure that names one).
+    for (const contradictory of [
+      { ...reply.consultReply, answerMessageId: null },
+      { ...reply.consultReply, outcome: "failed" },
+      { ...reply.consultReply, outcome: "timed_out" },
+    ]) {
+      const bad = { ...reply, consultReply: contradictory };
+      expect(ac.AgentConsultReplyEvent.safeParse(bad).success, JSON.stringify(contradictory)).toBe(false);
+      expect(AgentConsultReplyEvent.safeParse(bad).success, JSON.stringify(contradictory)).toBe(false);
+    }
 
     for (const answer of [
       { ok: true, chainId: U(9), hopId: U(11), questionMessageId: U(6), sentence: "Question sent to @bea." },
