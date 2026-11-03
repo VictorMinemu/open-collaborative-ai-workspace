@@ -70,7 +70,7 @@ import { approvalMessageRouteOf } from "../tool-approval";
 import { recordStep, type StepOutcomeInput, stepFor } from "./activity";
 import { type CellPrincipal, cellOf } from "./auth";
 import { noTrigger } from "./cards";
-import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, liveTurn } from "./claim";
+import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, liveTurn, taintReturnTurns } from "./claim";
 import { APPROVAL_MESSAGES, approvalDetails, approvalVerdict, type ToolApprovalGate } from "./tool-calls";
 
 /**
@@ -399,6 +399,8 @@ export async function decideSandboxCall(
     })
     .where(and(...conditions))
     .returning({ eventId: agentTurns.eventId });
+  // CR-A-01 follow-up: the turn's live return turns are tainted with it (claim.ts, `taintReturnTurns`).
+  if (updated.length > 0 && flags.untrustedOutput) await taintReturnTurns(tx, turn.eventId);
   if (updated.length === 0) {
     const [after] = await tx
       .select({ tainted: agentTurns.tainted })

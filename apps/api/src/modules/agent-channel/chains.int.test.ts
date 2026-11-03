@@ -779,6 +779,80 @@ describe("taint flows forward (Task 2; D-09, P-11, Pitfall 2)", () => {
     expect(forced.body.code).toBe("tainted");
   });
 
+  describe("CR-A-01 follow-up: the asking turn reads outside content after the answer came back (late taint)", () => {
+    beforeAll(async () => {
+      await ok(victor.request("PATCH", `/api/v1/agents/${archieId}/capabilities`, { internet: true }));
+    });
+    afterAll(async () => {
+      await ok(victor.request("PATCH", `/api/v1/agents/${archieId}/capabilities`, { internet: false }));
+    });
+
+    /** Bea answers while Archie's asking turn still runs: the return turn is delivered untainted. */
+    async function answeredWhileAsking() {
+      const { archie, answer, bea } = await consulted({ conversationId: trioId });
+      expect(archie.turn.tools).toContain("web_search");
+      await ok(post(bea, ANSWER));
+      await ok(done(bea));
+      const reply = await replyFor(answer.hopId);
+      expect(reply.turn.tainted).not.toBe(true);
+      expect((await turnRow(reply.eventId)).tainted).toBe(false);
+      expect((await turnRow(archie.eventId)).done_at).toBeNull();
+      return { archie, answer, reply };
+    }
+
+    it("the asking turn becomes tainted afterwards: its live return turn is tainted too, side effects refused", async () => {
+      const { archie, reply } = await answeredWhileAsking();
+      // The asking turn, still running, reads the web through the real gate.
+      expect((await askTool(archie, "web_search", { query: "pump order" })).body).toMatchObject({
+        allowed: true,
+      });
+      expect((await turnRow(archie.eventId)).tainted).toBe(true);
+      expect((await turnRow(reply.eventId)).tainted).toBe(true);
+      const forced = await consult(reply, carlId, { idempotencyKey: `${reply.eventId}:consult:0` });
+      expect(forced.status).toBe(403);
+      expect(forced.body.code).toBe("tainted");
+      const sideEffecting = Object.entries(reply.turn.toolFlags as Record<string, Json>)
+        .filter(([tool, f]) => f.sideEffecting === true && tool !== "ocw_consult_agent")
+        .map(([tool]) => tool);
+      expect(sideEffecting.length).toBeGreaterThan(0);
+      expect((await askTool(reply, sideEffecting[0] as string)).body).toMatchObject({
+        allowed: false,
+        reason: "tainted",
+      });
+    });
+
+    it("transitively: a return turn that asked again hands the late taint to its own live return turn", async () => {
+      const { archie, reply } = await answeredWhileAsking();
+      // The untainted return turn consults Carl; Carl answers; a second return turn is delivered, untainted.
+      const second = await ok(consult(reply, carlId, { idempotencyKey: `${reply.eventId}:consult:0` }));
+      const carl = await deliveryOn(second.questionMessageId as string, carlId);
+      await ok(post(carl, ANSWER));
+      await ok(done(carl));
+      const again = await replyFor(second.hopId as string);
+      expect((await turnRow(again.eventId)).tainted).toBe(false);
+      // Then the first asking turn reads the web.
+      expect((await askTool(archie, "web_search", { query: "pump order" })).body).toMatchObject({
+        allowed: true,
+      });
+      expect((await turnRow(reply.eventId)).tainted).toBe(true);
+      expect((await turnRow(again.eventId)).tainted).toBe(true);
+      // The consulted bots' own turns are not touched: the taint flows to the asker's continuations only.
+      expect((await turnRow(carl.eventId)).tainted).toBe(false);
+    });
+
+    it("a return turn that already finished is left as it was; a turn of another chain is never touched", async () => {
+      const { archie, reply } = await answeredWhileAsking();
+      await ok(post(reply, "Víctor: confirmed."));
+      await ok(done(reply));
+      const other = await answeredWhileAsking();
+      expect((await askTool(archie, "web_search", { query: "pump order" })).body).toMatchObject({
+        allowed: true,
+      });
+      expect((await turnRow(reply.eventId)).tainted).toBe(false);
+      expect((await turnRow(other.reply.eventId)).tainted).toBe(false);
+    });
+  });
+
   it("CR-A-01: member data the asking turn read stays with its return turn", async () => {
     const { archie, answer, bea } = await consulted();
     await su.query("update app.agent_turns set member_data = true where event_id = $1", [archie.eventId]);
