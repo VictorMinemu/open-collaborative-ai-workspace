@@ -195,6 +195,8 @@ const MEMORY_DM_TOOLS = [
   "ocw_memory_write",
   "ocw_memory_propose",
   "ocw_agent_card",
+  // 07.6-12: Sam holds `automation.create` in his DM with the bot.
+  "ocw_automation_propose",
 ];
 const READ_FLAGS = { untrustedOutput: false, sideEffecting: false };
 const WRITE_FLAGS = { untrustedOutput: false, sideEffecting: true };

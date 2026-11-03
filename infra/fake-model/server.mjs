@@ -60,12 +60,17 @@
 // mcp-oauth`), authorize / token / revoke / register and the bearer-protected MCP endpoint under `/mcp-oauth`, plus the
 // keychain test targets under `/kc`. Pre-registered public client `ocw-e2e` (redirect URIs: FAKE_MCP_OAUTH_REDIRECTS).
 //
+// Fake ERP MCP server (fake-erp-mcp.mjs, 07.6-04): streamable HTTP at `/erp-mcp` behind its own bearer
+// (OCW_FAKE_ERP_TOKEN, default `e2e-erp-token`), tools get_record / update_record (expectedUpdatedAt) / add_note /
+// list_records and the test hook __mutate (a sales order changed "elsewhere").
+//
 // Env: PORT (default 18999), FAKE_MODEL_HOST (default 0.0.0.0), FAKE_MODEL_CAPTURE_DIR (optional: write each request body as JSON),
 // FAKE_MCP_TOKEN (optional: the fake MCP routes then require `Authorization: Bearer <token>`),
 // FAKE_CLAWHUB_ARTIFACT_DIR (optional: npm-pack tarballs the fake ClawHub serves, digests computed from them).
 // FAKE_SANDBOX_TOKEN (optional: mounts the fake sandboxd at `/__sandboxd` behind this bearer, at least 32 characters),
 // FAKE_MCP_OAUTH_REDIRECTS (optional, comma list: the `ocw-e2e` client's redirect URIs; default
 // http://127.0.0.1:4290/api/v1/connectors/oauth/callback), FAKE_KC_TOKEN (optional: the bearer `/kc/whoami` accepts).
+// OCW_FAKE_ERP_TOKEN (optional: the bearer `/erp-mcp` requires; default `e2e-erp-token`).
 // FAKE_MODEL_DEBUG=1 (optional, off by default: log a short preview of each tool-offering request's messages,
 // to diagnose directive parsing inside a real cell; run-container-smoke.sh passes it through).
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -105,6 +110,14 @@ try {
 } catch (error) {
   if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
   console.warn("fake-model: fake-mcp-oauth.mjs not found, /mcp-oauth and /kc routes disabled");
+}
+// And the fake ERP MCP server (07.6-04).
+let createFakeErpMcp = null;
+try {
+  ({ createFakeErpMcp } = await import("./fake-erp-mcp.mjs"));
+} catch (error) {
+  if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
+  console.warn("fake-model: fake-erp-mcp.mjs not found, /erp-mcp disabled");
 }
 // And the fake sandboxd (07.8-05), mounted at `/__sandboxd` when FAKE_SANDBOX_TOKEN is set (07.8-08).
 let createFakeSandboxd = null;
@@ -697,7 +710,8 @@ const SANDBOXD_PREFIX = "/__sandboxd";
 
 /**
  * `opts.sandboxToken` overrides `FAKE_SANDBOX_TOKEN` (empty = no `/__sandboxd`);
- * `opts.mcpToken` overrides `FAKE_MCP_TOKEN` (empty = no token); `opts.clawhubArtifactDir` overrides
+ * `opts.mcpToken` overrides `FAKE_MCP_TOKEN` (empty = no token); `opts.erpToken` overrides `OCW_FAKE_ERP_TOKEN`
+ * (empty = the default `e2e-erp-token`; the ERP always needs a bearer); `opts.clawhubArtifactDir` overrides
  * `FAKE_CLAWHUB_ARTIFACT_DIR`; `opts.onRequest({kind, path, headers, body})` sees every model request.
  */
 export function createFakeModelServer(opts = {}) {
@@ -728,6 +742,7 @@ export function createFakeModelServer(opts = {}) {
       preRegistered: [{ client_id: "ocw-e2e", redirect_uris: redirects }],
       ...(process.env.FAKE_KC_TOKEN ? { kcToken: process.env.FAKE_KC_TOKEN } : {}),
     }) ?? null;
+  const erp = createFakeErpMcp?.({ token: opts.erpToken ?? process.env.OCW_FAKE_ERP_TOKEN ?? "" }) ?? null;
   const sandboxToken = opts.sandboxToken ?? process.env.FAKE_SANDBOX_TOKEN ?? "";
   const sandboxd =
     sandboxToken && createFakeSandboxd
@@ -742,6 +757,7 @@ export function createFakeModelServer(opts = {}) {
         return void (await sandboxd.handle(req, res));
       }
       if (mcpOAuth?.handle(req, res, url)) return;
+      if (erp?.handle(req, res, url)) return;
       if (mcp?.(req, res, url)) return;
       if (clawhub?.(req, res, url)) return;
       if (siwc?.(req, res, url)) return;

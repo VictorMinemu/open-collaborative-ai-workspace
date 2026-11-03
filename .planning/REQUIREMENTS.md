@@ -204,12 +204,12 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 
 ### Automations and Watched Records (AUTO) — added 2026-10-08 by the owner
 
-- [ ] **AUTO-01**: A Postgres-backed scheduler runs automations (standing order, trigger, delivery target by stable IDs, the person it runs for, budget) outside the cell, audited and restart-safe
-- [ ] **AUTO-02**: Signed webhooks and IMAP mail trigger automations; inbound content is untrusted and yields read-only turns
-- [ ] **AUTO-03**: Automations can be created from natural language and are confirmed by a person in a card
-- [ ] **AUTO-04**: Watched records keep an API-computed hash of an external record's watched fields; a change made elsewhere is reported in the card thread as before → after on access and on schedule, never overwritten
-- [ ] **AUTO-05**: Each person can get a scheduled digest by DM: pending decisions, followed cards, unread mentions, Work Zone sessions waiting or finished
-- [ ] **AUTO-06**: A finished Work Zone session can become a summary proposal in its project's memory through the MEM promotion flow
+- [x] **AUTO-01**: A Postgres-backed scheduler runs automations (standing order, trigger, delivery target by stable IDs, the person it runs for, budget) outside the cell, audited and restart-safe
+- [x] **AUTO-02**: Signed webhooks and IMAP mail trigger automations; inbound content is untrusted and yields read-only turns
+- [x] **AUTO-03**: Automations can be created from natural language and are confirmed by a person in a card
+- [x] **AUTO-04**: Watched records keep an API-computed hash of an external record's watched fields; a change made elsewhere is reported in the card thread as before → after on access and on schedule, never overwritten
+- [x] **AUTO-05**: Each person can get a scheduled digest by DM: pending decisions, followed cards, unread mentions, Work Zone sessions waiting or finished
+- [x] **AUTO-06**: A finished Work Zone session can become a summary proposal in its project's memory through the MEM promotion flow
 
 ### Agent-to-Agent Collaboration (A2A) — added 2026-10-08 by the owner
 
@@ -557,12 +557,12 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | APPROVE-02 | Phase 07.5 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
 | APPROVE-03 | Phase 07.5 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
 | APPROVE-04 | Phase 07.5 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
-| AUTO-01 | Phase 07.6 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
-| AUTO-02 | Phase 07.6 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
-| AUTO-03 | Phase 07.6 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
-| AUTO-04 | Phase 07.6 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
-| AUTO-05 | Phase 07.6 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
-| AUTO-06 | Phase 07.6 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| AUTO-01 | Phase 07.6 | Complete (owner checks in docs/DEMO.md: human_needed) | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| AUTO-02 | Phase 07.6 | Complete (owner checks in docs/DEMO.md: human_needed) | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| AUTO-03 | Phase 07.6 | Complete (owner checks in docs/DEMO.md: human_needed) | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| AUTO-04 | Phase 07.6 | Complete (owner checks in docs/DEMO.md: human_needed) | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| AUTO-05 | Phase 07.6 | Complete (owner checks in docs/DEMO.md: human_needed) | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| AUTO-06 | Phase 07.6 | Complete (owner checks in docs/DEMO.md: human_needed) | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
 | A2A-01 | Phase 07.7 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
 | A2A-02 | Phase 07.7 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
 | A2A-03 | Phase 07.7 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
@@ -691,4 +691,4 @@ today; every later phase still audits the sensitive actions it introduces.
 
 ---
 *Requirements defined: 2026-09-10*
-*Last updated: 2026-10-29 after Phases 07.11 and 07.12 were built (RTU-01…07, HSR-01…07 complete; owner checks human_needed). Previously: 2026-10-29 when Phase 07.12 was planned (HSR-01…07 added, owner request). Previously: 2026-10-28 when Phase 07.11 was planned (RTU-01…07 added, owner request). Previously: 2026-10-27 when Phase 07.10 was planned (WZS-01…11 added, owner request). Previously: 2026-10-22 when Phase 07.9 was planned (WZP-01…10 added, owner request). Previously: 2026-10-08 after Phase 7 (FOUND-05…07, SELF-01…07 complete; FOUND-06 says Garage, not MinIO; owner clean-machine check human_needed). Previously: 2026-10-07 after Phase 6 (MULTI-01…08, AGENT-01/02/04 delivered; MULTI-07's metered run deferred to the owner). Previously: 2026-10-07 after Phase 5 (AICHAT-01…09 delivered); before that: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered); before that: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*
+*Last updated: 2026-11-02 after Phase 07.6 was built (AUTO-01…06 complete; owner checks human_needed). Previously: 2026-10-29 after Phases 07.11 and 07.12 were built (RTU-01…07, HSR-01…07 complete; owner checks human_needed). Previously: 2026-10-29 when Phase 07.12 was planned (HSR-01…07 added, owner request). Previously: 2026-10-28 when Phase 07.11 was planned (RTU-01…07 added, owner request). Previously: 2026-10-27 when Phase 07.10 was planned (WZS-01…11 added, owner request). Previously: 2026-10-22 when Phase 07.9 was planned (WZP-01…10 added, owner request). Previously: 2026-10-08 after Phase 7 (FOUND-05…07, SELF-01…07 complete; FOUND-06 says Garage, not MinIO; owner clean-machine check human_needed). Previously: 2026-10-07 after Phase 6 (MULTI-01…08, AGENT-01/02/04 delivered; MULTI-07's metered run deferred to the owner). Previously: 2026-10-07 after Phase 5 (AICHAT-01…09 delivered); before that: 2026-10-06 after Phase 4 (CHAT-02, CHAT-04…14 delivered); before that: 2026-10-04 after the Phase 1 code audit (Restructure 2026-10-04: SLICE-06…18 added, SLICE-01…04 and DEV-07 superseded, traceability re-mapped)*

@@ -11,6 +11,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { WatchStripRow } from "@/components/watched/watch-strip-row";
 import { useUpdateBoardCard } from "@/lib/board-queries";
 import { cn } from "@/lib/utils";
 import { type BoardMenuColumn, cardMenuModel } from "./card-menu";
@@ -209,6 +210,8 @@ export function CardStrip({
           <WaitingOnBadge state={card.waitingOn} />
         )}
       </div>
+      {/* 07.6-17 (UI-SPEC 7b): row 3, the card's watched record. */}
+      <WatchStripRow card={{ messageId: card.messageId, conversationId: convId }} canPost={canPost} />
       {fields.length > 0 ? (
         <dl className="grid grid-cols-2 gap-x-4 gap-y-2" data-testid="card-strip-fields">
           {fields.map((f) => (

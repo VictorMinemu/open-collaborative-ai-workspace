@@ -1,6 +1,7 @@
 import {
   type AiBackend,
   AiMyUsageReportQuery,
+  type AiUsageKind,
   AiUsageReport,
   AiUsageReportQuery,
   type AiUsageReportRow,
@@ -86,6 +87,17 @@ function reportModelLabel(backend: string, provider: string, modelId: string): s
 
 type Totals = AiUsageReport["totals"];
 
+/**
+ * The by-model row of each usage kind (P-16): chat answers keep the model's own row; titles, digests and Work Zone
+ * session summaries each get theirs, so what they cost shows next to chat. Every kind adds to the totals.
+ */
+const KIND_SUFFIX: Record<AiUsageKind, string> = {
+  chat: "",
+  title: " · titles",
+  digest: " · digests",
+  session_summary: " · session summaries",
+};
+
 /** Null-safe sum: a null cost (member's plan, unpriced model) adds nothing; all null stays null. */
 function addTotals(a: Totals, b: Totals): Totals {
   return {
@@ -93,6 +105,7 @@ function addTotals(a: Totals, b: Totals): Totals {
     inputTokens: a.inputTokens + b.inputTokens,
     outputTokens: a.outputTokens + b.outputTokens,
     estimatedGenerations: a.estimatedGenerations + b.estimatedGenerations,
+    estimatedRecords: a.estimatedRecords + b.estimatedRecords,
     costMicrosUsd:
       a.costMicrosUsd === null && b.costMicrosUsd === null
         ? null
@@ -105,6 +118,7 @@ const ZERO: Totals = {
   inputTokens: 0,
   outputTokens: 0,
   estimatedGenerations: 0,
+  estimatedRecords: 0,
   costMicrosUsd: null,
 };
 
@@ -122,7 +136,8 @@ function byWeight(a: AiUsageReportRow, b: AiUsageReportRow): number {
  * One aggregate over `ai_usage_records` in the tenant transaction (RLS; the explicit organization predicate lets the
  * planner use `(organization_id, created_at)` / `(organization_id, requester_user_id, created_at)`). The window is the
  * last `days` UTC days, today included. "Answers" (`generations`, `estimatedGenerations`) count chat records only;
- * title records add tokens and cost and, by model, have their own row ("<model> · titles"). `userId` restricts the
+ * title records add tokens and cost and, by model, have their own row ("<model> · titles"), as digests and Work Zone
+ * session summaries do (Phase 07.6, P-16: "<model> · digests", "<model> · session summaries"). `userId` restricts the
  * report to one member's own records (the `/me` report).
  */
 export async function usageReport(
@@ -143,6 +158,7 @@ export async function usageReport(
     estimatedGenerations: sql<number>`count(*) filter (where ${r.kind} = 'chat' and ${r.estimated})`.mapWith(
       Number,
     ),
+    estimatedRecords: sql<number>`count(*) filter (where ${r.estimated})`.mapWith(Number),
     inputTokens: sql<number>`coalesce(sum(${r.inputTokens}), 0)`.mapWith(Number),
     outputTokens: sql<number>`coalesce(sum(${r.outputTokens}), 0)`.mapWith(Number),
     costMicrosUsd: sql<string | null>`sum(${r.costMicrosUsd})`,
@@ -173,6 +189,7 @@ export async function usageReport(
       backend: null,
       generations: a.generations,
       estimatedGenerations: a.estimatedGenerations,
+      estimatedRecords: a.estimatedRecords,
       inputTokens: a.inputTokens,
       outputTokens: a.outputTokens,
       costMicrosUsd: cost(a.costMicrosUsd),
@@ -184,13 +201,15 @@ export async function usageReport(
       .where(and(...where))
       .groupBy(r.backend, r.provider, r.modelId, r.kind);
     rows = agg.map((a) => {
-      const titles = a.kind === "title" ? " · titles" : "";
+      const suffix = KIND_SUFFIX[a.kind];
       return {
-        key: `${a.backend}:${a.provider}/${a.modelId}${titles}`,
-        label: `${reportModelLabel(a.backend, a.provider, a.modelId)}${titles}`,
+        key: `${a.backend}:${a.provider}/${a.modelId}${suffix}`,
+        label: `${reportModelLabel(a.backend, a.provider, a.modelId)}${suffix}`,
         backend: a.backend as AiBackend,
+        kind: a.kind,
         generations: a.generations,
         estimatedGenerations: a.estimatedGenerations,
+        estimatedRecords: a.estimatedRecords,
         inputTokens: a.inputTokens,
         outputTokens: a.outputTokens,
         costMicrosUsd: cost(a.costMicrosUsd),

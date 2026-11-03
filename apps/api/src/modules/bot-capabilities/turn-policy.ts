@@ -24,16 +24,25 @@ import {
   conversationMembers,
   conversations,
   memberAccountShares,
+  messages,
   type Tx,
   tenantOf,
+  watchedRecords,
 } from "@ocw/db";
-import { and, eq, isNull, ne, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import type { Env } from "../../config/env";
 import type { Core } from "../../core";
+import { channelFacts } from "../chat";
 // Types only: the memory service is injected by the caller (a value import would be a module cycle).
 import { type EffectiveVaultItem, effectiveVaultItems, unitAudienceAllows } from "../keychain";
 import type { MemoryAudience, MemoryService } from "../memory";
-import { agentResource, orgResource, type PermissionService, type PrincipalRef } from "../organization";
+import {
+  agentResource,
+  channelResource,
+  orgResource,
+  type PermissionService,
+  type PrincipalRef,
+} from "../organization";
 import { sandboxAvailable } from "../sandbox";
 import { approvalModesFor } from "../tool-approval";
 import { type CatalogSource, effectiveCapabilities, effectiveTools, readCapabilities } from "./capabilities";
@@ -130,6 +139,16 @@ const WORK_ZONE_PROJECTS_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEf
  * content can never propose a session (the proposal route claims it as side-effecting whatever the turn says).
  */
 const START_WORK_ZONE_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
+/**
+ * `ocw_automation_propose` (07.6-12, D-02, D-03): trusted answer, always side-effecting: a turn that read outside content
+ * never proposes an automation (the route refuses it 403 `tainted`, the plugin before it).
+ */
+const AUTOMATION_PROPOSE_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
+/**
+ * `ocw_record_update` (07.6-14, D-04, D-07): changes a record outside the workspace (side-effecting) and its answer
+ * reflects outside values (untrusted). A turn that read outside content is refused unless a 07.5 grant covers the call.
+ */
+const RECORD_UPDATE_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
 
 /**
  * The sandbox tools a turn is offered (07.8-05, D-12, P-05, P-06): every `ocw_sandbox_*` tool, `ocw_sandbox_import`
@@ -217,6 +236,13 @@ function assemble(
   keys = false,
   /** The turn's human holds `work_session.create` (07.5-08); never in the cell-wide view (no human). */
   workZone = false,
+  /**
+   * The turn's human may propose automations here (07.6-12): `automation.create`, their one-person DM with the bot or a
+   * channel they may post in, and a turn that does not start tainted; never in the cell-wide view (no human).
+   */
+  automations = false,
+  /** The turn's message is in the thread of a card this bot watches with an update tool (07.6-14). */
+  recordUpdate = false,
 ): TurnTools {
   const tools: string[] = [];
   const toolFlags: Record<string, TurnToolFlags> = {};
@@ -251,6 +277,14 @@ function assemble(
   }
   // Board cards (07.1-10, D-07): only on a board channel's turns; every other turn keeps exactly its tool list.
   if (board && conversationKind === "channel") add(BUILTIN_TOOLS.boardCard, BOARD_FLAGS);
+  // Natural-language automations (07.6-12, D-02, D-07): a proposal card only this human confirms; the route re-decides
+  // everything and refuses a tainted turn.
+  if (automations) add(BUILTIN_TOOLS.automationPropose, AUTOMATION_PROPOSE_FLAGS);
+  // Watched-record writes (07.6-14, D-07): only in a watched card's thread on a board, for the watch's bot; the route
+  // re-decides everything (the record from the thread, the rules, approvals, taint) at call time.
+  if (recordUpdate && board && conversationKind === "channel") {
+    add(BUILTIN_TOOLS.recordUpdate, RECORD_UPDATE_FLAGS);
+  }
   // Per-member connectors and keys (07.4-11, D-04, D-07, C-01). A turn carries the per-member tools under their logical
   // `<safe>__<tool>` names (for the gate) plus the static tools that reach them; the cell-wide view (null kind) carries
   // the static names only, never a logical per-member name (they are not OpenClaw tools).
@@ -323,6 +357,15 @@ async function computeTurn(
      * call themselves.
      */
     sandbox?: boolean;
+    /**
+     * Phase 07.6 (D-12, P-22): an automation run's turn, with no person present. The browser family (a member's sign-in,
+     * live control) is neither offered nor listed as withheld; the sandbox family is decided exactly as for any turn.
+     */
+    unattended?: boolean;
+    /** Phase 07.6 (D-02): the turn starts tainted, so it is never offered `ocw_automation_propose`. */
+    tainted?: boolean;
+    /** Phase 07.6-14: the turn is in the thread of a card this bot watches with an update tool. */
+    recordUpdate?: boolean;
   },
   env: SearchEnv,
   audience?: TurnAudience | null,
@@ -341,6 +384,7 @@ async function computeTurn(
   const workZone = (
     await perms.decide(tx, { kind: "user", userId: p.humanUserId }, "work_session.create", orgResource())
   ).allowed;
+  const automations = await mayProposeAutomations(tx, perms, p);
   const effective = effectiveCapabilities({
     scope: row.scope,
     caps,
@@ -480,6 +524,8 @@ async function computeTurn(
     p.board === true,
     usable.length > 0,
     workZone,
+    automations,
+    p.recordUpdate === true,
   );
   // Bot sandboxes (07.8-05, D-09, D-12, P-05) and browsers (07.8-14): offered only when the resolver grants
   // `sandbox.use` / `browser.use` to the bot acting for this human (07.3 module denies included), the organization
@@ -510,7 +556,8 @@ async function computeTurn(
         on: caps.browser,
       },
     ];
-    for (const family of families) {
+    // D-12: nobody is there to sign in or watch a browser on an unattended run turn.
+    for (const family of p.unattended ? families.filter((f) => f.kind !== "browser") : families) {
       const available = await sandboxAvailable(
         tx,
         perms,
@@ -551,6 +598,29 @@ async function computeTurn(
     sandboxOffered,
     ...assembled,
   };
+}
+
+/**
+ * Whether the turn's human may propose automations here (07.6-12, D-02, D-07): they hold `automation.create`, the turn
+ * does not start tainted, and it is their one-person DM with the bot (`dm`) or a channel they may post in (a proposal
+ * there delivers to that channel or its thread). Group DMs, shared DMs, AI chats and Work Zone sessions never offer it.
+ */
+async function mayProposeAutomations(
+  tx: Tx,
+  perms: PermissionService,
+  p: { humanUserId: string; conversationKind: string; conversationId?: string | null; tainted?: boolean },
+): Promise<boolean> {
+  if (p.tainted) return false;
+  if (p.conversationKind !== "dm" && p.conversationKind !== "channel") return false;
+  const human = { kind: "user", userId: p.humanUserId } as const;
+  if (!(await perms.decide(tx, human, "automation.create", orgResource())).allowed) return false;
+  if (p.conversationKind === "dm") return true;
+  // A channel's post right needs the channel: without it, fail closed.
+  if (!p.conversationId) return false;
+  const [conv] = await tx.select().from(conversations).where(eq(conversations.id, p.conversationId)).limit(1);
+  if (conv?.kind !== "channel" || conv.archivedAt !== null) return false;
+  const facts = await channelFacts(tx, conv, { kind: "user", id: p.humanUserId });
+  return (await perms.decide(tx, human, "channel.post", channelResource(facts))).allowed;
 }
 
 /**
@@ -633,6 +703,33 @@ async function isBoardChannel(tx: Tx, conversationId: string, conversationKind: 
     .where(eq(conversations.id, conversationId))
     .limit(1);
   return row?.layout === "board";
+}
+
+/**
+ * Whether the turn's message is in the thread of a card this bot watches with an update tool (07.6-14): one indexed
+ * lookup (the message by id, the watch by its unique card). A mention in the card's thread, or a 07.5 re-run on an
+ * approval card posted there, both have the card as thread root.
+ */
+async function inWatchedThread(tx: Tx, p: { messageId: string; agentId: string }): Promise<boolean> {
+  const [row] = await tx
+    .select({ id: watchedRecords.id })
+    .from(messages)
+    .innerJoin(
+      watchedRecords,
+      and(
+        eq(watchedRecords.cardMessageId, sql`coalesce(${messages.threadId}, ${messages.id})`),
+        eq(watchedRecords.conversationId, messages.conversationId),
+      ),
+    )
+    .where(
+      and(
+        eq(messages.id, p.messageId),
+        eq(watchedRecords.agentId, p.agentId),
+        isNotNull(watchedRecords.writeTool),
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
 }
 
 /**
@@ -793,6 +890,13 @@ export async function turnPolicy(
     messageId: string;
     eventId: string;
     clientTimeZone?: string | null;
+    /**
+     * Phase 07.6 (D-02, D-07, P-11): the turn starts tainted (`agent_turns.tainted` at insert): a run started by a webhook
+     * or a mail, or any turn in a thread that holds inbound content. Side-effecting calls are refused from the first one.
+     */
+    taintedAtStart?: boolean;
+    /** Phase 07.6 (D-12): an automation run's turn (no person present): never the browser tools. */
+    unattended?: boolean;
   },
   opts: {
     /** AI chat deliveries only (06-10): the chat's readers, for scoped tools and `turn.withheld`. */
@@ -807,11 +911,22 @@ export async function turnPolicy(
   // The kind the capability rules see: a "dm" shared by two or more humans is not a private chat (no memory).
   const scopeKind = await memoryScopeKind(tx, p.conversationId, p.conversationKind);
   const board = await isBoardChannel(tx, p.conversationId, p.conversationKind);
+  const recordUpdate = board && (await inWatchedThread(tx, { messageId: p.messageId, agentId: p.agentId }));
   const computed = await computeTurn(
     tx,
     perms,
     // Sandbox tools only while sandboxd is configured (07.8-05): without it nothing could run them.
-    { ...p, conversationKind: scopeKind, board, sandbox: core.env.OCW_SANDBOX_URL !== null },
+    {
+      agentId: p.agentId,
+      humanUserId: p.humanUserId,
+      conversationId: p.conversationId,
+      conversationKind: scopeKind,
+      board,
+      sandbox: core.env.OCW_SANDBOX_URL !== null,
+      unattended: p.unattended === true,
+      tainted: p.taintedAtStart === true,
+      recordUpdate,
+    },
     core.env,
     opts.audience,
   );
@@ -872,6 +987,7 @@ export async function turnPolicy(
     messageId: p.messageId,
     tools: turn.tools,
     toolFlags: turn.toolFlags,
+    tainted: p.taintedAtStart === true,
     ...(sticky ? { memberData: true } : {}),
   });
   return { deliver: true, turn };

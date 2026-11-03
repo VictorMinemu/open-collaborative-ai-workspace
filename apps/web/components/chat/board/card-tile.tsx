@@ -5,6 +5,7 @@ import { MessageSquare } from "lucide-react";
 import { type ComponentProps, type ReactNode, type Ref, useEffect, useId, useRef, useState } from "react";
 import { PrincipalAvatar } from "@/components/chat/principal-avatar";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useWatchSentence, WatchedIndicator } from "@/components/watched/watched-indicator";
 import { shortAgo } from "@/components/work-zone/session-sidebar";
 import { cn, relativeTime } from "@/lib/utils";
 import { WAITING, WaitingOnBadge } from "./waiting-on-badge";
@@ -123,8 +124,15 @@ export function CardTile({
   const accessibleName = !label || title !== card.title ? card.title : `${label} ${card.title}`;
   const at = lastActivityOf(card);
   const clock = now ?? Date.now();
+  // 07.6-17: a tile on a board (it has a menu) shows its watched record; the template preview has none.
+  const onBoard = menu !== undefined;
+  const watchSentence = useWatchSentence(
+    { messageId: card.messageId, conversationId: onBoard ? card.conversationId : "" },
+    now,
+  );
   const description = [
     card.waitingOn === "none" ? null : `${WAITING[card.waitingOn].label}.`,
+    watchSentence,
     card.replyCount === 0 ? "No replies." : `${replies(card.replyCount)}.`,
     `Last activity ${relativeTime(at, clock)}.`,
   ]
@@ -191,6 +199,7 @@ export function CardTile({
                 />
               </span>
               <span className="inline-flex items-center gap-1">
+                {onBoard ? <WatchedIndicator card={card} now={now} /> : null}
                 {card.replyCount > 0 ? (
                   <>
                     <span data-testid="card-replies" className="inline-flex items-center gap-1">

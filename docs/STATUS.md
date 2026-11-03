@@ -46,6 +46,19 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   `/approvals` inbox with its own badge; one approval allows exactly that call once, re-run as the asker's turn with the
   approved values pinned in the cell; bots propose Work Zone sessions (project, device, prompt) that only the asker
   starts, in Supervised mode, credited "proposed by" the bot (ADR-0026).
+- **07.6 Automations and watched records:** bots act without being asked, on jobs the Control Plane runs in
+  PostgreSQL (pg-boss, installed by the migrate service; no new service, OpenClaw's cron and webhooks off). Bots ›
+  Automations: a standing order for a bot, triggered by a schedule (presets or cron, time zones and DST), a signed
+  Standard Webhooks URL (leads and admins) or new mail in an IMAP folder read with a Keychain app password (read-only,
+  pinned TLS), delivered by stable id to a channel, thread, DM or board column; it always runs as its creator (admins
+  pause and delete, never run as someone else), re-decided at every run, with run history, budgets and a pause after
+  three failures. Each run posts a platform-owned run card and the bot answers in its thread; webhook and mail content
+  is posted by the platform first and the turns on it are tainted (no side effects without an approval). Bots propose
+  automations from a chat and only the asker confirms (Created with changes after an edit). Board cards can watch an
+  external record through a connector: the API hashes the watched fields (RFC 8785), reports changes before → after on
+  access and on schedule, and the bot's updates are compare-and-set with a note back. A per-person digest by DM (opt-in
+  metered summary) and Work Zone sessions proposed to the linked team project's memory (manual or opt-in automatic, the
+  owner pays) (ADR-0028).
 - **07.8 Bot sandboxes, sandbox packages and the live browser:** each bot gets its own sandbox (files, a shell,
   approved packages) and its own Chromium, created only by the `sandboxd` broker (the one Docker socket holder, optional
   `sandbox` compose profile) under gVisor or hardened runc, on private networks whose only way out is the

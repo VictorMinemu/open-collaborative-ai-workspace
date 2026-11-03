@@ -14,6 +14,7 @@ import { useCan } from "@/lib/permissions";
 import { AddToChannelDialog } from "./add-to-channel-dialog";
 import { BotCard } from "./bot-card";
 import { BotDetailSheet } from "./bot-detail-sheet";
+import { BotsSectionNav } from "./bots-section-nav";
 import { NewBotSheet, NoModels } from "./new-bot-sheet";
 import { TemplatesSection } from "./templates-section";
 
@@ -59,6 +60,7 @@ export function BotsGallery() {
           ) : null
         }
       />
+      <BotsSectionNav active="bots" />
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
         {canManageCell && cell.data && !cell.data.connected && list.length > 0 ? (
           <div

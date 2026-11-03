@@ -432,6 +432,14 @@ export const BUILTIN_TOOLS = {
   browserWait: "ocw_browser_wait",
   browserSignIn: "ocw_browser_signin",
   browserClose: "ocw_browser_close",
+  /**
+   * Phase 07.6 (AUTO-03, AUTO-04, P-21): `ocw_automation_propose` proposes a scheduled automation as a card the person
+   * confirms (offered by 07.6-12 to a human holding `automation.create`); `ocw_record_update` changes fields of the
+   * watched record of the turn's card with compare-and-set (offered by 07.6-14 only in that thread). Both are
+   * side-effecting: a tainted turn uses them only with a 07.5 approval.
+   */
+  automationPropose: "ocw_automation_propose",
+  recordUpdate: "ocw_record_update",
 } as const;
 
 export const MAX_TOOL_CALLS_PER_TURN = 8;

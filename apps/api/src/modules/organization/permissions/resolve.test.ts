@@ -148,6 +148,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "browser.control": true,
     "work_session.visibility": false,
     "work_project.manage": false,
+    "automation.create": true,
+    "automation.webhook": false,
+    "automation.manage": false,
+    "record.watch": true,
   },
   developer: {
     "org.read": true,
@@ -223,6 +227,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "browser.control": true,
     "work_session.visibility": false,
     "work_project.manage": false,
+    "automation.create": true,
+    "automation.webhook": false,
+    "automation.manage": false,
+    "record.watch": true,
   },
   lead: {
     "org.read": true,
@@ -298,6 +306,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "browser.control": true,
     "work_session.visibility": false,
     "work_project.manage": false,
+    "automation.create": true,
+    "automation.webhook": true,
+    "automation.manage": false,
+    "record.watch": true,
   },
   admin: {
     "org.read": true,
@@ -373,6 +385,10 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "browser.control": true,
     "work_session.visibility": true,
     "work_project.manage": true,
+    "automation.create": true,
+    "automation.webhook": true,
+    "automation.manage": true,
+    "record.watch": true,
   },
 };
 

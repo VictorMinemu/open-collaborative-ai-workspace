@@ -652,6 +652,63 @@ export async function effectiveVaultItems(
   return out;
 }
 
+/** A `Username & password` item opened for its human user (07.6-11, IMAP mailboxes). Never log or return any of it. */
+export type BasicCredentials =
+  | {
+      ok: true;
+      item: VaultItemRow;
+      name: string;
+      username: string;
+      password: string;
+      allowedHosts: string[];
+      /** The exact `host:port` entries the egress guard may admit to a private address (unit items only). */
+      privateAllow: string[];
+    }
+  | { ok: false; code: "not_found" | "not_usable" | "wrong_kind" };
+
+/**
+ * The credentials of a `basic` keychain item for `userId` itself (not for an agent): a personal item only of that
+ * person (any other, admins included, is `not_found`), a unit or organization item only when the resolver allows the
+ * person `vault.use` on the item's unit (or the organization), decided on `req` when there is one (the strict authz
+ * check sees it) and request-less otherwise (the mailbox poller). The value opens through the sealed path with the
+ * item's own AAD; an unreadable value is `not_usable`. The tx must carry `userId` = that person (owner-only RLS).
+ */
+export async function basicCredentialsFor(
+  core: Core,
+  tx: Tx,
+  perms: PermissionService,
+  p: { vaultItemId: string; userId: string; req?: FastifyRequest },
+): Promise<BasicCredentials> {
+  const row = await findVaultItem(tx, p.vaultItemId);
+  if (!row) return { ok: false, code: "not_found" };
+  if (row.scope === "personal" && row.ownerUserId !== p.userId) return { ok: false, code: "not_found" };
+  if (row.kind !== "basic") return { ok: false, code: "wrong_kind" };
+  const paths = await unitPaths(tx, row.unitId ? [row.unitId] : []);
+  // A unit key whose unit row is not readable here never falls back to the organization resource.
+  if (row.scope === "unit" && row.unitId && !paths.has(row.unitId)) return { ok: false, code: "not_usable" };
+  const resource = itemResource(row, paths);
+  const allowed = p.req
+    ? await perms.can(p.req, tx, "vault.use", resource)
+    : (await perms.decide(tx, { kind: "user", userId: p.userId }, "vault.use", resource)).allowed;
+  if (!allowed) return { ok: false, code: "not_usable" };
+  let secret: StoredSecret;
+  try {
+    secret = await openVaultSecret(core, tx, row);
+  } catch {
+    return { ok: false, code: "not_usable" };
+  }
+  if (secret.kind !== "basic") return { ok: false, code: "wrong_kind" };
+  return {
+    ok: true,
+    item: row,
+    name: row.name,
+    username: secret.username,
+    password: secret.password,
+    allowedHosts: row.allowedHosts,
+    privateAllow: await privateAllowFor(tx, row),
+  };
+}
+
 /**
  * The audience rule for unit keys (07.4-12, owner decision, WINDOWS #191; the rule unit memory follows, D-08): what a
  * bot fetches with a unit's key is posted where the conversation's readers see it, so a unit key is used only where

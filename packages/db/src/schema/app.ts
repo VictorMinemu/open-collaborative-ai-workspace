@@ -659,8 +659,23 @@ export const botPolicies = appSchema.table(
     egressPrivateHosts: text("egress_private_hosts").array().notNull().default(sql`'{}'::text[]`),
     updatedBy: uuid("updated_by"),
     updatedAt: ts("updated_at").notNull().defaultNow(),
+    /**
+     * Phase 07.6 (Pitfall 1, D-07): the organization's automation caps. How many automations one person may own, the
+     * shortest schedule interval, how many inbound items (webhook or mail) one automation may run per hour, and the
+     * ceiling of every automation's own `max_runs_per_day`.
+     */
+    maxAutomationsPerUser: integer("max_automations_per_user").notNull().default(10),
+    minScheduleMinutes: integer("min_schedule_minutes").notNull().default(15),
+    maxInboundPerHour: integer("max_inbound_per_hour").notNull().default(30),
+    maxRunsPerDayCap: integer("max_runs_per_day_cap").notNull().default(96),
   },
-  (t) => [check("bot_policies_egress_private_hosts_check", sql`cardinality(${t.egressPrivateHosts}) <= 64`)],
+  (t) => [
+    check("bot_policies_egress_private_hosts_check", sql`cardinality(${t.egressPrivateHosts}) <= 64`),
+    check("bot_policies_max_automations_per_user_check", sql`${t.maxAutomationsPerUser} between 0 and 1000`),
+    check("bot_policies_min_schedule_minutes_check", sql`${t.minScheduleMinutes} between 1 and 1440`),
+    check("bot_policies_max_inbound_per_hour_check", sql`${t.maxInboundPerHour} between 1 and 3600`),
+    check("bot_policies_max_runs_per_day_cap_check", sql`${t.maxRunsPerDayCap} between 1 and 288`),
+  ],
 );
 
 /** One row per delivered bot turn (D-07): the effective tool set the API shipped in `agent.mention.v1`. */
@@ -873,6 +888,8 @@ export const mcpServers = appSchema.table(
   },
   (t) => [
     uniqueIndex("mcp_servers_org_safe_name_uq").on(t.organizationId, t.safeName),
+    /** Phase 07.6: target of composite foreign keys that carry the organization (FKs bypass RLS). */
+    unique("mcp_servers_org_id_uq").on(t.organizationId, t.id),
     check("mcp_servers_transport_check", sql`${t.transport} in ('streamable-http','sse','sandboxed-stdio')`),
     check("mcp_servers_status_check", sql`${t.status} in ('pending','probing','ready','error')`),
     check(
@@ -1018,6 +1035,7 @@ const SECRET_KINDS = [
   "connector_credential",
   "vault_item",
   "browser_session",
+  "webhook_secret",
 ] as const;
 
 /** Encrypted (AES-256-GCM, OCW_ENCRYPTION_KEY) secrets. Never selected into API responses. */
@@ -1036,6 +1054,8 @@ export const secrets = appSchema.table(
      * by `vault_items.secret_ref`.
      * `browser_session` (Phase 07.8, D-08, P-09): a member's browser storage state for one site and bot, sealed with AAD
      * `<orgId>:<userId>:browser:<agentId>:<siteKey>` and referenced by `browser_sessions.secret_id` (owner-only).
+     * `webhook_secret` (Phase 07.6, D-02, D-07): an inbound webhook endpoint's Standard Webhooks signing secret,
+     * referenced by `webhook_endpoints.secret_id` / `previous_secret_id` (never returned after creation or rotation).
      */
     kind: text("kind", { enum: SECRET_KINDS }).notNull(),
     provider: text("provider"),
@@ -1728,10 +1748,17 @@ export const aiUsageRecords = appSchema.table(
   {
     id: id(),
     organizationId: orgId(),
-    generationId: uuid("generation_id").notNull(),
-    kind: text("kind", { enum: ["chat", "title"] }).notNull(),
+    /** Set for `chat` and `title` (one record per generation and kind); null for the Phase 07.6 kinds. */
+    generationId: uuid("generation_id"),
+    /**
+     * Phase 07.6 (D-05, D-06, P-16): `digest` (a digest's optional summary, paid by its person) and `session_summary`
+     * (a Work Zone session's memory summary, paid by the session's owner) are not chat generations: they carry the
+     * `subject_id` they were made for (the automation run, the work session) instead of a generation and conversation.
+     */
+    kind: text("kind", { enum: ["chat", "title", "digest", "session_summary"] }).notNull(),
     requesterUserId: uuid("requester_user_id").notNull(),
-    conversationId: uuid("conversation_id").notNull(),
+    /** Set for `chat` and `title`; null for the Phase 07.6 kinds. */
+    conversationId: uuid("conversation_id"),
     messageId: uuid("message_id"),
     backend: text("backend").notNull(),
     provider: text("provider").notNull(),
@@ -1744,12 +1771,26 @@ export const aiUsageRecords = appSchema.table(
     costMicrosUsd: bigint("cost_micros_usd", { mode: "number" }),
     priceRef: text("price_ref"),
     createdAt: createdAt(),
+    /** Phase 07.6: what a `digest` / `session_summary` record was made for (an automation run, a work session). */
+    subjectId: uuid("subject_id"),
   },
   (t) => [
     uniqueIndex("ai_usage_records_generation_kind_uq").on(t.generationId, t.kind),
+    /** Phase 07.6: one record per subject and kind, so a retried job never double-counts. */
+    uniqueIndex("ai_usage_records_subject_kind_uq")
+      .on(t.subjectId, t.kind)
+      .where(sql`subject_id is not null`),
     index("ai_usage_records_org_time_idx").on(t.organizationId, t.createdAt),
     index("ai_usage_records_requester_time_idx").on(t.organizationId, t.requesterUserId, t.createdAt),
-    check("ai_usage_records_kind_check", sql`${t.kind} in ('chat','title')`),
+    /**
+     * Phase 07.6 (P-16): two shapes. Chat and title records keep their generation and conversation (unchanged); the
+     * new kinds carry a subject and no generation.
+     */
+    check(
+      "ai_usage_records_kind_check",
+      sql`(${t.kind} in ('chat','title') and ${t.generationId} is not null and ${t.conversationId} is not null)
+        or (${t.kind} in ('digest','session_summary') and ${t.subjectId} is not null and ${t.generationId} is null)`,
+    ),
   ],
 );
 
@@ -1983,9 +2024,26 @@ export const messageCards = appSchema.table(
     platformOwned: boolean("platform_owned").notNull().default(false),
     createdAt: createdAt(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
+    /**
+     * Phase 07.6 (UI-SPEC R1, P-12): a short label shown instead of the status word ("Received") and up to three
+     * notices (`{ tone: "warning" | "neutral", text }`), honoured by the API only on platform-owned cards.
+     */
+    statusLabel: text("status_label"),
+    notices: jsonb("notices")
+      .$type<Array<{ tone: "warning" | "neutral"; text: string }>>()
+      .notNull()
+      .default([]),
   },
   (t) => [
     index("message_cards_conv_idx").on(t.organizationId, t.conversationId),
+    check(
+      "message_cards_status_label_len_check",
+      sql`${t.statusLabel} is null or char_length(${t.statusLabel}) between 1 and 24`,
+    ),
+    check(
+      "message_cards_notices_check",
+      sql`jsonb_typeof(${t.notices}) = 'array' and jsonb_array_length(${t.notices}) <= 3`,
+    ),
     check(
       "message_cards_decision_note_len_check",
       sql`${t.decisionNote} is null or char_length(${t.decisionNote}) <= 280`,
@@ -2192,6 +2250,8 @@ export const boardCards = appSchema.table(
       sql`${t.rank} COLLATE "C"`,
     ),
     uniqueIndex("board_cards_number_uq").on(t.conversationId, t.number).where(sql`number is not null`),
+    /** Phase 07.6: target of `watched_records_card_fk` (a watched card belongs to the record's board channel). */
+    unique("board_cards_message_conversation_uq").on(t.messageId, t.conversationId),
     check("board_cards_waiting_on_check", sql`${t.waitingOn} in ${WAITING_ON}`),
     check("board_cards_title_source_check", sql`${t.titleSource} in ('user','heuristic','auto')`),
     check("board_cards_title_len_check", sql`char_length(${t.title}) between 1 and 200`),
@@ -2574,6 +2634,8 @@ export const vaultItems = appSchema.table(
   },
   (t) => [
     unique("vault_items_org_handle_uq").on(t.organizationId, t.handle),
+    /** Phase 07.6: target of composite foreign keys that carry the organization (FKs bypass RLS). */
+    unique("vault_items_org_id_uq").on(t.organizationId, t.id),
     index("vault_items_owner_idx").on(t.organizationId, t.ownerUserId).where(sql`scope = 'personal'`),
     index("vault_items_unit_idx").on(t.organizationId, t.unitId).where(sql`scope = 'unit'`),
     check("vault_items_scope_check", sql`${t.scope} in ('personal','unit')`),
@@ -3446,4 +3508,670 @@ export const sandboxPackageInstalls = appSchema.table(
       sql`${t.detail} is null or char_length(${t.detail}) <= 200`,
     ),
   ],
+);
+
+// ---------------------------------------------------------------- automations and watched records (Phase 07.6)
+//
+// ADR-0028 (D-01, D-02, D-04, D-06, D-07, D-10). The schedule of record lives here, under RLS; pg-boss jobs carry ids
+// only and their handlers re-open withTenant(). The job ticks and the public webhook route find their rows through the
+// ids-only SECURITY DEFINER functions of post-migrate.sql (`due_automations`, `stale_automation_runs`, `due_mailboxes`,
+// `due_watched_records`, `lookup_webhook_endpoint`, `expired_automation_events`). Every reference to a table that has
+// an `(organization_id, id)` key is composite with the organization (FKs bypass RLS, 07.4 #169); the migration narrows
+// each `set null` of those to `SET NULL (<column>)` (PostgreSQL 15+; no drizzle builder), so organization_id is never
+// nulled. Message references (run cards, posted items) stay single-column. No repository → unit table: a Work Zone
+// session's team project is 07.9's `work_project_repos` (D-10).
+
+const AUTOMATION_TRIGGER_KINDS = sql.raw(`('schedule','webhook','mail')`);
+const WATCHED_CHECK_SOURCES = sql.raw(`('access','schedule','write','manual')`);
+
+/**
+ * A standing order (D-01, D-07; PRD §73-75): a bot, the instructions, a trigger, a delivery target by stable ids, the
+ * person it runs as (always its creator: `automations_run_as_creator_check`) and its budget. `digest` is the personal
+ * digest (D-05): one per person, scheduled, to their DM with the bot. Target shapes: `dm` = the run-as person's DM with
+ * the bot (resolved per run); `channel` = a conversation; `thread` = a conversation and its root message; `board` = a
+ * board channel and one of its columns (each run or inbound item becomes a card there, UI-SPEC R2). A board column an
+ * automation targets cannot be deleted until the automation is moved or removed (NO ACTION: the API answers first).
+ */
+export const automations = appSchema.table(
+  "automations",
+  {
+    id: id(),
+    organizationId: orgId(),
+    name: text("name").notNull(),
+    agentId: uuid("agent_id").notNull(),
+    runAsUserId: uuid("run_as_user_id").notNull(),
+    createdBy: uuid("created_by").notNull(),
+    actionKind: text("action_kind", { enum: ["agent_turn", "digest"] })
+      .notNull()
+      .default("agent_turn"),
+    instructions: text("instructions").notNull().default(""),
+    triggerKind: text("trigger_kind", { enum: ["schedule", "webhook", "mail"] }).notNull(),
+    /** Five-field cron in `time_zone` (an IANA zone); both set exactly for `schedule`. */
+    scheduleCron: text("schedule_cron"),
+    timeZone: text("time_zone"),
+    targetKind: text("target_kind", { enum: ["channel", "thread", "dm", "board"] }).notNull(),
+    conversationId: uuid("conversation_id"),
+    threadRootMessageId: uuid("thread_root_message_id"),
+    boardColumnId: uuid("board_column_id"),
+    /** Webhook and mail only: post the item (thread root / DM / reply) or file it as a board card. */
+    inboundAction: text("inbound_action", { enum: ["post", "board_card"] }),
+    /** Webhook and mail only: whether the bot is asked to act on the item (a read-only, tainted turn). */
+    inboundAskBot: boolean("inbound_ask_bot").notNull().default(true),
+    inboundConfig: jsonb("inbound_config").$type<Record<string, unknown>>().notNull().default({}),
+    /** Action settings (digest sections and days, the optional summary model). */
+    config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+    maxRunsPerDay: integer("max_runs_per_day").notNull().default(24),
+    /** The breaker (Pitfall 1): three failed or unanswered runs in a row → `needs_attention`. */
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    status: text("status", { enum: ["active", "paused", "needs_attention"] })
+      .notNull()
+      .default("active"),
+    pausedBy: uuid("paused_by"),
+    pausedAt: ts("paused_at"),
+    pausedReason: text("paused_reason"),
+    nextRunAt: ts("next_run_at"),
+    lastRunAt: ts("last_run_at"),
+    version: integer("version").notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    unique("automations_org_id_uq").on(t.organizationId, t.id),
+    foreignKey({
+      name: "automations_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "automations_conversation_fk",
+      columns: [t.organizationId, t.conversationId],
+      foreignColumns: [conversations.organizationId, conversations.id],
+    }).onDelete("cascade"),
+    /** The thread root is a message of the target conversation. */
+    foreignKey({
+      name: "automations_thread_root_fk",
+      columns: [t.threadRootMessageId, t.conversationId],
+      foreignColumns: [messages.id, messages.conversationId],
+    }).onDelete("cascade"),
+    /** The column is a column of the target board. */
+    foreignKey({
+      name: "automations_board_column_fk",
+      columns: [t.boardColumnId, t.conversationId],
+      foreignColumns: [boardColumns.id, boardColumns.conversationId],
+    }).onDelete("no action"),
+    // D-07, P-04: an automation always runs as its creator (admins may pause or delete it, never run as someone).
+    check("automations_run_as_creator_check", sql`${t.runAsUserId} = ${t.createdBy}`),
+    check("automations_name_len_check", sql`char_length(${t.name}) between 1 and 120`),
+    check("automations_instructions_len_check", sql`char_length(${t.instructions}) <= 4000`),
+    check("automations_action_kind_check", sql`${t.actionKind} in ('agent_turn','digest')`),
+    check("automations_trigger_kind_check", sql`${t.triggerKind} in ${AUTOMATION_TRIGGER_KINDS}`),
+    check("automations_target_kind_check", sql`${t.targetKind} in ('channel','thread','dm','board')`),
+    check("automations_status_check", sql`${t.status} in ('active','paused','needs_attention')`),
+    check(
+      "automations_schedule_check",
+      sql`(${t.triggerKind} = 'schedule' and ${t.scheduleCron} is not null and ${t.timeZone} is not null
+          and char_length(${t.scheduleCron}) between 9 and 120 and char_length(${t.timeZone}) between 1 and 64)
+        or (${t.triggerKind} <> 'schedule' and ${t.scheduleCron} is null and ${t.timeZone} is null)`,
+    ),
+    check(
+      "automations_target_check",
+      sql`(${t.targetKind} = 'dm' and ${t.conversationId} is null and ${t.threadRootMessageId} is null
+          and ${t.boardColumnId} is null)
+        or (${t.targetKind} = 'channel' and ${t.conversationId} is not null and ${t.threadRootMessageId} is null
+          and ${t.boardColumnId} is null)
+        or (${t.targetKind} = 'thread' and ${t.conversationId} is not null and ${t.threadRootMessageId} is not null
+          and ${t.boardColumnId} is null)
+        or (${t.targetKind} = 'board' and ${t.conversationId} is not null and ${t.boardColumnId} is not null
+          and ${t.threadRootMessageId} is null)`,
+    ),
+    check(
+      "automations_inbound_check",
+      sql`(${t.inboundAction} is not null) = (${t.triggerKind} in ('webhook','mail'))
+        and (${t.inboundAction} is null or ${t.inboundAction} in ('post','board_card'))
+        and (${t.inboundAction} is distinct from 'board_card' or ${t.targetKind} = 'board')`,
+    ),
+    check(
+      "automations_digest_check",
+      sql`${t.actionKind} <> 'digest' or (${t.triggerKind} = 'schedule' and ${t.targetKind} = 'dm')`,
+    ),
+    check("automations_max_runs_per_day_check", sql`${t.maxRunsPerDay} between 1 and 288`),
+    check("automations_consecutive_failures_check", sql`${t.consecutiveFailures} >= 0`),
+    check("automations_version_check", sql`${t.version} >= 1`),
+    check(
+      "automations_paused_reason_len_check",
+      sql`${t.pausedReason} is null or char_length(${t.pausedReason}) <= 200`,
+    ),
+    check(
+      "automations_config_check",
+      sql`jsonb_typeof(${t.inboundConfig}) = 'object' and jsonb_typeof(${t.config}) = 'object'`,
+    ),
+    /** One digest per person (D-05). */
+    uniqueIndex("automations_digest_uq")
+      .on(t.organizationId, t.runAsUserId)
+      .where(sql`action_kind = 'digest'`),
+    index("automations_due_idx").on(t.nextRunAt).where(sql`status = 'active' and trigger_kind = 'schedule'`),
+    index("automations_run_as_idx").on(t.organizationId, t.runAsUserId),
+    index("automations_agent_idx").on(t.organizationId, t.agentId),
+    index("automations_conversation_idx")
+      .on(t.organizationId, t.conversationId)
+      .where(sql`conversation_id is not null`),
+    index("automations_board_column_idx").on(t.boardColumnId).where(sql`board_column_id is not null`),
+  ],
+);
+
+/**
+ * An inbound webhook URL (D-02, D-07, Pitfall 4). `public_id` is the unguessable path segment (26 Crockford base32
+ * characters, unique across organizations: the public route finds the organization by it). Secrets are sealed
+ * `webhook_secret` rows; the previous one stays valid until `previous_valid_until` (rotation grace). Deleting the
+ * automation unlinks the endpoint and `deleted_at` tombstones it, so the route answers 410 rather than 404.
+ */
+export const webhookEndpoints = appSchema.table(
+  "webhook_endpoints",
+  {
+    id: id(),
+    organizationId: orgId(),
+    automationId: uuid("automation_id"),
+    publicId: text("public_id").notNull(),
+    secretId: uuid("secret_id"),
+    previousSecretId: uuid("previous_secret_id"),
+    previousValidUntil: ts("previous_valid_until"),
+    secretSetAt: ts("secret_set_at").notNull().defaultNow(),
+    lastRejectedAt: ts("last_rejected_at"),
+    lastRejectedReason: text("last_rejected_reason", {
+      enum: ["signature", "timestamp", "too_large", "rate_limited"],
+    }),
+    deletedAt: ts("deleted_at"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    unique("webhook_endpoints_org_id_uq").on(t.organizationId, t.id),
+    unique("webhook_endpoints_public_id_uq").on(t.publicId),
+    foreignKey({
+      name: "webhook_endpoints_automation_fk",
+      columns: [t.organizationId, t.automationId],
+      foreignColumns: [automations.organizationId, automations.id],
+    }).onDelete("set null"),
+    uniqueIndex("webhook_endpoints_automation_uq").on(t.automationId).where(sql`automation_id is not null`),
+    check("webhook_endpoints_public_id_check", sql`${t.publicId} ~* '^[0-9a-hjkmnp-tv-z]{26}$'`),
+    check(
+      "webhook_endpoints_rejected_reason_check",
+      sql`${t.lastRejectedReason} is null
+        or ${t.lastRejectedReason} in ('signature','timestamp','too_large','rate_limited')`,
+    ),
+  ],
+);
+
+/**
+ * An IMAP mailbox an automation polls (D-02): its owner's keychain item holds the sign-in (a deleted item unlinks it and
+ * the poll answers `auth_failed`). `uid_validity` / `last_uid` are the IMAP cursor; a changed UIDVALIDITY restarts it.
+ */
+export const mailboxes = appSchema.table(
+  "mailboxes",
+  {
+    id: id(),
+    organizationId: orgId(),
+    automationId: uuid("automation_id").notNull(),
+    ownerUserId: uuid("owner_user_id").notNull(),
+    vaultItemId: uuid("vault_item_id"),
+    host: text("host").notNull(),
+    port: integer("port").notNull().default(993),
+    folder: text("folder").notNull().default("INBOX"),
+    pollIntervalMinutes: integer("poll_interval_minutes").notNull().default(5),
+    uidValidity: bigint("uid_validity", { mode: "number" }),
+    lastUid: bigint("last_uid", { mode: "number" }),
+    nextPollAt: ts("next_poll_at").notNull().defaultNow(),
+    lastPolledAt: ts("last_polled_at"),
+    lastNewCount: integer("last_new_count").notNull().default(0),
+    status: text("status", { enum: ["active", "auth_failed", "unreachable", "paused"] })
+      .notNull()
+      .default("active"),
+    lastErrorCode: text("last_error_code"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    unique("mailboxes_org_id_uq").on(t.organizationId, t.id),
+    unique("mailboxes_automation_uq").on(t.automationId),
+    foreignKey({
+      name: "mailboxes_automation_fk",
+      columns: [t.organizationId, t.automationId],
+      foreignColumns: [automations.organizationId, automations.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "mailboxes_vault_item_fk",
+      columns: [t.organizationId, t.vaultItemId],
+      foreignColumns: [vaultItems.organizationId, vaultItems.id],
+    }).onDelete("set null"),
+    index("mailboxes_vault_item_idx")
+      .on(t.organizationId, t.vaultItemId)
+      .where(sql`vault_item_id is not null`),
+    index("mailboxes_due_idx").on(t.nextPollAt).where(sql`status in ('active','unreachable')`),
+    check("mailboxes_host_len_check", sql`char_length(${t.host}) between 1 and 253`),
+    check("mailboxes_port_check", sql`${t.port} between 1 and 65535`),
+    check("mailboxes_folder_len_check", sql`char_length(${t.folder}) between 1 and 200`),
+    check("mailboxes_poll_interval_check", sql`${t.pollIntervalMinutes} in (5,10,15,30,60)`),
+    check("mailboxes_status_check", sql`${t.status} in ('active','auth_failed','unreachable','paused')`),
+    check("mailboxes_last_new_count_check", sql`${t.lastNewCount} >= 0`),
+    check(
+      "mailboxes_last_error_code_len_check",
+      sql`${t.lastErrorCode} is null or char_length(${t.lastErrorCode}) <= 64`,
+    ),
+  ],
+);
+
+/**
+ * One inbound item (D-02, D-07): a webhook delivery or a mail message, exactly one source. Idempotent per source by
+ * `external_id` (`webhook-id`, `Message-ID`; Pitfall 6): a repeat only bumps `duplicate_count`. Untrusted, text-only
+ * content with caps (Pitfall 3); `content_purged_at` (the 30-day retention) requires every content column cleared.
+ */
+export const automationEvents = appSchema.table(
+  "automation_events",
+  {
+    id: id(),
+    organizationId: orgId(),
+    source: text("source", { enum: ["webhook", "mail"] }).notNull(),
+    webhookEndpointId: uuid("webhook_endpoint_id"),
+    mailboxId: uuid("mailbox_id"),
+    externalId: text("external_id").notNull(),
+    /** Groups a conversation of inbound items (the mail thread root, a configured JSON pointer). */
+    threadKey: text("thread_key"),
+    subject: text("subject"),
+    sender: text("sender"),
+    bodyText: text("body_text"),
+    bodyJson: jsonb("body_json").$type<unknown>(),
+    receivedAt: ts("received_at").notNull().defaultNow(),
+    result: text("result", { enum: ["accepted", "not_run"] }).notNull(),
+    reason: text("reason"),
+    /** The message the platform posted for it (a deleted message only unlinks). */
+    messageId: uuid("message_id").references(() => messages.id, { onDelete: "set null" }),
+    boardCardMessageId: uuid("board_card_message_id"),
+    /** The full-text reply posted after the card when the card's field cut the text (outside content too, LO-05). */
+    fullMessageId: uuid("full_message_id").references(() => messages.id, { onDelete: "set null" }),
+    duplicateCount: integer("duplicate_count").notNull().default(0),
+    lastDuplicateAt: ts("last_duplicate_at"),
+    contentPurgedAt: ts("content_purged_at"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    unique("automation_events_org_id_uq").on(t.organizationId, t.id),
+    foreignKey({
+      name: "automation_events_webhook_endpoint_fk",
+      columns: [t.organizationId, t.webhookEndpointId],
+      foreignColumns: [webhookEndpoints.organizationId, webhookEndpoints.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "automation_events_mailbox_fk",
+      columns: [t.organizationId, t.mailboxId],
+      foreignColumns: [mailboxes.organizationId, mailboxes.id],
+    }).onDelete("cascade"),
+    unique("automation_events_webhook_external_uq").on(t.webhookEndpointId, t.externalId),
+    unique("automation_events_mailbox_external_uq").on(t.mailboxId, t.externalId),
+    index("automation_events_thread_idx").on(t.organizationId, t.threadKey),
+    index("automation_events_message_idx").on(t.messageId).where(sql`message_id is not null`),
+    // The other half of the mention path's `message_id OR board_card_message_id` lookup (07.6 review A MD-07).
+    index("automation_events_board_card_idx")
+      .on(t.boardCardMessageId)
+      .where(sql`board_card_message_id is not null`),
+    index("automation_events_full_message_idx").on(t.fullMessageId).where(sql`full_message_id is not null`),
+    index("automation_events_retention_idx").on(t.receivedAt).where(sql`content_purged_at is null`),
+    check(
+      "automation_events_source_check",
+      sql`(${t.source} = 'webhook' and ${t.webhookEndpointId} is not null and ${t.mailboxId} is null)
+        or (${t.source} = 'mail' and ${t.mailboxId} is not null and ${t.webhookEndpointId} is null)`,
+    ),
+    check("automation_events_external_id_len_check", sql`char_length(${t.externalId}) between 1 and 998`),
+    check(
+      "automation_events_thread_key_len_check",
+      sql`${t.threadKey} is null or char_length(${t.threadKey}) <= 998`,
+    ),
+    check(
+      "automation_events_subject_len_check",
+      sql`${t.subject} is null or char_length(${t.subject}) <= 500`,
+    ),
+    check("automation_events_sender_len_check", sql`${t.sender} is null or char_length(${t.sender}) <= 320`),
+    check(
+      "automation_events_body_text_len_check",
+      sql`${t.bodyText} is null or char_length(${t.bodyText}) <= 32768`,
+    ),
+    check(
+      "automation_events_body_json_size_check",
+      sql`${t.bodyJson} is null or octet_length(${t.bodyJson}::text) <= 131072`,
+    ),
+    check("automation_events_result_check", sql`${t.result} in ('accepted','not_run')`),
+    check("automation_events_reason_len_check", sql`${t.reason} is null or char_length(${t.reason}) <= 64`),
+    check("automation_events_duplicate_count_check", sql`${t.duplicateCount} >= 0`),
+    check(
+      "automation_events_purged_check",
+      sql`${t.contentPurgedAt} is null or (${t.subject} is null and ${t.sender} is null and ${t.bodyText} is null
+        and ${t.bodyJson} is null and ${t.threadKey} is null)`,
+    ),
+  ],
+);
+
+/**
+ * One run of an automation (D-07, Pitfall 6): unique per scheduled instant and per inbound item, so a retried job never
+ * runs twice. `queued → delivered` (the run card posted and the turn handed to the cell) → `answered` / `no_reply`;
+ * `skipped` (a cap, a missed instant) and `failed` carry a `reason` code. Webhook and mail runs start `tainted`.
+ */
+export const automationRuns = appSchema.table(
+  "automation_runs",
+  {
+    id: id(),
+    organizationId: orgId(),
+    automationId: uuid("automation_id").notNull(),
+    trigger: text("trigger", { enum: ["schedule", "webhook", "mail", "manual"] }).notNull(),
+    scheduledFor: ts("scheduled_for"),
+    inboundEventId: uuid("inbound_event_id"),
+    status: text("status", { enum: ["queued", "delivered", "answered", "skipped", "failed", "no_reply"] })
+      .notNull()
+      .default("queued"),
+    reason: text("reason"),
+    /** The platform-owned run card (a deleted message only unlinks). */
+    anchorMessageId: uuid("anchor_message_id").references(() => messages.id, { onDelete: "set null" }),
+    boardCardMessageId: uuid("board_card_message_id"),
+    /** The `agent.automation_run.v1` event id handed to the cell. */
+    agentEventId: uuid("agent_event_id"),
+    tainted: boolean("tainted").notNull().default(false),
+    deliveredAt: ts("delivered_at"),
+    answeredAt: ts("answered_at"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      name: "automation_runs_automation_fk",
+      columns: [t.organizationId, t.automationId],
+      foreignColumns: [automations.organizationId, automations.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "automation_runs_inbound_event_fk",
+      columns: [t.organizationId, t.inboundEventId],
+      foreignColumns: [automationEvents.organizationId, automationEvents.id],
+    }).onDelete("set null"),
+    uniqueIndex("automation_runs_scheduled_uq")
+      .on(t.automationId, t.scheduledFor)
+      .where(sql`scheduled_for is not null`),
+    uniqueIndex("automation_runs_inbound_uq")
+      .on(t.automationId, t.inboundEventId)
+      .where(sql`inbound_event_id is not null`),
+    index("automation_runs_delivered_idx").on(t.status, t.deliveredAt).where(sql`status = 'delivered'`),
+    index("automation_runs_automation_idx").on(t.automationId, t.createdAt.desc()),
+    index("automation_runs_anchor_idx").on(t.anchorMessageId).where(sql`anchor_message_id is not null`),
+    index("automation_runs_inbound_event_idx").on(t.inboundEventId).where(sql`inbound_event_id is not null`),
+    check("automation_runs_trigger_check", sql`${t.trigger} in ('schedule','webhook','mail','manual')`),
+    check(
+      "automation_runs_status_check",
+      sql`${t.status} in ('queued','delivered','answered','skipped','failed','no_reply')`,
+    ),
+    check(
+      "automation_runs_scheduled_check",
+      sql`(${t.trigger} = 'schedule') = (${t.scheduledFor} is not null)`,
+    ),
+    check(
+      "automation_runs_inbound_check",
+      sql`${t.inboundEventId} is null or ${t.trigger} in ('webhook','mail')`,
+    ),
+    check("automation_runs_reason_len_check", sql`${t.reason} is null or char_length(${t.reason}) <= 64`),
+  ],
+);
+
+/**
+ * A bot's proposal of a scheduled automation (D-03, R5): the stored action of its `automation.create` approval, which
+ * only the run-as person decides. Applying it creates the automation (`automation_id`); `edited` records that the person
+ * changed it before applying.
+ */
+export const automationDrafts = appSchema.table(
+  "automation_drafts",
+  {
+    id: id(),
+    organizationId: orgId(),
+    agentId: uuid("agent_id").notNull(),
+    runAsUserId: uuid("run_as_user_id").notNull(),
+    /** The proposing turn (`agent_turns.event_id`). */
+    eventId: uuid("event_id").notNull(),
+    name: text("name").notNull(),
+    instructions: text("instructions").notNull(),
+    scheduleCron: text("schedule_cron").notNull(),
+    timeZone: text("time_zone").notNull(),
+    targetKind: text("target_kind", { enum: ["channel", "thread", "dm"] }).notNull(),
+    conversationId: uuid("conversation_id"),
+    threadRootMessageId: uuid("thread_root_message_id"),
+    maxRunsPerDay: integer("max_runs_per_day").notNull().default(24),
+    status: text("status", { enum: ["pending", "applied", "discarded", "expired"] })
+      .notNull()
+      .default("pending"),
+    automationId: uuid("automation_id"),
+    edited: boolean("edited").notNull().default(false),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      name: "automation_drafts_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "automation_drafts_conversation_fk",
+      columns: [t.organizationId, t.conversationId],
+      foreignColumns: [conversations.organizationId, conversations.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "automation_drafts_thread_root_fk",
+      columns: [t.threadRootMessageId, t.conversationId],
+      foreignColumns: [messages.id, messages.conversationId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "automation_drafts_automation_fk",
+      columns: [t.organizationId, t.automationId],
+      foreignColumns: [automations.organizationId, automations.id],
+    }).onDelete("set null"),
+    index("automation_drafts_run_as_idx").on(t.organizationId, t.runAsUserId, t.status),
+    index("automation_drafts_event_idx").on(t.organizationId, t.eventId),
+    index("automation_drafts_agent_idx").on(t.organizationId, t.agentId),
+    index("automation_drafts_conversation_idx")
+      .on(t.organizationId, t.conversationId)
+      .where(sql`conversation_id is not null`),
+    index("automation_drafts_automation_idx").on(t.automationId).where(sql`automation_id is not null`),
+    check("automation_drafts_name_len_check", sql`char_length(${t.name}) between 1 and 120`),
+    check("automation_drafts_instructions_len_check", sql`char_length(${t.instructions}) between 1 and 4000`),
+    check(
+      "automation_drafts_schedule_len_check",
+      sql`char_length(${t.scheduleCron}) between 9 and 120 and char_length(${t.timeZone}) between 1 and 64`,
+    ),
+    check(
+      "automation_drafts_target_check",
+      sql`(${t.targetKind} = 'dm' and ${t.conversationId} is null and ${t.threadRootMessageId} is null)
+        or (${t.targetKind} = 'channel' and ${t.conversationId} is not null and ${t.threadRootMessageId} is null)
+        or (${t.targetKind} = 'thread' and ${t.conversationId} is not null and ${t.threadRootMessageId} is not null)`,
+    ),
+    check("automation_drafts_max_runs_per_day_check", sql`${t.maxRunsPerDay} between 1 and 288`),
+    check("automation_drafts_status_check", sql`${t.status} in ('pending','applied','discarded','expired')`),
+  ],
+);
+
+/**
+ * A board card linked to an external record (D-04, D-09): the fields a template watches, read through a 07.4 connector
+ * (`read_tool` with `{ [id_arg]: external_ref }`) as `check_as_user_id`. `snapshot_hash` is sha256 over the canonical
+ * JSON of the projected fields (07.5 `canonicalJson`); `last_written_hash` is the compare-and-set base of the last
+ * `ocw_record_update` write. One watch per card.
+ */
+export const watchedRecords = appSchema.table(
+  "watched_records",
+  {
+    id: id(),
+    organizationId: orgId(),
+    cardMessageId: uuid("card_message_id").notNull(),
+    conversationId: uuid("conversation_id").notNull(),
+    agentId: uuid("agent_id").notNull(),
+    mcpServerId: uuid("mcp_server_id").notNull(),
+    externalRef: text("external_ref").notNull(),
+    readTool: text("read_tool").notNull(),
+    writeTool: text("write_tool"),
+    noteTool: text("note_tool"),
+    idArg: text("id_arg").notNull(),
+    /** The watched fields (`WatchedField[]`: a JSON pointer and a label each). */
+    fields: jsonb("fields").$type<Array<Record<string, unknown>>>().notNull(),
+    snapshot: jsonb("snapshot").$type<Record<string, unknown>>(),
+    snapshotHash: text("snapshot_hash"),
+    lastWrittenHash: text("last_written_hash"),
+    /**
+     * A write in flight (07.6 review HI-01): set atomically by the compare-and-set's `begin` only while no other lease
+     * is live, cleared when the write ends. Bounded, so a crashed API never blocks the record for long.
+     */
+    writeLeaseUntil: ts("write_lease_until"),
+    checkAsUserId: uuid("check_as_user_id").notNull(),
+    checkIntervalMinutes: integer("check_interval_minutes").notNull().default(60),
+    nextCheckAt: ts("next_check_at").notNull().defaultNow(),
+    checkedAt: ts("checked_at"),
+    lastChangedAt: ts("last_changed_at"),
+    lastStatus: text("last_status", { enum: ["ok", "changed", "not_connected", "unreachable", "error"] })
+      .notNull()
+      .default("ok"),
+    createdBy: uuid("created_by").notNull(),
+    version: integer("version").notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    unique("watched_records_org_id_uq").on(t.organizationId, t.id),
+    unique("watched_records_card_uq").on(t.cardMessageId),
+    /** The card is a card of the record's board channel. */
+    foreignKey({
+      name: "watched_records_card_fk",
+      columns: [t.cardMessageId, t.conversationId],
+      foreignColumns: [boardCards.messageId, boardCards.conversationId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "watched_records_conversation_fk",
+      columns: [t.organizationId, t.conversationId],
+      foreignColumns: [conversations.organizationId, conversations.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "watched_records_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "watched_records_mcp_server_fk",
+      columns: [t.organizationId, t.mcpServerId],
+      foreignColumns: [mcpServers.organizationId, mcpServers.id],
+    }).onDelete("cascade"),
+    index("watched_records_due_idx").on(t.nextCheckAt),
+    index("watched_records_conversation_idx").on(t.organizationId, t.conversationId),
+    index("watched_records_agent_idx").on(t.organizationId, t.agentId),
+    index("watched_records_mcp_server_idx").on(t.organizationId, t.mcpServerId),
+    check("watched_records_external_ref_len_check", sql`char_length(${t.externalRef}) between 1 and 200`),
+    check(
+      "watched_records_tools_len_check",
+      sql`char_length(${t.readTool}) between 1 and 200
+        and (${t.writeTool} is null or char_length(${t.writeTool}) between 1 and 200)
+        and (${t.noteTool} is null or char_length(${t.noteTool}) between 1 and 200)`,
+    ),
+    check("watched_records_id_arg_len_check", sql`char_length(${t.idArg}) between 1 and 100`),
+    check("watched_records_fields_check", sql`jsonb_typeof(${t.fields}) = 'array'`),
+    check(
+      "watched_records_snapshot_hash_check",
+      sql`${t.snapshotHash} is null or ${t.snapshotHash} ~ ${SHA256_HEX}`,
+    ),
+    check(
+      "watched_records_last_written_hash_check",
+      sql`${t.lastWrittenHash} is null or ${t.lastWrittenHash} ~ ${SHA256_HEX}`,
+    ),
+    check("watched_records_interval_check", sql`${t.checkIntervalMinutes} in (15,30,60,240,1440)`),
+    check(
+      "watched_records_last_status_check",
+      sql`${t.lastStatus} in ('ok','changed','not_connected','unreachable','error')`,
+    ),
+    check("watched_records_version_check", sql`${t.version} >= 1`),
+  ],
+);
+
+/**
+ * The before → after history of a watched record (D-04). Append-only for the app role (UPDATE and DELETE revoked in
+ * post-migrate); it still goes with its watched record (FK cascades are not subject to the grant).
+ */
+export const watchedRecordChanges = appSchema.table(
+  "watched_record_changes",
+  {
+    id: id(),
+    organizationId: orgId(),
+    watchedRecordId: uuid("watched_record_id").notNull(),
+    detectedAt: ts("detected_at").notNull().defaultNow(),
+    source: text("source", { enum: ["access", "schedule", "write", "manual"] }).notNull(),
+    before: jsonb("before").$type<Record<string, unknown>>(),
+    after: jsonb("after").$type<Record<string, unknown>>().notNull(),
+    beforeHash: text("before_hash"),
+    afterHash: text("after_hash").notNull(),
+    /** The thread reply that reported it (a deleted message only unlinks). */
+    messageId: uuid("message_id").references(() => messages.id, { onDelete: "set null" }),
+  },
+  (t) => [
+    foreignKey({
+      name: "watched_record_changes_record_fk",
+      columns: [t.organizationId, t.watchedRecordId],
+      foreignColumns: [watchedRecords.organizationId, watchedRecords.id],
+    }).onDelete("cascade"),
+    index("watched_record_changes_record_idx").on(t.organizationId, t.watchedRecordId, t.detectedAt),
+    index("watched_record_changes_message_idx").on(t.messageId).where(sql`message_id is not null`),
+    check("watched_record_changes_source_check", sql`${t.source} in ${WATCHED_CHECK_SOURCES}`),
+    check(
+      "watched_record_changes_before_hash_check",
+      sql`${t.beforeHash} is null or ${t.beforeHash} ~ ${SHA256_HEX}`,
+    ),
+    check("watched_record_changes_after_hash_check", sql`${t.afterHash} ~ ${SHA256_HEX}`),
+  ],
+);
+
+/**
+ * A Work Zone session's memory summary state (D-06, D-10, D-11): `writing` → `proposed` (a 07.2 proposal,
+ * `approval_id`) or `failed`. `unit_id` is the team project the proposal went to, resolved through 07.9's
+ * `work_project_repos` at summary time (a deleted unit only unlinks). Behind the session's audience like `work_prompts`
+ * (RESTRICTIVE `audience_backstop` in post-migrate).
+ */
+export const workSessionMemory = appSchema.table(
+  "work_session_memory",
+  {
+    workSessionId: uuid("work_session_id").primaryKey(),
+    organizationId: orgId(),
+    unitId: uuid("unit_id"),
+    status: text("status", { enum: ["writing", "proposed", "failed"] }).notNull(),
+    approvalId: uuid("approval_id"),
+    /** The session stream's last seq the summary covered. */
+    summarizedSeq: bigint("summarized_seq", { mode: "number" }),
+    /** Started by the owner's automatic preference, not the button. */
+    auto: boolean("auto").notNull().default(false),
+    errorCode: text("error_code"),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      name: "work_session_memory_session_fk",
+      columns: [t.organizationId, t.workSessionId],
+      foreignColumns: [workSessions.organizationId, workSessions.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "work_session_memory_unit_fk",
+      columns: [t.organizationId, t.unitId],
+      foreignColumns: [orgUnits.organizationId, orgUnits.id],
+    }).onDelete("set null"),
+    index("work_session_memory_unit_idx").on(t.organizationId, t.unitId).where(sql`unit_id is not null`),
+    check("work_session_memory_status_check", sql`${t.status} in ('writing','proposed','failed')`),
+    check(
+      "work_session_memory_error_code_len_check",
+      sql`${t.errorCode} is null or char_length(${t.errorCode}) <= 64`,
+    ),
+  ],
+);
+
+/** A person's Work Zone memory preference (D-06): propose a summary automatically when a session ends; off by default. */
+export const workMemoryPrefs = appSchema.table(
+  "work_memory_prefs",
+  {
+    organizationId: orgId(),
+    userId: uuid("user_id").notNull(),
+    autoPropose: boolean("auto_propose").notNull().default(false),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.organizationId, t.userId] })],
 );

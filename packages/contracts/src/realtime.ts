@@ -205,6 +205,15 @@ export const EventTypes = {
   workSessionVisibilityChanged: "work_session.visibility_changed",
   /** Durable on `org:<id>`: a team project's teams, repositories or default changed (WorkProjectUpdatedEvent). */
   workProjectUpdated: "work_project.updated",
+  // Phase 07.6 (07.6-01). Ids only; payloads in automations.ts, watched-records.ts and work-zone-memory.ts.
+  /** On `user:<runAs>`: an automation changed (AutomationUpdatedEvent). */
+  automationUpdated: "automation.updated",
+  /** On `user:<runAs>`: one of its runs changed status (AutomationRunUpdatedEvent). */
+  automationRunUpdated: "automation_run.updated",
+  /** On `conv:<board>`: a watched record was linked, checked, changed or unlinked (WatchedRecordUpdatedEvent). */
+  watchedRecordUpdated: "watched_record.updated",
+  /** On `user:<reader>` only (D-11), never `ws:` or `org:`: a session's memory summary changed. */
+  workSessionMemoryUpdated: "work_session_memory.updated",
 } as const;
 
 export const MemberUpdatedPayload = z.object({ userId: z.uuid(), changed: z.array(z.string()) });

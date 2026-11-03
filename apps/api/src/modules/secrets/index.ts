@@ -39,8 +39,15 @@ export interface SecretsService {
        * bundle or key (Phase 07.4, D-01). `vault_item`: a keychain item's value, AAD `<orgId>:vault:<itemId>` (D-04).
        * `browser_session`: a member's browser storage state for one site and bot (Phase 07.8, D-08, P-09), AAD
        * `<orgId>:<userId>:browser:<agentId>:<siteKey>`; only `browser/sessions.ts` seals and opens it.
+       * `webhook_secret`: an inbound webhook endpoint's Standard Webhooks signing secret (Phase 07.6, D-02, D-07), AAD
+       * `<orgId>:webhook_endpoint:<endpointId>`; only `automation/webhooks.ts` and `webhook-routes.ts` seal and open it.
        */
-      kind: "user_model_credential" | "connector_credential" | "vault_item" | "browser_session";
+      kind:
+        | "user_model_credential"
+        | "connector_credential"
+        | "vault_item"
+        | "browser_session"
+        | "webhook_secret";
       provider?: string | null;
       value: string;
       aad: string;

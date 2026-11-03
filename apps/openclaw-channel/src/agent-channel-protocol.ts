@@ -38,6 +38,11 @@
  *                                (ocw_work_zone_projects, 07.5: the projects the turn's human may start a session on)
  *   POST /work-zone/proposals  ← AgentChannelWorkZonePropose → `{approvalId, created}` or 200 `{refused}`
  *                                (ocw_start_work_zone, 07.5: a proposal the turn's human starts; never a mode)
+ *   POST /automations/propose  ← AgentChannelAutomationPropose → `{ok, approvalId?|code?, sentence}` (ocw_automation_propose,
+ *                                07.6: a scheduled automation as a card its person confirms; a refusal may come with a
+ *                                4xx status and the same body)
+ *   POST /records/update       ← AgentChannelRecordUpdate → `{ok, code, sentence}` (ocw_record_update, 07.6: compare-and-set
+ *                                on the watched record of the turn's card; 409 `record_changed` with the same body)
  *   POST /mcp/probe-results    ← AgentChannelMcpProbeResult (the tools an `mcp.probe` discovered; D-13)
  *   POST /plugins/report       ← AgentChannelPluginReport (a marketplace install / uninstall outcome; D-14)
  *   POST /plugins/verify-install, GET /plugins: used by infra/openclaw (install gate, boot render), not here
@@ -63,6 +68,11 @@ export const AgentChannelEventTypes = {
   pluginUninstall: "plugin.uninstall.v1",
   /** Phase 6 (AGENT-04, P-11): a reader approved or denied one of the agent's Agent Cards. */
   cardAction: "agent.card_action.v1",
+  /**
+   * Phase 07.6 (D-03): an automation run, built like a mention on the run's anchor message (author = the run-as human,
+   * text = a server sentence), plus the standing order and, for webhook and mail runs, the outside content apart.
+   */
+  automationRun: "agent.automation_run.v1",
 } as const;
 export const cellTopic = (cellId: string) => `cell:${cellId}`;
 
@@ -489,6 +499,55 @@ export const AgentCardActionEvent = AgentMentionEvent.omit({ type: true }).exten
   }),
 });
 export type AgentCardActionEvent = z.infer<typeof AgentCardActionEvent>;
+
+/** Phase 07.6: the contracts' `AUTOMATION_LIMITS` the plugin checks or bounds locally (parity: plugin-contract.test.ts). */
+export const AUTOMATION_LIMITS = {
+  nameMax: 120,
+  instructionsMax: 4000,
+  maxRunsPerDayCeiling: 288,
+  mailTextMaxChars: 32_768,
+  pointerMax: 200,
+  cronMax: 100,
+} as const;
+/** The inbound title bound (contracts: `AGENT_CARD_TITLE_MAX`). */
+export const AUTOMATION_INBOUND_TITLE_MAX = 200;
+
+/** `ocw_record_update`: at most this many field changes per call (contracts `AgentChannelRecordUpdate`). */
+export const RECORD_UPDATE_MAX_CHANGES = 20;
+/** The longest string value of one `ocw_record_update` change. */
+export const RECORD_UPDATE_VALUE_MAX = 500;
+
+/**
+ * Phase 07.6 (D-03, C-01): the outside content that started a run (a webhook payload or a mail), composed by the API.
+ * Untrusted: the mapper puts it in its own `external` block, never in the message text or the standing order. A
+ * malformed value fails the event (it is skipped), so outside content never arrives unlabelled.
+ */
+export const AgentAutomationRunInbound = z.object({
+  source: z.enum(["webhook", "mail"]),
+  title: z.string().max(AUTOMATION_INBOUND_TITLE_MAX),
+  text: z.string().max(AUTOMATION_LIMITS.mailTextMaxChars),
+  from: z.string().max(320).nullable(),
+  receivedAt: z.string(),
+});
+export type AgentAutomationRunInbound = z.infer<typeof AgentAutomationRunInbound>;
+
+/**
+ * `agent.automation_run.v1` (07.6 D-03, P-22): built by the API like a mention of the agent on the run's anchor message:
+ * `message.author` is the run-as human, `message.text` a server sentence and `turn` is computed for that human
+ * (unattended: never a browser tool, D-12). `trigger` stays a string so a newer trigger never drops the event.
+ */
+export const AgentAutomationRunEvent = AgentMentionEvent.omit({ type: true }).extend({
+  type: z.literal(AgentChannelEventTypes.automationRun),
+  automationRun: z.object({
+    automationId: Id,
+    runId: Id,
+    name: z.string().max(AUTOMATION_LIMITS.nameMax),
+    trigger: z.string().min(1).max(32),
+    instructions: z.string().max(AUTOMATION_LIMITS.instructionsMax),
+    inbound: AgentAutomationRunInbound.nullable(),
+  }),
+});
+export type AgentAutomationRunEvent = z.infer<typeof AgentAutomationRunEvent>;
 
 export const CellConfigChangedEvent = z.object({
   type: z.literal(AgentChannelEventTypes.configChanged),
@@ -1293,6 +1352,60 @@ export const AgentChannelWorkZoneProposeResponse = z.union([
   z.object({ approvalId: Id, created: z.boolean() }),
 ]);
 export type AgentChannelWorkZoneProposeResponse = z.infer<typeof AgentChannelWorkZoneProposeResponse>;
+
+// ---------------------------------------------------------------- automations and watched records (07.6, mirror of
+// contracts agent-channel.ts). Bodies carry only the turn's event and agent with the intent: the API derives the
+// conversation, the person (run-as) and the record from the stored turn and computes every hash itself (D-03, D-04).
+
+/** `POST /automations/propose` (`ocw_automation_propose`): never a conversation id, a person or a webhook/mail trigger. */
+export type AgentChannelAutomationPropose = {
+  eventId: string;
+  agentId: string;
+  name: string;
+  instructions: string;
+  schedule: { cron: string; timeZone: string };
+  /** `here`: the turn's conversation (its thread); `dm`: the person's DM with this bot. */
+  target: { kind: "here" } | { kind: "dm" };
+  maxRunsPerDay?: number;
+};
+
+/** The model reads `sentence` (composed by the API); `code` is the refusal code. */
+export const AgentChannelAutomationProposeResponse = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), approvalId: Id, sentence: z.string().max(500) }),
+  z.object({ ok: z.literal(false), code: z.string().max(64), sentence: z.string().max(500) }),
+]);
+export type AgentChannelAutomationProposeResponse = z.infer<typeof AgentChannelAutomationProposeResponse>;
+
+/** One field change of `ocw_record_update`: an RFC 6901 pointer (never `""`) → a scalar value. */
+export type RecordChangeValue = string | number | boolean | null;
+
+/** `POST /records/update` (`ocw_record_update`): never a record id or a hash (the API binds the record to the thread). */
+export type AgentChannelRecordUpdate = {
+  eventId: string;
+  agentId: string;
+  changes: Record<string, RecordChangeValue>;
+};
+
+export const AgentChannelRecordUpdateResponse = z.object({
+  ok: z.boolean(),
+  code: z.string().max(64).nullable(),
+  sentence: z.string().max(500),
+});
+export type AgentChannelRecordUpdateResponse = z.infer<typeof AgentChannelRecordUpdateResponse>;
+
+/**
+ * A refusal answered with a non-2xx status whose body still carries the server's sentence (`{ok: false, code,
+ * sentence}`, 403 `tainted`, 409 `record_changed`, …). Anything else in an error body is never read.
+ */
+export const AgentChannelSentenceAnswer = z.object({
+  ok: z.literal(false),
+  code: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]{0,63}$/u)
+    .nullable(),
+  sentence: z.string().min(1).max(500),
+});
+export type AgentChannelSentenceAnswer = z.infer<typeof AgentChannelSentenceAnswer>;
 
 // ---------------------------------------------------------------- confined sandbox tools (07.8, mirror of contracts
 // sandbox.ts and bot-capabilities.ts; parity test in sandbox-tools.test.ts)

@@ -14,7 +14,7 @@ export {
   reconnectReasonOf,
   touchConnection,
 } from "./credentials";
-export { callTool, listTools, McpUpstreamError } from "./mcp-client";
+export { callTool, listTools, type McpAuth, McpUpstreamError } from "./mcp-client";
 export { activeShare, readersOf } from "./shares";
 
 /**

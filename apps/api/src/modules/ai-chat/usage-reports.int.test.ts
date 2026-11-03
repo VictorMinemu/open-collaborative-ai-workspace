@@ -174,6 +174,7 @@ async function expected(where: string, params: unknown[]) {
     await su.query(
       `select count(*) filter (where kind = 'chat')::int as generations,
               count(*) filter (where kind = 'chat' and estimated)::int as estimated,
+              count(*) filter (where estimated)::int as estimated_records,
               coalesce(sum(input_tokens), 0)::bigint as input, coalesce(sum(output_tokens), 0)::bigint as output,
               sum(cost_micros_usd)::bigint as cost
        from app.ai_usage_records where ${where}`,
@@ -183,6 +184,7 @@ async function expected(where: string, params: unknown[]) {
   return {
     generations: r.generations as number,
     estimatedGenerations: r.estimated as number,
+    estimatedRecords: r.estimated_records as number,
     inputTokens: Number(r.input),
     outputTokens: Number(r.output),
     costMicrosUsd: r.cost === null ? null : Number(r.cost),
@@ -208,6 +210,7 @@ function sumRows(rows: Json[]) {
     inputTokens: rows.reduce((n, r) => n + r.inputTokens, 0),
     outputTokens: rows.reduce((n, r) => n + r.outputTokens, 0),
     estimatedGenerations: rows.reduce((n, r) => n + r.estimatedGenerations, 0),
+    estimatedRecords: rows.reduce((n, r) => n + r.estimatedRecords, 0),
     costMicrosUsd: costs.length === 0 ? null : costs.reduce((n, c) => n + c, 0),
   };
 }
@@ -506,6 +509,7 @@ describe("a member's own usage report (AICHAT-07, T-05-09-01)", () => {
       inputTokens: 0,
       outputTokens: 0,
       estimatedGenerations: 0,
+      estimatedRecords: 0,
       costMicrosUsd: null,
     });
   });

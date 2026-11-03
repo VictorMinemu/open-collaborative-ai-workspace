@@ -64,6 +64,12 @@
  *                                          when that is the refusal, like the real API. Both: 400 for any key beyond the
  *                                          contract's (a mode, a model, a user id). POST /__test/work-zone
  *                                          {refused?, projects?} sets the knobs ({} resets them)
+ *   POST /agent-channel/v1/automations/propose  (07.6) records the body (`automations.proposals`) and answers
+ *                                          `{ok: true, approvalId, sentence}`; POST /agent-channel/v1/records/update
+ *                                          records the body (`automations.recordUpdates`) and answers `{ok: true, code:
+ *                                          null, sentence}`. Both: 400 for any key beyond the contract's. POST
+ *                                          /__test/automations {propose?, record?: {status, code, sentence}} makes the
+ *                                          route refuse with that status and `{ok: false, code, sentence}` ({} resets)
  *   POST /agent-channel/v1/sandbox/{exec,process,read,write,list,delete,share,import}  (07.8) records every body
  *                                          (`sandbox.calls`, refused ones included) and answers a canned result per
  *                                          route (exec `exited 0` with stdout `hi`); 400 for any key beyond the contract's
@@ -207,6 +213,33 @@ const WORK_ZONE_BODY_KEYS = {
   projects: ["eventId", "agentId"],
   proposals: ["eventId", "agentId", "projectId", "deviceId", "prompt", "runtime"],
 } as const;
+/** 07.6: the automation proposal and watched-record routes' records and knobs (`POST /__test/automations`). */
+export type FakeAutomations = {
+  /** Every POST /automations/propose body, in order (refused ones included). */
+  proposals: Array<Record<string, unknown>>;
+  /** Every POST /records/update body, in order (refused ones included). */
+  recordUpdates: Array<Record<string, unknown>>;
+  /** When set, every proposal is answered with this status and `{ok: false, code, sentence}`. */
+  proposeRefusal?: { status: number; code: string; sentence: string };
+  /** When set, every record update is answered with this status and `{ok: false, code, sentence}`. */
+  recordRefusal?: { status: number; code: string; sentence: string };
+};
+const AUTOMATION_PROPOSE_KEYS = [
+  "eventId",
+  "agentId",
+  "name",
+  "instructions",
+  "schedule",
+  "target",
+  "maxRunsPerDay",
+] as const;
+const RECORD_UPDATE_KEYS = ["eventId", "agentId", "changes"] as const;
+const refusalKnob = (v: unknown): FakeAutomations["proposeRefusal"] => {
+  const r = v as { status?: unknown; code?: unknown; sentence?: unknown } | null;
+  return r && typeof r.status === "number" && typeof r.code === "string" && typeof r.sentence === "string"
+    ? { status: r.status, code: r.code, sentence: r.sentence }
+    : undefined;
+};
 /** 07.8: the sandbox routes' records and knobs (`POST /__test/sandbox` replaces the knobs). */
 export type FakeSandbox = {
   /** Every POST /sandbox/* body, in order (refused ones included). */
@@ -443,6 +476,8 @@ export type FakeAgentChannelApi = {
   connectorControl: ConnectorControl;
   /** The Work Zone proposal routes' records and knobs (07.5-10). */
   workZone: FakeWorkZone;
+  /** The automation proposal and watched-record update routes' records and knobs (07.6). */
+  automations: FakeAutomations;
   /** The sandbox routes' records and knobs (07.8). */
   sandbox: FakeSandbox;
   /** The browser routes' records and knobs (07.8). */
@@ -675,6 +710,7 @@ export async function startFakeAgentChannelApi(
     httpRequests: [] as Array<Record<string, unknown>>,
     connectorControl: {} as ConnectorControl,
     workZone: { projectLists: [], proposals: [], projects: fakeWorkZoneProjects() } as FakeWorkZone,
+    automations: { proposals: [], recordUpdates: [] } as FakeAutomations,
     sandbox: { calls: [], results: {} } as FakeSandbox,
     browser: { calls: [], results: {} } as FakeBrowser,
     // Never serialized: not in /cell, not in an answer, not in the state dump.
@@ -759,6 +795,17 @@ export async function startFakeAgentChannelApi(
           else delete state.workZone.refused;
           return json(res, 200, { ok: true });
         }
+        if (req.method === "POST" && url.pathname === "/__test/automations") {
+          // Replace the 07.6 knobs ({} resets them; the records stay).
+          const body = ((await readJson(req)) ?? {}) as { propose?: unknown; record?: unknown };
+          const propose = refusalKnob(body.propose);
+          const record = refusalKnob(body.record);
+          if (propose) state.automations.proposeRefusal = propose;
+          else delete state.automations.proposeRefusal;
+          if (record) state.automations.recordRefusal = record;
+          else delete state.automations.recordRefusal;
+          return json(res, 200, { ok: true });
+        }
         if (req.method === "POST" && url.pathname === "/__test/sandbox") {
           // Replace the sandbox knobs ({} resets them; the records stay).
           const body = ((await readJson(req)) ?? {}) as Partial<FakeSandbox>;
@@ -827,6 +874,7 @@ export async function startFakeAgentChannelApi(
             connectorLists: state.connectorLists,
             httpRequests: state.httpRequests,
             workZone: state.workZone,
+            automations: state.automations,
             sandbox: state.sandbox,
             browser: state.browser,
             mcpProbes: state.mcpProbes,
@@ -1127,6 +1175,34 @@ export async function startFakeAgentChannelApi(
           });
         }
         return json(res, 200, br.results[browserRoute] ?? fakeBrowserResult(browserRoute, body));
+      }
+      if (req.method === "POST" && (route === "/automations/propose" || route === "/records/update")) {
+        // 07.6: record the body; 400 for any key beyond the contract's (a conversation, a person, a record id, a hash).
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        const propose = route === "/automations/propose";
+        const auto = state.automations;
+        (propose ? auto.proposals : auto.recordUpdates).push({ ...body });
+        const allowed: readonly string[] = propose ? AUTOMATION_PROPOSE_KEYS : RECORD_UPDATE_KEYS;
+        if (
+          typeof body.eventId !== "string" ||
+          typeof body.agentId !== "string" ||
+          Object.keys(body).some((k) => !allowed.includes(k))
+        ) {
+          return json(res, 400, { error: { code: "bad_request", message: `bad body ${FAKE_ERROR_CANARY}` } });
+        }
+        const refusal = propose ? auto.proposeRefusal : auto.recordRefusal;
+        if (refusal) {
+          return json(res, refusal.status, { ok: false, code: refusal.code, sentence: refusal.sentence });
+        }
+        if (propose) {
+          const name = typeof body.name === "string" ? body.name : "it";
+          return json(res, 200, {
+            ok: true,
+            approvalId: randomUUID(),
+            sentence: `I posted a card proposing “${name}”. The person has to confirm it. Tell them in one short sentence, without repeating the details.`,
+          });
+        }
+        return json(res, 200, { ok: true, code: null, sentence: "Updated SO-10442 in ERP." });
       }
       const workZoneRoute =
         route === "/work-zone/projects"
@@ -1577,6 +1653,9 @@ export async function startFakeAgentChannelApi(
     },
     set connectorControl(value: ConnectorControl) {
       state.connectorControl = value;
+    },
+    get automations() {
+      return state.automations;
     },
     get workZone() {
       return state.workZone;

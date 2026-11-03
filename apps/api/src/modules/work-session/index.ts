@@ -49,6 +49,8 @@ export type {
   WorkSessionStartOptions,
   WorkSessionStartResult,
 } from "./start";
+// 07.6-13 (D-11): the digest names a session's team project with the same per-viewer decision (07.10, PD-04).
+export { projectNamedFor, type SessionProject, type ViewerFilter } from "./viewer-fields";
 
 /** The work-session module object: its routes, and session creation for other modules (07.5-08 proposals). */
 export interface WorkSessionModule extends ApiModule {
@@ -92,6 +94,8 @@ export function createWorkSessionModule(
     log: core.log,
     perms,
     storage: deps.storage ?? null,
+    // 07.6 (AUTO-06): a finished session enqueues its memory summary job.
+    jobs: core.jobs,
   });
   hub.setSessionHandler(service);
   // 07.11 (D-02, PD-03): the org's runtime updates level reaches the device module only through this source.

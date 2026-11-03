@@ -11,6 +11,11 @@
 # ocw-sandbox-sbx:e2e (and every other sandbox image the broker reads, once its Dockerfile and its env var exist), starts
 # apps/sandboxd as a host process on 127.0.0.1:4293 with namespace `ocw-e2e` and a generated token, and removes every
 # `ocw.namespace=ocw-e2e` container, volume and network (and the :e2e images) before the run and on exit.
+# Mail (07.6-04, P-17): OCW_E2E_MAIL=1 also runs GreenMail (scripts/e2e-greenmail.sh) as container ocw-e2e-greenmail
+# with IMAP on 127.0.0.1:4294 and SMTP on 127.0.0.1:4295 (OCW_E2E_IMAP_PORT / OCW_E2E_SMTP_PORT), exported to the specs,
+# reachable by the API as host `greenmail` (OCW_EGRESS_TEST_HOSTS), removed on exit. Works together with --sandbox.
+# Without the flag nothing mail-related starts. The fake ERP MCP is always on the fake server at /erp-mcp (bearer
+# e2e-erp-token).
 # Optional env (scripts/cell-proof.sh): OCW_E2E_API_HOST (API bind address, default 127.0.0.1; 0.0.0.0 only where a
 # container must reach the API and the host is disposable, e.g. CI), OCW_E2E_CLAWHUB_URL (ClawHub the API proxies,
 # default the fake); OCW_BUNDLED_PLUGINS and OCW_MOCK_MODEL_BASE_URL are kept over .env when the caller sets them.
@@ -34,6 +39,10 @@ WEB_DIST=.next-e2e
 LOCK=/tmp/ocw-e2e.lock
 SANDBOX_PORT="${OCW_E2E_SANDBOX_PORT:-4293}"   # --sandbox: the real sandboxd broker (host process, loopback)
 SANDBOX_NS="${OCW_E2E_SANDBOX_NS:-ocw-e2e}"    # --sandbox: the ONLY label namespace this script removes
+mail=0; [ "${OCW_E2E_MAIL:-0}" = 1 ] && mail=1   # OCW_E2E_MAIL=1: GreenMail (scripts/e2e-greenmail.sh)
+IMAP_PORT="${OCW_E2E_IMAP_PORT:-4294}"   # OCW_E2E_MAIL=1: GreenMail IMAP (loopback)
+SMTP_PORT="${OCW_E2E_SMTP_PORT:-4295}"   # OCW_E2E_MAIL=1: GreenMail SMTP (loopback)
+greenmail() { OCW_E2E_IMAP_PORT="$IMAP_PORT" OCW_E2E_SMTP_PORT="$SMTP_PORT" bash scripts/e2e-greenmail.sh "$@"; }
 # Default mode: the fake sandboxd behind this fixed, loopback-only test token (never a real broker's token).
 FAKE_SANDBOX_TOKEN=e2e-sandbox-token-0123456789abcdef0123456789
 
@@ -137,6 +146,7 @@ cleanup() {
       echo "e2e-isolated: no ocw.namespace=$SANDBOX_NS object left; :e2e sandbox images removed"
     fi
   fi
+  if [ "$mail" -eq 1 ]; then greenmail stop; fi
   storage stop garage >/dev/null 2>&1 || true
   release_lock
   report_sleeps
@@ -181,6 +191,11 @@ export OCW_E2E_FAKE_MCP_TOKEN="e2e-mcp-token"
 # (http://fake-mcp:4291/mcp-oauth/mcp) through its egress guard. TEST-ONLY: the API refuses this variable when
 # NODE_ENV is production, and only this script exports it.
 export OCW_EGRESS_TEST_HOSTS="fake-mcp=127.0.0.1"
+# Mail automations (07.6-04): with OCW_E2E_MAIL=1 an admin registers the mailbox at greenmail:<IMAP port>.
+if [ "$mail" -eq 1 ]; then
+  export OCW_EGRESS_TEST_HOSTS="$OCW_EGRESS_TEST_HOSTS,greenmail=127.0.0.1"
+  export OCW_E2E_IMAP_PORT="$IMAP_PORT" OCW_E2E_SMTP_PORT="$SMTP_PORT"
+fi
 # AI chats (Phase 5, P-08/P-12): the API's ChatGPT plan (Responses API + SIWC), mock backend and AI web search all
 # point at the fake. The bots' own SearXNG variable stays unset: bot-capabilities.spec expects that option disabled.
 export OCW_CHATGPT_API_BASE_URL="http://127.0.0.1:$FAKE_PORT/v1" OCW_CHATGPT_AUTH_BASE_URL="http://127.0.0.1:$FAKE_PORT/siwc"
@@ -201,8 +216,11 @@ export OCW_E2E_SANDBOX=fake
 
 # A Garage left running by an interrupted earlier run of this script is ours to stop (never another project's).
 storage stop garage >/dev/null 2>&1 || true
+# Same for a GreenMail of an interrupted run (only the fixed name ocw-e2e-greenmail).
+if [ "$mail" -eq 1 ]; then greenmail stop; fi
 ports=("$API_PORT" "$WEB_PORT" "$FAKE_PORT" "$STORAGE_PORT")
 if [ "$sandbox" -eq 1 ]; then ports+=("$SANDBOX_PORT"); fi
+if [ "$mail" -eq 1 ]; then ports+=("$IMAP_PORT" "$SMTP_PORT"); fi
 for p in "${ports[@]}"; do
   if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
     echo "e2e-isolated: port $p is busy (not started by this run); stop that process and retry"; exit 1
@@ -307,6 +325,12 @@ if [ "$sandbox" -eq 1 ]; then
   # The logs a full-stack sweep reads (the API's and sandboxd's), by path only.
   export OCW_E2E_RUN_DIR="$RUN_DIR"
   echo "e2e-isolated: real sandboxd on $OCW_SANDBOX_URL (namespace $SANDBOX_NS)"
+fi
+
+# ---------------------------------------------------------------- GreenMail (OCW_E2E_MAIL=1 only)
+if [ "$mail" -eq 1 ]; then
+  greenmail start >"$RUN_DIR/greenmail.log" 2>&1 || { cat "$RUN_DIR/greenmail.log"; exit 1; }
+  cat "$RUN_DIR/greenmail.log"
 fi
 
 # ---------------------------------------------------------------- fake server + API + web

@@ -20,6 +20,15 @@ describe("renderConfig", () => {
     assert.equal(config.agents.defaults.heartbeat.every, "0m");
   });
 
+  it("OpenClaw's own automations stay off (07.6 C-01): no cron scheduler, no webhook ingress, no sessions_send", () => {
+    const { config } = renderConfig(base);
+    // Automations are scheduled, verified and audited by the Control Plane; the cell only answers delivered turns.
+    assert.deepEqual(config.cron, { enabled: false });
+    assert.deepEqual(config.hooks, { enabled: false });
+    assert.equal(config.tools.deny.includes("group:sessions"), true);
+    assert.equal(config.tools.deny.includes("group:automation"), true);
+  });
+
   it("tools are an allowlist: minimal profile + explicit dangerous denies, never the wildcard or a web tool", () => {
     const { config } = renderConfig(base);
     assert.equal(config.tools.profile, "minimal");

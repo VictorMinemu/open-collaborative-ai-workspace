@@ -2,10 +2,11 @@
 // Restore a backup made by `ocw backup` (DESTRUCTIVE: replaces the database, the objects and the cell state).
 //   pnpm ocw restore DIR --yes [--env-file F | --dir D]
 // Checks every checksum and refuses a backup made by a newer release before changing anything. Then: stop api, web
-// and openclaw → start postgres, redis, garage → migrate (roles) → drop schemas app, auth, drizzle and pg_restore in one
-// transaction as ocw_migrator → migrate (upgrades an older backup, re-applies grants and policies) → objects → cell
-// state → [vault profile: secrets/ seal key and recovery material, then OpenBao's volume, then OpenBao] → start
-// everything. Uses the current .env (keys, passwords, AppRole credentials); the backup never carries it.
+// and openclaw → start postgres, redis, garage → migrate (roles) → drop schemas app, auth, drizzle, pgboss (07.6's job
+// queue, which migrate just installed) and pg_restore in one transaction as ocw_migrator → migrate (upgrades an older
+// backup, re-installs pgboss when the backup predates it, re-applies grants and policies) → objects → cell state →
+// [vault profile: secrets/ seal key and recovery material, then OpenBao's volume, then OpenBao] → start everything.
+// Uses the current .env (keys, passwords, AppRole credentials); the backup never carries it.
 // docs/self-hosting/backup-restore.md
 import {
   chmodSync,
@@ -169,7 +170,9 @@ export async function main(argv, deps = {}) {
   must(run, "up", ["up", "-d", "--wait", "postgres", "redis", "garage"]);
   step("migrate (database roles)");
   must(run, "migrate", ["run", "--rm", "migrate"]);
-  step(`dropping schemas app, auth, drizzle and restoring ${DB_DUMP} as ${MIGRATOR} (one transaction)`);
+  step(
+    `dropping schemas app, auth, drizzle, pgboss and restoring ${DB_DUMP} as ${MIGRATOR} (one transaction)`,
+  );
   must(
     run,
     "drop schemas",
@@ -178,7 +181,7 @@ export async function main(argv, deps = {}) {
       "-v",
       "ON_ERROR_STOP=1",
       "-c",
-      "SET client_min_messages = warning; DROP SCHEMA IF EXISTS app, auth, drizzle CASCADE",
+      "SET client_min_messages = warning; DROP SCHEMA IF EXISTS app, auth, drizzle, pgboss CASCADE",
     ]),
     { env: pgEnv },
   );

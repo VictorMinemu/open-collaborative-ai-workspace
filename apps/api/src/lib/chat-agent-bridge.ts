@@ -52,9 +52,16 @@ export interface AgentMention {
   /**
    * `mention` (default): the bot was addressed (an @mention, or the DM itself). `reply_mode`: nobody was
    * addressed and the candidates are team bots with reply mode `all` (D-12); delivery re-decides the org
-   * policy and applies the per-minute cap before metering.
+   * policy and applies the per-minute cap before metering. `automation` (Phase 07.6, D-03): an automation run delivered
+   * by `deliverAutomationRun` on its anchor message; the author is the run-as human (structural, never from text), the
+   * body the server's sentence, and the turn is unattended (D-12: no browser tools).
    */
-  trigger?: "mention" | "reply_mode";
+  trigger?: "mention" | "reply_mode" | "automation";
+  /**
+   * Phase 07.6 (D-02, D-07): the turn starts tainted (a webhook or mail run). Delivery also starts tainted any turn
+   * whose thread holds inbound content (taint propagation, P-11), whatever this says.
+   */
+  taintedAtStart?: boolean;
   /**
    * The asking human's IANA time zone as sent by their client (validated by the contract); used only for the
    * turn's local date and time (D-12). Never stored on the message.
@@ -91,7 +98,8 @@ export interface PostAgentMessageInput {
   onBehalfOfUserId?: string;
   /**
    * An Agent Card (06-13, P-11): `body` is its plain-text summary; the card row is inserted in the message transaction
-   * (version 1, this agent) and `message.created` carries it.
+   * (version 1, this agent) and `message.created` carries it. Its `statusLabel` and `notices` (Phase 07.6, R1, P-12)
+   * are stored only with `cardPlatformOwned: true`; an agent's values are dropped.
    */
   card?: AgentCardInput | PlatformCardInput;
   /**
@@ -188,6 +196,7 @@ export type LinkedCardInfo = LinkedCardBase &
       | "resultRoute"
       | "blocked"
       | "browser"
+      | "edited"
     >
   >;
 

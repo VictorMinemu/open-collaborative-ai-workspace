@@ -14,6 +14,8 @@ export {
 } from "./inject";
 export type { KeychainDeps } from "./routes";
 export {
+  type BasicCredentials,
+  basicCredentialsFor,
   type EffectiveVaultItem,
   effectiveVaultItems,
   findVaultItemByHandle,

@@ -74,6 +74,9 @@ describe("module catalog (Phase 07.3, ADR-0024)", () => {
         "bot.tool.use",
         "connector.connect",
         "vault.use",
+        // Phase 07.6 (07.6-01, P-05): automations live under Bots.
+        "automation.create",
+        "automation.webhook",
       ],
     });
     expect(modulesMatching("connector.connect")).toEqual(["bots"]);
@@ -150,7 +153,7 @@ describe("Sandbox and Browser modules (Phase 07.8, D-09, D-12, P-05)", () => {
     for (const p of browserGrains) expect(modulesMatching(p), p).toEqual(["browser"]);
   });
 
-  it("C-05 does not apply: no grain is added to an existing module", () => {
+  it("C-05 does not apply to 07.8: no sandbox or browser grain is added to an existing module", () => {
     expect(MODULE_CATALOG.work_zone.patterns).toEqual([
       "work_session.*",
       "device.pair",
@@ -166,6 +169,10 @@ describe("Sandbox and Browser modules (Phase 07.8, D-09, D-12, P-05)", () => {
       "bot.tool.use",
       "connector.connect",
       "vault.use",
+      // Phase 07.6 (07.6-01, P-05) appended the two automation grains after 07.8: for 07.6, C-05 does apply (a Bots-off
+      // rule set written before 07.6 holds 7 rows and needs the 2 new ones, like 07.4-14's backfill).
+      "automation.create",
+      "automation.webhook",
     ]);
     expect(MODULE_CATALOG.memory.patterns).toEqual(["memory.*"]);
     for (const m of ["work_zone", "ai_chats", "bots", "memory"] as const) {

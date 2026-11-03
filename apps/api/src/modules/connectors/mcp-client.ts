@@ -72,6 +72,11 @@ export interface McpTarget {
 export interface McpAuth {
   headerName: string;
   headerValue: string;
+  /**
+   * Phase 07.6 (watched records): the further headers of an organization-secret server (its admin-set credentials), sent
+   * with every request and redacted from every answer like the main one. An empty `headerName` sends no main header.
+   */
+  extraHeaders?: ReadonlyArray<{ name: string; value: string }>;
 }
 
 export interface McpToolInfo {
@@ -235,7 +240,7 @@ async function withClient<T>(
   opts: { timeoutMs: number; signal?: AbortSignal; redact: readonly string[] },
   run: (client: Client, options: { signal: AbortSignal; timeout: number }) => Promise<T>,
 ): Promise<T> {
-  const secrets = [auth.headerValue, ...opts.redact];
+  const secrets = [auth.headerValue, ...(auth.extraHeaders ?? []).map((h) => h.value), ...opts.redact];
   const controller = new AbortController();
   const timeout = new CallTimeout("timeout");
   const timer = setTimeout(() => controller.abort(timeout), opts.timeoutMs);
@@ -268,7 +273,10 @@ async function withClient<T>(
       }
       return res;
     }) as typeof fetch;
-    const requestInit = { headers: { [auth.headerName]: auth.headerValue } };
+    const headers: Record<string, string> = {};
+    for (const h of auth.extraHeaders ?? []) headers[h.name] = h.value;
+    if (auth.headerName) headers[auth.headerName] = auth.headerValue;
+    const requestInit = { headers };
     const transport =
       target.transport === "sse"
         ? new SSEClientTransport(url, { requestInit, fetch: fetchFn })
@@ -392,7 +400,11 @@ export async function callTool(
         undefined,
         options,
       );
-      return shapeToolResult(result, [auth.headerValue, ...opts.redact]);
+      return shapeToolResult(result, [
+        auth.headerValue,
+        ...(auth.extraHeaders ?? []).map((h) => h.value),
+        ...opts.redact,
+      ]);
     },
   );
 }

@@ -347,6 +347,8 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         connectorTools: m.connectorTools,
         // 07.5: who asked (sanitized), named in the gate's approval sentences.
         requesterName: m.sender.name,
+        // 07.6: a webhook or mail run read outside content before its first call: read-only from the start.
+        ...(m.startsTainted ? { tainted: true } : {}),
       },
       signal,
     );

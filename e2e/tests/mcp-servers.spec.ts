@@ -257,7 +257,7 @@ test("bot manager: enable one MCP tool on a team bot and use it; personal bots g
       sam.page,
       'say hi [[call echo {"text":"hi"}]]',
       `Tool ${echo}: allowed`,
-      `[turn tools: ${echo},ocw_agent_card,ocw_start_work_zone,ocw_work_zone_projects]`,
+      `[turn tools: ${echo},ocw_agent_card,ocw_automation_propose,ocw_start_work_zone,ocw_work_zone_projects]`,
     );
 
     // ---- Sam's personal bot: Docs is listed but off for personal bots

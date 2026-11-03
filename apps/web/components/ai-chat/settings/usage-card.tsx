@@ -5,7 +5,13 @@ import type { ReactNode } from "react";
 import { BackendTag } from "@/components/ai-chat/admin/ai-usage-report";
 import { MeteredBadge } from "@/components/bots/provider-bits";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatCostMicros, formatResetTime, formatTokens } from "@/lib/ai-format";
+import {
+  formatCostMicros,
+  formatResetTime,
+  formatTokens,
+  usageCostEstimated,
+  usageRowKindText,
+} from "@/lib/ai-format";
 import { useAiUsageToday, useMyAiUsageReport } from "@/lib/ai-usage-queries";
 import { errorMessage } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -157,7 +163,7 @@ function LastDays({ report }: { report: AiUsageReport }) {
     <>
       <ul className="divide-y" data-testid="usage-30d">
         {report.rows.map((row) => {
-          const titles = row.key.endsWith(" · titles");
+          const kindText = usageRowKindText(row);
           return (
             <li
               key={row.key}
@@ -180,14 +186,11 @@ function LastDays({ report }: { report: AiUsageReport }) {
                 >
                   {row.backend === "chatgpt_plan"
                     ? "Not billed"
-                    : formatCostMicros(
-                        row.costMicrosUsd,
-                        row.estimatedGenerations > 0 && (row.costMicrosUsd ?? 0) > 0,
-                      )}
+                    : formatCostMicros(row.costMicrosUsd, usageCostEstimated(row))}
                 </span>
               </div>
               <span className="text-muted-foreground text-xs tabular-nums">
-                {titles ? "Chat titles" : answers(row.generations)} · {formatTokens(row.inputTokens)} in ·{" "}
+                {kindText ?? answers(row.generations)} · {formatTokens(row.inputTokens)} in ·{" "}
                 {formatTokens(row.outputTokens)} out
               </span>
             </li>
@@ -202,7 +205,7 @@ function LastDays({ report }: { report: AiUsageReport }) {
           Total <span className="font-normal text-muted-foreground text-xs">· {answers(t.generations)}</span>
         </span>
         <span className="tabular-nums">
-          {formatCostMicros(t.costMicrosUsd ?? 0, t.estimatedGenerations > 0 && (t.costMicrosUsd ?? 0) > 0)}{" "}
+          {formatCostMicros(t.costMicrosUsd ?? 0, usageCostEstimated(t))}{" "}
           <span className="font-normal text-muted-foreground text-xs">to your organization</span>
         </span>
       </div>

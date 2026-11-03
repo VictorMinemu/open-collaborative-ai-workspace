@@ -2,6 +2,8 @@ import {
   AGENT_CHANNEL_BASE_PATH,
   type AgentChannelApprovalDenial,
   AgentChannelApprovalRefusalDetails,
+  type AgentChannelAutomationPropose,
+  AgentChannelAutomationProposeResponse,
   AgentChannelBoardCardResponse,
   type AgentChannelBoardCreateCard,
   type AgentChannelBoardPatchCard,
@@ -32,7 +34,10 @@ import {
   type AgentChannelPostMessage,
   AgentChannelPostMessageResponse,
   type AgentChannelProviderAuthReport,
+  type AgentChannelRecordUpdate,
+  AgentChannelRecordUpdateResponse,
   type AgentChannelRuntimeReport,
+  AgentChannelSentenceAnswer,
   type AgentChannelStatusReport,
   type AgentChannelToolCallApproval,
   AgentChannelToolCallDecision,
@@ -75,6 +80,8 @@ export class AgentChannelHttpError extends Error {
     readonly approval?: AgentChannelToolCallApproval,
     /** 07.5-11: who denied a 409 `approval_denied` and their note (`error.details.denial`), if valid. */
     readonly denial?: AgentChannelApprovalDenial,
+    /** 07.6: a refusal whose body carries the server's sentence (`{ok: false, code, sentence}`), if well-formed. */
+    readonly answer?: AgentChannelSentenceAnswer,
   ) {
     super(message);
     this.name = "AgentChannelHttpError";
@@ -126,6 +133,16 @@ export function denialOf(body: string): AgentChannelApprovalDenial | undefined {
   return refusalDetailsOf(body)?.denial;
 }
 
+/** The `{ok: false, code, sentence}` body of a refusal (07.6 routes), when well-formed; never any other content. */
+export function sentenceAnswerOf(body: string): AgentChannelSentenceAnswer | undefined {
+  try {
+    const parsed = AgentChannelSentenceAnswer.safeParse(JSON.parse(body));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** 408/425/429 and 5xx are retried; every other 4xx is a permanent failure. */
 export function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 425 || status === 429 || status >= 500;
@@ -153,6 +170,9 @@ export const CONNECTOR_REQUEST_TIMEOUT_MS = 35_000;
 
 /** Per-attempt budget of the Work Zone proposal routes (07.5-10): two attempts at most, both idempotent server side. */
 export const WORK_ZONE_REQUEST_TIMEOUT_MS = 10_000;
+
+/** 07.6: one attempt of 10 s for an automation proposal (a retry after a lost answer could post a second card). */
+export const AUTOMATION_PROPOSE_TIMEOUT_MS = 10_000;
 
 /**
  * 07.8: per-call budgets of the confined tools. Exec and process yield after 25 s server side (a process id), so they
@@ -221,6 +241,7 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
           errorCodeOf(raw.slice(0, 4_000)),
           approvalOf(raw.slice(0, 4_000)),
           denialOf(raw.slice(0, 4_000)),
+          sentenceAnswerOf(raw.slice(0, 4_000)),
         );
         if (!isRetryableStatus(res.status)) throw err;
         lastError = err;
@@ -460,6 +481,45 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
       return AgentChannelWorkZoneProposeResponse.parse(
         await request("POST", "/work-zone/proposals", req, signal, 2, WORK_ZONE_REQUEST_TIMEOUT_MS),
       );
+    },
+    /**
+     * `ocw_automation_propose` (07.6 AUTO-03): a scheduled automation as a card the turn's human confirms. One attempt (a
+     * retry after a lost answer could post a second card). A refusal answered with a 4xx that still carries
+     * `{ok: false, code, sentence}` resolves to that refusal; any other failure throws. Never logs the instructions.
+     */
+    async proposeAutomation(
+      req: AgentChannelAutomationPropose,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelAutomationProposeResponse> {
+      try {
+        return AgentChannelAutomationProposeResponse.parse(
+          await request("POST", "/automations/propose", req, signal, 1, AUTOMATION_PROPOSE_TIMEOUT_MS),
+        );
+      } catch (error) {
+        const answer = error instanceof AgentChannelHttpError ? error.answer : undefined;
+        if (answer?.code) return { ok: false, code: answer.code, sentence: answer.sentence };
+        throw error;
+      }
+    },
+    /**
+     * `ocw_record_update` (07.6 AUTO-04): compare-and-set on the watched record of the turn's card. One attempt (a write;
+     * the API reads and writes through the record's connector, so the budget is a connector call's). A refusal answered
+     * with a 4xx that still carries `{ok: false, code, sentence}` (409 `record_changed`, 403 `tainted`, …) resolves to
+     * that refusal; any other failure throws. Never logs the changes.
+     */
+    async updateRecord(
+      req: AgentChannelRecordUpdate,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelRecordUpdateResponse> {
+      try {
+        return AgentChannelRecordUpdateResponse.parse(
+          await request("POST", "/records/update", req, signal, 1, CONNECTOR_REQUEST_TIMEOUT_MS),
+        );
+      } catch (error) {
+        const answer = error instanceof AgentChannelHttpError ? error.answer : undefined;
+        if (answer) return { ok: false, code: answer.code, sentence: answer.sentence };
+        throw error;
+      }
     },
     /**
      * The tools an `mcp.probe` discovered, or why it failed (D-13). Three attempts at most: the API applies only

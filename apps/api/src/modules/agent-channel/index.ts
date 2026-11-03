@@ -26,18 +26,28 @@ import { randomToken, sha256Hex } from "../../lib/crypto";
 import { HttpError, notFound } from "../../lib/errors";
 import { applyCellStatus, cellAgents, cellProviders, cellSubscriptions, findAgent } from "../agent";
 import { linkTurnAttachments } from "../artifact";
+import type { AutomationProposals } from "../automation";
 import { cellAgentCapabilities, loadPolicy } from "../bot-capabilities";
 import { cellMcpServers } from "../mcp";
 import type { MemoryService } from "../memory";
 import { channelResource, createPermissionService, type ResourceFacts } from "../organization";
 import { cellApprovedPlugins } from "../plugins";
 import type { SandboxdClient } from "../sandbox";
+// Types only: the watched module reaches modules that import this one (a value import would be a cycle).
+import type { RecordWrites } from "../watched";
 import type { WorkZoneProposalService } from "../work-session";
 import { finishActivity } from "./activity";
 import { cellOf, createCellAuth } from "./auth";
+import { registerAutomationProposalRoutes } from "./automation-proposals";
 import { registerBoardAgentRoutes } from "./board";
 import { type BrowserBudgets, registerBrowserRoutes } from "./browser";
-import { noTrigger, registerCardActionHandler, registerCardRoutes, resolveReplyTarget } from "./cards";
+import {
+  postForTurn,
+  registerCardActionHandler,
+  registerCardRoutes,
+  replyTargetOrThrow,
+  resolveReplyTarget,
+} from "./cards";
 import { registerConnectorRoutes } from "./connectors";
 import { registerCellGateway } from "./gateway";
 import { registerHttpRequestRoutes } from "./http-requests";
@@ -48,12 +58,23 @@ import { registerMentionHandler } from "./mentions";
 import { registerPluginCellRoutes } from "./plugins";
 import { createCellPresence } from "./presence";
 import { createProviderAuth } from "./provider-auth";
+import { registerRecordRoutes } from "./records";
 import { registerSandboxRoutes } from "./sandbox";
 import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerWorkZoneRoutes } from "./work-zone";
 
 export { currentPhrase } from "./activity";
+export {
+  type DeliverAutomationRunInput,
+  type DeliverAutomationRunResult,
+  deliverAutomationRun,
+  inboundRooted,
+  markRunAnswered,
+  runAnchorTrigger,
+  runSentence,
+} from "./automation-runs";
 export type { BrowserBudgets } from "./browser";
+export { notifyCardFollowers, updatePlatformCardNotified } from "./card-followers";
 export { emitCardAction } from "./cards";
 export { conversationAudience } from "./memory-files";
 export { buildMentionEvents } from "./mentions";
@@ -121,6 +142,16 @@ export function createAgentChannelModule(
     memory: MemoryService;
     /** Work Zone proposals (07.5-08): the work-session module's service; absent = the two routes are not served. */
     workZone?: WorkZoneProposalService | null;
+    /**
+     * Natural-language automations (07.6-12): the automation module's proposal entry point; absent = the
+     * `/automations/propose` route is not served.
+     */
+    automations?: AutomationProposals | null;
+    /**
+     * Watched-record writes (07.6-14): the watched module's compare-and-set; absent = the `/records/update` route is not
+     * served.
+     */
+    records?: RecordWrites | null;
     /**
      * Per-tool approvals (07.5-11, D-04): the tool-approval service's one decision, asked by every agent-action route
      * (`/tool-calls`, `/connectors/call`, `/http-requests`) inside its claim transaction.
@@ -370,13 +401,14 @@ export function createAgentChannelModule(
               const body = req.body;
 
               // The post must answer a live turn of this bot here (403 `no_trigger`, audited, otherwise).
-              const check = await core.db.withTenant(ctx, (tx) =>
-                resolveReplyTarget(tx, core, body, {
-                  route: "messages",
-                  sessionId: `cell:${cell.credentialId}`,
-                }),
+              const check = replyTargetOrThrow(
+                await core.db.withTenant(ctx, (tx) =>
+                  resolveReplyTarget(tx, core, body, {
+                    route: "messages",
+                    sessionId: `cell:${cell.credentialId}`,
+                  }),
+                ),
               );
-              if (!check) throw noTrigger();
               // The turn the post answers, as resolved above (its agent and conversation were checked).
               const turnEventId = body.eventId ?? null;
 
@@ -386,8 +418,11 @@ export function createAgentChannelModule(
                 // answers (agent ∩ human: the turn's human and a replied-to human must still read the channel),
                 // then stores the message and audits `agent.message.posted` (actor = agent) in its own tx. The
                 // tenant user is the turn's human, so that audit row carries user_id = who asked.
-                result = await core.chatAgent.postAgentMessage(
+                // A run anchor's first reply also marks the run answered, in the post's transaction (07.6, P-03).
+                result = await postForTurn(
+                  core,
                   { organizationId: cell.organizationId, userId: check.onBehalfOf },
+                  check,
                   {
                     agentId: body.agentId,
                     conversationId: body.conversationId,
@@ -511,6 +546,13 @@ export function createAgentChannelModule(
           registerMemoryFileRoutes(scope, { core, perms, memory: opts.memory });
           // Work Zone proposals (07.5-08, D-03): the projects a turn's human may use, and a session proposed as a card.
           if (opts.workZone) registerWorkZoneRoutes(scope, core, opts.workZone);
+          // Natural-language automations (07.6-12, D-02, D-03): a proposal card only the turn's person confirms.
+          if (opts.automations) registerAutomationProposalRoutes(scope, core, opts.automations);
+          // Watched-record writes (07.6-14, D-04, D-07): compare-and-set on the watched record of the turn's card thread,
+          // governed like any side effect (taint, 07.5 approvals).
+          if (opts.records) {
+            registerRecordRoutes(scope, core, { toolApproval: opts.toolApproval, records: opts.records });
+          }
           // Bot sandboxes (07.8-05, D-02 (b), D-09): every `ocw_sandbox_*` call decided, approved, counted, capped and
           // audited by the API before sandboxd runs it.
           registerSandboxRoutes(scope, core, {

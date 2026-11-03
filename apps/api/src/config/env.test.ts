@@ -581,3 +581,27 @@ describe("egress variables (D-07)", () => {
     );
   });
 });
+
+describe("OCW_JOBS_WORKER (07.6-03, AUTO-01)", () => {
+  const base = {
+    DATABASE_URL: "postgres://app:x@localhost:5432/ocw",
+    AUTH_DATABASE_URL: "postgres://auth:x@localhost:5432/ocw",
+    REDIS_URL: "redis://localhost:6379",
+    BETTER_AUTH_SECRET: "b".repeat(32),
+    OCW_SETUP_TOKEN: "s".repeat(16),
+    OCW_ENCRYPTION_KEY: "a".repeat(64),
+  };
+
+  it("defaults to on, and to off when NODE_ENV is test (test stacks drain jobs themselves)", () => {
+    expect(loadEnv(base).OCW_JOBS_WORKER).toBe("on");
+    expect(loadEnv({ ...base, NODE_ENV: "production" }).OCW_JOBS_WORKER).toBe("on");
+    expect(loadEnv({ ...base, OCW_JOBS_WORKER: "" }).OCW_JOBS_WORKER).toBe("on");
+    expect(loadEnv({ ...base, NODE_ENV: "test" }).OCW_JOBS_WORKER).toBe("off");
+  });
+
+  it("accepts on and off, explicitly in any environment, and rejects anything else naming the variable", () => {
+    expect(loadEnv({ ...base, OCW_JOBS_WORKER: "off" }).OCW_JOBS_WORKER).toBe("off");
+    expect(loadEnv({ ...base, NODE_ENV: "test", OCW_JOBS_WORKER: "on" }).OCW_JOBS_WORKER).toBe("on");
+    expect(() => loadEnv({ ...base, OCW_JOBS_WORKER: "yes" })).toThrow(/OCW_JOBS_WORKER/);
+  });
+});

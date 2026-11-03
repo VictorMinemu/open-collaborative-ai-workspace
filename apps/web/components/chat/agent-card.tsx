@@ -151,12 +151,14 @@ const decidedFmt = new Intl.DateTimeFormat("en", {
   minute: "2-digit",
 });
 
-function StatusPill({ status }: { status: AgentCardStatus }) {
+function StatusPill({ status, label }: { status: AgentCardStatus; label?: string | undefined }) {
   const s = STATUS[status] ?? STATUS.info;
+  // 07.6 (R1): a platform-owned card's own word ("No reply", "Received"); the tone stays the status's.
+  const word = label ?? s.label;
   return (
     <span
       role="status"
-      aria-label={`Status: ${s.label}`}
+      aria-label={`Status: ${word}`}
       data-testid="agent-card-status"
       data-status={status}
       className={cn(
@@ -176,7 +178,7 @@ function StatusPill({ status }: { status: AgentCardStatus }) {
         ) : null}
         <span className={cn("relative inline-flex size-1.5 rounded-full", s.dot)} />
       </span>
-      {s.label}
+      {word}
     </span>
   );
 }
@@ -419,6 +421,31 @@ function WarningLine({ text }: { text: string }) {
     >
       <TriangleAlert className="size-4 shrink-0" aria-hidden />
       <span className="min-w-0 break-words">{text}</span>
+    </p>
+  );
+}
+
+/**
+ * A platform-owned card's notice (07.6, R1, UI-SPEC 8d): amber for a warning (outside content), muted for a neutral
+ * line (no reply, a run reason). Server text, rendered as text; a bot's card never gets one (T-07.6-15-03).
+ */
+function NoticeLine({ notice }: { notice: NonNullable<AgentCard["notices"]>[number] }) {
+  const warning = notice.tone === "warning";
+  const Icon = warning ? TriangleAlert : Info;
+  return (
+    <p
+      role="note"
+      data-testid="agent-card-notice"
+      data-tone={notice.tone}
+      className={cn(
+        "flex min-w-0 items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-4",
+        warning
+          ? "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-200"
+          : "bg-muted/40 text-muted-foreground",
+      )}
+    >
+      <Icon className="size-3.5 shrink-0" aria-hidden />
+      <span className="min-w-0 break-words">{notice.text}</span>
     </p>
   );
 }
@@ -698,11 +725,12 @@ function LinkedFooter({
  * never offers Approve, because the server refuses it there (T-07.5-14-04). Other cards never reach this code.
  */
 
-type LinkedKind = "tool" | "work_zone";
+type LinkedKind = "tool" | "work_zone" | "automation";
 
 function linkedKindOf(link: AgentCardApprovalLink | null): LinkedKind | null {
   if (link?.kind === "tool.call") return "tool";
   if (link?.kind === "work_zone.start") return "work_zone";
+  if (link?.kind === "automation.create") return "automation";
   return null;
 }
 
@@ -748,7 +776,38 @@ function LinkedPill({
   useBy: string | null | undefined;
   now: number;
 }) {
-  const p = pillOf(kind, status, useBy, now);
+  return <PillView p={pillOf(kind, status, useBy, now)} status={status} />;
+}
+
+/**
+ * The automation proposal's pill (07.6, UI-SPEC Surface 5 States): Proposed · Creating… · Created · Created with changes
+ * (applied from the editor, R5) · Discarded · Expired · Failed, from the approval's status.
+ */
+export function automationPillOf(
+  status: ApprovalRequestStatus,
+  edited: boolean | undefined,
+): ReturnType<typeof pillOf> {
+  switch (status) {
+    case "pending":
+      return { label: "Proposed", tone: STATUS.pending.tone, icon: "dot" };
+    case "approved":
+      return { label: "Creating…", tone: STATUS.running.tone, icon: "spinner" };
+    case "applied":
+      return {
+        label: edited ? "Created with changes" : "Created",
+        tone: STATUS.succeeded.tone,
+        icon: CircleCheck,
+      };
+    case "denied":
+      return { label: "Discarded", tone: STATUS.cancelled.tone, icon: CircleX };
+    case "expired":
+      return { label: "Expired", tone: STATUS.cancelled.tone, icon: Hourglass };
+    case "failed":
+      return { label: "Failed", tone: STATUS.failed.tone, icon: CircleX };
+  }
+}
+
+function PillView({ p, status }: { p: ReturnType<typeof pillOf>; status: ApprovalRequestStatus }) {
   const Icon = p.icon === "dot" || p.icon === "spinner" ? null : p.icon;
   return (
     <span
@@ -941,9 +1000,11 @@ function runsWith(card: AgentCard): string {
 }
 
 /** A refused card decision in words; a changed action asks to open the review again (UI-SPEC Interaction › Card). */
-function cardDecisionError(err: unknown): string {
+function cardDecisionError(err: unknown, kind?: string): string {
   if (isApiError(err, 409) && err.code === "approval_action_changed") {
-    return "This request changed. Open it to review again.";
+    return kind === "automation.create"
+      ? "This proposal changed. Open it to review again."
+      : "This request changed. Open it to review again.";
   }
   return reviewDecisionError(err);
 }
@@ -1001,7 +1062,7 @@ function CardDecision({
       setAsking(null);
       onDecided(outcome, decided);
     } catch (err) {
-      toast.error(cardDecisionError(err));
+      toast.error(cardDecisionError(err, link.kind));
       setAsking(null);
       // Changed, decided or expired meanwhile: show what the server holds now (never decided by itself).
       if (isApiError(err, 409) || isApiError(err, 403)) void refreshCard(qc, messageId);
@@ -1414,6 +1475,9 @@ function WzField({
 /** The pill of a 07.5 card, re-rendered when its use window or expiry passes. */
 function LinkedApprovalPillNow({ link }: { link: AgentCardApprovalLink }) {
   const now = useNow(link.status === "approved" ? link.useBy : link.expiresAt);
+  if (link.kind === "automation.create") {
+    return <PillView p={automationPillOf(link.status, link.edited)} status={link.status} />;
+  }
   return <LinkedPill kind={link.kind ?? ""} status={link.status} useBy={link.useBy} now={now} />;
 }
 
@@ -1662,6 +1726,212 @@ function WorkZoneProposalCard({
   );
 }
 
+/** Why creating a proposed automation failed, in words (UI-SPEC § Copy › Natural-language card); never a code. */
+export function automationFailedText(
+  code: string | null | undefined,
+  bot: string,
+  conversation: string,
+): string {
+  switch (code) {
+    case "target_not_postable":
+    case "agent_not_member":
+      return `${bot} can no longer post in ${conversation}.`;
+    case "automation_cap":
+      return "You've reached your limit of automations.";
+    case "schedule_too_frequent":
+      return "That schedule is too frequent for this workspace.";
+    case "agent_unavailable":
+    case "bot_not_readable":
+      return `${bot} isn't available any more.`;
+    case "runs_per_day":
+      return "Its daily run limit is over this workspace's limit.";
+    case "proposal_gone":
+      return "This proposal is no longer there.";
+    default:
+      return "Couldn't create the automation.";
+  }
+}
+
+/**
+ * A bot's natural-language automation proposal (07.6-12/15, AUTO-03, D-07, UI-SPEC Surface 5): the same fields for
+ * every reader; only the person it will run as gets Edit (the editor with the draft), Create automation and Discard,
+ * everyone else reads who can confirm it. The pill and the decided lines follow the approval (Created, Created with
+ * changes, Discarded, Expired, Failed); once created, Open automation goes to the server's result route.
+ */
+function AutomationProposalCard({
+  messageId,
+  card,
+  link,
+  bot,
+}: {
+  messageId: string;
+  card: AgentCard;
+  link: AgentCardApprovalLink;
+  bot: string;
+}) {
+  const me = useMe({ enabled: false }).data?.user.id ?? null;
+  const after = useFocusAfterDecision(!!card.decision);
+  const known = card.viewerCan !== undefined;
+  const mayDecide = (card.viewerCan ?? []).includes("decide");
+  const requester = me !== null && link.requestedForUserId === me;
+  const pending = link.status === "pending" && !card.decision;
+  const botName = fieldOf(card, "Bot") ?? bot;
+  const person = fieldOf(card, "Runs as") ?? "the person it runs as";
+  const conversation = fieldOf(card, "Deliver to") ?? "this conversation";
+  const firstRun = fieldOf(card, "First run");
+  const name = /“(.+)”/.exec(card.title)?.[1] ?? card.title;
+  const openTarget = openTargetOf(card);
+  const resultRoute =
+    link.status === "applied" && link.resultRoute && AgentCardRoute.safeParse(link.resultRoute).success
+      ? link.resultRoute
+      : null;
+  const showButtons = pending && requester && mayDecide;
+  const readonly = pending && known && !showButtons;
+  // The standing order is always the full-width block (UI-SPEC Surface 5), however short.
+  const asBlock = (f: AgentCard["fields"][number]) => f.label === "Instructions" || isBlock(f.value);
+  const inline = card.fields.filter((f) => !asBlock(f));
+  const blocks = card.fields.filter(asBlock);
+
+  const onDecided = (outcome: "approved" | "denied", decided: AgentCard) => {
+    const status = decided.approval?.status;
+    if (outcome === "denied") toast("Discarded.");
+    else if (status === "applied" || status === "approved") {
+      toast.success(firstRun ? `Created “${name}”. First run ${firstRun}.` : `Created “${name}”.`);
+    } else toast.error(automationFailedText(decided.approval?.resultCode, botName, conversation));
+    after.arm();
+  };
+
+  return (
+    <>
+      <div className="grid gap-3 px-3.5 pb-3.5">
+        {link.status === "failed" ? (
+          <p
+            data-testid="agent-card-failed-reason"
+            className="flex min-w-0 items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-red-800 text-xs leading-4 dark:border-red-400/25 dark:bg-red-400/10 dark:text-red-300"
+          >
+            <CircleX className="size-4 shrink-0" aria-hidden />
+            <span className="min-w-0 break-words">
+              {automationFailedText(link.resultCode, botName, conversation)}
+            </span>
+          </p>
+        ) : null}
+        {inline.length > 0 ? (
+          <dl
+            data-testid="agent-card-fields"
+            className="grid grid-cols-1 gap-x-4 gap-y-2 @[26rem]:grid-cols-2"
+          >
+            {inline.map((f, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: fields have no id and are replaced as a whole
+              <div key={`${i}:${f.label}`} className="min-w-0">
+                <dt className="truncate text-[11.5px] text-muted-foreground">{f.label}</dt>
+                <dd className="whitespace-pre-wrap break-words text-[13.5px] leading-5">{f.value}</dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
+        {blocks.map((f, i) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: fields have no id and are replaced as a whole
+          <div key={`${i}:${f.label}`} className="grid min-w-0 gap-1">
+            <p className="text-[11.5px] text-muted-foreground">{f.label}</p>
+            <div
+              data-testid="agent-card-block-value"
+              className="min-w-0 rounded-lg bg-muted/50 px-3 py-2 text-[13.5px] leading-5 dark:bg-white/[0.03]"
+            >
+              <UntrustedText text={f.value} clampLines={6} />
+            </div>
+          </div>
+        ))}
+        {link.warnings.map((w) => (
+          <WarningLine key={w} text={w} />
+        ))}
+        {pending ? (
+          <p data-testid="agent-card-automation-line" className="text-muted-foreground text-xs leading-4">
+            {botName} proposed this. Nothing runs until {person} confirms.
+          </p>
+        ) : null}
+        {link.status === "expired" ? (
+          <CardLine testId="agent-card-state-line" icon={Hourglass}>
+            No one confirmed it within 24 hours.
+          </CardLine>
+        ) : null}
+      </div>
+      {showButtons || readonly || card.decision || link.status === "failed" || resultRoute ? (
+        <div data-testid="agent-card-actions" className={FOOTER}>
+          {showButtons && openTarget ? (
+            <Link
+              href={openTarget}
+              data-testid="agent-card-open"
+              className={cn(buttonVariants({ size: "sm", variant: "outline" }), "max-lg:h-11 max-sm:w-full")}
+            >
+              {card.actions.find((a) => a.kind === "open")?.label ?? "Edit"}
+              <ArrowRight />
+            </Link>
+          ) : null}
+          {showButtons ? (
+            <span className="flex items-center gap-2 max-sm:w-full @[26rem]:ml-auto">
+              <CardDecision
+                messageId={messageId}
+                link={link}
+                approve={{ label: "Create automation", icon: Check, testId: "agent-card-create" }}
+                deny={{ label: "Discard", testId: "agent-card-discard" }}
+                copy={{
+                  approved: {
+                    title: `Create “${name}”?`,
+                    body: `It runs as you${firstRun ? ` from ${firstRun}` : ""}, with your permissions. You can pause or delete it in Bots › Automations.`,
+                    confirm: "Create automation",
+                    note: false,
+                  },
+                  denied: {
+                    title: `Discard “${name}”?`,
+                    body: `Nothing is created. ${botName} is told you discarded it.`,
+                    confirm: "Discard",
+                    note: false,
+                  },
+                }}
+                onDecided={onDecided}
+              />
+            </span>
+          ) : null}
+          {readonly ? (
+            <p
+              data-testid="agent-card-automation-readonly"
+              className="min-w-0 text-muted-foreground text-xs leading-4"
+            >
+              Only {person} can confirm this automation.
+            </p>
+          ) : null}
+          {card.decision && link.status !== "failed" ? (
+            <DecidedBlock
+              decision={card.decision}
+              display={link.display}
+              verbs={{ approved: "Created", denied: "Discarded" }}
+              focusRef={after.ref}
+            />
+          ) : null}
+          {link.status === "failed" ? (
+            <p
+              data-testid="agent-card-automation-followup"
+              className="min-w-0 text-muted-foreground text-xs leading-4"
+            >
+              Ask {botName} again when it's fixed.
+            </p>
+          ) : null}
+          {resultRoute ? (
+            <Link
+              href={resultRoute}
+              data-testid="agent-card-open-automation"
+              className={cn(buttonVariants({ size: "sm", variant: "outline" }), "max-lg:h-11 max-sm:w-full")}
+            >
+              Open automation
+              <ArrowRight />
+            </Link>
+          ) : null}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 export function AgentCardView({
   messageId,
   card: listed,
@@ -1699,7 +1969,12 @@ export function AgentCardView({
   const bot = authorName ?? "the bot";
   // 07.8-26 (UI-SPEC Surface 2): the platform's sign-in card renders its own body and footer under the kind row.
   const signIn = card.platformOwned === true && card.kind === "browser" ? (card.browserSignIn ?? null) : null;
-  const badge = !!link || !!signIn;
+  // 07.6 (R1, T-07.6-15-03): every card the server composed carries the badge, its own pill word and its notices; a
+  // bot's card never does, whatever its data says.
+  const platform = card.platformOwned === true;
+  const badge = !!link || !!signIn || platform;
+  const statusLabel = platform ? card.statusLabel : undefined;
+  const notices = platform && !linkedKind && !signIn ? (card.notices ?? []) : [];
 
   return (
     <article
@@ -1726,8 +2001,9 @@ export function AgentCardView({
         <div
           className={cn(
             "flex min-w-0 items-center justify-between gap-2",
-            // The sign-in pill is long ("Sign-in needed"): on a narrow card it drops under the kind and badge.
-            signIn && "flex-wrap gap-y-1.5",
+            // The sign-in pill is long ("Sign-in needed"), and so is a proposal's ("Created with changes"): on a narrow
+            // card it drops under the kind and badge instead of covering the badge.
+            (signIn || linkedKind === "automation") && "flex-wrap gap-y-1.5",
           )}
         >
           <span
@@ -1751,7 +2027,11 @@ export function AgentCardView({
           ) : link ? (
             <ApprovalStatusPill key={link.status} status={link.status} />
           ) : (
-            <StatusPill key={card.status} status={card.status} />
+            <StatusPill
+              key={`${card.status}:${statusLabel ?? ""}`}
+              status={card.status}
+              label={statusLabel}
+            />
           )}
         </div>
         <h3
@@ -1761,6 +2041,10 @@ export function AgentCardView({
         >
           {card.title}
         </h3>
+        {notices.map((n, i) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: notices have no id and are replaced as a whole
+          <NoticeLine key={i} notice={n} />
+        ))}
         {link?.status === "failed" && !linkedKind ? (
           <p
             data-testid="agent-card-failed-reason"
@@ -1777,14 +2061,28 @@ export function AgentCardView({
             data-testid="agent-card-fields"
             className="grid grid-cols-1 gap-x-4 gap-y-2 @[26rem]:grid-cols-2"
           >
-            {card.fields.map((f, i) => (
-              // Labels may repeat: the position keeps the key unique (fields are replaced as a whole).
-              // biome-ignore lint/suspicious/noArrayIndexKey: fields have no id and are replaced as a whole
-              <div key={`${i}:${f.label}`} className="min-w-0">
-                <dt className="truncate text-[11.5px] text-muted-foreground">{f.label}</dt>
-                <dd className="whitespace-pre-wrap break-words text-[13.5px] leading-5">{f.value}</dd>
-              </div>
-            ))}
+            {card.fields.map((f, i) =>
+              // 07.6 (UI-SPEC 8): a platform card's long value is a block value, clamped with Show more.
+              platform && isBlock(f.value) ? (
+                // biome-ignore lint/suspicious/noArrayIndexKey: fields have no id and are replaced as a whole
+                <div key={`${i}:${f.label}`} className="min-w-0 @[26rem]:col-span-2">
+                  <dt className="truncate text-[11.5px] text-muted-foreground">{f.label}</dt>
+                  <dd
+                    data-testid="agent-card-block-value"
+                    className="mt-1 min-w-0 rounded-lg bg-muted/50 px-3 py-2 text-[13.5px] leading-5 dark:bg-white/[0.03]"
+                  >
+                    <UntrustedText text={f.value} clampLines={6} />
+                  </dd>
+                </div>
+              ) : (
+                // Labels may repeat: the position keeps the key unique (fields are replaced as a whole).
+                // biome-ignore lint/suspicious/noArrayIndexKey: fields have no id and are replaced as a whole
+                <div key={`${i}:${f.label}`} className="min-w-0">
+                  <dt className="truncate text-[11.5px] text-muted-foreground">{f.label}</dt>
+                  <dd className="whitespace-pre-wrap break-words text-[13.5px] leading-5">{f.value}</dd>
+                </div>
+              ),
+            )}
           </dl>
         ) : null}
         {link && !linkedKind && summary.trim() && summary !== card.title ? (
@@ -1803,6 +2101,8 @@ export function AgentCardView({
         <ToolCallCard messageId={messageId} card={card} link={link} bot={bot} />
       ) : link && linkedKind === "work_zone" ? (
         <WorkZoneProposalCard messageId={messageId} card={card} link={link} bot={bot} />
+      ) : link && linkedKind === "automation" ? (
+        <AutomationProposalCard messageId={messageId} card={card} link={link} bot={bot} />
       ) : link ? (
         <LinkedFooter messageId={messageId} card={card} link={link} openTarget={openTarget} />
       ) : hasActions || card.decision ? (
@@ -1814,7 +2114,13 @@ export function AgentCardView({
             <Link
               href={openTarget}
               data-testid="agent-card-open"
-              className={buttonVariants({ size: "sm", variant: "outline" })}
+              className={
+                // A platform card's actions are 44 px, full width at 390 (UI-SPEC "Cards at 390"); any other card's
+                // markup stays exactly as it was (no class merge).
+                platform
+                  ? cn(buttonVariants({ size: "sm", variant: "outline" }), "max-lg:h-11 max-sm:w-full")
+                  : buttonVariants({ size: "sm", variant: "outline" })
+              }
             >
               {openAction?.label ?? "Open"}
               <ArrowRight />
@@ -1827,6 +2133,7 @@ export function AgentCardView({
               aria-pressed={following}
               data-testid="agent-card-follow"
               onClick={toggleFollow}
+              className={platform ? "max-lg:h-11 max-sm:w-full" : undefined}
             >
               {following ? <BellRing /> : <Bell />}
               {following ? "Following" : followAction.label}

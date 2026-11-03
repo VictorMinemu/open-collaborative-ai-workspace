@@ -222,6 +222,10 @@ function snapshot(ctx, s) {
     forcedRls: q(
       `select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'app' and c.relkind = 'r' and c.relforcerowsecurity`,
     ),
+    // 07.6 (ADR-0028): the job queue's schema comes back with every queue, so the API boots after a restore.
+    jobQueue: q(
+      `select (select version from pgboss.version) || ':' || (select string_agg(name, ',' order by name) from pgboss.queue where name not like '\\_\\_pgboss%')`,
+    ),
   };
 }
 

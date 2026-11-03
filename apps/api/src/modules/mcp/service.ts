@@ -37,9 +37,10 @@ import { checkMcpUrl } from "./url-policy";
 
 /**
  * MCP server registry (D-13, BOT-08). Header values are stored only in `app.secrets` (kind `mcp_credential`);
- * `mcp_servers.headers` keeps `[{name, secretId}]`. Values are revealed in exactly one place, `cellMcpServers`,
- * whose result travels only over the authenticated `/cell` channel. DTOs, audits and events carry names, ids
- * and the host only (principle 8, T-03.1-09-01).
+ * `mcp_servers.headers` keeps `[{name, secretId}]`. Values are revealed in two places: `cellMcpServers`, whose result
+ * travels only over the authenticated `/cell` channel, and `orgSecretHeaders` (Phase 07.6), whose result the API sends
+ * only as request headers of its own guarded MCP call (watched records) and never logs or returns. DTOs, audits and
+ * events carry names, ids and the host only (principle 8, T-03.1-09-01).
  */
 
 type ServerRow = typeof mcpServers.$inferSelect;
@@ -949,10 +950,30 @@ export async function probeMcpServer(core: Core, tx: Tx, id: string): Promise<Mc
   return getMcpServer(tx, id, mcpReadOptions(core));
 }
 
+// ---------------------------------------------------------------- API-side calls (Phase 07.6)
+
+/**
+ * The admin-set headers of an org-enabled, organization-secret server, for the API's own MCP call through the egress
+ * guard (07.6 watched records read with the workspace's access, D-07). Null for a per-member connector, a disabled or
+ * unknown server (RLS: another organization's id is never resolved). The caller sends them only as request headers and
+ * redacts every value from what comes back (`callTool`); it never logs, stores or returns them.
+ */
+export async function orgSecretHeaders(
+  core: Core,
+  tx: Tx,
+  serverId: string,
+): Promise<Array<{ name: string; value: string }> | null> {
+  const [row] = await tx.select().from(mcpServers).where(eq(mcpServers.id, serverId)).limit(1);
+  if (row?.authMode !== "org_secret" || !row.orgEnabled) return null;
+  const out: Array<{ name: string; value: string }> = [];
+  for (const h of row.headers) out.push({ name: h.name, value: await core.secrets.reveal(tx, h.secretId) });
+  return out;
+}
+
 // ---------------------------------------------------------------- cell snapshot
 
 /**
- * The org-enabled, organization-secret servers as the cell renders them (D-13; 07.4 C-01: never a per-member one). Header values are revealed ONLY here; the caller
+ * The org-enabled, organization-secret servers as the cell renders them (D-13; 07.4 C-01: never a per-member one). Header values are revealed only here and in `orgSecretHeaders`; the caller
  * must send the result over the authenticated Agent Channel and never log it. `tools` (the server's
  * `toolFilter.include`) = MCP tool names granted on any live bot, minus dangerous names; per-bot exposure is
  * still decided by each agent's `alsoAllow` and every turn.

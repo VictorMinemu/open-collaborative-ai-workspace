@@ -758,3 +758,102 @@ DROP POLICY IF EXISTS audience_backstop ON app.work_session_grants;
 CREATE POLICY audience_backstop ON app.work_session_grants AS RESTRICTIVE FOR ALL
   USING (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_session_grants.work_session_id))
   WITH CHECK (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_session_grants.work_session_id));
+-- Phase 07.6 (D-11): a session's memory summary state follows its session, as its prompts and approvals do.
+DROP POLICY IF EXISTS audience_backstop ON app.work_session_memory;
+CREATE POLICY audience_backstop ON app.work_session_memory AS RESTRICTIVE FOR ALL
+  USING (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_session_memory.work_session_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_session_memory.work_session_id));
+
+-- Automations and watched records (Phase 07.6; D-02, D-04, D-07, P-10, Pitfalls 3 and 6; ADR-0028).
+--
+-- Watched-record history is append-only (D-04): the app role may add a change, never rewrite or erase one. FK cascades
+-- are not subject to the grant, so a deleted watched record (or its card, board, bot or connector) still takes its
+-- history with it (automations-schema.int.test.ts proves it as ocw_app).
+REVOKE UPDATE, DELETE ON app.watched_record_changes FROM ocw_app;
+REVOKE TRUNCATE ON app.watched_record_changes FROM ocw_app;
+
+-- The pre-tenant reads of the job ticks and the public webhook route (D-07). Same shape as `stale_ai_generations`:
+-- SECURITY DEFINER as ocw_migrator (BYPASSRLS), fixed search_path, schema-qualified tables, limit clamped to 1..1000,
+-- across organizations by design. Each returns ids only (the webhook lookup adds one boolean); the caller re-reads
+-- every row by id inside that organization's own withTenant() transaction, where RLS applies again. Never a name, a
+-- schedule, an instruction, a sender or any inbound content.
+-- - `due_automations`: active scheduled automations whose `next_run_at` has come (the `automation.tick` cron).
+-- - `stale_automation_runs`: runs handed to the cell (`delivered`) and unanswered since before `p_before` (`no_reply`).
+-- - `due_mailboxes`: mailboxes to poll now, of active automations: `active` and `unreachable` ones when due,
+--   `auth_failed` ones after their back-off (`next_poll_at`, 30 minutes) or as soon as their Keychain item changed after
+--   the failure (07.6-11: a new password resumes the mailbox); `paused` ones wait for their owner.
+-- - `due_watched_records`: watched records whose next scheduled check has come.
+-- - `lookup_webhook_endpoint`: the endpoint and organization behind a public id. `active` is false for a tombstoned
+--   (`deleted_at`) or unlinked endpoint, so the route answers 410 instead of 404 (Pitfall 4); an unknown id has no row.
+-- - `expired_automation_events`: inbound items whose content is due for the 30-day purge (Pitfall 3).
+CREATE OR REPLACE FUNCTION app.due_automations(p_limit integer, p_now timestamptz)
+RETURNS TABLE (id uuid, organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT a.id, a.organization_id FROM app.automations a
+  WHERE a.status = 'active' AND a.trigger_kind = 'schedule' AND a.next_run_at <= p_now
+  ORDER BY a.next_run_at, a.id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.due_automations(integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.due_automations(integer, timestamptz) TO ocw_app;
+
+CREATE OR REPLACE FUNCTION app.stale_automation_runs(p_limit integer, p_before timestamptz)
+RETURNS TABLE (id uuid, organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT r.id, r.organization_id FROM app.automation_runs r
+  WHERE r.status = 'delivered' AND r.delivered_at < p_before
+  ORDER BY r.delivered_at, r.id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.stale_automation_runs(integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.stale_automation_runs(integer, timestamptz) TO ocw_app;
+
+CREATE OR REPLACE FUNCTION app.due_mailboxes(p_limit integer, p_now timestamptz)
+RETURNS TABLE (id uuid, organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT m.id, m.organization_id FROM app.mailboxes m
+  JOIN app.automations a ON a.organization_id = m.organization_id AND a.id = m.automation_id
+  WHERE a.status = 'active' AND (
+    (m.status IN ('active', 'unreachable', 'auth_failed') AND m.next_poll_at <= p_now)
+    OR (m.status = 'auth_failed' AND EXISTS (
+      SELECT 1 FROM app.vault_items v
+      WHERE v.organization_id = m.organization_id AND v.id = m.vault_item_id AND v.updated_at > m.updated_at
+    ))
+  )
+  ORDER BY m.next_poll_at, m.id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.due_mailboxes(integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.due_mailboxes(integer, timestamptz) TO ocw_app;
+
+CREATE OR REPLACE FUNCTION app.due_watched_records(p_limit integer, p_now timestamptz)
+RETURNS TABLE (id uuid, organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT w.id, w.organization_id FROM app.watched_records w
+  WHERE w.next_check_at <= p_now
+  ORDER BY w.next_check_at, w.id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.due_watched_records(integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.due_watched_records(integer, timestamptz) TO ocw_app;
+
+CREATE OR REPLACE FUNCTION app.lookup_webhook_endpoint(p_public_id text)
+RETURNS TABLE (endpoint_id uuid, organization_id uuid, active boolean)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT e.id, e.organization_id, (e.deleted_at IS NULL AND e.automation_id IS NOT NULL)
+  FROM app.webhook_endpoints e
+  WHERE e.public_id = p_public_id
+$fn$;
+REVOKE ALL ON FUNCTION app.lookup_webhook_endpoint(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.lookup_webhook_endpoint(text) TO ocw_app;
+
+CREATE OR REPLACE FUNCTION app.expired_automation_events(p_limit integer, p_before timestamptz)
+RETURNS TABLE (id uuid, organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT e.id, e.organization_id FROM app.automation_events e
+  WHERE e.content_purged_at IS NULL AND e.received_at < p_before
+  ORDER BY e.received_at, e.id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.expired_automation_events(integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.expired_automation_events(integer, timestamptz) TO ocw_app;

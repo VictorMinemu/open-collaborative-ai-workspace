@@ -8,7 +8,7 @@ import {
   Id,
   UpdateBoardColumnRequest,
 } from "@ocw/contracts";
-import { boardCards, boardColumns, boards, messages, type Tx } from "@ocw/db";
+import { automations, boardCards, boardColumns, boards, messages, type Tx } from "@ocw/db";
 import { and, asc, count, desc, eq, isNull, ne, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -252,6 +252,25 @@ export function registerColumnRoutes(app: App, ctx: BoardGuardCtx & { deps: Chat
           throw badRequest("Move the cards to another column of this board", "invalid_column");
         }
         if (columns.length === 1) throw conflict("A board keeps at least one column", "board_last_column");
+        // Phase 07.6 (07.6-02/05): an automation delivering to this column holds it (the FK is NO ACTION); say so
+        // before the database refuses. The column's row lock first (07.6 review A HI-03): a save pointing an
+        // automation at this column holds the column's key until it commits, so the count below sees it (409)
+        // instead of the delete failing on the foreign key (500); a save that comes later waits for this delete.
+        await tx
+          .select({ id: boardColumns.id })
+          .from(boardColumns)
+          .where(eq(boardColumns.id, column.id))
+          .for("update");
+        const [targeted] = await tx
+          .select({ n: count() })
+          .from(automations)
+          .where(eq(automations.boardColumnId, column.id));
+        if (Number(targeted?.n ?? 0) > 0) {
+          throw conflict(
+            "Automations deliver to this column. Move them to another column or delete them first.",
+            "board_column_has_automations",
+          );
+        }
 
         const [live] = await tx
           .select({ n: count() })

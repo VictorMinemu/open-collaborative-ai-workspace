@@ -29,6 +29,10 @@ export const AGENT_CARD_TITLE_MAX = 200;
 export const AGENT_CARD_FIELDS_MAX = 12;
 export const AGENT_CARD_ACTIONS_MAX = 4;
 export const AGENT_CARD_SUMMARY_MAX = 2_000;
+/** Phase 07.6 (R1): a platform card's pill word ("Received", "No reply", "Not saved") and its notices. */
+export const AGENT_CARD_STATUS_LABEL_MAX = 24;
+export const AGENT_CARD_NOTICES_MAX = 3;
+export const AGENT_CARD_NOTICE_MAX = 200;
 
 export const AgentCardKind = z.enum([
   "work_zone",
@@ -54,6 +58,16 @@ export const AgentCardField = z.object({
 export type AgentCardField = z.infer<typeof AgentCardField>;
 
 const ActionLabel = z.string().trim().min(1).max(40);
+
+/** Phase 07.6 (R1): a notice line under a platform card's title ("Outside content from …"). */
+export const AgentCardNotice = z.object({
+  tone: z.enum(["warning", "neutral"]),
+  text: z.string().trim().min(1).max(AGENT_CARD_NOTICE_MAX),
+});
+export type AgentCardNotice = z.infer<typeof AgentCardNotice>;
+
+const AgentCardStatusLabel = z.string().trim().min(1).max(AGENT_CARD_STATUS_LABEL_MAX);
+const AgentCardNotices = z.array(AgentCardNotice).max(AGENT_CARD_NOTICES_MAX);
 
 export const AgentCardAction = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("open"), label: ActionLabel, target: AgentCardRoute }),
@@ -139,6 +153,11 @@ export const AgentCardApprovalLink = z.object({
   blocked: WorkZoneStartBlock.nullable().optional(),
   /** Phase 07.8: a browser action's page (`ocw_browser_act` / D-13 `ocw_browser_open`); absent on every other card. */
   browser: AgentCardBrowserAction.nullable().optional(),
+  /**
+   * Phase 07.6 (R5): an automation proposal the person created from the editor with their own changes, so the card reads
+   * "Created with changes" (`automation.create` only; absent on every other card).
+   */
+  edited: z.boolean().optional(),
 });
 export type AgentCardApprovalLink = z.infer<typeof AgentCardApprovalLink>;
 
@@ -195,6 +214,12 @@ export const AgentCard = z.object({
   approval: AgentCardApprovalLink.nullable().optional(),
   /** Phase 07.8: the sign-in this `browser` card mirrors. Absent on every other card. */
   browserSignIn: AgentCardBrowserSignInLink.nullable().optional(),
+  /**
+   * Phase 07.6 (R1, P-12): the pill's word instead of the generic status label, and up to three notices. Honoured by the
+   * API only for platform-owned cards (set through `updatePlatformCard`); absent on older cards, which render as before.
+   */
+  statusLabel: AgentCardStatusLabel.optional(),
+  notices: AgentCardNotices.optional(),
 });
 export type AgentCard = z.infer<typeof AgentCard>;
 
@@ -211,6 +236,9 @@ export const AgentCardInput = AgentCard.pick({
 }).extend({
   kind: AgentCardKind.exclude(["browser"]),
   summary: z.string().trim().min(1).max(AGENT_CARD_SUMMARY_MAX),
+  /** Phase 07.6 (R1, P-12): stored only with `cardPlatformOwned: true`; an agent's values are not honoured. */
+  statusLabel: AgentCardStatusLabel.optional(),
+  notices: AgentCardNotices.optional(),
 });
 export type AgentCardInput = z.infer<typeof AgentCardInput>;
 

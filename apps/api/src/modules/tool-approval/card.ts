@@ -7,6 +7,7 @@ import {
   humanMembersOf,
   memberName,
   parseArgs,
+  previewArgsOf,
   type SourceInfo,
   shownTarget,
   sourceOf,
@@ -93,7 +94,7 @@ export async function cardDisplayOf(
     ? browserPreview(args)
     : isSandboxExecAfterSignIn(t.tool, args)
       ? sandboxExecPreview(args)
-      : orderPreview(args);
+      : orderPreview(await previewArgsOf(tx, t, args));
   // A browser action's card is its R8 fields alone (Action, Element, Page, Session, Value or Option).
   const exactActionFields = browser ? 0 : shownTarget(t) ? 3 : 2;
   const display = cardDisplay({

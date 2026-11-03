@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkSchema, createTenantDb, localMigrations } from "@ocw/db";
-import { bootstrapRoles, runMigrations } from "@ocw/db/migrate";
+import { bootstrapRoles, JOB_QUEUE_NAMES, runMigrations } from "@ocw/db/migrate";
 import { startAllOrNone } from "@ocw/db/testing";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { RedisContainer, type StartedRedisContainer } from "@testcontainers/redis";
@@ -79,6 +79,11 @@ const BACKFILL_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
   "../../../packages/db/drizzle/20261014042429_bots_off_connector_vault_backfill/migration.sql",
 );
+/** Phase 07.6 (07.6-01, P-05): the same completion for the two automation grains that joined the Bots module (7 → 9). */
+const AUTOMATION_BACKFILL_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../packages/db/drizzle/20261030071644_bots_off_automation_backfill/migration.sql",
+);
 /** The seed's fixed test key (32 bytes of 0x07) and plaintext; see packages/db/test/upgrade/seed-phase-5.sql. */
 const TEST_KEY_B64 = Buffer.alloc(32, 7).toString("base64");
 const SECRET_PLAINTEXT = "sk-upgrade-baseline-fake-provider-key";
@@ -106,6 +111,12 @@ const HEAD_ONLY = [
   "20261022213335_browser_takeover_abandoned",
   "20261023003251_work_zone_visibility",
   "20261028214642_runtime_updates",
+  "20261030071129_automations",
+  "20261030071644_bots_off_automation_backfill",
+  "20261102201704_watched_write_lease",
+  "20261102205627_automation_events_board_card_idx",
+  "20261102205808_automation_events_purge_thread_key",
+  "20261102210622_automation_events_full_message",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -187,6 +198,22 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       const m = new Map<string, number>();
       for (const t of SEEDED) m.set(t, (await c.query(`select count(*)::int as n from ${t}`)).rows[0].n);
       return m;
+    } finally {
+      await c.end();
+    }
+  }
+
+  /** The pgboss schema's catalog queues (pg-boss's own `__pgboss…` queues aside), or null when it is not installed. */
+  async function pgbossQueues(): Promise<string[] | null> {
+    const c = new pg.Client({ connectionString: urls.superuser });
+    await c.connect();
+    try {
+      const ns = await c.query("select to_regnamespace('pgboss') is not null as installed");
+      if (!ns.rows[0].installed) return null;
+      const { rows } = await c.query<{ name: string }>(
+        "select name from pgboss.queue where name not like '\\_\\_pgboss%' order by name",
+      );
+      return rows.map((r) => r.name);
     } finally {
       await c.end();
     }
@@ -316,6 +343,8 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
     expect(res).toEqual({ status: "behind", pending: HEAD_ONLY, unknown: [], modified: [] });
     // N-1 had no read grant for ocw_app: an N-1 database is "never migrated" to the guard until `migrate` runs.
     expect((await checkSchema(urls.app)).status).toBe("missing");
+    // Phase 07.6: N-1 has no job runtime.
+    expect(await pgbossQueues()).toBeNull();
   });
 
   describe("after HEAD's migrations", () => {
@@ -330,6 +359,20 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
 
     it("is ok for the API's own role", async () => {
       expect(await checkSchema(urls.app)).toEqual({ status: "ok", pending: [], unknown: [], modified: [] });
+    });
+
+    it("installs pg-boss as the migrator, with every catalog queue, and lets ocw_app use it (Phase 07.6, D-07)", async () => {
+      expect(await pgbossQueues()).toEqual([...JOB_QUEUE_NAMES].sort());
+      const c = new pg.Client({ connectionString: urls.app });
+      await c.connect();
+      try {
+        const { rows } = await c.query(
+          "select has_schema_privilege('pgboss', 'USAGE') as usage, has_schema_privilege('pgboss', 'CREATE') as create",
+        );
+        expect(rows[0]).toEqual({ usage: true, create: false });
+      } finally {
+        await c.end();
+      }
     });
 
     it("keeps every seeded row", async () => {
@@ -428,21 +471,24 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       }
     });
 
-    it("completes the old Bots-off rule sets, so Bots reads off and denies connections and keys; a custom set is untouched (WINDOWS #177)", async () => {
+    it("completes the old Bots-off rule sets, so Bots reads off and denies connections, keys and automations; a custom set is untouched (WINDOWS #177, 07.6-01)", async () => {
       const db = createTenantDb(urls.app, { max: 1 });
       try {
         const view = (organizationId: string, userId: string) =>
           db.withTenant({ organizationId }, async (tx) => {
             const rules = await loadRules(tx);
             const facts = await loadPrincipalFacts(tx, { kind: "user", userId });
-            const allowed = (p: "connector.connect" | "vault.use" | "bot.read") =>
-              decide(facts, orgResource(), rules, p).allowed;
+            const allowed = (
+              p: "connector.connect" | "vault.use" | "bot.read" | "automation.create" | "automation.webhook",
+            ) => decide(facts, orgResource(), rules, p).allowed;
             return {
               everyone: moduleStateOf(rules, "bots", null, { kind: "everyone" }),
               person: moduleStateOf(rules, "bots", null, { kind: "user", userId }),
               connect: allowed("connector.connect"),
               vault: allowed("vault.use"),
               botRead: allowed("bot.read"),
+              automation: allowed("automation.create"),
+              webhook: allowed("automation.webhook"),
               rows: rules.length,
             };
           });
@@ -452,8 +498,10 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
           connect: false,
           vault: false,
           botRead: false,
-          // 5 + 1 duplicate per subject at N-1, plus the 2 added for each of the two subjects.
-          rows: 16,
+          automation: false,
+          webhook: false,
+          // 5 + 1 duplicate per subject at N-1, plus the 2 added by 07.4-14 and the 2 added by 07.6-01 for each subject.
+          rows: 20,
         });
         expect(await view(ORG_B, BEA_ADMIN)).toEqual({
           everyone: "custom",
@@ -461,6 +509,9 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
           connect: true,
           vault: true,
           botRead: false,
+          // Bea is an admin: the custom set leaves her automation grains as they were.
+          automation: true,
+          webhook: true,
           rows: 3,
         });
         // Idempotent: running the backfill again adds nothing.
@@ -471,7 +522,37 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
             (await c.query("select count(*)::int as n from app.permission_rules")).rows[0].n as number;
           const before = await n();
           await c.query(readFileSync(BACKFILL_DIR, "utf8"));
+          await c.query(readFileSync(AUTOMATION_BACKFILL_DIR, "utf8"));
           expect(await n()).toBe(before);
+          const automations = await c.query(
+            "select organization_id, subject_kind, permission, created_by from app.permission_rules where permission like 'automation.%' order by subject_kind, permission",
+          );
+          expect(automations.rows).toEqual([
+            {
+              organization_id: ORG_A,
+              subject_kind: "everyone",
+              permission: "automation.create",
+              created_by: null,
+            },
+            {
+              organization_id: ORG_A,
+              subject_kind: "everyone",
+              permission: "automation.webhook",
+              created_by: null,
+            },
+            {
+              organization_id: ORG_A,
+              subject_kind: "user",
+              permission: "automation.create",
+              created_by: null,
+            },
+            {
+              organization_id: ORG_A,
+              subject_kind: "user",
+              permission: "automation.webhook",
+              created_by: null,
+            },
+          ]);
           const added = await c.query(
             "select subject_kind, permission, created_by from app.permission_rules where permission in ('connector.connect', 'vault.use') order by subject_kind, permission",
           );
@@ -695,6 +776,8 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       });
       const built = await buildApp(env, { logger: false });
       try {
+        // Ready starts the job runtime as ocw_app (Phase 07.6): a missing or older pgboss schema would reject here.
+        await built.app.ready();
         const res = await built.app.inject({ method: "GET", url: "/health" });
         expect(res.statusCode).toBe(200);
         expect(res.json()).toMatchObject({ status: "ok", checks: { db: "ok", redis: "ok" } });

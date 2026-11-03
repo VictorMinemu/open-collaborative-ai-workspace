@@ -350,6 +350,123 @@ describe("chunkText", () => {
   });
 });
 
+describe("automation proposals (07.6 AUTO-03, ocw_automation_propose)", () => {
+  const BODY = {
+    eventId: "e1",
+    agentId: "a1",
+    name: "Weekly sales report",
+    instructions: "Post the total.",
+    schedule: { cron: "0 17 * * 5", timeZone: "Europe/Madrid" },
+    target: { kind: "here" as const },
+  };
+  const client = (responses: Array<{ status: number; body?: unknown }>) => {
+    const scripted = scriptedFetch(responses);
+    return {
+      calls: scripted.calls,
+      c: createAgentChannelClient({
+        apiUrl: "http://api",
+        token: () => "t",
+        fetch: scripted.fetchImpl,
+        backoff: { baseMs: 1, maxMs: 2 },
+      }),
+    };
+  };
+
+  it("proposeAutomation posts the body once to /automations/propose and parses the answer", async () => {
+    const answer = {
+      ok: true,
+      approvalId: "ap-1",
+      sentence: "I posted a card proposing “Weekly sales report”.",
+    };
+    const { c, calls } = client([{ status: 200, body: answer }]);
+    await expect(c.proposeAutomation(BODY)).resolves.toEqual(answer);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("http://api/agent-channel/v1/automations/propose");
+    expect(calls[0]?.init.method).toBe("POST");
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual(BODY);
+  });
+
+  it("never retries (a retry could post a second card); a 4xx {ok:false, code, sentence} body is the refusal", async () => {
+    const failing = client([
+      { status: 503 },
+      { status: 200, body: { ok: true, approvalId: "x", sentence: "s" } },
+    ]);
+    await expect(failing.c.proposeAutomation(BODY)).rejects.toBeDefined();
+    expect(failing.calls).toHaveLength(1);
+    const refusal = {
+      ok: false,
+      code: "tainted",
+      sentence: "I can't propose an automation after reading outside content in this turn.",
+    };
+    const refused = client([{ status: 403, body: refusal }]);
+    await expect(refused.c.proposeAutomation(BODY)).resolves.toEqual(refusal);
+  });
+
+  it("an error body without a sentence keeps its code only; a malformed answer is rejected (never shown to the model)", async () => {
+    const coded = client([{ status: 404, body: { error: { code: "unknown_turn", message: "no" } } }]);
+    const err = (await coded.c.proposeAutomation(BODY).catch((e: unknown) => e)) as AgentChannelHttpError;
+    expect(err).toBeInstanceOf(AgentChannelHttpError);
+    expect(err.code).toBe("unknown_turn");
+    expect(err.answer).toBeUndefined();
+    const odd = client([{ status: 200, body: { ok: true, sentence: "no approval id" } }]);
+    await expect(odd.c.proposeAutomation(BODY)).rejects.toBeDefined();
+    const long = client([
+      { status: 409, body: { ok: false, code: "automation_cap", sentence: "x".repeat(501) } },
+    ]);
+    const e2 = (await long.c.proposeAutomation(BODY).catch((e: unknown) => e)) as AgentChannelHttpError;
+    expect(e2.answer).toBeUndefined();
+  });
+});
+
+describe("watched record updates (07.6 AUTO-04, ocw_record_update)", () => {
+  const BODY = { eventId: "e1", agentId: "a1", changes: { "/status": "Shipped" } };
+
+  it("updateRecord posts once to /records/update; a 409 record_changed body is the answer, not an error", async () => {
+    const ok = scriptedFetch([
+      { status: 200, body: { ok: true, code: null, sentence: "Updated SO-10442 in ERP." } },
+    ]);
+    const c = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: ok.fetchImpl });
+    await expect(c.updateRecord(BODY)).resolves.toEqual({
+      ok: true,
+      code: null,
+      sentence: "Updated SO-10442 in ERP.",
+    });
+    expect(ok.calls[0]?.url).toBe("http://api/agent-channel/v1/records/update");
+    expect(JSON.parse(String(ok.calls[0]?.init.body))).toEqual(BODY);
+    const changed = {
+      ok: false,
+      code: "record_changed",
+      sentence: "The record changed in ERP since the last check.",
+    };
+    const conflict = scriptedFetch([{ status: 409, body: changed }]);
+    const c2 = createAgentChannelClient({
+      apiUrl: "http://api",
+      token: () => "t",
+      fetch: conflict.fetchImpl,
+    });
+    await expect(c2.updateRecord(BODY)).resolves.toEqual(changed);
+  });
+
+  it("never retries a write (a 5xx is one attempt); an error without a sentence keeps its code", async () => {
+    const failing = scriptedFetch([
+      { status: 502 },
+      { status: 200, body: { ok: true, code: null, sentence: "s" } },
+    ]);
+    const c = createAgentChannelClient({
+      apiUrl: "http://api",
+      token: () => "t",
+      fetch: failing.fetchImpl,
+      backoff: { baseMs: 1, maxMs: 2 },
+    });
+    await expect(c.updateRecord(BODY)).rejects.toBeDefined();
+    expect(failing.calls).toHaveLength(1);
+    const coded = scriptedFetch([{ status: 404, body: { error: { code: "unknown_turn", message: "m" } } }]);
+    const c2 = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: coded.fetchImpl });
+    const err = (await c2.updateRecord(BODY).catch((e: unknown) => e)) as AgentChannelHttpError;
+    expect(err.code).toBe("unknown_turn");
+  });
+});
+
 describe("approval refusal details (07.5-04)", () => {
   const APPROVAL = {
     id: "0199a6f0-0000-7000-8000-0000000000a1",

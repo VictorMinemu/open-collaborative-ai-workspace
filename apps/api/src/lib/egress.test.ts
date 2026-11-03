@@ -8,6 +8,7 @@ import {
   hostPortOf,
   PLATFORM_SERVICE_NAMES,
   platformHostsFromEnv,
+  resolveEgressAddress,
 } from "./egress";
 
 /**
@@ -258,5 +259,103 @@ describe("egressFor", () => {
   it("uses the env's platform hosts", async () => {
     const err = await refusal(egressFor(env).fetch("https://postgres/"));
     expect(err.code).toBe("platform_host");
+  });
+});
+
+describe("resolveEgressAddress: the same refusals for a non-HTTP connection (07.6-11, IMAP)", () => {
+  const table: Record<string, Answer> = {
+    "imap.acme.com": [{ address: "203.0.113.10", family: 4 }],
+    "imap.public.example": [{ address: "8.8.4.4", family: 4 }],
+    "imap.lan.example": [{ address: "192.168.1.20", family: 4 }],
+    "imap.loop.example": [{ address: "127.0.0.1", family: 4 }],
+    "imap.mixed.example": [
+      { address: "8.8.4.4", family: 4 },
+      { address: "10.0.0.9", family: 4 },
+    ],
+    "imap.platform.example": [{ address: "172.30.0.5", family: 4 }],
+    postgres: [{ address: "172.30.0.5", family: 4 }],
+    // An injected resolver answers test hosts itself (createEgress uses the map only in its default lookup).
+    greenmail: [{ address: "127.0.0.1", family: 4 }],
+  };
+  const lookup = async (host: string): Promise<Answer> => {
+    const answer = table[host];
+    if (!answer) return noDns(host);
+    return answer;
+  };
+  const egress = createEgress({
+    platformHosts: ["postgres"],
+    testHosts: new Map([["greenmail", "127.0.0.1"]]),
+    lookup,
+  });
+
+  it("a public host resolves to its pinned address", async () => {
+    await expect(resolveEgressAddress(egress, "imap.public.example", { port: 993 })).resolves.toEqual({
+      address: "8.8.4.4",
+      family: 4,
+      testHost: false,
+    });
+  });
+
+  it("refuses documentation, loopback, private and mixed answers like fetch does", async () => {
+    for (const host of ["imap.acme.com", "imap.loop.example", "imap.lan.example", "imap.mixed.example"]) {
+      const err = await refusal(resolveEgressAddress(egress, host, { port: 993 }));
+      expect(err.code, host).toBe("private_address");
+      expect(err.host).toBe(host);
+    }
+  });
+
+  it("admits a private address only for the exact host:port of privateAllow (never loopback)", async () => {
+    await expect(
+      resolveEgressAddress(egress, "imap.lan.example", { port: 993, privateAllow: ["imap.lan.example:993"] }),
+    ).resolves.toMatchObject({ address: "192.168.1.20", testHost: false });
+    const otherPort = await refusal(
+      resolveEgressAddress(egress, "imap.lan.example", { port: 143, privateAllow: ["imap.lan.example:993"] }),
+    );
+    expect(otherPort.code).toBe("private_address");
+    const loop = await refusal(
+      resolveEgressAddress(egress, "imap.loop.example", {
+        port: 993,
+        privateAllow: ["imap.loop.example:993"],
+      }),
+    );
+    expect(loop.code).toBe("private_address");
+  });
+
+  it("refuses platform hosts by name and by resolved address, even when allowed", async () => {
+    expect((await refusal(resolveEgressAddress(egress, "postgres", { port: 5432 }))).code).toBe(
+      "platform_host",
+    );
+    const byAddress = await refusal(
+      resolveEgressAddress(egress, "imap.platform.example", {
+        port: 993,
+        privateAllow: ["imap.platform.example:993"],
+      }),
+    );
+    expect(byAddress.code).toBe("platform_host");
+  });
+
+  it("refuses localhost and metadata names and literal private IPs, answers dns_failed for unknown names", async () => {
+    expect((await refusal(resolveEgressAddress(egress, "localhost", { port: 993 }))).code).toBe(
+      "private_address",
+    );
+    expect((await refusal(resolveEgressAddress(egress, "10.0.0.1", { port: 993 }))).code).toBe(
+      "private_address",
+    );
+    expect((await refusal(resolveEgressAddress(egress, "nowhere.example", { port: 993 }))).code).toBe(
+      "dns_failed",
+    );
+    await expect(resolveEgressAddress(egress, "1.1.1.1", { port: 993 })).resolves.toEqual({
+      address: "1.1.1.1",
+      family: 4,
+      testHost: false,
+    });
+  });
+
+  it("a test host maps to its loopback address and says so", async () => {
+    await expect(resolveEgressAddress(egress, "GreenMail", { port: 3143 })).resolves.toEqual({
+      address: "127.0.0.1",
+      family: 4,
+      testHost: true,
+    });
   });
 });
