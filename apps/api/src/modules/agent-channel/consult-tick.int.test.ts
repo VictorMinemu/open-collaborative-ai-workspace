@@ -8,7 +8,7 @@ import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "..
 import { invite } from "../../testing-workzone";
 import { createPermissionService } from "../organization";
 import { chainLive } from "./chains";
-import { sweepConsults } from "./consult-tick";
+import { closeIdleChains, sweepConsults } from "./consult-tick";
 
 /**
  * 07.7-09 (A2A-03; D-03, D-04, D-06, D-11; P-10, P-15; C-02): a hop nobody answers ends by itself. The `consult.tick`
@@ -49,6 +49,7 @@ let labId: string;
 const core = () => stack.built.core;
 const deps = () => ({ perms: createPermissionService(core()), memory: stack.built.memory });
 const sweep = (now: Date, batch?: number) => sweepConsults(core(), deps(), now, batch);
+const idle = (now: Date) => closeIdleChains(core(), now);
 
 async function ok(res: Promise<Res> | Res, status = 200): Promise<Json> {
   const r = await res;
@@ -364,6 +365,49 @@ describe("an unanswered hop times out at the next tick (D-04, D-06, D-11)", () =
     const jobs = await rows("select data from pgboss.job where name = 'consult.tick'");
     expect(jobs.length).toBeGreaterThan(0);
     for (const j of jobs) expect(j.data).toEqual({});
+  });
+});
+
+describe("a lost done never strands a hop or a chain (CR-A-06)", () => {
+  it("Bea posted her answer but her done was lost: the tick closes the hop answered, never timed out", async () => {
+    await parkOthers();
+    const { hop, asked } = await consulted();
+    const posted = await ok(post(asked, ANSWER));
+    expect(await sweep(plus(await deadlineOf(hop.hopId), 1000))).toEqual({ timedOut: 0, cancelled: 0 });
+    expect(await hopRow(hop.hopId)).toMatchObject({
+      status: "answered",
+      answer_message_id: posted.messageId,
+    });
+    const replies = await repliesFor(hop.hopId);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]?.payload.consultReply).toMatchObject({
+      outcome: "answered",
+      answerMessageId: posted.messageId,
+    });
+    expect(replies[0]?.payload.message).toMatchObject({ id: posted.messageId, text: ANSWER });
+    expect(await auditsFor("agent.consult.answered", "hopId", hop.hopId)).toHaveLength(1);
+    expect(await auditsFor("agent.consult.timed_out", "hopId", hop.hopId)).toHaveLength(0);
+    // The late done changes nothing.
+    await ok(done(asked));
+    expect(await repliesFor(hop.hopId)).toHaveLength(1);
+  });
+
+  it("the return turn's and the first turn's done were lost: the idle sweep completes the chain, never one with a pending hop", async () => {
+    await parkOthers();
+    const { hop, asked } = await consulted();
+    await ok(post(asked, ANSWER));
+    await ok(done(asked));
+    const [back] = await repliesFor(hop.hopId);
+    await ok(post(back?.payload as Json, "Víctor: confirmed."));
+    const { hop: waiting } = await consulted();
+    const now = new Date();
+    expect((await chainRow(hop.chainId)).status).toBe("active");
+    await idle(plus(now, 60_000));
+    expect((await chainRow(hop.chainId)).status).toBe("active");
+    expect(await idle(plus(now, 11 * 60_000))).toBeGreaterThanOrEqual(1);
+    expect(await chainRow(hop.chainId)).toMatchObject({ status: "completed", closed_at: expect.any(Date) });
+    expect((await chainRow(waiting.chainId)).status).toBe("active");
+    expect((await hopRow(waiting.hopId)).status).toBe("pending");
   });
 });
 

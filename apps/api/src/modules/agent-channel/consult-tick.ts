@@ -2,7 +2,14 @@ import { agentChainHops, agentChains } from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { announceConsults, convTopic, lockNextSeq } from "../chat";
-import { cancelChain, chainLive, completeChain, deliverConsultReply } from "./chains";
+import {
+  answeringTurn,
+  cancelChain,
+  chainLive,
+  closeAnsweredHop,
+  completeChain,
+  deliverConsultReply,
+} from "./chains";
 import type { ConsultDeps } from "./consult";
 
 /**
@@ -17,6 +24,8 @@ import type { ConsultDeps } from "./consult";
  * whose return delivers nothing (a handoff, the asker's daily limit) leaves the chain to the completion rule, as a done
  * does. The lock order is the consult route's (thread stream → hop → chain), so a tick racing a done, a Stop, a consult
  * or another replica's tick waits instead of deadlocking, and the conditional update leaves exactly one outcome.
+ * CR-A-06: a hop whose answer is posted but whose done never came closes `answered` (never `timed_out`), and the
+ * idle sweep (`closeIdleChains`) ends active chains with nothing pending and no activity for ten minutes.
  */
 
 /** Hops per tick; the rest wait for the next minute (oldest deadline first). */
@@ -29,7 +38,10 @@ export interface SweepResult {
   cancelled: number;
 }
 
-type Outcome = "timed_out" | "cancelled" | null;
+type Outcome = "timed_out" | "cancelled" | "answered" | null;
+
+/** A chain with nothing pending and no activity for this long is ended by the tick (CR-A-06: a lost done). */
+export const CHAIN_IDLE_MS = 600_000;
 
 /** One expired hop in its organization: tx0 finds the chain's human, tx1 runs as that human. */
 async function expireHop(
@@ -70,6 +82,15 @@ async function expireHop(
     if (!(await chainLive(tx, core, chain))) {
       const cancelled = await cancelChain(tx, { core }, chain.id, { byUserId: null, reason: "auto" });
       return cancelled ? "cancelled" : null;
+    }
+    // CR-A-06: the hop's answer is posted but its done never came (best effort): it closes `answered` through the done's
+    // own path, never `timed_out`.
+    const answeredBy = await answeringTurn(tx, hop.id);
+    if (answeredBy) {
+      const answered = await closeAnsweredHop(tx, { core, ...deps }, null, answeredBy, hop.id, "replied");
+      if (!answered) return null;
+      await completeChain(tx, hop.chainId, now);
+      return "answered";
     }
     const [closed] = await tx
       .update(agentChainHops)
@@ -139,6 +160,54 @@ export async function sweepConsults(
 }
 
 /**
+ * The idle sweep (CR-A-06): a chain whose last pending thing was lost (the cell never sent a done: a skipped turn, a
+ * lost report) still ends. The ids-only `app.idle_agent_chains` lists active chains with nothing pending and nothing
+ * touched for `CHAIN_IDLE_MS`; each is completed in its own organization as the chain's human, under the thread's stream
+ * and then the chain's row lock (the one lock order), by the done's own completion rule at the tick's clock (its turns
+ * are by then older than the hop timeout, so taken as lost). Returns how many chains it completed.
+ */
+export async function closeIdleChains(
+  core: Core,
+  now: Date = new Date(),
+  batch: number = TICK_BATCH,
+): Promise<number> {
+  const idle = await core.db.pool.query<{ id: string; organization_id: string }>(
+    "select id, organization_id from app.idle_agent_chains($1, $2)",
+    [batch, new Date(now.getTime() - CHAIN_IDLE_MS).toISOString()],
+  );
+  let completed = 0;
+  for (const row of idle.rows) {
+    try {
+      const done = await core.db.withTenant(
+        { organizationId: row.organization_id, userId: null },
+        async (tx) => {
+          const [chain] = await tx
+            .select({ humanUserId: agentChains.humanUserId, conversationId: agentChains.conversationId })
+            .from(agentChains)
+            .where(eq(agentChains.id, row.id))
+            .limit(1);
+          if (!chain) return false;
+          await lockNextSeq(tx, convTopic(chain.conversationId));
+          await completeChain(tx, row.id, now);
+          const [after] = await tx
+            .select({ status: agentChains.status })
+            .from(agentChains)
+            .where(eq(agentChains.id, row.id));
+          return after?.status === "completed";
+        },
+      );
+      if (done) completed++;
+    } catch (err) {
+      core.log.error(
+        { chainId: row.id, organizationId: row.organization_id, err: { name: (err as Error)?.name } },
+        "consult tick: idle chain failed",
+      );
+    }
+  }
+  return completed;
+}
+
+/**
  * Wires the tick once (from the module factory, before `core.jobs` starts): the one-minute UTC cron, evaluated once
  * across replicas, and its worker (an empty payload: ids-only jobs, ADR-0028). Workers run only with
  * `OCW_JOBS_WORKER=on`; tests drive `sweepConsults` and `core.jobs.drain("consult.tick")`.
@@ -147,6 +216,8 @@ export function registerConsultTick(core: Core, deps: ConsultTickDeps): void {
   core.jobs.schedule("consult.tick", "* * * * *");
   core.jobs.work("consult.tick", async () => {
     const out = await sweepConsults(core, deps);
-    if (out.timedOut + out.cancelled > 0) core.log.info(out, "consult tick");
+    const idle = await closeIdleChains(core);
+    if (out.timedOut + out.cancelled + idle > 0)
+      core.log.info({ ...out, idleCompleted: idle }, "consult tick");
   });
 }

@@ -508,4 +508,57 @@ describe("agent chains schema (07.7-02)", () => {
       ).toHaveLength(2);
     });
   });
+
+  describe("app.idle_agent_chains (the consult.tick's idle sweep, CR-A-06)", () => {
+    const FN = "app.idle_agent_chains(integer,timestamptz)";
+    const now = new Date();
+    const ago = (seconds: number) => new Date(now.getTime() - seconds * 1000).toISOString();
+
+    it("is SECURITY DEFINER with a fixed search_path, executable by ocw_app and by no one else", async () => {
+      const meta = await migrator.query(
+        `select p.prosecdef, p.proconfig, has_function_privilege('ocw_app', p.oid, 'execute') as app,
+                has_function_privilege('ocw_auth', p.oid, 'execute') as auth,
+                exists (select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+                         where a.grantee = 0) as public
+           from pg_proc p where p.oid = $1::regprocedure`,
+        [FN],
+      );
+      expect(meta.rows[0]).toEqual({
+        prosecdef: true,
+        proconfig: ["search_path=pg_catalog, pg_temp"],
+        app: true,
+        auth: false,
+        public: false,
+      });
+    });
+
+    it("returns active chains with nothing pending and nothing touched since the bound, across organizations, ids only", async () => {
+      const idleA = await chain(migratorQ, A);
+      const idleB = await chain(migratorQ, B);
+      const pendingC = await chain(migratorQ, A);
+      const recentHop = await chain(migratorQ, B);
+      const done = await chain(migratorQ, A);
+      await hop(migratorQ, A, idleA, { status: "answered" });
+      await hop(migratorQ, A, pendingC, {});
+      await hop(migratorQ, B, recentHop, { status: "answered" });
+      await migratorQ("update app.agent_chains set updated_at = $2 where id = any($1::uuid[])", [
+        [idleA, idleB, pendingC, recentHop, done],
+        ago(3600),
+      ]);
+      await migratorQ("update app.agent_chain_hops set updated_at = $2 where chain_id = any($1::uuid[])", [
+        [idleA, pendingC],
+        ago(3600),
+      ]);
+      await migratorQ("update app.agent_chains set status = 'completed' where id = $1", [done]);
+      const r = await app.query("select * from app.idle_agent_chains($1, $2)", [1000, ago(600)]);
+      expect(r.fields.map((f) => f.name)).toEqual(["id", "organization_id"]);
+      const mine = new Set([idleA, idleB, pendingC, recentHop, done]);
+      expect(r.rows.filter((row) => mine.has(row.id)).sort((x, y) => x.id.localeCompare(y.id))).toEqual(
+        [
+          { id: idleA, organization_id: A.id },
+          { id: idleB, organization_id: B.id },
+        ].sort((x, y) => x.id.localeCompare(y.id)),
+      );
+    });
+  });
 });

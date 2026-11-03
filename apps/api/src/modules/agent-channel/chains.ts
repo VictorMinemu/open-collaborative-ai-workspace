@@ -18,7 +18,7 @@ import {
   type Tx,
   tenantOf,
 } from "@ocw/db";
-import { and, asc, eq, gte, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { App, Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
@@ -336,6 +336,20 @@ async function waitsForChild(tx: Tx, eventId: string): Promise<boolean> {
 }
 
 /**
+ * The turn whose posted answer stands for a hop whose done never came (CR-A-06): the latest turn answering the hop that
+ * posted something and is not waiting on a consult of its own. Null when none did (the hop really went unanswered).
+ */
+export async function answeringTurn(tx: Tx, hopId: string): Promise<TurnRow | null> {
+  const turns = await tx
+    .select()
+    .from(agentTurns)
+    .where(and(eq(agentTurns.answeringHopId, hopId), isNotNull(agentTurns.replyMessageId)))
+    .orderBy(desc(agentTurns.createdAt));
+  for (const turn of turns) if (!(await waitsForChild(tx, turn.eventId))) return turn;
+  return null;
+}
+
+/**
  * Closes the chain once nothing is left to answer (`active → completed`), under the chain's row lock taken after every
  * stream append (the consult route's order: stream, then chain), so a consult opening a hop in the same chain is either
  * seen as pending or refused `chain_closed`. Also the timeout tick's completion rule (07.7-09), with its clock (`now`).
@@ -377,12 +391,13 @@ export async function completeChain(tx: Tx, chainId: string, now?: Date): Promis
 /**
  * Closes the hop `turn` answers with its outcome (`pending → answered | failed`, once), announces it, delivers the
  * answer back for a consult, and audits it. Returns whether a return turn was delivered, or null when the hop was no
- * longer pending (a replay, a double done, a timeout or a Stop came first: nothing happens).
+ * longer pending (a replay, a double done, a timeout or a Stop came first: nothing happens). `cell` is null when the
+ * timeout tick closes a hop whose answer is posted but whose done never came (CR-A-06): audited `via: "tick"`.
  */
-async function closeAnsweredHop(
+export async function closeAnsweredHop(
   tx: Tx,
   deps: ConsultDeps,
-  cell: CellPrincipal,
+  cell: CellPrincipal | null,
   turn: TurnRow,
   hopId: string,
   outcome: AgentChannelTurnDone["outcome"],
@@ -407,7 +422,7 @@ async function closeAnsweredHop(
   ]);
   const ev = await deliverConsultReply(tx, deps, hop, status);
   await deps.core.audit.record(tx, {
-    ...cellAuditBase(cell),
+    ...(cell ? cellAuditBase(cell) : {}),
     action: status === "answered" ? "agent.consult.answered" : "agent.consult.failed",
     resourceType: "agent_chain_hop",
     resourceId: hop.id,
@@ -428,6 +443,7 @@ async function closeAnsweredHop(
       mode: hop.mode,
       eventId: turn.eventId,
       returnEventId: ev?.eventId ?? null,
+      ...(cell ? {} : { via: "tick" }),
     },
   });
   return { delivered: ev !== null };

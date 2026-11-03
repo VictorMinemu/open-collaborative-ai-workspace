@@ -780,6 +780,8 @@ export const agentChains = appSchema.table(
       foreignColumns: [agents.organizationId, agents.id],
     }).onDelete("cascade"),
     index("agent_chains_conversation_idx").on(t.organizationId, t.conversationId, t.threadRootId),
+    /** The `consult.tick` idle sweep (CR-A-06): active chains, least recently touched first. */
+    index("agent_chains_active_idx").on(t.updatedAt).where(sql`status = 'active'`),
     check("agent_chains_status_check", sql`${t.status} in ('active','completed','cancelled')`),
     check(
       "agent_chains_cancel_reason_check",
