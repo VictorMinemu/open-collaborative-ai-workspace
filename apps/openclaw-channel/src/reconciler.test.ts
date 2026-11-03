@@ -382,6 +382,62 @@ describe("capabilities in the cell (D-08 layer 1, D-09)", () => {
     expect(plan.upsertAgents["ocw-x"]?.tools).toMatchObject({ alsoAllow: ["web_search"] });
   });
 
+  it("07.7 C-01, D-02: no OpenClaw session or agent-to-agent tool ever reaches a bot's alsoAllow, even if the snapshot lists one; every non-disabled bot configures ocw_consult_agent turn-scoped; deny keeps group:sessions and group:messaging", async () => {
+    const inCell = [
+      "sessions_send",
+      "sessions_spawn",
+      "sessions_list",
+      "sessions_history",
+      "session_status",
+      "subagents",
+      "conversations_turn",
+      "conversations_send",
+      "agents_wait",
+      "agents_list",
+    ];
+    const plan = planReconcile(
+      {},
+      {
+        agents: [
+          agent("a", { capabilities: { tools: ["ocw_agent_card", "web_search", ...inCell] } }),
+          agent("b", { capabilities: { tools: ["ocw_agent_card"] } }),
+          agent("w", { capabilities: { tools: ["web_search", ...inCell] } }),
+          agent("d", { status: "disabled", capabilities: { tools: ["ocw_agent_card"] } }),
+        ],
+        providers: [ANTHROPIC],
+      },
+    );
+    // Entries are untyped OpenClaw config (`Record<string, unknown>`): read the two lists this test checks.
+    const toolsOf = (id: string) =>
+      plan.upsertAgents[id]?.tools as { alsoAllow?: string[]; deny?: string[] } | undefined;
+    const ids = Object.keys(plan.upsertAgents);
+    expect(ids.sort()).toEqual(["ocw-a", "ocw-b", "ocw-w"]);
+    for (const id of ids) {
+      const alsoAllow = toolsOf(id)?.alsoAllow ?? [];
+      for (const t of inCell) expect(alsoAllow).not.toContain(t);
+      expect(
+        alsoAllow.some((t) => /^(sessions?_|conversations_|agents_)/u.test(t) || t === "subagents"),
+      ).toBe(false);
+      expect(toolsOf(id)?.deny).toEqual(expect.arrayContaining(["group:sessions", "group:messaging"]));
+    }
+    // The consult tool is configured for every bot served delivered-turn tools; each turn's toolsAllow decides.
+    expect(toolsOf("ocw-a")?.alsoAllow).toContain("ocw_consult_agent");
+    expect(toolsOf("ocw-b")?.alsoAllow).toContain("ocw_consult_agent");
+    expect(plan.upsertAgents["ocw-w"]?.tools).toMatchObject({ alsoAllow: ["web_search"] });
+    // A disabled bot gets no entry at all, so nothing is configured for it.
+    expect(plan.upsertAgents["ocw-d"]).toBeUndefined();
+    expect(allowedAgentTools(inCell)).toEqual([]);
+    // The cell's filter mirrors the contracts' predicate for these names (the API never offers them either).
+    const contracts = (await import(
+      new URL("../../../packages/contracts/src/bot-capabilities.ts", import.meta.url).href
+    )) as { isDangerousToolName: (n: string) => boolean };
+    for (const t of inCell) expect(contracts.isDangerousToolName(t)).toBe(true);
+    // Our own turn-scoped and web tools are never caught by it.
+    expect(
+      allowedAgentTools(["ocw_consult_agent", "ocw_agent_card", "web_search", "m5e0c0de1__echo"]),
+    ).toEqual(["ocw_consult_agent", "ocw_agent_card", "web_search", "m5e0c0de1__echo"]);
+  });
+
   it("losing a tool re-provisions the agent without it", () => {
     const before = desiredAgentEntry(agent("w", { capabilities: { tools: ["web_search", "web_fetch"] } }));
     const plan = planReconcile(
