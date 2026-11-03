@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   OpenClawAgentTool,
   OpenClawPluginApi,
@@ -26,7 +27,8 @@ export { CONSULT_TOOL_NAME };
  *   - it resolves the active OCW turn from the trusted tool context and refuses locally without one, when the turn does
  *     not offer the tool, when the turn is tainted, or when the target is not one of `turn.consult.targets`,
  *   - it posts only the turn's event and agent, the target's id, the question and the mode, keyed
- *     `<eventId>:consult:<n>` (a retried call keeps its key, so the API answers the same hop); never a conversation, a
+ *     `<eventId>:consult:<hash of target and question>` (a retried call keeps its key, so the API answers the same hop;
+ *     another target or question never gets that hop, CR-C-07); never a conversation, a
  *     human, a chain or another agent id: the API takes them from the stored turn, and the schema is closed,
  *   - it returns at once: the answer arrives later as a new turn (`agent.consult_reply.v1`); nothing waits or polls,
  *   - it answers with the server's sentence (one bounded line), or a fixed local sentence; never an error body.
@@ -104,7 +106,7 @@ function refusedTarget(raw: string): string | undefined {
 export function consultRequestOf(
   t: Pick<ActiveTurn, "eventId" | "agentId" | "turn">,
   p: Record<string, unknown>,
-  key: () => string,
+  key: (target: ConsultTarget, question: string) => string,
 ): { body: AgentChannelConsultRequest } | { error: string; code: string } {
   if (Object.keys(p).some((k) => !KEYS.has(k))) {
     return { error: CONSULT_SENTENCES.extra_keys(), code: "extra_keys" };
@@ -131,44 +133,22 @@ export function consultRequestOf(
       target: target.id,
       question,
       mode: mode as ConsultMode,
-      idempotencyKey: key(),
+      idempotencyKey: key(target, question),
     },
   };
 }
 
-type CallCounter = { next: number; byCall: Map<string, number> };
 /**
- * Process-wide, like the gate's turns (tool-guard.ts): OpenClaw may load this module more than once, while the turn a
- * tool runs in was begun by another instance.
+ * CR-C-07: the consult's idempotency key, `<eventId>:consult:<16 hex>`, bound to what is asked: the turn's event, the
+ * target's id and the question (Unicode NFC, whitespace collapsed, case folded). A retry of the same call keeps it, even
+ * in another dispatch attempt of the turn (the bridge begins a new `ActiveTurn` each time, Pitfall 9), so the API answers
+ * the stored hop; another target or another question gets another key, so it never receives a hop it did not open.
+ * Within the contract's 120 characters for the API's uuid event ids.
  */
-const STATE_KEY = Symbol.for("ocw.openclaw-channel.consult-tool");
-type StateRegistry = { [STATE_KEY]?: WeakMap<ActiveTurn, CallCounter> };
-const registry = globalThis as StateRegistry;
-
-function counters(): WeakMap<ActiveTurn, CallCounter> {
-  registry[STATE_KEY] ??= new WeakMap();
-  return registry[STATE_KEY];
-}
-
-/** Tests only: forget every call counter. */
-export function resetConsultToolState(): void {
-  registry[STATE_KEY] = new WeakMap();
-}
-
-/** `n` of this call in the turn: a new tool call gets the next one, a retried call keeps its own (card-tool.ts). */
-function callIndex(t: ActiveTurn, toolCallId: string): number {
-  const calls = counters();
-  let counter = calls.get(t);
-  if (!counter) {
-    counter = { next: 0, byCall: new Map() };
-    calls.set(t, counter);
-  }
-  const id = toolCallId.trim();
-  const seen = id ? counter.byCall.get(id) : undefined;
-  if (seen !== undefined) return seen;
-  const n = counter.next++;
-  if (id) counter.byCall.set(id, n);
-  return n;
+export function consultIdempotencyKey(eventId: string, targetId: string, question: string): string {
+  const normalized = question.normalize("NFC").replace(/\s+/gu, " ").trim().toLowerCase();
+  const digest = createHash("sha256").update(`${targetId}\n${normalized}`, "utf8").digest("hex").slice(0, 16);
+  return `${eventId}:consult:${digest}`;
 }
 
 const DESCRIPTION =
@@ -208,7 +188,7 @@ function consultTool(deps: Deps, ctx: ConsultToolContext): OpenClawAgentTool {
       },
       required: ["target", "question"],
     },
-    async execute(toolCallId, params, signal) {
+    async execute(_toolCallId, params, signal) {
       const t = deps.guard.findTurn(ctx);
       if (!t) return answer(CONSULT_SENTENCES.no_turn(), false, "no_turn");
       if (!t.turn.tools.includes(name)) return answer(CONSULT_SENTENCES.not_in_turn(), false, "not_in_turn");
@@ -217,10 +197,9 @@ function consultTool(deps: Deps, ctx: ConsultToolContext): OpenClawAgentTool {
         deps.logger?.warn?.(`${name}: ${t.eventId} refused (tainted, local)`);
         return answer(consultTaintedSentence(t.requesterName), false, "tainted");
       }
-      const built = consultRequestOf(t, asParams(params), () => {
-        const n = callIndex(t, typeof toolCallId === "string" ? toolCallId : "");
-        return `${t.eventId}:consult:${n}`;
-      });
+      const built = consultRequestOf(t, asParams(params), (target, question) =>
+        consultIdempotencyKey(t.eventId, target.id, question),
+      );
       if ("error" in built) {
         if (built.code === "not_a_target")
           deps.logger?.warn?.(`${name}: ${t.eventId} refused (not_a_target)`);

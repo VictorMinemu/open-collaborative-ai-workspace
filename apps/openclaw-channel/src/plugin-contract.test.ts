@@ -46,7 +46,7 @@ import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js
 import { AUTOMATION_PROPOSE_TOOL, automationProposalOf } from "./automation-tool.js";
 import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
 import { MEMBER_ACCOUNT, NEEDS_RECONNECT, NOT_CONNECTED, REFUSAL_SENTENCE } from "./connector-tools.js";
-import { CONSULT_TOOL_NAME, resetConsultToolState } from "./consult-tool.js";
+import { CONSULT_TOOL_NAME, consultIdempotencyKey } from "./consult-tool.js";
 import { createMemoryCursorStore } from "./cursor-store.js";
 import { CommitTracker, runEventStream } from "./event-stream.js";
 import { UNKNOWN_SERVER_ERROR } from "./mcp-probe.js";
@@ -1651,8 +1651,6 @@ describe("consult (07.7 A2A-01, D-01, D-04, D-08): ocw_consult_agent, the protoc
     }) as MentionInput["turn"];
   const ARCHIE_TOOLS: CellAgent = { ...structuredClone(ARCHIE), capabilities: { tools: ["ocw_agent_card"] } };
 
-  beforeEach(() => resetConsultToolState());
-
   it("the mirror reads every 07.7 contract shape the same; older events still parse; the limits and the tool name are the contracts'", async () => {
     const chains = (await import(contracts("agent-chains.ts"))) as {
       A2A_MAX_DEPTH: number;
@@ -1888,7 +1886,7 @@ describe("consult (07.7 A2A-01, D-01, D-04, D-08): ocw_consult_agent, the protoc
         target: BEA_ID,
         question: "Is the pump order confirmed?",
         mode: "consult",
-        idempotencyKey: "evt-70:consult:0",
+        idempotencyKey: consultIdempotencyKey("evt-70", BEA_ID, "Is the pump order confirmed?"),
       },
     ]);
     expect(api.toolCalls.filter((c) => c.tool === CONSULT_TOOL_NAME)).toEqual([]);

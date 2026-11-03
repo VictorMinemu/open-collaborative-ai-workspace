@@ -1486,7 +1486,7 @@ export type AgentChannelRecordUpdateResponse = z.infer<typeof AgentChannelRecord
 /**
  * `POST /consultations` (`ocw_consult_agent`, D-08): only the turn's event and agent, the target and the intent. The API
  * derives the conversation, the thread, the human and the chain from the stored turn (strict body: any other key is
- * refused). The key is `<eventId>:consult:<n>`; a retry of the same key answers the stored hop.
+ * refused). The key is `<eventId>:consult:<hash of target and question>`; a retry of the same key answers the stored hop.
  */
 export type AgentChannelConsultRequest = {
   eventId: string;

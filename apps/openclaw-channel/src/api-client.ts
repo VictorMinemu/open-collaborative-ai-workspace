@@ -530,7 +530,8 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
     },
     /**
      * `ocw_consult_agent` (07.7 A2A-01, D-08): a question to another bot, posted in the turn's thread by the API. Two
-     * attempts at most: the cell's key (`<eventId>:consult:<n>`) makes a retry after a lost answer return the same hop.
+     * attempts at most: the cell's key (`<eventId>:consult:<hash>`, consult-tool.ts) makes a retry after a lost answer
+     * return the same hop.
      * A refusal answered with a 4xx that still carries `{ok: false, code, sentence}` resolves to that refusal; any other
      * failure throws. Never logs the question.
      */

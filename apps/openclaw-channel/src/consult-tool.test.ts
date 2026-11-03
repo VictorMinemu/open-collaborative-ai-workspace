@@ -3,7 +3,7 @@
  * A thin caller of `POST /consultations`, driven through the tool's registration with a recording client (the HTTP
  * shape is api-client.test.ts's; the gate's taint block is tool-guard.test.ts's).
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type {
   AgentChannelConsultRequest,
   AgentChannelConsultResponse,
@@ -14,8 +14,8 @@ import {
   CONSULT_SENTENCES,
   CONSULT_TOOL_NAME,
   type ConsultToolContext,
+  consultIdempotencyKey,
   registerConsultTool,
-  resetConsultToolState,
 } from "./consult-tool.js";
 import { openClawAgentIdFor } from "./mention-mapper.js";
 import { createToolGuard } from "./tool-guard.js";
@@ -114,8 +114,6 @@ function setup(
   return { calls, guard, registered, tool, begin, logs };
 }
 
-beforeEach(() => resetConsultToolState());
-
 describe("ocw_consult_agent (07.7 A2A-01, D-08, C-01): a thin, non-blocking caller of POST /consultations", () => {
   it("registers one tool under its fixed name with a closed schema: target, question, mode only", () => {
     const { registered, tool } = setup();
@@ -129,7 +127,7 @@ describe("ocw_consult_agent (07.7 A2A-01, D-08, C-01): a thin, non-blocking call
     expect(t.parameters.properties.question?.maxLength).toBe(4000);
   });
 
-  it("sends exactly the turn's event and bot, the target's id, the question, mode consult and key <eventId>:consult:0, and relays the server's sentence", async () => {
+  it("sends exactly the turn's event and bot, the target's id, the question, mode consult and the key bound to them, and relays the server's sentence", async () => {
     const { calls, begin, tool } = setup();
     begin();
     const r = await tool().execute("tc-1", { target: "@bea", question: `  ${QUESTION} ` });
@@ -140,28 +138,36 @@ describe("ocw_consult_agent (07.7 A2A-01, D-08, C-01): a thin, non-blocking call
         target: BEA,
         question: QUESTION,
         mode: "consult",
-        idempotencyKey: `${EVENT}:consult:0`,
+        idempotencyKey: consultIdempotencyKey(EVENT, BEA, QUESTION),
       },
     ]);
+    // `<eventId>:consult:<16 hex>`, within the contract's 120 characters.
+    expect(calls[0]?.idempotencyKey).toMatch(new RegExp(`^${EVENT}:consult:[0-9a-f]{16}$`, "u"));
+    expect(calls[0]?.idempotencyKey.length).toBeLessThanOrEqual(120);
     expect(text(r)).toBe(SENT);
     expect(r.details).toEqual({ ok: true });
   });
 
-  it("a second distinct call in the turn uses :consult:1; a retried call (same tool call id) reuses its key; a new turn starts at 0 again", async () => {
+  it("CR-C-07: the key is bound to the target and the question: a retry of the same call keeps it, even in a new attempt of the turn; another target or question gets another", async () => {
     const { calls, begin, tool } = setup();
     begin();
     await tool().execute("tc-1", { target: "@bea", question: QUESTION });
     await tool().execute("tc-2", { target: "carl", question: "And the invoice?", mode: "handoff" });
     await tool().execute("tc-1", { target: "@bea", question: QUESTION });
-    expect(calls.map((c) => [c.target, c.mode, c.idempotencyKey])).toEqual([
-      [BEA, "consult", `${EVENT}:consult:0`],
-      [CARL, "handoff", `${EVENT}:consult:1`],
-      [BEA, "consult", `${EVENT}:consult:0`],
-    ]);
-    // A whole-turn retry by the bridge begins a new turn object: its first consult reuses key 0 (Pitfall 9).
+    // A whole-turn retry by the bridge begins a new turn object (Pitfall 9): the same call keeps its key…
     begin();
-    await tool().execute("tc-9", { target: "@bea", question: QUESTION });
-    expect(calls.at(-1)?.idempotencyKey).toBe(`${EVENT}:consult:0`);
+    await tool().execute("tc-9", { target: BEA, question: `  ${QUESTION.replace(" ", "   ")}  ` });
+    // …while that attempt asking another bot, or another question, never gets the first attempt's stored hop.
+    await tool().execute("tc-1", { target: "@carl", question: QUESTION });
+    await tool().execute("tc-2", { target: "@bea", question: "Is the valve order confirmed?" });
+    const keys = calls.map((c) => c.idempotencyKey);
+    expect(keys).toHaveLength(6);
+    expect(keys[2]).toBe(keys[0]);
+    expect(keys[3]).toBe(keys[0]);
+    expect(new Set([keys[0], keys[1], keys[4], keys[5]]).size).toBe(4);
+    expect(keys.every((k) => k.startsWith(`${EVENT}:consult:`))).toBe(true);
+    // Another turn's same question is another hop.
+    expect(consultIdempotencyKey("other-event", BEA, QUESTION)).not.toBe(keys[0]);
   });
 
   it("the target may be the bot's id or its handle, with or without @, in any case", async () => {
