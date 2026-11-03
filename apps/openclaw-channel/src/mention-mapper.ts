@@ -153,7 +153,7 @@ export type MappedMention = {
    */
   startsTainted?: boolean;
   /**
-   * 07.7 (D-01, ADR-0019): the person the turn works for when it is not the sender. A consult reply's message is the
+   * 07.7 (D-01, ADR-0019, CR-C-02): the chain's human on a question or a consult reply. A consult reply's message is the
    * consulted bot's answer, while the turn is the chain's human's (`origin.onBehalfOf`): approval and taint sentences
    * name them. Absent = the sender.
    */
@@ -393,7 +393,12 @@ export function mapMention(
   const connectorTools = allowedTools.includes("ocw_connector_call")
     ? [...new Set(turn.tools)].filter((t) => CONNECTOR_LOGICAL_TOOL.test(t) && !agentToolSet.has(t))
     : [];
-  const askerName = opts.requester ?? sanitizeName(author.displayName);
+  // 07.7 (CR-C-02): a question delivery's author is the asking bot, but the turn is computed for the chain's human
+  // (`origin.onBehalfOf`): they are the requester the turn blocks, the sender and the gate's sentences name. The origin
+  // block shows the asking bot relaying the question.
+  const chainHuman = event.origin?.onBehalfOf;
+  const requester = opts.requester ?? (chainHuman ? sanitizeName(chainHuman.displayName) : undefined);
+  const askerName = requester ?? sanitizeName(author.displayName);
   const conversationLabel = direct
     ? `Direct chat with ${sanitizeName(author.displayName)}`
     : aiChat
@@ -421,11 +426,13 @@ export function mapMention(
     target: buildTarget(event.conversation.id, threadRootId),
     messageId: event.message.id,
     timestampMs: parseTime(event.message.createdAt),
-    sender: {
-      id: author.id,
-      name: sanitizeName(author.displayName),
-      isBot: author.kind !== "user",
-    },
+    sender: chainHuman
+      ? { id: chainHuman.id, name: sanitizeName(chainHuman.displayName), isBot: false }
+      : {
+          id: author.id,
+          name: sanitizeName(author.displayName),
+          isBot: author.kind !== "user",
+        },
     conversationLabel,
     groupMembers: formatGroupMembers(event.roster),
     mentionedUserIds: event.message.mentions.filter((m) => m.kind === "user").map((m) => m.id),
@@ -465,6 +472,7 @@ export function mapMention(
     // inbound-rooted thread): read-only from its first call, through 07.6's `startsTainted` → `beginTurn({tainted})`.
     // Every mapping built on this one (card actions, automation runs, consult replies) inherits it.
     ...(turn.tainted === true ? { startsTainted: true } : {}),
+    ...(chainHuman && requester ? { requesterName: requester } : {}),
   };
 }
 

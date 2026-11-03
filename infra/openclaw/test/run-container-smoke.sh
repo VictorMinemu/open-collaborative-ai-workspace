@@ -73,7 +73,7 @@
 # hooks pins and the gateway boots with them; with two bots (Archie, Bea) both configured with the turn-scoped
 # `ocw_consult_agent`, Archie's model consults Bea through one `POST /consultations` with exactly the contract's keys (never
 # `/tool-calls`) and relays the API's sentence; Bea gets the question as `agent.mention.v1` with `origin` (her model sees
-# who asked and for whom) and answers in the thread; Archie gets `agent.consult_reply.v1` and replies to her answer; each
+# who asked and for whom; the chain's human is the turn's asker, Archie only relays) and answers in the thread; Archie gets `agent.consult_reply.v1` and replies to her answer; each
 # turn reports done; a return turn delivered tainted (`turn.tainted`) cannot consult again (blocked in the cell: no
 # consultation, no `/tool-calls`); no model request lists a session or agent-to-agent tool.
 #
@@ -1080,8 +1080,10 @@ const ok =
   m.conversationId === "0199a6f0-0000-7000-8000-00000000c101" &&
   m.threadRootMessageId === "0199a6f0-0000-7000-8000-00000000d100" &&
   m.idempotencyKey === `evt:${EV}` &&
-  // The asker of this turn is Archie (the delivery'"'"'s author); no tool was offered.
-  m.text.startsWith("Hi Archie!") && m.text.endsWith("[tools: 0]");
+  // CR-C-02: the asker of this turn is the chain'"'"'s human (origin.onBehalfOf), never Archie, who only relays the
+  // question; no tool was offered.
+  m.text.startsWith("Hi Víctor Ruiz!") && m.text.includes("[asker id: 0199a6f0-0000-7000-8000-0000000000f1]") &&
+  m.text.endsWith("[tools: 0]");
 if (!ok) { console.log("FAIL: expected Bea'"'"'s answer in the thread, in reply to the question"); process.exit(1); }
 console.error(m.messageId);
 ' 2>"$SECRETS/consult-bea-reply"

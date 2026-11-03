@@ -1272,20 +1272,48 @@ describe("consults (07.7 D-01, Pitfall 1): origin and targets explained to the m
         text: ORIGIN_TEXT,
       },
     });
-    // Everything else is the mention's mapping (the sender is the asking bot, structurally).
-    expect(m.sender).toEqual({ id: "agent-archie", name: "Archie", isBot: true });
+    // CR-C-02: the requester is the chain's human (the turn is computed for them), never the asking bot, which the
+    // origin block shows relaying the question. The question stays the message the reply answers.
+    expect(m.sender).toEqual({ id: "u-victor", name: "Víctor Ruiz", isBot: false });
+    expect(m.requesterName).toBe("Víctor Ruiz");
     expect(m.body).toBe(QUESTION_TEXT);
     expect(m.messageId).toBe("msg-q");
     expect(m.threadRootId).toBe("msg-root");
     expect(m.contextBlocks.slice(1)).toEqual(before.contextBlocks);
-    expect({ ...m, contextBlocks: [], allowedTools: [] }).toEqual({
+    expect({ ...m, contextBlocks: [], allowedTools: [], sender: null, requesterName: null }).toEqual({
       ...before,
       contextBlocks: [],
       allowedTools: [],
+      sender: null,
+      requesterName: null,
     });
     // D-13: a hop turn is unattended: never a browser tool, even if a turn listed one.
     expect(before.allowedTools).toContain("ocw_browser_open");
     expect(m.allowedTools).toEqual(["ocw_agent_card", "ocw_consult_agent"]);
+  });
+
+  it("CR-C-02: on a question turn every human-facing label names the chain's human, never the asking bot", () => {
+    const now = { local: "2026-11-03 11:00", timeZone: "Europe/Madrid", iso: "2026-11-03T10:00:00.000Z" };
+    const m = mapMention(
+      asked({
+        turn: {
+          ...CONSULT_TURN,
+          now,
+          withheld: [{ tool: "erp__orders", reason: "denied_for_you" }],
+        },
+      }),
+      BEA_BOT,
+    );
+    expect(m.contextBlocks.find((b) => b.type === "current_time")?.label).toBe(
+      "Current time for Víctor Ruiz",
+    );
+    expect(m.contextBlocks.find((b) => b.type === "withheld_tools")?.payload.withheld).toEqual([
+      "erp__orders — Víctor Ruiz may not use it",
+    ]);
+    expect(JSON.stringify(m.contextBlocks.slice(1))).not.toContain("Archie");
+    expect(m.requesterName).toBe("Víctor Ruiz");
+    // A plain mention keeps its author as the requester (unchanged).
+    expect("requesterName" in mapMention(mention(), BOT)).toBe(false);
   });
 
   it("a handoff tells the target it continues for the human; the asking bot gets nothing back", () => {
