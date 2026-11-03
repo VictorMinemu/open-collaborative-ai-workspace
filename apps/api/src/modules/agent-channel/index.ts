@@ -52,6 +52,7 @@ import { registerChainUserRoutes } from "./chain-routes";
 import { recordChainReply, registerChainCellRoutes } from "./chains";
 import { registerConnectorRoutes } from "./connectors";
 import { registerConsultRoutes } from "./consult";
+import { registerConsultTick } from "./consult-tick";
 import { registerCellGateway } from "./gateway";
 import { registerHttpRequestRoutes } from "./http-requests";
 import { registerMcpCellRoutes } from "./mcp";
@@ -188,6 +189,9 @@ export function createAgentChannelModule(
   registerMentionHandler(core, { modelLabel: opts.modelLabel, memory: opts.memory });
   // Agent Cards (P-11): a reader's decision reaches the card's agent as `agent.card_action.v1`.
   registerCardActionHandler(core, { perms, modelLabel: opts.modelLabel, memory: opts.memory });
+  // Consult timeouts (07.7-09, D-11): the one-minute `consult.tick` on 07.6's job runtime (workers start and stop with
+  // `core.jobs`; no timer of our own).
+  registerConsultTick(core, { perms, modelLabel: opts.modelLabel, memory: opts.memory });
 
   async function uiTokenCreatedAt(tx: Tx): Promise<string | null> {
     const [row] = await tx

@@ -252,9 +252,9 @@ async function waitsForChild(tx: Tx, eventId: string): Promise<boolean> {
 /**
  * Closes the chain once nothing is left to answer (`active → completed`), under the chain's row lock taken after every
  * stream append (the consult route's order: stream, then chain), so a consult opening a hop in the same chain is either
- * seen as pending or refused `chain_closed`.
+ * seen as pending or refused `chain_closed`. Also the timeout tick's completion rule (07.7-09).
  */
-async function completeChain(tx: Tx, chainId: string): Promise<void> {
+export async function completeChain(tx: Tx, chainId: string): Promise<void> {
   const [chain] = await tx
     .select({ status: agentChains.status })
     .from(agentChains)
