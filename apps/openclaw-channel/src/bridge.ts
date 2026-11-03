@@ -4,6 +4,8 @@ import {
   AgentCardActionEvent,
   type AgentCardActionEvent as AgentCardActionEventType,
   AgentChannelEventTypes,
+  AgentConsultReplyEvent,
+  type AgentConsultReplyEvent as AgentConsultReplyEventType,
   AgentMentionEvent,
   type AgentMentionEvent as AgentMentionEventType,
   type CellAgent,
@@ -23,6 +25,7 @@ import {
   type MappedMention,
   mapAutomationRun,
   mapCardAction,
+  mapConsultReply,
   mapMention,
   replyIdempotencyKey,
 } from "./mention-mapper.js";
@@ -232,6 +235,15 @@ export function createBridge(opts: BridgeOptions) {
   }
 
   /**
+   * A consulted bot answered, failed or timed out (07.7 D-01, D-04): a turn like a mention of the asking bot in the
+   * hop's thread, in reply to the event's message (the answer, or the question again), keyed `evt:<eventId>`; it then
+   * reports done like any chain turn.
+   */
+  async function handleConsultReply(event: AgentConsultReplyEventType): Promise<void> {
+    await runTurn(event, "consult reply", (agent) => mapConsultReply(event, agent));
+  }
+
+  /**
    * 07.7 (D-04, P-09): a turn that can belong to a consult chain: it was offered `ocw_consult_agent` (it may open a
    * hop), it answers a question (`origin`), or it is a consult reply. Only these report `POST /turns/:eventId/done`;
    * every other turn sends nothing, as before.
@@ -397,6 +409,19 @@ export function createBridge(opts: BridgeOptions) {
         await handleAutomationRun(parsed.data);
         return;
       }
+      case AgentChannelEventTypes.consultReply: {
+        // agent.consult_reply.v1 (07.7): untrusted until parsed; the warning names the seq and the field path only
+        // (never the answer or a name).
+        const parsed = AgentConsultReplyEvent.safeParse(frame.data);
+        if (!parsed.success) {
+          log.warn?.(
+            `seq=${frame.seq}: invalid ${frame.type} payload; skipped (${parsed.error.issues[0]?.path.join(".") || "?"})`,
+          );
+          return;
+        }
+        await handleConsultReply(parsed.data);
+        return;
+      }
       case AgentChannelEventTypes.configChanged:
         await refreshCell();
         return;
@@ -486,6 +511,7 @@ export function createBridge(opts: BridgeOptions) {
     handleMention,
     handleCardAction,
     handleAutomationRun,
+    handleConsultReply,
     agents,
     snapshot: () => lastSnapshot,
   };

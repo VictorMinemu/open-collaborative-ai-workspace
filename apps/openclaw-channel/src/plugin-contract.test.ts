@@ -1982,6 +1982,103 @@ describe("consult (07.7 A2A-01, D-01, D-04, D-08): ocw_consult_agent, the protoc
     expect(logs.join("\n")).not.toContain(FAKE_ERROR_CANARY);
   });
 
+  const replyData = (n: number, over: Record<string, unknown> = {}) => ({
+    ...mention(n, {
+      message: {
+        id: `answer-${n}`,
+        text: "Yes, the pump order was confirmed on Monday.",
+        createdAt: "2026-11-03T10:01:00.000Z",
+        author: { kind: "agent", id: BEA_ID, displayName: "Bea" },
+        mentions: [],
+      },
+    }),
+    turn: consultTurn({ tools: ["ocw_agent_card"], consult: undefined }),
+    consultReply: {
+      chainId: "chain-1",
+      hopId: "hop-1",
+      target: { id: BEA_ID, handle: "bea", displayName: "Bea" },
+      mode: "consult",
+      outcome: "answered",
+      answerMessageId: `answer-${n}`,
+    },
+    ...over,
+  });
+
+  it("agent.consult_reply.v1 runs through the mention path (typing, the event's thread, in reply to its message, evt:<eventId>), then reports done", async () => {
+    startPlugin();
+    await api.waitFor(() => api.openSockets() === 1);
+    api.publish("agent.consult_reply.v1", replyData(80));
+    await api.waitFor(() => api.turnsDone.length === 1);
+    expect(api.messages).toHaveLength(1);
+    expect(api.messages[0]).toMatchObject({
+      agentId: ARCHIE.id,
+      conversationId: "conv-1",
+      threadRootMessageId: "root-1",
+      inReplyToMessageId: "answer-80",
+      eventId: "evt-80",
+      text: "Hi Bea!",
+      idempotencyKey: "evt:evt-80",
+    });
+    expect(port.dispatched[0]?.contextBlocks[0]).toMatchObject({
+      type: "consult_reply",
+      payload: { outcome: "answered" },
+    });
+    expect(api.turnsDone).toEqual([
+      { eventId: "evt-80", agentId: ARCHIE.id, outcome: "replied", status: 204 },
+    ]);
+    await api.waitFor(() => api.typing.some((t) => t.typing === false));
+    expect(api.typing[0]).toMatchObject({
+      conversationId: "conv-1",
+      threadRootMessageId: "root-1",
+      typing: true,
+    });
+  });
+
+  it("a question delivery (origin) reports done even when its turn is not offered the tool; an invalid consult reply is skipped with the seq and field path only, later events flow", async () => {
+    const logs: string[] = [];
+    const bridge = await directBridge(logs);
+    await bridge.handleFrame(
+      frame(81, {
+        ...mention(81),
+        turn: consultTurn({ tools: ["ocw_agent_card"], consult: undefined }),
+        origin: {
+          agent: { id: "agent-carl", handle: "carl", displayName: "Carl" },
+          chainId: "chain-2",
+          hopId: "hop-2",
+          depth: 1,
+          mode: "consult",
+          onBehalfOf: { kind: "user", id: "u-victor", displayName: "Víctor" },
+        },
+      }),
+    );
+    expect(port.dispatched[0]?.contextBlocks[0]?.type).toBe("consult_origin");
+    expect(api.turnsDone).toEqual([
+      { eventId: "evt-81", agentId: ARCHIE.id, outcome: "replied", status: 204 },
+    ]);
+    await bridge.handleFrame(
+      frame(
+        82,
+        replyData(82, {
+          consultReply: { ...replyData(82).consultReply, outcome: "SECRET-OUTCOME" },
+        }),
+        "agent.consult_reply.v1",
+      ),
+    );
+    expect(port.dispatched).toHaveLength(1);
+    const warning = logs.find((l) => l.includes("seq=82")) ?? "";
+    expect(warning).toContain("consultReply.outcome");
+    expect(warning).not.toContain("SECRET");
+    expect(warning).not.toContain("pump order");
+    await bridge.handleFrame(frame(83, replyData(83), "agent.consult_reply.v1"));
+    expect(port.dispatched).toHaveLength(2);
+    expect(api.messages.map((m) => m.idempotencyKey)).toEqual(["evt:evt-81", "evt:evt-83"]);
+    expect(api.turnsDone.map((d) => d.eventId)).toEqual(["evt-81", "evt-83"]);
+    // An older path is unaffected: a mention without the new fields runs and reports nothing.
+    await bridge.handleFrame(frame(84, { ...mention(84) }));
+    expect(port.dispatched[2]?.contextBlocks.some((b) => b.type.startsWith("consult"))).toBe(false);
+    expect(api.turnsDone).toHaveLength(2);
+  });
+
   it("a consult the API refuses (fake 409) is relayed as the server's sentence and the turn still ends in one done", async () => {
     await fetch(`${api.url}/__test/consult-outcome`, {
       method: "POST",
