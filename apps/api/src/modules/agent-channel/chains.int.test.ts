@@ -33,6 +33,8 @@ let samId: string;
 let archieId: string;
 let beaId: string;
 let opsId: string;
+let carlId: string;
+let trioId: string;
 let tokenB: string;
 let orgBEventId: string;
 
@@ -123,6 +125,34 @@ const updates = (conversationId: string, messageId: string) =>
     [`conv:${conversationId}`, messageId],
   ).then((r) => r.map((x) => x.payload.message as Json));
 
+/** Cell events of one type on one message. */
+const eventsOn = (type: string, messageId: string) =>
+  rows(
+    `select payload from app.stream_events where stream_id = $1 and type = $2
+       and payload->'message'->>'id' = $3 order by seq`,
+    [`cell:${orgId}`, type, messageId],
+  ).then((r) => r.map((x) => x.payload as Json));
+
+/** The consult reply to Archie for one hop. */
+async function replyFor(hopId: string): Promise<Json> {
+  const [ev] = (await replies(archieId)).filter((p) => p.consultReply.hopId === hopId);
+  if (!ev) throw new Error(`no consult reply for ${hopId}`);
+  return ev;
+}
+
+/** The cell's tool gate call for a delivered turn. */
+const askTool = (ev: Json, tool: string, params: Json = {}) =>
+  cell("/tool-calls", { eventId: ev.eventId, agentId: ev.agent.id, tool, params });
+
+async function until<T>(read: () => Promise<T>, ready: (v: T) => boolean, ms = 10_000): Promise<T> {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = await read();
+    if (ready(v) || Date.now() > end) return v;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 /** `as` writes in `conversationId` (in a thread when `threadRootId`) mentioning Archie; Archie's delivered turn. */
 async function archieTurn(p: { as?: TestClient; conversationId?: string; threadRootId?: string } = {}) {
   await su.query("delete from app.agent_usage_daily");
@@ -197,6 +227,9 @@ beforeAll(async () => {
   archieId = await teamBot("Archie", "archie");
   beaId = await teamBot("Bea", "bea");
   opsId = await channel("ops", [archieId, beaId]);
+  carlId = await teamBot("Carl", "carl");
+  // #trio: a third bot, so a return turn there would be offered a consult unless something takes it away.
+  trioId = await channel("trio", [archieId, beaId, carlId]);
   await ok(sam.request("POST", `/api/v1/channels/${opsId}/join`));
   // The organization switch "Bots may consult each other" (07.7-03): one `everyone` allow row.
   await ok(victor.request("PUT", "/api/v1/agent-messaging", { enabled: true }));
@@ -488,5 +521,238 @@ describe("POST /turns/:eventId/done is bound to this cell's turns (T-07.7-06-03)
     expect(await replies()).toEqual(before);
     // An ordinary turn's reply is not recorded on the ledger (chain turns only).
     expect((await turnRow(ev.eventId)).reply_message_id).toBeNull();
+  });
+});
+
+describe("taint flows forward (Task 2; D-09, P-11, Pitfall 2)", () => {
+  beforeAll(async () => {
+    await ok(victor.request("PATCH", `/api/v1/agents/${beaId}/capabilities`, { internet: true }));
+  });
+  afterAll(async () => {
+    await ok(victor.request("PATCH", `/api/v1/agents/${beaId}/capabilities`, { internet: false }));
+  });
+
+  it("Bea read the web while answering: Archie's return turn starts tainted, without the consult tool, side effects refused", async () => {
+    const { answer, bea } = await consulted({ conversationId: trioId });
+    expect(bea.turn.tools).toContain("web_search");
+    expect((await askTool(bea, "web_search", { query: "pump order" })).body).toMatchObject({ allowed: true });
+    expect((await turnRow(bea.eventId)).tainted).toBe(true);
+    await ok(post(bea, ANSWER));
+    await ok(done(bea));
+    const reply = await replyFor(answer.hopId);
+    expect(reply.turn.tainted).toBe(true);
+    expect((await turnRow(reply.eventId)).tainted).toBe(true);
+    // In #trio an untainted return turn would be offered Carl; a tainted one is never offered a consult.
+    expect(reply.turn.tools).not.toContain("ocw_consult_agent");
+    expect(reply.turn.consult).toBeUndefined();
+    const forced = await cell("/consultations", {
+      eventId: reply.eventId,
+      agentId: archieId,
+      target: carlId,
+      question: QUESTION,
+      idempotencyKey: `${reply.eventId}:consult:0`,
+    });
+    expect(forced.status).toBe(403);
+    expect(forced.body.code).toBe("tainted");
+    const sideEffecting = Object.entries(reply.turn.toolFlags as Record<string, Json>)
+      .filter(([, f]) => f.sideEffecting === true)
+      .map(([tool]) => tool);
+    expect(sideEffecting.length).toBeGreaterThan(0);
+    const refused = await askTool(reply, sideEffecting[0] as string);
+    expect(refused.body).toMatchObject({ allowed: false, reason: "tainted" });
+  });
+
+  it("member data read while answering stays with the answer: the return turn starts with it (the 07.5 re-run rule)", async () => {
+    const { answer, bea } = await consulted();
+    await su.query("update app.agent_turns set member_data = true where event_id = $1", [bea.eventId]);
+    await ok(post(bea, ANSWER));
+    await ok(done(bea));
+    const reply = await replyFor(answer.hopId);
+    expect(await turnRow(reply.eventId)).toMatchObject({ member_data: true, tainted: false });
+  });
+});
+
+describe("the root human pays every hop (Task 2; D-03, D-04, P-12, ADR-0019)", () => {
+  it("A → B → C in #trio: every turn is Víctor's, each bot meters its own turns, no AI usage record is written", async () => {
+    const aiUsageRecords = async () =>
+      Number((await rows("select count(*)::int as n from app.ai_usage_records"))[0]?.n);
+    const before = await aiUsageRecords();
+    const { archie, answer: ab, bea } = await consulted({ conversationId: trioId });
+    const bc = await ok(consult(bea, carlId));
+    await ok(post(bea, "Checking with Carl."));
+    await ok(done(bea));
+    const carl = await deliveryOn(bc.questionMessageId as string, carlId);
+    await ok(post(carl, "Shipped Monday."));
+    await ok(done(carl));
+    const [beaBack] = (await replies(beaId)).filter((p) => p.consultReply.hopId === bc.hopId);
+    await ok(post(beaBack!, ANSWER));
+    await ok(done(beaBack!));
+    const archieBack = await replyFor(ab.hopId);
+    await ok(post(archieBack, "Víctor: confirmed."));
+    await ok(done(archieBack));
+    expect((await chainRow(ab.chainId)).status).toBe("completed");
+
+    const turns = await rows(
+      "select agent_id, user_id from app.agent_turns where chain_id = $1 or event_id = $2",
+      [ab.chainId, archie.eventId],
+    );
+    expect(turns).toHaveLength(5);
+    expect(new Set(turns.map((t) => t.user_id))).toEqual(new Set([victorId]));
+    const usage = await rows("select agent_id, turns from app.agent_usage_daily where organization_id = $1", [
+      orgId,
+    ]);
+    expect(Object.fromEntries(usage.map((u) => [u.agent_id, u.turns]))).toEqual({
+      [archieId]: 2,
+      [beaId]: 2,
+      [carlId]: 1,
+    });
+    expect(await aiUsageRecords()).toBe(before);
+    const consultAudits = (
+      await rows(
+        "select user_id, metadata from app.audit_events where organization_id = $1 and action like 'agent.consult.%'",
+        [orgId],
+      )
+    ).filter((a) => a.metadata.chainId === ab.chainId);
+    expect(consultAudits.length).toBeGreaterThanOrEqual(4);
+    expect(new Set(consultAudits.map((a) => a.user_id))).toEqual(new Set([victorId]));
+  });
+
+  it("Archie at its daily limit when Bea is done: hop answered, no return turn, the usual notice once, chain completed", async () => {
+    const limitsId = await channel(`limits-${randomUUID().slice(0, 6)}`, [archieId, beaId]);
+    const { answer, bea } = await consulted({ conversationId: limitsId });
+    const posted = await ok(post(bea, ANSWER));
+    await su.query("update app.agent_usage_daily set turns = 100000 where agent_id = $1", [archieId]);
+    await ok(done(bea));
+    expect((await hopRow(answer.hopId)).status).toBe("answered");
+    expect((await replies(archieId)).filter((p) => p.consultReply.hopId === answer.hopId)).toHaveLength(0);
+    const notice = await until(
+      () =>
+        rows("select author_id from app.messages where client_message_id = $1", [
+          `limit:${posted.messageId}`,
+        ]),
+      (r) => r.length > 0,
+    );
+    expect(notice).toEqual([{ author_id: archieId }]);
+    const limited = (
+      await rows(
+        "select user_id, metadata from app.audit_events where action = 'agent.limit_reached' and agent_id = $1",
+        [archieId],
+      )
+    ).filter((a) => a.metadata.messageId === posted.messageId);
+    expect(limited).toHaveLength(1);
+    expect(limited[0]).toMatchObject({ user_id: victorId, metadata: { notified: true } });
+    expect((await chainRow(answer.chainId)).status).toBe("completed");
+    await su.query("delete from app.agent_usage_daily");
+  });
+});
+
+describe("chain turns carry no memory; card decisions never continue a chain (Task 2; Pitfall 4, P-13, D-10)", () => {
+  afterAll(async () => {
+    await ok(victor.request("PATCH", `/api/v1/agents/${beaId}/capabilities`, { memory: false }));
+  });
+
+  it("Bea keeps a note about Víctor: her chain turn carries no memory and no memory write tool", async () => {
+    await ok(victor.request("PATCH", `/api/v1/agents/${beaId}/capabilities`, { memory: true }));
+    const dmId = (await ok(victor.request("POST", `/api/v1/agents/${beaId}/dm`))).dmId as string;
+    const said = await ok(
+      victor.request("POST", `/api/v1/conversations/${dmId}/messages`, {
+        body: "remember: I like short answers",
+      }),
+    );
+    const dmTurn = await deliveryOn(said.id as string, beaId);
+    await ok(
+      cell("/memories", { eventId: dmTurn.eventId, agentId: beaId, text: "Víctor likes short answers" }),
+    );
+    const later = await ok(
+      victor.request("POST", `/api/v1/conversations/${dmId}/messages`, { body: "hi again" }),
+    );
+    expect((await deliveryOn(later.id as string, beaId)).turn.memory.length).toBeGreaterThan(0);
+
+    const { bea } = await consulted();
+    expect(bea.turn.memory).toEqual([]);
+    expect(bea.turn.tools).not.toContain("ocw_memory_save");
+    expect(bea.turn.tools).not.toContain("ocw_memory_write");
+    expect(JSON.stringify(bea.turn)).not.toContain("short answers");
+  });
+
+  it("Bea posts a card in her chain turn; Víctor approves it: that turn is outside the chain and its done touches no hop", async () => {
+    const { root, answer, bea } = await consulted();
+    const card = await cell("/cards", {
+      agentId: beaId,
+      conversationId: opsId,
+      threadRootId: root,
+      inReplyToMessageId: answer.questionMessageId,
+      eventId: bea.eventId,
+      idempotencyKey: `card-${randomUUID()}`,
+      card: {
+        kind: "approval",
+        title: "Confirm PO-1187",
+        fields: [{ label: "Order", value: "PO-1187" }],
+        status: "pending",
+        actions: [{ kind: "approve", label: "Approve", denyLabel: "Deny" }],
+        summary: "Confirm the pump order PO-1187",
+      },
+    });
+    expect(card.status, JSON.stringify(card.body)).toBe(201);
+    const cardId = card.body.messageId as string;
+    expect((await turnRow(bea.eventId)).reply_message_id).toBe(cardId);
+    await ok(victor.request("POST", `/api/v1/cards/${cardId}/decision`, { outcome: "approved" }));
+    const [action] = await eventsOn("agent.card_action.v1", cardId);
+    expect(action).toBeDefined();
+    expect(action!.origin).toBeUndefined();
+    expect(await turnRow(action!.eventId)).toMatchObject({
+      user_id: victorId,
+      chain_id: null,
+      chain_depth: 0,
+      answering_hop_id: null,
+      returning_hop_id: null,
+    });
+    await ok(done(action!));
+    expect((await hopRow(answer.hopId)).status).toBe("pending");
+    // Bea's own turn answers with its card.
+    await ok(done(bea));
+    expect(await hopRow(answer.hopId)).toMatchObject({ status: "answered", answer_message_id: cardId });
+  });
+});
+
+describe("an automation-rooted chain returns to the run's bot for the run-as person (Task 2; D-12)", () => {
+  it("a Run-now run of Archie consults Bea; the answer returns for Víctor; only Archie's own anchor reply answers the run", async () => {
+    const core = stack.built.core;
+    const automation = await ok(
+      victor.request("POST", "/api/v1/automations", {
+        name: `Pump report ${randomUUID().slice(0, 4)}`,
+        agentId: archieId,
+        instructions: "Check the pump orders with the team.",
+        trigger: { kind: "schedule", schedule: { cron: "0 17 * * 5", timeZone: "Europe/Madrid" } },
+        target: { kind: "channel", conversationId: opsId },
+        maxRunsPerDay: 24,
+      }),
+      201,
+    );
+    const automationId = automation.automation.id as string;
+    await su.query("delete from app.agent_usage_daily");
+    await ok(victor.request("POST", `/api/v1/automations/${automationId}/run`), 202);
+    await core.jobs.drain("automation.fire");
+    const [run] = (await cellEvents("agent.automation_run.v1", archieId)).filter(
+      (p) => p.automationRun.automationId === automationId,
+    );
+    expect(run).toBeDefined();
+    const answer = await ok(consult(run!, beaId));
+    const bea = await deliveryOn(answer.questionMessageId as string, beaId);
+    expect((await turnRow(bea.eventId)).user_id).toBe(victorId);
+    await ok(post(bea, ANSWER));
+    await ok(done(bea));
+    const back = await replyFor(answer.hopId);
+    expect(await turnRow(back.eventId)).toMatchObject({ user_id: victorId, returning_hop_id: answer.hopId });
+    const runStatus = async () =>
+      (await rows("select status from app.automation_runs where id = $1", [run!.automationRun.runId]))[0]
+        ?.status;
+    expect(await runStatus()).toBe("delivered");
+    const reply = await post(back, "Víctor: Bea confirms PO-1187.");
+    expect(reply.status, JSON.stringify(reply.body)).toBe(200);
+    // Neither the question nor the return turn's reply marks the run; Archie's own reply on the anchor does.
+    expect(await runStatus()).toBe("delivered");
+    await ok(post(run!, "Pump report: PO-1187 confirmed."));
+    expect(await runStatus()).toBe("answered");
   });
 });
