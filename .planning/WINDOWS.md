@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 177
+open_count: 178
 waived_count: 7
 fixed_count: 149
-total_count: 333
-last_updated: 2026-10-23T17:55:55.748Z
+total_count: 334
+last_updated: 2026-11-03T20:18:26.346Z
 ---
 
 # Broken Windows Ledger
@@ -348,6 +348,7 @@ last_updated: 2026-10-23T17:55:55.748Z
 | 331 | 07.9 | deviation | apps/api/src/modules/work-session/service.ts |  | 07.9-fanout (low, deferred): the queue is in memory, so a crash loses pending sweeps (revocation already decided at commit; lists refetch on reconnect) — sweep on boot or a durable outbox; a frame from another transaction published between commit and its invalidation reaching Redis is not held | open |  | 2026-10-23T08:31:50.471Z |  |
 | 332 | 07.9 | deviation | apps/web/components/work-zone/session-sidebar.tsx |  | 07.9-polish: the sidebar header + and the session search are under 44 px on mobile (shared components); the 640–767 px two-row header is not covered by any e2e | open |  | 2026-10-23T10:05:54.945Z |  |
 | 333 | 07.9 | deviation | apps/openclaw-channel/src/sandbox-tools.ts |  | SHOULD FIX (brwopen debug): ocw_sandbox_exec has the same inverted timeout chain as the browser had (cell waits 35 s; the API may take up to 60 s ensure + 40 s); only bites with a cold sandbox and a command reaching the 25 s yield — nest the budgets like BROWSER_TIMEOUTS_MS | open |  | 2026-10-23T17:55:55.748Z |  |
+| 334 | 07.7 | deviation | e2e/tests/bot-activity.spec.ts |  | 07.7-11: bot-activity's sandbox case is fake-broker-only (the real broker answers 'timeout: failed to run command python' where the fake says 'sh: python: not found'); it cannot pass under e2e-isolated.sh --sandbox, like sandbox-tab and browser-tab; run it without --sandbox | open |  | 2026-11-03T20:18:26.346Z |  |
 
 ````json
 [
@@ -4345,6 +4346,18 @@ last_updated: 2026-10-23T17:55:55.748Z
     "status": "open",
     "reason": "",
     "recorded_at": "2026-10-23T17:55:55.748Z",
+    "resolved_at": null
+  },
+  {
+    "id": 334,
+    "kind": "deviation",
+    "phase": "07.7",
+    "file": "e2e/tests/bot-activity.spec.ts",
+    "line": null,
+    "description": "07.7-11: bot-activity's sandbox case is fake-broker-only (the real broker answers 'timeout: failed to run command python' where the fake says 'sh: python: not found'); it cannot pass under e2e-isolated.sh --sandbox, like sandbox-tab and browser-tab; run it without --sandbox",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-11-03T20:18:26.346Z",
     "resolved_at": null
   }
 ]
