@@ -349,16 +349,26 @@ describe("job runtime (pg-boss, 07.6-03)", () => {
       try {
         await a.start();
         await b.start();
-        // Three minute boundaries: 10:01, 10:02 and 10:03.
+        // Three minute boundaries: 10:01, 10:02 and 10:03. The first pass may also file 10:00 (the clock starts inside
+        // that minute and pg-boss sends an occurrence still within its window), depending on when it runs: the
+        // guarantee is one job per minute slot whichever instance's pass files it, never two.
         for (let s = 0; s < 3 * 60 + 15; s += 5) await clock.tick(5_000);
         await a.drain("automation.tick");
+        const slots = await query<{ slot: string }>(
+          tdb.superuserUrl,
+          `select to_char(singleton_on, 'HH24:MI') as slot from pgboss.job
+            where name = '__pgboss__send-it' and data->>'name' = 'automation.tick' order by singleton_on`,
+        );
+        const minutes = slots.map((r) => r.slot);
+        expect(new Set(minutes).size, minutes.join(",")).toBe(minutes.length);
+        expect(minutes.filter((m) => m !== "10:00")).toEqual(["10:01", "10:02", "10:03"]);
         const [made] = await query<{ n: number }>(
           tdb.superuserUrl,
           "select count(*)::int as n from pgboss.job where name = 'automation.tick'",
         );
-        expect(made?.n).toBe(3);
-        await vi.waitFor(() => expect(ticks).toHaveLength(3), { timeout: 10_000 });
-        expect(new Set(ticks.map((t) => t.split(":")[1])).size).toBe(3);
+        expect(made?.n).toBe(minutes.length);
+        await vi.waitFor(() => expect(ticks).toHaveLength(minutes.length), { timeout: 10_000 });
+        expect(new Set(ticks.map((t) => t.split(":")[1])).size).toBe(minutes.length);
       } finally {
         // Detaches the clock (restores job_now) even when an assertion failed, so later tests read real time.
         await a.stop();
