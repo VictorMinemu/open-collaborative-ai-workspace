@@ -524,6 +524,73 @@ describe("POST /turns/:eventId/done is bound to this cell's turns (T-07.7-06-03)
   });
 });
 
+describe("one lock order: thread stream → turn → hop → chain (CR-A-02, CR-A-05)", () => {
+  /** A second connection holding the thread's stream row, the way an in-flight post does. */
+  async function holdStream(conversationId: string): Promise<pg.Client> {
+    const holder = new pg.Client({ connectionString: stack.db.superuserUrl });
+    await holder.connect();
+    await holder.query("begin");
+    await holder.query("select last_seq from app.streams where id = $1 for update", [
+      `conv:${conversationId}`,
+    ]);
+    return holder;
+  }
+  /** Until some backend waits on a lock while reading the streams table (the request is parked on the stream). */
+  const blockedOnStream = () =>
+    until(
+      () =>
+        rows(
+          `select count(*)::int as n from pg_stat_activity
+            where wait_event_type = 'Lock' and query ilike '%app.streams%' and pid <> pg_backend_pid()`,
+        ),
+      (r) => (r[0]?.n ?? 0) > 0,
+    );
+
+  it("CR-A-02: a consult waits for the thread's stream before it claims the turn (no deadlock with a first post)", async () => {
+    const { archie } = await archieTurn();
+    const holder = await holdStream(opsId);
+    let pending: Promise<{ status: number; body: Json }> | null = null;
+    try {
+      pending = consult(archie, beaId);
+      expect((await blockedOnStream())[0]?.n).toBeGreaterThan(0);
+      // The turn row is free: a first post holding the stream could still record its reply on it.
+      const probe = new pg.Client({ connectionString: stack.db.superuserUrl });
+      await probe.connect();
+      try {
+        await probe.query("begin");
+        const locked = await probe
+          .query("select event_id from app.agent_turns where event_id = $1 for update nowait", [
+            archie.eventId,
+          ])
+          .then(
+            () => false,
+            (e: { code?: string }) => e.code === "55P03",
+          );
+        await probe.query("rollback");
+        expect(locked).toBe(false);
+      } finally {
+        await probe.end();
+      }
+    } finally {
+      await holder.query("rollback");
+      await holder.end();
+    }
+    expect((await pending!).status).toBe(200);
+  });
+
+  it("CR-A-02: Archie's first post and his consult, at the same time, both succeed", async () => {
+    for (let i = 0; i < 5; i++) {
+      const { archie } = await archieTurn();
+      const [posted, asked] = await Promise.all([
+        post(archie, "Let me check with @bea."),
+        consult(archie, beaId),
+      ]);
+      expect(posted.status, JSON.stringify(posted.body)).toBe(200);
+      expect(asked.status, JSON.stringify(asked.body)).toBe(200);
+    }
+  });
+});
+
 describe("taint flows forward (Task 2; D-09, P-11, Pitfall 2)", () => {
   beforeAll(async () => {
     await ok(victor.request("PATCH", `/api/v1/agents/${beaId}/capabilities`, { internet: true }));

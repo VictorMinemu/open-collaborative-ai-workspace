@@ -32,7 +32,7 @@ import type { App, Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import { notFound } from "../../lib/errors";
 import { inChannel } from "../bot-capabilities";
-import { announceConsults } from "../chat";
+import { announceConsults, convTopic, lockNextSeq } from "../chat";
 import type { MemoryService } from "../memory";
 import { AuthzDeniedError, memberDirectory, type PermissionService } from "../organization";
 import { decideAgentMessage } from "./agent-message";
@@ -594,6 +594,10 @@ async function consult(
         await auditUnknownTurn(tx, core, { cell, tool: TOOL, reason: "unknown_turn", metadata });
         return { status: 404, code: "unknown_turn" };
       }
+      // CR-A-02: the thread's stream before anything locks the turn row (the claim below, the question's post): every
+      // writer's order is stream → turn → hop → chain, so a first post of this turn (stream, then `recordChainReply` on
+      // the turn) and this consult never deadlock.
+      await lockNextSeq(tx, convTopic(turn.conversationId));
       const person = await personName(tx, human);
       // A retry of the key (an OpenClaw or bridge retry) answers the stored hop: one hop, one message, one delivery.
       const prior = await hopByKey(tx, turn.agentId, body.idempotencyKey);
