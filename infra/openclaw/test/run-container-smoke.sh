@@ -74,7 +74,8 @@
 # `ocw_consult_agent`, Archie's model consults Bea through one `POST /consultations` with exactly the contract's keys (never
 # `/tool-calls`) and relays the API's sentence; Bea gets the question as `agent.mention.v1` with `origin` (her model sees
 # who asked and for whom) and answers in the thread; Archie gets `agent.consult_reply.v1` and replies to her answer; each
-# turn reports done; no model request lists a session or agent-to-agent tool.
+# turn reports done; a return turn delivered tainted (`turn.tainted`) cannot consult again (blocked in the cell: no
+# consultation, no `/tool-calls`); no model request lists a session or agent-to-agent tool.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
@@ -1096,12 +1097,13 @@ ORIGIN_REQS="$(docker exec "${P}-model" sh -c "grep -l '$CONSULT_CONV' /tmp/capt
 echo "   origin     : $ORIGIN_REQS model request(s) of the thread say who asked and for whom"
 [[ "$ORIGIN_REQS" -ge 1 ]] || { echo "FAIL: Bea's model never saw who asked and on whose behalf"; exit 1; }
 
-echo "== [consult] Bea's answer returns to Archie as agent.consult_reply.v1: he replies in the thread, in reply to it"
-RETURN="$SECRETS/consult-reply.json"
+# Writes an `agent.consult_reply.v1` for Archie to `$1`: Bea's answer `$2` (message and answerMessageId), event `$3`, extra
+# answer text `$4` (a directive for the fake model, or empty) and the turn block `$5` (JSON).
+consult_reply_event() {
 node -e '
 const fs = require("fs");
 const e = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-const [beaReply, chainId, hopId, eventId, extra, turnJson] = process.argv.slice(3);
+const [out, beaReply, eventId, extra, turnJson, chainId, hopId] = process.argv.slice(2);
 const bea = { kind: "agent", id: "0199a6f0-0000-7000-8000-00000000a002", displayName: "Bea" };
 const data = {
   ...e,
@@ -1121,9 +1123,14 @@ const data = {
   },
   turn: JSON.parse(turnJson),
 };
-fs.writeFileSync(process.argv[2], JSON.stringify({ type: "agent.consult_reply.v1", data }));
-' "$ROOT/infra/openclaw/test/mention-consult.json" "$RETURN" "$BEA_REPLY" "$CONSULT_CHAIN" "$CONSULT_HOP" \
-  0199a6f0-0000-7000-8000-00000000e103 "" '{"tools":[],"toolFlags":{},"memory":[],"now":null,"maxToolCalls":8,"maxWebCalls":5}'
+fs.writeFileSync(out, JSON.stringify({ type: "agent.consult_reply.v1", data }));
+' "$ROOT/infra/openclaw/test/mention-consult.json" "$1" "$2" "$3" "$4" "$5" "$CONSULT_CHAIN" "$CONSULT_HOP"
+}
+
+echo "== [consult] Bea's answer returns to Archie as agent.consult_reply.v1: he replies in the thread, in reply to it"
+RETURN="$SECRETS/consult-reply.json"
+consult_reply_event "$RETURN" "$BEA_REPLY" 0199a6f0-0000-7000-8000-00000000e103 "" \
+  '{"tools":[],"toolFlags":{},"memory":[],"now":null,"maxToolCalls":8,"maxWebCalls":5}'
 STATE="$(inject_and_wait "$RETURN" "$BEA_REPLY" /__test/event)"
 echo "$STATE" | BEA_REPLY="$BEA_REPLY" node -e '
 const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
@@ -1150,6 +1157,40 @@ ANSWER_REQS="$(docker exec "${P}-model" sh -c "grep -l '$CONSULT_CONV' /tmp/capt
 echo "   answered   : $ANSWER_REQS model request(s) of the thread tell Archie that @bea answered"
 [[ "$ANSWER_REQS" -ge 1 ]] || { echo "FAIL: Archie's model never saw that @bea answered"; exit 1; }
 
+echo "== [consult] a return turn delivered tainted (Bea read outside content) cannot consult again: blocked in the cell"
+# D-09: the API delivers the answer with turn.tainted (07.6 taintedAtStart); the fake model stands for a model the answer
+# persuaded to ask again. The gate refuses before any route: no POST /consultations, no /tool-calls request.
+TAINTED_ANSWER=0199a6f0-0000-7000-8000-00000000d105
+TAINTED_RETURN="$SECRETS/consult-reply-tainted.json"
+consult_reply_event "$TAINTED_RETURN" "$TAINTED_ANSWER" 0199a6f0-0000-7000-8000-00000000e104 \
+  '[[call ocw_consult_agent {"target":"@bea","question":"And the valve order?"}]]' \
+  '{"tools":["ocw_consult_agent"],"toolFlags":{"ocw_consult_agent":{"untrustedOutput":false,"sideEffecting":true}},"memory":[],"now":null,"maxToolCalls":8,"maxWebCalls":5,"consult":{"chainId":"0199a6f0-0000-7000-8000-0000000c4a01","depth":0,"targets":[{"id":"0199a6f0-0000-7000-8000-00000000a002","handle":"bea","displayName":"Bea","description":"Purchasing"}]},"tainted":true}'
+STATE="$(inject_and_wait "$TAINTED_RETURN" "$TAINTED_ANSWER" /__test/event)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e104";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d105");
+if (!m) { console.log("FAIL: Archie did not reply to the tainted answer"); process.exit(1); }
+const asked = (s.consultations ?? []).filter((b) => b.eventId === EV);
+const gated = s.toolCalls.filter((c) => c.eventId === EV);
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   tool calls :", JSON.stringify(gated.map((c) => c.tool)), "consults", asked.length, "total", (s.consultations ?? []).length);
+const ok =
+  m.agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
+  m.threadRootMessageId === "0199a6f0-0000-7000-8000-00000000d100" &&
+  m.idempotencyKey === `evt:${EV}` &&
+  asked.length === 0 && gated.length === 0 && (s.consultations ?? []).length === 1 &&
+  m.text.includes("Tool ocw_consult_agent") && m.text.includes("consult another bot after reading web or tool content");
+if (!ok) { console.log("FAIL: a tainted return turn reached the consult route or /tool-calls"); process.exit(1); }
+'
+DONE="$(wait_turn_done 0199a6f0-0000-7000-8000-00000000e104)"
+echo "   turn done  : $DONE"
+node -e '
+const d = JSON.parse(process.argv[1]);
+if (!d.some((x) => x.agentId === "0199a6f0-0000-7000-8000-00000000a001")) {
+  console.log("FAIL: the tainted return turn did not report done"); process.exit(1);
+}' "$DONE"
+
 echo "== [consult] no model request of the thread ever lists an OpenClaw session or agent-to-agent tool"
 CONSULT_DIR="$SECRETS/consult-captures"
 mkdir -p "$CONSULT_DIR"
@@ -1167,7 +1208,7 @@ for (const f of files) {
 }
 const banned = [...names].filter((n) => /^(sessions?_|conversations_|agents_)/u.test(n) || n === "subagents" || n === "message");
 console.log(`   tools      : ${files.length} model request(s) of the thread, tools offered: ${[...names].sort().join(",") || "(none)"}`);
-if (files.length < 3) { console.log("FAIL: the thread'"'"'s model requests were not captured"); process.exit(1); }
+if (files.length < 4) { console.log("FAIL: the thread'"'"'s model requests were not captured"); process.exit(1); }
 if (banned.length) { console.log("FAIL: a session or agent-to-agent tool reached the model:", banned.join(",")); process.exit(1); }
 ' "$CONSULT_DIR"
 
