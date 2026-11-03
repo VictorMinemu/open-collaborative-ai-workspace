@@ -562,6 +562,37 @@ describe("taint flows forward (Task 2; D-09, P-11, Pitfall 2)", () => {
     expect(refused.body).toMatchObject({ allowed: false, reason: "tainted" });
   });
 
+  it("CR-A-01: Archie's own turn read outside content after asking: the return turn starts tainted (same session, nothing laundered)", async () => {
+    const { archie, answer, bea } = await consulted({ conversationId: trioId });
+    // The asking turn keeps running after the consult call and reads untrusted content (a web or MCP result).
+    await su.query("update app.agent_turns set tainted = true where event_id = $1", [archie.eventId]);
+    await ok(post(bea, ANSWER));
+    await ok(done(bea));
+    expect((await turnRow(bea.eventId)).tainted).toBe(false);
+    const reply = await replyFor(answer.hopId);
+    expect(reply.turn.tainted).toBe(true);
+    expect((await turnRow(reply.eventId)).tainted).toBe(true);
+    expect(reply.turn.tools).not.toContain("ocw_consult_agent");
+    const forced = await cell("/consultations", {
+      eventId: reply.eventId,
+      agentId: archieId,
+      target: carlId,
+      question: QUESTION,
+      idempotencyKey: `${reply.eventId}:consult:0`,
+    });
+    expect(forced.status).toBe(403);
+    expect(forced.body.code).toBe("tainted");
+  });
+
+  it("CR-A-01: member data the asking turn read stays with its return turn", async () => {
+    const { archie, answer, bea } = await consulted();
+    await su.query("update app.agent_turns set member_data = true where event_id = $1", [archie.eventId]);
+    await ok(post(bea, ANSWER));
+    await ok(done(bea));
+    const reply = await replyFor(answer.hopId);
+    expect(await turnRow(reply.eventId)).toMatchObject({ member_data: true, user_id: victorId });
+  });
+
   it("member data read while answering stays with the answer: the return turn starts with it (the 07.5 re-run rule)", async () => {
     const { answer, bea } = await consulted();
     await su.query("update app.agent_turns set member_data = true where event_id = $1", [bea.eventId]);

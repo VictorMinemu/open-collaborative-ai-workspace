@@ -115,7 +115,8 @@ export async function chainLive(
  * human (tools, limits, metering and the ledger row are theirs; never the consulted bot's owner, ADR-0019), on the
  * answer (or, without one, on the question with a server sentence), `trigger: "consult"` (unattended, D-13), with the
  * asker's place in the chain (its own answering hop, if any, and the hop it receives). The return turn starts with the
- * taint and member data of every turn that answered the hop (D-09, Pitfall 2: nothing is laundered through a hop). The
+ * taint and member data of every turn that answered the hop and of the turn that asked it (D-09, Pitfall 2, CR-A-01:
+ * nothing is laundered through a hop, in either direction). The
  * event then names the consulted bot as `message.author` when it carries its answer, the chain's human in `origin`, and
  * is appended as `agent.consult_reply.v1`. Null when nothing is delivered: a handoff, a closed chain, a human who no
  * longer reads the conversation, a gone asker, or its daily limit (the existing notice then follows).
@@ -147,14 +148,16 @@ export async function deliverConsultReply(
     .limit(1);
   if (!target) return null;
 
-  // Every turn that answered this hop (the question turn and its own return turns): their taint and member data.
+  // CR-A-01: every turn that answered this hop (the question turn and its own return turns) AND the turn that asked it,
+  // as it stands now. Consulting is asynchronous: the asking turn keeps running after its consult call and may read
+  // outside content or member data, and the return turn resumes the same per-thread session, so it starts with all of it.
   const [carried] = await tx
     .select({
       tainted: sql<boolean>`coalesce(bool_or(${agentTurns.tainted}), false)`,
       memberData: sql<boolean>`coalesce(bool_or(${agentTurns.memberData}), false)`,
     })
     .from(agentTurns)
-    .where(eq(agentTurns.answeringHopId, hop.id));
+    .where(or(eq(agentTurns.answeringHopId, hop.id), eq(agentTurns.eventId, hop.sourceEventId)));
   const tainted = carried?.tainted === true;
   const memberData = carried?.memberData === true;
 
