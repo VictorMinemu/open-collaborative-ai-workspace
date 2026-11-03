@@ -589,6 +589,31 @@ describe("one lock order: thread stream → turn → hop → chain (CR-A-02, CR-
       expect(asked.status, JSON.stringify(asked.body)).toBe(200);
     }
   });
+
+  it("CR-A-05: done reads the turn after the stream lock, so a post committing under it is the answer", async () => {
+    const { answer, bea } = await consulted();
+    const posted = await ok(post(bea, ANSWER));
+    // Seen from done's side, the post has not committed yet: it is in flight and holds the stream.
+    await su.query("update app.agent_turns set reply_message_id = null where event_id = $1", [bea.eventId]);
+    const holder = await holdStream(opsId);
+    let pending: Promise<{ status: number; body: Json }> | null = null;
+    try {
+      await holder.query("update app.agent_turns set reply_message_id = $2 where event_id = $1", [
+        bea.eventId,
+        posted.messageId,
+      ]);
+      pending = done(bea);
+      await blockedOnStream();
+      await holder.query("commit");
+    } finally {
+      await holder.end().catch(() => undefined);
+    }
+    expect((await pending!).status).toBe(200);
+    expect(await hopRow(answer.hopId)).toMatchObject({
+      status: "answered",
+      answer_message_id: posted.messageId,
+    });
+  });
 });
 
 describe("taint flows forward (Task 2; D-09, P-11, Pitfall 2)", () => {

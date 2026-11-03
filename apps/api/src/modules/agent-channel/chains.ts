@@ -375,24 +375,26 @@ export async function turnDone(
     async (tx) => {
       const [turn] = await tx.select().from(agentTurns).where(eq(agentTurns.eventId, eventId));
       if (!turn || turn.agentId !== body.agentId) return null;
-      if (turn.chainId) return { userId: turn.userId, chainId: turn.chainId };
+      const base = { userId: turn.userId, conversationId: turn.conversationId };
+      if (turn.chainId) return { ...base, chainId: turn.chainId };
       const [rooted] = await tx
         .select({ id: agentChains.id })
         .from(agentChains)
         .where(eq(agentChains.rootEventId, eventId))
         .limit(1);
-      return { userId: turn.userId, chainId: rooted?.id ?? null };
+      return { ...base, chainId: rooted?.id ?? null };
     },
   );
   if (!found) throw notFound(UNKNOWN_TURN, "unknown_turn");
   const { chainId } = found;
   if (!chainId) return;
   await core.db.withTenant({ organizationId: cell.organizationId, userId: found.userId }, async (tx) => {
+    // The thread's stream first, then the turn, the hop and the chain: the consult route's lock order (CR-A-02), so a
+    // done and a consult in one chain never deadlock. The turn is read under the stream (CR-A-05): a post of this turn
+    // still in flight commits its reply under the same lock, so its answer is seen here (the conversation never changes).
+    await lockNextSeq(tx, convTopic(found.conversationId));
     const [turn] = await tx.select().from(agentTurns).where(eq(agentTurns.eventId, eventId));
     if (!turn) return;
-    // The thread's stream first, then the hop and the chain: the consult route's lock order (its post takes the stream,
-    // then spends the chain's budget and bumps a parent hop), so a done and a consult in one chain never deadlock.
-    await lockNextSeq(tx, convTopic(turn.conversationId));
     // P-15: an orphaned chain (thread root deleted, human gone) is cancelled `auto` at this touch; nothing closes or
     // returns.
     const [chain] = await tx.select().from(agentChains).where(eq(agentChains.id, chainId)).limit(1);
