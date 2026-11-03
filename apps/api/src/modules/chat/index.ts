@@ -134,6 +134,8 @@ export {
   updatePlatformCard,
   withCards,
 } from "./card-actions";
+/** Phase 07.7 (D-15): a consult hop's state on its messages; agent-channel announces every change. */
+export { announceConsults, consultsFor, withConsults } from "./consults";
 export { agentFactsOf, authorOf, type Directory, type DirectoryEntry, loadDirectory } from "./directory";
 export {
   dmAgentOf,

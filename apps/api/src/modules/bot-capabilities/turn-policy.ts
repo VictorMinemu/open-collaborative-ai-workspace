@@ -1,4 +1,6 @@
 import {
+  A2A_MAX_DEPTH,
+  A2A_MAX_TARGETS,
   type BotCapabilities,
   type BotCapabilityView,
   BROWSER_TOOL_NAMES,
@@ -6,6 +8,7 @@ import {
   BUILTIN_TOOLS,
   CONFINED_TOOL_FLAGS,
   type ConfinedToolName,
+  type ConsultTarget,
   MAX_SANDBOX_CALLS_PER_TURN,
   MAX_TOOL_CALLS_PER_TURN,
   MAX_WEB_CALLS_PER_TURN,
@@ -149,6 +152,11 @@ const AUTOMATION_PROPOSE_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEf
  * reflects outside values (untrusted). A turn that read outside content is refused unless a 07.5 grant covers the call.
  */
 const RECORD_UPDATE_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
+/**
+ * `ocw_consult_agent` (07.7, D-08, D-09): the API's own answer (trusted), always side-effecting: a turn that read outside
+ * content never consults another bot (the route's claim refuses it 403 `tainted`, the plugin before it).
+ */
+const CONSULT_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
 
 /**
  * The sandbox tools a turn is offered (07.8-05, D-12, P-05, P-06): every `ocw_sandbox_*` tool, `ocw_sandbox_import`
@@ -624,6 +632,31 @@ async function mayProposeAutomations(
 }
 
 /**
+ * Phase 07.7 (D-04: channels only in v1): the conversation is a live channel, or a thread conversation of one. DMs,
+ * group DMs, AI chats and Work Zone sessions never offer a consult.
+ */
+export async function inChannel(tx: Tx, conversationId: string): Promise<boolean> {
+  const [conv] = await tx
+    .select({
+      kind: conversations.kind,
+      parent: conversations.parentConversationId,
+      archivedAt: conversations.archivedAt,
+    })
+    .from(conversations)
+    .where(eq(conversations.id, conversationId))
+    .limit(1);
+  if (!conv || conv.archivedAt !== null) return false;
+  if (conv.kind === "channel") return true;
+  if (conv.kind !== "thread" || !conv.parent) return false;
+  const [parent] = await tx
+    .select({ kind: conversations.kind, archivedAt: conversations.archivedAt })
+    .from(conversations)
+    .where(eq(conversations.id, conv.parent))
+    .limit(1);
+  return parent?.kind === "channel" && parent.archivedAt === null;
+}
+
+/**
  * The tools (and their taint flags) this bot may use for this human in this kind of conversation, right now.
  * Used at delivery by `turnPolicy` and again at call time by the tool gate (03.1-04). With the conversation id the
  * member-account rule (07.4-11) is re-decided too, so a revoked share bites mid-turn.
@@ -897,6 +930,22 @@ export async function turnPolicy(
     taintedAtStart?: boolean;
     /** Phase 07.6 (D-12): an automation run's turn (no person present): never the browser tools. */
     unattended?: boolean;
+    /**
+     * Phase 07.7 (D-01, D-03): the turn's place in an agent chain, written to its `agent_turns` row. Absent = a turn
+     * outside any chain (depth 0).
+     */
+    chain?: {
+      chainId: string | null;
+      depth: number;
+      answeringHopId: string | null;
+      returningHopId: string | null;
+    } | null;
+    /**
+     * Phase 07.7 (D-04, D-08, D-09, P-05): the bots this turn may consult, decided by the caller with the canonical
+     * `agent.message` decision. The turn is offered `ocw_consult_agent` (and `turn.consult`) only with at least one
+     * target, below `A2A_MAX_DEPTH`, in a channel or a channel's thread, and when it does not start tainted.
+     */
+    consultTargets?: ConsultTarget[];
   },
   opts: {
     /** AI chat deliveries only (06-10): the chat's readers, for scoped tools and `turn.withheld`. */
@@ -960,9 +1009,36 @@ export async function turnPolicy(
     memoryFiles = loaded.files;
   }
 
+  // Phase 07.7 (D-04, D-08, D-09): `ocw_consult_agent` is a turn-scoped tool, offered only where a consult can succeed
+  // (the `mayProposeAutomations` rule): allowed targets, below the depth limit, a channel (or its thread), and a turn that
+  // does not start tainted. The route re-decides every term at call time; the cell-wide view never lists it.
+  const depth = p.chain?.depth ?? 0;
+  const consultTargetsHere = p.consultTargets ?? [];
+  const consult =
+    consultTargetsHere.length > 0 &&
+    depth < A2A_MAX_DEPTH &&
+    p.taintedAtStart !== true &&
+    computed.tools.length < MAX_TURN_TOOLS &&
+    (await inChannel(tx, p.conversationId));
+  if (consult && !computed.toolFlags[BUILTIN_TOOLS.consultAgent]) {
+    computed.tools.push(BUILTIN_TOOLS.consultAgent);
+    computed.toolFlags[BUILTIN_TOOLS.consultAgent] = CONSULT_FLAGS;
+  }
+
   const turn: TurnContext = {
     tools: computed.tools,
     toolFlags: computed.toolFlags,
+    ...(consult
+      ? {
+          consult: {
+            chainId: p.chain?.chainId ?? null,
+            depth,
+            targets: consultTargetsHere.slice(0, A2A_MAX_TARGETS),
+          },
+        }
+      : {}),
+    // D-09: the plugin starts its local taint from the server's.
+    ...(p.taintedAtStart === true ? { tainted: true } : {}),
     memory,
     now: computed.effective.dateTime.effective ? turnNow(p.clientTimeZone) : null,
     maxToolCalls: MAX_TOOL_CALLS_PER_TURN,
@@ -989,6 +1065,15 @@ export async function turnPolicy(
     toolFlags: turn.toolFlags,
     tainted: p.taintedAtStart === true,
     ...(sticky ? { memberData: true } : {}),
+    // Phase 07.7 (D-01): the chain context, plain ledger ids (the consult route and the turn-done signal read them).
+    ...(p.chain
+      ? {
+          chainId: p.chain.chainId,
+          chainDepth: p.chain.depth,
+          answeringHopId: p.chain.answeringHopId,
+          returningHopId: p.chain.returningHopId,
+        }
+      : {}),
   });
   return { deliver: true, turn };
 }

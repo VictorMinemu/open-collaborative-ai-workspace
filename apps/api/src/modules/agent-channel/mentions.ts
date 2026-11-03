@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  A2A_MAX_DEPTH,
   type AgentChannelAuthor,
   AgentChannelEventTypes,
   type AgentChannelHistoryEntry,
@@ -34,6 +35,7 @@ import {
 import { REPLY_MODE_PER_MINUTE } from "../chat";
 import type { MemoryService } from "../memory";
 import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
+import { consultTargets } from "./agent-message";
 import { inboundRooted } from "./inbound-origin";
 import { conversationAudience } from "./memory-files";
 
@@ -256,13 +258,31 @@ export async function buildMentionEvents(
       root,
       historyRows.map((m) => m.id),
     ));
-  // D-12: an automation run's turn has nobody present (no browser tools); a person's message never is one.
-  const unattended = mention.trigger === "automation";
+  // D-12: an automation run's turn has nobody present (no browser tools); a person's message never is one. Phase 07.7
+  // (D-13): neither has a consult hop turn (the question to a consulted bot, the answer back to the asker).
+  const unattended = mention.trigger === "automation" || mention.trigger === "consult";
+  // Phase 07.7 (D-04, D-08, D-09): consults are offered only where one can succeed: never on a reply-mode turn, only in
+  // a channel (or its thread), below the depth limit and on a turn that does not start tainted. The targets are decided
+  // per delivered bot with the canonical `agent.message` decision (`consultTargets`).
+  const chain = mention.chain ?? null;
+  const mayConsult =
+    !replyMode &&
+    !taintedAtStart &&
+    (chain?.depth ?? 0) < A2A_MAX_DEPTH &&
+    (conv.kind === "channel" || (conv.kind === "thread" && parent?.kind === "channel"));
 
   const events: StoredMention[] = [];
   for (const a of delivered) {
     // The event id first: the turn ledger row (`agent_turns`) is keyed by it.
     const eventId = randomUUID();
+    const targets = mayConsult
+      ? await consultTargets(tx, deps.perms, {
+          sourceAgentId: a.id,
+          humanUserId: mention.author.id,
+          conversationId: conv.id,
+          chain: chain ? { rootAgentId: chain.rootAgentId, usedTargetIds: chain.usedTargetIds } : null,
+        })
+      : [];
     const decision = await turnPolicy(
       tx,
       deps.core,
@@ -278,6 +298,15 @@ export async function buildMentionEvents(
         clientTimeZone: mention.clientTimeZone ?? null,
         taintedAtStart,
         unattended,
+        chain: chain
+          ? {
+              chainId: chain.chainId,
+              depth: chain.depth,
+              answeringHopId: chain.answeringHopId,
+              returningHopId: chain.returningHopId,
+            }
+          : null,
+        consultTargets: targets,
       },
       {
         audience,
