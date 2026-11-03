@@ -261,6 +261,10 @@ describe("tick → run → fire → anchor → turn → reply → answered (AUTO
 
       // Scout's answer lands in the anchor's thread and answers the run.
       await waitFor(async () => (await runRow(run.id)).status === "answered");
+      // The fake cell records its reply once the API has answered it, which can be just after the run is answered.
+      await waitFor(async () =>
+        plugin.replies.some((r) => r.mention.eventId === ev.eventId && r.created !== undefined),
+      );
       const reply = plugin.replies.find((r) => r.mention.eventId === ev.eventId);
       expect(reply?.created).toBe(true);
       const replyRow = (

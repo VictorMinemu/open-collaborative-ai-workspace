@@ -305,7 +305,9 @@ describe("forgery and replay fail (Task 2, D-02, D-07, Pitfall 4)", () => {
     const hook = await createHook({ name: "Late orders" });
     const row = await endpointRow(hook.publicId);
     const body = JSON.stringify(ORDER);
-    for (const offset of [-301_000, 301_000]) {
+    // 310 s, not 301: the header is whole seconds and the request may cross a second or two on a loaded runner, which
+    // would bring a 301 s future timestamp back inside the library's 300 s window by the time the API reads it.
+    for (const offset of [-310_000, 310_000]) {
       const res = await post(
         hook.publicId,
         body,
