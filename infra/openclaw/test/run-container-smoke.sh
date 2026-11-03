@@ -68,11 +68,18 @@
 # thread turn's `ocw_record_update` run in OpenClaw and reach `/automations/propose` and `/records/update` with exactly
 # the contract's keys (never `/tool-calls`); the replies relay the API's sentences; a DM turn that read web output
 # first makes no proposal.
+# Scenario consult (07.7-07 / A2A-01, A2A-02, D-01, D-02, D-04, D-08, D-09, C-01): the rendered config pins OpenClaw's own
+# agent-to-agent off (`tools.agentToAgent.enabled: false`, `tools.sessions.visibility: "self"`) next to 07.6's cron and
+# hooks pins and the gateway boots with them; with two bots (Archie, Bea) both configured with the turn-scoped
+# `ocw_consult_agent`, Archie's model consults Bea through one `POST /consultations` with exactly the contract's keys (never
+# `/tool-calls`) and relays the API's sentence; Bea gets the question as `agent.mention.v1` with `origin` (her model sees
+# who asked and for whom) and answers in the thread; Archie gets `agent.consult_reply.v1` and replies to her answer; each
+# turn reports done; no model request lists a session or agent-to-agent tool.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
 #                            dm-isolation, memory, memory-files, card, board, connectors, mcp, approval, work_zone,
-#                            marketplace, breaker, bot_sandbox, bot_browser, automation, automation-tools
+#                            marketplace, breaker, bot_sandbox, bot_browser, automation, automation-tools, consult
 #                            and sandbox (runs when it is listed, with SMOKE_BUILD=1, or when ocw-mcp-sandbox:local
 #                            exists; otherwise it prints "SKIP sandbox (image not built)")
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
@@ -913,6 +920,264 @@ const ok =
   m.text.includes("Tool ocw_automation_propose said: I can'"'"'t propose an automation after reading outside content in this turn.");
 if (!ok) { console.log("FAIL: a turn that read web output proposed an automation"); process.exit(1); }
 '
+fi
+
+if want consult; then
+CONSULT_A=0199a6f0-0000-7000-8000-00000000a001
+CONSULT_B=0199a6f0-0000-7000-8000-00000000a002
+CONSULT_CONV=0199a6f0-0000-7000-8000-00000000c101
+CONSULT_ROOT=0199a6f0-0000-7000-8000-00000000d100
+CONSULT_CHAIN=0199a6f0-0000-7000-8000-0000000c4a01
+CONSULT_HOP=0199a6f0-0000-7000-8000-0000000c4b01
+# Waits until the fake API recorded a turn-done signal for `$1` (sent after the reply, in the turn's finally); prints it.
+wait_turn_done() {
+  local done=""
+  for i in $(seq 1 30); do
+    done="$(api_exec "const r = await fetch('http://127.0.0.1:4000/__test/state'); const s = await r.json(); console.log(JSON.stringify((s.turnsDone ?? []).filter((d) => d.eventId === '$1')));")"
+    [[ "$done" != "[]" ]] && break
+    sleep 1
+  done
+  printf '%s' "$done"
+}
+
+echo "== [consult] OpenClaw's own agent-to-agent is pinned off next to 07.6's pins, and the gateway boots with them"
+docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json | node -e '
+const c = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const deny = c.tools?.deny ?? [];
+console.log("   agentToAgent:", JSON.stringify(c.tools?.agentToAgent ?? null), "sessions", JSON.stringify(c.tools?.sessions ?? null));
+console.log("   cron       :", JSON.stringify(c.cron ?? null), "hooks", JSON.stringify(c.hooks ?? null), "profile", c.tools?.profile);
+const ok =
+  c.tools?.agentToAgent?.enabled === false &&
+  c.tools?.sessions?.visibility === "self" &&
+  c.tools?.profile === "minimal" &&
+  deny.includes("group:sessions") && deny.includes("group:messaging") &&
+  c.cron?.enabled === false && c.hooks?.enabled === false;
+if (!ok) { console.log("FAIL: the rendered config does not pin OpenClaw agent-to-agent, sessions, cron and hooks off"); process.exit(1); }
+'
+docker logs "${P}-openclaw" 2>&1 | grep -E "http server listening" | head -3 | sed 's/^/   /'
+docker logs "${P}-openclaw" 2>&1 | grep -E "http server listening" >/dev/null ||
+  { echo "FAIL: the gateway is not listening with the 07.7 pins"; exit 1; }
+
+echo "== [consult] two bots in the cell: Archie and Bea (Purchasing), both configured with the turn-scoped ocw_consult_agent"
+# Bea joins the snapshot next to whatever Archie is (read back from GET /cell); restored at the end of the scenario.
+api_exec "
+const auth = { authorization: 'Bearer ' + process.env.FAKE_API_TOKEN };
+const cell = await (await fetch('http://127.0.0.1:4000/agent-channel/v1/cell', { headers: auth })).json();
+const archie = cell.agents.find((a) => a.id === '$CONSULT_A');
+const bea = { ...archie, id: '$CONSULT_B', handle: 'bea', displayName: 'Bea', avatarUrl: null, description: 'Purchasing',
+  instructions: 'You handle purchasing. Be brief.', status: 'provisioning', capabilities: { tools: ['ocw_agent_card'] } };
+await fetch('http://127.0.0.1:4000/__test/cell', { method: 'POST', headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ agents: [archie, bea], reason: 'agent.created', agentId: '$CONSULT_B' }) });
+"
+BOTS=""
+for i in $(seq 1 90); do
+  BOTS="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json | A="$CONSULT_A" B="$CONSULT_B" node -e '
+const c = JSON.parse(require("fs").readFileSync(0, "utf8"));
+// The plugin writes its bots under agents.entries, keyed by the OpenClaw agent id (reconciler applyPlanToDraft).
+const entry = (id) => c.agents?.entries?.[`ocw-${id}`];
+const out = [process.env.A, process.env.B].map((id) => ({ id, alsoAllow: entry(id)?.tools?.alsoAllow ?? null }));
+process.stdout.write(JSON.stringify(out));
+')"
+  READY="$(api_exec "const r = await fetch('http://127.0.0.1:4000/__test/state'); const s = await r.json(); console.log(s.statusReports.some((x) => x.agentId === '$CONSULT_B' && x.status === 'ready') ? 1 : 0);")"
+  if [[ "$READY" == "1" ]] && node -e '
+const bots = JSON.parse(process.argv[1]);
+process.exit(bots.every((b) => Array.isArray(b.alsoAllow) && b.alsoAllow.includes("ocw_consult_agent")) ? 0 : 1);
+' "$BOTS"; then break; fi
+  sleep 1
+done
+echo "   bots       : $BOTS"
+node -e '
+const bots = JSON.parse(process.argv[1]);
+const inCell = (t) => /^(sessions?_|conversations_|agents_)/u.test(t) || t === "subagents" || t === "message";
+const ok = bots.length === 2 && bots.every((b) => Array.isArray(b.alsoAllow) && b.alsoAllow.includes("ocw_consult_agent")) &&
+  !bots.some((b) => b.alsoAllow.some(inCell));
+if (!ok) { console.log("FAIL: both bots must be configured with ocw_consult_agent (turn-scoped) and no session tool"); process.exit(1); }
+' "$BOTS"
+[[ "$READY" == "1" ]] || { echo "FAIL: Bea never reported ready"; exit 1; }
+
+echo "== [consult] Archie's turn offering ocw_consult_agent: one POST /consultations bound to the turn, never /tool-calls"
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-consult.json" 0199a6f0-0000-7000-8000-00000000d101)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e101";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d101");
+if (!m) { console.log("FAIL: no reply to the consult mention"); process.exit(1); }
+const asked = (s.consultations ?? []).filter((b) => b.eventId === EV);
+const gated = s.toolCalls.filter((c) => c.eventId === EV);
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   consults   :", JSON.stringify(asked));
+const q = asked[0];
+const ok =
+  asked.length === 1 &&
+  Object.keys(q).sort().join() === "agentId,eventId,idempotencyKey,mode,question,target" &&
+  q.agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
+  q.target === "0199a6f0-0000-7000-8000-00000000a002" &&
+  q.question === "Is the pump order confirmed?" && q.mode === "consult" &&
+  q.idempotencyKey === `${EV}:consult:0` &&
+  // Self-validated by its own route (D-08): never asked to /tool-calls.
+  gated.length === 0 &&
+  m.text.includes("Tool ocw_consult_agent said: Question sent to @bea") &&
+  /\[tools: 1 \| ocw_consult_agent\]/.test(m.text) &&
+  m.conversationId === "0199a6f0-0000-7000-8000-00000000c101" &&
+  m.threadRootMessageId === "0199a6f0-0000-7000-8000-00000000d100" &&
+  m.idempotencyKey === `evt:${EV}`;
+if (!ok) { console.log("FAIL: expected one consultation with exactly the contract keys, no /tool-calls request and the API sentence relayed"); process.exit(1); }
+console.error(m.messageId);
+' 2>"$SECRETS/consult-archie-reply"
+DONE="$(wait_turn_done 0199a6f0-0000-7000-8000-00000000e101)"
+echo "   turn done  : $DONE"
+node -e '
+const d = JSON.parse(process.argv[1]);
+if (!d.some((x) => x.agentId === "0199a6f0-0000-7000-8000-00000000a001" && x.outcome === "replied")) {
+  console.log("FAIL: Archie'"'"'s consulting turn did not report done (replied)"); process.exit(1);
+}' "$DONE"
+ARCHIE_REPLY="$(tail -n 1 "$SECRETS/consult-archie-reply")"
+
+echo "== [consult] the question reaches Bea as agent.mention.v1 with origin: she answers in the thread, in reply to it"
+QUESTION_ID=0199a6f0-0000-7000-8000-00000000d102
+ASK="$SECRETS/consult-question.json"
+node -e '
+const fs = require("fs");
+const e = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const [archieReply, question, chainId, hopId] = process.argv.slice(3);
+const archie = { kind: "agent", id: "0199a6f0-0000-7000-8000-00000000a001", displayName: "Archie" };
+const out = {
+  ...e,
+  eventId: "0199a6f0-0000-7000-8000-00000000e102",
+  agent: { id: "0199a6f0-0000-7000-8000-00000000a002", handle: "bea", displayName: "Bea" },
+  // The API posts the question as Archie (postAgentMessageIn) and delivers it to Bea; the text carries no directive.
+  message: {
+    id: question,
+    text: "@bea Is the pump order confirmed?",
+    createdAt: "2026-11-03T09:00:05.000Z",
+    author: archie,
+    mentions: [{ kind: "agent", id: "0199a6f0-0000-7000-8000-00000000a002" }],
+  },
+  threadHistory: [
+    ...e.threadHistory,
+    { id: e.message.id, author: e.message.author, text: "@archie check the pump order with Bea", createdAt: e.message.createdAt },
+    { id: archieReply, author: archie, text: "Checking with Bea.", createdAt: "2026-11-03T09:00:04.000Z" },
+  ],
+  origin: {
+    agent: { id: archie.id, handle: "archie", displayName: "Archie" },
+    chainId, hopId, depth: 1, mode: "consult",
+    onBehalfOf: { kind: "user", id: "0199a6f0-0000-7000-8000-0000000000f1", displayName: "Víctor Ruiz" },
+  },
+  turn: { tools: [], toolFlags: {}, memory: [], now: null, maxToolCalls: 8, maxWebCalls: 5 },
+};
+fs.writeFileSync(process.argv[2], JSON.stringify(out));
+' "$ROOT/infra/openclaw/test/mention-consult.json" "$ASK" "$ARCHIE_REPLY" "$QUESTION_ID" "$CONSULT_CHAIN" "$CONSULT_HOP"
+STATE="$(inject_and_wait "$ASK" "$QUESTION_ID")"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e102";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d102");
+if (!m) { console.log("FAIL: Bea did not answer the question"); process.exit(1); }
+console.log("   answer     :", m.text.replace(/\n/g, " / "));
+const ok =
+  m.agentId === "0199a6f0-0000-7000-8000-00000000a002" &&
+  m.conversationId === "0199a6f0-0000-7000-8000-00000000c101" &&
+  m.threadRootMessageId === "0199a6f0-0000-7000-8000-00000000d100" &&
+  m.idempotencyKey === `evt:${EV}` &&
+  // The asker of this turn is Archie (the delivery'"'"'s author); no tool was offered.
+  m.text.startsWith("Hi Archie!") && m.text.endsWith("[tools: 0]");
+if (!ok) { console.log("FAIL: expected Bea'"'"'s answer in the thread, in reply to the question"); process.exit(1); }
+console.error(m.messageId);
+' 2>"$SECRETS/consult-bea-reply"
+BEA_REPLY="$(tail -n 1 "$SECRETS/consult-bea-reply")"
+DONE="$(wait_turn_done 0199a6f0-0000-7000-8000-00000000e102)"
+echo "   turn done  : $DONE"
+node -e '
+const d = JSON.parse(process.argv[1]);
+if (!d.some((x) => x.agentId === "0199a6f0-0000-7000-8000-00000000a002" && x.outcome === "replied")) {
+  console.log("FAIL: Bea'"'"'s consulted turn did not report done (replied)"); process.exit(1);
+}' "$DONE"
+ORIGIN_REQS="$(docker exec "${P}-model" sh -c "grep -l '$CONSULT_CONV' /tmp/capture/*-openai.json 2>/dev/null | xargs -r grep -l 'Asked by @archie (a bot) on behalf of Víctor Ruiz' | wc -l")"
+echo "   origin     : $ORIGIN_REQS model request(s) of the thread say who asked and for whom"
+[[ "$ORIGIN_REQS" -ge 1 ]] || { echo "FAIL: Bea's model never saw who asked and on whose behalf"; exit 1; }
+
+echo "== [consult] Bea's answer returns to Archie as agent.consult_reply.v1: he replies in the thread, in reply to it"
+RETURN="$SECRETS/consult-reply.json"
+node -e '
+const fs = require("fs");
+const e = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const [beaReply, chainId, hopId, eventId, extra, turnJson] = process.argv.slice(3);
+const bea = { kind: "agent", id: "0199a6f0-0000-7000-8000-00000000a002", displayName: "Bea" };
+const data = {
+  ...e,
+  eventId,
+  // Built like a mention of Archie: the message is Bea'"'"'s answer (its author is Bea), the turn is computed for Víctor.
+  message: {
+    id: beaReply,
+    text: `Hi Archie! The pump order is confirmed.${extra ? ` ${extra}` : ""}`,
+    createdAt: "2026-11-03T09:00:09.000Z",
+    author: bea,
+    mentions: [],
+  },
+  consultReply: {
+    chainId, hopId,
+    target: { id: bea.id, handle: "bea", displayName: "Bea" },
+    mode: "consult", outcome: "answered", answerMessageId: beaReply,
+  },
+  turn: JSON.parse(turnJson),
+};
+fs.writeFileSync(process.argv[2], JSON.stringify({ type: "agent.consult_reply.v1", data }));
+' "$ROOT/infra/openclaw/test/mention-consult.json" "$RETURN" "$BEA_REPLY" "$CONSULT_CHAIN" "$CONSULT_HOP" \
+  0199a6f0-0000-7000-8000-00000000e103 "" '{"tools":[],"toolFlags":{},"memory":[],"now":null,"maxToolCalls":8,"maxWebCalls":5}'
+STATE="$(inject_and_wait "$RETURN" "$BEA_REPLY" /__test/event)"
+echo "$STATE" | BEA_REPLY="$BEA_REPLY" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e103";
+const m = s.messages.find((x) => x.inReplyToMessageId === process.env.BEA_REPLY);
+if (!m) { console.log("FAIL: Archie did not reply to Bea'"'"'s answer"); process.exit(1); }
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+const ok =
+  m.agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
+  m.conversationId === "0199a6f0-0000-7000-8000-00000000c101" &&
+  m.threadRootMessageId === "0199a6f0-0000-7000-8000-00000000d100" &&
+  m.idempotencyKey === `evt:${EV}` &&
+  (s.consultations ?? []).filter((b) => b.eventId === EV).length === 0;
+if (!ok) { console.log("FAIL: expected Archie'"'"'s reply in the thread, in reply to Bea'"'"'s answer"); process.exit(1); }
+'
+DONE="$(wait_turn_done 0199a6f0-0000-7000-8000-00000000e103)"
+echo "   turn done  : $DONE"
+node -e '
+const d = JSON.parse(process.argv[1]);
+if (!d.some((x) => x.agentId === "0199a6f0-0000-7000-8000-00000000a001" && x.outcome === "replied")) {
+  console.log("FAIL: Archie'"'"'s return turn did not report done (replied)"); process.exit(1);
+}' "$DONE"
+ANSWER_REQS="$(docker exec "${P}-model" sh -c "grep -l '$CONSULT_CONV' /tmp/capture/*-openai.json 2>/dev/null | xargs -r grep -l '@bea answered your question' | wc -l")"
+echo "   answered   : $ANSWER_REQS model request(s) of the thread tell Archie that @bea answered"
+[[ "$ANSWER_REQS" -ge 1 ]] || { echo "FAIL: Archie's model never saw that @bea answered"; exit 1; }
+
+echo "== [consult] no model request of the thread ever lists an OpenClaw session or agent-to-agent tool"
+CONSULT_DIR="$SECRETS/consult-captures"
+mkdir -p "$CONSULT_DIR"
+for f in $(docker exec "${P}-model" sh -c "grep -l '$CONSULT_CONV' /tmp/capture/*.json 2>/dev/null || true"); do
+  docker exec "${P}-model" cat "$f" >"$CONSULT_DIR/$(basename "$f")"
+done
+node -e '
+const fs = require("fs"), path = require("path");
+const dir = process.argv[1];
+const files = fs.readdirSync(dir);
+const names = new Set();
+for (const f of files) {
+  const body = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+  for (const t of body.tools ?? []) names.add(t.function?.name ?? t.name ?? "");
+}
+const banned = [...names].filter((n) => /^(sessions?_|conversations_|agents_)/u.test(n) || n === "subagents" || n === "message");
+console.log(`   tools      : ${files.length} model request(s) of the thread, tools offered: ${[...names].sort().join(",") || "(none)"}`);
+if (files.length < 3) { console.log("FAIL: the thread'"'"'s model requests were not captured"); process.exit(1); }
+if (banned.length) { console.log("FAIL: a session or agent-to-agent tool reached the model:", banned.join(",")); process.exit(1); }
+' "$CONSULT_DIR"
+
+echo "== [consult] restore the single-bot cell (Bea leaves)"
+api_exec "
+const auth = { authorization: 'Bearer ' + process.env.FAKE_API_TOKEN };
+const cell = await (await fetch('http://127.0.0.1:4000/agent-channel/v1/cell', { headers: auth })).json();
+await fetch('http://127.0.0.1:4000/__test/cell', { method: 'POST', headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ agents: cell.agents.filter((a) => a.id !== '$CONSULT_B'), reason: 'agent.deleted', agentId: '$CONSULT_B' }) });
+"
 fi
 
 if want connectors; then

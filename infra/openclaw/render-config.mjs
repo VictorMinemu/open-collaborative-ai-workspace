@@ -231,6 +231,13 @@ export function renderConfig(env, opts = {}) {
       // Code Mode would expose only `exec`/`wait` and reach tools from JS; `exec` is denied (reconciler.ts too).
       codeMode: false,
       deny: DANGEROUS_TOOLS,
+      // 07.7 (C-01, D-02, ADR-0027): bots consult each other only through `ocw_consult_agent` and the Agent Channel API,
+      // which decides (resolver), records the chain and audits each hop. OpenClaw's own cross-agent session access is
+      // pinned off rather than left to its default; the pinned 2026.9.7 image's help text reads "Enables cross-agent
+      // session tool access (default: true); omitted or empty allow permits every agent pair". Its session tools are
+      // denied (`group:sessions`, `group:messaging`) as well, and a session sees only itself.
+      agentToAgent: { enabled: false },
+      sessions: { visibility: "self" },
       web: {
         search: {
           enabled: true,

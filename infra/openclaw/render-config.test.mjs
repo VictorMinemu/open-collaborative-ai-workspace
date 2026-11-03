@@ -29,6 +29,20 @@ describe("renderConfig", () => {
     assert.equal(config.tools.deny.includes("group:automation"), true);
   });
 
+  it("OpenClaw's own agent-to-agent stays off (07.7 C-01, D-02): no cross-agent session access, sessions see only themselves", () => {
+    const { config } = renderConfig(base);
+    // Bots consult each other only through ocw_consult_agent and the Agent Channel API (resolver, RLS, audit). The
+    // pinned image defaults agentToAgent to on (an omitted allow permits every pair): pinned off as defence in depth.
+    assert.deepEqual(config.tools.agentToAgent, { enabled: false });
+    assert.equal(config.tools.sessions.visibility, "self");
+    assert.equal(config.tools.profile, "minimal");
+    assert.equal(config.tools.deny.includes("group:sessions"), true);
+    assert.equal(config.tools.deny.includes("group:messaging"), true);
+    // 07.6's pins still hold next to them.
+    assert.deepEqual(config.cron, { enabled: false });
+    assert.deepEqual(config.hooks, { enabled: false });
+  });
+
   it("tools are an allowlist: minimal profile + explicit dangerous denies, never the wildcard or a web tool", () => {
     const { config } = renderConfig(base);
     assert.equal(config.tools.profile, "minimal");
