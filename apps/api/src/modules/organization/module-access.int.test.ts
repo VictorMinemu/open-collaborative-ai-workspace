@@ -546,6 +546,53 @@ describe("lead rights: Lena leads Backend", () => {
     await ok(ada.request("GET", "/api/v1/work-sessions"));
   });
 
+  it("CR-B-03: Lena turning Bots on at Backend never removes Víctor's consult deny there (only admins edit consult rules)", async () => {
+    const consultDeny = await ok(
+      victor.request("POST", "/api/v1/permission-rules", {
+        scopeUnitId: backendId,
+        subjectKind: "everyone",
+        permission: "agent.message",
+        effect: "deny",
+      }),
+    );
+    const danaDeny = await ok(
+      victor.request("POST", "/api/v1/permission-rules", {
+        scopeUnitId: backendId,
+        subjectKind: "user",
+        subjectId: danaId,
+        permission: "agent.message",
+        effect: "deny",
+      }),
+    );
+    try {
+      expect(stateOf(await ok(view(lena, backendId)), "bots").state).toBe("custom");
+      // On straight away, and off then on: the admin's rows stay; everything else Lena may undo, she does.
+      await ok(put(lena, "bots", backendId, everyone, true));
+      await ok(put(lena, "bots", backendId, person(danaId), true));
+      await ok(put(lena, "bots", backendId, everyone, false));
+      expect(stateOf(await ok(view(lena, backendId)), "bots").state).toBe("off");
+      await ok(put(lena, "bots", backendId, everyone, true));
+      expect((await rowsAt(backendId, everyone)).map((r) => r.id)).toEqual([consultDeny.id]);
+      expect((await rowsAt(backendId, person(danaId))).map((r) => r.id)).toEqual([danaDeny.id]);
+      expect(stateOf(await ok(view(lena, backendId)), "bots").state).toBe("custom");
+      // An admin's own toggle still removes it.
+      await ok(put(victor, "bots", backendId, everyone, true));
+      expect(await rowsAt(backendId, everyone)).toEqual([]);
+    } finally {
+      await su.query("delete from app.permission_rules where id = any($1::uuid[])", [
+        [consultDeny.id, danaDeny.id],
+      ]);
+    }
+  });
+
+  it("CR-B-03: what Lena turned off herself at Backend, Bots included, she turns back on completely", async () => {
+    await ok(put(lena, "bots", backendId, everyone, false));
+    expect((await rowsAt(backendId, everyone)).map((r) => r.permission)).toContain("agent.message");
+    const v = await ok(put(lena, "bots", backendId, everyone, true));
+    expect(stateOf(v, "bots").state).toBe("on");
+    expect(await rowsAt(backendId, everyone)).toEqual([]);
+  });
+
   it("Dana, a plain member, may neither read nor change Backend's modules", async () => {
     expect((await fails(view(dana, backendId), 403)).details).toMatchObject({
       permission: "unit.modules.manage",
