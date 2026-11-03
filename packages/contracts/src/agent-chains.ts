@@ -159,6 +159,16 @@ export const AgentChannelTurnDone = z.strictObject({
 });
 export type AgentChannelTurnDone = z.infer<typeof AgentChannelTurnDone>;
 
+/**
+ * `POST /api/v1/agent-chains/:id/cancel` (P-14, Stop): the chain's state after the call. Idempotent: a chain that was
+ * already stopped or completed answers its state unchanged.
+ */
+export const AgentChainCancelResponse = z.object({
+  chainId: Id,
+  status: AgentChainStatus,
+});
+export type AgentChainCancelResponse = z.infer<typeof AgentChainCancelResponse>;
+
 // ---------------------------------------------------------------- the thread (API → web)
 
 /**

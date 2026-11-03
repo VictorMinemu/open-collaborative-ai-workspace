@@ -152,6 +152,12 @@ export type MappedMention = {
    * rule. 07.7 (D-09): also set whenever the API delivered `turn.tainted = true`. Absent on every other turn.
    */
   startsTainted?: boolean;
+  /**
+   * 07.7 (D-01, ADR-0019): the person the turn works for when it is not the sender. A consult reply's message is the
+   * consulted bot's answer, while the turn is the chain's human's (`origin.onBehalfOf`): approval and taint sentences
+   * name them. Absent = the sender.
+   */
+  requesterName?: string;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
@@ -367,7 +373,12 @@ function parseTime(value: string | undefined): number | undefined {
 /** The AI chat conversation kind (06-10, P-10): flat like a DM, several participants like a channel. */
 const AI_CHAT = "ai_chat";
 
-export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined): MappedMention {
+export function mapMention(
+  event: AgentMentionEvent,
+  bot: CellAgent | undefined,
+  /** 07.7: the person the turn works for when the message is not theirs (a consult reply), named in the turn blocks. */
+  opts: { requester?: string } = {},
+): MappedMention {
   const direct = event.conversation.kind === "dm";
   const aiChat = event.conversation.kind === AI_CHAT;
   // In a DM or an AI chat `thread.rootMessageId` is the message itself (schema unchanged); the reply is flat.
@@ -382,7 +393,7 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
   const connectorTools = allowedTools.includes("ocw_connector_call")
     ? [...new Set(turn.tools)].filter((t) => CONNECTOR_LOGICAL_TOOL.test(t) && !agentToolSet.has(t))
     : [];
-  const askerName = sanitizeName(author.displayName);
+  const askerName = opts.requester ?? sanitizeName(author.displayName);
   const conversationLabel = direct
     ? `Direct chat with ${sanitizeName(author.displayName)}`
     : aiChat
@@ -689,13 +700,22 @@ export function mapAutomationRun(event: AgentAutomationRunEvent, bot: CellAgent 
  * none: the reply lands in the hop's thread with `inReplyToMessageId` = that message), plus a `consult_reply` block
  * (server data) naming the consulted bot and the outcome. A return turn is an unattended hop turn (D-13): never a
  * browser tool. Throws on a malformed event (the bridge validates first).
+ *
+ * 07.7-06: the event's `origin` names the hop being returned and, in `onBehalfOf`, the chain's human. It is not a
+ * question to this bot, so it never renders the question's "Consult request" block; the human (not the consulted bot
+ * whose answer is the message) is the turn's requester in the turn blocks and the gate's sentences.
  */
 export function mapConsultReply(event: AgentConsultReplyEvent, bot: CellAgent | undefined): MappedMention {
-  const { consultReply, ...rest } = AgentConsultReplyEvent.parse(event);
-  const base = mapMention({ ...rest, type: AgentChannelEventTypes.mention }, bot);
+  const { consultReply, origin, ...rest } = AgentConsultReplyEvent.parse(event);
+  const requester = origin ? sanitizeName(origin.onBehalfOf.displayName) : undefined;
+  const base = mapMention(
+    { ...rest, type: AgentChannelEventTypes.mention },
+    bot,
+    requester ? { requester } : {},
+  );
   const target = `@${blockHandle(consultReply.target.handle)}`;
-  const human = rest.origin
-    ? blockName(rest.origin.onBehalfOf.displayName)
+  const human = origin
+    ? blockName(origin.onBehalfOf.displayName)
     : rest.message.author.kind === "user"
       ? blockName(rest.message.author.displayName)
       : "the person who asked";
@@ -727,6 +747,7 @@ export function mapConsultReply(event: AgentConsultReplyEvent, bot: CellAgent | 
     ...base,
     allowedTools: base.allowedTools.filter((t) => !BROWSER_TOOLS.has(t)),
     contextBlocks: [block, ...base.contextBlocks],
+    ...(requester ? { requesterName: requester } : {}),
   };
 }
 
