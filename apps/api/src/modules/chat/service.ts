@@ -31,6 +31,7 @@ import type { ChannelFacts } from "../organization";
 import type { RealtimeService } from "../realtime";
 import { withActivity } from "./activity";
 import { cardOf, insertCard, withCards } from "./card-actions";
+import { withConsults } from "./consults";
 import { authorOf, type Directory } from "./directory";
 import { pinnedFor } from "./pins";
 import { reactionsFor } from "./reactions";
@@ -679,7 +680,8 @@ export async function hydrateViewer(tx: Tx, list: Message[], viewerId: string): 
   );
   // Agent Cards (P-11) with the viewer's fields (following, viewerCan); a bot reply's turn activity (07.8-10, R2),
   // the same for every viewer.
-  return withActivity(tx, await withCards(tx, hydrated, viewerId));
+  // Phase 07.7 (D-15): a consult hop's question or answer carries its hop state, the same for every viewer.
+  return withConsults(tx, await withActivity(tx, await withCards(tx, hydrated, viewerId)));
 }
 
 /** Top-level messages of a channel, newest page first in the DB, returned oldest → newest. */
@@ -962,7 +964,9 @@ export async function postMessage(
     };
   }
   // A bot reply carries its turn's activity (07.8-10, R2): viewer-agnostic, so it may ride the event.
-  if (author.kind === "agent") [message] = (await withActivity(tx, [message])) as [Message];
+  // Phase 07.7 (D-15): a consult question carries its hop (inserted by `onInserted` above) in its own `message.created`.
+  if (author.kind === "agent")
+    [message] = (await withConsults(tx, await withActivity(tx, [message]))) as [Message];
   const seq = await deps.realtime.appendEvent(tx, topic, EventTypes.messageCreated, { message });
   if (seq !== nextSeq) throw new Error(`stream seq drift on ${topic}: expected ${nextSeq}, got ${seq}`);
 

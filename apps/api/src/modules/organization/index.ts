@@ -15,6 +15,8 @@ import { createPermissionService } from "./permissions/service";
 import { registerRuleRoutes } from "./rules";
 import { registerUnitRoutes } from "./units";
 
+/** Phase 07.7 (P-05): the canonical `agent.message` decision, for the consult route and the offered targets. */
+export { type MessagingDecisionInput, messagingDecision } from "./agent-messaging";
 export { listMembers, memberDirectory } from "./members";
 export { audienceCoverFacts } from "./permissions/audience";
 export { AuthzDeniedError } from "./permissions/errors";

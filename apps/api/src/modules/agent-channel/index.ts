@@ -49,6 +49,7 @@ import {
   resolveReplyTarget,
 } from "./cards";
 import { registerConnectorRoutes } from "./connectors";
+import { registerConsultRoutes } from "./consult";
 import { registerCellGateway } from "./gateway";
 import { registerHttpRequestRoutes } from "./http-requests";
 import { registerMcpCellRoutes } from "./mcp";
@@ -64,6 +65,7 @@ import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerWorkZoneRoutes } from "./work-zone";
 
 export { currentPhrase } from "./activity";
+export { consultTargets, decideAgentMessage } from "./agent-message";
 export {
   type DeliverAutomationRunInput,
   type DeliverAutomationRunResult,
@@ -76,6 +78,7 @@ export {
 export type { BrowserBudgets } from "./browser";
 export { notifyCardFollowers, updatePlatformCardNotified } from "./card-followers";
 export { emitCardAction } from "./cards";
+export { CONSULT_SENTENCES, deliverConsultQuestion } from "./consult";
 export { conversationAudience } from "./memory-files";
 export { buildMentionEvents } from "./mentions";
 
@@ -548,6 +551,9 @@ export function createAgentChannelModule(
           if (opts.workZone) registerWorkZoneRoutes(scope, core, opts.workZone);
           // Natural-language automations (07.6-12, D-02, D-03): a proposal card only the turn's person confirms.
           if (opts.automations) registerAutomationProposalRoutes(scope, core, opts.automations);
+          // Agent-to-agent consults (07.7-04, D-07, D-08): a visible question in the turn's thread and a turn for the
+          // consulted bot on behalf of the same human, under the canonical decision and the chain guards.
+          registerConsultRoutes(scope, { core, perms, modelLabel: opts.modelLabel, memory: opts.memory });
           // Watched-record writes (07.6-14, D-04, D-07): compare-and-set on the watched record of the turn's card thread,
           // governed like any side effect (taint, 07.5 approvals).
           if (opts.records) {
