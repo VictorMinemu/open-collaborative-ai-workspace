@@ -2559,11 +2559,15 @@ echo "== [dm-isolation] deleting the bot leaves none of its DM transcripts in th
 AGENT_DIR="/home/node/.openclaw/agents/ocw-${BOT_ID}"
 BEFORE="$(docker exec "${P}-openclaw" sh -c "grep -rl '$SECRET_WORD' /home/node/.openclaw 2>/dev/null | wc -l")"
 echo "   before     : $BEFORE state file(s) hold the secret"
+# Wait for THIS removal: earlier scenarios (07.7 `consult` removes Bea) already logged `remove=1`, so count the lines
+# from before the delete and wait for a new one and for the agent dir to be purged (both checks below stay strict).
+REMOVALS_BEFORE="$(docker logs "${P}-openclaw" 2>&1 | grep -c "reconciled OpenClaw: agents upsert=0 remove=1" || true)"
 api_exec "
 await fetch('http://127.0.0.1:4000/__test/cell', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agents: [], reason: 'agent.deleted', agentId: '$BOT_ID' }) });
 "
-for i in $(seq 1 60); do
-  if docker logs "${P}-openclaw" 2>&1 | grep "reconciled OpenClaw: agents upsert=0 remove=1" >/dev/null; then break; fi
+for i in $(seq 1 120); do
+  REMOVALS_NOW="$(docker logs "${P}-openclaw" 2>&1 | grep -c "reconciled OpenClaw: agents upsert=0 remove=1" || true)"
+  if [[ "$REMOVALS_NOW" -gt "$REMOVALS_BEFORE" ]] && ! docker exec "${P}-openclaw" test -e "$AGENT_DIR"; then break; fi
   sleep 1
 done
 docker logs "${P}-openclaw" 2>&1 | grep -E "reconciled OpenClaw|purged OpenClaw state|could not purge|agent removal refused" | tail -n 3 | sed 's/^/   /'
