@@ -315,10 +315,14 @@ async function botView(
   const refs = new Map((named.length > 0 ? await teamBots(tx, { ids: named }) : []).map((b) => [b.id, b]));
   // Live team bots only, in display-name order; a rule naming a gone bot is not shown (and goes on the next PUT).
   const listed = (ids: readonly string[]) => [...refs.values()].filter((b) => ids.includes(b.id)).map(refOf);
+  const allow = listed(rules.allow);
+  // CR-B-06: `only` whose bots are all gone reads `default` (what its rows now decide: no live allow), so the sheet
+  // saves back exactly what it shows and that PUT removes the dangling rows.
+  const mode = rules.mode === "only" && allow.length === 0 ? "default" : rules.mode;
   return AgentMessagingView.parse({
     agentId: bot.id,
     orgDefault: (await switchRows(tx)).length > 0,
-    outbound: { mode: rules.mode, allow: listed(rules.allow), deny: listed(rules.deny) },
+    outbound: { mode, allow, deny: listed(rules.deny) },
     inbound: { consultable: rules.consultable },
     effective: await effectiveOf(tx, perms, bot),
     canManage: await canManage(req, tx, perms),

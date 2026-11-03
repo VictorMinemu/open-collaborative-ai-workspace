@@ -565,6 +565,23 @@ describe("per-bot consult rules: GET/PUT /api/v1/agents/:id/messaging (D-04, P-0
     }
   });
 
+  it("CR-B-06: 'only' bots that were all deleted read as default, so the sheet saves back what it shows", async () => {
+    const gone = await insertBot(orgId, "Gone");
+    try {
+      await ok(putBot(victor, archie, { mode: "only", allow: [gone] }));
+      await su.query("update app.agents set deleted_at = now() where id = $1", [gone]);
+      const view = await ok(getBot(victor, archie));
+      expect(view.outbound).toEqual({ mode: "default", allow: [], deny: [] });
+      // Saving exactly what the sheet shows (inbound flipped) works and removes the dangling row.
+      await ok(putBot(victor, archie, view.outbound, false));
+      expect(shape(await ownRows(archie))).toEqual([
+        { subject: "everyone", tool: `agent:${archie}`, effect: "deny" },
+      ]);
+    } finally {
+      await ok(putBot(victor, archie, { mode: "default" }));
+    }
+  });
+
   it("the summary names at most 50 targets, in display-name order", async () => {
     const many: string[] = [];
     for (let i = 0; i < 55; i++) many.push(await insertBot(orgId, `Zz${String(i).padStart(2, "0")}`));
