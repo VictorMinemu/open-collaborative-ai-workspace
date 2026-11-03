@@ -1018,13 +1018,16 @@ const gated = s.toolCalls.filter((c) => c.eventId === EV);
 console.log("   reply      :", m.text.replace(/\n/g, " / "));
 console.log("   consults   :", JSON.stringify(asked));
 const q = asked[0];
+// CR-C-07: the key is bound to the intent, <eventId>:consult:<first 16 hex of sha256(target id, normalised question)>.
+const intent = require("crypto").createHash("sha256")
+  .update("0199a6f0-0000-7000-8000-00000000a002\nis the pump order confirmed?", "utf8").digest("hex").slice(0, 16);
 const ok =
   asked.length === 1 &&
   Object.keys(q).sort().join() === "agentId,eventId,idempotencyKey,mode,question,target" &&
   q.agentId === "0199a6f0-0000-7000-8000-00000000a001" &&
   q.target === "0199a6f0-0000-7000-8000-00000000a002" &&
   q.question === "Is the pump order confirmed?" && q.mode === "consult" &&
-  q.idempotencyKey === `${EV}:consult:0` &&
+  q.idempotencyKey === `${EV}:consult:${intent}` &&
   // Self-validated by its own route (D-08): never asked to /tool-calls.
   gated.length === 0 &&
   m.text.includes("Tool ocw_consult_agent said: Question sent to @bea") &&
