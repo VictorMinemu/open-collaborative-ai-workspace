@@ -34,6 +34,7 @@ import { cn, relativeTime } from "@/lib/utils";
 import { AgentCardView } from "./agent-card";
 import { MessageAttachments } from "./attachments/attachment-grid";
 import { Lightbox } from "./attachments/lightbox";
+import { ConsultChip } from "./consult-chip";
 import { EmojiPicker } from "./emoji-picker";
 import { Markdown } from "./markdown";
 import {
@@ -526,6 +527,8 @@ const MessageRow = memo(function MessageRow({
             </Tooltip>
           </div>
         )}
+        {/* 07.7-10: a consult hop's provenance and live status (server side data), also on continuation rows. */}
+        {!deleted && message.consult ? <ConsultChip consult={message.consult} /> : null}
         {/* 07.8-20 (R2): what the bot did in its sandbox and browser this turn, above its reply, for every reader. */}
         {!deleted && message.activity ? (
           <BotActivity
