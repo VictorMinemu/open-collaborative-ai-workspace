@@ -405,24 +405,55 @@ describe("tracer: Bea answers, reports done, and Archie gets the answer back as 
     ).toHaveLength(1);
   });
 
-  it("Archie replies to Bea's answer in the same thread (accepted), and its done completes the chain", async () => {
+  it("Archie replies to Bea's answer in the same thread (accepted); its done leaves the chain to his first turn, still running (CR-A-07)", async () => {
     expect((await chainRow(answer.chainId)).status).toBe("active");
     const r = await post(reply, "Víctor: Bea says PO-1187 was confirmed on Monday.");
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body).toMatchObject({ created: true, threadRootMessageId: root });
     expect((await turnRow(reply.eventId)).reply_message_id).toBe(r.body.messageId);
     expect((await done(reply)).status).toBe(200);
-    expect(await chainRow(answer.chainId)).toMatchObject({
-      status: "completed",
-      closed_at: expect.any(Date),
-    });
+    expect((await turnRow(reply.eventId)).done_at).toEqual(expect.any(Date));
+    expect((await chainRow(answer.chainId)).status).toBe("active");
     // A root return turn delivers nothing further.
     expect(await replies()).toHaveLength(1);
   });
 
-  it("Archie's first turn reporting done after the chain completed changes nothing", async () => {
+  it("Archie's first turn reporting done completes the chain; a second done changes nothing", async () => {
+    expect((await done(archie)).status).toBe(200);
+    expect(await chainRow(answer.chainId)).toMatchObject({
+      status: "completed",
+      closed_at: expect.any(Date),
+    });
     expect((await done(archie)).status).toBe(200);
     expect((await chainRow(answer.chainId)).status).toBe("completed");
+  });
+});
+
+describe("a chain completes only once none of its turns still runs (CR-A-07)", () => {
+  it("Bea answers before Archie's first turn ends: its late done leaves the return turn its consult", async () => {
+    const { archie, answer, bea } = await consulted({ conversationId: trioId });
+    await ok(post(bea, ANSWER));
+    await ok(done(bea));
+    const reply = await replyFor(answer.hopId);
+    // The first turn ends after the answer came back: the return turn is still running.
+    await ok(done(archie));
+    expect((await chainRow(answer.chainId)).status).toBe("active");
+    const more = await consult(reply, carlId, { idempotencyKey: `${reply.eventId}:consult:0` });
+    expect(more.status, JSON.stringify(more.body)).toBe(200);
+    expect(more.body.ok).toBe(true);
+  });
+
+  it("the return turn ends first while Archie's first turn still runs: that turn may still consult", async () => {
+    const { archie, answer, bea } = await consulted({ conversationId: trioId });
+    await ok(post(bea, ANSWER));
+    await ok(done(bea));
+    const reply = await replyFor(answer.hopId);
+    await ok(post(reply, "Víctor: confirmed."));
+    await ok(done(reply));
+    expect((await chainRow(answer.chainId)).status).toBe("active");
+    const more = await consult(archie, carlId, { idempotencyKey: `${archie.eventId}:consult:1` });
+    expect(more.status, JSON.stringify(more.body)).toBe(200);
+    expect(more.body.ok).toBe(true);
   });
 });
 
@@ -486,7 +517,8 @@ describe("PR #25's trigger rule, unchanged, decides consult hop posts (D-06, P-0
 describe("POST /turns/:eventId/done is bound to this cell's turns (T-07.7-06-03)", () => {
   it("an unknown event, another bot's event or another organization's event is 404 unknown_turn", async () => {
     const { archie, bea } = await consulted();
-    const unknown = await done({ eventId: randomUUID(), agent: { id: beaId } });
+    const unknownId = randomUUID();
+    const unknown = await done({ eventId: unknownId, agent: { id: beaId } });
     expect(unknown.status).toBe(404);
     expect(unknown.body.error?.code).toBe("unknown_turn");
     const swapped = await done(bea, "replied", { agentId: archieId });
@@ -497,6 +529,21 @@ describe("POST /turns/:eventId/done is bound to this cell's turns (T-07.7-06-03)
     // Org B's own token cannot report org A's turns either.
     const crossed = await done(bea, "replied", {}, tokenB);
     expect(crossed.status).toBe(404);
+    // CR-A-09: every refusal is audited like any other cell route's unknown turn, with ids and the code only.
+    const refused = (
+      await rows(
+        "select organization_id, actor_kind, result, metadata from app.audit_events where action = 'bot.tool_call' and resource_id = 'turn.done'",
+      )
+    ).filter((a) => a.metadata.reason === "unknown_turn");
+    const forEvent = (eventId: string, org = orgId) =>
+      refused.filter((a) => a.metadata.eventId === eventId && a.organization_id === org);
+    expect(forEvent(unknownId)).toHaveLength(1);
+    expect(forEvent(bea.eventId).filter((a) => a.metadata.agentId === archieId)).toHaveLength(1);
+    expect(forEvent(orgBEventId)).toHaveLength(1);
+    expect(
+      refused.filter((a) => a.metadata.eventId === bea.eventId && a.organization_id !== orgId),
+    ).toHaveLength(1);
+    for (const a of refused) expect(a).toMatchObject({ actor_kind: "system", result: "denied" });
   });
 
   it("the body is strict (400 on extra fields or an unknown outcome)", async () => {
@@ -521,6 +568,154 @@ describe("POST /turns/:eventId/done is bound to this cell's turns (T-07.7-06-03)
     expect(await replies()).toEqual(before);
     // An ordinary turn's reply is not recorded on the ledger (chain turns only).
     expect((await turnRow(ev.eventId)).reply_message_id).toBeNull();
+  });
+});
+
+describe("the hop's answer is the consulted bot's whole reply, never a failure notice (CR-A-03, CR-A-04)", () => {
+  it("CR-A-03: Bea's reply in two chunks reaches Archie whole, as one answer, not repeated as history", async () => {
+    const { answer, bea } = await consulted();
+    const first = await ok(post(bea, "Part one: PO-1187 is confirmed."));
+    const second = await ok(
+      post(bea, "Part two: it ships Monday.", { idempotencyKey: `evt:${bea.eventId}:1` }),
+    );
+    // A post of another turn of Bea in the same thread is not part of this answer.
+    const other = await ok(
+      victor.request("POST", `/api/v1/conversations/${opsId}/messages`, {
+        body: "@bea something else",
+        mentions: [{ kind: "agent", id: beaId }],
+        threadRootId: bea.thread.rootMessageId,
+      }),
+    );
+    const otherTurn = await deliveryOn(other.id as string, beaId);
+    await ok(post(otherTurn, "Unrelated."));
+    await ok(done(bea));
+    expect(await hopRow(answer.hopId)).toMatchObject({
+      status: "answered",
+      answer_message_id: first.messageId,
+    });
+    const reply = await replyFor(answer.hopId);
+    expect(reply.message).toMatchObject({
+      id: first.messageId,
+      text: "Part one: PO-1187 is confirmed.\n\nPart two: it ships Monday.",
+      author: { kind: "agent", id: beaId },
+    });
+    expect(reply.consultReply).toMatchObject({ outcome: "answered", answerMessageId: first.messageId });
+    const historyIds = (reply.threadHistory as Json[]).map((h) => h.id);
+    expect(historyIds).not.toContain(first.messageId);
+    expect(historyIds).not.toContain(second.messageId);
+  });
+
+  it("CR-A-04: Bea's turn failed: the bridge's failure notice is not her answer", async () => {
+    const { root, answer, bea } = await consulted();
+    const notice = await ok(
+      post(bea, "Sorry, I couldn't generate a reply. Please try again in a moment.", {
+        idempotencyKey: `evt:${bea.eventId}:failed`,
+      }),
+    );
+    await ok(done(bea, "failed"));
+    expect(await hopRow(answer.hopId)).toMatchObject({ status: "failed", answer_message_id: null });
+    const reply = await replyFor(answer.hopId);
+    expect(reply.consultReply).toMatchObject({ outcome: "failed", answerMessageId: null });
+    expect(reply.message).toMatchObject({
+      id: answer.questionMessageId,
+      text: "@bea couldn't answer.",
+      author: { kind: "user", id: victorId },
+    });
+    const thread = await ok(victor.request("GET", `/api/v1/messages/${root}/thread`));
+    const listed = (thread.replies as Json[]).find((m) => m.id === notice.messageId);
+    expect(listed?.consult?.role).not.toBe("answer");
+  });
+});
+
+describe("one lock order: thread stream → turn → hop → chain (CR-A-02, CR-A-05)", () => {
+  /** A second connection holding the thread's stream row, the way an in-flight post does. */
+  async function holdStream(conversationId: string): Promise<pg.Client> {
+    const holder = new pg.Client({ connectionString: stack.db.superuserUrl });
+    await holder.connect();
+    await holder.query("begin");
+    await holder.query("select last_seq from app.streams where id = $1 for update", [
+      `conv:${conversationId}`,
+    ]);
+    return holder;
+  }
+  /** Until some backend waits on a lock while reading the streams table (the request is parked on the stream). */
+  const blockedOnStream = () =>
+    until(
+      () =>
+        rows(
+          `select count(*)::int as n from pg_stat_activity
+            where wait_event_type = 'Lock' and query ilike '%app.streams%' and pid <> pg_backend_pid()`,
+        ),
+      (r) => (r[0]?.n ?? 0) > 0,
+    );
+
+  it("CR-A-02: a consult waits for the thread's stream before it claims the turn (no deadlock with a first post)", async () => {
+    const { archie } = await archieTurn();
+    const holder = await holdStream(opsId);
+    let pending: Promise<{ status: number; body: Json }> | null = null;
+    try {
+      pending = consult(archie, beaId);
+      expect((await blockedOnStream())[0]?.n).toBeGreaterThan(0);
+      // The turn row is free: a first post holding the stream could still record its reply on it.
+      const probe = new pg.Client({ connectionString: stack.db.superuserUrl });
+      await probe.connect();
+      try {
+        await probe.query("begin");
+        const locked = await probe
+          .query("select event_id from app.agent_turns where event_id = $1 for update nowait", [
+            archie.eventId,
+          ])
+          .then(
+            () => false,
+            (e: { code?: string }) => e.code === "55P03",
+          );
+        await probe.query("rollback");
+        expect(locked).toBe(false);
+      } finally {
+        await probe.end();
+      }
+    } finally {
+      await holder.query("rollback");
+      await holder.end();
+    }
+    expect((await pending!).status).toBe(200);
+  });
+
+  it("CR-A-02: Archie's first post and his consult, at the same time, both succeed", async () => {
+    for (let i = 0; i < 5; i++) {
+      const { archie } = await archieTurn();
+      const [posted, asked] = await Promise.all([
+        post(archie, "Let me check with @bea."),
+        consult(archie, beaId),
+      ]);
+      expect(posted.status, JSON.stringify(posted.body)).toBe(200);
+      expect(asked.status, JSON.stringify(asked.body)).toBe(200);
+    }
+  });
+
+  it("CR-A-05: done reads the turn after the stream lock, so a post committing under it is the answer", async () => {
+    const { answer, bea } = await consulted();
+    const posted = await ok(post(bea, ANSWER));
+    // Seen from done's side, the post has not committed yet: it is in flight and holds the stream.
+    await su.query("update app.agent_turns set reply_message_id = null where event_id = $1", [bea.eventId]);
+    const holder = await holdStream(opsId);
+    let pending: Promise<{ status: number; body: Json }> | null = null;
+    try {
+      await holder.query("update app.agent_turns set reply_message_id = $2 where event_id = $1", [
+        bea.eventId,
+        posted.messageId,
+      ]);
+      pending = done(bea);
+      await blockedOnStream();
+      await holder.query("commit");
+    } finally {
+      await holder.end().catch(() => undefined);
+    }
+    expect((await pending!).status).toBe(200);
+    expect(await hopRow(answer.hopId)).toMatchObject({
+      status: "answered",
+      answer_message_id: posted.messageId,
+    });
   });
 });
 
@@ -562,6 +757,37 @@ describe("taint flows forward (Task 2; D-09, P-11, Pitfall 2)", () => {
     expect(refused.body).toMatchObject({ allowed: false, reason: "tainted" });
   });
 
+  it("CR-A-01: Archie's own turn read outside content after asking: the return turn starts tainted (same session, nothing laundered)", async () => {
+    const { archie, answer, bea } = await consulted({ conversationId: trioId });
+    // The asking turn keeps running after the consult call and reads untrusted content (a web or MCP result).
+    await su.query("update app.agent_turns set tainted = true where event_id = $1", [archie.eventId]);
+    await ok(post(bea, ANSWER));
+    await ok(done(bea));
+    expect((await turnRow(bea.eventId)).tainted).toBe(false);
+    const reply = await replyFor(answer.hopId);
+    expect(reply.turn.tainted).toBe(true);
+    expect((await turnRow(reply.eventId)).tainted).toBe(true);
+    expect(reply.turn.tools).not.toContain("ocw_consult_agent");
+    const forced = await cell("/consultations", {
+      eventId: reply.eventId,
+      agentId: archieId,
+      target: carlId,
+      question: QUESTION,
+      idempotencyKey: `${reply.eventId}:consult:0`,
+    });
+    expect(forced.status).toBe(403);
+    expect(forced.body.code).toBe("tainted");
+  });
+
+  it("CR-A-01: member data the asking turn read stays with its return turn", async () => {
+    const { archie, answer, bea } = await consulted();
+    await su.query("update app.agent_turns set member_data = true where event_id = $1", [archie.eventId]);
+    await ok(post(bea, ANSWER));
+    await ok(done(bea));
+    const reply = await replyFor(answer.hopId);
+    expect(await turnRow(reply.eventId)).toMatchObject({ member_data: true, user_id: victorId });
+  });
+
   it("member data read while answering stays with the answer: the return turn starts with it (the 07.5 re-run rule)", async () => {
     const { answer, bea } = await consulted();
     await su.query("update app.agent_turns set member_data = true where event_id = $1", [bea.eventId]);
@@ -590,6 +816,9 @@ describe("the root human pays every hop (Task 2; D-03, D-04, P-12, ADR-0019)", (
     const archieBack = await replyFor(ab.hopId);
     await ok(post(archieBack, "Víctor: confirmed."));
     await ok(done(archieBack));
+    // CR-A-07: Archie's first turn still runs until its own done.
+    expect((await chainRow(ab.chainId)).status).toBe("active");
+    await ok(done(archie));
     expect((await chainRow(ab.chainId)).status).toBe("completed");
 
     const turns = await rows(
@@ -619,7 +848,7 @@ describe("the root human pays every hop (Task 2; D-03, D-04, P-12, ADR-0019)", (
 
   it("Archie at its daily limit when Bea is done: hop answered, no return turn, the usual notice once, chain completed", async () => {
     const limitsId = await channel(`limits-${randomUUID().slice(0, 6)}`, [archieId, beaId]);
-    const { answer, bea } = await consulted({ conversationId: limitsId });
+    const { archie, answer, bea } = await consulted({ conversationId: limitsId });
     const posted = await ok(post(bea, ANSWER));
     await su.query("update app.agent_usage_daily set turns = 100000 where agent_id = $1", [archieId]);
     await ok(done(bea));
@@ -641,6 +870,8 @@ describe("the root human pays every hop (Task 2; D-03, D-04, P-12, ADR-0019)", (
     ).filter((a) => a.metadata.messageId === posted.messageId);
     expect(limited).toHaveLength(1);
     expect(limited[0]).toMatchObject({ user_id: victorId, metadata: { notified: true } });
+    // Nothing is pending and no return turn runs: the chain completes once Archie's first turn ends (CR-A-07).
+    await ok(done(archie));
     expect((await chainRow(answer.chainId)).status).toBe("completed");
     await su.query("delete from app.agent_usage_daily");
   });

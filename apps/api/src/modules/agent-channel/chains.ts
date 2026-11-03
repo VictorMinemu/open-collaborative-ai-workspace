@@ -1,4 +1,5 @@
 import {
+  A2A_HOP_TIMEOUT_MS,
   AgentChannelEventTypes,
   AgentChannelTurnDone,
   type AgentConsultReplyEvent,
@@ -17,7 +18,7 @@ import {
   type Tx,
   tenantOf,
 } from "@ocw/db";
-import { and, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { App, Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
@@ -25,7 +26,7 @@ import { notFound } from "../../lib/errors";
 import { announceConsults, convTopic, createConversationAccess, lockNextSeq } from "../chat";
 import { memberDirectory } from "../organization";
 import { type CellPrincipal, cellOf } from "./auth";
-import { cellAuditBase } from "./claim";
+import { auditUnknownTurn, cellAuditBase } from "./claim";
 import type { ConsultDeps } from "./consult";
 import { buildMentionEvents } from "./mentions";
 
@@ -60,8 +61,8 @@ export function noAnswerSentence(handle: string, outcome: "failed" | "timed_out"
 }
 
 /**
- * Records the first message a chain turn posted (`agent_turns.reply_message_id`), in the post's transaction: the hop's
- * answer when the turn answers one (D-15, P-09). Turns outside any chain record nothing; later posts never overwrite.
+ * Records the first message a chain turn posted (`agent_turns.reply_message_id`), in the post's transaction: the anchor
+ * of the hop's answer when the turn answers one (D-15, P-09; `answerOf` joins the turn's later chunks at delivery). Turns outside any chain record nothing; later posts never overwrite.
  */
 export async function recordChainReply(tx: Tx, p: { eventId: string; messageId: string }): Promise<void> {
   await tx
@@ -109,13 +110,77 @@ export async function chainLive(
   return createConversationAccess(core).isReadable(tx, chain.humanUserId, judged, { kinds: ["channel"] });
 }
 
+/** The longest answer a return turn carries (the chat's message bound). */
+const ANSWER_MAX = 20_000;
+
+/**
+ * The answer of an answered hop (CR-A-03): every post of the turn that answered it, in thread order, joined into one
+ * text, starting with the post recorded on that turn (`hop.answer_message_id`, the first, whatever its key: a message or
+ * a card). Later posts belong to that turn when they are the same bot's, in the same conversation, after the first, and
+ * keyed in the turn's own reply namespace (`evt:<eventId>:<n>`, the bridge's chunk and block keys; its failure notice,
+ * `evt:<eventId>:failed`, never is): another turn of the same bot in the same thread never mixes in. Deleted posts are
+ * skipped. Null when nothing is left (the answer was deleted).
+ */
+async function answerOf(tx: Tx, hop: HopRow): Promise<{ id: string; body: string; ids: string[] } | null> {
+  if (!hop.answerMessageId) return null;
+  const [first] = await tx
+    .select({ id: messages.id, seq: messages.seq, conversationId: messages.conversationId })
+    .from(messages)
+    .where(eq(messages.id, hop.answerMessageId))
+    .limit(1);
+  if (!first) return null;
+  const [turn] = await tx
+    .select({ eventId: agentTurns.eventId })
+    .from(agentTurns)
+    .where(and(eq(agentTurns.answeringHopId, hop.id), eq(agentTurns.replyMessageId, first.id)))
+    .limit(1);
+  const prefix = turn ? `evt:${turn.eventId}:` : null;
+  const posts = await tx
+    .select({
+      id: messages.id,
+      body: messages.body,
+      key: messages.clientMessageId,
+      deletedAt: messages.deletedAt,
+    })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.conversationId, first.conversationId),
+        eq(messages.authorKind, "agent"),
+        eq(messages.authorId, hop.targetAgentId),
+        gte(messages.seq, first.seq),
+        prefix
+          ? or(eq(messages.id, first.id), like(messages.clientMessageId, `${prefix}%`))
+          : eq(messages.id, first.id),
+      ),
+    )
+    .orderBy(asc(messages.seq))
+    .limit(100);
+  const chunk = (key: string | null) =>
+    prefix !== null && /^\d{1,6}$/u.test((key ?? "").slice(prefix.length));
+  const kept = posts.filter(
+    (m) => !m.deletedAt && m.body.trim() !== "" && (m.id === first.id || chunk(m.key)),
+  );
+  const [head] = kept;
+  if (!head) return null;
+  return {
+    id: head.id,
+    body: kept
+      .map((m) => m.body)
+      .join("\n\n")
+      .slice(0, ANSWER_MAX),
+    ids: kept.map((m) => m.id),
+  };
+}
+
 /**
  * Delivers a closed hop back to the bot that asked (D-01, D-07: the `deliverAutomationRun` / `emitCardAction`
  * pattern), in the closing transaction, which runs as the chain's human. The `AgentMention`'s structural author is that
  * human (tools, limits, metering and the ledger row are theirs; never the consulted bot's owner, ADR-0019), on the
  * answer (or, without one, on the question with a server sentence), `trigger: "consult"` (unattended, D-13), with the
  * asker's place in the chain (its own answering hop, if any, and the hop it receives). The return turn starts with the
- * taint and member data of every turn that answered the hop (D-09, Pitfall 2: nothing is laundered through a hop). The
+ * taint and member data of every turn that answered the hop and of the turn that asked it (D-09, Pitfall 2, CR-A-01:
+ * nothing is laundered through a hop, in either direction). The
  * event then names the consulted bot as `message.author` when it carries its answer, the chain's human in `origin`, and
  * is appended as `agent.consult_reply.v1`. Null when nothing is delivered: a handoff, a closed chain, a human who no
  * longer reads the conversation, a gone asker, or its daily limit (the existing notice then follows).
@@ -147,25 +212,21 @@ export async function deliverConsultReply(
     .limit(1);
   if (!target) return null;
 
-  // Every turn that answered this hop (the question turn and its own return turns): their taint and member data.
+  // CR-A-01: every turn that answered this hop (the question turn and its own return turns) AND the turn that asked it,
+  // as it stands now. Consulting is asynchronous: the asking turn keeps running after its consult call and may read
+  // outside content or member data, and the return turn resumes the same per-thread session, so it starts with all of it.
   const [carried] = await tx
     .select({
       tainted: sql<boolean>`coalesce(bool_or(${agentTurns.tainted}), false)`,
       memberData: sql<boolean>`coalesce(bool_or(${agentTurns.memberData}), false)`,
     })
     .from(agentTurns)
-    .where(eq(agentTurns.answeringHopId, hop.id));
+    .where(or(eq(agentTurns.answeringHopId, hop.id), eq(agentTurns.eventId, hop.sourceEventId)));
   const tainted = carried?.tainted === true;
   const memberData = carried?.memberData === true;
 
-  const [answer] = hop.answerMessageId
-    ? await tx
-        .select({ id: messages.id, body: messages.body, deletedAt: messages.deletedAt })
-        .from(messages)
-        .where(eq(messages.id, hop.answerMessageId))
-        .limit(1)
-    : [];
-  const posted = answer && !answer.deletedAt ? answer : null;
+  // CR-A-04: only an answered hop carries an answer; a failed turn's post (the bridge's failure notice) never does.
+  const posted = outcome === "answered" ? await answerOf(tx, hop) : null;
   const effective: ConsultOutcome = outcome === "answered" && !posted ? "failed" : outcome;
   const used = await tx
     .select({ id: agentChainHops.targetAgentId })
@@ -210,8 +271,11 @@ export async function deliverConsultReply(
     await tx.update(agentTurns).set({ memberData: true }).where(eq(agentTurns.eventId, ev.eventId));
   }
   const targetRef = { id: target.id, handle: target.username, displayName: target.name };
+  const answerIds = new Set(posted?.ids ?? []);
   const payload: StoredConsultReply = {
     ...ev,
+    // The answer is the event's message: its chunks are not repeated as history.
+    threadHistory: ev.threadHistory.filter((h) => !answerIds.has(h.id)),
     type: AgentChannelEventTypes.consultReply,
     // The answer is the consulted bot's message; a server sentence stays the chain's human's (the card-action pattern).
     message: posted
@@ -272,13 +336,27 @@ async function waitsForChild(tx: Tx, eventId: string): Promise<boolean> {
 }
 
 /**
+ * The turn whose posted answer stands for a hop whose done never came (CR-A-06): the latest turn answering the hop that
+ * posted something and is not waiting on a consult of its own. Null when none did (the hop really went unanswered).
+ */
+export async function answeringTurn(tx: Tx, hopId: string): Promise<TurnRow | null> {
+  const turns = await tx
+    .select()
+    .from(agentTurns)
+    .where(and(eq(agentTurns.answeringHopId, hopId), isNotNull(agentTurns.replyMessageId)))
+    .orderBy(desc(agentTurns.createdAt));
+  for (const turn of turns) if (!(await waitsForChild(tx, turn.eventId))) return turn;
+  return null;
+}
+
+/**
  * Closes the chain once nothing is left to answer (`active → completed`), under the chain's row lock taken after every
  * stream append (the consult route's order: stream, then chain), so a consult opening a hop in the same chain is either
- * seen as pending or refused `chain_closed`. Also the timeout tick's completion rule (07.7-09).
+ * seen as pending or refused `chain_closed`. Also the timeout tick's completion rule (07.7-09), with its clock (`now`).
  */
-export async function completeChain(tx: Tx, chainId: string): Promise<void> {
+export async function completeChain(tx: Tx, chainId: string, now?: Date): Promise<void> {
   const [chain] = await tx
-    .select({ status: agentChains.status })
+    .select({ status: agentChains.status, rootEventId: agentChains.rootEventId })
     .from(agentChains)
     .where(eq(agentChains.id, chainId))
     .for("update");
@@ -289,6 +367,21 @@ export async function completeChain(tx: Tx, chainId: string): Promise<void> {
     .where(and(eq(agentChainHops.chainId, chainId), eq(agentChainHops.status, "pending")))
     .limit(1);
   if (pending) return;
+  // CR-A-07: none of the chain's turns (its root turn, every hop and return turn) may still run: one without a done,
+  // younger than the hop timeout (an older one is taken as lost; the tick's idle sweep ends such a chain).
+  const at = now ? sql`${now.toISOString()}::timestamptz` : sql`now()`;
+  const [running] = await tx
+    .select({ eventId: agentTurns.eventId })
+    .from(agentTurns)
+    .where(
+      and(
+        or(eq(agentTurns.chainId, chainId), eq(agentTurns.eventId, chain.rootEventId)),
+        isNull(agentTurns.doneAt),
+        sql`${agentTurns.createdAt} > ${at} - make_interval(secs => ${A2A_HOP_TIMEOUT_MS / 1000})`,
+      ),
+    )
+    .limit(1);
+  if (running) return;
   await tx
     .update(agentChains)
     .set({ status: "completed", closedAt: sql`now()`, updatedAt: sql`now()` })
@@ -298,12 +391,13 @@ export async function completeChain(tx: Tx, chainId: string): Promise<void> {
 /**
  * Closes the hop `turn` answers with its outcome (`pending → answered | failed`, once), announces it, delivers the
  * answer back for a consult, and audits it. Returns whether a return turn was delivered, or null when the hop was no
- * longer pending (a replay, a double done, a timeout or a Stop came first: nothing happens).
+ * longer pending (a replay, a double done, a timeout or a Stop came first: nothing happens). `cell` is null when the
+ * timeout tick closes a hop whose answer is posted but whose done never came (CR-A-06): audited `via: "tick"`.
  */
-async function closeAnsweredHop(
+export async function closeAnsweredHop(
   tx: Tx,
   deps: ConsultDeps,
-  cell: CellPrincipal,
+  cell: CellPrincipal | null,
   turn: TurnRow,
   hopId: string,
   outcome: AgentChannelTurnDone["outcome"],
@@ -313,7 +407,8 @@ async function closeAnsweredHop(
     .update(agentChainHops)
     .set({
       status,
-      answerMessageId: turn.replyMessageId,
+      // CR-A-04: a failed turn has no answer (its post, if any, is the bridge's failure notice or a fragment).
+      answerMessageId: status === "answered" ? turn.replyMessageId : null,
       closedAt: sql`now()`,
       updatedAt: sql`now()`,
     })
@@ -327,7 +422,7 @@ async function closeAnsweredHop(
   ]);
   const ev = await deliverConsultReply(tx, deps, hop, status);
   await deps.core.audit.record(tx, {
-    ...cellAuditBase(cell),
+    ...(cell ? cellAuditBase(cell) : {}),
     action: status === "answered" ? "agent.consult.answered" : "agent.consult.failed",
     resourceType: "agent_chain_hop",
     resourceId: hop.id,
@@ -348,6 +443,7 @@ async function closeAnsweredHop(
       mode: hop.mode,
       eventId: turn.eventId,
       returnEventId: ev?.eventId ?? null,
+      ...(cell ? {} : { via: "tick" }),
     },
   });
   return { delivered: ev !== null };
@@ -357,8 +453,9 @@ async function closeAnsweredHop(
  * `POST /turns/:eventId/done` (P-09): the cell's signal that a turn which may belong to a chain ended. tx0 (no user)
  * binds the event to this cell's bot (RLS: another organization's event is invisible) and finds its chain; a turn outside
  * any chain changes nothing. tx1 runs as the turn's human: the hop it answers closes (unless it is waiting for a consult
- * of its own), and the chain completes when nothing is pending and either this is the root bot's turn or no return
- * turn was delivered. Idempotent: every write is conditional.
+ * of its own), the turn is marked done, and the chain completes when nothing is pending and none of its turns still
+ * runs (CR-A-07: a return turn just delivered, or the root's first turn still working, keeps it open). Idempotent: every
+ * write is conditional.
  */
 export async function turnDone(
   deps: ConsultDeps,
@@ -371,25 +468,36 @@ export async function turnDone(
     { organizationId: cell.organizationId, userId: null },
     async (tx) => {
       const [turn] = await tx.select().from(agentTurns).where(eq(agentTurns.eventId, eventId));
-      if (!turn || turn.agentId !== body.agentId) return null;
-      if (turn.chainId) return { userId: turn.userId, chainId: turn.chainId };
+      if (!turn || turn.agentId !== body.agentId) {
+        // CR-A-09: an unknown, foreign or mismatched turn is audited like every other cell route's (ids and code only).
+        await auditUnknownTurn(tx, core, {
+          cell,
+          tool: "turn.done",
+          reason: "unknown_turn",
+          metadata: { eventId, agentId: body.agentId },
+        });
+        return null;
+      }
+      const base = { userId: turn.userId, conversationId: turn.conversationId };
+      if (turn.chainId) return { ...base, chainId: turn.chainId };
       const [rooted] = await tx
         .select({ id: agentChains.id })
         .from(agentChains)
         .where(eq(agentChains.rootEventId, eventId))
         .limit(1);
-      return { userId: turn.userId, chainId: rooted?.id ?? null };
+      return { ...base, chainId: rooted?.id ?? null };
     },
   );
   if (!found) throw notFound(UNKNOWN_TURN, "unknown_turn");
   const { chainId } = found;
   if (!chainId) return;
   await core.db.withTenant({ organizationId: cell.organizationId, userId: found.userId }, async (tx) => {
+    // The thread's stream first, then the turn, the hop and the chain: the consult route's lock order (CR-A-02), so a
+    // done and a consult in one chain never deadlock. The turn is read under the stream (CR-A-05): a post of this turn
+    // still in flight commits its reply under the same lock, so its answer is seen here (the conversation never changes).
+    await lockNextSeq(tx, convTopic(found.conversationId));
     const [turn] = await tx.select().from(agentTurns).where(eq(agentTurns.eventId, eventId));
     if (!turn) return;
-    // The thread's stream first, then the hop and the chain: the consult route's lock order (its post takes the stream,
-    // then spends the chain's budget and bumps a parent hop), so a done and a consult in one chain never deadlock.
-    await lockNextSeq(tx, convTopic(turn.conversationId));
     // P-15: an orphaned chain (thread root deleted, human gone) is cancelled `auto` at this touch; nothing closes or
     // returns.
     const [chain] = await tx.select().from(agentChains).where(eq(agentChains.id, chainId)).limit(1);
@@ -397,11 +505,16 @@ export async function turnDone(
       await cancelChain(tx, deps, chainId, { byUserId: null, reason: "auto" });
       return;
     }
-    let closed: { delivered: boolean } | null = null;
+    // CR-A-07: this turn no longer runs (the first report counts).
+    await tx
+      .update(agentTurns)
+      .set({ doneAt: sql`now()` })
+      .where(and(eq(agentTurns.eventId, turn.eventId), isNull(agentTurns.doneAt)));
     if (turn.answeringHopId && !(await waitsForChild(tx, turn.eventId))) {
-      closed = await closeAnsweredHop(tx, deps, cell, turn, turn.answeringHopId, body.outcome);
+      await closeAnsweredHop(tx, deps, cell, turn, turn.answeringHopId, body.outcome);
     }
-    if (!turn.answeringHopId || (closed && !closed.delivered)) await completeChain(tx, chainId);
+    // A return turn this done delivered is a running turn of the chain, so the chain waits for it.
+    await completeChain(tx, chainId);
   });
 }
 

@@ -2527,8 +2527,9 @@ off. The `can_message` / `cannot_message` matrix above is expressed as `agent.me
 per target bot or for the whole organization; deny wins), decided together with the person's own rights and what that
 person may see; an organization switch in Settings › Bot policy turns consults on, and they are **off by default**.
 A chain is bounded: at most two levels deep, no bot asked twice and never the bot that started it, 3 consults per
-chain, one open question per bot at a time, each bot's daily limit, and a 5-minute timeout per question. The person who
-started the chain pays for every turn in it and can stop it. In v1, consults work in channels and their threads only
+chain, one open question per bot in each chain at a time (a bot taking part in several people's requests may have one
+open in each; each bot's daily limit bounds the total), and a 5-minute timeout per question. The person who started
+the chain pays for every turn in it and can stop it. In v1, consults work in channels and their threads only
 (not in DMs, group DMs or AI chats), only between team bots that are already members of the channel, and only admins
 edit the rules.
 

@@ -272,6 +272,17 @@ describe("one consult round-trips at contract level (07.7-01 tracer, D-01, D-08)
       }).success,
     ).toBe(false);
     expect(AgentConsultReplyEvent.safeParse({ ...replyBase, type: "agent.mention.v1" }).success).toBe(false);
+    // CR-B-08: `answered` carries the answer message, and only `answered` does.
+    const pair = (outcome: string, answerMessageId: string | null) =>
+      AgentConsultReplyEvent.safeParse({
+        ...replyBase,
+        consultReply: { ...replyBase.consultReply, outcome, answerMessageId },
+      }).success;
+    expect(pair("answered", ANSWER_MSG)).toBe(true);
+    expect(pair("answered", null)).toBe(false);
+    expect(pair("failed", null)).toBe(true);
+    expect(pair("failed", ANSWER_MSG)).toBe(false);
+    expect(pair("timed_out", ANSWER_MSG)).toBe(false);
 
     expect(AgentChannelTurnDone.parse({ agentId: AGENT_A, outcome: "replied" })).toEqual({
       agentId: AGENT_A,

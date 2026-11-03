@@ -170,11 +170,12 @@ const factsOf = (b: BotRow): AgentFacts => ({
  */
 async function teamBots(
   tx: Tx,
-  where: { ids?: readonly string[]; exceptId?: string; limit?: number } = {},
+  where: { ids?: readonly string[]; exceptId?: string; enabledOnly?: boolean; limit?: number } = {},
 ): Promise<BotRow[]> {
   const conds = [eq(agents.scope, "team"), isNull(agents.deletedAt)];
   if (where.ids) conds.push(inArray(agents.id, [...where.ids]));
   if (where.exceptId) conds.push(ne(agents.id, where.exceptId));
+  if (where.enabledOnly) conds.push(ne(agents.status, "disabled"));
   const q = tx
     .select(botColumns)
     .from(agents)
@@ -285,14 +286,19 @@ function wantedRows(agentId: string, body: SetAgentMessagingRequest): WantedRow[
  * "Right now" (P-04): the targets this bot may consult, decided by the resolver's agent pass alone (the bot as the
  * principal, the target with tool agent:<target>) over at most 200 candidates, naming at most 50. People still need to
  * see the target at consult time (the human pass of `messagingDecision`), so a hidden unit persona can be listed here
- * and refused for a given person. `any` = every candidate read is allowed.
+ * and refused for a given person. Disabled bots are no candidates; `any` = every enabled team bot was read (at most
+ * 200) and allowed, `some` otherwise (CR-B-07).
  */
 async function effectiveOf(
   tx: Tx,
   perms: PermissionService,
   bot: BotRow,
 ): Promise<AgentMessagingView["effective"]> {
-  const candidates = await teamBots(tx, { exceptId: bot.id, limit: EFFECTIVE_READ_MAX });
+  // CR-B-07: a disabled bot is never consultable (`target_unavailable`), so it is no candidate; one more than the cap is
+  // read to know whether every bot was checked.
+  const read = await teamBots(tx, { exceptId: bot.id, enabledOnly: true, limit: EFFECTIVE_READ_MAX + 1 });
+  const partial = read.length > EFFECTIVE_READ_MAX;
+  const candidates = partial ? read.slice(0, EFFECTIVE_READ_MAX) : read;
   const allowed = await perms.filterFor(
     tx,
     { kind: "agent", agentId: bot.id },
@@ -300,7 +306,9 @@ async function effectiveOf(
     PERMISSION,
     (c) => ({ ...agentResource(factsOf(c), null), tool: agentMessageTool(c.id) }),
   );
-  const kind = allowed.length === 0 ? "none" : allowed.length === candidates.length ? "any" : "some";
+  // `any` only when every bot was read and allowed; past the cap the summary says `some`.
+  const kind =
+    allowed.length === 0 ? "none" : allowed.length === candidates.length && !partial ? "any" : "some";
   return { kind, targets: allowed.slice(0, EFFECTIVE_LIST_MAX).map(refOf) };
 }
 
@@ -315,10 +323,14 @@ async function botView(
   const refs = new Map((named.length > 0 ? await teamBots(tx, { ids: named }) : []).map((b) => [b.id, b]));
   // Live team bots only, in display-name order; a rule naming a gone bot is not shown (and goes on the next PUT).
   const listed = (ids: readonly string[]) => [...refs.values()].filter((b) => ids.includes(b.id)).map(refOf);
+  const allow = listed(rules.allow);
+  // CR-B-06: `only` whose bots are all gone reads `default` (what its rows now decide: no live allow), so the sheet
+  // saves back exactly what it shows and that PUT removes the dangling rows.
+  const mode = rules.mode === "only" && allow.length === 0 ? "default" : rules.mode;
   return AgentMessagingView.parse({
     agentId: bot.id,
     orgDefault: (await switchRows(tx)).length > 0,
-    outbound: { mode: rules.mode, allow: listed(rules.allow), deny: listed(rules.deny) },
+    outbound: { mode, allow, deny: listed(rules.deny) },
     inbound: { consultable: rules.consultable },
     effective: await effectiveOf(tx, perms, bot),
     canManage: await canManage(req, tx, perms),

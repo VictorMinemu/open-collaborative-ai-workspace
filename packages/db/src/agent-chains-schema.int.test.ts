@@ -296,7 +296,17 @@ describe("agent chains schema (07.7-02)", () => {
       await q("update app.agent_chain_hops set status = 'answered', closed_at = now() where id = $1", [ab]);
       await hop(q, A, c, { target_agent_id: A.c });
       // B, the target of A → B, may consult D at depth 2 while A's consult of C is pending.
-      await hop(q, A, c, { source_agent_id: A.b, target_agent_id: A.d, depth: 2, parent_hop_id: ab });
+      const bd = await hop(q, A, c, {
+        source_agent_id: A.b,
+        target_agent_id: A.d,
+        depth: 2,
+        parent_hop_id: ab,
+      });
+      // CR-B-01: depth ≤ 2 is the database's: a hop parented on a depth-2 hop (D, asked by B, asks E) fails the parent
+      // key, whatever depth it claims (a depth-2 hop's parent was asked by the chain's root, so it is at depth 1).
+      await refused(q, "agent_chain_hops_parent_fk", () =>
+        hop(q, A, c, { source_agent_id: A.d, target_agent_id: A.e, depth: 2, parent_hop_id: bd }),
+      );
       const n = await q("select count(*)::int as n from app.agent_chain_hops where chain_id = $1", [c]);
       expect(n.rows[0].n).toBe(3);
     });
@@ -313,6 +323,14 @@ describe("agent chains schema (07.7-02)", () => {
     const foreign = await chain(migratorQ, B);
     await asApp(A.id, async (q) => {
       await refused(q, "agent_chain_hops_chain_fk", () => hop(q, A, foreign));
+    });
+    // CR-B-04: B's message as the question of A's hop fails the question key too (it carries the organization).
+    const foreignQuestion = await question(migratorQ, B, B.a);
+    await asApp(A.id, async (q) => {
+      const c = await chain(q, A);
+      await refused(q, "agent_chain_hops_question_fk", () =>
+        hop(q, A, c, { question_message_id: foreignQuestion }),
+      );
     });
   });
 
@@ -506,6 +524,59 @@ describe("agent chains schema (07.7-02)", () => {
       expect(
         (await app.query("select * from app.expired_agent_chain_hops($1, $2)", [2, now.toISOString()])).rows,
       ).toHaveLength(2);
+    });
+  });
+
+  describe("app.idle_agent_chains (the consult.tick's idle sweep, CR-A-06)", () => {
+    const FN = "app.idle_agent_chains(integer,timestamptz)";
+    const now = new Date();
+    const ago = (seconds: number) => new Date(now.getTime() - seconds * 1000).toISOString();
+
+    it("is SECURITY DEFINER with a fixed search_path, executable by ocw_app and by no one else", async () => {
+      const meta = await migrator.query(
+        `select p.prosecdef, p.proconfig, has_function_privilege('ocw_app', p.oid, 'execute') as app,
+                has_function_privilege('ocw_auth', p.oid, 'execute') as auth,
+                exists (select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+                         where a.grantee = 0) as public
+           from pg_proc p where p.oid = $1::regprocedure`,
+        [FN],
+      );
+      expect(meta.rows[0]).toEqual({
+        prosecdef: true,
+        proconfig: ["search_path=pg_catalog, pg_temp"],
+        app: true,
+        auth: false,
+        public: false,
+      });
+    });
+
+    it("returns active chains with nothing pending and nothing touched since the bound, across organizations, ids only", async () => {
+      const idleA = await chain(migratorQ, A);
+      const idleB = await chain(migratorQ, B);
+      const pendingC = await chain(migratorQ, A);
+      const recentHop = await chain(migratorQ, B);
+      const done = await chain(migratorQ, A);
+      await hop(migratorQ, A, idleA, { status: "answered" });
+      await hop(migratorQ, A, pendingC, {});
+      await hop(migratorQ, B, recentHop, { status: "answered" });
+      await migratorQ("update app.agent_chains set updated_at = $2 where id = any($1::uuid[])", [
+        [idleA, idleB, pendingC, recentHop, done],
+        ago(3600),
+      ]);
+      await migratorQ("update app.agent_chain_hops set updated_at = $2 where chain_id = any($1::uuid[])", [
+        [idleA, pendingC],
+        ago(3600),
+      ]);
+      await migratorQ("update app.agent_chains set status = 'completed' where id = $1", [done]);
+      const r = await app.query("select * from app.idle_agent_chains($1, $2)", [1000, ago(600)]);
+      expect(r.fields.map((f) => f.name)).toEqual(["id", "organization_id"]);
+      const mine = new Set([idleA, idleB, pendingC, recentHop, done]);
+      expect(r.rows.filter((row) => mine.has(row.id)).sort((x, y) => x.id.localeCompare(y.id))).toEqual(
+        [
+          { id: idleA, organization_id: A.id },
+          { id: idleB, organization_id: B.id },
+        ].sort((x, y) => x.id.localeCompare(y.id)),
+      );
     });
   });
 });

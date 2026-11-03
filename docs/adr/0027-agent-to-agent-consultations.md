@@ -93,10 +93,10 @@ requests are decided by PostgreSQL, never by a read-then-write:
 
 | Guard | Enforcement |
 |---|---|
-| depth ≤ 2 | `agent_chain_hops_depth_check` (1..2), `agent_chain_hops_parent_depth_check` (a parent exactly at depth 2), `agent_chain_hops_source_depth_check` (depth 1 is asked by the root), `agent_chain_hops_parent_fk` (a depth-2 hop is asked by the target of its parent, in the same chain) |
+| depth ≤ 2 | `agent_chain_hops_depth_check` (1..2), `agent_chain_hops_parent_depth_check` (a parent exactly at depth 2), `agent_chain_hops_source_depth_check` (depth 1 is asked by the root), `agent_chain_hops_parent_fk` (a depth-2 hop is asked by the target of its parent, in the same chain, and that parent was asked by the chain's root, so it is at depth 1: a hop parented on a depth-2 hop fails the key) |
 | no agent twice per chain | `agent_chain_hops_target_once` unique (chain, target); `agent_chain_hops_not_root` against the chain's real root (the hops' chain key carries `root_agent_id`); `agent_chain_hops_not_self` |
 | hop budget 3 per chain | conditional `UPDATE … SET hops_used = hops_used + 1 WHERE status = 'active' AND hops_used < hop_budget`; `agent_chains_budget_check`. Every hop counts, refused ones too |
-| one pending consult per source | partial unique `agent_chain_hops_one_pending` (chain, source) `WHERE status = 'pending'` |
+| one pending consult per source, per chain | partial unique `agent_chain_hops_one_pending` (chain, source) `WHERE status = 'pending'`. PRD §80 says "one open question per bot in each chain at a time": a bot taking part in several people's chains may have one open in each; its daily limit bounds the total (CR-B-02) |
 | retries | `agent_chain_hops_idempotency` unique (source, key); `question_message_id` unique |
 | daily limits | unchanged: every hop turn passes `turnPolicy` and counts against its own bot's `dailyLimit` |
 | fan-out per turn | unchanged: the claim's cap of 8 tool calls per turn |

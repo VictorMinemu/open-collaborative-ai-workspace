@@ -525,6 +525,85 @@ describe("per-bot consult rules: GET/PUT /api/v1/agents/:id/messaging (D-04, P-0
     expect(await messagingRows()).toEqual(rows);
   });
 
+  it("CR-B-05: more than 100 per-target rules never make the sheet a 500; /permission-rules refuses the 101st", async () => {
+    const many: string[] = [];
+    for (let i = 0; i < 102; i++) many.push(await insertBot(orgId, `Yy${String(i).padStart(3, "0")}`));
+    const tool = (id: string) => `agent:${id}`;
+    try {
+      // Rows from before the cap (or a race): 101 never-ask rows on Archie.
+      for (const id of many.slice(0, 101)) {
+        await su.query(
+          `insert into app.permission_rules (organization_id, subject_kind, subject_id, permission, tool, effect)
+           values ($1, 'agent', $2, 'agent.message', $3, 'deny')`,
+          [orgId, archie, tool(id)],
+        );
+      }
+      const view = await ok(getBot(victor, archie));
+      expect(view.outbound.deny).toHaveLength(101);
+      await su.query("delete from app.permission_rules where subject_id = $1 and tool = $2", [
+        archie,
+        tool(many[100] as string),
+      ]);
+      const refused = await fails(
+        victor.request("POST", "/api/v1/permission-rules", {
+          subjectKind: "agent",
+          subjectId: archie,
+          permission: "agent.message",
+          tool: tool(many[101] as string),
+          effect: "deny",
+        }),
+        409,
+      );
+      expect(refused.code).toBe("agent_rule_limit");
+      expect((await ownRows(archie)).filter((r) => r.effect === "deny")).toHaveLength(100);
+    } finally {
+      await su.query(
+        "delete from app.permission_rules where subject_id = $1 and permission = 'agent.message'",
+        [archie],
+      );
+      await su.query("update app.agents set deleted_at = now() where id = any($1::uuid[])", [many]);
+    }
+  });
+
+  it("CR-B-06: 'only' bots that were all deleted read as default, so the sheet saves back what it shows", async () => {
+    const gone = await insertBot(orgId, "Gone");
+    try {
+      await ok(putBot(victor, archie, { mode: "only", allow: [gone] }));
+      await su.query("update app.agents set deleted_at = now() where id = $1", [gone]);
+      const view = await ok(getBot(victor, archie));
+      expect(view.outbound).toEqual({ mode: "default", allow: [], deny: [] });
+      // Saving exactly what the sheet shows (inbound flipped) works and removes the dangling row.
+      await ok(putBot(victor, archie, view.outbound, false));
+      expect(shape(await ownRows(archie))).toEqual([
+        { subject: "everyone", tool: `agent:${archie}`, effect: "deny" },
+      ]);
+    } finally {
+      await ok(putBot(victor, archie, { mode: "default" }));
+    }
+  });
+
+  it("CR-B-07: the summary never lists a disabled bot, and never says any past what it read", async () => {
+    const off = await insertBot(orgId, "Aaoff");
+    await su.query("update app.agents set status = 'disabled' where id = $1", [off]);
+    try {
+      await ok(putBot(victor, archie, { mode: "any" }));
+      const view = await ok(getBot(victor, archie));
+      expect(view.effective.targets.map((t: Json) => t.id)).not.toContain(off);
+      expect(view.effective.kind).toBe("any");
+      // Past the read cap the summary cannot have checked every bot: "some", never "any".
+      const many: string[] = [];
+      for (let i = 0; i < 200; i++) many.push(await insertBot(orgId, `Xx${String(i).padStart(3, "0")}`));
+      try {
+        expect((await ok(getBot(victor, archie))).effective.kind).toBe("some");
+      } finally {
+        await su.query("update app.agents set deleted_at = now() where id = any($1::uuid[])", [many]);
+      }
+    } finally {
+      await su.query("update app.agents set deleted_at = now() where id = $1", [off]);
+      await ok(putBot(victor, archie, { mode: "default" }));
+    }
+  });
+
   it("the summary names at most 50 targets, in display-name order", async () => {
     const many: string[] = [];
     for (let i = 0; i < 55; i++) many.push(await insertBot(orgId, `Zz${String(i).padStart(2, "0")}`));

@@ -329,6 +329,8 @@ export const messages = appSchema.table(
     index("messages_conv_seq_idx").on(t.organizationId, t.conversationId, t.seq),
     /** Target of `board_cards_message_fk` (Phase 07.1): a card's root message lives in the card's board channel. */
     unique("messages_id_conversation_uq").on(t.id, t.conversationId),
+    /** Target of composite keys that carry the organization (FKs bypass RLS), e.g. `agent_chain_hops_question_fk`. */
+    unique("messages_org_id_uq").on(t.organizationId, t.id),
     index("messages_thread_idx").on(t.organizationId, t.threadId),
     /** Idempotent posts: the same author + client key (agent idempotencyKey, web clientMessageId) never duplicates. */
     uniqueIndex("messages_author_client_msg_uq")
@@ -721,9 +723,17 @@ export const agentTurns = appSchema.table(
     answeringHopId: uuid("answering_hop_id"),
     returningHopId: uuid("returning_hop_id"),
     replyMessageId: uuid("reply_message_id"),
+    /**
+     * Phase 07.7 (CR-A-07): when the cell reported this chain turn done (`POST /turns/:eventId/done`, first report
+     * only). A chain completes only once no hop is pending and none of its turns still runs (no `done_at`, younger than
+     * the hop timeout: an older one is taken as lost). Null for every turn outside a chain.
+     */
+    doneAt: ts("done_at"),
   },
   (t) => [
     index("agent_turns_org_agent_time_idx").on(t.organizationId, t.agentId, t.createdAt),
+    /** The turns of one chain (07.7 completion rule). */
+    index("agent_turns_chain_idx").on(t.chainId).where(sql`chain_id is not null`),
     check("agent_turns_sandbox_calls_check", sql`${t.sandboxCalls} >= 0`),
     check("agent_turns_chain_depth_check", sql`${t.chainDepth} between 0 and 2`),
   ],
@@ -772,6 +782,8 @@ export const agentChains = appSchema.table(
       foreignColumns: [agents.organizationId, agents.id],
     }).onDelete("cascade"),
     index("agent_chains_conversation_idx").on(t.organizationId, t.conversationId, t.threadRootId),
+    /** The `consult.tick` idle sweep (CR-A-06): active chains, least recently touched first. */
+    index("agent_chains_active_idx").on(t.updatedAt).where(sql`status = 'active'`),
     check("agent_chains_status_check", sql`${t.status} in ('active','completed','cancelled')`),
     check(
       "agent_chains_cancel_reason_check",
@@ -810,20 +822,34 @@ export const agentChainHops = appSchema.table(
     refusalReason: text("refusal_reason"),
     sourceEventId: uuid("source_event_id").notNull(),
     targetEventId: uuid("target_event_id"),
-    questionMessageId: uuid("question_message_id")
-      .notNull()
-      .references(() => messages.id, { onDelete: "cascade" }),
+    /** The question message, in the hop's organization (`agent_chain_hops_question_fk`, CR-B-04). */
+    questionMessageId: uuid("question_message_id").notNull(),
     answerMessageId: uuid("answer_message_id"),
     idempotencyKey: text("idempotency_key").notNull(),
     deadlineAt: ts("deadline_at").notNull(),
+    /**
+     * CR-A-08: how many times the `consult.tick` failed to time this hop out. Each failure pushes `deadline_at` out
+     * (backoff, so newer expired hops are reached first); after the last attempt the hop ends `failed` (`tick_error`).
+     */
+    tickAttempts: smallint("tick_attempts").notNull().default(0),
     closedAt: ts("closed_at"),
     createdAt: createdAt(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
   (t) => [
     unique("agent_chain_hops_question_uq").on(t.questionMessageId),
-    /** Target of `agent_chain_hops_parent_fk`: a depth-2 hop's parent is in its chain and targeted its source. */
-    unique("agent_chain_hops_parent_key_uq").on(t.organizationId, t.chainId, t.id, t.targetAgentId),
+    /**
+     * Target of `agent_chain_hops_parent_fk`: a depth-2 hop's parent is in its chain, targeted its source, and was asked
+     * by the chain's root, so the parent is at depth 1 (`agent_chain_hops_source_depth_check`) and depth ≤ 2 holds in
+     * the database (CR-B-01).
+     */
+    unique("agent_chain_hops_parent_root_key_uq").on(
+      t.organizationId,
+      t.chainId,
+      t.id,
+      t.targetAgentId,
+      t.sourceAgentId,
+    ),
     foreignKey({
       name: "agent_chain_hops_chain_fk",
       columns: [t.organizationId, t.chainId, t.rootAgentId],
@@ -831,8 +857,13 @@ export const agentChainHops = appSchema.table(
     }).onDelete("cascade"),
     foreignKey({
       name: "agent_chain_hops_parent_fk",
-      columns: [t.organizationId, t.chainId, t.parentHopId, t.sourceAgentId],
-      foreignColumns: [t.organizationId, t.chainId, t.id, t.targetAgentId],
+      columns: [t.organizationId, t.chainId, t.parentHopId, t.sourceAgentId, t.rootAgentId],
+      foreignColumns: [t.organizationId, t.chainId, t.id, t.targetAgentId, t.sourceAgentId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "agent_chain_hops_question_fk",
+      columns: [t.organizationId, t.questionMessageId],
+      foreignColumns: [messages.organizationId, messages.id],
     }).onDelete("cascade"),
     foreignKey({
       name: "agent_chain_hops_source_fk",

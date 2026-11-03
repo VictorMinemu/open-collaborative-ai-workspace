@@ -1,4 +1,5 @@
 import {
+  AGENT_RULE_LIST_MAX,
   CreatePermissionRuleRequest,
   EventTypes,
   IdParams,
@@ -7,9 +8,9 @@ import {
   PermissionRuleList,
 } from "@ocw/contracts";
 import { agents, orgMembers, permissionRules, type Tx, tenantOf } from "@ocw/db";
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull, like, sql } from "drizzle-orm";
 import { type App, type Core, tenant } from "../../core";
-import { badRequest, notFound } from "../../lib/errors";
+import { badRequest, conflict, notFound } from "../../lib/errors";
 import type { PermissionService } from "./permissions/service";
 import { orgTopic, requireUnit } from "./units";
 
@@ -122,6 +123,36 @@ export async function deleteRuleRow(
   return true;
 }
 
+/**
+ * CR-B-05: a bot's consult sheet (`/agents/:id/messaging`) lists its organization-scope per-target `agent.message` rules
+ * and saves them back in one request of at most `AGENT_RULE_LIST_MAX` per effect, so this writer refuses one more (409
+ * `agent_rule_limit`) instead of leaving a sheet that cannot be saved.
+ */
+async function assertAgentRuleRoom(tx: Tx, body: CreatePermissionRuleRequest): Promise<void> {
+  if (body.permission !== "agent.message" || body.subjectKind !== "agent" || body.scopeUnitId) return;
+  if (!body.tool?.startsWith("agent:") || body.pathPrefix) return;
+  const [row] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(permissionRules)
+    .where(
+      and(
+        isNull(permissionRules.scopeUnitId),
+        eq(permissionRules.subjectKind, "agent"),
+        eq(permissionRules.subjectId, body.subjectId ?? ""),
+        eq(permissionRules.permission, "agent.message"),
+        eq(permissionRules.effect, body.effect),
+        isNull(permissionRules.pathPrefix),
+        like(permissionRules.tool, "agent:%"),
+      ),
+    );
+  if ((row?.n ?? 0) >= AGENT_RULE_LIST_MAX) {
+    throw conflict(
+      `A bot can name at most ${AGENT_RULE_LIST_MAX} bots per list in its consult rules`,
+      "agent_rule_limit",
+    );
+  }
+}
+
 export function registerRuleRoutes(app: App, core: Core, perms: PermissionService): void {
   const tags = ["organization"];
   const requireUser = core.identity.requireUser;
@@ -156,6 +187,7 @@ export function registerRuleRoutes(app: App, core: Core, perms: PermissionServic
         const body = req.body;
         if (body.scopeUnitId) await requireUnit(tx, body.scopeUnitId);
         await assertSubjectExists(tx, body.subjectKind, body.subjectId);
+        await assertAgentRuleRoom(tx, body);
         const rule = await insertRuleRow(
           core,
           tx,
