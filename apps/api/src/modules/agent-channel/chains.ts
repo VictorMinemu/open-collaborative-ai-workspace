@@ -19,7 +19,7 @@ import {
 } from "@ocw/db";
 import { and, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
-import type { App } from "../../core";
+import type { App, Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import { notFound } from "../../lib/errors";
 import { announceConsults, convTopic, createConversationAccess, lockNextSeq } from "../chat";
@@ -80,6 +80,35 @@ export async function recordChainReply(tx: Tx, p: { eventId: string; messageId: 
     );
 }
 
+type ChainRow = typeof agentChains.$inferSelect;
+
+/**
+ * Whether a chain may still act (P-15, T-07.7-09-04): its thread root is not deleted and its human still reads the
+ * conversation (a thread is judged by its channel; the resolver decides `channel.read`). False → the caller cancels the
+ * chain with reason `auto` (`cancelChain`): a request, a return and a tick touching an orphaned chain all stop it. Reads
+ * only, in the caller's transaction (which runs as the chain's human).
+ */
+export async function chainLive(
+  tx: Tx,
+  core: Core,
+  chain: Pick<ChainRow, "conversationId" | "threadRootId" | "humanUserId">,
+): Promise<boolean> {
+  const [root] = await tx
+    .select({ deletedAt: messages.deletedAt })
+    .from(messages)
+    .where(eq(messages.id, chain.threadRootId))
+    .limit(1);
+  if (!root || root.deletedAt) return false;
+  const [conv] = await tx
+    .select({ id: conversations.id, kind: conversations.kind, parent: conversations.parentConversationId })
+    .from(conversations)
+    .where(eq(conversations.id, chain.conversationId))
+    .limit(1);
+  const judged = conv ? (conv.kind === "thread" ? conv.parent : conv.id) : null;
+  if (!judged) return false;
+  return createConversationAccess(core).isReadable(tx, chain.humanUserId, judged, { kinds: ["channel"] });
+}
+
 /**
  * Delivers a closed hop back to the bot that asked (D-01, D-07: the `deliverAutomationRun` / `emitCardAction`
  * pattern), in the closing transaction, which runs as the chain's human. The `AgentMention`'s structural author is that
@@ -102,22 +131,15 @@ export async function deliverConsultReply(
   const { organizationId } = tenantOf(tx);
   const [chain] = await tx.select().from(agentChains).where(eq(agentChains.id, hop.chainId)).limit(1);
   if (chain?.status !== "active") return null;
+  // The confused-deputy rule at delivery (the asker's reply re-checks it), and the lazy automatic cancel (P-15): a chain
+  // whose thread root is gone or whose human no longer reads the channel stops here, and nothing is delivered.
+  if (!(await chainLive(tx, core, chain))) {
+    await cancelChain(tx, deps, chain.id, { byUserId: null, reason: "auto" });
+    return null;
+  }
   const directory = await memberDirectory(tx);
   const person = directory.get(chain.humanUserId);
   if (!person) return null;
-  // The confused-deputy rule at delivery (the asker's reply re-checks it): a thread is read through its channel.
-  const [conv] = await tx
-    .select({ id: conversations.id, kind: conversations.kind, parent: conversations.parentConversationId })
-    .from(conversations)
-    .where(eq(conversations.id, chain.conversationId))
-    .limit(1);
-  const judged = conv ? (conv.kind === "thread" ? conv.parent : conv.id) : null;
-  if (
-    !judged ||
-    !(await createConversationAccess(core).isReadable(tx, chain.humanUserId, judged, { kinds: ["channel"] }))
-  ) {
-    return null;
-  }
   const [target] = await tx
     .select({ id: agents.id, name: agents.name, username: agents.username })
     .from(agents)
@@ -368,6 +390,13 @@ export async function turnDone(
     // The thread's stream first, then the hop and the chain: the consult route's lock order (its post takes the stream,
     // then spends the chain's budget and bumps a parent hop), so a done and a consult in one chain never deadlock.
     await lockNextSeq(tx, convTopic(turn.conversationId));
+    // P-15: an orphaned chain (thread root deleted, human gone) is cancelled `auto` at this touch; nothing closes or
+    // returns.
+    const [chain] = await tx.select().from(agentChains).where(eq(agentChains.id, chainId)).limit(1);
+    if (chain?.status === "active" && !(await chainLive(tx, core, chain))) {
+      await cancelChain(tx, deps, chainId, { byUserId: null, reason: "auto" });
+      return;
+    }
     let closed: { delivered: boolean } | null = null;
     if (turn.answeringHopId && !(await waitsForChild(tx, turn.eventId))) {
       closed = await closeAnsweredHop(tx, deps, cell, turn, turn.answeringHopId, body.outcome);

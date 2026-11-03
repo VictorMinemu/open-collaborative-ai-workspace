@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
+import { agentChains } from "@ocw/db";
+import { eq } from "drizzle-orm";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { sha256Hex } from "../../lib/crypto";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { invite } from "../../testing-workzone";
 import { createPermissionService } from "../organization";
+import { chainLive } from "./chains";
 import { sweepConsults } from "./consult-tick";
 
 /**
@@ -360,6 +363,233 @@ describe("an unanswered hop times out at the next tick (D-04, D-06, D-11)", () =
     expect(await repliesFor(hop.hopId)).toHaveLength(1);
     const jobs = await rows("select data from pgboss.job where name = 'consult.tick'");
     expect(jobs.length).toBeGreaterThan(0);
+    for (const j of jobs) expect(j.data).toEqual({});
+  });
+});
+
+describe("exactly one outcome per hop under races (D-04, D-11)", () => {
+  it("a tick racing the answer's done: one final status and one consult reply", async () => {
+    await parkOthers();
+    const { hop, asked } = await consulted();
+    expect((await post(asked, ANSWER)).status).toBe(200);
+    const deadline = await deadlineOf(hop.hopId);
+    const [swept, signalled] = await Promise.all([sweep(plus(deadline, 1000)), done(asked)]);
+    expect(signalled.status).toBe(200);
+    const status = (await hopRow(hop.hopId)).status as string;
+    expect(["answered", "timed_out"]).toContain(status);
+    expect(swept.timedOut).toBe(status === "timed_out" ? 1 : 0);
+    const replies = await repliesFor(hop.hopId);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]?.payload.consultReply.outcome).toBe(status);
+    const closings = [
+      ...(await auditsFor("agent.consult.answered", "hopId", hop.hopId)),
+      ...(await auditsFor("agent.consult.timed_out", "hopId", hop.hopId)),
+    ];
+    expect(closings).toHaveLength(1);
+  });
+
+  it("two ticks at once (two replicas): one times the hop out, one reply in total", async () => {
+    await parkOthers();
+    const { hop } = await consulted();
+    const at = plus(await deadlineOf(hop.hopId), 1000);
+    const both = await Promise.all([sweep(at), sweep(at)]);
+    expect(both.reduce((n, r) => n + r.timedOut, 0)).toBe(1);
+    expect((await hopRow(hop.hopId)).status).toBe("timed_out");
+    expect(await repliesFor(hop.hopId)).toHaveLength(1);
+    expect(await auditsFor("agent.consult.timed_out", "hopId", hop.hopId)).toHaveLength(1);
+  });
+});
+
+describe("each hop in its own organization (C-02, T-07.7-09-01)", () => {
+  it("expired hops of two organizations time out in their tenants; each reply lands on its own cell; batch 1 = one per pass", async () => {
+    await parkOthers();
+    const a = await consulted();
+    const { turn: max } = await rootTurn({
+      as: eve,
+      conversationId: labId,
+      botId: maxId,
+      handle: "max",
+      org: orgB,
+    });
+    const b = await ok(consult(max, nellId, {}, tokenB));
+    expect(b.ok, JSON.stringify(b)).toBe(true);
+    const latest = Math.max((await deadlineOf(a.hop.hopId)).getTime(), (await deadlineOf(b.hopId)).getTime());
+    const at = new Date(latest + 1000);
+
+    expect(await sweep(at, 1)).toEqual({ timedOut: 1, cancelled: 0 });
+    const statuses = [(await hopRow(a.hop.hopId)).status, (await hopRow(b.hopId)).status];
+    expect(statuses.filter((x) => x === "timed_out")).toHaveLength(1);
+    expect(await sweep(at, 1)).toEqual({ timedOut: 1, cancelled: 0 });
+    expect((await hopRow(a.hop.hopId)).status).toBe("timed_out");
+    expect((await hopRow(b.hopId)).status).toBe("timed_out");
+
+    const ra = await repliesFor(a.hop.hopId);
+    const rb = await repliesFor(b.hopId);
+    expect(ra.map((r) => r.stream_id)).toEqual([`cell:${orgId}`]);
+    expect(rb.map((r) => r.stream_id)).toEqual([`cell:${orgB}`]);
+    expect(rb[0]?.payload).toMatchObject({
+      agent: { id: maxId },
+      message: { text: "@nell did not answer in time." },
+    });
+    expect(rb[0]?.payload.consultReply.outcome).toBe("timed_out");
+    expect((await turnRow(rb[0]?.payload.eventId)).user_id).toBe(eveId);
+    const [auditB] = await auditsFor("agent.consult.timed_out", "hopId", b.hopId);
+    expect(auditB?.organization_id).toBe(orgB);
+    expect(auditB?.user_id).toBe(eveId);
+  });
+});
+
+describe("nested deadlines (P-10) and handoffs", () => {
+  it("A → B bumped past B → C: at C's deadline only B → C times out (Bea hears back); A → B only after its own", async () => {
+    await parkOthers();
+    const { hop: ab, asked: bea } = await consulted();
+    const bc = await ok(consult(bea, carlId));
+    expect(bc.ok, JSON.stringify(bc)).toBe(true);
+    const dBC = await deadlineOf(bc.hopId);
+    const dAB = await deadlineOf(ab.hopId);
+    expect(dAB.getTime()).toBeGreaterThanOrEqual(dBC.getTime() + 2 * 60_000);
+
+    expect(await sweep(plus(dBC, 1000))).toEqual({ timedOut: 1, cancelled: 0 });
+    expect((await hopRow(bc.hopId)).status).toBe("timed_out");
+    expect((await hopRow(ab.hopId)).status).toBe("pending");
+    const [toBea] = await repliesFor(bc.hopId);
+    expect(toBea?.payload).toMatchObject({
+      agent: { id: beaId },
+      message: { text: "@carl did not answer in time." },
+    });
+    expect(await turnRow(toBea?.payload.eventId)).toMatchObject({
+      user_id: victorId,
+      chain_depth: 1,
+      answering_hop_id: ab.hopId,
+      returning_hop_id: bc.hopId,
+    });
+
+    expect(await sweep(plus(dAB, -1000))).toEqual({ timedOut: 0, cancelled: 0 });
+    expect(await sweep(plus(dAB, 1000))).toEqual({ timedOut: 1, cancelled: 0 });
+    expect((await hopRow(ab.hopId)).status).toBe("timed_out");
+    const [toArchie] = await repliesFor(ab.hopId);
+    expect(toArchie?.payload.agent.id).toBe(archieId);
+  });
+
+  it("an expired handoff becomes timed_out with no reply, and the chain completes", async () => {
+    await parkOthers();
+    const { hop } = await consulted({ mode: "handoff" });
+    expect(await sweep(plus(await deadlineOf(hop.hopId), 1000))).toEqual({ timedOut: 1, cancelled: 0 });
+    expect((await hopRow(hop.hopId)).status).toBe("timed_out");
+    expect(await repliesFor(hop.hopId)).toHaveLength(0);
+    expect((await chainRow(hop.chainId)).status).toBe("completed");
+  });
+});
+
+describe("orphaned chains are cancelled `auto` at their next touch (P-15, T-07.7-09-04)", () => {
+  const deleteRoot = async (root: string) => ok(victor.request("DELETE", `/api/v1/messages/${root}`));
+
+  /** The chain was cancelled automatically, once, with a system actor and nothing delivered. */
+  async function expectAutoCancelled(chainId: string, hopId: string) {
+    expect(await chainRow(chainId)).toMatchObject({
+      status: "cancelled",
+      cancel_reason: "auto",
+      cancelled_by_user_id: null,
+    });
+    expect((await hopRow(hopId)).status).toBe("cancelled");
+    const audits = await auditsFor("agent.chain.cancelled", "chainId", chainId);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ actor_kind: "system" });
+    expect(audits[0]?.metadata.reason).toBe("auto");
+    expect(await repliesFor(hopId)).toHaveLength(0);
+  }
+
+  it("chainLive is true for a normal chain and false once its thread root is deleted", async () => {
+    await parkOthers();
+    const { root, hop } = await consulted();
+    const live = () =>
+      core().db.withTenant({ organizationId: orgId, userId: victorId }, async (tx) => {
+        const [chain] = await tx.select().from(agentChains).where(eq(agentChains.id, hop.chainId));
+        if (!chain) throw new Error("chain missing");
+        return chainLive(tx, core(), chain);
+      });
+    expect(await live()).toBe(true);
+    await deleteRoot(root);
+    expect(await live()).toBe(false);
+  });
+
+  it("thread root deleted → the next tick cancels the chain; a new consult is 409 chain_closed", async () => {
+    await parkOthers();
+    const { root, archie, hop } = await consulted();
+    await deleteRoot(root);
+    expect(await sweep(plus(await deadlineOf(hop.hopId), 1000))).toEqual({ timedOut: 0, cancelled: 1 });
+    await expectAutoCancelled(hop.chainId, hop.hopId);
+    const again = await consult(archie, carlId);
+    expect(again.status).toBe(409);
+    expect(again.body.code).toBe("chain_closed");
+  });
+
+  it("thread root deleted → the next consult request cancels the chain and answers 409 chain_closed", async () => {
+    await parkOthers();
+    const { root, archie, hop } = await consulted();
+    await deleteRoot(root);
+    const again = await consult(archie, carlId);
+    expect(again.status, JSON.stringify(again.body)).toBe(409);
+    expect(again.body.code).toBe("chain_closed");
+    await expectAutoCancelled(hop.chainId, hop.hopId);
+  });
+
+  it("thread root deleted → the answer's done cancels the chain and returns nothing", async () => {
+    await parkOthers();
+    const { root, hop, asked } = await consulted();
+    expect((await post(asked, ANSWER)).status).toBe(200);
+    await deleteRoot(root);
+    expect((await done(asked)).status).toBe(200);
+    await expectAutoCancelled(hop.chainId, hop.hopId);
+    // Nothing is left for a tick.
+    expect(await sweep(plus(await deadlineOf(hop.hopId), 1000))).toEqual({ timedOut: 0, cancelled: 0 });
+  });
+
+  async function privateChain() {
+    const privId = await channel(
+      victor,
+      `priv-${randomUUID().slice(0, 6)}`,
+      [archieId, beaId, carlId],
+      "private",
+    );
+    await ok(victor.request("POST", `/api/v1/channels/${privId}/members`, { kind: "user", id: samId }));
+    const out = await consulted({ as: sam, conversationId: privId });
+    expect((await chainRow(out.hop.chainId)).human_user_id).toBe(samId);
+    await ok(victor.request("DELETE", `/api/v1/channels/${privId}/members/user/${samId}`));
+    return out;
+  }
+
+  it("the chain's human removed from the private channel → the next tick cancels the chain", async () => {
+    await parkOthers();
+    const { hop } = await privateChain();
+    expect(await sweep(plus(await deadlineOf(hop.hopId), 1000))).toEqual({ timedOut: 0, cancelled: 1 });
+    await expectAutoCancelled(hop.chainId, hop.hopId);
+  });
+
+  it("the chain's human removed → the next consult request is refused (no live turn) and cancels the chain", async () => {
+    await parkOthers();
+    const { archie, hop } = await privateChain();
+    const again = await consult(archie, carlId);
+    expect(again.status).toBe(404);
+    await expectAutoCancelled(hop.chainId, hop.hopId);
+  });
+
+  it("the chain's human removed → the done of the consulted bot's turn cancels the chain", async () => {
+    await parkOthers();
+    const { hop, asked } = await privateChain();
+    expect((await done(asked, "failed")).status).toBe(200);
+    await expectAutoCancelled(hop.chainId, hop.hopId);
+  });
+});
+
+describe("pgboss holds ids only (ADR-0028, T-07.7-09-05)", () => {
+  it("after every scenario, each consult.tick job carries {}", async () => {
+    await core().db.withTenant({ organizationId: orgB, userId: null }, (tx) =>
+      core().jobs.sendInTx(tx, "consult.tick", {}),
+    );
+    expect(await core().jobs.drain("consult.tick")).toBe(1);
+    const jobs = await rows("select data from pgboss.job where name = 'consult.tick'");
+    expect(jobs.length).toBeGreaterThanOrEqual(2);
     for (const j of jobs) expect(j.data).toEqual({});
   });
 });

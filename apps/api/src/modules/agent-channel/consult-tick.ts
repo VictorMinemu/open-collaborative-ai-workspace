@@ -2,7 +2,7 @@ import { agentChainHops, agentChains } from "@ocw/db";
 import { and, eq, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { announceConsults, convTopic, lockNextSeq } from "../chat";
-import { completeChain, deliverConsultReply } from "./chains";
+import { cancelChain, chainLive, completeChain, deliverConsultReply } from "./chains";
 import type { ConsultDeps } from "./consult";
 
 /**
@@ -11,7 +11,8 @@ import type { ConsultDeps } from "./consult";
  * A hop nobody answers ends by itself: once a minute (07.6's job runtime, `consult.tick`, UTC, evaluated once across
  * replicas) the ids-only `app.expired_agent_chain_hops` lists pending hops past their deadline across organizations, and
  * each is handled in its own organization's tenant transaction as the chain's human, re-read `FOR UPDATE` (the listing is
- * never trusted): `pending → timed_out` once, announced on the question, audited with ids only, and for a `consult` hop
+ * never trusted): an orphaned chain (thread root deleted, human gone) is cancelled `auto` instead (P-15); otherwise
+ * `pending → timed_out` once, announced on the question, audited with ids only, and for a `consult` hop
  * returned to the asker as `agent.consult_reply.v1` with the server sentence "@<target> did not answer in time.". A hop
  * whose return delivers nothing (a handoff, the asker's daily limit) leaves the chain to the completion rule, as a done
  * does. The lock order is the consult route's (thread stream → hop → chain), so a tick racing a done, a Stop, a consult
@@ -63,6 +64,13 @@ async function expireHop(
       )
       .for("update");
     if (!hop) return null;
+    const [chain] = await tx.select().from(agentChains).where(eq(agentChains.id, hop.chainId)).limit(1);
+    if (chain?.status !== "active") return null;
+    // P-15: an orphaned chain (thread root deleted, human gone) is cancelled `auto` instead; nothing is delivered.
+    if (!(await chainLive(tx, core, chain))) {
+      const cancelled = await cancelChain(tx, { core }, chain.id, { byUserId: null, reason: "auto" });
+      return cancelled ? "cancelled" : null;
+    }
     const [closed] = await tx
       .update(agentChainHops)
       .set({ status: "timed_out", closedAt: sql`now()`, updatedAt: sql`now()` })

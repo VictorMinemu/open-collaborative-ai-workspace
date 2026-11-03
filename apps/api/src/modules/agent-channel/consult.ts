@@ -37,6 +37,7 @@ import type { MemoryService } from "../memory";
 import { AuthzDeniedError, memberDirectory, type PermissionService } from "../organization";
 import { decideAgentMessage } from "./agent-message";
 import { type CellPrincipal, cellOf } from "./auth";
+import { cancelChain, chainLive } from "./chains";
 import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, claimToolCall, liveTurn } from "./claim";
 import { buildMentionEvents, type StoredMention } from "./mentions";
 
@@ -241,6 +242,18 @@ async function chainOf(tx: Tx, turn: AgentTurnRow): Promise<ChainRow | null> {
     .where(turn.chainId ? eq(agentChains.id, turn.chainId) : eq(agentChains.rootEventId, turn.eventId))
     .limit(1);
   return row ?? null;
+}
+
+/**
+ * The turn's chain after the lazy automatic cancel (P-15): an active chain whose thread root is deleted or whose human
+ * no longer reads the channel is cancelled `auto` at this touch (in the request's transaction, before its claim: the
+ * thread's stream, then the chain, the consult route's lock order), so the request is refused `chain_closed`.
+ */
+async function touchChain(tx: Tx, core: Core, turn: AgentTurnRow): Promise<ChainRow | null> {
+  const chain = await chainOf(tx, turn);
+  if (chain?.status !== "active" || (await chainLive(tx, core, chain))) return chain;
+  await cancelChain(tx, { core }, chain.id, { byUserId: null, reason: "auto" });
+  return chainOf(tx, turn);
 }
 
 /** The target is a member of the turn's conversation or of its parent channel (D-04: v1 never adds it). */
@@ -575,6 +588,9 @@ async function consult(
     return await core.db.withTenant(ctx, async (tx): Promise<Answer> => {
       const turn = await liveTurn(tx, core, body);
       if (!turn || turn.userId !== human) {
+        // The human no longer reads the turn's conversation: its chain (if any) is orphaned and stops here (P-15).
+        const [stale] = await tx.select().from(agentTurns).where(eq(agentTurns.eventId, body.eventId));
+        if (stale && stale.agentId === body.agentId) await touchChain(tx, core, stale);
         await auditUnknownTurn(tx, core, { cell, tool: TOOL, reason: "unknown_turn", metadata });
         return { status: 404, code: "unknown_turn" };
       }
@@ -585,7 +601,7 @@ async function consult(
 
       const target = await findTarget(tx, body.target);
       const vars = { handle: target?.username ?? null, person };
-      const chain = await chainOf(tx, turn);
+      const chain = await touchChain(tx, core, turn);
       const code = prior ? "idempotency_conflict" : await precheck(tx, perms, { turn, chain, target });
       const claim = await claimToolCall(tx, core, {
         cell,
