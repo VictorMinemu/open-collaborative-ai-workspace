@@ -2518,6 +2518,20 @@ cannot_message:
   - @production-agent
 ```
 
+**v1 (Phase 07.7, ADR-0027).** An agent consults or hands work to another agent only through the platform: its
+`ocw_consult_agent` tool asks the Agent Channel API, which posts the question as a visible, attributed message in the
+same thread and delivers it to the other bot as a new turn on behalf of the person who started the thread's request;
+the answer returns to the asking bot as another turn, so the whole exchange stays in the thread with an audited chain.
+Agents typing `@handles` in their replies still never wake another bot, and OpenClaw's own agent-to-agent tools stay
+off. The `can_message` / `cannot_message` matrix above is expressed as `agent.message` permission rules (per source bot,
+per target bot or for the whole organization; deny wins), decided together with the person's own rights and what that
+person may see; an organization switch in Settings › Bot policy turns consults on, and they are **off by default**.
+A chain is bounded: at most two levels deep, no bot asked twice and never the bot that started it, 3 consults per
+chain, one open question per bot at a time, each bot's daily limit, and a 5-minute timeout per question. The person who
+started the chain pays for every turn in it and can stop it. In v1, consults work in channels and their threads only
+(not in DMs, group DMs or AI chats), only between team bots that are already members of the channel, and only admins
+edit the rules.
+
 ---
 
 ### 81. Memory
