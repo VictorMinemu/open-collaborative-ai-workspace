@@ -102,7 +102,7 @@ async function expireHop(
     });
     // Nothing went back (a handoff, the asker at its limit): the chain completes once nothing is pending; otherwise the
     // asker's return turn closes it with its own done.
-    if (!ev) await completeChain(tx, closed.chainId);
+    if (!ev) await completeChain(tx, closed.chainId, now);
     return "timed_out";
   });
 }

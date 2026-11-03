@@ -126,6 +126,7 @@ const HEAD_ONLY = [
   "20261102210622_automation_events_full_message",
   "20261103043136_agent_chains",
   "20261103045700_bots_off_agent_message_backfill",
+  "20261103182852_agent_turns_done_at",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [

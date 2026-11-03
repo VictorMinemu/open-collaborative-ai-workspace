@@ -1,4 +1,5 @@
 import {
+  A2A_HOP_TIMEOUT_MS,
   AgentChannelEventTypes,
   AgentChannelTurnDone,
   type AgentConsultReplyEvent,
@@ -337,11 +338,11 @@ async function waitsForChild(tx: Tx, eventId: string): Promise<boolean> {
 /**
  * Closes the chain once nothing is left to answer (`active → completed`), under the chain's row lock taken after every
  * stream append (the consult route's order: stream, then chain), so a consult opening a hop in the same chain is either
- * seen as pending or refused `chain_closed`. Also the timeout tick's completion rule (07.7-09).
+ * seen as pending or refused `chain_closed`. Also the timeout tick's completion rule (07.7-09), with its clock (`now`).
  */
-export async function completeChain(tx: Tx, chainId: string): Promise<void> {
+export async function completeChain(tx: Tx, chainId: string, now?: Date): Promise<void> {
   const [chain] = await tx
-    .select({ status: agentChains.status })
+    .select({ status: agentChains.status, rootEventId: agentChains.rootEventId })
     .from(agentChains)
     .where(eq(agentChains.id, chainId))
     .for("update");
@@ -352,6 +353,21 @@ export async function completeChain(tx: Tx, chainId: string): Promise<void> {
     .where(and(eq(agentChainHops.chainId, chainId), eq(agentChainHops.status, "pending")))
     .limit(1);
   if (pending) return;
+  // CR-A-07: none of the chain's turns (its root turn, every hop and return turn) may still run: one without a done,
+  // younger than the hop timeout (an older one is taken as lost; the tick's idle sweep ends such a chain).
+  const at = now ? sql`${now.toISOString()}::timestamptz` : sql`now()`;
+  const [running] = await tx
+    .select({ eventId: agentTurns.eventId })
+    .from(agentTurns)
+    .where(
+      and(
+        or(eq(agentTurns.chainId, chainId), eq(agentTurns.eventId, chain.rootEventId)),
+        isNull(agentTurns.doneAt),
+        sql`${agentTurns.createdAt} > ${at} - make_interval(secs => ${A2A_HOP_TIMEOUT_MS / 1000})`,
+      ),
+    )
+    .limit(1);
+  if (running) return;
   await tx
     .update(agentChains)
     .set({ status: "completed", closedAt: sql`now()`, updatedAt: sql`now()` })
@@ -421,8 +437,9 @@ async function closeAnsweredHop(
  * `POST /turns/:eventId/done` (P-09): the cell's signal that a turn which may belong to a chain ended. tx0 (no user)
  * binds the event to this cell's bot (RLS: another organization's event is invisible) and finds its chain; a turn outside
  * any chain changes nothing. tx1 runs as the turn's human: the hop it answers closes (unless it is waiting for a consult
- * of its own), and the chain completes when nothing is pending and either this is the root bot's turn or no return
- * turn was delivered. Idempotent: every write is conditional.
+ * of its own), the turn is marked done, and the chain completes when nothing is pending and none of its turns still
+ * runs (CR-A-07: a return turn just delivered, or the root's first turn still working, keeps it open). Idempotent: every
+ * write is conditional.
  */
 export async function turnDone(
   deps: ConsultDeps,
@@ -463,11 +480,16 @@ export async function turnDone(
       await cancelChain(tx, deps, chainId, { byUserId: null, reason: "auto" });
       return;
     }
-    let closed: { delivered: boolean } | null = null;
+    // CR-A-07: this turn no longer runs (the first report counts).
+    await tx
+      .update(agentTurns)
+      .set({ doneAt: sql`now()` })
+      .where(and(eq(agentTurns.eventId, turn.eventId), isNull(agentTurns.doneAt)));
     if (turn.answeringHopId && !(await waitsForChild(tx, turn.eventId))) {
-      closed = await closeAnsweredHop(tx, deps, cell, turn, turn.answeringHopId, body.outcome);
+      await closeAnsweredHop(tx, deps, cell, turn, turn.answeringHopId, body.outcome);
     }
-    if (!turn.answeringHopId || (closed && !closed.delivered)) await completeChain(tx, chainId);
+    // A return turn this done delivered is a running turn of the chain, so the chain waits for it.
+    await completeChain(tx, chainId);
   });
 }
 

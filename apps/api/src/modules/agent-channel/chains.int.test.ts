@@ -405,24 +405,55 @@ describe("tracer: Bea answers, reports done, and Archie gets the answer back as 
     ).toHaveLength(1);
   });
 
-  it("Archie replies to Bea's answer in the same thread (accepted), and its done completes the chain", async () => {
+  it("Archie replies to Bea's answer in the same thread (accepted); its done leaves the chain to his first turn, still running (CR-A-07)", async () => {
     expect((await chainRow(answer.chainId)).status).toBe("active");
     const r = await post(reply, "Víctor: Bea says PO-1187 was confirmed on Monday.");
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body).toMatchObject({ created: true, threadRootMessageId: root });
     expect((await turnRow(reply.eventId)).reply_message_id).toBe(r.body.messageId);
     expect((await done(reply)).status).toBe(200);
-    expect(await chainRow(answer.chainId)).toMatchObject({
-      status: "completed",
-      closed_at: expect.any(Date),
-    });
+    expect((await turnRow(reply.eventId)).done_at).toEqual(expect.any(Date));
+    expect((await chainRow(answer.chainId)).status).toBe("active");
     // A root return turn delivers nothing further.
     expect(await replies()).toHaveLength(1);
   });
 
-  it("Archie's first turn reporting done after the chain completed changes nothing", async () => {
+  it("Archie's first turn reporting done completes the chain; a second done changes nothing", async () => {
+    expect((await done(archie)).status).toBe(200);
+    expect(await chainRow(answer.chainId)).toMatchObject({
+      status: "completed",
+      closed_at: expect.any(Date),
+    });
     expect((await done(archie)).status).toBe(200);
     expect((await chainRow(answer.chainId)).status).toBe("completed");
+  });
+});
+
+describe("a chain completes only once none of its turns still runs (CR-A-07)", () => {
+  it("Bea answers before Archie's first turn ends: its late done leaves the return turn its consult", async () => {
+    const { archie, answer, bea } = await consulted({ conversationId: trioId });
+    await ok(post(bea, ANSWER));
+    await ok(done(bea));
+    const reply = await replyFor(answer.hopId);
+    // The first turn ends after the answer came back: the return turn is still running.
+    await ok(done(archie));
+    expect((await chainRow(answer.chainId)).status).toBe("active");
+    const more = await consult(reply, carlId, { idempotencyKey: `${reply.eventId}:consult:0` });
+    expect(more.status, JSON.stringify(more.body)).toBe(200);
+    expect(more.body.ok).toBe(true);
+  });
+
+  it("the return turn ends first while Archie's first turn still runs: that turn may still consult", async () => {
+    const { archie, answer, bea } = await consulted({ conversationId: trioId });
+    await ok(post(bea, ANSWER));
+    await ok(done(bea));
+    const reply = await replyFor(answer.hopId);
+    await ok(post(reply, "Víctor: confirmed."));
+    await ok(done(reply));
+    expect((await chainRow(answer.chainId)).status).toBe("active");
+    const more = await consult(archie, carlId, { idempotencyKey: `${archie.eventId}:consult:1` });
+    expect(more.status, JSON.stringify(more.body)).toBe(200);
+    expect(more.body.ok).toBe(true);
   });
 });
 
@@ -769,6 +800,9 @@ describe("the root human pays every hop (Task 2; D-03, D-04, P-12, ADR-0019)", (
     const archieBack = await replyFor(ab.hopId);
     await ok(post(archieBack, "Víctor: confirmed."));
     await ok(done(archieBack));
+    // CR-A-07: Archie's first turn still runs until its own done.
+    expect((await chainRow(ab.chainId)).status).toBe("active");
+    await ok(done(archie));
     expect((await chainRow(ab.chainId)).status).toBe("completed");
 
     const turns = await rows(
@@ -798,7 +832,7 @@ describe("the root human pays every hop (Task 2; D-03, D-04, P-12, ADR-0019)", (
 
   it("Archie at its daily limit when Bea is done: hop answered, no return turn, the usual notice once, chain completed", async () => {
     const limitsId = await channel(`limits-${randomUUID().slice(0, 6)}`, [archieId, beaId]);
-    const { answer, bea } = await consulted({ conversationId: limitsId });
+    const { archie, answer, bea } = await consulted({ conversationId: limitsId });
     const posted = await ok(post(bea, ANSWER));
     await su.query("update app.agent_usage_daily set turns = 100000 where agent_id = $1", [archieId]);
     await ok(done(bea));
@@ -820,6 +854,8 @@ describe("the root human pays every hop (Task 2; D-03, D-04, P-12, ADR-0019)", (
     ).filter((a) => a.metadata.messageId === posted.messageId);
     expect(limited).toHaveLength(1);
     expect(limited[0]).toMatchObject({ user_id: victorId, metadata: { notified: true } });
+    // Nothing is pending and no return turn runs: the chain completes once Archie's first turn ends (CR-A-07).
+    await ok(done(archie));
     expect((await chainRow(answer.chainId)).status).toBe("completed");
     await su.query("delete from app.agent_usage_daily");
   });

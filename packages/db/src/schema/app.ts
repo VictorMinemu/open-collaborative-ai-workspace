@@ -721,9 +721,17 @@ export const agentTurns = appSchema.table(
     answeringHopId: uuid("answering_hop_id"),
     returningHopId: uuid("returning_hop_id"),
     replyMessageId: uuid("reply_message_id"),
+    /**
+     * Phase 07.7 (CR-A-07): when the cell reported this chain turn done (`POST /turns/:eventId/done`, first report
+     * only). A chain completes only once no hop is pending and none of its turns still runs (no `done_at`, younger than
+     * the hop timeout: an older one is taken as lost). Null for every turn outside a chain.
+     */
+    doneAt: ts("done_at"),
   },
   (t) => [
     index("agent_turns_org_agent_time_idx").on(t.organizationId, t.agentId, t.createdAt),
+    /** The turns of one chain (07.7 completion rule). */
+    index("agent_turns_chain_idx").on(t.chainId).where(sql`chain_id is not null`),
     check("agent_turns_sandbox_calls_check", sql`${t.sandboxCalls} >= 0`),
     check("agent_turns_chain_depth_check", sql`${t.chainDepth} between 0 and 2`),
   ],
