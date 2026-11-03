@@ -78,7 +78,50 @@ export type BridgeOptions = {
 };
 
 /** What `runTurn` reads from any delivered turn event (mention, card action, automation run, consult reply). */
-type ChainFacts = { eventId: string; agent: { id: string }; type?: string; origin?: unknown };
+type ChainFacts = {
+  eventId: string;
+  agent: { id: string };
+  type?: string;
+  origin?: unknown;
+  turn?: { tools: readonly string[] } | undefined;
+};
+
+/** The turn-like events: a chain turn among them that the bridge skips still reports done (CR-C-03). */
+const TURN_EVENT_TYPES: ReadonlySet<string> = new Set([
+  AgentChannelEventTypes.mention,
+  AgentChannelEventTypes.cardAction,
+  AgentChannelEventTypes.automationRun,
+  AgentChannelEventTypes.consultReply,
+]);
+
+const readableId = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 200;
+
+/**
+ * CR-C-03: the chain facts of a turn-like frame that failed to parse, read from its raw fields only (no value is
+ * logged): its event and bot ids, its type, whether it carries an `origin`, and the tools its turn lists. Null when
+ * either id is unreadable.
+ */
+function rawChainFacts(type: string, data: unknown): ChainFacts | null {
+  if (!TURN_EVENT_TYPES.has(type) || !data || typeof data !== "object") return null;
+  const raw = data as {
+    eventId?: unknown;
+    agent?: { id?: unknown } | null;
+    origin?: unknown;
+    turn?: unknown;
+  };
+  const agentId = raw.agent && typeof raw.agent === "object" ? raw.agent.id : undefined;
+  if (!readableId(raw.eventId) || !readableId(agentId)) return null;
+  const tools = (raw.turn as { tools?: unknown } | null | undefined)?.tools;
+  return {
+    eventId: raw.eventId,
+    agent: { id: agentId },
+    type,
+    ...(raw.origin !== undefined ? { origin: raw.origin } : {}),
+    turn: {
+      tools: Array.isArray(tools) ? tools.filter((t): t is string => typeof t === "string") : [],
+    },
+  };
+}
 
 export const FAILURE_REPLY = "Sorry, I couldn't generate a reply right now. Please try again in a moment.";
 
@@ -246,22 +289,23 @@ export function createBridge(opts: BridgeOptions) {
   /**
    * 07.7 (D-04, P-09): a turn that can belong to a consult chain: it was offered `ocw_consult_agent` (it may open a
    * hop), it answers a question (`origin`), or it is a consult reply. Only these report `POST /turns/:eventId/done`;
-   * every other turn sends nothing, as before.
+   * every other turn sends nothing, as before. Read from the event itself (the mapping's `turn` is the event's), so a
+   * turn the bridge skips before mapping is judged the same way (CR-C-03).
    */
-  function mayBelongToChain(event: ChainFacts, mention: MappedMention): boolean {
+  function mayBelongToChain(event: ChainFacts): boolean {
     return (
-      mention.turn.tools.includes(CONSULT_TOOL_NAME) ||
+      (event.turn?.tools ?? []).includes(CONSULT_TOOL_NAME) ||
       event.origin !== undefined ||
       event.type === AgentChannelEventTypes.consultReply
     );
   }
 
   /** Best effort: the turn never fails or retries on it (the `consult.tick` timeout is the backstop). */
-  async function reportDone(event: ChainFacts, mention: MappedMention, label: string, replied: boolean) {
+  async function reportDone(event: ChainFacts, agentId: string, label: string, replied: boolean) {
     try {
       await opts.client.turnDone(
         event.eventId,
-        { agentId: mention.ocwAgentId, outcome: replied ? "replied" : "failed" },
+        { agentId, outcome: replied ? "replied" : "failed" },
         opts.signal,
       );
     } catch (error) {
@@ -269,6 +313,22 @@ export function createBridge(opts: BridgeOptions) {
       const status = error instanceof AgentChannelHttpError ? String(error.status) : "unreachable";
       log.warn?.(`${label} ${event.eventId}: turn done not reported (${status})`);
     }
+  }
+
+  /**
+   * CR-C-03: a chain turn the bridge skips (its bot is unknown or disabled, its payload invalid) still reports `failed`,
+   * so the API closes the hop (or the chain) now instead of at the consult timeout. Never while stopping: the successor
+   * replays the event and decides.
+   */
+  async function reportSkipped(event: ChainFacts, label: string): Promise<void> {
+    if (opts.signal.aborted || !mayBelongToChain(event)) return;
+    await reportDone(event, event.agent.id, label, false);
+  }
+
+  /** An invalid turn-like frame: skipped (the caller logged it), reported failed when it may be a chain turn. */
+  async function skipInvalid(frame: DurableFrame): Promise<void> {
+    const facts = rawChainFacts(frame.type, frame.data);
+    if (facts) await reportSkipped(facts, `seq=${frame.seq}: ${frame.type}`);
   }
 
   async function runTurn(
@@ -283,14 +343,16 @@ export function createBridge(opts: BridgeOptions) {
     }
     if (!agent) {
       log.warn?.(`${label} ${event.eventId} for unknown agent ${event.agent.id}; skipped`);
+      await reportSkipped(event, label);
       return;
     }
     if (agent.status === "disabled") {
       log.info?.(`${label} ${event.eventId} for disabled agent ${agent.id}; skipped`);
+      await reportSkipped(event, label);
       return;
     }
     const mention = map(agent);
-    const chainTurn = mayBelongToChain(event, mention);
+    const chainTurn = mayBelongToChain(event);
     let index = 0;
     const post = async (text: string) => {
       for (const chunk of chunkText(text, maxReplyChars)) {
@@ -366,7 +428,7 @@ export function createBridge(opts: BridgeOptions) {
     } finally {
       // 07.7 (D-04): a dispatched chain turn tells the API it ended, after its last post (stopping: nothing is sent,
       // the successor replays the event and reports it).
-      if (chainTurn && !opts.signal.aborted) await reportDone(event, mention, label, index > 0);
+      if (chainTurn && !opts.signal.aborted) await reportDone(event, mention.ocwAgentId, label, index > 0);
       await stopTyping();
     }
   }
@@ -379,6 +441,7 @@ export function createBridge(opts: BridgeOptions) {
           log.warn?.(
             `seq=${frame.seq}: invalid agent.mention.v1 payload; skipped (${parsed.error.issues[0]?.path.join(".") ?? "?"}: ${parsed.error.issues[0]?.message ?? "?"})`,
           );
+          await skipInvalid(frame);
           return;
         }
         await handleMention(parsed.data);
@@ -391,6 +454,7 @@ export function createBridge(opts: BridgeOptions) {
           log.warn?.(
             `seq=${frame.seq}: invalid ${frame.type} payload; skipped (${parsed.error.issues[0]?.path.join(".") || "?"})`,
           );
+          await skipInvalid(frame);
           return;
         }
         await handleCardAction(parsed.data);
@@ -404,6 +468,7 @@ export function createBridge(opts: BridgeOptions) {
           log.warn?.(
             `seq=${frame.seq}: invalid ${frame.type} payload; skipped (${parsed.error.issues[0]?.path.join(".") || "?"})`,
           );
+          await skipInvalid(frame);
           return;
         }
         await handleAutomationRun(parsed.data);
@@ -417,6 +482,7 @@ export function createBridge(opts: BridgeOptions) {
           log.warn?.(
             `seq=${frame.seq}: invalid ${frame.type} payload; skipped (${parsed.error.issues[0]?.path.join(".") || "?"})`,
           );
+          await skipInvalid(frame);
           return;
         }
         await handleConsultReply(parsed.data);

@@ -1942,7 +1942,7 @@ describe("consult (07.7 A2A-01, D-01, D-04, D-08): ocw_consult_agent, the protoc
     ]);
   });
 
-  it("a turn not offered the tool and without origin sends no done (unchanged); a disabled or unknown bot's turn reports nothing", async () => {
+  it("a turn not offered the tool and without origin sends no done (unchanged); a disabled or unknown bot's chain turn is skipped but reports failed (CR-C-03)", async () => {
     const bridge = await directBridge();
     await bridge.handleFrame(
       frame(72, { ...mention(72), turn: consultTurn({ tools: ["ocw_agent_card"], consult: undefined }) }),
@@ -1960,8 +1960,65 @@ describe("consult (07.7 A2A-01, D-01, D-04, D-08): ocw_consult_agent, the protoc
         turn: consultTurn(),
       }),
     );
+    // A skipped turn outside any chain still reports nothing.
+    await bridge.handleFrame(frame(76, { ...mention(76) }));
+    expect(port.dispatched).toHaveLength(2);
     expect(api.messages).toHaveLength(2);
-    expect(api.turnsDone).toEqual([]);
+    // The API closes the hop (or the chain) at once instead of waiting for the consult timeout.
+    expect(api.turnsDone).toEqual([
+      { eventId: "evt-74", agentId: ARCHIE.id, outcome: "failed", status: 204 },
+      { eventId: "evt-75", agentId: "agent-nobody", outcome: "failed", status: 204 },
+    ]);
+  });
+
+  it("CR-C-03: a chain turn whose payload is invalid is skipped but reports failed when its ids are readable; never while stopping", async () => {
+    const logs: string[] = [];
+    const bridge = await directBridge(logs);
+    // A consult reply with an unknown outcome, a question with a malformed origin, a chain mention with a bad turn.
+    await bridge.handleFrame(
+      frame(
+        90,
+        replyData(90, { consultReply: { ...replyData(90).consultReply, outcome: "SECRET-OUTCOME" } }),
+        "agent.consult_reply.v1",
+      ),
+    );
+    await bridge.handleFrame(
+      frame(91, { ...mention(91), origin: { agent: { id: "agent-carl" }, chainId: "chain-9" } }),
+    );
+    await bridge.handleFrame(
+      frame(92, { ...mention(92), turn: consultTurn(), thread: { rootMessageId: 42 } }),
+    );
+    // Not a chain turn (no origin, not offered the tool, not a reply), or no readable ids: nothing is reported.
+    await bridge.handleFrame(frame(93, { ...mention(93), thread: { rootMessageId: 42 } }));
+    await bridge.handleFrame(
+      frame(94, { ...mention(94), eventId: 7, origin: { chainId: "chain-9" } }, "agent.mention.v1"),
+    );
+    expect(port.dispatched).toHaveLength(0);
+    expect(api.turnsDone).toEqual([
+      { eventId: "evt-90", agentId: ARCHIE.id, outcome: "failed", status: 204 },
+      { eventId: "evt-91", agentId: ARCHIE.id, outcome: "failed", status: 204 },
+      { eventId: "evt-92", agentId: ARCHIE.id, outcome: "failed", status: 204 },
+    ]);
+    expect(logs.join("\n")).not.toContain("SECRET");
+    // Stopping (a successor replays the event): nothing is reported for a skipped turn either.
+    const stop = new AbortController();
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const stopping = createBridge({ client, port, signal: stop.signal });
+    await stopping.refreshCell();
+    api.agents = [{ ...structuredClone(ARCHIE), status: "disabled" }];
+    await stopping.refreshCell();
+    stop.abort();
+    await stopping.handleFrame(frame(95, { ...mention(95), turn: consultTurn() })).catch(() => undefined);
+    await stopping
+      .handleFrame(
+        frame(
+          96,
+          replyData(96, { consultReply: { ...replyData(96).consultReply, outcome: "x" } }),
+          "agent.consult_reply.v1",
+        ),
+      )
+      .catch(() => undefined);
+    expect(api.turnsDone.map((d) => d.eventId)).toEqual(["evt-90", "evt-91", "evt-92"]);
   });
 
   it("a failing done (API 500) neither fails the turn nor retries it: one dispatch, one reply, no error body in the logs", async () => {
@@ -2040,7 +2097,7 @@ describe("consult (07.7 A2A-01, D-01, D-04, D-08): ocw_consult_agent, the protoc
     });
   });
 
-  it("a question delivery (origin) reports done even when its turn is not offered the tool; an invalid consult reply is skipped with the seq and field path only, later events flow", async () => {
+  it("a question delivery (origin) reports done even when its turn is not offered the tool; an invalid consult reply is skipped with the seq and field path only (and reports failed, CR-C-03), later events flow", async () => {
     const logs: string[] = [];
     const bridge = await directBridge(logs);
     await bridge.handleFrame(
@@ -2078,11 +2135,11 @@ describe("consult (07.7 A2A-01, D-01, D-04, D-08): ocw_consult_agent, the protoc
     await bridge.handleFrame(frame(83, replyData(83), "agent.consult_reply.v1"));
     expect(port.dispatched).toHaveLength(2);
     expect(api.messages.map((m) => m.idempotencyKey)).toEqual(["evt:evt-81", "evt:evt-83"]);
-    expect(api.turnsDone.map((d) => d.eventId)).toEqual(["evt-81", "evt-83"]);
+    expect(api.turnsDone.map((d) => d.eventId)).toEqual(["evt-81", "evt-82", "evt-83"]);
     // An older path is unaffected: a mention without the new fields runs and reports nothing.
     await bridge.handleFrame(frame(84, { ...mention(84) }));
     expect(port.dispatched[2]?.contextBlocks.some((b) => b.type.startsWith("consult"))).toBe(false);
-    expect(api.turnsDone).toHaveLength(2);
+    expect(api.turnsDone).toHaveLength(3);
   });
 
   it("D-09: a consult reply delivered tainted starts tainted in the real port: the model's consult reaches neither /consultations nor /tool-calls, the reply says it was refused, and the turn still reports done", async () => {
