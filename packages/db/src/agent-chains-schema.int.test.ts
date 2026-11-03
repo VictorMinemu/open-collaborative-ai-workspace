@@ -296,7 +296,17 @@ describe("agent chains schema (07.7-02)", () => {
       await q("update app.agent_chain_hops set status = 'answered', closed_at = now() where id = $1", [ab]);
       await hop(q, A, c, { target_agent_id: A.c });
       // B, the target of A → B, may consult D at depth 2 while A's consult of C is pending.
-      await hop(q, A, c, { source_agent_id: A.b, target_agent_id: A.d, depth: 2, parent_hop_id: ab });
+      const bd = await hop(q, A, c, {
+        source_agent_id: A.b,
+        target_agent_id: A.d,
+        depth: 2,
+        parent_hop_id: ab,
+      });
+      // CR-B-01: depth ≤ 2 is the database's: a hop parented on a depth-2 hop (D, asked by B, asks E) fails the parent
+      // key, whatever depth it claims (a depth-2 hop's parent was asked by the chain's root, so it is at depth 1).
+      await refused(q, "agent_chain_hops_parent_fk", () =>
+        hop(q, A, c, { source_agent_id: A.d, target_agent_id: A.e, depth: 2, parent_hop_id: bd }),
+      );
       const n = await q("select count(*)::int as n from app.agent_chain_hops where chain_id = $1", [c]);
       expect(n.rows[0].n).toBe(3);
     });

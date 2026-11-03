@@ -837,8 +837,18 @@ export const agentChainHops = appSchema.table(
   },
   (t) => [
     unique("agent_chain_hops_question_uq").on(t.questionMessageId),
-    /** Target of `agent_chain_hops_parent_fk`: a depth-2 hop's parent is in its chain and targeted its source. */
-    unique("agent_chain_hops_parent_key_uq").on(t.organizationId, t.chainId, t.id, t.targetAgentId),
+    /**
+     * Target of `agent_chain_hops_parent_fk`: a depth-2 hop's parent is in its chain, targeted its source, and was asked
+     * by the chain's root, so the parent is at depth 1 (`agent_chain_hops_source_depth_check`) and depth ≤ 2 holds in
+     * the database (CR-B-01).
+     */
+    unique("agent_chain_hops_parent_root_key_uq").on(
+      t.organizationId,
+      t.chainId,
+      t.id,
+      t.targetAgentId,
+      t.sourceAgentId,
+    ),
     foreignKey({
       name: "agent_chain_hops_chain_fk",
       columns: [t.organizationId, t.chainId, t.rootAgentId],
@@ -846,8 +856,8 @@ export const agentChainHops = appSchema.table(
     }).onDelete("cascade"),
     foreignKey({
       name: "agent_chain_hops_parent_fk",
-      columns: [t.organizationId, t.chainId, t.parentHopId, t.sourceAgentId],
-      foreignColumns: [t.organizationId, t.chainId, t.id, t.targetAgentId],
+      columns: [t.organizationId, t.chainId, t.parentHopId, t.sourceAgentId, t.rootAgentId],
+      foreignColumns: [t.organizationId, t.chainId, t.id, t.targetAgentId, t.sourceAgentId],
     }).onDelete("cascade"),
     foreignKey({
       name: "agent_chain_hops_source_fk",

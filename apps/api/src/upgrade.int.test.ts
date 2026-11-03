@@ -129,6 +129,7 @@ const HEAD_ONLY = [
   "20261103182852_agent_turns_done_at",
   "20261103183214_agent_chains_active_idx",
   "20261103183523_agent_chain_hops_tick_attempts",
+  "20261103183822_agent_chain_hops_parent_depth",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
