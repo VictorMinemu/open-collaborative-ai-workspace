@@ -826,6 +826,11 @@ export const agentChainHops = appSchema.table(
     answerMessageId: uuid("answer_message_id"),
     idempotencyKey: text("idempotency_key").notNull(),
     deadlineAt: ts("deadline_at").notNull(),
+    /**
+     * CR-A-08: how many times the `consult.tick` failed to time this hop out. Each failure pushes `deadline_at` out
+     * (backoff, so newer expired hops are reached first); after the last attempt the hop ends `failed` (`tick_error`).
+     */
+    tickAttempts: smallint("tick_attempts").notNull().default(0),
     closedAt: ts("closed_at"),
     createdAt: createdAt(),
     updatedAt: ts("updated_at").notNull().defaultNow(),

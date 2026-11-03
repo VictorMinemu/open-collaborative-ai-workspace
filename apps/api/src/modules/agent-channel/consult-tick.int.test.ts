@@ -411,6 +411,59 @@ describe("a lost done never strands a hop or a chain (CR-A-06)", () => {
   });
 });
 
+describe("a hop the tick cannot close is retried with backoff, then given up (CR-A-08)", () => {
+  it("a poison hop never starves a newer expired one, and ends failed tick_error after its last attempt", async () => {
+    await parkOthers();
+    const { hop: poison } = await consulted();
+    const { hop: good } = await consulted();
+    const goodDeadline = await deadlineOf(good.hopId);
+    await su.query("update app.agent_chain_hops set deadline_at = $2 where id = $1", [
+      poison.hopId,
+      plus(goodDeadline, -60_000).toISOString(),
+    ]);
+    // The poison hop cannot be timed out (a broken row in production; a trigger here).
+    await su.query(`create or replace function app.test_poison_hop() returns trigger language plpgsql as $$
+      begin
+        if new.id = '${poison.hopId}'::uuid and new.status = 'timed_out' then raise exception 'poison hop'; end if;
+        return new;
+      end $$`);
+    await su.query(
+      "create trigger test_poison_hop before update on app.agent_chain_hops for each row execute function app.test_poison_hop()",
+    );
+    try {
+      let at = plus(goodDeadline, 1000);
+      // Oldest first: the poison hop fails, and its next try moves behind the newer hop.
+      expect(await sweep(at, 1)).toEqual({ timedOut: 0, cancelled: 0 });
+      const once = await hopRow(poison.hopId);
+      expect(once).toMatchObject({ status: "pending", tick_attempts: 1 });
+      expect(new Date(once.deadline_at).getTime()).toBeGreaterThan(at.getTime());
+      expect(await sweep(at, 1)).toEqual({ timedOut: 1, cancelled: 0 });
+      expect((await hopRow(good.hopId)).status).toBe("timed_out");
+      // Bounded: each later failure counts, and the last one ends the hop.
+      for (let i = 0; i < 10 && (await hopRow(poison.hopId)).status === "pending"; i++) {
+        at = plus(await deadlineOf(poison.hopId), 1000);
+        await sweep(at, 1);
+      }
+      expect(await hopRow(poison.hopId)).toMatchObject({
+        status: "failed",
+        refusal_reason: "tick_error",
+        tick_attempts: 5,
+        closed_at: expect.any(Date),
+      });
+      const failed = await auditsFor("agent.consult.failed", "hopId", poison.hopId);
+      expect(failed).toHaveLength(1);
+      expect(failed[0]).toMatchObject({
+        actor_kind: "system",
+        result: "error",
+        metadata: { reason: "tick_error" },
+      });
+    } finally {
+      await su.query("drop trigger if exists test_poison_hop on app.agent_chain_hops");
+      await su.query("drop function if exists app.test_poison_hop()");
+    }
+  });
+});
+
 describe("exactly one outcome per hop under races (D-04, D-11)", () => {
   it("a tick racing the answer's done: one final status and one consult reply", async () => {
     await parkOthers();

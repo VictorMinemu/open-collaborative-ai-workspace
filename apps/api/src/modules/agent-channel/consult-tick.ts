@@ -128,10 +128,70 @@ async function expireHop(
   });
 }
 
+/** CR-A-08: the tick's tries on one hop before it gives up, and the backoff between them (1, 2, 4, 8 minutes). */
+export const TICK_MAX_ATTEMPTS = 5;
+const backoffMs = (attempt: number) => Math.min(30, 2 ** (attempt - 1)) * 60_000;
+
+/**
+ * A hop the tick could not close (CR-A-08), in its own short transaction: the failure is counted and its next try pushed
+ * out by the backoff (the listing is oldest deadline first, so newer expired hops are reached first and a poison hop
+ * never starves them); the last attempt ends it `pending → failed` with `refusal_reason = 'tick_error'`, announced
+ * nowhere (whatever broke would break again), audited with ids only. The idle sweep then ends its chain.
+ */
+async function recordTickFailure(
+  core: Core,
+  organizationId: string,
+  hopId: string,
+  now: Date,
+): Promise<void> {
+  await core.db.withTenant({ organizationId, userId: null }, async (tx) => {
+    const [hop] = await tx
+      .update(agentChainHops)
+      .set({ tickAttempts: sql`${agentChainHops.tickAttempts} + 1`, updatedAt: sql`now()` })
+      .where(and(eq(agentChainHops.id, hopId), eq(agentChainHops.status, "pending")))
+      .returning();
+    if (!hop) return;
+    if (hop.tickAttempts < TICK_MAX_ATTEMPTS) {
+      await tx
+        .update(agentChainHops)
+        .set({ deadlineAt: new Date(now.getTime() + backoffMs(hop.tickAttempts)).toISOString() })
+        .where(eq(agentChainHops.id, hopId));
+      return;
+    }
+    await tx
+      .update(agentChainHops)
+      .set({ status: "failed", refusalReason: "tick_error", closedAt: sql`now()` })
+      .where(and(eq(agentChainHops.id, hopId), eq(agentChainHops.status, "pending")));
+    const [chain] = await tx
+      .select({ humanUserId: agentChains.humanUserId })
+      .from(agentChains)
+      .where(eq(agentChains.id, hop.chainId));
+    await core.audit.record(tx, {
+      action: "agent.consult.failed",
+      resourceType: "agent_chain_hop",
+      resourceId: hop.id,
+      result: "error",
+      actorKind: "system",
+      agentId: hop.targetAgentId,
+      userId: chain?.humanUserId ?? null,
+      // Ids and the code only.
+      metadata: {
+        chainId: hop.chainId,
+        hopId: hop.id,
+        questionMessageId: hop.questionMessageId,
+        sourceAgentId: hop.sourceAgentId,
+        targetAgentId: hop.targetAgentId,
+        reason: "tick_error",
+        attempts: hop.tickAttempts,
+      },
+    });
+  });
+}
+
 /**
  * One minute of consult timeouts (D-11). Safe to run on several replicas at once and twice in the same minute: the
  * stream lock, the row lock and the conditional update leave one outcome per hop. A failure on one hop is logged with
- * ids and the error name and never stops the others.
+ * ids and the error name, counted with backoff and bounded (CR-A-08), and never stops the others.
  */
 export async function sweepConsults(
   core: Core,
@@ -150,10 +210,18 @@ export async function sweepConsults(
       if (outcome === "timed_out") out.timedOut++;
       else if (outcome === "cancelled") out.cancelled++;
     } catch (err) {
-      core.log.warn(
+      core.log.error(
         { hopId: row.id, organizationId: row.organization_id, err: { name: (err as Error)?.name } },
         "consult tick failed",
       );
+      try {
+        await recordTickFailure(core, row.organization_id, row.id, now);
+      } catch (again) {
+        core.log.error(
+          { hopId: row.id, organizationId: row.organization_id, err: { name: (again as Error)?.name } },
+          "consult tick could not record the failure",
+        );
+      }
     }
   }
   return out;
