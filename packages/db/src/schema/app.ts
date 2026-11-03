@@ -708,10 +708,165 @@ export const agentTurns = appSchema.table(
      * workspace writes are refused.
      */
     memberData: boolean("member_data").notNull().default(false),
+    /**
+     * Phase 07.7 (A2A-01, D-04, D-14, ADR-0027): the turn's place in an agent-to-agent chain. Plain ledger ids like
+     * `message_id` (no foreign key: the ledger outlives a cancelled or deleted chain row). `chain_depth` is 0 for a turn
+     * outside any chain and for the root's own turns (its first turn and its return turns), 1 or 2 for a consulted bot's
+     * turns. `answering_hop_id` is the hop this turn answers (the target's question turn and its return turns);
+     * `returning_hop_id` the hop whose answer, failure or timeout this turn receives; `reply_message_id` this turn's first
+     * post (the hop's answer when the turn answers one).
+     */
+    chainId: uuid("chain_id"),
+    chainDepth: smallint("chain_depth").notNull().default(0),
+    answeringHopId: uuid("answering_hop_id"),
+    returningHopId: uuid("returning_hop_id"),
+    replyMessageId: uuid("reply_message_id"),
   },
   (t) => [
     index("agent_turns_org_agent_time_idx").on(t.organizationId, t.agentId, t.createdAt),
     check("agent_turns_sandbox_calls_check", sql`${t.sandboxCalls} >= 0`),
+    check("agent_turns_chain_depth_check", sql`${t.chainDepth} between 0 and 2`),
+  ],
+);
+
+/**
+ * Phase 07.7 (A2A-01, A2A-03, D-03, D-04, D-14, ADR-0027): an agent-to-agent chain, opened by the first consult of a
+ * root turn (`root_event_id`, unique) in a channel thread. `human_user_id` is the root turn's human (the run-as person
+ * for an automation root): every hop runs and pays as that person. The hop budget is consumed only by the conditional
+ * `UPDATE … SET hops_used = hops_used + 1 WHERE status = 'active' AND hops_used < hop_budget`, and the check keeps it
+ * from ever going over. `(organization_id, id, root_agent_id)` is the target of the hops' chain key, so a hop's
+ * not-root check compares against the chain's real root.
+ */
+export const agentChains = appSchema.table(
+  "agent_chains",
+  {
+    id: id(),
+    organizationId: orgId(),
+    conversationId: uuid("conversation_id").notNull(),
+    threadRootId: uuid("thread_root_id").notNull(),
+    rootEventId: uuid("root_event_id").notNull(),
+    rootAgentId: uuid("root_agent_id").notNull(),
+    humanUserId: uuid("human_user_id").notNull(),
+    status: text("status", { enum: ["active", "completed", "cancelled"] })
+      .notNull()
+      .default("active"),
+    hopBudget: smallint("hop_budget").notNull().default(3),
+    hopsUsed: smallint("hops_used").notNull().default(0),
+    cancelReason: text("cancel_reason", { enum: ["user", "auto"] }),
+    cancelledByUserId: uuid("cancelled_by_user_id"),
+    closedAt: ts("closed_at"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    unique("agent_chains_root_event_uq").on(t.rootEventId),
+    unique("agent_chains_org_id_root_uq").on(t.organizationId, t.id, t.rootAgentId),
+    foreignKey({
+      name: "agent_chains_conversation_fk",
+      columns: [t.organizationId, t.conversationId],
+      foreignColumns: [conversations.organizationId, conversations.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "agent_chains_root_agent_fk",
+      columns: [t.organizationId, t.rootAgentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    index("agent_chains_conversation_idx").on(t.organizationId, t.conversationId, t.threadRootId),
+    check("agent_chains_status_check", sql`${t.status} in ('active','completed','cancelled')`),
+    check(
+      "agent_chains_cancel_reason_check",
+      sql`${t.cancelReason} is null or ${t.cancelReason} in ('user','auto')`,
+    ),
+    check(
+      "agent_chains_budget_check",
+      sql`${t.hopBudget} between 1 and 10 and ${t.hopsUsed} between 0 and ${t.hopBudget}`,
+    ),
+  ],
+);
+
+/**
+ * Phase 07.7 (A2A-01, A2A-03, D-03, D-04, D-14, ADR-0027): one consult (or handoff) from `source_agent_id` to
+ * `target_agent_id`, posted as `question_message_id` in the chain's thread. The loop guards are constraints, never
+ * read-then-write: an agent is a target at most once per chain and never the chain's root or itself; depth is 1 (asked
+ * by the root, no parent) or 2 (asked by the target of its parent hop, in the same chain); one pending consult per source
+ * per chain; one hop per (source, idempotency key). `pending` hops past `deadline_at` are timed out by the one-minute
+ * `consult.tick` (`app.expired_agent_chain_hops`, D-11).
+ */
+export const agentChainHops = appSchema.table(
+  "agent_chain_hops",
+  {
+    id: id(),
+    organizationId: orgId(),
+    chainId: uuid("chain_id").notNull(),
+    rootAgentId: uuid("root_agent_id").notNull(),
+    parentHopId: uuid("parent_hop_id"),
+    sourceAgentId: uuid("source_agent_id").notNull(),
+    targetAgentId: uuid("target_agent_id").notNull(),
+    depth: smallint("depth").notNull(),
+    mode: text("mode", { enum: ["consult", "handoff"] }).notNull(),
+    status: text("status", { enum: ["pending", "answered", "failed", "timed_out", "cancelled", "refused"] })
+      .notNull()
+      .default("pending"),
+    refusalReason: text("refusal_reason"),
+    sourceEventId: uuid("source_event_id").notNull(),
+    targetEventId: uuid("target_event_id"),
+    questionMessageId: uuid("question_message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    answerMessageId: uuid("answer_message_id"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    deadlineAt: ts("deadline_at").notNull(),
+    closedAt: ts("closed_at"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    unique("agent_chain_hops_question_uq").on(t.questionMessageId),
+    /** Target of `agent_chain_hops_parent_fk`: a depth-2 hop's parent is in its chain and targeted its source. */
+    unique("agent_chain_hops_parent_key_uq").on(t.organizationId, t.chainId, t.id, t.targetAgentId),
+    foreignKey({
+      name: "agent_chain_hops_chain_fk",
+      columns: [t.organizationId, t.chainId, t.rootAgentId],
+      foreignColumns: [agentChains.organizationId, agentChains.id, agentChains.rootAgentId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "agent_chain_hops_parent_fk",
+      columns: [t.organizationId, t.chainId, t.parentHopId, t.sourceAgentId],
+      foreignColumns: [t.organizationId, t.chainId, t.id, t.targetAgentId],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "agent_chain_hops_source_fk",
+      columns: [t.organizationId, t.sourceAgentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "agent_chain_hops_target_fk",
+      columns: [t.organizationId, t.targetAgentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    unique("agent_chain_hops_target_once").on(t.chainId, t.targetAgentId),
+    uniqueIndex("agent_chain_hops_one_pending").on(t.chainId, t.sourceAgentId).where(sql`status = 'pending'`),
+    unique("agent_chain_hops_idempotency").on(t.sourceAgentId, t.idempotencyKey),
+    index("agent_chain_hops_pending_deadline_idx").on(t.deadlineAt).where(sql`status = 'pending'`),
+    index("agent_chain_hops_answer_idx").on(t.answerMessageId).where(sql`answer_message_id is not null`),
+    check("agent_chain_hops_not_self", sql`${t.targetAgentId} <> ${t.sourceAgentId}`),
+    check("agent_chain_hops_not_root", sql`${t.targetAgentId} <> ${t.rootAgentId}`),
+    check("agent_chain_hops_depth_check", sql`${t.depth} between 1 and 2`),
+    check("agent_chain_hops_parent_depth_check", sql`(${t.depth} = 1) = (${t.parentHopId} is null)`),
+    check(
+      "agent_chain_hops_source_depth_check",
+      sql`(${t.depth} = 1) = (${t.sourceAgentId} = ${t.rootAgentId})`,
+    ),
+    check("agent_chain_hops_mode_check", sql`${t.mode} in ('consult','handoff')`),
+    check(
+      "agent_chain_hops_status_check",
+      sql`${t.status} in ('pending','answered','failed','timed_out','cancelled','refused')`,
+    ),
+    check(
+      "agent_chain_hops_refusal_reason_len_check",
+      sql`${t.refusalReason} is null or char_length(${t.refusalReason}) <= 64`,
+    ),
+    check("agent_chain_hops_idempotency_len_check", sql`char_length(${t.idempotencyKey}) between 1 and 200`),
   ],
 );
 
