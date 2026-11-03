@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AGENT_TOOL_PATTERN } from "./agent-chains";
 import { Id, IsoDateTime, OrgRole } from "./common";
 import { MemoryFolder } from "./memory";
 import {
@@ -143,9 +144,10 @@ export const RuleTool = z
 
 /**
  * The permissions a tool-layer rule refines: Work Zone approvals and bot tool use (Phase 3.1, so an admin can
- * deny one MCP or plugin tool to a role, unit or user).
+ * deny one MCP or plugin tool to a role, unit or user), and agent-to-agent consults (Phase 07.7, ADR-0027: the tool is
+ * the target bot, `agent:<uuid>`, so a rule allows or denies consulting one bot).
  */
-const TOOL_PERMISSIONS: readonly Permission[] = ["work_session.approve", "bot.tool.use"];
+const TOOL_PERMISSIONS: readonly Permission[] = ["work_session.approve", "bot.tool.use", "agent.message"];
 
 /** The permissions a folder rule refines: memory files (Phase 07.2, D-04). */
 const PATH_PERMISSIONS: readonly Permission[] = ["memory.read", "memory.write", "memory.promote"];
@@ -188,7 +190,24 @@ export const CreatePermissionRuleRequest = z
       ctx.addIssue({
         code: "custom",
         path: ["tool"],
-        message: `a tool applies only to ${TOOL_PERMISSIONS.join(" or ")}`,
+        message: `a tool applies only to ${TOOL_PERMISSIONS.join(", ")}`,
+      });
+    }
+    // Phase 07.7 (D-04, P-04): per-target consult rules. An `agent.message` tool names exactly one bot as
+    // `agent:<lowercase uuid>`, and an `agent:` tool never refines another permission.
+    const onAgentMessage = permissionMatches(r.permission, "agent.message");
+    if (r.tool !== null && onAgentMessage && !AGENT_TOOL_PATTERN.test(r.tool)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["tool"],
+        message: "an agent.message tool must be agent:<agent id>",
+      });
+    }
+    if (r.tool !== null && !onAgentMessage && r.tool.toLowerCase().startsWith("agent:")) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["tool"],
+        message: "an agent: tool applies only to agent.message",
       });
     }
     // Mirrors the tool refinement: a folder only ever narrows a memory rule.

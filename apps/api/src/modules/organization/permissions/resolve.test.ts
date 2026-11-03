@@ -152,6 +152,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "automation.webhook": false,
     "automation.manage": false,
     "record.watch": true,
+    // Phase 07.7 (ADR-0027): the human side of a consult; agents need an explicit allow rule.
+    "agent.message": true,
   },
   developer: {
     "org.read": true,
@@ -231,6 +233,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "automation.webhook": false,
     "automation.manage": false,
     "record.watch": true,
+    // Phase 07.7 (ADR-0027): the human side of a consult; agents need an explicit allow rule.
+    "agent.message": true,
   },
   lead: {
     "org.read": true,
@@ -310,6 +314,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "automation.webhook": true,
     "automation.manage": false,
     "record.watch": true,
+    // Phase 07.7 (ADR-0027): the human side of a consult; agents need an explicit allow rule.
+    "agent.message": true,
   },
   admin: {
     "org.read": true,
@@ -389,6 +395,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "automation.webhook": true,
     "automation.manage": true,
     "record.watch": true,
+    // Phase 07.7 (ADR-0027): the human side of a consult; agents need an explicit allow rule.
+    "agent.message": true,
   },
 };
 

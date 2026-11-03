@@ -178,3 +178,121 @@ export const MessageConsult = z.object({
   status: ConsultHopStatus,
 });
 export type MessageConsult = z.infer<typeof MessageConsult>;
+
+// ---------------------------------------------------------------- who may consult whom (D-02, D-04, P-03, P-04)
+
+/**
+ * A per-target `agent.message` rule names the target bot in the rule's existing `tool` column (D-04). Lowercase uuid
+ * only, so one bot has exactly one spelling; 42 characters, inside `RuleTool`'s 64.
+ */
+export const AGENT_TOOL_PATTERN = /^agent:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** The rule tool that names `agentId` as a consult target (`agent:<uuid>`). */
+export function agentMessageTool(agentId: string): string {
+  return `agent:${agentId.toLowerCase()}`;
+}
+
+/** Rule lists per bot (allow, deny): bounded so a view or a request never grows without limit. */
+const AGENT_RULE_LIST_MAX = 100;
+/** The bots a "Right now" summary names before it stops listing. */
+const AGENT_EFFECTIVE_MAX = 50;
+
+export const AgentRef = z.object({
+  id: Id,
+  handle: z.string().min(1).max(64),
+  displayName: z.string().min(1).max(120),
+});
+export type AgentRef = z.infer<typeof AgentRef>;
+
+/**
+ * `GET|PUT /api/v1/agent-messaging` (P-03): the organization switch "Bots may consult each other", off by default. On =
+ * exactly one organization-scope rule `{everyone, allow, agent.message, tool null}`; off = no such rule.
+ */
+export const AgentMessagingSettings = z.object({
+  enabled: z.boolean(),
+  /** The caller holds `rule.manage` (admins in v1). */
+  canManage: z.boolean(),
+});
+export type AgentMessagingSettings = z.infer<typeof AgentMessagingSettings>;
+
+export const UpdateAgentMessagingSettingsRequest = z.object({ enabled: z.boolean() });
+export type UpdateAgentMessagingSettingsRequest = z.infer<typeof UpdateAgentMessagingSettingsRequest>;
+
+/**
+ * Who one bot may consult (P-04), organization-scope `agent.message` rules with the bot as subject: `default` = no
+ * rule of its own (the organization switch decides), `any` = allow every bot, `only` = allow the listed bots, `none` =
+ * deny every bot. Deny always wins, so `only` cannot narrow below an organization switch that is on.
+ */
+export const AgentMessagingOutboundMode = z.enum(["default", "any", "only", "none"]);
+export type AgentMessagingOutboundMode = z.infer<typeof AgentMessagingOutboundMode>;
+
+/** `GET /api/v1/agents/:id/messaging`: the bot's rules and the server-computed "Right now" summary. */
+export const AgentMessagingView = z.object({
+  agentId: Id,
+  /** The organization switch is on. */
+  orgDefault: z.boolean(),
+  outbound: z.object({
+    mode: AgentMessagingOutboundMode,
+    /** `only`: the bots it may consult. */
+    allow: z.array(AgentRef).max(AGENT_RULE_LIST_MAX),
+    /** "Never ask": bots it may never consult, whatever the mode. */
+    deny: z.array(AgentRef).max(AGENT_RULE_LIST_MAX),
+  }),
+  /** Off = an `{everyone, deny, tool agent:<this bot>}` rule: no bot may consult it. */
+  inbound: z.object({ consultable: z.boolean() }),
+  /** What the rules add up to right now, computed by the API's decision (never in the client). */
+  effective: z.object({
+    kind: z.enum(["any", "none", "some"]),
+    targets: z.array(AgentRef).max(AGENT_EFFECTIVE_MAX),
+  }),
+  /** The caller holds `rule.manage` (admins in v1). */
+  canManage: z.boolean(),
+});
+export type AgentMessagingView = z.infer<typeof AgentMessagingView>;
+
+const AgentIdList = z.array(Id).max(AGENT_RULE_LIST_MAX);
+
+/** `PUT /api/v1/agents/:id/messaging`: replaces the bot's own `agent.message` rules (outbound and inbound). */
+export const SetAgentMessagingRequest = z
+  .object({
+    outbound: z.object({
+      mode: AgentMessagingOutboundMode,
+      allow: AgentIdList,
+      deny: AgentIdList,
+    }),
+    inbound: z.object({ consultable: z.boolean() }),
+  })
+  .superRefine((r, ctx) => {
+    const { mode } = r.outbound;
+    // Ids compare case-insensitively: one bot has one identity whatever the spelling.
+    const allow = r.outbound.allow.map((id) => id.toLowerCase());
+    const deny = r.outbound.deny.map((id) => id.toLowerCase());
+    if ((mode === "only") !== allow.length > 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["outbound", "allow"],
+        message: "an allow list is required with mode only, and only with it",
+      });
+    }
+    if (mode === "none" && deny.length > 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["outbound", "deny"],
+        message: "mode none already denies every bot",
+      });
+    }
+    if (new Set(allow).size !== allow.length) {
+      ctx.addIssue({ code: "custom", path: ["outbound", "allow"], message: "duplicate bot" });
+    }
+    if (new Set(deny).size !== deny.length) {
+      ctx.addIssue({ code: "custom", path: ["outbound", "deny"], message: "duplicate bot" });
+    }
+    if (allow.some((id) => deny.includes(id))) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["outbound"],
+        message: "a bot cannot be both allowed and denied",
+      });
+    }
+  });
+export type SetAgentMessagingRequest = z.infer<typeof SetAgentMessagingRequest>;

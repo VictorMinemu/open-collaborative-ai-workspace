@@ -476,3 +476,95 @@ describe("confined sandbox and browser tools (07.8 D-02, D-03, D-11, D-13)", () 
     ).toBe(false);
   });
 });
+
+describe("agent-to-agent consults (07.7 D-02, D-04, D-09, C-01)", () => {
+  const target = { id: ID2, handle: "purchasing", displayName: "Purchasing", description: null };
+
+  it("ocw_consult_agent is a built-in that the dangerous-name filter never refuses", () => {
+    expect(BUILTIN_TOOLS.consultAgent).toBe("ocw_consult_agent");
+    expect(isDangerousToolName(BUILTIN_TOOLS.consultAgent)).toBe(false);
+    expect(isDangerousToolName(BUILTIN_TOOLS.consultAgent, "sandbox")).toBe(false);
+  });
+
+  it("OpenClaw's in-cell agent-to-agent tools are refused on both hosts (C-01)", () => {
+    for (const name of [
+      "subagents",
+      "conversations_turn",
+      "conversations_list",
+      "conversations_send",
+      "agents_list",
+      "agents_wait",
+      "Agents_List",
+      "sessions_send",
+      "sessions_spawn",
+    ]) {
+      expect(isDangerousToolName(name), name).toBe(true);
+      expect(isDangerousToolName(name, "cell"), name).toBe(true);
+      expect(isDangerousToolName(name, "sandbox"), name).toBe(true);
+    }
+    for (const name of [
+      "ocw_consult_agent",
+      "web_search",
+      "ocw_agent_card",
+      "ocw_automation_propose",
+      "lookup_agent",
+      "m3f9a12c4__list_conversations",
+    ]) {
+      expect(isDangerousToolName(name), name).toBe(false);
+    }
+  });
+
+  it("the exact dangerous list is unchanged, so the render-config and reconciler parity stays valid", () => {
+    expect(DANGEROUS_TOOL_NAMES).toEqual([
+      "apply_patch",
+      "edit",
+      "exec",
+      "ls",
+      "openclaw",
+      "process",
+      "read",
+      "write",
+      "sessions_yield",
+      "tool_call",
+      "tool_describe",
+      "tool_search",
+      "presence",
+      "session_status",
+      "browser",
+      "canvas",
+      "message",
+      "gateway",
+      "nodes",
+      "x_search",
+      "code_execution",
+      "group:runtime",
+      "group:fs",
+      "group:ui",
+      "group:automation",
+      "group:nodes",
+      "group:sessions",
+      "group:messaging",
+      "group:media",
+    ]);
+  });
+
+  it("turns parse with and without consult targets and an initial taint (D-09)", () => {
+    expect(TurnContext.parse(turn).consult).toBeUndefined();
+    expect(TurnContext.parse(turn).tainted).toBeUndefined();
+    const withConsult = {
+      ...turn,
+      maxSandboxCalls: 40,
+      tainted: true,
+      consult: { chainId: null, depth: 0, targets: [target] },
+    };
+    expect(TurnContext.parse(withConsult)).toEqual(withConsult);
+    expect(AgentMentionEvent.parse({ ...mentionEvent, turn: withConsult }).turn).toEqual(withConsult);
+    expect(TurnContext.safeParse({ ...turn, tainted: "yes" }).success).toBe(false);
+    expect(
+      TurnContext.safeParse({ ...turn, consult: { chainId: null, depth: 2, targets: [target] } }).success,
+    ).toBe(false);
+    expect(
+      TurnContext.safeParse({ ...turn, consult: { chainId: null, depth: 0, targets: [] } }).success,
+    ).toBe(false);
+  });
+});

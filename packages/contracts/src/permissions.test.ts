@@ -25,12 +25,37 @@ const id = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
 const now = 1_790_000_000;
 
 describe("permission vocabulary", () => {
-  it("has exactly the 77 agreed permissions", () => {
+  it("has exactly the 78 agreed permissions", () => {
     // 64 through 07.4; 07.5-01 appended `tool_approval.manage`; 07.8-30 appended the five sandbox and browser grains;
     // 07.9-01 appended `work_session.visibility` and `work_project.manage`; 07.11-01 appended `device.maintain`;
-    // 07.6-01 appended the three automation grains and `record.watch`.
-    expect(Permission.options).toHaveLength(77);
-    expect(new Set(Permission.options).size).toBe(77);
+    // 07.6-01 appended the three automation grains and `record.watch`; 07.7-01 appended `agent.message` (ADR-0027).
+    expect(Permission.options).toHaveLength(78);
+    expect(new Set(Permission.options).size).toBe(78);
+  });
+
+  it("Phase 07.7 `agent.message` is a delegable Bots grain every role holds and agents do not (D-02, D-04)", () => {
+    // Appended at the end, never renamed (position 77).
+    expect(Permission.options[77]).toBe("agent.message");
+    expect(PERMISSION_SURFACE["agent.message"]).toBe("bots");
+    const holders = OrgRole.options.filter((role) => ROLE_PERMISSIONS[role].includes("agent.message"));
+    expect(holders).toEqual(["standard", "developer", "lead", "admin"]);
+    // Closed by default for agents: only an explicit allow rule opens a consult (the org switch or a per-bot rule).
+    expect(AGENT_PERMISSIONS).not.toContain("agent.message");
+    expect(AGENT_PERMISSIONS).toHaveLength(9);
+    expect(LEAD_PERMISSIONS).not.toContain("agent.message");
+    expect(NON_DELEGABLE_PERMISSIONS).not.toContain("agent.message");
+    expect(PermissionPattern.safeParse("agent.message").success).toBe(true);
+    expect(PermissionPattern.safeParse("agent.*").success).toBe(true);
+    expect(PERMISSION_DESCRIPTIONS["agent.message"]).toBe(
+      "Consult another bot, or let bots consult other bots for you",
+    );
+    expect(PERMISSION_DESCRIPTIONS["agent.message"].length).toBeGreaterThan(10);
+    // ADR-0027: the Bots switch also stops consults.
+    const modulesOf = (p: Permission) =>
+      ModuleId.options.filter((m) =>
+        MODULE_CATALOG[m].patterns.some((pattern) => permissionMatches(pattern, p)),
+      );
+    expect(modulesOf("agent.message")).toEqual(["bots"]);
   });
 
   it("Phase 07.6 automation and watched-record grains exist exactly as 07.6-01 defines them (D-07, P-04, P-05)", () => {

@@ -6,6 +6,7 @@ import {
   A2A_MAX_TARGETS,
   A2A_PARENT_GRACE_MS,
   A2A_QUESTION_MAX,
+  AGENT_TOOL_PATTERN,
   AgentChainStatus,
   AgentChannelConsultRequest,
   AgentChannelConsultResponse,
@@ -13,14 +14,25 @@ import {
   AgentChannelTurnDone,
   AgentConsultReplyEvent,
   AgentMentionEvent,
+  AgentMessagingOutboundMode,
+  AgentMessagingSettings,
+  AgentMessagingView,
+  AgentRef,
   AgentTurnOrigin,
+  agentMessageTool,
   ConsultHopStatus,
   ConsultMode,
   ConsultRefusal,
   ConsultTarget,
+  CreatePermissionRuleRequest,
+  isApprovableTool,
   Message,
   MessageConsult,
+  RuleTool,
+  SetAgentMessagingRequest,
+  ToolPattern,
   TurnConsult,
+  UpdateAgentMessagingSettingsRequest,
 } from "./index";
 
 const EVENT = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a50";
@@ -368,5 +380,143 @@ describe("limits and enums (D-03, D-04, D-11)", () => {
     for (const shared of ["unknown_turn", "no_trigger", "not_in_turn", "tainted", "cap_reached"]) {
       expect(codes as readonly string[], shared).not.toContain(shared);
     }
+  });
+});
+
+describe("per-target rules on the existing tool column (D-04, P-04)", () => {
+  const rule = { subjectKind: "everyone", permission: "agent.message", effect: "allow" } as const;
+
+  it("agentMessageTool names a target as agent:<uuid> within the RuleTool bounds", () => {
+    const tool = agentMessageTool(AGENT_B);
+    expect(tool).toBe(`agent:${AGENT_B}`);
+    expect(tool).toMatch(AGENT_TOOL_PATTERN);
+    expect(tool.length).toBeLessThanOrEqual(64);
+    expect(RuleTool.safeParse(tool).success).toBe(true);
+    expect(AGENT_TOOL_PATTERN.test(`agent:${AGENT_B.toUpperCase()}`)).toBe(false);
+    expect(AGENT_TOOL_PATTERN.test(`xagent:${AGENT_B}`)).toBe(false);
+    expect(AGENT_TOOL_PATTERN.test(`agent:${AGENT_B}x`)).toBe(false);
+  });
+
+  it("accepts agent.message with no tool or with one agent:<uuid> tool", () => {
+    expect(CreatePermissionRuleRequest.parse({ ...rule, tool: null }).tool).toBeNull();
+    expect(CreatePermissionRuleRequest.parse(rule).tool).toBeNull();
+    const perTarget = CreatePermissionRuleRequest.parse({
+      ...rule,
+      subjectKind: "agent",
+      subjectId: AGENT_A,
+      tool: agentMessageTool(AGENT_B),
+    });
+    expect(perTarget.tool).toBe(`agent:${AGENT_B}`);
+    // Inbound off for B: everyone, deny, tool agent:<B>.
+    expect(
+      CreatePermissionRuleRequest.safeParse({ ...rule, effect: "deny", tool: agentMessageTool(AGENT_B) })
+        .success,
+    ).toBe(true);
+  });
+
+  it("refuses any other tool on agent.message and an agent: tool on any other permission", () => {
+    for (const tool of [
+      "web_search",
+      "agent:not-a-uuid",
+      `agent:${AGENT_B.toUpperCase()}`,
+      "agent:",
+      `Agent:${AGENT_B}`,
+    ]) {
+      expect(CreatePermissionRuleRequest.safeParse({ ...rule, tool }).success, tool).toBe(false);
+    }
+    for (const permission of ["bot.tool.use", "work_session.approve", "channel.post"]) {
+      expect(
+        CreatePermissionRuleRequest.safeParse({ ...rule, permission, tool: agentMessageTool(AGENT_B) })
+          .success,
+        permission,
+      ).toBe(false);
+    }
+    // The existing tool permissions keep their own tools.
+    expect(
+      CreatePermissionRuleRequest.safeParse({ ...rule, permission: "bot.tool.use", tool: "web_search" })
+        .success,
+    ).toBe(true);
+    // 07.2's folder refine still applies: a folder only narrows a memory rule.
+    expect(CreatePermissionRuleRequest.safeParse({ ...rule, pathPrefix: "hr/" }).success).toBe(false);
+  });
+
+  it("no 07.5 approval policy can name ocw_consult_agent (D-10)", () => {
+    expect(isApprovableTool("ocw_consult_agent")).toBe(false);
+    expect(ToolPattern.safeParse("ocw_consult_agent").success).toBe(false);
+  });
+});
+
+describe("agent messaging settings and per-bot rules (P-03, P-04)", () => {
+  const ref = (id: string, handle: string) => ({ id, handle, displayName: handle });
+
+  it("the organization switch and the per-bot view parse minimal fixtures", () => {
+    expect(AgentMessagingSettings.parse({ enabled: false, canManage: true })).toEqual({
+      enabled: false,
+      canManage: true,
+    });
+    expect(UpdateAgentMessagingSettingsRequest.parse({ enabled: true })).toEqual({ enabled: true });
+    expect(UpdateAgentMessagingSettingsRequest.safeParse({ enabled: "on" }).success).toBe(false);
+    expect(AgentMessagingOutboundMode.options).toEqual(["default", "any", "only", "none"]);
+    expect(AgentRef.parse(ref(AGENT_B, "purchasing"))).toEqual(ref(AGENT_B, "purchasing"));
+
+    const view = {
+      agentId: AGENT_A,
+      orgDefault: false,
+      outbound: { mode: "only", allow: [ref(AGENT_B, "purchasing")], deny: [] },
+      inbound: { consultable: true },
+      effective: { kind: "some", targets: [ref(AGENT_B, "purchasing")] },
+      canManage: true,
+    };
+    expect(AgentMessagingView.parse(view)).toEqual(view);
+    expect(AgentMessagingView.safeParse({ ...view, effective: { kind: "all", targets: [] } }).success).toBe(
+      false,
+    );
+    expect(
+      AgentMessagingView.safeParse({
+        ...view,
+        effective: { kind: "some", targets: Array(51).fill(ref(AGENT_B, "purchasing")) },
+      }).success,
+    ).toBe(false);
+  });
+
+  const set = (outbound: { mode: string; allow?: string[]; deny?: string[] }, consultable = true) => ({
+    outbound: { allow: [], deny: [], ...outbound },
+    inbound: { consultable },
+  });
+  const ids = (n: number) =>
+    Array.from({ length: n }, (_, i) => `0199a1b2-c3d4-7e5f-8a9b-${String(i).padStart(12, "0")}`);
+
+  it("accepts each outbound mode with its lists", () => {
+    for (const ok of [
+      set({ mode: "only", allow: [AGENT_B] }),
+      set({ mode: "any", deny: [AGENT_B] }),
+      set({ mode: "default" }, false),
+      set({ mode: "default", deny: [AGENT_B] }),
+      set({ mode: "none" }),
+      set({ mode: "only", allow: ids(100) }),
+    ]) {
+      expect(SetAgentMessagingRequest.safeParse(ok).success, JSON.stringify(ok.outbound)).toBe(true);
+    }
+  });
+
+  it("refuses inconsistent or unbounded lists", () => {
+    for (const bad of [
+      set({ mode: "only" }),
+      set({ mode: "any", allow: [AGENT_B] }),
+      set({ mode: "default", allow: [AGENT_B] }),
+      set({ mode: "none", deny: [AGENT_B] }),
+      set({ mode: "only", allow: [AGENT_B], deny: [AGENT_B] }),
+      set({ mode: "only", allow: [AGENT_B, AGENT_B] }),
+      set({ mode: "any", deny: [VICTOR, VICTOR] }),
+      set({ mode: "only", allow: ids(101) }),
+      set({ mode: "any", deny: ids(101) }),
+      set({ mode: "only", allow: ["purchasing"] }),
+      set({ mode: "sometimes" }),
+    ]) {
+      expect(SetAgentMessagingRequest.safeParse(bad).success, JSON.stringify(bad.outbound)).toBe(false);
+    }
+    expect(
+      SetAgentMessagingRequest.safeParse({ outbound: { mode: "default", allow: [], deny: [] } }).success,
+    ).toBe(false);
   });
 });

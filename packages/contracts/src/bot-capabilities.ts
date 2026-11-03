@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AgentScope, AgentStatus, ModelProviderKind } from "./agent";
+import { TurnConsult } from "./agent-chains";
 import { Id, IsoDateTime } from "./common";
 import { MemberAccountResourceKind } from "./connectors";
 import { MEMORY_LIMITS, MemoryPath, MemoryScopeKind } from "./memory";
@@ -372,6 +373,16 @@ export const TurnContext = z.object({
   memoryFiles: z.array(TurnMemoryFile).max(2).optional(),
   /** Phase 07.8 (D-11 F-7): sandbox and browser calls this turn may make; absent on older payloads. */
   maxSandboxCalls: z.number().int().optional(),
+  /**
+   * Phase 07.7 (D-01, ADR-0027): present only when the turn is offered `ocw_consult_agent`: the bots it may consult
+   * (decided by the API) and this turn's depth in its chain. Absent on older payloads and on every other turn.
+   */
+  consult: TurnConsult.optional(),
+  /**
+   * Phase 07.7 (D-09): the turn starts tainted (07.6 `taintedAtStart`: outside content, an inbound-rooted thread, a
+   * consult answer that read web or MCP content); the plugin starts its local taint from it. Absent = untainted.
+   */
+  tainted: z.boolean().optional(),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -440,6 +451,11 @@ export const BUILTIN_TOOLS = {
    */
   automationPropose: "ocw_automation_propose",
   recordUpdate: "ocw_record_update",
+  /**
+   * 07.7 (ADR-0027): consult another bot through `POST /consultations`; self-validated by its route, always
+   * side-effecting, never approvable (not in `APPROVABLE_BUILTINS`, D-10). Offered only with `TurnContext.consult`.
+   */
+  consultAgent: "ocw_consult_agent",
 } as const;
 
 export const MAX_TOOL_CALLS_PER_TURN = 8;
@@ -635,6 +651,9 @@ function words(name: string): string[] {
  * Phase 07.8 (D-03): `host: "sandbox"` is for tools that run only inside a bot's sandbox. It skips the shell, file and
  * browser-control word sets and uses `SANDBOX_REFUSED_TOOL_NAMES` as the exact list; administration, messaging,
  * `session(s)_*`, `group:*` and config mutation stay refused. The default host (`cell`) is unchanged.
+ *
+ * Phase 07.7 (C-01): `subagents`, `conversations_*` and `agents_*` (OpenClaw's in-cell agent-to-agent tools) are refused
+ * on both hosts. A predicate change only: `DANGEROUS_TOOL_NAMES` and its mirrors stay identical.
  */
 export function isDangerousToolName(name: string, host: ToolHost = "cell"): boolean {
   const lower = name.trim().toLowerCase();
@@ -643,6 +662,9 @@ export function isDangerousToolName(name: string, host: ToolHost = "cell"): bool
   if ((confined ? SANDBOX_REFUSED_EXACT : DANGEROUS_EXACT).has(lower) || lower.startsWith("group:"))
     return true;
   if (lower.startsWith("session_") || lower.startsWith("sessions_")) return true;
+  // Phase 07.7 (C-01, ADR-0027): OpenClaw's in-cell agent-to-agent tools. Bots reach each other only through
+  // `ocw_consult_agent`, which the Agent Channel API decides and audits.
+  if (lower === "subagents" || lower.startsWith("conversations_") || lower.startsWith("agents_")) return true;
   const w = words(name);
   const has = (set: Set<string>) => w.some((x) => set.has(x));
   if (has(ADMIN_WORDS) || has(MESSAGING_WORDS)) return true;
