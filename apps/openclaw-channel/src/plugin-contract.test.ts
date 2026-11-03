@@ -12,15 +12,22 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createFakeMcp } from "../../../infra/fake-model/fake-mcp.mjs";
 import {
+  A2A_LIMITS,
   AGENT_CHANNEL_TOOL_REFUSALS,
   AgentAutomationRunEvent,
   AgentCardActionEvent,
   AgentChannelApprovalRefusalDetails,
   AgentChannelAutomationProposeResponse,
+  type AgentChannelConsultRequest,
+  AgentChannelConsultResponse,
+  AgentChannelEventTypes,
   AgentChannelRecordUpdateResponse,
   AgentChannelToolCallDecision,
+  type AgentChannelTurnDone,
   AgentChannelWorkZoneProjectsResponse,
   AgentChannelWorkZoneProposeResponse,
+  AgentConsultReplyEvent,
+  AgentMentionEvent,
   AUTOMATION_INBOUND_TITLE_MAX,
   AUTOMATION_LIMITS,
   type CellAgent,
@@ -39,6 +46,7 @@ import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js
 import { AUTOMATION_PROPOSE_TOOL, automationProposalOf } from "./automation-tool.js";
 import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
 import { MEMBER_ACCOUNT, NEEDS_RECONNECT, NOT_CONNECTED, REFUSAL_SENTENCE } from "./connector-tools.js";
+import { CONSULT_TOOL_NAME, resetConsultToolState } from "./consult-tool.js";
 import { createMemoryCursorStore } from "./cursor-store.js";
 import { CommitTracker, runEventStream } from "./event-stream.js";
 import { UNKNOWN_SERVER_ERROR } from "./mcp-probe.js";
@@ -1619,6 +1627,388 @@ describe("the two 07.6 tools (AUTO-03, AUTO-04): offered per turn, mirrored from
   });
 });
 
+describe("consult (07.7 A2A-01, D-01, D-04, D-08): ocw_consult_agent, the protocol mirror and the turn-done signal", () => {
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean } };
+  const U = (n: number) => `0199a6f0-0000-7000-8000-${String(n).padStart(12, "0")}`;
+  const CONSULT = { untrustedOutput: false, sideEffecting: true };
+  const BEA_ID = "agent-bea";
+  const consultTurn = (over: Record<string, unknown> = {}): MentionInput["turn"] =>
+    ({
+      tools: ["ocw_agent_card", CONSULT_TOOL_NAME],
+      toolFlags: { [CONSULT_TOOL_NAME]: CONSULT },
+      memory: [],
+      now: null,
+      maxToolCalls: 8,
+      maxWebCalls: 5,
+      consult: {
+        chainId: null,
+        depth: 0,
+        targets: [{ id: BEA_ID, handle: "bea", displayName: "Bea", description: "Purchasing" }],
+      },
+      ...over,
+    }) as MentionInput["turn"];
+  const ARCHIE_TOOLS: CellAgent = { ...structuredClone(ARCHIE), capabilities: { tools: ["ocw_agent_card"] } };
+
+  beforeEach(() => resetConsultToolState());
+
+  it("the mirror reads every 07.7 contract shape the same; older events still parse; the limits and the tool name are the contracts'", async () => {
+    const chains = (await import(contracts("agent-chains.ts"))) as {
+      A2A_MAX_DEPTH: number;
+      A2A_QUESTION_MAX: number;
+      A2A_MAX_TARGETS: number;
+      AgentChannelConsultRequest: Schema;
+      AgentChannelConsultResponse: Schema;
+      AgentChannelTurnDone: Schema;
+    };
+    const ac = (await import(contracts("agent-channel.ts"))) as {
+      AgentChannelEventTypes: Record<string, string>;
+      AgentMentionEvent: Schema;
+      AgentConsultReplyEvent: Schema;
+    };
+    const caps = (await import(contracts("bot-capabilities.ts"))) as {
+      BUILTIN_TOOLS: Record<string, string>;
+    };
+    expect(A2A_LIMITS).toEqual({
+      maxDepth: chains.A2A_MAX_DEPTH,
+      questionMax: chains.A2A_QUESTION_MAX,
+      maxTargets: chains.A2A_MAX_TARGETS,
+    });
+    expect(CONSULT_TOOL_NAME).toBe(caps.BUILTIN_TOOLS.consultAgent);
+    expect(AgentChannelEventTypes.consultReply).toBe("agent.consult_reply.v1");
+    expect(ac.AgentChannelEventTypes.consultReply).toBe(AgentChannelEventTypes.consultReply);
+
+    const base = {
+      eventId: U(1),
+      seq: 4,
+      type: "agent.mention.v1",
+      organizationId: U(2),
+      cellId: U(2),
+      agent: { id: U(3), handle: "bea", displayName: "Bea" },
+      conversation: { id: U(4), kind: "channel", name: "ops" },
+      thread: { rootMessageId: U(5) },
+      message: {
+        id: U(6),
+        text: "@bea Is the pump order confirmed?",
+        createdAt: "2026-11-03T10:00:00.000Z",
+        author: { kind: "agent", id: U(7), displayName: "Archie" },
+        mentions: [{ kind: "agent", id: U(3) }],
+      },
+      threadHistory: [],
+      roster: [{ kind: "user", id: U(8), displayName: "Víctor", role: "owner" }],
+      turn: {
+        tools: [CONSULT_TOOL_NAME],
+        toolFlags: { [CONSULT_TOOL_NAME]: CONSULT },
+        memory: [],
+        now: null,
+        maxToolCalls: 8,
+        maxWebCalls: 5,
+        consult: {
+          chainId: U(9),
+          depth: 1,
+          targets: [{ id: U(10), handle: "carl", displayName: "Carl", description: null }],
+        },
+        tainted: true,
+      },
+    };
+    const origin = {
+      agent: { id: U(7), handle: "archie", displayName: "Archie" },
+      chainId: U(9),
+      hopId: U(11),
+      depth: 1,
+      mode: "consult",
+      onBehalfOf: { kind: "user", id: U(8), displayName: "Víctor" },
+    };
+    const asked = { ...base, origin };
+    expect(ac.AgentMentionEvent.safeParse(asked).success).toBe(true);
+    expect(AgentMentionEvent.parse(asked)).toEqual(asked);
+    // An older event (no origin, no consult, no taint) still parses, unchanged.
+    const { turn: _turn, ...older } = base;
+    expect(ac.AgentMentionEvent.safeParse(older).success).toBe(true);
+    expect(AgentMentionEvent.parse(older)).toEqual(older);
+    // A malformed origin fails the event in both (a question never arrives without who asked and for whom).
+    const badOrigin = { ...base, origin: { ...origin, depth: 3 } };
+    expect(ac.AgentMentionEvent.safeParse(badOrigin).success).toBe(false);
+    expect(AgentMentionEvent.safeParse(badOrigin).success).toBe(false);
+
+    const reply = {
+      ...base,
+      type: "agent.consult_reply.v1",
+      consultReply: {
+        chainId: U(9),
+        hopId: U(11),
+        target: { id: U(3), handle: "bea", displayName: "Bea" },
+        mode: "consult",
+        outcome: "answered",
+        answerMessageId: U(12),
+      },
+    };
+    expect(ac.AgentConsultReplyEvent.safeParse(reply).success).toBe(true);
+    expect(AgentConsultReplyEvent.parse(reply)).toEqual(reply);
+    const timedOut = {
+      ...reply,
+      consultReply: { ...reply.consultReply, outcome: "timed_out", answerMessageId: null },
+    };
+    expect(ac.AgentConsultReplyEvent.safeParse(timedOut).success).toBe(true);
+    expect(AgentConsultReplyEvent.parse(timedOut)).toEqual(timedOut);
+
+    for (const answer of [
+      { ok: true, chainId: U(9), hopId: U(11), questionMessageId: U(6), sentence: "Question sent to @bea." },
+      {
+        ok: false,
+        code: "limit_reached",
+        hopId: U(11),
+        questionMessageId: U(6),
+        sentence: "@bea has reached its daily limit and cannot answer today.",
+      },
+      { ok: false, code: "not_allowed", sentence: "You are not allowed to consult @bea here." },
+    ]) {
+      expect(chains.AgentChannelConsultResponse.safeParse(answer).success).toBe(true);
+      expect(AgentChannelConsultResponse.parse(answer)).toEqual(answer);
+    }
+    // What the cell sends is what the strict contracts accept.
+    const request: AgentChannelConsultRequest = {
+      eventId: U(1),
+      agentId: U(3),
+      target: U(10),
+      question: "Is the pump order confirmed?",
+      mode: "consult",
+      idempotencyKey: `${U(1)}:consult:0`,
+    };
+    expect(chains.AgentChannelConsultRequest.safeParse(request).success).toBe(true);
+    const done: AgentChannelTurnDone = { agentId: U(3), outcome: "replied" };
+    expect(chains.AgentChannelTurnDone.safeParse(done).success).toBe(true);
+  });
+
+  it("the manifest lists the tool; every non-disabled bot's alsoAllow configures it (turn-scoped); a turn may use it only when offered", () => {
+    const manifest = JSON.parse(
+      readFileSync(path.join(import.meta.dirname, "..", "openclaw.plugin.json"), "utf8"),
+    ) as { contracts?: { tools?: string[] } };
+    expect(manifest.contracts?.tools).toContain(CONSULT_TOOL_NAME);
+    const entry = planReconcile({}, { agents: [ARCHIE_TOOLS], providers: [FAKE] }).upsertAgents[
+      openClawAgentIdFor(ARCHIE.id)
+    ];
+    expect(entry?.tools).toMatchObject({ alsoAllow: expect.arrayContaining([CONSULT_TOOL_NAME]) });
+    const bare: CellAgent = { ...structuredClone(ARCHIE), capabilities: { tools: ["web_search"] } };
+    const bareEntry = planReconcile({}, { agents: [bare], providers: [FAKE] }).upsertAgents[
+      openClawAgentIdFor(ARCHIE.id)
+    ];
+    expect(bareEntry?.tools).toMatchObject({ alsoAllow: ["web_search"] });
+    const asTurn = (tools: string[]) =>
+      mapMention(
+        {
+          ...mention(1),
+          seq: 1,
+          type: "agent.mention.v1",
+          organizationId: "o",
+          cellId: "c",
+          turn: consultTurn({ tools }),
+        },
+        ARCHIE_TOOLS,
+      ).allowedTools;
+    expect(asTurn(["ocw_agent_card"])).toEqual(["ocw_agent_card"]);
+    expect(asTurn(["ocw_agent_card", CONSULT_TOOL_NAME])).toEqual(["ocw_agent_card", CONSULT_TOOL_NAME]);
+  });
+
+  type ToolFactory = (ctx: Record<string, unknown>) => {
+    name: string;
+    execute: (id: string, p: unknown) => Promise<{ content: Array<{ text: string }> }>;
+  };
+
+  /** The real port, whose fake OpenClaw "model" calls tools through the gate, then answers with their results. */
+  function modelPort(calls: Array<{ tool: string; params: Record<string, unknown> }>): FakePort {
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const guard = createToolGuard({ client: () => client });
+    const factories: ToolFactory[] = [];
+    registerFull(
+      { on: () => undefined, registerTool: (f: ToolFactory) => factories.push(f) } as never,
+      guard,
+      () => client,
+    );
+    const runtime: PluginRuntimeLike = {
+      config: { current: () => ({}), mutateConfigFile: async () => undefined },
+      channel: {
+        routing: {
+          buildAgentSessionKey: (p) => `agent:${p.agentId}:ocw:channel:${p.peer?.id ?? "none"}`,
+        },
+        inbound: {
+          ingress: { resolveStable: async () => ({ ingress: { admission: "dispatch" } }) },
+          buildContext: (params) => params,
+          dispatch: async (params) => {
+            const route = params.route as { sessionKey: string; agentId: string };
+            const ctx = { sessionKey: route.sessionKey, agentId: route.agentId };
+            const results: string[] = [];
+            let n = 0;
+            for (const call of calls) {
+              const toolCallId = `tc-${++n}`;
+              const blocked = await guard.beforeToolCall(
+                { toolName: call.tool, params: call.params, toolCallId },
+                ctx,
+              );
+              if (blocked) {
+                results.push(blocked.blockReason);
+                continue;
+              }
+              const tool = factories.map((f) => f(ctx)).find((x) => x.name === call.tool);
+              const r = await tool?.execute(toolCallId, call.params);
+              results.push(r ? r.content.map((c) => c.text).join("") : "missing tool");
+            }
+            const delivery = params.delivery as { deliver: (p: { text: string }) => Promise<void> };
+            await delivery.deliver({ text: results.join(" ") || "nothing to do" });
+          },
+        },
+      },
+    };
+    const real = createOpenClawPort({ runtime, accountId: "default", cfg: {}, guard });
+    const p = fakePort();
+    p.dispatchMention = async (m, deliver, signal) => {
+      p.dispatched.push(m);
+      await real.dispatchMention(m, deliver, signal);
+    };
+    return p;
+  }
+
+  const ASK = {
+    tool: CONSULT_TOOL_NAME,
+    params: { target: "@bea", question: "Is the pump order confirmed?" },
+  };
+
+  it("tracer: the model's consult in a mention → one POST /consultations bound to the event (never /tool-calls) → the server's sentence → the reply → exactly one done, replied", async () => {
+    api.agents = [structuredClone(ARCHIE_TOOLS)];
+    port = modelPort([ASK]);
+    startPlugin();
+    await api.waitFor(() => api.openSockets() === 1);
+    api.publishMention(mention(70, { turn: consultTurn() }));
+    await api.waitFor(() => api.turnsDone.length === 1);
+    expect(api.consultations).toEqual([
+      {
+        eventId: "evt-70",
+        agentId: ARCHIE.id,
+        target: BEA_ID,
+        question: "Is the pump order confirmed?",
+        mode: "consult",
+        idempotencyKey: "evt-70:consult:0",
+      },
+    ]);
+    expect(api.toolCalls.filter((c) => c.tool === CONSULT_TOOL_NAME)).toEqual([]);
+    expect(api.messages).toHaveLength(1);
+    expect(api.messages[0]).toMatchObject({
+      eventId: "evt-70",
+      inReplyToMessageId: "msg-70",
+      idempotencyKey: "evt:evt-70",
+    });
+    expect(api.messages[0]?.text).toContain("Their answer will arrive as a new message in this thread.");
+    expect(api.turnsDone).toEqual([
+      { eventId: "evt-70", agentId: ARCHIE.id, outcome: "replied", status: 204 },
+    ]);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(api.turnsDone).toHaveLength(1);
+  });
+
+  const directBridge = async (logs: string[] = []) => {
+    const client = createAgentChannelClient({
+      apiUrl: api.url,
+      token: () => api.token,
+      backoff: { baseMs: 1, maxMs: 2 },
+    });
+    const bridge = createBridge({
+      client,
+      port,
+      signal: new AbortController().signal,
+      log: { info: (m) => logs.push(m), warn: (m) => logs.push(m), error: (m) => logs.push(m) },
+      typingIntervalMs: 50,
+      retryDelayMs: 1,
+    });
+    await bridge.refreshCell();
+    return bridge;
+  };
+  const frame = (seq: number, data: Record<string, unknown>, type = "agent.mention.v1") => ({
+    seq,
+    type,
+    data: { ...data, seq, type, organizationId: "org-1", cellId: "org-1" },
+  });
+
+  it("a turn offered the tool that fails after its retries posts the failure notice and reports failed", async () => {
+    port.reply = () => [];
+    const bridge = await directBridge();
+    await bridge.handleFrame(frame(71, { ...mention(71), turn: consultTurn() }));
+    expect(port.dispatched).toHaveLength(3);
+    expect(api.messages.map((m) => [m.text, m.idempotencyKey])).toEqual([
+      [FAILURE_REPLY, "evt:evt-71:failed"],
+    ]);
+    expect(api.turnsDone).toEqual([
+      { eventId: "evt-71", agentId: ARCHIE.id, outcome: "failed", status: 204 },
+    ]);
+  });
+
+  it("a turn not offered the tool and without origin sends no done (unchanged); a disabled or unknown bot's turn reports nothing", async () => {
+    const bridge = await directBridge();
+    await bridge.handleFrame(
+      frame(72, { ...mention(72), turn: consultTurn({ tools: ["ocw_agent_card"], consult: undefined }) }),
+    );
+    await bridge.handleFrame(frame(73, { ...mention(73) }));
+    expect(api.messages).toHaveLength(2);
+    expect(api.turnsDone).toEqual([]);
+    api.agents = [{ ...structuredClone(ARCHIE), status: "disabled" }];
+    await bridge.refreshCell();
+    await bridge.handleFrame(frame(74, { ...mention(74), turn: consultTurn() }));
+    await bridge.handleFrame(
+      frame(75, {
+        ...mention(75),
+        agent: { id: "agent-nobody", handle: "x", displayName: "X" },
+        turn: consultTurn(),
+      }),
+    );
+    expect(api.messages).toHaveLength(2);
+    expect(api.turnsDone).toEqual([]);
+  });
+
+  it("a failing done (API 500) neither fails the turn nor retries it: one dispatch, one reply, no error body in the logs", async () => {
+    await fetch(`${api.url}/__test/turn-done`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: 500 }),
+    });
+    const logs: string[] = [];
+    const bridge = await directBridge(logs);
+    await expect(
+      bridge.handleFrame(frame(76, { ...mention(76), turn: consultTurn() })),
+    ).resolves.toBeUndefined();
+    expect(port.dispatched).toHaveLength(1);
+    expect(api.messages.map((m) => m.text)).toEqual(["Hi Víctor!"]);
+    expect(api.turnsDone.length).toBeGreaterThanOrEqual(1);
+    expect(api.turnsDone.every((d) => d.eventId === "evt-76" && d.outcome === "replied")).toBe(true);
+    expect(logs.join("\n")).not.toContain(FAKE_ERROR_CANARY);
+  });
+
+  it("a consult the API refuses (fake 409) is relayed as the server's sentence and the turn still ends in one done", async () => {
+    await fetch(`${api.url}/__test/consult-outcome`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        status: 409,
+        body: {
+          ok: false,
+          code: "consult_pending",
+          sentence: "You already have a question waiting for an answer. Wait for it before asking again.",
+        },
+      }),
+    });
+    api.agents = [structuredClone(ARCHIE_TOOLS)];
+    port = modelPort([{ tool: CONSULT_TOOL_NAME, params: { target: BEA_ID, question: "Again?" } }]);
+    const bridge = await directBridge();
+    await bridge.handleFrame(frame(77, { ...mention(77), turn: consultTurn() }));
+    expect(api.consultations).toHaveLength(1);
+    expect(api.messages[0]?.text).toBe(
+      "You already have a question waiting for an answer. Wait for it before asking again.",
+    );
+    expect(api.turnsDone).toEqual([
+      { eventId: "evt-77", agentId: ARCHIE.id, outcome: "replied", status: 204 },
+    ]);
+  });
+});
+
 /** Every tool the plugin owns, in registration order (manifest `contracts.tools` and `registerFull`). */
 const PLUGIN_TOOLS = [
   "ocw_memory_save",
@@ -1650,6 +2040,7 @@ const PLUGIN_TOOLS = [
   "ocw_browser_close",
   "ocw_automation_propose",
   "ocw_record_update",
+  "ocw_consult_agent",
 ];
 
 describe("memory tool (D-10): manifest, registration and the fake API", () => {
@@ -1743,6 +2134,7 @@ describe("board tool (07.1-13, BOARD-02): a board turn → ocw_board_card → PO
         "ocw_start_work_zone",
         "ocw_automation_propose",
         "ocw_record_update",
+        "ocw_consult_agent",
       ],
     });
     const boardTurn = {

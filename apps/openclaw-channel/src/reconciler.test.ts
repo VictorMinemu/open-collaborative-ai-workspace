@@ -332,7 +332,7 @@ describe("capabilities in the cell (D-08 layer 1, D-09)", () => {
     });
   });
 
-  it("a bot served delivered-turn tools (ocw_agent_card) also configures ocw_board_card, the two Work Zone tools and the two 07.6 tools; a bot with none does not (07.1-13, 07.5-10, 07.6-20)", () => {
+  it("a bot served delivered-turn tools (ocw_agent_card) also configures ocw_board_card, the two Work Zone tools, the two 07.6 tools and the 07.7 consult tool; a bot with none does not (07.1-13, 07.5-10, 07.6-20, 07.7-05)", () => {
     const plan = planReconcile(
       {},
       {
@@ -353,6 +353,7 @@ describe("capabilities in the cell (D-08 layer 1, D-09)", () => {
         "ocw_start_work_zone",
         "ocw_automation_propose",
         "ocw_record_update",
+        "ocw_consult_agent",
       ],
     });
     expect(plan.upsertAgents["ocw-w"]?.tools).toMatchObject({ alsoAllow: ["web_search"] });
