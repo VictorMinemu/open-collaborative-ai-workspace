@@ -64,10 +64,9 @@ const TOOL = BUILTIN_TOOLS.consultAgent;
 /** Trusted answer, always side-effecting (D-08, D-09): never from a tainted turn, whatever the turn's flags say. */
 const FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
 const UNKNOWN_TURN = "No delivered turn of this bot has that id";
-const TARGET_NOT_FOUND = "No bot of this organization has that id";
 const Refusal = z.union([AgentChannelConsultResponse, ApiError]);
 
-type Status = 200 | 403 | 409;
+type Status = 200 | 403 | 404 | 409;
 /** The route's answer table (07.7-01): 403 for the claim and the decisions, 409 for the cap and the guards. */
 const STATUS: Record<string, Status> = {
   not_in_turn: 403,
@@ -85,6 +84,7 @@ const STATUS: Record<string, Status> = {
   budget_exhausted: 409,
   consult_pending: 409,
   idempotency_conflict: 409,
+  target_not_found: 404,
 };
 
 /** One line, no control characters, bounded: the only server values a sentence carries. */
@@ -123,6 +123,7 @@ export const CONSULT_SENTENCES = {
     `I can't consult another bot after reading web or tool content in this turn. Tell ${v.person} to ask again in a new message.`,
   not_in_turn: () => "Consulting other bots is not available on this turn.",
   cap_reached: () => "This turn already used all its tool calls. Ask again in a new message.",
+  target_not_found: () => "That bot does not exist in this organization. Check the handle with the person.",
   other: (v: SentenceVars) => `${at(v)} cannot be consulted here.`,
 } as const;
 
@@ -137,8 +138,8 @@ export function consultSentence(code: string, v: SentenceVars): string {
 }
 
 type Answer =
-  | { status: 200 | 403 | 409; body: AgentChannelConsultResponse }
-  | { status: 404; code: "unknown_turn" | "target_not_found" };
+  | { status: 200 | 403 | 404 | 409; body: AgentChannelConsultResponse }
+  | { status: 404; code: "unknown_turn" };
 
 export interface ConsultDeps {
   core: Core;
@@ -538,8 +539,8 @@ async function hopByKey(tx: Tx, agentId: string, key: string): Promise<HopRow | 
   return hop ?? null;
 }
 
+/** A refusal the model reads: every code but `unknown_turn` carries its sentence, a 404 `target_not_found` included. */
 function refusal(code: string, vars: SentenceVars): Answer {
-  if (code === "target_not_found") return { status: 404, code };
   return { status: STATUS[code] ?? 409, body: { ok: false, code, sentence: consultSentence(code, vars) } };
 }
 
@@ -745,16 +746,13 @@ export function registerConsultRoutes(scope: App, deps: ConsultDeps): void {
         security: bearer,
         body: AgentChannelConsultRequest,
         // A refusal is the model's answer; a validation or authorization error keeps the uniform error body.
-        response: { 200: AgentChannelConsultResponse, 403: Refusal, 404: ApiError, 409: Refusal },
+        response: { 200: AgentChannelConsultResponse, 403: Refusal, 404: Refusal, 409: Refusal },
       },
     },
     async (req, reply) => {
       const answer = await consult(deps, cellOf(req), req.body);
-      if (answer.status === 404) {
-        throw answer.code === "target_not_found"
-          ? notFound(TARGET_NOT_FOUND, "target_not_found")
-          : notFound(UNKNOWN_TURN, "unknown_turn");
-      }
+      // No live turn: the uniform error body (the plugin reads it as "turn no longer active").
+      if ("code" in answer) throw notFound(UNKNOWN_TURN, "unknown_turn");
       return reply.code(answer.status).send(answer.body);
     },
   );

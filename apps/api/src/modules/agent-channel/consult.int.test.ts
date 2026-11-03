@@ -162,11 +162,9 @@ async function expectRefused(
   eventId: string,
 ) {
   expect(r.status, JSON.stringify(r.body)).toBe(status);
-  if (status === 404) expect(r.body.error?.code).toBe(code);
-  else {
-    expect(r.body).toEqual({ ok: false, code, sentence: expect.any(String) });
-    expect(AgentChannelConsultResponse.safeParse(r.body).success).toBe(true);
-  }
+  // Every refusal but `unknown_turn` is the model's answer, with its sentence (a 404 `target_not_found` included).
+  expect(r.body).toEqual({ ok: false, code, sentence: expect.any(String) });
+  expect(AgentChannelConsultResponse.safeParse(r.body).success).toBe(true);
   expect(await rows("select id from app.agent_chain_hops where source_event_id = $1", [eventId])).toEqual([]);
   expect(
     await rows("select id from app.messages where client_message_id like $1", [`consult:${eventId}%`]),
