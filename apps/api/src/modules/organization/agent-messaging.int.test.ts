@@ -30,6 +30,8 @@ let patId: string;
 let opsId: string;
 let archie: string;
 let bea: string;
+let opsy: string;
+let pebble: string;
 
 // biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
 type Json = Record<string, any>;
@@ -152,6 +154,8 @@ beforeAll(async () => {
 
   archie = await insertBot(orgId, "Archie");
   bea = await insertBot(orgId, "Bea");
+  opsy = await insertBot(orgId, "Opsy", { unitId: opsId });
+  pebble = await insertBot(orgId, "Pebble", { scope: "personal", ownerUserId: victorId });
 });
 
 afterAll(async () => {
@@ -234,7 +238,64 @@ describe("the organization switch: closed by default, one audited rule (D-04, P-
   });
 });
 
-// TASK2_HUMAN_SIDE
+describe("target visibility for the human through real rows and facts (D-02, P-05)", () => {
+  beforeAll(async () => {
+    await ok(setSwitch(victor, true));
+  });
+  afterAll(async () => {
+    await ok(setSwitch(victor, false));
+  });
+
+  it("a unit persona of Ops is consultable only for people who see it (members, its lead, admins)", async () => {
+    expect(await decision(archie, samId, opsy)).toEqual({
+      allowed: false,
+      denial: { permission: "agent.message", layer: "resource", reason: "unit_agent" },
+    });
+    for (const human of [patId, leeId, victorId])
+      expect((await decision(archie, human, opsy)).allowed).toBe(true);
+    // The organization bot stays consultable for Sam.
+    expect((await decision(archie, samId, bea)).allowed).toBe(true);
+  });
+
+  it("a personal bot is never a target for someone who does not own it", async () => {
+    for (const human of [samId, leeId]) {
+      expect((await decision(archie, human, pebble)).denial).toEqual({
+        permission: "agent.message",
+        layer: "resource",
+        reason: "personal_bot",
+      });
+    }
+  });
+
+  it("Sam with 07.3's Bots module off is refused, everyone else keeps it", async () => {
+    const bots = (enabled: boolean) =>
+      victor.request("PUT", "/api/v1/module-access", {
+        module: "bots",
+        scopeUnitId: null,
+        subject: { kind: "user", userId: samId },
+        enabled,
+      });
+    await ok(bots(false));
+    try {
+      expect((await decision(archie, samId, bea)).denial).toMatchObject({
+        permission: "agent.message",
+        layer: "user",
+        reason: "denied_by_rule",
+      });
+      expect((await decision(archie, patId, bea)).allowed).toBe(true);
+    } finally {
+      await ok(bots(true));
+    }
+    expect((await decision(archie, samId, bea)).allowed).toBe(true);
+  });
+
+  it("a deleted or unknown target is denied", async () => {
+    expect((await decision(archie, samId, "00000000-0000-4000-8000-000000000000")).denial).toMatchObject({
+      permission: "agent.message",
+      reason: "agent_not_found",
+    });
+  });
+});
 
 // TASK3_PER_BOT
 

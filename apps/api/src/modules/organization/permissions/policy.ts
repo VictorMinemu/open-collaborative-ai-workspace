@@ -65,8 +65,19 @@ export interface Precondition {
 
 /** The memory grains (Phase 07.2); preconditions judge them on memory resources only. */
 const MEMORY_GRAINS = new Set<Permission>(["memory.read", "memory.write", "memory.promote"]);
-/** Permissions that use or configure one bot: owner-only on a personal bot (D-01). */
-const PERSONAL_BOT_GATED = new Set<Permission>(["bot.read", "bot.configure", "bot.internet", "bot.tool.use"]);
+/**
+ * Permissions that use or configure one bot: owner-only on a personal bot (D-01). 07.7: `agent.message` too, so a bot
+ * never consults a personal bot its human does not own (target visibility on the on-behalf-of pass, ADR-0027).
+ */
+const PERSONAL_BOT_GATED = new Set<Permission>([
+  "bot.read",
+  "bot.configure",
+  "bot.internet",
+  "bot.tool.use",
+  "agent.message",
+]);
+/** 07.7: target visibility for the human the agent acts for, ADR-0027 — a unit persona is seen only by its audience. */
+const UNIT_AGENT_GATED = new Set<Permission>(["bot.read", "agent.message"]);
 /** Membership of a direct conversation is fixed at creation (D-03). */
 const DM_FIXED = new Set<Permission>([
   "channel.members.add",
@@ -327,8 +338,9 @@ export const PRECONDITIONS: readonly Precondition[] = [
   },
   {
     // Unit personas (AGENT-01, P-04): seen and mentioned by the members of the persona's unit subtree, the leads of
-    // any unit on its path, its owner and admins. Nobody else learns it exists, whatever rule allows `bot.read`.
-    applies: (perm) => perm === "bot.read",
+    // any unit on its path, its owner and admins. Nobody else learns it exists, whatever rule allows `bot.read`, and
+    // no bot acting for them consults it (`agent.message`, 07.7).
+    applies: (perm) => UNIT_AGENT_GATED.has(perm),
     check: (p, r) => {
       if (r.type !== "agent" || p.kind !== "user" || !r.state.has("unit_scoped")) return null;
       if (r.relations.has("owner") || p.orgRole === "admin") return null;
