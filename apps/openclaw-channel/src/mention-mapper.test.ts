@@ -1386,8 +1386,8 @@ describe("consults (07.7 D-01, Pitfall 1): origin and targets explained to the m
       } as AgentMentionEvent,
       BEA_BOT,
     );
-    const [carl, dora] = m.contextBlocks.find((b) => b.type === "consult_targets")?.payload
-      .targets as string[];
+    const targets = m.contextBlocks.find((b) => b.type === "consult_targets")?.payload.targets;
+    const [carl, dora] = (targets ?? []) as string[];
     expect(LONG.length).toBeGreaterThan(80);
     expect(carl).toBe(`@carl — Carl: ${LONG}`);
     const description = dora?.replace(/^@dora — Dora: /u, "") ?? "";
