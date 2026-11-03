@@ -59,6 +59,17 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   access and on schedule, and the bot's updates are compare-and-set with a note back. A per-person digest by DM (opt-in
   metered summary) and Work Zone sessions proposed to the linked team project's memory (manual or opt-in automatic, the
   owner pays) (ADR-0028).
+- **07.7 Agent-to-agent consults:** a bot asks another bot for help, or hands work over, only through the platform
+  (`ocw_consult_agent`): the question is a visible message in the thread on behalf of the person who asked, the other
+  bot answers there, and its whole reply comes back to the asking bot as a new turn, labelled as another bot's answer
+  (information, not instructions), so it can tell the person what it found. Off by default: admins turn on "Bots may
+  consult each other" in Settings › Bot policy and set each team bot's rules in its sheet (Can ask: organization
+  default, any bot, only these bots, no bot; Never ask; Other bots can ask), with a server-computed "Right now" line.
+  Each question shows a live chip (Waiting, Answered, Couldn't answer, No answer in time, Stopped, Daily limit reached)
+  and the person who asked, or a channel moderator, can Stop it. Chains are bounded by the database (two levels, no
+  bot asked twice, 3 consults, one open question per bot per chain, 5-minute timeouts on the job runtime), the person
+  pays for every turn, taint from either side carries forward, and OpenClaw's own agent-to-agent tools stay off; v1
+  works in channels and threads, between team bots that are members (ADR-0027).
 - **07.8 Bot sandboxes, sandbox packages and the live browser:** each bot gets its own sandbox (files, a shell,
   approved packages) and its own Chromium, created only by the `sandboxd` broker (the one Docker socket holder, optional
   `sandbox` compose profile) under gVisor or hardened runc, on private networks whose only way out is the

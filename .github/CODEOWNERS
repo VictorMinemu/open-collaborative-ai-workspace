@@ -123,6 +123,15 @@
 /apps/api/src/modules/agent-channel/automation-proposals.ts @VictorMinemu
 /apps/api/src/modules/agent-channel/records.ts     @VictorMinemu
 /apps/api/src/modules/watched/                     @VictorMinemu
+# Phase 07.7 (ADR-0027): agent-to-agent consults: the consult route and its guards, the chain ledger with turn done,
+# return turns and Stop, the agent.message decision and its admin rules, the timeout tick, and the cell's consult tool.
+/apps/api/src/modules/agent-channel/consult.ts     @VictorMinemu
+/apps/api/src/modules/agent-channel/chains.ts      @VictorMinemu
+/apps/api/src/modules/agent-channel/chain-routes.ts @VictorMinemu
+/apps/api/src/modules/agent-channel/agent-message.ts @VictorMinemu
+/apps/api/src/modules/agent-channel/consult-tick.ts @VictorMinemu
+/apps/api/src/modules/organization/agent-messaging.ts @VictorMinemu
+/apps/openclaw-channel/src/consult-tool.ts         @VictorMinemu
 
 # The guardrails themselves and the decisions they enforce.
 /.semgrep/                                         @VictorMinemu
