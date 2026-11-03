@@ -34,6 +34,7 @@ import {
   runAnchorTrigger,
 } from "./automation-runs";
 import { notifyCardFollowers } from "./card-followers";
+import { recordChainReply } from "./chains";
 import { buildMentionEvents } from "./mentions";
 
 /**
@@ -407,6 +408,7 @@ export function registerCardRoutes(app: App, ctx: { core: Core }): void {
         },
       );
       const target = replyTargetOrThrow(check);
+      const eventId = body.eventId;
       // Chat decides exactly as for a message (agent principal, membership, confused deputy for the turn's human, flat
       // conversations), stores the message and its card in one transaction and audits `agent_card.posted`.
       const result = await postForTurn(
@@ -422,6 +424,10 @@ export function registerCardRoutes(app: App, ctx: { core: Core }): void {
           inReplyToMessageId: body.inReplyToMessageId,
           onBehalfOfUserId: target.onBehalfOf,
           card: body.card,
+          // 07.7 (D-15, P-09): a card can be a chain turn's first post, so its hop's answer at turn-done.
+          ...(eventId
+            ? { onInserted: (tx: Tx, messageId: string) => recordChainReply(tx, { eventId, messageId }) }
+            : {}),
         },
       ).catch(chatUnavailable);
       reply.code(result.created ? 201 : 200);

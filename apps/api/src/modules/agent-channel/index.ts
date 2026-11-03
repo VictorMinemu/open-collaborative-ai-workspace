@@ -48,6 +48,7 @@ import {
   replyTargetOrThrow,
   resolveReplyTarget,
 } from "./cards";
+import { recordChainReply, registerChainCellRoutes } from "./chains";
 import { registerConnectorRoutes } from "./connectors";
 import { registerConsultRoutes } from "./consult";
 import { registerCellGateway } from "./gateway";
@@ -78,6 +79,7 @@ export {
 export type { BrowserBudgets } from "./browser";
 export { notifyCardFollowers, updatePlatformCardNotified } from "./card-followers";
 export { emitCardAction } from "./cards";
+export { deliverConsultReply, noAnswerSentence, recordChainReply } from "./chains";
 export { CONSULT_SENTENCES, deliverConsultQuestion } from "./consult";
 export { conversationAudience } from "./memory-files";
 export { buildMentionEvents } from "./mentions";
@@ -440,6 +442,8 @@ export function createAgentChannelModule(
                       ? {
                           onInserted: async (tx: Tx, messageId: string) => {
                             await finishActivity(tx, { eventId: turnEventId, replyMessageId: messageId });
+                            // 07.7 (D-15, P-09): a chain turn's first post is its hop's answer at turn-done.
+                            await recordChainReply(tx, { eventId: turnEventId, messageId });
                             await linkTurnAttachments(tx, {
                               eventId: turnEventId,
                               conversationId: body.conversationId,
@@ -554,6 +558,9 @@ export function createAgentChannelModule(
           // Agent-to-agent consults (07.7-04, D-07, D-08): a visible question in the turn's thread and a turn for the
           // consulted bot on behalf of the same human, under the canonical decision and the chain guards.
           registerConsultRoutes(scope, { core, perms, modelLabel: opts.modelLabel, memory: opts.memory });
+          // The turn-done signal (07.7-06, P-09): the hop a turn answers closes, and the answer returns to the asker as
+          // a new turn for the same human (`agent.consult_reply.v1`).
+          registerChainCellRoutes(scope, { core, perms, modelLabel: opts.modelLabel, memory: opts.memory });
           // Watched-record writes (07.6-14, D-04, D-07): compare-and-set on the watched record of the turn's card thread,
           // governed like any side effect (taint, 07.5 approvals).
           if (opts.records) {
