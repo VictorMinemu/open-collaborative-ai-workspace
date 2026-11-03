@@ -1,4 +1,5 @@
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
+import { expectNoSeriousA11y } from "../support/a11y";
 import { apiAs, BASE_URL, ensureMember, openAs } from "../support/actors";
 import { addBot, waitBotReady } from "../support/automations";
 import { cellToken } from "../support/cell-token";
@@ -9,6 +10,7 @@ import {
   identityReply,
   type MentionPayload,
 } from "../support/fake-cell-plugin";
+import { captureReview, expectNoSidewaysScroll, unnamedControls } from "../support/layout";
 import { ADMIN, API_URL } from "./env";
 
 /**
@@ -17,10 +19,16 @@ import { ADMIN, API_URL } from "./env";
  * `POST /agent-channel/v1/consultations`), so Archie's question appears in the thread with the chip "Asked @bea for
  * Víctor" and a live status; Bea's answer carries "Answer to @archie"; Archie's final reply (its consult-reply turn)
  * follows in the same thread. Every turn reports done like the real bridge (`autoDone`). Setup turns the organization
- * switch "Bots may consult each other" on and restores it off; the bots it creates are deleted after.
+ * switch "Bots may consult each other" on and restores it off; the bots it creates are deleted after. Both projects
+ * (1440 and 390, the thread as a sheet): chips wrap inside the thread without sideways overflow, Stop is a 44 px target
+ * at 390, axe finds nothing serious on the thread with chips in light and dark, and the UI contract's screenshots
+ * (consult-thread, consult-waiting, consult-stopped; light and -dark) are captured for review.
  */
 
 test.describe.configure({ mode: "serial" });
+
+const widthOf = (project: string) => (project === "mobile" ? "390" : "1440");
+const PANEL = '[data-testid="thread-panel"]';
 
 const BEA_ANSWER = "Yes, the pump order is confirmed. It ships Thursday.";
 const FINAL = "Bea confirms the pump order: it ships Thursday.";
@@ -150,14 +158,43 @@ async function openThread(page: Page, rootId: string): Promise<Locator> {
 const chipOf = (panel: Locator, messageId: string) =>
   messageRow(panel, messageId).getByTestId("consult-chip");
 
+/** The thread's own scroll area (the message list under the header). */
+const bodyOf = (panel: Locator) => panel.getByTestId("thread-scroll");
+
+/** Scrolls only the thread's scroll area so `row` sits near its top (never the app shell, 07.7-08's note). */
+async function frame(panel: Locator, row: Locator): Promise<void> {
+  const handle = await row.elementHandle();
+  await bodyOf(panel).evaluate((scroller, el) => {
+    if (!el) return;
+    const top = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+    scroller.scrollTop += top - 8;
+  }, handle);
+}
+
+/**
+ * The thread with chips under review (C-03): no sideways overflow in the thread body or the page, every control named,
+ * axe clean in light and dark, then `<name>-<width>` captured light and dark.
+ */
+async function review(page: Page, panel: Locator, name: string, w: string): Promise<void> {
+  const overflow = await bodyOf(panel).evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
+  expect(overflow.scroll, `${name}: the thread body never scrolls sideways`).toBeLessThanOrEqual(
+    overflow.client,
+  );
+  for (const theme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: theme });
+    await expectNoSeriousA11y(page, PANEL);
+    expect(await unnamedControls(page), `${name} (${theme}): controls without a name`).toEqual([]);
+    await expectNoSidewaysScroll(page, `${name} (${theme})`);
+  }
+  await page.emulateMedia({ colorScheme: "light" });
+  await captureReview(page, `${name}-${w}`);
+}
+
 test("a two-bot consult in one thread: Archie's question with its live chip, Bea's answer, Archie's final reply", async ({
   browser,
 }, info) => {
   test.setTimeout(180_000);
-  test.skip(
-    info.project.name !== "desktop",
-    "the tracer runs on desktop; 390 is covered with the review below",
-  );
+  const w = widthOf(info.project.name);
   held.add(bea.id);
   const rootId = await askArchie("Is the pump order confirmed?");
   const questionId = await questionOf(rootId);
@@ -200,6 +237,10 @@ test("a two-bot consult in one thread: Archie's question with its live chip, Bea
     const doneBy = (id: string) =>
       plugin.doneReports.filter((d) => d.status === 200 && d.agentId === id).length;
     await expect.poll(() => [doneBy(archie.id), doneBy(bea.id)]).toEqual([2, 1]);
+
+    // The full exchange, Answered: the question chip near the top of the thread's view, light and dark.
+    await frame(panel, question);
+    await review(page, panel, "consult-thread", w);
   } finally {
     await context.close();
   }
@@ -209,6 +250,7 @@ test("Stop: Víctor (the chain's human) stops a waiting consult; Alex never sees
   browser,
 }, info) => {
   test.setTimeout(180_000);
+  const w = widthOf(info.project.name);
   // Bea never answers: the hop stays pending until someone stops the chain.
   held.add(bea.id);
   const rootId = await askArchie("Do we have spare valves in stock?");
@@ -231,6 +273,23 @@ test("Stop: Víctor (the chain's human) stops a waiting consult; Alex never sees
     await expect(stop).toBeVisible();
     await expect(stop).toHaveAttribute("data-testid", "consult-stop");
     await expect(aChip.getByTestId("consult-stop")).toHaveCount(0);
+    // At 390 Stop is a 44 × 44 target; at 1440 it stays compact inside the chip.
+    const box = await stop.boundingBox();
+    expect(box, "Stop's box").toBeTruthy();
+    if (w === "390") {
+      expect(box?.width ?? 0).toBeGreaterThanOrEqual(43.5);
+      expect(box?.height ?? 0).toBeGreaterThanOrEqual(43.5);
+    } else {
+      expect(box?.height ?? 0).toBeLessThanOrEqual(24.5);
+    }
+    // The chip (Stop included) stays inside the message column.
+    const row = await messageRow(vPanel, questionId).boundingBox();
+    const chipBox = await vChip.boundingBox();
+    expect((chipBox?.x ?? 0) + (chipBox?.width ?? 0)).toBeLessThanOrEqual(
+      (row?.x ?? 0) + (row?.width ?? 0) + 0.5,
+    );
+    await frame(vPanel, messageRow(vPanel, questionId));
+    await review(v.page, vPanel, "consult-waiting", w);
 
     await stop.click();
     await expect(
@@ -244,6 +303,8 @@ test("Stop: Víctor (the chain's human) stops a waiting consult; Alex never sees
       await expect(chip.getByTestId("consult-status")).toHaveText("Stopped");
       await expect(chip.getByTestId("consult-stop")).toHaveCount(0);
     }
+    await frame(vPanel, messageRow(vPanel, questionId));
+    await review(v.page, vPanel, "consult-stopped", w);
   } finally {
     await a.context.close();
     await v.context.close();
