@@ -6,7 +6,14 @@ import {
   type Page,
   test,
 } from "@playwright/test";
+import { expectNoSeriousA11y } from "../support/a11y";
 import { type Actor, apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
+import {
+  captureReview,
+  expectNoSidewaysScroll,
+  expectTouchTargets,
+  unnamedControls,
+} from "../support/layout";
 import { ADMIN, API_URL } from "./env";
 
 /**
@@ -15,7 +22,9 @@ import { ADMIN, API_URL } from "./env";
  * state comes back from the API on reload), and sets each team bot's consult rules in its sheet: who it can ask, whom it
  * must never ask and whether other bots can ask it, with the API's "Right now" line after every change. "Only these
  * bots" is disabled with its reason while the switch is on. A standard member and every personal bot's sheet never show
- * the section. The spec leaves the organization switch off and deletes the bots it created.
+ * the section. On both projects: a failed load says so and recovers, a refused save shows the copy-table toast and the
+ * previous state, axe passes in light and dark, every control is 44 px at 390, and the UI contract's screenshots are
+ * captured when OCW_E2E_SCREENSHOT_DIR is set. The spec leaves the organization switch off and deletes the bots it created.
  */
 
 test.describe.configure({ mode: "serial" });
@@ -129,7 +138,9 @@ test("an admin turns consulting on and off in Settings › Bot policy; it starts
   const page = await signIn(browser, info.project.name);
   await openBotPolicy(page);
 
-  // Between the policy form and the personal bots table.
+  // Between the policy form and the personal bots table (each loads on its own: wait for both neighbours).
+  await expect(page.getByTestId("bot-policy-settings")).toBeVisible();
+  await expect(page.getByTestId("personal-bots-table")).toBeVisible();
   const order = await page
     .locator(
       '[data-testid="bot-policy-settings"], [data-testid="agent-consult-settings"], [data-testid="personal-bots-table"]',
@@ -293,4 +304,161 @@ test("a standard member never sees consult rules, and no personal bot's sheet sh
   await sam.goto(`${BASE_URL}/settings/bot-policy`);
   await expect(sam.getByText("Only workspace admins can manage the bot policy.")).toBeVisible();
   await expect(sam.getByTestId("agent-consult-settings")).toHaveCount(0);
+});
+
+// ---------------------------------------------------------------- Task 3: states, accessibility, 390 and dark
+
+/** axe (light and dark), named controls, no sideways scroll; 44 px targets below 1024. */
+async function checkScreen(page: Page, selector: string, label: string) {
+  for (const theme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: theme });
+    await expectNoSeriousA11y(page, selector);
+    expect.soft(await unnamedControls(page), `${label} (${theme}): unnamed controls`).toEqual([]);
+    await expectNoSidewaysScroll(page, `${label} ${theme}`);
+  }
+  await page.emulateMedia({ colorScheme: "light" });
+  await expectTouchTargets(page, selector);
+}
+
+/**
+ * Scrolls the section (with its sheet heading) into the review frame by moving only its nearest scroll area:
+ * `scrollIntoView` would also shift the app shell's overflow-hidden ancestors and crop the page in the capture.
+ */
+async function frame(section: Locator, block: "start" | "center") {
+  await section.evaluate((el, at) => {
+    const target = el.closest("section") ?? el;
+    let box = target.parentElement;
+    while (box && !/auto|scroll/u.test(getComputedStyle(box).overflowY)) box = box.parentElement;
+    if (!box) return;
+    // Ancestors above the scroll area never scroll for a person: undo what an earlier scrollIntoView did to them.
+    for (let n = box.parentElement; n; n = n.parentElement) n.scrollTop = 0;
+    document.scrollingElement?.scrollTo(0, 0);
+    const rect = target.getBoundingClientRect();
+    const top = rect.top - box.getBoundingClientRect().top + box.scrollTop;
+    box.scrollTop = at === "start" ? top - 8 : top - (box.clientHeight - rect.height) / 2;
+  }, block);
+}
+
+async function putRules(bot: Bot, body: unknown): Promise<void> {
+  const res = await admin.put(`/api/v1/agents/${bot.id}/messaging`, { data: body });
+  expect(res.ok(), `PUT /agents/${bot.name}/messaging: ${res.status()} ${await res.text()}`).toBe(true);
+}
+
+const MESSAGING_ROUTE = /\/api\/v1\/agents\/[0-9a-f-]{36}\/messaging$/u;
+
+test("Settings › Bot policy: the switch passes axe in both themes, is a 44 px target and is captured", async ({
+  browser,
+}, info) => {
+  const tag = info.project.name === "mobile" ? "390" : "1440";
+  const page = await signIn(browser, info.project.name);
+  await openBotPolicy(page);
+  const section = page.getByTestId("agent-consult-settings");
+  await section.scrollIntoViewIfNeeded();
+  await checkScreen(page, '[data-testid="agent-consult-settings"]', `consult settings ${tag}`);
+  // One row: the text wraps beside the switch, and the whole row (a <label>) is the hit area.
+  const row = await section.getByTestId("agent-consult-row").boundingBox();
+  const toggle = await page.getByTestId("agent-consult-switch").boundingBox();
+  expect(row && toggle, "row and switch are laid out").toBeTruthy();
+  if (row && toggle) {
+    expect(row.height).toBeGreaterThanOrEqual(44);
+    expect(toggle.y).toBeLessThan(row.y + 24);
+    expect(toggle.x + toggle.width).toBeLessThanOrEqual(row.x + row.width);
+  }
+  await frame(section, "center");
+  await captureReview(page, `consult-settings-${tag}`);
+});
+
+test("the bot sheet section: loading error recovers, a refused save restores the state, axe, 44 px, screenshots", async ({
+  browser,
+}, info) => {
+  test.setTimeout(150_000);
+  const mobile = info.project.name === "mobile";
+  const tag = mobile ? "390" : "1440";
+  await setSwitch(false);
+  const archie = await freshTeamBot("Archie");
+  const bea = await freshTeamBot("Bea");
+  const carl = await freshTeamBot("Carl");
+  await putRules(archie, {
+    outbound: { mode: "default", allow: [], deny: [carl.id] },
+    inbound: { consultable: true },
+  });
+  const page = await signIn(browser, info.project.name);
+
+  // A failed load says so; Try again recovers.
+  await page.route(MESSAGING_ROUTE, (route) =>
+    route.request().method() === "GET"
+      ? route.fulfill({ status: 500, json: { error: { code: "internal", message: "Boom" } } })
+      : route.fallback(),
+  );
+  let sheet = await openBotSheet(page, "Archie");
+  let section = sheet.getByTestId("agent-messaging-section");
+  await expect(section.getByText("Couldn't load consult settings.")).toBeVisible({ timeout: 15_000 });
+  await page.unroute(MESSAGING_ROUTE);
+  await section.getByRole("button", { name: "Try again" }).click();
+  await expect(section.getByTestId("agent-messaging-effective-line")).toHaveText(
+    "Archie can't ask other bots.",
+  );
+
+  // A refused save (the API's invalid_agent_messaging) shows the copy-table toast and the server state comes back.
+  await page.route(MESSAGING_ROUTE, (route) =>
+    route.request().method() === "PUT"
+      ? route.fulfill({
+          status: 400,
+          json: {
+            error: {
+              code: "invalid_agent_messaging",
+              message: "Pick bots of this organization other than this one",
+            },
+          },
+        })
+      : route.fallback(),
+  );
+  const inbound = section.getByTestId("agent-messaging-inbound-switch");
+  await inbound.click();
+  await expect(page.getByText("One of those bots can't be used here. Pick another one.")).toBeVisible();
+  await expect(inbound).toHaveAttribute("aria-checked", "true");
+  await expect(section.getByRole("list", { name: "Never ask" }).getByRole("listitem")).toHaveText([
+    `@${carl.username}`,
+  ]);
+  await page.unroute(MESSAGING_ROUTE);
+  expect((await viewOf(archie)).inbound.consultable).toBe(true);
+
+  // The default view: axe, names, no sideways scroll, 44 px; captured.
+  await section.scrollIntoViewIfNeeded();
+  await checkScreen(page, '[data-testid="agent-messaging-section"]', `bot consult section ${tag}`);
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 10_000 });
+  await frame(section, "start");
+  await captureReview(page, `bot-consult-section-${tag}`);
+
+  if (!mobile) {
+    // "Only these bots" with two chips, switch off. A third bot outside the list keeps the line naming the two (the API
+    // says "any bot" when a list happens to cover every bot of the organization).
+    await freshTeamBot("Dora");
+    await putRules(archie, {
+      outbound: { mode: "only", allow: [bea.id, carl.id], deny: [] },
+      inbound: { consultable: true },
+    });
+    await page.reload();
+    sheet = await openBotSheet(page, "Archie");
+    section = sheet.getByTestId("agent-messaging-section");
+    await expect(section.getByRole("list", { name: "Only these bots" }).getByRole("listitem")).toHaveCount(2);
+    await expect(section.getByTestId("agent-messaging-effective-line")).toHaveText(
+      `Archie can ask @${bea.username} and @${carl.username}.`,
+    );
+    await checkScreen(page, '[data-testid="agent-messaging-section"]', "bot consult only 1440");
+    await frame(section, "start");
+    await captureReview(page, "bot-consult-only-1440");
+  } else {
+    // The switch on: "Only these bots" disabled, with its reason line.
+    await setSwitch(true);
+    await page.reload();
+    sheet = await openBotSheet(page, "Archie");
+    section = sheet.getByTestId("agent-messaging-section");
+    await expect(section.getByTestId("agent-messaging-only-reason")).toBeVisible();
+    await expect(section.getByTestId("agent-messaging-mode")).toHaveText("Organization default (On)");
+    await checkScreen(page, '[data-testid="agent-messaging-section"]', "bot consult only disabled 390");
+    await frame(section, "start");
+    await captureReview(page, "bot-consult-only-disabled-390");
+    await setSwitch(false);
+  }
 });
