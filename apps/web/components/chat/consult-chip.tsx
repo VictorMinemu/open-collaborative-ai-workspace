@@ -17,7 +17,7 @@ import {
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
-import { stopErrorMessage, stopSuccessMessage, useCancelAgentChain } from "@/lib/consult-queries";
+import { stopErrorMessage, stopResultToast, useCancelAgentChain } from "@/lib/consult-queries";
 import { cn } from "@/lib/utils";
 import { dirKey, type OrgDirectory, useOrgDirectory } from "./use-chat-directory";
 
@@ -125,7 +125,13 @@ function StopButton({ consult, names }: { consult: MessageConsult; names: Consul
       disabled={cancel.isPending}
       onClick={() =>
         cancel.mutate(consult.chainId, {
-          onSuccess: () => toast.success(stopSuccessMessage(names.source)),
+          onSuccess: (r) => {
+            // CR-C-05: the API's actual status (a chain that finished meanwhile is not "Stopped").
+            const result = stopResultToast(r, names.source);
+            if (result.tone === "success") toast.success(result.text);
+            else if (result.tone === "info") toast.message(result.text);
+            else toast.error(result.text);
+          },
           onError: (err) => toast.error(stopErrorMessage(err)),
         })
       }

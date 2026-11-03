@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiRequestError } from "@/lib/api";
 import { chatKeys } from "@/lib/chat-queries";
-import { stopErrorMessage, stopSuccessMessage } from "@/lib/consult-queries";
+import { stopErrorMessage, stopResultToast, stopSuccessMessage } from "@/lib/consult-queries";
 import { queryKeys } from "@/lib/queries";
 import { ConsultChip, consultChipModel, consultNames } from "./consult-chip";
 
@@ -17,6 +17,7 @@ import { ConsultChip, consultChipModel, consultNames } from "./consult-chip";
 
 const VICTOR = "00000000-0000-4000-8000-0000000000f1";
 const ALEX = "00000000-0000-4000-8000-0000000000f2";
+const CHAIN = "00000000-0000-4000-8000-0000000000c1";
 const ARCHIE = "00000000-0000-4000-8000-0000000000a1";
 const BEA = "00000000-0000-4000-8000-0000000000b1";
 
@@ -246,12 +247,28 @@ describe("Stop messages", () => {
   it("success names the asking bot; 403 and 404 read the copy table; anything else the API's message", () => {
     expect(stopSuccessMessage("@archie")).toBe("Stopped. @archie won't get more answers for this request.");
     expect(stopSuccessMessage("a bot")).toBe("Stopped. A bot won't get more answers for this request.");
+    // CR-C-05: a channel moderator may stop a chain too (chain-routes.ts).
     expect(stopErrorMessage(new ApiRequestError(403, "not_chain_owner", "x"))).toBe(
-      "Only the person who asked can stop this.",
+      "Only the person who asked or a channel moderator can stop this.",
     );
     expect(stopErrorMessage(new ApiRequestError(404, "chain_not_found", "x"))).toBe(
       "This request is no longer available.",
     );
     expect(stopErrorMessage(new ApiRequestError(500, "internal", "Something broke"))).toBe("Something broke");
+  });
+
+  it("CR-C-05: the toast follows the API's status: Stopped only when the chain was stopped, never on a finished one", () => {
+    expect(stopResultToast({ chainId: CHAIN, status: "cancelled" }, "@archie")).toEqual({
+      tone: "success",
+      text: "Stopped. @archie won't get more answers for this request.",
+    });
+    expect(stopResultToast({ chainId: CHAIN, status: "completed" }, "@archie")).toEqual({
+      tone: "info",
+      text: "This request had already finished.",
+    });
+    expect(stopResultToast({ chainId: CHAIN, status: "active" }, "@archie")).toEqual({
+      tone: "error",
+      text: "This request couldn't be stopped. Try again.",
+    });
   });
 });
