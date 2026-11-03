@@ -276,16 +276,22 @@ export type AgentAutomationRunEvent = z.infer<typeof AgentAutomationRunEvent>;
  */
 export const AgentConsultReplyEvent = AgentMentionEvent.omit({ type: true }).extend({
   type: z.literal(AgentChannelEventTypes.consultReply),
-  consultReply: z.object({
-    chainId: Id,
-    hopId: Id,
-    /** The bot that was consulted. */
-    target: z.object({ id: Id, handle: z.string(), displayName: z.string() }),
-    mode: ConsultMode,
-    outcome: z.enum(["answered", "failed", "timed_out"]),
-    /** The consulted bot's answer message; null when it failed or timed out. */
-    answerMessageId: Id.nullable(),
-  }),
+  consultReply: z
+    .object({
+      chainId: Id,
+      hopId: Id,
+      /** The bot that was consulted. */
+      target: z.object({ id: Id, handle: z.string(), displayName: z.string() }),
+      mode: ConsultMode,
+      outcome: z.enum(["answered", "failed", "timed_out"]),
+      /** The consulted bot's answer message; null when it failed or timed out. */
+      answerMessageId: Id.nullable(),
+    })
+    // CR-B-08: the authoritative hop result never contradicts itself: `answered` names its answer, nothing else does.
+    .refine((r) => (r.outcome === "answered") === (r.answerMessageId !== null), {
+      message: "answered carries the answer message id, failed and timed_out carry none",
+      path: ["answerMessageId"],
+    }),
 });
 export type AgentConsultReplyEvent = z.infer<typeof AgentConsultReplyEvent>;
 
