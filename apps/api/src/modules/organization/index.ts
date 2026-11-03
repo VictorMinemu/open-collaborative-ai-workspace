@@ -7,6 +7,7 @@ import {
 } from "@ocw/contracts";
 import type { Tx } from "@ocw/db";
 import { type ApiModule, type Core, tenant } from "../../core";
+import { registerAgentMessagingRoutes } from "./agent-messaging";
 import { registerMemberRoutes } from "./members";
 import { registerModuleAccessRoutes } from "./module-access";
 import { orgResource, userResource } from "./permissions/policy";
@@ -132,6 +133,7 @@ export function createOrganizationModule(core: Core, deps: OrganizationDeps): Ap
       registerUnitRoutes(app, core, perms, deps);
       registerRuleRoutes(app, core, perms);
       registerModuleAccessRoutes(app, core, perms);
+      registerAgentMessagingRoutes(app, core, perms);
 
       app.get(
         "/me/permissions",
