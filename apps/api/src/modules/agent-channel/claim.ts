@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { MAX_TOOL_CALLS_PER_TURN, MAX_WEB_CALLS_PER_TURN, type TurnToolFlags } from "@ocw/contracts";
-import { agentToolCalls, agentTurns, conversations, type Tx } from "@ocw/db";
+import { agentChainHops, agentChains, agentToolCalls, agentTurns, conversations, type Tx } from "@ocw/db";
 import { and, eq, lt, type SQL, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { createConversationAccess } from "../chat";
@@ -80,6 +80,7 @@ export async function claimToolCall(
       })
       .where(and(...conditions))
       .returning({ eventId: agentTurns.eventId });
+    if (updated.length > 0 && flags.untrustedOutput) await taintReturnTurns(tx, turn.eventId);
     if (updated.length === 0) {
       // Nothing updated: say why from a fresh read (only on the denial path).
       const [after] = await tx
@@ -131,6 +132,41 @@ export async function claimToolCall(
     },
   });
   return { callId: row.id, allowed: reason === null, reason };
+}
+
+/** `agent_chains_budget_check`'s ceiling: a chain never has more hops, so never more return turns in a row. */
+const LATE_TAINT_MAX_STEPS = 10;
+
+/**
+ * Late taint (07.7 CR-A-01 follow-up; A2A-03, D-09, Pitfall 2): a turn that just read untrusted content hands its taint
+ * to every still-running return turn that continues it. A consult is asynchronous: the asking turn keeps running after
+ * its call, so the consulted bot may answer (and the return turn be delivered untainted, `deliverConsultReply`'s
+ * snapshot) before the asking turn reads outside content. The return turn resumes the same per-thread OpenClaw session,
+ * so it is tainted from then on, like its asker. Transitive through the chain (a return turn that asked again and got
+ * its own answer back), bounded by the largest hop budget a chain may have (every hop adds at most one return turn).
+ * Scoped to the one chain this turn roots or belongs to (unique `root_event_id`, indexed `chain_id`); a finished return
+ * turn is left as it was. The server is the authority: every side-effecting call is claimed against `agent_turns.tainted` (this file,
+ * the sandbox claim, the memory, board and consult routes), so the cell's local guard needs no new signal.
+ */
+export async function taintReturnTurns(tx: Tx, eventId: string): Promise<void> {
+  await tx.execute(sql`
+    with recursive chain as (
+      select c.id from ${agentChains} c where c.root_event_id = ${eventId}
+      union
+      select t.chain_id from ${agentTurns} t where t.event_id = ${eventId} and t.chain_id is not null
+    ), reach(event_id, n) as (
+      select ${eventId}::uuid, 0
+      union
+      select t.event_id, r.n + 1
+        from reach r
+        join ${agentChainHops} h
+          on h.source_event_id = r.event_id and h.mode = 'consult' and h.chain_id in (select id from chain)
+        join ${agentTurns} t on t.returning_hop_id = h.id and t.chain_id = h.chain_id
+       where r.n < ${LATE_TAINT_MAX_STEPS}
+    )
+    update ${agentTurns} t set tainted = true
+      from reach r
+     where t.event_id = r.event_id and r.n > 0 and t.tainted = false and t.done_at is null`);
 }
 
 /** A call refused before any turn was found (unknown, foreign or no longer live): audited with no human to attribute. */

@@ -13,6 +13,7 @@ import {
   AgentCardPatch,
   BrowserHost,
 } from "./agent-cards";
+import { A2A_MAX_DEPTH, ConsultMode } from "./agent-chains";
 import { APPROVAL_NOTE_MAX, ApprovalNote } from "./approvals";
 import { AUTOMATION_LIMITS, AutomationRunTrigger, AutomationSchedule, JsonPointer } from "./automations";
 import {
@@ -88,6 +89,11 @@ export const AgentChannelEventTypes = {
    * sentence) plus the standing order and, for inbound triggers, the outside content as a separate labelled block.
    */
   automationRun: "agent.automation_run.v1",
+  /**
+   * Phase 07.7 (D-01, ADR-0027): a consulted bot answered, failed or timed out. Built like a mention of the asking bot
+   * in the hop's thread; the answer (if any) is `consultReply.answerMessageId`. Older plugins skip the unknown type.
+   */
+  consultReply: "agent.consult_reply.v1",
 } as const;
 
 const UUID_RE = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
@@ -123,6 +129,22 @@ export const AgentChannelHistoryEntry = z.object({
 });
 export type AgentChannelHistoryEntry = z.infer<typeof AgentChannelHistoryEntry>;
 
+/**
+ * Phase 07.7 (D-01, ADR-0027): why a bot's turn is a consult. Server-built from the chain ledger, never from message
+ * text. `agent` is the bot that asked (also `message.author` of the delivery); `onBehalfOf` the human the whole chain
+ * runs for and who pays every hop (ADR-0019).
+ */
+export const AgentTurnOrigin = z.object({
+  agent: z.object({ id: Id, handle: z.string(), displayName: z.string() }),
+  chainId: Id,
+  hopId: Id,
+  /** 1 = asked by the root turn's bot, 2 = asked by a bot that was itself consulted. */
+  depth: z.number().int().min(1).max(A2A_MAX_DEPTH),
+  mode: ConsultMode,
+  onBehalfOf: AgentChannelAuthor.extend({ kind: z.literal("user") }),
+});
+export type AgentTurnOrigin = z.infer<typeof AgentTurnOrigin>;
+
 export const AgentMentionEvent = z.object({
   eventId: Id,
   /** Seq of this event on `cell:<cellId>` (the plugin's resume cursor). */
@@ -149,6 +171,11 @@ export const AgentMentionEvent = z.object({
    * the API at delivery. Absent (older API) = no tools: the plugin fails closed.
    */
   turn: TurnContext.optional(),
+  /**
+   * Phase 07.7 (D-01): server-built; present only on a consult delivery (the question to the consulted bot). Older
+   * plugins ignore it.
+   */
+  origin: AgentTurnOrigin.optional(),
 });
 export type AgentMentionEvent = z.infer<typeof AgentMentionEvent>;
 
@@ -239,6 +266,34 @@ export const AgentAutomationRunEvent = AgentMentionEvent.omit({ type: true }).ex
   }),
 });
 export type AgentAutomationRunEvent = z.infer<typeof AgentAutomationRunEvent>;
+
+/**
+ * Phase 07.7 (D-01, D-07, ADR-0027): a consulted bot's hop ended, delivered to the bot that asked as a new turn in the
+ * hop's thread. Built like a mention of the asking bot: structural author = the chain's human, `message` = the answer
+ * (or the question again when there is none), `turn` computed for that human; the return turn starts with the
+ * consulted turn's taint (07.6 `taintedAtStart`, D-09). `cancelled` is never delivered: a stopped chain wakes no bot.
+ * Older plugins skip the unknown type.
+ */
+export const AgentConsultReplyEvent = AgentMentionEvent.omit({ type: true }).extend({
+  type: z.literal(AgentChannelEventTypes.consultReply),
+  consultReply: z
+    .object({
+      chainId: Id,
+      hopId: Id,
+      /** The bot that was consulted. */
+      target: z.object({ id: Id, handle: z.string(), displayName: z.string() }),
+      mode: ConsultMode,
+      outcome: z.enum(["answered", "failed", "timed_out"]),
+      /** The consulted bot's answer message; null when it failed or timed out. */
+      answerMessageId: Id.nullable(),
+    })
+    // CR-B-08: the authoritative hop result never contradicts itself: `answered` names its answer, nothing else does.
+    .refine((r) => (r.outcome === "answered") === (r.answerMessageId !== null), {
+      message: "answered carries the answer message id, failed and timed_out carry none",
+      path: ["answerMessageId"],
+    }),
+});
+export type AgentConsultReplyEvent = z.infer<typeof AgentConsultReplyEvent>;
 
 export const CellConfigChangedEvent = z.object({
   type: z.literal(AgentChannelEventTypes.configChanged),

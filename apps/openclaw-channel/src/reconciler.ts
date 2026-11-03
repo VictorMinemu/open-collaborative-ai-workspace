@@ -57,6 +57,14 @@ const DANGEROUS_SET: ReadonlySet<string> = new Set(DANGEROUS_TOOLS.map((t) => t.
  */
 const FAMILY_GRANTS: ReadonlySet<string> = new Set(["bundle-mcp", "bundle-lsp"]);
 
+/**
+ * 07.7 (C-01, D-02, ADR-0027): OpenClaw's own session and agent-to-agent tools (`sessions_send`, `sessions_spawn`,
+ * `session_status`, `subagents`, `conversations_*`, `agents_*`) would let bots reach each other around the Agent Channel
+ * API, the resolver and the audit. Mirrors those rules of `isDangerousToolName` in packages/contracts (the API never
+ * lists them; the cell refuses them on its own as well, next to the `group:sessions` / `group:messaging` denies).
+ */
+const IN_CELL_SESSION_TOOL = /^(?:sessions?_|conversations_|agents_)|^subagents$/u;
+
 /** The tools a bot entry may list in `alsoAllow`: never a dangerous name, a group, a family or a wildcard. */
 export function allowedAgentTools(tools: readonly string[] | undefined): string[] {
   return [...new Set(tools ?? [])].filter((t) => {
@@ -66,7 +74,8 @@ export function allowedAgentTools(tools: readonly string[] | undefined): string[
       !lower.includes("*") &&
       !lower.startsWith("group:") &&
       !DANGEROUS_SET.has(lower) &&
-      !FAMILY_GRANTS.has(lower)
+      !FAMILY_GRANTS.has(lower) &&
+      !IN_CELL_SESSION_TOOL.test(lower)
     );
   });
 }

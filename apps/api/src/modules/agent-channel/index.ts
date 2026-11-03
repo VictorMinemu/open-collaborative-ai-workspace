@@ -48,7 +48,11 @@ import {
   replyTargetOrThrow,
   resolveReplyTarget,
 } from "./cards";
+import { registerChainUserRoutes } from "./chain-routes";
+import { recordChainReply, registerChainCellRoutes } from "./chains";
 import { registerConnectorRoutes } from "./connectors";
+import { registerConsultRoutes } from "./consult";
+import { registerConsultTick } from "./consult-tick";
 import { registerCellGateway } from "./gateway";
 import { registerHttpRequestRoutes } from "./http-requests";
 import { registerMcpCellRoutes } from "./mcp";
@@ -64,6 +68,7 @@ import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerWorkZoneRoutes } from "./work-zone";
 
 export { currentPhrase } from "./activity";
+export { consultTargets, decideAgentMessage } from "./agent-message";
 export {
   type DeliverAutomationRunInput,
   type DeliverAutomationRunResult,
@@ -76,6 +81,8 @@ export {
 export type { BrowserBudgets } from "./browser";
 export { notifyCardFollowers, updatePlatformCardNotified } from "./card-followers";
 export { emitCardAction } from "./cards";
+export { cancelChain, deliverConsultReply, noAnswerSentence, recordChainReply } from "./chains";
+export { CONSULT_SENTENCES, deliverConsultQuestion } from "./consult";
 export { conversationAudience } from "./memory-files";
 export { buildMentionEvents } from "./mentions";
 
@@ -182,6 +189,9 @@ export function createAgentChannelModule(
   registerMentionHandler(core, { modelLabel: opts.modelLabel, memory: opts.memory });
   // Agent Cards (P-11): a reader's decision reaches the card's agent as `agent.card_action.v1`.
   registerCardActionHandler(core, { perms, modelLabel: opts.modelLabel, memory: opts.memory });
+  // Consult timeouts (07.7-09, D-11): the one-minute `consult.tick` on 07.6's job runtime (workers start and stop with
+  // `core.jobs`; no timer of our own).
+  registerConsultTick(core, { perms, modelLabel: opts.modelLabel, memory: opts.memory });
 
   async function uiTokenCreatedAt(tx: Tx): Promise<string | null> {
     const [row] = await tx
@@ -437,6 +447,8 @@ export function createAgentChannelModule(
                       ? {
                           onInserted: async (tx: Tx, messageId: string) => {
                             await finishActivity(tx, { eventId: turnEventId, replyMessageId: messageId });
+                            // 07.7 (D-15, P-09): a chain turn's first post is its hop's answer at turn-done.
+                            await recordChainReply(tx, { eventId: turnEventId, messageId });
                             await linkTurnAttachments(tx, {
                               eventId: turnEventId,
                               conversationId: body.conversationId,
@@ -548,6 +560,12 @@ export function createAgentChannelModule(
           if (opts.workZone) registerWorkZoneRoutes(scope, core, opts.workZone);
           // Natural-language automations (07.6-12, D-02, D-03): a proposal card only the turn's person confirms.
           if (opts.automations) registerAutomationProposalRoutes(scope, core, opts.automations);
+          // Agent-to-agent consults (07.7-04, D-07, D-08): a visible question in the turn's thread and a turn for the
+          // consulted bot on behalf of the same human, under the canonical decision and the chain guards.
+          registerConsultRoutes(scope, { core, perms, modelLabel: opts.modelLabel, memory: opts.memory });
+          // The turn-done signal (07.7-06, P-09): the hop a turn answers closes, and the answer returns to the asker as
+          // a new turn for the same human (`agent.consult_reply.v1`).
+          registerChainCellRoutes(scope, { core, perms, modelLabel: opts.modelLabel, memory: opts.memory });
           // Watched-record writes (07.6-14, D-04, D-07): compare-and-set on the watched record of the turn's card thread,
           // governed like any side effect (taint, 07.5 approvals).
           if (opts.records) {
@@ -598,6 +616,9 @@ export function createAgentChannelModule(
         },
         { prefix: AGENT_CHANNEL_BASE_PATH },
       );
+
+      // Stop (07.7-06, P-14): the chain's human or a channel moderator stops an agent-to-agent chain.
+      registerChainUserRoutes(app, core, perms);
 
       registerCellGateway(app, core, auth, presence, perms);
     },

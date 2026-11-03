@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AgentScope, AgentStatus } from "./agent";
 import { AgentCard } from "./agent-cards";
+import { MessageConsult } from "./agent-chains";
 import { AiAddressing, AiGeneration } from "./ai-generation";
 import { Attachment, MAX_ATTACHMENTS_PER_MESSAGE } from "./attachments";
 import { ChannelLayout } from "./board";
@@ -129,6 +130,11 @@ export const Message = z.object({
   card: AgentCard.optional(),
   /** Bot replies (Phase 07.8, R2): what the bot did in its sandbox and browser this turn, composed by the API. */
   activity: BotTurnActivity.optional(),
+  /**
+   * Consult hops (Phase 07.7, ADR-0027): viewer-agnostic hop side data on a question or answer message; travels in
+   * `message.created` / `message.updated`.
+   */
+  consult: MessageConsult.nullable().optional(),
 });
 export type Message = z.infer<typeof Message>;
 

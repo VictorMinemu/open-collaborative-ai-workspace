@@ -1,0 +1,67 @@
+{
+  "eventId": "0199a6f0-0000-7000-8000-00000000e101",
+  "agent": { "id": "0199a6f0-0000-7000-8000-00000000a001", "handle": "archie", "displayName": "Archie" },
+  "conversation": { "id": "0199a6f0-0000-7000-8000-00000000c101", "kind": "channel", "name": "ops" },
+  "thread": { "rootMessageId": "0199a6f0-0000-7000-8000-00000000d100" },
+  "message": {
+    "id": "0199a6f0-0000-7000-8000-00000000d101",
+    "text": "@archie check the pump order with Bea [[call ocw_consult_agent {\"target\":\"0199a6f0-0000-7000-8000-00000000a002\",\"question\":\"Is the pump order confirmed?\"}]]",
+    "createdAt": "2026-11-03T09:00:01.000Z",
+    "author": { "kind": "user", "id": "0199a6f0-0000-7000-8000-0000000000f1", "displayName": "Víctor Ruiz" },
+    "mentions": [{ "kind": "agent", "id": "0199a6f0-0000-7000-8000-00000000a001" }]
+  },
+  "threadHistory": [
+    {
+      "id": "0199a6f0-0000-7000-8000-00000000d100",
+      "author": {
+        "kind": "user",
+        "id": "0199a6f0-0000-7000-8000-0000000000f1",
+        "displayName": "Víctor Ruiz"
+      },
+      "text": "The pump for line 3 is due this week.",
+      "createdAt": "2026-11-03T09:00:00.000Z"
+    }
+  ],
+  "roster": [
+    {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f1",
+      "displayName": "Víctor Ruiz",
+      "role": "owner"
+    },
+    {
+      "kind": "agent",
+      "id": "0199a6f0-0000-7000-8000-00000000a001",
+      "displayName": "Archie",
+      "handle": "archie"
+    },
+    {
+      "kind": "agent",
+      "id": "0199a6f0-0000-7000-8000-00000000a002",
+      "displayName": "Bea",
+      "handle": "bea"
+    }
+  ],
+  "turn": {
+    "tools": ["ocw_consult_agent"],
+    "toolFlags": {
+      "ocw_consult_agent": { "untrustedOutput": false, "sideEffecting": true }
+    },
+    "memory": [],
+    "now": null,
+    "maxToolCalls": 8,
+    "maxWebCalls": 5,
+    "consult": {
+      "chainId": null,
+      "depth": 0,
+      "targets": [
+        {
+          "id": "0199a6f0-0000-7000-8000-00000000a002",
+          "handle": "bea",
+          "displayName": "Bea",
+          "description": "Purchasing"
+        }
+      ]
+    }
+  }
+}

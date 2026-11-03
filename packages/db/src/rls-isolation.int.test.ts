@@ -690,7 +690,22 @@ async function seedOrg(c: pg.Client, org: string) {
     `update app.message_cards set status_label = 'Received', notices = '[{"tone":"warning","text":"From outside the workspace"}]' where message_id = $1`,
     [cardMsg],
   );
+
+  // Phase 07.7 (A2A-01, D-14): one chain rooted at the team bot's turn in the channel, with one pending consult of the
+  // personal bot (a schema fixture only: v1 never consults personal bots, which the API decides, not the table).
+  const chain = randomUUID();
+  await q(
+    "insert into app.agent_chains (id, organization_id, conversation_id, thread_root_id, root_event_id, root_agent_id, human_user_id) values ($1, $2, $3, $4, $5, $6, $7)",
+    [chain, org, conv, msg, randomUUID(), agent, user],
+  );
+  await q(
+    "insert into app.agent_chain_hops (organization_id, chain_id, root_agent_id, source_agent_id, target_agent_id, depth, mode, source_event_id, question_message_id, idempotency_key, deadline_at) values ($1, $2, $3, $3, $4, 1, 'consult', $5, $6, $7, now() + interval '5 minutes')",
+    [org, chain, agent, personal, randomUUID(), msg, `${randomUUID()}:consult:0`],
+  );
 }
+
+/** Phase 07.7: the agent-to-agent ledger (chains and their hops). */
+const AGENT_CHAIN_TABLES = ["app.agent_chains", "app.agent_chain_hops"] as const;
 
 /** Phase 07.6: the ten automation, inbound, watched-record and Work Zone memory tables. */
 const AUTOMATION_TABLES = [
@@ -2961,6 +2976,96 @@ describe("tenant isolation (RLS)", () => {
       ]);
       expect(still.rows[0].n, `${tbl} B rows intact`).toBe(seeded.rows[0].n);
     }
+  });
+
+  it("Phase 07.7: the two agent chain tables are org-scoped, forced, seeded and invisible and unwritable across tenants (C-02, D-14)", async () => {
+    const scoped = new Map((await orgScopedTables()).map((t) => [t.tbl, t]));
+    for (const tbl of AGENT_CHAIN_TABLES) {
+      expect(scoped.get(tbl), tbl).toMatchObject({ rls: true, force: true, policies: 1 });
+      const seeded = await migrator.query(
+        `select count(*)::int as n from ${tbl} where organization_id = $1`,
+        [B],
+      );
+      expect(seeded.rows[0].n, `${tbl} has B rows`).toBeGreaterThan(0);
+      const own = await inTenant(A, () => app.query(`select count(*)::int as n from ${tbl}`));
+      expect(own.rows[0].n, `${tbl} seeded for A`).toBeGreaterThan(0);
+      const cross = await inTenant(A, () =>
+        app.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [B]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant select`).toBe(0);
+      for (const stmt of [
+        `update ${tbl} set organization_id = organization_id where organization_id = $1`,
+        `delete from ${tbl} where organization_id = $1`,
+      ]) {
+        const n = await inTenant(A, () => app.query(stmt, [B]).then((res) => res.rowCount));
+        expect(n, `${tbl}: ${stmt}`).toBe(0);
+      }
+      // INSERT of a copy of B's row while in A's context is refused by the tenant policy.
+      const row = await migrator.query(
+        `select row_to_json(t) as j from ${tbl} t where organization_id = $1 limit 1`,
+        [B],
+      );
+      await expect(
+        inTenant(A, () =>
+          app.query(`insert into ${tbl} select * from json_populate_record(null::${tbl}, $1::json)`, [
+            JSON.stringify(row.rows[0].j),
+          ]),
+        ),
+        `${tbl} cross-tenant insert`,
+      ).rejects.toThrow(/row-level security/);
+      // Moving one of A's own rows into B is refused by the tenant policy (or first by a composite foreign key, which
+      // carries the organization and so finds no parent in B).
+      await expect(
+        inTenant(A, () =>
+          app.query(`update ${tbl} set organization_id = $1 where organization_id = $2`, [B, A]),
+        ),
+        `${tbl} cross-tenant move`,
+      ).rejects.toThrow(/row-level security|violates foreign key constraint/);
+      const still = await migrator.query(`select count(*)::int as n from ${tbl} where organization_id = $1`, [
+        B,
+      ]);
+      expect(still.rows[0].n, `${tbl} B rows intact`).toBe(seeded.rows[0].n);
+    }
+    // A's tenant cannot open a chain on B's conversation or root it at B's bot, nor add a hop to B's chain, even with
+    // A's own organization id: the composite keys carry the organization (FKs bypass RLS).
+    const b = (
+      await migrator.query(
+        "select c.id, c.conversation_id, c.root_agent_id, h.target_agent_id from app.agent_chains c join app.agent_chain_hops h on h.chain_id = c.id where c.organization_id = $1 limit 1",
+        [B],
+      )
+    ).rows[0];
+    const a = (
+      await migrator.query(
+        "select c.conversation_id, c.thread_root_id, c.root_agent_id, c.human_user_id, h.target_agent_id from app.agent_chains c join app.agent_chain_hops h on h.chain_id = c.id where c.organization_id = $1 limit 1",
+        [A],
+      )
+    ).rows[0];
+    const openChain = (conversation: string, rootAgent: string) =>
+      inTenant(A, () =>
+        app.query(
+          "insert into app.agent_chains (organization_id, conversation_id, thread_root_id, root_event_id, root_agent_id, human_user_id) values ($1, $2, $3, $4, $5, $6)",
+          [A, conversation, a.thread_root_id, randomUUID(), rootAgent, a.human_user_id],
+        ),
+      );
+    await expect(openChain(b.conversation_id, a.root_agent_id)).rejects.toMatchObject({
+      constraint: "agent_chains_conversation_fk",
+    });
+    await expect(openChain(a.conversation_id, b.root_agent_id)).rejects.toMatchObject({
+      constraint: "agent_chains_root_agent_fk",
+    });
+    await expect(
+      inTenant(A, async () => {
+        const question = randomUUID();
+        await app.query(
+          "insert into app.messages (id, organization_id, conversation_id, seq, author_kind, author_id, body) values ($1, $2, $3, 99, 'agent', $4, 'q')",
+          [question, A, a.conversation_id, a.root_agent_id],
+        );
+        await app.query(
+          "insert into app.agent_chain_hops (organization_id, chain_id, root_agent_id, source_agent_id, target_agent_id, depth, mode, source_event_id, question_message_id, idempotency_key, deadline_at) values ($1, $2, $3, $3, $4, 1, 'consult', $5, $6, 'k', now())",
+          [A, b.id, a.root_agent_id, a.target_agent_id, randomUUID(), question],
+        );
+      }),
+    ).rejects.toMatchObject({ constraint: "agent_chain_hops_chain_fk" });
   });
 
   it("Phase 07.11 schema constraints: the update history is org-scoped and checked, the policy level too (D-02, D-06, PD-04)", async () => {

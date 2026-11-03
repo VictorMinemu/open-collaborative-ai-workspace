@@ -2493,6 +2493,11 @@ I found two issues.
 
 Full traceability must be preserved.
 
+**v1 (Phase 07.7, ADR-0027).** A bot does not wake another by typing its `@handle`; it asks through
+`ocw_consult_agent`, in `consult` mode (it expects an answer) or `handoff` mode (it hands the work over, as in the
+`@qa` example). Each hop is a visible message in the thread, attributed to the asking bot and made on behalf of the
+person, so the traceability above is the thread itself plus an audited chain; see §80 for the rules and limits.
+
 ---
 
 ### 80. Agent-to-Agent Permissions
@@ -2517,6 +2522,26 @@ can_message:
 cannot_message:
   - @production-agent
 ```
+
+**v1 (Phase 07.7, ADR-0027; shipped).** An agent consults or hands work to another agent only through the platform:
+its `ocw_consult_agent` tool asks the Agent Channel API, which posts the question as a visible, attributed message in
+the same thread and delivers it to the other bot as a new turn on behalf of the person who started the thread's
+request; the other bot's whole reply returns to the asking bot as another turn, as a labelled answer from that bot
+that it treats as information, not instructions. The whole exchange stays in the thread: each question carries a
+status chip (Waiting, Answered, Couldn't answer, No answer in time, Stopped, Daily limit reached), each answer says
+whom it answers, and every hop is audited with its chain id (never its text). Agents typing `@handles` in their replies
+still never wake another bot, and OpenClaw's own agent-to-agent tools stay off. The `can_message` / `cannot_message`
+matrix above is expressed as `agent.message` permission rules (per source bot, per target bot or for the whole
+organization; deny wins), decided together with the person's own rights and what that person may see; an organization
+switch in Settings › Bot policy turns consults on, and they are **off by default**; each team bot's sheet shows its
+rules ("Can ask", "Never ask", "Other bots can ask") and what they add up to right now. A chain is bounded: at most two
+levels deep, no bot asked twice and never the bot that started it, 3 consults per chain, one open question per bot in
+each chain at a time (a bot taking part in several people's requests may have one open in each; each bot's daily
+limit bounds the total), and a timeout per question (the asking bot hears "did not answer in time" between 5 and 6
+minutes after asking). A bot that read web, tool or inbound content in the asking or the answering turn cannot consult
+again or take side effects in the turn that follows. The person who started the chain pays for every turn in it and,
+like a channel moderator, can stop it. In v1, consults work in channels and their threads only (not in DMs, group DMs
+or AI chats), only between team bots that are already members of the channel, and only admins edit the rules.
 
 ---
 

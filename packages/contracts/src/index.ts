@@ -1,5 +1,6 @@
 export * from "./agent";
 export * from "./agent-cards";
+export * from "./agent-chains";
 export * from "./agent-channel";
 export * from "./agent-templates";
 export * from "./ai-chat";

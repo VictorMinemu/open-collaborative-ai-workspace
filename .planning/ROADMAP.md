@@ -654,8 +654,11 @@ Plans:
 **Goal**: An agent consults or delegates to another agent through the platform, within a permission matrix of who may
 message whom, with every hop visible in the thread, audited and bounded
 **Requirements**: A2A-01, A2A-02, A2A-03
-**Depends on:** Phase 07.3, Phase 07.5
-**Research:** done (`OPS-FEATURES.md` F7)
+**Depends on:** Phase 07.3, Phase 07.5; since the 2026-11-02 revision also Phase 07.6 (job runtime, proactive delivery,
+self-validated cell tools, taint at start; D-07 … D-12) and Phase 07.8 (hop turns are unattended: sandbox tools under
+07.8's rules, never the browser; D-13)
+**ADR:** 0027 (reserved for this phase; Proposed in 07.7-02, accepted at the gate 07.7-11, D-16)
+**Research:** done (`OPS-FEATURES.md` F7; re-checked against `main` 441a0561 on 2026-11-02)
 **UI hint**: yes
 **Success Criteria** (what must be TRUE):
 
@@ -668,17 +671,17 @@ message whom, with every hop visible in the thread, audited and bounded
 
 Plans:
 
-- [ ] 07.7-01-PLAN.md — Wave 1: Contracts first for the whole phase.
-- [ ] 07.7-02-PLAN.md — Wave 1: Ledger tables with RLS, loop guards as constraints, chain context on the turn ledger, the sweeper function, the Bots
-- [ ] 07.7-03-PLAN.md — Wave 2: Make `agent.message` decisions follow D-02 exactly and give admins the two writers of those rules.
-- [ ] 07.7-04-PLAN.md — Wave 2: Build `POST /agent-channel/v1/consultations` end to end: offering, decision, guards, the question message, the chain and
-- [ ] 07.7-05-PLAN.md — Wave 2: Add `ocw_consult_agent`, `agent.consult_reply.v1` handling, the turn-done call and initial taint to the OpenClaw plugin.
-- [ ] 07.7-06-PLAN.md — Wave 3: Close hops on the turn-done signal, deliver the answer back as `agent.consult_reply.v1`, make consult turns valid
-- [ ] 07.7-07-PLAN.md — Wave 3: Pin OpenClaw's in-cell agent-to-agent off and prove a two-bot consult in a real cell.
-- [ ] 07.7-08-PLAN.md — Wave 3: Ship the organization switch and the per-bot consult rules in the web app, to the UI contract above.
-- [ ] 07.7-09-PLAN.md — Wave 4: Time out unanswered hops and cancel orphaned chains, exactly once, per organization.
-- [ ] 07.7-10-PLAN.md — Wave 4: Render consult hops in threads with live status and Stop, and prove a two-bot consult in the browser.
-- [ ] 07.7-11-PLAN.md — Wave 5: Gate the phase: route-coverage cross-tenant guard, full verification on fresh infrastructure, docs and the signed
+- [x] 07.7-01-PLAN.md — Wave 1: Contracts first for the whole phase.
+- [x] 07.7-02-PLAN.md — Wave 1: Ledger tables with RLS, loop guards as constraints, chain context on the turn ledger, the expired-hops function and the `consult.tick` queue, the Bots
+- [x] 07.7-03-PLAN.md — Wave 2: Make `agent.message` decisions follow D-02 exactly and give admins the two writers of those rules.
+- [x] 07.7-04-PLAN.md — Wave 2: Build `POST /agent-channel/v1/consultations` end to end on 07.6's primitives: the self-validated route and the claim, the canonical decision, guards, the question posted with `postAgentMessageIn`, the chain and
+- [x] 07.7-05-PLAN.md — Wave 2: Add `ocw_consult_agent`, `agent.consult_reply.v1` handling, the turn-done call and initial taint to the OpenClaw plugin.
+- [x] 07.7-06-PLAN.md — Wave 3: Close hops on the turn-done signal, deliver the answer back as `agent.consult_reply.v1` on 07.6's delivery pattern, pin consult turns as valid
+- [x] 07.7-07-PLAN.md — Wave 3: Pin OpenClaw's in-cell agent-to-agent off and prove a two-bot consult in a real cell.
+- [x] 07.7-08-PLAN.md — Wave 3: Ship the organization switch and the per-bot consult rules in the web app, to the UI contract above.
+- [x] 07.7-09-PLAN.md — Wave 4: Time out unanswered hops and cancel orphaned chains, exactly once, per organization, on `core.jobs`.
+- [x] 07.7-10-PLAN.md — Wave 4: Render consult hops in threads with live status and Stop, and prove a two-bot consult in the browser.
+- [x] 07.7-11-PLAN.md — Wave 5: Gate the phase: the security route table, the release images, full verification on fresh infrastructure, ADR-0027 accepted, docs and the signed
 
 ### Phase 07.8: Bot sandboxes, plugins and live browser (INSERTED)
 

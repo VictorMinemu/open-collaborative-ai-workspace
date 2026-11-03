@@ -213,9 +213,9 @@ SLICE-06…18 were added on 2026-10-04 after the code audit of the widened demo 
 
 ### Agent-to-Agent Collaboration (A2A) — added 2026-10-08 by the owner
 
-- [ ] **A2A-01**: An agent consults or delegates to another agent through the API; the answer returns as a new turn and each hop is a visible, attributed thread message audited with a chain id
-- [ ] **A2A-02**: Effective agent-to-agent permission = source agent ∩ triggering human ∩ target visibility ∩ agent.message rules (deny wins)
-- [ ] **A2A-03**: Chains are bounded (depth ≤ 2, no agent twice, per-chain budget, daily limits) and the asker pays
+- [x] **A2A-01**: An agent consults or delegates to another agent through the API; the answer returns as a new turn and each hop is a visible, attributed thread message audited with a chain id
+- [x] **A2A-02**: Effective agent-to-agent permission = source agent ∩ triggering human ∩ target visibility ∩ agent.message rules (deny wins)
+- [x] **A2A-03**: Chains are bounded (depth ≤ 2, no agent twice, per-chain budget, daily limits) and the asker pays
 
 ### Devices, Projects and Work Zone Contracts (DEV)
 
@@ -563,9 +563,9 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | AUTO-04 | Phase 07.6 | Complete (owner checks in docs/DEMO.md: human_needed) | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
 | AUTO-05 | Phase 07.6 | Complete (owner checks in docs/DEMO.md: human_needed) | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
 | AUTO-06 | Phase 07.6 | Complete (owner checks in docs/DEMO.md: human_needed) | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
-| A2A-01 | Phase 07.7 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
-| A2A-02 | Phase 07.7 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
-| A2A-03 | Phase 07.7 | Pending | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| A2A-01 | Phase 07.7 | Complete (owner check in docs/DEMO.md: human_needed) | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| A2A-02 | Phase 07.7 | Complete (owner check in docs/DEMO.md: human_needed) | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
+| A2A-03 | Phase 07.7 | Complete (owner check in docs/DEMO.md: human_needed) | New (owner, 2026-10-08; research `.planning/research/OPS-FEATURES.md`) |
 | SBX-01 | Phase 07.8 | Pending | New (owner, 2026-10-14) |
 | SBX-02 | Phase 07.8 | Pending | New (owner, 2026-10-14) |
 | SBX-03 | Phase 07.8 | Pending | New (owner, 2026-10-14) |

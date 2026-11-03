@@ -176,7 +176,12 @@ function ThreadBody({
         <div
           ref={scroll.ref}
           onScroll={scroll.onScroll}
-          className="scrollbar-thin min-h-0 flex-1 overflow-y-auto"
+          role="region"
+          aria-label="Thread messages"
+          // biome-ignore lint/a11y/noNoninteractiveTabindex: a scrollable region must be reachable by keyboard (axe scrollable-region-focusable; a thread on a touch screen has no hover toolbar to focus)
+          tabIndex={0}
+          data-testid="thread-scroll"
+          className="scrollbar-thin min-h-0 flex-1 overflow-y-auto outline-none focus-visible:ring-[3px] focus-visible:ring-ring/40 focus-visible:ring-inset"
         >
           {thread.isPending ? (
             <div className="grid gap-3 p-5">

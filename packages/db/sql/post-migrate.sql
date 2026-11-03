@@ -857,3 +857,39 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
 $fn$;
 REVOKE ALL ON FUNCTION app.expired_automation_events(integer, timestamptz) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.expired_automation_events(integer, timestamptz) TO ocw_app;
+
+-- Phase 07.7 (A2A-03, D-04, D-11, ADR-0027): the pre-tenant read of the `consult.tick` job (one global cron, every
+-- minute, UTC). Same shape as the 07.6 tick functions above: pending agent-to-agent hops whose deadline has passed,
+-- across organizations by design, oldest deadline first, ids and organization ids only (never a question, an answer,
+-- an agent or a chain). The tick re-reads every hop by id inside its organization's own withTenant() transaction, as
+-- the chain's human, where RLS applies again, and times it out there with a conditional `pending →` update.
+CREATE OR REPLACE FUNCTION app.expired_agent_chain_hops(p_limit integer, p_now timestamptz)
+RETURNS TABLE (id uuid, organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT h.id, h.organization_id FROM app.agent_chain_hops h
+  WHERE h.status = 'pending' AND h.deadline_at < p_now
+  ORDER BY h.deadline_at, h.id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.expired_agent_chain_hops(integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.expired_agent_chain_hops(integer, timestamptz) TO ocw_app;
+
+-- Phase 07.7 review (CR-A-06): the `consult.tick`'s second pre-tenant read. A chain whose last pending thing was lost
+-- (a done the cell never sent) must still end: active chains with no pending hop whose chain row and hops have not
+-- changed since `p_before` (the tick passes now − 10 minutes), least recently touched first, ids and organization ids
+-- only. The tick completes each inside its organization's own withTenant() transaction, under the chain's row lock,
+-- with the same completion rule as a done (`completeChain`).
+CREATE OR REPLACE FUNCTION app.idle_agent_chains(p_limit integer, p_before timestamptz)
+RETURNS TABLE (id uuid, organization_id uuid)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  SELECT c.id, c.organization_id FROM app.agent_chains c
+  WHERE c.status = 'active' AND c.updated_at < p_before
+    AND NOT EXISTS (
+      SELECT 1 FROM app.agent_chain_hops h
+      WHERE h.chain_id = c.id AND (h.status = 'pending' OR h.updated_at >= p_before)
+    )
+  ORDER BY c.updated_at, c.id
+  LIMIT least(greatest(p_limit, 1), 1000)
+$fn$;
+REVOKE ALL ON FUNCTION app.idle_agent_chains(integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.idle_agent_chains(integer, timestamptz) TO ocw_app;

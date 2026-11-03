@@ -386,6 +386,71 @@ describe("tool guard under abuse (Task 3)", () => {
     });
   });
 
+  describe("ocw_consult_agent (07.7 D-08, D-09, P-11)", () => {
+    const CONSULT = { untrustedOutput: false, sideEffecting: true };
+    const consultTurn = (flags: TurnContext["toolFlags"][string] = CONSULT) =>
+      turn({
+        tools: ["web_search", "ocw_memory_save", "ocw_consult_agent"],
+        toolFlags: { web_search: WEB, ocw_memory_save: MEMORY, ocw_consult_agent: flags },
+      });
+    const ASK = { target: "@bea", question: "Is the pump order confirmed?" };
+    const TAINTED =
+      "I can't consult another bot after reading web or tool content in this turn. Tell Ana Pérez to ask again in a new message.";
+
+    it("an untainted turn's consult is never sent to /tool-calls (self-validated) and is not blocked; it is counted locally", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: consultTurn() });
+      expect(await g.beforeToolCall(call("ocw_consult_agent", ASK), ctx())).toBeUndefined();
+      expect(fake.requests).toHaveLength(0);
+      expect(g.activeTurn(SESSION)?.calls).toBe(1);
+    });
+
+    it("stays side-effecting whatever the turn's flags say: after untrusted output it is blocked with its own sentence, before any route", async () => {
+      for (const flags of [
+        { untrustedOutput: false, sideEffecting: false },
+        { untrustedOutput: false, sideEffecting: true, approval: "always" as const },
+      ]) {
+        const fake = fakeClient();
+        const g = createToolGuard({ client: () => fake.client });
+        g.beginTurn(SESSION, {
+          eventId: "evt-1",
+          agentId: "a1",
+          turn: consultTurn(flags),
+          requesterName: "Ana Pérez",
+        });
+        expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+        expect(await g.beforeToolCall(call("ocw_consult_agent", ASK), ctx())).toEqual({
+          block: true,
+          blockReason: TAINTED,
+        });
+        expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
+      }
+    });
+
+    it("a turn the API delivered tainted (turn.tainted → startsTainted → beginTurn) blocks the first consult and the first memory save locally; a read-only untrusted tool is still asked at the gate", async () => {
+      const fake = fakeClient();
+      const g = createToolGuard({ client: () => fake.client });
+      g.beginTurn(SESSION, {
+        eventId: "evt-1",
+        agentId: "a1",
+        turn: consultTurn(),
+        requesterName: "Ana Pérez",
+        tainted: true,
+      });
+      expect(await g.beforeToolCall(call("ocw_consult_agent", ASK), ctx())).toEqual({
+        block: true,
+        blockReason: TAINTED,
+      });
+      const save = await g.beforeToolCall(call("ocw_memory_save", { text: "x" }), ctx());
+      expect(save?.blockReason).toMatch(/read-only after untrusted content/u);
+      expect(fake.requests).toHaveLength(0);
+      expect(g.activeTurn(SESSION)?.calls).toBe(0);
+      expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
+      expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
+    });
+  });
+
   describe("ocw_record_update (07.6 AUTO-04, D-04)", () => {
     const RECORD = { untrustedOutput: true, sideEffecting: true };
     const recordTurn = (flags: TurnContext["toolFlags"][string] = RECORD) =>

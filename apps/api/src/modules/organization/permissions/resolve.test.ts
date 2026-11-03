@@ -1,4 +1,5 @@
 import {
+  agentMessageTool,
   MODULE_CATALOG,
   ModuleId,
   NON_DELEGABLE_PERMISSIONS,
@@ -152,6 +153,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "automation.webhook": false,
     "automation.manage": false,
     "record.watch": true,
+    // Phase 07.7 (ADR-0027): the human side of a consult; agents need an explicit allow rule.
+    "agent.message": true,
   },
   developer: {
     "org.read": true,
@@ -231,6 +234,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "automation.webhook": false,
     "automation.manage": false,
     "record.watch": true,
+    // Phase 07.7 (ADR-0027): the human side of a consult; agents need an explicit allow rule.
+    "agent.message": true,
   },
   lead: {
     "org.read": true,
@@ -310,6 +315,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "automation.webhook": true,
     "automation.manage": false,
     "record.watch": true,
+    // Phase 07.7 (ADR-0027): the human side of a consult; agents need an explicit allow rule.
+    "agent.message": true,
   },
   admin: {
     "org.read": true,
@@ -389,6 +396,8 @@ const EXPECTED: Record<OrgRole, Record<Permission, boolean>> = {
     "automation.webhook": true,
     "automation.manage": true,
     "record.watch": true,
+    // Phase 07.7 (ADR-0027): the human side of a consult; agents need an explicit allow rule.
+    "agent.message": true,
   },
 };
 
@@ -3154,5 +3163,226 @@ describe("session audience: who sees a Work Zone session (Phase 07.9, D-04, D-05
   it("agents are judged as themselves; the audience gate is for people", () => {
     const agent: PrincipalFacts = { ...user(null), kind: "agent", id: "agent-1" };
     expect(precondition("work_session.read", agent, session([]))).toBeNull();
+  });
+});
+
+describe("Phase 07.7 agent.message: who may consult whom (D-02, D-04, P-05, ADR-0027)", () => {
+  const A = "0a000000-0000-4000-8000-00000000000a";
+  const B = "0b000000-0000-4000-8000-00000000000b";
+  const C = "0c000000-0000-4000-8000-00000000000c";
+  const D = "0d000000-0000-4000-8000-00000000000d";
+  const H = "u-h";
+  const X = "unit-x";
+  const Y = "unit-y";
+  const PARENT = "unit-parent";
+  const agentPrincipal = (id: string, extra: Partial<PrincipalFacts> = {}): PrincipalFacts => ({
+    ...user(null),
+    kind: "agent",
+    id,
+    ...extra,
+  });
+  const source = agentPrincipal(A);
+  const human = user("standard", { id: H });
+  interface Target {
+    id: string;
+    scope: "team" | "personal";
+    ownerUserId: string | null;
+    disabled: boolean;
+    unitPath?: readonly string[];
+  }
+  const orgBot = (id: string): Target => ({ id, scope: "team", ownerUserId: null, disabled: false });
+
+  /** The canonical decision (P-05): the source agent for H, with the target bot (tool agent:<target>) on both passes. */
+  function consult(
+    rules: RuleFact[],
+    target: Target = orgBot(B),
+    opts: { from?: PrincipalFacts; as?: PrincipalFacts } = {},
+  ) {
+    const from = opts.from ?? source;
+    const as = opts.as ?? human;
+    const tool = agentMessageTool(target.id);
+    return decide(from, { ...agentResource(target, null), tool }, rules, "agent.message", {
+      principal: as,
+      resource: { ...agentResource(target, as.id), tool },
+    });
+  }
+
+  const orgSwitch = rule({ id: "r-switch", permission: "agent.message", effect: "allow" });
+  const agentRule = (id: string, effect: "allow" | "deny", tool: string | null) =>
+    rule({ id, subjectKind: "agent", subjectId: A, permission: "agent.message", effect, tool });
+
+  it("closed by default: no rule denies every pair (agents never hold the grain without an allow rule)", () => {
+    for (const target of [orgBot(B), orgBot(C)]) {
+      expect(consult([], target)).toEqual({
+        allowed: false,
+        denial: { permission: "agent.message", layer: "role", reason: "missing_permission" },
+      });
+    }
+    // The human holds it through the role; the agent pass alone is what closes it.
+    expect(allowed(human, orgResource(), "agent.message")).toBe(true);
+  });
+
+  it("the organization switch (one everyone allow) opens every pair", () => {
+    expect(consult([orgSwitch], orgBot(B)).allowed).toBe(true);
+    expect(consult([orgSwitch], orgBot(C), { from: agentPrincipal(D) }).allowed).toBe(true);
+  });
+
+  it("a per-target allow opens exactly that target", () => {
+    const onlyB = agentRule("r-only-b", "allow", agentMessageTool(B));
+    expect(consult([onlyB], orgBot(B)).allowed).toBe(true);
+    expect(consult([onlyB], orgBot(C)).denial).toMatchObject({ permission: "agent.message", layer: "role" });
+    // Another source gains nothing from A's rule.
+    expect(consult([onlyB], orgBot(B), { from: agentPrincipal(D) }).allowed).toBe(false);
+  });
+
+  it("never ask: a per-target deny beats the switch for that target only (layer tool)", () => {
+    const neverB = agentRule("r-never-b", "deny", agentMessageTool(B));
+    expect(consult([orgSwitch, neverB], orgBot(B)).denial).toEqual({
+      permission: "agent.message",
+      layer: "tool",
+      reason: "denied_by_rule",
+      ruleId: "r-never-b",
+    });
+    expect(consult([orgSwitch, neverB], orgBot(C)).allowed).toBe(true);
+  });
+
+  it("outbound none: the source's deny beats the switch and any per-target allow (layer agent)", () => {
+    const none = agentRule("r-none", "deny", null);
+    for (const target of [orgBot(B), orgBot(C)]) {
+      expect(consult([orgSwitch, none], target).denial).toMatchObject({
+        permission: "agent.message",
+        layer: "agent",
+        ruleId: "r-none",
+      });
+    }
+    const onlyB = agentRule("r-only-b", "allow", agentMessageTool(B));
+    expect(consult([onlyB, none], orgBot(B)).denial).toMatchObject({ layer: "agent", ruleId: "r-none" });
+    // Another source keeps the switch.
+    expect(consult([orgSwitch, none], orgBot(B), { from: agentPrincipal(D) }).allowed).toBe(true);
+  });
+
+  it("inbound off: an everyone deny on agent:<B> refuses B to every source, nobody else", () => {
+    const inboundOff = rule({
+      id: "r-inbound-b",
+      permission: "agent.message",
+      effect: "deny",
+      tool: agentMessageTool(B),
+    });
+    for (const from of [source, agentPrincipal(D)]) {
+      expect(consult([orgSwitch, inboundOff], orgBot(B), { from }).denial).toMatchObject({
+        permission: "agent.message",
+        layer: "tool",
+        ruleId: "r-inbound-b",
+      });
+    }
+    const onlyB = agentRule("r-only-b", "allow", agentMessageTool(B));
+    expect(consult([onlyB, inboundOff], orgBot(B)).allowed).toBe(false);
+    expect(consult([orgSwitch, inboundOff], orgBot(C)).allowed).toBe(true);
+  });
+
+  it("a unit-scoped deny matches targets in the unit, never a source 'in' it (agents carry no member paths)", () => {
+    const denyX = rule({ id: "r-deny-x", scopeUnitId: X, permission: "agent.message", effect: "deny" });
+    const inX: Target = { ...orgBot(B), unitPath: [PARENT, X] };
+    expect(consult([orgSwitch, denyX], inX).denial).toMatchObject({
+      permission: "agent.message",
+      layer: "unit",
+      unitId: X,
+    });
+    // A persona of Y, for a human who sees it (a member of Y), is outside the rule.
+    const inY = user("standard", { id: H, memberUnitPaths: [[PARENT, Y]] });
+    expect(consult([orgSwitch, denyX], { ...orgBot(C), unitPath: [PARENT, Y] }, { as: inY }).allowed).toBe(
+      true,
+    );
+    expect(consult([orgSwitch, denyX], orgBot(C)).allowed).toBe(true);
+    // A persona of X asking: as a principal it has no unit paths, so "agents of unit X" rules never bind a source.
+    const personaOfX = agentPrincipal(D);
+    expect(personaOfX.memberUnitPaths).toEqual([]);
+    expect(consult([orgSwitch, denyX], orgBot(C), { from: personaOfX }).allowed).toBe(true);
+  });
+
+  it("the human pass: a user deny on H refuses whatever the agent-side rules allow", () => {
+    const denyH = rule({
+      id: "r-deny-h",
+      subjectKind: "user",
+      subjectId: H,
+      permission: "agent.message",
+      effect: "deny",
+    });
+    const any = agentRule("r-any", "allow", null);
+    expect(consult([orgSwitch, any, denyH], orgBot(B)).denial).toEqual({
+      permission: "agent.message",
+      layer: "user",
+      reason: "denied_by_rule",
+      ruleId: "r-deny-h",
+    });
+    // Another human is unaffected.
+    const other = user("standard", { id: "u-other" });
+    expect(consult([orgSwitch, denyH], orgBot(B), { as: other }).allowed).toBe(true);
+  });
+
+  it("target visibility: a unit persona H cannot see is denied unit_agent; members, leads above and admins pass", () => {
+    const persona: Target = { ...orgBot(B), unitPath: [PARENT, Y] };
+    expect(consult([orgSwitch], persona)).toEqual({
+      allowed: false,
+      denial: { permission: "agent.message", layer: "resource", reason: "unit_agent" },
+    });
+    // Even with every agent-side allow.
+    const onlyB = agentRule("r-only-b", "allow", agentMessageTool(B));
+    expect(consult([orgSwitch, onlyB], persona).denial).toMatchObject({ reason: "unit_agent" });
+    const member = user("standard", { id: "u-m", memberUnitPaths: [[PARENT, Y]] });
+    const lead = user("lead", { id: "u-l", memberUnitPaths: [[PARENT]], leadOfUnitIds: new Set([PARENT]) });
+    const admin = user("admin", { id: "u-admin" });
+    for (const as of [member, lead, admin]) {
+      expect(consult([orgSwitch], persona, { as }).allowed, as.id).toBe(true);
+    }
+    // The visibility precondition never judges the source agent itself (the agent pass).
+    expect(precondition("agent.message", source, agentResource(persona, null))).toBeNull();
+  });
+
+  it("target visibility: a personal bot H does not own is denied personal_bot, admins included", () => {
+    const personal: Target = { id: B, scope: "personal", ownerUserId: "u-owner", disabled: false };
+    const admin = user("admin", { id: "u-admin" });
+    for (const as of [human, admin]) {
+      expect(consult([orgSwitch], personal, { as })).toEqual({
+        allowed: false,
+        denial: { permission: "agent.message", layer: "resource", reason: "personal_bot" },
+      });
+    }
+    // Its owner sees it (v1 still offers no personal bot as a target: the consult route's rule, 07.7-04).
+    const owner = user("standard", { id: "u-owner" });
+    expect(consult([orgSwitch], personal, { as: owner }).allowed).toBe(true);
+  });
+
+  it("07.3's Bots module off for H, H's unit or the organization refuses the consult", () => {
+    const botsRows = (extra: Partial<RuleFact>): RuleFact[] =>
+      MODULE_CATALOG.bots.patterns.map((permission, i) =>
+        rule({ id: `bots-${i}`, permission, effect: "deny", ...extra }),
+      );
+    expect(MODULE_CATALOG.bots.patterns).toContain("agent.message");
+    const offForH = botsRows({ subjectKind: "user", subjectId: H });
+    expect(consult([orgSwitch, ...offForH], orgBot(B)).denial).toMatchObject({
+      permission: "agent.message",
+      layer: "user",
+      reason: "denied_by_rule",
+    });
+    expect(consult([orgSwitch, ...botsRows({})], orgBot(B)).denial).toMatchObject({
+      permission: "agent.message",
+      layer: "org",
+    });
+    const inX = user("standard", { id: H, memberUnitPaths: [[X]] });
+    expect(
+      consult([orgSwitch, ...botsRows({ scopeUnitId: X })], orgBot(B), { as: inX }).denial,
+    ).toMatchObject({
+      permission: "agent.message",
+      layer: "unit",
+      unitId: X,
+    });
+  });
+
+  it("a deactivated source agent is denied as a principal", () => {
+    expect(consult([orgSwitch], orgBot(B), { from: agentPrincipal(A, { deactivated: true }) })).toEqual({
+      allowed: false,
+      denial: { permission: "agent.message", layer: "agent", reason: "agent_disabled" },
+    });
   });
 });

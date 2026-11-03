@@ -14,7 +14,7 @@ import type { FastifyRequest } from "fastify";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { badRequest } from "../../lib/errors";
 import { loadRules } from "./permissions/facts";
-import { moduleTargetResource } from "./permissions/policy";
+import { moduleTargetResource, orgResource } from "./permissions/policy";
 import type { RuleFact } from "./permissions/resolve";
 import type { PermissionService } from "./permissions/service";
 import { assertSubjectExists, deleteRuleRow, insertRuleRow, type RuleRow, rulesChanged } from "./rules";
@@ -23,7 +23,8 @@ import { requireUnit, uuidArray } from "./units";
 /**
  * Module access (ADR-0024, ACCESS-02): turning a module off for the organization, a unit or a person writes one
  * ordinary `effect: "deny"`, `tool: null` row per catalog pattern at exactly that scope and subject; turning it on
- * deletes exactly those rows (duplicates and hand-written catalog rows included). Nothing else is ever written or
+ * deletes exactly those rows (duplicates and hand-written catalog rows included), except that a caller without
+ * `rule.manage` never deletes an admin-only grain's row another person wrote (CR-B-03). Nothing else is ever written or
  * deleted: no allow row, no tool row, no non-catalog permission, no row of another scope or subject (P-05). Rows go
  * through the same helpers as `/permission-rules` (per-row audit), and one `permission_rules.updated` per request that
  * changed rows re-decides live subscriptions (ADR-0009). Who may do it is the resolver's `unit.modules.manage`
@@ -31,6 +32,12 @@ import { requireUnit, uuidArray } from "./units";
  */
 
 type Subject = { kind: "everyone" } | { kind: "user"; userId: string };
+
+/**
+ * Catalog patterns whose rules only admins edit (`rule.manage`), although a module toggle covers them: `agent.message`
+ * joined the Bots catalog in 07.7 so Bots off also stops consults, but consult rules are admin-only (D-04).
+ */
+const ADMIN_ONLY_PATTERNS: ReadonlySet<string> = new Set(["agent.message"]);
 
 /**
  * The state of one module's exact rows (deny, no tool, no folder, same scope, same subject, catalog patterns only). A
@@ -318,7 +325,19 @@ export function registerModuleAccessRoutes(app: App, core: Core, perms: Permissi
         const metadata = { module, via: "module_access" };
         const changed: string[] = [];
         if (enabled) {
+          // CR-B-03 (D-04, ADR-0027 §7): only admins edit consult rules. A caller without `rule.manage` (a lead) never
+          // removes an admin-only grain's row someone else wrote (an admin's deny, whether hand-written or from an
+          // admin's own module toggle); the lead's own rows and the backfill's (no author) go as before. Strictness
+          // never decreases: the module then reads `custom` until an admin turns it on or deletes the rule.
+          const callerId = authOf(req).userId;
+          const admin = await perms.can(req, tx, "rule.manage", orgResource());
           for (const row of existing) {
+            const kept =
+              !admin &&
+              ADMIN_ONLY_PATTERNS.has(row.permission) &&
+              row.createdBy !== null &&
+              row.createdBy !== callerId;
+            if (kept) continue;
             if (await deleteRuleRow(core, tx, row, metadata)) changed.push(row.id);
           }
         } else {

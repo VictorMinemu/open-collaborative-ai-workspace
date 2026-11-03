@@ -54,9 +54,17 @@ export interface AgentMention {
    * addressed and the candidates are team bots with reply mode `all` (D-12); delivery re-decides the org
    * policy and applies the per-minute cap before metering. `automation` (Phase 07.6, D-03): an automation run delivered
    * by `deliverAutomationRun` on its anchor message; the author is the run-as human (structural, never from text), the
-   * body the server's sentence, and the turn is unattended (D-12: no browser tools).
+   * body the server's sentence, and the turn is unattended (D-12: no browser tools). `consult` (Phase 07.7, D-07, D-13):
+   * a consult question (or answer) delivered by agent-channel's consult code; the structural author is the chain's
+   * human and the turn is unattended like an automation run. Set only by agent-channel's consult code; chat never sets
+   * it.
    */
-  trigger?: "mention" | "reply_mode" | "automation";
+  trigger?: "mention" | "reply_mode" | "automation" | "consult";
+  /**
+   * Phase 07.7 (D-01, D-07; ADR-0027): the chain this delivery belongs to, built by agent-channel's consult code from the
+   * chain ledger, never from message text. Absent = a turn outside any chain (depth 0). Chat never sets it.
+   */
+  chain?: ChainDelivery;
   /**
    * Phase 07.6 (D-02, D-07): the turn starts tainted (a webhook or mail run). Delivery also starts tainted any turn
    * whose thread holds inbound content (taint propagation, P-11), whatever this says.
@@ -67,6 +75,21 @@ export interface AgentMention {
    * turn's local date and time (D-12). Never stored on the message.
    */
   clientTimeZone?: string | null;
+}
+
+/**
+ * Phase 07.7 (D-01, D-03): a delivery's place in an agent chain. `depth` is the delivered turn's depth (1 = a bot asked
+ * by the root turn's bot, 2 = asked by a consulted bot, 0 = the root bot's own return turn); `answeringHopId` is the hop
+ * the turn answers, `returningHopId` the hop whose answer it brings back; `rootAgentId` and `usedTargetIds` keep the root
+ * and every bot already asked in the chain out of the turn's consult targets.
+ */
+export interface ChainDelivery {
+  chainId: string | null;
+  depth: 0 | 1 | 2;
+  answeringHopId: string | null;
+  returningHopId: string | null;
+  rootAgentId: string | null;
+  usedTargetIds: string[];
 }
 
 export interface ThreadContext {

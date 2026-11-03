@@ -1,8 +1,8 @@
 /**
  * Tools the API offers only on some turns, decided per delivery from facts the cell-wide snapshot does not carry
  * (07.1-13, 07.5-10, 07.6-20). `ocw_board_card` is offered only on a board channel's turns (07.1-10), the two Work Zone
- * proposal tools only on turns whose human holds `work_session.create` (07.5-08), and the two 07.6 tools only where
- * their own rules hold (below), so `GET /cell` (the bot's tools in
+ * proposal tools only on turns whose human holds `work_session.create` (07.5-08), the two 07.6 tools and the 07.7 consult
+ * tool only where their own rules hold (below), so `GET /cell` (the bot's tools in
  * any conversation, for no human) never lists them, while OpenClaw can only run a tool the bot's entry configures
  * (`alsoAllow`) and a turn may only narrow that list (`toolsAllow`).
  *
@@ -20,13 +20,18 @@ const WORK_ZONE_TOOLS = ["ocw_work_zone_projects", "ocw_start_work_zone"] as con
  * (offered by 07.6-14 only in the thread of a watched card): both decided per turn, never in `GET /cell`.
  */
 const AUTOMATION_TOOLS = ["ocw_automation_propose", "ocw_record_update"] as const;
+/**
+ * 07.7 (D-08, ADR-0027): `ocw_consult_agent`, offered by 07.7-04 only on a channel turn below the chain's depth limit,
+ * with at least one bot the `agent.message` decision allows, and never on a turn that starts tainted; never in `GET /cell`.
+ */
+export const CONSULT_TOOL_NAME = "ocw_consult_agent";
 const DELIVERED_TURN_TOOL = "ocw_agent_card";
 
 /** The bot's snapshot tools plus the turn-scoped ones it may be offered (only for a bot that is offered any tool). */
 export function withTurnScopedTools(tools: readonly string[] | undefined): string[] {
   const list = [...(tools ?? [])];
   if (!list.includes(DELIVERED_TURN_TOOL)) return list;
-  for (const name of [BOARD_TOOL_NAME, ...WORK_ZONE_TOOLS, ...AUTOMATION_TOOLS]) {
+  for (const name of [BOARD_TOOL_NAME, ...WORK_ZONE_TOOLS, ...AUTOMATION_TOOLS, CONSULT_TOOL_NAME]) {
     if (!list.includes(name)) list.push(name);
   }
   return list;

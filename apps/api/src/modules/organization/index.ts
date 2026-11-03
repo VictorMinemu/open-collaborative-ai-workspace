@@ -7,6 +7,7 @@ import {
 } from "@ocw/contracts";
 import type { Tx } from "@ocw/db";
 import { type ApiModule, type Core, tenant } from "../../core";
+import { registerAgentMessagingRoutes } from "./agent-messaging";
 import { registerMemberRoutes } from "./members";
 import { registerModuleAccessRoutes } from "./module-access";
 import { orgResource, userResource } from "./permissions/policy";
@@ -14,6 +15,8 @@ import { createPermissionService } from "./permissions/service";
 import { registerRuleRoutes } from "./rules";
 import { registerUnitRoutes } from "./units";
 
+/** Phase 07.7 (P-05): the canonical `agent.message` decision, for the consult route and the offered targets. */
+export { type MessagingDecisionInput, messagingDecision } from "./agent-messaging";
 export { listMembers, memberDirectory } from "./members";
 export { audienceCoverFacts } from "./permissions/audience";
 export { AuthzDeniedError } from "./permissions/errors";
@@ -132,6 +135,7 @@ export function createOrganizationModule(core: Core, deps: OrganizationDeps): Ap
       registerUnitRoutes(app, core, perms, deps);
       registerRuleRoutes(app, core, perms);
       registerModuleAccessRoutes(app, core, perms);
+      registerAgentMessagingRoutes(app, core, perms);
 
       app.get(
         "/me/permissions",

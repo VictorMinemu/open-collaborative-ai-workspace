@@ -77,8 +77,12 @@ describe("module catalog (Phase 07.3, ADR-0024)", () => {
         // Phase 07.6 (07.6-01, P-05): automations live under Bots.
         "automation.create",
         "automation.webhook",
+        // Phase 07.7 (07.7-01, ADR-0027): the Bots switch also stops consults between bots.
+        "agent.message",
       ],
     });
+    expect(MODULE_CATALOG.bots.patterns).toHaveLength(10);
+    expect(modulesMatching("agent.message")).toEqual(["bots"]);
     expect(modulesMatching("connector.connect")).toEqual(["bots"]);
     expect(modulesMatching("vault.use")).toEqual(["bots"]);
     // Governance grains of the team surface stay out of every module (like bot.manage_unit).
@@ -112,6 +116,7 @@ describe("module catalog (Phase 07.3, ADR-0024)", () => {
     expect(modulePatternOf("work_session.*")).toBe("work_zone");
     expect(modulePatternOf("device.pair")).toBe("work_zone");
     expect(modulePatternOf("bot.tool.use")).toBe("bots");
+    expect(modulePatternOf("agent.message")).toBe("bots");
     expect(modulePatternOf("memory.*")).toBe("memory");
     expect(modulePatternOf("sandbox.*")).toBe("sandbox");
     expect(modulePatternOf("browser.*")).toBe("browser");
@@ -173,6 +178,9 @@ describe("Sandbox and Browser modules (Phase 07.8, D-09, D-12, P-05)", () => {
       // rule set written before 07.6 holds 7 rows and needs the 2 new ones, like 07.4-14's backfill).
       "automation.create",
       "automation.webhook",
+      // Phase 07.7 (07.7-01, ADR-0027, D-14): consults join Bots; 07.7-02's data-only backfill adds the 10th deny row to
+      // every complete 9-row Bots-off set, so those sets stay "off" instead of turning "custom".
+      "agent.message",
     ]);
     expect(MODULE_CATALOG.memory.patterns).toEqual(["memory.*"]);
     for (const m of ["work_zone", "ai_chats", "bots", "memory"] as const) {

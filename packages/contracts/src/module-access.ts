@@ -55,6 +55,8 @@ export const MODULE_CATALOG: Record<ModuleId, ModuleDefinition> = {
       // Phase 07.6 (07.6-01, P-05): automations live under Bots, so Bots off also stops creating them and webhooks.
       "automation.create",
       "automation.webhook",
+      // 07.7: the Bots switch also stops consults; ADR-0027 (07.7-02's backfill completes the older Bots-off sets).
+      "agent.message",
     ],
   },
   // Phase 07.2 (07.2-01): every memory grain (read, write, promote); new memory grains keep the `memory.` prefix.

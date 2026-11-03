@@ -99,6 +99,9 @@ export const Permission = z.enum([
   "automation.webhook",
   "automation.manage",
   "record.watch",
+  // Phase 07.7 (07.7-01, ADR-0027): agent-to-agent consults. Every role holds it for the bots that work for them; agent
+  // principals never hold it by default, so a consult needs an explicit allow rule (closed by default, D-04).
+  "agent.message",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -184,6 +187,7 @@ export const PERMISSION_SURFACE: Record<Permission, PermissionSurface> = {
   "automation.webhook": "bots",
   "automation.manage": "admin",
   "record.watch": "chat",
+  "agent.message": "bots",
 };
 
 export const ROLE_SURFACES: Record<OrgRole, PermissionSurface[]> = {
@@ -227,6 +231,8 @@ const STANDARD: readonly Permission[] = [
   // Phase 07.6 (D-07): your own automations, run as you; watching a record you can read from a board card.
   "automation.create",
   "record.watch",
+  // Phase 07.7 (D-02, D-04): the human side of a consult; the agent side needs an allow rule (org switch or per bot).
+  "agent.message",
 ];
 const DEVELOPER: readonly Permission[] = [
   ...STANDARD,
@@ -505,6 +511,7 @@ export const PERMISSION_DESCRIPTIONS: Record<Permission, string> = {
   "automation.webhook": "Create webhook endpoints that other apps can call",
   "automation.manage": "See, pause and delete everyone's automations",
   "record.watch": "Watch an external record from a board card",
+  "agent.message": "Consult another bot, or let bots consult other bots for you",
 };
 
 // ---------------------------------------------------------------- tokens (AUTH-06)

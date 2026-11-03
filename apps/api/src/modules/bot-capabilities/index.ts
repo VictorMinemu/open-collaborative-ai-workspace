@@ -43,6 +43,7 @@ export {
   cellAgentCapabilities,
   currentTurn,
   currentTurnTools,
+  inChannel,
   memberAccountAllowed,
   memberAccountFacts,
   recordLimitReached,

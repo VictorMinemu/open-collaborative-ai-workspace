@@ -13,6 +13,8 @@ import {
   AgentChannelConnectorCallResponse,
   type AgentChannelConnectorList,
   AgentChannelConnectorListResponse,
+  type AgentChannelConsultRequest,
+  AgentChannelConsultResponse,
   type AgentChannelHttpRequest,
   AgentChannelHttpResponse,
   type AgentChannelMcpProbeResult,
@@ -43,6 +45,7 @@ import {
   AgentChannelToolCallDecision,
   type AgentChannelToolCallRequest,
   type AgentChannelToolCallResult,
+  type AgentChannelTurnDone,
   type AgentChannelTyping,
   type AgentChannelWorkZoneProjects,
   AgentChannelWorkZoneProjectsResponse,
@@ -173,6 +176,10 @@ export const WORK_ZONE_REQUEST_TIMEOUT_MS = 10_000;
 
 /** 07.6: one attempt of 10 s for an automation proposal (a retry after a lost answer could post a second card). */
 export const AUTOMATION_PROPOSE_TIMEOUT_MS = 10_000;
+
+/** 07.7: per-attempt budget of a consult (two attempts, the key answers the same hop) and of the turn-done signal. */
+export const CONSULT_TIMEOUT_MS = 10_000;
+export const TURN_DONE_TIMEOUT_MS = 10_000;
 
 /**
  * 07.8: per-call budgets of the confined tools. Exec and process yield after 25 s server side (a process id), so they
@@ -520,6 +527,42 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
         if (answer) return { ok: false, code: answer.code, sentence: answer.sentence };
         throw error;
       }
+    },
+    /**
+     * `ocw_consult_agent` (07.7 A2A-01, D-08): a question to another bot, posted in the turn's thread by the API. Two
+     * attempts at most: the cell's key (`<eventId>:consult:<hash>`, consult-tool.ts) makes a retry after a lost answer
+     * return the same hop.
+     * A refusal answered with a 4xx that still carries `{ok: false, code, sentence}` resolves to that refusal; any other
+     * failure throws. Never logs the question.
+     */
+    async consult(
+      req: AgentChannelConsultRequest,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelConsultResponse> {
+      try {
+        return AgentChannelConsultResponse.parse(
+          await request("POST", "/consultations", req, signal, 2, CONSULT_TIMEOUT_MS),
+        );
+      } catch (error) {
+        const answer = error instanceof AgentChannelHttpError ? error.answer : undefined;
+        if (answer?.code) return { ok: false, code: answer.code, sentence: answer.sentence };
+        throw error;
+      }
+    },
+    /**
+     * 07.7 (P-09): a turn that can belong to a consult chain ended (`replied` | `failed`). Idempotent on the server, so
+     * two attempts of 10 s at most; the caller never fails or retries the turn on it (the `consult.tick` timeout is the
+     * backstop).
+     */
+    async turnDone(eventId: string, body: AgentChannelTurnDone, signal?: AbortSignal): Promise<void> {
+      await request(
+        "POST",
+        `/turns/${encodeURIComponent(eventId)}/done`,
+        body,
+        signal,
+        2,
+        TURN_DONE_TIMEOUT_MS,
+      );
     },
     /**
      * The tools an `mcp.probe` discovered, or why it failed (D-13). Three attempts at most: the API applies only

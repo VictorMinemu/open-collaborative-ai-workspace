@@ -14,8 +14,10 @@ import { errorMessage, isApiError } from "@/lib/api";
 import { useCreateTargets, useDeleteAgent, useModels, useUpdateAgent } from "@/lib/bots-queries";
 import { validate } from "@/lib/form";
 import { useUnits } from "@/lib/org-queries";
+import { useCan } from "@/lib/permissions";
 import { useMe, useMembers } from "@/lib/queries";
 import { formatDate } from "@/lib/utils";
+import { AgentMessagingSection } from "./agent-messaging-section";
 import { BotAvatar, botAbilities, ModelChip, ScopeBadge, StatusChip } from "./bot-bits";
 import { canMessage, MessageBotButton, OpenBotPageLink, PersonalBadge } from "./bot-card";
 import {
@@ -76,6 +78,8 @@ export function BotDetailSheet({
   const units = useUnits();
   const members = useMembers();
   const me = useMe({ enabled: false });
+  // Consult rules (07.7-08, D-04): admins in v1. Cosmetic: the API refuses the routes without `rule.read`.
+  const canReadRules = useCan("rule.read");
   // Owner only (07.4-08): the template this personal bot was started from; null for every other bot.
   const isOwnPersonal =
     !!agent && agent.scope === "personal" && !!me.data && agent.ownerUserId === me.data.user.id;
@@ -318,6 +322,12 @@ export function BotDetailSheet({
           {canConfigure ? (
             <SheetSection title="Capabilities">
               <CapabilitiesPanel agentId={agent.id} />
+            </SheetSection>
+          ) : null}
+
+          {!personal && canReadRules ? (
+            <SheetSection title="Consulting other bots">
+              <AgentMessagingSection agent={agent} />
             </SheetSection>
           ) : null}
 

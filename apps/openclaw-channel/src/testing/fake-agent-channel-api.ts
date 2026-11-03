@@ -90,6 +90,14 @@
  *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
  *                                          and sha256 (`verifyCalls`); like the real API, the install gate's authority
  *   GET  /agent-channel/v1/plugins            the rows with a plugin id (boot allowlist)
+ *   POST /agent-channel/v1/consultations  (07.7) records every body (`consultations`, refused ones included) and answers
+ *                                          `{ok: true, chainId, hopId, questionMessageId, sentence}` (the same hop for the
+ *                                          same idempotency key); 400 for any key beyond the contract's (a conversation, a
+ *                                          human, a chain). POST /__test/consult-outcome {status, body} makes it answer
+ *                                          that status and body instead ({} resets)
+ *   POST /agent-channel/v1/turns/:eventId/done  (07.7) records `{eventId, agentId, outcome, status}` (`turnsDone`, every
+ *                                          attempt) and answers 204; POST /__test/turn-done {status} makes every call
+ *                                          answer that status with an error body carrying FAKE_ERROR_CANARY ({} resets)
  * Test-only controls under /__test/* (never part of the real API).
  */
 import { randomUUID } from "node:crypto";
@@ -224,6 +232,11 @@ export type FakeAutomations = {
   /** When set, every record update is answered with this status and `{ok: false, code, sentence}`. */
   recordRefusal?: { status: number; code: string; sentence: string };
 };
+/** 07.7: every POST /turns/:eventId/done attempt, with the status the fake API answered. */
+export type StoredTurnDone = { eventId: string; agentId: unknown; outcome: unknown; status: number };
+/** 07.7: the consult route's knob (`POST /__test/consult-outcome`): the status and body of every answer while set. */
+export type ConsultOutcome = { status: number; body: Record<string, unknown> };
+const CONSULT_KEYS = ["eventId", "agentId", "target", "question", "mode", "idempotencyKey"] as const;
 const AUTOMATION_PROPOSE_KEYS = [
   "eventId",
   "agentId",
@@ -480,6 +493,10 @@ export type FakeAgentChannelApi = {
   automations: FakeAutomations;
   /** The sandbox routes' records and knobs (07.8). */
   sandbox: FakeSandbox;
+  /** Every POST /consultations body, in order (refused ones included; 07.7). */
+  consultations: Array<Record<string, unknown>>;
+  /** Every POST /turns/:eventId/done attempt, in order (07.7). */
+  turnsDone: StoredTurnDone[];
   /** The browser routes' records and knobs (07.8). */
   browser: FakeBrowser;
   /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
@@ -667,6 +684,8 @@ export async function startFakeAgentChannelApi(
   const byKey = new Map<string, StoredMessage>();
   /** Work Zone proposal → approval id (a retry of the same proposal gets the same approval). */
   const workZoneApprovals = new Map<string, string>();
+  /** 07.7: (agent, idempotency key) → the hop a consult created (a retry of the same key answers the same hop). */
+  const consultHops = new Map<string, { chainId: string; hopId: string; questionMessageId: string }>();
   /** Current flow per plugin row (set when a plugin command is published), as `cell_plugins.flow_id`. */
   const pluginFlows = new Map<string, string>();
 
@@ -713,6 +732,10 @@ export async function startFakeAgentChannelApi(
     automations: { proposals: [], recordUpdates: [] } as FakeAutomations,
     sandbox: { calls: [], results: {} } as FakeSandbox,
     browser: { calls: [], results: {} } as FakeBrowser,
+    consultations: [] as Array<Record<string, unknown>>,
+    consultOutcome: undefined as ConsultOutcome | undefined,
+    turnsDone: [] as StoredTurnDone[],
+    turnDoneStatus: 204,
     // Never serialized: not in /cell, not in an answer, not in the state dump.
     connectorToken: opts.connectorToken ?? "fake-connector-token",
     mcpServers: opts.mcpServers ?? ([] as CellMcpServer[]),
@@ -826,6 +849,21 @@ export async function startFakeAgentChannelApi(
           else delete br.refusal;
           return json(res, 200, { ok: true });
         }
+        if (req.method === "POST" && url.pathname === "/__test/consult-outcome") {
+          // 07.7: the consult route's answer ({} resets it; the records stay).
+          const body = ((await readJson(req)) ?? {}) as { status?: unknown; body?: unknown };
+          state.consultOutcome =
+            typeof body.status === "number" && body.body && typeof body.body === "object"
+              ? { status: body.status, body: body.body as Record<string, unknown> }
+              : undefined;
+          return json(res, 200, { ok: true });
+        }
+        if (req.method === "POST" && url.pathname === "/__test/turn-done") {
+          // 07.7: the turn-done route's status ({} resets it to 204; the records stay).
+          const body = ((await readJson(req)) ?? {}) as { status?: unknown };
+          state.turnDoneStatus = typeof body.status === "number" ? body.status : 204;
+          return json(res, 200, { ok: true });
+        }
         if (req.method === "POST" && url.pathname === "/__test/tool-approval") {
           // One tool's approval reply; no reply clears it.
           const body = ((await readJson(req)) ?? {}) as Partial<ToolApprovalControl> & { tool?: string };
@@ -877,6 +915,8 @@ export async function startFakeAgentChannelApi(
             automations: state.automations,
             sandbox: state.sandbox,
             browser: state.browser,
+            consultations: state.consultations,
+            turnsDone: state.turnsDone,
             mcpProbes: state.mcpProbes,
             cellReads: state.cellReads,
             plugins: state.plugins,
@@ -1175,6 +1215,48 @@ export async function startFakeAgentChannelApi(
           });
         }
         return json(res, 200, br.results[browserRoute] ?? fakeBrowserResult(browserRoute, body));
+      }
+      if (req.method === "POST" && route === "/consultations") {
+        // 07.7: record the body; 400 for any key beyond the contract's (the API takes everything else from the turn).
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        state.consultations.push({ ...body });
+        if (
+          ["eventId", "agentId", "target", "question", "idempotencyKey"].some(
+            (k) => typeof body[k] !== "string",
+          ) ||
+          Object.keys(body).some((k) => !(CONSULT_KEYS as readonly string[]).includes(k))
+        ) {
+          return json(res, 400, { error: { code: "bad_request", message: `bad body ${FAKE_ERROR_CANARY}` } });
+        }
+        if (state.consultOutcome) return json(res, state.consultOutcome.status, state.consultOutcome.body);
+        const key = `${String(body.agentId)}\u0000${String(body.idempotencyKey)}`;
+        let hop = consultHops.get(key);
+        if (!hop) {
+          hop = { chainId: randomUUID(), hopId: randomUUID(), questionMessageId: randomUUID() };
+          consultHops.set(key, hop);
+        }
+        const handle = state.agents.find((a) => a.id === body.target)?.handle ?? "the bot";
+        return json(res, 200, {
+          ok: true,
+          ...hop,
+          sentence: `Question sent to @${handle}. Their answer will arrive as a new message in this thread. Tell the person in one line that you are checking.`,
+        });
+      }
+      const turnDone = /^\/turns\/([^/]+)\/done$/u.exec(route);
+      if (req.method === "POST" && turnDone) {
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        const status = state.turnDoneStatus;
+        state.turnsDone.push({
+          eventId: decodeURIComponent(turnDone[1] ?? ""),
+          agentId: body.agentId,
+          outcome: body.outcome,
+          status,
+        });
+        if (status >= 400) {
+          return json(res, status, { error: { code: "test_failure", message: `done ${FAKE_ERROR_CANARY}` } });
+        }
+        res.writeHead(204).end();
+        return;
       }
       if (req.method === "POST" && (route === "/automations/propose" || route === "/records/update")) {
         // 07.6: record the body; 400 for any key beyond the contract's (a conversation, a person, a record id, a hash).
@@ -1662,6 +1744,12 @@ export async function startFakeAgentChannelApi(
     },
     get sandbox() {
       return state.sandbox;
+    },
+    get consultations() {
+      return state.consultations;
+    },
+    get turnsDone() {
+      return state.turnsDone;
     },
     get browser() {
       return state.browser;

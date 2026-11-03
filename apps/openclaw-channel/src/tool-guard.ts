@@ -17,6 +17,8 @@ import type { AgentChannelClient } from "./api-client.js";
 import { automationTaintedSentence } from "./automation-tool.js";
 // connector-tools.ts imports from this module too; its sentences are only read while a call runs.
 import { REFUSAL_SENTENCE } from "./connector-tools.js";
+// consult-tool.ts imports from this module too; the sentence is only called while a call runs (as automation-tool.ts).
+import { consultTaintedSentence } from "./consult-tool.js";
 import { openClawAgentIdFor } from "./mention-mapper.js";
 // record-tool.ts imports from this module too; the sentence is only called while a call runs (see the note there).
 import { recordTaintedSentence } from "./record-tool.js";
@@ -32,7 +34,8 @@ import { workZoneTaintedSentence } from "./work-zone-tools.js";
  *     (taint) — locally first, which saves a round trip,
  *   - asks `POST /agent-channel/v1/tool-calls` for every call except `ocw_memory_save`, `ocw_memory_write`,
  *     `ocw_memory_propose`, `ocw_board_card`, the connector and keychain tools, the Work Zone tools and the 07.6
- *     `ocw_automation_propose` / `ocw_record_update` (validated by their own routes, `SELF_VALIDATED_TOOLS`) and blocks
+ *     `ocw_automation_propose` / `ocw_record_update` and the 07.7 `ocw_consult_agent` (validated by their own routes,
+ *     `SELF_VALIDATED_TOOLS`) and blocks
  *     on a denial, an error or a
  *     timeout (fail closed, under OpenClaw's 15 s budget),
  *   - reports each allowed call's outcome (status, result count, provider, duration; never content).
@@ -120,6 +123,8 @@ const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
   // update) the 07.5 approval themselves.
   "ocw_automation_propose",
   "ocw_record_update",
+  // 07.7 (ADR-0027): validated by `/consultations` (the claim, the decision, the chain guards); never `/tool-calls`.
+  "ocw_consult_agent",
 ]);
 /**
  * 07.6 (D-04, D-07): side-effecting whatever flags a turn carries, but, unlike `ALWAYS_SIDE_EFFECTING`, a turn's 07.5
@@ -140,6 +145,9 @@ const ALWAYS_SIDE_EFFECTING: ReadonlySet<string> = new Set([
   "ocw_board_card",
   "ocw_start_work_zone",
   "ocw_automation_propose",
+  // 07.7 (ADR-0027): validated by `/consultations`; a consult after untrusted content is the injection the taint rule
+  // exists for.
+  "ocw_consult_agent",
 ]);
 /** Unknown flags are treated as the most dangerous combination. */
 const UNKNOWN_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: true };
@@ -529,6 +537,8 @@ export function createToolGuard(
         // 07.6: the UI-SPEC's model-facing sentence for a proposal after outside content.
         if (tool === "ocw_automation_propose") return block(automationTaintedSentence(t.requesterName));
         if (tool === "ocw_record_update") return block(recordTaintedSentence(t.requesterName));
+        // 07.7: the consult route's own sentence for a tainted turn.
+        if (tool === "ocw_consult_agent") return block(consultTaintedSentence(t.requesterName));
         // 07.8: `ocw_sandbox_share` (and an act the API flags) reads the 07.4 sentence its route would answer.
         if (confined) return block(REFUSAL_SENTENCE.tainted);
         return block(

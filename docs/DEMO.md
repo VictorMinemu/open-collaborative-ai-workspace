@@ -887,6 +887,47 @@ Validation). On your own stack with a real model:
    the ERP keeps your change.
 4. **From a phone.** Run step 1 of the demo (Run now) and step 4 (confirm a proposal) at 390 px wide.
 
+## Agent-to-agent consults (Phase 07.7)
+
+Phase 07.7 (ADR-0027). A bot asks another bot for help only through the workspace: the question is a message in the
+thread, on behalf of the person who asked, and the answer comes back to the asking bot as a new turn. Consults are
+**off** until an admin turns them on. The demo's bots run through the fake cell (or the compose cell's mock model), so
+what the bots say is scripted; the switch, the rules, the chips and Stop are real.
+
+1. **Turn it on (Víctor).** Settings › **Bot policy** › *Bots may consult each other*: switch it on (a toast confirms).
+   Sam (not an admin) sees the switch disabled with "Only admins can change this."
+2. **Set a bot's rules (Víctor).** Bots › open a team bot (Archie) › **Consulting other bots**: the *Right now* line
+   reads "Archie can ask …" from the server. Try *Can ask* › **No bot** (the line reads that it can ask no bot), then
+   back to **Organization default**; add `@carl` under **Never ask** (Carl leaves the line); switch **Other bots can ask
+   Archie** off and on. With the organization switch on, **Only these bots** is disabled and says why (deny wins).
+3. **Run a consult (Víctor).** Add Archie and Bea to `#ops`. In a thread of `#ops`, mention Archie and ask him to check
+   something with Bea. Archie's question appears in the thread as "@bea …" with a chip *Asked @bea for Víctor Ruiz ·
+   Waiting…*; Bea's answer appears with *Answer to @archie*, the chip turns **Answered** live, and Archie's reply to you
+   follows in the same thread.
+4. **Read the chips.** A question can read **Waiting…**, **Answered**, **Couldn't answer**, **No answer in time** (after
+   5 to 6 minutes without an answer), **Stopped** or **Daily limit reached**; a second-level question starts with
+   *Step 2 ·*; a handoff reads *Handed over to …*.
+5. **Stop (Víctor).** Ask again while Bea is slow (or held in the fake cell): **Stop** on the chip ends the request,
+   both your browser and Alex's show **Stopped** live, and Bea's late answer still posts but wakes nobody. Alex (a
+   member, not a moderator) never sees Stop.
+6. **Audit.** `app.audit_events` holds `agent.consult.requested`, `agent.consult.answered` and
+   `agent.chain.cancelled`, each with the chain id and no message text:
+   `SELECT occurred_at, action, user_id, metadata FROM app.audit_events WHERE action LIKE 'agent.c%' ORDER BY occurred_at DESC LIMIT 10;`
+
+**Owner check: two bots helping one person** (never run by an agent: it needs your own stack and real models; record
+the result in `.planning/phases/07.7-agent-to-agent-collaboration/07.7-VALIDATION.md` › Manual-Only Verifications and
+in ADR-0027 › Validation). On your own stack, with two team bots on real models that are members of one channel:
+
+1. Turn **Bots may consult each other** on (Settings › Bot policy).
+2. In a thread, mention bot A and ask it to check something with bot B (for example "@archie ask @bea whether the pump
+   order is confirmed and tell me"). Confirm the three messages in the thread: A's question to B with its chip, B's
+   answer marked *Answer to @archie*, and A's reply to you; the chip reads **Answered**.
+3. Ask a second request that keeps B busy, and press **Stop** on its chip: the chip reads **Stopped** and A does not
+   reply again for that request.
+4. Run the audit query of step 6 above: the `agent.consult.*` and `agent.chain.cancelled` rows carry the chain id (the
+   same `chainId` on the request, the answer and the Stop), and none shows the question or the answer.
+5. Turn the switch off again: mention A with the same request; A no longer offers to ask B.
+
 ## Troubleshooting
 
 | Symptom | Fix |
