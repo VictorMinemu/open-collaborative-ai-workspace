@@ -22,7 +22,7 @@ import { z } from "zod";
 import type { App } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import { notFound } from "../../lib/errors";
-import { announceConsults, createConversationAccess } from "../chat";
+import { announceConsults, convTopic, createConversationAccess, lockNextSeq } from "../chat";
 import { memberDirectory } from "../organization";
 import { type CellPrincipal, cellOf } from "./auth";
 import { cellAuditBase } from "./claim";
@@ -365,12 +365,80 @@ export async function turnDone(
   await core.db.withTenant({ organizationId: cell.organizationId, userId: found.userId }, async (tx) => {
     const [turn] = await tx.select().from(agentTurns).where(eq(agentTurns.eventId, eventId));
     if (!turn) return;
+    // The thread's stream first, then the hop and the chain: the consult route's lock order (its post takes the stream,
+    // then spends the chain's budget and bumps a parent hop), so a done and a consult in one chain never deadlock.
+    await lockNextSeq(tx, convTopic(turn.conversationId));
     let closed: { delivered: boolean } | null = null;
     if (turn.answeringHopId && !(await waitsForChild(tx, turn.eventId))) {
       closed = await closeAnsweredHop(tx, deps, cell, turn, turn.answeringHopId, body.outcome);
     }
     if (!turn.answeringHopId || (closed && !closed.delivered)) await completeChain(tx, chainId);
   });
+}
+
+/**
+ * Stops a chain (P-14, D-04): `active → cancelled` once (with the reason and, for a person's Stop, who stopped it),
+ * every pending hop `cancelled`, the questions re-announced, `agent.chain.cancelled` audited with ids and counts. No
+ * in-flight turn is aborted (the cell has no abort; ADR-0027): a late answer still posts, but its done finds no pending
+ * hop and delivers nothing, and new consults in the chain are `chain_closed`. Null when the chain was not active (a
+ * second Stop, a completed chain): nothing changes and nothing is audited. The caller decides who may stop it.
+ */
+export async function cancelChain(
+  tx: Tx,
+  deps: Pick<ConsultDeps, "core">,
+  chainId: string,
+  p: { byUserId: string | null; reason: "user" | "auto" },
+): Promise<{ cancelledHops: number } | null> {
+  const { core } = deps;
+  const [current] = await tx
+    .select({ conversationId: agentChains.conversationId })
+    .from(agentChains)
+    .where(eq(agentChains.id, chainId))
+    .limit(1);
+  if (!current) return null;
+  // The thread's stream before the chain row (the consult route's order: its post holds the stream when it spends the
+  // chain's budget), so a Stop racing a consult waits instead of deadlocking.
+  await lockNextSeq(tx, convTopic(current.conversationId));
+  const [chain] = await tx
+    .update(agentChains)
+    .set({
+      status: "cancelled",
+      cancelReason: p.reason,
+      cancelledByUserId: p.byUserId,
+      closedAt: sql`now()`,
+      updatedAt: sql`now()`,
+    })
+    .where(and(eq(agentChains.id, chainId), eq(agentChains.status, "active")))
+    .returning();
+  if (!chain) return null;
+  const hops = await tx
+    .update(agentChainHops)
+    .set({ status: "cancelled", closedAt: sql`now()`, updatedAt: sql`now()` })
+    .where(and(eq(agentChainHops.chainId, chainId), eq(agentChainHops.status, "pending")))
+    .returning({ id: agentChainHops.id, questionMessageId: agentChainHops.questionMessageId });
+  await announceConsults(
+    tx,
+    core,
+    hops.map((h) => h.questionMessageId),
+  );
+  await core.audit.record(tx, {
+    action: "agent.chain.cancelled",
+    resourceType: "agent_chain",
+    resourceId: chain.id,
+    result: "success",
+    ...(p.byUserId ? { actorKind: "user" as const, actorId: p.byUserId } : { actorKind: "system" as const }),
+    userId: p.byUserId ?? chain.humanUserId,
+    // Ids and counts only.
+    metadata: {
+      chainId: chain.id,
+      reason: p.reason,
+      cancelledHops: hops.length,
+      hopIds: hops.map((h) => h.id),
+      humanUserId: chain.humanUserId,
+      conversationId: chain.conversationId,
+    },
+  });
+  return { cancelledHops: hops.length };
 }
 
 const DoneParams = z.object({ eventId: Id });

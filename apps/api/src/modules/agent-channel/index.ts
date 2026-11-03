@@ -48,6 +48,7 @@ import {
   replyTargetOrThrow,
   resolveReplyTarget,
 } from "./cards";
+import { registerChainUserRoutes } from "./chain-routes";
 import { recordChainReply, registerChainCellRoutes } from "./chains";
 import { registerConnectorRoutes } from "./connectors";
 import { registerConsultRoutes } from "./consult";
@@ -79,7 +80,7 @@ export {
 export type { BrowserBudgets } from "./browser";
 export { notifyCardFollowers, updatePlatformCardNotified } from "./card-followers";
 export { emitCardAction } from "./cards";
-export { deliverConsultReply, noAnswerSentence, recordChainReply } from "./chains";
+export { cancelChain, deliverConsultReply, noAnswerSentence, recordChainReply } from "./chains";
 export { CONSULT_SENTENCES, deliverConsultQuestion } from "./consult";
 export { conversationAudience } from "./memory-files";
 export { buildMentionEvents } from "./mentions";
@@ -611,6 +612,9 @@ export function createAgentChannelModule(
         },
         { prefix: AGENT_CHANNEL_BASE_PATH },
       );
+
+      // Stop (07.7-06, P-14): the chain's human or a channel moderator stops an agent-to-agent chain.
+      registerChainUserRoutes(app, core, perms);
 
       registerCellGateway(app, core, auth, presence, perms);
     },
