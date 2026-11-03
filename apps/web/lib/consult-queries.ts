@@ -1,7 +1,8 @@
 "use client";
 
 import { AgentChainCancelResponse } from "@ocw/contracts";
-import { useMutation } from "@tanstack/react-query";
+import { type UseMutationOptions, useMutation } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { api, errorMessage, isApiError } from "./api";
 
 /**
@@ -15,8 +16,37 @@ export function cancelAgentChain(chainId: string): Promise<AgentChainCancelRespo
   return api.post(`/api/v1/agent-chains/${chainId}/cancel`, { schema: AgentChainCancelResponse });
 }
 
-export function useCancelAgentChain() {
-  return useMutation({ mutationFn: cancelAgentChain });
+type Tone = "success" | "info" | "error";
+
+function toastNotify(tone: Tone, text: string): void {
+  if (tone === "success") toast.success(text);
+  else if (tone === "info") toast.message(text);
+  else toast.error(text);
+}
+
+/**
+ * Stop's mutation with its toast in the mutation's own options (07.7-11 gate). The chip turns Stopped, and the Stop
+ * button unmounts, as soon as the server announces the hop, which can be before the HTTP answer; callbacks passed to
+ * `mutate()` are dropped once their observer unmounts, these are not. `source` is the asking bot as the chip names it.
+ */
+export function cancelChainMutation(
+  source: string,
+  notify: (tone: Tone, text: string) => void = toastNotify,
+  mutationFn: (chainId: string) => Promise<AgentChainCancelResponse> = cancelAgentChain,
+): UseMutationOptions<AgentChainCancelResponse, unknown, string> {
+  return {
+    mutationFn,
+    onSuccess: (r) => {
+      // CR-C-05: the API's actual status (a chain that finished meanwhile is not "Stopped").
+      const result = stopResultToast(r, source);
+      notify(result.tone, result.text);
+    },
+    onError: (err) => notify("error", stopErrorMessage(err)),
+  };
+}
+
+export function useCancelAgentChain(source: string) {
+  return useMutation(cancelChainMutation(source));
 }
 
 /** The success toast; `source` is the asking bot as the chip names it (`@archie`, or `a bot`). */

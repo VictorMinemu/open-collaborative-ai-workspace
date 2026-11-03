@@ -14,10 +14,9 @@ import {
   TimerOff,
   Waypoints,
 } from "lucide-react";
-import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
-import { stopErrorMessage, stopResultToast, useCancelAgentChain } from "@/lib/consult-queries";
+import { useCancelAgentChain } from "@/lib/consult-queries";
 import { cn } from "@/lib/utils";
 import { dirKey, type OrgDirectory, useOrgDirectory } from "./use-chat-directory";
 
@@ -115,7 +114,8 @@ export function consultChipModel(
 
 /** Stop the chain this question belongs to; the chip turns Stopped when the server announces it. */
 function StopButton({ consult, names }: { consult: MessageConsult; names: ConsultNames }) {
-  const cancel = useCancelAgentChain();
+  // The toast lives in the mutation (cancelChainMutation): this button unmounts when the chip turns Stopped.
+  const cancel = useCancelAgentChain(names.source);
   return (
     <Button
       type="button"
@@ -123,18 +123,7 @@ function StopButton({ consult, names }: { consult: MessageConsult; names: Consul
       data-testid="consult-stop"
       aria-label={`Stop asking ${names.target}`}
       disabled={cancel.isPending}
-      onClick={() =>
-        cancel.mutate(consult.chainId, {
-          onSuccess: (r) => {
-            // CR-C-05: the API's actual status (a chain that finished meanwhile is not "Stopped").
-            const result = stopResultToast(r, names.source);
-            if (result.tone === "success") toast.success(result.text);
-            else if (result.tone === "info") toast.message(result.text);
-            else toast.error(result.text);
-          },
-          onError: (err) => toast.error(stopErrorMessage(err)),
-        })
-      }
+      onClick={() => cancel.mutate(consult.chainId)}
       className="h-6 gap-1 px-1.5 font-medium text-foreground text-xs max-md:h-11 max-md:px-3"
     >
       {cancel.isPending ? <Spinner className="size-3" /> : <Square aria-hidden className="size-3" />}

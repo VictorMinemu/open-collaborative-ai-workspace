@@ -4,7 +4,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { ApiRequestError } from "@/lib/api";
 import { chatKeys } from "@/lib/chat-queries";
-import { stopErrorMessage, stopResultToast, stopSuccessMessage } from "@/lib/consult-queries";
+import {
+  cancelChainMutation,
+  stopErrorMessage,
+  stopResultToast,
+  stopSuccessMessage,
+} from "@/lib/consult-queries";
 import { queryKeys } from "@/lib/queries";
 import { ConsultChip, consultChipModel, consultNames } from "./consult-chip";
 
@@ -270,5 +275,40 @@ describe("Stop messages", () => {
       tone: "error",
       text: "This request couldn't be stopped. Try again.",
     });
+  });
+});
+
+describe("Stop's toast belongs to the mutation, not to the button (07.7-11 gate)", () => {
+  // The chip turns Stopped (and Stop unmounts) as soon as the server announces the hop, which can be before the HTTP
+  // answer arrives. Callbacks passed to `mutate()` are dropped once their observer unmounts, so the toast lives in the
+  // mutation's own options: it still fires with no observer at all.
+  const run = async (
+    fn: () => Promise<{ chainId: string; status: "active" | "completed" | "cancelled" }>,
+  ) => {
+    const client = new QueryClient();
+    const said: Array<[string, string]> = [];
+    const mutation = client.getMutationCache().build(
+      client,
+      cancelChainMutation("@archie", (tone, text) => said.push([tone, text]), fn),
+    );
+    await mutation.execute(CHAIN).catch(() => {});
+    return said;
+  };
+
+  it("a cancelled chain says Stopped with no mounted button", async () => {
+    expect(await run(async () => ({ chainId: CHAIN, status: "cancelled" }))).toEqual([
+      ["success", "Stopped. @archie won't get more answers for this request."],
+    ]);
+  });
+
+  it("a chain that had finished says so; a refusal gives its copy", async () => {
+    expect(await run(async () => ({ chainId: CHAIN, status: "completed" }))).toEqual([
+      ["info", "This request had already finished."],
+    ]);
+    expect(
+      await run(async () => {
+        throw new ApiRequestError(403, "not_chain_owner", "x");
+      }),
+    ).toEqual([["error", "Only the person who asked or a channel moderator can stop this."]]);
   });
 });
