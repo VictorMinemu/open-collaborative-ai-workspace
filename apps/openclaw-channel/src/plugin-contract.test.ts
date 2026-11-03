@@ -2079,6 +2079,25 @@ describe("consult (07.7 A2A-01, D-01, D-04, D-08): ocw_consult_agent, the protoc
     expect(api.turnsDone).toHaveLength(2);
   });
 
+  it("D-09: a consult reply delivered tainted starts tainted in the real port: the model's consult reaches neither /consultations nor /tool-calls, the reply says it was refused, and the turn still reports done", async () => {
+    api.agents = [structuredClone(ARCHIE_TOOLS)];
+    port = modelPort([ASK, { tool: "ocw_agent_card", params: { action: "create" } }]);
+    const bridge = await directBridge();
+    await bridge.handleFrame(
+      frame(85, replyData(85, { turn: consultTurn({ tainted: true }) }), "agent.consult_reply.v1"),
+    );
+    expect(port.dispatched[0]?.startsTainted).toBe(true);
+    expect(api.consultations).toEqual([]);
+    expect(api.toolCalls.filter((c) => c.tool === CONSULT_TOOL_NAME)).toEqual([]);
+    expect(api.messages).toHaveLength(1);
+    expect(api.messages[0]?.text).toContain(
+      "I can't consult another bot after reading web or tool content in this turn.",
+    );
+    expect(api.turnsDone).toEqual([
+      { eventId: "evt-85", agentId: ARCHIE.id, outcome: "replied", status: 204 },
+    ]);
+  });
+
   it("a consult the API refuses (fake 409) is relayed as the server's sentence and the turn still ends in one done", async () => {
     await fetch(`${api.url}/__test/consult-outcome`, {
       method: "POST",

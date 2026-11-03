@@ -149,7 +149,7 @@ export type MappedMention = {
   /**
    * 07.6 (D-02, D-07): the turn read outside content before its first tool call (a webhook or mail automation run), so
    * the tool gate starts it tainted (read-only). The API inserts the same turn tainted; this is the local copy of that
-   * rule. Absent on every other turn.
+   * rule. 07.7 (D-09): also set whenever the API delivered `turn.tainted = true`. Absent on every other turn.
    */
   startsTainted?: boolean;
 };
@@ -450,6 +450,10 @@ export function mapMention(event: AgentMentionEvent, bot: CellAgent | undefined)
         label: conversationLabel,
       }),
     ],
+    // 07.7 (D-09, P-11): the API delivered the turn tainted (a consult answer that read web or MCP content, an
+    // inbound-rooted thread): read-only from its first call, through 07.6's `startsTainted` → `beginTurn({tainted})`.
+    // Every mapping built on this one (card actions, automation runs, consult replies) inherits it.
+    ...(turn.tainted === true ? { startsTainted: true } : {}),
   };
 }
 
@@ -674,7 +678,8 @@ export function mapAutomationRun(event: AgentAutomationRunEvent, bot: CellAgent 
     ...base,
     allowedTools: base.allowedTools.filter((t) => !BROWSER_TOOLS.has(t)),
     contextBlocks: [...blocks, ...base.contextBlocks],
-    startsTainted: inbound !== null,
+    // Outside content taints the run here; 07.7 (D-09): so does a turn the API delivered tainted.
+    startsTainted: inbound !== null || base.startsTainted === true,
   };
 }
 
