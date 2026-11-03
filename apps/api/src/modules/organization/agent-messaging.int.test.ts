@@ -297,7 +297,250 @@ describe("target visibility for the human through real rows and facts (D-02, P-0
   });
 });
 
-// TASK3_PER_BOT
+type Outbound = { mode: "default" | "any" | "only" | "none"; allow?: string[]; deny?: string[] };
+
+const messagingBody = (outbound: Outbound, consultable = true) => ({
+  outbound: { mode: outbound.mode, allow: outbound.allow ?? [], deny: outbound.deny ?? [] },
+  inbound: { consultable },
+});
+const getBot = (as: TestClient, id: string) => as.request("GET", `/api/v1/agents/${id}/messaging`);
+const putBot = (as: TestClient, id: string, outbound: Outbound, consultable = true) =>
+  as.request("PUT", `/api/v1/agents/${id}/messaging`, messagingBody(outbound, consultable));
+
+/** A bot's own rows (P-04): organization scope, `agent.message`, subject the bot or everyone with tool agent:<bot>. */
+const ownRows = async (agentId: string) =>
+  (await messagingRows()).filter(
+    (r) =>
+      r.scope_unit_id === null &&
+      ((r.subject_kind === "agent" && r.subject_id === agentId) ||
+        (r.subject_kind === "everyone" && r.tool === `agent:${agentId}`)),
+  );
+
+const shape = (rows: Json[]) =>
+  rows
+    .map((r) => ({ subject: r.subject_kind, tool: r.tool, effect: r.effect }))
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+
+async function ref(agentId: string) {
+  const row = (await su.query("select name, username from app.agents where id = $1", [agentId])).rows[0];
+  return { id: agentId, handle: row.username as string, displayName: row.name as string };
+}
+
+const counts = async () => ({
+  created: (await auditRows("permission_rule.created")).length,
+  deleted: (await auditRows("permission_rule.deleted")).length,
+  events: (await ruleEvents()).length,
+});
+
+describe("per-bot consult rules: GET/PUT /api/v1/agents/:id/messaging (D-04, P-04)", () => {
+  afterAll(async () => {
+    for (const id of [archie, bea]) await ok(putBot(victor, id, { mode: "default" }));
+    await ok(setSwitch(victor, false));
+  });
+
+  it("no rows: the default view says nobody can be consulted right now", async () => {
+    expect(await ok(getBot(victor, archie))).toEqual({
+      agentId: archie,
+      orgDefault: false,
+      outbound: { mode: "default", allow: [], deny: [] },
+      inbound: { consultable: true },
+      effective: { kind: "none", targets: [] },
+      canManage: true,
+    });
+  });
+
+  it("only → any + never ask → none: exact row diffs, one audit per row, one event per changed PUT", async () => {
+    let before = await counts();
+    const only = await ok(putBot(victor, archie, { mode: "only", allow: [bea] }));
+    expect(only.outbound).toEqual({ mode: "only", allow: [await ref(bea)], deny: [] });
+    expect(only.effective).toEqual({ kind: "some", targets: [await ref(bea)] });
+    expect(shape(await ownRows(archie))).toEqual([
+      { subject: "agent", tool: `agent:${bea}`, effect: "allow" },
+    ]);
+    let after = await counts();
+    expect(after).toEqual({
+      created: before.created + 1,
+      deleted: before.deleted,
+      events: before.events + 1,
+    });
+    const [createdOnly] = (await auditRows("permission_rule.created")).slice(-1);
+    expect(createdOnly?.metadata).toMatchObject({ via: "agent_messaging", agentId: archie });
+
+    before = after;
+    const any = await ok(putBot(victor, archie, { mode: "any", deny: [bea] }));
+    expect(any.outbound).toEqual({ mode: "any", allow: [], deny: [await ref(bea)] });
+    // Every other team bot (the Ops persona included: the summary is the agent pass) except Bea.
+    expect(any.effective).toEqual({ kind: "some", targets: [await ref(opsy)] });
+    expect(shape(await ownRows(archie))).toEqual(
+      shape([
+        { subject_kind: "agent", tool: null, effect: "allow" },
+        { subject_kind: "agent", tool: `agent:${bea}`, effect: "deny" },
+      ]),
+    );
+    after = await counts();
+    expect(after).toEqual({
+      created: before.created + 2,
+      deleted: before.deleted + 1,
+      events: before.events + 1,
+    });
+
+    const none = await ok(putBot(victor, archie, { mode: "none" }));
+    expect(none.outbound).toEqual({ mode: "none", allow: [], deny: [] });
+    expect(none.effective).toEqual({ kind: "none", targets: [] });
+    expect(shape(await ownRows(archie))).toEqual([{ subject: "agent", tool: null, effect: "deny" }]);
+  });
+
+  it("inbound off on Bea: one everyone deny on agent:<Bea>, and Archie's summary drops her", async () => {
+    await ok(putBot(victor, archie, { mode: "any" }));
+    expect((await ok(getBot(victor, archie))).effective).toEqual({
+      kind: "any",
+      targets: [await ref(bea), await ref(opsy)],
+    });
+    const off = await ok(putBot(victor, bea, { mode: "default" }, false));
+    expect(off.inbound).toEqual({ consultable: false });
+    expect(shape(await ownRows(bea))).toEqual([
+      { subject: "everyone", tool: `agent:${bea}`, effect: "deny" },
+    ]);
+    expect((await ok(getBot(victor, archie))).effective).toEqual({
+      kind: "some",
+      targets: [await ref(opsy)],
+    });
+    // Archie's own rows are untouched by Bea's PUT.
+    expect(shape(await ownRows(archie))).toEqual([{ subject: "agent", tool: null, effect: "allow" }]);
+    await ok(putBot(victor, bea, { mode: "default" }, true));
+    expect(await ownRows(bea)).toEqual([]);
+  });
+
+  it("the org switch shows as orgDefault and opens the default mode", async () => {
+    await ok(putBot(victor, archie, { mode: "default" }));
+    await ok(setSwitch(victor, true));
+    const view = await ok(getBot(victor, archie));
+    expect(view.orgDefault).toBe(true);
+    expect(view.outbound.mode).toBe("default");
+    expect(view.effective.kind).toBe("any");
+    await ok(setSwitch(victor, false));
+  });
+
+  it("a PUT identical to the current state writes nothing", async () => {
+    await ok(putBot(victor, archie, { mode: "only", allow: [bea, opsy] }, false));
+    const before = await counts();
+    const rows = (await ownRows(archie)).map((r) => r.id).sort();
+    await ok(putBot(victor, archie, { mode: "only", allow: [opsy, bea.toUpperCase()] }, false));
+    expect(await counts()).toEqual(before);
+    expect((await ownRows(archie)).map((r) => r.id).sort()).toEqual(rows);
+    await ok(putBot(victor, archie, { mode: "default" }));
+  });
+
+  it("only the bot's own rows change: other rules, other bots, the switch and unit or authorless rows survive", async () => {
+    await ok(setSwitch(victor, true));
+    const unrelated = [
+      // An admin rule on another grain.
+      `insert into app.permission_rules (organization_id, subject_kind, subject_id, permission, effect, created_by)
+       values ($1, 'user', '${samId}', 'bot.read', 'deny', '${victorId}') returning id`,
+      // Another bot's agent.message row.
+      `insert into app.permission_rules (organization_id, subject_kind, subject_id, permission, effect, created_by)
+       values ($1, 'agent', '${bea}', 'agent.message', 'allow', '${victorId}') returning id`,
+      // A unit-scoped agent.message rule naming Archie: never read or written as a per-bot setting (Pitfall 10).
+      `insert into app.permission_rules (organization_id, scope_unit_id, subject_kind, subject_id, permission, effect)
+       values ($1, '${opsId}', 'agent', '${archie}', 'agent.message', 'deny') returning id`,
+      // The authorless org-scope deny 07.7-02's backfill writes next to a complete Bots-off set.
+      `insert into app.permission_rules (organization_id, subject_kind, permission, effect)
+       values ($1, 'everyone', 'agent.message', 'deny') returning id`,
+    ];
+    const keep: string[] = [];
+    for (const q of unrelated) keep.push((await su.query(q, [orgId])).rows[0].id as string);
+    // 07.3's unit-scoped Bots rows (agent.message included).
+    const botsOps = (enabled: boolean) =>
+      victor.request("PUT", "/api/v1/module-access", {
+        module: "bots",
+        scopeUnitId: opsId,
+        subject: { kind: "everyone" },
+        enabled,
+      });
+    await ok(botsOps(false));
+    const moduleRows = (
+      await su.query(
+        "select id from app.permission_rules where organization_id = $1 and scope_unit_id = $2",
+        [orgId, opsId],
+      )
+    ).rows.map((r) => r.id as string);
+    const survivors = [...keep, ...moduleRows, ...(await switchRows()).map((r) => r.id as string)];
+    try {
+      await ok(putBot(victor, archie, { mode: "any", deny: [bea] }, false));
+      await ok(putBot(victor, archie, { mode: "none" }));
+      await ok(putBot(victor, archie, { mode: "default" }));
+      const ids = new Set(
+        (await su.query("select id from app.permission_rules where organization_id = $1", [orgId])).rows.map(
+          (r) => r.id as string,
+        ),
+      );
+      for (const id of survivors) expect(ids.has(id), id).toBe(true);
+      // The view never counts the unit-scoped row: Archie is in the default mode.
+      expect((await ok(getBot(victor, archie))).outbound.mode).toBe("default");
+    } finally {
+      await su.query("delete from app.permission_rules where id = any($1::uuid[])", [keep]);
+      await ok(botsOps(true));
+      await ok(setSwitch(victor, false));
+    }
+  });
+
+  it("refuses targets that are not live team bots of this organization (400), writing nothing", async () => {
+    const ghost = await insertBot(orgId, "Ghost");
+    await su.query("update app.agents set deleted_at = now() where id = $1", [ghost]);
+    const before = await counts();
+    const rows = await messagingRows();
+    for (const target of [archie, pebble, ghost, randomUUID()]) {
+      expect((await fails(putBot(victor, archie, { mode: "only", allow: [target] }), 400)).code).toBe(
+        "invalid_agent_messaging",
+      );
+      expect((await fails(putBot(victor, archie, { mode: "any", deny: [target] }), 400)).code).toBe(
+        "invalid_agent_messaging",
+      );
+    }
+    // The contract refuses impossible combinations.
+    expect((await fails(putBot(victor, archie, { mode: "only" }), 400)).code).toBe("validation_error");
+    expect((await fails(putBot(victor, archie, { mode: "none", deny: [bea] }), 400)).code).toBe(
+      "validation_error",
+    );
+    expect(await counts()).toEqual(before);
+    expect(await messagingRows()).toEqual(rows);
+
+    // The bot itself must be a live team bot: personal, deleted and unknown ids are 404.
+    for (const id of [pebble, ghost, randomUUID()]) {
+      expect((await fails(getBot(victor, id), 404)).code).toBe("bot_not_found");
+      expect((await fails(putBot(victor, id, { mode: "any" }), 404)).code).toBe("bot_not_found");
+    }
+  });
+
+  it("only admins: a lead of the bot's unit and a standard member get 403 on GET and PUT", async () => {
+    const rows = await messagingRows();
+    for (const c of [sam, lee]) {
+      for (const id of [archie, opsy]) {
+        expect((await fails(getBot(c, id), 403)).details).toMatchObject({ permission: "rule.read" });
+        expect((await fails(putBot(c, id, { mode: "any" }), 403)).details).toMatchObject({
+          permission: "rule.manage",
+        });
+      }
+    }
+    expect(await messagingRows()).toEqual(rows);
+  });
+
+  it("the summary names at most 50 targets, in display-name order", async () => {
+    const many: string[] = [];
+    for (let i = 0; i < 55; i++) many.push(await insertBot(orgId, `Zz${String(i).padStart(2, "0")}`));
+    try {
+      await ok(putBot(victor, archie, { mode: "any" }));
+      const view = await ok(getBot(victor, archie));
+      expect(view.effective.kind).toBe("any");
+      expect(view.effective.targets).toHaveLength(50);
+      expect(view.effective.targets.slice(0, 2)).toEqual([await ref(bea), await ref(opsy)]);
+      expect(view.effective.targets.map((t: Json) => t.id)).not.toContain(archie);
+    } finally {
+      await su.query("update app.agents set deleted_at = now() where id = any($1::uuid[])", [many]);
+      await ok(putBot(victor, archie, { mode: "default" }));
+    }
+  });
+});
 
 /** A client whose membership moved to a fresh organization B, as its admin (module-access.int.test.ts). */
 async function otherOrgAdmin(): Promise<{ client: TestClient; orgB: string; userB: string }> {
@@ -347,5 +590,19 @@ describe("tenant isolation (C-02)", () => {
     expect(await switchRows(eve.orgB)).toHaveLength(0);
   });
 
-  // TASK3_CROSS_TENANT
+  it("another organization's bot is 404 on both routes and refused as a target (400)", async () => {
+    const zed = await insertBot(eve.orgB, "Zed");
+    expect((await fails(getBot(victor, zed), 404)).code).toBe("bot_not_found");
+    expect((await fails(putBot(victor, zed, { mode: "any" }), 404)).code).toBe("bot_not_found");
+    expect((await fails(getBot(eve.client, archie), 404)).code).toBe("bot_not_found");
+    expect((await fails(putBot(eve.client, archie, { mode: "none" }), 404)).code).toBe("bot_not_found");
+    expect((await fails(putBot(victor, archie, { mode: "only", allow: [zed] }), 400)).code).toBe(
+      "invalid_agent_messaging",
+    );
+    expect((await fails(putBot(eve.client, zed, { mode: "any", deny: [bea] }), 400)).code).toBe(
+      "invalid_agent_messaging",
+    );
+    expect(await messagingRows(eve.orgB)).toEqual([]);
+    expect(await ownRows(archie)).toEqual([]);
+  });
 });
