@@ -524,6 +524,62 @@ describe("POST /turns/:eventId/done is bound to this cell's turns (T-07.7-06-03)
   });
 });
 
+describe("the hop's answer is the consulted bot's whole reply, never a failure notice (CR-A-03, CR-A-04)", () => {
+  it("CR-A-03: Bea's reply in two chunks reaches Archie whole, as one answer, not repeated as history", async () => {
+    const { answer, bea } = await consulted();
+    const first = await ok(post(bea, "Part one: PO-1187 is confirmed."));
+    const second = await ok(
+      post(bea, "Part two: it ships Monday.", { idempotencyKey: `evt:${bea.eventId}:1` }),
+    );
+    // A post of another turn of Bea in the same thread is not part of this answer.
+    const other = await ok(
+      victor.request("POST", `/api/v1/conversations/${opsId}/messages`, {
+        body: "@bea something else",
+        mentions: [{ kind: "agent", id: beaId }],
+        threadRootId: bea.thread.rootMessageId,
+      }),
+    );
+    const otherTurn = await deliveryOn(other.id as string, beaId);
+    await ok(post(otherTurn, "Unrelated."));
+    await ok(done(bea));
+    expect(await hopRow(answer.hopId)).toMatchObject({
+      status: "answered",
+      answer_message_id: first.messageId,
+    });
+    const reply = await replyFor(answer.hopId);
+    expect(reply.message).toMatchObject({
+      id: first.messageId,
+      text: "Part one: PO-1187 is confirmed.\n\nPart two: it ships Monday.",
+      author: { kind: "agent", id: beaId },
+    });
+    expect(reply.consultReply).toMatchObject({ outcome: "answered", answerMessageId: first.messageId });
+    const historyIds = (reply.threadHistory as Json[]).map((h) => h.id);
+    expect(historyIds).not.toContain(first.messageId);
+    expect(historyIds).not.toContain(second.messageId);
+  });
+
+  it("CR-A-04: Bea's turn failed: the bridge's failure notice is not her answer", async () => {
+    const { root, answer, bea } = await consulted();
+    const notice = await ok(
+      post(bea, "Sorry, I couldn't generate a reply. Please try again in a moment.", {
+        idempotencyKey: `evt:${bea.eventId}:failed`,
+      }),
+    );
+    await ok(done(bea, "failed"));
+    expect(await hopRow(answer.hopId)).toMatchObject({ status: "failed", answer_message_id: null });
+    const reply = await replyFor(answer.hopId);
+    expect(reply.consultReply).toMatchObject({ outcome: "failed", answerMessageId: null });
+    expect(reply.message).toMatchObject({
+      id: answer.questionMessageId,
+      text: "@bea couldn't answer.",
+      author: { kind: "user", id: victorId },
+    });
+    const thread = await ok(victor.request("GET", `/api/v1/messages/${root}/thread`));
+    const listed = (thread.replies as Json[]).find((m) => m.id === notice.messageId);
+    expect(listed?.consult?.role).not.toBe("answer");
+  });
+});
+
 describe("one lock order: thread stream → turn → hop → chain (CR-A-02, CR-A-05)", () => {
   /** A second connection holding the thread's stream row, the way an in-flight post does. */
   async function holdStream(conversationId: string): Promise<pg.Client> {

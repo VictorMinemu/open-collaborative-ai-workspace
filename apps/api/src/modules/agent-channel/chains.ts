@@ -17,7 +17,7 @@ import {
   type Tx,
   tenantOf,
 } from "@ocw/db";
-import { and, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, asc, eq, gte, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { App, Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
@@ -60,8 +60,8 @@ export function noAnswerSentence(handle: string, outcome: "failed" | "timed_out"
 }
 
 /**
- * Records the first message a chain turn posted (`agent_turns.reply_message_id`), in the post's transaction: the hop's
- * answer when the turn answers one (D-15, P-09). Turns outside any chain record nothing; later posts never overwrite.
+ * Records the first message a chain turn posted (`agent_turns.reply_message_id`), in the post's transaction: the anchor
+ * of the hop's answer when the turn answers one (D-15, P-09; `answerOf` joins the turn's later chunks at delivery). Turns outside any chain record nothing; later posts never overwrite.
  */
 export async function recordChainReply(tx: Tx, p: { eventId: string; messageId: string }): Promise<void> {
   await tx
@@ -107,6 +107,69 @@ export async function chainLive(
   const judged = conv ? (conv.kind === "thread" ? conv.parent : conv.id) : null;
   if (!judged) return false;
   return createConversationAccess(core).isReadable(tx, chain.humanUserId, judged, { kinds: ["channel"] });
+}
+
+/** The longest answer a return turn carries (the chat's message bound). */
+const ANSWER_MAX = 20_000;
+
+/**
+ * The answer of an answered hop (CR-A-03): every post of the turn that answered it, in thread order, joined into one
+ * text, starting with the post recorded on that turn (`hop.answer_message_id`, the first, whatever its key: a message or
+ * a card). Later posts belong to that turn when they are the same bot's, in the same conversation, after the first, and
+ * keyed in the turn's own reply namespace (`evt:<eventId>:<n>`, the bridge's chunk and block keys; its failure notice,
+ * `evt:<eventId>:failed`, never is): another turn of the same bot in the same thread never mixes in. Deleted posts are
+ * skipped. Null when nothing is left (the answer was deleted).
+ */
+async function answerOf(tx: Tx, hop: HopRow): Promise<{ id: string; body: string; ids: string[] } | null> {
+  if (!hop.answerMessageId) return null;
+  const [first] = await tx
+    .select({ id: messages.id, seq: messages.seq, conversationId: messages.conversationId })
+    .from(messages)
+    .where(eq(messages.id, hop.answerMessageId))
+    .limit(1);
+  if (!first) return null;
+  const [turn] = await tx
+    .select({ eventId: agentTurns.eventId })
+    .from(agentTurns)
+    .where(and(eq(agentTurns.answeringHopId, hop.id), eq(agentTurns.replyMessageId, first.id)))
+    .limit(1);
+  const prefix = turn ? `evt:${turn.eventId}:` : null;
+  const posts = await tx
+    .select({
+      id: messages.id,
+      body: messages.body,
+      key: messages.clientMessageId,
+      deletedAt: messages.deletedAt,
+    })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.conversationId, first.conversationId),
+        eq(messages.authorKind, "agent"),
+        eq(messages.authorId, hop.targetAgentId),
+        gte(messages.seq, first.seq),
+        prefix
+          ? or(eq(messages.id, first.id), like(messages.clientMessageId, `${prefix}%`))
+          : eq(messages.id, first.id),
+      ),
+    )
+    .orderBy(asc(messages.seq))
+    .limit(100);
+  const chunk = (key: string | null) =>
+    prefix !== null && /^\d{1,6}$/u.test((key ?? "").slice(prefix.length));
+  const kept = posts.filter(
+    (m) => !m.deletedAt && m.body.trim() !== "" && (m.id === first.id || chunk(m.key)),
+  );
+  const [head] = kept;
+  if (!head) return null;
+  return {
+    id: head.id,
+    body: kept
+      .map((m) => m.body)
+      .join("\n\n")
+      .slice(0, ANSWER_MAX),
+    ids: kept.map((m) => m.id),
+  };
 }
 
 /**
@@ -161,14 +224,8 @@ export async function deliverConsultReply(
   const tainted = carried?.tainted === true;
   const memberData = carried?.memberData === true;
 
-  const [answer] = hop.answerMessageId
-    ? await tx
-        .select({ id: messages.id, body: messages.body, deletedAt: messages.deletedAt })
-        .from(messages)
-        .where(eq(messages.id, hop.answerMessageId))
-        .limit(1)
-    : [];
-  const posted = answer && !answer.deletedAt ? answer : null;
+  // CR-A-04: only an answered hop carries an answer; a failed turn's post (the bridge's failure notice) never does.
+  const posted = outcome === "answered" ? await answerOf(tx, hop) : null;
   const effective: ConsultOutcome = outcome === "answered" && !posted ? "failed" : outcome;
   const used = await tx
     .select({ id: agentChainHops.targetAgentId })
@@ -213,8 +270,11 @@ export async function deliverConsultReply(
     await tx.update(agentTurns).set({ memberData: true }).where(eq(agentTurns.eventId, ev.eventId));
   }
   const targetRef = { id: target.id, handle: target.username, displayName: target.name };
+  const answerIds = new Set(posted?.ids ?? []);
   const payload: StoredConsultReply = {
     ...ev,
+    // The answer is the event's message: its chunks are not repeated as history.
+    threadHistory: ev.threadHistory.filter((h) => !answerIds.has(h.id)),
     type: AgentChannelEventTypes.consultReply,
     // The answer is the consulted bot's message; a server sentence stays the chain's human's (the card-action pattern).
     message: posted
@@ -316,7 +376,8 @@ async function closeAnsweredHop(
     .update(agentChainHops)
     .set({
       status,
-      answerMessageId: turn.replyMessageId,
+      // CR-A-04: a failed turn has no answer (its post, if any, is the bridge's failure notice or a fragment).
+      answerMessageId: status === "answered" ? turn.replyMessageId : null,
       closedAt: sql`now()`,
       updatedAt: sql`now()`,
     })

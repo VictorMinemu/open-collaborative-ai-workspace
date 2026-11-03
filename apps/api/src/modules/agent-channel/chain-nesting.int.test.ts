@@ -300,16 +300,17 @@ describe("handoff (Pattern 5): the hop closes with no return turn", () => {
 });
 
 describe("failed hops return the failure to the asker", () => {
-  it("done(failed) after Bea's failure notice: hop failed, Archie's reply carries the notice, outcome failed", async () => {
+  it("done(failed) after Bea's failure notice: hop failed with no answer, Archie gets the server sentence (CR-A-04)", async () => {
     const { hop, turn: bea } = await asked();
-    const notice = await ok(post(bea, "Sorry, I couldn't finish that."));
+    await ok(post(bea, "Sorry, I couldn't finish that."));
     await ok(done(bea, "failed"));
-    expect(await hopRow(hop.hopId)).toMatchObject({ status: "failed", answer_message_id: notice.messageId });
+    expect(await hopRow(hop.hopId)).toMatchObject({ status: "failed", answer_message_id: null });
     const [reply] = await repliesFor(archieId, hop.hopId);
     expect(reply?.payload.consultReply).toMatchObject({ outcome: "failed", answerMessageId: null });
     expect(reply?.payload.message).toMatchObject({
-      id: notice.messageId,
-      author: { kind: "agent", id: beaId },
+      id: hop.questionMessageId,
+      text: "@bea couldn't answer.",
+      author: { kind: "user", id: victorId },
     });
     const failed = await audits("agent.consult.failed", hop.hopId);
     expect(failed).toHaveLength(1);
