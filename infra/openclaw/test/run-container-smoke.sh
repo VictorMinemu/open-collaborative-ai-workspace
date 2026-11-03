@@ -811,14 +811,17 @@ echo "== [automation] OpenClaw's own cron, webhook ingress and sessions_send sta
 docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json | node -e '
 const c = JSON.parse(require("fs").readFileSync(0, "utf8"));
 const deny = c.tools?.deny ?? [];
-const agents = c.agents?.list ?? [];
+// The plugin writes its bots under agents.entries (reconciler applyPlanToDraft); an empty list would make the per-bot
+// check below vacuous, so at least one bot entry must be there (07.7-07 deviation 2).
+const agents = Object.values(c.agents?.entries ?? {});
 const offered = agents.flatMap((a) => a.tools?.alsoAllow ?? []);
 console.log("   cron       :", JSON.stringify(c.cron ?? null), "hooks", JSON.stringify(c.hooks ?? null));
-console.log("   denied     :", ["group:automation", "group:sessions"].filter((g) => deny.includes(g)).join(","));
+console.log("   denied     :", ["group:automation", "group:sessions"].filter((g) => deny.includes(g)).join(","), "bots", agents.length);
 const ok =
   c.cron?.enabled === false &&
   c.hooks?.enabled === false &&
   deny.includes("group:automation") && deny.includes("group:sessions") &&
+  agents.length > 0 &&
   agents.every((a) => (a.tools?.deny ?? []).includes("group:sessions")) &&
   !offered.some((t) => ["cron", "sessions_send", "group:automation", "group:sessions"].includes(t));
 if (!ok) { console.log("FAIL: OpenClaw cron, webhooks or sessions_send are reachable in the rendered config"); process.exit(1); }
