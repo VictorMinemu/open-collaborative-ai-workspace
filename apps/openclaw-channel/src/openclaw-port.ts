@@ -345,8 +345,9 @@ export function createOpenClawPort(opts: RealPortOptions): OpenClawPort {
         turn: { ...m.turn, tools: allowed },
         // 07.4: the logical connector tools only `ocw_connector_call` may name (never OpenClaw tools).
         connectorTools: m.connectorTools,
-        // 07.5: who asked (sanitized), named in the gate's approval sentences.
-        requesterName: m.sender.name,
+        // 07.5: who asked (sanitized), named in the gate's approval sentences. 07.7: a consult reply's is the chain's
+        // human, never the consulted bot whose answer is the message.
+        requesterName: m.requesterName ?? m.sender.name,
         // 07.6: a webhook or mail run read outside content before its first call: read-only from the start.
         ...(m.startsTainted ? { tainted: true } : {}),
       },

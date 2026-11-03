@@ -1456,6 +1456,23 @@ describe("consults (07.7 D-01, Pitfall 1): origin and targets explained to the m
     );
   });
 
+  it("a reply's origin names the chain's human as the requester and never renders the question's block (07.7-06)", () => {
+    const bot: CellAgent = { ...BOT, capabilities: { tools: ["ocw_agent_card"] } };
+    const now = { local: "2026-11-03 11:01", timeZone: "Europe/Madrid", iso: "2026-11-03T10:01:00.000Z" };
+    const origin = { ...ORIGIN, agent: { id: "agent-bea", handle: "bea", displayName: "Bea" } };
+    const m = mapConsultReply(consultReply("answered", {}, { origin, turn: { ...CONSULT_TURN, now } }), bot);
+    expect(m.contextBlocks.map((b) => b.type)).not.toContain("consult_origin");
+    expect(m.contextBlocks.find((b) => b.type === "current_time")?.label).toBe(
+      "Current time for Víctor Ruiz",
+    );
+    expect(m.requesterName).toBe("Víctor Ruiz");
+    // The answer stays the consulted bot's message, structurally.
+    expect(m.sender).toEqual({ id: "agent-bea", name: "Bea", isBot: true });
+    // Without origin nothing changes: the sender names the turn.
+    const plain = mapConsultReply(consultReply("answered"), bot);
+    expect(plain.requesterName).toBeUndefined();
+  });
+
   it("rejects a malformed reply (unknown outcome)", () => {
     expect(() => consultReply("answered", { outcome: "cancelled" })).toThrow();
   });
