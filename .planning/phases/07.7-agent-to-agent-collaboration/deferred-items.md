@@ -7,3 +7,4 @@
   pattern (`WEB_PATTERNS` in `apps/api/src/modules/organization/permissions/guard.test.ts`) flags. Introduced by
   07.7-08 (`a0579d09`). Fix: rename the local (e.g. `mayReadRules`); the decision already comes from `useCan("rule.read")`.
   `pnpm verify` fails on this one unit test until then.
+  **Resolved** in `36cf70a2` (renamed to `mayReadRules`; guard test 5/5).
