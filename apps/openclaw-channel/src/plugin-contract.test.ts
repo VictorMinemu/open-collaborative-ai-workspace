@@ -2023,6 +2023,12 @@ describe("consult (07.7 A2A-01, D-01, D-04, D-08): ocw_consult_agent, the protoc
       type: "consult_reply",
       payload: { outcome: "answered" },
     });
+    // CR-C-01: the answer reaches OpenClaw only inside its attributed, untrusted block, never as the message body.
+    expect(port.dispatched[0]?.contextBlocks[1]).toMatchObject({
+      type: "consult_answer",
+      payload: { untrusted: true, text: "Yes, the pump order was confirmed on Monday." },
+    });
+    expect(port.dispatched[0]?.body).not.toContain("pump order");
     expect(api.turnsDone).toEqual([
       { eventId: "evt-80", agentId: ARCHIE.id, outcome: "replied", status: 204 },
     ]);
