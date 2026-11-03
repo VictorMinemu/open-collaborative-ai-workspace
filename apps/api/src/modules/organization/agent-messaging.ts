@@ -170,11 +170,12 @@ const factsOf = (b: BotRow): AgentFacts => ({
  */
 async function teamBots(
   tx: Tx,
-  where: { ids?: readonly string[]; exceptId?: string; limit?: number } = {},
+  where: { ids?: readonly string[]; exceptId?: string; enabledOnly?: boolean; limit?: number } = {},
 ): Promise<BotRow[]> {
   const conds = [eq(agents.scope, "team"), isNull(agents.deletedAt)];
   if (where.ids) conds.push(inArray(agents.id, [...where.ids]));
   if (where.exceptId) conds.push(ne(agents.id, where.exceptId));
+  if (where.enabledOnly) conds.push(ne(agents.status, "disabled"));
   const q = tx
     .select(botColumns)
     .from(agents)
@@ -285,14 +286,19 @@ function wantedRows(agentId: string, body: SetAgentMessagingRequest): WantedRow[
  * "Right now" (P-04): the targets this bot may consult, decided by the resolver's agent pass alone (the bot as the
  * principal, the target with tool agent:<target>) over at most 200 candidates, naming at most 50. People still need to
  * see the target at consult time (the human pass of `messagingDecision`), so a hidden unit persona can be listed here
- * and refused for a given person. `any` = every candidate read is allowed.
+ * and refused for a given person. Disabled bots are no candidates; `any` = every enabled team bot was read (at most
+ * 200) and allowed, `some` otherwise (CR-B-07).
  */
 async function effectiveOf(
   tx: Tx,
   perms: PermissionService,
   bot: BotRow,
 ): Promise<AgentMessagingView["effective"]> {
-  const candidates = await teamBots(tx, { exceptId: bot.id, limit: EFFECTIVE_READ_MAX });
+  // CR-B-07: a disabled bot is never consultable (`target_unavailable`), so it is no candidate; one more than the cap is
+  // read to know whether every bot was checked.
+  const read = await teamBots(tx, { exceptId: bot.id, enabledOnly: true, limit: EFFECTIVE_READ_MAX + 1 });
+  const partial = read.length > EFFECTIVE_READ_MAX;
+  const candidates = partial ? read.slice(0, EFFECTIVE_READ_MAX) : read;
   const allowed = await perms.filterFor(
     tx,
     { kind: "agent", agentId: bot.id },
@@ -300,7 +306,9 @@ async function effectiveOf(
     PERMISSION,
     (c) => ({ ...agentResource(factsOf(c), null), tool: agentMessageTool(c.id) }),
   );
-  const kind = allowed.length === 0 ? "none" : allowed.length === candidates.length ? "any" : "some";
+  // `any` only when every bot was read and allowed; past the cap the summary says `some`.
+  const kind =
+    allowed.length === 0 ? "none" : allowed.length === candidates.length && !partial ? "any" : "some";
   return { kind, targets: allowed.slice(0, EFFECTIVE_LIST_MAX).map(refOf) };
 }
 

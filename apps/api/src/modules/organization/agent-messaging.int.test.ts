@@ -582,6 +582,28 @@ describe("per-bot consult rules: GET/PUT /api/v1/agents/:id/messaging (D-04, P-0
     }
   });
 
+  it("CR-B-07: the summary never lists a disabled bot, and never says any past what it read", async () => {
+    const off = await insertBot(orgId, "Aaoff");
+    await su.query("update app.agents set status = 'disabled' where id = $1", [off]);
+    try {
+      await ok(putBot(victor, archie, { mode: "any" }));
+      const view = await ok(getBot(victor, archie));
+      expect(view.effective.targets.map((t: Json) => t.id)).not.toContain(off);
+      expect(view.effective.kind).toBe("any");
+      // Past the read cap the summary cannot have checked every bot: "some", never "any".
+      const many: string[] = [];
+      for (let i = 0; i < 200; i++) many.push(await insertBot(orgId, `Xx${String(i).padStart(3, "0")}`));
+      try {
+        expect((await ok(getBot(victor, archie))).effective.kind).toBe("some");
+      } finally {
+        await su.query("update app.agents set deleted_at = now() where id = any($1::uuid[])", [many]);
+      }
+    } finally {
+      await su.query("update app.agents set deleted_at = now() where id = $1", [off]);
+      await ok(putBot(victor, archie, { mode: "default" }));
+    }
+  });
+
   it("the summary names at most 50 targets, in display-name order", async () => {
     const many: string[] = [];
     for (let i = 0; i < 55; i++) many.push(await insertBot(orgId, `Zz${String(i).padStart(2, "0")}`));
