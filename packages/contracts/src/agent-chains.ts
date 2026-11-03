@@ -202,8 +202,16 @@ export function agentMessageTool(agentId: string): string {
   return `agent:${agentId.toLowerCase()}`;
 }
 
-/** Rule lists per bot (allow, deny): bounded so a view or a request never grows without limit. */
-const AGENT_RULE_LIST_MAX = 100;
+/**
+ * Rule lists per bot (allow, deny): bounded so a request never grows without limit. `POST /permission-rules` refuses a
+ * per-target `agent.message` rule past it (per bot and effect, `agent_rule_limit`), so a bot's sheet always saves back.
+ */
+export const AGENT_RULE_LIST_MAX = 100;
+/**
+ * What a view may carry (CR-B-05): rows from before the writer's cap, or a race past it, must never turn the sheet into
+ * a 500; above the request bound the sheet cannot be saved back until rules are removed, but nothing is dropped.
+ */
+const AGENT_RULE_VIEW_MAX = 1000;
 /** The bots a "Right now" summary names before it stops listing. */
 const AGENT_EFFECTIVE_MAX = 50;
 
@@ -244,9 +252,9 @@ export const AgentMessagingView = z.object({
   outbound: z.object({
     mode: AgentMessagingOutboundMode,
     /** `only`: the bots it may consult. */
-    allow: z.array(AgentRef).max(AGENT_RULE_LIST_MAX),
+    allow: z.array(AgentRef).max(AGENT_RULE_VIEW_MAX),
     /** "Never ask": bots it may never consult, whatever the mode. */
-    deny: z.array(AgentRef).max(AGENT_RULE_LIST_MAX),
+    deny: z.array(AgentRef).max(AGENT_RULE_VIEW_MAX),
   }),
   /** Off = an `{everyone, deny, tool agent:<this bot>}` rule: no bot may consult it. */
   inbound: z.object({ consultable: z.boolean() }),
