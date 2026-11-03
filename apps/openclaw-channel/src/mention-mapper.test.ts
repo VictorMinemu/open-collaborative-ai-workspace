@@ -1364,6 +1364,39 @@ describe("consults (07.7 D-01, Pitfall 1): origin and targets explained to the m
     expect(lines.filter((l) => l.startsWith("@carl "))).toHaveLength(1);
   });
 
+  it("CR-C-06: a target's description keeps its commas; a long one ends on a word with an ellipsis", () => {
+    const LONG =
+      "Purchasing, suppliers, delivery dates, stock levels and returns for all plants in Spain and Portugal, plus the weekly reorder report";
+    const huge = `${"Inventory, ".repeat(30)}end`;
+    // Built past the schema (whose bound is 200 today), as a newer API with a longer bound would deliver it.
+    const m = mapMention(
+      {
+        ...asked(),
+        turn: {
+          ...CONSULT_TURN,
+          consult: {
+            chainId: null,
+            depth: 0,
+            targets: [
+              { id: "agent-carl", handle: "carl", displayName: "Carl", description: LONG },
+              { id: "agent-dora", handle: "dora", displayName: "Dora", description: huge },
+            ],
+          },
+        },
+      } as AgentMentionEvent,
+      BEA_BOT,
+    );
+    const [carl, dora] = m.contextBlocks.find((b) => b.type === "consult_targets")?.payload
+      .targets as string[];
+    expect(LONG.length).toBeGreaterThan(80);
+    expect(carl).toBe(`@carl — Carl: ${LONG}`);
+    const description = dora?.replace(/^@dora — Dora: /u, "") ?? "";
+    expect(description.length).toBeLessThanOrEqual(200);
+    expect(description.endsWith("…")).toBe(true);
+    // Cut on a word boundary: the last word kept is whole.
+    expect(description).toMatch(/Inventory…$/u);
+  });
+
   function consultReply(
     outcome: "answered" | "failed" | "timed_out",
     over: Record<string, unknown> = {},

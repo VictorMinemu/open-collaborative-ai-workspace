@@ -307,6 +307,26 @@ function blockName(name: string, max = 80): string {
   return cleaned || "unknown";
 }
 
+/** The contract's bound on a consult target's description (characters). */
+const DESCRIPTION_MAX = 200;
+
+/**
+ * A target's description inside a consult block (CR-C-06): what the model picks the right bot by, so it keeps its commas
+ * and its length up to the contract's 200 characters. One line, without the characters a structure or a directive needs
+ * (`<>`, backticks, brackets, braces, parentheses, backslashes, colons); a longer one ends on a whole word with "…".
+ */
+function blockDescription(raw: string): string {
+  const cleaned = oneLine(raw, raw.length)
+    .replace(/[<>`[\]{}()\\:]/gu, "")
+    .replace(/\s{2,}/gu, " ")
+    .trim();
+  if (cleaned.length <= DESCRIPTION_MAX) return cleaned;
+  const cut = cleaned.slice(0, DESCRIPTION_MAX - 1);
+  const space = cut.lastIndexOf(" ");
+  const head = (space >= DESCRIPTION_MAX / 2 ? cut.slice(0, space) : cut).replace(/[\s.,;—-]+$/u, "");
+  return `${head}…`;
+}
+
 /** A bot handle inside a consult block: handle characters only. */
 function blockHandle(handle: string): string {
   return handle.replace(/[^a-z0-9_.-]/giu, "").slice(0, 64) || "unknown";
@@ -324,9 +344,9 @@ function consultTargetLines(turn: TurnContext): string[] {
   for (const t of turn.consult?.targets ?? []) {
     if (seen.has(t.id) || lines.length >= A2A_LIMITS.maxTargets) continue;
     seen.add(t.id);
-    const description = t.description ? blockName(t.description, 200) : "";
+    const description = t.description ? blockDescription(t.description) : "";
     lines.push(
-      `@${blockHandle(t.handle)} — ${blockName(t.displayName)}${description && description !== "unknown" ? `: ${description}` : ""}`,
+      `@${blockHandle(t.handle)} — ${blockName(t.displayName)}${description ? `: ${description}` : ""}`,
     );
   }
   return lines;
