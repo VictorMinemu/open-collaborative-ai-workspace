@@ -517,7 +517,8 @@ describe("PR #25's trigger rule, unchanged, decides consult hop posts (D-06, P-0
 describe("POST /turns/:eventId/done is bound to this cell's turns (T-07.7-06-03)", () => {
   it("an unknown event, another bot's event or another organization's event is 404 unknown_turn", async () => {
     const { archie, bea } = await consulted();
-    const unknown = await done({ eventId: randomUUID(), agent: { id: beaId } });
+    const unknownId = randomUUID();
+    const unknown = await done({ eventId: unknownId, agent: { id: beaId } });
     expect(unknown.status).toBe(404);
     expect(unknown.body.error?.code).toBe("unknown_turn");
     const swapped = await done(bea, "replied", { agentId: archieId });
@@ -528,6 +529,21 @@ describe("POST /turns/:eventId/done is bound to this cell's turns (T-07.7-06-03)
     // Org B's own token cannot report org A's turns either.
     const crossed = await done(bea, "replied", {}, tokenB);
     expect(crossed.status).toBe(404);
+    // CR-A-09: every refusal is audited like any other cell route's unknown turn, with ids and the code only.
+    const refused = (
+      await rows(
+        "select organization_id, actor_kind, result, metadata from app.audit_events where action = 'bot.tool_call' and resource_id = 'turn.done'",
+      )
+    ).filter((a) => a.metadata.reason === "unknown_turn");
+    const forEvent = (eventId: string, org = orgId) =>
+      refused.filter((a) => a.metadata.eventId === eventId && a.organization_id === org);
+    expect(forEvent(unknownId)).toHaveLength(1);
+    expect(forEvent(bea.eventId).filter((a) => a.metadata.agentId === archieId)).toHaveLength(1);
+    expect(forEvent(orgBEventId)).toHaveLength(1);
+    expect(
+      refused.filter((a) => a.metadata.eventId === bea.eventId && a.organization_id !== orgId),
+    ).toHaveLength(1);
+    for (const a of refused) expect(a).toMatchObject({ actor_kind: "system", result: "denied" });
   });
 
   it("the body is strict (400 on extra fields or an unknown outcome)", async () => {

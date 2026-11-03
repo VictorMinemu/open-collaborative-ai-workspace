@@ -26,7 +26,7 @@ import { notFound } from "../../lib/errors";
 import { announceConsults, convTopic, createConversationAccess, lockNextSeq } from "../chat";
 import { memberDirectory } from "../organization";
 import { type CellPrincipal, cellOf } from "./auth";
-import { cellAuditBase } from "./claim";
+import { auditUnknownTurn, cellAuditBase } from "./claim";
 import type { ConsultDeps } from "./consult";
 import { buildMentionEvents } from "./mentions";
 
@@ -468,7 +468,16 @@ export async function turnDone(
     { organizationId: cell.organizationId, userId: null },
     async (tx) => {
       const [turn] = await tx.select().from(agentTurns).where(eq(agentTurns.eventId, eventId));
-      if (!turn || turn.agentId !== body.agentId) return null;
+      if (!turn || turn.agentId !== body.agentId) {
+        // CR-A-09: an unknown, foreign or mismatched turn is audited like every other cell route's (ids and code only).
+        await auditUnknownTurn(tx, core, {
+          cell,
+          tool: "turn.done",
+          reason: "unknown_turn",
+          metadata: { eventId, agentId: body.agentId },
+        });
+        return null;
+      }
       const base = { userId: turn.userId, conversationId: turn.conversationId };
       if (turn.chainId) return { ...base, chainId: turn.chainId };
       const [rooted] = await tx
