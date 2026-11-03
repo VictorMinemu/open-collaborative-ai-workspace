@@ -4,6 +4,8 @@ import {
   AgentCardActionEvent,
   type AgentCardActionEvent as AgentCardActionEventType,
   AgentChannelEventTypes,
+  AgentConsultReplyEvent,
+  type AgentConsultReplyEvent as AgentConsultReplyEventType,
   AgentMentionEvent,
   type AgentMentionEvent as AgentMentionEventType,
   type CellAgent,
@@ -15,7 +17,7 @@ import {
   ProviderAuthRevokeEvent,
   ProviderAuthStartEvent,
 } from "./agent-channel-protocol.js";
-import type { AgentChannelClient } from "./api-client.js";
+import { type AgentChannelClient, AgentChannelHttpError } from "./api-client.js";
 import { sleep } from "./backoff.js";
 import type { DurableFrame, EventStreamLogger } from "./event-stream.js";
 import { handleMcpProbe, type probeMcpServer } from "./mcp-probe.js";
@@ -23,12 +25,14 @@ import {
   type MappedMention,
   mapAutomationRun,
   mapCardAction,
+  mapConsultReply,
   mapMention,
   replyIdempotencyKey,
 } from "./mention-mapper.js";
 import type { PluginInstaller } from "./plugin-installer.js";
 import type { AgentProvisioningResult } from "./reconciler.js";
 import type { SubscriptionAuth } from "./subscription-auth.js";
+import { CONSULT_TOOL_NAME } from "./turn-scoped-tools.js";
 
 /**
  * Everything the bridge needs from OpenClaw. The real implementation (openclaw-port.ts) wraps the
@@ -72,6 +76,9 @@ export type BridgeOptions = {
   /** Marketplace executor for `plugin.install.v1` / `plugin.uninstall.v1` (D-14); omitted → those events are ignored. */
   plugins?: PluginInstaller;
 };
+
+/** What `runTurn` reads from any delivered turn event (mention, card action, automation run, consult reply). */
+type ChainFacts = { eventId: string; agent: { id: string }; type?: string; origin?: unknown };
 
 export const FAILURE_REPLY = "Sorry, I couldn't generate a reply right now. Please try again in a moment.";
 
@@ -227,8 +234,45 @@ export function createBridge(opts: BridgeOptions) {
     await runTurn(event, "automation run", (agent) => mapAutomationRun(event, agent));
   }
 
+  /**
+   * A consulted bot answered, failed or timed out (07.7 D-01, D-04): a turn like a mention of the asking bot in the
+   * hop's thread, in reply to the event's message (the answer, or the question again), keyed `evt:<eventId>`; it then
+   * reports done like any chain turn.
+   */
+  async function handleConsultReply(event: AgentConsultReplyEventType): Promise<void> {
+    await runTurn(event, "consult reply", (agent) => mapConsultReply(event, agent));
+  }
+
+  /**
+   * 07.7 (D-04, P-09): a turn that can belong to a consult chain: it was offered `ocw_consult_agent` (it may open a
+   * hop), it answers a question (`origin`), or it is a consult reply. Only these report `POST /turns/:eventId/done`;
+   * every other turn sends nothing, as before.
+   */
+  function mayBelongToChain(event: ChainFacts, mention: MappedMention): boolean {
+    return (
+      mention.turn.tools.includes(CONSULT_TOOL_NAME) ||
+      event.origin !== undefined ||
+      event.type === AgentChannelEventTypes.consultReply
+    );
+  }
+
+  /** Best effort: the turn never fails or retries on it (the `consult.tick` timeout is the backstop). */
+  async function reportDone(event: ChainFacts, mention: MappedMention, label: string, replied: boolean) {
+    try {
+      await opts.client.turnDone(
+        event.eventId,
+        { agentId: mention.ocwAgentId, outcome: replied ? "replied" : "failed" },
+        opts.signal,
+      );
+    } catch (error) {
+      // The status only: an error body never reaches the logs.
+      const status = error instanceof AgentChannelHttpError ? String(error.status) : "unreachable";
+      log.warn?.(`${label} ${event.eventId}: turn done not reported (${status})`);
+    }
+  }
+
   async function runTurn(
-    event: { eventId: string; agent: { id: string } },
+    event: ChainFacts,
     label: string,
     map: (agent: CellAgent) => MappedMention,
   ): Promise<void> {
@@ -246,6 +290,7 @@ export function createBridge(opts: BridgeOptions) {
       return;
     }
     const mention = map(agent);
+    const chainTurn = mayBelongToChain(event, mention);
     let index = 0;
     const post = async (text: string) => {
       for (const chunk of chunkText(text, maxReplyChars)) {
@@ -319,6 +364,9 @@ export function createBridge(opts: BridgeOptions) {
           .catch(() => undefined);
       }
     } finally {
+      // 07.7 (D-04): a dispatched chain turn tells the API it ended, after its last post (stopping: nothing is sent,
+      // the successor replays the event and reports it).
+      if (chainTurn && !opts.signal.aborted) await reportDone(event, mention, label, index > 0);
       await stopTyping();
     }
   }
@@ -359,6 +407,19 @@ export function createBridge(opts: BridgeOptions) {
           return;
         }
         await handleAutomationRun(parsed.data);
+        return;
+      }
+      case AgentChannelEventTypes.consultReply: {
+        // agent.consult_reply.v1 (07.7): untrusted until parsed; the warning names the seq and the field path only
+        // (never the answer or a name).
+        const parsed = AgentConsultReplyEvent.safeParse(frame.data);
+        if (!parsed.success) {
+          log.warn?.(
+            `seq=${frame.seq}: invalid ${frame.type} payload; skipped (${parsed.error.issues[0]?.path.join(".") || "?"})`,
+          );
+          return;
+        }
+        await handleConsultReply(parsed.data);
         return;
       }
       case AgentChannelEventTypes.configChanged:
@@ -450,6 +511,7 @@ export function createBridge(opts: BridgeOptions) {
     handleMention,
     handleCardAction,
     handleAutomationRun,
+    handleConsultReply,
     agents,
     snapshot: () => lastSnapshot,
   };

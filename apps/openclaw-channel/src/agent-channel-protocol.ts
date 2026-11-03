@@ -43,6 +43,12 @@
  *                                4xx status and the same body)
  *   POST /records/update       ← AgentChannelRecordUpdate → `{ok, code, sentence}` (ocw_record_update, 07.6: compare-and-set
  *                                on the watched record of the turn's card; 409 `record_changed` with the same body)
+ *   POST /consultations        ← AgentChannelConsultRequest → `{ok, chainId?, hopId?, questionMessageId?, code?, sentence}`
+ *                                (ocw_consult_agent, 07.7: a question to another bot, posted in the turn's thread; the
+ *                                answer arrives later as `agent.consult_reply.v1`; a refusal may come with a 4xx status
+ *                                and the same body)
+ *   POST /turns/:eventId/done  ← AgentChannelTurnDone (07.7: a turn that can belong to a consult chain ended; replied |
+ *                                failed; idempotent server side)
  *   POST /mcp/probe-results    ← AgentChannelMcpProbeResult (the tools an `mcp.probe` discovered; D-13)
  *   POST /plugins/report       ← AgentChannelPluginReport (a marketplace install / uninstall outcome; D-14)
  *   POST /plugins/verify-install, GET /plugins: used by infra/openclaw (install gate, boot render), not here
@@ -73,6 +79,11 @@ export const AgentChannelEventTypes = {
    * text = a server sentence), plus the standing order and, for webhook and mail runs, the outside content apart.
    */
   automationRun: "agent.automation_run.v1",
+  /**
+   * Phase 07.7 (D-01, ADR-0027): a consulted bot answered, failed or timed out, delivered to the bot that asked as a new
+   * turn in the hop's thread (built like a mention; `consultReply` says who answered and how).
+   */
+  consultReply: "agent.consult_reply.v1",
 } as const;
 export const cellTopic = (cellId: string) => `cell:${cellId}`;
 
@@ -389,6 +400,32 @@ export const TurnWithheld = z.object({
 });
 export type TurnWithheld = z.infer<typeof TurnWithheld>;
 
+// ---------------------------------------------------------------- agent-to-agent consults (07.7, mirror of contracts
+// agent-chains.ts and agent-channel.ts; parity: plugin-contract.test.ts)
+
+/** The contracts' A2A limits the cell checks or bounds locally (`A2A_MAX_DEPTH`, `A2A_QUESTION_MAX`, `A2A_MAX_TARGETS`). */
+export const A2A_LIMITS = { maxDepth: 2, questionMax: 4000, maxTargets: 20 } as const;
+export const CONSULT_MODES = ["consult", "handoff"] as const;
+export const ConsultMode = z.enum(CONSULT_MODES);
+export type ConsultMode = z.infer<typeof ConsultMode>;
+
+/** A bot this turn may consult (decided by the API: a member of the conversation the `agent.message` decision allows). */
+export const ConsultTarget = z.object({
+  id: Id,
+  handle: z.string().min(1).max(64),
+  displayName: z.string().min(1).max(120),
+  description: z.string().max(200).nullable(),
+});
+export type ConsultTarget = z.infer<typeof ConsultTarget>;
+
+/** `TurnContext.consult`: the bots this turn may consult and its depth in its chain (0 = a root turn). */
+export const TurnConsult = z.object({
+  chainId: Id.nullable(),
+  depth: z.number().int().nonnegative(),
+  targets: z.array(ConsultTarget).min(1).max(A2A_LIMITS.maxTargets),
+});
+export type TurnConsult = z.infer<typeof TurnConsult>;
+
 export const TurnContext = z.object({
   tools: z.array(z.string()),
   toolFlags: z.record(z.string(), TurnToolFlags).default({}),
@@ -411,6 +448,17 @@ export const TurnContext = z.object({
    * API) or invalid → `SANDBOX_LIMITS.callsPerTurn`; the API counts and refuses `budget_exhausted` either way.
    */
   maxSandboxCalls: z.number().int().nonnegative().optional().catch(undefined),
+  /**
+   * 07.7 (D-01, ADR-0027): present only when the turn is offered `ocw_consult_agent`: the bots it may consult and this
+   * turn's depth in its chain. An invalid block reads as absent (the tool then refuses every target: fail closed).
+   */
+  consult: TurnConsult.optional().catch(undefined),
+  /**
+   * 07.7 (D-09): the API delivered the turn tainted (07.6 `taintedAtStart`: outside content, an inbound-rooted thread, a
+   * consult answer that read web or MCP content); the gate starts the turn read-only. No `.catch`: a malformed value
+   * invalidates the whole turn block, so the run gets no tools at all (fail closed, never untainted by accident).
+   */
+  tainted: z.boolean().optional(),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -422,6 +470,20 @@ export const EMPTY_TURN: TurnContext = {
   maxToolCalls: 0,
   maxWebCalls: 0,
 };
+
+/**
+ * 07.7 (D-01, ADR-0027): why a bot's turn is a consult. Server-built from the chain ledger, never from message text:
+ * `agent` is the bot that asked (also the delivery's `message.author`), `onBehalfOf` the human the chain runs for.
+ */
+export const AgentTurnOrigin = z.object({
+  agent: z.object({ id: Id, handle: z.string(), displayName: z.string() }),
+  chainId: Id,
+  hopId: Id,
+  depth: z.number().int().min(1).max(A2A_LIMITS.maxDepth),
+  mode: ConsultMode,
+  onBehalfOf: AgentChannelAuthor.extend({ kind: z.literal("user") }),
+});
+export type AgentTurnOrigin = z.infer<typeof AgentTurnOrigin>;
 
 export const AgentMentionEvent = z.object({
   eventId: Id,
@@ -449,6 +511,11 @@ export const AgentMentionEvent = z.object({
   roster: z.array(AgentChannelRosterEntry),
   /** Additive (Phase 3.1). Absent → no tools on this turn. An invalid block also means no tools. */
   turn: TurnContext.optional().catch(undefined),
+  /**
+   * 07.7 (D-01): server-built, present only on a consult delivery (the question to the consulted bot). No `.catch`: a
+   * malformed origin fails the event (it is skipped), so a question never arrives without who asked and for whom.
+   */
+  origin: AgentTurnOrigin.optional(),
 });
 export type AgentMentionEvent = z.infer<typeof AgentMentionEvent>;
 
@@ -548,6 +615,27 @@ export const AgentAutomationRunEvent = AgentMentionEvent.omit({ type: true }).ex
   }),
 });
 export type AgentAutomationRunEvent = z.infer<typeof AgentAutomationRunEvent>;
+
+/**
+ * `agent.consult_reply.v1` (07.7 D-01, D-07, ADR-0027): a consulted bot's hop ended, delivered to the bot that asked as a
+ * new turn in the hop's thread. Built like a mention: `message` is the answer (or the question again when there is
+ * none), `turn` is computed for the chain's human and starts with the consulted turn's taint (`turn.tainted`, D-09).
+ * `cancelled` is never delivered. Older plugins skip the unknown type.
+ */
+export const AgentConsultReplyEvent = AgentMentionEvent.omit({ type: true }).extend({
+  type: z.literal(AgentChannelEventTypes.consultReply),
+  consultReply: z.object({
+    chainId: Id,
+    hopId: Id,
+    /** The bot that was consulted. */
+    target: z.object({ id: Id, handle: z.string(), displayName: z.string() }),
+    mode: ConsultMode,
+    outcome: z.enum(["answered", "failed", "timed_out"]),
+    /** The consulted bot's answer message; null when it failed or timed out. */
+    answerMessageId: Id.nullable(),
+  }),
+});
+export type AgentConsultReplyEvent = z.infer<typeof AgentConsultReplyEvent>;
 
 export const CellConfigChangedEvent = z.object({
   type: z.literal(AgentChannelEventTypes.configChanged),
@@ -1392,6 +1480,47 @@ export const AgentChannelRecordUpdateResponse = z.object({
   sentence: z.string().max(500),
 });
 export type AgentChannelRecordUpdateResponse = z.infer<typeof AgentChannelRecordUpdateResponse>;
+
+// ---------------------------------------------------------------- consults (07.7, mirror of contracts agent-chains.ts)
+
+/**
+ * `POST /consultations` (`ocw_consult_agent`, D-08): only the turn's event and agent, the target and the intent. The API
+ * derives the conversation, the thread, the human and the chain from the stored turn (strict body: any other key is
+ * refused). The key is `<eventId>:consult:<n>`; a retry of the same key answers the stored hop.
+ */
+export type AgentChannelConsultRequest = {
+  eventId: string;
+  agentId: string;
+  target: string;
+  question: string;
+  mode: ConsultMode;
+  idempotencyKey: string;
+};
+
+/**
+ * The model reads `sentence` (composed by the API). `{ok: false, code: "limit_reached"}` also names the posted hop and
+ * question; any other refusal posted nothing. An unknown code from a newer API stays a string.
+ */
+export const AgentChannelConsultResponse = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    chainId: Id,
+    hopId: Id,
+    questionMessageId: Id,
+    sentence: z.string().max(500),
+  }),
+  z.object({
+    ok: z.literal(false),
+    code: z.string().max(64),
+    sentence: z.string().max(500),
+    hopId: Id.optional(),
+    questionMessageId: Id.optional(),
+  }),
+]);
+export type AgentChannelConsultResponse = z.infer<typeof AgentChannelConsultResponse>;
+
+/** `POST /turns/:eventId/done` (P-09): the bridge's `finally` for a turn that can belong to a chain. */
+export type AgentChannelTurnDone = { agentId: string; outcome: "replied" | "failed" };
 
 /**
  * A refusal answered with a non-2xx status whose body still carries the server's sentence (`{ok: false, code,

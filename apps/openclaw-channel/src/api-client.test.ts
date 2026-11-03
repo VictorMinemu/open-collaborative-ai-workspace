@@ -467,6 +467,103 @@ describe("watched record updates (07.6 AUTO-04, ocw_record_update)", () => {
   });
 });
 
+describe("consults (07.7 A2A-01, ocw_consult_agent) and the turn-done signal (P-09)", () => {
+  const BODY = {
+    eventId: "e1",
+    agentId: "a1",
+    target: "b1",
+    question: "Is the pump order confirmed?",
+    mode: "consult" as const,
+    idempotencyKey: "e1:consult:0",
+  };
+  const client = (responses: Array<{ status: number; body?: unknown }>) => {
+    const scripted = scriptedFetch(responses);
+    return {
+      calls: scripted.calls,
+      c: createAgentChannelClient({
+        apiUrl: "http://api",
+        token: () => "cell-token",
+        fetch: scripted.fetchImpl,
+        backoff: { baseMs: 1, maxMs: 2 },
+      }),
+    };
+  };
+  const SENT = {
+    ok: true,
+    chainId: "ch-1",
+    hopId: "hop-1",
+    questionMessageId: "q-1",
+    sentence: "Question sent to @bea.",
+  };
+
+  it("consult posts the body to /consultations with the bearer token and parses a 200 answer (ok or limit_reached)", async () => {
+    const { c, calls } = client([{ status: 200, body: SENT }]);
+    await expect(c.consult(BODY)).resolves.toEqual(SENT);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("http://api/agent-channel/v1/consultations");
+    expect(calls[0]?.init.method).toBe("POST");
+    expect((calls[0]?.init.headers as Record<string, string> | undefined)?.authorization).toBe(
+      "Bearer cell-token",
+    );
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual(BODY);
+    const limit = {
+      ok: false,
+      code: "limit_reached",
+      hopId: "hop-1",
+      questionMessageId: "q-1",
+      sentence: "@bea has reached its daily limit and cannot answer today.",
+    };
+    await expect(client([{ status: 200, body: limit }]).c.consult(BODY)).resolves.toEqual(limit);
+  });
+
+  it("two attempts at most (the key makes a retry answer the same hop); a 4xx {ok:false, code, sentence} body is the refusal", async () => {
+    const retried = client([{ status: 503 }, { status: 200, body: SENT }]);
+    await expect(retried.c.consult(BODY)).resolves.toEqual(SENT);
+    expect(retried.calls).toHaveLength(2);
+    expect(new Set(retried.calls.map((x) => String(x.init.body))).size).toBe(1);
+    const failing = client([{ status: 503 }, { status: 503 }, { status: 200, body: SENT }]);
+    await expect(failing.c.consult(BODY)).rejects.toBeDefined();
+    expect(failing.calls).toHaveLength(2);
+    for (const [status, code] of [
+      [403, "not_allowed"],
+      [403, "tainted"],
+      [409, "consult_pending"],
+      [409, "budget_exhausted"],
+    ] as const) {
+      const refusal = { ok: false, code, sentence: `refused: ${code}` };
+      const refused = client([{ status, body: refusal }]);
+      await expect(refused.c.consult(BODY)).resolves.toEqual(refusal);
+      expect(refused.calls).toHaveLength(1);
+    }
+  });
+
+  it("an error body without a sentence throws with its code only; a malformed 200 is rejected", async () => {
+    const coded = client([{ status: 404, body: { error: { code: "unknown_turn", message: "no" } } }]);
+    const err = (await coded.c.consult(BODY).catch((e: unknown) => e)) as AgentChannelHttpError;
+    expect(err).toBeInstanceOf(AgentChannelHttpError);
+    expect(err.status).toBe(404);
+    expect(err.code).toBe("unknown_turn");
+    await expect(
+      client([{ status: 200, body: { ok: true, sentence: "no hop" } }]).c.consult(BODY),
+    ).rejects.toBeDefined();
+  });
+
+  it("turnDone posts {agentId, outcome} to /turns/<eventId>/done", async () => {
+    const { c, calls } = client([{ status: 204 }]);
+    await expect(c.turnDone("evt/1", { agentId: "a1", outcome: "replied" })).resolves.toBeUndefined();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("http://api/agent-channel/v1/turns/evt%2F1/done");
+    expect(calls[0]?.init.method).toBe("POST");
+    expect((calls[0]?.init.headers as Record<string, string> | undefined)?.authorization).toBe(
+      "Bearer cell-token",
+    );
+    expect(JSON.parse(String(calls[0]?.init.body))).toEqual({ agentId: "a1", outcome: "replied" });
+    const failing = client([{ status: 500 }, { status: 500 }, { status: 204 }]);
+    await expect(failing.c.turnDone("e2", { agentId: "a1", outcome: "failed" })).rejects.toBeDefined();
+    expect(failing.calls).toHaveLength(2);
+  });
+});
+
 describe("approval refusal details (07.5-04)", () => {
   const APPROVAL = {
     id: "0199a6f0-0000-7000-8000-0000000000a1",
