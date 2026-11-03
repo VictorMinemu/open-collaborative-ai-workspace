@@ -10,9 +10,14 @@ import {
   Gauge,
   LoaderCircle,
   type LucideIcon,
+  Square,
   TimerOff,
   Waypoints,
 } from "lucide-react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
+import { stopErrorMessage, stopSuccessMessage, useCancelAgentChain } from "@/lib/consult-queries";
 import { cn } from "@/lib/utils";
 import { dirKey, type OrgDirectory, useOrgDirectory } from "./use-chat-directory";
 
@@ -31,6 +36,14 @@ export interface ConsultChipModel {
   text: string;
   /** The question's state; the answer carries none. */
   status?: { icon: LucideIcon; label: string; tone: ConsultTone; spin: boolean };
+  /** Offer Stop: a waiting question, seen by the chain's human or a channel moderator (a hint; the API decides). */
+  canStop: boolean;
+}
+
+/** Who is looking: the chain's human, and whether they may moderate the channel (`message.delete_any`). */
+export interface ConsultViewer {
+  isHuman: boolean;
+  canModerate: boolean;
 }
 
 /** How the chip names the hop's parties: `@handle` for bots, the display name for the person; never an id. */
@@ -73,8 +86,14 @@ export function consultNames(consult: MessageConsult, dir: Pick<OrgDirectory, "b
 }
 
 /** What the chip says for this hop (pure: the copy table of the 07.7-10 UI contract). */
-export function consultChipModel(consult: MessageConsult, names: ConsultNames): ConsultChipModel {
-  if (consult.role === "answer") return { icon: CornerDownRight, text: `Answer to ${names.source}` };
+export function consultChipModel(
+  consult: MessageConsult,
+  names: ConsultNames,
+  viewer: ConsultViewer,
+): ConsultChipModel {
+  if (consult.role === "answer") {
+    return { icon: CornerDownRight, text: `Answer to ${names.source}`, canStop: false };
+  }
   const handoff = consult.mode === "handoff";
   const step = consult.depth >= 2 ? "Step 2 · " : "";
   const asked = handoff
@@ -90,13 +109,51 @@ export function consultChipModel(consult: MessageConsult, names: ConsultNames): 
       tone: s.tone,
       spin: consult.status === "pending",
     },
+    canStop: consult.status === "pending" && (viewer.isHuman || viewer.canModerate),
   };
 }
 
-export function ConsultChip({ consult }: { consult: MessageConsult }) {
+/** Stop the chain this question belongs to; the chip turns Stopped when the server announces it. */
+function StopButton({ consult, names }: { consult: MessageConsult; names: ConsultNames }) {
+  const cancel = useCancelAgentChain();
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      data-testid="consult-stop"
+      aria-label={`Stop asking ${names.target}`}
+      disabled={cancel.isPending}
+      onClick={() =>
+        cancel.mutate(consult.chainId, {
+          onSuccess: () => toast.success(stopSuccessMessage(names.source)),
+          onError: (err) => toast.error(stopErrorMessage(err)),
+        })
+      }
+      className="h-6 gap-1 px-1.5 font-medium text-foreground text-xs max-md:h-11 max-md:px-3"
+    >
+      {cancel.isPending ? <Spinner className="size-3" /> : <Square aria-hidden className="size-3" />}
+      Stop
+    </Button>
+  );
+}
+
+export function ConsultChip({
+  consult,
+  meId,
+  canModerate,
+}: {
+  consult: MessageConsult;
+  /** The signed-in person (empty while unknown: no Stop). */
+  meId: string;
+  /** The channel's `viewerCan` has `message.delete_any`. */
+  canModerate: boolean;
+}) {
   const dir = useOrgDirectory();
   const names = consultNames(consult, dir);
-  const model = consultChipModel(consult, names);
+  const model = consultChipModel(consult, names, {
+    isHuman: !!meId && meId === consult.onBehalfOfUserId,
+    canModerate,
+  });
   const Icon = model.icon;
   const status = model.status;
   const StatusIcon = status?.icon;
@@ -124,6 +181,7 @@ export function ConsultChip({ consult }: { consult: MessageConsult }) {
           </span>
         </>
       ) : null}
+      {model.canStop ? <StopButton consult={consult} names={names} /> : null}
     </p>
   );
 }

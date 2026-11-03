@@ -204,3 +204,48 @@ test("a two-bot consult in one thread: Archie's question with its live chip, Bea
     await context.close();
   }
 });
+
+test("Stop: Víctor (the chain's human) stops a waiting consult; Alex never sees Stop; both see Stopped live", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  // Bea never answers: the hop stays pending until someone stops the chain.
+  held.add(bea.id);
+  const rootId = await askArchie("Do we have spare valves in stock?");
+  const questionId = await questionOf(rootId);
+  await beaTurn(rootId);
+
+  const v = await openAs(browser, ADMIN, info.project.name);
+  const a = await openAs(browser, ALEX, info.project.name);
+  try {
+    const vPanel = await openThread(v.page, rootId);
+    const aPanel = await openThread(a.page, rootId);
+    const vChip = chipOf(vPanel, questionId);
+    const aChip = chipOf(aPanel, questionId);
+    for (const chip of [vChip, aChip]) {
+      await expect(chip).toContainText(`Asked @${bea.username} for ${ADMIN.name}`);
+      await expect(chip.getByTestId("consult-status")).toHaveText("Waiting…");
+    }
+    // Stop is offered to the chain's human only (Alex is a member, not a moderator): a hint, the API decides.
+    const stop = vChip.getByRole("button", { name: `Stop asking @${bea.username}` });
+    await expect(stop).toBeVisible();
+    await expect(stop).toHaveAttribute("data-testid", "consult-stop");
+    await expect(aChip.getByTestId("consult-stop")).toHaveCount(0);
+
+    await stop.click();
+    await expect(
+      v.page
+        .locator("[data-sonner-toast]")
+        .filter({ hasText: `Stopped. @${archie.username} won't get more answers for this request.` }),
+    ).toBeVisible();
+    // The server announces the hop's new status: both readers see Stopped without a reload, and Stop is gone.
+    for (const chip of [vChip, aChip]) {
+      await expect(chip).toHaveAttribute("data-status", "cancelled", { timeout: 15_000 });
+      await expect(chip.getByTestId("consult-status")).toHaveText("Stopped");
+      await expect(chip.getByTestId("consult-stop")).toHaveCount(0);
+    }
+  } finally {
+    await a.context.close();
+    await v.context.close();
+  }
+});
