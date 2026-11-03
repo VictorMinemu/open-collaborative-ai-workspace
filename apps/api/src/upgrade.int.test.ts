@@ -84,6 +84,13 @@ const AUTOMATION_BACKFILL_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
   "../../../packages/db/drizzle/20261030071644_bots_off_automation_backfill/migration.sql",
 );
+/**
+ * Phase 07.7 (07.7-02, P-06, ADR-0027): the same completion for `agent.message`, which joined the Bots module (9 → 10).
+ */
+const AGENT_MESSAGE_BACKFILL_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../packages/db/drizzle/20261103045700_bots_off_agent_message_backfill/migration.sql",
+);
 /** The seed's fixed test key (32 bytes of 0x07) and plaintext; see packages/db/test/upgrade/seed-phase-5.sql. */
 const TEST_KEY_B64 = Buffer.alloc(32, 7).toString("base64");
 const SECRET_PLAINTEXT = "sk-upgrade-baseline-fake-provider-key";
@@ -118,6 +125,7 @@ const HEAD_ONLY = [
   "20261102205808_automation_events_purge_thread_key",
   "20261102210622_automation_events_full_message",
   "20261103043136_agent_chains",
+  "20261103045700_bots_off_agent_message_backfill",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -364,6 +372,8 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
 
     it("installs pg-boss as the migrator, with every catalog queue, and lets ocw_app use it (Phase 07.6, D-07)", async () => {
       expect(await pgbossQueues()).toEqual([...JOB_QUEUE_NAMES].sort());
+      // Phase 07.7 (D-11, ADR-0027): the hop timeouts' global tick queue is created on an upgraded database.
+      expect(await pgbossQueues()).toContain("consult.tick");
       const c = new pg.Client({ connectionString: urls.app });
       await c.connect();
       try {
@@ -472,7 +482,7 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       }
     });
 
-    it("completes the old Bots-off rule sets, so Bots reads off and denies connections, keys and automations; a custom set is untouched (WINDOWS #177, 07.6-01)", async () => {
+    it("completes the old Bots-off rule sets, so Bots reads off and denies connections, keys, automations and consults; a custom set is untouched (WINDOWS #177, 07.6-01, 07.7-02)", async () => {
       const db = createTenantDb(urls.app, { max: 1 });
       try {
         const view = (organizationId: string, userId: string) =>
@@ -501,8 +511,9 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
           botRead: false,
           automation: false,
           webhook: false,
-          // 5 + 1 duplicate per subject at N-1, plus the 2 added by 07.4-14 and the 2 added by 07.6-01 for each subject.
-          rows: 20,
+          // 5 + 1 duplicate per subject at N-1, plus the 2 added by 07.4-14, the 2 added by 07.6-01 and the
+          // `agent.message` row added by 07.7-02 for each subject.
+          rows: 22,
         });
         expect(await view(ORG_B, BEA_ADMIN)).toEqual({
           everyone: "custom",
@@ -524,7 +535,36 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
           const before = await n();
           await c.query(readFileSync(BACKFILL_DIR, "utf8"));
           await c.query(readFileSync(AUTOMATION_BACKFILL_DIR, "utf8"));
+          await c.query(readFileSync(AGENT_MESSAGE_BACKFILL_DIR, "utf8"));
           expect(await n()).toBe(before);
+          // 07.7-02 (ADR-0027): `agent.message` is denied for org A's everyone and for Max in person, by an authorless
+          // deny row without tool or folder; Bea's custom set gets none. The backfill never writes an allow row. (The
+          // resolver view above reads `off` for the 10-pattern Bots catalog once 07.7-01's grain is merged.)
+          const consults = await c.query(
+            "select organization_id, scope_unit_id, subject_kind, subject_id, effect, tool, path_prefix, created_by from app.permission_rules where permission = 'agent.message' order by subject_kind",
+          );
+          expect(consults.rows).toEqual([
+            {
+              organization_id: ORG_A,
+              scope_unit_id: null,
+              subject_kind: "everyone",
+              subject_id: null,
+              effect: "deny",
+              tool: null,
+              path_prefix: null,
+              created_by: null,
+            },
+            {
+              organization_id: ORG_A,
+              scope_unit_id: null,
+              subject_kind: "user",
+              subject_id: MAX_MEMBER,
+              effect: "deny",
+              tool: null,
+              path_prefix: null,
+              created_by: null,
+            },
+          ]);
           const automations = await c.query(
             "select organization_id, subject_kind, permission, created_by from app.permission_rules where permission like 'automation.%' order by subject_kind, permission",
           );
@@ -568,6 +608,32 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
         }
       } finally {
         await db.close();
+      }
+    });
+
+    it("keeps every bot turn outside any chain and adds no chain or hop (Phase 07.7, D-04, D-14)", async () => {
+      const c = new pg.Client({ connectionString: urls.migrator });
+      await c.connect();
+      try {
+        const turns = await c.query(
+          "select event_id, chain_id, chain_depth, answering_hop_id, returning_hop_id, reply_message_id from app.agent_turns order by event_id",
+        );
+        expect(turns.rows).toEqual([
+          {
+            event_id: N1_TURN,
+            chain_id: null,
+            chain_depth: 0,
+            answering_hop_id: null,
+            returning_hop_id: null,
+            reply_message_id: null,
+          },
+        ]);
+        const empty = await c.query(
+          "select (select count(*)::int from app.agent_chains) as chains, (select count(*)::int from app.agent_chain_hops) as hops",
+        );
+        expect(empty.rows).toEqual([{ chains: 0, hops: 0 }]);
+      } finally {
+        await c.end();
       }
     });
 

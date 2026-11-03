@@ -25,6 +25,8 @@ export const JOB_QUEUE_NAMES = [
   "watched.check",
   "work_session.summarize",
   "maintenance.daily",
+  // 07.7: hop timeouts, ADR-0027 (one global tick; the worker and its schedule are registered by 07.7-09).
+  "consult.tick",
 ] as const;
 export type JobQueueName = (typeof JOB_QUEUE_NAMES)[number];
 

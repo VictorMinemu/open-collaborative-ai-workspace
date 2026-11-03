@@ -41,6 +41,8 @@ export const JOB_QUEUES = {
     .object({ organizationId: Id, workSessionId: Id, mode: z.enum(["auto", "manual"]) })
     .strict(),
   "maintenance.daily": Empty,
+  // Phase 07.7 (D-11, ADR-0027): the hop timeouts' tick; it reads `app.expired_agent_chain_hops` (ids only).
+  "consult.tick": Empty,
 } as const satisfies Record<JobQueueName, z.ZodType>;
 
 export type QueueName = keyof typeof JOB_QUEUES;
@@ -52,7 +54,12 @@ const queuesMatchCatalog: Exact<QueueName, JobQueueName> = true;
 void queuesMatchCatalog;
 
 /** The queues a global cron tick may target (UTC, registered at `start()` when workers are on). */
-export type TickQueue = "automation.tick" | "mailbox.tick" | "watched.tick" | "maintenance.daily";
+export type TickQueue =
+  | "automation.tick"
+  | "mailbox.tick"
+  | "watched.tick"
+  | "maintenance.daily"
+  | "consult.tick";
 
 export interface JobContext {
   /** Aborted when pg-boss gives up on the job (expiry or shutdown past the grace period). */
