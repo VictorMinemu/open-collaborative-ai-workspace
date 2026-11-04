@@ -23,7 +23,41 @@ Node and pnpm run only the `pnpm ocw` command-line tool on the host. The service
 downloads the base images and every dependency, so allow 10 to 20 minutes. The owner's clean-machine check below
 records the measured time.
 
+## Install with one command (Linux server)
+
+On Ubuntu 24.04 or Debian 12, [`scripts/install.sh`](../scripts/install.sh) runs every step below:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/VictorMinemu/open-collaborative-ai-workspace/main/scripts/install.sh \
+  | sudo bash -s -- --domain ocw.example.com
+```
+
+It installs the prerequisites when they are missing: git, Docker Engine with Compose from Docker's apt repository,
+and Node 24, checksum-verified from nodejs.org. Then it:
+
+1. clones into `/opt/ocw`;
+2. runs `ocw setup`;
+3. runs `ocw enable proxy --site-address <domain>`;
+4. runs `docker compose up -d --build --wait`.
+
+Re-running it resumes a failed install. It never overwrites `.env` or rotates a secret. From a checkout,
+`sudo ./scripts/install.sh --domain …` installs that checkout in place. `--help` lists the options:
+
+| Option | Effect |
+| --- | --- |
+| `--domain <IPv4>` | Caddy's internal CA instead of Let's Encrypt |
+| `--tls internal` | Caddy's internal CA for a DNS name too |
+| `--local` | No proxy |
+| `--dir` | Install directory (default `/opt/ocw`) |
+| `--ref` | Branch or tag to install (default `main`) |
+| `--prepare-only` | Install the prerequisites only |
+| `--dry-run` | Print the steps without changing anything |
+
+The README walks a team through the first hour after the install: [the tutorial](../README.md#install-it-on-a-server).
+
 ## Install
+
+The same steps by hand, on any host with the [requirements](#requirements):
 
 ```bash
 git clone https://github.com/VictorMinemu/open-collaborative-ai-workspace.git ocw
