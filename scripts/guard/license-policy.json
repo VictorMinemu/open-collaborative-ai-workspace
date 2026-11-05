@@ -38,8 +38,8 @@
       "name": "@anthropic-ai/claude-agent-sdk",
       "match": ["@anthropic-ai/claude-agent-sdk", "@anthropic-ai/claude-agent-sdk-*"],
       "reason": "Work Zone Claude Code adapter in the Local Runtime (prod dependency of apps/local-runtime); Anthropic commercial terms",
-      "adr": "docs/adr/0021-self-hosted-release.md",
-      "status": "pending owner/legal confirmation"
+      "adr": "docs/adr/0034-public-releases-and-bundled-claude-agent-sdk.md",
+      "status": "owner-confirmed 2026-11-05 for the desktop app release"
     }
   ]
 }

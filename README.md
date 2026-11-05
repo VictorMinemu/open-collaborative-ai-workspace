@@ -140,10 +140,13 @@ SMTP (`OCW_SMTP_URL`, `OCW_MAIL_FROM` in `.env`). Without it, an admin creates a
 
 The Work Zone runs Claude Code or Codex on a machine you choose, under your own subscription:
 
-- **A teammate's Mac** (Apple silicon), with the desktop app. There is no signed download yet, so build it from a
-  checkout with `pnpm install && pnpm --filter @ocw/desktop package:mac`, then open
-  `apps/desktop/release/mac-arm64/OCW.app` (the first time, right-click › Open). Pair it under
-  **Settings › Devices › Add device › Desktop app**.
+- **A teammate's Mac** (Apple silicon), with the desktop app:
+  1. Download `OCW-<version>-macos-arm64.dmg` from the [latest release](../../releases/latest) and drag OCW to
+     Applications.
+  2. The app is not notarized yet, so macOS blocks the first launch. Open it once, then go to **System Settings ›
+     Privacy & Security** and choose **Open Anyway**. Alternatively, run
+     `xattr -dr com.apple.quarantine /Applications/OCW.app`.
+  3. Enter your workspace URL, then pair it under **Settings › Devices › Add device › Desktop app**.
 - **A shared Linux or macOS server** with no desktop app:
   1. Under **Settings › Devices › Add a device › Server**, copy the one-line command (`curl … /api/v1/runtime/install.sh | sh`).
   2. Run it there as a non-root user.
@@ -160,7 +163,7 @@ Run these from `/opt/ocw`:
 | --- | --- |
 | Status and logs | `docker compose ps`, then `docker compose logs -f api` |
 | Back up (database, files, bot state) | `node scripts/ocw.mjs backup` → `backups/<time>/` |
-| Upgrade | Back up, then `git pull --ff-only`, `node scripts/ocw.mjs setup --add-missing` and `docker compose up -d --build --wait` |
+| Upgrade to the newest release | `sudo node scripts/ocw.mjs upgrade` (backup, new release, new keys, rebuild; `--check` only looks) |
 | Monitoring (Grafana, Prometheus, Loki, Tempo) | `node scripts/ocw.mjs enable observability` |
 | Secrets in OpenBao | `node scripts/ocw.mjs enable vault` |
 | Stop, keeping the data | `docker compose down` |
@@ -186,8 +189,8 @@ This setup serves only the machine it runs on. To give a team access, use the se
 
 MVP 1 is for testing with your team, not yet for production-critical work:
 
-- **Desktop app:** macOS on Apple silicon only, built from source and not notarized. Signed builds for macOS,
-  Windows and Linux are MVP 2 (Phase 9).
+- **Desktop app:** macOS on Apple silicon only, and not notarized. Signed builds for macOS, Windows and Linux are
+  MVP 2 (Phase 9).
 - **Attachments:** bots cannot read them yet.
 - **Claude:** works through an org API key only. Some ChatGPT Business or Enterprise seats cannot sign in with their
   plan.

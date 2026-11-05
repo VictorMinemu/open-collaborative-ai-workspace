@@ -312,10 +312,15 @@ pnpm ocw backup                    # database, objects, cell state (and OpenBao 
 pnpm ocw restore backups/<time> --yes
 ```
 
+Upgrade to the newest release with one command:
+
+```bash
+pnpm ocw upgrade --check           # current and newest release; changes nothing
+pnpm ocw upgrade                   # backup → git checkout <tag> → new keys → docker compose up -d --build --wait
+```
+
 The runbook covers cron, `--consistent`, restoring onto a new machine, upgrading and rolling back:
-[backup-restore.md](self-hosting/backup-restore.md). An upgrade is a backup, `git checkout <tag>`,
-`pnpm ocw setup --add-missing`, then `docker compose up -d --build --wait`. The API refuses to start on a schema it
-does not match.
+[backup-restore.md](self-hosting/backup-restore.md). The API refuses to start on a schema it does not match.
 
 > A backup never contains `.env`. With the vault on, it does contain OpenBao's seal key, so it can unseal the secrets
 > by itself. Keep it as private as `.env`.

@@ -22,7 +22,7 @@
 #   --tls internal      Caddy's own CA even for a DNS name (internal names); clients must trust its root.
 #   --local             no proxy: http://localhost:3000 on this machine only (a laptop trial, not for a team).
 #   --dir <path>        install directory when cloning (default /opt/ocw).
-#   --ref <git ref>     branch or tag to clone (default main).
+#   --ref <git ref>     branch or tag to clone (default the newest vX.Y.Z release, else main).
 #   --repo <url>        repository to clone (default the upstream GitHub repository).
 #   --ports <NN> --project <name> --image-tag <tag>
 #                       a second instance on the same host (passed to `ocw setup` on the first run; docs/INSTALL.md).
@@ -34,7 +34,7 @@ set -euo pipefail
 ORIG_ARGS=("$@")
 
 REPO_URL="https://github.com/VictorMinemu/open-collaborative-ai-workspace.git"
-REF="main"
+REF=""
 DIR="/opt/ocw"
 DOMAIN=""
 TLS=""
@@ -44,6 +44,7 @@ PREPARE_ONLY=0
 DRY_RUN=0
 DIR_SET=0
 SETUP_ARGS=()
+IMAGE_TAG_SET=0
 
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -58,7 +59,7 @@ Usage: install.sh --domain <host> [--tls internal] [--dir /opt/ocw] [--ref main]
   --tls internal      Caddy's internal CA even for a DNS name
   --local             no proxy: http://localhost:3000 on this machine only (a trial, not for a team)
   --dir <path>        install directory when cloning (default /opt/ocw)
-  --ref <git ref>     branch or tag to clone (default main)
+  --ref <git ref>     branch or tag to clone (default the newest release, else main)
   --repo <url>        repository to clone (default the upstream GitHub repository)
   --ports <NN> --project <name> --image-tag <tag>
                       a second instance on this host (passed to ocw setup on the first run)
@@ -86,7 +87,8 @@ while [[ $# -gt 0 ]]; do
     --ref=*) REF="${1#*=}"; shift ;;
     --repo) REPO_URL="${2:-}"; shift 2 ;;
     --repo=*) REPO_URL="${1#*=}"; shift ;;
-    --ports | --project | --image-tag) SETUP_ARGS+=("$1" "${2:-}"); shift 2 ;;
+    --image-tag) IMAGE_TAG_SET=1; SETUP_ARGS+=("$1" "${2:-}"); shift 2 ;;
+    --ports | --project) SETUP_ARGS+=("$1" "${2:-}"); shift 2 ;;
     --no-docker-install) INSTALL_DOCKER=0; shift ;;
     --prepare-only) PREPARE_ONLY=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -243,9 +245,15 @@ if [[ $DIR_SET -eq 0 && -n "$SELF" && -f "$SELF" && -f "$(cd "$(dirname "$SELF")
   DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
   say "Using this checkout: $DIR"
 elif [[ -f "$DIR/compose.yaml" && -d "$DIR/.git" ]]; then
-  say "Using the existing checkout in $DIR (not updated: upgrades follow docs/self-hosting/backup-restore.md)"
+  say "Using the existing checkout in $DIR (not updated here: upgrade with node scripts/ocw.mjs upgrade)"
 else
   [[ ! -e "$DIR" || -z "$(ls -A "$DIR" 2>/dev/null)" ]] || die "$DIR exists and is not an install of this project; choose another --dir"
+  if [[ -z "$REF" ]]; then
+    # The newest stable release (vX.Y.Z, no pre-release); main until one is published. `ocw upgrade` moves between them.
+    REF="$(git ls-remote --tags --refs "$REPO_URL" 'v*' 2>/dev/null | sed 's#.*refs/tags/##' |
+      grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+    REF="${REF:-main}"
+  fi
   say "Cloning $REPO_URL ($REF) into $DIR"
   # A server needs no planning history (.planning/ is most of the tree): a sparse, blobless clone skips it, and later
   # `git pull` / `git checkout <tag>` upgrades keep the same sparse set.
@@ -268,6 +276,8 @@ if [[ -f "$DIR/.env" ]]; then
   ocw setup --add-missing
 else
   say "Generating .env with fresh secrets (written with mode 0600, never printed)"
+  # A release's images are tagged with it, so `ocw upgrade` keeps the previous release's images for a rollback.
+  if [[ $IMAGE_TAG_SET -eq 0 && "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then SETUP_ARGS+=(--image-tag "$REF"); fi
   ocw setup "${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}"
 fi
 
@@ -320,6 +330,7 @@ $(printf '\033[1m')Open Collaborative AI Workspace is running.$(printf '\033[0m'
 
   Operate it from "$DIR":  docker compose ps | logs -f api | down
   Back up:               cd "$DIR" && node scripts/ocw.mjs backup   (docs/self-hosting/backup-restore.md)
+  Upgrade:               cd "$DIR" && sudo node scripts/ocw.mjs upgrade   (backup, newest release, rebuild)
   Operator tool:         cd "$DIR" && node scripts/ocw.mjs help
   Guide:                 "$DIR/docs/INSTALL.md"
 EOF

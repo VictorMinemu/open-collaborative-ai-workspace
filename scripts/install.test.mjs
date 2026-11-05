@@ -60,7 +60,8 @@ describe("install.sh --dry-run", { skip: canPlan ? false : "no Docker and no apt
     const r = run(["--dry-run", "--domain", "ocw.example.com", "--dir", dir, "--ref", "v1.2.3"]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /\[dry-run\] git clone --quiet --depth 1 --branch v1\.2\.3 /);
-    assert.match(r.stdout, /\[dry-run\] node -- .*\/ocw\/scripts\/ocw\.mjs setup\n/);
+    // A release's images carry its tag, so `ocw upgrade` keeps them for a rollback.
+    assert.match(r.stdout, /\[dry-run\] node -- .*\/ocw\/scripts\/ocw\.mjs setup --image-tag v1\.2\.3\n/);
     assert.match(
       r.stdout,
       /\[dry-run\] node -- .*scripts\/ocw\.mjs enable proxy --site-address ocw\.example\.com --no-up/,
@@ -71,7 +72,7 @@ describe("install.sh --dry-run", { skip: canPlan ? false : "no Docker and no apt
   });
 
   it("an IPv4 address gets Caddy's internal CA and the root-certificate hint", () => {
-    const r = run(["--dry-run", "--domain", "203.0.113.7", "--dir", path.join(tmp, "ip")]);
+    const r = run(["--dry-run", "--domain", "203.0.113.7", "--dir", path.join(tmp, "ip"), "--ref", "main"]);
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /Caddy's internal CA/);
     assert.match(r.stdout, /root\.crt/);
@@ -81,7 +82,9 @@ describe("install.sh --dry-run", { skip: canPlan ? false : "no Docker and no apt
     const copy = path.join(tmp, "downloaded", "install.sh");
     mkdirSync(path.dirname(copy), { recursive: true });
     copyFileSync(INSTALL, copy);
-    const r = spawnSync("bash", [copy, "--dry-run", "--domain", "ocw.example.com"], { encoding: "utf8" });
+    const r = spawnSync("bash", [copy, "--dry-run", "--domain", "ocw.example.com", "--ref", "main"], {
+      encoding: "utf8",
+    });
     assert.equal(r.status, 0, r.stderr);
     assert.match(
       r.stdout,
@@ -94,8 +97,35 @@ describe("install.sh --dry-run", { skip: canPlan ? false : "no Docker and no apt
     assert.doesNotMatch(r.stdout, /Using this checkout/);
   });
 
+  it("without --ref, installs the newest stable release (never a pre-release), and main when there is none", () => {
+    const repo = path.join(tmp, "origin");
+    const git = (...args) =>
+      spawnSync("git", ["-c", "user.email=t@example.com", "-c", "user.name=t", "-C", repo, ...args], {
+        encoding: "utf8",
+      });
+    mkdirSync(repo);
+    git("init", "--quiet");
+    git("commit", "--quiet", "--allow-empty", "-m", "x");
+    const plan = () =>
+      run([
+        "--dry-run",
+        "--domain",
+        "ocw.example.com",
+        "--dir",
+        path.join(tmp, "rel"),
+        "--repo",
+        `file://${repo}`,
+      ]);
+    assert.match(plan().stdout, /git clone --quiet --depth 1 --branch main /);
+    for (const tag of ["v0.2.0", "v0.10.0", "v0.11.0-rc.1", "latest"]) git("tag", tag);
+    const r = plan();
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /git clone --quiet --depth 1 --branch v0\.10\.0 /);
+    assert.match(r.stdout, /ocw\.mjs setup --image-tag v0\.10\.0\n/);
+  });
+
   it("--local skips the proxy and points at localhost", () => {
-    const r = run(["--dry-run", "--local", "--dir", path.join(tmp, "local")]);
+    const r = run(["--dry-run", "--local", "--dir", path.join(tmp, "local"), "--ref", "main"]);
     assert.equal(r.status, 0, r.stderr);
     assert.doesNotMatch(r.stdout, /enable proxy/);
     assert.match(r.stdout, /http:\/\/localhost:3000\/setup/);

@@ -1,0 +1,89 @@
+# Releases. A vX.Y.Z tag builds the desktop app on a macOS runner and publishes a GitHub release with the app, the
+# server installer and their SHA-256 checksums; the notes come from docs/releases/<tag>.md (else GitHub's generated
+# notes). A tag with a suffix (v0.2.0-rc.1) is published as a pre-release, which `ocw upgrade` never picks by itself.
+# Pull requests touching the desktop app, the daemon or this file build the app too (nothing is uploaded).
+# The macOS build is unsigned: an ad-hoc signature, no Developer ID and no notarization (the release notes say how to
+# open it). workflow_dispatch rebuilds and re-uploads an existing tag.
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - "apps/local-runtime/**"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "An existing release tag to rebuild and publish (vX.Y.Z)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  desktop-macos:
+    name: desktop app (macOS arm64)
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: write # the publish step only; pull requests from forks get a read-only token anyway
+    env:
+      TAG: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
+    steps:
+      - name: Check the tag
+        if: env.TAG != ''
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "not a release tag: $TAG"; exit 1; }
+      # Pinned to commit SHAs: this job can publish releases.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG && format('refs/tags/{0}', env.TAG) || github.ref }}
+          # .planning/ is most of the tree and no build reads it.
+          sparse-checkout: |
+            /*
+            !/.planning/
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - name: pnpm (corepack)
+        run: corepack enable && pnpm --version
+      - run: pnpm install --frozen-lockfile
+      - name: App version from the tag
+        if: env.TAG != ''
+        working-directory: apps/desktop
+        run: npm pkg set version="${TAG#v}"
+      - name: Build OCW.app and the .dmg
+        run: pnpm --filter @ocw/desktop package:mac
+      - name: Collect the release files
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          dmg="$(ls apps/desktop/release/*.dmg | head -n 1)"
+          cp "$dmg" "out/OCW-${TAG:-pr}-macos-arm64.dmg"
+          cp scripts/install.sh out/install.sh
+          (cd out && shasum -a 256 * > SHA256SUMS)
+          cat out/SHA256SUMS
+      # No workflow artifact: on a public repository it would be a second, unreviewed download channel. A pull request
+      # only proves the app builds; a tag publishes it through the release below.
+      - name: Publish the GitHub release
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber
+            exit 0
+          fi
+          args=(--verify-tag --title "OCW $TAG")
+          if [[ -f "docs/releases/$TAG.md" ]]; then args+=(--notes-file "docs/releases/$TAG.md"); else args+=(--generate-notes); fi
+          if [[ "$TAG" == *-* ]]; then args+=(--prerelease); else args+=(--latest); fi
+          gh release create "$TAG" "${args[@]}" out/*

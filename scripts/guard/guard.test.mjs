@@ -249,7 +249,7 @@ describe("guard: dependency licenses", () => {
     assert.equal(notes.length, 1);
     assert.match(
       notes[0],
-      /^exception: @anthropic-ai\/claude-agent-sdk \(pending owner\/legal confirmation, ADR-0021\)/,
+      /^exception: @anthropic-ai\/claude-agent-sdk \(owner-confirmed 2026-11-05 for the desktop app release, ADR-0034\)/,
     );
     // A look-alike name is not covered.
     assert.equal(checkGraph([entry("@anthropic-ai/claude-agent-sdkx", "Unknown")], policy).length, 1);
@@ -369,7 +369,7 @@ describe("guard: the repository", () => {
     assert.equal(res.status, 0, res.out);
     assert.match(
       res.out,
-      /exception: @anthropic-ai\/claude-agent-sdk \(pending owner\/legal confirmation, ADR-0021\)/,
+      /exception: @anthropic-ai\/claude-agent-sdk \(owner-confirmed 2026-11-05 for the desktop app release, ADR-0034\)/,
     );
   });
 });
