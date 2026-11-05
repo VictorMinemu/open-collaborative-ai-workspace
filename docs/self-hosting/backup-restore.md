@@ -159,9 +159,10 @@ pnpm ocw restore backups/<pre-upgrade> --yes   # the backup from step 1; everyth
 
 Every `pnpm verify` restores the previous release's schema and data and migrates them to the current code. The test
 then checks the rows, tenant isolation, forced row-level security, sealed secrets and API boot
-(`apps/api/src/upgrade.int.test.ts`). Until `v0.1.0` is tagged, N-1 is the Phase 5 merge (`3bbcbd9`). From `v0.1.0`
-on, N-1 is the previous release tag. Upgrade one release at a time when you skip several, and take a backup before
-each one.
+(`apps/api/src/upgrade.int.test.ts`). N-1 is still the Phase 5 merge (`3bbcbd9`). It is older than `v0.1.0` (the
+Phase 7 tag, which had no published release), so the test covers every migration up to `v0.2.0`, the first public
+release. From the next release on, N-1 is the previous release tag. Upgrade one release at a time when you skip
+several, and take a backup before each one.
 
 ## Object storage keys
 
