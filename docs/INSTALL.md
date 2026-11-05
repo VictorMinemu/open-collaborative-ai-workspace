@@ -32,6 +32,8 @@ curl -fsSL https://raw.githubusercontent.com/VictorMinemu/open-collaborative-ai-
   | sudo bash -s -- --domain ocw.example.com
 ```
 
+To read it first, `curl -fsSLo install.sh <same URL>`, then `sudo bash install.sh --domain ocw.example.com`.
+
 It installs the prerequisites when they are missing: git, Docker Engine with Compose from Docker's apt repository,
 and Node 24, checksum-verified from nodejs.org. Then it:
 
