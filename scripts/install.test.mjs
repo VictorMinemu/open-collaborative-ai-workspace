@@ -4,7 +4,7 @@
 // prints the whole plan (clone, `ocw setup`, `ocw enable proxy`, `docker compose up`) without running any of it.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, describe, it } from "node:test";
@@ -75,6 +75,23 @@ describe("install.sh --dry-run", { skip: canPlan ? false : "no Docker and no apt
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /Caddy's internal CA/);
     assert.match(r.stdout, /root\.crt/);
+  });
+
+  it("a downloaded copy outside a checkout clones the repository into /opt/ocw", () => {
+    const copy = path.join(tmp, "downloaded", "install.sh");
+    mkdirSync(path.dirname(copy), { recursive: true });
+    copyFileSync(INSTALL, copy);
+    const r = spawnSync("bash", [copy, "--dry-run", "--domain", "ocw.example.com"], { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(
+      r.stdout,
+      /\[dry-run\] git clone --quiet --depth 1 --branch main --filter=blob:none --sparse https:\/\/github\.com\/VictorMinemu\/open-collaborative-ai-workspace\.git \/opt\/ocw/,
+    );
+    assert.match(
+      r.stdout,
+      /\[dry-run\] git -C \/opt\/ocw sparse-checkout set --no-cone \/\* !\/\.planning\//,
+    );
+    assert.doesNotMatch(r.stdout, /Using this checkout/);
   });
 
   it("--local skips the proxy and points at localhost", () => {

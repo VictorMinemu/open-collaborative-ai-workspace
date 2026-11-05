@@ -71,12 +71,15 @@ curl -fsSL https://raw.githubusercontent.com/VictorMinemu/open-collaborative-ai-
   | sudo bash -s -- --domain ocw.your-company.com
 ```
 
-Or from a checkout, which also works while the repository is private:
+To read the script before running it, download it first:
 
 ```bash
-git clone https://github.com/VictorMinemu/open-collaborative-ai-workspace.git /opt/ocw
-sudo /opt/ocw/scripts/install.sh --domain ocw.your-company.com
+curl -fsSLo install.sh https://raw.githubusercontent.com/VictorMinemu/open-collaborative-ai-workspace/main/scripts/install.sh
+less install.sh
+sudo bash install.sh --domain ocw.your-company.com
 ```
+
+From a checkout, `sudo ./scripts/install.sh --domain …` installs that checkout in place.
 
 The [installer](scripts/install.sh) does five things:
 
