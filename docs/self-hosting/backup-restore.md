@@ -111,10 +111,27 @@ until then.
 
 ## Upgrading
 
+Releases are the `vX.Y.Z` tags on GitHub ([releases](https://github.com/VictorMinemu/open-collaborative-ai-workspace/releases)).
+`ocw upgrade` moves an install to the newest one (`node scripts/ocw.mjs upgrade` where pnpm is not installed):
+
+```bash
+pnpm ocw upgrade --check      # current and newest release; changes nothing
+pnpm ocw upgrade              # asks first; --yes in scripts; --to vX.Y.Z for a given release
+```
+
+It refuses to start on edited tracked files, on an older release, or on a release made before an install from
+`main`. It then runs, in order:
+
+1. `ocw backup --consistent` into `backups/pre-<tag>-<time>/`;
+2. `git checkout <tag>`, and `OCW_IMAGE_TAG=<tag>` in `.env`, so the previous release's images stay for a rollback;
+3. `ocw setup --add-missing` from the new release (new keys only; never rotates a value);
+4. `docker compose up -d --build --wait` (the one-shot migrate service upgrades the schema).
+
+If a step after the backup fails, it prints the commit, image tag and backup to go back to. The same steps by hand:
+
 ```bash
 pnpm ocw backup --consistent                  # 1. a backup of the current release
 git fetch --tags && git checkout v0.2.0      # 2. the new release
-pnpm install --frozen-lockfile
 pnpm ocw setup --add-missing                  # 3. new keys the release needs; never rotates existing values
 docker compose up -d --build --wait           # 4. new images; the one-shot migrate service upgrades the schema
 ```
@@ -133,7 +150,7 @@ with its own before it listens. If they differ, it exits with one of these messa
 roll back:
 
 ```bash
-git checkout v0.1.0 && pnpm install --frozen-lockfile
+git checkout v0.1.0                            # and OCW_IMAGE_TAG back to the previous tag in .env
 docker compose up -d --build --wait            # the API refuses to start: "migrated by a newer release"
 pnpm ocw restore backups/<pre-upgrade> --yes   # the backup from step 1; everything after it is lost
 ```
