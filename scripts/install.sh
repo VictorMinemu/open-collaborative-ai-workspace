@@ -247,7 +247,10 @@ elif [[ -f "$DIR/compose.yaml" && -d "$DIR/.git" ]]; then
 else
   [[ ! -e "$DIR" || -z "$(ls -A "$DIR" 2>/dev/null)" ]] || die "$DIR exists and is not an install of this project; choose another --dir"
   say "Cloning $REPO_URL ($REF) into $DIR"
-  run git clone --quiet --depth 1 --branch "$REF" "$REPO_URL" "$DIR"
+  # A server needs no planning history (.planning/ is most of the tree): a sparse, blobless clone skips it, and later
+  # `git pull` / `git checkout <tag>` upgrades keep the same sparse set.
+  run git clone --quiet --depth 1 --branch "$REF" --filter=blob:none --sparse "$REPO_URL" "$DIR"
+  run git -C "$DIR" sparse-checkout set --no-cone '/*' '!/.planning/'
 fi
 
 if [[ $DRY_RUN -eq 0 ]]; then

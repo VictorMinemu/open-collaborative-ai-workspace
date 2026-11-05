@@ -85,7 +85,11 @@ describe("install.sh --dry-run", { skip: canPlan ? false : "no Docker and no apt
     assert.equal(r.status, 0, r.stderr);
     assert.match(
       r.stdout,
-      /\[dry-run\] git clone --quiet --depth 1 --branch main https:\/\/github\.com\/VictorMinemu\/open-collaborative-ai-workspace\.git \/opt\/ocw/,
+      /\[dry-run\] git clone --quiet --depth 1 --branch main --filter=blob:none --sparse https:\/\/github\.com\/VictorMinemu\/open-collaborative-ai-workspace\.git \/opt\/ocw/,
+    );
+    assert.match(
+      r.stdout,
+      /\[dry-run\] git -C \/opt\/ocw sparse-checkout set --no-cone \/\* !\/\.planning\//,
     );
     assert.doesNotMatch(r.stdout, /Using this checkout/);
   });
