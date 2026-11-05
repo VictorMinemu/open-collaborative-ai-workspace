@@ -339,10 +339,11 @@ describe("job runtime (pg-boss, 07.6-03)", () => {
         jobs.schedule("automation.tick", "* * * * *");
         return jobs;
       };
-      // An earlier test's real-time schedule (its row and the ticks it queued) is not this test's, and its real-time
-      // cron claim (pgboss.version.cron_on, later than this clock) would keep the fake clock from claiming a pass.
+      // An earlier test's real-time schedule (its row, the ticks it queued and the `__pgboss__send-it` slots its cron
+      // pass already filed, e.g. today's 18:25) is not this test's, and its real-time cron claim
+      // (pgboss.version.cron_on, later than this clock) would keep the fake clock from claiming a pass.
       const resetCron =
-        "delete from pgboss.job where name = 'automation.tick'; delete from pgboss.schedule where name = 'automation.tick'; update pgboss.version set cron_on = null";
+        "delete from pgboss.job where name = 'automation.tick' or (name = '__pgboss__send-it' and data->>'name' = 'automation.tick'); delete from pgboss.schedule where name = 'automation.tick'; update pgboss.version set cron_on = null";
       await query(tdb.superuserUrl, resetCron);
       const a = make("a");
       const b = make("b");
@@ -357,7 +358,9 @@ describe("job runtime (pg-boss, 07.6-03)", () => {
         const slots = await query<{ slot: string }>(
           tdb.superuserUrl,
           `select to_char(singleton_on, 'HH24:MI') as slot from pgboss.job
-            where name = '__pgboss__send-it' and data->>'name' = 'automation.tick' order by singleton_on`,
+            where name = '__pgboss__send-it' and data->>'name' = 'automation.tick'
+              and singleton_on >= '2026-01-05T10:00:00Z' and singleton_on < '2026-01-05T11:00:00Z'
+            order by singleton_on`,
         );
         const minutes = slots.map((r) => r.slot);
         expect(new Set(minutes).size, minutes.join(",")).toBe(minutes.length);
