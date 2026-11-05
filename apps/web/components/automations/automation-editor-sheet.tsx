@@ -136,6 +136,21 @@ function valuesOfDraft(d: AutomationDraftDefaults): Values {
   return { ...d, triggerKind: "schedule", inbound: EMPTY_INBOUND, mailbox: EMPTY_MAILBOX };
 }
 
+/**
+ * The form with the first usable bot when it has none yet (a personal bot also switches the target to its DM); a
+ * form that already has a bot, such as a proposal's, comes back unchanged.
+ */
+export function withDefaultBot<V extends { agentId: string; target: { kind: string } }>(
+  v: V,
+  bots: readonly { id: string; ready: boolean; personal: boolean }[],
+): V {
+  if (v.agentId || bots.length === 0) return v;
+  const first = bots.find((b) => b.ready) ?? bots[0];
+  if (!first) return v;
+  const target = first.personal ? { ...EMPTY_TARGET, kind: "dm" as const } : v.target;
+  return { ...v, agentId: first.id, target };
+}
+
 function blank(): Values {
   return {
     name: "",
@@ -267,16 +282,14 @@ export function AutomationEditorSheet({
     setConfirmDiscard(false);
   }, [key, id, draftId, automation, draftView]);
 
-  // A new automation picks the first usable bot (personal bots first, as the API lists them).
+  // A new automation picks the first usable bot (personal bots first, as the API lists them). A proposal (`?draft=`)
+  // always keeps its own bot, and the functional update never replaces a bot already set in the same render.
   const bots = options.data?.bots ?? [];
   useEffect(() => {
-    if (mode !== "new" || values.agentId || bots.length === 0) return;
-    const first = bots.find((b) => b.ready) ?? bots[0];
-    if (!first) return;
-    const target = first.personal ? { ...EMPTY_TARGET, kind: "dm" as const } : values.target;
-    setValues((v) => ({ ...v, agentId: first.id, target }));
-    setInitial((v) => ({ ...v, agentId: first.id, target }));
-  }, [mode, values.agentId, values.target, bots]);
+    if (mode !== "new" || draftId || values.agentId || bots.length === 0) return;
+    setValues((v) => withDefaultBot(v, bots));
+    setInitial((v) => withDefaultBot(v, bots));
+  }, [mode, draftId, values.agentId, bots]);
 
   const bot =
     bots.find((b) => b.id === values.agentId) ??
