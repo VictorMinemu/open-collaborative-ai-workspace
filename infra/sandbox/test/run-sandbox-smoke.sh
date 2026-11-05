@@ -523,6 +523,12 @@ section_core() {
     ok "purge B removes its container, workspace and packages volumes and network (A's objects stay)"
   else
     fail "purge B → ${status} $(cat "$WORK/body.json"), ${left_b} object(s) left"
+    # Intermittent (2 of ~13 CI runs, always "removed 3, 2 left"): name what stayed so the next one is diagnosable.
+    docker ps -a --filter "label=ocw.agent=${B}" --format '     left container {{.Names}} kind={{.Label "ocw.kind"}} {{.Status}}' || true
+    docker volume ls --filter "label=ocw.agent=${B}" --format '     left volume {{.Name}}' || true
+    for n in $(docker network ls -q --filter "label=ocw.agent=${B}"); do
+      docker network inspect -f '     left network {{.Name}} endpoints: {{range .Containers}}{{.Name}} {{end}}' "$n" || true
+    done
   fi
 }
 
