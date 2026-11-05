@@ -41,7 +41,8 @@ jobs:
         if: env.TAG != ''
         run: |
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "not a release tag: $TAG"; exit 1; }
-      - uses: actions/checkout@v7
+      # Pinned to commit SHAs: this job can publish releases.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG && format('refs/tags/{0}', env.TAG) || github.ref }}
           # .planning/ is most of the tree and no build reads it.
@@ -49,7 +50,7 @@ jobs:
             /*
             !/.planning/
           sparse-checkout-cone-mode: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
       - name: pnpm (corepack)
