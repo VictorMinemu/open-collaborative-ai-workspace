@@ -547,6 +547,14 @@ describe("Phase 07.14 organization connections", () => {
   });
 
   it("as the app role in organization B, organization A's connection is invisible, unchangeable, and B cannot point at A's server", async () => {
+    // The organization's table: RLS forced, the tenant policy alone (no owner-only policy, PD-05).
+    const rls = await db.query(
+      `select c.relrowsecurity as rls, c.relforcerowsecurity as force,
+              array(select polname::text from pg_policy where polrelid = c.oid order by 1) as policies
+         from pg_class c where c.oid = 'app.connector_org_connections'::regclass`,
+    );
+    expect(rls.rows).toEqual([{ rls: true, force: true, policies: ["tenant_isolation"] }]);
+
     const srv = await server(a.id, "streamable-http", "org_oauth");
     expect(await orgConn(a.id, srv, "account_label", ["ops@a.example.test"])).toBe(null);
 
