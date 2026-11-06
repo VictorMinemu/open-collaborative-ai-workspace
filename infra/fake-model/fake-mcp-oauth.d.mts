@@ -54,6 +54,19 @@ export interface FakeMcpOAuthScenario {
   /** AS metadata advertises neither dynamic registration nor client ID metadata documents (a client must be
    * pre-registered). */
   no_registration?: boolean;
+  /** AS metadata lists `client_secret_post` alone in `token_endpoint_auth_methods_supported`, and the token endpoint
+   * refuses a Basic header with 401 `invalid_client` (07.14 D-10: a client must pick post from the metadata). */
+  cc_post_only?: boolean;
+  /** AS metadata of a client-credentials-only server: `issuer`, `token_endpoint`, `grant_types_supported:
+   * ["client_credentials"]`, `token_endpoint_auth_methods_supported` (and revocation), with no
+   * `authorization_endpoint`, `response_types_supported` or `code_challenge_methods_supported` (07.14 D-17). */
+  no_authorization_endpoint?: boolean;
+  /** AS metadata's `issuer` is `<base>/mcp-oauth-other` while it is served at the `mcp-oauth` well-known path
+   * (07.14 D-10 `issuer_mismatch`). */
+  issuer_mismatch_meta?: boolean;
+  /** authorize redirects to the registered redirect with `error=invalid_scope`, `state` and `iss`, and no code
+   * (07.14 D-10 `scope_rejected`). */
+  invalid_scope_at_authorize?: boolean;
 }
 
 export interface FakeMcpOAuthStats {

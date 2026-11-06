@@ -29,6 +29,9 @@ export const CALLBACK_URL = `${PUBLIC_API_URL}/api/v1/connectors/oauth/callback`
 export const PRE_REGISTERED = "ocw-test";
 export const PRE_REGISTERED_CONFIDENTIAL = "ocw-test-confidential";
 export const CONFIDENTIAL_SECRET = "CONFIDENTIAL-CLIENT-SECRET-CANARY";
+/** The fake's pre-registered client-credentials client (07.14 `org_client_credentials`); no redirect URIs. */
+export const PRE_REGISTERED_CC = "ocw-test-cc";
+export const CC_SECRET = "CC-CLIENT-SECRET-CANARY";
 
 // biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
 export type Json = Record<string, any>;
@@ -94,6 +97,7 @@ export async function startConnectorsStack(
         client_secret: CONFIDENTIAL_SECRET,
         redirect_uris: [CALLBACK_URL],
       },
+      { client_id: PRE_REGISTERED_CC, client_secret: CC_SECRET, redirect_uris: [] },
     ],
   });
   let down = false;

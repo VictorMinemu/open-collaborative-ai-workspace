@@ -266,6 +266,23 @@ export function createFakeMcpOAuth(opts = {}) {
       delete meta.registration_endpoint;
       delete meta.client_id_metadata_document_supported;
     }
+    if (scenario.cc_post_only) meta.token_endpoint_auth_methods_supported = ["client_secret_post"];
+    if (scenario.issuer_mismatch_meta && o.issuer === `${o.origin}${PREFIX}`)
+      meta.issuer = `${o.origin}${PREFIX}-other`;
+    if (scenario.no_authorization_endpoint) {
+      // A client-credentials-only server: no authorize, PKCE, registration or CIMD (07.14 D-17).
+      return {
+        issuer: meta.issuer,
+        token_endpoint: meta.token_endpoint,
+        revocation_endpoint: meta.revocation_endpoint,
+        scopes_supported: RESOURCE_SCOPES,
+        grant_types_supported: ["client_credentials"],
+        token_endpoint_auth_methods_supported: meta.token_endpoint_auth_methods_supported.filter(
+          (m) => m !== "none",
+        ),
+        revocation_endpoint_auth_methods_supported: meta.revocation_endpoint_auth_methods_supported,
+      };
+    }
     return meta;
   }
 
@@ -377,7 +394,8 @@ export function createFakeMcpOAuth(opts = {}) {
       return fail("invalid_target", "resource must be the protected resource");
     const requested = (q.get("scope") ?? "").split(/\s+/u).filter(Boolean);
     const known = [...RESOURCE_SCOPES, "offline_access"];
-    if (requested.some((s) => !known.includes(s))) return fail("invalid_scope", "unknown scope");
+    if (scenario.invalid_scope_at_authorize || requested.some((s) => !known.includes(s)))
+      return fail("invalid_scope", "unknown scope");
     if (scenario.deny) return fail("access_denied", "the user denied the request");
     const scope = requested.filter((s) => s !== "offline_access").join(" ") || DEFAULT_SCOPE;
 
@@ -399,6 +417,8 @@ export function createFakeMcpOAuth(opts = {}) {
   /** Client authentication at the token endpoint: Basic, client_secret_post, or none for public clients. */
   function authenticateClient(req, form) {
     const basic = basicCredentials(req);
+    // cc_post_only: the metadata lists client_secret_post alone, so a Basic header is refused (07.14 D-10).
+    if (scenario.cc_post_only && basic) return null;
     const id = basic ? basic.id : form.get("client_id");
     const secret = basic ? basic.secret : form.get("client_secret");
     const client = clients.get(id ?? "");
