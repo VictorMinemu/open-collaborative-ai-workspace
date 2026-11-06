@@ -54,5 +54,9 @@ linux:
   icon: resources/icon.png
   category: Development
   executableName: ocw
+  # The default name comes from the package name (@ocw/desktop), whose slash becomes a directory.
+  artifactName: OCW-${version}-linux-${arch}.${ext}
+  # WM_CLASS = ocw, so desktop environments match the window to ocw.desktop.
+  syncDesktopName: true
   synopsis: Open Collaborative AI Workspace desktop app
   maintainer: Autofy Labs
