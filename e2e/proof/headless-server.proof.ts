@@ -120,6 +120,7 @@ test("A clean Linux server becomes a shared Work Zone device from the web", asyn
     await expect(start).toBeVisible();
     await start.getByTestId("project-option").filter({ hasText: PROJECT }).first().click();
     await start.getByTestId("runtime-claude-code").click();
+    await start.getByTestId("new-session-settings-toggle").click();
     await start.getByTestId("mode-acceptEdits").click();
     await start.getByTestId("first-prompt").fill("Add a short CONTRIBUTING guide for new teammates");
     await start.getByTestId("start-session").click();
