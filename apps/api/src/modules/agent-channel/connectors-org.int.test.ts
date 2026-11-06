@@ -240,3 +240,64 @@ describe("tracer: every member's bot uses the organization's account", () => {
     expect(text).not.toMatch(/fakeat_|fakert_/u);
   });
 });
+
+// ---------------------------------------------------------------- Task 2: the list and per-tool approvals
+
+const list = (ev: Json) => cell("POST", "/connectors/list", { eventId: ev.eventId, agentId: scoutId });
+const listed = (r: Res) => (r.body?.connectors as Json[] | undefined)?.find((c) => c.connector === safe);
+
+describe("ocw_connector_list and per-tool approvals on the organization's account", () => {
+  it("ocw_connector_list lists the organization connector as connected for every asker", async () => {
+    for (const [who, conversation, mention] of [
+      [s.sam, opsId, true],
+      [s.alex, alexDm, false],
+    ] as const) {
+      const r = await list(await turnOf(who, conversation, mention));
+      expect(r.status, JSON.stringify(r.body)).toBe(200);
+      expect(listed(r)).toMatchObject({ name: "Acme Drive", status: "connected" });
+      expect(((listed(r)?.tools ?? []) as Json[]).map((t) => t.name).sort()).toEqual([
+        "create_record",
+        "echo_auth",
+        "whoami",
+      ]);
+      expect(JSON.stringify(r.body)).not.toMatch(/fakeat_|fakert_|Bearer/u);
+    }
+  });
+
+  it("a per-tool approval rule asks before any token is read or anything is sent", async () => {
+    await s.su.query(
+      `insert into app.tool_approval_policies
+         (organization_id, scope_unit_id, tool_pattern, mode, approver_kind, approver_user_ids, created_by, updated_by)
+       values ($1, null, $2, 'always', 'requester', '{}', $3, $3)`,
+      [s.orgA, `${safe}__*`, s.victorId],
+    );
+    try {
+      const ev = await turnOf(s.sam, opsId, true);
+      expect(ev.turn.toolFlags[`${safe}__whoami`]).toMatchObject({ approval: "always" });
+      const usedBefore = (await orgConnectionRow(s, s.orgA, server.id))?.last_used_at;
+      const before = await fakeStats(s);
+      const r = await call(ev);
+      expect(r.status, JSON.stringify(r.body)).toBe(409);
+      expect(codeOf(r)).toBe("approval_required");
+      const after = await fakeStats(s);
+      expect(after.mcpRequests).toBe(before.mcpRequests);
+      expect(after.tokenRequests).toEqual(before.tokenRequests);
+      expect((await orgConnectionRow(s, s.orgA, server.id))?.last_used_at).toEqual(usedBefore);
+      // The organization's MCP tool, never "your account".
+      const id = r.body?.error.details.approval.id as string;
+      const detail = await ok(s.sam.request("GET", `/api/v1/approvals/${id}`));
+      expect(detail.view.source).toMatchObject({ kind: "mcp", account: "org" });
+    } finally {
+      await s.su.query("delete from app.tool_approval_policies where organization_id = $1", [s.orgA]);
+    }
+  });
+
+  it("after Disconnect the list says not_connected; connecting again lists it connected", async () => {
+    await ok(s.victor.request("DELETE", `/api/v1/connectors/${server.id}/org-connection`), 204);
+    const r = await list(await turnOf(s.alex, alexDm));
+    expect(r.status).toBe(200);
+    expect(listed(r)).toMatchObject({ status: "not_connected" });
+    expect((await connectOrgOAuth(s, s.victor, server.id)).status).toBe(302);
+    expect(listed(await list(await turnOf(s.alex, alexDm)))).toMatchObject({ status: "connected" });
+  });
+});
