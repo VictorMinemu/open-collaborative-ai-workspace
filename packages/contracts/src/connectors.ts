@@ -8,12 +8,66 @@ import { Id, IsoDateTime } from "./common";
  * per member and calls the server itself through the connector proxy, so a token never reaches the cell, the model,
  * a log or an audit row (principles 6, 8, 9).
  *
+ * Phase 07.14 (D-01) adds two organization modes: `org_oauth` (an admin signs in once for the whole organization) and
+ * `org_client_credentials` (an OAuth client ID and secret, no browser). Both are proxied by the API like the member
+ * modes, and their token is sealed for the organization, never for a member; it never reaches the cell either.
+ *
  * Secret material is WRITE-ONLY: request schemas take it (`ConnectorOAuthClientInput.clientSecret`,
- * `ConnectSecretRequest.value`), response schemas only say whether one is stored (`hasSecret`).
+ * `ConnectSecretRequest.value`, `ClientCredentialsInput.clientSecret`), response schemas only say whether one is
+ * stored (`hasSecret`).
  */
 
-export const ConnectorAuthMode = z.enum(["org_secret", "per_member_oauth", "per_member_secret"]);
+/** The three 07.4 values first, unchanged; the two 07.14 organization modes after them. */
+export const ConnectorAuthMode = z.enum([
+  "org_secret",
+  "per_member_oauth",
+  "per_member_secret",
+  "org_oauth",
+  "org_client_credentials",
+]);
 export type ConnectorAuthMode = z.infer<typeof ConnectorAuthMode>;
+
+// ---------------------------------------------------------------- mode predicates (07.14 D-16)
+//
+// Every mode question in the code base is answered by one of these predicates (or its mode list, for SQL `inArray`).
+// This file is the only place a literal comparison against the organization-headers mode is allowed (Semgrep
+// `ocw.raw-auth-mode`, 07.14-13): a new mode then cannot be silently read as a member's account or rendered in the cell.
+
+/** The organization's headers are rendered in the OpenClaw cell (`org_secret` only). No other mode's credential ever is. */
+export function rendersInCell(mode: ConnectorAuthMode): boolean {
+  return mode === "org_secret";
+}
+
+/** The API calls the server itself through the connector proxy with a sealed credential (every mode but `org_secret`). */
+export function usesConnectorProxy(mode: ConnectorAuthMode): boolean {
+  return !rendersInCell(mode);
+}
+
+/** Each member connects their own account (`per_member_oauth`, `per_member_secret`): member lists, shares, audience rule. */
+export function isPerMemberMode(mode: ConnectorAuthMode): boolean {
+  return mode === "per_member_oauth" || mode === "per_member_secret";
+}
+
+/** One shared account sealed for the organization (`org_oauth`, `org_client_credentials`), used by every member's bots. */
+export function isOrgCredentialMode(mode: ConnectorAuthMode): boolean {
+  return mode === "org_oauth" || mode === "org_client_credentials";
+}
+
+/** A browser OAuth sign-in (authorization code + PKCE) obtains the token (`per_member_oauth`, `org_oauth`). */
+export function usesOAuthSignIn(mode: ConnectorAuthMode): boolean {
+  return mode === "per_member_oauth" || mode === "org_oauth";
+}
+
+function modesWhere(pred: (mode: ConnectorAuthMode) => boolean): readonly ConnectorAuthMode[] {
+  return Object.freeze(ConnectorAuthMode.options.filter(pred));
+}
+
+/** The predicates as mode lists, in `ConnectorAuthMode` order, for SQL (`inArray(mcpServers.authMode, LIST)`). */
+export const CELL_MODES: readonly ConnectorAuthMode[] = modesWhere(rendersInCell);
+export const CONNECTOR_PROXY_MODES: readonly ConnectorAuthMode[] = modesWhere(usesConnectorProxy);
+export const PER_MEMBER_MODES: readonly ConnectorAuthMode[] = modesWhere(isPerMemberMode);
+export const ORG_CREDENTIAL_MODES: readonly ConnectorAuthMode[] = modesWhere(isOrgCredentialMode);
+export const OAUTH_SIGN_IN_MODES: readonly ConnectorAuthMode[] = modesWhere(usesOAuthSignIn);
 
 /** Whether members can start an OAuth connection: `needs_client` = no usable client registration for the issuer. */
 export const ConnectorOAuthStatus = z.enum(["ready", "needs_client", "https_required", "error"]);

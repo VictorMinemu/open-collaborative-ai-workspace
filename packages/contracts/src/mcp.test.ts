@@ -371,3 +371,105 @@ describe("connector auth modes on the registry (07.4 D-01, CONN-01)", () => {
     ).toEqual(oauth);
   });
 });
+
+describe("organization credential modes on the registry (07.14 D-01 … D-03)", () => {
+  const http = {
+    name: "Acme CRM",
+    transport: "streamable-http",
+    url: "https://crm.example.com/mcp",
+  } as const;
+  const oauthClient = { issuer: "https://auth.example.com", clientId: "ocw", clientSecret: "s" };
+  const issuesAt = (res: { error?: { issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey> }> } }) =>
+    (res.error?.issues ?? []).map((i) => i.path.map(String).join("."));
+
+  it("an org-mode create parses end to end", () => {
+    expect(CreateMcpServerRequest.parse({ ...http, authMode: "org_oauth" })).toMatchObject({
+      authMode: "org_oauth",
+      headers: [],
+    });
+    expect(CreateMcpServerRequest.parse({ ...http, authMode: "org_client_credentials" }).authMode).toBe(
+      "org_client_credentials",
+    );
+  });
+
+  it("both organization modes are refused on the stdio sandbox transport", () => {
+    for (const authMode of ["org_oauth", "org_client_credentials"] as const) {
+      const res = CreateMcpServerRequest.safeParse({
+        name: "Local",
+        transport: "sandboxed-stdio",
+        sandboxServer: "everything",
+        authMode,
+      });
+      expect(res.success, authMode).toBe(false);
+      expect(issuesAt(res), authMode).toContain("authMode");
+      expect(JSON.stringify(res.error?.issues), authMode).toContain("stdio");
+    }
+  });
+
+  it("both organization modes refuse organization headers", () => {
+    for (const authMode of ["org_oauth", "org_client_credentials"] as const) {
+      const res = CreateMcpServerRequest.safeParse({
+        ...http,
+        authMode,
+        headers: [{ name: "Authorization", value: "Bearer org" }],
+      });
+      expect(res.success, authMode).toBe(false);
+      expect(issuesAt(res), authMode).toContain("headers");
+    }
+  });
+
+  it("an OAuth client and a CIMD opt-out belong to the sign-in modes only", () => {
+    expect(
+      CreateMcpServerRequest.safeParse({ ...http, authMode: "org_oauth", oauthClient, oauthUseCimd: false })
+        .success,
+    ).toBe(true);
+    for (const authMode of ["org_client_credentials", "org_secret", "per_member_secret"] as const) {
+      const extra = authMode === "per_member_secret" ? { memberHeaderName: "X-Api-Key" } : {};
+      const withClient = CreateMcpServerRequest.safeParse({ ...http, ...extra, authMode, oauthClient });
+      expect(withClient.success, authMode).toBe(false);
+      expect(issuesAt(withClient), authMode).toContain("oauthClient");
+      const noCimd = CreateMcpServerRequest.safeParse({ ...http, ...extra, authMode, oauthUseCimd: false });
+      expect(noCimd.success, authMode).toBe(false);
+      expect(issuesAt(noCimd), authMode).toContain("oauthUseCimd");
+    }
+  });
+
+  it("scopes belong to the sign-in modes and client credentials only", () => {
+    for (const authMode of ["per_member_oauth", "org_oauth", "org_client_credentials"] as const) {
+      expect(
+        CreateMcpServerRequest.safeParse({ ...http, authMode, oauthScopes: ["read"] }).success,
+        authMode,
+      ).toBe(true);
+    }
+    const memberKey = CreateMcpServerRequest.safeParse({
+      ...http,
+      authMode: "per_member_secret",
+      memberHeaderName: "X-Api-Key",
+      oauthScopes: ["read"],
+    });
+    expect(memberKey.success).toBe(false);
+    expect(issuesAt(memberKey)).toContain("oauthScopes");
+    const orgHeaders = CreateMcpServerRequest.safeParse({ ...http, oauthScopes: ["read"] });
+    expect(orgHeaders.success).toBe(false);
+    expect(issuesAt(orgHeaders)).toContain("oauthScopes");
+  });
+
+  it("a member key header is still per_member_secret only", () => {
+    const res = CreateMcpServerRequest.safeParse({
+      ...http,
+      authMode: "org_oauth",
+      memberHeaderName: "X-Api-Key",
+    });
+    expect(res.success).toBe(false);
+    expect(issuesAt(res)).toContain("memberHeaderName");
+  });
+
+  it("update checks an organization mode against the request's fields", () => {
+    expect(
+      UpdateMcpServerRequest.safeParse({ authMode: "org_client_credentials", oauthClient }).success,
+    ).toBe(false);
+    expect(
+      UpdateMcpServerRequest.parse({ authMode: "org_oauth", oauthScopes: ["read"], clearConnections: true }),
+    ).toEqual({ authMode: "org_oauth", oauthScopes: ["read"], clearConnections: true });
+  });
+});

@@ -14,6 +14,8 @@ import {
   AgentTemplateOptions,
   AgentTemplatePreview,
   AgentTemplateVersion,
+  CELL_MODES,
+  CONNECTOR_PROXY_MODES,
   ConnectionStatus,
   ConnectorAuthMode,
   ConnectorErrorCode,
@@ -25,13 +27,21 @@ import {
   CreateMemberAccountShareRequest,
   connectorOAuthUrls,
   InstantiateAgentTemplateResponse,
+  isOrgCredentialMode,
+  isPerMemberMode,
   McpServer,
   McpServerList,
   MemberAccountShare,
   MemberAccountShareList,
   MemberConnector,
   MemberConnectorList,
+  OAUTH_SIGN_IN_MODES,
+  ORG_CREDENTIAL_MODES,
+  PER_MEMBER_MODES,
   ReadersPreview,
+  rendersInCell,
+  usesConnectorProxy,
+  usesOAuthSignIn,
   VaultItem,
   VaultItemList,
 } from "./index";
@@ -40,8 +50,14 @@ const ID = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 const ID2 = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c";
 
 describe("connector vocabulary (07.4 D-01, CONN-01)", () => {
-  it("names the three auth modes, the OAuth and connection states and the error codes", () => {
-    expect(ConnectorAuthMode.options).toEqual(["org_secret", "per_member_oauth", "per_member_secret"]);
+  it("names the five auth modes (07.14 D-01), the OAuth and connection states and the error codes", () => {
+    expect(ConnectorAuthMode.options).toEqual([
+      "org_secret",
+      "per_member_oauth",
+      "per_member_secret",
+      "org_oauth",
+      "org_client_credentials",
+    ]);
     expect(ConnectorOAuthStatus.options).toEqual(["ready", "needs_client", "https_required", "error"]);
     expect(ConnectionStatus.options).toEqual(["not_connected", "connected", "needs_reconnect"]);
     expect(ConnectorErrorCode.options).toEqual(
@@ -79,6 +95,52 @@ describe("connector vocabulary (07.4 D-01, CONN-01)", () => {
       method: "pre_registered",
     });
     expect(ConnectorOAuthClientView.safeParse({ ...view, method: "manual" }).success).toBe(false);
+  });
+});
+
+describe("auth-mode predicates and mode lists (07.14 D-01, D-16)", () => {
+  // The D-16 table: one row per mode, one column per predicate.
+  const TABLE: Record<
+    ConnectorAuthMode,
+    { cell: boolean; proxy: boolean; member: boolean; orgCredential: boolean; signIn: boolean }
+  > = {
+    org_secret: { cell: true, proxy: false, member: false, orgCredential: false, signIn: false },
+    per_member_oauth: { cell: false, proxy: true, member: true, orgCredential: false, signIn: true },
+    per_member_secret: { cell: false, proxy: true, member: true, orgCredential: false, signIn: false },
+    org_oauth: { cell: false, proxy: true, member: false, orgCredential: true, signIn: true },
+    org_client_credentials: { cell: false, proxy: true, member: false, orgCredential: true, signIn: false },
+  };
+
+  it("the table covers every mode", () => {
+    expect(Object.keys(TABLE).sort()).toEqual([...ConnectorAuthMode.options].sort());
+  });
+
+  describe.each(ConnectorAuthMode.options)("%s", (mode) => {
+    const row = TABLE[mode];
+    it("answers every predicate as the D-16 table says", () => {
+      expect(rendersInCell(mode)).toBe(row.cell);
+      expect(usesConnectorProxy(mode)).toBe(row.proxy);
+      expect(usesConnectorProxy(mode)).toBe(!rendersInCell(mode));
+      expect(isPerMemberMode(mode)).toBe(row.member);
+      expect(isOrgCredentialMode(mode)).toBe(row.orgCredential);
+      expect(usesOAuthSignIn(mode)).toBe(row.signIn);
+    });
+  });
+
+  it("every mode list is the mode options filtered by its predicate, in order, and frozen", () => {
+    const lists: Array<[readonly ConnectorAuthMode[], (m: ConnectorAuthMode) => boolean]> = [
+      [CELL_MODES, rendersInCell],
+      [CONNECTOR_PROXY_MODES, usesConnectorProxy],
+      [PER_MEMBER_MODES, isPerMemberMode],
+      [ORG_CREDENTIAL_MODES, isOrgCredentialMode],
+      [OAUTH_SIGN_IN_MODES, usesOAuthSignIn],
+    ];
+    for (const [list, pred] of lists) {
+      expect(list).toEqual(ConnectorAuthMode.options.filter(pred));
+      expect(Object.isFrozen(list)).toBe(true);
+    }
+    expect(CELL_MODES).toEqual(["org_secret"]);
+    expect(ORG_CREDENTIAL_MODES).toEqual(["org_oauth", "org_client_credentials"]);
   });
 });
 

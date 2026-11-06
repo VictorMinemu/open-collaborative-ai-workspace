@@ -317,6 +317,17 @@ async function resolveHeaders(
 const STDIO_MEMBER = "Member accounts need a remote server (streamable HTTP or SSE), not the stdio sandbox";
 
 /**
+ * 07.14-01 widened the contract to five modes before the column (07.14-02) and the registry (07.14-05) take the two
+ * organization modes: until then they are refused here with a 400, never stored half-supported.
+ */
+function storableAuthMode(mode: ConnectorAuthMode): ServerRow["authMode"] {
+  if (mode === "org_oauth" || mode === "org_client_credentials") {
+    throw badRequest("Organization account modes are not available yet", "auth_mode_unavailable");
+  }
+  return mode;
+}
+
+/**
  * The header a member's key is sent in. The contract checks only its shape (`mcp.ts` cannot import keychain's rule:
  * import cycle), so the forbidden-injection rule and the transport's reserved headers are enforced here.
  */
@@ -629,7 +640,7 @@ export async function recordProbeResult(
 
 export async function createMcpServer(core: Core, tx: Tx, input: CreateMcpServerRequest): Promise<McpServer> {
   const ctx = tenantOf(tx);
-  const mode: ConnectorAuthMode = input.authMode;
+  const mode = storableAuthMode(input.authMode);
   const perMember = mode !== "org_secret";
   let url: string | null = null;
   let sandboxServer: string | null = null;
@@ -726,7 +737,7 @@ export async function updateMcpServer(
 ): Promise<McpServer> {
   const row = await findServer(tx, id);
   const from = row.authMode;
-  const to: ConnectorAuthMode = input.authMode ?? from;
+  const to = input.authMode === undefined ? from : storableAuthMode(input.authMode);
   const modeChanged = to !== from;
   const perMember = to !== "org_secret";
 

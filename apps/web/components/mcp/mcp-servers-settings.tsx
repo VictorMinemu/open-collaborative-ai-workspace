@@ -70,6 +70,8 @@ const MODE_BADGE: Record<McpServer["authMode"], string | null> = {
   org_secret: null,
   per_member_oauth: "Member sign-in",
   per_member_secret: "Member key",
+  org_oauth: "Organization sign-in",
+  org_client_credentials: "Client credentials",
 };
 
 /**
