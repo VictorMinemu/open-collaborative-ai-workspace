@@ -407,7 +407,7 @@ of the thin Work Zone that Phase 1 already ships.
 **Operations features (inserted 2026-10-08, owner).** Phases 07.1–07.7 turn the 2026-10-06 operations meeting into
 generic capabilities for any organization (research: `.planning/research/OPS-FEATURES.md`). Each feature is owned by the
 Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits → Agent Card when a human approves);
-OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.12 → 07.13 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 and 07.12 added 2026-10-29 and 07.13 added 2026-11-06 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
+OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.12 → 07.14 → 07.13 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 and 07.12 added 2026-10-29 and 07.13 and 07.14 added 2026-11-06 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
 (F17), ERP-driven board columns beyond watched records.
 
 ### Phase 07.1: Board channels and record templates (INSERTED)
@@ -1007,6 +1007,44 @@ with no manual step on any device.
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 07.13 to break down)
+
+### Phase 07.14: Organization connector auth (INSERTED)
+
+**Goal**: An admin can register any MCP server whatever its authentication, and give the organization's bots one shared
+account on it: sign in once with OAuth for the whole organization, or use OAuth client credentials, besides the
+existing organization headers, member sign-in and member keys. When OAuth cannot work, the admin sees which step failed
+and how to fix it.
+
+- **Organization sign-in (OAuth):** an admin with `mcp.manage` connects the server once (authorization code + PKCE,
+  the existing per-issuer client choice); the organization's bots use that account everywhere organization secrets
+  apply. The token is sealed for the organization and connector, refreshed by the API and never reaches the cell.
+- **Client credentials (OAuth, machine to machine):** client id and secret, token endpoint discovered from the server
+  (or entered), scopes and RFC 8707 `resource`; tokens fetched and refreshed by the API.
+- **Diagnosis:** the dialog and the server row say which OAuth step failed (discovery, issuer, PKCE, client
+  registration, HTTPS, token exchange) with one fix line, and give the redirect URI and client metadata URL to copy.
+- **Same custody and audit as member connectors (ADR-0025):** sealed in `app.secrets`, serialized refresh, reconnect
+  states, revocation on disconnect, every connect/disconnect/use audited, egress guard on every request.
+
+**Requirements**: COA-01, COA-02, COA-03, COA-04, COA-05
+**Depends on:** Phase 07.4 (connectors, OAuth client, custody)
+**ADR:** 0036
+**Success Criteria** (what must be TRUE):
+
+  1. An admin adds an OAuth-only MCP server in organization sign-in mode, connects it once, and a bot in any channel
+     calls its tools with that account; members never see or handle the token
+  2. A server that only offers client credentials works with a client id and secret, including refresh before expiry
+  3. Disconnect revokes at the provider; an expired or revoked grant shows "Reconnect" to admins and the bot's tool
+     fails with a clear reason; switching mode or deleting the server destroys the stored credential after a confirmation
+  4. When a sign-in cannot start or finish, the admin sees the failed step and a fix line; nothing secret is shown
+  5. Existing servers (organization headers, member sign-in, member keys) behave exactly as before; covered by
+     integration tests on a fake OAuth MCP server (authorization code with PKCE, client credentials, refresh, revoke),
+     tenant isolation tests and an e2e spec in the web
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.14 to break down)
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
