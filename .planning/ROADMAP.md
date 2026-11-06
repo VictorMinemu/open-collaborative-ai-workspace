@@ -1040,11 +1040,43 @@ and how to fix it.
      integration tests on a fake OAuth MCP server (authorization code with PKCE, client credentials, refresh, revoke),
      tenant isolation tests and an e2e spec in the web
 
-**Plans:** 0 plans
+**Plans:** 14 plans in 7 waves (CONTEXT/RESEARCH/PATTERNS/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 08 the API end-to-end tracer, 13 the browser end to end, 14 the gate)
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 07.14 to break down)
+- [ ] 07.14-01-PLAN.md — Wave 1: Contracts (five modes, shared predicates and mode lists, D-10 failure codes and fix lines, `OrgConnection`, client-credential input, Test sign-in DTOs), the web on the predicates, and the phase hub (plan map, shared files, PD-01…PD-18, edge coverage)
+- [ ] 07.14-02-PLAN.md — Wave 1: Migration: `auth_mode` widened, `mcp_servers.auth_failure`, `connector_org_connections` (tenant RLS, composite FK), N-1 → N upgrade test
+- [ ] 07.14-03-PLAN.md — Wave 1: Fake OAuth MCP server: client-credentials grant, diagnosis scenarios, pre-registered CC clients for the API stack and e2e
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 07.14-04-PLAN.md — Wave 2: OAuth client: failure `step`, client-credentials discovery and grant, registration-free client preview, `diagnose()`
+- [ ] 07.14-05-PLAN.md — Wave 2: Registry: org modes in create/update/delete, `org_connection_exists` confirm and destroy, D-14 clients kept, DTO `orgConnection`/`authFailure`, cell stays org headers only
+- [ ] 07.14-06-PLAN.md — Wave 2: Classification consumers: per-tool approvals, templates and member-account shares on the predicates
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 07.14-07-PLAN.md — Wave 3: Organization custody and sign-in: credential module over a principal, `flow.ts`, `org-routes.ts` connect/disconnect, the callback's organization branch, re-probe by mode, AAD and tenant isolation
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 07.14-08-PLAN.md — Wave 4: Bots use the organization's account: proxy credential by mode, turn-policy split, organization messages and audit (phase API end-to-end tracer)
+- [ ] 07.14-09-PLAN.md — Wave 4: Client credentials end to end in the API (save, serialized re-grant, issuer pin, revoke) and the Test sign-in route
+- [ ] 07.14-10-PLAN.md — Wave 4: Watched records read and write with organization accounts (workspace access)
+- [ ] 07.14-11-PLAN.md — Wave 4: Web server row: organization connection, Connect/Reconnect/Disconnect, failure box, arrival banners; 1440/390 light/dark
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 07.14-12-PLAN.md — Wave 5: Web dialog: five grouped modes, client-credential fields, org mode-switch confirm, Test sign-in panel; 1440/390 light/dark
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 07.14-13-PLAN.md — Wave 6: Browser end to end (admin connects, a member's bot uses it, Disconnect bites), leak sweep with organization canaries, Semgrep `ocw.raw-auth-mode`
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 07.14-14-PLAN.md — Wave 7: Phase gate: full gate, `gate:compose`, ADR-0036, connectors and reverse-proxy docs, DEMO owner check, STATUS, AGENTS, CODEOWNERS, signed VALIDATION
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
