@@ -2180,3 +2180,94 @@ describe("organization modes: delete and isolation (07.14-05 Task 3, D-08)", () 
     await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}?clearConnections=true`));
   });
 });
+
+describe("a mode switch or delete racing the organization's connect (07.14-09, 07.14-07 deferred item)", () => {
+  let adminId: string;
+
+  beforeAll(async () => {
+    adminId = (
+      await rowsOf("select user_id from app.org_members where organization_id = $1 and display_name = $2", [
+        orgId,
+        ADMIN.name,
+      ])
+    )[0]?.user_id as string;
+  });
+
+  /**
+   * Plays the connect transaction (07.14-07: `orgAccountServer(tx, id, true)`, then the store): holds the server row,
+   * waits until the request queues on it, then stores the organization's connection and commits. The request must
+   * then see that connection, as if it had arrived after the commit.
+   */
+  async function racingConnect(
+    serverId: string,
+    request: () => Promise<{ status: number; body: Record<string, unknown> | null }>,
+  ) {
+    const holder = new pg.Client({ connectionString: stack.db.superuserUrl });
+    await holder.connect();
+    try {
+      await holder.query("begin");
+      await holder.query("select id from app.mcp_servers where id = $1 for update", [serverId]);
+      const pending = request();
+      const waiting = async () =>
+        Number(
+          (
+            await su.query(
+              `select count(*)::int as n from pg_stat_activity
+               where datname = current_database() and wait_event_type = 'Lock' and query ilike '%mcp_servers%'
+                 and pid <> pg_backend_pid()`,
+            )
+          ).rows[0].n,
+        );
+      for (let i = 0; i < 200 && (await waiting()) < 1; i++) await new Promise((r) => setTimeout(r, 25));
+      expect(await waiting()).toBe(1);
+      await holder.query(
+        `insert into app.connector_org_connections (organization_id, server_id, method, status, client_id, connected_by)
+         values ($1, $2, 'client_credentials', 'connected', 'ocw-race', $3)`,
+        [orgId, serverId, adminId],
+      );
+      await holder.query("commit");
+      return await pending;
+    } finally {
+      await holder.end();
+    }
+  }
+
+  const createCc = async (name: string) =>
+    ok(
+      admin.request("POST", "/api/v1/mcp-servers", {
+        name,
+        transport: "streamable-http",
+        url: `https://${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.example.com/mcp`,
+        authMode: "org_client_credentials",
+      }),
+    );
+  const orgRows = (serverId: string) =>
+    rowsOf("select client_id from app.connector_org_connections where server_id = $1", [serverId]);
+
+  it("a mode switch queued behind the connect asks first (org_connection_exists) and leaves the connection in place", async () => {
+    const svc = await createCc("Race switch");
+    const r = await racingConnect(svc.id, () =>
+      admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, { authMode: "org_oauth" }),
+    );
+    expect(r.status, JSON.stringify(r.body)).toBe(409);
+    expect((r.body as Json).error).toMatchObject({
+      code: "org_connection_exists",
+      details: { method: "client_credentials" },
+    });
+    expect(
+      (await rowsOf("select auth_mode from app.mcp_servers where id = $1", [svc.id]))[0]?.auth_mode,
+    ).toBe("org_client_credentials");
+    expect(await orgRows(svc.id)).toEqual([{ client_id: "ocw-race" }]);
+    await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}?clearConnections=true`));
+  });
+
+  it("a delete queued behind the connect asks first (org_connection_exists) and deletes nothing", async () => {
+    const svc = await createCc("Race delete");
+    const r = await racingConnect(svc.id, () => admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}`));
+    expect(r.status, JSON.stringify(r.body)).toBe(409);
+    expect((r.body as Json).error).toMatchObject({ code: "org_connection_exists" });
+    expect(await rowsOf("select 1 from app.mcp_servers where id = $1", [svc.id])).toHaveLength(1);
+    expect(await orgRows(svc.id)).toEqual([{ client_id: "ocw-race" }]);
+    await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}?clearConnections=true`));
+  });
+});
