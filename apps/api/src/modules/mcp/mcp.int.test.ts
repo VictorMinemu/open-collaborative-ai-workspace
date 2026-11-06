@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import type { AgentChannelMcpProbeResult } from "@ocw/contracts";
@@ -1786,5 +1787,256 @@ describe("organization modes on the registry (07.14-05)", () => {
     expect(list.servers).toEqual([]);
     for (const text of ["ops@acme.example", "ocw-reports", "drive.example.com"])
       expect(JSON.stringify(list)).not.toContain(text);
+  });
+});
+
+describe("organization modes: edits, mode switches and the organization's credential (07.14-05 Task 2, D-01, D-08, D-14)", () => {
+  let adminId: string;
+  const remote = (name: string, authMode: string, extra: Json = {}) => ({
+    name,
+    transport: "streamable-http",
+    url: `https://${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.example.com/mcp`,
+    authMode,
+    ...extra,
+  });
+  const CLIENT = {
+    issuer: "https://auth.switch.example",
+    clientId: "ocw-switch",
+    clientSecret: "switch-secret",
+  };
+  const orgRow = (serverId: string) =>
+    rowsOf("select method, secret_id from app.connector_org_connections where server_id = $1", [serverId]);
+  const secretExists = async (id: string) =>
+    (await rowsOf("select 1 from app.secrets where id = $1", [id])).length === 1;
+
+  beforeAll(async () => {
+    adminId = (
+      await rowsOf("select user_id from app.org_members where organization_id = $1 and display_name = $2", [
+        orgId,
+        ADMIN.name,
+      ])
+    )[0]?.user_id as string;
+  });
+
+  it("each edit is checked against the resulting mode and the stored transport", async () => {
+    const env = stack.built.core.env;
+    env.OCW_MCP_SANDBOX_URL = "http://mcp-sandbox:8080/";
+    env.OCW_MCP_SANDBOX_SERVERS = ["everything"];
+    try {
+      const stdio = await ok(
+        admin.request("POST", "/api/v1/mcp-servers", {
+          name: "Stdio org",
+          transport: "sandboxed-stdio",
+          sandboxServer: "everything",
+        }),
+      );
+      for (const authMode of ["org_oauth", "org_client_credentials"]) {
+        const r = await admin.request("PATCH", `/api/v1/mcp-servers/${stdio.id}`, { authMode });
+        expect(r.status).toBe(400);
+        expect(codeOf(r)).toBe("per_member_needs_remote");
+        expect((r.body as Json).error.message).toContain("remote server");
+      }
+      await ok(admin.request("DELETE", `/api/v1/mcp-servers/${stdio.id}`));
+    } finally {
+      env.OCW_MCP_SANDBOX_URL = null;
+      env.OCW_MCP_SANDBOX_SERVERS = [];
+    }
+
+    const signIn = await ok(
+      admin.request("POST", "/api/v1/mcp-servers", remote("Rules sign-in", "org_oauth")),
+    );
+    const cc = await ok(
+      admin.request("POST", "/api/v1/mcp-servers", remote("Rules cc", "org_client_credentials")),
+    );
+    const headers = await admin.request("PATCH", `/api/v1/mcp-servers/${signIn.id}`, {
+      headers: [{ name: "Authorization", value: "Bearer x" }],
+    });
+    expect(codeOf(headers)).toBe("headers_not_allowed");
+    for (const body of [{ oauthClient: CLIENT }, { oauthUseCimd: false }]) {
+      const r = await admin.request("PATCH", `/api/v1/mcp-servers/${cc.id}`, body);
+      expect(r.status, JSON.stringify(body)).toBe(400);
+      expect(codeOf(r), JSON.stringify(body)).toBe("oauth_not_allowed");
+    }
+    // Client credentials take scopes; organization headers take none.
+    expect(
+      (await ok(admin.request("PATCH", `/api/v1/mcp-servers/${cc.id}`, { oauthScopes: ["reports.read"] })))
+        .oauthScopes,
+    ).toEqual(["reports.read"]);
+    const docs = await ok(admin.request("POST", "/api/v1/mcp-servers", { ...DOCS, name: "Rules headers" }));
+    const scopes = await admin.request("PATCH", `/api/v1/mcp-servers/${docs.id}`, { oauthScopes: ["a"] });
+    expect(codeOf(scopes)).toBe("oauth_not_allowed");
+    for (const s of [signIn, cc, docs]) await ok(admin.request("DELETE", `/api/v1/mcp-servers/${s.id}`));
+  });
+
+  it("member sign-in → organization sign-in keeps the OAuth clients (D-14) and still asks the member confirmation", async () => {
+    const svc = await ok(
+      admin.request(
+        "POST",
+        "/api/v1/mcp-servers",
+        remote("Keep clients", "per_member_oauth", { oauthClient: CLIENT, oauthScopes: ["a"] }),
+      ),
+    );
+    // A dynamically registered client of another issuer, as 07.4-10 stores one.
+    await su.query(
+      `insert into app.connector_oauth_clients (organization_id, server_id, issuer, client_id, method)
+       values ($1, $2, 'https://dcr.switch.example', 'dcr-client', 'dcr')`,
+      [orgId, svc.id],
+    );
+    await asTenant((tx) => setOAuthStatus(tx, svc.id, "needs_client"));
+    await seedConnection(orgId, samId, svc.id);
+    await seedConnection(orgId, adminId, svc.id);
+    const refused = await admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, { authMode: "org_oauth" });
+    expect(refused.status).toBe(409);
+    expect((refused.body as Json).error).toMatchObject({ code: "connections_exist", details: { count: 2 } });
+
+    const switched = await ok(
+      admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, {
+        authMode: "org_oauth",
+        clearConnections: true,
+      }),
+    );
+    expect(switched).toMatchObject({
+      authMode: "org_oauth",
+      status: "pending",
+      oauthStatus: "ready",
+      oauthScopes: ["a"],
+      memberConnections: 0,
+      orgConnection: null,
+    });
+    expect((switched.oauthClients as Json[]).map((c) => c.clientId).sort()).toEqual([
+      "dcr-client",
+      "ocw-switch",
+    ]);
+    expect(
+      (await rowsOf("select 1 from app.connector_connections where server_id = $1", [svc.id])).length,
+    ).toBe(0);
+    expect((await audits("connector.connections_cleared")).at(-1)).toMatchObject({
+      resource_id: svc.id,
+      metadata: { count: 2, reason: "mode_changed" },
+    });
+    // And back, with nobody connected: no confirmation, the clients still kept.
+    const back = await ok(
+      admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, { authMode: "per_member_oauth" }),
+    );
+    expect(back.oauthClients).toHaveLength(2);
+    await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}`));
+  });
+
+  it("leaving an organization mode with its connection asks first, then destroys it locally and audits it (D-08)", async () => {
+    const cases: Array<[from: string, to: Json, method: string]> = [
+      ["org_oauth", { authMode: "org_secret" }, "oauth"],
+      ["org_oauth", { authMode: "per_member_oauth" }, "oauth"],
+      ["org_oauth", { authMode: "org_client_credentials" }, "oauth"],
+      ["org_client_credentials", { authMode: "org_oauth" }, "client_credentials"],
+      [
+        "org_client_credentials",
+        { authMode: "per_member_secret", memberHeaderName: "X-Api-Key" },
+        "client_credentials",
+      ],
+    ];
+    for (const [from, to, method] of cases) {
+      const label = `${from} → ${to.authMode}`;
+      const svc = await ok(
+        admin.request(
+          "POST",
+          "/api/v1/mcp-servers",
+          remote(`Leave ${from} ${to.authMode}`, from, from === "org_oauth" ? { oauthClient: CLIENT } : {}),
+        ),
+      );
+      const secretId = await seedOrgConnection(svc.id, {
+        method: method as "oauth" | "client_credentials",
+        connectedBy: adminId,
+      });
+      await asTenant((tx) => setAuthFailure(tx, svc.id, "token_exchange_failed"));
+
+      const refused = await admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, to);
+      expect(refused.status, label).toBe(409);
+      expect((refused.body as Json).error, label).toMatchObject({
+        code: "org_connection_exists",
+        details: { method },
+      });
+      expect((await getMcpServer_(svc.id)).authMode, label).toBe(from);
+      expect(await orgRow(svc.id), label).toHaveLength(1);
+
+      const switched = await ok(
+        admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, { ...to, clearConnections: true }),
+      );
+      expect(switched, label).toMatchObject({
+        authMode: to.authMode,
+        orgConnection: null,
+        authFailure: null,
+      });
+      expect(await orgRow(svc.id), label).toHaveLength(0);
+      expect(await secretExists(secretId), label).toBe(false);
+      const disconnected = (
+        await rowsOf(
+          "select resource_type, metadata from app.audit_events where organization_id = $1 and action = 'connector.org_disconnected' and metadata->>'serverId' = $2",
+          [orgId, svc.id],
+        )
+      )[0];
+      expect(disconnected, label).toEqual({
+        resource_type: "connector_org_connection",
+        metadata: { serverId: svc.id, method, revoked: false, reason: "mode_changed" },
+      });
+      // OAuth client registrations survive only between the two sign-in modes (D-14).
+      const keepsClients = from === "org_oauth" && to.authMode === "per_member_oauth";
+      expect((switched.oauthClients as Json[]).length, label).toBe(keepsClients ? 1 : 0);
+      await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}`));
+    }
+  });
+
+  it("without a connection the switch needs no confirmation; leaving both sign-in modes removes the clients and the failure", async () => {
+    const svc = await ok(
+      admin.request(
+        "POST",
+        "/api/v1/mcp-servers",
+        remote("No connection", "org_oauth", { oauthClient: CLIENT, oauthScopes: ["files.read"] }),
+      ),
+    );
+    const clientSecret = (
+      await rowsOf("select client_secret_id from app.connector_oauth_clients where server_id = $1", [svc.id])
+    )[0]?.client_secret_id as string;
+    await asTenant((tx) => setAuthFailure(tx, svc.id, "discovery_failed"));
+    const switched = await ok(
+      admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, {
+        authMode: "org_secret",
+        headers: [{ name: "Authorization", value: "Bearer org" }],
+      }),
+    );
+    expect(switched).toMatchObject({
+      authMode: "org_secret",
+      oauthClients: [],
+      oauthStatus: null,
+      oauthScopes: null,
+      authFailure: null,
+      orgConnection: null,
+      status: "probing",
+    });
+    expect(await secretExists(clientSecret)).toBe(false);
+    expect((await audits("connector.org_disconnected")).some((a) => a.metadata.serverId === svc.id)).toBe(
+      false,
+    );
+    await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}`));
+  });
+
+  it("an edit that keeps the mode keeps the organization's connection", async () => {
+    const svc = await ok(
+      admin.request("POST", "/api/v1/mcp-servers", remote("Keep connection", "org_oauth")),
+    );
+    const secretId = await seedOrgConnection(svc.id, { method: "oauth", connectedBy: adminId });
+    for (const body of [{ name: "Keep connection 2" }, { authMode: "org_oauth" }, { orgEnabled: false }]) {
+      const r = await ok(admin.request("PATCH", `/api/v1/mcp-servers/${svc.id}`, body));
+      expect(r.orgConnection, JSON.stringify(body)).toMatchObject({ method: "oauth", hasSecret: true });
+    }
+    expect(await secretExists(secretId)).toBe(true);
+    await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}?clearConnections=true`));
+  });
+
+  it("the registry destroys the organization's credential locally only: the mcp module imports no provider client", async () => {
+    // D-08: a switch or a delete never revokes at the provider (only the admin's Disconnect, in connectors, does).
+    for (const file of ["service.ts", "index.ts", "routes.ts"]) {
+      const src = readFileSync(fileURLToPath(new URL(`./${file}`, import.meta.url)), "utf8");
+      expect(src, file).not.toMatch(/from "\.\.\/connectors|lib\/egress"/u);
+    }
   });
 });
