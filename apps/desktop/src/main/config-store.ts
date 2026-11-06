@@ -1,6 +1,7 @@
 // Desktop settings (`<userData>/desktop.json`, mode 0600). The device token is stored only as
-// OS-encrypted ciphertext (Electron safeStorage → macOS Keychain); it is decrypted in memory and
-// handed to the daemon through an environment variable at spawn time, never written in plaintext.
+// OS-encrypted ciphertext (Electron safeStorage: macOS Keychain, Windows DPAPI, Linux Secret
+// Service); it is decrypted in memory and handed to the daemon through an environment variable at
+// spawn time, never written in plaintext.
 
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -65,7 +66,7 @@ export class ConfigStore {
   }): Promise<void> {
     if (!this.cipher.isAvailable()) {
       throw new Error(
-        "Secure storage (Keychain) is not available, so the device token cannot be stored safely.",
+        "Secure storage (the Keychain, Credential Manager or a Secret Service keyring) is not available, so the device token cannot be stored safely.",
       );
     }
     const encryptedToken = this.cipher.encrypt(input.token).toString("base64");

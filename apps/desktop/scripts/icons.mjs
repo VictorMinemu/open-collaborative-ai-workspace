@@ -1,5 +1,6 @@
 // Renders resources/icon.svg and the tray templates to PNG (Playwright Chromium) and builds
-// resources/icon.icns with macOS iconutil. Outputs are committed; rerun only when the art changes.
+// resources/icon.icns with macOS iconutil (Windows and Linux use icon.png). Outputs are committed;
+// rerun only when the art changes.
 //   pnpm --filter @ocw/desktop icons
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -48,6 +49,16 @@ mkdirSync(join(res, "tray"), { recursive: true });
 for (const [name, svg] of [
   ["trayTemplate", tray(1)],
   ["trayOfflineTemplate", tray(0.45)],
+]) {
+  await render(svg, 16, join(res, "tray", `${name}.png`));
+  await render(svg, 32, join(res, "tray", `${name}@2x.png`));
+}
+// Windows and Linux do not tint tray icons, and black rings vanish on a dark taskbar: they get the
+// coloured app icon instead (faded when the runtime is offline).
+const faded = (opacity) => appSvg.replace("<svg ", `<svg opacity="${opacity}" `);
+for (const [name, svg] of [
+  ["trayColor", appSvg],
+  ["trayColorOffline", faded(0.45)],
 ]) {
   await render(svg, 16, join(res, "tray", `${name}.png`));
   await render(svg, 32, join(res, "tray", `${name}@2x.png`));

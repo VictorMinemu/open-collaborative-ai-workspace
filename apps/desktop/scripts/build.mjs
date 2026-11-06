@@ -74,12 +74,14 @@ if (withDaemon) {
   const out = join(dist, "daemon");
   rmSync(out, { recursive: true, force: true });
   // Hoisted (flat, symlink-free) node_modules so electron-builder can copy it as a plain folder.
+  // On Windows `pnpm` is a .cmd shim, which only a shell can start (fixed arguments, no user input).
   execFileSync(
     "pnpm",
     ["--filter", "@ocw/local-runtime", "deploy", "--prod", "--legacy", "--config.node-linker=hoisted", out],
     {
       cwd: root,
       stdio: "inherit",
+      shell: process.platform === "win32",
     },
   );
   // The SDK's bundled Claude Code binaries (~200 MB per platform) are not needed: the daemon

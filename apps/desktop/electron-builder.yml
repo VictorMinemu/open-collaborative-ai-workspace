@@ -1,4 +1,8 @@
-# Unsigned macOS build for the MVP 0 demo (ad-hoc signature only; no Developer ID, no notarization).
+# Desktop builds (scripts/package.mjs), each on its own platform; the release workflow renames the
+# files. None is signed yet (Phase 9):
+#   macOS arm64 .dmg (ad-hoc signature; no Developer ID, no notarization)
+#   Windows x64 per-user NSIS installer (no Authenticode signature: SmartScreen warns)
+#   Linux x64 AppImage and .deb (the .deb installs an AppArmor profile for Electron's sandbox)
 appId: dev.ocw.desktop
 productName: OCW
 copyright: Open Collaborative AI Workspace · AGPL-3.0
@@ -12,9 +16,9 @@ files:
   - dist/assets/**
   - package.json
   - "!**/*.map"
-# The Local Runtime daemon (dist/daemon, with its node_modules) is copied into
-# Contents/Resources/daemon by scripts/after-pack.cjs: electron-builder always strips node_modules
-# from extraResources. It runs outside the asar as plain Node (Electron with ELECTRON_RUN_AS_NODE).
+# The Local Runtime daemon (dist/daemon, with its node_modules) is copied into Contents/Resources/daemon
+# (resources/daemon on Windows and Linux) by scripts/after-pack.cjs: electron-builder always strips
+# node_modules from extraResources. It runs outside the asar as plain Node (Electron with ELECTRON_RUN_AS_NODE).
 afterPack: scripts/after-pack.cjs
 asar: true
 npmRebuild: false
@@ -33,3 +37,22 @@ mac:
 dmg:
   title: OCW
   icon: resources/icon.icns
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: resources/icon.png
+nsis:
+  oneClick: true
+  perMachine: false
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  icon: resources/icon.png
+  category: Development
+  executableName: ocw
+  synopsis: Open Collaborative AI Workspace desktop app
+  maintainer: Autofy Labs
