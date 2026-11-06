@@ -294,6 +294,51 @@ export async function registerConnector(
   );
 }
 
+/**
+ * The admin registers an organization sign-in server (`org_oauth`, 07.14) on the fake, with the pre-registered public
+ * client `ocw-test` unless told otherwise.
+ */
+export async function registerOrgConnector(
+  s: ConnectorsStack,
+  extra: Json = {},
+  as: TestClient = s.victor,
+): Promise<Json> {
+  return registerConnector(
+    s,
+    { name: `Drive ${randomUUID().slice(0, 6)}`, authMode: "org_oauth", ...extra },
+    as,
+  );
+}
+
+/** POST org-connection/connect → authorize → callback with the same admin's session; returns the final redirect. */
+export async function connectOrgOAuth(
+  s: ConnectorsStack,
+  as: TestClient,
+  serverId: string,
+): Promise<{ status: number; location: string }> {
+  const start = await ok(as.request("POST", `/api/v1/connectors/${serverId}/org-connection/connect`));
+  return callback(s, await authorize(s, start.authorizeUrl), as);
+}
+
+/** The organization's connection row of a server (superuser read). */
+export const orgConnectionRow = async (s: ConnectorsStack, orgId: string, serverId: string) =>
+  (
+    await s.su.query(
+      "select * from app.connector_org_connections where organization_id = $1 and server_id = $2",
+      [orgId, serverId],
+    )
+  ).rows[0] as Json | undefined;
+
+/** The organization's sealed bundle of a server, opened with the organization AAD (test-only: never printed). */
+export async function orgBundleOf(s: ConnectorsStack, orgId: string, serverId: string): Promise<Json | null> {
+  const row = await orgConnectionRow(s, orgId, serverId);
+  if (!row?.secret_id) return null;
+  const { core } = s.stack.built;
+  return core.db.withTenant({ organizationId: orgId }, async (tx) =>
+    JSON.parse(await core.secrets.revealSealed(tx, row.secret_id, `${orgId}:org:connector:${serverId}`)),
+  );
+}
+
 /** Plays the browser at the authorization server: follows the authorize URL once, returns the redirect. */
 export async function authorize(s: ConnectorsStack, authorizeUrl: string): Promise<string> {
   const res = await s.browser.fetch(authorizeUrl, {}, { privateAllow: [`fake-mcp:${s.fakePort}`] });
