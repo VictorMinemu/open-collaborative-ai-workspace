@@ -1,9 +1,27 @@
 "use client";
 
-import { isPerMemberMode, type McpServer, type McpServerList, usesConnectorProxy } from "@ocw/contracts";
-import { KeyRound, Pencil, Plug, Plus, RefreshCw, ShieldCheck, Trash2, TriangleAlert } from "lucide-react";
-import { useRouter } from "next/navigation";
-import { useRef, useState } from "react";
+import {
+  isOrgCredentialMode,
+  isPerMemberMode,
+  type McpServer,
+  type McpServerList,
+  usesConnectorProxy,
+} from "@ocw/contracts";
+import {
+  CircleAlert,
+  CircleCheck,
+  KeyRound,
+  Pencil,
+  Plug,
+  Plus,
+  RefreshCw,
+  ShieldCheck,
+  Trash2,
+  TriangleAlert,
+  X,
+} from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ServerUnreachable } from "@/components/common/server-unreachable";
 import { Badge } from "@/components/ui/badge";
@@ -29,10 +47,13 @@ import {
   useProbeMcpServer,
   useUpdateMcpServer,
 } from "@/lib/mcp-queries";
+import { type ArrivalBanner as ArrivalCopy, arrivalBanner } from "@/lib/org-connection-format";
+import { useReprobeConnector } from "@/lib/org-connection-queries";
 import { useCan, usePermissions } from "@/lib/permissions";
 import { cn, relativeTime } from "@/lib/utils";
 import { McpServerDialog, TRANSPORTS } from "./mcp-server-dialog";
 import { McpToolsEmpty, McpToolsList } from "./mcp-tools-list";
+import { OrgConnectionRow } from "./org-connection-row";
 import { PrivateHostsCard } from "./private-hosts-card";
 
 type Flag = "orgEnabled" | "personalAllowed" | "trustedChaining";
@@ -65,6 +86,12 @@ const EMPTY_SANDBOX: McpServerList["sandbox"] = { available: false, servers: [] 
 
 /** A per-member connector the cell never probes: pending means no member has connected yet (UI-SPEC R6). */
 const MEMBER_PENDING = { label: "Waiting for a member to connect", variant: "outline", busy: false } as const;
+/** An organization-account server the cell never probes: pending means no admin has connected it yet (07.14 PD-12). */
+const ORG_PENDING = { label: "Waiting for an admin to connect", variant: "outline", busy: false } as const;
+
+/** Query parameters of an organization sign-in's return (07.14 PD-06), read once and removed from the URL. */
+const ARRIVAL_PARAMS = ["connected", "error", "connector"] as const;
+type Arrival = { connected: string | null; error: string | null; connector: string | null };
 
 const MODE_BADGE: Record<McpServer["authMode"], string | null> = {
   org_secret: null,
@@ -117,6 +144,28 @@ export function McpServersSettings() {
   const canManageBots = useCan("bot.manage");
   const q = useMcpServers(canManage);
   const [editing, setEditing] = useState<McpServer | "new" | null>(null);
+  const router = useRouter();
+  const pathname = usePathname();
+  const [arrival, setArrival] = useState<Arrival | null>(null);
+
+  // One-time arrival of an organization sign-in (`?connected=<id>` / `?error=<code>&connector=<id>`): read once per page
+  // load, then the parameters leave the URL so a reload repeats nothing (the 07.4 Connections pattern).
+  const arrivalRead = useRef(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: read once per page load by design
+  useEffect(() => {
+    if (arrivalRead.current) return;
+    arrivalRead.current = true;
+    const params = new URLSearchParams(window.location.search);
+    if (!ARRIVAL_PARAMS.some((p) => params.has(p))) return;
+    setArrival({
+      connected: params.get("connected"),
+      error: params.get("error"),
+      connector: params.get("connector"),
+    });
+    for (const p of ARRIVAL_PARAMS) params.delete(p);
+    const qs = params.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  }, []);
 
   if (!canManage) {
     return (
@@ -137,9 +186,17 @@ export function McpServersSettings() {
 
   const servers = q.data?.servers ?? [];
   const sandbox = q.data?.sandbox ?? EMPTY_SANDBOX;
+  // Only a server of the loaded list, in an organization mode, and a closed code render (T-07.14-11-01).
+  const arrivalServer = arrival
+    ? servers.find(
+        (s) => s.id === (arrival.connected ?? arrival.connector) && isOrgCredentialMode(s.authMode),
+      )
+    : undefined;
+  const banner = arrival && arrivalServer ? arrivalBanner(arrival, arrivalServer.name) : null;
 
   return (
     <Shell>
+      {banner ? <ArrivalBannerView banner={banner} onDismiss={() => setArrival(null)} /> : null}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="font-semibold text-[15px] tracking-tight">Connected servers</h2>
@@ -188,7 +245,11 @@ export function McpServersSettings() {
         <ul className="grid gap-3" aria-label="MCP servers" data-testid="mcp-server-list">
           {servers.map((s) => (
             <li key={s.id}>
-              <ServerCard server={s} onEdit={() => setEditing(s)} />
+              <ServerCard
+                server={s}
+                oauthAvailable={q.data?.oauth?.oauthAvailable ?? false}
+                onEdit={() => setEditing(s)}
+              />
             </li>
           ))}
         </ul>
@@ -217,10 +278,66 @@ function Shell({ children }: { children: React.ReactNode }) {
   return <div className="mx-auto grid w-full max-w-4xl gap-5 px-4 py-6 sm:px-6 sm:py-8">{children}</div>;
 }
 
-function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void }) {
+/**
+ * The return banner of an organization sign-in (07.4-UI-SPEC § 2 pattern, 07.14 PD-12): inline above the list so it is
+ * read on arrival (focused), success `role="status"`, error `role="alert"`; fixed copy only, never provider text.
+ */
+function ArrivalBannerView({ banner, onDismiss }: { banner: ArrivalCopy; onDismiss: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    ref.current?.focus();
+  }, []);
+  const ok = banner.kind === "success";
+  const Icon = ok ? CircleCheck : CircleAlert;
+  return (
+    <div
+      ref={ref}
+      tabIndex={-1}
+      role={ok ? "status" : "alert"}
+      data-testid="mcp-arrival-banner"
+      data-kind={banner.kind}
+      className={cn(
+        "flex items-start gap-3 rounded-xl border px-4 py-3 outline-none",
+        ok ? "border-success/30 bg-success/8" : "border-destructive/30 bg-destructive/8",
+      )}
+    >
+      <Icon className={cn("mt-0.5 size-4 shrink-0", ok ? "text-success" : "text-destructive")} aria-hidden />
+      <div className="grid min-w-0 flex-1 gap-0.5 text-sm">
+        <p className="font-medium" data-testid="mcp-arrival-banner-title">
+          {banner.title}
+        </p>
+        {banner.body ? (
+          <p className="text-muted-foreground" data-testid="mcp-arrival-banner-body">
+            {banner.body}
+          </p>
+        ) : null}
+      </div>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        aria-label="Dismiss"
+        onClick={onDismiss}
+        className="-my-1 -mr-1 shrink-0 max-md:-my-2.5 max-md:-mr-2.5 max-md:size-11"
+      >
+        <X />
+      </Button>
+    </div>
+  );
+}
+
+function ServerCard({
+  server,
+  oauthAvailable,
+  onEdit,
+}: {
+  server: McpServer;
+  oauthAvailable: boolean;
+  onEdit: () => void;
+}) {
   const update = useUpdateMcpServer(server.id);
   const probe = useProbeMcpServer(server.id);
   const memberProbe = useProbeConnector(server.id);
+  const orgProbe = useReprobeConnector(server.id);
   const router = useRouter();
   const remove = useDeleteMcpServer(server.id);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -231,8 +348,14 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
   // D-16: member lists, counts and copy follow `isPerMemberMode`; who probes (the API or the cell) follows
   // `usesConnectorProxy` (07.14-01).
   const perMember = isPerMemberMode(server.authMode);
+  const orgAccount = isOrgCredentialMode(server.authMode);
   const proxied = usesConnectorProxy(server.authMode);
-  const status = perMember && server.status === "pending" ? MEMBER_PENDING : STATUS[server.status];
+  const status =
+    server.status === "pending" && perMember
+      ? MEMBER_PENDING
+      : server.status === "pending" && orgAccount
+        ? ORG_PENDING
+        : STATUS[server.status];
   const transport = TRANSPORTS.find((t) => t.value === server.transport)?.label ?? server.transport;
   const modeBadge = MODE_BADGE[server.authMode];
   const oauthBadge = server.oauthStatus ? OAUTH_BADGE[server.oauthStatus] : undefined;
@@ -248,10 +371,20 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
 
   async function reprobe() {
     try {
-      // A per-member connector is probed with the admin's OWN connection (UI-SPEC R6), never by the cell.
-      if (proxied) await memberProbe.mutateAsync();
+      // A per-member connector is probed with the admin's OWN connection (UI-SPEC R6), an organization-account one with
+      // the organization's (07.14); never by the cell.
+      if (orgAccount) await orgProbe.mutateAsync();
+      else if (proxied) await memberProbe.mutateAsync();
       else await probe.mutateAsync();
     } catch (err) {
+      if (orgAccount && isNotConnected(err)) {
+        toast(
+          err.code === "needs_reconnect"
+            ? `Reconnect ${server.name} for the organization first`
+            : `Connect ${server.name} for the organization first`,
+        );
+        return;
+      }
       if (perMember && isNotConnected(err)) {
         toast(reprobeRefusal(err.code, server.name), {
           action: {
@@ -264,7 +397,7 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
       toast.error("Could not check the server", { description: errorMessage(err) });
     }
   }
-  const probing = probe.isPending || memberProbe.isPending;
+  const probing = probe.isPending || memberProbe.isPending || orgProbe.isPending;
 
   async function onDelete() {
     try {
@@ -402,6 +535,10 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
         </div>
       </div>
 
+      {orgAccount ? (
+        <OrgConnectionRow server={server} oauthAvailable={oauthAvailable} onEdit={onEdit} />
+      ) : null}
+
       {server.oauthStatus === "needs_client" ? (
         <p
           role="note"
@@ -416,7 +553,7 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
         </p>
       ) : null}
 
-      {server.oauthStatus === "error" ? (
+      {server.oauthStatus === "error" && !orgAccount ? (
         <p
           role="note"
           className="mx-4 -mt-1 mb-3 flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-[13px] leading-snug"
