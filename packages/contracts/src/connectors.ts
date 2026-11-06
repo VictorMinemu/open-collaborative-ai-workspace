@@ -94,6 +94,57 @@ export const ConnectorErrorCode = z.enum([
 ]);
 export type ConnectorErrorCode = z.infer<typeof ConnectorErrorCode>;
 
+// ---------------------------------------------------------------- sign-in diagnosis (07.14 D-10, D-15)
+
+/**
+ * Why an organization sign-in, a client-credentials grant or a Test sign-in failed: the D-10 closed set, in diagnosis
+ * order (the first failed step wins). Never provider text. Stored as `mcp_servers.auth_failure`. A separate field from
+ * `ConnectorErrorCode`, which the member flows keep unchanged.
+ */
+export const ConnectorAuthFailure = z.enum([
+  "https_required",
+  "discovery_failed",
+  "issuer_mismatch",
+  "token_endpoint_untrusted",
+  "pkce_unsupported",
+  "client_registration_unavailable",
+  "scope_rejected",
+  "token_exchange_failed",
+]);
+export type ConnectorAuthFailure = z.infer<typeof ConnectorAuthFailure>;
+
+/** One fix line per failure (07.14 PD-12, final copy); `{server}` is the server's name (`authFailureFix`). */
+export const AUTH_FAILURE_FIX: Readonly<Record<ConnectorAuthFailure, string>> = Object.freeze({
+  https_required:
+    "Sign-in needs this workspace's public HTTPS address in OCW_PUBLIC_API_URL. Run pnpm ocw enable proxy on the server (or set the URL), then reload this page.",
+  discovery_failed:
+    "{server} publishes no OAuth sign-in information OCW can read. Check the URL, or use Organization headers with an API key.",
+  issuer_mismatch:
+    "{server}'s sign-in server names a different issuer than its address. The provider has to fix its metadata; until then, use Organization headers.",
+  token_endpoint_untrusted:
+    "The sign-in endpoints must use HTTPS (or this MCP server's own address). Check the Token URL, or ask the provider for an HTTPS endpoint.",
+  pkce_unsupported:
+    "{server}'s sign-in doesn't offer PKCE (S256), which OCW requires. Use Client credentials or Organization headers.",
+  client_registration_unavailable:
+    "{server} doesn't let OCW register itself. Create an OAuth app at the provider with the redirect URI below, then enter its client ID and secret under Pre-registered client.",
+  scope_rejected:
+    "The provider refused the requested scopes. Clear Scopes to use the server's own, or enter scopes it accepts.",
+  token_exchange_failed:
+    "The provider didn't finish the sign-in. Check the client ID and secret, then try again.",
+});
+
+/** The fix line for `code` with the server's name in place (inserted literally, never as a replacement pattern). */
+export function authFailureFix(code: ConnectorAuthFailure, serverName: string): string {
+  return AUTH_FAILURE_FIX[code].split("{server}").join(serverName);
+}
+
+/** The `?error=` of an organization sign-in redirect to `/settings/mcp-servers` (07.14 PD-06). */
+export const OrgSignInError = z.union([
+  ConnectorAuthFailure,
+  z.enum(["access_denied", "flow_expired", "session_mismatch"]),
+]);
+export type OrgSignInError = z.infer<typeof OrgSignInError>;
+
 // ---------------------------------------------------------------- OAuth client registration
 
 /** The instance's OAuth URLs, derived from `OCW_PUBLIC_API_URL` (`connectorOAuthUrls`). */
@@ -252,6 +303,51 @@ export type ConnectStartResponse = z.infer<typeof ConnectStartResponse>;
 /** `PUT /api/v1/connectors/:id/secret`: the member's key for a `per_member_secret` connector. Write-only. */
 export const ConnectSecretRequest = z.object({ value: z.string().min(1).max(8192) });
 export type ConnectSecretRequest = z.infer<typeof ConnectSecretRequest>;
+
+// ---------------------------------------------------------------- organization connection (07.14 D-03, D-06, D-11)
+
+/** How the organization's account was obtained: an admin's OAuth sign-in, or OAuth client credentials. */
+export const OrgConnectionMethod = z.enum(["oauth", "client_credentials"]);
+export type OrgConnectionMethod = z.infer<typeof OrgConnectionMethod>;
+
+/**
+ * The organization's shared account on one server (`McpServer.orgConnection`). Served only to `mcp.manage`; never a
+ * token, secret or secret id (strict: an extra key is refused, so none can be added by accident).
+ */
+export const OrgConnection = z.strictObject({
+  method: OrgConnectionMethod,
+  status: ConnectionStatus,
+  /** "Connected as {account}": from an ID token's email or preferred_username; null for client credentials or unknown. */
+  accountLabel: z.string().max(320).nullable(),
+  /** Client credentials only: the client ID (an identifier, not a secret). */
+  clientId: z.string().nullable(),
+  /** Client credentials only: the token endpoint in use (discovered or admin-entered). */
+  tokenEndpoint: z.string().nullable(),
+  scopes: z.array(z.string()),
+  /** The admin who connected it (null once they left the organization). */
+  connectedBy: z.object({ id: Id, name: z.string() }).nullable(),
+  connectedAt: IsoDateTime.nullable(),
+  lastUsedAt: IsoDateTime.nullable(),
+  /** Only with `needs_reconnect`. */
+  reconnectReason: ConnectorReconnectReason.nullable(),
+  /** Client credentials: whether a client secret is stored (it is never returned). */
+  hasSecret: z.boolean(),
+});
+export type OrgConnection = z.infer<typeof OrgConnection>;
+
+/**
+ * `PUT /api/v1/connectors/:id/org-connection/client-credentials` and the Test sign-in's client credentials. The secret
+ * is write-only: omitted = keep the stored one. `tokenEndpoint` omitted = the server's published metadata.
+ */
+export const ClientCredentialsInput = z.strictObject({
+  clientId: z.string().trim().min(1).max(256),
+  clientSecret: z.string().min(1).max(4096).optional(),
+  tokenEndpoint: z
+    .url({ protocol: /^https?$/ })
+    .max(2000)
+    .optional(),
+});
+export type ClientCredentialsInput = z.infer<typeof ClientCredentialsInput>;
 
 /** UTF-8 bytes of `value` serialized as JSON (`Infinity` when it cannot be serialized): the bound of tool payloads. */
 export function jsonBytes(value: unknown): number {

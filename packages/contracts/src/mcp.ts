@@ -1,12 +1,16 @@
 import { z } from "zod";
 import { Id, IsoDateTime } from "./common";
 import {
+  ClientCredentialsInput,
+  ConnectorAuthFailure,
   ConnectorAuthMode,
   ConnectorOAuthClientInput,
+  ConnectorOAuthClientMethod,
   ConnectorOAuthClientView,
   ConnectorOAuthStatus,
   ConnectorOAuthUrls,
   jsonBytes,
+  OrgConnection,
   rendersInCell,
   usesConnectorProxy,
   usesOAuthSignIn,
@@ -123,6 +127,11 @@ export const McpServer = z.object({
    * Members connected to it (member modes only; 0 otherwise), shown before a mode switch or a delete clears them (R4).
    */
   memberConnections: z.number().int().nonnegative().default(0),
+  // Phase 07.14 (D-06, D-10): defaulted, so 3.1 and 07.4 payloads parse unchanged.
+  /** Organization modes: the organization's shared account (null = not connected, or another mode). */
+  orgConnection: OrgConnection.nullable().default(null),
+  /** Organization modes: why the last organization sign-in or client-credential save failed (null = none). */
+  authFailure: ConnectorAuthFailure.nullable().default(null),
 });
 export type McpServer = z.infer<typeof McpServer>;
 
@@ -269,3 +278,91 @@ export const UpdateMcpServerRequest = z
     if (v.authMode !== undefined) checkConnectorAuth(v.authMode, v, ctx, false);
   });
 export type UpdateMcpServerRequest = z.infer<typeof UpdateMcpServerRequest>;
+
+// ---------------------------------------------------------------- Test sign-in (07.14 D-10, D-18)
+
+/** The diagnosis steps in order (PD-08): each maps to one `ConnectorAuthFailure`. */
+export const AuthTestStep = z.enum([
+  "public_url",
+  "discovery",
+  "issuer",
+  "endpoints",
+  "pkce",
+  "client_registration",
+  "token",
+]);
+export type AuthTestStep = z.infer<typeof AuthTestStep>;
+
+/** The modes a Test sign-in can check: both sign-in modes and client credentials. */
+export const OAuthTestMode = ConnectorAuthMode.extract([
+  "per_member_oauth",
+  "org_oauth",
+  "org_client_credentials",
+]);
+export type OAuthTestMode = z.infer<typeof OAuthTestMode>;
+
+/**
+ * `POST /api/v1/connectors/oauth-test`: dry-runs a sign-in for an unsaved form (`url`) or a saved server (`serverId`).
+ * Never registers a client and never stores anything (D-18). Field rules follow `checkConnectorAuth`: client
+ * credentials only for `org_client_credentials`, an OAuth client and the CIMD opt-out only for the sign-in modes.
+ */
+export const OAuthTestRequest = z
+  .strictObject({
+    serverId: Id.optional(),
+    url: z.string().max(2000).optional(),
+    transport: z.enum(["streamable-http", "sse"]).optional(),
+    authMode: OAuthTestMode,
+    oauthUseCimd: z.boolean().optional(),
+    oauthClient: ConnectorOAuthClientInput.optional(),
+    clientCredentials: ClientCredentialsInput.optional(),
+    oauthScopes: McpOAuthScopes.optional(),
+    /** The page's origin, to warn when the redirect URI points at another host (RESEARCH Pitfall 1). */
+    pageOrigin: z.string().max(2000).optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.url === undefined && v.serverId === undefined) {
+      ctx.addIssue({ code: "custom", path: ["url"], message: "name a URL or a saved server" });
+    }
+    if (v.clientCredentials !== undefined && v.authMode !== "org_client_credentials") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["clientCredentials"],
+        message: "only the client-credentials mode takes client credentials",
+      });
+    }
+    if (!usesOAuthSignIn(v.authMode)) {
+      if (v.oauthClient !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["oauthClient"],
+          message: "only sign-in modes take an OAuth client",
+        });
+      }
+      if (v.oauthUseCimd !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["oauthUseCimd"],
+          message: "only sign-in modes use a client metadata document",
+        });
+      }
+    }
+  });
+export type OAuthTestRequest = z.infer<typeof OAuthTestRequest>;
+
+/**
+ * The Test sign-in answer: which step failed (the first failure stops the run; later steps are `skipped`) and the
+ * instance's URLs to copy. Never provider text, a token or a secret.
+ */
+export const OAuthTestResponse = z.object({
+  ok: z.boolean(),
+  failure: ConnectorAuthFailure.nullable(),
+  steps: z
+    .array(z.object({ step: AuthTestStep, status: z.enum(["ok", "failed", "skipped"]) }))
+    .max(AuthTestStep.options.length),
+  clientMethod: ConnectorOAuthClientMethod.nullable(),
+  issuer: z.string().nullable(),
+  tokenEndpoint: z.string().nullable(),
+  redirectUri: z.string(),
+  clientMetadataUrl: z.string().nullable(),
+});
+export type OAuthTestResponse = z.infer<typeof OAuthTestResponse>;

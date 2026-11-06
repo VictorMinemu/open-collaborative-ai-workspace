@@ -67,6 +67,23 @@ export const WatchedErrorCode = z.enum([
 export type WatchedErrorCode = z.infer<typeof WatchedErrorCode>;
 
 const ExternalRef = z.string().trim().min(1).max(200);
+/**
+ * Whose credential a watched record's connector uses: the workspace's (`org_secret`; since 07.14 also the organization
+ * account modes, decided by the API with `rendersInCell || isOrgCredentialMode`) or the viewer's own (`per_member`).
+ */
+export const WatchedConnectorAccess = z.enum(["org_secret", "per_member"]);
+export type WatchedConnectorAccess = z.infer<typeof WatchedConnectorAccess>;
+
+/** True for workspace access (every member's bots read with one shared credential), false for a member's own. */
+export function isWorkspaceAccess(access: WatchedConnectorAccess): boolean {
+  switch (access) {
+    case "org_secret":
+      return true;
+    case "per_member":
+      return false;
+  }
+}
+
 const ToolName = z.string().trim().min(1).max(128);
 const IdArg = z.string().trim().min(1).max(64);
 const PersonRef = z.object({ id: Id, displayName: z.string() });
@@ -77,7 +94,7 @@ export const WatchedRecord = z.object({
   conversationId: Id,
   /** The bot that reports changes and may write (through `ocw_record_update`). */
   agent: PersonRef,
-  connector: z.object({ id: Id, name: z.string(), authMode: z.enum(["org_secret", "per_member"]) }),
+  connector: z.object({ id: Id, name: z.string(), authMode: WatchedConnectorAccess }),
   externalRef: ExternalRef,
   readTool: ToolName,
   writeTool: ToolName.nullable(),
@@ -185,7 +202,7 @@ export type WatchOptionTool = z.infer<typeof WatchOptionTool>;
 export const WatchOptionConnector = z.object({
   id: Id,
   name: z.string(),
-  authMode: z.enum(["org_secret", "per_member"]),
+  authMode: WatchedConnectorAccess,
   /** Per-member connectors: the viewer's own connection; null for organization-secret ones. */
   connection: z.enum(["connected", "not_connected", "needs_reconnect"]).nullable(),
   /** The viewer shares this per-member connector on this board (always true for organization-secret ones). */

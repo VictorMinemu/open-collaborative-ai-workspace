@@ -143,6 +143,9 @@ function toDto(row: ServerRow, extras: DtoExtras, opts: McpReadOptions): McpServ
         method: c.method,
       })),
     memberConnections: perMember ? (extras.connections.get(row.id) ?? 0) : 0,
+    // 07.14: no organization mode is stored yet (refused by `storableAuthMode`); 07.14-05 fills these in.
+    orgConnection: null,
+    authFailure: null,
   };
 }
 

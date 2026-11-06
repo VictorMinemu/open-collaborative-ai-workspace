@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AgentChannelEventTypes,
   AgentChannelMcpProbeResult,
+  AuthTestStep,
   CellMcpServer,
   CellSnapshot,
   CreateMcpServerRequest,
@@ -11,6 +12,8 @@ import {
   McpServer,
   McpServerList,
   McpServerTool,
+  OAuthTestRequest,
+  OAuthTestResponse,
   UpdateMcpServerRequest,
 } from "./index";
 
@@ -55,6 +58,8 @@ const orgSecretDefaults = {
   oauthUseCimd: true,
   oauthClients: [],
   memberConnections: 0,
+  orgConnection: null,
+  authFailure: null,
 };
 
 describe("MCP registry contracts (D-13)", () => {
@@ -471,5 +476,129 @@ describe("organization credential modes on the registry (07.14 D-01 … D-03)", 
     expect(
       UpdateMcpServerRequest.parse({ authMode: "org_oauth", oauthScopes: ["read"], clearConnections: true }),
     ).toEqual({ authMode: "org_oauth", oauthScopes: ["read"], clearConnections: true });
+  });
+});
+
+describe("the organization connection on the server and Test sign-in (07.14 D-10, D-18; COA-04, COA-05)", () => {
+  it("a 3.1 or 07.4 server payload without the 07.14 fields parses with no connection and no failure", () => {
+    const parsed = McpServer.parse(server);
+    expect(parsed.orgConnection).toBeNull();
+    expect(parsed.authFailure).toBeNull();
+    const member = McpServer.parse({
+      ...server,
+      authMode: "per_member_oauth",
+      headers: [],
+      memberConnections: 2,
+    });
+    expect(member.orgConnection).toBeNull();
+    expect(member.authFailure).toBeNull();
+  });
+
+  it("an organization server carries its connection and its last sign-in failure", () => {
+    const parsed = McpServer.parse({
+      ...server,
+      authMode: "org_oauth",
+      headers: [],
+      authFailure: "pkce_unsupported",
+      orgConnection: {
+        method: "oauth",
+        status: "connected",
+        accountLabel: "ops@example.com",
+        clientId: null,
+        tokenEndpoint: null,
+        scopes: [],
+        connectedBy: { id: ID, name: "Ada Admin" },
+        connectedAt: NOW,
+        lastUsedAt: NOW,
+        reconnectReason: null,
+        hasSecret: false,
+      },
+    });
+    expect(parsed.orgConnection?.accountLabel).toBe("ops@example.com");
+    expect(parsed.authFailure).toBe("pkce_unsupported");
+    expect(McpServer.safeParse({ ...server, authFailure: "needs_client" }).success).toBe(false);
+  });
+
+  const issuesOf = (input: unknown) => {
+    const res = OAuthTestRequest.safeParse(input);
+    return res.success ? [] : res.error.issues.map((i) => i.path.map(String).join("."));
+  };
+
+  it("Test sign-in needs a URL or a saved server (E9)", () => {
+    expect(OAuthTestRequest.safeParse({ authMode: "org_oauth" }).success).toBe(false);
+    expect(
+      OAuthTestRequest.safeParse({ authMode: "org_oauth", url: "https://crm.example.com/mcp" }).success,
+    ).toBe(true);
+    expect(OAuthTestRequest.safeParse({ authMode: "per_member_oauth", serverId: ID }).success).toBe(true);
+  });
+
+  it("client credentials only for org_client_credentials, an OAuth client only for the sign-in modes", () => {
+    const clientCredentials = { clientId: "ocw-test-cc", clientSecret: "s" };
+    const oauthClient = { issuer: "https://auth.example.com", clientId: "ocw" };
+    expect(issuesOf({ authMode: "org_oauth", serverId: ID, clientCredentials })).toContain(
+      "clientCredentials",
+    );
+    expect(issuesOf({ authMode: "per_member_oauth", serverId: ID, clientCredentials })).toContain(
+      "clientCredentials",
+    );
+    expect(issuesOf({ authMode: "org_client_credentials", serverId: ID, oauthClient })).toContain(
+      "oauthClient",
+    );
+    expect(issuesOf({ authMode: "org_client_credentials", serverId: ID, oauthUseCimd: false })).toContain(
+      "oauthUseCimd",
+    );
+    expect(issuesOf({ authMode: "org_oauth", serverId: ID, oauthClient, oauthUseCimd: false })).toEqual([]);
+    expect(OAuthTestRequest.safeParse({ authMode: "org_secret", serverId: ID }).success).toBe(false);
+    expect(OAuthTestRequest.safeParse({ authMode: "per_member_secret", serverId: ID }).success).toBe(false);
+  });
+
+  it("a full client-credentials Test parses; an unknown key is refused", () => {
+    const full = {
+      url: "https://crm.example.com/mcp",
+      transport: "streamable-http",
+      authMode: "org_client_credentials",
+      clientCredentials: {
+        clientId: "ocw-test-cc",
+        clientSecret: "s",
+        tokenEndpoint: "https://auth.example.com/token",
+      },
+      oauthScopes: ["crm.read"],
+      pageOrigin: "https://ocw.example.com",
+    };
+    expect(OAuthTestRequest.parse(full)).toEqual(full);
+    expect(OAuthTestRequest.safeParse({ ...full, headers: [] }).success).toBe(false);
+    expect(OAuthTestRequest.safeParse({ ...full, transport: "sandboxed-stdio" }).success).toBe(false);
+    expect(OAuthTestRequest.safeParse({ ...full, url: "x".repeat(2001) }).success).toBe(false);
+  });
+
+  it("the Test answer reports each of the seven steps and carries no provider text", () => {
+    expect(AuthTestStep.options).toEqual([
+      "public_url",
+      "discovery",
+      "issuer",
+      "endpoints",
+      "pkce",
+      "client_registration",
+      "token",
+    ]);
+    const answer = {
+      ok: false,
+      failure: "pkce_unsupported",
+      steps: AuthTestStep.options.map((step, i) => ({
+        step,
+        status: i < 4 ? "ok" : i === 4 ? "failed" : "skipped",
+      })),
+      clientMethod: null,
+      issuer: "https://auth.example.com",
+      tokenEndpoint: "https://auth.example.com/token",
+      redirectUri: "https://ocw.example.com/api/v1/connectors/oauth/callback",
+      clientMetadataUrl: null,
+    };
+    expect(OAuthTestResponse.parse(answer)).toEqual(answer);
+    const withText = OAuthTestResponse.parse({ ...answer, error_description: "provider says no" });
+    expect(withText).not.toHaveProperty("error_description");
+    expect(
+      OAuthTestResponse.safeParse({ ...answer, steps: [{ step: "pkce", status: "maybe" }] }).success,
+    ).toBe(false);
   });
 });
