@@ -15,10 +15,12 @@ export {
   oauthClientsOf,
   orgSecretHeaders,
   probeMcpServer,
+  reconnectReasonOfCode,
   recordProbeResult,
   replaceServerTools,
   requestProbe,
   sandboxInfo,
+  setAuthFailure,
   setOAuthStatus,
   updateMcpServer,
 } from "./service";
@@ -35,6 +37,11 @@ export { checkMcpUrl, type McpUrlCheck } from "./url-policy";
  * Phase 07.4 (D-01): each server has an auth mode. `org_secret` servers are rendered in the cell as before;
  * `per_member_oauth` / `per_member_secret` connectors never are (the connectors module calls them with the member's
  * own credential and records their tools through `replaceServerTools`).
+ *
+ * Phase 07.14 (D-01): `org_oauth` / `org_client_credentials` servers use one organization account, also called by the
+ * connectors module and never rendered in the cell. The registry shows that connection (`orgConnection`) and the last
+ * sign-in failure (`authFailure`, written through `setAuthFailure`), and asks before a mode switch or a delete
+ * destroys it (409 `org_connection_exists`).
  */
 export function createMcpModule(core: Core): ApiModule {
   const perms = createPermissionService(core);
