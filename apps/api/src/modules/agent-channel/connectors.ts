@@ -232,12 +232,13 @@ const stricter = (a: TurnToolFlags | undefined, b: TurnToolFlags | undefined): T
 });
 
 /**
- * The per-member connectors whose logical tools are in `tools`, each with those tools (catalog order) and the asker's
- * connection status. Descriptions and schemas are the probe's (third-party) values, bounded by the contract.
+ * The proxied connectors whose logical tools are in `tools`, each with those tools (catalog order) and the status of the
+ * credential a call would use: the asker's own connection for a member mode, the organization's for an org mode
+ * (07.14). Descriptions and schemas are the probe's (third-party) values, bounded by the contract.
  */
 async function listedConnectors(
   tx: Tx,
-  userId: string,
+  ctx: { organizationId: string; userId: string },
   tools: readonly string[],
 ): Promise<AgentChannelConnectorEntry[]> {
   const offered = new Set(tools.filter((t) => /^m[0-9a-f]{8}__/u.test(t)));
@@ -260,11 +261,16 @@ async function listedConnectors(
     byServer.set(r.server.id, entry);
   }
   const groups = [...byServer.values()].slice(0, CONNECTOR_TOOL_LIMITS.connectors);
+  const isOrg = (g: { server: ServerRow }) => isOrgCredentialMode(g.server.authMode);
+  // Member modes in one query; each org-mode server reads its one organization row.
   const statuses = await connectionStatusFor(
     tx,
-    userId,
-    groups.map((g) => g.server.id),
+    ctx.userId,
+    groups.filter((g) => !isOrg(g)).map((g) => g.server.id),
   );
+  for (const g of groups.filter(isOrg)) {
+    statuses.set(g.server.id, await credentialStatusFor(tx, credentialKeyOf(g.server, ctx)));
+  }
   return groups.map(({ server, tools: serverTools }) => ({
     connector: server.safeName,
     name: server.name,
@@ -562,7 +568,11 @@ export function registerConnectorRoutes(
           const started = Date.now();
           const claim = await claimWith(null);
           if (!claim.allowed) return { refused: claim.reason as Refusal };
-          const connectors = await listedConnectors(tx, turn.userId, now.tools);
+          const connectors = await listedConnectors(
+            tx,
+            { organizationId: cell.organizationId, userId: turn.userId },
+            now.tools,
+          );
           const keys = now.keys.usable.slice(0, CONNECTOR_TOOL_LIMITS.keys).map((k) => ({
             handle: k.handle,
             name: k.name,
