@@ -255,6 +255,129 @@ describe("saved servers", () => {
   });
 });
 
+describe("security: stored secrets and clients only go to the saved target (write-only secrets, ADR-0025)", () => {
+  /** A saved client-credentials server whose stored target is not the fake (the fake plays another target). */
+  let moved: Json;
+  /** A saved sign-in server with its pre-registered client, stored target moved off the fake too. */
+  let movedSignIn: Json;
+  /** Saved without metadata, with the admin's Token URL on the fake's origin. */
+  let adminUrl: Json;
+  /** Saved normally: issuer pinned. */
+  let pinned: Json;
+  const grants = async () => (await fakeStats(s)).tokenRequests.client_credentials;
+
+  beforeAll(async () => {
+    moved = await registerCcConnector(s);
+    await ok(saveCc(s, s.victor, moved.id));
+    movedSignIn = await registerOrgConnector(s);
+    for (const id of [moved.id, movedSignIn.id]) {
+      await s.su.query("update app.mcp_servers set url = 'https://saved.example.com/mcp' where id = $1", [
+        id,
+      ]);
+    }
+    adminUrl = await registerCcConnector(s);
+    s.fake.setScenario({ no_prm: true });
+    await ok(
+      saveCc(s, s.victor, adminUrl.id, {
+        clientId: PRE_REGISTERED_CC,
+        clientSecret: CC_SECRET,
+        tokenEndpoint: `${s.fakeBase}/mcp-oauth/token`,
+      }),
+    );
+    s.fake.setScenario({});
+    pinned = await registerCcConnector(s);
+    await ok(saveCc(s, s.victor, pinned.id));
+  });
+
+  it("a changed URL with no secret in the form: the stored secret is not sent, no token request", async () => {
+    const before = await grants();
+    const r = await ok(
+      test({
+        serverId: moved.id,
+        url: mcpUrl(),
+        authMode: "org_client_credentials",
+        clientCredentials: { clientId: PRE_REGISTERED_CC },
+      }),
+    );
+    expect(r).toMatchObject({ ok: false, failure: "token_exchange_failed" });
+    expect(await grants()).toBe(before);
+    // Nothing from the form at all: the same.
+    expect(
+      await ok(test({ serverId: moved.id, url: mcpUrl(), authMode: "org_client_credentials" })),
+    ).toMatchObject({ ok: false, failure: "token_exchange_failed" });
+    expect(await grants()).toBe(before);
+  });
+
+  it("a changed URL does not use the saved server's clients either", async () => {
+    const same = await ok(test({ serverId: movedSignIn.id, authMode: "org_oauth", url: mcpUrl() }));
+    expect(same.clientMethod).not.toBe("pre_registered");
+  });
+
+  it("the saved URL given explicitly is the saved target: the stored secret is used", async () => {
+    const before = await grants();
+    expect(
+      await ok(test({ serverId: pinned.id, url: mcpUrl(), authMode: "org_client_credentials" })),
+    ).toMatchObject({ ok: true });
+    expect(await grants()).toBe(before + 1);
+  });
+
+  it("a changed Token URL with no secret: nothing sent; the saved Token URL still works", async () => {
+    s.fake.setScenario({ no_prm: true });
+    const before = await grants();
+    const changed = await ok(
+      test({
+        serverId: adminUrl.id,
+        authMode: "org_client_credentials",
+        clientCredentials: {
+          clientId: PRE_REGISTERED_CC,
+          tokenEndpoint: `${s.fakeBase}/mcp-oauth/alt/token`,
+        },
+      }),
+    );
+    expect(changed).toMatchObject({ ok: false, failure: "token_exchange_failed" });
+    expect(await grants()).toBe(before);
+    expect(
+      await ok(
+        test({
+          serverId: adminUrl.id,
+          authMode: "org_client_credentials",
+          clientCredentials: { clientId: PRE_REGISTERED_CC },
+        }),
+      ),
+    ).toMatchObject({ ok: true });
+    expect(await grants()).toBe(before + 1);
+  });
+
+  it("the saved issuer changed: the stored secret goes to neither issuer (issuer_mismatch)", async () => {
+    s.fake.setScenario({ different_issuer: true });
+    const before = await grants();
+    const r = await ok(test({ serverId: pinned.id, authMode: "org_client_credentials" }));
+    expect(r).toMatchObject({ ok: false, failure: "issuer_mismatch" });
+    expect(await grants()).toBe(before);
+  });
+
+  it("a form Token URL the registry would refuse → 400 before any request", async () => {
+    const before = await grants();
+    const mcp = (await fakeStats(s)).mcpRequests;
+    for (const tokenEndpoint of [
+      "http://169.254.169.254/latest/token",
+      `https://127.0.0.1:${s.fakePort}/mcp-oauth/token`,
+    ]) {
+      await fails(
+        test({
+          url: mcpUrl(),
+          authMode: "org_client_credentials",
+          clientCredentials: { clientId: PRE_REGISTERED_CC, clientSecret: CC_SECRET, tokenEndpoint },
+        }),
+        400,
+        "invalid_url",
+      );
+    }
+    expect(await grants()).toBe(before);
+    expect((await fakeStats(s)).mcpRequests).toBe(mcp);
+  });
+});
+
 describe("who may test, and how often", () => {
   it("a member without mcp.manage → 403", async () => {
     await fails(test({ url: mcpUrl(), authMode: "org_oauth" }, s.sam), 403);

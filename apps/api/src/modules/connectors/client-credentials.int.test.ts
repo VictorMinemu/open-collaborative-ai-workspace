@@ -459,6 +459,60 @@ describe("auth methods, the admin-entered Token URL and refused saves (D-03, D-1
   });
 });
 
+describe("security: a kept secret only goes where it was saved for (write-only secrets, ADR-0025)", () => {
+  it("the issuer changed since the save: saving without the secret → 400 secret_required, nothing sent", async () => {
+    const server = await savedServer();
+    s.fake.setScenario({ different_issuer: true });
+    const before = await ccRequests();
+    await fails(saveCc(s, s.victor, server.id, { clientId: PRE_REGISTERED_CC }), 400, "secret_required");
+    expect(await ccRequests()).toBe(before);
+  });
+
+  it("another Token URL without the secret → 400 secret_required, nothing sent; with the secret typed again it saves", async () => {
+    const server = await registerCcConnector(s);
+    s.fake.setScenario({ no_prm: true });
+    await ok(
+      saveCc(s, s.victor, server.id, {
+        clientId: PRE_REGISTERED_CC,
+        clientSecret: CC_SECRET,
+        tokenEndpoint: `${s.fakeBase}/mcp-oauth/token`,
+      }),
+    );
+    const before = await ccRequests();
+    const moved = { clientId: PRE_REGISTERED_CC, tokenEndpoint: `${s.fakeBase}/mcp-oauth/alt/token` };
+    await fails(saveCc(s, s.victor, server.id, moved), 400, "secret_required");
+    expect(await ccRequests()).toBe(before);
+    // The saved Token URL (omitted or repeated) keeps the secret.
+    await ok(saveCc(s, s.victor, server.id, { clientId: PRE_REGISTERED_CC }));
+    await ok(
+      saveCc(s, s.victor, server.id, {
+        clientId: PRE_REGISTERED_CC,
+        tokenEndpoint: `${s.fakeBase}/mcp-oauth/token`,
+      }),
+    );
+    await ok(saveCc(s, s.victor, server.id, { ...moved, clientSecret: CC_SECRET }));
+    expect(await ccRequests()).toBe(before + 3);
+  });
+
+  it("a Token URL the registry would refuse (cloud metadata, loopback) → 409 token_endpoint_untrusted before any request", async () => {
+    const server = await registerCcConnector(s);
+    s.fake.setScenario({ no_prm: true });
+    const before = await ccRequests();
+    for (const tokenEndpoint of ["https://169.254.169.254/latest/token", "https://localhost/token"]) {
+      await fails(
+        saveCc(s, s.victor, server.id, {
+          clientId: PRE_REGISTERED_CC,
+          clientSecret: CC_SECRET,
+          tokenEndpoint,
+        }),
+        409,
+        "token_endpoint_untrusted",
+      );
+    }
+    expect(await ccRequests()).toBe(before);
+  });
+});
+
 describe("Disconnect and tenant isolation (D-08)", () => {
   it("Disconnect revokes the access token, then deletes the row and its secret", async () => {
     const server = await savedServer();
