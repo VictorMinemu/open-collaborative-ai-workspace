@@ -13,8 +13,10 @@ import {
   getMcpServer,
   listMcpServers,
   oauthClientsOf,
+  orgSecretHeaders,
   recordProbeResult,
   replaceServerTools,
+  setAuthFailure,
   setOAuthStatus,
 } from "./index";
 
@@ -1487,3 +1489,302 @@ describe("cross-tenant: another organization's admin cannot read, change or dele
 async function getMcpServer_(id: string): Promise<Json> {
   return asTenant<Json>((tx) => getMcpServer(tx, id));
 }
+
+// ---------------------------------------------------------------- Phase 07.14-05: organization modes (D-01, D-04, D-06, D-08, D-14)
+
+const ORG_TOKEN = "ORG-ACCESS-TOKEN-CANARY";
+const ORG_CLIENT_SECRET = "ORG-CLIENT-SECRET-CANARY";
+
+/**
+ * The organization's account on a server, as the connectors module stores it (07): a sealed bundle (AAD
+ * `<org>:org:connector:<server>`) and one `connector_org_connections` row. Returns the secret id.
+ */
+async function seedOrgConnection(
+  serverId: string,
+  row: {
+    method: "oauth" | "client_credentials";
+    status?: "connected" | "needs_reconnect";
+    connectedBy: string | null;
+    accountLabel?: string | null;
+    clientId?: string | null;
+    tokenEndpoint?: string | null;
+    scopes?: string[];
+    lastError?: string | null;
+    lastUsedAt?: string | null;
+  },
+): Promise<string> {
+  const secretId = await asTenant<string>((tx) =>
+    stack.built.core.secrets.putSealed(tx, {
+      name: "organization connector credential",
+      kind: "connector_credential",
+      value: JSON.stringify({ kind: row.method, accessToken: ORG_TOKEN }),
+      aad: `${orgId}:org:connector:${serverId}`,
+    }),
+  );
+  await su.query(
+    `insert into app.connector_org_connections
+       (organization_id, server_id, method, status, secret_id, issuer, client_id, token_endpoint, scopes,
+        account_label, last_error, connected_by, last_used_at)
+     values ($1, $2, $3, $4, $5, 'https://auth.org.example', $6, $7, $8, $9, $10, $11, $12)`,
+    [
+      orgId,
+      serverId,
+      row.method,
+      row.status ?? "connected",
+      secretId,
+      row.clientId ?? null,
+      row.tokenEndpoint ?? null,
+      row.scopes ?? [],
+      row.accountLabel ?? null,
+      row.lastError ?? null,
+      row.connectedBy,
+      row.lastUsedAt ?? null,
+    ],
+  );
+  return secretId;
+}
+
+describe("organization modes on the registry (07.14-05)", () => {
+  let adminId: string;
+  let olga: TestClient;
+  let signIn: Json;
+  let cc: Json;
+
+  const SIGN_IN = {
+    name: "Org Drive",
+    transport: "streamable-http",
+    url: "https://drive.example.com/mcp",
+    authMode: "org_oauth",
+    oauthScopes: ["files.read", "files.read"],
+    oauthUseCimd: false,
+    oauthClient: {
+      issuer: "https://auth.drive.example",
+      clientId: "ocw-org",
+      clientSecret: ORG_CLIENT_SECRET,
+    },
+  };
+  const CC = {
+    name: "Org Reports",
+    transport: "sse",
+    url: "https://reports.example.com/sse",
+    authMode: "org_client_credentials",
+    oauthScopes: ["reports.read"],
+  };
+
+  beforeAll(async () => {
+    adminId = (
+      await rowsOf("select user_id from app.org_members where organization_id = $1 and display_name = $2", [
+        orgId,
+        ADMIN.name,
+      ])
+    )[0]?.user_id as string;
+    // Olga: invited into org A, then moved into her own organization as its admin (the 07.4 cross-tenant recipe).
+    const [client, olgaId] = await joinAs("olga@example.test", "Olga", "developer");
+    olga = client;
+    const orgC = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Other Org', $2)", [
+      orgC,
+      `other-org-${orgC}`,
+    ]);
+    await su.query("delete from auth.member where user_id = $1", [olgaId]);
+    await su.query("delete from app.org_members where user_id = $1", [olgaId]);
+    await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+      orgC,
+      olgaId,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Olga', 'admin')",
+      [orgC, olgaId],
+    );
+    await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgC, olgaId]);
+  });
+
+  it("an admin registers an organization sign-in server: pending, never probed by the cell, the client sealed and write-only", async () => {
+    const probesBefore = (await cellEvents("mcp.probe")).length;
+    signIn = await ok(admin.request("POST", "/api/v1/mcp-servers", SIGN_IN));
+    expect(signIn).toMatchObject({
+      name: "Org Drive",
+      authMode: "org_oauth",
+      headers: [],
+      status: "pending",
+      oauthStatus: "ready",
+      oauthScopes: ["files.read"],
+      oauthUseCimd: false,
+      oauthClients: [
+        {
+          issuer: "https://auth.drive.example",
+          clientId: "ocw-org",
+          hasSecret: true,
+          method: "pre_registered",
+        },
+      ],
+      memberConnections: 0,
+      orgConnection: null,
+      authFailure: null,
+    });
+    expect((await cellEvents("mcp.probe")).length).toBe(probesBefore);
+    const client = await rowsOf(
+      "select s.kind, s.ciphertext from app.connector_oauth_clients c join app.secrets s on s.id = c.client_secret_id where c.server_id = $1",
+      [signIn.id],
+    );
+    expect(client).toHaveLength(1);
+    expect(client[0]?.kind).toBe("mcp_credential");
+    expect(client[0]?.ciphertext).not.toContain(ORG_CLIENT_SECRET);
+    expect((await audits("mcp.server.created")).at(-1)?.metadata).toMatchObject({
+      name: "Org Drive",
+      authMode: "org_oauth",
+      preRegisteredClient: true,
+      oauthUseCimd: false,
+    });
+    const allAudits = await rowsOf("select metadata from app.audit_events where organization_id = $1", [
+      orgId,
+    ]);
+    expect(JSON.stringify([signIn, allAudits])).not.toContain(ORG_CLIENT_SECRET);
+  });
+
+  it("a client-credentials server takes scopes but no OAuth client; neither mode takes headers or the stdio sandbox", async () => {
+    const probesBefore = (await cellEvents("mcp.probe")).length;
+    cc = await ok(admin.request("POST", "/api/v1/mcp-servers", CC));
+    expect(cc).toMatchObject({
+      authMode: "org_client_credentials",
+      transport: "sse",
+      status: "pending",
+      oauthStatus: null,
+      oauthScopes: ["reports.read"],
+      oauthClients: [],
+      orgConnection: null,
+      authFailure: null,
+      memberConnections: 0,
+    });
+    expect((await cellEvents("mcp.probe")).length).toBe(probesBefore);
+    const refused = async (body: Json) => {
+      const r = await admin.request("POST", "/api/v1/mcp-servers", body);
+      expect(r.status, JSON.stringify(body)).toBe(400);
+    };
+    await refused({ ...CC, name: "CC client", oauthClient: SIGN_IN.oauthClient });
+    for (const mode of ["org_oauth", "org_client_credentials"]) {
+      await refused({
+        ...CC,
+        name: "Headers",
+        authMode: mode,
+        headers: [{ name: "Authorization", value: "x" }],
+      });
+      await refused({
+        name: "Stdio",
+        transport: "sandboxed-stdio",
+        sandboxServer: "everything",
+        authMode: mode,
+      });
+    }
+    expect(
+      (await rowsOf("select 1 from app.mcp_servers where name in ('CC client', 'Headers', 'Stdio')", []))
+        .length,
+    ).toBe(0);
+  });
+
+  it("neither reaches the cell, enabled or not; their credential is never revealed and a cell report is ignored", async () => {
+    const cellIds = async () =>
+      (await asTenant<Json[]>((tx) => cellMcpServers(stack.built.core, tx))).map((s) => s.id);
+    expect(signIn.orgEnabled).toBe(true);
+    expect(await cellIds()).not.toContain(signIn.id);
+    expect(await cellIds()).not.toContain(cc.id);
+    await ok(admin.request("PATCH", `/api/v1/mcp-servers/${cc.id}`, { orgEnabled: false }));
+    expect(await cellIds()).not.toContain(cc.id);
+    await ok(admin.request("PATCH", `/api/v1/mcp-servers/${cc.id}`, { orgEnabled: true }));
+    expect(await cellIds()).not.toContain(cc.id);
+    // Not vacuous: the organization-headers servers are still there.
+    expect((await cellIds()).length).toBeGreaterThan(0);
+    for (const id of [signIn.id, cc.id]) {
+      expect(await asTenant((tx) => orgSecretHeaders(stack.built.core, tx, id))).toBeNull();
+      expect(
+        await asTenant((tx) =>
+          recordProbeResult(stack.built.core, tx, {
+            probeId: randomUUID(),
+            serverId: id,
+            ok: true,
+            tools: [],
+          }),
+        ),
+      ).toEqual({ applied: false });
+    }
+  });
+
+  it("the organization connection shows in the DTO (method, status, label, who connected it, hasSecret), never a token or a secret id", async () => {
+    const secretId = await seedOrgConnection(signIn.id, {
+      method: "oauth",
+      connectedBy: adminId,
+      accountLabel: "ops@acme.example",
+      scopes: ["files.read"],
+      lastUsedAt: "2026-11-01T10:00:00.000Z",
+    });
+    const one = await ok(admin.request("GET", `/api/v1/mcp-servers/${signIn.id}`));
+    expect(one.orgConnection).toEqual({
+      method: "oauth",
+      status: "connected",
+      accountLabel: "ops@acme.example",
+      clientId: null,
+      tokenEndpoint: null,
+      scopes: ["files.read"],
+      connectedBy: { id: adminId, name: ADMIN.name },
+      connectedAt: expect.any(String),
+      lastUsedAt: "2026-11-01T10:00:00.000Z",
+      reconnectReason: null,
+      hasSecret: true,
+    });
+    const list = await ok(admin.request("GET", "/api/v1/mcp-servers"));
+    const listed = (list.servers as Json[]).find((s) => s.id === signIn.id);
+    expect(listed?.orgConnection).toEqual(one.orgConnection);
+    // No other server shows it.
+    for (const s of list.servers as Json[]) if (s.id !== signIn.id) expect(s.orgConnection).toBeNull();
+    for (const text of [ORG_TOKEN, secretId]) expect(JSON.stringify([one, list])).not.toContain(text);
+
+    // Client credentials: the client id and token URL show; a connection whose admin left reads `connectedBy: null`.
+    await seedOrgConnection(cc.id, {
+      method: "client_credentials",
+      status: "needs_reconnect",
+      connectedBy: randomUUID(),
+      clientId: "ocw-reports",
+      tokenEndpoint: "https://auth.reports.example/token",
+      lastError: "invalid_client",
+    });
+    expect((await ok(admin.request("GET", `/api/v1/mcp-servers/${cc.id}`))).orgConnection).toMatchObject({
+      method: "client_credentials",
+      status: "needs_reconnect",
+      accountLabel: null,
+      clientId: "ocw-reports",
+      tokenEndpoint: "https://auth.reports.example/token",
+      connectedBy: null,
+      lastUsedAt: null,
+      reconnectReason: "revoked",
+      hasSecret: true,
+    });
+  });
+
+  it("the last sign-in failure shows as authFailure until it is cleared", async () => {
+    await asTenant((tx) => setAuthFailure(tx, cc.id, "scope_rejected"));
+    expect((await ok(admin.request("GET", `/api/v1/mcp-servers/${cc.id}`))).authFailure).toBe(
+      "scope_rejected",
+    );
+    await asTenant((tx) => setAuthFailure(tx, cc.id, null));
+    expect((await ok(admin.request("GET", `/api/v1/mcp-servers/${cc.id}`))).authFailure).toBeNull();
+  });
+
+  it("the admin probe refuses an organization-account server with org_connector (a member one keeps member_connector)", async () => {
+    for (const id of [signIn.id, cc.id]) {
+      const r = await admin.request("POST", `/api/v1/mcp-servers/${id}/probe`);
+      expect(r.status).toBe(409);
+      expect(codeOf(r)).toBe("org_connector");
+    }
+  });
+
+  it("another organization's admin reads none of it", async () => {
+    for (const id of [signIn.id, cc.id]) {
+      const r = await olga.request("GET", `/api/v1/mcp-servers/${id}`);
+      expect(r.status).toBe(404);
+    }
+    const list = await ok(olga.request("GET", "/api/v1/mcp-servers"));
+    expect(list.servers).toEqual([]);
+    for (const text of ["ops@acme.example", "ocw-reports", "drive.example.com"])
+      expect(JSON.stringify(list)).not.toContain(text);
+  });
+});
