@@ -1,11 +1,13 @@
-import { AUTH_FAILURE_FIX, authFailureFix, type OrgConnection } from "@ocw/contracts";
+import { AUTH_FAILURE_FIX, authFailureFix, type OrgConnection, OrgSignInError } from "@ocw/contracts";
 import { describe, expect, it } from "vitest";
 import {
   arrivalBanner,
+  disconnectCopy,
   failureBox,
   notConnectedLine,
   orgConnectionLine,
   orgConnectionStatus,
+  orgDeleteSentence,
   reasonLine,
   stepLabel,
   stepOfFailure,
@@ -144,5 +146,39 @@ describe("arrivalBanner", () => {
     for (const code of Object.keys(AUTH_FAILURE_FIX) as Array<keyof typeof AUTH_FAILURE_FIX>) {
       expect(arrivalBanner({ error: code }, "Acme")?.body).toBe(authFailureFix(code, "Acme"));
     }
+  });
+});
+
+describe("every organization sign-in outcome", () => {
+  it("maps every OrgSignInError value to a banner", () => {
+    for (const code of OrgSignInError.options.flatMap((o) => o.options)) {
+      const b = arrivalBanner({ error: code }, "Acme");
+      expect(b, code).not.toBeNull();
+      expect(b?.kind).toBe("error");
+    }
+  });
+
+  it("says the three user outcomes in their own sentences, without a fix line", () => {
+    expect(arrivalBanner({ error: "access_denied" }, "Acme")).toEqual({
+      kind: "error",
+      title: "Acme didn't allow access.",
+      body: null,
+    });
+    expect(arrivalBanner({ error: "flow_expired" }, "Acme")?.title).toBe(
+      "That sign-in took too long or was already used. Try Connect again.",
+    );
+    expect(arrivalBanner({ error: "session_mismatch" }, "Acme")?.title).toBe(
+      "That sign-in was started from another account. Sign in as the admin who started it and try again.",
+    );
+  });
+});
+
+describe("disconnect and delete copy", () => {
+  it("names the server", () => {
+    expect(orgDeleteSentence("Acme")).toBe("The organization's sign-in to Acme is deleted too.");
+    expect(disconnectCopy("Acme")).toEqual({
+      title: "Disconnect Acme?",
+      body: "Bots stop using the organization's account on Acme. OCW also signs it out at the provider when it can.",
+    });
   });
 });
