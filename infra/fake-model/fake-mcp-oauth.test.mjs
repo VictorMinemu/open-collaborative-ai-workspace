@@ -963,3 +963,151 @@ describe("fake MCP OAuth: /kc credentials are configurable (07.4-12 leak sweep c
     assert.equal((await token("kc-client", "kc-secret")).status, 401);
   });
 });
+
+describe("fake MCP OAuth: client credentials grant (RFC 6749 §4.4, 07.14-03)", () => {
+  const CC = "cc-client";
+  const CC_SECRET = "cc-secret";
+  // A secret RFC 6749 §2.3.1 must form-urlencode inside Basic: it only matches once decoded.
+  const ODD = "cc:odd";
+  const ODD_SECRET = "s3cr:t%/é+";
+  let direct;
+  let meta;
+  let resource;
+  before(async () => {
+    direct = await mountDirect({
+      preRegistered: [
+        { client_id: CC, client_secret: CC_SECRET, redirect_uris: [] },
+        { client_id: ODD, client_secret: ODD_SECRET, redirect_uris: [] },
+        { client_id: "pub", redirect_uris: [E2E_REDIRECT] },
+      ],
+    });
+    meta = await (await fetch(`${direct.origin}/.well-known/oauth-authorization-server/mcp-oauth`)).json();
+    resource = `${direct.origin}/mcp-oauth/mcp`;
+  });
+  beforeEach(() => direct.fake.reset());
+  after(() => new Promise((resolve) => direct.srv.close(resolve)));
+
+  const basicOf = (id, secret) =>
+    `Basic ${Buffer.from(`${encodeURIComponent(id)}:${encodeURIComponent(secret)}`).toString("base64")}`;
+  const ccBasic = (form = {}, id = CC, secret = CC_SECRET) =>
+    tokenRequest(
+      meta,
+      { grant_type: "client_credentials", resource, ...form },
+      { authorization: basicOf(id, secret) },
+    );
+  const ccPost = (form = {}) =>
+    tokenRequest(meta, {
+      grant_type: "client_credentials",
+      client_id: CC,
+      client_secret: CC_SECRET,
+      resource,
+      ...form,
+    });
+
+  it("AS metadata lists client_credentials among the grant types", () => {
+    assert.ok(meta.grant_types_supported.includes("client_credentials"));
+    assert.ok(meta.grant_types_supported.includes("authorization_code"));
+  });
+
+  it("Basic client auth buys a bearer without a refresh token; whoami names the client's own subject", async () => {
+    const out = await ccBasic();
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.match(out.body.access_token, /^fakeat_/u);
+    assert.equal(out.body.token_type, "Bearer");
+    assert.equal(out.body.expires_in, 3600);
+    assert.equal(out.body.scope, "records:read");
+    assert.equal(out.body.refresh_token, undefined);
+    assert.equal(out.body.id_token, undefined);
+    const me = await whoami(direct.origin, out.body.access_token);
+    assert.deepEqual(me, { subject: `sub_cc_${CC}`, scopes: ["records:read"] });
+    const stats = await statsOf(direct.origin);
+    assert.equal(stats.tokenRequests.client_credentials, 1);
+    assert.equal(stats.lastResource.cc, resource);
+    assert.equal(stats.lastClientAuth, "basic");
+    assert.equal(stats.accessTokenHashes.length, 1);
+    assert.ok(direct.fake.issuedTokens().access.includes(out.body.access_token));
+  });
+
+  it("client_secret_post works too, with the same stable subject per client", async () => {
+    const out = await ccPost({ scope: "records:read records:write" });
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.equal(out.body.scope, "records:read records:write");
+    const me = await whoami(direct.origin, out.body.access_token);
+    assert.equal(me.subject, `sub_cc_${CC}`);
+    const created = await callTool(direct.origin, out.body.access_token, "create_record", { title: "x" });
+    assert.equal(created.res.status, 200);
+    assert.equal((await statsOf(direct.origin)).lastClientAuth, "post");
+  });
+
+  it("Basic credentials are form-urlencoded-decoded before comparison (RFC 6749 §2.3.1)", async () => {
+    const out = await ccBasic({}, ODD, ODD_SECRET);
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.equal((await whoami(direct.origin, out.body.access_token)).subject, `sub_cc_${ODD}`);
+    const raw = `Basic ${Buffer.from(`${ODD}:${ODD_SECRET}`).toString("base64")}`;
+    const refused = await tokenRequest(
+      meta,
+      { grant_type: "client_credentials", resource },
+      { authorization: raw },
+    );
+    assert.equal(refused.status, 401);
+    assert.equal(refused.body.error, "invalid_client");
+  });
+
+  it("refuses a missing or other resource, an unknown scope, a wrong secret and a public client; counts each", async () => {
+    const noResource = await ccBasic({ resource: "" });
+    assert.deepEqual([noResource.status, noResource.body.error], [400, "invalid_target"]);
+    const other = await ccBasic({ resource: `${direct.origin}/elsewhere` });
+    assert.deepEqual([other.status, other.body.error], [400, "invalid_target"]);
+    const scope = await ccBasic({ scope: "unknown" });
+    assert.deepEqual([scope.status, scope.body.error], [400, "invalid_scope"]);
+    const wrong = await ccBasic({}, CC, "not-the-secret");
+    assert.deepEqual([wrong.status, wrong.body.error], [401, "invalid_client"]);
+    const unknown = await ccBasic({}, "nobody", "x");
+    assert.deepEqual([unknown.status, unknown.body.error], [401, "invalid_client"]);
+    const pub = await tokenRequest(meta, { grant_type: "client_credentials", client_id: "pub", resource });
+    assert.deepEqual([pub.status, pub.body.error], [400, "unauthorized_client"]);
+    for (const r of [noResource, other, scope, wrong, unknown, pub])
+      assert.equal(r.body.access_token, undefined);
+    const stats = await statsOf(direct.origin);
+    assert.equal(stats.tokenRequests.client_credentials, 6);
+    assert.equal(stats.lastClientAuth, "none");
+    assert.equal(stats.accessTokenHashes.length, 0);
+  });
+
+  it("follows the scenario's expires_in", async () => {
+    direct.fake.setScenario({ expires_in: 60 });
+    assert.equal((await ccBasic()).body.expires_in, 60);
+  });
+
+  it("revoke_all and /revoke reject client-credential tokens like any grant", async () => {
+    const first = (await ccBasic()).body.access_token;
+    assert.equal(await initStatus(direct.origin, first), 200);
+    const revoked = await fetch(meta.revocation_endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        authorization: basicOf(CC, CC_SECRET),
+      },
+      body: new URLSearchParams({ token: first }),
+    });
+    assert.equal(revoked.status, 200);
+    assert.equal(await initStatus(direct.origin, first), 401);
+    const second = (await ccBasic()).body.access_token;
+    assert.equal(await initStatus(direct.origin, second), 200);
+    direct.fake.setScenario({ revoke_all: true });
+    assert.equal(await initStatus(direct.origin, second), 401);
+    const third = (await ccBasic()).body.access_token;
+    assert.equal(await initStatus(direct.origin, third), 401);
+  });
+
+  it("stats never carry the client secret or a client-credential token; reset clears the new counters", async () => {
+    const tok = (await ccBasic()).body.access_token;
+    const json = JSON.stringify(await statsOf(direct.origin));
+    for (const s of [tok, CC_SECRET]) assert.ok(!json.includes(s), "stats leaked a secret or token");
+    direct.fake.reset();
+    const stats = await statsOf(direct.origin);
+    assert.equal(stats.tokenRequests.client_credentials, 0);
+    assert.equal(stats.lastResource.cc, null);
+    assert.equal(stats.lastClientAuth, null);
+  });
+});
