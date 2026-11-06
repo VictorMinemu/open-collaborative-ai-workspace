@@ -11,3 +11,10 @@
   is never used there (`orgAccountServer` requires an org mode, and the DTO shows `orgConnection` only for org modes),
   but it would reappear if the server were switched back. Fix (out of 07's files): `findServer(tx, id)` with
   `for update` in `updateMcpServer` and `deleteMcpServer`, so the check and the switch see the same state.
+
+## From 07.14-08
+
+- **`automation/mailboxes.int.test.ts` flakes under the full `pnpm verify` load.** In one full run all 7 cases that
+  inject mail through GreenMail failed with nodemailer's `Greeting never received` (30 s timeouts). The same file run
+  alone right after passed 18/18. This plan does not touch that module, so it was not changed. A likely fix is a longer
+  SMTP greeting timeout, or waiting for GreenMail's SMTP banner in that suite's setup before the first inject.
