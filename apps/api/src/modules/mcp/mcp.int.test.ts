@@ -2040,3 +2040,143 @@ describe("organization modes: edits, mode switches and the organization's creden
     }
   });
 });
+
+describe("organization modes: delete and isolation (07.14-05 Task 3, D-08)", () => {
+  let adminId: string;
+  let mallory: TestClient;
+
+  beforeAll(async () => {
+    adminId = (
+      await rowsOf("select user_id from app.org_members where organization_id = $1 and display_name = $2", [
+        orgId,
+        ADMIN.name,
+      ])
+    )[0]?.user_id as string;
+    // Mallory: admin of her own organization (the 07.4 cross-tenant recipe).
+    const [client, malloryId] = await joinAs("mallory@example.test", "Mallory", "developer");
+    mallory = client;
+    const orgM = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Mallory Org', $2)", [
+      orgM,
+      `mallory-${orgM}`,
+    ]);
+    await su.query("delete from auth.member where user_id = $1", [malloryId]);
+    await su.query("delete from app.org_members where user_id = $1", [malloryId]);
+    await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+      orgM,
+      malloryId,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Mallory', 'admin')",
+      [orgM, malloryId],
+    );
+    await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [
+      orgM,
+      malloryId,
+    ]);
+  });
+
+  const createCc = async (name: string) =>
+    ok(
+      admin.request("POST", "/api/v1/mcp-servers", {
+        name,
+        transport: "streamable-http",
+        url: `https://${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.example.com/mcp`,
+        authMode: "org_client_credentials",
+      }),
+    );
+
+  it("DELETE with the organization's connection asks first, then removes the server, the row and its sealed bundle", async () => {
+    const svc = await createCc("Delete cc");
+    const secretId = await seedOrgConnection(svc.id, {
+      method: "client_credentials",
+      connectedBy: adminId,
+      clientId: "ocw-delete",
+    });
+    const refused = await admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}`);
+    expect(refused.status).toBe(409);
+    expect((refused.body as Json).error).toMatchObject({
+      code: "org_connection_exists",
+      details: { method: "client_credentials" },
+    });
+    expect((await getMcpServer_(svc.id)).orgConnection).toMatchObject({ clientId: "ocw-delete" });
+
+    await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}?clearConnections=true`));
+    expect((await rowsOf("select 1 from app.mcp_servers where id = $1", [svc.id])).length).toBe(0);
+    expect(
+      (await rowsOf("select 1 from app.connector_org_connections where server_id = $1", [svc.id])).length,
+    ).toBe(0);
+    expect((await rowsOf("select 1 from app.secrets where id = $1", [secretId])).length).toBe(0);
+    // Disconnected (locally, not revoked), then deleted.
+    const trail = await rowsOf(
+      `select action, metadata from app.audit_events
+       where organization_id = $1 and action in ('connector.org_disconnected', 'mcp.server.deleted')
+         and (metadata->>'serverId' = $2 or resource_id = $2::uuid)
+       order by id`,
+      [orgId, svc.id],
+    );
+    expect(trail.map((a) => a.action)).toEqual(["connector.org_disconnected", "mcp.server.deleted"]);
+    expect(trail[0]?.metadata).toEqual({
+      serverId: svc.id,
+      method: "client_credentials",
+      revoked: false,
+      reason: "server_deleted",
+    });
+
+    // Repeating it finds nothing: same end state, no second audit.
+    const again = await admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}?clearConnections=true`);
+    expect(again.status).toBe(404);
+    expect(codeOf(again)).toBe("mcp_server_not_found");
+    expect(
+      (await audits("connector.org_disconnected")).filter((a) => a.metadata.serverId === svc.id),
+    ).toHaveLength(1);
+  });
+
+  it("DELETE of an organization-mode server without a connection needs no confirmation; member servers keep connections_exist", async () => {
+    const svc = await createCc("Delete bare cc");
+    await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}`));
+    const member = await ok(
+      admin.request("POST", "/api/v1/mcp-servers", {
+        name: "Delete member",
+        transport: "streamable-http",
+        url: "https://delete-member.example.com/mcp",
+        authMode: "per_member_secret",
+        memberHeaderName: "X-Api-Key",
+      }),
+    );
+    await seedConnection(orgId, samId, member.id);
+    const refused = await admin.request("DELETE", `/api/v1/mcp-servers/${member.id}`);
+    expect((refused.body as Json).error).toMatchObject({ code: "connections_exist", details: { count: 1 } });
+    await ok(admin.request("DELETE", `/api/v1/mcp-servers/${member.id}?clearConnections=true`));
+  });
+
+  it("another organization's admin cannot change or delete an organization-mode server, and its connection survives", async () => {
+    const svc = await createCc("Tenant cc");
+    const secretId = await seedOrgConnection(svc.id, {
+      method: "client_credentials",
+      connectedBy: adminId,
+      clientId: "ocw-tenant",
+    });
+    const snapshot = async () => ({
+      server: await rowsOf("select name, auth_mode from app.mcp_servers where id = $1", [svc.id]),
+      connection: await rowsOf(
+        "select method, secret_id, client_id from app.connector_org_connections where server_id = $1",
+        [svc.id],
+      ),
+    });
+    const before = await snapshot();
+    const cases: Array<[string, string, unknown?]> = [
+      ["PATCH", `/api/v1/mcp-servers/${svc.id}`, { name: "Pwned" }],
+      ["PATCH", `/api/v1/mcp-servers/${svc.id}`, { authMode: "org_secret", clearConnections: true }],
+      ["DELETE", `/api/v1/mcp-servers/${svc.id}?clearConnections=true`],
+    ];
+    for (const [method, path, body] of cases) {
+      const r = await mallory.request(method as "PATCH", path, body);
+      expect(r.status, `${method} ${path}`).toBe(404);
+      expect(JSON.stringify(r.body)).not.toContain("ocw-tenant");
+    }
+    expect(await snapshot()).toEqual(before);
+    expect((await rowsOf("select 1 from app.secrets where id = $1", [secretId])).length).toBe(1);
+    await ok(admin.request("DELETE", `/api/v1/mcp-servers/${svc.id}?clearConnections=true`));
+  });
+});
