@@ -14,6 +14,9 @@
 //   POST /mcp-oauth/token        authorization_code (single-use 5-minute codes, PKCE S256, `resource` must match,
 //                                an unsigned `id_token` whose email is `<subject>@fake-mcp.test`) and refresh_token
 //                                (`resource` required, rotation; a rotated token → invalid_grant + family revoked)
+//                                and client_credentials (RFC 6749 §4.4, 07.14-03: pre-registered confidential clients
+//                                only, Basic or post auth, `resource` required, no refresh token, subject
+//                                `sub_cc_<client_id>`)
 //   POST /mcp-oauth/revoke       RFC 7009: always 200; an access or refresh token revokes its whole grant
 //   POST /mcp-oauth/register     RFC 7591 dynamic client registration
 //   POST /mcp-oauth/mcp          streamable HTTP MCP behind a bearer (401 + WWW-Authenticate resource_metadata);
@@ -159,11 +162,13 @@ const toolResult = (value) => ({
 
 function freshStats() {
   return {
-    tokenRequests: { authorization_code: 0, refresh_token: 0 },
+    tokenRequests: { authorization_code: 0, refresh_token: 0, client_credentials: 0 },
     refreshReuse: 0,
     revocations: 0,
     registrations: 0,
-    lastResource: { authorize: null, token: null, refresh: null },
+    lastResource: { authorize: null, token: null, refresh: null, cc: null },
+    /** How the last token request authenticated the client: "basic" | "post" | "none" (never the secret). */
+    lastClientAuth: null,
     mcpRequests: 0,
     mcpCalls: 0,
     accessTokenHashes: [],
@@ -252,7 +257,7 @@ export function createFakeMcpOAuth(opts = {}) {
       authorization_response_iss_parameter_supported: true,
       scopes_supported: [...RESOURCE_SCOPES, "offline_access"],
       response_types_supported: ["code"],
-      grant_types_supported: ["authorization_code", "refresh_token"],
+      grant_types_supported: ["authorization_code", "refresh_token", "client_credentials"],
       token_endpoint_auth_methods_supported: AUTH_METHODS,
       revocation_endpoint_auth_methods_supported: AUTH_METHODS,
     };
@@ -279,19 +284,22 @@ export function createFakeMcpOAuth(opts = {}) {
     return `${b64url({ alg: "none", typ: "JWT" })}.${b64url(claims)}.`;
   }
 
-  function issue(familyId, { withIdToken }) {
+  function issue(familyId, { withIdToken, withRefresh = true }) {
     const fam = families.get(familyId);
     const accessToken = `fakeat_${rand()}`;
-    const refreshToken = `fakert_${rand()}`;
     const expiresIn = typeof scenario.expires_in === "number" ? scenario.expires_in : 3600;
     accessTokens.set(accessToken, { familyId, exp: Date.now() + expiresIn * 1000 });
-    refreshTokens.set(refreshToken, { familyId, state: "active" });
     stats.accessTokenHashes.push(sha256Hex(accessToken));
+    let refreshToken;
+    if (withRefresh) {
+      refreshToken = `fakert_${rand()}`;
+      refreshTokens.set(refreshToken, { familyId, state: "active" });
+    }
     return {
       access_token: accessToken,
       token_type: "Bearer",
       expires_in: expiresIn,
-      refresh_token: refreshToken,
+      ...(refreshToken ? { refresh_token: refreshToken } : {}),
       scope: fam.scope,
       ...(withIdToken && !scenario.no_id_token ? { id_token: idToken(fam) } : {}),
     };
@@ -399,6 +407,41 @@ export function createFakeMcpOAuth(opts = {}) {
     return client;
   }
 
+  /** How a token request presents client credentials (stats only, never the secret). */
+  function clientAuthMethod(req, form) {
+    if (/^Basic\s/iu.test(req.headers.authorization ?? "")) return "basic";
+    return form.has("client_secret") ? "post" : "none";
+  }
+
+  /**
+   * RFC 6749 §4.4 for pre-registered confidential clients (07.14-03). Strict like a real server: a public client is
+   * `unauthorized_client`, `resource` must name this MCP (RFC 8707), unknown scopes are `invalid_scope`. Every grant
+   * of one client has the same subject; there is no refresh token, so renewing means a new grant.
+   */
+  function clientCredentials(req, res, form, o, err) {
+    const basic = basicCredentials(req);
+    const known = clients.get((basic ? basic.id : form.get("client_id")) ?? "");
+    if (!known) return err("invalid_client", 401);
+    if (known.client_secret === undefined) return err("unauthorized_client");
+    const client = authenticateClient(req, form);
+    if (!client) return err("invalid_client", 401);
+    if (form.get("resource") !== o.resource) return err("invalid_target");
+    const requested = (form.get("scope") ?? "").split(/\s+/u).filter(Boolean);
+    const supported = [...RESOURCE_SCOPES, "offline_access"];
+    if (requested.some((s) => !supported.includes(s))) return err("invalid_scope");
+    const scope = requested.filter((s) => s !== "offline_access").join(" ") || DEFAULT_SCOPE;
+    const familyId = randomUUID();
+    families.set(familyId, {
+      subject: `sub_cc_${client.client_id}`,
+      clientId: client.client_id,
+      scope,
+      resource: o.resource,
+      issuer: o.issuer,
+      revoked: false,
+    });
+    return send(res, 200, issue(familyId, { withIdToken: false, withRefresh: false }));
+  }
+
   async function token(req, res, o) {
     const form = new URLSearchParams(await readText(req));
     const err = (error, status = 400) => send(res, status, { error, error_description: `fake: ${error}` });
@@ -409,10 +452,15 @@ export function createFakeMcpOAuth(opts = {}) {
     } else if (grantType === "refresh_token") {
       stats.tokenRequests.refresh_token += 1;
       stats.lastResource.refresh = form.get("resource");
+    } else if (grantType === "client_credentials") {
+      stats.tokenRequests.client_credentials += 1;
+      stats.lastResource.cc = form.get("resource");
     } else {
       return err("unsupported_grant_type");
     }
+    stats.lastClientAuth = clientAuthMethod(req, form);
     if (scenario.fail_token_5xx) return err("temporarily_unavailable", 503);
+    if (grantType === "client_credentials") return clientCredentials(req, res, form, o, err);
     const client = authenticateClient(req, form);
     if (!client) return err("invalid_client", 401);
 

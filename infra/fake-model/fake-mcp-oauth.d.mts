@@ -20,9 +20,10 @@ export const FAKE_MCP_OAUTH_TOOLS: ReadonlyArray<{
 
 export interface FakeMcpOAuthClient {
   client_id: string;
-  /** Absent: a public client (`token_endpoint_auth_method: none`). */
+  /** Absent: a public client (`token_endpoint_auth_method: none`). Present: a confidential client, which may also
+   * use the `client_credentials` grant (subject `sub_cc_<client_id>`, no refresh token; 07.14-03). */
   client_secret?: string;
-  /** Compared exactly at authorize and token. */
+  /** Compared exactly at authorize and token; `[]` for a client-credentials-only client. */
   redirect_uris: string[];
 }
 
@@ -57,7 +58,7 @@ export interface FakeMcpOAuthScenario {
 
 export interface FakeMcpOAuthStats {
   /** Every token request per grant type, refused and 503 ones included. */
-  tokenRequests: { authorization_code: number; refresh_token: number };
+  tokenRequests: { authorization_code: number; refresh_token: number; client_credentials: number };
   /** Rotated refresh tokens presented again (each one revoked its family). */
   refreshReuse: number;
   /** Revocation requests. */
@@ -65,7 +66,16 @@ export interface FakeMcpOAuthStats {
   /** Successful dynamic client registrations. */
   registrations: number;
   /** The `resource` parameter last received on each request kind (null until one arrives). */
-  lastResource: { authorize: string | null; token: string | null; refresh: string | null };
+  lastResource: {
+    authorize: string | null;
+    token: string | null;
+    refresh: string | null;
+    /** The last `client_credentials` token request (07.14-03). */
+    cc: string | null;
+  };
+  /** How the last token request (any grant) presented client credentials: an `Authorization: Basic` header,
+   * `client_secret` in the body, or neither. Never the secret itself; null until one arrives (07.14-03). */
+  lastClientAuth: "basic" | "post" | "none" | null;
   /** Every HTTP request to `/mcp-oauth/mcp`, rejected ones included. */
   mcpRequests: number;
   /** Authenticated `tools/call` requests. */
