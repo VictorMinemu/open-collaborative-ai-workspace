@@ -11,10 +11,11 @@ import {
   type MemberConnector,
   MemberConnectorList,
   MemberConnector as MemberConnectorSchema,
+  PER_MEMBER_MODES,
   ReadersPreview,
 } from "@ocw/contracts";
 import { connectorConnections, mcpServers, mcpServerTools, type Tx } from "@ocw/db";
-import { asc, eq, ne } from "drizzle-orm";
+import { asc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { markDecided } from "../../authz";
 import { type App, authOf, type Core, tenant } from "../../core";
@@ -151,7 +152,8 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
         const servers = await tx
           .select()
           .from(mcpServers)
-          .where(ne(mcpServers.authMode, "org_secret"))
+          // Member modes only: an organization-account server is the organization's, never a member's (07.14).
+          .where(inArray(mcpServers.authMode, [...PER_MEMBER_MODES]))
           .orderBy(asc(mcpServers.name), asc(mcpServers.createdAt));
         const rows = await tx
           .select()

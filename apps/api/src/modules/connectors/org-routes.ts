@@ -1,12 +1,13 @@
-import { ConnectStartResponse, IdParams, type OrgSignInError } from "@ocw/contracts";
+import { ConnectorAuthFailure, ConnectStartResponse, IdParams, type OrgSignInError } from "@ocw/contracts";
 import type { mcpServers, Tx } from "@ocw/db";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { type App, type AuthContext, type Core, tenant } from "../../core";
 import { egressFor } from "../../lib/egress";
 import { conflict, notFound } from "../../lib/errors";
 import { setAuthFailure, setOAuthStatus } from "../mcp";
-import type { PermissionService } from "../organization";
+import { orgResource, type PermissionService } from "../organization";
 import { clientSecretFor, oauthBundleOf, orgAccountServer, storeOrgConnection } from "./credentials";
+import { authFailureOf } from "./diagnosis";
 import { type FlowRecord, flowAuth, settingsUrl, startOAuthFlow } from "./flow";
 import { exchangeCode, revokeToken, type TokenBundle } from "./oauth";
 import { probeConnector } from "./probe";
@@ -59,7 +60,9 @@ export function registerOrgConnectionRoutes(app: App, core: Core, perms: Permiss
 
 /**
  * A failed organization sign-in: audited `connector.connect_failed` with `principal: organization` in the flow's
- * tenant, then the browser goes back to Settings › MCP servers with the closed code.
+ * tenant, then the browser goes back to Settings › MCP servers with the closed code. A D-10 code is also recorded as
+ * the server's `auth_failure` (D-10, D-15), while the server is still an organization-account one; `access_denied`,
+ * `flow_expired` and `session_mismatch` never are (they say nothing about the provider's setup).
  */
 export async function orgSignInFailed(
   core: Core,
@@ -69,30 +72,36 @@ export async function orgSignInFailed(
   code: OrgSignInError,
 ) {
   req.log.info({ serverId: flow.serverId, code, principal: "organization" }, "connector callback refused");
+  const failure = ConnectorAuthFailure.safeParse(code);
   await core.db
-    .withTenant({ organizationId: flow.organizationId, userId: flow.userId }, (tx) =>
-      core.audit.record(tx, {
+    .withTenant({ organizationId: flow.organizationId, userId: flow.userId }, async (tx) => {
+      await core.audit.record(tx, {
         action: "connector.connect_failed",
         resourceType: "mcp_server",
         resourceId: flow.serverId,
         metadata: { serverId: flow.serverId, code, principal: "organization" },
-      }),
-    )
+      });
+      if (failure.success && (await orgAccountServer(tx, flow.serverId))) {
+        await setAuthFailure(tx, flow.serverId, failure.data);
+      }
+    })
     .catch(() => {});
   return reply.redirect(settingsUrl(core, "organization", { error: code, connector: flow.serverId }), 302);
 }
 
 /**
  * The organization branch of `GET /connectors/oauth/callback` (07.14 PD-06), called after the shared checks (the flow
- * consumed first, the session's user and organization equal the flow's, RFC 9207 `iss`). Redeems the code against the
- * flow's issuer, seals the bundle for the organization (`storeOrgConnection`, `connected_by` = the admin) and audits
+ * consumed first, the session's user and organization equal the flow's, RFC 9207 `iss`). The admin must still hold
+ * `mcp.manage` (re-decided now, as `requirePermission` decides it: a demotion within the 10 minutes is a
+ * `session_mismatch`). `error=invalid_scope` is `scope_rejected` here (members keep `token_exchange_failed`). Redeems
+ * the code against the flow's issuer, seals the bundle for the organization (`storeOrgConnection`, `connected_by` = the admin) and audits
  * `connector.org_connected` in one tenant transaction that holds the server row, then lists the tools with the new
  * token and sends the admin back to Settings › MCP servers. A server that left `org_oauth` meanwhile stores nothing
  * (`flow_expired`); a grant that could not be stored is revoked at its issuer.
  */
 export async function completeOrgSignIn(
   core: Core,
-  _perms: PermissionService,
+  perms: PermissionService,
   req: FastifyRequest,
   reply: FastifyReply,
   flow: FlowRecord,
@@ -100,15 +109,30 @@ export async function completeOrgSignIn(
   q: { code?: string | undefined; error?: string | undefined },
 ) {
   const failed = (code: OrgSignInError) => orgSignInFailed(core, req, reply, flow, code);
-  if (q.error) return failed(q.error === "access_denied" ? "access_denied" : "token_exchange_failed");
-  if (!q.code) return failed("token_exchange_failed");
-
   const ctx = {
     organizationId: flow.organizationId,
     userId: flow.userId,
     sessionId: session.sessionId,
     clientKind: session.clientKind,
   };
+  // T-07.14-07-01: only an admin who still manages MCP servers completes the organization's sign-in.
+  const decision = await core.db
+    .withTenant(ctx, (tx) =>
+      perms.decide(tx, { kind: "user", userId: flow.userId }, "mcp.manage", orgResource()),
+    )
+    .catch(() => ({ allowed: false }));
+  if (!decision.allowed) return failed("session_mismatch");
+  if (q.error) {
+    return failed(
+      q.error === "access_denied"
+        ? "access_denied"
+        : q.error === "invalid_scope"
+          ? "scope_rejected"
+          : "token_exchange_failed",
+    );
+  }
+  if (!q.code) return failed("token_exchange_failed");
+
   const prepared = await core.db.withTenant(ctx, async (tx) => {
     const server = await orgAccountServer(tx, flow.serverId);
     if (server?.authMode !== "org_oauth") return null;
@@ -127,8 +151,8 @@ export async function completeOrgSignIn(
       redirectUri: flow.redirectUri,
       ...(flow.scope ? { scope: flow.scope } : {}),
     });
-  } catch {
-    return failed("token_exchange_failed");
+  } catch (err) {
+    return failed(authFailureOf(err));
   }
 
   let stored: "stored" | "gone" | "failed";

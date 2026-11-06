@@ -6,7 +6,8 @@ import { z } from "zod";
 import { authOf, type Core, tenant } from "../../core";
 import { egressFor } from "../../lib/egress";
 import { HttpError } from "../../lib/errors";
-import { oauthClientsOf, setOAuthStatus } from "../mcp";
+import { oauthClientsOf, setAuthFailure, setOAuthStatus } from "../mcp";
+import { authFailureOf } from "./diagnosis";
 import {
   buildAuthorization,
   type ClientChoice,
@@ -114,7 +115,8 @@ export function flowAuth(
  * member and the organization routes share this body; only the record's `principal` differs.
  *
  * A refusal answers the 07.4 409 code. Admin-visible states are recorded in their own transaction (the request's own
- * rolls back with its 409): `oauth_status` (`needs_client` / `error`).
+ * rolls back with its 409): `oauth_status` (`needs_client` / `error`) for both principals as before, and, for the
+ * organization only, `auth_failure` = the D-10 step that failed (D-10, D-15; member flows never write it).
  */
 export async function startOAuthFlow(
   core: Core,
@@ -133,8 +135,15 @@ export async function startOAuthFlow(
         : e.code === "pkce_unsupported" || (e.code === "discovery_failed" && e.terminal)
           ? ("error" as const)
           : null;
-    if (status) {
-      await core.db.withTenant(tenant(req), (tx) => setOAuthStatus(tx, server.id, status)).catch(() => {});
+    // D-10, D-15: the organization's server shows the step that failed; member flows never write it.
+    const failure = principal === "organization" ? authFailureOf(e) : null;
+    if (status || failure) {
+      await core.db
+        .withTenant(tenant(req), async (tx) => {
+          if (status) await setOAuthStatus(tx, server.id, status);
+          if (failure) await setAuthFailure(tx, server.id, failure);
+        })
+        .catch(() => {});
     }
     return connectError(e.code);
   };
