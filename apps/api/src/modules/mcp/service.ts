@@ -564,7 +564,7 @@ function orgConnectionExists(method: OrgConnectionMethod, what: string): HttpErr
 
 /**
  * Deletes the organization's connection of a server and its sealed bundle in the caller's transaction (07.14 D-08,
- * PD-11), as `clearConnections` does for members, and audits `connector.org_disconnected`. Nothing is revoked at the
+ * PD-11), as `clearConnections` does for members, and audits the disconnect with its reason. Nothing is revoked at the
  * provider (`revoked: false`): only the admin's Disconnect in the connectors module revokes. Returns the method, or
  * null when there was no connection.
  */
@@ -1090,7 +1090,8 @@ export async function updateMcpServer(
 
 /**
  * Deletes a server with its tools, grants, header secrets and OAuth clients. With member connections it answers 409
- * `connections_exist` unless `clearConnections` confirms; then every connection and its sealed credential go too.
+ * `connections_exist`, with the organization's connection 409 `org_connection_exists` (07.14 D-08), unless
+ * `clearConnections` confirms; then every connection and its sealed credential go too (locally, never revoked).
  */
 export async function deleteMcpServer(
   core: Core,
@@ -1101,6 +1102,10 @@ export async function deleteMcpServer(
   const row = await findServer(tx, id);
   const connections = (await connectionCounts(tx, id)).get(id) ?? 0;
   if (connections > 0 && opts.clearConnections !== true) throw connectionsExist(connections, "delete it");
+  const orgMethod = await orgConnectionMethodOf(tx, id);
+  if (orgMethod !== null && opts.clearConnections !== true) throw orgConnectionExists(orgMethod, "delete it");
+  // Before the server row: its cascade would drop the connection row but leave the sealed bundle behind.
+  await clearOrgConnection(core, tx, id, "server_deleted");
   await clearConnections(core, tx, id, "server_deleted");
   await removeOAuthClients(core, tx, id);
   await tx

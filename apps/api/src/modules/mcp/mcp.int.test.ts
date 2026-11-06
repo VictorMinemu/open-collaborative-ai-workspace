@@ -2111,7 +2111,7 @@ describe("organization modes: delete and isolation (07.14-05 Task 3, D-08)", () 
     const trail = await rowsOf(
       `select action, metadata from app.audit_events
        where organization_id = $1 and action in ('connector.org_disconnected', 'mcp.server.deleted')
-         and (metadata->>'serverId' = $2 or resource_id = $2::uuid)
+         and (metadata->>'serverId' = $2 or resource_id = $2)
        order by id`,
       [orgId, svc.id],
     );
