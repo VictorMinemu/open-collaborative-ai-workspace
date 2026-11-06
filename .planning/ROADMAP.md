@@ -407,7 +407,7 @@ of the thin Work Zone that Phase 1 already ships.
 **Operations features (inserted 2026-10-08, owner).** Phases 07.1–07.7 turn the 2026-10-06 operations meeting into
 generic capabilities for any organization (research: `.planning/research/OPS-FEATURES.md`). Each feature is owned by the
 Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits → Agent Card when a human approves);
-OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.12 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 and 07.12 added 2026-10-29 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
+OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.12 → 07.13 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 and 07.12 added 2026-10-29 and 07.13 added 2026-11-06 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
 (F17), ERP-driven board columns beyond watched records.
 
 ### Phase 07.1: Board channels and record templates (INSERTED)
@@ -963,6 +963,50 @@ Plans:
 **Wave 5** *(blocked on Wave 4 completion)*
 
 - [x] 07.12-11-PLAN.md — Wave 5: Phase gate: full gate, container proof, `gate:compose`, `docs/SERVER.md`, INSTALL, DEMO owner checks, STATUS, AGENTS, CODEOWNERS, ADR-0033, signed VALIDATION
+
+### Phase 07.13: Work Zone local browser (INSERTED)
+
+**Goal**: A Work Zone session can use a browser, the way bots can, but on the session's own device: Claude Code and
+Codex open pages (including the device's own `localhost` dev servers), read them, click, type and take screenshots,
+while everyone who can see the session watches it live in the web. Teams already running OCW get it by upgrading,
+with no manual step on any device.
+
+- **On the device, not the server:** the Local Runtime starts an isolated Chromium (its own throwaway profile per
+  session, never the user's real browser or cookies) on the machine that runs the session, desktop app or headless
+  server, so it reaches `localhost` and the device's network.
+- **One tool set for both runtimes:** the runtime exposes the browser to Claude Code (Agent SDK) and Codex
+  (app-server) as the same tools, normalized at the adapter edge; nothing outside the adapter depends on either.
+- **Governed like the bots' browser (ADR-0029) where it applies:** org policy ∩ device opt-in decides it, per-tool
+  approvals apply, every navigation and action is audited, and page content is treated as untrusted input.
+- **Live view:** the session's audience sees the page (frames) in the session view; no absolute path and no cookie
+  leaves the device.
+- **Delivered by the upgrade:** `ocw upgrade` on the server is enough on the server side; the runtime fetches a pinned,
+  checksum-verified browser build by itself the first time it is needed; headless runtimes update their own bundle from
+  the workspace under the runtime updates level (07.11), and the desktop app tells its user when a newer app is out.
+
+**Requirements**: WZB-01, WZB-02, WZB-03, WZB-04, WZB-05, WZB-06, WZB-07
+**Depends on:** Phase 07.12 (headless runtime, served bundle), Phase 07.8 (browser governance), Phase 07.11 (updates level)
+**ADR:** 0035
+**Success Criteria** (what must be TRUE):
+
+  1. In a Work Zone session on a desktop device and on a headless server, Claude Code and Codex can open a page served
+     on the device's `localhost`, read it, act on it and return a screenshot, through the same browser tools
+  2. The browser is off unless the organization's policy and the device both allow it; each navigation and action is
+     audited without page content, absolute paths or cookies, and per-tool approval rules apply to the browser tools
+  3. Each session gets a fresh, isolated browser profile that is deleted when the session ends; the user's own browser
+     profile and cookies are never read
+  4. Everyone in the session's audience sees the browser live in the session view (light/dark, 1440 and 390 widths)
+  5. A team on `v0.2.x` that runs `ocw upgrade` gets the feature with no manual step on headless devices (the runtime
+     updates itself and fetches the pinned browser on first use, checksum-verified), and desktop users are told a new
+     app version is available; an older runtime shows a clear "update this device" state instead of failing
+  6. Proven by an e2e spec (fake runtime driving the real local browser against a local page) and a container proof on
+     the headless runtime; documented in `docs/SERVER.md`, the README and ADR-0035
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.13 to break down)
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 

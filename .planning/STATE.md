@@ -5,15 +5,15 @@ current_phase: 07.7
 current_phase_name: agent-to-agent-collaboration
 status: verifying
 stopped_at: Phase 03.1 complete, ready to plan Phase 1
-last_updated: "2026-11-03T20:00:00.000Z"
+last_updated: "2026-11-06T14:40:00.631Z"
 last_activity: 2026-11-03
 last_activity_desc: Phase 07.7 built, reviewed and gated (ADR-0027 Accepted); PR next
-state_head: 1311b4c5eb19bb6a843b5ade877c30ec6d677ed4
+state_head: 4a7b040279f9cf36eb282eb82943beb989cc94e3
 progress:
   total_phases: 12
   completed_phases: 4
   total_plans: 281
-  completed_plans: 246
+  completed_plans: 281
 ---
 
 # Project State
@@ -101,6 +101,7 @@ Recent decisions affecting current work:
 - Phase 07.10 inserted after Phase 07.9: Work Zone sidebar by team like chat channels (owner request 2026-10-27)
 - Phase 07.11 inserted after Phase 07.10: Runtime CLI auto-updates for Claude Code and Codex on every device, server-type shared devices first (modeled on T3 Code) (URGENT)
 - Phase 07.12 inserted after Phase 07.11: Headless Work Zone server: install, terminal pairing, service and doctor from the CLI, no desktop app (URGENT)
+- Phase 07.13 inserted after Phase 07.12: Work Zone local browser: Claude Code and Codex sessions get a browser on the session's own device (localhost reachable), governed like the bots' browser, live in the web, delivered to existing teams by the upgrade
 
 ## Deferred Items
 
