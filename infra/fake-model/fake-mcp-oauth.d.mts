@@ -41,6 +41,10 @@ export interface FakeMcpOAuthScenario {
   insufficient_scope?: boolean;
   /** Access token lifetime in seconds (default 3600). */
   expires_in?: number;
+  /** Token responses leave out `expires_in` (the token still lives `expires_in` seconds; 07.14-09). */
+  omit_expires_in?: boolean;
+  /** The protected resource metadata (RFC 9728) answers 404: the server publishes none (07.14-09). */
+  no_prm?: boolean;
   /** Revokes every grant issued so far and rejects every token while set. */
   revoke_all?: boolean;
   /** Every access token is refused at the MCP endpoint (401 `invalid_token`) while set, but no grant is revoked: a

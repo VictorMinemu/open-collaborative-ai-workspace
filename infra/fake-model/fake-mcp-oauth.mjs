@@ -318,7 +318,8 @@ export function createFakeMcpOAuth(opts = {}) {
     return {
       access_token: accessToken,
       token_type: "Bearer",
-      expires_in: expiresIn,
+      // omit_expires_in: the token still lives `expiresIn`, but the client is not told (07.14-09, the 300 s default).
+      ...(scenario.omit_expires_in ? {} : { expires_in: expiresIn }),
       ...(refreshToken ? { refresh_token: refreshToken } : {}),
       scope: fam.scope,
       ...(withIdToken && !scenario.no_id_token ? { id_token: idToken(fam) } : {}),
@@ -788,7 +789,8 @@ export function createFakeMcpOAuth(opts = {}) {
     const o = origins(req);
     const get = req.method === "GET";
     const post = req.method === "POST";
-    if (get && p === PRM_PATH) return send(res, 200, prm(o));
+    // no_prm: a server that publishes no RFC 9728 metadata (07.14-09: the admin-entered Token URL is used then).
+    if (get && p === PRM_PATH && !scenario.no_prm) return send(res, 200, prm(o));
     if (get && p === AS_META_PATH) return send(res, 200, asMetadata(o));
     if (get && p === `${AS_META_PATH}${ALT}`) return send(res, 200, asMetadata(origins(req, true)));
     if (p === `${PREFIX}/mcp`) return mcpEndpoint(req, res, o);
