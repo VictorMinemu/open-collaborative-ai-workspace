@@ -30,6 +30,13 @@ Rules (checked by `infra/ci/slots.test.mjs`):
 - A cancelled run's leftovers are removed by the next run of the same slot (`slot-reset.sh` at the start of its first
   step that uses the daemon) and its cleanup step.
 
+Browsers never share the dind's network namespace. Every container any workflow starts or stops there adds or removes
+a veth (each with an IPv6 link-local address) and often a bridge, and Chromium's Linux network-change notifier answers
+every address change by failing pending connects and requests with `net::ERR_NETWORK_CHANGED` (no command-line switch
+turns that off). So the e2e step runs without host networking: it joins its compose project's network and
+`infra/ci/tcp-forward.mjs` serves the slot's postgres/redis/Garage ports (NN02-NN04) on the step's own loopback, so
+the .env URLs and the port blocks above stay the same. The "Ports" column still lists them as the slot's.
+
 Shared resources:
 
 - **Step image.** Each pipeline builds and runs `ocw-ci:<commit sha>` (`infra/ci/build-image.sh`), so a pull request
