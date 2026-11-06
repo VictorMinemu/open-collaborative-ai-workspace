@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ConnectorAuthFailure } from "@ocw/contracts";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestDatabase, type TestDatabase } from "./testing";
@@ -11,9 +12,12 @@ import { startTestDatabase, type TestDatabase } from "./testing";
 
 let tdb: TestDatabase;
 let db: pg.Client;
+/** Phase 07.14: the app role (no RLS bypass), for the tenant cases. */
+let app: pg.Client;
 
 const CHECK = "23514";
 const UNIQUE = "23505";
+const FOREIGN_KEY = "23503";
 
 interface Org {
   id: string;
@@ -132,11 +136,14 @@ beforeAll(async () => {
   tdb = await startTestDatabase();
   db = new pg.Client({ connectionString: tdb.migratorUrl });
   await db.connect();
+  app = new pg.Client({ connectionString: tdb.appUrl });
+  await app.connect();
   a = await seedOrg();
   b = await seedOrg();
 });
 
 afterAll(async () => {
+  await app?.end();
   await db?.end();
   await tdb?.stop();
 });
@@ -420,5 +427,171 @@ describe("Phase 07.4 schema constraints", () => {
       [tplKey],
     );
     expect(grants.rows[0].n).toBe(0);
+  });
+});
+
+/** Runs `fn` as ocw_app inside `org`'s tenant transaction (the `withTenant()` set_config), then rolls back. */
+async function inTenant<T>(org: string, fn: () => Promise<T>): Promise<T> {
+  await app.query("begin");
+  try {
+    await app.query("select set_config('app.organization_id', $1, true)", [org]);
+    return await fn();
+  } finally {
+    await app.query("rollback");
+  }
+}
+
+/** One organization connection row (07.14 D-06); `extra` names more columns, `values` their values. */
+function orgConn(org: string, serverId: string, extra = "", values: unknown[] = []) {
+  return sqlState(
+    `insert into app.connector_org_connections (organization_id, server_id, method, status${extra ? `, ${extra}` : ""}) values ($1, $2, 'oauth', 'connected'${values.map((_, i) => `, $${i + 3}`).join("")})`,
+    [org, serverId, ...values],
+  );
+}
+
+describe("Phase 07.14 organization connections", () => {
+  it("the two organization modes are storable on a remote transport, never on the stdio sandbox; an unknown mode is refused", async () => {
+    for (const mode of ["org_oauth", "org_client_credentials"]) {
+      await expect(server(a.id, "streamable-http", mode), mode).resolves.toBeTypeOf("string");
+      await expect(server(a.id, "sse", mode), mode).resolves.toBeTypeOf("string");
+      await expect(server(a.id, "sandboxed-stdio", mode), mode).rejects.toMatchObject({ code: CHECK });
+      const stdio = await server(a.id, "sandboxed-stdio");
+      expect(
+        await sqlState("update app.mcp_servers set auth_mode = $1 where id = $2", [mode, stdio]),
+        mode,
+      ).toBe(CHECK);
+    }
+    await expect(server(a.id, "streamable-http", "nope")).rejects.toMatchObject({ code: CHECK });
+  });
+
+  it("auth_failure is null by default and holds only one of the eight closed codes, never provider text", async () => {
+    const srv = await server(a.id, "streamable-http", "org_oauth");
+    const fresh = await db.query("select auth_failure from app.mcp_servers where id = $1", [srv]);
+    expect(fresh.rows).toEqual([{ auth_failure: null }]);
+    expect(ConnectorAuthFailure.options).toHaveLength(8);
+    for (const code of ConnectorAuthFailure.options) {
+      expect(
+        await sqlState("update app.mcp_servers set auth_failure = $1 where id = $2", [code, srv]),
+        code,
+      ).toBe(null);
+    }
+    expect(
+      await sqlState("update app.mcp_servers set auth_failure = 'provider said no' where id = $1", [srv]),
+    ).toBe(CHECK);
+    expect(await sqlState("update app.mcp_servers set auth_failure = null where id = $1", [srv])).toBe(null);
+  });
+
+  it("one organization connection per (organization, server); status, method and the text columns are closed or bounded", async () => {
+    const srv = await server(a.id, "streamable-http", "org_oauth");
+    expect(await orgConn(a.id, srv)).toBe(null);
+    expect(await orgConn(a.id, srv)).toBe(UNIQUE);
+
+    const other = await server(a.id, "streamable-http", "org_client_credentials");
+    const bad: Array<[string, unknown]> = [
+      ["account_label", "x".repeat(201)],
+      ["last_error", "x".repeat(65)],
+      ["client_id", "x".repeat(257)],
+      ["token_endpoint", `https://as.example.test/${"x".repeat(2000)}`],
+    ];
+    for (const [col, value] of bad) expect(await orgConn(a.id, other, col, [value]), col).toBe(CHECK);
+    expect(
+      await sqlState(
+        "insert into app.connector_org_connections (organization_id, server_id, method, status) values ($1, $2, 'oauth', 'revoked')",
+        [a.id, other],
+      ),
+    ).toBe(CHECK);
+    expect(
+      await sqlState(
+        "insert into app.connector_org_connections (organization_id, server_id, method, status) values ($1, $2, 'password', 'connected')",
+        [a.id, other],
+      ),
+    ).toBe(CHECK);
+    expect(
+      await orgConn(a.id, other, "account_label, last_error, client_id, token_endpoint", [
+        "x".repeat(200),
+        "x".repeat(64),
+        "x".repeat(256),
+        "https://as.example.test/token",
+      ]),
+    ).toBe(null);
+    expect(
+      await sqlState(
+        "update app.connector_org_connections set method = 'client_credentials', status = 'needs_reconnect' where server_id = $1",
+        [other],
+      ),
+    ).toBe(null);
+    const row = await db.query(
+      "select scopes, secret_id, connected_by, connected_at is not null as connected from app.connector_org_connections where server_id = $1",
+      [srv],
+    );
+    expect(row.rows).toEqual([{ scopes: [], secret_id: null, connected_by: null, connected: true }]);
+  });
+
+  it("deleting the server deletes its organization connection; deleting the sealed secret only unlinks it", async () => {
+    const srv = await server(a.id, "streamable-http", "org_oauth");
+    const sealed = await secret(a.id, "connector_credential");
+    expect(await orgConn(a.id, srv, "secret_id", [sealed])).toBe(null);
+    await db.query("delete from app.secrets where id = $1", [sealed]);
+    const unlinked = await db.query(
+      "select secret_id from app.connector_org_connections where server_id = $1",
+      [srv],
+    );
+    expect(unlinked.rows).toEqual([{ secret_id: null }]);
+
+    await db.query("delete from app.mcp_servers where id = $1", [srv]);
+    const left = await db.query(
+      "select count(*)::int as n from app.connector_org_connections where server_id = $1",
+      [srv],
+    );
+    expect(left.rows).toEqual([{ n: 0 }]);
+  });
+
+  it("as the app role in organization B, organization A's connection is invisible, unchangeable, and B cannot point at A's server", async () => {
+    const srv = await server(a.id, "streamable-http", "org_oauth");
+    expect(await orgConn(a.id, srv, "account_label", ["ops@a.example.test"])).toBe(null);
+
+    await inTenant(b.id, async () => {
+      expect(
+        (await app.query("select * from app.connector_org_connections where server_id = $1", [srv])).rowCount,
+      ).toBe(0);
+      expect(
+        (
+          await app.query(
+            "update app.connector_org_connections set status = 'needs_reconnect', last_error = 'revoked' where server_id = $1",
+            [srv],
+          )
+        ).rowCount,
+      ).toBe(0);
+      expect(
+        (await app.query("delete from app.connector_org_connections where server_id = $1", [srv])).rowCount,
+      ).toBe(0);
+    });
+
+    // A row of organization B naming A's server passes B's tenant policy but fails the composite foreign key.
+    const forged = await inTenant(b.id, () =>
+      app
+        .query(
+          "insert into app.connector_org_connections (organization_id, server_id, method, status) values ($1, $2, 'oauth', 'connected')",
+          [b.id, srv],
+        )
+        .then(
+          () => null,
+          (err: { code?: string }) => err.code ?? "unknown",
+        ),
+    );
+    expect(forged).toBe(FOREIGN_KEY);
+
+    // A's own tenant sees its row; the migrator confirms it is unchanged.
+    const own = await inTenant(a.id, () =>
+      app.query("select count(*)::int as n from app.connector_org_connections where server_id = $1", [srv]),
+    );
+    expect(own.rows).toEqual([{ n: 1 }]);
+    const after = await db.query(
+      "select status, last_error, account_label from app.connector_org_connections where server_id = $1",
+      [srv],
+    );
+    expect(after.rows).toEqual([
+      { status: "connected", last_error: null, account_label: "ops@a.example.test" },
+    ]);
   });
 });
