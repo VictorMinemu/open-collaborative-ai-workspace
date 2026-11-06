@@ -260,10 +260,16 @@ describe("who may test, and how often", () => {
     await fails(test({ url: mcpUrl(), authMode: "org_oauth" }, s.sam), 403);
   });
 
-  it("the 11th call within a minute by one admin → 429; another admin is not limited by it", async () => {
+  it("the 11th call within a minute by one admin → 429; another admin and the other routes are not limited by it", async () => {
+    const other = await registerCcConnector(s);
+    before = await snapshot();
     const refused = { url: `http://127.0.0.1:${s.fakePort}/mcp`, authMode: "org_oauth" };
     for (let i = 0; i < 10; i++) await fails(test(refused), 400);
     await fails(test(refused), 429);
     await fails(test(refused, s.eve), 400);
+    // The limit is the Test route's own: the organization-connection routes beside it keep answering.
+    for (let i = 0; i < 12; i++) {
+      await fails(saveCc(s, s.victor, other.id, { clientId: PRE_REGISTERED_CC }), 400, "secret_required");
+    }
   });
 });

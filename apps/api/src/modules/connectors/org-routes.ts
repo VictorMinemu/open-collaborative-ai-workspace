@@ -2,16 +2,20 @@ import {
   ClientCredentialsInput,
   ConnectorAuthFailure,
   ConnectStartResponse,
+  connectorOAuthUrls,
   IdParams,
   McpServer,
+  OAuthTestRequest,
+  OAuthTestResponse,
   type OrgSignInError,
 } from "@ocw/contracts";
-import type { mcpServers, Tx } from "@ocw/db";
+import { mcpServers, type Tx } from "@ocw/db";
+import { eq } from "drizzle-orm";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { type App, type AuthContext, authOf, type Core, tenant } from "../../core";
 import { egressFor } from "../../lib/egress";
 import { badRequest, conflict, HttpError, notFound } from "../../lib/errors";
-import { getMcpServer, mcpReadOptions, setAuthFailure, setOAuthStatus } from "../mcp";
+import { checkMcpUrl, getMcpServer, mcpReadOptions, setAuthFailure, setOAuthStatus } from "../mcp";
 import { orgResource, type PermissionService } from "../organization";
 import {
   ccBundleFrom,
@@ -22,8 +26,8 @@ import {
   orgClientCredentialsOf,
   storeOrgConnection,
 } from "./credentials";
-import { authFailureOf } from "./diagnosis";
-import { type FlowRecord, flowAuth, settingsUrl, startOAuthFlow } from "./flow";
+import { authFailureOf, type DiagnoseInput, diagnose } from "./diagnosis";
+import { type FlowRecord, flowAuth, serverClientsOf, settingsUrl, startOAuthFlow } from "./flow";
 import {
   type ClientCredentialsToken,
   ConnectorOAuthError,
@@ -38,6 +42,8 @@ import { probeConnector } from "./probe";
 
 const tags = ["connectors"];
 type ServerRow = typeof mcpServers.$inferSelect;
+/** Test sign-ins per admin per minute (T-07.14-09-04: not a port scanner). */
+const OAUTH_TEST_PER_MINUTE = 10;
 
 /** An organization-account server of the caller's organization, in `mode` when given: 404 when absent, 409 otherwise. */
 async function orgServerIn(tx: Tx, id: string, mode?: ServerRow["authMode"]): Promise<ServerRow> {
@@ -93,6 +99,28 @@ export function registerOrgConnectionRoutes(app: App, core: Core, perms: Permiss
     async (req) => saveClientCredentials(core, req, req.params.id, req.body),
   );
 
+  // Test sign-in (D-10, D-18, PD-08): a dry run on unsaved or saved values; writes nothing, registers nothing.
+  app.post(
+    "/connectors/oauth-test",
+    {
+      config: {
+        authz: "user" as const,
+        // After requireUser and mcp.manage, so the bucket is the admin (T-07.14-09-04), not the IP.
+        rateLimit: {
+          max: OAUTH_TEST_PER_MINUTE,
+          timeWindow: "1 minute",
+          hook: "preHandler",
+          keyGenerator: (r: FastifyRequest) => `oauth-test:${r.auth?.userId ?? r.ip}`,
+        },
+      },
+      // A copy: the rate-limit plugin appends its hook to this route's array, which must not be the shared one.
+      preHandler: [...admin.preHandler],
+      logLevel: "info",
+      schema: { tags, body: OAuthTestRequest, response: { 200: OAuthTestResponse } },
+    },
+    async (req) => testSignIn(core, req, req.body),
+  );
+
   // Disconnect (D-08): revoke at the provider first, then forget the account. 404 `not_connected` when there is none.
   app.delete(
     "/connectors/:id/org-connection",
@@ -109,6 +137,86 @@ export function registerOrgConnectionRoutes(app: App, core: Core, perms: Permiss
       return reply.code(204).send();
     },
   );
+}
+
+/**
+ * `POST /connectors/oauth-test` (07.14 D-10, D-18, PD-08): loads the values to check and calls `diagnose()`, nothing
+ * else. The URL is the form's (checked as the registry checks it, before any request) or the saved server's; a saved
+ * server is read in the caller's tenant only (another organization's id is a 404, its stored values never used). Its
+ * stored clients, and for client credentials its stored client and secret, fill in what the form omits (a stored
+ * secret only for the same client id). Scopes are the form's, else the server's. Reads only: no row, client, secret,
+ * `auth_failure` or `oauth_status` is written and no client is registered. The answer is `diagnose()`'s (closed codes,
+ * no token, secret or provider text); the log line carries the outcome code only.
+ */
+async function testSignIn(
+  core: Core,
+  req: FastifyRequest,
+  body: OAuthTestRequest,
+): Promise<OAuthTestResponse> {
+  const loaded = await core.db.withTenant(tenant(req), async (tx) => {
+    let server: ServerRow | null = null;
+    if (body.serverId !== undefined) {
+      const [row] = await tx.select().from(mcpServers).where(eq(mcpServers.id, body.serverId)).limit(1);
+      if (!row) throw notFound("Connector not found", "connector_not_found");
+      server = row;
+    }
+    return {
+      server,
+      clients: server ? await serverClientsOf(tx, core, server.id) : { preRegistered: [], stored: [] },
+      cc:
+        server && body.authMode === "org_client_credentials"
+          ? await orgClientCredentialsOf(tx, core, server.id)
+          : null,
+    };
+  });
+  const { server, clients } = loaded;
+  const serverUrl = body.url ?? server?.url ?? null;
+  if (!serverUrl) throw badRequest("A URL is required to test a sign-in", "url_required");
+  const check = checkMcpUrl(serverUrl);
+  if (!check.ok) throw badRequest(check.reason, "invalid_url");
+
+  // The form's client for its issuer first; the saved ones for the others.
+  const formClient = body.oauthClient;
+  const preRegistered = formClient
+    ? [
+        {
+          issuer: formClient.issuer,
+          clientId: formClient.clientId,
+          ...(formClient.clientSecret ? { clientSecret: formClient.clientSecret } : {}),
+        },
+        ...clients.preRegistered.filter((c) => c.issuer !== formClient.issuer),
+      ]
+    : clients.preRegistered;
+
+  let cc: DiagnoseInput["cc"];
+  if (body.authMode === "org_client_credentials") {
+    const form = body.clientCredentials;
+    const saved = loaded.cc;
+    const clientId = form?.clientId ?? saved?.clientId;
+    const clientSecret =
+      form?.clientSecret ?? (saved && saved.clientId === clientId ? saved.clientSecret : undefined);
+    const tokenEndpoint =
+      form?.tokenEndpoint ?? (saved && saved.issuer === null ? saved.tokenEndpoint : undefined);
+    if (clientId && clientSecret)
+      cc = { clientId, clientSecret, ...(tokenEndpoint ? { tokenEndpoint } : {}) };
+  }
+
+  const result = await diagnose(egressFor(core.env), {
+    serverUrl,
+    mode: body.authMode,
+    urls: connectorOAuthUrls(core.env.OCW_PUBLIC_API_URL),
+    preRegistered,
+    storedClients: clients.stored,
+    allowCimd: body.oauthUseCimd ?? server?.oauthUseCimd ?? true,
+    scopes: [...(body.oauthScopes ?? server?.oauthScopes ?? [])],
+    ...(cc ? { cc } : {}),
+    ...(body.pageOrigin !== undefined ? { pageOrigin: body.pageOrigin } : {}),
+  });
+  req.log.info(
+    { serverId: server?.id ?? null, mode: body.authMode, failure: result.failure },
+    "connector sign-in tested",
+  );
+  return result;
 }
 
 /**

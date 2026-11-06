@@ -330,6 +330,25 @@ describe("organization B (WINDOWS #169)", () => {
       "POST /api/v1/connectors/:p/org-connection/connect": async () => {
         await fails(s.eve.request("POST", `/api/v1/connectors/${orgDrive.id}/org-connection/connect`), 404);
       },
+      // 07.14-09: client credentials and the Test sign-in never reach another organization's server.
+      "PUT /api/v1/connectors/:p/org-connection/client-credentials": async () => {
+        await fails(
+          s.eve.request("PUT", `/api/v1/connectors/${orgDrive.id}/org-connection/client-credentials`, {
+            clientId: "x",
+            clientSecret: "y",
+          }),
+          404,
+        );
+      },
+      "POST /api/v1/connectors/oauth-test": async () => {
+        await fails(
+          s.eve.request("POST", "/api/v1/connectors/oauth-test", {
+            serverId: orgDrive.id,
+            authMode: "org_oauth",
+          }),
+          404,
+        );
+      },
       "GET /api/v1/connectors/oauth/callback": async () => {
         // Org A's flow, completed with org B's session: refused and consumed.
         const start = await ok(s.victor.request("POST", `/api/v1/connectors/${crm.id}/connect`));

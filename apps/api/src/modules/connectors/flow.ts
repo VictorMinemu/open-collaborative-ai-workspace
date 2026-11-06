@@ -1,5 +1,5 @@
 import { type ConnectorErrorCode, connectorOAuthUrls } from "@ocw/contracts";
-import { connectorOAuthClients, type mcpServers } from "@ocw/db";
+import { connectorOAuthClients, type mcpServers, type Tx } from "@ocw/db";
 import { and, eq } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -11,6 +11,7 @@ import { authFailureOf } from "./diagnosis";
 import {
   buildAuthorization,
   type ClientChoice,
+  type ClientPreviewOptions,
   ConnectorOAuthError,
   chooseClient,
   chooseScope,
@@ -109,6 +110,30 @@ export function flowAuth(
 }
 
 /**
+ * A server's OAuth clients for `previewClient` / `chooseClient`, secrets revealed in the caller's tenant transaction
+ * (RLS): the admin's pre-registered ones and the stored CIMD / DCR ones, per issuer. Shared by the sign-in start and
+ * the Test sign-in (07.14-09), so both decide from the same clients.
+ */
+export async function serverClientsOf(
+  tx: Tx,
+  core: Core,
+  serverId: string,
+): Promise<Pick<ClientPreviewOptions, "preRegistered" | "stored">> {
+  const clients = await oauthClientsOf(tx, serverId);
+  const reveal = async (id: string | null) =>
+    id ? await core.secrets.reveal(tx, id).catch(() => undefined) : undefined;
+  const preRegistered: Array<ClientPreviewOptions["preRegistered"][number]> = [];
+  const stored: Array<ClientPreviewOptions["stored"][number]> = [];
+  for (const c of clients) {
+    const clientSecret = await reveal(c.clientSecretId);
+    const entry = { issuer: c.issuer, clientId: c.clientId, ...(clientSecret ? { clientSecret } : {}) };
+    if (c.method === "pre_registered") preRegistered.push(entry);
+    else stored.push({ ...entry, method: c.method });
+  }
+  return { preRegistered, stored };
+}
+
+/**
  * Starts a sign-in for `principal` on a server the route already resolved (and authorized) in the caller's tenant
  * (07.4-10; 07.14 PD-06): load the server's clients, discover the authorization server, choose a client, keep a new
  * dynamic registration per issuer, choose the scope, build the PKCE authorization, then write the flow record. The
@@ -148,20 +173,7 @@ export async function startOAuthFlow(
     return connectError(e.code);
   };
 
-  const loaded = await core.db.withTenant(tenant(req), async (tx) => {
-    const clients = await oauthClientsOf(tx, server.id);
-    const reveal = async (id: string | null) =>
-      id ? await core.secrets.reveal(tx, id).catch(() => undefined) : undefined;
-    const preRegistered = [];
-    const stored = [];
-    for (const c of clients) {
-      const clientSecret = await reveal(c.clientSecretId);
-      const entry = { issuer: c.issuer, clientId: c.clientId, ...(clientSecret ? { clientSecret } : {}) };
-      if (c.method === "pre_registered") preRegistered.push(entry);
-      else stored.push({ ...entry, method: c.method });
-    }
-    return { preRegistered, stored };
-  });
+  const loaded = await core.db.withTenant(tenant(req), (tx) => serverClientsOf(tx, core, server.id));
   if (!oauthUrls.oauthAvailable || !oauthUrls.redirectUri) {
     throw await refuse(new ConnectorOAuthError("https_required", { step: "https_required" }));
   }
