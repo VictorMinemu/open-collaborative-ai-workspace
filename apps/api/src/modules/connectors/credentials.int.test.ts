@@ -7,20 +7,27 @@ import {
   type ConnectorsStack,
   connectionRow,
   connectOAuth,
+  connectOrgOAuth,
   fails,
   fakeStats,
   type Json,
   ok,
+  orgBundleOf,
+  orgConnectionRow,
   PRE_REGISTERED,
   registerConnector,
+  registerOrgConnector,
   startConnectorsStack,
 } from "../../testing-connectors";
+import { storeConnection } from "./credentials";
 import {
   accessTokenFor,
   ConnectorTokenUnavailableError,
   connectionAad,
+  credentialStatusFor,
   forceRefresh,
   markNeedsReconnect,
+  touchCredential,
 } from "./index";
 
 /**
@@ -639,5 +646,254 @@ describe("member and tenant isolation", () => {
     } finally {
       await ok(s.victor.request("DELETE", `/api/v1/permission-rules/${rule.id}`));
     }
+  });
+});
+
+// ---------------------------------------------------------------- 07.14-07 Task 3: the organization's credential
+
+describe("organization custody (07.14)", () => {
+  let org: Json;
+  const orgKey = (serverId = org.id, organizationId = s.orgA, actingUserId: string | null = s.victorId) => ({
+    organizationId,
+    serverId,
+    principal: "organization" as const,
+    actingUserId,
+  });
+  const orgRow = (serverId = org.id) => orgConnectionRow(s, s.orgA, serverId);
+  async function connectOrg(serverId = org.id) {
+    expect((await connectOrgOAuth(s, s.victor, serverId)).status).toBe(302);
+  }
+
+  beforeAll(async () => {
+    org = await registerOrgConnector(s);
+  });
+
+  it("two racing callers on an expiring organization token make one refresh; two forced refreshes make one; no reuse", async () => {
+    s.fake.setScenario({ expires_in: 30 });
+    await connectOrg();
+    s.fake.setScenario({});
+    const before = await fakeStats(s);
+    const [a, b] = await Promise.all([
+      accessTokenFor(s.stack.built.core, orgKey()),
+      accessTokenFor(s.stack.built.core, orgKey(org.id, s.orgA, s.samId)),
+    ]);
+    if (!a.ok || !b.ok) throw new Error("expected tokens");
+    expect(a.headerValue).toBe(b.headerValue);
+    expect(await refreshes()).toBe(before.tokenRequests.refresh_token + 1);
+    expect((await fakeStats(s)).accessTokenHashes).toContain(sha(a.headerValue.slice(7)));
+    expect(Date.parse((await orgRow())?.access_expires_at)).toBeGreaterThan(Date.now() + 3_000_000);
+
+    // A fresh grant: the refresh above is still inside the lock window (which would be reused).
+    await connectOrg();
+    const mid = await refreshes();
+    const old = await accessTokenFor(s.stack.built.core, orgKey());
+    const [c, d] = await Promise.all([
+      forceRefresh(s.stack.built.core, orgKey()),
+      forceRefresh(s.stack.built.core, orgKey(org.id, s.orgA, null)),
+    ]);
+    if (!c.ok || !d.ok || !old.ok) throw new Error("expected tokens");
+    expect(c.headerValue).toBe(d.headerValue);
+    expect(c.headerValue).not.toBe(old.headerValue);
+    expect(await refreshes()).toBe(mid + 1);
+    expect((await fakeStats(s)).refreshReuse).toBe(before.refreshReuse);
+  });
+
+  it("an issuer change → needs_reconnect (provider_changed): no token request at either issuer, revoked at the old one", async () => {
+    await connectOrg();
+    const before = (await fakeStats(s)).tokenRequests;
+    const revoked = await revocations();
+    s.fake.setScenario({ different_issuer: true });
+    expect(await forceRefresh(s.stack.built.core, orgKey())).toEqual({
+      ok: false,
+      reason: "needs_reconnect",
+    });
+    expect((await fakeStats(s)).tokenRequests).toEqual(before);
+    expect(await revocations()).toBe(revoked + 1);
+    expect(await orgRow()).toMatchObject({
+      status: "needs_reconnect",
+      last_error: "issuer_changed",
+      secret_id: null,
+    });
+    s.fake.setScenario({});
+    expect((await ok(s.victor.request("GET", `/api/v1/mcp-servers/${org.id}`))).orgConnection).toMatchObject({
+      status: "needs_reconnect",
+      reconnectReason: "provider_changed",
+      hasSecret: false,
+    });
+  });
+
+  it("a refused refresh → needs_reconnect (revoked), audited connector.org_needs_reconnect; markNeedsReconnect does the same", async () => {
+    await connectOrg();
+    s.fake.setScenario({ revoke_all: true });
+    expect(await forceRefresh(s.stack.built.core, orgKey())).toEqual({
+      ok: false,
+      reason: "needs_reconnect",
+    });
+    s.fake.setScenario({});
+    expect((await ok(s.victor.request("GET", `/api/v1/mcp-servers/${org.id}`))).orgConnection).toMatchObject({
+      status: "needs_reconnect",
+      reconnectReason: "revoked",
+    });
+    const refusedAudit = (await auditRows(s, s.orgA, ["connector.org_needs_reconnect"])).at(-1);
+    expect(refusedAudit).toMatchObject({
+      user_id: s.victorId,
+      metadata: { serverId: org.id, code: "invalid_grant", revokeAtIssuer: true },
+    });
+    // The member audit name is never used for the organization's credential.
+    expect(
+      (await auditRows(s, s.orgA, ["connector.needs_reconnect"])).some((r) => r.metadata.serverId === org.id),
+    ).toBe(false);
+
+    await connectOrg();
+    const b = await orgBundleOf(s, s.orgA, org.id);
+    const revoked = await revocations();
+    await markNeedsReconnect(s.stack.built.core, { ...orgKey(), code: "upstream_unauthorized" });
+    expect(await orgRow()).toMatchObject({ status: "needs_reconnect", last_error: "upstream_unauthorized" });
+    expect(await revocations()).toBe(revoked + 1);
+    expect(await refreshStatus(b)).toBe(400);
+    expect((await auditRows(s, s.orgA, ["connector.org_needs_reconnect"])).at(-1)).toMatchObject({
+      metadata: { serverId: org.id, code: "upstream_unauthorized", revokeAtIssuer: true },
+    });
+  });
+
+  it("Disconnect revokes at the provider, then deletes the row and its secret; a second one is 404 and sends nothing", async () => {
+    await connectOrg();
+    const secretId = (await orgRow())?.secret_id;
+    const before = await revocations();
+    expect((await s.victor.request("DELETE", `/api/v1/connectors/${org.id}/org-connection`)).status).toBe(
+      204,
+    );
+    expect(await revocations()).toBe(before + 1);
+    expect(await orgRow()).toBeUndefined();
+    expect((await s.su.query("select 1 from app.secrets where id = $1", [secretId])).rowCount).toBe(0);
+    expect((await auditRows(s, s.orgA, ["connector.org_disconnected"])).at(-1)).toMatchObject({
+      user_id: s.victorId,
+      metadata: { serverId: org.id, method: "oauth", revoked: true, reason: "admin" },
+    });
+    expect((await ok(s.victor.request("GET", `/api/v1/mcp-servers/${org.id}`))).orgConnection).toBeNull();
+    await fails(
+      s.victor.request("DELETE", `/api/v1/connectors/${org.id}/org-connection`),
+      404,
+      "not_connected",
+    );
+    expect(await revocations()).toBe(before + 1);
+    // Only an admin disconnects the organization's account.
+    await connectOrg();
+    await fails(s.sam.request("DELETE", `/api/v1/connectors/${org.id}/org-connection`), 403);
+    expect((await orgRow())?.status).toBe("connected");
+  });
+
+  it("with the provider down Disconnect still deletes (revoked false)", async () => {
+    await connectOrg();
+    s.setDown(true);
+    expect((await s.victor.request("DELETE", `/api/v1/connectors/${org.id}/org-connection`)).status).toBe(
+      204,
+    );
+    s.setDown(false);
+    expect(await orgRow()).toBeUndefined();
+    expect((await auditRows(s, s.orgA, ["connector.org_disconnected"])).at(-1)).toMatchObject({
+      metadata: { serverId: org.id, revoked: false, reason: "admin" },
+    });
+  });
+
+  it("Re-probe lists tools with the organization's token for an org server; a member server keeps the admin's own", async () => {
+    await fails(s.victor.request("POST", `/api/v1/connectors/${org.id}/probe`), 409, "not_connected");
+    await connectOrg();
+    await s.su.query("delete from app.mcp_server_tools where server_id = $1", [org.id]);
+    // Víctor has no member connection to it: only the organization's token can list these tools.
+    expect(await connectionRow(s, s.victorId, org.id)).toBeUndefined();
+    const dto = await ok(s.victor.request("POST", `/api/v1/connectors/${org.id}/probe`));
+    expect(dto.tools.map((t: Json) => t.name).sort()).toEqual(["create_record", "echo_auth", "whoami"]);
+    expect(dto.status).toBe("ready");
+    await fails(s.sam.request("POST", `/api/v1/connectors/${org.id}/probe`), 403);
+    const member = await registerConnector(s);
+    await fails(s.victor.request("POST", `/api/v1/connectors/${member.id}/probe`), 409, "not_connected");
+  });
+
+  it("a bundle swapped between the organization row and a member row of the same server fails closed both ways", async () => {
+    await connectOrg();
+    const { core } = s.stack.built;
+    const orgSecret = (await orgRow())?.secret_id;
+    // A member credential on the same server (seeded below the API: the routes never make one for an org mode).
+    await core.db.withTenant({ organizationId: s.orgA, userId: s.victorId }, (tx) =>
+      storeConnection(tx, core, {
+        userId: s.victorId,
+        serverId: org.id,
+        bundle: { kind: "secret", value: "X" },
+      }),
+    );
+    const memberSecret = (await connectionRow(s, s.victorId, org.id))?.secret_id;
+    const before = (await fakeStats(s)).tokenRequests;
+    try {
+      await s.su.query("update app.connector_org_connections set secret_id = $1 where server_id = $2", [
+        memberSecret,
+        org.id,
+      ]);
+      expect(await accessTokenFor(core, orgKey())).toEqual({ ok: false, reason: "needs_reconnect" });
+      // The member's key path, with the org secret on the member row and the server read as a member one.
+      await s.su.query("update app.connector_org_connections set secret_id = $1 where server_id = $2", [
+        orgSecret,
+        org.id,
+      ]);
+      await s.su.query(
+        "update app.connector_connections set secret_id = $1 where user_id = $2 and server_id = $3",
+        [orgSecret, s.victorId, org.id],
+      );
+      await s.su.query("update app.mcp_servers set auth_mode = 'per_member_oauth' where id = $1", [org.id]);
+      expect(await accessTokenFor(core, key(s.victorId, org.id))).toEqual({
+        ok: false,
+        reason: "needs_reconnect",
+      });
+    } finally {
+      await s.su.query("update app.mcp_servers set auth_mode = 'org_oauth' where id = $1", [org.id]);
+      await s.su.query("delete from app.connector_connections where user_id = $1 and server_id = $2", [
+        s.victorId,
+        org.id,
+      ]);
+      await s.su.query("delete from app.secrets where id = $1", [memberSecret]);
+    }
+    expect((await fakeStats(s)).tokenRequests).toEqual(before);
+    // Neither failed open destroyed the organization's credential.
+    expect((await s.su.query("select 1 from app.secrets where id = $1", [orgSecret])).rowCount).toBe(1);
+    expect(await accessTokenFor(core, orgKey())).toMatchObject({ ok: true });
+  });
+
+  it("org B can neither read, connect, disconnect, probe nor use org A's organization connection", async () => {
+    await connectOrg();
+    const { core } = s.stack.built;
+    await fails(s.eve.request("DELETE", `/api/v1/connectors/${org.id}/org-connection`), 404);
+    await fails(s.eve.request("POST", `/api/v1/connectors/${org.id}/org-connection/connect`), 404);
+    await fails(s.eve.request("POST", `/api/v1/connectors/${org.id}/probe`), 404);
+    await fails(s.eve.request("GET", `/api/v1/mcp-servers/${org.id}`), 404);
+    expect(await accessTokenFor(core, orgKey(org.id, s.orgB, s.eveId))).toEqual({
+      ok: false,
+      reason: "not_connected",
+    });
+    expect(
+      await core.db.withTenant({ organizationId: s.orgB, userId: s.eveId }, (tx) =>
+        credentialStatusFor(tx, orgKey(org.id, s.orgB, s.eveId)),
+      ),
+    ).toBe("not_connected");
+    expect(await orgRow()).toMatchObject({ status: "connected" });
+  });
+
+  it("credentialStatusFor / touchCredential read and stamp the organization row, and the member row for a member key", async () => {
+    await connectOrg();
+    const { core } = s.stack.built;
+    const inA = <T>(fn: (tx: Parameters<Parameters<typeof core.db.withTenant>[1]>[0]) => Promise<T>) =>
+      core.db.withTenant({ organizationId: s.orgA, userId: s.victorId }, fn);
+    expect(await inA((tx) => credentialStatusFor(tx, orgKey()))).toBe("connected");
+    expect((await orgRow())?.last_used_at).toBeNull();
+    await inA((tx) => touchCredential(tx, orgKey()));
+    expect((await orgRow())?.last_used_at).not.toBeNull();
+
+    await reconnect();
+    expect(await inA((tx) => credentialStatusFor(tx, key(s.victorId, oauth.id)))).toBe("connected");
+    expect(await inA((tx) => credentialStatusFor(tx, key(s.victorId, keyServer.id)))).toBe("not_connected");
+    await inA((tx) => touchCredential(tx, key(s.victorId, oauth.id)));
+    expect((await connectionRow(s, s.victorId, oauth.id))?.last_used_at).not.toBeNull();
+    // A member key never reads the organization row, and the organization key never reads a member's.
+    expect(await inA((tx) => credentialStatusFor(tx, key(s.victorId, org.id)))).toBe("not_connected");
+    expect(await inA((tx) => credentialStatusFor(tx, orgKey(oauth.id)))).toBe("not_connected");
   });
 });
