@@ -14,7 +14,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, statSync, truncateSync } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   app,
   BrowserWindow,
@@ -261,23 +261,31 @@ async function addProjectFlow(name?: string): Promise<AddProjectResult> {
   const options: Electron.OpenDialogOptions = {
     title: "Add project",
     buttonLabel: "Add project",
-    message: "Choose a git repository. It stays on this computer; the server sees its name, never its path.",
+    message:
+      "Choose a project folder (a git repository or any folder). It stays on this computer; the server sees its name, never its path.",
     properties: ["openDirectory"],
   };
   const picked = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
   const chosen = picked.filePaths[0];
   if (picked.canceled || !chosen) return { ok: false, canceled: true };
   try {
-    const root = await validateProjectDir(chosen, { forbidden: [ocwHome, app.getPath("userData")] });
+    const { root, git } = await validateProjectDir(chosen, { forbidden: [ocwHome, app.getPath("userData")] });
     const raw = await controlRequest(
       socketPath,
       { cmd: "addProject", path: root, ...(name ? { name } : {}) },
       15_000,
     );
     const project = toPublicProject(LocalProject.parse(raw));
-    notify("Project added", `${project.name} is ready for Work Zone sessions on this computer.`);
+    // Folder name only: web content never sees a path (AGENTS principle 7).
+    const notice = git
+      ? undefined
+      : `${basename(root)} has no git repository: sessions work; changes and worktrees are off.`;
+    notify(
+      "Project added",
+      `${project.name} is ready for Work Zone sessions on this computer.${notice ? ` ${notice}` : ""}`,
+    );
     void pollStatus();
-    return { ok: true, project };
+    return { ok: true, project, ...(notice ? { notice } : {}) };
   } catch (err) {
     const error =
       err instanceof ProjectPathError
