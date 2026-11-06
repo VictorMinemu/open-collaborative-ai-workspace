@@ -36,6 +36,8 @@ export const DeviceProjectAnnouncement = z.object({
   name: z.string().min(1).max(200),
   gitRemote: z.string().max(2048).nullable(),
   defaultBranch: z.string().max(255).nullable(),
+  /** False when the project folder is in no git repository (the Work Zone works without git). Absent on older devices. */
+  git: z.boolean().optional(),
 });
 export type DeviceProjectAnnouncement = z.infer<typeof DeviceProjectAnnouncement>;
 
@@ -148,6 +150,8 @@ export const DiffResultFrame = z.object({
   truncated: z.boolean().optional(),
   branch: z.string().max(255).nullable().optional(),
   headSha: z.string().max(64).nullable().optional(),
+  /** False when the project has no git repository: no files, no patch, nothing to compare. Absent on older devices. */
+  git: z.boolean().optional(),
 });
 export type DiffResultFrame = z.infer<typeof DiffResultFrame>;
 
