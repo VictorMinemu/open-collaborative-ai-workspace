@@ -1110,4 +1110,64 @@ describe("fake MCP OAuth: client credentials grant (RFC 6749 §4.4, 07.14-03)", 
     assert.equal(stats.lastResource.cc, null);
     assert.equal(stats.lastClientAuth, null);
   });
+
+  it("cc_post_only advertises client_secret_post alone and refuses Basic", async () => {
+    direct.fake.setScenario({ cc_post_only: true });
+    const as = await (
+      await fetch(`${direct.origin}/.well-known/oauth-authorization-server/mcp-oauth`)
+    ).json();
+    assert.deepEqual(as.token_endpoint_auth_methods_supported, ["client_secret_post"]);
+    const basic = await ccBasic();
+    assert.deepEqual([basic.status, basic.body.error], [401, "invalid_client"]);
+    assert.equal((await ccPost()).status, 200);
+    assert.equal((await statsOf(direct.origin)).tokenRequests.client_credentials, 2);
+  });
+});
+
+describe("fake MCP OAuth: diagnosis scenarios (07.14-03, D-10)", () => {
+  const asMeta = async () => (await fetch(`${base}/.well-known/oauth-authorization-server/mcp-oauth`)).json();
+
+  it("no_authorization_endpoint serves client-credentials-only metadata", async () => {
+    await scenario(base, { no_authorization_endpoint: true });
+    const as = await asMeta();
+    assert.equal(as.issuer, `${base}/mcp-oauth`);
+    assert.equal(as.token_endpoint, `${base}/mcp-oauth/token`);
+    assert.deepEqual(as.grant_types_supported, ["client_credentials"]);
+    assert.ok(as.token_endpoint_auth_methods_supported.includes("client_secret_basic"));
+    for (const key of [
+      "authorization_endpoint",
+      "response_types_supported",
+      "code_challenge_methods_supported",
+    ])
+      assert.equal(key in as, false, key);
+    await scenario(base, {});
+    assert.equal((await asMeta()).authorization_endpoint, `${base}/mcp-oauth/authorize`);
+  });
+
+  it("issuer_mismatch_meta names another issuer than the URL the metadata is served at", async () => {
+    await scenario(base, { issuer_mismatch_meta: true });
+    const as = await asMeta();
+    assert.equal(as.issuer, `${base}/mcp-oauth-other`);
+    assert.equal(as.token_endpoint, `${base}/mcp-oauth/token`);
+  });
+
+  it("invalid_scope_at_authorize redirects with error=invalid_scope, state and iss, and no code", async () => {
+    await scenario(base, { invalid_scope_at_authorize: true });
+    const { query, params } = await authorize(base);
+    assert.equal(query.get("error"), "invalid_scope");
+    assert.equal(query.get("state"), params.state);
+    assert.equal(query.get("iss"), `${base}/mcp-oauth`);
+    assert.equal(query.has("code"), false);
+  });
+
+  it("the e2e fake pre-registers the confidential client ocw-e2e-cc", async () => {
+    const { as } = await discover(base);
+    const out = await tokenRequest(
+      as,
+      { grant_type: "client_credentials", resource: `${base}/mcp-oauth/mcp` },
+      { authorization: `Basic ${Buffer.from("ocw-e2e-cc:e2e-cc-secret-canary").toString("base64")}` },
+    );
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.equal((await whoami(base, out.body.access_token)).subject, "sub_cc_ocw-e2e-cc");
+  });
 });
