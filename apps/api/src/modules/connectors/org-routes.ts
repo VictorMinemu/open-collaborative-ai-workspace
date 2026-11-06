@@ -140,12 +140,14 @@ export function registerOrgConnectionRoutes(app: App, core: Core, perms: Permiss
 }
 
 /**
- * `POST /connectors/oauth-test` (07.14 D-10, D-18, PD-08): loads the values to check and calls `diagnose()`, nothing
+ * `POST /connectors/oauth-test` (07.14 D-10, D-18, PD-08): loads the values to check and calls `diagnose`, nothing
  * else. The URL is the form's (checked as the registry checks it, before any request) or the saved server's; a saved
  * server is read in the caller's tenant only (another organization's id is a 404, its stored values never used). Its
- * stored clients, and for client credentials its stored client and secret, fill in what the form omits (a stored
- * secret only for the same client id). Scopes are the form's, else the server's. Reads only: no row, client, secret,
- * `auth_failure` or `oauth_status` is written and no client is registered. The answer is `diagnose()`'s (closed codes,
+ * stored clients, and for client credentials its stored client and secret, fill in what the form omits, and only
+ * against the saved target (stored secrets are write-only, ADR-0025): the saved URL, the same client id and Token URL,
+ * and, for a stored secret, the saved issuer and endpoint as discovered now (`pin`). A form Token URL meets the
+ * registry's URL policy first. Scopes are the form's, else the server's. Reads only: no row, client, secret,
+ * `auth_failure` or `oauth_status` is written and no client is registered. The answer is `diagnose`'s (closed codes,
  * no token, secret or provider text); the log line carries the outcome code only.
  */
 async function testSignIn(
@@ -169,11 +171,21 @@ async function testSignIn(
           : null,
     };
   });
-  const { server, clients } = loaded;
+  const { server } = loaded;
   const serverUrl = body.url ?? server?.url ?? null;
   if (!serverUrl) throw badRequest("A URL is required to test a sign-in", "url_required");
   const check = checkMcpUrl(serverUrl);
   if (!check.ok) throw badRequest(check.reason, "invalid_url");
+  const formEndpoint = body.clientCredentials?.tokenEndpoint;
+  if (formEndpoint !== undefined) {
+    // The admin's Token URL meets the registry's URL policy before any request (trusted() and the guard follow).
+    const endpointCheck = checkMcpUrl(formEndpoint);
+    if (!endpointCheck.ok) throw badRequest(endpointCheck.reason, "invalid_url");
+  }
+  // Stored secrets are write-only: the saved server's clients and secret are used only against its saved target. A
+  // changed URL is another target, tested with what the form supplies alone.
+  const savedTarget = server !== null && (body.url === undefined || body.url === server.url);
+  const clients = savedTarget ? loaded.clients : { preRegistered: [], stored: [] };
 
   // The form's client for its issuer first; the saved ones for the others.
   const formClient = body.oauthClient;
@@ -191,14 +203,26 @@ async function testSignIn(
   let cc: DiagnoseInput["cc"];
   if (body.authMode === "org_client_credentials") {
     const form = body.clientCredentials;
-    const saved = loaded.cc;
+    const saved = savedTarget ? loaded.cc : null;
     const clientId = form?.clientId ?? saved?.clientId;
-    const clientSecret =
-      form?.clientSecret ?? (saved && saved.clientId === clientId ? saved.clientSecret : undefined);
-    const tokenEndpoint =
-      form?.tokenEndpoint ?? (saved && saved.issuer === null ? saved.tokenEndpoint : undefined);
-    if (clientId && clientSecret)
-      cc = { clientId, clientSecret, ...(tokenEndpoint ? { tokenEndpoint } : {}) };
+    // The stored secret: same client, same Token URL (omitted or repeated), and pinned to the saved issuer and endpoint.
+    const keep =
+      saved !== null &&
+      saved.clientId === clientId &&
+      (formEndpoint === undefined || formEndpoint === saved.tokenEndpoint);
+    const clientSecret = form?.clientSecret ?? (keep ? saved.clientSecret : undefined);
+    const tokenEndpoint = formEndpoint ?? (saved && saved.issuer === null ? saved.tokenEndpoint : undefined);
+    const pin =
+      form?.clientSecret === undefined && keep && saved
+        ? { issuer: saved.issuer, tokenEndpoint: saved.tokenEndpoint }
+        : undefined;
+    // Always passed: the Token URL still drives discovery when there is no secret to try (the token step fails then).
+    cc = {
+      ...(clientId ? { clientId } : {}),
+      ...(clientSecret ? { clientSecret } : {}),
+      ...(tokenEndpoint ? { tokenEndpoint } : {}),
+      ...(pin ? { pin } : {}),
+    };
   }
 
   const result = await diagnose(egressFor(core.env), {
@@ -220,10 +244,12 @@ async function testSignIn(
 }
 
 /**
- * `PUT /connectors/:id/org-connection/client-credentials` (07.14 D-03, D-05, D-06, D-15, PD-07). The secret is the
+ * The client-credentials save route (07.14 D-03, D-05, D-06, D-15, PD-07). The secret is the
  * body's, else the stored one for the same client id (a new client id needs its secret: 400 `secret_required`). The
  * token endpoint is the published one (RFC 9728 → RFC 8414, the issuer pinned), else the admin's Token URL (or the
- * one saved before), checked by `trusted()` before the secret is sent. A refused discovery or grant answers 409 whose
+ * one saved before), checked by the registry's URL policy and `trusted()` before the secret is sent. A kept secret
+ * goes only to the issuer and token endpoint it was saved for (else 400 `secret_required`, nothing sent: stored
+ * secrets are write-only, ADR-0025). A refused discovery or grant answers 409 whose
  * `code` is the D-10 failure, records it as `auth_failure` in its own transaction and stores nothing. A grant is sealed
  * for the organization with the server row held (`connected_by` = the admin), audited `connector.org_connected`,
  * `auth_failure` cleared; then the tools are listed with the new token. Nothing returned or logged carries the secret
@@ -265,9 +291,12 @@ async function saveClientCredentials(
 
   const egress = egressFor(core.env);
   const scopes = [...(server.oauthScopes ?? [])];
+  // The admin's Token URL meets the registry's URL policy before any request (trusted() and the guard follow).
+  if (body.tokenEndpoint !== undefined && !checkMcpUrl(body.tokenEndpoint).ok) {
+    return refused(new ConnectorOAuthError("token_exchange_failed", { step: "token_endpoint_untrusted" }));
+  }
   let disc: TokenEndpointDiscovery;
   let tokenEndpoint: string;
-  let token: ClientCredentialsToken;
   try {
     if (!server.url) throw new ConnectorOAuthError("discovery_failed", { step: "discovery_failed" });
     disc = await discoverTokenEndpoint(egress, server.url);
@@ -278,6 +307,19 @@ async function saveClientCredentials(
       (stored && stored.issuer === null ? stored.tokenEndpoint : undefined);
     if (!endpoint) throw new ConnectorOAuthError("discovery_failed", { step: "discovery_failed" });
     tokenEndpoint = endpoint;
+  } catch (err) {
+    return refused(err);
+  }
+  // A kept (stored) secret is write-only: it goes only to the issuer and token endpoint it was saved for. Another
+  // Token URL, or a server whose issuer or endpoint changed since, needs the secret typed again.
+  if (
+    body.clientSecret === undefined &&
+    (stored?.issuer !== disc.issuer || stored?.tokenEndpoint !== tokenEndpoint)
+  ) {
+    throw badRequest("Enter this client's secret again: its token endpoint changed", "secret_required");
+  }
+  let token: ClientCredentialsToken;
+  try {
     token = await clientCredentialsGrant(egress, {
       tokenEndpoint,
       issuer: disc.issuer,

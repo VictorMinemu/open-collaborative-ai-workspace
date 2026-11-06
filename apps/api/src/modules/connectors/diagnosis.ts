@@ -65,8 +65,18 @@ export interface DiagnoseInput {
   allowCimd: boolean;
   /** Client credentials: the scopes to request (empty = none sent). */
   scopes: string[];
-  /** Client credentials only. `tokenEndpoint`: the admin's Token URL, used when the server publishes no metadata. */
-  cc?: { clientId: string; clientSecret: string; tokenEndpoint?: string };
+  /**
+   * Client credentials only. `tokenEndpoint`: the admin's Token URL, used when the server publishes no metadata.
+   * `pin`: set when the secret is the stored one (not typed in the form): it is sent only to the saved issuer's saved
+   * token endpoint; a discovery that now names another issuer or endpoint fails before any token request.
+   */
+  cc?: {
+    /** Missing (none typed, none usable): the token step fails with nothing sent. */
+    clientId?: string;
+    clientSecret?: string;
+    tokenEndpoint?: string;
+    pin?: { issuer: string | null; tokenEndpoint: string };
+  };
   /** The origin the admin opened the page on (RESEARCH Pitfall 1). */
   pageOrigin?: string;
 }
@@ -190,6 +200,17 @@ export async function diagnose(egress: Egress, input: DiagnoseInput): Promise<OA
     return answer();
   }
   pass("discovery");
+  // A stored secret never follows a changed issuer or token endpoint (write-only secrets: it is not readable back).
+  const pin = input.cc?.pin;
+  if (pin && disc.issuer !== pin.issuer) {
+    fail(["issuer"], "issuer_mismatch");
+    return answer();
+  }
+  if (pin && endpoint !== pin.tokenEndpoint) {
+    if (disc.issuer !== null) pass("issuer");
+    fail(["endpoints"], "token_endpoint_untrusted");
+    return answer();
+  }
   // Without metadata there is no issuer to check (the step stays skipped); the admin's URL is checked below.
   if (disc.issuer !== null) {
     issuer = disc.issuer;
@@ -201,7 +222,9 @@ export async function diagnose(egress: Egress, input: DiagnoseInput): Promise<OA
     return answer();
   }
   pass("endpoints");
-  if (!input.cc) {
+  const { clientId, clientSecret } = input.cc ?? {};
+  if (!clientId || !clientSecret) {
+    // No client or no secret to try (none typed, none usable here): nothing is sent.
     fail(["token"], "token_exchange_failed");
     return answer();
   }
@@ -213,8 +236,8 @@ export async function diagnose(egress: Egress, input: DiagnoseInput): Promise<OA
       resource: disc.resource,
       sameOrigin: disc.sameOrigin,
       mcpOrigin: disc.mcpOrigin,
-      clientId: input.cc.clientId,
-      clientSecret: input.cc.clientSecret,
+      clientId,
+      clientSecret,
       scopes: input.scopes,
       authMethods: disc.authMethods,
     });
