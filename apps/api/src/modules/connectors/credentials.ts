@@ -18,12 +18,14 @@ import {
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { z } from "zod";
 import type { Core } from "../../core";
-import { egressFor } from "../../lib/egress";
+import { egressFor, hostPortOf } from "../../lib/egress";
 import { reconnectReasonOfCode } from "../mcp";
 import {
   type ClientCredentialsToken,
   ConnectorOAuthError,
+  clientCredentialsGrant,
   discover,
+  discoverTokenEndpoint,
   refreshTokens,
   revokeToken,
   type TokenBundle,
@@ -148,7 +150,7 @@ export function ccBundleFrom(
     scopes: [...input.scopes],
     accessToken: token.accessToken,
     expiresAt: token.expiresAt,
-    refreshedAt: Date.now(),
+    // No `refreshedAt`: a token refused right after the save is re-granted (only a re-grant opens the reuse window).
   };
 }
 
@@ -180,6 +182,26 @@ const tokenBundleOf = (b: OAuthBundle): TokenBundle => ({
   authMethod: b.authMethod,
   accountLabel: b.accountLabel,
 });
+
+/**
+ * What RFC 7009 revocation needs of a client-credentials bundle: its access token (there is no refresh token), at the
+ * revocation endpoint published with the pinned issuer, never one an admin typed (null then: nothing is sent).
+ */
+function ccRevocationOf(b: ClientCredentialsBundle): TokenBundle | null {
+  if (!b.accessToken || !b.revocationEndpoint) return null;
+  return {
+    accessToken: b.accessToken,
+    expiresAt: b.expiresAt ?? null,
+    scopes: b.scopes,
+    issuer: b.issuer ?? "",
+    clientId: b.clientId,
+    resource: b.resource,
+    tokenEndpoint: b.tokenEndpoint,
+    revocationEndpoint: b.revocationEndpoint,
+    authMethod: b.authMethod,
+    accountLabel: null,
+  };
+}
 
 /** A member's own credential for a per-member connector (07.4). */
 export interface ConnectionKey {
@@ -697,6 +719,98 @@ const refused = (reason: "not_connected" | "needs_reconnect", dropped?: DroppedG
   dropped,
 });
 
+/** The MCP URL's origin and `host:port`: the only plain-http origin and private target its OAuth calls may reach. */
+function mcpOriginsOf(serverUrl: string): { mcpOrigin: string; sameOrigin: string } | null {
+  try {
+    const url = new URL(serverUrl);
+    return { mcpOrigin: url.origin, sameOrigin: hostPortOf(url) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A client-credentials re-grant (07.14 D-03, D-07, PD-07), inside `refreshAttempt`'s transaction and only by the
+ * holder of the refresh lock: one token request across every API instance. Before each one the issuer pinned at save
+ * time is re-discovered (when the bundle has one) and compared: a changed or vanished issuer is `needs_reconnect`
+ * (`issuer_changed`) and the secret is sent nowhere; a discovery that fails sends nothing and is transient. The grant
+ * uses the stored endpoint, client and auth method, and the server's current scopes (an admin's change applies at the
+ * next grant). A terminal refusal (`invalid_client`, `unauthorized_client`, `invalid_scope`, …) is `needs_reconnect`
+ * with that code; there is no grant left to revoke at the issuer.
+ */
+async function regrantInTx(
+  tx: Tx,
+  core: Core,
+  store: CredentialStore,
+  server: ServerRow,
+  row: CredentialRow,
+  bundle: ClientCredentialsBundle,
+): Promise<Attempt> {
+  const egress = egressFor(core.env);
+  const dead = async (code: string) => {
+    const dropped = await markInTx(tx, core, store, row, code, { bundle, refreshRefused: true });
+    return refused("needs_reconnect", dropped);
+  };
+  if (!server.url) return { kind: "transient", code: "discovery_failed" };
+  let where = mcpOriginsOf(server.url);
+  if (bundle.issuer !== null) {
+    let current: TokenEndpointDiscovery;
+    try {
+      current = await discoverTokenEndpoint(egress, server.url);
+    } catch (err) {
+      const code = err instanceof ConnectorOAuthError ? err.code : "discovery_failed";
+      core.log.warn({ serverId: store.serverId, code }, "connector issuer re-discovery failed");
+      return { kind: "transient", code };
+    }
+    if (current.issuer !== bundle.issuer) {
+      core.log.warn({ serverId: store.serverId, code: "issuer_changed" }, "connector issuer changed");
+      return dead("issuer_changed");
+    }
+    where = current;
+  }
+  if (!where) return { kind: "transient", code: "discovery_failed" };
+  const scopes = [...(server.oauthScopes ?? [])];
+  let token: ClientCredentialsToken;
+  try {
+    token = await clientCredentialsGrant(egress, {
+      tokenEndpoint: bundle.tokenEndpoint,
+      issuer: bundle.issuer,
+      resource: bundle.resource,
+      sameOrigin: where.sameOrigin,
+      mcpOrigin: where.mcpOrigin,
+      clientId: bundle.clientId,
+      clientSecret: bundle.clientSecret,
+      scopes,
+      authMethods: [bundle.authMethod],
+    });
+  } catch (err) {
+    const e = err instanceof ConnectorOAuthError ? err : null;
+    const code = e?.oauthError ?? e?.code ?? "refresh_failed";
+    core.log.warn(
+      { serverId: store.serverId, code, terminal: !!e?.terminal },
+      "connector client-credentials grant failed",
+    );
+    return e?.terminal ? dead(code) : { kind: "transient", code };
+  }
+  const stored: ClientCredentialsBundle = {
+    ...bundle,
+    scopes,
+    authMethod: token.authMethod,
+    accessToken: token.accessToken,
+    expiresAt: token.expiresAt,
+    refreshedAt: Date.now(),
+  };
+  if (!row.secretId) return refused("needs_reconnect");
+  await core.secrets.replaceSealed(tx, row.secretId, JSON.stringify(stored), store.aad);
+  await store.update(tx, row.id, {
+    accessExpiresAt: new Date(token.expiresAt).toISOString(),
+    scopes: token.scopes,
+    lastError: null,
+    updatedAt: new Date().toISOString(),
+  });
+  return { kind: "token", token: headerFor(server, stored) };
+}
+
 /**
  * One refresh attempt in its OWN transaction (a `needs_reconnect` transition commits even though the caller then
  * fails): lock the row, re-read the bundle (another instance may have refreshed), and only the holder of the Redis lock
@@ -718,7 +832,7 @@ async function refreshAttempt(
     if (row.status !== "connected") return refused("needs_reconnect");
     const bundle = await openBundle(tx, core, store, row);
     if (!bundle) return refused("needs_reconnect");
-    if (bundle.kind !== "oauth") return { kind: "token", token: headerFor(server, bundle) };
+    if (bundle.kind === "secret") return { kind: "token", token: headerFor(server, bundle) };
     if (force) {
       // Someone refreshed since the caller's 401, or within the lock window: reuse that token.
       const recent = bundle.refreshedAt !== undefined && Date.now() - bundle.refreshedAt < REFRESH_LOCK_MS;
@@ -729,6 +843,7 @@ async function refreshAttempt(
       return { kind: "token", token: headerFor(server, bundle) };
     }
     if (!holdsLock) return { kind: "wait" };
+    if (bundle.kind === "client_credentials") return regrantInTx(tx, core, store, server, row, bundle);
     if (!bundle.refreshToken) {
       const dropped = await markInTx(tx, core, store, row, "expired_no_refresh", {
         bundle,
@@ -990,17 +1105,20 @@ export async function disconnectOrg(
     const row = await orgConnection(tx, p.serverId);
     if (!row) return null;
     const bundle = await openBundle(tx, core, store, row);
-    const clientSecret =
-      bundle?.kind === "oauth"
-        ? await clientSecretFor(tx, core, p.serverId, bundle.issuer, bundle.clientId)
-        : undefined;
-    return { bundle, clientSecret };
+    if (bundle?.kind === "client_credentials") {
+      // Client credentials: the access token is the whole grant; the client's own secret authenticates the revocation.
+      return { revoke: ccRevocationOf(bundle), clientSecret: bundle.clientSecret };
+    }
+    if (bundle?.kind !== "oauth") return { revoke: null, clientSecret: undefined };
+    return {
+      revoke: tokenBundleOf(bundle),
+      clientSecret: await clientSecretFor(tx, core, p.serverId, bundle.issuer, bundle.clientId),
+    };
   });
   if (!found) return null;
-  const revoked =
-    found.bundle?.kind === "oauth"
-      ? await revokeToken(egressFor(core.env), tokenBundleOf(found.bundle), found.clientSecret)
-      : false;
+  const revoked = found.revoke
+    ? await revokeToken(egressFor(core.env), found.revoke, found.clientSecret)
+    : false;
   return core.db.withTenant(store.tenant, async (tx) => {
     const row = await orgConnection(tx, p.serverId, true);
     if (!row) return null;
