@@ -216,6 +216,8 @@ export const LocalProjectSchema = z.object({
   name: z.string(),
   gitRemote: z.string().nullable(),
   defaultBranch: z.string().nullable(),
+  /** False when the folder is in no git repository (registered as it is). Absent on entries written before it. */
+  git: z.boolean().optional(),
   addedAt: z.string(),
 });
 export type LocalProject = z.infer<typeof LocalProjectSchema>;
@@ -245,11 +247,12 @@ export class ProjectRegistry {
 
   /** What the server is allowed to see: no paths. */
   toSynced(): DeviceProjectAnnouncement[] {
-    return this.projects.map(({ localId, name, gitRemote, defaultBranch }) => ({
+    return this.projects.map(({ localId, name, gitRemote, defaultBranch, git }) => ({
       localId,
       name,
       gitRemote,
       defaultBranch,
+      ...(git === undefined ? {} : { git }),
     }));
   }
 
@@ -267,6 +270,8 @@ export class ProjectRegistry {
       name: name?.trim() || basename(abs),
       gitRemote: info?.remote ?? null,
       defaultBranch: info?.defaultBranch ?? null,
+      // A folder without git is a valid project (the Work Zone works without it); nothing is created in it.
+      git: info !== null,
       addedAt: new Date().toISOString(),
     };
     this.projects.push(project);

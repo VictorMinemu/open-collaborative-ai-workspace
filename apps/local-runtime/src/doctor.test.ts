@@ -585,6 +585,21 @@ describe("ocw-runtime doctor: every other check with its fix line (07.12, D-05, 
     expect(gone.fix).toContain("payments:");
     expect(gone.fix).toContain("`ocw-runtime remove-project payments`");
 
+    // A project without git is a valid Work Zone project: ok, with a short note.
+    const noGit = check(
+      await runDoctor(
+        deps({
+          projects: async () => [
+            { name: "app", path: `${HOME}/src/app`, exists: true, isGitRepo: true },
+            { name: "notes", path: `${HOME}/notes`, exists: true, isGitRepo: false },
+          ],
+        }),
+      ),
+      "projects",
+    );
+    expect(noGit.status).toBe("ok");
+    expect(noGit.summary).toBe("2 registered: app (~/src/app), notes (~/notes, no git)");
+
     const off = check(
       await runDoctor(
         deps({ ...notRunning, updatesLevel: async () => ({ level: "off", source: "config" }) }),

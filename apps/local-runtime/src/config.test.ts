@@ -1,6 +1,8 @@
+import { execFileSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -274,5 +276,52 @@ describe("ProjectRegistry.resolveRef (07.12, D-07)", () => {
     await expect(empty.resolveRef("api")).rejects.toThrow(
       'no registered project matches "api"; none are registered',
     );
+  });
+});
+
+describe("ProjectRegistry: projects without git", () => {
+  it("registers a folder in no repository as it is, announced with git false and no branch or path", async () => {
+    const root = realpathSync(home());
+    const notes = join(root, "notes");
+    mkdirSync(notes);
+    writeFileSync(join(notes, "todo.md"), "- one\n");
+    mkdirSync(join(root, "ocw"));
+    const reg = new ProjectRegistry(join(root, "ocw"));
+    await reg.load();
+    const p = await reg.add(notes);
+    expect(p).toMatchObject({ path: notes, name: "notes", gitRemote: null, defaultBranch: null, git: false });
+    expect(readdirSync(notes)).toEqual(["todo.md"]);
+    expect(reg.toSynced()).toEqual([
+      { localId: p.localId, name: "notes", gitRemote: null, defaultBranch: null, git: false },
+    ]);
+    expect(JSON.stringify(reg.toSynced())).not.toContain(root);
+  });
+
+  it("a repository is announced with git true; an entry written before the flag loads and is announced without it", async () => {
+    const root = realpathSync(home());
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    execFileSync("git", ["init", "-q", "-b", "main", repo]);
+    const ocw = join(root, "ocw");
+    mkdirSync(ocw);
+    const old = {
+      localId: "lp_old",
+      path: join(root, "old"),
+      name: "old",
+      gitRemote: null,
+      defaultBranch: "main",
+    };
+    writeFileSync(
+      join(ocw, "projects.json"),
+      JSON.stringify({ projects: [{ ...old, addedAt: "2026-01-01T00:00:00.000Z" }] }),
+    );
+    const reg = new ProjectRegistry(ocw);
+    await reg.load();
+    const p = await reg.add(repo);
+    expect(p).toMatchObject({ defaultBranch: "main", git: true });
+    expect(reg.toSynced()).toEqual([
+      { localId: "lp_old", name: "old", gitRemote: null, defaultBranch: "main" },
+      { localId: p.localId, name: "repo", gitRemote: null, defaultBranch: "main", git: true },
+    ]);
   });
 });

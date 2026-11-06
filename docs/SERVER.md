@@ -94,6 +94,7 @@ service so it connects with the new pairing (when a session runs, or for a syste
 instead). Setup warns when the server URL is plain `http://` to another host.
 
 Repositories later: `ocw-runtime add-project <dir>`, `ocw-runtime remove-project <dir|name>`, `ocw-runtime projects`.
+A folder without git works too: sessions run in it; the Changes view says "No git" and isolated worktrees are off.
 
 ## Pairing
 

@@ -357,7 +357,9 @@ describe("Daemon <-> Device Link", () => {
       fullAccessOptIn: false,
     });
     const sync = await server.frame("projects.sync", (f) => f.projects.length === 1);
-    expect(sync.projects).toEqual([{ localId, name: "acme", gitRemote: null, defaultBranch: "main" }]);
+    expect(sync.projects).toEqual([
+      { localId, name: "acme", gitRemote: null, defaultBranch: "main", git: true },
+    ]);
     expect(JSON.stringify(server.last.frames)).not.toContain(home);
   });
 
@@ -456,6 +458,58 @@ describe("Daemon <-> Device Link", () => {
     });
     expect(await server.frame("ack", (f) => f.commandId === "b2")).toMatchObject({ ok: false });
     expect(runtime.started).toHaveLength(0);
+  });
+
+  it("a project without git: announced git false, a session starts, the diff says no git, a worktree is refused clearly", async () => {
+    const plain = join(home, "notes");
+    mkdirSync(plain);
+    writeFileSync(join(plain, "todo.md"), "- one\n");
+    await daemon.start();
+    await server.frame("hello");
+    const res = await controlRequest(socketPath(), { cmd: "addProject", path: plain });
+    expect(res.ok).toBe(true);
+    const localId = (res.result as { localId: string }).localId;
+    const sync = await server.frame("projects.sync", (f) => f.projects.length === 1);
+    expect(sync.projects).toEqual([
+      { localId, name: "notes", gitRemote: null, defaultBranch: null, git: false },
+    ]);
+
+    server.send({
+      id: "n1",
+      kind: "session.start",
+      sessionId: "wn1",
+      payload: { projectLocalId: localId, permissionMode: "acceptEdits" },
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "n1")).toMatchObject({ ok: true });
+    expect(runtime.started[0]).toMatchObject({ sessionId: "wn1", cwd: realpathSync(plain) });
+
+    server.send({ id: "n2", kind: "diff.request", sessionId: "wn1", payload: { projectLocalId: localId } });
+    const diff = await server.frame("diff.result", (f) => f.requestId === "n2");
+    expect(diff).toMatchObject({
+      files: [],
+      patch: "",
+      truncated: false,
+      branch: null,
+      headSha: null,
+      git: false,
+    });
+    expect(await server.frame("ack", (f) => f.commandId === "n2")).toMatchObject({ ok: true });
+
+    server.send({
+      id: "n3",
+      kind: "session.start",
+      sessionId: "wn2",
+      payload: { projectLocalId: localId, permissionMode: "acceptEdits", worktree: true },
+    });
+    const refused = await server.frame("ack", (f) => f.commandId === "n3");
+    expect(refused).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("this project has no git repository; isolated worktrees need git"),
+    });
+    expect(runtime.started).toHaveLength(1);
+    expect(existsSync(join(plain, ".git"))).toBe(false);
+    expect(existsSync(join(plain, ".ocw-worktrees"))).toBe(false);
+    expect(JSON.stringify(server.last.frames)).not.toContain(home);
   });
 
   it("sends the runtimes' catalogs in a capabilities frame after connect (sanitised, opt-in off)", async () => {
