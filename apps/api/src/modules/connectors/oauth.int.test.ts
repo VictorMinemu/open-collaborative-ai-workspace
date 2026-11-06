@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import { type ConnectorOAuthUrls, connectorOAuthUrls } from "@ocw/contracts";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -8,6 +9,7 @@ import {
   type FakeMcpOAuthStats,
 } from "../../../../../infra/fake-model/fake-mcp-oauth.mjs";
 import { createEgress, type Egress } from "../../lib/egress";
+import { CC_SECRET, PRE_REGISTERED_CC } from "../../testing-connectors";
 import { clientMetadataDocument } from "./client-metadata";
 import { callTool, listTools, McpUpstreamError } from "./mcp-client";
 import {
@@ -17,8 +19,10 @@ import {
   checkCallbackIssuer,
   chooseClient,
   chooseScope,
+  clientCredentialsGrant,
   type DiscoveredAuth,
   discover,
+  discoverTokenEndpoint,
   exchangeCode,
   refreshTokens,
   revokeToken,
@@ -53,7 +57,10 @@ const cimdDocs = new Map<string, unknown>();
 
 beforeAll(async () => {
   fake = createFakeMcpOAuth({
-    preRegistered: [{ client_id: PRE_REGISTERED, redirect_uris: [REDIRECT] }],
+    preRegistered: [
+      { client_id: PRE_REGISTERED, redirect_uris: [REDIRECT] },
+      { client_id: PRE_REGISTERED_CC, client_secret: CC_SECRET, redirect_uris: [] },
+    ],
     cimdFetch: async (url) => {
       const doc = cimdDocs.get(url);
       if (!doc) throw new Error("no such client metadata document");
@@ -620,5 +627,144 @@ describe("MCP client against the fake: results and errors", () => {
       ),
     );
     expect(err.code).toBe("egress_refused");
+  });
+});
+
+describe("client credentials against the fake (07.14 D-03, D-17)", () => {
+  /** The grant's inputs from a discovery, with the fake's pre-registered client-credentials client. */
+  const grantInput = (
+    disc: Awaited<ReturnType<typeof discoverTokenEndpoint>>,
+    over: Partial<Parameters<typeof clientCredentialsGrant>[1]> = {},
+  ): Parameters<typeof clientCredentialsGrant>[1] => ({
+    tokenEndpoint: disc.tokenEndpoint ?? "",
+    issuer: disc.issuer,
+    resource: disc.resource,
+    sameOrigin: disc.sameOrigin,
+    mcpOrigin: disc.mcpOrigin,
+    clientId: PRE_REGISTERED_CC,
+    clientSecret: CC_SECRET,
+    scopes: [],
+    authMethods: disc.authMethods,
+    ...over,
+  });
+  const bearerOf = (accessToken: string) => ({
+    headerName: "Authorization",
+    headerValue: `Bearer ${accessToken}`,
+  });
+
+  it("finds the token endpoint through RFC 9728 → RFC 8414, grants with Basic and resource, and lists tools", async () => {
+    const disc = await discoverTokenEndpoint(egress, serverUrl);
+    expect(disc).toMatchObject({
+      resource: serverUrl,
+      issuer: `${base}/mcp-oauth`,
+      tokenEndpoint: `${base}/mcp-oauth/token`,
+      revocationEndpoint: `${base}/mcp-oauth/revoke`,
+      sameOrigin: `fake-mcp:${port}`,
+      mcpOrigin: base,
+    });
+    expect(disc.authMethods).toContain("client_secret_basic");
+
+    const before = Date.now();
+    const token = await clientCredentialsGrant(egress, grantInput(disc));
+    expect(token.accessToken).toMatch(/^fakeat_/);
+    expect(token.authMethod).toBe("client_secret_basic");
+    expect(token.expiresAt).toBeGreaterThan(before);
+
+    const tools = await listTools(egress, target(), bearerOf(token.accessToken));
+    expect(tools.map((t) => t.name)).toContain("whoami");
+
+    const s = await stats();
+    expect(s.tokenRequests.client_credentials).toBe(1);
+    expect(s.lastResource.cc).toBe(serverUrl);
+    expect(s.lastClientAuth).toBe("basic");
+  });
+
+  it("cc_post_only: picks client_secret_post from the metadata", async () => {
+    fake.setScenario({ cc_post_only: true });
+    const disc = await discoverTokenEndpoint(egress, serverUrl);
+    expect(disc.authMethods).toEqual(["client_secret_post"]);
+    const token = await clientCredentialsGrant(egress, grantInput(disc));
+    expect(token.authMethod).toBe("client_secret_post");
+    expect((await stats()).lastClientAuth).toBe("post");
+  });
+
+  it("no_authorization_endpoint: the lenient metadata read still finds the token endpoint and the issuer", async () => {
+    fake.setScenario({ no_authorization_endpoint: true });
+    await expect(discover(egress, serverUrl)).rejects.toBeInstanceOf(ConnectorOAuthError);
+    const disc = await discoverTokenEndpoint(egress, serverUrl);
+    expect(disc).toMatchObject({
+      issuer: `${base}/mcp-oauth`,
+      tokenEndpoint: `${base}/mcp-oauth/token`,
+      revocationEndpoint: `${base}/mcp-oauth/revoke`,
+    });
+    const token = await clientCredentialsGrant(egress, grantInput(disc));
+    expect(token.accessToken).toMatch(/^fakeat_/);
+  });
+
+  it("no metadata: answers nulls, and an admin-entered endpoint on the MCP URL's own origin works", async () => {
+    const bare = `${base}/no-prm/mcp`;
+    const disc = await discoverTokenEndpoint(egress, bare);
+    expect(disc).toEqual({
+      resource: resourceUrlFromServerUrl(bare).href,
+      issuer: null,
+      tokenEndpoint: null,
+      revocationEndpoint: null,
+      authMethods: [],
+      scopes: undefined,
+      sameOrigin: `fake-mcp:${port}`,
+      mcpOrigin: base,
+    });
+    // The fake's own MCP resource, with the token URL an admin typed in (no metadata to pin an issuer).
+    const token = await clientCredentialsGrant(
+      egress,
+      grantInput(disc, { tokenEndpoint: `${base}/mcp-oauth/token`, issuer: null, resource: serverUrl }),
+    );
+    expect(token.authMethod).toBe("client_secret_basic");
+    const tools = await listTools(egress, target(), bearerOf(token.accessToken));
+    expect(tools.length).toBeGreaterThan(0);
+  });
+
+  it("an admin token endpoint on another port or host over http is refused before any request", async () => {
+    const disc = await discoverTokenEndpoint(egress, serverUrl);
+    for (const tokenEndpoint of [
+      `http://fake-mcp:${port + 1}/mcp-oauth/token`,
+      `http://127.0.0.1:${port}/mcp-oauth/token`,
+      `http://user:pw@fake-mcp:${port}/mcp-oauth/token`,
+    ]) {
+      await expect(clientCredentialsGrant(egress, grantInput(disc, { tokenEndpoint }))).rejects.toMatchObject(
+        {
+          step: "token_endpoint_untrusted",
+        },
+      );
+    }
+    expect((await stats()).tokenRequests.client_credentials).toBe(0);
+  });
+
+  it("a wrong secret is terminal (invalid_client); an unknown scope is terminal scope_rejected", async () => {
+    const disc = await discoverTokenEndpoint(egress, serverUrl);
+    await expect(
+      clientCredentialsGrant(egress, grantInput(disc, { clientSecret: "wrong-secret" })),
+    ).rejects.toMatchObject({
+      code: "token_exchange_failed",
+      terminal: true,
+      oauthError: "invalid_client",
+      step: "token_exchange_failed",
+    });
+    await expect(
+      clientCredentialsGrant(egress, grantInput(disc, { scopes: ["unknown"] })),
+    ).rejects.toMatchObject({
+      code: "token_exchange_failed",
+      terminal: true,
+      oauthError: "invalid_scope",
+      step: "scope_rejected",
+    });
+  });
+
+  it("issuer_mismatch_meta: the metadata's issuer is not its URL", async () => {
+    fake.setScenario({ issuer_mismatch_meta: true });
+    await expect(discoverTokenEndpoint(egress, serverUrl)).rejects.toMatchObject({
+      code: "discovery_failed",
+      step: "issuer_mismatch",
+    });
   });
 });
