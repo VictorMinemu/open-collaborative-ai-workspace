@@ -5,6 +5,7 @@ import {
   McpServer,
   McpServerList,
   Ok,
+  rendersInCell,
   type UpdateMcpServerRequest,
 } from "@ocw/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -25,7 +26,7 @@ const PROBING = new Set(["pending", "probing"]);
  * Only the cell probes, and only organization-secret servers: a per-member connector stays `pending` until a member
  * connects (07.4-10), so it never keeps the list polling.
  */
-const awaitingCellProbe = (s: McpServer) => s.authMode === "org_secret" && PROBING.has(s.status);
+const awaitingCellProbe = (s: McpServer) => rendersInCell(s.authMode) && PROBING.has(s.status);
 
 function noRetryOn4xx(failureCount: number, err: unknown): boolean {
   if (isApiError(err) && err.status >= 400 && err.status < 500) return false;

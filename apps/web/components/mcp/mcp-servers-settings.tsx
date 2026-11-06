@@ -1,6 +1,6 @@
 "use client";
 
-import type { McpServer, McpServerList } from "@ocw/contracts";
+import { isPerMemberMode, type McpServer, type McpServerList, usesConnectorProxy } from "@ocw/contracts";
 import { KeyRound, Pencil, Plug, Plus, RefreshCw, ShieldCheck, Trash2, TriangleAlert } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
@@ -228,7 +228,10 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
   const [deleteCount, setDeleteCount] = useState<number | null>(null);
   const members = deleteCount ?? server.memberConnections;
   const cancelDeleteRef = useRef<HTMLButtonElement>(null);
-  const perMember = server.authMode !== "org_secret";
+  // D-16: member lists, counts and copy follow `isPerMemberMode`; who probes (the API or the cell) follows
+  // `usesConnectorProxy` (07.14-01).
+  const perMember = isPerMemberMode(server.authMode);
+  const proxied = usesConnectorProxy(server.authMode);
   const status = perMember && server.status === "pending" ? MEMBER_PENDING : STATUS[server.status];
   const transport = TRANSPORTS.find((t) => t.value === server.transport)?.label ?? server.transport;
   const modeBadge = MODE_BADGE[server.authMode];
@@ -246,7 +249,7 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
   async function reprobe() {
     try {
       // A per-member connector is probed with the admin's OWN connection (UI-SPEC R6), never by the cell.
-      if (perMember) await memberProbe.mutateAsync();
+      if (proxied) await memberProbe.mutateAsync();
       else await probe.mutateAsync();
     } catch (err) {
       if (perMember && isNotConnected(err)) {
@@ -350,7 +353,7 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
               </li>
             </ul>
           ) : null}
-          {!perMember && server.headers.length > 0 ? (
+          {!proxied && server.headers.length > 0 ? (
             <ul className="mt-2 flex flex-wrap gap-1.5" aria-label="Headers">
               {server.headers.map((h) => (
                 <li
@@ -371,10 +374,10 @@ function ServerCard({ server, onEdit }: { server: McpServer; onEdit: () => void 
             variant="ghost"
             size="sm"
             onClick={reprobe}
-            disabled={probing || status.busy || (!perMember && !server.orgEnabled)}
+            disabled={probing || status.busy || (!proxied && !server.orgEnabled)}
             data-testid="mcp-reprobe"
             className={cn("flex-1 sm:flex-none", TOUCH)}
-            title={perMember || server.orgEnabled ? undefined : "Turn it on for bots first"}
+            title={proxied || server.orgEnabled ? undefined : "Turn it on for bots first"}
           >
             <RefreshCw className={cn(probing && "animate-spin")} /> Re-probe
           </Button>

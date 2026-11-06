@@ -4,12 +4,14 @@ import {
   type ConnectorAuthMode,
   type CreateMcpServerRequest,
   isAllowedInjectionHeader,
+  isPerMemberMode,
   type McpHeaderInput,
   McpHeaderName,
   McpMemberHeaderPrefix,
   type McpServer,
   type McpServerList,
   type McpTransport,
+  rendersInCell,
   type UpdateMcpServerRequest,
 } from "@ocw/contracts";
 import {
@@ -269,7 +271,7 @@ function ServerForm({
     if (authMode === "per_member_oauth" && scopeList().some((s) => s.length > 200)) {
       next.scopes = "Each scope is at most 200 characters";
     }
-    if (authMode !== "org_secret") return next;
+    if (!rendersInCell(authMode)) return next;
     const headerErrors: Record<number, string> = {};
     const seen = new Set<string>();
     for (const h of headers) {
@@ -372,7 +374,7 @@ function ServerForm({
     if (Object.keys(body).length > 0) await update.mutateAsync(body);
     toast.success(`${name.trim()} saved`, {
       description:
-        authMode === "org_secret" && (body.url || body.headers || body.sandboxServer || body.authMode)
+        rendersInCell(authMode) && (body.url || body.headers || body.sandboxServer || body.authMode)
           ? "Its tools are being checked again."
           : undefined,
     });
@@ -391,7 +393,7 @@ function ServerForm({
       if (sandboxed && sandboxServer !== server.sandboxServer) body.sandboxServer = sandboxServer;
       const modeChanged = authMode !== server.authMode;
       if (modeChanged) body.authMode = authMode;
-      if (authMode === "org_secret") {
+      if (rendersInCell(authMode)) {
         const headersChanged =
           headers.length !== server.headers.length ||
           headers.some((h) => !h.stored || h.replace) ||
@@ -401,7 +403,7 @@ function ServerForm({
       Object.assign(body, updateConnectorFields(server, modeChanged));
       // Leaving a member mode deletes every member's sign-in or key: ask first, with the count the list already has
       // (R4). Nothing is sent until the admin confirms.
-      if (modeChanged && server.authMode !== "org_secret" && server.memberConnections > 0) {
+      if (modeChanged && isPerMemberMode(server.authMode) && server.memberConnections > 0) {
         setConfirm({ count: server.memberConnections, body });
         return;
       }
@@ -421,7 +423,7 @@ function ServerForm({
         transport,
         ...(sandboxed ? { sandboxServer } : { url: url.trim() }),
         // Values typed in a hidden block are discarded: only the chosen mode's fields are sent.
-        headers: authMode === "org_secret" ? headerInputs() : [],
+        headers: rendersInCell(authMode) ? headerInputs() : [],
         orgEnabled: true,
         personalAllowed: false,
         trustedChaining: false,
@@ -430,10 +432,9 @@ function ServerForm({
       };
       await create.mutateAsync(body);
       toast.success(`${body.name} added`, {
-        description:
-          authMode === "org_secret"
-            ? "Your bots' runtime is discovering its tools."
-            : "Its tools appear after the first member connects.",
+        description: rendersInCell(authMode)
+          ? "Your bots' runtime is discovering its tools."
+          : "Its tools appear after the first member connects.",
       });
       finish();
     } catch (err) {
@@ -563,7 +564,7 @@ function ServerForm({
           <legend className="mb-2 font-medium text-sm">Authentication</legend>
           <div className="grid gap-2 sm:grid-cols-3">
             {AUTH_MODES.map((m) => {
-              const stdioBlocked = m.value !== "org_secret" && sandboxed;
+              const stdioBlocked = !rendersInCell(m.value) && sandboxed;
               const httpsBlocked = m.value === "per_member_oauth" && oauthBlocked;
               const disabled = stdioBlocked || httpsBlocked;
               const selected = authMode === m.value;
@@ -865,7 +866,7 @@ function ServerForm({
           </div>
         ) : null}
 
-        {authMode === "org_secret" ? (
+        {rendersInCell(authMode) ? (
           <div className="grid gap-2">
             <div className="flex items-center justify-between gap-2">
               <span className="font-medium text-sm">Headers</span>
@@ -1094,7 +1095,7 @@ function ClearConnectionsDialog({
           </PlainDialogTitle>
           <PlainDialogDescription>
             Switching {serverName} to {mode} deletes every member's saved sign-in or key.{" "}
-            {toMode === "org_secret"
+            {!isPerMemberMode(toMode)
               ? "Bots stop acting with members' own accounts."
               : "They'll need to connect again."}
           </PlainDialogDescription>
