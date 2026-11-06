@@ -29,6 +29,7 @@ import {
   forceRefresh,
   McpUpstreamError,
   markNeedsReconnect,
+  stripControl,
   touchCredential,
 } from "../connectors";
 import type { PermissionService } from "../organization";
@@ -79,6 +80,8 @@ import {
  * (`credentialKeyOf`): an org-mode server never uses a member's credential and a member-mode server never the
  * organization's (no fallback either way). The turn's human is still the acting user (the tenant transaction, the
  * claim and the audit), audits say `credential: "organization"`, and the organization's token never reaches the cell.
+ * Without a usable organization credential the 409 names the server and an admin as the one who can fix it (PD-10), and
+ * no connect card is posted (no member can connect it).
  */
 
 const tags = ["agent-channel"];
@@ -124,6 +127,22 @@ type ToolRow = typeof mcpServerTools.$inferSelect;
 /** Who the audit says the call ran as: the server's stored mode decides, never a body field. */
 const credentialOf = (server: ServerRow) =>
   isOrgCredentialMode(server.authMode) ? "organization" : "member";
+
+/** A server's admin-set name for a sentence: control characters removed, whitespace collapsed, bounded. */
+const sentenceName = (server: ServerRow) =>
+  stripControl(server.name).replace(/\s+/gu, " ").trim().slice(0, 80) || "this server";
+
+/**
+ * Why there is no usable credential (07.14 PD-10). A member mode keeps 07.4's sentence (the connect card tells the
+ * member what to do); an org mode names the server and who can fix it, an admin, since no member can.
+ */
+function credentialMessage(reason: "not_connected" | "needs_reconnect", server: ServerRow): string {
+  if (!isOrgCredentialMode(server.authMode)) return MESSAGES[reason];
+  const name = sentenceName(server);
+  return reason === "not_connected"
+    ? `The organization hasn't connected ${name} yet. An admin can connect it in Settings › MCP servers.`
+    : `The organization's connection to ${name} needs to be reconnected by an admin.`;
+}
 
 /** A proxied connector of the tx's organization by its safe name, and its catalog tool by logical name. */
 async function connectorTool(
@@ -189,13 +208,27 @@ function missingScopes(challenge: string | undefined): string[] {
     .slice(0, 10);
 }
 
-/** What the model reads when the member's account lacks a permission (CONN-02): the scopes, never a token. */
-function insufficientScopeAnswer(err: McpUpstreamError): AgentChannelConnectorCallResponse {
+/**
+ * What the model reads when the account lacks a permission (CONN-02): the scopes, never a token. The member's account
+ * is reconnected by the member; the organization's (07.14 PD-10) by an admin.
+ */
+function insufficientScopeAnswer(
+  err: McpUpstreamError,
+  server: ServerRow,
+): AgentChannelConnectorCallResponse {
   const scopes = missingScopes(err.wwwAuthenticate);
+  const asks = scopes.length > 0 ? ` (it asks for: ${scopes.join(", ")})` : "";
+  if (isOrgCredentialMode(server.authMode)) {
+    return {
+      content: `The service refused this: the organization's account is missing a permission it needs${asks}. An admin can reconnect it in Settings › MCP servers.`,
+      truncated: false,
+      isError: true,
+    };
+  }
   return {
     content:
       "The service refused this: the account of the person who asked is missing a permission it needs" +
-      (scopes.length > 0 ? ` (it asks for: ${scopes.join(", ")})` : "") +
+      asks +
       ". They can reconnect in Settings › Connections and allow it, or ask an admin.",
     truncated: false,
     isError: true,
@@ -217,6 +250,8 @@ type CallDecided =
       card?: { turn: AgentTurnRow; server: ServerRow; reason: ConnectCardReason };
       /** 07.5-11: the 409's `details` (the approval waited on, or who denied it). */
       details?: Record<string, unknown>;
+      /** 07.14 PD-10: the 409's sentence when it is not the code's fixed one (an org mode's missing credential). */
+      message?: string;
     }
   | { go: { turn: AgentTurnRow; server: ServerRow; tool: ToolRow; callId: string } };
 
@@ -367,6 +402,10 @@ export function registerConnectorRoutes(
           if (status !== "connected") {
             const reason = status === "needs_reconnect" ? "needs_reconnect" : "not_connected";
             await refuse(reason, flags);
+            // 07.14 PD-10: no member can fix the organization's credential, so no connect card asks one to.
+            if (isOrgCredentialMode(server.authMode)) {
+              return { refused: reason, message: credentialMessage(reason, server) };
+            }
             return { refused: reason, card: { turn, server, reason } };
           }
 
@@ -419,7 +458,7 @@ export function registerConnectorRoutes(
         throw new HttpError(
           409,
           decided.refused,
-          MESSAGES[decided.refused],
+          ("message" in decided ? decided.message : undefined) ?? MESSAGES[decided.refused],
           "details" in decided ? decided.details : undefined,
         );
       }
@@ -475,7 +514,7 @@ export function registerConnectorRoutes(
       } catch (err) {
         // Codes only: an upstream error (which may carry response text) is never logged or returned.
         if (err instanceof McpUpstreamError && err.code === "insufficient_scope") {
-          answer = insufficientScopeAnswer(err);
+          answer = insufficientScopeAnswer(err, server);
           scopeRefused = true;
         } else {
           failure = failureOf(err);
@@ -499,13 +538,16 @@ export function registerConnectorRoutes(
         if (sent) await touchCredential(tx, key);
       });
       if (refusal) {
-        await postConnectCard(core, {
-          organizationId: cell.organizationId,
-          turn,
-          server,
-          reason: refusal,
-        });
-        throw new HttpError(409, refusal, MESSAGES[refusal]);
+        // A member reconnects their own account from the card; the organization's is an admin's to fix (07.14 PD-10).
+        if (!isOrgCredentialMode(server.authMode)) {
+          await postConnectCard(core, {
+            organizationId: cell.organizationId,
+            turn,
+            server,
+            reason: refusal,
+          });
+        }
+        throw new HttpError(409, refusal, credentialMessage(refusal, server));
       }
       if (failure || !answer) {
         const code = failure?.code ?? "upstream_error";

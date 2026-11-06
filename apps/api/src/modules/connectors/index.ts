@@ -25,7 +25,7 @@ export {
   touchConnection,
   touchCredential,
 } from "./credentials";
-export { callTool, listTools, type McpAuth, McpUpstreamError } from "./mcp-client";
+export { callTool, listTools, type McpAuth, McpUpstreamError, stripControl } from "./mcp-client";
 export { activeShare, readersOf } from "./shares";
 
 /**
