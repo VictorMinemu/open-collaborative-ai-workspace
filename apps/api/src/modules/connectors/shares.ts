@@ -1,8 +1,9 @@
-import type {
-  CreateMemberAccountShareRequest,
-  MemberAccountResourceKind,
-  MemberAccountShare,
-  ReadersPreview,
+import {
+  type CreateMemberAccountShareRequest,
+  isPerMemberMode,
+  type MemberAccountResourceKind,
+  type MemberAccountShare,
+  type ReadersPreview,
 } from "@ocw/contracts";
 import {
   agents,
@@ -180,7 +181,9 @@ async function ownResource(
       )
       .where(eq(mcpServers.id, resourceId))
       .limit(1);
-    return row && row.authMode !== "org_secret" ? { name: row.name } : null;
+    // 07.14 PD-09: only a member mode is a member's own account; an organization account is never theirs to share,
+    // even with a stray connection row.
+    return row && isPerMemberMode(row.authMode) ? { name: row.name } : null;
   }
   // Personal keys are their owner's alone (RLS restrictive policy too); unit keys are never "a member's account".
   const [item] = await tx
