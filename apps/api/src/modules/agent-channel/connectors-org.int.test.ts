@@ -228,7 +228,7 @@ describe("tracer: every member's bot uses the organization's account", () => {
     const snapshot = await cell("GET", "/cell");
     expect(snapshot.status).toBe(200);
     expect(((snapshot.body?.mcpServers ?? []) as Json[]).map((m) => m.id)).not.toContain(server.id);
-    const scout = (snapshot.body?.agents as Json[]).find((a) => a.id === scoutId);
+    const scout = ((snapshot.body?.agents ?? []) as Json[]).find((a) => a.id === scoutId);
     const tools = scout?.capabilities.tools as string[];
     expect(tools).toEqual(expect.arrayContaining(["ocw_connector_call", "ocw_connector_list"]));
     expect(tools.filter((t) => t.startsWith(`${safe}__`))).toEqual([]);
