@@ -51,6 +51,9 @@ export interface FakeMcpOAuthScenario {
   fail_token_5xx?: boolean;
   /** The code exchange returns no `id_token`. */
   no_id_token?: boolean;
+  /** The `email` claim of the id_token the code exchange returns (default `<subject>@fake-mcp.test`): the account
+   * label's encoding cases (07.14 COA-04). */
+  id_token_email?: string;
   /** AS metadata advertises neither dynamic registration nor client ID metadata documents (a client must be
    * pre-registered). */
   no_registration?: boolean;

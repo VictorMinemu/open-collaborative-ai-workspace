@@ -293,7 +293,10 @@ export function createFakeMcpOAuth(opts = {}) {
       iss: fam.issuer,
       sub: fam.subject,
       aud: fam.clientId,
-      email: `${fam.subject}@fake-mcp.test`,
+      email:
+        typeof scenario.id_token_email === "string"
+          ? scenario.id_token_email
+          : `${fam.subject}@fake-mcp.test`,
       email_verified: true,
       iat: now,
       exp: now + 3600,
