@@ -414,3 +414,38 @@ describe("inbox row, card link and the re-run's grant (06 hooks)", () => {
     });
   }
 });
+
+describe("whose account an MCP tool runs with, by the server's mode (07.14 D-04, PD-09)", () => {
+  // Member modes are the requester's own account; organization modes, like organization headers, are the
+  // organization's: their card never promises "your account".
+  const CASES = [
+    { mode: "org_oauth", kind: "mcp", account: "org", source: "Notes · MCP server" },
+    { mode: "org_client_credentials", kind: "mcp", account: "org", source: "Notes · MCP server" },
+    { mode: "org_secret", kind: "mcp", account: "org", source: "Notes · MCP server" },
+    { mode: "per_member_oauth", kind: "connector", account: "requester", source: "Notes · your account" },
+    { mode: "per_member_secret", kind: "connector", account: "requester", source: "Notes · your account" },
+  ] as const;
+
+  for (const c of CASES) {
+    it(`${c.mode}: a ${c.kind} tool on the ${c.account === "org" ? "organization's" : "requester's"} account, and the card says so`, async () => {
+      await setRule(f, { mode: "always", approverKind: "requester" });
+      await f.su.query("update app.mcp_servers set auth_mode = $2 where id = $1", [f.notesId, c.mode]);
+      try {
+        const { id, cardMessageId } = await requestFor({ text: "hello" });
+        const detail = ApprovalDetail.parse(await ok(get(f.sam, id)));
+        if (detail.view.type !== "tool_call") throw new Error("not a tool_call view");
+        expect(detail.view.source).toEqual({
+          kind: c.kind,
+          name: "Notes",
+          account: c.account,
+          keyName: null,
+        });
+        const card = await cardOf(f.sam, cardMessageId);
+        expect(card.fields.find((x) => x.label === "Source")?.value).toBe(c.source);
+        if (c.account === "org") expect(JSON.stringify(card)).not.toContain("your account");
+      } finally {
+        await f.su.query("update app.mcp_servers set auth_mode = 'org_secret' where id = $1", [f.notesId]);
+      }
+    });
+  }
+});
