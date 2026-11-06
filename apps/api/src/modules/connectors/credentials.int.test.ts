@@ -889,7 +889,8 @@ describe("organization custody (07.14)", () => {
 
     await reconnect();
     expect(await inA((tx) => credentialStatusFor(tx, key(s.victorId, oauth.id)))).toBe("connected");
-    expect(await inA((tx) => credentialStatusFor(tx, key(s.victorId, keyServer.id)))).toBe("not_connected");
+    const unused = await registerConnector(s);
+    expect(await inA((tx) => credentialStatusFor(tx, key(s.victorId, unused.id)))).toBe("not_connected");
     await inA((tx) => touchCredential(tx, key(s.victorId, oauth.id)));
     expect((await connectionRow(s, s.victorId, oauth.id))?.last_used_at).not.toBeNull();
     // A member key never reads the organization row, and the organization key never reads a member's.

@@ -19,6 +19,7 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { z } from "zod";
 import type { Core } from "../../core";
 import { egressFor } from "../../lib/egress";
+import { reconnectReasonOfCode } from "../mcp";
 import { ConnectorOAuthError, discover, refreshTokens, revokeToken, type TokenBundle } from "./oauth";
 
 /**
@@ -475,21 +476,12 @@ export async function storeOrgConnection(
 
 // ---------------------------------------------------------------- reconnect state
 
-/** UI-SPEC R2: why a connection needs reconnecting, from its stored terminal code. */
+/**
+ * UI-SPEC R2: why a connection needs reconnecting, from its stored terminal code. One table for both principals: the
+ * registry's (`reconnectReasonOfCode`, 07.14-05), which the organization DTO uses too.
+ */
 export function reconnectReasonOf(lastError: string | null): ConnectorReconnectReason {
-  switch (lastError) {
-    case "invalid_grant":
-    case "refresh_token_reused":
-    case "access_denied":
-    case "invalid_client":
-    case "unauthorized_client":
-    case "upstream_unauthorized":
-      return "revoked";
-    case "issuer_changed":
-      return "provider_changed";
-    default:
-      return "expired";
-  }
+  return reconnectReasonOfCode(lastError);
 }
 
 /**
@@ -777,6 +769,28 @@ export async function connectionStatusFor(
   return out;
 }
 
+/**
+ * The status of the credential a key names (no row = `not_connected`): the member's own row for a member key
+ * (`connectionStatusFor`), the server's organization row for an organization key, only while the server is an
+ * organization-account one of the tx's organization (RLS).
+ */
+export async function credentialStatusFor(tx: Tx, key: CredentialKey): Promise<ConnectionStatus> {
+  if (!isOrgKey(key)) {
+    return (await connectionStatusFor(tx, key.userId, [key.serverId])).get(key.serverId) ?? "not_connected";
+  }
+  if (!(await orgAccountServer(tx, key.serverId))) return "not_connected";
+  return (await orgConnection(tx, key.serverId))?.status ?? "not_connected";
+}
+
+/** Stamps `last_used_at` on the credential a key names (the connector proxy, after a call). */
+export async function touchCredential(tx: Tx, key: CredentialKey): Promise<void> {
+  if (!isOrgKey(key)) return touchConnection(tx, key);
+  await tx
+    .update(connectorOrgConnections)
+    .set({ lastUsedAt: new Date().toISOString() })
+    .where(eq(connectorOrgConnections.serverId, key.serverId));
+}
+
 /** Stamps `last_used_at` on the member's connection (the connector proxy, after a call). */
 export async function touchConnection(tx: Tx, p: { userId: string; serverId: string }): Promise<void> {
   await tx
@@ -836,6 +850,50 @@ export async function disconnect(core: Core, p: ConnectionKey): Promise<{ revoke
         revoked,
         ...(shares.length > 0 ? { sharesRevoked: shares.length } : {}),
       },
+    });
+    return { revoked };
+  });
+}
+
+/**
+ * The admin's Disconnect of the organization's account (07.14 D-08), mirroring `disconnect`: the bundle and the
+ * confidential client's secret are read in one tenant transaction, the grant is revoked at the authorization server
+ * outside any transaction (RFC 7009, best effort: the refresh token, else the access token), then the row and its
+ * sealed secret are deleted and the disconnect is audited (`reason: admin`, `revoked`) in a second one.
+ * Null when the server has no organization connection (nothing is sent then).
+ */
+export async function disconnectOrg(
+  core: Core,
+  p: { organizationId: string; serverId: string; actingUserId: string },
+): Promise<{ revoked: boolean } | null> {
+  const key: OrgConnectionKey = { ...p, principal: "organization" };
+  const store = storeOf(key);
+  const found = await core.db.withTenant(store.tenant, async (tx) => {
+    if (!(await store.server(tx))) return null;
+    const row = await orgConnection(tx, p.serverId);
+    if (!row) return null;
+    const bundle = await openBundle(tx, core, store, row);
+    const clientSecret =
+      bundle?.kind === "oauth"
+        ? await clientSecretFor(tx, core, p.serverId, bundle.issuer, bundle.clientId)
+        : undefined;
+    return { bundle, clientSecret };
+  });
+  if (!found) return null;
+  const revoked =
+    found.bundle?.kind === "oauth"
+      ? await revokeToken(egressFor(core.env), tokenBundleOf(found.bundle), found.clientSecret)
+      : false;
+  return core.db.withTenant(store.tenant, async (tx) => {
+    const row = await orgConnection(tx, p.serverId, true);
+    if (!row) return null;
+    await tx.delete(connectorOrgConnections).where(eq(connectorOrgConnections.id, row.id));
+    if (row.secretId) await core.secrets.remove(tx, row.secretId);
+    await core.audit.record(tx, {
+      action: "connector.org_disconnected",
+      resourceType: "connector_org_connection",
+      resourceId: row.id,
+      metadata: { serverId: p.serverId, method: row.method, revoked, reason: "admin" },
     });
     return { revoked };
   });

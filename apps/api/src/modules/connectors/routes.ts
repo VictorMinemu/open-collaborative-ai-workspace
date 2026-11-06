@@ -13,6 +13,7 @@ import {
   MemberConnector as MemberConnectorSchema,
   PER_MEMBER_MODES,
   ReadersPreview,
+  usesConnectorProxy,
 } from "@ocw/contracts";
 import { connectorConnections, mcpServers, mcpServerTools, type Tx } from "@ocw/db";
 import { asc, eq, inArray } from "drizzle-orm";
@@ -29,6 +30,7 @@ import {
   accessTokenFor,
   ConnectorTokenUnavailableError,
   clientSecretFor,
+  credentialKeyOf,
   disconnect,
   oauthBundleOf,
   perMemberServer,
@@ -398,7 +400,8 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
     },
   );
 
-  // Settings › MCP servers "Re-probe" for a per-member connector (UI-SPEC R6): with the admin's OWN connection only.
+  // Settings › MCP servers "Re-probe" of a proxied connector (UI-SPEC R6; 07.14 D-05): a member-mode connector with the
+  // admin's OWN connection only, an organization-account one with the organization's credential.
   app.post(
     "/connectors/:id/probe",
     {
@@ -408,8 +411,12 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
     },
     async (req) => {
       const auth = authOf(req);
-      await core.db.withTenant(tenant(req), (tx) => serverIn(tx, req.params.id));
-      const key = { organizationId: auth.organizationId, userId: auth.userId, serverId: req.params.id };
+      const server = await core.db.withTenant(tenant(req), async (tx) => {
+        const [row] = await tx.select().from(mcpServers).where(eq(mcpServers.id, req.params.id)).limit(1);
+        if (!row || !usesConnectorProxy(row.authMode)) throw missing();
+        return row;
+      });
+      const key = credentialKeyOf(server, auth);
       const token = await accessTokenFor(core, key).catch((err) => {
         if (err instanceof ConnectorTokenUnavailableError) {
           throw new HttpError(
@@ -421,7 +428,11 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
         throw err;
       });
       if (!token.ok) throw connectError(token.reason);
-      await probeConnector(core, key, token);
+      await probeConnector(
+        core,
+        { organizationId: auth.organizationId, userId: auth.userId, serverId: server.id },
+        token,
+      );
       return core.db.withTenant(tenant(req), (tx) => getMcpServer(tx, req.params.id, mcpReadOptions(core)));
     },
   );

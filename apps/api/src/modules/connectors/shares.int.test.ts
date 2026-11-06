@@ -324,6 +324,9 @@ describe("organization B (WINDOWS #169)", () => {
       "POST /api/v1/connectors/:p/probe": async () => {
         await fails(s.eve.request("POST", `/api/v1/connectors/${crm.id}/probe`), 404);
       },
+      "DELETE /api/v1/connectors/:p/org-connection": async () => {
+        await fails(s.eve.request("DELETE", `/api/v1/connectors/${orgDrive.id}/org-connection`), 404);
+      },
       "POST /api/v1/connectors/:p/org-connection/connect": async () => {
         await fails(s.eve.request("POST", `/api/v1/connectors/${orgDrive.id}/org-connection/connect`), 404);
       },

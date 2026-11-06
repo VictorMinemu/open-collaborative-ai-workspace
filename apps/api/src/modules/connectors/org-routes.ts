@@ -1,12 +1,18 @@
 import { ConnectorAuthFailure, ConnectStartResponse, IdParams, type OrgSignInError } from "@ocw/contracts";
 import type { mcpServers, Tx } from "@ocw/db";
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { type App, type AuthContext, type Core, tenant } from "../../core";
+import { type App, type AuthContext, authOf, type Core, tenant } from "../../core";
 import { egressFor } from "../../lib/egress";
 import { conflict, notFound } from "../../lib/errors";
 import { setAuthFailure, setOAuthStatus } from "../mcp";
 import { orgResource, type PermissionService } from "../organization";
-import { clientSecretFor, oauthBundleOf, orgAccountServer, storeOrgConnection } from "./credentials";
+import {
+  clientSecretFor,
+  disconnectOrg,
+  oauthBundleOf,
+  orgAccountServer,
+  storeOrgConnection,
+} from "./credentials";
 import { authFailureOf } from "./diagnosis";
 import { type FlowRecord, flowAuth, settingsUrl, startOAuthFlow } from "./flow";
 import { exchangeCode, revokeToken, type TokenBundle } from "./oauth";
@@ -31,9 +37,10 @@ async function orgServerIn(tx: Tx, id: string, mode?: ServerRow["authMode"]): Pr
 }
 
 /**
- * Organization connection routes (Phase 07.14, D-02, D-05, D-06; COA-01, COA-03), all `mcp.manage`: an admin connects
- * the organization's shared account once through the one OAuth callback (`completeOrgSignIn`), and every member's bots
- * use it wherever organization tools are allowed. No response or redirect carries a token, refresh token, code,
+ * Organization connection routes (Phase 07.14, D-02, D-05, D-06, D-08; COA-01, COA-03), all `mcp.manage`: an admin
+ * connects the organization's shared account once through the one OAuth callback (`completeOrgSignIn`), and every
+ * member's bots use it wherever organization tools are allowed; Disconnect revokes it at the provider. Another
+ * organization's server id is a 404 (tenant RLS). No response or redirect carries a token, refresh token, code,
  * verifier or client secret: redirects carry a connector id or an `OrgSignInError`.
  */
 export function registerOrgConnectionRoutes(app: App, core: Core, perms: PermissionService): void {
@@ -54,6 +61,23 @@ export function registerOrgConnectionRoutes(app: App, core: Core, perms: Permiss
         orgServerIn(tx, req.params.id, "org_oauth"),
       );
       return startOAuthFlow(core, req, { server, principal: "organization" });
+    },
+  );
+
+  // Disconnect (D-08): revoke at the provider first, then forget the account. 404 `not_connected` when there is none.
+  app.delete(
+    "/connectors/:id/org-connection",
+    { ...admin, logLevel: "info", schema: { tags, params: IdParams } },
+    async (req, reply) => {
+      const auth = authOf(req);
+      await core.db.withTenant(tenant(req), (tx) => orgServerIn(tx, req.params.id));
+      const done = await disconnectOrg(core, {
+        organizationId: auth.organizationId,
+        serverId: req.params.id,
+        actingUserId: auth.userId,
+      });
+      if (!done) throw notFound("The organization isn't connected to this connector", "not_connected");
+      return reply.code(204).send();
     },
   );
 }
