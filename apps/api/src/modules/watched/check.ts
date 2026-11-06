@@ -1,5 +1,8 @@
 import {
+  isOrgCredentialMode,
+  isPerMemberMode,
   projectFields,
+  rendersInCell,
   type WatchedCheckSource,
   type WatchedField,
   type WatchedStatus,
@@ -16,11 +19,12 @@ import {
   activeShare,
   ConnectorTokenUnavailableError,
   callTool,
+  credentialKeyOf,
   forceRefresh,
   type McpAuth,
   McpUpstreamError,
   markNeedsReconnect,
-  touchConnection,
+  touchCredential,
 } from "../connectors";
 import { orgSecretHeaders } from "../mcp";
 import type { PermissionService } from "../organization";
@@ -33,8 +37,9 @@ export const TOOL_NOT_ALLOWED = "tool_not_allowed";
 
 /**
  * Watched-record checks (AUTO-04, D-04, D-07, P-13; Pattern 8, Pitfall 9). A check reads the record through the 07.4
- * connector (the workspace's org-secret headers, or the linker's own member credential under the share rule), projects
- * the watched fields, hashes them (`canonicalHash`, RFC 8785) and compares with the snapshot:
+ * connector (the workspace's org-secret headers, the organization's own account for the 07.14 organization modes, or
+ * the linker's own member credential under the share rule), projects the watched fields, hashes them (`canonicalHash`,
+ * RFC 8785) and compares with the snapshot:
  *
  * - no snapshot yet → the baseline, silently;
  * - same hash → nothing; equal to `last_written_hash` → the bot's own write (07.6-14), silently, once (the marker is
@@ -110,6 +115,11 @@ export type CallOutcome =
  * compare-and-set): an org-secret server with the workspace's headers; a per-member one with that member's own
  * credential (one forced refresh on a 401, then `needs_reconnect`). Only 07.4's `callTool` through the egress guard
  * (T-07.6-07-03). The tool and share rules are the caller's (checked before).
+ *
+ * 07.14 (D-04, D-07, D-08): an organization-account server (`org_oauth`, `org_client_credentials`) is called with the
+ * organization's token only (`credentialKeyOf` by the stored mode), never with `userId`'s own account, and only while
+ * it is switched on. Its credential is an admin's to fix, so a refused one (not connected, `needs_reconnect`, or a
+ * second 401 after the one forced refresh) fails `connector_unavailable`: an error, never a member's reconnect.
  */
 export async function callWith(
   core: Core,
@@ -128,7 +138,7 @@ export async function callWith(
   const run = (auth: McpAuth, redact: readonly string[]) =>
     callTool(egress, target, auth, call, { timeoutMs: p.timeoutMs ?? READ_TIMEOUT_MS, redact });
 
-  if (p.server.authMode === "org_secret") {
+  if (rendersInCell(p.server.authMode)) {
     const headers = await core.db.withTenant({ organizationId: p.organizationId, userId: p.userId }, (tx) =>
       orgSecretHeaders(core, tx, p.server.id),
     );
@@ -140,13 +150,18 @@ export async function callWith(
     }
   }
 
-  const key = { organizationId: p.organizationId, userId: p.userId, serverId: p.server.id };
+  const org = isOrgCredentialMode(p.server.authMode);
+  if (org && !p.server.orgEnabled) return fail("error", "connector_unavailable");
+  // The organization's key for the organization modes, `userId`'s own for the member modes; never the other one.
+  const key = credentialKeyOf(p.server, { organizationId: p.organizationId, userId: p.userId });
+  const refusedCredential = (reason: string): ReadFailure =>
+    org ? fail("error", "connector_unavailable") : fail("not_connected", reason);
   const unauthorized = (err: unknown) => err instanceof McpUpstreamError && err.code === "unauthorized";
   const withToken = (t: Extract<AccessToken, { ok: true }>) =>
     run({ headerName: t.headerName, headerValue: t.headerValue }, t.secretParts);
   try {
     const token = await accessTokenFor(core, key);
-    if (!token.ok) return fail("not_connected", token.reason);
+    if (!token.ok) return refusedCredential(token.reason);
     let result: Awaited<ReturnType<typeof run>>;
     try {
       result = await withToken(token);
@@ -154,17 +169,17 @@ export async function callWith(
       if (!unauthorized(err)) throw err;
       // A 401 on a token that still looked valid: exactly one forced refresh and one retry (07.4 D-01).
       const fresh = await forceRefresh(core, key);
-      if (!fresh.ok) return fail("not_connected", "needs_reconnect");
+      if (!fresh.ok) return refusedCredential("needs_reconnect");
       try {
         result = await withToken(fresh);
       } catch (retryErr) {
         if (!unauthorized(retryErr)) throw retryErr;
         await markNeedsReconnect(core, { ...key, code: "upstream_unauthorized" });
-        return fail("not_connected", "needs_reconnect");
+        return refusedCredential("needs_reconnect");
       }
     }
     await core.db.withTenant({ organizationId: p.organizationId, userId: p.userId }, (tx) =>
-      touchConnection(tx, { userId: p.userId, serverId: p.server.id }),
+      touchCredential(tx, key),
     );
     return { ok: true, result };
   } catch (err) {
@@ -209,7 +224,8 @@ export async function readRecord(
     refuseTools(tx, { serverId: server.id, agentId: w.agentId, readTool: w.readTool }),
   );
   if (refused) return fail("error", TOOL_NOT_ALLOWED);
-  if (server.authMode !== "org_secret") {
+  // Only a member's own account needs the linker's share; workspace connectors read with one shared credential.
+  if (isPerMemberMode(server.authMode)) {
     const shared = await core.db.withTenant(
       { organizationId: w.organizationId, userId: w.checkAsUserId },
       (tx) =>
@@ -334,8 +350,14 @@ export async function checkWatchedRecord(
             metadata: { ...auditMeta, status, code },
           });
         }
-        // Only the linker can fix their own connection; a revoked share is their own choice (nothing to tell).
-        if (transition && status === "not_connected" && code !== "share_revoked") {
+        // Only the linker can fix their own connection; a revoked share is their own choice (nothing to tell). The
+        // organization's account is an admin's to fix (07.14 D-08): no member is ever asked to reconnect it.
+        if (
+          transition &&
+          status === "not_connected" &&
+          code !== "share_revoked" &&
+          isPerMemberMode(server.authMode)
+        ) {
           await tellLinker(core, deps, tx, w, server);
         }
         await emitUpdated(core, tx, w);

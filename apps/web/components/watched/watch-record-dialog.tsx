@@ -1,13 +1,14 @@
 "use client";
 
-import type {
-  PreviewWatchedRecordResponse,
-  UpdateWatchedRecordRequest,
-  WatchedCheckInterval,
-  WatchedField,
-  WatchedRecord,
-  WatchOptionConnector,
-  WatchOptions,
+import {
+  isWorkspaceAccess,
+  type PreviewWatchedRecordResponse,
+  type UpdateWatchedRecordRequest,
+  type WatchedCheckInterval,
+  type WatchedField,
+  type WatchedRecord,
+  type WatchOptionConnector,
+  type WatchOptions,
 } from "@ocw/contracts";
 import { ArrowUpRight, ChevronDown, ChevronRight, Info, Trash2, TriangleAlert } from "lucide-react";
 import Link from "next/link";
@@ -103,7 +104,7 @@ export function writeTools(c: WatchOptionConnector | undefined, agentId: string)
 /** The connector selected by default: the first one the viewer can use now. */
 export function defaultConnector(options: WatchOptions | undefined): WatchOptionConnector | undefined {
   const list = options?.connectors ?? [];
-  return list.find((c) => c.authMode === "org_secret" || c.connection === "connected") ?? list[0];
+  return list.find((c) => isWorkspaceAccess(c.authMode) || c.connection === "connected") ?? list[0];
 }
 
 type Errors = Partial<Record<"recordId" | "fields" | "bot" | "form", string>>;
@@ -189,10 +190,10 @@ function WatchForm({
   const effectiveIdArg = idArg || tool?.idArg || "id";
   const name = connector?.name ?? watch?.connector.name ?? "the connector";
   const usable = connector
-    ? connector.authMode === "org_secret" || connector.connection === "connected"
+    ? isWorkspaceAccess(connector.authMode) || connector.connection === "connected"
     : edit;
   const needsShare =
-    !!connector && connector.authMode === "per_member" && usable && (!connector.shared || shareRefused);
+    !!connector && !isWorkspaceAccess(connector.authMode) && usable && (!connector.shared || shareRefused);
   const bots = opts?.bots ?? [];
   const botFor = (a: string) => tool?.agentIds.includes(a) ?? true;
   const agent = bots.find((b) => b.id === agentId) ?? (edit ? undefined : bots.find((b) => botFor(b.id)));
@@ -404,7 +405,7 @@ function WatchForm({
                       <SelectItem
                         key={c.id}
                         value={c.id}
-                        disabled={c.authMode === "per_member" && c.connection !== "connected"}
+                        disabled={!isWorkspaceAccess(c.authMode) && c.connection !== "connected"}
                         data-testid="watch-connector-option"
                         className="max-md:min-h-11"
                       >
@@ -417,7 +418,7 @@ function WatchForm({
             </FormField>
             {!edit ? <ConnectRows options={opts} /> : null}
 
-            {connector && !edit && connector.authMode === "org_secret" ? (
+            {connector && !edit && isWorkspaceAccess(connector.authMode) ? (
               <Notice tone="neutral">
                 Read with the workspace's {connector.name} access. Everyone in #{channel} sees the values.
               </Notice>
@@ -677,7 +678,7 @@ function WatchForm({
 /** Per-member connectors the viewer has not connected: one "Connect in Settings" row each (UI-SPEC 7a). */
 function ConnectRows({ options }: { options: WatchOptions | undefined }) {
   const off = (options?.connectors ?? []).filter(
-    (c) => c.authMode === "per_member" && c.connection !== "connected",
+    (c) => !isWorkspaceAccess(c.authMode) && c.connection !== "connected",
   );
   if (off.length === 0) return null;
   return (

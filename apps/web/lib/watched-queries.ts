@@ -3,6 +3,7 @@
 import {
   type CreateWatchedRecordRequest,
   EventTypes,
+  isWorkspaceAccess,
   MyPermissions,
   type PreviewWatchedRecordRequest,
   PreviewWatchedRecordResponse,
@@ -285,7 +286,8 @@ export const CHECK_INTERVALS = [
 
 /** The Connector option: `{name} · workspace access` / `· your account` / `· your account · connect it first`. */
 export function connectorLabel(c: Pick<WatchOptionConnector, "name" | "authMode" | "connection">): string {
-  if (c.authMode === "org_secret") return `${c.name} · workspace access`;
+  // Organization headers and the organization's own account alike (07.14 D-04): one shared credential.
+  if (isWorkspaceAccess(c.authMode)) return `${c.name} · workspace access`;
   return c.connection === "connected"
     ? `${c.name} · your account`
     : `${c.name} · your account · connect it first`;
