@@ -229,8 +229,14 @@ function toDto(row: ServerRow, extras: DtoExtras, opts: McpReadOptions): McpServ
   };
 }
 
-async function findServer(tx: Tx, id: string): Promise<ServerRow> {
-  const [row] = await tx.select().from(mcpServers).where(eq(mcpServers.id, id));
+/**
+ * The server of the tx's organization (RLS), or 404. `lock` takes the row (`for update`): an edit or a delete holds it
+ * while it reads the connections it may destroy, so an organization connect holding the same row (07.14-07) has either
+ * committed and is seen, or waits until this transaction ends (07.14-09).
+ */
+async function findServer(tx: Tx, id: string, lock = false): Promise<ServerRow> {
+  const q = tx.select().from(mcpServers).where(eq(mcpServers.id, id));
+  const [row] = lock ? await q.for("update") : await q;
   if (!row) throw notFound("MCP server not found", "mcp_server_not_found");
   return row;
 }
@@ -891,7 +897,7 @@ export async function updateMcpServer(
   id: string,
   input: UpdateMcpServerRequest,
 ): Promise<McpServer> {
-  const row = await findServer(tx, id);
+  const row = await findServer(tx, id, true);
   const from = row.authMode;
   const to = input.authMode ?? from;
   const modeChanged = to !== from;
@@ -1099,7 +1105,7 @@ export async function deleteMcpServer(
   id: string,
   opts: { clearConnections?: boolean } = {},
 ): Promise<void> {
-  const row = await findServer(tx, id);
+  const row = await findServer(tx, id, true);
   const connections = (await connectionCounts(tx, id)).get(id) ?? 0;
   if (connections > 0 && opts.clearConnections !== true) throw connectionsExist(connections, "delete it");
   const orgMethod = await orgConnectionMethodOf(tx, id);

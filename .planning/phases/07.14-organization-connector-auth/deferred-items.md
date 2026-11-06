@@ -11,6 +11,9 @@
   is never used there (`orgAccountServer` requires an org mode, and the DTO shows `orgConnection` only for org modes),
   but it would reappear if the server were switched back. Fix (out of 07's files): `findServer(tx, id)` with
   `for update` in `updateMcpServer` and `deleteMcpServer`, so the check and the switch see the same state.
+  **Resolved in 07.14-09:** `findServer(tx, id, true)` in both; `mcp.int.test.ts` › "a mode switch or delete racing
+  the organization's connect" holds the row like the connect transaction, commits a connection while the PATCH or
+  DELETE waits, and both now answer 409 `org_connection_exists` with the connection left in place.
 
 ## From 07.14-08
 
