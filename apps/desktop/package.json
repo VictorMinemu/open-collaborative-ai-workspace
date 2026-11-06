@@ -32,5 +32,6 @@
     "typescript": "7.0.2",
     "vitest": "5.0.2",
     "zod": "4.6.5"
-  }
+  },
+  "homepage": "https://github.com/VictorMinemu/open-collaborative-ai-workspace"
 }
