@@ -20,7 +20,15 @@ import { z } from "zod";
 import type { Core } from "../../core";
 import { egressFor } from "../../lib/egress";
 import { reconnectReasonOfCode } from "../mcp";
-import { ConnectorOAuthError, discover, refreshTokens, revokeToken, type TokenBundle } from "./oauth";
+import {
+  type ClientCredentialsToken,
+  ConnectorOAuthError,
+  discover,
+  refreshTokens,
+  revokeToken,
+  type TokenBundle,
+  type TokenEndpointDiscovery,
+} from "./oauth";
 
 /**
  * Custody of connector credentials, for two principals (Phase 07.4 D-01, CONN-01/02; Phase 07.14 D-06, D-07, PD-04).
@@ -89,9 +97,60 @@ const OAuthBundle = z.object({
   refreshedAt: z.number().optional(),
 });
 const SecretBundle = z.object({ kind: z.literal("secret"), value: z.string().min(1) });
-export const StoredBundle = z.discriminatedUnion("kind", [OAuthBundle, SecretBundle]);
+/**
+ * The organization's client credentials (07.14 D-03, PD-07): the client and where its secret may go (the token endpoint
+ * of the issuer pinned at save time; null = an admin-entered Token URL without metadata), with the current token. There
+ * is no refresh token: a renewal is a new grant with the same secret.
+ */
+const ClientCredentialsBundle = z.object({
+  kind: z.literal("client_credentials"),
+  clientId: z.string().min(1),
+  clientSecret: z.string().min(1),
+  tokenEndpoint: z.string(),
+  issuer: z.string().nullable(),
+  resource: z.string(),
+  revocationEndpoint: z.string().nullable(),
+  authMethod: z.enum(["client_secret_basic", "client_secret_post"]),
+  /** The scopes asked for (empty = none sent); the row keeps the granted ones. */
+  scopes: z.array(z.string()),
+  accessToken: z.string().min(1).optional(),
+  expiresAt: z.number().optional(),
+  /** Epoch ms of the last grant (a forced re-grant within the lock window reuses it). */
+  refreshedAt: z.number().optional(),
+});
+export const StoredBundle = z.discriminatedUnion("kind", [
+  OAuthBundle,
+  SecretBundle,
+  ClientCredentialsBundle,
+]);
 export type StoredBundle = z.infer<typeof StoredBundle>;
 type OAuthBundle = z.infer<typeof OAuthBundle>;
+export type ClientCredentialsBundle = z.infer<typeof ClientCredentialsBundle>;
+
+/**
+ * The sealed client-credentials bundle of a save (pure): where the secret goes (the discovered endpoint, else the
+ * admin's), the pinned issuer, the resource, the auth method the grant used, the scopes asked for and the token.
+ */
+export function ccBundleFrom(
+  discovery: Pick<TokenEndpointDiscovery, "issuer" | "resource" | "revocationEndpoint">,
+  input: { clientId: string; clientSecret: string; tokenEndpoint: string; scopes: string[] },
+  token: ClientCredentialsToken,
+): ClientCredentialsBundle {
+  return {
+    kind: "client_credentials",
+    clientId: input.clientId,
+    clientSecret: input.clientSecret,
+    tokenEndpoint: input.tokenEndpoint,
+    issuer: discovery.issuer,
+    resource: discovery.resource,
+    revocationEndpoint: discovery.revocationEndpoint,
+    authMethod: token.authMethod,
+    scopes: [...input.scopes],
+    accessToken: token.accessToken,
+    expiresAt: token.expiresAt,
+    refreshedAt: Date.now(),
+  };
+}
 
 export const oauthBundleOf = (b: TokenBundle): OAuthBundle => ({
   kind: "oauth",
@@ -194,6 +253,32 @@ export async function orgAccountServer(tx: Tx, serverId: string, lock = false): 
   return row && isOrgCredentialMode(row.authMode) ? row : null;
 }
 
+/**
+ * The organization's stored client credentials of a server, opened in the caller's tenant transaction (RLS: another
+ * organization's server is never read), or null. For the save route (keep the secret when it is omitted) and the Test
+ * sign-in (use the stored values when the form omits them). Never logged or returned to a client.
+ */
+export async function orgClientCredentialsOf(
+  tx: Tx,
+  core: Core,
+  serverId: string,
+): Promise<ClientCredentialsBundle | null> {
+  if (!(await orgAccountServer(tx, serverId))) return null;
+  const row = await orgConnection(tx, serverId);
+  if (!row?.secretId) return null;
+  const { organizationId } = tenantOf(tx);
+  try {
+    const bundle = StoredBundle.parse(
+      JSON.parse(
+        await core.secrets.revealSealed(tx, row.secretId, orgConnectionAad(organizationId, serverId)),
+      ),
+    );
+    return bundle.kind === "client_credentials" ? bundle : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The member's own connection to a connector (RLS: owner only), optionally locked. */
 async function ownConnection(
   tx: Tx,
@@ -252,7 +337,7 @@ interface CredentialStore {
 }
 
 const MEMBER_KINDS: ReadonlySet<StoredBundle["kind"]> = new Set(["oauth", "secret"]);
-const ORG_KINDS: ReadonlySet<StoredBundle["kind"]> = new Set(["oauth"]);
+const ORG_KINDS: ReadonlySet<StoredBundle["kind"]> = new Set(["oauth", "client_credentials"]);
 
 function storeOf(key: CredentialKey): CredentialStore {
   if (isOrgKey(key)) {
@@ -340,6 +425,18 @@ function headerFor(server: ServerRow, bundle: StoredBundle): AccessToken {
       secretParts: [bundle.accessToken, headerValue],
     };
   }
+  if (bundle.kind === "client_credentials") {
+    // Never granted (not a state a save leaves): fail closed.
+    if (!bundle.accessToken) return { ok: false, reason: "needs_reconnect" };
+    const headerValue = `Bearer ${bundle.accessToken}`;
+    // The client secret too: a server that echoes it back is redacted like the token.
+    return {
+      ok: true,
+      headerName: "Authorization",
+      headerValue,
+      secretParts: [bundle.accessToken, headerValue, bundle.clientSecret],
+    };
+  }
   const headerValue = `${server.memberHeaderPrefix ?? ""}${bundle.value}`;
   return {
     ok: true,
@@ -349,7 +446,16 @@ function headerFor(server: ServerRow, bundle: StoredBundle): AccessToken {
   };
 }
 
-const fresh = (b: OAuthBundle) => b.expiresAt === null || b.expiresAt - Date.now() > REFRESH_WINDOW_MS;
+/**
+ * Usable as is: an OAuth token without an expiry or expiring after the window, a client-credentials token expiring
+ * after the window (one expiring within it, exactly 60 s included, is re-granted first; 07.14 D-07).
+ */
+function fresh(b: OAuthBundle | ClientCredentialsBundle): boolean {
+  if (b.kind === "oauth") return b.expiresAt === null || b.expiresAt - Date.now() > REFRESH_WINDOW_MS;
+  return (
+    b.accessToken !== undefined && b.expiresAt !== undefined && b.expiresAt - Date.now() > REFRESH_WINDOW_MS
+  );
+}
 
 // ---------------------------------------------------------------- storing
 
@@ -386,6 +492,7 @@ export async function storeConnection(
   p: { userId: string; serverId: string; bundle: StoredBundle },
 ): Promise<ConnectionRow> {
   const { organizationId } = tenantOf(tx);
+  if (!MEMBER_KINDS.has(p.bundle.kind)) throw new Error("not a member credential");
   const previous = await ownConnection(tx, p.userId, p.serverId, true);
   const secretId = await sealInPlace(tx, core, {
     previousSecretId: previous?.secretId ?? null,
@@ -433,7 +540,13 @@ export async function storeConnection(
 export async function storeOrgConnection(
   tx: Tx,
   core: Core,
-  p: { serverId: string; connectedBy: string; bundle: StoredBundle },
+  p: {
+    serverId: string;
+    connectedBy: string;
+    bundle: StoredBundle;
+    /** Client credentials: the scopes the token was granted (the row shows them), else the bundle's. */
+    grantedScopes?: string[];
+  },
 ): Promise<OrgConnectionRow> {
   const { organizationId } = tenantOf(tx);
   if (!ORG_KINDS.has(p.bundle.kind)) throw new Error("not an organization credential");
@@ -446,17 +559,21 @@ export async function storeOrgConnection(
     name: "Organization connector sign-in",
   });
   const now = new Date().toISOString();
-  const oauth = p.bundle.kind === "oauth" ? p.bundle : null;
+  const b = p.bundle;
+  const cc = b.kind === "client_credentials" ? b : null;
+  const oauth = b.kind === "oauth" ? b : null;
+  const expiresAt = cc?.expiresAt ?? oauth?.expiresAt ?? null;
   const values = {
-    method: "oauth" as const,
+    method: cc ? ("client_credentials" as const) : ("oauth" as const),
     status: "connected" as const,
     secretId,
-    issuer: oauth?.issuer ?? null,
-    clientId: oauth?.clientId ?? null,
-    tokenEndpoint: null,
-    scopes: oauth?.scopes ?? [],
+    issuer: cc?.issuer ?? oauth?.issuer ?? null,
+    clientId: cc?.clientId ?? oauth?.clientId ?? null,
+    // Client credentials: the endpoint in use (discovered or admin-entered), shown to admins; never the secret.
+    tokenEndpoint: cc?.tokenEndpoint ?? null,
+    scopes: p.grantedScopes ?? oauth?.scopes ?? [],
     accountLabel: oauth?.accountLabel ?? null,
-    accessExpiresAt: oauth?.expiresAt ? new Date(oauth.expiresAt).toISOString() : null,
+    accessExpiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
     lastError: null,
     connectedBy: p.connectedBy,
     connectedAt: now,
@@ -748,7 +865,7 @@ export async function forceRefresh(core: Core, p: CredentialKey): Promise<Access
   const c = await current(core, store);
   if (c.kind === "refused") return { ok: false, reason: c.reason };
   if (c.bundle.kind === "secret") return headerFor(c.server, c.bundle);
-  return refreshSerialized(core, store, c.row.id, { staleToken: c.bundle.accessToken });
+  return refreshSerialized(core, store, c.row.id, { staleToken: c.bundle.accessToken ?? "" });
 }
 
 // ---------------------------------------------------------------- statuses, use and disconnect
