@@ -95,6 +95,19 @@ export function failureBox(code: ConnectorAuthFailure, server: string): { title:
   };
 }
 
+/** The Disconnect confirmation (D-08): the provider sign-out is best effort, so the copy says "when it can". */
+export function disconnectCopy(server: string): { title: string; body: string } {
+  return {
+    title: `Disconnect ${server}?`,
+    body: `Bots stop using the organization's account on ${server}. OCW also signs it out at the provider when it can.`,
+  };
+}
+
+/** The delete dialog's extra sentence when the organization's connection goes with the server (PD-11). */
+export function orgDeleteSentence(server: string): string {
+  return `The organization's sign-in to ${server} is deleted too.`;
+}
+
 export interface ArrivalBanner {
   kind: "success" | "error";
   title: string;

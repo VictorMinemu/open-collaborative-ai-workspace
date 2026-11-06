@@ -1,13 +1,23 @@
 "use client";
 
 import { ConnectorAuthFailure, ConnectorErrorCode, type McpServer } from "@ocw/contracts";
-import { Building2, CircleAlert, CircleCheck, CircleDashed } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { Building2, CircleAlert, CircleCheck, CircleDashed, TriangleAlert, Unplug } from "lucide-react";
+import { type ReactNode, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { errorMessage, isApiError } from "@/lib/api";
 import {
+  disconnectCopy,
+  failureBox,
   notConnectedLine,
   type OrgRowStatus,
   orgConnectionLine,
@@ -16,7 +26,7 @@ import {
   stepLabel,
   stepOfFailure,
 } from "@/lib/org-connection-format";
-import { useStartOrgConnect } from "@/lib/org-connection-queries";
+import { useDisconnectOrg, useStartOrgConnect } from "@/lib/org-connection-queries";
 import { cn } from "@/lib/utils";
 
 /** 44 px touch targets below `md` (UI-SPEC: every control at 390). */
@@ -64,7 +74,10 @@ export function OrgConnectionRow({
   onEdit: () => void;
 }) {
   const connect = useStartOrgConnect(server.id);
+  const disconnect = useDisconnectOrg(server.id);
   const [opening, setOpening] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const cancelRef = useRef<HTMLButtonElement>(null);
   const c = server.orgConnection;
   const status = orgConnectionStatus(c);
   const cc = server.authMode === "org_client_credentials";
@@ -86,6 +99,18 @@ export function OrgConnectionRow({
       setOpening(false);
       const t = connectRefusal(err, server.name);
       toast.error(t.title, t.description ? { description: t.description } : undefined);
+    }
+  }
+
+  async function onDisconnect() {
+    try {
+      await disconnect.mutateAsync();
+      setConfirmDisconnect(false);
+      toast.success(`${server.name} disconnected`, {
+        description: "Bots no longer use the organization's account.",
+      });
+    } catch (err) {
+      toast.error(`Couldn't disconnect ${server.name}`, { description: errorMessage(err) });
     }
   }
 
@@ -130,35 +155,117 @@ export function OrgConnectionRow({
     }
   }
 
-  return (
-    <section
-      aria-label={`Organization account on ${server.name}`}
-      className="mx-4 -mt-1 mb-3 flex flex-col gap-2.5 rounded-xl border bg-background px-3 py-2.5 sm:flex-row sm:items-center sm:gap-3"
-      data-testid="mcp-org-connection"
-      data-status={status}
-    >
-      <div className="flex min-w-0 flex-1 items-start gap-2.5">
-        <Building2 className="mt-1 size-4 shrink-0 text-muted-foreground" aria-hidden />
-        <div className="grid min-w-0 gap-1">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="font-medium text-[13px]">Organization account</span>
-            <span
-              className={cn(
-                "inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-2 font-semibold text-[11px]",
-                pill.className,
-              )}
-              data-testid="mcp-org-status"
-            >
-              <PillIcon className="size-3" aria-hidden />
-              {pill.label}
-            </span>
-          </div>
-          <p className="min-w-0 break-words text-muted-foreground text-xs" data-testid="mcp-org-account">
-            {line}
-          </p>
-        </div>
+  const failure = server.authFailure ? failureBox(server.authFailure, server.name) : null;
+  const copy = disconnectCopy(server.name);
+  const actions =
+    primary || status !== "not_connected" ? (
+      <div className="flex shrink-0 gap-2 max-sm:w-full">
+        {status !== "not_connected" ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setConfirmDisconnect(true)}
+            data-testid="mcp-org-disconnect"
+            aria-label={`Disconnect ${server.name} for the organization`}
+            className={cn("max-sm:flex-1", TOUCH)}
+          >
+            <Unplug /> Disconnect
+          </Button>
+        ) : null}
+        {primary}
       </div>
-      {primary ? <div className="flex shrink-0 gap-2 max-sm:w-full">{primary}</div> : null}
-    </section>
+    ) : null;
+
+  return (
+    <>
+      <section
+        aria-label={`Organization account on ${server.name}`}
+        className="mx-4 -mt-1 mb-3 flex flex-col gap-2.5 rounded-xl border bg-background px-3 py-2.5 sm:flex-row sm:items-center sm:gap-3"
+        data-testid="mcp-org-connection"
+        data-status={status}
+      >
+        <div className="flex min-w-0 flex-1 items-start gap-2.5">
+          <Building2 className="mt-1 size-4 shrink-0 text-muted-foreground" aria-hidden />
+          <div className="grid min-w-0 gap-1">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="font-medium text-[13px]">Organization account</span>
+              <span
+                className={cn(
+                  "inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-2 font-semibold text-[11px]",
+                  pill.className,
+                )}
+                data-testid="mcp-org-status"
+              >
+                <PillIcon className="size-3" aria-hidden />
+                {pill.label}
+              </span>
+            </div>
+            <p className="min-w-0 break-words text-muted-foreground text-xs" data-testid="mcp-org-account">
+              {line}
+            </p>
+          </div>
+        </div>
+        {actions}
+      </section>
+
+      {failure && server.authFailure ? (
+        <div
+          role="note"
+          className="mx-4 -mt-1 mb-3 flex flex-col gap-2 rounded-lg border border-warning/30 bg-warning/8 px-3 py-2 text-[13px] leading-snug sm:flex-row sm:items-start sm:gap-3"
+          data-testid="mcp-auth-failure"
+          data-code={server.authFailure}
+        >
+          <div className="flex min-w-0 flex-1 items-start gap-2">
+            <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden />
+            <div className="grid min-w-0 gap-0.5">
+              <p className="font-medium">{failure.title}</p>
+              <p className="text-muted-foreground">{failure.fix}</p>
+            </div>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onEdit}
+            data-testid="mcp-auth-failure-test"
+            className={cn("shrink-0 bg-background max-sm:w-full", TOUCH)}
+          >
+            Test sign-in
+          </Button>
+        </div>
+      ) : null}
+
+      <Dialog open={confirmDisconnect} onOpenChange={(o) => !disconnect.isPending && setConfirmDisconnect(o)}>
+        <DialogContent data-testid="mcp-org-disconnect-dialog" initialFocus={cancelRef}>
+          <DialogHeader>
+            <span className="mb-1 flex size-10 items-center justify-center rounded-xl border border-destructive/25 bg-destructive/10 text-destructive shadow-xs">
+              <Unplug className="size-5" strokeWidth={1.75} aria-hidden />
+            </span>
+            <DialogTitle>{copy.title}</DialogTitle>
+            <DialogDescription>{copy.body}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              ref={cancelRef}
+              variant="outline"
+              onClick={() => setConfirmDisconnect(false)}
+              disabled={disconnect.isPending}
+              className={TOUCH}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => void onDisconnect()}
+              disabled={disconnect.isPending}
+              className={TOUCH}
+              data-testid="mcp-org-disconnect-confirm"
+            >
+              {disconnect.isPending ? <Spinner /> : null}
+              Disconnect
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

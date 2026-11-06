@@ -37,7 +37,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { errorMessage } from "@/lib/api";
+import { errorMessage, isApiError } from "@/lib/api";
 import { reprobeRefusal } from "@/lib/connections-format";
 import { isNotConnected, useProbeConnector } from "@/lib/connector-queries";
 import {
@@ -47,7 +47,11 @@ import {
   useProbeMcpServer,
   useUpdateMcpServer,
 } from "@/lib/mcp-queries";
-import { type ArrivalBanner as ArrivalCopy, arrivalBanner } from "@/lib/org-connection-format";
+import {
+  type ArrivalBanner as ArrivalCopy,
+  arrivalBanner,
+  orgDeleteSentence,
+} from "@/lib/org-connection-format";
 import { useReprobeConnector } from "@/lib/org-connection-queries";
 import { useCan, usePermissions } from "@/lib/permissions";
 import { cn, relativeTime } from "@/lib/utils";
@@ -344,6 +348,13 @@ function ServerCard({
   /** Members a delete disconnects: the DTO's count, or the 409's when members connected since the list loaded. */
   const [deleteCount, setDeleteCount] = useState<number | null>(null);
   const members = deleteCount ?? server.memberConnections;
+  /**
+   * The organization's connection a delete also removes (PD-11): from the DTO, or from a 409 `org_connection_exists`
+   * when an admin connected it since the list loaded (the same in-place update as the member count).
+   */
+  const [orgConnectedOnDelete, setOrgConnectedOnDelete] = useState(false);
+  const orgConnected = orgConnectedOnDelete || server.orgConnection !== null;
+  const confirmsConnections = members > 0 || orgConnected;
   const cancelDeleteRef = useRef<HTMLButtonElement>(null);
   // D-16: member lists, counts and copy follow `isPerMemberMode`; who probes (the API or the cell) follows
   // `usesConnectorProxy` (07.14-01).
@@ -401,13 +412,14 @@ function ServerCard({
 
   async function onDelete() {
     try {
-      await remove.mutateAsync({ clearConnections: members > 0 });
+      await remove.mutateAsync({ clearConnections: confirmsConnections });
       setConfirmDelete(false);
       toast.success(`${server.name} removed`, { description: "Its tools were taken off every bot." });
     } catch (err) {
       // Fallback (R4): the same dialog updates in place with the server's count; the next click confirms it.
       const count = connectionsExistCount(err);
       if (count !== null) setDeleteCount(count);
+      else if (isApiError(err, 409) && err.code === "org_connection_exists") setOrgConnectedOnDelete(true);
       else toast.error("Could not remove the server", { description: errorMessage(err) });
     }
   }
@@ -539,7 +551,7 @@ function ServerCard({
         <OrgConnectionRow server={server} oauthAvailable={oauthAvailable} onEdit={onEdit} />
       ) : null}
 
-      {server.oauthStatus === "needs_client" ? (
+      {server.oauthStatus === "needs_client" && !(orgAccount && server.authFailure) ? (
         <p
           role="note"
           className="mx-4 -mt-1 mb-3 flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/8 px-3 py-2 text-[13px] leading-snug"
@@ -623,13 +635,17 @@ function ServerCard({
         open={confirmDelete}
         onOpenChange={(o) => {
           setConfirmDelete(o);
-          if (!o) setDeleteCount(null);
+          if (!o) {
+            setDeleteCount(null);
+            setOrgConnectedOnDelete(false);
+          }
         }}
       >
         <DialogContent
           data-testid="mcp-delete-dialog"
           data-members={members}
-          initialFocus={members > 0 ? cancelDeleteRef : undefined}
+          data-org-connection={orgConnected || undefined}
+          initialFocus={confirmsConnections ? cancelDeleteRef : undefined}
         >
           <DialogHeader>
             <DialogTitle>Delete {server.name}?</DialogTitle>
@@ -638,6 +654,7 @@ function ServerCard({
               {members > 0
                 ? `${members === 1 ? "1 member is" : `${members} members are`} connected; their sign-ins and keys are deleted too. `
                 : ""}
+              {orgConnected ? `${orgDeleteSentence(server.name)} ` : ""}
               This can't be undone.
             </DialogDescription>
           </DialogHeader>
@@ -658,7 +675,11 @@ function ServerCard({
               data-testid="mcp-delete-confirm"
             >
               {remove.isPending ? <Spinner /> : <Trash2 />}
-              {members > 0 ? `Delete and disconnect ${members}` : "Delete server"}
+              {members > 0
+                ? `Delete and disconnect ${members}`
+                : orgConnected
+                  ? "Delete and disconnect"
+                  : "Delete server"}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -1,6 +1,6 @@
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { expectNoSeriousA11y } from "../support/a11y";
-import { apiAs, BASE_URL, openAs } from "../support/actors";
+import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
 import { FAKE_MCP_HOST, FAKE_URL } from "../support/bot-tools";
 import { ADMIN, shot } from "./env";
 
@@ -87,9 +87,12 @@ async function connectFromRow(page: Page, card: Locator, server: ServerJson, tes
   const onRequest = (r: { isNavigationRequest(): boolean; url(): string }) => {
     if (r.isNavigationRequest()) visited.push(r.url());
   };
+  const banner = page.getByTestId("mcp-arrival-banner");
+  // A banner from an earlier return would satisfy the wait below before the browser even leaves.
+  if (await banner.isVisible()) await banner.getByRole("button", { name: "Dismiss" }).click();
+  await expect(banner).toHaveCount(0);
   page.on("request", onRequest);
   await card.getByTestId(testId).click();
-  const banner = page.getByTestId("mcp-arrival-banner");
   await expect(banner).toHaveAttribute("data-kind", "success", { timeout: 30_000 });
   page.off("request", onRequest);
   expect(visited.some((u) => u.startsWith(`http://${FAKE_HOST}/mcp-oauth/authorize?`))).toBe(true);
@@ -102,6 +105,19 @@ async function connectFromRow(page: Page, card: Locator, server: ServerJson, tes
   );
   // Read once: the parameters leave the URL, so a reload repeats nothing.
   await expect(page).toHaveURL(/\/settings\/mcp-servers$/);
+}
+
+async function fakeRevocations(): Promise<number> {
+  const res = await fetch(`${FAKE_URL}/mcp-oauth/__stats`);
+  return ((await res.json()) as { revocations: number }).revocations;
+}
+
+/** axe on the server list in light and dark (07.4 Accessibility contract, 07.14 D-11). */
+async function a11yBothThemes(page: Page) {
+  await expectNoSeriousA11y(page, '[data-testid="mcp-server-list"]');
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expectNoSeriousA11y(page, '[data-testid="mcp-server-list"]');
+  await page.emulateMedia({ colorScheme: "light" });
 }
 
 test.afterEach(async () => {
@@ -156,6 +172,154 @@ test("admin: connect the organization's account from the row, at both widths and
       await bothThemes(page, `mcp-org-row-connected-${w}`);
     } finally {
       await me.context.close();
+    }
+  } finally {
+    await removeServers(admin, [DOCS]);
+    await admin.dispose();
+  }
+});
+
+test("admin: reconnect, disconnect, failures and delete, at both widths and themes", async ({
+  browser,
+}, info) => {
+  test.setTimeout(240_000);
+  expect(FAKE_URL, "OCW_E2E_FAKE_URL (the fake OAuth MCP server) is set by scripts/e2e-isolated.sh").not.toBe(
+    "",
+  );
+  const w = info.project.name === "mobile" ? "390" : "1440";
+  const admin = await apiAs(ADMIN);
+  await ensureMember(admin, SAM, "developer");
+  const docs = await orgOAuthServer(admin, DOCS);
+  try {
+    const me = await openAs(browser, ADMIN, info.project.name);
+    const page = me.page;
+    try {
+      await page.goto(`${BASE_URL}/settings/mcp-servers`);
+      const card = serverCard(page, DOCS);
+      const row = card.getByTestId("mcp-org-connection");
+
+      // ---- needs reconnect (D-08): a short-lived token whose grant the provider revoked; Re-probe tries to refresh
+      await fakeScenario({ expires_in: 1 });
+      await connectFromRow(page, card, docs);
+      await expect(row).toHaveAttribute("data-status", "connected");
+      await page.getByTestId("mcp-arrival-banner").getByRole("button", { name: "Dismiss" }).click();
+      await fakeScenario({ revoke_all: true });
+      await card.getByTestId("mcp-reprobe").click();
+      await expect(row).toHaveAttribute("data-status", "needs_reconnect", { timeout: 15_000 });
+      await expect(row.getByTestId("mcp-org-status")).toHaveText("Needs reconnect");
+      await expect(row.getByTestId("mcp-org-account")).toHaveText("Access was revoked at the provider.");
+      await expect(row.getByTestId("mcp-org-disconnect")).toBeVisible();
+      await showRow(card);
+      await bothThemes(page, `mcp-org-row-needs-reconnect-${w}`);
+      await a11yBothThemes(page);
+
+      // ---- Reconnect goes through the provider again and comes back with the banner
+      await fakeScenario({});
+      await connectFromRow(page, card, docs, "mcp-org-reconnect");
+      await expect(row).toHaveAttribute("data-status", "connected");
+
+      // ---- Disconnect asks first (focus on Cancel), then signs out at the provider and forgets the account
+      const revokedBefore = await fakeRevocations();
+      await row.getByTestId("mcp-org-disconnect").click();
+      const dialog = page.getByTestId("mcp-org-disconnect-dialog");
+      await expect(dialog).toBeVisible();
+      await expect(dialog).toContainText(`Disconnect ${DOCS}?`);
+      await expect(dialog).toContainText(
+        `Bots stop using the organization's account on ${DOCS}. OCW also signs it out at the provider when it can.`,
+      );
+      await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
+      await bothThemes(page, `mcp-org-disconnect-${w}`);
+      await dialog.getByTestId("mcp-org-disconnect-confirm").click();
+      await expect(dialog).toBeHidden();
+      await expect(row).toHaveAttribute("data-status", "not_connected");
+      await expect(row.getByTestId("mcp-org-account")).toHaveText(
+        `Not connected. Bots can't use ${DOCS} until an admin connects it.`,
+      );
+      expect(await fakeRevocations()).toBeGreaterThan(revokedBefore);
+
+      // ---- the provider refuses: a coded arrival (D-10), alert, fixed sentence only
+      await fakeScenario({ deny: true });
+      await row.getByTestId("mcp-org-connect").click();
+      const banner = page.getByTestId("mcp-arrival-banner");
+      await expect(banner).toHaveAttribute("data-kind", "error", { timeout: 30_000 });
+      await expect(banner).toHaveAttribute("role", "alert");
+      await expect(banner).toBeFocused();
+      await expect(page.getByTestId("mcp-arrival-banner-title")).toHaveText(`${DOCS} didn't allow access.`);
+      await expect(page).toHaveURL(/\/settings\/mcp-servers$/);
+
+      await fakeScenario({ invalid_scope_at_authorize: true });
+      await row.getByTestId("mcp-org-connect").click();
+      await expect(page.getByTestId("mcp-arrival-banner-title")).toHaveText(
+        `Couldn't connect ${DOCS}: Token.`,
+        { timeout: 30_000 },
+      );
+      await expect(page.getByTestId("mcp-arrival-banner-body")).toHaveText(
+        "The provider refused the requested scopes. Clear Scopes to use the server's own, or enter scopes it accepts.",
+      );
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await bothThemes(page, `mcp-org-banner-error-${w}`);
+
+      // ---- a refused start records the failing step on the row (D-10), with its fix line and Test sign-in
+      await page.getByTestId("mcp-arrival-banner").getByRole("button", { name: "Dismiss" }).click();
+      await fakeScenario({ no_pkce_meta: true });
+      await row.getByTestId("mcp-org-connect").click();
+      await expect(page.locator("[data-sonner-toast]").first()).toContainText(
+        `Couldn't connect ${DOCS}: PKCE (S256).`,
+      );
+      await page.reload();
+      const failure = card.getByTestId("mcp-auth-failure");
+      await expect(failure).toHaveAttribute("data-code", "pkce_unsupported");
+      await expect(failure).toHaveAttribute("role", "note");
+      await expect(failure).toContainText("Last sign-in failed: PKCE (S256).");
+      await expect(failure).toContainText(
+        `${DOCS}'s sign-in doesn't offer PKCE (S256), which OCW requires. Use Client credentials or Organization headers.`,
+      );
+      await showRow(card);
+      await failure.scrollIntoViewIfNeeded();
+      await bothThemes(page, `mcp-org-row-failure-${w}`);
+      await a11yBothThemes(page);
+      await failure.getByTestId("mcp-auth-failure-test").click();
+      await expect(page.getByTestId("mcp-server-dialog")).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("mcp-server-dialog")).toBeHidden();
+
+      // ---- a success clears the recorded failure
+      await fakeScenario({});
+      await connectFromRow(page, card, docs);
+      await expect(row).toHaveAttribute("data-status", "connected");
+      await expect(card.getByTestId("mcp-auth-failure")).toHaveCount(0);
+    } finally {
+      await me.context.close();
+    }
+
+    // ---- a member's Settings › Connections lists no organization-mode server (COA-05)
+    const sam = await openAs(browser, SAM, info.project.name);
+    try {
+      await sam.page.goto(`${BASE_URL}/settings/connections`);
+      await expect(sam.page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
+      await expect(sam.page.getByTestId(`connector-row-${docs.id}`)).toHaveCount(0);
+      await expect(sam.page.getByText(DOCS)).toHaveCount(0);
+    } finally {
+      await sam.context.close();
+    }
+
+    // ---- Delete names the organization's sign-in and confirms it (PD-11)
+    const again = await openAs(browser, ADMIN, info.project.name);
+    try {
+      const page = again.page;
+      await page.goto(`${BASE_URL}/settings/mcp-servers`);
+      const card = serverCard(page, DOCS);
+      await expect(card.getByTestId("mcp-org-connection")).toHaveAttribute("data-status", "connected");
+      await card.getByTestId("mcp-delete").click();
+      const dialog = page.getByTestId("mcp-delete-dialog");
+      await expect(dialog).toContainText(`The organization's sign-in to ${DOCS} is deleted too.`);
+      await expect(dialog.getByTestId("mcp-delete-confirm")).toHaveText("Delete and disconnect");
+      await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
+      await dialog.getByTestId("mcp-delete-confirm").click();
+      await expect(dialog).toBeHidden();
+      await expect(card).toHaveCount(0);
+    } finally {
+      await again.context.close();
     }
   } finally {
     await removeServers(admin, [DOCS]);
