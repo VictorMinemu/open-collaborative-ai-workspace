@@ -1,8 +1,15 @@
 import { randomUUID } from "node:crypto";
-import type { ConnectionStatus, ConnectorReconnectReason } from "@ocw/contracts";
+import {
+  type ConnectionStatus,
+  type ConnectorAuthMode,
+  type ConnectorReconnectReason,
+  isOrgCredentialMode,
+  isPerMemberMode,
+} from "@ocw/contracts";
 import {
   connectorConnections,
   connectorOAuthClients,
+  connectorOrgConnections,
   mcpServers,
   memberAccountShares,
   type Tx,
@@ -15,18 +22,24 @@ import { egressFor } from "../../lib/egress";
 import { ConnectorOAuthError, discover, refreshTokens, revokeToken, type TokenBundle } from "./oauth";
 
 /**
- * Custody of a member's own connector credential (Phase 07.4, D-01; CONN-01, CONN-02), in ADR-0017's shape: the token
- * bundle (OAuth) or the member's key (secret mode) is sealed in `app.secrets` (kind `connector_credential`) with the
- * AAD `${org}:${user}:connector:${serverId}`, so it opens only for that member, organization and connector. The
- * `connector_connections` row holds state and display metadata only.
+ * Custody of connector credentials, for two principals (Phase 07.4 D-01, CONN-01/02; Phase 07.14 D-06, D-07, PD-04).
+ * In ADR-0017's shape, the token bundle (OAuth) or the member's key (secret mode) is sealed in `app.secrets` (kind
+ * `connector_credential`); the rows hold state and display metadata only.
  *
- * - Every query is keyed by the member's own user id inside `withTenant({ organizationId, userId })`: tenant RLS plus
- *   the restrictive owner-only policy (`post-migrate.sql`) make another member's row invisible (WINDOWS #170), and the
- *   connector is resolved in the same tenant transaction, so a row pointing at another organization's server is never
- *   read, refreshed or used (WINDOWS #169).
- * - Refresh is serialized across API instances (Redis `SET NX PX` + `select … for update` + re-read): rotating refresh
- *   tokens are spent exactly once. The authorization server is re-discovered before each refresh; a different issuer
- *   is a reconnect, and the stored credentials are never sent to it (RFC 9207 spirit, Pitfall 3).
+ * - **Member** (`ConnectionKey`): `connector_connections`, AAD `${org}:${user}:connector:${serverId}`. Every query is
+ *   keyed by the member's own user id inside `withTenant({ organizationId, userId })`: tenant RLS plus the restrictive
+ *   owner-only policy (`post-migrate.sql`) make another member's row invisible (WINDOWS #170).
+ * - **Organization** (`OrgConnectionKey`): `connector_org_connections`, one row per server, AAD
+ *   `${org}:org:connector:${serverId}`, read inside `withTenant({ organizationId, userId: actingUserId })` (tenant
+ *   RLS). The AADs cannot collide: a member AAD's second segment is a user UUID, never the literal `org`, so a bundle
+ *   swapped from one principal to the other never opens.
+ * - The connector is resolved in the same tenant transaction for both, in its principal's modes only, so a row
+ *   pointing at another organization's server, or at a server in the other principal's mode, is never read, refreshed
+ *   or used (WINDOWS #169).
+ * - Refresh is serialized across API instances (Redis `SET NX PX` + `select … for update` + re-read), one shared
+ *   implementation for both principals: rotating refresh tokens are spent exactly once. The authorization server is
+ *   re-discovered before each refresh; a different issuer is a reconnect, and the stored credentials are never sent to
+ *   it (RFC 9207 spirit, Pitfall 3).
  * - Terminal failures commit `needs_reconnect` in their own transaction; transient ones change nothing. The dropped
  *   grant is then revoked best effort at the issuer that granted it, when its client is still known (WINDOWS #193).
  * - Nothing here logs or returns a token, refresh token, key or client secret outside `AccessToken.headerValue`, which
@@ -34,10 +47,14 @@ import { ConnectorOAuthError, discover, refreshTokens, revokeToken, type TokenBu
  */
 
 type ConnectionRow = typeof connectorConnections.$inferSelect;
+type OrgConnectionRow = typeof connectorOrgConnections.$inferSelect;
 type ServerRow = typeof mcpServers.$inferSelect;
 
 export const connectionAad = (organizationId: string, userId: string, serverId: string) =>
   `${organizationId}:${userId}:connector:${serverId}`;
+/** The organization's AAD for a server's shared account (07.14 PD-04). */
+export const orgConnectionAad = (organizationId: string, serverId: string) =>
+  `${organizationId}:org:connector:${serverId}`;
 
 /** An access token expiring within this window is refreshed before use. */
 export const REFRESH_WINDOW_MS = 60_000;
@@ -46,6 +63,8 @@ const REFRESH_LOCK_MS = 30_000;
 const REFRESH_WAIT_MS = 35_000;
 const REFRESH_POLL_MS = 100;
 export const refreshLockKey = (connectionId: string) => `ocw:conn:refresh:${connectionId}`;
+/** The organization's refresh lock is per server: there is one organization connection per server. */
+export const orgRefreshLockKey = (serverId: string) => `ocw:conn:refresh:org:${serverId}`;
 const RELEASE_LOCK =
   "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
 
@@ -102,10 +121,43 @@ const tokenBundleOf = (b: OAuthBundle): TokenBundle => ({
   accountLabel: b.accountLabel,
 });
 
+/** A member's own credential for a per-member connector (07.4). */
 export interface ConnectionKey {
   organizationId: string;
   userId: string;
   serverId: string;
+}
+
+/**
+ * The organization's shared credential for an organization-account server (07.14 PD-04). `actingUserId` is the human
+ * on whose request it is used (the turn's member, the admin who connects or re-probes): the tenant transaction and its
+ * audit rows carry them. Null for system work.
+ */
+export interface OrgConnectionKey {
+  organizationId: string;
+  serverId: string;
+  principal: "organization";
+  actingUserId: string | null;
+}
+
+export type CredentialKey = ConnectionKey | OrgConnectionKey;
+
+export const isOrgKey = (key: CredentialKey): key is OrgConnectionKey =>
+  "principal" in key && key.principal === "organization";
+
+/** The credential a call to this server uses: the organization's for the org modes, else the caller's own. */
+export function credentialKeyOf(
+  server: { id: string; authMode: ConnectorAuthMode },
+  ctx: { organizationId: string; userId: string },
+): CredentialKey {
+  return isOrgCredentialMode(server.authMode)
+    ? {
+        organizationId: ctx.organizationId,
+        serverId: server.id,
+        principal: "organization",
+        actingUserId: ctx.userId,
+      }
+    : { organizationId: ctx.organizationId, userId: ctx.userId, serverId: server.id };
 }
 
 /** What the connector proxy sends upstream. `secretParts` = every string to redact from what comes back. */
@@ -128,7 +180,17 @@ export class ConnectorTokenUnavailableError extends Error {
 /** A per-member connector of the tx's organization (RLS), or null: another organization's id is never resolved. */
 export async function perMemberServer(tx: Tx, serverId: string): Promise<ServerRow | null> {
   const [row] = await tx.select().from(mcpServers).where(eq(mcpServers.id, serverId)).limit(1);
-  return row && row.authMode !== "org_secret" ? row : null;
+  return row && isPerMemberMode(row.authMode) ? row : null;
+}
+
+/**
+ * An organization-account server (`org_oauth` / `org_client_credentials`) of the tx's organization (RLS), or null.
+ * `lock` takes the server row (`for update`): a store holds it so that a concurrent mode switch or delete waits.
+ */
+export async function orgAccountServer(tx: Tx, serverId: string, lock = false): Promise<ServerRow | null> {
+  const q = tx.select().from(mcpServers).where(eq(mcpServers.id, serverId)).limit(1);
+  const [row] = lock ? await q.for("update") : await q;
+  return row && isOrgCredentialMode(row.authMode) ? row : null;
 }
 
 /** The member's own connection to a connector (RLS: owner only), optionally locked. */
@@ -147,25 +209,95 @@ async function ownConnection(
   return row ?? null;
 }
 
+/** The organization's connection of a server (tenant RLS), optionally locked. */
+async function orgConnection(tx: Tx, serverId: string, lock = false): Promise<OrgConnectionRow | null> {
+  const q = tx
+    .select()
+    .from(connectorOrgConnections)
+    .where(eq(connectorOrgConnections.serverId, serverId))
+    .limit(1);
+  const [row] = lock ? await q.for("update") : await q;
+  return row ?? null;
+}
+
+/** The fields of a credential row the shared custody code reads (both tables have them). */
+interface CredentialRow {
+  id: string;
+  serverId: string;
+  status: "connected" | "needs_reconnect";
+  secretId: string | null;
+}
+
+type CredentialUpdate = Partial<
+  Pick<ConnectionRow, "status" | "secretId" | "lastError" | "accessExpiresAt" | "scopes" | "updatedAt">
+>;
+
+/**
+ * Where one principal's credential lives (PD-04): the row lookup and its lock, the server lookup in that principal's
+ * modes, the AAD, the refresh lock key, the `needs_reconnect` / refreshed writes and the audit names. `refreshAttempt`,
+ * `refreshSerialized`, `current` and `markInTx` are written once over it.
+ */
+interface CredentialStore {
+  tenant: { organizationId: string; userId: string | null };
+  serverId: string;
+  aad: string;
+  /** Bundle kinds this principal may hold: anything else fails closed. */
+  kinds: ReadonlySet<StoredBundle["kind"]>;
+  lockKey(rowId: string): string;
+  server(tx: Tx): Promise<ServerRow | null>;
+  row(tx: Tx, lock?: boolean): Promise<CredentialRow | null>;
+  update(tx: Tx, rowId: string, set: CredentialUpdate): Promise<void>;
+  audit: { needsReconnect: string; resourceType: string };
+}
+
+const MEMBER_KINDS: ReadonlySet<StoredBundle["kind"]> = new Set(["oauth", "secret"]);
+const ORG_KINDS: ReadonlySet<StoredBundle["kind"]> = new Set(["oauth"]);
+
+function storeOf(key: CredentialKey): CredentialStore {
+  if (isOrgKey(key)) {
+    return {
+      tenant: { organizationId: key.organizationId, userId: key.actingUserId },
+      serverId: key.serverId,
+      aad: orgConnectionAad(key.organizationId, key.serverId),
+      kinds: ORG_KINDS,
+      lockKey: () => orgRefreshLockKey(key.serverId),
+      server: (tx) => orgAccountServer(tx, key.serverId),
+      row: (tx, lock) => orgConnection(tx, key.serverId, lock),
+      update: async (tx, rowId, set) => {
+        await tx.update(connectorOrgConnections).set(set).where(eq(connectorOrgConnections.id, rowId));
+      },
+      audit: { needsReconnect: "connector.org_needs_reconnect", resourceType: "connector_org_connection" },
+    };
+  }
+  return {
+    tenant: { organizationId: key.organizationId, userId: key.userId },
+    serverId: key.serverId,
+    aad: connectionAad(key.organizationId, key.userId, key.serverId),
+    kinds: MEMBER_KINDS,
+    lockKey: refreshLockKey,
+    server: (tx) => perMemberServer(tx, key.serverId),
+    row: (tx, lock) => ownConnection(tx, key.userId, key.serverId, lock),
+    update: async (tx, rowId, set) => {
+      await tx.update(connectorConnections).set(set).where(eq(connectorConnections.id, rowId));
+    },
+    audit: { needsReconnect: "connector.needs_reconnect", resourceType: "connector_connection" },
+  };
+}
+
 async function openBundle(
   tx: Tx,
   core: Core,
-  row: ConnectionRow,
-  organizationId: string,
+  store: CredentialStore,
+  row: CredentialRow,
 ): Promise<StoredBundle | null> {
   if (!row.secretId) return null;
   try {
-    return StoredBundle.parse(
-      JSON.parse(
-        await core.secrets.revealSealed(
-          tx,
-          row.secretId,
-          connectionAad(organizationId, row.userId, row.serverId),
-        ),
-      ),
+    const bundle = StoredBundle.parse(
+      JSON.parse(await core.secrets.revealSealed(tx, row.secretId, store.aad)),
     );
+    return store.kinds.has(bundle.kind) ? bundle : null;
   } catch {
-    // A seal that does not open for this member (AAD), a missing row or a malformed value: fail closed.
+    // A seal that does not open for this principal (AAD), a missing row or a malformed value: fail closed.
     return null;
   }
 }
@@ -221,32 +353,45 @@ const fresh = (b: OAuthBundle) => b.expiresAt === null || b.expiresAt - Date.now
 // ---------------------------------------------------------------- storing
 
 /**
- * Seals the bundle and upserts the member's row (`connected`, `last_error` null). A reconnect re-seals the existing
- * secret in place (`replaceSealed`: same id), so no stale credential is left behind.
+ * Seals a bundle in place: a reconnect re-seals the existing secret (`replaceSealed`: same id), so no stale credential
+ * is left behind; a secret that no longer opens is replaced by a new one.
  */
+async function sealInPlace(
+  tx: Tx,
+  core: Core,
+  p: { previousSecretId: string | null; serverId: string; value: string; aad: string; name: string },
+): Promise<string> {
+  if (p.previousSecretId) {
+    try {
+      await core.secrets.replaceSealed(tx, p.previousSecretId, p.value, p.aad);
+      return p.previousSecretId;
+    } catch {
+      // Seal a new one below.
+    }
+  }
+  return core.secrets.putSealed(tx, {
+    name: p.name,
+    kind: "connector_credential",
+    provider: p.serverId,
+    value: p.value,
+    aad: p.aad,
+  });
+}
+
+/** Seals the bundle and upserts the member's row (`connected`, `last_error` null), re-sealing in place. */
 export async function storeConnection(
   tx: Tx,
   core: Core,
   p: { userId: string; serverId: string; bundle: StoredBundle },
 ): Promise<ConnectionRow> {
   const { organizationId } = tenantOf(tx);
-  const aad = connectionAad(organizationId, p.userId, p.serverId);
-  const value = JSON.stringify(StoredBundle.parse(p.bundle));
   const previous = await ownConnection(tx, p.userId, p.serverId, true);
-  let secretId = previous?.secretId ?? null;
-  if (secretId) {
-    try {
-      await core.secrets.replaceSealed(tx, secretId, value, aad);
-    } catch {
-      secretId = null;
-    }
-  }
-  secretId ??= await core.secrets.putSealed(tx, {
+  const secretId = await sealInPlace(tx, core, {
+    previousSecretId: previous?.secretId ?? null,
+    serverId: p.serverId,
+    value: JSON.stringify(StoredBundle.parse(p.bundle)),
+    aad: connectionAad(organizationId, p.userId, p.serverId),
     name: "Connector sign-in",
-    kind: "connector_credential",
-    provider: p.serverId,
-    value,
-    aad,
   });
   const now = new Date().toISOString();
   const oauth = p.bundle.kind === "oauth" ? p.bundle : null;
@@ -275,6 +420,56 @@ export async function storeConnection(
     })
     .returning();
   if (!row) throw new Error("connection upsert returned no row");
+  return row;
+}
+
+/**
+ * Seals the organization's bundle and upserts the server's one organization row (`connected`, `last_error` null,
+ * `connected_by` = the admin), re-sealing in place (07.14 D-06). The caller holds the server row lock
+ * (`orgAccountServer(tx, id, true)`), so concurrent stores for a server are serialized: the last one wins, with the
+ * same secret id.
+ */
+export async function storeOrgConnection(
+  tx: Tx,
+  core: Core,
+  p: { serverId: string; connectedBy: string; bundle: StoredBundle },
+): Promise<OrgConnectionRow> {
+  const { organizationId } = tenantOf(tx);
+  if (!ORG_KINDS.has(p.bundle.kind)) throw new Error("not an organization credential");
+  const previous = await orgConnection(tx, p.serverId, true);
+  const secretId = await sealInPlace(tx, core, {
+    previousSecretId: previous?.secretId ?? null,
+    serverId: p.serverId,
+    value: JSON.stringify(StoredBundle.parse(p.bundle)),
+    aad: orgConnectionAad(organizationId, p.serverId),
+    name: "Organization connector sign-in",
+  });
+  const now = new Date().toISOString();
+  const oauth = p.bundle.kind === "oauth" ? p.bundle : null;
+  const values = {
+    method: "oauth" as const,
+    status: "connected" as const,
+    secretId,
+    issuer: oauth?.issuer ?? null,
+    clientId: oauth?.clientId ?? null,
+    tokenEndpoint: null,
+    scopes: oauth?.scopes ?? [],
+    accountLabel: oauth?.accountLabel ?? null,
+    accessExpiresAt: oauth?.expiresAt ? new Date(oauth.expiresAt).toISOString() : null,
+    lastError: null,
+    connectedBy: p.connectedBy,
+    connectedAt: now,
+    updatedAt: now,
+  };
+  const [row] = await tx
+    .insert(connectorOrgConnections)
+    .values({ organizationId, serverId: p.serverId, ...values })
+    .onConflictDoUpdate({
+      target: [connectorOrgConnections.organizationId, connectorOrgConnections.serverId],
+      set: values,
+    })
+    .returning();
+  if (!row) throw new Error("organization connection upsert returned no row");
   return row;
 }
 
@@ -315,7 +510,7 @@ interface DroppedGrant {
 async function droppedGrantOf(
   tx: Tx,
   core: Core,
-  row: ConnectionRow,
+  row: CredentialRow,
   bundle: StoredBundle | null,
   refreshRefused: boolean,
 ): Promise<DroppedGrant | null> {
@@ -339,21 +534,24 @@ async function revokeDropped(core: Core, serverId: string, dropped: DroppedGrant
 async function markInTx(
   tx: Tx,
   core: Core,
-  row: ConnectionRow,
+  store: CredentialStore,
+  row: CredentialRow,
   code: string,
   dropped: { bundle: StoredBundle | null; refreshRefused: boolean },
 ): Promise<DroppedGrant | null> {
   const lastError = code.slice(0, LAST_ERROR_MAX);
   const revoke = await droppedGrantOf(tx, core, row, dropped.bundle, dropped.refreshRefused);
-  await tx
-    .update(connectorConnections)
-    .set({ status: "needs_reconnect", secretId: null, lastError, updatedAt: new Date().toISOString() })
-    .where(eq(connectorConnections.id, row.id));
-  // The grant is dead: its sealed bundle goes too (it opened for this member, so it is theirs).
+  await store.update(tx, row.id, {
+    status: "needs_reconnect",
+    secretId: null,
+    lastError,
+    updatedAt: new Date().toISOString(),
+  });
+  // The grant is dead: its sealed bundle goes too (it opened for this principal, so it is theirs).
   if (row.secretId) await core.secrets.remove(tx, row.secretId);
   await core.audit.record(tx, {
-    action: "connector.needs_reconnect",
-    resourceType: "connector_connection",
+    action: store.audit.needsReconnect,
+    resourceType: store.audit.resourceType,
     resourceId: row.id,
     metadata: { serverId: row.serverId, code: lastError, revokeAtIssuer: revoke !== null },
   });
@@ -361,21 +559,19 @@ async function markInTx(
 }
 
 /**
- * Marks the member's connection `needs_reconnect` with a short code (e.g. `upstream_unauthorized` after a refreshed
- * token still got a 401), in its own committed transaction, and audits it. No-op without a connected row.
+ * Marks the connection `needs_reconnect` with a short code (e.g. `upstream_unauthorized` after a refreshed token
+ * still got a 401), in its own committed transaction, and audits it. No-op without a connected row.
  */
-export async function markNeedsReconnect(core: Core, p: ConnectionKey & { code: string }): Promise<void> {
-  const dropped = await core.db.withTenant(
-    { organizationId: p.organizationId, userId: p.userId },
-    async (tx) => {
-      if (!(await perMemberServer(tx, p.serverId))) return null;
-      const row = await ownConnection(tx, p.userId, p.serverId, true);
-      if (row?.status !== "connected") return null;
-      const bundle = await openBundle(tx, core, row, p.organizationId);
-      // The resource server refused a refreshed token: the grant may still be live at the issuer, so revoke it whole.
-      return markInTx(tx, core, row, p.code, { bundle, refreshRefused: false });
-    },
-  );
+export async function markNeedsReconnect(core: Core, p: CredentialKey & { code: string }): Promise<void> {
+  const store = storeOf(p);
+  const dropped = await core.db.withTenant(store.tenant, async (tx) => {
+    if (!(await store.server(tx))) return null;
+    const row = await store.row(tx, true);
+    if (row?.status !== "connected") return null;
+    const bundle = await openBundle(tx, core, store, row);
+    // The resource server refused a refreshed token: the grant may still be live at the issuer, so revoke it whole.
+    return markInTx(tx, core, store, row, p.code, { bundle, refreshRefused: false });
+  });
   await revokeDropped(core, p.serverId, dropped);
 }
 
@@ -399,21 +595,19 @@ const refused = (reason: "not_connected" | "needs_reconnect", dropped?: DroppedG
  */
 async function refreshAttempt(
   core: Core,
-  key: ConnectionKey & { connectionId: string },
+  store: CredentialStore,
+  rowId: string,
   holdsLock: boolean,
   force: { staleToken: string } | null,
 ): Promise<Attempt> {
-  return core.db.withTenant({ organizationId: key.organizationId, userId: key.userId }, async (tx) => {
-    const server = await perMemberServer(tx, key.serverId);
+  return core.db.withTenant(store.tenant, async (tx) => {
+    const server = await store.server(tx);
     if (!server) return refused("not_connected");
-    const [row] = await tx
-      .select()
-      .from(connectorConnections)
-      .where(and(eq(connectorConnections.id, key.connectionId), eq(connectorConnections.userId, key.userId)))
-      .for("update");
-    if (!row) return refused("not_connected");
+    const row = await store.row(tx, true);
+    // Gone, or replaced by another connection since the caller read it.
+    if (!row || row.id !== rowId) return refused("not_connected");
     if (row.status !== "connected") return refused("needs_reconnect");
-    const bundle = await openBundle(tx, core, row, key.organizationId);
+    const bundle = await openBundle(tx, core, store, row);
     if (!bundle) return refused("needs_reconnect");
     if (bundle.kind !== "oauth") return { kind: "token", token: headerFor(server, bundle) };
     if (force) {
@@ -427,7 +621,10 @@ async function refreshAttempt(
     }
     if (!holdsLock) return { kind: "wait" };
     if (!bundle.refreshToken) {
-      const dropped = await markInTx(tx, core, row, "expired_no_refresh", { bundle, refreshRefused: false });
+      const dropped = await markInTx(tx, core, store, row, "expired_no_refresh", {
+        bundle,
+        refreshRefused: false,
+      });
       return refused("needs_reconnect", dropped);
     }
 
@@ -436,13 +633,16 @@ async function refreshAttempt(
     if (server.url) {
       const current = await discover(egress, server.url).catch(() => null);
       if (current && current.issuer !== bundle.issuer) {
-        core.log.warn({ serverId: key.serverId, code: "issuer_changed" }, "connector issuer changed");
+        core.log.warn({ serverId: store.serverId, code: "issuer_changed" }, "connector issuer changed");
         // Revoked at the OLD issuer that granted it (its stored revocation endpoint), never sent to the new one.
-        const dropped = await markInTx(tx, core, row, "issuer_changed", { bundle, refreshRefused: false });
+        const dropped = await markInTx(tx, core, store, row, "issuer_changed", {
+          bundle,
+          refreshRefused: false,
+        });
         return refused("needs_reconnect", dropped);
       }
     }
-    const clientSecret = await clientSecretFor(tx, core, key.serverId, bundle.issuer, bundle.clientId);
+    const clientSecret = await clientSecretFor(tx, core, store.serverId, bundle.issuer, bundle.clientId);
     let next: TokenBundle;
     try {
       next = await refreshTokens(egress, tokenBundleOf(bundle), clientSecret);
@@ -450,32 +650,24 @@ async function refreshAttempt(
       const e = err instanceof ConnectorOAuthError ? err : null;
       const code = e?.oauthError ?? e?.code ?? "refresh_failed";
       core.log.warn(
-        { serverId: key.serverId, code, terminal: !!e?.terminal },
+        { serverId: store.serverId, code, terminal: !!e?.terminal },
         "connector token refresh failed",
       );
       if (e?.terminal) {
-        const dropped = await markInTx(tx, core, row, code, { bundle, refreshRefused: true });
+        const dropped = await markInTx(tx, core, store, row, code, { bundle, refreshRefused: true });
         return refused("needs_reconnect", dropped);
       }
       return { kind: "transient", code };
     }
     const stored: OAuthBundle = { ...oauthBundleOf(next), refreshedAt: Date.now() };
     if (!row.secretId) return refused("needs_reconnect");
-    await core.secrets.replaceSealed(
-      tx,
-      row.secretId,
-      JSON.stringify(stored),
-      connectionAad(key.organizationId, key.userId, key.serverId),
-    );
-    await tx
-      .update(connectorConnections)
-      .set({
-        accessExpiresAt: stored.expiresAt ? new Date(stored.expiresAt).toISOString() : null,
-        scopes: stored.scopes,
-        lastError: null,
-        updatedAt: new Date().toISOString(),
-      })
-      .where(eq(connectorConnections.id, row.id));
+    await core.secrets.replaceSealed(tx, row.secretId, JSON.stringify(stored), store.aad);
+    await store.update(tx, row.id, {
+      accessExpiresAt: stored.expiresAt ? new Date(stored.expiresAt).toISOString() : null,
+      scopes: stored.scopes,
+      lastError: null,
+      updatedAt: new Date().toISOString(),
+    });
     return { kind: "token", token: headerFor(server, stored) };
   });
 }
@@ -486,11 +678,12 @@ async function refreshAttempt(
  */
 async function refreshSerialized(
   core: Core,
-  key: ConnectionKey & { connectionId: string },
+  store: CredentialStore,
+  rowId: string,
   force: { staleToken: string } | null,
 ): Promise<AccessToken> {
   const redis = core.bus.pub;
-  const lock = refreshLockKey(key.connectionId);
+  const lock = store.lockKey(rowId);
   const me = randomUUID();
   const deadline = Date.now() + REFRESH_WAIT_MS;
   for (;;) {
@@ -500,14 +693,14 @@ async function refreshSerialized(
         .catch(() => null)) === "OK";
     let outcome: Attempt;
     try {
-      outcome = await refreshAttempt(core, key, holdsLock, force);
+      outcome = await refreshAttempt(core, store, rowId, holdsLock, force);
     } finally {
       if (holdsLock) await redis.eval(RELEASE_LOCK, { keys: [lock], arguments: [me] }).catch(() => 0);
     }
     switch (outcome.kind) {
       case "token":
         // After the attempt's transaction committed (and the lock is released): best effort, never blocks a retry.
-        await revokeDropped(core, key.serverId, outcome.dropped ?? null);
+        await revokeDropped(core, store.serverId, outcome.dropped ?? null);
         return outcome.token;
       case "transient":
         throw new ConnectorTokenUnavailableError(outcome.code);
@@ -518,37 +711,39 @@ async function refreshSerialized(
   }
 }
 
-/** The member's connection and opened bundle, read in one tenant transaction (no refresh). */
+/** The principal's connection and opened bundle, read in one tenant transaction (no refresh). */
 async function current(
   core: Core,
-  p: ConnectionKey,
+  store: CredentialStore,
 ): Promise<
   | { kind: "refused"; reason: "not_connected" | "needs_reconnect" }
-  | { kind: "ready"; server: ServerRow; row: ConnectionRow; bundle: StoredBundle }
+  | { kind: "ready"; server: ServerRow; row: CredentialRow; bundle: StoredBundle }
 > {
-  return core.db.withTenant({ organizationId: p.organizationId, userId: p.userId }, async (tx) => {
-    const server = await perMemberServer(tx, p.serverId);
+  return core.db.withTenant(store.tenant, async (tx) => {
+    const server = await store.server(tx);
     if (!server) return { kind: "refused", reason: "not_connected" };
-    const row = await ownConnection(tx, p.userId, p.serverId);
+    const row = await store.row(tx);
     if (!row) return { kind: "refused", reason: "not_connected" };
     if (row.status !== "connected") return { kind: "refused", reason: "needs_reconnect" };
-    const bundle = await openBundle(tx, core, row, p.organizationId);
+    const bundle = await openBundle(tx, core, store, row);
     if (!bundle) return { kind: "refused", reason: "needs_reconnect" };
     return { kind: "ready", server, row, bundle };
   });
 }
 
 /**
- * The header the connector proxy sends for this member (07.4-11/12): the member's key, or their access token refreshed
- * first when it expires within a minute (serialized). Missing → `not_connected`; a dead grant, an issuer change or a
- * credential that does not open for this member → `needs_reconnect`; an authorization server outage →
- * `ConnectorTokenUnavailableError` (nothing cleared). Never log or return the result to a client.
+ * The header the connector proxy sends for this credential (07.4-11/12; the organization's since 07.14): the
+ * member's key, or the access token refreshed first when it expires within a minute (serialized). Missing →
+ * `not_connected`; a dead grant, an issuer change or a credential that does not open for this principal →
+ * `needs_reconnect`; an authorization server outage → `ConnectorTokenUnavailableError` (nothing cleared). Never log
+ * or return the result to a client.
  */
-export async function accessTokenFor(core: Core, p: ConnectionKey): Promise<AccessToken> {
-  const c = await current(core, p);
+export async function accessTokenFor(core: Core, p: CredentialKey): Promise<AccessToken> {
+  const store = storeOf(p);
+  const c = await current(core, store);
   if (c.kind === "refused") return { ok: false, reason: c.reason };
   if (c.bundle.kind === "secret" || fresh(c.bundle)) return headerFor(c.server, c.bundle);
-  return refreshSerialized(core, { ...p, connectionId: c.row.id }, null);
+  return refreshSerialized(core, store, c.row.id, null);
 }
 
 /**
@@ -556,11 +751,12 @@ export async function accessTokenFor(core: Core, p: ConnectionKey): Promise<Acce
  * token (a second forced refresh within the lock window reuses the result). A key has nothing to refresh: the same
  * header comes back, and the caller marks `needs_reconnect` (`upstream_unauthorized`) if it is refused again.
  */
-export async function forceRefresh(core: Core, p: ConnectionKey): Promise<AccessToken> {
-  const c = await current(core, p);
+export async function forceRefresh(core: Core, p: CredentialKey): Promise<AccessToken> {
+  const store = storeOf(p);
+  const c = await current(core, store);
   if (c.kind === "refused") return { ok: false, reason: c.reason };
   if (c.bundle.kind === "secret") return headerFor(c.server, c.bundle);
-  return refreshSerialized(core, { ...p, connectionId: c.row.id }, { staleToken: c.bundle.accessToken });
+  return refreshSerialized(core, store, c.row.id, { staleToken: c.bundle.accessToken });
 }
 
 // ---------------------------------------------------------------- statuses, use and disconnect
@@ -597,11 +793,12 @@ export async function touchConnection(tx: Tx, p: { userId: string; serverId: str
  */
 export async function disconnect(core: Core, p: ConnectionKey): Promise<{ revoked: boolean } | null> {
   const ctx = { organizationId: p.organizationId, userId: p.userId };
+  const store = storeOf(p);
   const found = await core.db.withTenant(ctx, async (tx) => {
     if (!(await perMemberServer(tx, p.serverId))) return null;
     const row = await ownConnection(tx, p.userId, p.serverId);
     if (!row) return null;
-    const bundle = await openBundle(tx, core, row, p.organizationId);
+    const bundle = await openBundle(tx, core, store, row);
     const clientSecret =
       bundle?.kind === "oauth"
         ? await clientSecretFor(tx, core, p.serverId, bundle.issuer, bundle.clientId)

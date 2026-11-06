@@ -10,6 +10,7 @@ import {
   join,
   ok,
   registerConnector,
+  registerOrgConnector,
   startConnectorsStack,
 } from "../../testing-connectors";
 import { activeShare } from "./index";
@@ -304,6 +305,8 @@ describe("organization B (WINDOWS #169)", () => {
           )
         ).rows,
       ]);
+    // An organization-account server of org A (07.14): org B reaches none of its routes either.
+    const orgDrive = await registerOrgConnector(s);
     const before = await snapshot();
     const cases: Record<string, () => Promise<void>> = {
       "GET /api/v1/connectors": async () => {
@@ -320,6 +323,9 @@ describe("organization B (WINDOWS #169)", () => {
       },
       "POST /api/v1/connectors/:p/probe": async () => {
         await fails(s.eve.request("POST", `/api/v1/connectors/${crm.id}/probe`), 404);
+      },
+      "POST /api/v1/connectors/:p/org-connection/connect": async () => {
+        await fails(s.eve.request("POST", `/api/v1/connectors/${orgDrive.id}/org-connection/connect`), 404);
       },
       "GET /api/v1/connectors/oauth/callback": async () => {
         // Org A's flow, completed with org B's session: refused and consumed.

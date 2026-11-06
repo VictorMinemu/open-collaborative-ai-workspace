@@ -1,5 +1,6 @@
 import type { ApiModule, Core } from "../../core";
 import { createPermissionService } from "../organization";
+import { registerOrgConnectionRoutes } from "./org-routes";
 import { registerConnectorRoutes } from "./routes";
 
 export {
@@ -37,6 +38,7 @@ export function createConnectorsModule(core: Core): ApiModule {
     name: "connectors",
     register(app) {
       registerConnectorRoutes(app, core, perms);
+      registerOrgConnectionRoutes(app, core, perms);
     },
   };
 }

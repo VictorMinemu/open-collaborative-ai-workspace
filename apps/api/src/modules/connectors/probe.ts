@@ -1,3 +1,4 @@
+import { rendersInCell } from "@ocw/contracts";
 import { mcpServers } from "@ocw/db";
 import { eq } from "drizzle-orm";
 import type { Core } from "../../core";
@@ -6,9 +7,9 @@ import { replaceServerTools } from "../mcp";
 import { listTools, McpUpstreamError } from "./mcp-client";
 
 /**
- * The API-side probe of a per-member connector (D-02): the cell never probes these servers, so the first member who
- * connects (or an admin with their own connection, `POST /connectors/:id/probe`) lists the tools with their own
- * credential, through the egress guard, and the catalog records names, flags and input schemas (`replaceServerTools`).
+ * The API-side probe of a proxied connector (07.4 D-02; 07.14 D-05): the cell never probes these servers, so the
+ * first member who connects, the admin who connects the organization's account, or an admin's Re-probe
+ * (`POST /connectors/:id/probe`) lists the tools with that credential, through the egress guard, and the catalog records names, flags and input schemas (`replaceServerTools`).
  * A failure sets the server's status to `error` with a coded detail; it never fails the member's connection.
  */
 export async function probeConnector(
@@ -21,7 +22,7 @@ export async function probeConnector(
     const [row] = await tx.select().from(mcpServers).where(eq(mcpServers.id, p.serverId)).limit(1);
     return row ?? null;
   });
-  if (!server?.url || server.authMode === "org_secret" || server.transport === "sandboxed-stdio") {
+  if (!server?.url || rendersInCell(server.authMode) || server.transport === "sandboxed-stdio") {
     return { ok: false, code: "not_probeable" };
   }
   const target = {
