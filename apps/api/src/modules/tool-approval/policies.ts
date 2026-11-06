@@ -1,7 +1,9 @@
 import {
   type ApprovableGroup,
+  type ConnectorAuthMode,
   Id,
   isApprovableTool,
+  isPerMemberMode,
   strictestMode,
   TOOL_APPROVAL_LIMITS,
   type ToolApprovalHistory,
@@ -48,7 +50,7 @@ export interface CatalogSourceLike {
   sourceKind: "mcp" | "plugin";
   sourceId: string;
   sourceName: string;
-  authMode?: string;
+  authMode?: ConnectorAuthMode;
   tools: ReadonlyArray<{ name: string; sideEffecting: boolean }>;
 }
 
@@ -251,7 +253,9 @@ export async function approvableCatalog(
     const safeName = safeOf.get(s.sourceId) ?? null;
     groups.push({
       source: {
-        kind: s.authMode && s.authMode !== "org_secret" ? "connector" : "mcp",
+        // 07.14 D-04, PD-09: only member modes are a member's connector; organization modes, like organization
+        // headers, are the organization's MCP server.
+        kind: s.authMode && isPerMemberMode(s.authMode) ? "connector" : "mcp",
         id: s.sourceId,
         name: s.sourceName,
         safeName: safeName && /^m[0-9a-f]{8}$/.test(safeName) ? safeName : null,
