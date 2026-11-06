@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { mcpServers, watchedRecords } from "@ocw/db";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   createFakeErpMcp,
@@ -22,6 +24,7 @@ import {
 } from "../../testing-connectors";
 import { callTool, markNeedsReconnect } from "../connectors";
 import { replaceServerTools } from "../mcp";
+import { compareAndSet, preflight } from "./write";
 
 /**
  * 07.6-07 (AUTO-04, D-04, D-07, P-13; Pattern 8, Pitfalls 8 and 9): watched records. A board card is linked to a record
@@ -1130,5 +1133,96 @@ describe("organization-account connectors (07.14)", () => {
     }
     await forceCheck(w.id);
     expect(["ok", "changed"]).toContain((await row(w.id)).last_status);
+  });
+
+  describe("write-back (compare-and-set) with the organization's account", () => {
+    let ww: Json;
+    const changes = { "/title": "Q3 report" } as const;
+
+    const cas = async () =>
+      compareAndSet(
+        core(),
+        {},
+        {
+          organizationId: s.orgA,
+          watchedRecordId: ww.id,
+          base: (await row(ww.id)).snapshot_hash as string,
+          requesterUserId: s.samId,
+          requesterName: "Sam",
+          agent: { id: opsId, displayName: "Ops helper" },
+          changes,
+        },
+      );
+
+    /** The watch's rules as the Agent Channel route decides them in its claim transaction. */
+    const rules = () =>
+      core().db.withTenant({ organizationId: s.orgA, userId: s.samId }, async (tx) => {
+        const [wr] = await tx.select().from(watchedRecords).where(eq(watchedRecords.id, ww.id));
+        const [server] = await tx.select().from(mcpServers).where(eq(mcpServers.id, drive.id));
+        if (!wr || !server) throw new Error("watch or server missing");
+        return preflight(tx, { w: wr, server, requesterUserId: s.samId, agentId: opsId, changes });
+      });
+
+    beforeAll(async () => {
+      const c = await humanCard(ordersId, "EXP-0052 Written back with the organization's account");
+      ww = await ok(
+        s.sam.request(
+          "POST",
+          "/api/v1/watched-records",
+          driveLink(c.messageId, { writeTool: "create_record" }),
+        ),
+        201,
+      );
+      expect(await drain("watched.check")).toBe(1);
+      expect((await row(ww.id)).last_status).toBe("ok");
+    });
+
+    it("a bot's write succeeds with the organization's token: no member connection or share", async () => {
+      expect(await rules()).toBeNull();
+      const before = await fakeStats(s);
+      expect(await cas()).toEqual({ kind: "written", recordId: "me" });
+      // Read, write (create_record needs the organization grant's records:write), read: all with the organization's
+      // token, which needed no refresh.
+      const after = await fakeStats(s);
+      expect(after.mcpCalls).toBe(before.mcpCalls + 3);
+      expect(after.tokenRequests).toEqual(before.tokenRequests);
+      expect(await memberRows()).toEqual({ connections: 0, shares: 0 });
+      const written = (await auditRows(s, s.orgA, ["watched_record.written"])).filter(
+        (a) => a.resource_id === ww.id,
+      );
+      expect(written).toHaveLength(1);
+      expect(written[0]).toMatchObject({ user_id: s.samId });
+    });
+
+    it("switched off for the organization: refused connector_error before any request", async () => {
+      await ok(s.victor.request("PATCH", `/api/v1/mcp-servers/${drive.id}`, { orgEnabled: false }));
+      try {
+        expect(await rules()).toBe("connector_error");
+        const before = await fakeStats(s);
+        expect(await cas()).toEqual({ kind: "refused", code: "connector_error" });
+        expect((await fakeStats(s)).mcpRequests).toBe(before.mcpRequests);
+      } finally {
+        await ok(s.victor.request("PATCH", `/api/v1/mcp-servers/${drive.id}`, { orgEnabled: true }));
+      }
+    });
+
+    it("the organization's connection needs reconnecting: refused connector_error, nothing sent upstream", async () => {
+      await markNeedsReconnect(core(), {
+        organizationId: s.orgA,
+        serverId: drive.id,
+        principal: "organization",
+        actingUserId: null,
+        code: "upstream_unauthorized",
+      });
+      expect((await orgConnectionRow(s, s.orgA, drive.id))?.status).toBe("needs_reconnect");
+      // Never "connect your own account": the organization's credential is an admin's to fix (D-08).
+      expect(await rules()).toBe("connector_error");
+      const before = await fakeStats(s);
+      expect(await cas()).toEqual({ kind: "refused", code: "connector_error" });
+      const after = await fakeStats(s);
+      expect(after.mcpRequests).toBe(before.mcpRequests);
+      expect(after.tokenRequests).toEqual(before.tokenRequests);
+      expect(await memberRows()).toEqual({ connections: 0, shares: 0 });
+    });
   });
 });
