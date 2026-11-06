@@ -310,6 +310,39 @@ export async function registerOrgConnector(
   );
 }
 
+/**
+ * The admin registers an organization client-credentials server (`org_client_credentials`, 07.14 D-03) on the fake's
+ * MCP URL, scopes empty unless told otherwise.
+ */
+export async function registerCcConnector(
+  s: ConnectorsStack,
+  extra: Json = {},
+  as: TestClient = s.victor,
+): Promise<Json> {
+  return ok(
+    as.request("POST", "/api/v1/mcp-servers", {
+      name: `Ledger ${randomUUID().slice(0, 6)}`,
+      transport: "streamable-http",
+      url: `${s.fakeBase}/mcp-oauth/mcp`,
+      authMode: "org_client_credentials",
+      ...extra,
+    }),
+  );
+}
+
+/**
+ * `PUT /connectors/:id/org-connection/client-credentials` as `as`, with the fake's pre-registered client-credentials
+ * client unless another body is given. Returns the raw response (`ok()` / `fails()` read it).
+ */
+export async function saveCc(
+  _s: ConnectorsStack,
+  as: TestClient,
+  serverId: string,
+  body: Json = { clientId: PRE_REGISTERED_CC, clientSecret: CC_SECRET },
+): Promise<Res> {
+  return as.request("PUT", `/api/v1/connectors/${serverId}/org-connection/client-credentials`, body);
+}
+
 /** POST org-connection/connect → authorize → callback with the same admin's session; returns the final redirect. */
 export async function connectOrgOAuth(
   s: ConnectorsStack,
