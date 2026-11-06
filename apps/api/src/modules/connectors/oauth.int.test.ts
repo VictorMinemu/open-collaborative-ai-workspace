@@ -11,6 +11,7 @@ import {
 import { createEgress, type Egress } from "../../lib/egress";
 import { CC_SECRET, PRE_REGISTERED_CC } from "../../testing-connectors";
 import { clientMetadataDocument } from "./client-metadata";
+import { type DiagnoseInput, diagnose } from "./diagnosis";
 import { callTool, listTools, McpUpstreamError } from "./mcp-client";
 import {
   buildAuthorization,
@@ -766,5 +767,153 @@ describe("client credentials against the fake (07.14 D-03, D-17)", () => {
       code: "discovery_failed",
       step: "issuer_mismatch",
     });
+  });
+});
+
+describe("diagnose against the fake (07.14 D-10, D-18)", () => {
+  const httpsUrls = connectorOAuthUrls("https://ocw.example.test");
+  const run = (over: Partial<DiagnoseInput> = {}, through: Egress = egress) =>
+    diagnose(through, {
+      serverUrl,
+      mode: "org_oauth",
+      urls: httpsUrls,
+      preRegistered: [],
+      storedClients: [],
+      allowCimd: true,
+      scopes: [],
+      ...over,
+    });
+  const statusOf = (r: Awaited<ReturnType<typeof diagnose>>) =>
+    Object.fromEntries(r.steps.map((s) => [s.step, s.status]));
+  /** The guard, counting every request made through it. */
+  const counting = () => {
+    const counter = { requests: 0 };
+    const through: Egress = {
+      fetch: (input, init, policy) => {
+        counter.requests += 1;
+        return egress.fetch(input, init, policy);
+      },
+      bound: (policy) => {
+        const bound = egress.bound(policy);
+        return ((input: string | URL | Request, init?: RequestInit) => {
+          counter.requests += 1;
+          return bound(input, init);
+        }) as typeof fetch;
+      },
+    };
+    return { through, counter };
+  };
+  const cc = { clientId: PRE_REGISTERED_CC, clientSecret: CC_SECRET };
+
+  it("sign-in, CIMD-capable: every step ok but token (skipped), the client method previewed, nothing registered", async () => {
+    const r = await run();
+    expect(statusOf(r)).toEqual({
+      public_url: "ok",
+      discovery: "ok",
+      issuer: "ok",
+      endpoints: "ok",
+      pkce: "ok",
+      client_registration: "ok",
+      token: "skipped",
+    });
+    expect(r).toMatchObject({
+      ok: true,
+      failure: null,
+      clientMethod: "cimd",
+      issuer: `${base}/mcp-oauth`,
+      tokenEndpoint: `${base}/mcp-oauth/token`,
+      redirectUri: httpsUrls.redirectUri,
+      clientMetadataUrl: httpsUrls.clientMetadataUrl,
+    });
+    const dcr = await run({ urls: loopbackUrls, mode: "per_member_oauth" });
+    expect(dcr.clientMethod).toBe("dcr");
+    expect((await stats()).registrations).toBe(0);
+  });
+
+  it("no_registration without a pre-registered client: client_registration fails, token skipped, nothing registered", async () => {
+    fake.setScenario({ no_registration: true });
+    const r = await run({ urls: loopbackUrls });
+    expect(r).toMatchObject({ ok: false, failure: "client_registration_unavailable", clientMethod: null });
+    expect(statusOf(r)).toMatchObject({ client_registration: "failed", token: "skipped", pkce: "ok" });
+    expect((await stats()).registrations).toBe(0);
+  });
+
+  it("no_pkce_meta: pkce fails; client_registration and token are skipped", async () => {
+    fake.setScenario({ no_pkce_meta: true });
+    const r = await run();
+    expect(r.failure).toBe("pkce_unsupported");
+    expect(statusOf(r)).toMatchObject({ pkce: "failed", client_registration: "skipped", token: "skipped" });
+  });
+
+  it("issuer_mismatch_meta: issuer fails and every later step is skipped", async () => {
+    fake.setScenario({ issuer_mismatch_meta: true });
+    const r = await run();
+    expect(r.failure).toBe("issuer_mismatch");
+    expect(statusOf(r)).toEqual({
+      public_url: "ok",
+      discovery: "ok",
+      issuer: "failed",
+      endpoints: "skipped",
+      pkce: "skipped",
+      client_registration: "skipped",
+      token: "skipped",
+    });
+  });
+
+  it("public_url: no OAuth address or a loopback redirect behind another page origin fails before any request", async () => {
+    const { through, counter } = counting();
+    const lan = await run({ urls: connectorOAuthUrls("http://ocw.lan:4290") }, through);
+    expect(lan).toMatchObject({ ok: false, failure: "https_required" });
+    const tunnel = await run(
+      { urls: connectorOAuthUrls("http://localhost:4000"), pageOrigin: "https://ocw.example.com" },
+      through,
+    );
+    expect(tunnel.failure).toBe("https_required");
+    expect(statusOf(tunnel).public_url).toBe("failed");
+    expect(counter.requests).toBe(0);
+
+    const local = await run({ urls: loopbackUrls, pageOrigin: "http://localhost:3000" });
+    expect(statusOf(local).public_url).toBe("ok");
+    expect(local.ok).toBe(true);
+  });
+
+  it("client credentials: a real grant whose token is dropped; wrong secret, unknown scope and an untrusted URL fail", async () => {
+    const good = await run({ mode: "org_client_credentials", cc });
+    expect(statusOf(good)).toEqual({
+      public_url: "skipped",
+      discovery: "ok",
+      issuer: "ok",
+      endpoints: "ok",
+      pkce: "skipped",
+      client_registration: "skipped",
+      token: "ok",
+    });
+    expect(good).toMatchObject({ ok: true, clientMethod: null, tokenEndpoint: `${base}/mcp-oauth/token` });
+    expect((await stats()).tokenRequests.client_credentials).toBe(1);
+    const issued = fake.issuedTokens().access;
+    expect(issued.length).toBeGreaterThan(0);
+
+    const wrong = await run({ mode: "org_client_credentials", cc: { ...cc, clientSecret: "wrong-secret" } });
+    expect(wrong).toMatchObject({ ok: false, failure: "token_exchange_failed" });
+    expect(statusOf(wrong).token).toBe("failed");
+
+    const scope = await run({ mode: "org_client_credentials", cc, scopes: ["unknown"] });
+    expect(scope.failure).toBe("scope_rejected");
+
+    for (const r of [good, wrong, scope]) {
+      const text = JSON.stringify(r);
+      expect(text).not.toContain(CC_SECRET);
+      for (const token of fake.issuedTokens().access) expect(text).not.toContain(token);
+    }
+
+    fake.reset();
+    const untrusted = await run({
+      serverUrl: `${base}/no-prm/mcp`,
+      mode: "org_client_credentials",
+      cc: { ...cc, tokenEndpoint: `http://127.0.0.1:${port}/mcp-oauth/token` },
+    });
+    expect(untrusted).toMatchObject({ ok: false, failure: "token_endpoint_untrusted" });
+    expect(statusOf(untrusted)).toMatchObject({ endpoints: "failed", token: "skipped" });
+    expect((await stats()).tokenRequests.client_credentials).toBe(0);
   });
 });
