@@ -214,6 +214,10 @@ function trusted(endpoint: string | undefined, mcpOrigin: string): boolean {
   return u.protocol === "https:" || (u.protocol === "http:" && u.origin === mcpOrigin);
 }
 
+/** `trusted()` for callers that check an admin-entered endpoint before using it (the Test sign-in, 07.14 D-10). */
+export const isTrustedEndpoint = (endpoint: string, mcpOrigin: string): boolean =>
+  trusted(endpoint, mcpOrigin);
+
 const stripSlash = (s: string) => s.replace(/\/+$/u, "");
 
 /** RFC 7009 endpoint: an RFC 8414 field the SDK's OIDC metadata type does not declare. */
