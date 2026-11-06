@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   assertNoGlobalFetch,
@@ -13,6 +14,7 @@ import {
   registerOrgConnector,
   startConnectorsStack,
 } from "../../testing-connectors";
+import { markNeedsReconnect, orgConnectionAad } from "../connectors";
 
 /**
  * 07.14-08 (D-04, D-05, D-07, D-08, D-13; COA-01, COA-03, COA-05): the connector proxy with the organization's account.
@@ -299,5 +301,183 @@ describe("ocw_connector_list and per-tool approvals on the organization's accoun
     expect(listed(r)).toMatchObject({ status: "not_connected" });
     expect((await connectOrgOAuth(s, s.victor, server.id)).status).toBe(302);
     expect(listed(await list(await turnOf(s.alex, alexDm)))).toMatchObject({ status: "connected" });
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: the organization's failure paths
+
+/** Every card Scout posted in a conversation (a member's connect card would be one). */
+const cardCount = async (conversationId: string) =>
+  (
+    await s.su.query(
+      `select count(*)::int as n from app.message_cards c join app.messages m on m.id = c.message_id
+        where m.conversation_id = $1 and c.agent_id = $2`,
+      [conversationId, scoutId],
+    )
+  ).rows[0].n as number;
+
+const toolCallsOf = async (eventId: string) =>
+  (
+    await s.su.query(
+      "select decision, reason, status from app.agent_tool_calls where event_id = $1 order by created_at",
+      [eventId],
+    )
+  ).rows as Json[];
+
+const NEEDS_RECONNECT = "The organization's connection to Acme Drive needs to be reconnected by an admin.";
+
+/** Replaces the organization's sealed access token with one the provider never issued (expiry unchanged). */
+async function staleOrgAccessToken(): Promise<string> {
+  const row = await orgConnectionRow(s, s.orgA, server.id);
+  const bundle = await orgBundleOf(s, s.orgA, server.id);
+  if (!row?.secret_id || !bundle) throw new Error("no organization bundle");
+  const stale = `fakeat_stale_${randomUUID()}`;
+  const { core } = s.stack.built;
+  await core.db.withTenant({ organizationId: s.orgA }, (tx) =>
+    core.secrets.replaceSealed(
+      tx,
+      row.secret_id,
+      JSON.stringify({ ...bundle, accessToken: stale }),
+      orgConnectionAad(s.orgA, server.id),
+    ),
+  );
+  return stale;
+}
+
+describe("the organization's failures: the admin's sentence, never a connect card", () => {
+  it("an org server never connected: 409 not_connected with the organization sentence, no card, nothing sent", async () => {
+    const lone = await registerOrgConnector(s, { name: "Team Wiki" });
+    // Probed by hand (a probe needs the organization's token): the catalog and a ready server.
+    await s.su.query(
+      `insert into app.mcp_server_tools (organization_id, server_id, name, openclaw_name, read_only) values ($1, $2, 'whoami', $3, true)`,
+      [s.orgA, lone.id, `${lone.safeName}__whoami`],
+    );
+    await s.su.query("update app.mcp_servers set status = 'ready' where id = $1", [lone.id]);
+    await grant([{ sourceId: lone.id, tool: `${lone.safeName}__whoami` }]);
+
+    const ev = await turnOf(s.alex, alexDm);
+    expect(ev.turn.tools).toContain(`${lone.safeName}__whoami`);
+    const cards = await cardCount(alexDm);
+    const before = await fakeStats(s);
+    const r = await call(ev, "whoami", {}, lone.safeName);
+    expect(r.status, JSON.stringify(r.body)).toBe(409);
+    expect(r.body?.error).toMatchObject({
+      code: "not_connected",
+      message:
+        "The organization hasn't connected Team Wiki yet. An admin can connect it in Settings › MCP servers.",
+    });
+    expect(await cardCount(alexDm)).toBe(cards);
+    const after = await fakeStats(s);
+    expect(after.mcpRequests).toBe(before.mcpRequests);
+    expect(after.tokenRequests).toEqual(before.tokenRequests);
+    expect(await toolCallsOf(ev.eventId)).toEqual([
+      expect.objectContaining({ decision: "denied", reason: "not_connected" }),
+    ]);
+    const turn = (
+      await s.su.query("select tainted, tool_calls from app.agent_turns where event_id = $1", [ev.eventId])
+    ).rows[0];
+    expect(turn).toEqual({ tainted: false, tool_calls: 0 });
+    expect((await auditRows(s, s.orgA, ["bot.tool_call"])).at(-1)).toMatchObject({
+      user_id: s.alexId,
+      metadata: { reason: "not_connected", credential: "organization" },
+    });
+    expect(await memberConnectionsOf(lone.id)).toBe(0);
+  });
+
+  it("an organization connection marked needs_reconnect: 409 with the admin sentence, no card, nothing sent", async () => {
+    await markNeedsReconnect(s.stack.built.core, {
+      organizationId: s.orgA,
+      serverId: server.id,
+      principal: "organization",
+      actingUserId: s.victorId,
+      code: "invalid_grant",
+    });
+    const ev = await turnOf(s.sam, opsId, true);
+    const cards = await cardCount(opsId);
+    const before = await fakeStats(s);
+    const r = await call(ev);
+    expect(r.status, JSON.stringify(r.body)).toBe(409);
+    expect(r.body?.error).toMatchObject({ code: "needs_reconnect", message: NEEDS_RECONNECT });
+    expect(await cardCount(opsId)).toBe(cards);
+    expect((await fakeStats(s)).mcpRequests).toBe(before.mcpRequests);
+    expect((await connectOrgOAuth(s, s.victor, server.id)).status).toBe(302);
+  });
+
+  it("a dead grant: one refresh attempt, then needs_reconnect for the organization, audited, no card", async () => {
+    const ev = await turnOf(s.alex, alexDm);
+    const cards = await cardCount(alexDm);
+    s.fake.setScenario({ revoke_all: true });
+    const before = await fakeStats(s);
+    const r = await call(ev);
+    expect(r.status, JSON.stringify(r.body)).toBe(409);
+    expect(r.body?.error).toMatchObject({ code: "needs_reconnect", message: NEEDS_RECONNECT });
+    expect((await fakeStats(s)).tokenRequests.refresh_token).toBe(before.tokenRequests.refresh_token + 1);
+    expect((await orgConnectionRow(s, s.orgA, server.id))?.status).toBe("needs_reconnect");
+    expect((await auditRows(s, s.orgA, ["connector.org_needs_reconnect"])).at(-1)).toMatchObject({
+      metadata: { serverId: server.id },
+    });
+    expect(await cardCount(alexDm)).toBe(cards);
+    expect(await toolCallsOf(ev.eventId)).toEqual([
+      expect.objectContaining({ decision: "allowed", status: "blocked" }),
+    ]);
+    expect((await auditRows(s, s.orgA, ["bot.tool_call.completed"])).at(-1)?.metadata).toMatchObject({
+      status: "blocked",
+      reason: "needs_reconnect",
+      credential: "organization",
+    });
+    s.fake.setScenario({});
+    expect((await connectOrgOAuth(s, s.victor, server.id)).status).toBe(302);
+  });
+
+  it("a 401 again after the forced refresh: needs_reconnect (upstream_unauthorized), audited, the admin sentence", async () => {
+    const ev = await turnOf(s.alex, alexDm);
+    s.fake.setScenario({ reject_access_tokens: true });
+    const before = await fakeStats(s);
+    const r = await call(ev);
+    expect(r.status, JSON.stringify(r.body)).toBe(409);
+    expect(r.body?.error).toMatchObject({ code: "needs_reconnect", message: NEEDS_RECONNECT });
+    expect((await fakeStats(s)).tokenRequests.refresh_token).toBe(before.tokenRequests.refresh_token + 1);
+    expect(await orgConnectionRow(s, s.orgA, server.id)).toMatchObject({
+      status: "needs_reconnect",
+      last_error: "upstream_unauthorized",
+    });
+    expect((await auditRows(s, s.orgA, ["connector.org_needs_reconnect"])).at(-1)).toMatchObject({
+      metadata: { serverId: server.id, code: "upstream_unauthorized" },
+    });
+    s.fake.setScenario({});
+    expect((await connectOrgOAuth(s, s.victor, server.id)).status).toBe(302);
+  });
+
+  it("a token the provider rejects once: one forced refresh, one retry, success with the organization's grant", async () => {
+    const stale = await staleOrgAccessToken();
+    const ev = await turnOf(s.alex, alexDm);
+    const before = await fakeStats(s);
+    const r = await call(ev);
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(JSON.parse(r.body?.content as string).subject).toBe(await orgSubjectOf(server.id));
+    const after = await fakeStats(s);
+    expect(after.tokenRequests.refresh_token).toBe(before.tokenRequests.refresh_token + 1);
+    expect(after.mcpCalls).toBe(before.mcpCalls + 1);
+    expect((await orgBundleOf(s, s.orgA, server.id))?.accessToken).not.toBe(stale);
+    expect((await orgConnectionRow(s, s.orgA, server.id))?.status).toBe("connected");
+  });
+
+  it("insufficient_scope: an error result with the organization copy, never a token", async () => {
+    const ev = await turnOf(s.alex, alexDm);
+    s.fake.setScenario({ insufficient_scope: true });
+    const r = await call(ev);
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body).toMatchObject({ isError: true, truncated: false });
+    const content = r.body?.content as string;
+    expect(content).toContain("the organization's account is missing a permission it needs");
+    expect(content).toContain("records:write");
+    expect(content).toContain("An admin can reconnect it in Settings › MCP servers.");
+    expect(content).not.toContain("Settings › Connections");
+    expect(content).not.toMatch(/fakeat_|fakert_|Bearer/u);
+    expect((await auditRows(s, s.orgA, ["bot.tool_call.completed"])).at(-1)?.metadata).toMatchObject({
+      status: "error",
+      reason: "insufficient_scope",
+      credential: "organization",
+    });
   });
 });

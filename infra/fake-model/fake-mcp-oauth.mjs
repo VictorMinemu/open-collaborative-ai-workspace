@@ -333,7 +333,7 @@ export function createFakeMcpOAuth(opts = {}) {
 
   /** The grant behind a bearer for this resource, or null when unknown, expired, revoked or for another one. */
   function grantOf(token, o) {
-    if (scenario.revoke_all) return null;
+    if (scenario.revoke_all || scenario.reject_access_tokens) return null;
     const at = accessTokens.get(token);
     if (!at || at.exp <= Date.now()) return null;
     const fam = families.get(at.familyId);

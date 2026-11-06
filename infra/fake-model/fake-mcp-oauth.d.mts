@@ -43,6 +43,9 @@ export interface FakeMcpOAuthScenario {
   expires_in?: number;
   /** Revokes every grant issued so far and rejects every token while set. */
   revoke_all?: boolean;
+  /** Every access token is refused at the MCP endpoint (401 `invalid_token`) while set, but no grant is revoked: a
+   * refresh still succeeds and its new token is refused too (07.14-08: the second 401 after a forced refresh). */
+  reject_access_tokens?: boolean;
   /** Delays each MCP `tools/call` by this many milliseconds. */
   slow_mcp_ms?: number;
   /** The PRM names the second authorization server (`<base>/mcp-oauth/alt`). */
