@@ -219,7 +219,7 @@ function Step({
 }) {
   const id = useId();
   return (
-    <section aria-labelledby={id} className="grid gap-2.5">
+    <section aria-labelledby={id} className="grid min-w-0 grid-cols-1 gap-2.5">
       <div className="grid gap-0.5">
         <div className="flex min-h-8 items-center justify-between gap-3">
           <h3 id={id} className="font-semibold text-sm tracking-tight">
@@ -480,14 +480,14 @@ export function NewSessionDialog({
           {/* Phones and tablets: one scrolling column. Desktop: where on the left, how and who on the right, both in view. */}
           <div
             className={cn(
-              "scrollbar-thin min-h-0 flex-1 overflow-y-auto",
+              "scrollbar-thin min-h-0 flex-1 overflow-x-hidden overflow-y-auto",
               !empty && "lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.08fr)] lg:overflow-hidden",
             )}
           >
             {/* 1. Where: the repository, which names the computer it runs on */}
             <div
               className={cn(
-                "grid content-start px-5 pt-4 pb-4 lg:pb-6",
+                "grid min-w-0 grid-cols-1 content-start px-5 pt-4 pb-4 lg:pb-6",
                 !empty && "scrollbar-thin lg:overflow-y-auto lg:border-r lg:bg-muted/25 lg:pt-5",
               )}
             >
@@ -544,7 +544,7 @@ export function NewSessionDialog({
             </div>
 
             {empty ? null : (
-              <div className="scrollbar-thin grid content-start gap-7 px-5 pt-2 pb-6 lg:overflow-y-auto lg:pt-5">
+              <div className="scrollbar-thin grid min-w-0 grid-cols-1 content-start gap-7 px-5 pt-2 pb-6 lg:overflow-y-auto lg:pt-5">
                 {/* 2. Which agent, and how it works */}
                 <Step title="Agent">
                   <div
@@ -668,7 +668,10 @@ export function NewSessionDialog({
                       />
                     </button>
                     {settingsOpen ? (
-                      <div id="new-session-settings" className="grid gap-5 border-t px-3 pt-4 pb-3">
+                      <div
+                        id="new-session-settings"
+                        className="grid grid-cols-1 gap-5 border-t px-3 pt-4 pb-3"
+                      >
                         <div className="grid gap-2">
                           <div className="grid gap-3 sm:grid-cols-2">
                             <div className="grid gap-1.5">
@@ -823,13 +826,13 @@ export function NewSessionDialog({
 
                 {/* 3. Who sees it (the draft audience, applied at start) */}
                 {project && audience ? (
-                  <section aria-label="Visibility" className="-my-2">
+                  <section aria-label="Visibility" className="-my-2 min-w-0">
                     <NewSessionVisibilityLine project={project} value={audience} onChange={setAudience} />
                   </section>
                 ) : null}
 
                 {/* 4. What to do first */}
-                <section className="grid gap-2">
+                <section className="grid min-w-0 grid-cols-1 gap-2">
                   <Label htmlFor="first-prompt" className="text-sm">
                     First prompt <span className="font-normal text-muted-foreground">(optional)</span>
                   </Label>

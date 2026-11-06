@@ -214,6 +214,17 @@ test("new session: grouped repositories, one 'Visible to' line, a draft choice a
       // The whole panel (owner feedback 2026-11-06): 44 px targets and no sideways scroll on a phone.
       await expectTouchTargets(page, '[data-testid="new-session-dialog"]');
       await expectNoSidewaysScroll(page, "new-session dialog (panel)");
+      // Nor inside the sheet: a long device name in "Visible to" once widened its column past the screen, pushing
+      // the Model list off to the side where the backdrop took the tap.
+      expect(
+        await dialog.evaluate((el) => {
+          const right = el.getBoundingClientRect().right;
+          return [...el.querySelectorAll<HTMLElement>("*")]
+            .filter((x) => x.getBoundingClientRect().right > right + 1)
+            .map((x) => `${x.tagName}.${String(x.className).slice(0, 60)}`);
+        }),
+        "nothing in the sheet is wider than the screen",
+      ).toEqual([]);
     }
     // The footer says what the session starts on; Start is the one primary action.
     await expect(dialog.getByTestId("start-session")).toBeEnabled();
