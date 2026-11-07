@@ -967,6 +967,41 @@ The demo has no real provider: the automated tests use the fake OAuth MCP server
 5. **Client credentials** (if a provider gives you a client ID and secret): the same with **Authentication › Client
    credentials**: Test sign-in, Save (the row turns *Ready* with *Client …*), a member's bot uses a tool, Disconnect.
 
+## Bots read attachments (Phase 07.15)
+
+Phase 07.15 (ADR-0037). Bots now read the files people attach where they talk to them:
+
+- **Paperclip in bot DMs.** Personal and team bot DMs take files like a DM with a person (same limits, same upload).
+  Channels, threads and AI chats with personas already did.
+- **What a bot reads.** Text, code, CSV, JSON and PDFs with a text layer as text (up to 64 000 characters per file and
+  200 000 per turn, 20 reads per turn); images only when the bot's model takes images. Other files (archives, Office
+  documents) can be copied into the bot's sandbox, where its tools open them. A file the bot cannot read is named on
+  its turn with a reason, so it tells you why.
+- **Who sees what.** A bot reads only files of the conversation it answers, as the person who asked, and in a channel
+  only files of the same thread. A personal bot's sandbox takes files only from conversations you read; a team bot's
+  sandbox never takes files from one member's DM, because others share that sandbox.
+- **Safety.** A file is untrusted: after a read, the bot cannot save memory or change data in that turn without your
+  approval. Each read (`bot.attachment_read`) and import (`bot.attachment_imported`) has an `app.audit_events` row with
+  ids and counts only, never the file's name or content.
+- **Not yet:** OCR for scanned PDFs, audio and video, images for bots on a ChatGPT plan, bots attaching files.
+
+The demo has no real model: the automated tests use a fake model and a real OpenClaw cell.
+
+**Owner check** (never run by an agent: it needs a real model; record each result in
+`.planning/phases/07.15-bots-read-attachments/07.15-VALIDATION.md` › Manual-Only Verifications). On
+`https://ocw.autofy.ing`:
+
+1. **Image and PDF in your personal bot's DM.** Attach a photo and a short PDF and ask what they show. The answer
+   describes both.
+2. **A model that cannot see images.** With a bot on a text-only or ChatGPT-plan model, attach a photo and ask about
+   it. The bot says it cannot see images.
+3. **A team bot in a channel thread.** In a channel, reply in a thread with a CSV attached, mention a team bot and ask
+   for a total. The answer uses the CSV's numbers.
+4. **Into the sandbox.** Ask your personal bot to copy a CSV into its sandbox and count its rows. It answers with the
+   count.
+5. **Audit.** The `bot.attachment_read` rows show ids and counts, never the file's name or content:
+   `select action, result, metadata from app.audit_events where action like 'bot.attachment_%' order by occurred_at desc limit 5;`
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -991,8 +1026,7 @@ The demo has no real provider: the automated tests use the fake OAuth MCP server
 ## Known limits (MVP 0)
 
 Desktop app is ad-hoc signed (no notarization); its main window loads the web app URL, and clicking a chat
-notification may not focus it until the app is code-signed. Bots cannot read attachments yet (files are hidden in
-bot DMs). Full
+notification may not focus it until the app is code-signed. Full
 `docker compose up` (with API/web images) is defined but was not re-run on this machine because the
 Docker disk is full; the demo runs API/web natively. See
 `.planning/phases/01-mvp-0-multiplayer-ai-chat-slice/01-DEVIATIONS.md`.

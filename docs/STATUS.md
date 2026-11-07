@@ -131,3 +131,15 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   proxy and the Cloudflare CIMD hint), never registers and never stores; the last failure shows on the server row.
   Mode questions go through shared predicates in `packages/contracts` (Semgrep `ocw.raw-auth-mode`) (ADR-0036,
   docs/self-hosting/connectors.md).
+- **07.15 Bots read attachments:** the paperclip is on in personal and team bot DMs (same limits and presigned upload
+  as a person DM). A bot turn lists the attachments of the messages it reads as metadata only (id, name, type, size,
+  kind, per-bot access and a note; at most 20, newest history first), and a turn with readable files gets the
+  turn-scoped `ocw_attachment_read`, which posts only the turn's ids to `POST /attachments/read`. The API re-decides
+  each read as the asker (`liveTurn` and one row rule shared with `ocw_sandbox_import`: live, ready, linked, same
+  conversation, same thread in channels, never a Work Zone image) and answers text in a labelled untrusted block
+  (256 KiB range, BOM/UTF-8/UTF-16/windows-1252, 64 000 characters per file, 200 000 and 20 reads per turn on their own
+  `agent_turns` counters, outside the cap of 8), an image as a tool-result image part (rendition or a ≤ 5 MiB
+  original, image-capable models only) or PDF text from `unpdf@1.9.1` in a bounded worker (100 pages, 10 s, 256 MB,
+  2 at a time, no eval); nothing is cached. Refusals are closed codes with fixed sentences; a read taints the turn;
+  `bot.attachment_read` and `bot.attachment_imported` audit ids and counts, never names or content. Other files go to
+  the sandbox under F-8. A persona-only message in a shared AI chat meets the chat model's attachment gate (ADR-0037).
