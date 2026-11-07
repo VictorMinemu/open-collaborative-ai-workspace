@@ -1,8 +1,12 @@
 # Woodpecker port of the `e2e` job in .github/workflows/ci.yml, one workflow per viewport, each on its own fresh stack.
 # Postgres/Redis/Garage come from compose; the fake, the API and the web run inside the `e2e` step (background
-# processes end with the step). Host networking puts that step in dind's network namespace, where the published
-# compose ports live. The checkout is copied under /home/ocw-ci so compose bind mounts (./infra/garage/...) resolve
-# on the dind daemon (see verify.yaml). Failure reports are kept in /home/ocw-ci/artifacts for 7 days.
+# processes end with the step). The step keeps its own network namespace (no host networking): in the dind's, every
+# container another workflow starts or stops (testcontainers in verify, sandbox networks, step containers) adds or
+# removes an address, and Chromium answers each address change by failing pending connects with
+# net::ERR_NETWORK_CHANGED (no switch turns that off on Linux). The step joins the compose network instead and
+# infra/ci/tcp-forward.mjs serves the slot's postgres/redis/Garage ports on its own loopback, so every .env URL stays.
+# The checkout is copied under /home/ocw-ci so compose bind mounts (./infra/garage/...) resolve on the dind daemon
+# (see verify.yaml). Failure reports are kept in /home/ocw-ci/artifacts for 7 days.
 # Both viewports run at once next to the other workflows (infra/ci/README.md): each is its own slot e2e-<viewport>,
 # with its own compose project, workspace and port block PORT_BLOCK (web NN00, API NN01, postgres NN02, redis NN03,
 # Garage NN04 from `pnpm setup:env --ports`, the fake on NN91), which infra/ci/slots.test.mjs keeps disjoint.
@@ -82,7 +86,7 @@ steps:
   - name: e2e
     image: ocw-ci:${CI_COMMIT_SHA}
     pull: false
-    network_mode: host
+    # No `network_mode: host` (see the header): Chromium must not share the dind's network namespace.
     volumes: [*docker_sock, *shared]
     environment: *env
     commands:
@@ -93,6 +97,12 @@ steps:
       # and the API reaches it on 127.0.0.1:${PORT_BLOCK}04.
       - pnpm setup:env --ports ${PORT_BLOCK} --project "$${COMPOSE_PROJECT_NAME}"
       - docker compose up -d --wait postgres redis garage
+      # Compose publishes those on the dind's loopback, outside this namespace: join the stack's network (Woodpecker
+      # keeps Docker's default hostname, the container id) and serve the same ports on this step's loopback.
+      - docker network connect "$${COMPOSE_PROJECT_NAME}_default" "$$(hostname)"
+      - (nohup node infra/ci/tcp-forward.mjs 127.0.0.1:${PORT_BLOCK}02=postgres:5432 127.0.0.1:${PORT_BLOCK}03=redis:6379 127.0.0.1:${PORT_BLOCK}04=garage:3900 > forward.log 2>&1 &)
+      - for i in $$(seq 1 20); do grep -q "tcp-forward. ready" forward.log && break; sleep 1; done
+      - cat forward.log && grep -q "tcp-forward. ready" forward.log
       - pnpm db:migrate
       # Fake model, MCP, ClawHub and sandboxd (loopback, no internet).
       # The fake OAuth server pre-registers the e2e client with this stack's callback (the API listens on
@@ -116,7 +126,7 @@ steps:
     environment: *env
     commands:
       - cd "$${W}"
-      - tail -n 200 api.log web.log fake.log || true
+      - tail -n 200 api.log web.log fake.log forward.log || true
       - docker compose logs --tail 50 garage || true
       - out="/home/ocw-ci/artifacts/$${CI_PIPELINE_NUMBER}-e2e-${PROJECT}" && mkdir -p "$${out}"
       - cp -r e2e/playwright-report e2e/test-results "$${out}/" 2>/dev/null || true
