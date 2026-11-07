@@ -20,6 +20,20 @@ import { type AttachmentPart, attachmentKey, createObjectStorage, type ObjectSto
 import { createAttachmentSweeper } from "./sweeper";
 
 export type { AttachmentScope, AttachmentScopes, ScopedKind } from "./attachments";
+export { EXTRACT_LIMITS } from "./extract/limits";
+export {
+  type AgentRead,
+  type AgentReadCaps,
+  type ExtractRefusal,
+  readAttachmentForAgent,
+} from "./extract/read";
+export {
+  type AgentReadKind,
+  attachmentKindOf,
+  cutChars,
+  decodeText,
+  TEXT_EXTENSIONS,
+} from "./extract/text";
 export { type AttachmentRow, toAttachment } from "./model";
 export { fitImageWithin } from "./renditions";
 export {

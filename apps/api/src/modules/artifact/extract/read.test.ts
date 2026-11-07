@@ -138,12 +138,17 @@ describe("readAttachmentForAgent: text", () => {
   it("answers unavailable when the store fails", async () => {
     const txt = row({ filename: "a.txt", declaredType: "text/plain" });
     const { storage } = memoryStorage(txt, {}, { rangeGet: new Error("connect ECONNREFUSED secret-text") });
-    expect(await readAttachmentForAgent(storage, txt, CAPS)).toEqual({ kind: "refused", code: "unavailable" });
+    expect(await readAttachmentForAgent(storage, txt, CAPS)).toEqual({
+      kind: "refused",
+      code: "unavailable",
+    });
   });
 
   it("refuses bytes with a NUL in the first 8 KiB as unsupported_type", async () => {
     const bin = row({ filename: "data.txt", declaredType: "text/plain", sizeBytes: 6 });
-    const { storage } = memoryStorage(bin, { original: new Uint8Array([0x61, 0x00, 0x00, 0x62, 0x63, 0x64]) });
+    const { storage } = memoryStorage(bin, {
+      original: new Uint8Array([0x61, 0x00, 0x00, 0x62, 0x63, 0x64]),
+    });
     expect(await readAttachmentForAgent(storage, bin, CAPS)).toEqual({
       kind: "refused",
       code: "unsupported_type",
