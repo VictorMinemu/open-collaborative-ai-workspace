@@ -38,7 +38,11 @@ ids="$({
   docker volume ls --format '{{.Name}} {{.Name}}'
 } | ours | sort -u)"
 [ -n "$ids" ] && docker volume rm -f $ids >/dev/null 2>&1
-ids="$(docker image ls --filter label=ocw.namespace --format '{{.ID}} {{.Label "ocw.namespace"}}' | ours | sort -u)"
+# An image row has no .Label field (`docker image ls --format` fails on it at the first row): the namespace of each
+# labelled image is read with `docker image inspect`, one image at a time (one gone since the listing is skipped).
+ids="$(for id in $(docker image ls -q --filter label=ocw.namespace | sort -u); do
+  docker image inspect --format '{{.Id}} {{index .Config.Labels "ocw.namespace"}}' "$id" 2>/dev/null
+done | ours | sort -u)"
 [ -n "$ids" ] && docker image rm -f $ids >/dev/null 2>&1
 echo "slot-reset: objects of $PREFIX removed (compose project, ocw.namespace or name $PREFIX or $PREFIX-*)"
 exit 0

@@ -18,7 +18,7 @@
 // any evaluated value: a page is seen only through `serializeSnapshot` (redact.mjs) over the accessibility tree, and
 // through screenshots with masked fields (capture.mjs). Facts the redaction needs (input type, autocomplete,
 // -webkit-text-security, labels; never a value) and the human-typed marks are read in an isolated world
-// (`WORLD`) that page scripts cannot see.
+// (`WORLD`, world.mjs) that page scripts cannot see.
 //
 // Env: OCW_BROWSER_EXECUTABLE (Chromium path), OCW_BROWSER_PROXY (empty = no proxy), OCW_BROWSER_CHROMIUM_SANDBOX
 // (on | off; off is refused under gVisor), OCW_BROWSER_RUNTIME (runsc | runc, from sandboxd; gVisor is also detected).
@@ -29,6 +29,7 @@ import { basename, join } from "node:path";
 import { chromium } from "playwright-core";
 import { maskedScreenshot, startScreencast } from "./capture.mjs";
 import { backendIdFromRef, isSensitive, isSensitiveField, serializeSnapshot } from "./redact.mjs";
+import { createWorld, replaceWorldScript } from "./world.mjs";
 
 // ---------------------------------------------------------------- limits (mirror BROWSER_LIMITS / SANDBOX_LIMITS)
 
@@ -50,7 +51,6 @@ const LIMITS = {
   screenshotMaxBytes: 5_242_880,
 };
 const DOWNLOAD_DIR = "/tmp/downloads";
-const WORLD = "__ocw_agent_world";
 const FRAME_JPEG = 0;
 const FRAME_JSON = 1;
 
@@ -90,91 +90,14 @@ const fail = (code, message) => {
   throw new OpError(code, message);
 };
 
-// ---------------------------------------------------------------- the isolated world
+// ---------------------------------------------------------------- the isolated world (world.mjs)
 
-/*
- * Installed in every document of a context's page, in `WORLD` only. It marks the editable elements that receive a
- * trusted input event while a takeover is active (window capture listeners, registered before any page script), and
- * reads the DOM facts the redaction needs. It never reads an element's value.
- */
-const worldScript = (active) => `(() => {
-  if (globalThis.__ocw) { globalThis.__ocw.setActive(${active ? "true" : "false"}); return; }
-  const marked = new Set();
-  let active = ${active ? "true" : "false"};
-  const editable = (el) => !!el && el.nodeType === 1 &&
-    (el.localName === "input" || el.localName === "textarea" || el.localName === "select" || el.isContentEditable);
-  const mark = (e) => {
-    if (!active || !e.isTrusted) return;
-    const path = typeof e.composedPath === "function" ? e.composedPath() : [];
-    for (const el of [path[0], e.target]) if (editable(el)) marked.add(el);
-  };
-  for (const t of ["keydown", "beforeinput", "input", "change", "paste", "drop", "compositionend"]) {
-    window.addEventListener(t, mark, true);
-  }
-  const collect = (root, out) => {
-    for (const el of root.querySelectorAll("*")) {
-      if (editable(el)) out.push(el);
-      if (el.shadowRoot) collect(el.shadowRoot, out);
-    }
-    return out;
-  };
-  const text = (s) => (typeof s === "string" ? s.replace(/\\s+/g, " ").trim().slice(0, 200) : null);
-  const facts = (el) => {
-    const cs = getComputedStyle(el);
-    const tag = el.localName;
-    return {
-      tag,
-      type: tag === "input" ? String(el.type || "text").toLowerCase() : tag === "textarea" || tag === "select" ? tag : "contenteditable",
-      autocomplete: el.getAttribute("autocomplete"),
-      textSecurity: cs.getPropertyValue("-webkit-text-security") || "none",
-      label: text(Array.from(el.labels || []).map((l) => l.textContent).join(" ")),
-      attrName: el.getAttribute("name"),
-      attrId: el.id || null,
-      placeholder: el.getAttribute("placeholder"),
-      ariaLabel: el.getAttribute("aria-label"),
-    };
-  };
-  const focused = () => {
-    let el = document.activeElement;
-    while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
-    return editable(el) ? el : null;
-  };
-  globalThis.__ocw = {
-    setActive(v) { active = !!v; },
-    fields() { return collect(document, []); },
-    marked() { return Array.from(marked).filter((el) => el.isConnected); },
-    factsOf(list) { return list.map(facts); },
-    focusFacts() { const el = focused(); return el ? facts(el) : null; },
-    anyMarked() { return marked.size > 0; },
-  };
-})();`;
+/** The world's context in the current document, its takeover flag in step with the context's (navigation-safe). */
+const worldContextId = (ctx) => createWorld(ctx.cdp, ctx.takeover);
 
-async function worldContextId(ctx) {
-  const { frameTree } = await ctx.cdp.send("Page.getFrameTree");
-  const { executionContextId } = await ctx.cdp.send("Page.createIsolatedWorld", {
-    frameId: frameTree.frame.id,
-    worldName: WORLD,
-    grantUniveralAccess: false,
-  });
-  // The current document may predate the new-document script (or the world): install idempotently.
-  await ctx.cdp.send("Runtime.evaluate", {
-    contextId: executionContextId,
-    expression: worldScript(ctx.takeover),
-  });
-  return executionContextId;
-}
-
+/** Re-registers the new-document script with the context's takeover flag. */
 async function setWorldScript(ctx) {
-  if (ctx.worldScriptId) {
-    await ctx.cdp
-      .send("Page.removeScriptToEvaluateOnNewDocument", { identifier: ctx.worldScriptId })
-      .catch(() => {});
-  }
-  const { identifier } = await ctx.cdp.send("Page.addScriptToEvaluateOnNewDocument", {
-    source: worldScript(ctx.takeover),
-    worldName: WORLD,
-  });
-  ctx.worldScriptId = identifier;
+  ctx.worldScriptId = await replaceWorldScript(ctx.cdp, ctx.worldScriptId, ctx.takeover);
 }
 
 /** backendNodeIds of the elements of an array object, then release the object group. */

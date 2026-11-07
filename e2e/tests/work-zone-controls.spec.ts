@@ -381,6 +381,15 @@ test("New session dialog: only the chosen device's catalog models and the modes 
     await expect(dialog).toBeVisible();
     await dialog.getByTestId("project-option").filter({ hasText: projectName }).click();
     await dialog.getByTestId("runtime-claude-code").click();
+    // Model, effort, permissions and worktree are one summary row until opened (owner feedback 2026-11-06).
+    const settings = dialog.getByTestId("new-session-settings-toggle");
+    await expect(settings).toHaveAttribute("aria-expanded", "false");
+    await expect(dialog.getByTestId("new-session-settings-summary")).toHaveText(
+      "Default model · Supervised · Current checkout",
+    );
+    await expect(dialog.getByTestId("mode-default")).toHaveCount(0);
+    await settings.click();
+    await expect(settings).toHaveAttribute("aria-expanded", "true");
 
     // ---- modes: the five, with descriptions; Full access disabled with the device's reason
     for (const m of ["default", "acceptEdits", "auto", "fullAccess", "plan"])
@@ -434,6 +443,11 @@ test("New session dialog: only the chosen device's catalog models and the modes 
     await dialog.getByTestId("new-session-effort").click();
     await page.getByRole("option", { name: "High", exact: true }).click();
     await dialog.getByTestId("mode-acceptEdits").click();
+
+    // The summary row says what was chosen.
+    await expect(dialog.getByTestId("new-session-settings-summary")).toHaveText(
+      "Claude Sonnet 5.5 · High · Auto-accept edits · Current checkout",
+    );
 
     // ---- the request carries model, mode and effort
     await dialog.getByTestId("start-session").click();

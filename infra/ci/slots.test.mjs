@@ -323,6 +323,8 @@ describe("infra/ci/slot-reset.sh removes its own slot's objects and nothing else
         encoding: "utf8",
       });
       assert.equal(res.status, 0, res.stderr);
+      // A listing that fails (a format field the object type lacks) would silently remove nothing.
+      assert.doesNotMatch(res.stderr, /template parsing error|No such/u);
       const removed = calls(dir)
         .filter((c) => c.some((w) => w === "rm"))
         .flatMap((c) =>
