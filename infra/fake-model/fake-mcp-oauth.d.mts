@@ -52,6 +52,8 @@ export interface FakeMcpOAuthScenario {
   reject_access_tokens?: boolean;
   /** Delays each MCP `tools/call` by this many milliseconds. */
   slow_mcp_ms?: number;
+  /** Delays each revocation (RFC 7009) answer by this many milliseconds (07.14 review WR-02: Disconnect races). */
+  slow_revoke_ms?: number;
   /** The PRM names the second authorization server (`<base>/mcp-oauth/alt`). */
   different_issuer?: boolean;
   /** The token endpoint answers 503 `temporarily_unavailable` (the attempt is still counted). */

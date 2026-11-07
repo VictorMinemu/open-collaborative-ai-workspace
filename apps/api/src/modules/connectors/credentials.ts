@@ -19,6 +19,7 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { z } from "zod";
 import type { Core } from "../../core";
 import { egressFor, hostPortOf } from "../../lib/egress";
+import { HttpError } from "../../lib/errors";
 import { reconnectReasonOfCode } from "../mcp";
 import {
   type ClientCredentialsToken,
@@ -1156,11 +1157,20 @@ export async function disconnect(core: Core, p: ConnectionKey): Promise<{ revoke
   });
 }
 
+/** How many times Disconnect re-reads and revokes a connection that changed under it before answering 409. */
+const DISCONNECT_ATTEMPTS = 3;
+
 /**
  * The admin's Disconnect of the organization's account (07.14 D-08), mirroring `disconnect`: the bundle and the
  * confidential client's secret are read in one tenant transaction, the grant is revoked at the authorization server
  * outside any transaction (RFC 7009, best effort: the refresh token, else the access token), then the row and its
  * sealed secret are deleted and the disconnect is audited (`reason: admin`, `revoked`) in a second one.
+ *
+ * The second transaction holds the server row and the connection row (the locks every store and refresh takes) and
+ * deletes only the version that was revoked (review WR-02): a reconnect, a client-credentials save or a refresh that
+ * committed while the revocation was in flight re-sealed the bundle in place, so the new grant is read and revoked in
+ * turn before anything is deleted, and `revoked` describes the grant that is deleted. After `DISCONNECT_ATTEMPTS`
+ * changes in a row it answers 409 `org_connection_changed` and deletes nothing.
  * Null when the server has no organization connection (nothing is sent then).
  */
 export async function disconnectOrg(
@@ -1169,36 +1179,54 @@ export async function disconnectOrg(
 ): Promise<{ revoked: boolean } | null> {
   const key: OrgConnectionKey = { ...p, principal: "organization" };
   const store = storeOf(key);
-  const found = await core.db.withTenant(store.tenant, async (tx) => {
-    if (!(await store.server(tx))) return null;
-    const row = await orgConnection(tx, p.serverId);
-    if (!row) return null;
-    const bundle = await openBundle(tx, core, store, row);
-    if (bundle?.kind === "client_credentials") {
-      // Client credentials: the access token is the whole grant; the client's own secret authenticates the revocation.
-      return { revoke: ccRevocationOf(bundle), clientSecret: bundle.clientSecret };
-    }
-    if (bundle?.kind !== "oauth") return { revoke: null, clientSecret: undefined };
-    return {
-      revoke: tokenBundleOf(bundle),
-      clientSecret: await clientSecretFor(tx, core, p.serverId, bundle.issuer, bundle.clientId),
-    };
-  });
-  if (!found) return null;
-  const revoked = found.revoke
-    ? await revokeToken(egressFor(core.env), found.revoke, found.clientSecret)
-    : false;
-  return core.db.withTenant(store.tenant, async (tx) => {
-    const row = await orgConnection(tx, p.serverId, true);
-    if (!row) return null;
-    await tx.delete(connectorOrgConnections).where(eq(connectorOrgConnections.id, row.id));
-    if (row.secretId) await core.secrets.remove(tx, row.secretId);
-    await core.audit.record(tx, {
-      action: "connector.org_disconnected",
-      resourceType: "connector_org_connection",
-      resourceId: row.id,
-      metadata: { serverId: p.serverId, method: row.method, revoked, reason: "admin" },
+  const sameVersion = (
+    a: Pick<OrgConnectionRow, "id" | "secretId" | "updatedAt">,
+    b: Pick<OrgConnectionRow, "id" | "secretId" | "updatedAt">,
+  ) => a.id === b.id && a.secretId === b.secretId && a.updatedAt === b.updatedAt;
+  for (let attempt = 0; attempt < DISCONNECT_ATTEMPTS; attempt++) {
+    const found = await core.db.withTenant(store.tenant, async (tx) => {
+      if (!(await store.server(tx))) return null;
+      const row = await orgConnection(tx, p.serverId);
+      if (!row) return null;
+      const version = { id: row.id, secretId: row.secretId, updatedAt: row.updatedAt };
+      const bundle = await openBundle(tx, core, store, row);
+      if (bundle?.kind === "client_credentials") {
+        // Client credentials: the access token is the whole grant; the client's own secret authenticates the revocation.
+        return { version, revoke: ccRevocationOf(bundle), clientSecret: bundle.clientSecret };
+      }
+      if (bundle?.kind !== "oauth") return { version, revoke: null, clientSecret: undefined };
+      return {
+        version,
+        revoke: tokenBundleOf(bundle),
+        clientSecret: await clientSecretFor(tx, core, p.serverId, bundle.issuer, bundle.clientId),
+      };
     });
-    return { revoked };
-  });
+    if (!found) return null;
+    const revoked = found.revoke
+      ? await revokeToken(egressFor(core.env), found.revoke, found.clientSecret)
+      : false;
+    const done = await core.db.withTenant(store.tenant, async (tx) => {
+      // The server row first, as the store paths take it, then the connection row, as refreshes take it.
+      if (!(await orgAccountServer(tx, p.serverId, true))) return null;
+      const row = await orgConnection(tx, p.serverId, true);
+      if (!row) return null;
+      if (!sameVersion(row, found.version)) return "changed" as const;
+      await tx.delete(connectorOrgConnections).where(eq(connectorOrgConnections.id, row.id));
+      if (row.secretId) await core.secrets.remove(tx, row.secretId);
+      await core.audit.record(tx, {
+        action: "connector.org_disconnected",
+        resourceType: "connector_org_connection",
+        resourceId: row.id,
+        metadata: { serverId: p.serverId, method: row.method, revoked, reason: "admin" },
+      });
+      return { revoked };
+    });
+    if (done !== "changed") return done;
+    core.log.info({ serverId: p.serverId, attempt }, "organization connection changed during Disconnect");
+  }
+  throw new HttpError(
+    409,
+    "org_connection_changed",
+    "The organization's connection changed while disconnecting it. Try Disconnect again.",
+  );
 }

@@ -530,6 +530,41 @@ describe("Disconnect and tenant isolation (D-08)", () => {
     });
   });
 
+  it("WR-02: a grant stored while Disconnect revokes is revoked too before it is deleted; the audit is truthful", async () => {
+    const server = await savedServer();
+    const first = (await orgBundleOf(s, s.orgA, server.id))?.accessToken as string;
+    const revoked = await revocations();
+    s.fake.setScenario({ slow_revoke_ms: 1_500 });
+    const disconnecting = s.victor.request("DELETE", `/api/v1/connectors/${server.id}/org-connection`);
+    // The first revocation is in flight (outside any transaction): another admin saves again meanwhile.
+    await new Promise((r) => setTimeout(r, 300));
+    await ok(saveCc(s, s.victor, server.id));
+    const second = (await orgBundleOf(s, s.orgA, server.id))?.accessToken as string;
+    expect(second).not.toBe(first);
+    await ok(disconnecting, 204);
+    s.fake.setScenario({});
+    // Both grants were revoked at the provider: the second one is not left live behind a deleted row.
+    expect(await revocations()).toBe(revoked + 2);
+    await expect(
+      callTool(
+        egressFor(s.stack.built.core.env),
+        { url: server.url, transport: "streamable-http" },
+        { headerName: "Authorization", headerValue: `Bearer ${second}` },
+        { name: "whoami", arguments: {} },
+        { redact: [second] },
+      ),
+    ).rejects.toMatchObject({ code: "unauthorized" });
+    expect(await orgConnectionRow(s, s.orgA, server.id)).toBeUndefined();
+    const audits = (await auditRows(s, s.orgA, ["connector.org_disconnected"])).filter(
+      (a) => a.metadata.serverId === server.id,
+    );
+    expect(audits).toEqual([
+      expect.objectContaining({
+        metadata: { serverId: server.id, method: "client_credentials", revoked: true, reason: "admin" },
+      }),
+    ]);
+  });
+
   it("without a revocation endpoint Disconnect still deletes (revoked false)", async () => {
     const server = await registerCcConnector(s);
     s.fake.setScenario({ no_prm: true });

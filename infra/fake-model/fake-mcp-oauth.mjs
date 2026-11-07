@@ -534,6 +534,10 @@ export function createFakeMcpOAuth(opts = {}) {
   async function revoke(req, res) {
     const form = new URLSearchParams(await readText(req));
     stats.revocations += 1;
+    // 07.14 review WR-02: a slow revocation endpoint opens the window in which a reconnect can land mid-Disconnect.
+    if (typeof scenario.slow_revoke_ms === "number" && scenario.slow_revoke_ms > 0) {
+      await sleep(scenario.slow_revoke_ms);
+    }
     const t = form.get("token") ?? "";
     const familyId = refreshTokens.get(t)?.familyId ?? accessTokens.get(t)?.familyId;
     if (familyId) revokeFamily(familyId);

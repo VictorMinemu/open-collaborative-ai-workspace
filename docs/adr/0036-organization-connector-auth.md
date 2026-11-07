@@ -260,3 +260,9 @@ Amended in place while the phase is unmerged, after `07.14-REVIEW.md`. Each item
   Connect get the same limit as Test sign-in: 10 per minute per admin, each route its own bucket (`org-cc:<user>`,
   `org-connect:<user>`, `oauth-test:<user>`), counted after `requireUser` and `mcp.manage`, each with its own copy of
   the preHandler array. The 11th call answers 429 before any request.
+- **Disconnect deletes only the grant it revoked (WR-02).** Its deleting transaction holds the server row and the
+  connection row (the locks every store and refresh takes) and compares the row's version (id, secret id,
+  `updated_at`) with the one it read before revoking. A reconnect, save or refresh that committed while the revocation
+  was in flight is read and revoked in turn before anything is deleted, so no live grant is left behind a deleted row
+  and the audit's `revoked` describes the deleted grant. After three changes in a row it answers 409
+  `org_connection_changed` and deletes nothing.
