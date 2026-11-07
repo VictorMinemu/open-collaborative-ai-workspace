@@ -5,6 +5,7 @@ import {
   type AttachmentRow,
   AttachmentTooLargeError,
   attachmentRowsForMessages,
+  decodeText,
   labelName,
   type ObjectStorage,
   readAttachmentBytes,
@@ -88,18 +89,6 @@ export function checkAttachmentsForModel(
   return { ok: true };
 }
 
-const utf8 = new TextDecoder("utf-8", { fatal: true });
-
-/** UTF-8 text without NUL bytes, or null (a binary declared as text is never inlined). */
-function decodeText(bytes: Uint8Array): string | null {
-  if (bytes.includes(0)) return null;
-  try {
-    return utf8.decode(bytes).replace(/^\uFEFF/u, "");
-  } catch {
-    return null;
-  }
-}
-
 const placeholder = (text: string): ModelFilePart => ({ type: "text", text });
 
 /**
@@ -168,8 +157,10 @@ export async function modelPartsFor(
       }
       let content: string | null = null;
       try {
-        // Never more than the inline cap, whatever the stored object holds.
-        content = decodeText(await readAttachmentBytes(storage, row, "original", AI_TEXT_INLINE_MAX_BYTES));
+        // Never more than the inline cap, whatever the stored object holds. The bot read's decoder (07.15 IN-04): byte
+        // order mark, UTF-16, strict UTF-8, windows-1252; a NUL outside UTF-16 is not text (never inlined).
+        const bytes = await readAttachmentBytes(storage, row, "original", AI_TEXT_INLINE_MAX_BYTES);
+        content = decodeText(bytes, { complete: true })?.text ?? null;
       } catch {
         content = null;
       }
