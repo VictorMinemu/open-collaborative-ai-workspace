@@ -1,5 +1,8 @@
+import { INLINE_IMAGE_TYPES } from "@ocw/contracts";
 import type { FastifyBaseLogger } from "fastify";
 import type { AttachmentRow } from "../model";
+import { AttachmentTooLargeError, readAttachmentBytes } from "../read-bytes";
+import { RENDITIONS } from "../renditions";
 import { attachmentKey, type ObjectStorage } from "../storage";
 import { EXTRACT_LIMITS } from "./limits";
 import { attachmentKindOf, cutChars, decodeText } from "./text";
@@ -63,9 +66,55 @@ export async function readAttachmentForAgent(
       } catch (err) {
         return failed(err);
       }
+    case "image":
+      try {
+        return await readImage(storage, row);
+      } catch (err) {
+        if (err instanceof AttachmentTooLargeError) return refused("too_large");
+        return failed(err);
+      }
     default:
+      // `pdf` joins in 07.15-05 (pdfText); everything else cannot be read as text.
       return refused("unsupported_type");
   }
+}
+
+type ImageType = Extract<AgentRead, { kind: "image" }>["mimeType"];
+const IMAGE_TYPES = new Set<string>(INLINE_IMAGE_TYPES);
+const LARGE_EDGE = RENDITIONS.find((r) => r.part === "large.webp")!.size;
+
+/**
+ * The size of the stored `large.webp` rendition from the original's oriented dimensions: the box sharp's `fit:
+ * "inside"`, `withoutEnlargement` gives at upload (`renderRenditions`, the same settings as `fitImageWithin`).
+ * Computed, never decoded: nothing is resized at read time.
+ */
+function renditionSize(width: number | null, height: number | null) {
+  if (width === null || height === null || width <= 0 || height <= 0) return { width: null, height: null };
+  const scale = Math.min(1, LARGE_EDGE / Math.max(width, height));
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
+/**
+ * Image bytes for the model (D-03, D-05): the stored `large.webp` rendition when there is one (EXIF-free, ≤ 2048 px,
+ * made by sharp at upload), else the original of an `INLINE_IMAGE_TYPES` image up to
+ * `EXTRACT_LIMITS.imageOriginalMaxBytes`, else `too_large` (T-07.15-04-03: no image is decoded or resized here).
+ * The image reaches the model only as the tool result's image part (ADR-0029 spike ii), never through OpenClaw's
+ * native media.
+ */
+async function readImage(storage: ObjectStorage, row: AttachmentRow): Promise<AgentRead> {
+  const cap = EXTRACT_LIMITS.imageOriginalMaxBytes;
+  if (row.hasRenditions) {
+    const data = await readAttachmentBytes(storage, row, "large.webp", cap);
+    return { kind: "image", mimeType: "image/webp", data, ...renditionSize(row.width, row.height) };
+  }
+  const type = row.contentType ?? row.declaredType;
+  if (!IMAGE_TYPES.has(type)) return refused("unsupported_type");
+  if (row.sizeBytes > cap) return refused("too_large");
+  const data = await readAttachmentBytes(storage, row, "original", cap);
+  return { kind: "image", mimeType: type as ImageType, data, width: row.width, height: row.height };
 }
 
 /**
