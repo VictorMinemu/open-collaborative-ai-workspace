@@ -256,3 +256,7 @@ Amended in place while the phase is unmerged, after `07.14-REVIEW.md`. Each item
     mismatch the code is never redeemed (`flow_expired`), or a grant already redeemed is revoked and nothing is
     stored. A client-credentials save whose server URL changed during the grant stores nothing (409 `url_changed`).
     A member's key store holds the same `for share` lock.
+- **Every route that reaches admin-chosen URLs is rate limited (WR-01).** The client-credentials save and organization
+  Connect get the same limit as Test sign-in: 10 per minute per admin, each route its own bucket (`org-cc:<user>`,
+  `org-connect:<user>`, `oauth-test:<user>`), counted after `requireUser` and `mcp.manage`, each with its own copy of
+  the preHandler array. The 11th call answers 429 before any request.

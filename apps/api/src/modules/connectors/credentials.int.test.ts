@@ -17,6 +17,7 @@ import {
   PRE_REGISTERED,
   registerConnector,
   registerOrgConnector,
+  resetConnectorRateLimits,
   startConnectorsStack,
 } from "../../testing-connectors";
 import { storeConnection } from "./credentials";
@@ -108,10 +109,12 @@ beforeAll(async () => {
   );
 }, 240_000);
 
-afterEach(() => {
+afterEach(async () => {
   assertNoGlobalFetch(s);
   s.fake.setScenario({});
   s.setDown(false);
+  // The organization's save and Connect are limited per admin (WR-01); this file uses them more often than that.
+  await resetConnectorRateLimits(s);
 });
 
 afterAll(async () => {

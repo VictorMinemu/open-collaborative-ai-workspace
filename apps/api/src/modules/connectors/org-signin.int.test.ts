@@ -18,6 +18,7 @@ import {
   orgConnectionRow,
   registerConnector,
   registerOrgConnector,
+  resetConnectorRateLimits,
   startConnectorsStack,
 } from "../../testing-connectors";
 import { accessTokenFor } from "./index";
@@ -38,9 +39,11 @@ beforeAll(async () => {
   s = await startConnectorsStack();
 }, 240_000);
 
-afterEach(() => {
+afterEach(async () => {
   assertNoGlobalFetch(s);
   s.fake.setScenario({});
+  // Connect is limited per admin (WR-01); this file connects more often than that within a minute.
+  await resetConnectorRateLimits(s);
 });
 
 afterAll(async () => {

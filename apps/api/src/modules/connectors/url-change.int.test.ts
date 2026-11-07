@@ -20,6 +20,7 @@ import {
   registerCcConnector,
   registerConnector,
   registerOrgConnector,
+  resetConnectorRateLimits,
   saveCc,
   startConnectorsStack,
 } from "../../testing-connectors";
@@ -80,10 +81,11 @@ beforeAll(async () => {
   canaryUrl = `http://fake-mcp:${(canary.address() as AddressInfo).port}/mcp-oauth/mcp`;
 }, 240_000);
 
-afterEach(() => {
+afterEach(async () => {
   assertNoGlobalFetch(s);
   s.fake.setScenario({});
   canaryHits.length = 0;
+  await resetConnectorRateLimits(s);
 });
 
 afterAll(async () => {

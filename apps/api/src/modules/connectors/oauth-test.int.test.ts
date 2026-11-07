@@ -15,6 +15,7 @@ import {
   type Res,
   registerCcConnector,
   registerOrgConnector,
+  resetConnectorRateLimits,
   saveCc,
   startConnectorsStack,
 } from "../../testing-connectors";
@@ -43,12 +44,8 @@ async function snapshot(): Promise<Json> {
   };
 }
 
-/** Forgets every Test sign-in rate-limit counter (the 429 case counts its own). */
-async function resetLimit(): Promise<void> {
-  const redis = s.stack.built.core.bus.pub;
-  const keys = await redis.keys("ocw:rl:*oauth-test*");
-  if (keys.length > 0) await redis.del(keys);
-}
+/** Forgets every organization-connection rate-limit counter (the 429 cases count their own). */
+const resetLimit = () => resetConnectorRateLimits(s);
 
 const test = (body: Json, as = s.victor): Promise<Res> =>
   as.request("POST", "/api/v1/connectors/oauth-test", body);
@@ -391,8 +388,38 @@ describe("who may test, and how often", () => {
     await fails(test(refused), 429);
     await fails(test(refused, s.eve), 400);
     // The limit is the Test route's own: the organization-connection routes beside it keep answering.
-    for (let i = 0; i < 12; i++) {
+    await fails(saveCc(s, s.victor, other.id, { clientId: PRE_REGISTERED_CC }), 400, "secret_required");
+  });
+
+  // 07.14 review WR-01: the save and Connect make the same outbound requests (discovery, a grant at an admin-entered
+  // Token URL, DCR), so each has its own 10-per-minute bucket per admin, like Test sign-in.
+  it("the client-credentials save: the 11th within a minute by one admin → 429, before any request", async () => {
+    const other = await registerCcConnector(s);
+    before = await snapshot();
+    for (let i = 0; i < 10; i++) {
       await fails(saveCc(s, s.victor, other.id, { clientId: PRE_REGISTERED_CC }), 400, "secret_required");
     }
+    const stats = await fakeStats(s);
+    await fails(saveCc(s, s.victor, other.id), 429);
+    expect((await fakeStats(s)).tokenRequests).toEqual(stats.tokenRequests);
+    // Another admin's bucket is their own (org B's admin is a 404 on org A's server, never a 429).
+    await fails(saveCc(s, s.eve, other.id), 404);
+    // Its own bucket: Test sign-in still answers.
+    await fails(test({ url: `http://127.0.0.1:${s.fakePort}/mcp`, authMode: "org_oauth" }), 400);
+  });
+
+  it("organization Connect: the 11th within a minute by one admin → 429", async () => {
+    const other = await registerCcConnector(s);
+    before = await snapshot();
+    // A client-credentials server refuses Connect (409 wrong_auth_mode) before any request: the bucket still counts.
+    for (let i = 0; i < 10; i++) {
+      await fails(
+        s.victor.request("POST", `/api/v1/connectors/${other.id}/org-connection/connect`),
+        409,
+        "wrong_auth_mode",
+      );
+    }
+    await fails(s.victor.request("POST", `/api/v1/connectors/${other.id}/org-connection/connect`), 429);
+    await fails(saveCc(s, s.victor, other.id, { clientId: PRE_REGISTERED_CC }), 400, "secret_required");
   });
 });

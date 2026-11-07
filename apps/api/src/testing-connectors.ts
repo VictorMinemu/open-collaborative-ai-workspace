@@ -443,6 +443,18 @@ export const auditRows = async (s: ConnectorsStack, orgId: string, actions: stri
     )
   ).rows as Json[];
 
+/**
+ * Forgets the per-admin rate-limit buckets of the organization-connection routes (Test sign-in, client-credentials
+ * save, organization Connect; 07.14 review WR-01), so a file's many saves are not counted against one minute.
+ */
+export async function resetConnectorRateLimits(s: ConnectorsStack): Promise<void> {
+  const redis = s.stack.built.core.bus.pub;
+  for (const bucket of ["oauth-test", "org-cc", "org-connect"]) {
+    const keys = await redis.keys(`ocw:rl:*${bucket}:*`);
+    if (keys.length > 0) await redis.del(keys);
+  }
+}
+
 /** Fails when an MCP SDK call fell back to the global fetch (#175). */
 export function assertNoGlobalFetch(s: ConnectorsStack): void {
   expect(s.globalFakeCalls).toEqual([]);

@@ -42,8 +42,11 @@ import { probeConnector } from "./probe";
 
 const tags = ["connectors"];
 type ServerRow = typeof mcpServers.$inferSelect;
-/** Test sign-ins per admin per minute (T-07.14-09-04: not a port scanner). */
-const OAUTH_TEST_PER_MINUTE = 10;
+/**
+ * Calls per admin per minute, per route, of the routes that reach admin-chosen URLs: Test sign-in, the
+ * client-credentials save and organization Connect (T-07.14-09-04, review WR-01: not a port scanner).
+ */
+const ORG_OUTBOUND_PER_MINUTE = 10;
 
 /** An organization-account server of the caller's organization, in `mode` when given: 404 when absent, 409 otherwise. */
 async function orgServerIn(tx: Tx, id: string, mode?: ServerRow["authMode"]): Promise<ServerRow> {
@@ -72,11 +75,29 @@ export function registerOrgConnectionRoutes(app: App, core: Core, perms: Permiss
     config: { authz: "user" as const },
     preHandler: [core.identity.requireUser, perms.requirePermission("mcp.manage")],
   };
+  /**
+   * An `mcp.manage` route that reaches admin-chosen URLs (discovery, a token endpoint, DCR), limited per admin (07.14
+   * T-07.14-09-04, review WR-01: not a port scanner). The bucket is counted after requireUser and mcp.manage, so it is
+   * the admin's, not the IP's. Each route gets a COPY of the preHandler array: the rate-limit plugin appends its hook to
+   * the route's own array, which must never be the shared one (plan 09's fix).
+   */
+  const limitedAdmin = (bucket: string) => ({
+    config: {
+      authz: "user" as const,
+      rateLimit: {
+        max: ORG_OUTBOUND_PER_MINUTE,
+        timeWindow: "1 minute",
+        hook: "preHandler" as const,
+        keyGenerator: (r: FastifyRequest) => `${bucket}:${r.auth?.userId ?? r.ip}`,
+      },
+    },
+    preHandler: [...admin.preHandler],
+  });
 
   app.post(
     "/connectors/:id/org-connection/connect",
     {
-      ...admin,
+      ...limitedAdmin("org-connect"),
       logLevel: "info",
       schema: { tags, params: IdParams, response: { 200: ConnectStartResponse } },
     },
@@ -92,7 +113,7 @@ export function registerOrgConnectionRoutes(app: App, core: Core, perms: Permiss
   app.put(
     "/connectors/:id/org-connection/client-credentials",
     {
-      ...admin,
+      ...limitedAdmin("org-cc"),
       logLevel: "info",
       schema: { tags, params: IdParams, body: ClientCredentialsInput, response: { 200: McpServer } },
     },
@@ -103,18 +124,7 @@ export function registerOrgConnectionRoutes(app: App, core: Core, perms: Permiss
   app.post(
     "/connectors/oauth-test",
     {
-      config: {
-        authz: "user" as const,
-        // After requireUser and mcp.manage, so the bucket is the admin (T-07.14-09-04), not the IP.
-        rateLimit: {
-          max: OAUTH_TEST_PER_MINUTE,
-          timeWindow: "1 minute",
-          hook: "preHandler",
-          keyGenerator: (r: FastifyRequest) => `oauth-test:${r.auth?.userId ?? r.ip}`,
-        },
-      },
-      // A copy: the rate-limit plugin appends its hook to this route's array, which must not be the shared one.
-      preHandler: [...admin.preHandler],
+      ...limitedAdmin("oauth-test"),
       logLevel: "info",
       schema: { tags, body: OAuthTestRequest, response: { 200: OAuthTestResponse } },
     },

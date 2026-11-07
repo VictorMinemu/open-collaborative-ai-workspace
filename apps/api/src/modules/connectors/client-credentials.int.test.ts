@@ -15,6 +15,7 @@ import {
   PRE_REGISTERED,
   PRE_REGISTERED_CC,
   registerCcConnector,
+  resetConnectorRateLimits,
   saveCc,
   startConnectorsStack,
 } from "../../testing-connectors";
@@ -43,10 +44,12 @@ beforeAll(async () => {
   s = await startConnectorsStack();
 }, 240_000);
 
-afterEach(() => {
+afterEach(async () => {
   assertNoGlobalFetch(s);
   s.fake.setScenario({});
   s.setDown(false);
+  // The save is limited per admin (WR-01); this file saves more often than that within a minute.
+  await resetConnectorRateLimits(s);
 });
 
 afterAll(async () => {
