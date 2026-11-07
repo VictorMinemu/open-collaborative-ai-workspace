@@ -806,7 +806,15 @@ describe("organization custody (07.14)", () => {
   });
 
   it("Re-probe lists tools with the organization's token for an org server; a member server keeps the admin's own", async () => {
-    await fails(s.victor.request("POST", `/api/v1/connectors/${org.id}/probe`), 409, "not_connected");
+    const notConnected = await fails(
+      s.victor.request("POST", `/api/v1/connectors/${org.id}/probe`),
+      409,
+      "not_connected",
+    );
+    // IN-01: the organization's copy, never the member's "You aren't connected".
+    expect(notConnected.error.message).toBe(
+      `The organization hasn't connected ${org.name} yet. An admin can connect it in Settings › MCP servers.`,
+    );
     await connectOrg();
     await s.su.query("delete from app.mcp_server_tools where server_id = $1", [org.id]);
     // Víctor has no member connection to it: only the organization's token can list these tools.
@@ -816,7 +824,12 @@ describe("organization custody (07.14)", () => {
     expect(dto.status).toBe("ready");
     await fails(s.sam.request("POST", `/api/v1/connectors/${org.id}/probe`), 403);
     const member = await registerConnector(s);
-    await fails(s.victor.request("POST", `/api/v1/connectors/${member.id}/probe`), 409, "not_connected");
+    const own = await fails(
+      s.victor.request("POST", `/api/v1/connectors/${member.id}/probe`),
+      409,
+      "not_connected",
+    );
+    expect(own.error.message).toBe("You aren't connected to this connector.");
   });
 
   it("a bundle swapped between the organization row and a member row of the same server fails closed both ways", async () => {

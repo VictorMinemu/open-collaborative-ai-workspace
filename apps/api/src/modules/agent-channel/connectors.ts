@@ -29,6 +29,7 @@ import {
   forceRefresh,
   McpUpstreamError,
   markNeedsReconnect,
+  orgCredentialSentence,
   stripControl,
   touchCredential,
 } from "../connectors";
@@ -138,10 +139,8 @@ const sentenceName = (server: ServerRow) =>
  */
 function credentialMessage(reason: "not_connected" | "needs_reconnect", server: ServerRow): string {
   if (!isOrgCredentialMode(server.authMode)) return MESSAGES[reason];
-  const name = sentenceName(server);
-  return reason === "not_connected"
-    ? `The organization hasn't connected ${name} yet. An admin can connect it in Settings › MCP servers.`
-    : `The organization's connection to ${name} needs to be reconnected by an admin.`;
+  // One sentence for the proxy and Re-probe (07.14 review IN-01).
+  return orgCredentialSentence(reason, sentenceName(server));
 }
 
 /** A proxied connector of the tx's organization by its safe name, and its catalog tool by logical name. */

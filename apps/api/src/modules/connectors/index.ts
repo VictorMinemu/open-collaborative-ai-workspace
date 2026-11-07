@@ -25,6 +25,7 @@ export {
   touchConnection,
   touchCredential,
 } from "./credentials";
+export { orgCredentialSentence } from "./flow";
 export { callTool, listTools, type McpAuth, McpUpstreamError, stripControl } from "./mcp-client";
 export { activeShare, readersOf } from "./shares";
 

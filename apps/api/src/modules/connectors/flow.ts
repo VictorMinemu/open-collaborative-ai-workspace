@@ -1,4 +1,4 @@
-import { type ConnectorErrorCode, connectorOAuthUrls } from "@ocw/contracts";
+import { type ConnectorErrorCode, connectorOAuthUrls, isOrgCredentialMode } from "@ocw/contracts";
 import { connectorOAuthClients, type mcpServers, type Tx } from "@ocw/db";
 import { and, eq } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
@@ -8,6 +8,7 @@ import { egressFor } from "../../lib/egress";
 import { HttpError } from "../../lib/errors";
 import { oauthClientsOf, setAuthFailure, setOAuthStatus } from "../mcp";
 import { authFailureOf } from "./diagnosis";
+import { stripControl } from "./mcp-client";
 import {
   buildAuthorization,
   type ClientChoice,
@@ -76,6 +77,29 @@ const MESSAGES: Record<ConnectorErrorCode, string> = {
   needs_reconnect: "Your sign-in stopped working. Reconnect to keep using it.",
 };
 export const connectError = (code: ConnectorErrorCode) => new HttpError(409, code, MESSAGES[code]);
+
+/**
+ * Why the organization's credential is unusable, in the admin's words (07.14 PD-10): no member can fix it, so the
+ * sentence names the server and who can. `name` is the server's display name, already cleaned for a sentence.
+ */
+export function orgCredentialSentence(reason: "not_connected" | "needs_reconnect", name: string): string {
+  return reason === "not_connected"
+    ? `The organization hasn't connected ${name} yet. An admin can connect it in Settings › MCP servers.`
+    : `The organization's connection to ${name} needs to be reconnected by an admin.`;
+}
+
+/**
+ * The 409 for a credential that cannot be used (07.14 review IN-01): the member's copy for a member mode, the
+ * organization's for an organization mode (Re-probe on an org server never says "You aren't connected").
+ */
+export function credentialError(
+  reason: "not_connected" | "needs_reconnect",
+  server: Pick<ServerRow, "authMode" | "name">,
+): HttpError {
+  if (!isOrgCredentialMode(server.authMode)) return connectError(reason);
+  const name = stripControl(server.name).replace(/\s+/gu, " ").trim().slice(0, 80) || "this server";
+  return new HttpError(409, reason, orgCredentialSentence(reason, name));
+}
 
 type ServerRow = typeof mcpServers.$inferSelect;
 

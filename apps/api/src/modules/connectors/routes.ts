@@ -39,8 +39,8 @@ import {
 } from "./credentials";
 import {
   CONNECTOR_CLIENT_NAME,
-  connectError,
   connectFlowKey,
+  credentialError,
   FlowRecord,
   flowAuth,
   STATE_RE,
@@ -439,7 +439,7 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
         }
         throw err;
       });
-      if (!token.ok) throw connectError(token.reason);
+      if (!token.ok) throw credentialError(token.reason, server);
       await probeConnector(
         core,
         { organizationId: auth.organizationId, userId: auth.userId, serverId: server.id },
