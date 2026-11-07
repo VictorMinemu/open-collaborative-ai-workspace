@@ -62,6 +62,12 @@ export async function startFakeSandboxd(token = FAKE_SANDBOXD_TOKEN): Promise<Fa
   };
 }
 
+/** What `turnOf`'s message carries besides its default body (07.15-03). */
+export interface TurnOpts {
+  body?: string;
+  attachmentIds?: string[];
+}
+
 export interface SandboxStack {
   stack: TestStack;
   sandboxd: FakeSandboxdServer;
@@ -83,8 +89,11 @@ export interface SandboxStack {
   logs: string[];
   /** POST to the Agent Channel with a cell token (organization A's by default). */
   cell(path: string, body: unknown, token?: string): Promise<Res>;
-  /** `who` writes in `conversationId`; returns `agentId`'s delivered `agent.mention.v1` payload (its turn). */
-  turnOf(who: TestClient, conversationId: string, agentId?: string): Promise<Json>;
+  /**
+   * `who` writes in `conversationId` (`opts.body`, else a fresh sentence; `opts.attachmentIds` sent with the message);
+   * returns `agentId`'s delivered `agent.mention.v1` payload (its turn).
+   */
+  turnOf(who: TestClient, conversationId: string, agentId?: string, opts?: TurnOpts): Promise<Json>;
   /** Organization A's sandbox policy row (the switch, the cap, the kill state), written directly. */
   setPolicy(p: { enabled?: boolean; maxSandboxes?: number; killed?: boolean }): Promise<void>;
   /** A bot's own sandbox switch (`capabilities.sandbox`), written directly (the PATCH route is 07.8-15's). */
@@ -237,10 +246,16 @@ async function prepare(
     return { status: res.status, body: text ? (JSON.parse(text) as Json) : null };
   };
 
-  const turnOf = async (who: TestClient, conversationId: string, agentId = scout.id): Promise<Json> => {
+  const turnOf = async (
+    who: TestClient,
+    conversationId: string,
+    agentId = scout.id,
+    opts: TurnOpts = {},
+  ): Promise<Json> => {
     const msg = await ok(
       who.request("POST", `/api/v1/conversations/${conversationId}/messages`, {
-        body: `please run it ${randomUUID().slice(0, 6)}`,
+        body: opts.body ?? `please run it ${randomUUID().slice(0, 6)}`,
+        ...(opts.attachmentIds ? { attachmentIds: opts.attachmentIds } : {}),
       }) as Promise<Res>,
     );
     const rows = (

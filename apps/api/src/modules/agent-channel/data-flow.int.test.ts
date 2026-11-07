@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type TestClient, WEB_ORIGIN } from "../../testing";
 import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
-import { startTestStorage, type TestStorage } from "../../testing-storage";
+import { startTestStorage, type TestStorage, uploadAttachment } from "../../testing-storage";
 import { recordMemberData, stickyMemberData } from "../bot-capabilities";
 import { keepForSite, sealSession } from "../browser/sessions";
 import { createConversationAccess } from "../chat";
@@ -734,6 +734,62 @@ describe("ocw_sandbox_import: only when the conversation's audience covers the w
       ),
     );
     expect(audienceCovers(mine)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------- 07.15-03: the one row rule (D-16), the import audit (D-07)
+
+const NUMBERS = "a,b\n1,2\n";
+const csv = (name: string, content: string) => ({ name, type: "text/csv", bytes: Buffer.from(content) });
+
+/** Every audit row a turn wrote, whatever its action. */
+const turnAudits = async (eventId: string) =>
+  (
+    await s.su.query(
+      `select action, agent_id, user_id, result, resource_type, resource_id, metadata from app.audit_events
+        where metadata->>'eventId' = $1 order by occurred_at, id`,
+      [eventId],
+    )
+  ).rows as Json[];
+
+/** The media type an import audit names: the sniffed type, else the declared one. */
+const mediaTypeOf = async (attachmentId: string) =>
+  (
+    await s.su.query("select coalesce(content_type, declared_type) as t from app.attachments where id = $1", [
+      attachmentId,
+    ])
+  ).rows[0]?.t as string;
+
+describe("07.15 D-16: a bot imports only a file its turn reads; every import is audited (D-07)", () => {
+  it("Sam's CSV attached in his personal bot's DM lands in Scout's workspace through the shared rule, audited without its name", async () => {
+    const attachmentId = await uploadAttachment(s.sam, scout.dm, csv("numbers.csv", NUMBERS));
+    const ev = await s.turnOf(s.sam, scout.dm, scout.id, { attachmentIds: [attachmentId] });
+    const imported = await ok(sandbox("import", ev, scout.id, { attachmentId }));
+    expect(imported).toEqual({ path: "downloads/numbers.csv", size: 8 });
+    expect((await ok(sandbox("read", ev, scout.id, { path: "downloads/numbers.csv" }))).content).toBe(
+      NUMBERS,
+    );
+
+    const audits = await auditOf("bot.attachment_imported", ev.eventId);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ agent_id: scout.id, user_id: s.samId, result: "success" });
+    expect(audits[0]?.metadata).toEqual({
+      eventId: ev.eventId,
+      conversationId: scout.dm,
+      attachmentId,
+      mediaType: await mediaTypeOf(attachmentId),
+      bytes: 8,
+      outcome: "imported",
+    });
+    const all = await turnAudits(ev.eventId);
+    const row = all.find((a) => a.action === "bot.attachment_imported");
+    expect(row).toMatchObject({ resource_type: "attachment", resource_id: attachmentId });
+    // Beside the unchanged 07.8 rows: the decision and the outcome.
+    expect(all.filter((a) => a.action === "sandbox.file_imported")).toHaveLength(1);
+    expect(
+      all.filter((a) => a.action === "bot.tool_call" && a.metadata.tool === "ocw_sandbox_import"),
+    ).toHaveLength(1);
+    expect(JSON.stringify(all)).not.toContain("numbers");
   });
 });
 
