@@ -1,25 +1,57 @@
-// 07.15-05 (D-05, PD-07): the PDF text worker. Plain JavaScript on purpose: the parent starts it with `execArgv: []`,
-// so it never inherits the API's `--import tsx --import ./src/telemetry.ts` (RESEARCH Pitfall 4).
+// 07.15-05 (D-05, PD-07), CR-01 (07.15 review): the PDF text extractor. It runs as its own Node process, never in the
+// API process: `pdf.ts` spawns `node` on this file with a bounded heap, the permission model (read access to this file
+// and the unpdf package only; no child processes, no workers, no addons, no writes), no code generation from strings,
+// an empty environment (no secret, no `_FILE` path, no NODE_OPTIONS) and a fresh temporary working directory. The
+// parent watches this process's resident memory and kills it past `EXTRACT_LIMITS.pdfRssMb` (a worker thread could not
+// be bounded: its ArrayBuffers, such as PDF.js's inflated streams, belonged to the API process). Plain JavaScript on
+// purpose: the API's `--import tsx` preload is never inherited (RESEARCH Pitfall 4).
 //
-// workerData: { data: Uint8Array (a fresh copy, transferred), maxPages: number, maxChars: number }. Nothing else: no
-// secret, no environment (the parent passes `env: {}`).
-//
-// It posts exactly one message:
-//   { ok: true, totalPages, pages, text, truncated }   pages read = min(numPages, maxPages), cut early at maxChars
+// argv: <unpdf entry URL> <maxPages> <maxChars> <maxBytes>
+// stdin: the PDF bytes, at most maxBytes.
+// The IPC channel carries exactly one answer and nothing else:
+//   { ok: true, totalPages, pages, text, truncated }   pages read = min(numPages, maxPages), cut early past maxChars
 //   { ok: false, error: "encrypted" | "invalid" | "failed" }
 // The error is chosen by `err.name` only. PDF.js messages can quote document strings, so no message, warning or
-// document string ever leaves this thread except the extracted text itself (P3). Eval is off (CVE-2024-4367 class)
-// and nothing is rendered.
-import { parentPort, workerData } from "node:worker_threads";
-import { getDocumentProxy } from "unpdf";
+// document string ever leaves this process except the extracted text itself (P3): the console is silenced and the
+// parent drops stdout and stderr anyway. Eval is off (CVE-2024-4367 class) and nothing is rendered.
+for (const method of ["log", "info", "warn", "error", "debug", "trace", "dir"])
+  console[method] = () => undefined;
 
-const { data, maxPages, maxChars } = workerData;
+const [unpdfUrl, maxPagesArg, maxCharsArg, maxBytesArg] = process.argv.slice(2);
+const maxPages = Number(maxPagesArg);
+const maxChars = Number(maxCharsArg);
+const maxBytes = Number(maxBytesArg);
+
+// The parent went away: nothing is left to answer.
+process.on("disconnect", () => process.exit(0));
+
+function answer(message) {
+  process.send(message, () => process.exit(0));
+}
 
 function code(err) {
   const name = err && typeof err === "object" ? err.name : undefined;
   if (name === "PasswordException") return "encrypted";
   if (name === "InvalidPDFException") return "invalid";
   return "failed";
+}
+
+/** The PDF from stdin into one fresh buffer, refused past maxBytes (the parent already checked the size). */
+async function input() {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of process.stdin) {
+    total += chunk.length;
+    if (total > maxBytes) throw Object.assign(new Error("input over the cap"), { name: "InputTooLarge" });
+    chunks.push(chunk);
+  }
+  const data = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    data.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return data;
 }
 
 function pageText(content) {
@@ -34,7 +66,9 @@ function pageText(content) {
 
 let doc;
 try {
-  doc = await getDocumentProxy(new Uint8Array(data), { isEvalSupported: false, verbosity: 0 });
+  const data = await input();
+  const { getDocumentProxy } = await import(unpdfUrl);
+  doc = await getDocumentProxy(data, { isEvalSupported: false, verbosity: 0 });
   const totalPages = doc.numPages;
   const last = Math.min(totalPages, maxPages);
   let text = "";
@@ -53,13 +87,13 @@ try {
       break;
     }
   }
-  parentPort.postMessage({ ok: true, totalPages, pages, text, truncated: cut || pages < totalPages });
+  answer({ ok: true, totalPages, pages, text, truncated: cut || pages < totalPages });
 } catch (err) {
-  parentPort.postMessage({ ok: false, error: code(err) });
+  answer({ ok: false, error: code(err) });
 } finally {
   try {
     await doc?.destroy();
   } catch {
-    // the answer is already posted; the parent terminates this thread anyway
+    // the answer is already on its way; the parent kills this process anyway
   }
 }

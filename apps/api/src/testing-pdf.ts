@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { constants, createDeflate } from "node:zlib";
 
 /**
  * PDF fixtures for the bot read layer (07.15-05): built byte by byte, so no test downloads or stores a binary file.
@@ -8,6 +9,8 @@ import { randomBytes } from "node:crypto";
  * - `makeEncryptedPdf()`: the same with a Standard security handler (V 1, R 2) whose O and U entries are random, so
  *   the empty user password fails and PDF.js raises `PasswordException`.
  * - `GARBAGE_PDF`: random-looking bytes behind a `%PDF-1.4` header (deterministic, so a run never flakes).
+ * - `makeFlateBombPdf(inflatedBytes)`: a one-page PDF whose content stream is `FlateDecode` of `inflatedBytes` spaces
+ *   (about 1 MB for 1 GiB): a decompression bomb (CR-01, 07.15 review).
  */
 
 /** A PDF literal string body: backslash and both parentheses escaped; the text is Latin-1 (Helvetica's encoding). */
@@ -94,3 +97,51 @@ function garbage(): Uint8Array {
 }
 
 export const GARBAGE_PDF: Uint8Array = garbage();
+
+/**
+ * A decompression bomb (CR-01): one page whose content stream inflates to `inflatedBytes` spaces. Deflated as a stream
+ * from one reused 1 MiB chunk, so building it never holds more than about a megabyte (the tests measure this
+ * process's memory).
+ */
+export async function makeFlateBombPdf(inflatedBytes: number): Promise<Uint8Array> {
+  const deflate = createDeflate({ level: 9, strategy: constants.Z_RLE });
+  const out: Buffer[] = [];
+  deflate.on("data", (chunk: Buffer) => out.push(chunk));
+  const done = new Promise<void>((resolve, reject) => {
+    deflate.once("end", resolve);
+    deflate.once("error", reject);
+  });
+  const chunk = Buffer.alloc(1024 * 1024, 0x20);
+  for (let left = inflatedBytes; left > 0; left -= chunk.length) {
+    const piece = left >= chunk.length ? chunk : chunk.subarray(0, left);
+    if (!deflate.write(piece)) await new Promise((resolve) => deflate.once("drain", resolve));
+  }
+  deflate.end();
+  await done;
+  const stream = Buffer.concat(out);
+  const latin1 = (text: string) => Buffer.from(text, "latin1");
+  const parts: Buffer[] = [latin1("%PDF-1.4\n")];
+  const offsets: number[] = [];
+  let at = parts[0]?.length ?? 0;
+  const object = (body: Buffer) => {
+    offsets.push(at);
+    const bytes = Buffer.concat([latin1(`${offsets.length} 0 obj\n`), body, latin1("\nendobj\n")]);
+    parts.push(bytes);
+    at += bytes.length;
+  };
+  object(latin1("<< /Type /Catalog /Pages 2 0 R >>"));
+  object(latin1("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"));
+  object(latin1("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>"));
+  object(
+    Buffer.concat([
+      latin1(`<< /Length ${stream.length} /Filter /FlateDecode >>\nstream\n`),
+      stream,
+      latin1("\nendstream"),
+    ]),
+  );
+  let xref = `xref\n0 ${offsets.length + 1}\n0000000000 65535 f \n`;
+  for (const off of offsets) xref += `${String(off).padStart(10, "0")} 00000 n \n`;
+  xref += `trailer\n<< /Size ${offsets.length + 1} /Root 1 0 R >>\nstartxref\n${at}\n%%EOF\n`;
+  parts.push(latin1(xref));
+  return new Uint8Array(Buffer.concat(parts));
+}

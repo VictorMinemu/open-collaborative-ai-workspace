@@ -91,9 +91,9 @@ export async function readAttachmentForAgent(
 }
 
 /**
- * A PDF's text from the bounded worker (`pdfText`, 07.15-05): the first `EXTRACT_LIMITS.pdfPages` pages, at most
- * `charsPerFile` code units, within `pdfMs` and `pdfHeapMb`. Truncated when pages or characters were cut; any
- * failure is the worker's fixed code.
+ * A PDF's text from the bounded extractor process (`pdfText`, 07.15-05, CR-01): the first `EXTRACT_LIMITS.pdfPages`
+ * pages, at most `charsPerFile` code units, within `pdfMs`, `pdfHeapMb` and `pdfRssMb`. Truncated when pages or
+ * characters were cut; any failure is the extractor's fixed code (`too_large` when it needed more memory).
  */
 async function readPdf(
   bytes: Uint8Array,

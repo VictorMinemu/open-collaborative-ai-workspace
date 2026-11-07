@@ -1,12 +1,14 @@
+import { realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { getResolvedPDFJS } from "unpdf";
 import { describe, expect, it } from "vitest";
-import { GARBAGE_PDF, makeEncryptedPdf, makePdf } from "../../../testing-pdf";
+import { GARBAGE_PDF, makeEncryptedPdf, makeFlateBombPdf, makePdf } from "../../../testing-pdf";
 import { EXTRACT_LIMITS } from "./limits";
 import { pdfText, pdfWorkersInFlight } from "./pdf";
 
 /**
- * 07.15-05 (BRA-02, D-05, D-12, PD-07): a PDF's text for a bot, parsed only inside a bounded Worker (unpdf 1.9.1,
- * PDF.js without eval), never on the API's event loop. Every failure is a fixed code.
+ * 07.15-05 (BRA-02, D-05, D-12, PD-07), CR-01: a PDF's text for a bot, parsed only inside a bounded child process
+ * (unpdf 1.9.1, PDF.js without eval), never in the API process. Every failure is a fixed code.
  */
 
 const CAPS = { pages: 100, chars: 64_000, ms: 10_000, heapMb: 256 };
@@ -80,9 +82,9 @@ describe("pdfText bounds and failures", () => {
 });
 
 /**
- * Hostile workers (E12): a worker stuck in a synchronous loop, one that exhausts its heap, and one that posts a forged
- * message. `pdfText` resolves only after its worker is terminated, so the in-flight count returning to 0 proves the
- * thread is gone and the slot was given back.
+ * Hostile extractors (E12): a process stuck in a synchronous loop, one that exhausts its heap, and one that sends a
+ * forged message. `pdfText` resolves only after its process has exited, so the in-flight count returning to 0 proves
+ * the process is gone and the slot was given back.
  */
 describe("pdfText under hostile workers", () => {
   const HANG = new URL("./fixtures/hang-worker.mjs", import.meta.url);
@@ -132,5 +134,106 @@ describe("pdfText under hostile workers", () => {
       code: "extraction_failed",
     });
     expect(pdfWorkersInFlight()).toBe(0);
+  });
+});
+
+/** Whether `pid` is still a live process (signal 0 only checks; ESRCH means it is gone and reaped). */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** Runs `fn` while sampling this process's resident memory every 10 ms; returns its result and the peak growth. */
+async function withRss<T>(fn: () => Promise<T>): Promise<{ value: T; growthMb: number }> {
+  const start = process.memoryUsage.rss();
+  let peak = start;
+  const timer = setInterval(() => {
+    peak = Math.max(peak, process.memoryUsage.rss());
+  }, 10);
+  try {
+    const value = await fn();
+    peak = Math.max(peak, process.memoryUsage.rss());
+    return { value, growthMb: (peak - start) / 1024 / 1024 };
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+/**
+ * CR-01 (07.15 review): a worker thread's `resourceLimits` bound only the JavaScript heap, so a 1 MB PDF whose
+ * content stream inflates to 1 GiB raised the API process to about 2 GB. Extraction now runs in a child process that
+ * the parent kills once its resident memory passes `EXTRACT_LIMITS.pdfRssMb` (and, on Linux, under an address-space
+ * limit), so none of that memory is ever the API's.
+ */
+describe("pdfText out of the API process (CR-01)", () => {
+  const RSS = new URL("./fixtures/rss-worker.mjs", import.meta.url);
+  const PROBE = new URL("./fixtures/probe-worker.mjs", import.meta.url);
+
+  it("a decompression bomb (1 MB inflating to 1 GiB) is too_large, the child is killed, this process stays small", async () => {
+    const bomb = await makeFlateBombPdf(1024 * 1024 * 1024);
+    expect(bomb.length).toBeLessThan(2 * 1024 * 1024);
+    const pids: number[] = [];
+    const started = Date.now();
+    const { value, growthMb } = await withRss(() =>
+      pdfText(bomb, CAPS, { onSpawn: (pid) => pids.push(pid) }),
+    );
+    expect(value).toEqual({ ok: false, code: "too_large" });
+    expect(Date.now() - started).toBeLessThan(CAPS.ms);
+    expect(growthMb).toBeLessThan(128);
+    expect(pids).toHaveLength(1);
+    expect(alive(pids[0] as number)).toBe(false);
+    expect(pdfWorkersInFlight()).toBe(0);
+  }, 30_000);
+
+  it("an extractor that allocates memory outside its heap in a loop that never yields is killed: too_large", async () => {
+    const pids: number[] = [];
+    const { value, growthMb } = await withRss(() =>
+      pdfText(new TextEncoder().encode("grow"), CAPS, { workerUrl: RSS, onSpawn: (pid) => pids.push(pid) }),
+    );
+    expect(value).toEqual({ ok: false, code: "too_large" });
+    expect(growthMb).toBeLessThan(128);
+    expect(alive(pids[0] as number)).toBe(false);
+    expect(pdfWorkersInFlight()).toBe(0);
+  }, 30_000);
+
+  it("the extractor has no environment, no inherited flags, a temporary cwd and the permission model on", async () => {
+    const before = process.env.OCW_PROBE_SECRET;
+    process.env.OCW_PROBE_SECRET = "must-not-reach-the-extractor";
+    try {
+      const out = await pdfText(new TextEncoder().encode("12345"), CAPS, { workerUrl: PROBE });
+      if (!out.ok) throw new Error(`expected the probe's answer, got ${out.code}`);
+      const facts = JSON.parse(out.text);
+      expect(facts.input).toBe(5);
+      // macOS sets `__CF_USER_TEXT_ENCODING` in every process it starts; nothing of the API's environment arrives.
+      expect(facts.env.filter((key: string) => key !== "__CF_USER_TEXT_ENCODING")).toEqual([]);
+      expect(facts.execArgv).toEqual(
+        expect.arrayContaining(["--permission", "--disallow-code-generation-from-strings"]),
+      );
+      expect(facts.execArgv.join(" ")).not.toMatch(/tsx|telemetry|--import|--require|--inspect/u);
+      expect(facts.cwd).not.toBe(process.cwd());
+      expect(facts.cwd.startsWith(realpathSync(tmpdir()))).toBe(true);
+      expect(facts).toMatchObject({
+        permission: true,
+        readEtc: false,
+        readCwd: false,
+        write: false,
+        child: false,
+        worker: false,
+        addon: false,
+        codeGeneration: false,
+      });
+      expect(out.text).not.toContain("must-not-reach-the-extractor");
+    } finally {
+      if (before === undefined) delete process.env.OCW_PROBE_SECRET;
+      else process.env.OCW_PROBE_SECRET = before;
+    }
+  });
+
+  it("a real PDF still reads with every bound in place (unpdf loads under the permission model)", async () => {
+    expect(await pdfText(makePdf(["Permitted"]), CAPS)).toMatchObject({ ok: true, pages: 1 });
   });
 });
