@@ -374,6 +374,90 @@ describe("sandboxes, usage and the event cursor (D-01, SBX-01/02)", () => {
   });
 });
 
+describe("Phase 07.15 attachment budget (D-11, D-17)", () => {
+  const counters = async (event: string) =>
+    (
+      await db.query(
+        "select attachment_reads::int as reads, attachment_chars::int as chars from app.agent_turns where event_id = $1",
+        [event],
+      )
+    ).rows;
+
+  it("a new turn starts with an empty attachment budget", async () => {
+    const o = await seedOrg();
+    expect(await counters(o.event)).toEqual([{ reads: 0, chars: 0 }]);
+  });
+
+  it("refuses negative attachment counters through their named checks and accepts the full budget", async () => {
+    const o = await seedOrg();
+    await refused(
+      db.query("update app.agent_turns set attachment_reads = -1 where event_id = $1", [o.event]),
+      {
+        constraint: "agent_turns_attachment_reads_check",
+      },
+    );
+    await refused(
+      db.query("update app.agent_turns set attachment_chars = -1 where event_id = $1", [o.event]),
+      {
+        constraint: "agent_turns_attachment_chars_check",
+      },
+    );
+    await db.query(
+      "update app.agent_turns set attachment_reads = 20, attachment_chars = 200000 where event_id = $1",
+      [o.event],
+    );
+    expect(await counters(o.event)).toEqual([{ reads: 20, chars: 200000 }]);
+  });
+
+  it("another organization's tenant neither reads nor updates a turn's attachment counters as the app role", async () => {
+    const a = await seedOrg();
+    const b = await seedOrg();
+    const app = new pg.Client({ connectionString: tdb.appUrl });
+    await app.connect();
+    const asTenant = async <T>(org: string, run: () => Promise<T>): Promise<T> => {
+      await app.query("begin");
+      try {
+        await app.query("select set_config('app.organization_id', $1, true)", [org]);
+        const out = await run();
+        await app.query("commit");
+        return out;
+      } catch (e) {
+        await app.query("rollback");
+        throw e;
+      }
+    };
+    try {
+      const read = (org: string) =>
+        asTenant(
+          org,
+          async () =>
+            (
+              await app.query(
+                "select attachment_reads::int as reads, attachment_chars::int as chars from app.agent_turns where event_id = $1",
+                [a.event],
+              )
+            ).rows,
+        );
+      expect(await read(b.id)).toEqual([]);
+      const updated = await asTenant(
+        b.id,
+        async () =>
+          (
+            await app.query(
+              "update app.agent_turns set attachment_reads = attachment_reads + 1, attachment_chars = attachment_chars + 500 where event_id = $1",
+              [a.event],
+            )
+          ).rowCount,
+      );
+      expect(updated).toBe(0);
+      expect(await read(a.id)).toEqual([{ reads: 0, chars: 0 }]);
+      expect(await counters(a.event)).toEqual([{ reads: 0, chars: 0 }]);
+    } finally {
+      await app.end();
+    }
+  });
+});
+
 describe("browser contexts, sessions and sign-in requests (D-06, D-08, BRW-01/03/04)", () => {
   it("a takeover lease has both a controller and an expiry, or neither; hosts and states are bounded", async () => {
     const o = await seedOrg();
