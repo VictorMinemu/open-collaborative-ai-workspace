@@ -25,13 +25,24 @@ const AUTOMATION_TOOLS = ["ocw_automation_propose", "ocw_record_update"] as cons
  * with at least one bot the `agent.message` decision allows, and never on a turn that starts tainted; never in `GET /cell`.
  */
 export const CONSULT_TOOL_NAME = "ocw_consult_agent";
+/**
+ * 07.15 (PD-03): `ocw_attachment_read`, offered by 07.15-07 only on a delivered turn that lists at least one file it may
+ * read (`access: "read"`) while object storage is configured; never in `GET /cell`.
+ */
+export const ATTACHMENT_TOOL_NAME = "ocw_attachment_read";
 const DELIVERED_TURN_TOOL = "ocw_agent_card";
 
 /** The bot's snapshot tools plus the turn-scoped ones it may be offered (only for a bot that is offered any tool). */
 export function withTurnScopedTools(tools: readonly string[] | undefined): string[] {
   const list = [...(tools ?? [])];
   if (!list.includes(DELIVERED_TURN_TOOL)) return list;
-  for (const name of [BOARD_TOOL_NAME, ...WORK_ZONE_TOOLS, ...AUTOMATION_TOOLS, CONSULT_TOOL_NAME]) {
+  for (const name of [
+    BOARD_TOOL_NAME,
+    ...WORK_ZONE_TOOLS,
+    ...AUTOMATION_TOOLS,
+    CONSULT_TOOL_NAME,
+    ATTACHMENT_TOOL_NAME,
+  ]) {
     if (!list.includes(name)) list.push(name);
   }
   return list;
