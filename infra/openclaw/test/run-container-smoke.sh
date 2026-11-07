@@ -353,6 +353,37 @@ if ! docker logs "${P}-openclaw" 2>&1 | grep "agent channel connected" >/dev/nul
   echo "FAIL: the ocw channel plugin never connected to the Agent Channel API within 120 s" >&2
   exit 1
 fi
+
+# Boot hot reload (07.15-11): the plugin's first sync writes the bots, providers and MCP servers into OpenClaw's config,
+# which OpenClaw then hot-reloads, reloading the plugin too. A turn that starts inside that window can find the plugin
+# mid-reload ("Plugin source changed while preparing its reload") and run with no callable tools, so whichever scenario
+# runs first waits until every config change OpenClaw detected since boot is applied (`config hot reload applied`),
+# bounded at 90 s. Past the bound it warns and goes on, as before this wait existed.
+boot_reload_pending() { # → 0 while the cell has synced no config yet, or a detected change is not yet applied
+  local logs synced detected applied
+  logs="$(docker logs "${P}-openclaw" 2>&1)" # captured once: `docker logs | grep -q` under pipefail can SIGPIPE
+  synced="$(grep -c "cell synced:" <<<"$logs" || true)"
+  detected="$(grep -c "\[reload\] config change detected" <<<"$logs" || true)"
+  applied="$(grep -c "\[reload\] config hot reload applied" <<<"$logs" || true)"
+  [[ "$synced" -eq 0 ]] && return 0
+  # A sync that changed nothing ("OpenClaw unchanged") triggers no reload.
+  if grep "cell synced:" <<<"$logs" | grep -q "OpenClaw updated" && [[ "$detected" -eq 0 ]]; then return 0; fi
+  [[ "$applied" -lt "$detected" ]]
+}
+echo "== waiting for OpenClaw's boot hot reload to settle"
+BOOT_RELOAD_SETTLED=0
+for i in $(seq 1 90); do
+  if ! boot_reload_pending; then
+    BOOT_RELOAD_SETTLED=1
+    break
+  fi
+  sleep 1
+done
+if [[ "$BOOT_RELOAD_SETTLED" == "1" ]]; then
+  docker logs "${P}-openclaw" 2>&1 | grep -E "\[reload\] config hot reload applied" | head -n 1 | cut -c1-160 | sed 's/^/   /' || true
+else
+  echo "WARN: OpenClaw's boot hot reload did not settle within 90 s; the first scenario starts anyway" >&2
+fi
 docker logs "${P}-openclaw" 2>&1 | grep -E "ocw-cell|http server listening|\[ocw\]|heartbeat" | sed 's/^/   /'
 
 api_exec() { docker exec -i "${P}-api" node --input-type=module -e "$1"; }
