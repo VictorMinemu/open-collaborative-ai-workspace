@@ -14,7 +14,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, statSync, truncateSync } from "node:fs";
 import { hostname } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   app,
   BrowserWindow,
@@ -153,7 +153,14 @@ function spawnDaemon(): ChildProcess {
   const out = openDaemonLog();
   try {
     // detached → own process group, so stop() can signal the daemon and everything it spawned.
-    return spawn(cmd.command, cmd.args, { cwd: cmd.cwd, env, detached: true, stdio: ["ignore", out, out] });
+    // windowsHide: no console window for the daemon on Windows.
+    return spawn(cmd.command, cmd.args, {
+      cwd: cmd.cwd,
+      env,
+      detached: true,
+      windowsHide: true,
+      stdio: ["ignore", out, out],
+    });
   } finally {
     if (typeof out === "number") closeSync(out);
   }
@@ -254,23 +261,31 @@ async function addProjectFlow(name?: string): Promise<AddProjectResult> {
   const options: Electron.OpenDialogOptions = {
     title: "Add project",
     buttonLabel: "Add project",
-    message: "Choose a git repository. It stays on this computer; the server sees its name, never its path.",
+    message:
+      "Choose a project folder (a git repository or any folder). It stays on this computer; the server sees its name, never its path.",
     properties: ["openDirectory"],
   };
   const picked = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
   const chosen = picked.filePaths[0];
   if (picked.canceled || !chosen) return { ok: false, canceled: true };
   try {
-    const root = await validateProjectDir(chosen, { forbidden: [ocwHome, app.getPath("userData")] });
+    const { root, git } = await validateProjectDir(chosen, { forbidden: [ocwHome, app.getPath("userData")] });
     const raw = await controlRequest(
       socketPath,
       { cmd: "addProject", path: root, ...(name ? { name } : {}) },
       15_000,
     );
     const project = toPublicProject(LocalProject.parse(raw));
-    notify("Project added", `${project.name} is ready for Work Zone sessions on this computer.`);
+    // Folder name only: web content never sees a path (AGENTS principle 7).
+    const notice = git
+      ? undefined
+      : `${basename(root)} has no git repository: sessions work; changes and worktrees are off.`;
+    notify(
+      "Project added",
+      `${project.name} is ready for Work Zone sessions on this computer.${notice ? ` ${notice}` : ""}`,
+    );
     void pollStatus();
-    return { ok: true, project };
+    return { ok: true, project, ...(notice ? { notice } : {}) };
   } catch (err) {
     const error =
       err instanceof ProjectPathError
@@ -304,6 +319,11 @@ function webUrlOk(url: string): boolean {
   }
 }
 
+/** Linux takes the window icon from here; macOS and Windows from the app bundle / executable. */
+function windowIcon(): { icon?: string } {
+  return process.platform === "linux" ? { icon: asset("icon.png") } : {};
+}
+
 function openOnboarding(): void {
   if (onboardingWindow && !onboardingWindow.isDestroyed()) {
     onboardingWindow.show();
@@ -317,7 +337,9 @@ function openOnboarding(): void {
     maximizable: false,
     fullscreenable: false,
     title: "Welcome to OCW",
-    titleBarStyle: "hiddenInset",
+    // hiddenInset exists only on macOS; elsewhere a hidden title bar would leave no close button.
+    ...(process.platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
+    ...windowIcon(),
     backgroundColor: BG,
     show: false,
     webPreferences: hardenedPreferences(join(DIST, "preload", "onboarding.cjs")),
@@ -353,6 +375,7 @@ function openMain(): void {
     minWidth: 900,
     minHeight: 600,
     title: "OCW",
+    ...windowIcon(),
     backgroundColor: BG,
     show: false,
     webPreferences: hardenedPreferences(join(DIST, "preload", "main.cjs")),
@@ -666,13 +689,24 @@ function runtimeItems(s: DesktopStatus): MenuItemConstructorOptions[] {
   ];
 }
 
+/** macOS tints black template images; Windows and Linux get the coloured icon (faded when offline). */
+function trayImage(online: boolean): Electron.NativeImage {
+  const name =
+    process.platform === "darwin"
+      ? online
+        ? "trayTemplate.png"
+        : "trayOfflineTemplate.png"
+      : online
+        ? "trayColor.png"
+        : "trayColorOffline.png";
+  return nativeImage.createFromPath(asset("tray", name));
+}
+
 function refreshChrome(): void {
   const s = status ?? computeStatus();
   if (tray) {
     const online = s.state === "online";
-    tray.setImage(
-      nativeImage.createFromPath(asset("tray", online ? "trayTemplate.png" : "trayOfflineTemplate.png")),
-    );
+    tray.setImage(trayImage(online));
     tray.setToolTip(`OCW · ${s.label}`);
     tray.setContextMenu(
       Menu.buildFromTemplate([
@@ -781,7 +815,7 @@ async function main(): Promise<void> {
   registerIpc();
 
   if (process.platform === "darwin" && !app.isPackaged) app.dock?.setIcon(asset("icon.png"));
-  tray = new Tray(nativeImage.createFromPath(asset("tray", "trayOfflineTemplate.png")));
+  tray = new Tray(trayImage(false));
   refreshChrome();
 
   if (store.config.onboarded && store.config.webUrl) openMain();

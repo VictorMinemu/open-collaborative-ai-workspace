@@ -239,6 +239,29 @@ describe("runSetup --yes … --service none (07.12-08 tracer, D-02, D-06, PD-13)
     expect(h.calls).toEqual(["token"]);
   });
 
+  it("a --project folder without git is registered, followed by one line saying so", async () => {
+    const h = harness({
+      registry: {
+        add: async (path) => ({
+          added: true,
+          project: {
+            localId: "lp_1",
+            path,
+            name: "repo",
+            gitRemote: null,
+            defaultBranch: null,
+            git: false,
+            addedAt: "2026-10-29T00:00:00.000Z",
+          },
+        }),
+      },
+    });
+    expect(await runSetup(flagsArgs(), h.deps)).toBe(0);
+    const i = h.stdout.indexOf('Registered "repo" (~/repo).');
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(h.stdout[i + 1]).toBe("repo has no git repository: sessions work; changes and worktrees are off.");
+  });
+
   it("a project that cannot be registered fails the step (exit 1)", async () => {
     const h = harness({
       registry: {

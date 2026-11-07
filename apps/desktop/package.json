@@ -14,7 +14,10 @@
     "dev": "node scripts/dev.mjs",
     "start": "node scripts/dev.mjs",
     "icons": "node scripts/icons.mjs",
-    "package:mac": "node scripts/package-mac.mjs",
+    "package": "node scripts/package.mjs",
+    "package:mac": "node scripts/package.mjs --mac",
+    "package:win": "node scripts/package.mjs --win",
+    "package:linux": "node scripts/package.mjs --linux",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:smoke": "node scripts/build.mjs && playwright test -c e2e/playwright.config.ts"
@@ -29,5 +32,7 @@
     "typescript": "7.0.2",
     "vitest": "5.0.2",
     "zod": "4.6.5"
-  }
+  },
+  "homepage": "https://github.com/VictorMinemu/open-collaborative-ai-workspace",
+  "desktopName": "ocw.desktop"
 }

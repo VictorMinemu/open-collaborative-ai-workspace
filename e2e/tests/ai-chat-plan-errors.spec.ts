@@ -215,8 +215,11 @@ test("a member without a connection finds Continue with ChatGPT in the picker an
   await expect(dialog).toBeVisible();
   const popupPromise = page.waitForEvent("popup");
   await dialog.getByTestId("chatgpt-dialog-continue").click();
-  await (await popupPromise).close().catch(() => {});
+  const popup = await popupPromise;
+  // Close the tab only once it has landed: closing it earlier aborts the authorize -> loopback navigation, so the
+  // loopback route never runs (as in ai-chat-signin.spec).
   await expect.poll(landed, { timeout: 10_000 }).toMatch(/^http:\/\/127\.0\.0\.1:1455\/auth\/callback\?/u);
+  await popup.close();
   await dialog.getByTestId("chatgpt-redirect-input").fill(landed());
   await dialog.getByTestId("chatgpt-connect-submit").click();
   await expect(dialog).toBeHidden();

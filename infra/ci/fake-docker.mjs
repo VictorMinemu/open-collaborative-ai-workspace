@@ -91,15 +91,38 @@ function main() {
   if (a === "ps") return print(list(state.containers ?? [], args.slice(1), "id"));
   if (a === "network" && b === "ls") return print(list(state.networks ?? [], args.slice(2), "id"));
   if (a === "volume" && b === "ls") return print(list(state.volumes ?? [], args.slice(2), "name"));
-  if (a === "image" && b === "ls") return print(list(images, args.slice(2), "id"));
+  if (a === "image" && b === "ls") {
+    // As Docker's image formatter: an image row has no .Label / .Labels field (containers, networks and volumes do).
+    // The template fails once a row is rendered, so a script relying on it silently matches nothing.
+    const at = args.indexOf("--format");
+    const rows = list(images, args.slice(2), "id");
+    if (at >= 0 && /\{\{\s*\.Labels?\b/u.test(args[at + 1] ?? "") && rows) {
+      process.stderr.write(
+        `template parsing error: template: :1:10: executing "" at <.Label>: can't evaluate field Label in type *formatter.imageContext\n`,
+      );
+      process.exit(1);
+    }
+    return print(rows);
+  }
   if (a === "volume" && b === "inspect") {
     const v = (state.volumes ?? []).find((x) => x.name === args.at(-1));
     if (!v) process.exit(1);
     return print(v.createdAt ?? "");
   }
   if (a === "image" && b === "inspect") {
-    if (!images.some((x) => x.ref === args.at(-1) || x.id === args.at(-1))) process.exit(1);
-    return print("[]");
+    const image = images.find((x) => x.ref === args.at(-1) || x.id === args.at(-1));
+    if (!image) {
+      process.stderr.write(`Error response from daemon: No such image: ${args.at(-1)}\n`);
+      process.exit(1);
+    }
+    const at = args.indexOf("--format");
+    if (at < 0) return print("[]");
+    // `{{.Id}}` and `{{index .Config.Labels "<key>"}}`: the image fields the scripts read.
+    return print(
+      args[at + 1]
+        .replace(/\{\{index \.Config\.Labels "([^"]+)"\}\}/g, (_, k) => image.labels?.[k] ?? "<no value>")
+        .replace(/\{\{\.Id\}\}/g, image.id),
+    );
   }
   if (a === "inspect") {
     if (!state.self) process.exit(1);

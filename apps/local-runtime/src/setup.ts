@@ -23,6 +23,7 @@ import { type EnrollResult, normalizeServerUrl, proposedDeviceName } from "./enr
 import { type RuntimeInstallInfo, readInstallInfo } from "./install-info.js";
 import { errorMessage, silentLogger } from "./logger.js";
 import { PairingCancelledError, PairingError, pairByDeviceCode } from "./pair.js";
+import { assertProjectDirAllowed, noGitNotice } from "./project-dir.js";
 import { type DetectedManager, SUPERVISOR_FALLBACK } from "./service/detect.js";
 import { createServiceManager, defaultServiceDeps, type ServiceManager } from "./service/index.js";
 import { applyServiceEnv, readServiceEnv } from "./service-env.js";
@@ -363,6 +364,7 @@ async function setupSteps(args: SetupArgs, deps: SetupDeps): Promise<number> {
         ? `Registered "${added.project.name}" (${where}).`
         : `${where} is already registered as "${added.project.name}".`,
     );
+    if (added.project.git === false) deps.out(noGitNotice(added.project.name));
   }
 
   // 4. Service.
@@ -630,6 +632,8 @@ export function defaultSetupDeps(home: string): SetupDeps & { cancel: () => void
         await registry.load();
         const existing = registry.list().find((p) => p.path === abs);
         if (existing) return { project: existing, added: false };
+        // The same folders `add-project` and the desktop refuse; a folder without git is fine.
+        await assertProjectDirAllowed(abs, { userHome: homedir(), forbidden: [home] });
         try {
           // A running daemon registers it and tells the server at once.
           const res = await controlRequest(socket, { cmd: "addProject", path: abs });

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { expect, type Page, test } from "@playwright/test";
 import { contrastOf, expectNoSeriousA11y } from "../support/a11y";
 import { apiAs } from "../support/actors";
@@ -51,6 +54,10 @@ test("Work Zone layout (ref-4): sidebar rows and groups, collapsible turns, chan
   let device: FakeDeviceHandle | null = null;
   let settledDevice: FakeDeviceHandle | null = null;
   const sessionIds: string[] = [];
+  // The fake holds the live turn in "Working" until this file exists (OCW_RUNTIME_FAKE_HOLD_FILE): under load the
+  // page can load after a timed turn already asked for approval, so the spec releases it once it has seen "Working".
+  const holdDir = mkdtempSync(join(tmpdir(), "ocw-e2e-hold-"));
+  const release = join(holdDir, "release");
 
   /** The session list lives in the navigation drawer on a phone. */
   const openSidebar = async () => {
@@ -102,11 +109,11 @@ test("Work Zone layout (ref-4): sidebar rows and groups, collapsible turns, chan
       )
       .toBe(12);
 
-    // ---- the live session: Supervised, so the fake asks before writing; slow enough to watch "Working"
+    // ---- the live session: Supervised, so the fake asks before writing; held in "Working" until the spec has seen it
     device = await startFakeDevice(adminApi, {
       name: `E2E Layout ${tag}`,
       projectName: `layout-${tag}`,
-      env: { OCW_RUNTIME_FAKE_DELAY_MS: "900" },
+      env: { OCW_RUNTIME_FAKE_DELAY_MS: "900", OCW_RUNTIME_FAKE_HOLD_FILE: release },
     });
     const created = await adminApi.post("/api/v1/work-sessions", {
       data: {
@@ -143,8 +150,10 @@ test("Work Zone layout (ref-4): sidebar rows and groups, collapsible turns, chan
     // ---- the agent bar floats above the composer while the runtime works; the composer has no stop button
     const bar = page.getByTestId("agent-bar");
     await expect(bar).toBeVisible();
-    await expect(bar).toContainText(/1 agent working|Waiting for approval/);
+    await expect(bar).toContainText("1 agent working");
     await expect(page.getByTestId("composer-controls").getByTestId("interrupt")).toHaveCount(0);
+    // Seen working: let the fake ask for approval.
+    writeFileSync(release, "");
 
     // ---- approval: the row reads "Needs approval" in the warning tone
     const banner = page.getByTestId("approval-banner");
@@ -298,5 +307,6 @@ test("Work Zone layout (ref-4): sidebar rows and groups, collapsible turns, chan
     await device?.stop();
     await settledDevice?.stop();
     await adminApi.dispose();
+    rmSync(holdDir, { recursive: true, force: true });
   }
 });

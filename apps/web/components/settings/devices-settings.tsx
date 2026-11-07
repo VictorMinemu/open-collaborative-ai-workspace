@@ -122,7 +122,10 @@ export function DevicesSettings() {
                 onClick={async () => {
                   const res = await desktop.addProject();
                   if (res.ok) {
-                    toast.success(`Added ${res.project.name}`);
+                    toast.success(
+                      `Added ${res.project.name}`,
+                      res.notice ? { description: res.notice } : undefined,
+                    );
                     void qc.invalidateQueries({ queryKey: wzKeys.devices });
                   } else if (!res.canceled) toast.error(res.error);
                 }}

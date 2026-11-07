@@ -10,33 +10,31 @@ import {
   type RuntimeInfo,
 } from "@ocw/contracts";
 import { useQueryClient } from "@tanstack/react-query";
-import {
-  Check,
-  FolderGit2,
-  FolderKanban,
-  FolderPlus,
-  GitBranch,
-  Laptop,
-  Lock,
-  Rocket,
-  Server,
-} from "lucide-react";
+import { ChevronDown, FolderPlus, LockOpen, Rocket, SlidersHorizontal } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { useGrain } from "@/components/shell/module-gate";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
 import {
   Dialog,
-  DialogBody,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
+} from "@/components/ui/panel-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
@@ -44,6 +42,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { errorMessage, isApiError } from "@/lib/api";
 import { useDesktop } from "@/lib/desktop";
 import { defaultAudience, groupRepos, isStartable } from "@/lib/new-session-groups";
+import { readNewSessionPrefs, saveNewSessionPrefs } from "@/lib/new-session-prefs";
 import { useMe } from "@/lib/queries";
 import { type DraftAudience, draftInput } from "@/lib/session-visibility";
 import { cn } from "@/lib/utils";
@@ -54,15 +53,26 @@ import {
   useRuntimeControls,
   wzKeys,
 } from "@/lib/workzone-queries";
-import { controlReasonText, isShown, OnlineDot, PERMISSION_MODES, RUNTIMES, RuntimeLogo } from "./meta";
+import { controlReasonText, isShown, PERMISSION_MODES, RUNTIMES, RuntimeLogo } from "./meta";
+import {
+  AddServerLink,
+  onRadioGroupKeyDown,
+  ProjectList,
+  ProjectsEmpty,
+  ProjectsLoading,
+  RowCheck,
+  radioRowClass,
+  TOUCH,
+} from "./new-session-sections";
 import { NewSessionVisibilityLine } from "./visibility/new-session-visibility-line";
 import type { NewSessionPreselect } from "./work-zone-context";
+
+export { AddServerLink, stepRadio } from "./new-session-sections";
 
 /** Before the device's controls load (or for a device with no catalog): the modes every runtime always had. */
 const LEGACY_MODES: PermissionMode[] = ["default", "acceptEdits", "plan"];
 
-/** D-14: a repository of the caller's device linked to a team project they can't open (the API names no project). */
-const HIDDEN_PROJECT = "Linked to a project you can't open";
+const RUNTIME_IDS = ["claude-code", "codex"] as const;
 
 /** "Leo Park" · "Leo Park and Pia Gómez" · "Leo Park, Pia Gómez and 2 more". */
 function namesOf(names: readonly string[]): string {
@@ -139,42 +149,98 @@ export function audienceRefusal(
 /**
  * The repository the dialog opens on (07.9 rule, 07.10-05 R5). A repository nobody can start on from here (D-14: its
  * project is hidden from the caller) is never preselected. A repository id is kept when it is one the caller may
- * choose; a team project picks its first online repository, else its first; anything else (no target, or one the
- * caller may not use) falls back to the first online repository, else the first. Never forced: the API decides.
+ * choose; a team project picks its first online repository, else its first. Without a usable target, the repository the
+ * viewer started their last session on (`lastUsed`), when it is still listed and its device online; then the first
+ * online repository, else the first. Never forced: the API decides.
  */
 export function preselectedRepo(
   available: readonly Project[],
   target: NewSessionPreselect | undefined,
+  lastUsed?: string | null,
 ): string | null {
   const startable = available.filter((p) => !p.teamProjectHidden);
   const firstOf = (list: readonly Project[]) => list.find((p) => p.deviceOnline) ?? list[0];
   let chosen: Project | undefined;
   if (typeof target === "string") chosen = startable.find((p) => p.id === target);
   else if (target) chosen = firstOf(startable.filter((p) => p.teamProject?.id === target.teamProjectId));
+  if (!chosen && lastUsed) chosen = startable.find((p) => p.id === lastUsed && p.deviceOnline);
   return (chosen ?? firstOf(startable))?.id ?? null;
 }
 
 /**
- * "Run sessions on a server" (07.12-07, owner feedback 2026-10-29): where sessions start, the way to Add a device ›
- * Server. A paired server then shows up here as one more device, like a laptop.
+ * Why Start session can't be pressed yet, in the order of the form, shown next to the button; null = ready. Never a
+ * silently disabled button.
  */
-export function AddServerLink({ className, onClick }: { className?: string; onClick?: () => void }) {
+export function startBlocker(s: {
+  loading: boolean;
+  hasProjects: boolean;
+  project: Pick<Project, "deviceName" | "deviceOnline" | "teamProjectHidden"> | null;
+  runtimeLabel: string;
+  runtimeReady: boolean;
+}): string | null {
+  if (!s.project) {
+    if (s.loading) return "Loading your projects…";
+    return s.hasProjects ? "Choose a project" : "Add a project to start a session";
+  }
+  if (s.project.teamProjectHidden) return "Choose a project";
+  if (!s.project.deviceOnline) return `${s.project.deviceName} is offline`;
+  if (!s.runtimeReady) return `${s.runtimeLabel} isn't ready on ${s.project.deviceName}`;
+  return null;
+}
+
+/** The collapsed Model and permissions row, in words: "Default model · Supervised · Current checkout". */
+export function settingsSummary(s: {
+  modelLabel: string | null;
+  effortLabel: string | null;
+  modeLabel: string;
+  worktree: boolean;
+}): string {
+  return [
+    s.modelLabel ?? "Default model",
+    s.effortLabel,
+    s.modeLabel,
+    s.worktree ? "Isolated worktree" : "Current checkout",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** One step of the form: a heading, an optional action on its right and an optional hint under it. */
+function Step({
+  title,
+  hint,
+  action,
+  children,
+}: {
+  title: ReactNode;
+  hint?: ReactNode;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
+  const id = useId();
   return (
-    <Link
-      href="/settings/devices?add=server"
-      data-testid="new-session-add-server"
-      onClick={onClick}
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-sm text-muted-foreground text-xs underline decoration-dotted decoration-muted-foreground/50 underline-offset-4 outline-none hover:text-foreground hover:decoration-solid focus-visible:ring-[3px] focus-visible:ring-ring/40 max-lg:min-h-11",
-        className,
-      )}
-    >
-      <Server aria-hidden className="size-3.5 shrink-0" />
-      Run sessions on a server
-    </Link>
+    <section aria-labelledby={id} className="grid min-w-0 grid-cols-1 gap-2.5">
+      <div className="grid gap-0.5">
+        <div className="flex min-h-8 items-center justify-between gap-3">
+          <h3 id={id} className="font-semibold text-sm tracking-tight">
+            {title}
+          </h3>
+          {action}
+        </div>
+        {hint ? <p className="text-[13px] text-muted-foreground leading-snug">{hint}</p> : null}
+      </div>
+      {children}
+    </section>
   );
 }
 
+/**
+ * Start a Work Zone session (owner feedback 2026-11-06: "chaos, not as nice as the rest"). One decision per step, in
+ * the order a person thinks about it: where (the repository, which names its computer), which agent and how (Model and
+ * permissions folded into one summary row until opened), who sees it, then the first prompt. The last repository and
+ * agent are preselected; the footer says why Start is unavailable and holds the error, so both are always in view. A
+ * sheet that fills a phone, a fixed-height dialog on desktop (nothing jumps while lists load).
+ */
 export function NewSessionDialog({
   open,
   onOpenChange,
@@ -205,18 +271,29 @@ export function NewSessionDialog({
   const [worktree, setWorktree] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [error, setError] = useState<string | null>(null);
-  // The error line sits at the end of the scrolling body; a refusal after Start brings it into view (D-13 refusal).
-  const errorRef = useRef<HTMLParagraphElement>(null);
-  useEffect(() => {
-    if (error) errorRef.current?.scrollIntoView({ block: "nearest" });
-  }, [error]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
   /** Who the session will be visible to (Surface 3): the project's default until Change picks another (draft). */
   const [audience, setAudience] = useState<DraftAudience | null>(null);
+
+  // Opening the dialog starts on the viewer's last agent (the device's readiness below may still switch it).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only when the dialog opens, never on a later change
+  useEffect(() => {
+    if (!open) return;
+    const last = readNewSessionPrefs().runtime;
+    if (last && last !== runtime) {
+      setRuntime(last);
+      setModel("default");
+      setEffort("default");
+    }
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
     setError(null);
-    setProjectId(preselectedRepo(available, initialTarget ?? initialProjectId));
+    setProjectId(
+      preselectedRepo(available, initialTarget ?? initialProjectId, readNewSessionPrefs().projectId),
+    );
   }, [open, initialTarget, initialProjectId, available]);
 
   const project = available.find((p) => p.id === projectId) ?? null;
@@ -231,6 +308,7 @@ export function NewSessionDialog({
   const device = devices.data?.find((d) => d.id === project?.deviceId) ?? null;
   const runtimeInfo = (id: RuntimeId) => device?.runtimes.find((r) => r.id === id);
   const me = useMe({ enabled: false });
+  const ownDevice = !!device && device.ownerUserId === me.data?.user.id;
   const updater = device ? whoUpdates(device, me.data?.user.id) : "";
   const cardState = (id: RuntimeId) =>
     runtimeCardState(runtimeInfo(id), device?.runtimeCompatibility?.[id], updater);
@@ -293,7 +371,7 @@ export function NewSessionDialog({
         "",
       ).ready;
     if (device && !ready(runtime)) {
-      const alt = (["claude-code", "codex"] as const).find(ready);
+      const alt = RUNTIME_IDS.find(ready);
       if (alt) {
         setRuntime(alt);
         setModel("default");
@@ -309,14 +387,25 @@ export function NewSessionDialog({
     if (!desktop) return;
     const res = await desktop.addProject();
     if (res.ok) {
-      toast.success(`Added ${res.project.name}`);
+      toast.success(`Added ${res.project.name}`, res.notice ? { description: res.notice } : undefined);
       await qc.invalidateQueries({ queryKey: wzKeys.projects });
     } else if (!res.canceled) toast.error(res.error);
   }
 
+  const runtimeReady = cardState(runtime).ready;
+  const blocker = startBlocker({
+    loading: projects.isPending,
+    hasProjects: available.length > 0,
+    project,
+    runtimeLabel: RUNTIMES[runtime].label,
+    runtimeReady,
+  });
+  const canSubmit = !!project && isStartable(project) && runtimeReady && !create.isPending;
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     if (!project) return setError("Choose a project");
+    if (!canSubmit) return;
     setError(null);
     const visibility = audience ? draftInput(audience) : null;
     try {
@@ -330,6 +419,7 @@ export function NewSessionDialog({
         ...(effort !== "default" ? { effort } : {}),
         ...(prompt.trim() ? { prompt: prompt.trim() } : {}),
       });
+      saveNewSessionPrefs({ projectId: project.id, runtime });
       onOpenChange(false);
       setPrompt("");
       router.push(`/work-zone/${s.id}`);
@@ -338,385 +428,465 @@ export function NewSessionDialog({
     }
   }
 
-  const runtimeReady = cardState(runtime).ready;
-  const canSubmit = !!project && isStartable(project) && runtimeReady && !create.isPending;
+  /** ⌘/Ctrl + Enter anywhere starts; in the prompt, Enter starts and Shift + Enter breaks the line (the composer's rule). */
+  function onFormKeyDown(e: KeyboardEvent<HTMLFormElement>) {
+    if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
+    const inPrompt = (e.target as HTMLElement).id === "first-prompt";
+    if (!(e.metaKey || e.ctrlKey) && !(inPrompt && !e.shiftKey)) return;
+    e.preventDefault();
+    if (canSubmit) formRef.current?.requestSubmit();
+  }
+
+  const closeDialog = () => onOpenChange(false);
+  const empty = projects.isSuccess && available.length === 0;
+  const emptyKind = devices.isSuccess && devices.data.length === 0 ? "no-devices" : "no-projects";
+  const modeMeta = PERMISSION_MODES.find((m) => m.value === mode);
+  const summary = settingsSummary({
+    modelLabel: model === "default" ? null : (chosenModel?.displayName ?? null),
+    effortLabel: effort === "default" ? null : (EFFORT_LABELS[effort] ?? effort),
+    modeLabel: modeMeta?.label ?? mode,
+    worktree,
+  });
+  const noRuntimeReady = !!device && RUNTIME_IDS.every((id) => !cardState(id).ready);
+  const runtimeStop =
+    cardState(runtime).ready || !device ? runtime : RUNTIME_IDS.find((id) => cardState(id).ready);
+  const modeStop =
+    modeOptions.find((o) => o.meta.value === mode && o.available)?.meta.value ??
+    modeOptions.find((o) => o.available)?.meta.value;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-xl" data-testid="new-session-dialog">
-        <form onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col gap-4">
-          <DialogHeader>
-            <DialogTitle>New session</DialogTitle>
+      <DialogContent
+        data-testid="new-session-dialog"
+        className={cn(
+          "sm:max-w-[40rem] max-sm:max-h-[calc(100dvh-0.75rem)]",
+          !empty &&
+            "max-sm:h-[calc(100dvh-0.75rem)] sm:h-[min(48rem,calc(100dvh-4rem))] lg:h-[min(42rem,calc(100dvh-4rem))] lg:max-w-[60rem]",
+        )}
+      >
+        <form
+          ref={formRef}
+          onSubmit={onSubmit}
+          onKeyDown={onFormKeyDown}
+          className="flex min-h-0 flex-1 flex-col"
+        >
+          <DialogHeader className={cn("pb-1", !empty && "lg:border-b lg:pb-4")}>
+            <DialogTitle className="text-lg">New session</DialogTitle>
             <DialogDescription>
               Runs on a computer in your team. People who can see the session follow it and queue prompts;
               they run one at a time.
             </DialogDescription>
           </DialogHeader>
-          <DialogBody className="grid gap-5">
-            {/* Project */}
-            <section className="grid gap-2">
-              <div className="flex items-center justify-between">
-                <Label>Project</Label>
-                {desktop ? (
-                  <Button type="button" size="sm" variant="ghost" onClick={addFromDesktop}>
-                    <FolderPlus /> Add project from this computer
-                  </Button>
-                ) : null}
-              </div>
-              {available.length === 0 ? (
-                <div className="rounded-lg border border-dashed p-4 text-center text-muted-foreground text-sm">
-                  No projects yet. Add a repository from the desktop app, or run{" "}
-                  <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px]">
-                    ocw-runtime add-project .
-                  </code>{" "}
-                  on a paired device.{" "}
-                  <Link href="/settings/devices" className="text-primary underline-offset-4 hover:underline">
-                    Manage devices
-                  </Link>
-                  {canPair ? (
-                    <div className="mt-2 flex justify-center">
-                      <AddServerLink onClick={() => onOpenChange(false)} />
-                    </div>
-                  ) : null}
-                </div>
-              ) : (
-                <div className="grid gap-3" role="radiogroup" aria-label="Project">
-                  {groups.teams.map((g) => (
-                    <div
-                      key={g.project.id}
-                      className="grid gap-1.5"
-                      data-testid={`project-group-${g.project.id}`}
-                    >
-                      <p className="flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
-                        <FolderKanban aria-hidden className="size-3.5 shrink-0" />
-                        <span className="min-w-0 truncate" title={g.project.name}>
-                          <span className="font-semibold">{g.project.name}</span> · Team project
-                        </span>
-                      </p>
-                      {g.repos.map((p) => (
-                        <RepoOption
-                          key={p.id}
-                          project={p}
-                          selected={p.id === projectId}
-                          onSelect={setProjectId}
-                          showDevice
-                        />
-                      ))}
-                    </div>
-                  ))}
-                  {groups.hidden.length > 0 ? (
-                    <div className="grid gap-1.5" data-testid="project-group-hidden">
-                      <p className="flex min-w-0 items-center gap-1.5 text-muted-foreground text-xs">
-                        <Lock aria-hidden className="size-3.5 shrink-0" />
-                        <span className="min-w-0 truncate">{HIDDEN_PROJECT}</span>
-                      </p>
-                      {groups.hidden.map((p) => (
-                        <RepoOption
-                          key={p.id}
-                          project={p}
-                          selected={false}
-                          onSelect={setProjectId}
-                          showDevice
-                        />
-                      ))}
-                    </div>
-                  ) : null}
-                  {groups.personal.length > 0 && (groups.teams.length > 0 || groups.hidden.length > 0) ? (
-                    <p
-                      className="-mb-1.5 font-semibold text-muted-foreground text-xs"
-                      data-testid="project-group-personal"
-                    >
-                      Personal
-                    </p>
-                  ) : null}
-                  {groups.personal.map((g) => (
-                    <div key={g.deviceId} className="grid gap-1.5">
-                      <p className="flex items-center gap-1.5 text-muted-foreground text-xs">
-                        <Laptop className="size-3.5" /> {g.deviceName}
-                        <OnlineDot online={g.deviceOnline} className="ml-0.5 size-1.5" />
-                        <span>{g.deviceOnline ? "Online" : "Offline"}</span>
-                      </p>
-                      {g.repos.map((p) => (
-                        <RepoOption
-                          key={p.id}
-                          project={p}
-                          selected={p.id === projectId}
-                          onSelect={setProjectId}
-                        />
-                      ))}
-                    </div>
-                  ))}
-                </div>
+          {/* Phones and tablets: one scrolling column. Desktop: where on the left, how and who on the right, both in view. */}
+          <div
+            className={cn(
+              "scrollbar-thin min-h-0 flex-1 overflow-x-hidden overflow-y-auto",
+              !empty && "lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.08fr)] lg:overflow-hidden",
+            )}
+          >
+            {/* 1. Where: the repository, which names the computer it runs on */}
+            <div
+              className={cn(
+                "grid min-w-0 grid-cols-1 content-start px-5 pt-4 pb-4 lg:pb-6",
+                !empty && "scrollbar-thin lg:overflow-y-auto lg:border-r lg:bg-muted/25 lg:pt-5",
               )}
-              {canPair && available.length > 0 ? (
-                <AddServerLink className="justify-self-start" onClick={() => onOpenChange(false)} />
-              ) : null}
-              <NewSessionVisibilityLine project={project} value={audience} onChange={setAudience} />
-            </section>
-
-            {/* Runtime */}
-            <section className="grid gap-2">
-              <Label>Agent</Label>
-              <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Agent">
-                {(["claude-code", "codex"] as const).map((id) => {
-                  const info = runtimeInfo(id);
-                  const state = cardState(id);
-                  const ready = state.ready;
-                  const selected = runtime === id;
-                  return (
-                    <button
-                      key={id}
+            >
+              <Step
+                title="Project"
+                hint={empty ? undefined : "A repository on one of your team's computers."}
+                action={
+                  desktop && !empty ? (
+                    <Button
                       type="button"
-                      role="radio"
-                      aria-checked={selected}
-                      data-testid={`runtime-${id}`}
-                      disabled={!!device && !ready}
-                      onClick={() => {
-                        setRuntime(id);
-                        setModel("default");
-                        setEffort("default");
-                      }}
-                      className={cn(
-                        "flex items-start gap-3 rounded-lg border p-3 text-left transition-[border-color,background-color,box-shadow] disabled:cursor-not-allowed disabled:opacity-55",
-                        selected
-                          ? "border-primary/60 bg-primary/5 ring-[3px] ring-primary/15"
-                          : "hover:border-foreground/20 hover:bg-accent/40",
-                      )}
+                      size="sm"
+                      variant="ghost"
+                      onClick={addFromDesktop}
+                      className={cn("-mr-2", TOUCH)}
                     >
-                      <RuntimeLogo runtime={id} className="mt-0.5 size-7 rounded-lg" />
-                      <span className="grid min-w-0 gap-0.5">
-                        <span className="flex items-center gap-1.5 font-medium text-sm">
-                          {RUNTIMES[id].label}
-                          {info?.version ? (
-                            <span className="font-normal text-muted-foreground text-xs">{info.version}</span>
-                          ) : null}
-                        </span>
-                        <span
-                          data-testid={device && state.tone !== "muted" ? "runtime-compat-note" : undefined}
-                          className={cn(
-                            "text-xs leading-snug",
-                            !device || state.tone === "muted"
-                              ? "text-muted-foreground"
-                              : state.tone === "warning"
-                                ? "text-amber-700 dark:text-amber-300"
-                                : "text-red-700 dark:text-red-300",
-                          )}
-                        >
-                          {!device ? RUNTIMES[id].subscription : (state.note ?? RUNTIMES[id].subscription)}
-                        </span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
-
-            <section className="grid gap-2">
-              <Label>Model</Label>
-              <div className="grid gap-2 sm:grid-cols-2">
-                <Select
-                  items={[
-                    { value: "default", label: "Default" },
-                    ...catalogModels.map((m) => ({ value: m.id, label: m.displayName })),
-                  ]}
-                  value={model}
-                  onValueChange={(v) => {
-                    setModel(v ?? "default");
-                    setEffort("default");
-                  }}
-                >
-                  <SelectTrigger aria-label="Model" data-testid="new-session-model" />
-                  <SelectContent>
-                    <SelectItem value="default">Default</SelectItem>
-                    {catalogModels.map((m) => (
-                      <SelectItem key={m.id} value={m.id}>
-                        {m.displayName}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {efforts.length > 0 ? (
-                  <Select
-                    items={[
-                      { value: "default", label: "Default" },
-                      ...efforts.map((e) => ({ value: e.value, label: EFFORT_LABELS[e.value] ?? e.value })),
-                    ]}
-                    value={effort}
-                    onValueChange={(v) => setEffort(v ?? "default")}
+                      <FolderPlus aria-hidden /> Add project from this computer
+                    </Button>
+                  ) : null
+                }
+              >
+                {projects.isPending ? (
+                  <ProjectsLoading />
+                ) : projects.isError ? (
+                  <div
+                    role="status"
+                    className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed px-4 py-3 text-[13px] text-muted-foreground"
                   >
-                    <SelectTrigger aria-label="Reasoning effort" data-testid="new-session-effort" />
-                    <SelectContent>
-                      <SelectItem value="default">Default</SelectItem>
-                      {efforts.map((e) => (
-                        <SelectItem key={e.value} value={e.value}>
-                          {EFFORT_LABELS[e.value] ?? e.value}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                ) : null}
-              </div>
-              <p className="text-muted-foreground text-xs">
-                {device && controls.isSuccess && !rc?.catalog
-                  ? `${device.name} has not reported its ${RUNTIMES[runtime].label} models yet; the runtime picks its default.`
-                  : `Models ${RUNTIMES[runtime].label} reported on ${device?.name ?? "the device"}. Change them anytime from the composer.`}
-              </p>
-            </section>
-
-            <section className="grid gap-2">
-              <Label>Permissions</Label>
-              <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Permission mode">
-                {modeOptions.map(({ meta, available, reason }) => {
-                  const Icon = meta.icon;
-                  const selected = mode === meta.value;
-                  return (
-                    <button
-                      key={meta.value}
+                    Couldn't load your projects.
+                    <Button
                       type="button"
-                      role="radio"
-                      aria-checked={selected}
-                      data-testid={`mode-${meta.value}`}
-                      disabled={!available}
-                      onClick={() => setMode(meta.value)}
-                      className={cn(
-                        "flex items-start gap-2.5 rounded-lg border p-2.5 text-left transition-[border-color,background-color,box-shadow] disabled:cursor-not-allowed",
-                        selected
-                          ? "border-primary/60 bg-primary/5 ring-[3px] ring-primary/15"
-                          : "hover:border-foreground/20 hover:bg-accent/40 disabled:hover:border-border disabled:hover:bg-transparent",
-                      )}
+                      size="sm"
+                      variant="outline"
+                      onClick={() => projects.refetch()}
+                      className={TOUCH}
                     >
-                      <Icon
-                        className={cn(
-                          "mt-0.5 size-4 shrink-0",
-                          !available
-                            ? "text-muted-foreground/60"
-                            : meta.tone === "warning"
-                              ? "text-amber-600 dark:text-amber-400"
-                              : "text-foreground/80",
-                        )}
-                      />
-                      <span className="grid min-w-0 gap-0.5">
-                        <span
-                          className={cn("font-medium text-[13px]", !available && "text-muted-foreground")}
-                        >
-                          {meta.label}
-                        </span>
-                        <span className="text-muted-foreground text-xs leading-snug">{meta.hint}</span>
-                        {reason ? (
-                          <span className="text-amber-700 text-xs leading-snug dark:text-amber-300/90">
-                            {reason}
-                          </span>
-                        ) : null}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
-
-            <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
-              <span className="grid gap-0.5">
-                <span className="font-medium text-sm">Isolated worktree</span>
-                <span className="text-muted-foreground text-xs">
-                  Work on a separate git branch so the device's checkout stays untouched.
-                </span>
-              </span>
-              <Switch checked={worktree} onCheckedChange={setWorktree} aria-label="Isolated worktree" />
+                      Try again
+                    </Button>
+                  </div>
+                ) : empty ? (
+                  <ProjectsEmpty
+                    kind={emptyKind}
+                    canPair={canPair}
+                    desktop={!!desktop}
+                    onAddFromDesktop={addFromDesktop}
+                    onNavigate={closeDialog}
+                  />
+                ) : (
+                  <ProjectList groups={groups} selectedId={projectId} onSelect={setProjectId} />
+                )}
+                {canPair && available.length > 0 ? (
+                  <AddServerLink className="justify-self-start" onClick={closeDialog} />
+                ) : null}
+              </Step>
             </div>
 
-            <section className="grid gap-2">
-              <Label htmlFor="first-prompt">
-                First prompt <span className="font-normal text-muted-foreground">(optional)</span>
-              </Label>
-              <Textarea
-                id="first-prompt"
-                data-testid="first-prompt"
-                rows={3}
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder="e.g. Add a dark-mode toggle to the settings page"
-              />
-            </section>
+            {empty ? null : (
+              <div className="scrollbar-thin grid min-w-0 grid-cols-1 content-start gap-7 px-5 pt-2 pb-6 lg:overflow-y-auto lg:pt-5">
+                {/* 2. Which agent, and how it works */}
+                <Step title="Agent">
+                  <div
+                    className="grid grid-cols-2 gap-2"
+                    role="radiogroup"
+                    aria-label="Agent"
+                    onKeyDown={onRadioGroupKeyDown}
+                  >
+                    {RUNTIME_IDS.map((id) => {
+                      const info = runtimeInfo(id);
+                      const state = cardState(id);
+                      const ready = state.ready;
+                      const selected = runtime === id;
+                      const note = device ? state.note : null;
+                      return (
+                        <button
+                          key={id}
+                          type="button"
+                          role="radio"
+                          aria-checked={selected}
+                          tabIndex={runtimeStop === id ? 0 : -1}
+                          data-testid={`runtime-${id}`}
+                          disabled={!!device && !ready}
+                          onClick={() => {
+                            setRuntime(id);
+                            setModel("default");
+                            setEffort("default");
+                          }}
+                          className={cn(
+                            "flex min-h-14 items-start gap-2.5 rounded-lg border bg-card p-3 text-left sm:gap-3 outline-none transition-[border-color,background-color,box-shadow]",
+                            "focus-visible:ring-[3px] focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-60",
+                            selected && (ready || !device)
+                              ? "border-primary/50 bg-brand-soft/60 ring-1 ring-primary/30 dark:bg-brand-soft/40"
+                              : "hover:border-foreground/20 hover:bg-accent/40 disabled:hover:border-border disabled:hover:bg-card",
+                          )}
+                        >
+                          <RuntimeLogo runtime={id} className="size-6 rounded-md sm:size-7 sm:rounded-lg" />
+                          <span className="grid min-w-0 flex-1 gap-0.5">
+                            <span className="truncate font-medium text-sm leading-tight">
+                              {RUNTIMES[id].label}
+                            </span>
+                            <span
+                              data-testid={
+                                device && state.tone !== "muted" ? "runtime-compat-note" : undefined
+                              }
+                              className={cn(
+                                "text-xs leading-snug",
+                                !note || state.tone === "muted"
+                                  ? "text-muted-foreground"
+                                  : state.tone === "warning"
+                                    ? "text-amber-700 dark:text-amber-300"
+                                    : "text-red-700 dark:text-red-300",
+                              )}
+                            >
+                              {note ??
+                                (device
+                                  ? info?.version
+                                    ? `Ready · ${info.version}`
+                                    : "Ready"
+                                  : RUNTIMES[id].vendor)}
+                            </span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {noRuntimeReady && device ? (
+                    <p
+                      data-testid="new-session-no-runtime"
+                      className="rounded-md bg-warning/12 px-3 py-2 text-[13px] text-amber-800 leading-snug dark:text-amber-200"
+                    >
+                      Neither agent is ready on {device.name}.{" "}
+                      {ownDevice ? (
+                        <Link
+                          href="/settings/devices"
+                          onClick={closeDialog}
+                          className="font-medium underline underline-offset-4 max-md:inline-flex max-md:min-h-11 max-md:items-center"
+                        >
+                          Set one up in Settings › Devices
+                        </Link>
+                      ) : (
+                        `Ask ${device.ownerName ?? "its owner"} to install and sign in to Claude Code or Codex.`
+                      )}
+                    </p>
+                  ) : (
+                    <p className="text-[13px] text-muted-foreground">{RUNTIMES[runtime].subscription}</p>
+                  )}
 
-            {error ? (
-              <p
-                ref={errorRef}
-                role="alert"
-                className="rounded-md bg-destructive/10 px-3 py-2 text-destructive text-sm"
+                  {/* Model, effort, permissions and worktree: one summary row until opened */}
+                  <div className="rounded-lg border bg-card" data-open={settingsOpen || undefined}>
+                    <button
+                      type="button"
+                      aria-expanded={settingsOpen}
+                      aria-controls="new-session-settings"
+                      data-testid="new-session-settings-toggle"
+                      onClick={() => setSettingsOpen((o) => !o)}
+                      className="flex min-h-12 w-full items-center gap-3 rounded-lg px-3 py-2 text-left outline-none transition-colors hover:bg-accent/40 focus-visible:ring-[3px] focus-visible:ring-ring/40"
+                    >
+                      <SlidersHorizontal aria-hidden className="size-4 shrink-0 text-muted-foreground" />
+                      <span className="grid min-w-0 flex-1">
+                        <span className="font-medium text-sm">Model and permissions</span>
+                        <span
+                          data-testid="new-session-settings-summary"
+                          className="truncate text-muted-foreground text-xs"
+                        >
+                          {summary}
+                        </span>
+                      </span>
+                      {mode === "fullAccess" ? (
+                        <span className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full bg-warning/15 px-2 font-medium text-[12px] text-amber-800 dark:text-amber-300">
+                          <LockOpen aria-hidden className="size-3.5" />
+                          Full access
+                        </span>
+                      ) : null}
+                      <ChevronDown
+                        aria-hidden
+                        className={cn(
+                          "size-4 shrink-0 text-muted-foreground transition-transform",
+                          settingsOpen && "rotate-180",
+                        )}
+                      />
+                    </button>
+                    {settingsOpen ? (
+                      <div
+                        id="new-session-settings"
+                        className="grid grid-cols-1 gap-5 border-t px-3 pt-4 pb-3"
+                      >
+                        <div className="grid gap-2">
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <div className="grid gap-1.5">
+                              <Label>Model</Label>
+                              <Select
+                                items={[
+                                  { value: "default", label: "Default" },
+                                  ...catalogModels.map((m) => ({ value: m.id, label: m.displayName })),
+                                ]}
+                                value={model}
+                                onValueChange={(v) => {
+                                  setModel(v ?? "default");
+                                  setEffort("default");
+                                }}
+                              >
+                                <SelectTrigger
+                                  aria-label="Model"
+                                  data-testid="new-session-model"
+                                  className="max-md:h-11"
+                                />
+                                <SelectContent>
+                                  <SelectItem value="default">Default</SelectItem>
+                                  {catalogModels.map((m) => (
+                                    <SelectItem key={m.id} value={m.id}>
+                                      {m.displayName}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            {efforts.length > 0 ? (
+                              <div className="grid gap-1.5">
+                                <Label>Reasoning effort</Label>
+                                <Select
+                                  items={[
+                                    { value: "default", label: "Default" },
+                                    ...efforts.map((e) => ({
+                                      value: e.value,
+                                      label: EFFORT_LABELS[e.value] ?? e.value,
+                                    })),
+                                  ]}
+                                  value={effort}
+                                  onValueChange={(v) => setEffort(v ?? "default")}
+                                >
+                                  <SelectTrigger
+                                    aria-label="Reasoning effort"
+                                    data-testid="new-session-effort"
+                                    className="max-md:h-11"
+                                  />
+                                  <SelectContent>
+                                    <SelectItem value="default">Default</SelectItem>
+                                    {efforts.map((e) => (
+                                      <SelectItem key={e.value} value={e.value}>
+                                        {EFFORT_LABELS[e.value] ?? e.value}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              </div>
+                            ) : null}
+                          </div>
+                          <p className="text-muted-foreground text-xs">
+                            {device && controls.isSuccess && !rc?.catalog
+                              ? `${device.name} has not reported its ${RUNTIMES[runtime].label} models yet; the runtime picks its default.`
+                              : `Models ${RUNTIMES[runtime].label} reported on ${device?.name ?? "the device"}. Change them anytime from the composer.`}
+                          </p>
+                        </div>
+
+                        <div className="grid gap-1.5">
+                          <Label>Permissions</Label>
+                          <div
+                            className="divide-y overflow-hidden rounded-lg border"
+                            role="radiogroup"
+                            aria-label="Permission mode"
+                            onKeyDown={onRadioGroupKeyDown}
+                          >
+                            {modeOptions.map(({ meta, available: ok, reason }) => {
+                              const Icon = meta.icon;
+                              const selected = mode === meta.value;
+                              return (
+                                <button
+                                  key={meta.value}
+                                  type="button"
+                                  role="radio"
+                                  aria-checked={selected}
+                                  tabIndex={modeStop === meta.value ? 0 : -1}
+                                  data-testid={`mode-${meta.value}`}
+                                  disabled={!ok}
+                                  onClick={() => setMode(meta.value)}
+                                  className={cn(radioRowClass, "items-start")}
+                                >
+                                  <Icon
+                                    aria-hidden
+                                    className={cn(
+                                      "mt-0.5 size-4 shrink-0",
+                                      !ok
+                                        ? "text-muted-foreground/60"
+                                        : meta.tone === "warning"
+                                          ? "text-amber-600 dark:text-amber-400"
+                                          : selected
+                                            ? "text-primary"
+                                            : "text-foreground/80",
+                                    )}
+                                  />
+                                  <span className="grid min-w-0 flex-1 gap-0.5">
+                                    <span
+                                      className={cn(
+                                        "font-medium text-[13px] leading-tight",
+                                        !ok && "text-muted-foreground",
+                                      )}
+                                    >
+                                      {meta.label}
+                                    </span>
+                                    <span className="text-muted-foreground text-xs leading-snug">
+                                      {meta.hint}
+                                    </span>
+                                    {reason ? (
+                                      <span className="text-amber-700 text-xs leading-snug dark:text-amber-300/90">
+                                        {reason}
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                  <RowCheck checked={selected} />
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        {/* biome-ignore lint/a11y/noLabelWithoutControl: the Switch renders the control inside the label */}
+                        <label className="flex min-h-11 cursor-pointer items-center justify-between gap-4 rounded-lg border px-3 py-2.5">
+                          <span className="grid gap-0.5">
+                            <span className="font-medium text-[13px]">Isolated worktree</span>
+                            <span
+                              id="new-session-worktree-hint"
+                              className="text-muted-foreground text-xs leading-snug"
+                            >
+                              Work on a separate git branch so the device's checkout stays untouched.
+                            </span>
+                          </span>
+                          <Switch
+                            checked={worktree}
+                            onCheckedChange={setWorktree}
+                            aria-label="Isolated worktree"
+                            aria-describedby="new-session-worktree-hint"
+                          />
+                        </label>
+                      </div>
+                    ) : null}
+                  </div>
+                </Step>
+
+                {/* 3. Who sees it (the draft audience, applied at start) */}
+                {project && audience ? (
+                  <section aria-label="Visibility" className="-my-2 min-w-0">
+                    <NewSessionVisibilityLine project={project} value={audience} onChange={setAudience} />
+                  </section>
+                ) : null}
+
+                {/* 4. What to do first */}
+                <section className="grid min-w-0 grid-cols-1 gap-2">
+                  <Label htmlFor="first-prompt" className="text-sm">
+                    First prompt <span className="font-normal text-muted-foreground">(optional)</span>
+                  </Label>
+                  <Textarea
+                    id="first-prompt"
+                    data-testid="first-prompt"
+                    rows={3}
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    placeholder="e.g. Add a dark-mode toggle to the settings page"
+                    aria-describedby="first-prompt-hint"
+                    className="max-h-48 resize-none"
+                  />
+                  <p id="first-prompt-hint" className="text-muted-foreground text-xs max-md:sr-only">
+                    Enter starts the session · Shift + Enter for a new line
+                  </p>
+                </section>
+              </div>
+            )}
+          </div>
+          <DialogFooter className="flex-col gap-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0 text-[13px] sm:flex-1">
+              {error ? (
+                <p role="alert" className="font-medium text-destructive leading-snug">
+                  {error}
+                </p>
+              ) : (
+                <p
+                  id="new-session-status"
+                  data-testid="new-session-status"
+                  className={cn("truncate text-muted-foreground", !blocker && "max-sm:hidden")}
+                >
+                  {blocker ?? (project ? `On ${project.deviceName} with ${RUNTIMES[runtime].label}` : null)}
+                </p>
+              )}
+            </div>
+            <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-2 sm:flex">
+              <Button type="button" variant="outline" onClick={closeDialog} className={TOUCH}>
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={!canSubmit}
+                aria-describedby={blocker && !error ? "new-session-status" : undefined}
+                data-testid="start-session"
+                className={TOUCH}
               >
-                {error}
-              </p>
-            ) : null}
-          </DialogBody>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={!canSubmit} data-testid="start-session">
-              {create.isPending ? <Spinner /> : <Rocket />}
-              Start session
-            </Button>
+                {create.isPending ? <Spinner /> : <Rocket aria-hidden />}
+                Start session
+              </Button>
+            </div>
           </DialogFooter>
         </form>
       </DialogContent>
     </Dialog>
-  );
-}
-
-/**
- * One repository of the Project radio group (the existing radio card). Under a team project its caption also names the
- * device that runs it, with its status, since the group is no longer a device (UI-SPEC Surface 3). A repository linked
- * to a project the caller can't open (D-14) is shown, disabled, with the reason; it never reads as personal.
- */
-function RepoOption({
-  project: p,
-  selected,
-  onSelect,
-  showDevice = false,
-}: {
-  project: Project;
-  selected: boolean;
-  onSelect: (id: string) => void;
-  showDevice?: boolean;
-}) {
-  const hidden = p.teamProjectHidden === true;
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={selected}
-      data-testid={hidden ? "project-option-hidden" : "project-option"}
-      disabled={!isStartable(p)}
-      title={hidden ? `${HIDDEN_PROJECT}. Ask one of its leads to add you.` : undefined}
-      onClick={() => onSelect(p.id)}
-      className={cn(
-        "flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-[border-color,background-color,box-shadow] disabled:cursor-not-allowed disabled:opacity-55",
-        selected
-          ? "border-primary/60 bg-primary/5 ring-[3px] ring-primary/15"
-          : "hover:border-foreground/20 hover:bg-accent/40",
-      )}
-    >
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-        {hidden ? <Lock className="size-4" /> : <FolderGit2 className="size-4" />}
-      </span>
-      <span className="grid min-w-0 flex-1">
-        <span className="truncate font-medium text-sm">{p.name}</span>
-        <span className="flex min-w-0 items-center gap-1 text-muted-foreground text-xs">
-          <GitBranch className="size-3 shrink-0" />
-          <span className="shrink-0">{p.defaultBranch ?? "no branch"}</span>
-          {showDevice ? (
-            <>
-              <span className="min-w-0 truncate"> · {p.deviceName}</span>
-              <span aria-hidden className="inline-flex shrink-0 px-0.5">
-                <OnlineDot online={p.deviceOnline} className="size-1.5" />
-              </span>
-              <span className="shrink-0">{p.deviceOnline ? "Online" : "Offline"}</span>
-            </>
-          ) : null}
-          {p.gitRemote ? <span className="min-w-0 truncate"> · {p.gitRemote}</span> : null}
-        </span>
-      </span>
-      {selected ? <Check className="size-4 text-primary" /> : null}
-    </button>
   );
 }

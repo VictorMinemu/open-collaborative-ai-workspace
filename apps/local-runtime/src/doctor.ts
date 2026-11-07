@@ -589,17 +589,18 @@ async function checkProjects(ctx: Context): Promise<Finding> {
   }
   const home = ctx.deps.homeDir();
   const shown = (p: DoctorProject) => `${p.name} (${displayPath(p.path, home)})`;
-  const bad = projects.filter((p) => !p.exists || !p.isGitRepo);
+  // A project without git is valid (the Work Zone works without it): only a missing directory fails.
+  const bad = projects.filter((p) => !p.exists);
   const first = bad[0];
   if (first) {
-    const why = (p: DoctorProject) => (p.exists ? "is not a git repository" : "is missing");
     return fail(
-      bad.map((p) => `${shown(p)} ${why(p)}`).join("; "),
-      `${first.name}: the directory ${first.exists ? "is not a git repository" : "is gone"}; restore it, or ` +
-        `\`ocw-runtime remove-project ${shellArg(first.name)}\``,
+      bad.map((p) => `${shown(p)} is missing`).join("; "),
+      `${first.name}: the directory is gone; restore it, or \`ocw-runtime remove-project ${shellArg(first.name)}\``,
     );
   }
-  return ok(`${projects.length} registered: ${projects.map(shown).join(", ")}`);
+  const listed = (p: DoctorProject) =>
+    p.isGitRepo ? shown(p) : `${p.name} (${displayPath(p.path, home)}, no git)`;
+  return ok(`${projects.length} registered: ${projects.map(listed).join(", ")}`);
 }
 
 async function checkUpdates(ctx: Context): Promise<Finding> {

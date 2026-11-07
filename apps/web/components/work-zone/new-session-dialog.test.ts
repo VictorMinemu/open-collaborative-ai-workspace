@@ -8,6 +8,9 @@ import {
   audienceRefusal,
   preselectedRepo,
   runtimeCardState,
+  settingsSummary,
+  startBlocker,
+  stepRadio,
   whoUpdates,
 } from "./new-session-dialog";
 
@@ -139,6 +142,92 @@ describe("preselectedRepo", () => {
   it("a team project with no repository the viewer can use falls back to the default", () => {
     expect(preselectedRepo([offlinePortal, scratch], { teamProjectId: BILLING_ID })).toBe(scratch.id);
     expect(preselectedRepo([hidden, scratch], { teamProjectId: PORTAL_ID })).toBe(scratch.id);
+  });
+
+  it("without a target, the repository used last when it is still online and startable", () => {
+    const all = [scratch, onlinePortal, billingRepo];
+    expect(preselectedRepo(all, undefined, billingRepo.id)).toBe(billingRepo.id);
+    // A target always wins over the last one used.
+    expect(preselectedRepo(all, { teamProjectId: PORTAL_ID }, billingRepo.id)).toBe(onlinePortal.id);
+    expect(preselectedRepo(all, onlinePortal.id, billingRepo.id)).toBe(onlinePortal.id);
+    // Gone, offline or hidden since: the default rule.
+    expect(preselectedRepo(all, undefined, "01a11635-d6e7-7c87-9f17-00000000dead")).toBe(scratch.id);
+    expect(preselectedRepo([offlinePortal, scratch], undefined, offlinePortal.id)).toBe(scratch.id);
+    expect(preselectedRepo([hidden, scratch], undefined, hidden.id)).toBe(scratch.id);
+  });
+});
+
+/** Why Start session is unavailable, in the footer next to the button (never a silently disabled button). */
+describe("startBlocker", () => {
+  const project = {
+    deviceName: "Ana's MacBook",
+    deviceOnline: true,
+    teamProjectHidden: false,
+  };
+  const base = {
+    loading: false,
+    hasProjects: true,
+    project,
+    runtimeLabel: "Claude Code",
+    runtimeReady: true,
+  };
+
+  it("is null when everything is ready", () => {
+    expect(startBlocker(base)).toBeNull();
+  });
+
+  it("names the first thing missing, in the order of the form", () => {
+    expect(startBlocker({ ...base, loading: true, project: null })).toBe("Loading your projects…");
+    expect(startBlocker({ ...base, hasProjects: false, project: null })).toBe(
+      "Add a project to start a session",
+    );
+    expect(startBlocker({ ...base, project: null })).toBe("Choose a project");
+    expect(startBlocker({ ...base, project: { ...project, teamProjectHidden: true } })).toBe(
+      "Choose a project",
+    );
+    expect(startBlocker({ ...base, project: { ...project, deviceOnline: false } })).toBe(
+      "Ana's MacBook is offline",
+    );
+    expect(startBlocker({ ...base, runtimeReady: false })).toBe("Claude Code isn't ready on Ana's MacBook");
+  });
+});
+
+/** The one-line summary on the collapsed Model and permissions row. */
+describe("settingsSummary", () => {
+  it("says the defaults in words", () => {
+    expect(
+      settingsSummary({ modelLabel: null, effortLabel: null, modeLabel: "Supervised", worktree: false }),
+    ).toBe("Default model · Supervised · Current checkout");
+  });
+
+  it("lists what was changed", () => {
+    expect(
+      settingsSummary({
+        modelLabel: "Claude Sonnet 5.5",
+        effortLabel: "High",
+        modeLabel: "Auto-accept edits",
+        worktree: true,
+      }),
+    ).toBe("Claude Sonnet 5.5 · High · Auto-accept edits · Isolated worktree");
+  });
+});
+
+/** Arrow keys move between the options of a radio group (one tab stop per group). */
+describe("stepRadio", () => {
+  it("moves forward and back, wrapping", () => {
+    expect(stepRadio(3, 0, "ArrowDown")).toBe(1);
+    expect(stepRadio(3, 0, "ArrowRight")).toBe(1);
+    expect(stepRadio(3, 2, "ArrowDown")).toBe(0);
+    expect(stepRadio(3, 0, "ArrowUp")).toBe(2);
+    expect(stepRadio(3, 1, "ArrowLeft")).toBe(0);
+  });
+
+  it("jumps to the ends, starts at the first when nothing has focus, ignores other keys", () => {
+    expect(stepRadio(4, 2, "Home")).toBe(0);
+    expect(stepRadio(4, 1, "End")).toBe(3);
+    expect(stepRadio(4, -1, "ArrowDown")).toBe(0);
+    expect(stepRadio(4, 1, "Enter")).toBeNull();
+    expect(stepRadio(0, 0, "ArrowDown")).toBeNull();
   });
 });
 

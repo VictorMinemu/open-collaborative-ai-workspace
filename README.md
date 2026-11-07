@@ -40,7 +40,7 @@ Everything runs with `docker compose` on your own server. No essential feature d
 - **AI chats:** multiplayer, with org keys or each member's own ChatGPT plan.
 - **Bots:** OpenClaw bots, personas, Agent Cards, memory, per-tool approvals, sandboxes and a browser, automations and
   bot-to-bot consultations.
-- **Work Zone:** the Work Zone with the macOS desktop app or a headless Linux/macOS server.
+- **Work Zone:** the Work Zone with the desktop app (macOS, Windows, Linux) or a headless Linux/macOS server.
 - **Self-hosting:** a self-hosted release with HTTPS, backups, upgrades, OpenBao and observability.
 
 [`docs/STATUS.md`](docs/STATUS.md) lists what is built, and the roadmap continues in
@@ -140,13 +140,18 @@ SMTP (`OCW_SMTP_URL`, `OCW_MAIL_FROM` in `.env`). Without it, an admin creates a
 
 The Work Zone runs Claude Code or Codex on a machine you choose, under your own subscription:
 
-- **A teammate's Mac** (Apple silicon), with the desktop app:
-  1. Download `OCW-<version>-macos-arm64.dmg` from the [latest release](../../releases/latest) and drag OCW to
-     Applications.
-  2. The app is not notarized yet, so macOS blocks the first launch. Open it once, then go to **System Settings ›
-     Privacy & Security** and choose **Open Anyway**. Alternatively, run
-     `xattr -dr com.apple.quarantine /Applications/OCW.app`.
-  3. Enter your workspace URL, then pair it under **Settings › Devices › Add device › Desktop app**.
+- **A teammate's computer**, with the desktop app from the [latest release](../../releases/latest). The builds are
+  not signed yet, so the first launch needs one extra step:
+  - **Mac** (Apple silicon): open `OCW-<version>-macos-arm64.dmg` and drag OCW to Applications. Open it once, then
+    go to **System Settings › Privacy & Security** and choose **Open Anyway** (or run
+    `xattr -dr com.apple.quarantine /Applications/OCW.app`).
+  - **Windows** (x64): run `OCW-<version>-windows-x64-setup.exe`. If SmartScreen stops it, choose **More info ›
+    Run anyway**. It installs for the current user, without admin rights.
+  - **Linux** (x64): on Ubuntu or Debian, `sudo apt install ./OCW-<version>-linux-amd64.deb`. Elsewhere,
+    `chmod +x OCW-<version>-linux-x86_64.AppImage` and run it. The app keeps the device token in the desktop
+    keyring (GNOME Keyring or KWallet), which must be available.
+
+  Then enter your workspace URL and pair it under **Settings › Devices › Add device › Desktop app**.
 - **A shared Linux or macOS server** with no desktop app:
   1. Under **Settings › Devices › Add a device › Server**, copy the one-line command (`curl … /api/v1/runtime/install.sh | sh`).
   2. Run it there as a non-root user.
@@ -189,8 +194,8 @@ This setup serves only the machine it runs on. To give a team access, use the se
 
 MVP 1 is for testing with your team, not yet for production-critical work:
 
-- **Desktop app:** macOS on Apple silicon only, and not notarized. Signed builds for macOS, Windows and Linux are
-  MVP 2 (Phase 9).
+- **Desktop app:** builds for macOS on Apple silicon, Windows x64 and Linux x64, none of them signed yet. Signed
+  builds are MVP 2 (Phase 9).
 - **Attachments:** bots cannot read them yet.
 - **Claude:** works through an org API key only. Some ChatGPT Business or Enterprise seats cannot sign in with their
   plan.

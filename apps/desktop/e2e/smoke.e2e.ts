@@ -213,6 +213,9 @@ test("onboarding → pairing → main window, hardened and supervised", async ()
   expect(bridge.isDesktop).toBe(true);
   expect(bridge.keys).toEqual([
     "addProject",
+    "chatgptLoopbackAwait",
+    "chatgptLoopbackCancel",
+    "chatgptLoopbackPrepare",
     "isDesktop",
     "listProjects",
     "onStatus",
@@ -269,12 +272,29 @@ test("onboarding → pairing → main window, hardened and supervised", async ()
   expect(added).toMatchObject({ ok: true });
   expect(added.project.name).toBe("demo-repo");
   expect(JSON.stringify(added)).not.toContain(repo);
+  expect(added).not.toHaveProperty("notice");
+  // A folder without git is a project too: registered as it is, with a short note (folder name only).
+  const plain = join(dirname(repo), "plain-notes");
+  mkdirSync(plain);
+  await pick(plain);
+  const addedPlain = (await addProject()) as {
+    ok: boolean;
+    notice?: string;
+    project: Record<string, unknown>;
+  };
+  expect(addedPlain).toMatchObject({
+    ok: true,
+    project: { name: "plain-notes", defaultBranch: null },
+    notice: "plain-notes has no git repository: sessions work; changes and worktrees are off.",
+  });
+  expect(JSON.stringify(addedPlain)).not.toContain(plain);
+  expect(existsSync(join(plain, ".git"))).toBe(false);
   const listed = await main.evaluate(() =>
     (
       window as unknown as { ocwDesktop: { listProjects: () => Promise<unknown[]> } }
     ).ocwDesktop.listProjects(),
   );
-  expect(listed).toHaveLength(1);
+  expect(listed).toHaveLength(2);
   expect(JSON.stringify(listed)).not.toContain(repo);
 
   // Navigation is pinned to the web origin.
