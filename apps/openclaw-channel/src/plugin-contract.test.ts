@@ -2225,6 +2225,7 @@ const PLUGIN_TOOLS = [
   "ocw_browser_wait",
   "ocw_browser_signin",
   "ocw_browser_close",
+  "ocw_attachment_read",
   "ocw_automation_propose",
   "ocw_record_update",
   "ocw_consult_agent",

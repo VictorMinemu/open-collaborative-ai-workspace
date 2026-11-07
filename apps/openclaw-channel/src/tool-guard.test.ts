@@ -3,6 +3,8 @@ import {
   type AgentChannelToolCallDecision,
   type AgentChannelToolCallRequest,
   type AgentChannelToolCallResult,
+  ATTACHMENT_READ_LIMITS,
+  ATTACHMENT_READ_SENTENCES,
   CONFINED_TOOL_FLAGS,
   CONFINED_TOOL_NAMES,
   SANDBOX_LIMITS,
@@ -1517,5 +1519,92 @@ describe("confined sandbox and browser tools (07.8 D-11 F-7, P-06, P-07)", () =>
       expect(await g.beforeToolCall(call(name, {}), ctx()), name).toMatchObject({ block: true });
     }
     expect(fake.requests).toHaveLength(0);
+  });
+});
+
+describe("ocw_attachment_read (07.15 D-08, D-17, Pitfall 2): self-validated, its own budget, a read taints the turn", () => {
+  const READ = { untrustedOutput: true, sideEffecting: false };
+  const LIST = { untrustedOutput: false, sideEffecting: false };
+  const FILE = "0199a6f0-0000-7000-8000-0000000000f1";
+  const readTurn = (over: Partial<TurnContext> = {}) =>
+    turn({
+      tools: ["ocw_memory_list", "ocw_memory_save", "ocw_attachment_read"],
+      toolFlags: { ocw_memory_list: LIST, ocw_memory_save: MEMORY, ocw_attachment_read: READ },
+      maxAttachmentReads: 20,
+      ...over,
+    });
+  const begin = (g: ReturnType<typeof createToolGuard>, t: TurnContext = readTurn()) =>
+    g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: t });
+  const read = () => call("ocw_attachment_read", { attachmentId: FILE });
+
+  it("after the 8 gated calls every one of the turn's 20 reads still runs, the 21st is blocked locally with the cap sentence, and `calls` stays 8", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    for (let i = 0; i < 8; i++)
+      expect(await g.beforeToolCall(call("ocw_memory_list"), ctx())).toBeUndefined();
+    expect(fake.requests).toHaveLength(8);
+    expect(await g.beforeToolCall(call("ocw_memory_list"), ctx())).toMatchObject({ block: true });
+    for (let i = 0; i < 20; i++)
+      expect(await g.beforeToolCall(read(), ctx()), `read ${i + 1}`).toBeUndefined();
+    expect(await g.beforeToolCall(read(), ctx())).toEqual({
+      block: true,
+      blockReason: ATTACHMENT_READ_SENTENCES.cap_reached,
+    });
+    // Reads never reach /tool-calls and never count against the cap of 8.
+    expect(fake.requests).toHaveLength(8);
+    expect(g.activeTurn(SESSION)?.calls).toBe(8);
+    expect(g.activeTurn(SESSION)?.attachmentReads).toBe(20);
+  });
+
+  it("reads the turn's own budget, falling back to the contracts' 20 when the API sent none", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g, readTurn({ maxAttachmentReads: 2 }));
+    expect(await g.beforeToolCall(read(), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(read(), ctx())).toBeUndefined();
+    expect(await g.beforeToolCall(read(), ctx())).toMatchObject({ block: true });
+    const { maxAttachmentReads: _omit, ...older } = readTurn();
+    begin(g, older);
+    for (let i = 0; i < ATTACHMENT_READ_LIMITS.readsPerTurn; i++) {
+      expect(await g.beforeToolCall(read(), ctx())).toBeUndefined();
+    }
+    expect(await g.beforeToolCall(read(), ctx())).toMatchObject({ block: true });
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("a read taints the turn locally: a later side-effecting tool is refused in the cell, a read still runs", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g);
+    expect(g.activeTurn(SESSION)?.tainted).toBe(false);
+    expect(await g.beforeToolCall(read(), ctx())).toBeUndefined();
+    expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+    expect((await g.beforeToolCall(call("ocw_memory_save", { text: "x" }), ctx()))?.blockReason).toContain(
+      "read-only after untrusted content",
+    );
+    expect(await g.beforeToolCall(read(), ctx())).toBeUndefined();
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  it("takes its static flags even when the turn sent none (never the unknown, side-effecting default)", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    g.beginTurn(SESSION, {
+      eventId: "evt-1",
+      agentId: "a1",
+      turn: readTurn({ toolFlags: {} }),
+      tainted: true,
+    });
+    expect(await g.beforeToolCall(read(), ctx())).toBeUndefined();
+    expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+  });
+
+  it("is refused on a turn that does not list it", async () => {
+    const fake = fakeClient();
+    const g = createToolGuard({ client: () => fake.client });
+    begin(g, readTurn({ tools: ["ocw_memory_list"] }));
+    expect(await g.beforeToolCall(read(), ctx())).toMatchObject({ block: true });
+    expect(g.activeTurn(SESSION)?.attachmentReads).toBe(0);
   });
 });

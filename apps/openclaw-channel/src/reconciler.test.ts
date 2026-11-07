@@ -354,10 +354,31 @@ describe("capabilities in the cell (D-08 layer 1, D-09)", () => {
         "ocw_automation_propose",
         "ocw_record_update",
         "ocw_consult_agent",
+        "ocw_attachment_read",
       ],
     });
     expect(plan.upsertAgents["ocw-w"]?.tools).toMatchObject({ alsoAllow: ["web_search"] });
     expect(plan.upsertAgents["ocw-q"]?.tools).not.toHaveProperty("alsoAllow");
+  });
+
+  it("07.15 PD-03: every non-disabled bot configures ocw_attachment_read turn-scoped (GET /cell never lists it); a disabled bot gets no entry", () => {
+    const plan = planReconcile(
+      {},
+      {
+        agents: [
+          agent("a", { capabilities: { tools: ["ocw_agent_card"] } }),
+          agent("b", { capabilities: { tools: ["ocw_agent_card", "web_search"] } }),
+          agent("d", { status: "disabled", capabilities: { tools: ["ocw_agent_card"] } }),
+        ],
+        providers: [ANTHROPIC],
+      },
+    );
+    const alsoAllow = (id: string) =>
+      (plan.upsertAgents[id]?.tools as { alsoAllow?: string[] } | undefined)?.alsoAllow ?? [];
+    for (const id of ["ocw-a", "ocw-b"]) {
+      expect(alsoAllow(id).filter((t) => t === "ocw_attachment_read")).toEqual(["ocw_attachment_read"]);
+    }
+    expect(plan.upsertAgents["ocw-d"]).toBeUndefined();
   });
 
   it("Code Mode is off for every bot: it hides tools behind `exec`, which the gate always refuses", () => {
