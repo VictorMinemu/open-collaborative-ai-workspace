@@ -10,3 +10,19 @@
   usual rules) and the read route re-decides. D-14 says "a persona never widens" the chat model's gate, so the phase gate
   (07.15-11) or a follow-up should decide whether the shared send route applies `assertReadableBy` to persona-only
   messages too. The web composer's `attachment-gate.ts` already offers only the chat model's types.
+
+## Found during 07.15-08
+
+- **An import with the default path shows the file name in the activity tab.** `ocw_sandbox_import` without a `path`
+  lands at `downloads/<sanitized name>` (`importPathOf`, 07.8-25), and its activity step's target is that workspace path
+  (`stepFor` → `displayPath(input.path)`). So with the default path, the file's name appears in `bot_turn_activity`. P1
+  lists activity among the records that never carry a name. The activity tab is read by the same people who see the
+  attachment in the conversation, and 07.8 shows workspace paths there on purpose, so 08 did not change it (that would
+  remove visible behaviour). The 08 leak sweep imports to an explicit `inbox/p.txt`, and proves that the read and the
+  API's own records carry neither the name nor the content. The gate (07.15-11, ADR-0037) should decide: keep it (the
+  workspace path is the person's own view), or show only the folder for a derived path.
+- **D-14 at read time (from 07.15-07's item): not enforced in 08.** An AI chat has no single governing model: every
+  message is answered by the model its sender picked (`resolveOr409(tx, body.model, userId)`), so the read route has no
+  "conversation's model" to check against cheaply. The `.zip` from 07-07's item is already refused at read time
+  (`unsupported_type`, kind `other`). The remaining gap is the shared send route's persona-only branch skipping
+  `assertReadableBy`, and it stays for 07.15-11.

@@ -69,7 +69,7 @@ import {
 } from "../sandbox";
 import { approvalMessageRouteOf } from "../tool-approval";
 import { recordStep, type StepOutcomeInput, stepFor } from "./activity";
-import { attachmentForTurn } from "./attachment-access";
+import { attachmentAuditFields, attachmentForTurn } from "./attachment-access";
 import { type CellPrincipal, cellOf } from "./auth";
 import { noTrigger } from "./cards";
 import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, liveTurn, taintReturnTurns } from "./claim";
@@ -1267,12 +1267,13 @@ export function registerSandboxRoutes(
             resourceId: body.attachmentId,
             result: outcome.kind === "ok" ? "success" : outcome.kind === "denied" ? "denied" : "error",
             // Never the file's name, its content or a path (`pathLength` stays on `sandbox.file_imported`).
+            // The fields every bot file access shares with `bot.attachment_read` (07.15-08, PD-09).
             metadata: {
               eventId: turn.eventId,
-              conversationId: resolved?.conversationId ?? turn.conversationId,
-              attachmentId: body.attachmentId,
-              mediaType: resolved ? (resolved.contentType ?? resolved.declaredType) : null,
-              bytes: resolved?.sizeBytes ?? 0,
+              ...attachmentAuditFields(resolved, {
+                attachmentId: body.attachmentId,
+                conversationId: turn.conversationId,
+              }),
               outcome: outcome.kind === "ok" ? "imported" : outcome.reason,
             },
           }),
