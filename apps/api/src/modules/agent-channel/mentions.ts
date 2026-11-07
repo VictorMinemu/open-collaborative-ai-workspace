@@ -269,7 +269,9 @@ export async function buildMentionEvents(
       ...historyRows.map((m) => m.id),
     ]);
     for (const id of [mention.messageId, ...historyRows.map((m) => m.id).reverse()]) {
-      attachments.push(...(byMessage.get(id) ?? []));
+      // 07.15 IN-02: only the conversation's own files, as `attachmentForTurn` decides (a thread conversation's root
+      // message, and so its files, belongs to the parent channel).
+      attachments.push(...(byMessage.get(id) ?? []).filter((r) => r.conversationId === conv.id));
     }
   }
   // Phase 07.7 (D-04, D-08, D-09): consults are offered only where one can succeed: never on a reply-mode turn, only in

@@ -102,6 +102,27 @@ describe("buildTurnAttachments: the access and note per kind, model and sandbox"
     else expect(attachments[0]?.note).toBe(note);
   });
 
+  it.each([
+    ["import covered", true, true, "import"],
+    ["no import", false, false, "none"],
+  ] as const)(
+    "IN-02: a PDF over the 25 MiB read bound is listed tooLarge, never read (%s)",
+    async (_l, offered, covered, access) => {
+      const big = row({
+        filename: "scan.pdf",
+        declaredType: "application/pdf",
+        contentType: "application/pdf",
+        sizeBytes: EXTRACT_LIMITS.pdfMaxBytes + 1,
+      });
+      const { attachments } = await buildTurnAttachments([big], ctx(true, offered, covered));
+      expect(attachments[0]).toMatchObject({ kind: "pdf", access, note: N.tooLarge });
+      const exact = { ...big, sizeBytes: EXTRACT_LIMITS.pdfMaxBytes };
+      expect((await buildTurnAttachments([exact], ctx(true, offered, covered))).attachments[0]?.access).toBe(
+        "read",
+      );
+    },
+  );
+
   it("an image over the original cap WITH renditions reads (the large.webp rendition)", async () => {
     const big = image({ hasRenditions: true, sizeBytes: EXTRACT_LIMITS.imageOriginalMaxBytes + 1 });
     const { attachments } = await buildTurnAttachments([big], ctx(true, false, false));

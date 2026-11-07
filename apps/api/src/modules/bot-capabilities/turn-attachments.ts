@@ -30,7 +30,8 @@ const imageReadable = (row: AttachmentRow) =>
  * The attachments a turn lists (07.15 D-02, D-04, D-09, D-13, PD-04): `rows` in listing order (the caller applies it),
  * at most `ATTACHMENT_READ_LIMITS.listPerTurn`, the rest counted in `more`. Each entry is metadata only (never content,
  * a URL or a storage key) with how THIS bot can read the file:
- * - text and PDF → `read`;
+ * - text → `read`; a PDF → `read` up to `EXTRACT_LIMITS.pdfMaxBytes`, else `tooLarge` and `import` or `none`, as the
+ *   read route refuses it `too_large` (07.15 IN-02);
  * - an image → `read` for an image model when it has a rendition or an original within the inline cap; otherwise
  *   `modelNoImages` (no image model) or `tooLarge`, and `import` when the sandbox copy is possible, else `none`;
  * - anything else → `import` with `cannotReadImport` when the turn offers `ocw_sandbox_import` and the conversation's
@@ -58,6 +59,9 @@ export async function buildTurnAttachments(
     let note: string | undefined;
     if (kind === "image" && !(ctx.imageModel && imageReadable(row))) {
       note = ctx.imageModel ? TURN_ATTACHMENT_NOTES.tooLarge : TURN_ATTACHMENT_NOTES.modelNoImages;
+      access = (await importable()) ? "import" : "none";
+    } else if (kind === "pdf" && row.sizeBytes > EXTRACT_LIMITS.pdfMaxBytes) {
+      note = TURN_ATTACHMENT_NOTES.tooLarge;
       access = (await importable()) ? "import" : "none";
     } else if (kind === "other") {
       if (!ctx.importOffered) {
