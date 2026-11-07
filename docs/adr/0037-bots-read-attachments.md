@@ -186,7 +186,8 @@ inflates to 1 GiB grew the shared API to about 2 GB. Now:
   - `--disallow-code-generation-from-strings`;
   - an empty environment (no secret, no `_FILE` path, no `NODE_OPTIONS`) and none of the API's flags;
   - a fresh temporary working directory;
-  - the bytes on stdin; stdout and stderr are dropped. The one IPC answer is still Zod-parsed.
+  - the bytes on stdin and no IPC channel. The child writes one JSON answer to stdout; the API reads at most 1 MiB of
+    it (killing the child past that) and still Zod-parses it. stderr is dropped.
 - **Memory watchdog.** The API polls the child's resident memory and kills it past `EXTRACT_LIMITS.pdfRssMb`
   (512 MiB). It reads `/proc/<pid>/status` every 20 ms on Linux and runs `ps` every 50 ms on macOS. The read then
   answers `too_large`.
