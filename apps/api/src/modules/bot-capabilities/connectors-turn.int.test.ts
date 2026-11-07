@@ -411,6 +411,8 @@ describe("flags and the cell-wide view", () => {
           tainted: turn.tainted,
           createdAt: turn.created_at,
           sandboxCalls: turn.sandbox_calls,
+          attachmentReads: turn.attachment_reads,
+          attachmentChars: turn.attachment_chars,
           memberData: turn.member_data,
           chainId: turn.chain_id,
           chainDepth: turn.chain_depth,
