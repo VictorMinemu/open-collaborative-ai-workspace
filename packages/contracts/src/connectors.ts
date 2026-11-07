@@ -278,7 +278,7 @@ export const MemberConnector = z.object({
   secretHeaderName: z.string().nullable(),
   secretHeaderPrefix: z.string().nullable(),
   /** "Connected as {account}" (R1): from an ID token's email or preferred_username; null for keys or when unknown. */
-  accountLabel: z.string().max(320).nullable(),
+  accountLabel: z.string().max(200).nullable(),
   /** Only with `needs_reconnect` (R2). */
   reconnectReason: ConnectorReconnectReason.nullable(),
 });
@@ -318,7 +318,7 @@ export const OrgConnection = z.strictObject({
   method: OrgConnectionMethod,
   status: ConnectionStatus,
   /** "Connected as {account}": from an ID token's email or preferred_username; null for client credentials or unknown. */
-  accountLabel: z.string().max(320).nullable(),
+  accountLabel: z.string().max(200).nullable(),
   /** Client credentials only: the client ID (an identifier, not a secret). */
   clientId: z.string().nullable(),
   /** Client credentials only: the token endpoint in use (discovered or admin-entered). */

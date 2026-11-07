@@ -246,7 +246,9 @@ describe("organization connector vocabulary (07.14 D-06, D-10, D-15)", () => {
         reconnectReason: "revoked",
       }).reconnectReason,
     ).toBe("revoked");
-    expect(OrgConnection.safeParse({ ...connection, accountLabel: "x".repeat(321) }).success).toBe(false);
+    // IN-02: the column's bound (`account_label <= 200`, oauth.ts `ACCOUNT_LABEL_MAX`), not a looser one.
+    expect(OrgConnection.safeParse({ ...connection, accountLabel: "x".repeat(200) }).success).toBe(true);
+    expect(OrgConnection.safeParse({ ...connection, accountLabel: "x".repeat(201) }).success).toBe(false);
   });
 
   it("client-credential input takes a write-only secret, kept by omission", () => {
@@ -422,6 +424,10 @@ describe("member connections (D-01, R1, R2)", () => {
     };
     expect(MemberConnector.parse(key)).toEqual(key);
     expect(MemberConnector.safeParse({ ...memberConnector, authMode: "org_secret" }).success).toBe(false);
+    // IN-02: the same column bound as the organization's (`connector_connections.account_label <= 200`).
+    expect(MemberConnector.safeParse({ ...memberConnector, accountLabel: "x".repeat(201) }).success).toBe(
+      false,
+    );
   });
 
   it("says why a connection needs reconnecting, and nothing else", () => {
