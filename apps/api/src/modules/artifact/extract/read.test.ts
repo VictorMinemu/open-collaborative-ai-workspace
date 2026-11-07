@@ -144,6 +144,49 @@ describe("readAttachmentForAgent: text", () => {
     });
   });
 
+  it("reads a file of exactly textReadBytes whole, untruncated", async () => {
+    const size = EXTRACT_LIMITS.textReadBytes;
+    const exact = row({ filename: "exact.csv", declaredType: "text/csv", sizeBytes: size });
+    const { storage } = memoryStorage(exact, { original: enc("a".repeat(size)) });
+    expect(await readAttachmentForAgent(storage, exact, { ...CAPS, charsPerFile: size })).toMatchObject({
+      kind: "text",
+      chars: size,
+      truncated: false,
+    });
+  });
+
+  it("reads a 0-byte text file as empty text", async () => {
+    const empty = row({ filename: "empty.txt", declaredType: "text/plain", sizeBytes: 0 });
+    const { storage } = memoryStorage(empty, { original: new Uint8Array() });
+    expect(await readAttachmentForAgent(storage, empty, CAPS)).toEqual({
+      kind: "text",
+      text: "",
+      chars: 0,
+      truncated: false,
+    });
+  });
+
+  it("decodes a UTF-8 file whose last character the range cut split, trimming the partial tail", async () => {
+    // 3-byte characters: 262 144 is not a multiple of 3, so the cut lands inside one.
+    const body = enc("€".repeat(100_000));
+    const euros = row({ filename: "prices.txt", declaredType: "text/plain", sizeBytes: body.length });
+    const { storage } = memoryStorage(euros, { original: body });
+    const read = await readAttachmentForAgent(storage, euros, CAPS);
+    expect(read).toMatchObject({ kind: "text", chars: 64_000, truncated: true });
+    expect(read.kind === "text" && read.text).toBe("€".repeat(64_000));
+  });
+
+  it("decodes a windows-1252 file", async () => {
+    const legacy = row({ filename: "menu.txt", declaredType: "text/plain", sizeBytes: 4 });
+    const { storage } = memoryStorage(legacy, { original: new Uint8Array([0x63, 0x61, 0x66, 0xe9]) });
+    expect(await readAttachmentForAgent(storage, legacy, CAPS)).toEqual({
+      kind: "text",
+      text: "café",
+      chars: 4,
+      truncated: false,
+    });
+  });
+
   it("refuses bytes with a NUL in the first 8 KiB as unsupported_type", async () => {
     const bin = row({ filename: "data.txt", declaredType: "text/plain", sizeBytes: 6 });
     const { storage } = memoryStorage(bin, {
