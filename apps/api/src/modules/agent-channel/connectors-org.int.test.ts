@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   assertNoGlobalFetch,
   auditRows,
+  CC_SECRET,
   type ConnectorsStack,
   connectOrgOAuth,
   fakeStats,
@@ -12,8 +13,11 @@ import {
   ok,
   orgBundleOf,
   orgConnectionRow,
+  PRE_REGISTERED_CC,
   type Res,
+  registerCcConnector,
   registerOrgConnector,
+  saveCc,
   startConnectorsStack,
 } from "../../testing-connectors";
 import { markNeedsReconnect, orgConnectionAad } from "../connectors";
@@ -525,5 +529,36 @@ describe("07.14 review CR-01: the organization's token goes only to the URL it w
       await new Promise<void>((resolve) => canary.close(() => resolve()));
     }
     expect((await connectOrgOAuth(s, s.victor, server.id)).status).toBe(302);
+  });
+});
+
+describe("07.14 review WR-03: a resource server's 401 never destroys the organization's client secret", () => {
+  it("client credentials, 401 after the one re-grant: an upstream error, the secret kept, the next call re-grants", async () => {
+    const ledger = await registerCcConnector(s, { name: "Acme Ledger" });
+    await ok(saveCc(s, s.victor, ledger.id));
+    await grant(["whoami"].map((t) => ({ sourceId: ledger.id, tool: `${ledger.safeName}__${t}` })));
+    const secretId = (await orgConnectionRow(s, s.orgA, ledger.id))?.secret_id;
+    const ledgerCall = (ev: Json) => call(ev, "whoami", {}, ledger.safeName);
+
+    s.fake.setScenario({ reject_access_tokens: true });
+    const before = await fakeStats(s);
+    const refused = await ledgerCall(await turnOf(s.alex, alexDm));
+    expect(refused.status, JSON.stringify(refused.body)).toBe(502);
+    expect(codeOf(refused)).toBe("upstream_error");
+    expect((await fakeStats(s)).tokenRequests.client_credentials).toBe(
+      before.tokenRequests.client_credentials + 1,
+    );
+    expect(await orgConnectionRow(s, s.orgA, ledger.id)).toMatchObject({
+      status: "connected",
+      secret_id: secretId,
+      last_error: "upstream_unauthorized",
+    });
+    expect((await orgBundleOf(s, s.orgA, ledger.id))?.clientSecret).toBe(CC_SECRET);
+
+    s.fake.setScenario({});
+    const okCall = await ledgerCall(await turnOf(s.sam, opsId, true));
+    expect(okCall.status, JSON.stringify(okCall.body)).toBe(200);
+    expect(JSON.parse(okCall.body?.content as string).subject).toBe(`sub_cc_${PRE_REGISTERED_CC}`);
+    expect((await orgConnectionRow(s, s.orgA, ledger.id))?.last_error).toBeNull();
   });
 });

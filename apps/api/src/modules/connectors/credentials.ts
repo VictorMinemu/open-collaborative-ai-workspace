@@ -698,24 +698,61 @@ async function revokeDropped(core: Core, serverId: string, dropped: DroppedGrant
   core.log.info({ serverId, revoked }, "connector grant revoked at its issuer after a terminal failure");
 }
 
+/**
+ * A client-credentials bundle without its token (07.14 review WR-03): the client, its secret and where the secret may
+ * go, kept sealed so a re-grant (or an admin's retry) needs nothing typed again.
+ */
+const withoutToken = (b: ClientCredentialsBundle): ClientCredentialsBundle => ({
+  kind: b.kind,
+  clientId: b.clientId,
+  clientSecret: b.clientSecret,
+  tokenEndpoint: b.tokenEndpoint,
+  issuer: b.issuer,
+  resource: b.resource,
+  revocationEndpoint: b.revocationEndpoint,
+  authMethod: b.authMethod,
+  scopes: b.scopes,
+});
+
+/**
+ * Commits `needs_reconnect` with `code` and audits it. The sealed bundle is destroyed, except with `keepClientSecret`
+ * for a client-credentials bundle (WR-03: the token endpoint refused a grant, e.g. `invalid_client`), which is re-sealed
+ * without its token: nothing is sent while the row needs reconnecting, and the admin's Update credentials can retry
+ * with the stored secret (it is still pinned to its issuer, token endpoint and URL).
+ */
 async function markInTx(
   tx: Tx,
   core: Core,
   store: CredentialStore,
   row: CredentialRow,
   code: string,
-  dropped: { bundle: StoredBundle | null; refreshRefused: boolean },
+  dropped: { bundle: StoredBundle | null; refreshRefused: boolean; keepClientSecret?: boolean },
 ): Promise<DroppedGrant | null> {
   const lastError = code.slice(0, LAST_ERROR_MAX);
   const revoke = await droppedGrantOf(tx, core, row, dropped.bundle, dropped.refreshRefused);
-  await store.update(tx, row.id, {
-    status: "needs_reconnect",
-    secretId: null,
-    lastError,
-    updatedAt: new Date().toISOString(),
-  });
-  // The grant is dead: its sealed bundle goes too (it opened for this principal, so it is theirs).
-  if (row.secretId) await core.secrets.remove(tx, row.secretId);
+  if (dropped.keepClientSecret === true && dropped.bundle?.kind === "client_credentials" && row.secretId) {
+    await core.secrets.replaceSealed(
+      tx,
+      row.secretId,
+      JSON.stringify(withoutToken(dropped.bundle)),
+      store.aad,
+    );
+    await store.update(tx, row.id, {
+      status: "needs_reconnect",
+      lastError,
+      accessExpiresAt: null,
+      updatedAt: new Date().toISOString(),
+    });
+  } else {
+    await store.update(tx, row.id, {
+      status: "needs_reconnect",
+      secretId: null,
+      lastError,
+      updatedAt: new Date().toISOString(),
+    });
+    // The grant is dead: its sealed bundle goes too (it opened for this principal, so it is theirs).
+    if (row.secretId) await core.secrets.remove(tx, row.secretId);
+  }
   await core.audit.record(tx, {
     action: store.audit.needsReconnect,
     resourceType: store.audit.resourceType,
@@ -726,20 +763,53 @@ async function markInTx(
 }
 
 /**
+ * What `markNeedsReconnect` did: `needs_reconnect` committed, `token_dropped` (client credentials refused upstream:
+ * only the access token went, the connection stays and the next use re-grants; WR-03), or `none` (no connected row).
+ */
+export type MarkOutcome = "needs_reconnect" | "token_dropped" | "none";
+
+/**
  * Marks the connection `needs_reconnect` with a short code (e.g. `upstream_unauthorized` after a refreshed token
  * still got a 401), in its own committed transaction, and audits it. No-op without a connected row.
+ *
+ * Client credentials and `upstream_unauthorized` (07.14 review WR-03): the token endpoint has just accepted the
+ * client's secret, so a resource server's 401 says nothing against the secret. Only the access token is dropped
+ * (re-sealed in place, `last_error` recorded, still `connected`); the next use re-grants once. Any member's call or a
+ * watched check can reach this path, so it must never destroy the organization's secret. Only a terminal refusal at
+ * the token endpoint (`invalid_client`, …) marks it `needs_reconnect`, and even then the secret stays sealed.
  */
-export async function markNeedsReconnect(core: Core, p: CredentialKey & { code: string }): Promise<void> {
+export async function markNeedsReconnect(
+  core: Core,
+  p: CredentialKey & { code: string },
+): Promise<MarkOutcome> {
   const store = storeOf(p);
-  const dropped = await core.db.withTenant(store.tenant, async (tx) => {
-    if (!(await store.server(tx))) return null;
-    const row = await store.row(tx, true);
-    if (row?.status !== "connected") return null;
-    const bundle = await openBundle(tx, core, store, row);
-    // The resource server refused a refreshed token: the grant may still be live at the issuer, so revoke it whole.
-    return markInTx(tx, core, store, row, p.code, { bundle, refreshRefused: false });
-  });
-  await revokeDropped(core, p.serverId, dropped);
+  const done = await core.db.withTenant(
+    store.tenant,
+    async (tx): Promise<{ outcome: MarkOutcome; dropped: DroppedGrant | null }> => {
+      if (!(await store.server(tx))) return { outcome: "none", dropped: null };
+      const row = await store.row(tx, true);
+      if (row?.status !== "connected") return { outcome: "none", dropped: null };
+      const bundle = await openBundle(tx, core, store, row);
+      if (bundle?.kind === "client_credentials" && p.code === "upstream_unauthorized" && row.secretId) {
+        await core.secrets.replaceSealed(tx, row.secretId, JSON.stringify(withoutToken(bundle)), store.aad);
+        await store.update(tx, row.id, {
+          lastError: p.code.slice(0, LAST_ERROR_MAX),
+          accessExpiresAt: null,
+          updatedAt: new Date().toISOString(),
+        });
+        core.log.warn(
+          { serverId: p.serverId, code: p.code },
+          "connector token refused upstream; the client-credentials token was dropped",
+        );
+        return { outcome: "token_dropped", dropped: null };
+      }
+      // The resource server refused a refreshed token: the grant may still be live at the issuer, so revoke it whole.
+      const dropped = await markInTx(tx, core, store, row, p.code, { bundle, refreshRefused: false });
+      return { outcome: "needs_reconnect", dropped };
+    },
+  );
+  await revokeDropped(core, p.serverId, done.dropped);
+  return done.outcome;
 }
 
 // ---------------------------------------------------------------- access tokens and refresh
@@ -783,8 +853,14 @@ async function regrantInTx(
   bundle: ClientCredentialsBundle,
 ): Promise<Attempt> {
   const egress = egressFor(core.env);
-  const dead = async (code: string) => {
-    const dropped = await markInTx(tx, core, store, row, code, { bundle, refreshRefused: true });
+  // `keepClientSecret`: a refusal at the pinned token endpoint keeps the sealed secret for an admin's retry (WR-03);
+  // an issuer change does not (the stored secret may never go to another issuer, so a retry needs it typed again).
+  const dead = async (code: string, keepClientSecret = false) => {
+    const dropped = await markInTx(tx, core, store, row, code, {
+      bundle,
+      refreshRefused: true,
+      keepClientSecret,
+    });
     return refused("needs_reconnect", dropped);
   };
   if (!server.url) return { kind: "transient", code: "discovery_failed" };
@@ -826,7 +902,7 @@ async function regrantInTx(
       { serverId: store.serverId, code, terminal: !!e?.terminal },
       "connector client-credentials grant failed",
     );
-    return e?.terminal ? dead(code) : { kind: "transient", code };
+    return e?.terminal ? dead(code, true) : { kind: "transient", code };
   }
   const stored: ClientCredentialsBundle = {
     ...bundle,
@@ -877,7 +953,8 @@ async function refreshAttempt(
     if (force) {
       // Someone refreshed since the caller's 401, or within the lock window: reuse that token.
       const recent = bundle.refreshedAt !== undefined && Date.now() - bundle.refreshedAt < REFRESH_LOCK_MS;
-      if (bundle.accessToken !== force.staleToken || recent) {
+      // A client-credentials bundle whose token was dropped (WR-03) has nothing to reuse: it is re-granted.
+      if (bundle.accessToken !== undefined && (bundle.accessToken !== force.staleToken || recent)) {
         return { kind: "token", token: headerFor(server, bundle) };
       }
     } else if (fresh(bundle)) {

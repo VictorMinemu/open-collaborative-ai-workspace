@@ -509,8 +509,11 @@ export function registerConnectorRoutes(
                 answer = await run(fresh);
               } catch (retryErr) {
                 if (!unauthorized(retryErr)) throw retryErr;
-                await markNeedsReconnect(core, { ...key, code: "upstream_unauthorized" });
-                refusal = "needs_reconnect";
+                const marked = await markNeedsReconnect(core, { ...key, code: "upstream_unauthorized" });
+                // Client credentials (07.14 review WR-03): only the token was dropped, the connection stands and the
+                // next call re-grants; this call is the server's error, not an admin's reconnect.
+                if (marked === "token_dropped") failure = { code: "upstream_error", outcome: "error" };
+                else refusal = "needs_reconnect";
               }
             }
           }

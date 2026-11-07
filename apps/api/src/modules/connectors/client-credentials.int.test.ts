@@ -19,7 +19,13 @@ import {
   saveCc,
   startConnectorsStack,
 } from "../../testing-connectors";
-import { accessTokenFor, ConnectorTokenUnavailableError, forceRefresh, orgConnectionAad } from "./index";
+import {
+  accessTokenFor,
+  ConnectorTokenUnavailableError,
+  forceRefresh,
+  markNeedsReconnect,
+  orgConnectionAad,
+} from "./index";
 import { callTool } from "./mcp-client";
 
 /**
@@ -287,11 +293,13 @@ describe("terminal re-grants and the issuer pin (D-03, D-07, D-08)", () => {
       ok: false,
       reason: "needs_reconnect",
     });
-    expect(await orgConnectionRow(s, s.orgA, server.id)).toMatchObject({
-      status: "needs_reconnect",
-      last_error: "invalid_client",
-      secret_id: null,
-    });
+    const row = await orgConnectionRow(s, s.orgA, server.id);
+    expect(row).toMatchObject({ status: "needs_reconnect", last_error: "invalid_client" });
+    // WR-03: the sealed client secret stays (an admin can retry with Update credentials); only the token goes.
+    expect(row?.secret_id).not.toBeNull();
+    const kept = await orgBundleOf(s, s.orgA, server.id);
+    expect(kept).toMatchObject({ kind: "client_credentials", clientSecret: "ROTATED-AT-THE-PROVIDER" });
+    expect(kept?.accessToken).toBeUndefined();
     expect(await revocations()).toBe(revoked);
     expect((await auditRows(s, s.orgA, ["connector.org_needs_reconnect"])).at(-1)).toMatchObject({
       user_id: s.victorId,
@@ -300,11 +308,18 @@ describe("terminal re-grants and the issuer pin (D-03, D-07, D-08)", () => {
     expect((await dtoOf(server.id)).orgConnection).toMatchObject({
       status: "needs_reconnect",
       reconnectReason: "revoked",
-      hasSecret: false,
+      hasSecret: true,
     });
+    // Nothing is sent while it needs reconnecting.
+    const before = await ccRequests();
+    expect(await accessTokenFor(s.stack.built.core, orgKey(server.id))).toEqual({
+      ok: false,
+      reason: "needs_reconnect",
+    });
+    expect(await ccRequests()).toBe(before);
   });
 
-  it("invalid_scope (the server's scopes changed to an unknown one) → needs_reconnect with invalid_scope", async () => {
+  it("invalid_scope (the server's scopes changed to an unknown one) → needs_reconnect; fixed, a save without the secret recovers", async () => {
     const server = await savedServer();
     await ok(s.victor.request("PATCH", `/api/v1/mcp-servers/${server.id}`, { oauthScopes: ["unknown"] }));
     expect(await forceRefresh(s.stack.built.core, orgKey(server.id))).toEqual({
@@ -315,6 +330,36 @@ describe("terminal re-grants and the issuer pin (D-03, D-07, D-08)", () => {
       status: "needs_reconnect",
       last_error: "invalid_scope",
     });
+    // WR-03: the admin fixes the scopes and retries with the stored secret (never typed again).
+    await ok(s.victor.request("PATCH", `/api/v1/mcp-servers/${server.id}`, { oauthScopes: [] }));
+    const saved = await ok(saveCc(s, s.victor, server.id, { clientId: PRE_REGISTERED_CC }));
+    expect(saved.orgConnection).toMatchObject({ status: "connected", hasSecret: true });
+  });
+
+  it("WR-03: a 401 on a fresh grant drops only the access token; the next use re-grants with the kept secret", async () => {
+    const server = await savedServer();
+    const secretId = (await orgConnectionRow(s, s.orgA, server.id))?.secret_id;
+    const { core } = s.stack.built;
+    expect(await markNeedsReconnect(core, { ...orgKey(server.id), code: "upstream_unauthorized" })).toBe(
+      "token_dropped",
+    );
+    const row = await orgConnectionRow(s, s.orgA, server.id);
+    expect(row).toMatchObject({
+      status: "connected",
+      secret_id: secretId,
+      last_error: "upstream_unauthorized",
+    });
+    const b = await orgBundleOf(s, s.orgA, server.id);
+    expect(b).toMatchObject({ kind: "client_credentials", clientSecret: CC_SECRET });
+    expect(b?.accessToken).toBeUndefined();
+    expect(
+      (await auditRows(s, s.orgA, ["connector.org_needs_reconnect"])).map((a) => a.resource_id),
+    ).not.toContain(row?.id);
+    const before = await ccRequests();
+    const t = await accessTokenFor(core, orgKey(server.id));
+    expect(t).toMatchObject({ ok: true, headerName: "Authorization" });
+    expect(await ccRequests()).toBe(before + 1);
+    expect((await orgConnectionRow(s, s.orgA, server.id))?.last_error).toBeNull();
   });
 
   it("an issuer change → needs_reconnect issuer_changed; the secret is sent to neither issuer", async () => {

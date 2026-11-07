@@ -266,3 +266,13 @@ Amended in place while the phase is unmerged, after `07.14-REVIEW.md`. Each item
   was in flight is read and revoked in turn before anything is deleted, so no live grant is left behind a deleted row
   and the audit's `revoked` describes the deleted grant. After three changes in a row it answers 409
   `org_connection_changed` and deletes nothing.
+- **A resource server's 401 never destroys the organization's client secret (WR-03).** Before this fix, a second 401
+  after the one forced re-grant marked the connection `needs_reconnect` and destroyed the sealed bundle, client secret
+  included, and any member's bot turn or watched check could trigger it. Now, for client credentials, that second 401
+  drops only the access token: the bundle is re-sealed in place without it, `last_error` records
+  `upstream_unauthorized`, the row stays `connected`, the call fails as an upstream error (no admin sentence), and the
+  next use re-grants once. A terminal refusal at the pinned token endpoint (`invalid_client`, `unauthorized_client`,
+  `invalid_scope`, …) still marks `needs_reconnect` and sends nothing more, but keeps the sealed secret (without a
+  token), so **Update credentials** can retry with the stored secret once the cause is fixed; it is still bound to its
+  issuer, token endpoint and URL. An issuer or URL change still destroys it (a retry would need it typed again
+  anyway). OAuth bundles (`org_oauth`) keep the earlier behaviour: their second 401 is `needs_reconnect`.
