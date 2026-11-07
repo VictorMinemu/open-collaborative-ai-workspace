@@ -275,6 +275,10 @@ test("a release that changed upstream between review and approval refreshes the 
   await expect(sheet).toBeVisible();
   await expect(sheet.getByTestId("package-digest-value")).toHaveText(DIGEST);
   await expect(sheet.getByTestId("package-digest-value")).not.toHaveText(before ?? "");
+  // At 1440 the toast sits over the sheet's footer: a click while it slides in lands on the toast (an outside press
+  // that closes the sheet), and Sonner pauses it while the pointer rests there. Move off and let it close first.
+  await page.mouse.move(0, 0);
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 15_000 });
   // The refreshed review approves.
   await sheet.getByTestId("package-approve").click();
   await expect(page.getByText("ocw-moving 3.1.0 approved.", { exact: false })).toBeVisible();
@@ -292,6 +296,8 @@ test("a release that changed upstream between review and approval refreshes the 
   await expect(sheet).toBeVisible();
   await expect(sheet.getByTestId("package-digest-value")).toHaveText(top ?? "");
   await expect(sheet.getByTestId("package-dependencies")).toHaveText("1 dependency, pinned by hash");
+  await page.mouse.move(0, 0);
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 15_000 });
   await sheet.getByTestId("package-approve").click();
   await expect(page.getByText("ocw-deps 0.9.0 approved.", { exact: false })).toBeVisible();
   await expect(rowOf(page, "ocw-deps")).toBeVisible();
