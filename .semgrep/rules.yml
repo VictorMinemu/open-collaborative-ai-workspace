@@ -142,24 +142,38 @@ rules:
       inArray(mcpServers.authMode, CELL_MODES | CONNECTOR_PROXY_MODES | PER_MEMBER_MODES | ORG_CREDENTIAL_MODES).
     patterns:
       - pattern-either:
-          - pattern: $X === "$MODE"
-          - pattern: '"$MODE" === $X'
-          - pattern: $X !== "$MODE"
-          - pattern: '"$MODE" !== $X'
-          - pattern: eq($COLUMN, "$MODE")
-          - pattern: ne($COLUMN, "$MODE")
-      - metavariable-regex:
-          metavariable: $MODE
-          regex: ^org_secret$
+          - patterns:
+              - pattern-either:
+                  - pattern: $X === "$MODE"
+                  - pattern: '"$MODE" === $X'
+                  - pattern: $X !== "$MODE"
+                  - pattern: '"$MODE" !== $X'
+                  # 07.14 review IN-03: the loose operators and list membership ask the same raw question.
+                  - pattern: $X == "$MODE"
+                  - pattern: '"$MODE" == $X'
+                  - pattern: $X != "$MODE"
+                  - pattern: '"$MODE" != $X'
+                  - pattern: eq($COLUMN, "$MODE")
+                  - pattern: ne($COLUMN, "$MODE")
+                  - pattern: '[..., "$MODE", ...].includes($X)'
+                  - pattern: 'inArray($COLUMN, [..., "$MODE", ...])'
+                  - pattern: 'notInArray($COLUMN, [..., "$MODE", ...])'
+              - metavariable-regex:
+                  metavariable: $MODE
+                  regex: ^org_secret$
+          # A switch case (IN-03): Semgrep's TypeScript patterns cannot name one case of a switch, so a regex does.
+          - pattern-regex: '\bcase\s+["''`]org_secret["''`]\s*:'
       # Semgrep 1.178 derives no prefilter from string literals or a metavariable-regex, so without this conjunct it
       # parses every target as TypeScript and breaks the SQL fixture's rule test (rules.sql). The regex lets it skip
       # files that never name the mode.
       - pattern-regex: org_secret
     paths:
-      # packages/contracts/src/connectors.ts holds the predicates themselves and lies outside apps/.
+      # packages/contracts/src/connectors.ts holds the predicates themselves: the one place a raw comparison lives.
       include:
         - /apps/
+        - /packages/
       exclude:
+        - /packages/contracts/src/connectors.ts
         - "*.test.ts"
         - "*.test.tsx"
         - "*.spec.ts"

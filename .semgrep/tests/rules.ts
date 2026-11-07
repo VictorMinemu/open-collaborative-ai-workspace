@@ -116,3 +116,26 @@ const defaultMode: ConnectorAuthMode = "org_secret";
 const memberKey = server.authMode === "per_member_secret";
 // ok: ocw.raw-auth-mode
 setAuthMode("org_secret");
+// 07.14 review IN-03: the loose operators, switch cases and list membership are raw comparisons too.
+// ruleid: ocw.raw-auth-mode
+const loose = server.authMode == "org_secret";
+// ruleid: ocw.raw-auth-mode
+const looseNot = "org_secret" != server.authMode;
+switch (server.authMode) {
+  // ruleid: ocw.raw-auth-mode
+  case "org_secret":
+    break;
+  // ok: ocw.raw-auth-mode
+  case "per_member_oauth":
+    break;
+}
+// ruleid: ocw.raw-auth-mode
+const listed = ["org_secret", "per_member_secret"].includes(server.authMode);
+// ruleid: ocw.raw-auth-mode
+const listedRows = await tx.select().from(mcpServers).where(inArray(mcpServers.authMode, ["org_secret"]));
+// ruleid: ocw.raw-auth-mode
+const notListedRows = await tx.select().from(mcpServers).where(notInArray(mcpServers.authMode, ["org_secret"]));
+// ok: ocw.raw-auth-mode
+const memberListed = ["per_member_oauth", "per_member_secret"].includes(server.authMode);
+// ok: ocw.raw-auth-mode
+const modes: ConnectorAuthMode[] = ["org_secret", "org_oauth"];
