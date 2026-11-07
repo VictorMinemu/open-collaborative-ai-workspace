@@ -289,6 +289,9 @@ Amended in place while the phase is unmerged, after `07.14-REVIEW.md`. Each item
   `case "org_secret":`, `[…, "org_secret", …].includes(x)` and `inArray` / `notInArray` with that literal, and it now
   covers `packages/` as well as `apps/` (only `packages/contracts/src/connectors.ts` is exempt). The one existing match,
   a switch over the watched-records access kind named `org_secret`, became an exhaustive lookup table.
+- **Test sign-in decrypts only a secret it could send (IN-04).** Its client step is a dry run, so the saved server's
+  OAuth client secrets stay sealed (no `reveal`); only the organization's client-credentials bundle is opened, for
+  the client-credentials test that may send its secret to the pinned token endpoint.
 - **Smaller fixes.** Re-probe of an organization server without a usable credential answers the organization's
   sentence, as the proxy does (IN-01). `accountLabel` is bounded at the column's 200 characters in the contracts
   (IN-02). The post-commit probe never throws: a stored connection whose tool listing (or the write recording its

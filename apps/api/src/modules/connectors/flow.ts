@@ -136,16 +136,20 @@ export function flowAuth(
 /**
  * A server's OAuth clients for `previewClient` / `chooseClient`, secrets revealed in the caller's tenant transaction
  * (RLS): the admin's pre-registered ones and the stored CIMD / DCR ones, per issuer. Shared by the sign-in start and
- * the Test sign-in (07.14-09), so both decide from the same clients.
+ * the Test sign-in (07.14-09), so both decide from the same clients. `revealSecrets: false` (the Test sign-in's dry
+ * run, review IN-04: the client step only previews which client would be used, so no secret is ever sent) leaves every
+ * client secret sealed: none is decrypted into process memory.
  */
 export async function serverClientsOf(
   tx: Tx,
   core: Core,
   serverId: string,
+  opts: { revealSecrets?: boolean } = {},
 ): Promise<Pick<ClientPreviewOptions, "preRegistered" | "stored">> {
   const clients = await oauthClientsOf(tx, serverId);
+  const revealSecrets = opts.revealSecrets ?? true;
   const reveal = async (id: string | null) =>
-    id ? await core.secrets.reveal(tx, id).catch(() => undefined) : undefined;
+    id && revealSecrets ? await core.secrets.reveal(tx, id).catch(() => undefined) : undefined;
   const preRegistered: Array<ClientPreviewOptions["preRegistered"][number]> = [];
   const stored: Array<ClientPreviewOptions["stored"][number]> = [];
   for (const c of clients) {

@@ -174,7 +174,10 @@ async function testSignIn(
     }
     return {
       server,
-      clients: server ? await serverClientsOf(tx, core, server.id) : { preRegistered: [], stored: [] },
+      // A dry run never sends an OAuth client secret, so none is decrypted (IN-04).
+      clients: server
+        ? await serverClientsOf(tx, core, server.id, { revealSecrets: false })
+        : { preRegistered: [], stored: [] },
       cc:
         server && body.authMode === "org_client_credentials"
           ? await orgClientCredentialsOf(tx, core, server.id)

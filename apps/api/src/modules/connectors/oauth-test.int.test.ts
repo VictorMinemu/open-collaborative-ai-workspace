@@ -1,9 +1,10 @@
 import { connectorOAuthUrls } from "@ocw/contracts";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   assertNoGlobalFetch,
   CALLBACK_URL,
   CC_SECRET,
+  CONFIDENTIAL_SECRET,
   type ConnectorsStack,
   fails,
   fakeStats,
@@ -11,6 +12,7 @@ import {
   ok,
   PRE_REGISTERED,
   PRE_REGISTERED_CC,
+  PRE_REGISTERED_CONFIDENTIAL,
   PUBLIC_API_URL,
   type Res,
   registerCcConnector,
@@ -232,6 +234,29 @@ describe("saved servers", () => {
   it("a saved sign-in server uses its stored pre-registered client", async () => {
     const r = await ok(test({ serverId: signIn.id, authMode: "org_oauth" }));
     expect(r).toMatchObject({ ok: true, clientMethod: "pre_registered" });
+  });
+
+  it("IN-04: a sign-in test never decrypts a stored OAuth client secret (the client step is a dry run)", async () => {
+    const confidential = await registerOrgConnector(s, {
+      oauthClient: {
+        issuer: issuer(),
+        clientId: PRE_REGISTERED_CONFIDENTIAL,
+        clientSecret: CONFIDENTIAL_SECRET,
+      },
+    });
+    before = await snapshot();
+    const { core } = s.stack.built;
+    const reveal = vi.spyOn(core.secrets, "reveal");
+    const revealSealed = vi.spyOn(core.secrets, "revealSealed");
+    try {
+      const r = await ok(test({ serverId: confidential.id, authMode: "org_oauth" }));
+      expect(r).toMatchObject({ ok: true, clientMethod: "pre_registered" });
+      expect(reveal).not.toHaveBeenCalled();
+      expect(revealSealed).not.toHaveBeenCalled();
+    } finally {
+      reveal.mockRestore();
+      revealSealed.mockRestore();
+    }
   });
 
   it("org B's admin naming org A's server → 404, nothing of org A used", async () => {
