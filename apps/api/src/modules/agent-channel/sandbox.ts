@@ -35,7 +35,7 @@ import {
   type ToolApprovalRefusal,
   type TurnToolFlags,
 } from "@ocw/contracts";
-import { agentToolCalls, agentTurns, type Tx, withSavepoint } from "@ocw/db";
+import { agentToolCalls, agentTurns, conversations, messages, type Tx, withSavepoint } from "@ocw/db";
 import { and, eq, lt, type SQL, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import type { z } from "zod";
@@ -804,6 +804,59 @@ async function assertFile(
   return entry;
 }
 
+/** Conversations whose bot history is the whole conversation (mentions.ts: DMs, group DMs, AI chats are flat). */
+const FLAT_HISTORY_KINDS = new Set(["dm", "group", "ai_chat"]);
+/** Conversation kinds a bot turn reads messages in; a Work Zone session's files are never a chat attachment. */
+const IMPORT_KINDS = new Set(["channel", "thread", ...FLAT_HISTORY_KINDS]);
+
+/**
+ * The attachment `ocw_sandbox_import` may take for this turn, or null (the caller answers `not_found`, so a file the
+ * turn does not read is indistinguishable from a missing one). Run in the turn's transaction AS its human (RLS), after
+ * `liveTurn` checked that the human still reads the turn's conversation; the bot reads only what its delivery gave
+ * it. So the file must be exactly one the turn's history shows (`buildMentionEvents` in mentions.ts):
+ * - `ready`, of the turn's conversation, sent with a message (never an upload still waiting in someone's composer)
+ *   and never a Work Zone prompt's image;
+ * - that message live (not a tombstone, whatever the file's own status says) and in the turn's conversation;
+ * - in a channel, that message is the turn's thread root or a reply in that thread (the root is the turn message's
+ *   thread, or the turn message itself); a DM, group DM or AI chat is read whole.
+ */
+async function importableAttachment(
+  tx: Tx,
+  turn: Pick<AgentTurnRow, "conversationId" | "messageId">,
+  attachmentId: string,
+): Promise<AttachmentRow | null> {
+  const [row] = await attachmentRowsByIds(tx, [attachmentId]);
+  if (!row || row.conversationId !== turn.conversationId || row.status !== "ready") return null;
+  if (row.messageId === null || row.workPromptId !== null) return null;
+  const [conv] = await tx
+    .select({ kind: conversations.kind })
+    .from(conversations)
+    .where(eq(conversations.id, turn.conversationId))
+    .limit(1);
+  if (!conv || !IMPORT_KINDS.has(conv.kind)) return null;
+  const [carrier] = await tx
+    .select({
+      id: messages.id,
+      conversationId: messages.conversationId,
+      threadId: messages.threadId,
+      deletedAt: messages.deletedAt,
+    })
+    .from(messages)
+    .where(eq(messages.id, row.messageId))
+    .limit(1);
+  if (!carrier || carrier.deletedAt !== null || carrier.conversationId !== turn.conversationId) return null;
+  // A DM, group DM or AI chat is one flat history; a thread conversation is read whole too (mentions.ts).
+  if (FLAT_HISTORY_KINDS.has(conv.kind) || conv.kind === "thread") return row;
+  const [trigger] = await tx
+    .select({ id: messages.id, threadId: messages.threadId })
+    .from(messages)
+    .where(and(eq(messages.id, turn.messageId), eq(messages.conversationId, turn.conversationId)))
+    .limit(1);
+  if (!trigger) return null;
+  const root = trigger.threadId ?? trigger.id;
+  return carrier.id === root || carrier.threadId === root ? row : null;
+}
+
 /** Where an import lands when the bot names no path: `downloads/<the attachment's name>` (sanitized). */
 function importPathOf(row: Pick<AttachmentRow, "id" | "filename">): string {
   const path = `downloads/${sanitizeFilename(row.filename)}`;
@@ -1065,8 +1118,9 @@ export function registerSandboxRoutes(
     },
   );
 
-  // 07.8-25 (D-11 F-8, P-11): an attachment of the turn's own conversation copied into the workspace, only when the
-  // conversation's audience already covers the workspace's (`audienceCovers`, the resolver's rule: refuse when unsure).
+  // 07.8-25 (D-11 F-8, P-11): an attachment the turn reads (a live message of its conversation, in its thread for a
+  // channel: `importableAttachment`) copied into the workspace, only when the conversation's audience already covers
+  // the workspace's (`audienceCovers`, the resolver's rule: refuse when unsure).
   const access = createConversationAccess(core);
   const isReadable = (tx: Tx, userId: string, conversationId: string) =>
     access.isReadable(tx, userId, conversationId, { kinds: ["channel", "dm", "group", "ai_chat"] });
@@ -1092,10 +1146,9 @@ export function registerSandboxRoutes(
         failureAudit: (reason) => ({ reason, attachmentId: body.attachmentId }),
         precheck: async (tx, turn) => {
           if (!storage) return "service_unavailable";
-          const [row] = await attachmentRowsByIds(tx, [body.attachmentId]);
-          // Another conversation's file, one nobody can read yet (pending) or one gone: no such file for this turn.
-          if (!row || row.conversationId !== turn.conversationId || row.status !== "ready")
-            return "not_found";
+          // Only a file the turn reads (`importableAttachment`): anything else reads exactly like a missing file.
+          const row = await importableAttachment(tx, turn, body.attachmentId);
+          if (!row) return "not_found";
           if (row.sizeBytes > SANDBOX_LIMITS.uploadMaxBytes) return "too_large";
           const facts = await audienceCoverFacts(
             tx,
