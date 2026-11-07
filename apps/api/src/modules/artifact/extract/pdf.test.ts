@@ -1,7 +1,8 @@
 import { getResolvedPDFJS } from "unpdf";
 import { describe, expect, it } from "vitest";
 import { GARBAGE_PDF, makeEncryptedPdf, makePdf } from "../../../testing-pdf";
-import { pdfText } from "./pdf";
+import { EXTRACT_LIMITS } from "./limits";
+import { pdfText, pdfWorkersInFlight } from "./pdf";
 
 /**
  * 07.15-05 (BRA-02, D-05, D-12, PD-07): a PDF's text for a bot, parsed only inside a bounded Worker (unpdf 1.9.1,
@@ -75,5 +76,61 @@ describe("pdfText bounds and failures", () => {
 
   it("answers extraction_failed for random bytes behind a PDF header", async () => {
     expect(await pdfText(GARBAGE_PDF, CAPS)).toEqual({ ok: false, code: "extraction_failed" });
+  });
+});
+
+/**
+ * Hostile workers (E12): a worker stuck in a synchronous loop, one that exhausts its heap, and one that posts a forged
+ * message. `pdfText` resolves only after its worker is terminated, so the in-flight count returning to 0 proves the
+ * thread is gone and the slot was given back.
+ */
+describe("pdfText under hostile workers", () => {
+  const HANG = new URL("./fixtures/hang-worker.mjs", import.meta.url);
+  const OOM = new URL("./fixtures/oom-worker.mjs", import.meta.url);
+  const enc = (s: string) => new TextEncoder().encode(s);
+
+  it("terminates a worker that never answers at the deadline: timeout", async () => {
+    const started = Date.now();
+    const out = await pdfText(enc("spin"), { ...CAPS, ms: 300 }, { workerUrl: HANG });
+    expect(out).toEqual({ ok: false, code: "timeout" });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(pdfWorkersInFlight()).toBe(0);
+  });
+
+  it("answers extraction_failed when the worker exhausts its heap", async () => {
+    const started = Date.now();
+    const out = await pdfText(enc("grow"), { ...CAPS, heapMb: 16 }, { workerUrl: OOM });
+    expect(out).toEqual({ ok: false, code: "extraction_failed" });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(pdfWorkersInFlight()).toBe(0);
+  });
+
+  it("answers busy at once while two reads are in flight, and starts workers again once they end", async () => {
+    expect(EXTRACT_LIMITS.pdfConcurrency).toBe(2);
+    const first = pdfText(enc("spin"), { ...CAPS, ms: 1_000 }, { workerUrl: HANG });
+    const second = pdfText(enc("spin"), { ...CAPS, ms: 1_000 }, { workerUrl: HANG });
+    expect(pdfWorkersInFlight()).toBe(2);
+    const started = Date.now();
+    expect(await pdfText(makePdf(["Third"]), CAPS)).toEqual({ ok: false, code: "busy" });
+    expect(Date.now() - started).toBeLessThan(50);
+    expect(await first).toEqual({ ok: false, code: "timeout" });
+    expect(await second).toEqual({ ok: false, code: "timeout" });
+    expect(pdfWorkersInFlight()).toBe(0);
+    expect(await pdfText(makePdf(["Fourth"]), CAPS)).toMatchObject({ ok: true, pages: 1 });
+  });
+
+  it("answers extraction_failed for a malformed worker message", async () => {
+    const out = await pdfText(enc("malformed"), CAPS, { workerUrl: HANG });
+    expect(out).toEqual({ ok: false, code: "extraction_failed" });
+    expect(pdfWorkersInFlight()).toBe(0);
+  });
+
+  it("answers extraction_failed when the worker script cannot start, and gives the slot back", async () => {
+    const missing = new URL("./fixtures/no-such-worker.mjs", import.meta.url);
+    expect(await pdfText(enc("x"), CAPS, { workerUrl: missing })).toEqual({
+      ok: false,
+      code: "extraction_failed",
+    });
+    expect(pdfWorkersInFlight()).toBe(0);
   });
 });
