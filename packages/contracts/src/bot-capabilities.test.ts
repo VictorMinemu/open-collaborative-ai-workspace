@@ -17,10 +17,12 @@ import {
   DANGEROUS_TOOL_NAMES,
   DEFAULT_BOT_POLICY,
   DEFAULT_CAPABILITIES,
+  isApprovableTool,
   isDangerousToolName,
   MAX_SANDBOX_CALLS_PER_TURN,
   SANDBOX_REFUSED_TOOL_NAMES,
   SANDBOX_TOOL_NAMES,
+  ToolPattern,
   TURN_ATTACHMENT_NOTES,
   TurnAttachment,
   TurnContext,
@@ -681,6 +683,20 @@ describe("turn attachments (07.15 D-02, D-04, D-05, PD-03, PD-04)", () => {
       readsPerTurn: 20,
       charsPerTurn: 200_000,
       charsPerFile: 64_000,
+    });
+  });
+
+  it("ocw_attachment_read is never approvable and never a dangerous name, on either host (D-08, PD-08)", () => {
+    expect(isApprovableTool(BUILTIN_TOOLS.attachmentRead)).toBe(false);
+    expect(isApprovableTool("OCW_ATTACHMENT_READ")).toBe(false);
+    expect(ToolPattern.safeParse(BUILTIN_TOOLS.attachmentRead).success).toBe(false);
+    expect(isDangerousToolName(BUILTIN_TOOLS.attachmentRead)).toBe(false);
+    expect(isDangerousToolName(BUILTIN_TOOLS.attachmentRead, "sandbox")).toBe(false);
+    // The 07.8 import keeps its own flags (what the sandbox tools read later taints).
+    expect(CONFINED_TOOL_FLAGS.ocw_sandbox_import).toEqual({
+      untrustedOutput: false,
+      sideEffecting: false,
+      memberData: "none",
     });
   });
 });
