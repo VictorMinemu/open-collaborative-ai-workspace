@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import type { FastifyBaseLogger } from "fastify";
 import { describe, expect, it } from "vitest";
 import type { AttachmentRow } from "../model";
 import { type AttachmentPart, attachmentKey, type ObjectStorage } from "../storage";
@@ -196,5 +197,145 @@ describe("readAttachmentForAgent: text", () => {
       kind: "refused",
       code: "unsupported_type",
     });
+  });
+});
+
+describe("readAttachmentForAgent: images", () => {
+  const MiB = 1024 * 1024;
+  const webp = new Uint8Array([0x52, 0x49, 0x46, 0x46, 1, 2, 3]);
+
+  it("gives the stored large.webp rendition, never the original, with the rendition's dimensions", async () => {
+    const png = row({
+      filename: "photo.png",
+      declaredType: "image/png",
+      contentType: "image/png",
+      sizeBytes: 3 * MiB,
+      hasRenditions: true,
+      width: 4000,
+      height: 3000,
+    });
+    const { storage, calls } = memoryStorage(png, { "large.webp": webp, original: new Uint8Array([9, 9]) });
+    expect(await readAttachmentForAgent(storage, png, CAPS)).toEqual({
+      kind: "image",
+      mimeType: "image/webp",
+      data: webp,
+      width: 2048,
+      height: 1536,
+    });
+    expect(calls).toEqual([{ method: "stream", key: keyOf(png, "large.webp") }]);
+  });
+
+  it("keeps a rendition's dimensions when the original was already within 2048 px, and null when unknown", async () => {
+    const small = row({
+      filename: "s.jpg",
+      declaredType: "image/jpeg",
+      contentType: "image/jpeg",
+      hasRenditions: true,
+      width: 800,
+      height: 1200,
+    });
+    const a = memoryStorage(small, { "large.webp": webp });
+    expect(await readAttachmentForAgent(a.storage, small, CAPS)).toMatchObject({ width: 800, height: 1200 });
+    const unknown = row({ contentType: "image/png", declaredType: "image/png", hasRenditions: true });
+    const b = memoryStorage(unknown, { "large.webp": webp });
+    expect(await readAttachmentForAgent(b.storage, unknown, CAPS)).toMatchObject({
+      width: null,
+      height: null,
+    });
+  });
+
+  it("gives the original of an image without renditions, with its sniffed type and the row's dimensions", async () => {
+    const body = new Uint8Array(MiB).fill(7);
+    const gif = row({
+      filename: "anim.gif",
+      declaredType: "image/gif",
+      contentType: "image/gif",
+      sizeBytes: MiB,
+      width: 320,
+      height: 240,
+    });
+    const { storage, calls } = memoryStorage(gif, { original: body });
+    expect(await readAttachmentForAgent(storage, gif, CAPS)).toEqual({
+      kind: "image",
+      mimeType: "image/gif",
+      data: body,
+      width: 320,
+      height: 240,
+    });
+    expect(calls).toEqual([{ method: "stream", key: keyOf(gif, "original") }]);
+  });
+
+  it("refuses an original over 5 MiB without renditions as too_large, before any storage call", async () => {
+    const huge = row({
+      filename: "scan.png",
+      declaredType: "image/png",
+      contentType: "image/png",
+      sizeBytes: EXTRACT_LIMITS.imageOriginalMaxBytes + 1,
+    });
+    const { storage, calls } = memoryStorage(huge, { original: new Uint8Array([1]) });
+    expect(await readAttachmentForAgent(storage, huge, CAPS)).toEqual({ kind: "refused", code: "too_large" });
+    expect(calls).toEqual([]);
+  });
+
+  it("answers too_large when the stored object is larger than the cap, whatever the row says", async () => {
+    const liar = row({
+      filename: "a.webp",
+      declaredType: "image/webp",
+      contentType: "image/webp",
+      sizeBytes: 10,
+    });
+    const { storage } = memoryStorage(liar, {
+      original: new Uint8Array(EXTRACT_LIMITS.imageOriginalMaxBytes + 1),
+    });
+    expect(await readAttachmentForAgent(storage, liar, CAPS)).toEqual({ kind: "refused", code: "too_large" });
+  });
+
+  it("answers unavailable on any other storage error and logs only the error's name", async () => {
+    const png = row({ declaredType: "image/png", contentType: "image/png", hasRenditions: true });
+    const { storage } = memoryStorage(png, {}, { stream: new Error("socket hang up: secret-content") });
+    const logged: unknown[] = [];
+    const log = {
+      warn: (obj: unknown) => {
+        logged.push(obj);
+      },
+    } as unknown as Pick<FastifyBaseLogger, "warn">;
+    expect(await readAttachmentForAgent(storage, png, CAPS, { log })).toEqual({
+      kind: "refused",
+      code: "unavailable",
+    });
+    expect(logged).toEqual([{ err: { name: "Error" } }]);
+    expect(JSON.stringify(logged)).not.toContain("secret-content");
+  });
+
+  it("returns an SVG as its markup, never as an image", async () => {
+    const markup = '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+    const svg = row({
+      filename: "logo.svg",
+      declaredType: "image/svg+xml",
+      contentType: "application/octet-stream",
+      sizeBytes: enc(markup).length,
+    });
+    const { storage, calls } = memoryStorage(svg, { original: enc(markup) });
+    expect(await readAttachmentForAgent(storage, svg, CAPS)).toEqual({
+      kind: "text",
+      text: markup,
+      chars: markup.length,
+      truncated: false,
+    });
+    expect(calls.map((c) => c.method)).toEqual(["rangeGet"]);
+  });
+
+  it.each([
+    ["page.html", "text/html", "<html><body onload=x()>hi</body></html>"],
+    ["app.js", "text/javascript", "process.exit(1)"],
+  ] as const)("returns %s as its text, never evaluated", async (filename, declaredType, body) => {
+    const r = row({
+      filename,
+      declaredType,
+      contentType: "application/octet-stream",
+      sizeBytes: enc(body).length,
+    });
+    const { storage } = memoryStorage(r, { original: enc(body) });
+    expect(await readAttachmentForAgent(storage, r, CAPS)).toMatchObject({ kind: "text", text: body });
   });
 });
