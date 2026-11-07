@@ -126,6 +126,8 @@ describe("serialized refresh", () => {
     s.fake.setScenario({ expires_in: 1 });
     await reconnect();
     s.fake.setScenario({});
+    // Past its 1 s life (a token is reused for its first half, WR-04).
+    await new Promise((r) => setTimeout(r, 1_100));
     const before = await refreshes();
     const [a, b] = await Promise.all([
       accessTokenFor(s.stack.built.core, key(s.victorId, oauth.id)),
@@ -674,9 +676,11 @@ describe("organization custody (07.14)", () => {
   });
 
   it("two racing callers on an expiring organization token make one refresh; two forced refreshes make one; no reuse", async () => {
-    s.fake.setScenario({ expires_in: 30 });
+    s.fake.setScenario({ expires_in: 2 });
     await connectOrg();
     s.fake.setScenario({});
+    // Past the first half of its 2 s life: it is refreshed before use (WR-04).
+    await new Promise((r) => setTimeout(r, 1_100));
     const before = await fakeStats(s);
     const [a, b] = await Promise.all([
       accessTokenFor(s.stack.built.core, orgKey()),

@@ -276,3 +276,8 @@ Amended in place while the phase is unmerged, after `07.14-REVIEW.md`. Each item
   token), so **Update credentials** can retry with the stored secret once the cause is fixed; it is still bound to its
   issuer, token endpoint and URL. An issuer or URL change still destroys it (a retry would need it typed again
   anyway). OAuth bundles (`org_oauth`) keep the earlier behaviour: their second 401 is `needs_reconnect`.
+- **Short-lived tokens are reused for half their life (WR-04).** "60 s before expiry" above becomes "60 s, or half the
+  token's lifetime when that is shorter", for both principals and both OAuth and client credentials. Bundles now
+  record `issuedAt`. A token that lives 60 s or less (some client-credentials issuers) used to be never fresh: every
+  call, and every waiter of a serialized refresh, minted its own token (one rotation spent per call for rotating
+  refresh tokens). Bundles stored before `issuedAt` keep the fixed 60 s window until their next refresh.

@@ -99,6 +99,11 @@ const OAuthBundle = z.object({
   accountLabel: z.string().nullable(),
   /** Epoch ms of the last refresh (a forced refresh within the lock window reuses it). */
   refreshedAt: z.number().optional(),
+  /**
+   * Epoch ms when the current access token was obtained (07.14 review WR-04): with `expiresAt` it gives the token's
+   * lifetime, which bounds the refresh window. Absent on bundles stored before it (the fixed 60 s window applies).
+   */
+  issuedAt: z.number().optional(),
 });
 /**
  * A member's key. `serverUrl` is the server URL it was entered for (07.14 review CR-01): it is sent only while the
@@ -130,6 +135,11 @@ const ClientCredentialsBundle = z.object({
   expiresAt: z.number().optional(),
   /** Epoch ms of the last grant (a forced re-grant within the lock window reuses it). */
   refreshedAt: z.number().optional(),
+  /**
+   * Epoch ms when the current access token was obtained (07.14 review WR-04): with `expiresAt` it gives the token's
+   * lifetime, which bounds the refresh window. Absent on bundles stored before it (the fixed 60 s window applies).
+   */
+  issuedAt: z.number().optional(),
 });
 export const StoredBundle = z.discriminatedUnion("kind", [
   OAuthBundle,
@@ -161,6 +171,7 @@ export function ccBundleFrom(
     scopes: [...input.scopes],
     accessToken: token.accessToken,
     expiresAt: token.expiresAt,
+    issuedAt: Date.now(),
     // No `refreshedAt`: a token refused right after the save is re-granted (only a re-grant opens the reuse window).
   };
 }
@@ -178,6 +189,8 @@ export const oauthBundleOf = (b: TokenBundle): OAuthBundle => ({
   revocationEndpoint: b.revocationEndpoint,
   authMethod: b.authMethod,
   accountLabel: b.accountLabel,
+  // The code exchange or refresh that produced it has just answered.
+  issuedAt: Date.now(),
 });
 
 const tokenBundleOf = (b: OAuthBundle): TokenBundle => ({
@@ -505,14 +518,25 @@ function headerFor(server: ServerRow, bundle: StoredBundle): AccessToken {
 }
 
 /**
+ * How long before expiry a token is renewed (07.14 review WR-04): 60 s, or half the token's lifetime when that is
+ * shorter. A token that lives 60 s or less is then reused for its first half by every caller (and by the waiters of a
+ * serialized refresh, which re-read the token just minted), instead of never being fresh: one grant per call, and one
+ * spent rotation per call for a rotating refresh token. Without `issuedAt` (bundles stored before it) the fixed 60 s
+ * window applies.
+ */
+export function refreshWindowMs(expiresAt: number, issuedAt: number | undefined): number {
+  if (issuedAt === undefined) return REFRESH_WINDOW_MS;
+  return Math.min(REFRESH_WINDOW_MS, Math.max(0, (expiresAt - issuedAt) / 2));
+}
+
+/**
  * Usable as is: an OAuth token without an expiry or expiring after the window, a client-credentials token expiring
- * after the window (one expiring within it, exactly 60 s included, is re-granted first; 07.14 D-07).
+ * after the window (one expiring within it, its boundary included, is re-granted first; 07.14 D-07, WR-04).
  */
 function fresh(b: OAuthBundle | ClientCredentialsBundle): boolean {
-  if (b.kind === "oauth") return b.expiresAt === null || b.expiresAt - Date.now() > REFRESH_WINDOW_MS;
-  return (
-    b.accessToken !== undefined && b.expiresAt !== undefined && b.expiresAt - Date.now() > REFRESH_WINDOW_MS
-  );
+  if (b.kind === "oauth" && b.expiresAt === null) return true;
+  if (b.accessToken === undefined || b.expiresAt === undefined || b.expiresAt === null) return false;
+  return b.expiresAt - Date.now() > refreshWindowMs(b.expiresAt, b.issuedAt);
 }
 
 // ---------------------------------------------------------------- storing
@@ -911,6 +935,7 @@ async function regrantInTx(
     accessToken: token.accessToken,
     expiresAt: token.expiresAt,
     refreshedAt: Date.now(),
+    issuedAt: Date.now(),
   };
   if (!row.secretId) return refused("needs_reconnect");
   await core.secrets.replaceSealed(tx, row.secretId, JSON.stringify(stored), store.aad);

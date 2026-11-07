@@ -206,10 +206,20 @@ async function rewriteOrgBundle(serverId: string, change: (b: Json) => Json) {
   );
 }
 
+/** Moves the organization's token `ms` into its life (its issue and expiry instants shift back by `ms`). */
+const ageOrgToken = (serverId: string, ms: number) =>
+  rewriteOrgBundle(serverId, (b) => ({
+    ...b,
+    expiresAt: b.expiresAt - ms,
+    ...(b.issuedAt !== undefined ? { issuedAt: b.issuedAt - ms } : {}),
+  }));
+
 describe("re-grant before expiry, serialized (D-03, D-07; COA-02 concurrency, COA-03 adjacency)", () => {
   it("a token expiring within the 60 s window is re-granted on next use; one expiring in an hour is not", async () => {
-    const short = await savedServer({ scenario: { expires_in: 60 } });
+    const short = await savedServer({ scenario: { expires_in: 120 } });
     s.fake.setScenario({});
+    // Two minutes long, 70 s in: 50 s left, inside the 60 s window.
+    await ageOrgToken(short.id, 70_000);
     const old = (await orgBundleOf(s, s.orgA, short.id))?.accessToken;
     const before = await ccRequests();
     const renewed = await tokenOf(short.id);
@@ -240,8 +250,23 @@ describe("re-grant before expiry, serialized (D-03, D-07; COA-02 concurrency, CO
     expect(Math.abs((await orgBundleOf(s, s.orgA, server.id))?.expiresAt - expires)).toBeLessThan(1_000);
   });
 
+  it("WR-04: a 30 s token is reused for the first half of its life, by every caller, with no new grant", async () => {
+    const server = await savedServer({ scenario: { expires_in: 30 } });
+    s.fake.setScenario({});
+    const saved = (await orgBundleOf(s, s.orgA, server.id))?.accessToken;
+    const before = await ccRequests();
+    const tokens = await Promise.all(
+      [s.victorId, s.samId, null, s.victorId, s.samId].map((u) => tokenOf(server.id, u)),
+    );
+    expect(new Set(tokens)).toEqual(new Set([saved]));
+    expect(await tokenOf(server.id)).toBe(saved);
+    expect(await ccRequests()).toBe(before);
+  });
+
   it("three racing callers on an expiring token cause exactly one token request and get the same new token", async () => {
     const server = await savedServer({ scenario: { expires_in: 30 } });
+    // 20 s into its 30 s life: past the half-life window (15 s), so it is re-granted.
+    await ageOrgToken(server.id, 20_000);
     s.fake.setScenario({});
     const before = await ccRequests();
     const tokens = await Promise.all([
