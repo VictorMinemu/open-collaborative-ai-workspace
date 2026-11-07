@@ -61,7 +61,9 @@ const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString("hex");
 
 export function makeEncryptedPdf(): Uint8Array {
   const objects = pdfObjects(["This text is behind a password"]);
-  objects.push(`<< /Filter /Standard /V 1 /R 2 /O <${hex(randomBytes(32))}> /U <${hex(randomBytes(32))}> /P -4 >>`);
+  objects.push(
+    `<< /Filter /Standard /V 1 /R 2 /O <${hex(randomBytes(32))}> /U <${hex(randomBytes(32))}> /P -4 >>`,
+  );
   const encrypt = objects.length;
   const id = hex(randomBytes(16));
   return assemble(objects, ` /Encrypt ${encrypt} 0 R /ID [<${id}> <${id}>]`);
