@@ -1,6 +1,6 @@
 import { conversations, messages, type Tx } from "@ocw/db";
 import { and, eq, isNull, or, type SQL, sql } from "drizzle-orm";
-import { type AttachmentRow, attachmentRowsByIds } from "../artifact";
+import { type AgentReadKind, type AttachmentRow, attachmentKindOf, attachmentRowsByIds } from "../artifact";
 import type { AgentTurnRow } from "./claim";
 
 /**
@@ -104,4 +104,29 @@ export async function attachmentForTurn(
     )
     .limit(1);
   return carrier ? row : null;
+}
+
+/**
+ * The D-07 audit fields every bot file access shares (`bot.attachment_read`, `bot.attachment_imported`; PD-09): ids,
+ * the kind, the media type and the size, never the file's name, content, key or a path. With no resolved row (an
+ * unknown id, a file the turn does not read) only the ids are known: `kind` and `mediaType` null, `bytes` 0.
+ */
+export function attachmentAuditFields(
+  row: AttachmentRow | null,
+  unresolved: { attachmentId: string; conversationId: string },
+): {
+  attachmentId: string;
+  conversationId: string;
+  kind: AgentReadKind | null;
+  mediaType: string | null;
+  bytes: number;
+} {
+  if (!row) return { ...unresolved, kind: null, mediaType: null, bytes: 0 };
+  return {
+    attachmentId: row.id,
+    conversationId: row.conversationId,
+    kind: attachmentKindOf(row),
+    mediaType: row.contentType ?? row.declaredType,
+    bytes: row.sizeBytes,
+  };
 }
