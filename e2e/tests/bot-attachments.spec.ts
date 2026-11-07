@@ -87,6 +87,31 @@ async function expectLoaded(img: Locator) {
     .toBeGreaterThan(0);
 }
 
+/** A finger-sized target on phones (44 × 44). */
+async function expectFingerSized(target: Locator) {
+  const box = await target.boundingBox();
+  expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+  expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+}
+
+/**
+ * The composer's buttons on a phone (07.15-11): the paperclip, @ and Send are 44 × 44 targets, Send keeps its 32 px
+ * filled square, and the row is no taller than the 32 px buttons it had (the extra height overlaps the padding).
+ */
+async function expectComposerTargets(scope: Page | Locator, sendTestId: string, withMention: boolean) {
+  const clip = scope.getByTestId("attach-button");
+  await expectFingerSized(clip);
+  const send = scope.getByTestId(sendTestId);
+  await expectFingerSized(send);
+  const square = await send.locator("span").first().boundingBox();
+  expect(Math.round(square?.width ?? 0)).toBe(32);
+  expect(Math.round(square?.height ?? 0)).toBe(32);
+  if (withMention) await expectFingerSized(scope.getByRole("button", { name: "Mention someone" }));
+  // The row's height comes from the textarea and the 32 px layout box each button keeps (44 − 2 × 6 px overlap).
+  const row = await clip.locator("..").boundingBox();
+  expect(row?.height ?? 0).toBeLessThanOrEqual(36);
+}
+
 /** Adds files the way the device does: a drop on desktop, the paperclip's picker on a phone. */
 async function addFiles(page: Page, files: FileSpec[], mobile: boolean) {
   // The paperclip and the drop target appear together once the attachments config has loaded.
@@ -226,12 +251,8 @@ test("a member attaches an image and a PDF in their personal bot's DM and the bo
     const clip = s.page.getByTestId("attach-button");
     await expect(clip).toBeVisible();
     await expect(clip).toBeEnabled();
-    if (mobile) {
-      // A finger-sized target on phones (44 × 44), without making the composer taller.
-      const box = await clip.boundingBox();
-      expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
-      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
-    }
+    // Finger-sized targets on phones (44 × 44), without making the composer taller (a bot DM has no @ button).
+    if (mobile) await expectComposerTargets(s.page, "composer-send", false);
 
     await addFiles(s.page, [PHOTO, INVOICE], mobile);
     await expectReady(s.page, 2);
@@ -453,6 +474,11 @@ test("in a channel thread a team bot reads the mentioning message's file and an 
     const panel = s.page.getByTestId("thread-panel");
     await expect(panel).toBeVisible();
     await expect(panel.getByTestId("message")).toHaveCount(2);
+    if (project === "mobile") {
+      await expectComposerTargets(panel, "thread-composer-send", true);
+      // The thread composer's paperclip, @ and Send at phone size, for review (07.15-11).
+      await bothThemes(s.page, "bot-thread-composer-390");
+    }
     await panel
       .getByTestId("attach-file")
       .setInputFiles({ name: "b.png", mimeType: "image/png", buffer: mockup(480, 300, [16, 185, 129]) });
