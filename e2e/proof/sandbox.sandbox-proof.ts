@@ -137,6 +137,16 @@ const confinedOf = (tools: string[]) =>
 const runningOfOrg = () =>
   docker("ps", "-q", "--filter", `label=ocw.org=${state.org}`).split("\n").filter(Boolean);
 
+/** The organization's running containers as `id name kind`, for a failure message. */
+const describeRunningOfOrg = () =>
+  docker(
+    "ps",
+    "--filter",
+    `label=ocw.org=${state.org}`,
+    "--format",
+    '{{.ID}} {{.Names}} {{.Label "ocw.kind"}}',
+  ).replaceAll("\n", "; ") || "none";
+
 type DockerEvent = { at: number; action: string; id: string; signal?: string };
 
 /**
@@ -444,7 +454,20 @@ test("3. the kill switch stops a running command within 5 s; the next exec answe
   const afterReply = await replyTo(ana, state.scoutDm, after);
   console.log(`[proof] after-kill reply: ${afterReply}`);
   expect(afterReply).toContain("Tool ocw_sandbox_exec not offered");
-  expect(runningOfOrg()).toEqual([]);
+  // Nothing of the organization runs again after the kill: Docker's allowance counted from the kill, and at least one
+  // more second (CI p164 found two containers started after `docker ps` had already emptied, one per bot, with no
+  // sandboxd op that starts one: a sweeper pass that listed the shells just before the kill and then started a files
+  // helper to measure each; fixed in sweeper.ts). A failure names what runs, its kind and how long after the kill.
+  const deadline = Math.max(started + KILL_BUDGET_MS + DOCKER_KILL_WAIT_MS, Date.now() + 1_000);
+  let leftover: string[] = runningOfOrg();
+  while (leftover.length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    leftover = runningOfOrg();
+  }
+  expect(
+    leftover,
+    `running after the kill: ${describeRunningOfOrg()} (${Date.now() - started} ms after it)`,
+  ).toEqual([]);
   await ana.dispose();
   passed(3);
 });
