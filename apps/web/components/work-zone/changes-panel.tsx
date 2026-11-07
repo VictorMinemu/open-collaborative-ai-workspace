@@ -1,6 +1,6 @@
 "use client";
 
-import type { DiffFile, WorkSessionChanges } from "@ocw/contracts";
+import type { DiffFile, WorkSessionChanges, WorkSessionDiff } from "@ocw/contracts";
 import { ChevronRight, FileDiff, GitBranch, RefreshCw } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -43,13 +43,14 @@ export function ChangesPanel({
   const parsed = useMemo(() => parsePatch(diff.data?.patch ?? ""), [diff.data?.patch]);
   const adds = files.reduce((n, f) => n + f.additions, 0);
   const dels = files.reduce((n, f) => n + f.deletions, 0);
+  const noGit = projectHasNoGit(diff.data, live);
 
   return (
     <div className="grid gap-3" data-testid="changes-panel">
       <div className="flex items-center gap-2">
         <span className="flex min-w-0 items-center gap-1.5 font-mono text-[12px] text-muted-foreground">
           <GitBranch className="size-3.5 shrink-0" />
-          <span className="truncate">{diff.data?.branch ?? live?.branch ?? "—"}</span>
+          <span className="truncate">{noGit ? "No git" : (diff.data?.branch ?? live?.branch ?? "—")}</span>
         </span>
         {files.length > 0 ? (
           <span className="font-mono text-[12px]">
@@ -83,6 +84,8 @@ export function ChangesPanel({
         <p className="rounded-lg bg-destructive/8 px-3 py-2 text-destructive text-sm">
           {errorMessage(diff.error)}
         </p>
+      ) : noGit ? (
+        <NoGitState />
       ) : files.length === 0 ? (
         <div className="rounded-lg border border-dashed px-4 py-6 text-center">
           <FileDiff className="mx-auto mb-2 size-5 text-muted-foreground" />
@@ -127,6 +130,24 @@ export function ChangesPanel({
           ) : null}
         </>
       )}
+    </div>
+  );
+}
+
+/** The device said the project has no git repository (the latest diff wins over the last live changes). */
+export function projectHasNoGit(diff: WorkSessionDiff | undefined, live: WorkSessionChanges | null): boolean {
+  return diff ? diff.git === false : live?.git === false;
+}
+
+/** A project without git: the session works, its changes are not tracked. */
+export function NoGitState() {
+  return (
+    <div className="rounded-lg border border-dashed px-4 py-6 text-center" data-testid="changes-no-git">
+      <FileDiff className="mx-auto mb-2 size-5 text-muted-foreground" />
+      <p className="font-medium text-sm">No git</p>
+      <p className="mt-0.5 text-muted-foreground text-xs">
+        This project has no git repository, so changes are not tracked here. Run git init in it to see diffs.
+      </p>
     </div>
   );
 }

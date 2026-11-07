@@ -293,6 +293,8 @@ export const WorkSessionDiff = z.object({
   branch: z.string().nullable(),
   headSha: z.string().nullable(),
   generatedAt: IsoDateTime,
+  /** False when the session's project has no git repository (changes are not tracked). */
+  git: z.boolean().optional(),
 });
 export type WorkSessionDiff = z.infer<typeof WorkSessionDiff>;
 
@@ -314,6 +316,8 @@ export const WorkSessionChanges = z.object({
   headSha: z.string().nullable(),
   truncated: z.boolean(),
   at: IsoDateTime,
+  /** False when the session's project has no git repository (changes are not tracked). */
+  git: z.boolean().optional(),
 });
 export type WorkSessionChanges = z.infer<typeof WorkSessionChanges>;
 

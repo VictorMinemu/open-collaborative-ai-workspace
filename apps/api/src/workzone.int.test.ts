@@ -659,6 +659,34 @@ describe("work sessions", () => {
       return s.branch === "ocw/session";
     });
   });
+
+  it("relays a project without git as an empty diff that says so (older devices: the flag is absent)", async () => {
+    const { id } = await newSession({ title: "No git" });
+    const pending = admin.request("GET", `/api/v1/work-sessions/${id}/diff`);
+    const req = await device.command("diff.request", id);
+    device.send({
+      type: "diff.result",
+      requestId: req.id,
+      files: [],
+      patch: "",
+      truncated: false,
+      branch: null,
+      headSha: null,
+      git: false,
+    });
+    device.ack(req.id);
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ files: [], patch: "", branch: null, headSha: null, git: false });
+
+    const again = admin.request("GET", `/api/v1/work-sessions/${id}/diff`);
+    const req2 = await device.command("diff.request", id);
+    device.send({ type: "diff.result", requestId: req2.id, files: [], patch: "" });
+    device.ack(req2.id);
+    const old = await again;
+    expect(old.status).toBe(200);
+    expect(old.body).not.toHaveProperty("git");
+  });
 });
 
 describe("devices and Work Zone on the permission resolver", () => {

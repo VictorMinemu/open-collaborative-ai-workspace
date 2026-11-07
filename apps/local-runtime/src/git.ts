@@ -225,6 +225,8 @@ export async function unifiedPatch(
   return { patch: text, truncated };
 }
 
+export const NO_GIT_WORKTREE_MESSAGE = "this project has no git repository; isolated worktrees need git";
+
 export interface WorktreeResult {
   path: string;
   branch: string;
@@ -237,15 +239,23 @@ export interface WorktreeResult {
  */
 export async function ensureSessionWorktree(repo: string, sessionId: string): Promise<WorktreeResult> {
   if (!/^[A-Za-z0-9_-]+$/.test(sessionId)) throw new GitError("invalid session id for worktree", null);
+  if (!(await isGitRepo(repo))) throw new GitError(NO_GIT_WORKTREE_MESSAGE, null);
   const top = (await git(repo, ["rev-parse", "--show-toplevel"])).stdout.trim();
   const path = join(top, WORKTREE_DIR, sessionId);
   const branch = `ocw/${sessionId.replace(/-/g, "").slice(0, 12)}`;
-  await excludeWorktreeDir(top);
-  if (existsSync(join(path, ".git"))) return { path, branch, created: false };
-  await mkdir(join(top, WORKTREE_DIR), { recursive: true });
-  if (!(await gitOrNull(top, ["rev-parse", "--verify", "-q", "HEAD"]))) {
-    throw new GitError("repository has no commits; cannot create a worktree", null);
+  if (existsSync(join(path, ".git"))) {
+    await excludeWorktreeDir(top);
+    return { path, branch, created: false };
   }
+  // Checked before anything is written: a repository with no commit has nothing to branch from.
+  if (!(await gitOrNull(top, ["rev-parse", "--verify", "-q", "HEAD"]))) {
+    throw new GitError(
+      "the repository has no commits yet; make a first commit to use an isolated worktree, or start without one",
+      null,
+    );
+  }
+  await excludeWorktreeDir(top);
+  await mkdir(join(top, WORKTREE_DIR), { recursive: true });
   const branchExists =
     (await gitOrNull(top, ["rev-parse", "--verify", "-q", `refs/heads/${branch}`])) !== null;
   const args = branchExists
