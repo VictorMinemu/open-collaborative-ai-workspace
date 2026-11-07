@@ -1419,6 +1419,7 @@ export class WorkSessionService implements DeviceSessionHandler {
         headSha: frame.headSha ?? null,
         truncated: frame.truncated ?? false,
         at: new Date().toISOString(),
+        ...(frame.git === false ? { git: false } : {}),
       };
       await this.deps.realtime.appendEvent(tx, wsTopic(s.id), EventTypes.workSessionChanges, changes);
     });

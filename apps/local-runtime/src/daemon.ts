@@ -62,7 +62,7 @@ import {
 import { type ControlRequest, ControlSocketServer, controlSocketPath } from "./control-socket.js";
 import { DeviceLink, type DeviceLinkOptions } from "./device-link.js";
 import { FakeRuntime } from "./fake/fake-runtime.js";
-import { changedFiles, ensureSessionWorktree, repoInfo, unifiedPatch } from "./git.js";
+import { changedFiles, ensureSessionWorktree, isGitRepo, repoInfo, unifiedPatch } from "./git.js";
 import { createLogger, errorMessage, type Logger } from "./logger.js";
 import { RuntimeGate } from "./maintenance/gate.js";
 import {
@@ -979,6 +979,20 @@ export class Daemon {
       cwd = project.path;
     }
     const roots = this.rootsFor(cwd, project);
+    if (!(await isGitRepo(cwd))) {
+      // A project without git: nothing to compare, said so instead of failing.
+      this.send({
+        type: "diff.result",
+        requestId: cmd.id,
+        files: [],
+        patch: "",
+        truncated: false,
+        branch: null,
+        headSha: null,
+        git: false,
+      });
+      return;
+    }
     const [files, { patch, truncated }, info] = await Promise.all([
       changedFiles(cwd),
       unifiedPatch(cwd),

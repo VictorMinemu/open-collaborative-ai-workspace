@@ -617,6 +617,69 @@ describe("ocw-runtime remove-project (07.12-03, D-07)", () => {
   }, 60_000);
 });
 
+describe("ocw-runtime add-project: projects without git", () => {
+  /** An OCW home and a scratch user home (HOME) inside one temp root. */
+  function scratch(): { home: string; userHome: string; env: Record<string, string> } {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));
+    dirs.push(root);
+    const userHome = join(root, "user");
+    mkdirSync(userHome);
+    return {
+      home: join(root, "ocw"),
+      userHome,
+      env: { HOME: userHome, OCW_RUNTIME_REGISTRY_URL: "http://127.0.0.1:9" },
+    };
+  }
+  const registered = (home: string): unknown[] =>
+    existsSync(join(home, "projects.json"))
+      ? (JSON.parse(readFileSync(join(home, "projects.json"), "utf8")) as { projects: unknown[] }).projects
+      : [];
+
+  it("a folder without git is registered as it is, nothing created in it, with one line saying so", async () => {
+    const { home, userHome, env } = scratch();
+    const dir = join(userHome, "notes");
+    mkdirSync(dir);
+    writeFileSync(join(dir, "todo.md"), "- one\n");
+    const r = await cliAsync(home, ["add-project", dir], env);
+    expect(r.code, r.stderr).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({
+      name: "notes",
+      path: dir,
+      gitRemote: null,
+      defaultBranch: null,
+      git: false,
+    });
+    expect(r.stderr.trim()).toBe(
+      "notes has no git repository: sessions work; changes and worktrees are off.",
+    );
+    expect(readdirSync(dir)).toEqual(["todo.md"]);
+  }, 30_000);
+
+  it("the home folder and the OCW home are refused, with or without git, and nothing is registered", async () => {
+    const { home, userHome, env } = scratch();
+    const atHome = await cliAsync(home, ["add-project", userHome], env);
+    expect(atHome.code).toBe(1);
+    expect(atHome.stderr).toContain("home folder");
+    mkdirSync(home, { recursive: true });
+    const atState = await cliAsync(home, ["add-project", home], env);
+    expect(atState.code).toBe(1);
+    expect(atState.stderr).toContain("OCW");
+    expect(registered(home)).toEqual([]);
+    expect(existsSync(join(userHome, ".git"))).toBe(false);
+  }, 30_000);
+
+  it("a repository is registered as before, with no line on stderr", async () => {
+    const { home, userHome, env } = scratch();
+    const repo = join(userHome, "repo");
+    mkdirSync(repo);
+    execFileSync("git", ["init", "-q", "-b", "main", repo]);
+    const r = await cliAsync(home, ["add-project", repo], env);
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stderr).toBe("");
+    expect(JSON.parse(r.stdout)).toMatchObject({ name: "repo", defaultBranch: "main", git: true });
+  }, 30_000);
+});
+
 describe("an unpaired daemon (07.12-03)", () => {
   it("tells a headless owner to pair with ocw-runtime setup (or the desktop app)", async () => {
     const home = realpathSync(mkdtempSync(join(tmpdir(), "ocw-cli-")));

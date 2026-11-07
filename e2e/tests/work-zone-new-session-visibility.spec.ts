@@ -210,8 +210,57 @@ test("new session: grouped repositories, one 'Visible to' line, a draft choice a
     }
     expect(await unnamedControls(page)).toEqual([]);
     await axeBothThemes(page, '[data-testid="new-session-dialog"]');
+    if (mobile) {
+      // The whole panel (owner feedback 2026-11-06): 44 px targets and no sideways scroll on a phone.
+      await expectTouchTargets(page, '[data-testid="new-session-dialog"]');
+      await expectNoSidewaysScroll(page, "new-session dialog (panel)");
+      // Nor inside the sheet: a long device name in "Visible to" once widened its column past the screen, pushing
+      // the Model list off to the side where the backdrop took the tap.
+      expect(
+        await dialog.evaluate((el) => {
+          const right = el.getBoundingClientRect().right;
+          return [...el.querySelectorAll<HTMLElement>("*")]
+            .filter((x) => x.getBoundingClientRect().right > right + 1)
+            .map((x) => `${x.tagName}.${String(x.className).slice(0, 60)}`);
+        }),
+        "nothing in the sheet is wider than the screen",
+      ).toEqual([]);
+    }
+    // The footer says what the session starts on; Start is the one primary action.
+    await expect(dialog.getByTestId("start-session")).toBeEnabled();
+    if (!mobile)
+      await expect(dialog.getByTestId("new-session-status")).toHaveText(
+        `On E2E NS A ${run} with Claude Code`,
+      );
     await blur(page);
     await captureReview(page, `new-session-dialog-${tag}`);
+
+    // ---- Model and permissions: one summary row, opened in place (progressive disclosure), axe in both themes
+    const settings = dialog.getByTestId("new-session-settings-toggle");
+    await expect(settings).toHaveAttribute("aria-expanded", "false");
+    await expect(dialog.getByTestId("new-session-settings-summary")).toHaveText(
+      "Default model · Supervised · Current checkout",
+    );
+    await settings.click();
+    await expect(settings).toHaveAttribute("aria-expanded", "true");
+    await expect(dialog.getByTestId("mode-default")).toHaveAttribute("aria-checked", "true");
+    await expect(dialog.getByTestId("new-session-model")).toBeVisible();
+    expect(await unnamedControls(page)).toEqual([]);
+    await axeBothThemes(page, '[data-testid="new-session-dialog"]');
+    if (mobile) await expectTouchTargets(page, '[data-testid="new-session-dialog"]');
+    await blur(page);
+    await captureReview(page, `new-session-dialog-settings-${tag}`);
+    await settings.click();
+    await expect(dialog.getByTestId("mode-default")).toHaveCount(0);
+
+    // ---- keyboard: one tab stop per radio group; arrow keys move the choice
+    const chosen = dialog.locator('[data-testid="project-option"][aria-checked="true"]');
+    await chosen.focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(chosen).not.toContainText(`ns-web-${tag}`);
+    await expect(chosen).toBeFocused();
+    await page.keyboard.press("ArrowUp");
+    await expect(chosen).toContainText(`ns-web-${tag}`);
 
     // ---- Change opens the panel in draft mode, with the preview count for the repository
     let surface = await openDraft(page, mobile);
@@ -279,6 +328,10 @@ test("new session: grouped repositories, one 'Visible to' line, a draft choice a
 
     // ---- a stale choice: People with Leo, then Leo leaves the project before Start (D-04, D-13)
     const again = await openDialog(page);
+    // The repository of the last session started here is chosen again.
+    await expect(again.locator('[data-testid="project-option"][aria-checked="true"]')).toContainText(
+      `ns-web-${tag}`,
+    );
     await again
       .getByTestId("project-option")
       .filter({ hasText: `ns-web-${tag}` })

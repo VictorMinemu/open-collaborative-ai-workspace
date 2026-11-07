@@ -8,7 +8,8 @@
 //                                  print this runtime's version (the bundle's package version; 0.0.0-dev under tsx)
 //   ocw-runtime detect             print Claude Code detection
 //   ocw-runtime status             query a running daemon over the control socket
-//   ocw-runtime add-project <dir>  register a project (via the running daemon, or directly when stopped)
+//   ocw-runtime add-project <dir>  register a project (via the running daemon, or directly when stopped); a folder
+//                                  without git is registered as it is (no changes view, no worktrees)
 //   ocw-runtime projects           list registered projects (local only)
 //   ocw-runtime full-access on|off|status
 //                                  the device owner's Full access opt-in (ADR-0012); writes runtime.json and asks
@@ -52,6 +53,7 @@ import { readInstallInfo } from "./install-info.js";
 import { createLogger, errorMessage, silentLogger } from "./logger.js";
 import { publicInstallFields, resolveInstall } from "./maintenance/install-method.js";
 import { PairingCancelledError, pairByDeviceCode } from "./pair.js";
+import { assertProjectDirAllowed, noGitNotice } from "./project-dir.js";
 import { defaultServiceDeps, serviceCommand } from "./service/index.js";
 import { applyServiceEnv } from "./service-env.js";
 import {
@@ -413,17 +415,33 @@ async function main(argv: string[]): Promise<void> {
       const path = rest[0];
       if (!path) throw new Error("usage: ocw-runtime add-project <dir> [--name <name>]");
       const name = flag(rest, "name");
+      const home = ocwHome();
+      // The same folders the desktop refuses (home, system, OCW state), before anything is registered.
+      const dir = await assertProjectDirAllowed(path, { forbidden: [home] });
+      // stdout stays the project's JSON; the no-git note goes to stderr.
+      const noGit = (p: unknown) => {
+        const project = p as { git?: boolean; name?: string } | null;
+        if (project?.git === false) process.stderr.write(`${noGitNotice(project.name ?? "this folder")}\n`);
+      };
       try {
-        return await viaSocket({ cmd: "addProject", path, ...(name ? { name } : {}) });
+        const res = await controlRequest(controlSocketPath(home), {
+          cmd: "addProject",
+          path: dir,
+          ...(name ? { name } : {}),
+        });
+        if (!res.ok) throw new Error(res.error ?? "request failed");
+        process.stdout.write(`${JSON.stringify(res.result, null, 2)}\n`);
+        noGit(res.result);
+        return;
       } catch (err) {
         if (!daemonDown(err)) throw err;
         // Daemon not running: register directly; it is announced on the next connect.
-        const home = ocwHome();
         await ensureOcwHome(home);
         const registry = new ProjectRegistry(home);
         await registry.load();
-        const project = await registry.add(path, name);
+        const project = await registry.add(dir, name);
         process.stdout.write(`${JSON.stringify(project, null, 2)}\n`);
+        noGit(project);
         return;
       }
     }

@@ -184,6 +184,7 @@ export type ChatgptLoopbackResult =
   | { ok: false; reason: "timeout" | "cancelled" | "invalid_url" };
 
 export type AddProjectResult =
-  | { ok: true; project: PublicProject }
+  /** `notice`: a short note for the user (e.g. the folder has no git repository); folder names only, never a path. */
+  | { ok: true; project: PublicProject; notice?: string }
   | { ok: false; canceled: true }
   | { ok: false; canceled: false; error: string };

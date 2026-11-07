@@ -114,6 +114,7 @@ test("Shared devices: the owner shares with Sam at a cap, Sam starts a session, 
       .filter({ hasText: `shared-${tag}` })
       .click();
     await start.getByTestId("runtime-claude-code").click();
+    await start.getByTestId("new-session-settings-toggle").click();
     await start.getByTestId("mode-acceptEdits").click();
     await start.getByTestId("first-prompt").fill("Add a short CONTRIBUTING guide for new teammates");
     await start.getByTestId("start-session").click();
