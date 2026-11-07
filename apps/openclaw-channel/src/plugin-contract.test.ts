@@ -3082,3 +3082,152 @@ describe("connector tools (07.4 D-07, C-01): registerFull → the real HTTP clie
     expect(text(http)).toBe(APPROVAL_SENTENCES.approval_used({ tool: "ocw_http_request" }));
   });
 });
+
+describe("attachments mirror parity (07.15-01: plugin ↔ packages/contracts bot-capabilities.ts, agent-channel.ts; Pitfall 9)", () => {
+  // Non-literal specifiers: the contracts package lives outside this package (and is not type-checked from here).
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean; data?: unknown } };
+  const load = async () => ({
+    caps: (await import(contracts("bot-capabilities.ts"))) as {
+      TurnAttachment: Schema;
+      TurnContext: Schema;
+      TurnAttachmentKind: { options: string[] };
+      TurnAttachmentAccess: { options: string[] };
+      TURN_ATTACHMENT_NOTES: Record<string, string>;
+      ATTACHMENT_READ_LIMITS: Record<string, number>;
+    },
+    channel: (await import(contracts("agent-channel.ts"))) as Record<string, Schema>,
+  });
+
+  /** Same verdict (and, when accepted, the same canonical output) from the mirror and the contract. */
+  function expectSameVerdicts(mirror: Schema, contract: Schema, samples: unknown[]) {
+    for (const v of samples) {
+      const a = mirror.safeParse(v);
+      const b = contract.safeParse(v);
+      expect(a.success, JSON.stringify(v)?.slice(0, 160)).toBe(b.success);
+      if (a.success && b.success) expect(a.data).toEqual(b.data);
+    }
+  }
+
+  const A1 = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e71";
+  const A2 = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e72";
+  const MSG = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e73";
+  const image = {
+    id: A1,
+    messageId: MSG,
+    name: "photo.png",
+    mediaType: "image/png",
+    size: 182_044,
+    kind: "image",
+    access: "read",
+  };
+  const archive = {
+    id: A2,
+    messageId: MSG,
+    name: "data.zip",
+    mediaType: "application/zip",
+    size: 9_001,
+    kind: "other",
+    access: "import",
+    note: "Can't be read as text; copy it into the sandbox with ocw_sandbox_import.",
+  };
+  const turn = { tools: [], toolFlags: {}, memory: [], now: null, maxToolCalls: 8, maxWebCalls: 5 };
+  /** The one fixture turn both copies must read the same way. */
+  const withFiles = {
+    ...turn,
+    attachments: [image, archive],
+    attachmentsMore: 3,
+    maxAttachmentReads: 20,
+    maxAttachmentChars: 200_000,
+  };
+
+  it("the enums, notes and limits are the contracts'", async () => {
+    const { caps } = await load();
+    const m = await import("./agent-channel-protocol.js");
+    expect([...m.TurnAttachmentKind.options]).toEqual([...caps.TurnAttachmentKind.options]);
+    expect([...m.TurnAttachmentAccess.options]).toEqual([...caps.TurnAttachmentAccess.options]);
+    expect({ ...m.TURN_ATTACHMENT_NOTES }).toEqual({ ...caps.TURN_ATTACHMENT_NOTES });
+    expect({ ...m.ATTACHMENT_READ_LIMITS }).toEqual({ ...caps.ATTACHMENT_READ_LIMITS });
+    expect(archive.note).toBe(caps.TURN_ATTACHMENT_NOTES.cannotReadImport);
+  });
+
+  it("a turn with attachments parses identically in both copies, alone and inside a mention", async () => {
+    const { caps } = await load();
+    const m = await import("./agent-channel-protocol.js");
+    const contract = caps.TurnContext.safeParse(withFiles);
+    expect(contract.success).toBe(true);
+    expect(m.TurnContext.parse(withFiles)).toEqual(contract.data);
+    expect(m.TurnContext.parse(withFiles)).toEqual(withFiles);
+    const event = {
+      eventId: "evt-1",
+      seq: 1,
+      type: "agent.mention.v1",
+      organizationId: "org-1",
+      cellId: "cell-1",
+      agent: { id: "agent-1", handle: "scout", displayName: "Scout" },
+      conversation: { id: "conv-1", kind: "dm", name: null },
+      thread: { rootMessageId: MSG },
+      message: {
+        id: MSG,
+        text: "",
+        createdAt: "2026-11-07T10:00:00.000Z",
+        author: { kind: "user", id: "user-1", displayName: "Sam" },
+        mentions: [],
+      },
+      threadHistory: [],
+      roster: [],
+      turn: withFiles,
+    };
+    expect(m.AgentMentionEvent.parse(event).turn).toEqual(withFiles);
+  });
+
+  it("a 07.14 turn and EMPTY_TURN parse unchanged in the mirror (no attachment fields appear)", async () => {
+    const { caps } = await load();
+    const m = await import("./agent-channel-protocol.js");
+    expect(caps.TurnContext.safeParse(turn).success).toBe(true);
+    const parsed = m.TurnContext.parse(turn);
+    expect(parsed).toEqual(turn);
+    for (const k of ["attachments", "attachmentsMore", "maxAttachmentReads", "maxAttachmentChars"]) {
+      expect(k in parsed, k).toBe(false);
+    }
+    expect(m.TurnContext.parse(m.EMPTY_TURN)).toEqual(m.EMPTY_TURN);
+  });
+
+  it("each entry: the mirror accepts and refuses what the contract does", async () => {
+    const { caps } = await load();
+    const m = await import("./agent-channel-protocol.js");
+    expectSameVerdicts(m.TurnAttachment, caps.TurnAttachment, [
+      image,
+      archive,
+      { ...archive, note: "x".repeat(200) },
+      { ...archive, note: "x".repeat(201) },
+      { ...image, kind: "video" },
+      { ...image, access: "write" },
+      { ...image, size: -1 },
+      { ...image, size: 1.5 },
+      { ...image, name: "x".repeat(256) },
+      { ...image, mediaType: "x".repeat(128) },
+      { ...image, url: "https://garage.example/k", path: "/tmp/photo.png" },
+    ]);
+  });
+
+  it("an invalid list or budget is refused by the contract; the mirror drops it and keeps the turn", async () => {
+    const { caps } = await load();
+    const m = await import("./agent-channel-protocol.js");
+    const twentyOne = Array.from({ length: 21 }, () => image);
+    for (const bad of [
+      { attachments: twentyOne },
+      { attachments: [{ ...image, kind: "video" }] },
+      { attachments: "nope" },
+    ]) {
+      expect(caps.TurnContext.safeParse({ ...turn, ...bad }).success).toBe(false);
+      const parsed = m.TurnContext.safeParse({ ...turn, ...bad });
+      expect(parsed.success).toBe(true);
+      expect(parsed.data?.attachments).toBeUndefined();
+    }
+    expect(caps.TurnContext.safeParse({ ...turn, attachmentsMore: -1 }).success).toBe(false);
+    expect(m.TurnContext.parse({ ...turn, attachmentsMore: -1 }).attachmentsMore).toBeUndefined();
+    expect(m.TurnContext.parse({ ...turn, maxAttachmentReads: "20" }).maxAttachmentReads).toBeUndefined();
+  });
+});

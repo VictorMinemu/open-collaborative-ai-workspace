@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   AgentChannelMemorySave,
   AgentChannelToolCallRequest,
+  ATTACHMENT_READ_FLAGS,
+  ATTACHMENT_READ_LIMITS,
   AgentMentionEvent,
   BotCapabilities,
   BotCapabilityView,
@@ -19,6 +21,8 @@ import {
   MAX_SANDBOX_CALLS_PER_TURN,
   SANDBOX_REFUSED_TOOL_NAMES,
   SANDBOX_TOOL_NAMES,
+  TURN_ATTACHMENT_NOTES,
+  TurnAttachment,
   TurnContext,
   UpdateBotCapabilitiesRequest,
   UpdateBotPolicyRequest,
@@ -566,5 +570,109 @@ describe("agent-to-agent consults (07.7 D-02, D-04, D-09, C-01)", () => {
     expect(
       TurnContext.safeParse({ ...turn, consult: { chainId: null, depth: 0, targets: [] } }).success,
     ).toBe(false);
+  });
+});
+
+describe("turn attachments (07.15 D-02, D-04, D-05, PD-03, PD-04)", () => {
+  const MSG = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5d";
+  const image = {
+    id: ID,
+    messageId: MSG,
+    name: "photo.png",
+    mediaType: "image/png",
+    size: 182_044,
+    kind: "image",
+    access: "read",
+  };
+  const archive = {
+    id: ID2,
+    messageId: MSG,
+    name: "data.zip",
+    mediaType: "application/zip",
+    size: 9_001,
+    kind: "other",
+    access: "import",
+    note: TURN_ATTACHMENT_NOTES.cannotReadImport,
+  };
+  const withFiles = {
+    ...turn,
+    attachments: [image, archive],
+    attachmentsMore: 3,
+    maxAttachmentReads: 20,
+    maxAttachmentChars: 200_000,
+  };
+
+  it("a turn that lists attachments with its read budget parses, alone and inside a mention", () => {
+    expect(TurnContext.parse(withFiles)).toEqual(withFiles);
+    expect(AgentMentionEvent.parse({ ...mentionEvent, turn: withFiles }).turn).toEqual(withFiles);
+  });
+
+  it("a 07.14 turn (no attachment fields) parses unchanged", () => {
+    const parsed = TurnContext.parse(turn);
+    expect(parsed).toEqual(turn);
+    expect(parsed.attachments).toBeUndefined();
+    expect(parsed.attachmentsMore).toBeUndefined();
+    expect(parsed.maxAttachmentReads).toBeUndefined();
+    expect(parsed.maxAttachmentChars).toBeUndefined();
+  });
+
+  it("at most 20 listed; bounded note, closed kind and access, non-negative size", () => {
+    const twenty = Array.from({ length: ATTACHMENT_READ_LIMITS.listPerTurn }, () => image);
+    expect(TurnContext.safeParse({ ...turn, attachments: twenty }).success).toBe(true);
+    const over = TurnContext.safeParse({ ...turn, attachments: [...twenty, image] });
+    expect(over.success).toBe(false);
+    expect(over.error?.issues[0]?.path).toEqual(["attachments"]);
+    for (const bad of [
+      { ...archive, note: "x".repeat(201) },
+      { ...image, kind: "video" },
+      { ...image, access: "write" },
+      { ...image, size: -1 },
+      { ...image, size: 1.5 },
+      { ...image, id: "not-a-uuid" },
+      { ...image, name: "x".repeat(256) },
+      { ...image, mediaType: "x".repeat(128) },
+    ]) {
+      expect(TurnAttachment.safeParse(bad).success, JSON.stringify(bad).slice(0, 80)).toBe(false);
+      expect(TurnContext.safeParse({ ...turn, attachments: [bad] }).success).toBe(false);
+    }
+    expect(TurnAttachment.safeParse({ ...archive, note: "x".repeat(200) }).success).toBe(true);
+    expect(TurnContext.safeParse({ ...turn, attachmentsMore: -1 }).success).toBe(false);
+  });
+
+  it("the turn carries metadata only: no URL, key, path or content field survives the parse", () => {
+    const parsed = TurnAttachment.parse({
+      ...image,
+      url: "https://garage.example/bucket/key",
+      key: "org/conv/att",
+      path: "/Users/x/photo.png",
+      content: "secret",
+    });
+    expect(Object.keys(parsed).sort()).toEqual(["access", "id", "kind", "mediaType", "messageId", "name", "size"]);
+  });
+
+  it("the five fixed notes, each at most 200 characters", () => {
+    expect(TURN_ATTACHMENT_NOTES).toEqual({
+      modelNoImages: "This bot's model can't see images.",
+      cannotReadImport: "Can't be read as text; copy it into the sandbox with ocw_sandbox_import.",
+      cannotReadNoSandbox: "Can't be read as text, and this bot has no sandbox here.",
+      cannotReadNarrower:
+        "Can't be read as text, and this bot's sandbox is shared more widely than this conversation, so it can't be copied there.",
+      tooLarge: "Too large to read.",
+    });
+    for (const note of Object.values(TURN_ATTACHMENT_NOTES)) {
+      expect(note.length).toBeLessThanOrEqual(200);
+      expect(TurnAttachment.safeParse({ ...archive, note }).success).toBe(true);
+    }
+  });
+
+  it("ocw_attachment_read is a built-in with untrusted, non-side-effecting flags and the hub's limits", () => {
+    expect(BUILTIN_TOOLS.attachmentRead).toBe("ocw_attachment_read");
+    expect(ATTACHMENT_READ_FLAGS).toEqual({ untrustedOutput: true, sideEffecting: false });
+    expect(ATTACHMENT_READ_LIMITS).toEqual({
+      listPerTurn: 20,
+      readsPerTurn: 20,
+      charsPerTurn: 200_000,
+      charsPerFile: 64_000,
+    });
   });
 });
