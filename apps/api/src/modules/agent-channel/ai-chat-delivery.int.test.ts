@@ -715,4 +715,39 @@ describe("07.15-07 (D-02, D-14): a persona's turn lists the files of the chat's 
     const [ev] = await deliveriesOf(messageId);
     expect(ev?.turn.attachments?.map((a: { id: string }) => a.id)).toContain(notes);
   });
+
+  it("WR-08: a sender's model that cannot be resolved fails closed: only text goes to the persona", async () => {
+    const created = await ok(createChat(victor, "Look at the logs with me"), 201);
+    const chat = (created.chat as Json).id as string;
+    await settled((created.generation as Json).id as string);
+    await ok(addAgent(victor, chat, backendId), 201);
+    // A model the plan's catalog does not have: the gateway answers ModelUnavailableError, so nothing says what it reads.
+    const gone = { model: { ...PLAN_MODEL, modelId: "gpt-not-in-any-catalog" } };
+
+    const bytes = await sharp({ create: { width: 32, height: 32, channels: 3, background: "#a63" } })
+      .png()
+      .toBuffer();
+    const image = await uploadAttachment(victor, chat, { name: "chart.png", type: "image/png", bytes });
+    const archive = await uploadAttachment(victor, chat, {
+      name: "logs.zip",
+      type: "application/zip",
+      bytes: new Uint8Array([0x00, 0x9f, 0x92, 0x96, 0x01, 0x02, 0x03, 0xfe, 0xff, 0x00]),
+    });
+    for (const id of [image, archive]) {
+      const refused = await send(victor, chat, "@backend look", { attachmentIds: [id], ...gone });
+      expect(refused.status).toBe(400);
+      expect(errorCode(refused)).toBe("attachment_not_supported");
+      const { rows } = await su.query("select message_id from app.attachments where id = $1", [id]);
+      expect(rows[0]?.message_id ?? null).toBeNull();
+    }
+
+    // Text is what every model reads: it still goes.
+    const notes = await uploadAttachment(victor, chat, {
+      name: "log.txt",
+      type: "text/plain",
+      bytes: new TextEncoder().encode("step lint failed\n"),
+    });
+    const posted = await send(victor, chat, "@backend what failed?", { attachmentIds: [notes], ...gone });
+    expect(posted.status).toBe(202);
+  });
 });
