@@ -9,6 +9,7 @@ import {
   CONFINED_TOOL_FLAGS,
   type ConfinedToolName,
   type ConsultTarget,
+  isPerMemberMode,
   MAX_SANDBOX_CALLS_PER_TURN,
   MAX_TOOL_CALLS_PER_TURN,
   MAX_WEB_CALLS_PER_TURN,
@@ -19,6 +20,7 @@ import {
   type TurnNow,
   type TurnToolFlags,
   type TurnWithheldResource,
+  usesConnectorProxy,
 } from "@ocw/contracts";
 import {
   agents,
@@ -200,11 +202,22 @@ export function confinedCellTools(
 }
 
 /**
- * Whether a catalog source acts with the asking member's own account (07.4 D-01): a per-member MCP connector. Its tools
- * are called by the API (`ocw_connector_call`) under logical names and follow the member-account audience rule.
+ * Whether the API calls a catalog source's server itself through the connector proxy (07.4 D-01; 07.14 D-04): a
+ * per-member connector or an organization-account server (`org_oauth`, `org_client_credentials`). Its tools are offered
+ * under logical `<safe>__<tool>` names with `ocw_connector_list` / `ocw_connector_call`, and never in the cell-wide view
+ * (they are not OpenClaw tools, and the credential never reaches the cell).
+ */
+function proxiedSource(source: CatalogSource): boolean {
+  return source.sourceKind === "mcp" && source.authMode !== undefined && usesConnectorProxy(source.authMode);
+}
+
+/**
+ * Whether a catalog source acts with the asking member's own account (07.4 D-01): a per-member connector only. Its tools
+ * follow the member-account audience rule. The organization's account (07.14) is an organization resource: its tools
+ * get the organization-resource checks of every other catalog tool (`shared_with_group`, `not_every_participant`).
  */
 function memberAccountSource(source: CatalogSource): boolean {
-  return source.sourceKind === "mcp" && source.authMode !== undefined && source.authMode !== "org_secret";
+  return source.sourceKind === "mcp" && source.authMode !== undefined && isPerMemberMode(source.authMode);
 }
 
 /**
@@ -293,13 +306,14 @@ function assemble(
   if (recordUpdate && board && conversationKind === "channel") {
     add(BUILTIN_TOOLS.recordUpdate, RECORD_UPDATE_FLAGS);
   }
-  // Per-member connectors and keys (07.4-11, D-04, D-07, C-01). A turn carries the per-member tools under their logical
-  // `<safe>__<tool>` names (for the gate) plus the static tools that reach them; the cell-wide view (null kind) carries
-  // the static names only, never a logical per-member name (they are not OpenClaw tools).
+  // Proxied connectors and keys (07.4-11, D-04, D-07, C-01; 07.14 D-04). A turn carries the proxied tools (per-member
+  // connectors and organization-account servers) under their logical `<safe>__<tool>` names (for the gate) plus the
+  // static tools that reach them; the cell-wide view (null kind) carries the static names only, never a logical name
+  // (they are not OpenClaw tools).
   const cellWide = conversationKind === null;
   const memberTools: TurnToolFlags[] = [];
   for (const source of catalog) {
-    if (!memberAccountSource(source)) continue;
+    if (!proxiedSource(source)) continue;
     for (const t of source.tools) {
       if (effectiveToolNames.has(`${source.sourceKind}:${source.sourceId}:${t.name}`)) {
         memberTools.push(catalogFlags(source, t.sideEffecting));
@@ -318,7 +332,7 @@ function assemble(
     });
   }
   for (const source of catalog) {
-    if (cellWide && memberAccountSource(source)) continue;
+    if (cellWide && proxiedSource(source)) continue;
     for (const t of source.tools) {
       if (effectiveToolNames.has(`${source.sourceKind}:${source.sourceId}:${t.name}`)) {
         add(t.name, catalogFlags(source, t.sideEffecting));
@@ -470,7 +484,8 @@ async function computeTurn(
     const source = sources.get(`${t.sourceKind}:${t.sourceId}`);
     if (source && memberAccountSource(source)) {
       // The member's own account: only where they alone read the result, or where they shared it (their explicit,
-      // audited choice covers that audience, so the group checks below do not apply).
+      // audited choice covers that audience, so the group checks below do not apply). The organization's account
+      // (07.14) is not a member's: it falls through to the organization-resource checks below.
       if (memberMay("connector", source.sourceId)) allowed.add(toolKey(t));
       else {
         withhold(t.tool, "member_account", {

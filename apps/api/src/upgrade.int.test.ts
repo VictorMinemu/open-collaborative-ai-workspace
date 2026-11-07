@@ -131,6 +131,7 @@ const HEAD_ONLY = [
   "20261103183523_agent_chain_hops_tick_attempts",
   "20261103183822_agent_chain_hops_parent_depth",
   "20261103184214_agent_chain_hops_question_org_fk",
+  "20261106163356_org_connector_auth",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -454,7 +455,7 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
       await c.connect();
       try {
         const { rows } = await c.query(
-          "select id, transport, auth_mode, oauth_status, member_header_name, oauth_use_cimd from app.mcp_servers order by id",
+          "select id, transport, auth_mode, oauth_status, member_header_name, oauth_use_cimd, auth_failure from app.mcp_servers order by id",
         );
         expect(rows).toEqual([
           {
@@ -465,6 +466,8 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
             member_header_name: null,
             // 07.4-10 (WINDOWS #179): existing servers keep the default (CIMD when it applies).
             oauth_use_cimd: true,
+            // 07.14 D-15: no organization sign-in has ever failed on an existing server.
+            auth_failure: null,
           },
           {
             id: MCP_STDIO,
@@ -474,14 +477,17 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
             member_header_name: null,
             // 07.4-10 (WINDOWS #179): existing servers keep the default (CIMD when it applies).
             oauth_use_cimd: true,
+            auth_failure: null,
           },
         ]);
         const empty = await c.query(
           `select (select count(*)::int from app.connector_connections) + (select count(*)::int from app.vault_items)
                 + (select count(*)::int from app.agent_templates) + (select count(*)::int from app.member_account_shares) as n,
-                  (select count(*)::int from app.agents where template_id is not null) as linked`,
+                  (select count(*)::int from app.agents where template_id is not null) as linked,
+                  (select count(*)::int from app.connector_org_connections) as org_connections`,
         );
-        expect(empty.rows).toEqual([{ n: 0, linked: 0 }]);
+        // 07.14 D-12: the upgrade connects no organization account; every server keeps what it had.
+        expect(empty.rows).toEqual([{ n: 0, linked: 0, org_connections: 0 }]);
       } finally {
         await c.end();
       }
@@ -812,6 +818,8 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
         expect(rows.map((r) => r.tbl)).toEqual(
           expect.arrayContaining(["app.ai_chat_grants", "app.message_cards"]),
         );
+        // 07.14 D-06: the organization connection table is covered by the same loop, with no code of its own.
+        expect(rows.map((r) => r.tbl)).toContain("app.connector_org_connections");
         expect(rows.filter((r) => !(r.rls && r.force && r.policy))).toEqual([]);
       } finally {
         await c.end();

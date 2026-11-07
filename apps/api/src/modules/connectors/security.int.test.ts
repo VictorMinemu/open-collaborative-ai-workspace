@@ -7,18 +7,26 @@ import {
   assertNoGlobalFetch,
   authorize,
   bundleOf,
+  CC_SECRET,
   CONFIDENTIAL_SECRET,
   type ConnectorsStack,
   callback,
   connectionRow,
+  fails,
   fakeStats,
   type Json,
   ok,
+  orgBundleOf,
+  orgConnectionRow,
+  PRE_REGISTERED_CC,
   PRE_REGISTERED_CONFIDENTIAL,
   type Res,
+  registerCcConnector,
+  registerOrgConnector,
+  saveCc,
   startConnectorsStack,
 } from "../../testing-connectors";
-import { connectionAad } from "./index";
+import { connectionAad, orgConnectionAad } from "./index";
 import { connectFlowKey } from "./routes";
 
 /**
@@ -32,6 +40,13 @@ import { connectFlowKey } from "./routes";
  *   accepts), send the member key upstream (refused), make http requests with every key (whoami and the /kc/echo
  *   mirror), list the turn's connectors and keys; every member, admin, keychain and template endpoint of the phase is
  *   read; the cell snapshot is read; Víctor disconnects (revocation).
+ *
+ * 07.14-13 (D-09, COA-03) adds the organization's credentials: Víctor connects an `org_oauth` server for the
+ * organization (its flow's verifier and state kept) and saves client credentials with the `CC_SECRET` canary on an
+ * `org_client_credentials` server; Sam's channel turn calls both through the proxy; one forced refresh and one forced
+ * re-grant run; a Test sign-in grants with the secret; Víctor disconnects the sign-in (revoked at the provider) and a
+ * confirmed mode switch destroys the client credentials. Every token and code the fake issued to those flows, the
+ * verifier, the state and the client secret join the canaries below.
  *
  * Then no secret (nor its base64 forms) may appear in any text, varchar, array or jsonb column of any app or auth table
  * (sealed secrets are bytea), any API response body or header, any WebSocket frame Víctor's or Sam's sockets received,
@@ -53,6 +68,12 @@ let scoutId = "";
 let victorDm = "";
 let samDm = "";
 let flowSecrets: string[] = [];
+/** The organization sign-in flow's state and PKCE verifier (07.14-13). */
+let orgFlowSecrets: string[] = [];
+/** The organization's servers: sign-in (`org_oauth`) and client credentials (07.14-13). */
+let orgServer: Json;
+let ccServer: Json;
+let salesId = "";
 let cellSnapshot = "";
 const keys: Record<"api" | "basic" | "client", Json> = {} as Record<"api" | "basic" | "client", Json>;
 
@@ -85,20 +106,30 @@ async function socketOf(client: ConnectorsStack["victor"], topics: string[]) {
     ws.once("open", resolve);
     ws.once("error", reject);
   });
-  for (const topic of topics) {
-    ws.send(JSON.stringify({ op: "sub", topic }));
-    const until = Date.now() + 5000;
-    while (!frames.some((f) => f.includes('"subscribed"') && f.includes(`"${topic}"`))) {
-      if (Date.now() > until) throw new Error(`no subscribed frame for ${topic}`);
-      await new Promise((r) => setTimeout(r, 10));
-    }
-  }
+  for (const topic of topics) await subscribe({ ws, frames }, topic);
   return { ws, frames };
 }
 
-async function turnOf(who: ConnectorsStack["victor"], conversationId: string): Promise<Json> {
+/** Subscribes an open socket to one more topic and waits for the server's confirmation. */
+async function subscribe(sock: { ws: WebSocket; frames: string[] }, topic: string) {
+  sock.ws.send(JSON.stringify({ op: "sub", topic }));
+  const until = Date.now() + 5000;
+  while (!sock.frames.some((f) => f.includes('"subscribed"') && f.includes(`"${topic}"`))) {
+    if (Date.now() > until) throw new Error(`no subscribed frame for ${topic}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+async function turnOf(
+  who: ConnectorsStack["victor"],
+  conversationId: string,
+  mention = false,
+): Promise<Json> {
   const msg = await ok(
-    who.request("POST", `/api/v1/conversations/${conversationId}/messages`, { body: "use my accounts" }),
+    who.request("POST", `/api/v1/conversations/${conversationId}/messages`, {
+      body: mention ? "@scout use the organization's accounts" : "use my accounts",
+      ...(mention ? { mentions: [{ kind: "agent", id: scoutId }] } : {}),
+    }),
   );
   const rows = (
     await s.su.query(
@@ -412,6 +443,158 @@ describe("the scenario: every credential path of the phase, with canaries", () =
     );
     expect((await fakeStats(s)).revocations).toBe(before.revocations + 1);
   });
+
+  // ---------------------------------------------------------------- 07.14-13: the organization's credentials
+
+  /** Replaces the organization's sealed access token of a server with one the provider never issued. */
+  async function staleOrgToken(serverId: string) {
+    const row = await orgConnectionRow(s, s.orgA, serverId);
+    const bundle = await orgBundleOf(s, s.orgA, serverId);
+    if (!row?.secret_id || !bundle) throw new Error("no organization bundle");
+    const { core } = s.stack.built;
+    await core.db.withTenant({ organizationId: s.orgA }, (tx) =>
+      core.secrets.replaceSealed(
+        tx,
+        row.secret_id,
+        JSON.stringify({ ...bundle, accessToken: `fakeat_stale_${rand()}` }),
+        orgConnectionAad(s.orgA, serverId),
+      ),
+    );
+  }
+
+  it("Víctor connects an org_oauth server for the organization (the flow's verifier and state are kept)", async () => {
+    orgServer = await registerOrgConnector(s, { name: "Company CRM" });
+    const start = await ok(
+      s.victor.request("POST", `/api/v1/connectors/${orgServer.id}/org-connection/connect`),
+    );
+    const state = new URL(start.authorizeUrl).searchParams.get("state") ?? "";
+    const flow = JSON.parse((await s.stack.built.core.bus.pub.get(connectFlowKey(state))) ?? "{}") as Json;
+    expect(flow).toMatchObject({ principal: "organization", verifier: expect.any(String) });
+    orgFlowSecrets = [state, flow.verifier];
+    const done = await callback(s, await authorize(s, start.authorizeUrl), s.victor);
+    expect(done.status).toBe(302);
+    expect(done.location).toContain(`connected=${orgServer.id}`);
+    expect((await orgConnectionRow(s, s.orgA, orgServer.id))?.status).toBe("connected");
+  });
+
+  it("Víctor saves client credentials with the client-secret canary", async () => {
+    ccServer = await registerCcConnector(s, { name: "Billing API" });
+    const saved = await ok(saveCc(s, s.victor, ccServer.id));
+    expect(JSON.stringify(saved)).not.toContain(CC_SECRET);
+    expect((await orgConnectionRow(s, s.orgA, ccServer.id))?.status).toBe("connected");
+  });
+
+  it("Sam's channel turn calls both through the proxy; one forced refresh and one forced re-grant", async () => {
+    const caps = await ok(s.victor.request("GET", `/api/v1/agents/${scoutId}/capabilities`));
+    await ok(
+      s.victor.request("PATCH", `/api/v1/agents/${scoutId}/capabilities`, {
+        tools: [
+          ...caps.tools
+            .filter((t: Json) => t.granted)
+            .map((t: Json) => ({ sourceKind: t.sourceKind, sourceId: t.sourceId, tool: t.tool })),
+          ...[orgServer, ccServer].flatMap((srv) =>
+            ["whoami", "echo_auth"].map((t) => ({
+              sourceKind: "mcp",
+              sourceId: srv.id,
+              tool: `${srv.safeName}__${t}`,
+            })),
+          ),
+        ],
+      }),
+    );
+    salesId = (
+      await ok(s.victor.request("POST", "/api/v1/channels", { name: "sales", visibility: "private" }))
+    ).id;
+    await ok(s.victor.request("POST", `/api/v1/channels/${salesId}/members`, { kind: "user", id: s.samId }));
+    await ok(s.victor.request("POST", `/api/v1/channels/${salesId}/members`, { kind: "agent", id: scoutId }));
+    for (const sock of sockets) await subscribe(sock, `conv:${salesId}`);
+
+    const call = (ev: Json, srv: Json, tool = "whoami") =>
+      cell("/connectors/call", {
+        eventId: ev.eventId,
+        agentId: scoutId,
+        connector: srv.safeName,
+        tool,
+        arguments: {},
+      });
+    const ev = await turnOf(s.sam, salesId, true);
+    for (const srv of [orgServer, ccServer]) {
+      expect(ev.turn.tools).toEqual(
+        expect.arrayContaining([`${srv.safeName}__whoami`, "ocw_connector_call"]),
+      );
+      const who = await call(ev, srv);
+      expect(who.status, JSON.stringify(who.body)).toBe(200);
+      expect(JSON.parse(who.body?.content as string).subject).toMatch(/^sub_/u);
+      // The provider echoes the Authorization header it received: the proxy redacts the organization's token.
+      const echoed = await call(ev, srv, "echo_auth");
+      expect(echoed.status, JSON.stringify(echoed.body)).toBe(200);
+      expect(echoed.body?.content).toContain("[redacted]");
+    }
+
+    // A token the provider no longer accepts: one forced refresh (sign-in) and one forced re-grant (client credentials).
+    await staleOrgToken(orgServer.id);
+    await staleOrgToken(ccServer.id);
+    const before = await fakeStats(s);
+    const again = await turnOf(s.sam, salesId, true);
+    for (const srv of [orgServer, ccServer]) {
+      const r = await call(again, srv);
+      expect(r.status, JSON.stringify(r.body)).toBe(200);
+    }
+    const after = await fakeStats(s);
+    expect(after.tokenRequests.refresh_token).toBe(before.tokenRequests.refresh_token + 1);
+    expect(after.tokenRequests.client_credentials).toBe(before.tokenRequests.client_credentials + 1);
+  });
+
+  it("the organization's endpoints and a Test sign-in with the secret are read; the cell snapshot again", async () => {
+    const grants = (await fakeStats(s)).tokenRequests.client_credentials;
+    const tested = await ok(
+      s.victor.request("POST", "/api/v1/connectors/oauth-test", {
+        url: `${s.fakeBase}/mcp-oauth/mcp`,
+        authMode: "org_client_credentials",
+        clientCredentials: { clientId: PRE_REGISTERED_CC, clientSecret: CC_SECRET },
+      }),
+    );
+    expect(tested).toMatchObject({ ok: true, failure: null });
+    expect((await fakeStats(s)).tokenRequests.client_credentials).toBe(grants + 1);
+    const reads: Array<[ConnectorsStack["victor"], string]> = [
+      [s.victor, "/api/v1/mcp-servers"],
+      [s.victor, `/api/v1/mcp-servers/${orgServer.id}`],
+      [s.victor, `/api/v1/mcp-servers/${ccServer.id}`],
+      [s.sam, "/api/v1/mcp-servers"],
+      [s.sam, "/api/v1/connectors"],
+      [s.victor, `/api/v1/agents/${scoutId}/capabilities`],
+      [s.sam, `/api/v1/conversations/${salesId}/messages`],
+    ];
+    for (const [who, path] of reads) {
+      const r = await who.request("GET", path);
+      expect([200, 403, 404], `${path}: ${r.status}`).toContain(r.status);
+    }
+    const snapshot = await cell("/cell", undefined, "GET");
+    expect(snapshot.status).toBe(200);
+    cellSnapshot += `\n${JSON.stringify(snapshot.body)}`;
+  });
+
+  it("Víctor disconnects the organization's sign-in (revoked at the provider); a confirmed switch destroys the client's", async () => {
+    const before = await fakeStats(s);
+    expect(
+      (await s.victor.request("DELETE", `/api/v1/connectors/${orgServer.id}/org-connection`)).status,
+    ).toBe(204);
+    expect((await fakeStats(s)).revocations).toBe(before.revocations + 1);
+    expect(await orgConnectionRow(s, s.orgA, ccServer.id)).toBeDefined();
+    await fails(
+      s.victor.request("PATCH", `/api/v1/mcp-servers/${ccServer.id}`, { authMode: "org_secret" }),
+      409,
+      "org_connection_exists",
+    );
+    await ok(
+      s.victor.request("PATCH", `/api/v1/mcp-servers/${ccServer.id}`, {
+        authMode: "org_secret",
+        clearConnections: true,
+      }),
+    );
+    expect(await orgConnectionRow(s, s.orgA, orgServer.id)).toBeUndefined();
+    expect(await orgConnectionRow(s, s.orgA, ccServer.id)).toBeUndefined();
+  });
 });
 
 describe("the sweep: no secret of this phase anywhere but the sealed store and the wire to its host", () => {
@@ -429,6 +612,10 @@ describe("the sweep: no secret of this phase anywhere but the sealed store and t
       ["vault client secret", KC_CLIENT.secret],
       ["oauth state", flowSecrets[0] ?? ""],
       ["pkce verifier", flowSecrets[1] ?? ""],
+      // 07.14-13: the organization's sign-in flow and its client-credentials secret (D-09).
+      ["org client-credentials secret", CC_SECRET],
+      ["org oauth state", orgFlowSecrets[0] ?? ""],
+      ["org pkce verifier", orgFlowSecrets[1] ?? ""],
       ...issued.access.map((t, i): [string, string] => [`access token #${i}`, t]),
       ...issued.refresh.map((t, i): [string, string] => [`refresh token #${i}`, t]),
       ...issued.codes.map((t, i): [string, string] => [`authorization code #${i}`, t]),
@@ -438,9 +625,17 @@ describe("the sweep: no secret of this phase anywhere but the sealed store and t
     expect(issued.refresh.length).toBeGreaterThanOrEqual(2);
     expect(issued.codes.length).toBeGreaterThanOrEqual(1);
     expect(issued.access.some((t) => t.startsWith("fakekc_"))).toBe(true);
+    // 07.14-13: both organization flows ran: two codes (member and organization sign-in), the organization's refresh,
+    // and three client-credentials grants (save, re-grant, Test sign-in) on top of the member flow's tokens.
+    expect(orgFlowSecrets.every((v) => v.length > 0)).toBe(true);
+    expect(issued.codes.length).toBeGreaterThanOrEqual(2);
+    expect(issued.refresh.length).toBeGreaterThanOrEqual(4);
+    expect((await fakeStats(s)).tokenRequests.client_credentials).toBeGreaterThanOrEqual(3);
+    expect(issued.access.filter((t) => t.startsWith("fakeat_")).length).toBeGreaterThanOrEqual(7);
   });
 
-  const withoutState = () => new Map([...secrets].filter(([name]) => name !== "oauth state"));
+  const STATES = ["oauth state", "org oauth state"];
+  const withoutState = () => new Map([...secrets].filter(([name]) => !STATES.includes(name)));
 
   it("no database text, varchar, array or jsonb column holds one (sealed secrets are bytea)", async () => {
     expect(leaks(await scanDb(), secrets)).toEqual([]);
@@ -455,10 +650,12 @@ describe("the sweep: no secret of this phase anywhere but the sealed store and t
   it("no API response body or header holds one (the state is the authorize URL's own, by design)", () => {
     expect(responses.length).toBeGreaterThan(30);
     expect(leaks(responses.join("\n"), withoutState())).toEqual([]);
-    // The state appears only in the connect answer's authorize URL.
-    const withState = responses.filter((r) => formsOf(flowSecrets[0] ?? "").some((f) => r.includes(f)));
-    expect(withState).toHaveLength(1);
-    expect(withState[0]).toContain("authorizeUrl");
+    // Each state appears only in its own connect answer's authorize URL (the member's and the organization's).
+    for (const state of [flowSecrets[0], orgFlowSecrets[0]]) {
+      const withState = responses.filter((r) => formsOf(state ?? "").some((f) => r.includes(f)));
+      expect(withState).toHaveLength(1);
+      expect(withState[0]).toContain("authorizeUrl");
+    }
   });
 
   it("no WebSocket frame holds one", () => {
@@ -477,10 +674,14 @@ describe("the sweep: no secret of this phase anywhere but the sealed store and t
     expect(leaks(s.logs.join("\n"), secrets)).toEqual([]);
   });
 
-  it("the cell snapshot holds none, and no per-member connector", () => {
+  it("the cell snapshot holds none, and no per-member or organization-credential connector", () => {
     expect(cellSnapshot.length).toBeGreaterThan(0);
     expect(leaks(cellSnapshot, secrets)).toEqual([]);
     expect(cellSnapshot).not.toContain(oauthServer.safeName);
     expect(cellSnapshot).not.toContain(keyServer.safeName);
+    // 07.14 D-04: while connected, neither organization-credential server reaches the cell (probe-fallback
+    // prohibition); the snapshot was read before the mode switch.
+    expect(cellSnapshot).not.toContain(orgServer.safeName);
+    expect(cellSnapshot).not.toContain(ccServer.safeName);
   });
 });

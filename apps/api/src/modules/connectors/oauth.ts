@@ -1,14 +1,17 @@
 import { randomBytes } from "node:crypto";
 import {
+  buildDiscoveryUrls,
   discoverAuthorizationServerMetadata,
   discoverOAuthProtectedResourceMetadata,
   exchangeAuthorization,
   extractWWWAuthenticateParams,
+  fetchToken,
   refreshAuthorization,
   registerClient,
   selectClientAuthMethod,
   startAuthorization,
 } from "@modelcontextprotocol/sdk/client/auth.js";
+import { ClientCredentialsProvider } from "@modelcontextprotocol/sdk/client/auth-extensions.js";
 import { OAuthError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type {
   AuthorizationServerMetadata,
@@ -23,8 +26,9 @@ import {
   checkResourceAllowed,
   resourceUrlFromServerUrl,
 } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
-import type { ConnectorErrorCode, ConnectorOAuthUrls } from "@ocw/contracts";
+import type { ConnectorAuthFailure, ConnectorErrorCode, ConnectorOAuthUrls } from "@ocw/contracts";
 import { decodeJwt } from "jose";
+import { z } from "zod";
 import { type Egress, type EgressPolicy, EgressRefusedError, hostPortOf } from "../../lib/egress";
 import { clientMetadataDocument } from "./client-metadata";
 
@@ -59,6 +63,18 @@ const TERMINAL_OAUTH_ERRORS = new Set([
   "unauthorized_client",
 ]);
 
+/**
+ * Client credentials (07.14 D-03): the 07.4 set plus `invalid_scope`, which will not fix itself without an admin
+ * (a member's code flow never sees it at the token endpoint). A separate set: the member refresh's is unchanged.
+ */
+export const CC_TERMINAL_OAUTH_ERRORS: ReadonlySet<string> = new Set([
+  ...TERMINAL_OAUTH_ERRORS,
+  "invalid_scope",
+]);
+
+/** A client-credentials token without `expires_in` is renewed after this many seconds (07.14 RESEARCH Pitfall 5). */
+export const CC_DEFAULT_TTL_S = 300;
+
 /** Guard refusals that are a policy decision (the rest are network trouble). */
 const POLICY_REFUSALS = new Set([
   "bad_url",
@@ -69,14 +85,23 @@ const POLICY_REFUSALS = new Set([
   "platform_host",
 ]);
 
-/** `terminal`: the grant or client is dead (reconnect); otherwise transient (keep tokens, retry later). */
+/**
+ * `terminal`: the grant or client is dead (reconnect); otherwise transient (keep tokens, retry later). `step`: the
+ * D-10 failure the error stands for (07.14), set at every throw site; `code` stays what 07.4 returned (COA-05), so
+ * member flows are unchanged while organization flows and the Test sign-in read `step`.
+ */
 export class ConnectorOAuthError extends Error {
   readonly code: ConnectorErrorCode;
   readonly terminal: boolean;
   /** The RFC 6749 `error` of the authorization server when there was one (a fixed token, never free text). */
   readonly oauthError: string | null;
+  /** The failed sign-in step (D-10 closed set); null when the throw site named none. Never provider text. */
+  readonly step: ConnectorAuthFailure | null;
 
-  constructor(code: ConnectorErrorCode, opts: { terminal?: boolean; oauthError?: string | null } = {}) {
+  constructor(
+    code: ConnectorErrorCode,
+    opts: { terminal?: boolean; oauthError?: string | null; step?: ConnectorAuthFailure } = {},
+  ) {
     const oauthError =
       opts.oauthError && /^[a-z0-9_.-]{1,64}$/iu.test(opts.oauthError) ? opts.oauthError : null;
     super(`connector oauth: ${code}${oauthError ? ` (${oauthError})` : ""}`);
@@ -84,6 +109,7 @@ export class ConnectorOAuthError extends Error {
     this.code = code;
     this.terminal = opts.terminal ?? false;
     this.oauthError = oauthError;
+    this.step = opts.step ?? null;
   }
 }
 
@@ -127,6 +153,50 @@ export interface TokenBundle {
   accountLabel: string | null;
 }
 
+/**
+ * What client credentials need from discovery (07.14 D-17): no authorization endpoint, PKCE or response type. All
+ * null / empty when the server publishes no RFC 9728 metadata: the admin-entered Token URL is used then.
+ */
+export interface TokenEndpointDiscovery {
+  /** RFC 8707 resource: the PRM `resource`, else `resourceUrlFromServerUrl(serverUrl)`. Always sent. */
+  resource: string;
+  /** The authorization server's issuer, pinned at save time; null without metadata. */
+  issuer: string | null;
+  tokenEndpoint: string | null;
+  revocationEndpoint: string | null;
+  /** `token_endpoint_auth_methods_supported` (empty = the RFC 8414 default, Basic). */
+  authMethods: string[];
+  /** PRM `scopes_supported`. */
+  scopes: string[] | undefined;
+  /** `host:port` of the MCP URL: the only private / plain-http target the OAuth calls may reach. */
+  sameOrigin: string;
+  /** Origin of the MCP URL: the only plain-http origin an endpoint may have (`trusted()`). */
+  mcpOrigin: string;
+}
+
+/** A client-credentials access token. There is never a refresh token: renewing is a new grant. */
+export interface ClientCredentialsToken {
+  accessToken: string;
+  /** Epoch ms; `CC_DEFAULT_TTL_S` from now when the server did not say. */
+  expiresAt: number;
+  scopes: string[];
+  authMethod: "client_secret_basic" | "client_secret_post";
+}
+
+export interface ClientCredentialsGrantInput {
+  tokenEndpoint: string;
+  /** The pinned issuer; null for an admin-entered endpoint without metadata. */
+  issuer: string | null;
+  resource: string;
+  sameOrigin: string;
+  mcpOrigin: string;
+  clientId: string;
+  clientSecret: string;
+  /** Empty: no `scope` parameter (the server's default). */
+  scopes: string[];
+  authMethods: string[];
+}
+
 // ---------------------------------------------------------------- helpers
 
 const random = (bytes: number) => randomBytes(bytes).toString("base64url");
@@ -143,6 +213,10 @@ function trusted(endpoint: string | undefined, mcpOrigin: string): boolean {
   if (u.username || u.password || u.hash) return false;
   return u.protocol === "https:" || (u.protocol === "http:" && u.origin === mcpOrigin);
 }
+
+/** `trusted()` for callers that check an admin-entered endpoint before using it (the Test sign-in, 07.14 D-10). */
+export const isTrustedEndpoint = (endpoint: string, mcpOrigin: string): boolean =>
+  trusted(endpoint, mcpOrigin);
 
 const stripSlash = (s: string) => s.replace(/\/+$/u, "");
 
@@ -174,38 +248,54 @@ function oauthPolicy(sameOrigin: string): EgressPolicy {
 /** The SDK's message when the server answers 404 (or nothing) for RFC 9728 metadata (`discoverOAuthProtectedResourceMetadata`). */
 const NO_PRM_MESSAGE = "Resource server does not implement OAuth 2.0 Protected Resource Metadata";
 
+const isZodError = (err: unknown) => err instanceof Error && err.name === "ZodError";
+
 /**
  * A discovery failure as a code: a policy refusal by the guard, or anything else. `terminal` = the server answered and
  * cannot be signed in to as it is (no RFC 9728 metadata, or a document that does not parse): an admin must act, a
- * retry will not help. Network trouble and timeouts stay transient.
+ * retry will not help. Network trouble and timeouts stay transient. `phase`: a guard refusal while reading the
+ * authorization server is an untrusted endpoint (D-10); one on the MCP host itself is a discovery failure.
  */
-function discoveryError(err: unknown): ConnectorOAuthError {
+function discoveryError(err: unknown, phase: "prm" | "as"): ConnectorOAuthError {
   if (err instanceof ConnectorOAuthError) return err;
   const refusal = findRefusal(err);
-  if (refusal && POLICY_REFUSALS.has(refusal.code)) return new ConnectorOAuthError("egress_refused");
-  if (refusal) return new ConnectorOAuthError("discovery_failed");
+  if (refusal && POLICY_REFUSALS.has(refusal.code)) {
+    return new ConnectorOAuthError("egress_refused", {
+      step: phase === "as" ? "token_endpoint_untrusted" : "discovery_failed",
+    });
+  }
+  if (refusal) return new ConnectorOAuthError("discovery_failed", { step: "discovery_failed" });
   const message = err instanceof Error ? err.message : "";
-  const answered = message.startsWith(NO_PRM_MESSAGE) || (err instanceof Error && err.name === "ZodError");
-  return new ConnectorOAuthError("discovery_failed", { terminal: answered });
+  const answered = message.startsWith(NO_PRM_MESSAGE) || isZodError(err);
+  return new ConnectorOAuthError("discovery_failed", { terminal: answered, step: "discovery_failed" });
 }
 
-/** A token endpoint failure as a code; terminal only for the RFC 6749 errors that kill the grant. */
-function tokenError(err: unknown): ConnectorOAuthError {
+/**
+ * A token endpoint failure as a code; terminal only for the RFC 6749 errors of `terminalSet` (the member set by
+ * default, `CC_TERMINAL_OAUTH_ERRORS` for client credentials). Only the RFC 6749 `error` token is kept: never
+ * `error_description`, a body or an SDK message. Any other throw (the SDK's `btoa` on a non-Latin-1 secret included)
+ * is a plain `token_exchange_failed`.
+ */
+function tokenError(
+  err: unknown,
+  terminalSet: ReadonlySet<string> = TERMINAL_OAUTH_ERRORS,
+): ConnectorOAuthError {
   if (err instanceof ConnectorOAuthError) return err;
   const refusal = findRefusal(err);
   if (refusal) {
-    return new ConnectorOAuthError(
-      POLICY_REFUSALS.has(refusal.code) ? "egress_refused" : "token_exchange_failed",
-    );
+    return POLICY_REFUSALS.has(refusal.code)
+      ? new ConnectorOAuthError("egress_refused", { step: "token_endpoint_untrusted" })
+      : new ConnectorOAuthError("token_exchange_failed", { step: "token_exchange_failed" });
   }
   if (err instanceof OAuthError) {
     const oauthError = err.errorCode;
     return new ConnectorOAuthError("token_exchange_failed", {
-      terminal: TERMINAL_OAUTH_ERRORS.has(oauthError),
+      terminal: terminalSet.has(oauthError),
       oauthError,
+      step: oauthError === "invalid_scope" ? "scope_rejected" : "token_exchange_failed",
     });
   }
-  return new ConnectorOAuthError("token_exchange_failed");
+  return new ConnectorOAuthError("token_exchange_failed", { step: "token_exchange_failed" });
 }
 
 /** `resource_metadata`, `scope` and `error` of a `WWW-Authenticate: Bearer …` challenge. */
@@ -246,15 +336,20 @@ function clientInformation(client: { clientId: string; clientSecret?: string }):
   };
 }
 
+/** Only a non-empty bearer access token is usable on an MCP request. */
+function assertBearer(tokens: OAuthTokens): void {
+  if (tokens.token_type.toLowerCase() !== "bearer" || !tokens.access_token) {
+    throw new ConnectorOAuthError("token_exchange_failed", { step: "token_exchange_failed" });
+  }
+}
+
 function bundleFrom(
   tokens: OAuthTokens,
   ctx: Omit<TokenBundle, "accessToken" | "refreshToken" | "expiresAt" | "scopes" | "accountLabel">,
   fallbackScopes: string[],
   accountLabel: string | null,
 ): TokenBundle {
-  if (tokens.token_type.toLowerCase() !== "bearer" || !tokens.access_token) {
-    throw new ConnectorOAuthError("token_exchange_failed");
-  }
+  assertBearer(tokens);
   return {
     accessToken: tokens.access_token,
     ...(tokens.refresh_token ? { refreshToken: tokens.refresh_token } : {}),
@@ -270,35 +365,44 @@ function bundleFrom(
 
 // ---------------------------------------------------------------- discovery
 
+type BoundFetch = ReturnType<Egress["bound"]>;
+
+/** The MCP URL, its guard policy and its RFC 9728 metadata with the first (trusted) authorization server. */
+interface ProtectedResource {
+  mcp: URL;
+  sameOrigin: string;
+  fetchFn: BoundFetch;
+  /** Null only with `allowMissing` when the server publishes no RFC 9728 metadata (a 404). */
+  found: { prm: OAuthProtectedResourceMetadata; asUrl: string } | null;
+}
+
 /**
- * RFC 9728 protected resource metadata, then RFC 8414 / OIDC metadata of its first authorization server, all through
- * the guard. `wwwAuthenticate` (a 401 challenge from the MCP server) may name the PRM URL. Refuses with
- * `pkce_unsupported` unless the server advertises S256, `discovery_failed` for an untrusted endpoint, an issuer that
- * is not the discovered URL or a PRM `resource` that is not this server, and `egress_refused` for a guard refusal.
+ * The PRM half of discovery, shared by `discover()` (sign-in) and `discoverTokenEndpoint()` (client credentials):
+ * the URL checks, an optional `WWW-Authenticate` naming the PRM URL, the PRM through the guard, the RFC 8707 resource
+ * check and the first authorization server's `trusted()` check (before it is ever fetched).
  */
-export async function discover(
+async function protectedResource(
   egress: Egress,
   serverUrl: string,
-  opts: { wwwAuthenticate?: string } = {},
-): Promise<DiscoveredAuth> {
+  opts: { wwwAuthenticate?: string; allowMissing?: boolean },
+): Promise<ProtectedResource> {
+  const failed = () => new ConnectorOAuthError("discovery_failed", { step: "discovery_failed" });
   let mcp: URL;
   let sameOrigin: string;
   try {
     mcp = new URL(serverUrl);
     sameOrigin = hostPortOf(mcp);
   } catch {
-    throw new ConnectorOAuthError("discovery_failed");
+    throw failed();
   }
-  if (mcp.protocol !== "https:" && mcp.protocol !== "http:")
-    throw new ConnectorOAuthError("discovery_failed");
+  if (mcp.protocol !== "https:" && mcp.protocol !== "http:") throw failed();
   const fetchFn = egress.bound(oauthPolicy(sameOrigin));
 
   let resourceMetadataUrl: URL | undefined;
   if (opts.wwwAuthenticate) {
     const challenge = parseWwwAuthenticate(opts.wwwAuthenticate);
     if (challenge.resourceMetadataUrl) {
-      if (!trusted(challenge.resourceMetadataUrl, mcp.origin))
-        throw new ConnectorOAuthError("discovery_failed");
+      if (!trusted(challenge.resourceMetadataUrl, mcp.origin)) throw failed();
       resourceMetadataUrl = new URL(challenge.resourceMetadataUrl);
     }
   }
@@ -307,7 +411,10 @@ export async function discover(
   try {
     prm = await discoverOAuthProtectedResourceMetadata(serverUrl, { resourceMetadataUrl }, fetchFn);
   } catch (err) {
-    throw discoveryError(err);
+    if (opts.allowMissing && err instanceof Error && err.message.startsWith(NO_PRM_MESSAGE)) {
+      return { mcp, sameOrigin, fetchFn, found: null };
+    }
+    throw discoveryError(err, "prm");
   }
   // The token must be bound to this server: the PRM resource is the server URL or a prefix of it, same origin.
   let resourceOk = false;
@@ -319,31 +426,58 @@ export async function discover(
   } catch {
     resourceOk = false;
   }
-  if (!resourceOk) throw new ConnectorOAuthError("discovery_failed");
+  if (!resourceOk) throw failed();
 
   const asUrl = prm.authorization_servers?.[0];
-  if (!asUrl || !trusted(asUrl, mcp.origin)) throw new ConnectorOAuthError("discovery_failed");
+  if (!asUrl) throw failed();
+  if (!trusted(asUrl, mcp.origin)) {
+    throw new ConnectorOAuthError("discovery_failed", { step: "token_endpoint_untrusted" });
+  }
+  return { mcp, sameOrigin, fetchFn, found: { prm, asUrl } };
+}
+
+/**
+ * RFC 9728 protected resource metadata, then RFC 8414 / OIDC metadata of its first authorization server, all through
+ * the guard. `wwwAuthenticate` (a 401 challenge from the MCP server) may name the PRM URL. Refuses with
+ * `pkce_unsupported` unless the server advertises S256, `discovery_failed` for an untrusted endpoint, an issuer that
+ * is not the discovered URL or a PRM `resource` that is not this server, and `egress_refused` for a guard refusal.
+ * Each refusal's `step` names the D-10 check (`discovery_failed`, `issuer_mismatch`, `token_endpoint_untrusted`,
+ * `pkce_unsupported`) while `code` stays the 07.4 one.
+ */
+export async function discover(
+  egress: Egress,
+  serverUrl: string,
+  opts: { wwwAuthenticate?: string } = {},
+): Promise<DiscoveredAuth> {
+  const { mcp, sameOrigin, fetchFn, found } = await protectedResource(egress, serverUrl, opts);
+  if (!found) throw new ConnectorOAuthError("discovery_failed", { step: "discovery_failed" });
+  const { prm, asUrl } = found;
 
   let metadata: AuthServerMetadata | undefined;
   try {
     metadata = await discoverAuthorizationServerMetadata(asUrl, { fetchFn });
   } catch (err) {
-    throw discoveryError(err);
+    throw discoveryError(err, "as");
   }
-  if (!metadata) throw new ConnectorOAuthError("discovery_failed");
-  if (stripSlash(metadata.issuer) !== stripSlash(asUrl)) throw new ConnectorOAuthError("discovery_failed");
+  if (!metadata) throw new ConnectorOAuthError("discovery_failed", { step: "discovery_failed" });
+  // The code stays `discovery_failed` for members (07.4); the step tells the admin which check failed (D-10).
+  if (stripSlash(metadata.issuer) !== stripSlash(asUrl)) {
+    throw new ConnectorOAuthError("discovery_failed", { step: "issuer_mismatch" });
+  }
   const endpoints = [metadata.authorization_endpoint, metadata.token_endpoint];
   const optional = [metadata.registration_endpoint, revocationEndpointOf(metadata)];
   if (
     !endpoints.every((e) => trusted(e, mcp.origin)) ||
     !optional.every((e) => e === undefined || trusted(e, mcp.origin))
   ) {
-    throw new ConnectorOAuthError("discovery_failed");
+    throw new ConnectorOAuthError("discovery_failed", { step: "token_endpoint_untrusted" });
   }
-  if (!metadata.response_types_supported.includes("code")) throw new ConnectorOAuthError("discovery_failed");
+  if (!metadata.response_types_supported.includes("code")) {
+    throw new ConnectorOAuthError("discovery_failed", { step: "discovery_failed" });
+  }
   // MCP spec: "If the field is absent, MCP clients MUST refuse to proceed" (the SDK only checks a present field).
   if (!metadata.code_challenge_methods_supported?.includes("S256")) {
-    throw new ConnectorOAuthError("pkce_unsupported");
+    throw new ConnectorOAuthError("pkce_unsupported", { step: "pkce_unsupported" });
   }
   return {
     serverUrl,
@@ -355,67 +489,195 @@ export async function discover(
   };
 }
 
-// ---------------------------------------------------------------- client choice
+/**
+ * The RFC 8414 fields client credentials read. Lenient on purpose: a client-credentials-only authorization server may
+ * publish no `authorization_endpoint`, which the SDK's schema requires (07.14 RESEARCH Pitfall 3).
+ */
+const TokenEndpointMetadata = z.object({
+  issuer: z.string(),
+  token_endpoint: z.string(),
+  token_endpoint_auth_methods_supported: z.array(z.string()).optional(),
+  revocation_endpoint: z.string().optional(),
+  scopes_supported: z.array(z.string()).optional(),
+});
+type TokenEndpointMetadata = z.infer<typeof TokenEndpointMetadata>;
 
 /**
- * The client for the discovered issuer, in the spec's order: a pre-registered client for this exact issuer, else a
- * client ID metadata document (the instance has an https CIMD URL and the server advertises support), else dynamic
- * registration (RFC 7591, a stored client of this issuer is reused), else `needs_client`. Credentials are matched by
- * issuer only: a client registered at another authorization server is never used ("MUST NOT reuse").
+ * The authorization server's metadata for client credentials: the SDK's discovery first; when its schema refuses the
+ * document, the same well-known URLs (`buildDiscoveryUrls`) read through the same bound fetch with the lenient schema.
+ * The bound policy caps every body at `OAUTH_MAX_BYTES`.
  */
-export async function chooseClient(
+async function tokenEndpointMetadata(fetchFn: BoundFetch, asUrl: string): Promise<TokenEndpointMetadata> {
+  const answered = () =>
+    new ConnectorOAuthError("discovery_failed", { terminal: true, step: "discovery_failed" });
+  try {
+    const metadata = await discoverAuthorizationServerMetadata(asUrl, { fetchFn });
+    if (!metadata) throw answered();
+    const revocation = revocationEndpointOf(metadata);
+    return {
+      issuer: metadata.issuer,
+      token_endpoint: metadata.token_endpoint,
+      ...(metadata.token_endpoint_auth_methods_supported
+        ? { token_endpoint_auth_methods_supported: metadata.token_endpoint_auth_methods_supported }
+        : {}),
+      ...(revocation ? { revocation_endpoint: revocation } : {}),
+      ...(metadata.scopes_supported ? { scopes_supported: metadata.scopes_supported } : {}),
+    };
+  } catch (err) {
+    if (!isZodError(err)) throw discoveryError(err, "as");
+  }
+  for (const { url } of buildDiscoveryUrls(asUrl)) {
+    let res: Response;
+    try {
+      res = await fetchFn(url, { headers: { accept: "application/json" } });
+    } catch (err) {
+      throw discoveryError(err, "as");
+    }
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      if (res.status >= 400 && res.status < 500) continue;
+      throw new ConnectorOAuthError("discovery_failed", { step: "discovery_failed" });
+    }
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch (err) {
+      throw findRefusal(err) ? discoveryError(err, "as") : answered();
+    }
+    const parsed = TokenEndpointMetadata.safeParse(body);
+    if (!parsed.success) throw answered();
+    return parsed.data;
+  }
+  throw answered();
+}
+
+/**
+ * Discovery for client credentials (07.14 D-17, PD-07): the same PRM step, issuer equality (RFC 8414 §3.3, the issuer
+ * then pinned by the caller) and `trusted()` checks as `discover()`, without the code-flow requirements (authorization
+ * endpoint, `code` response type, PKCE). A server without RFC 9728 metadata answers nulls, not a throw: the admin's
+ * Token URL is used then, and `resource` is still sent (`resourceUrlFromServerUrl`).
+ */
+export async function discoverTokenEndpoint(
   egress: Egress,
-  d: DiscoveredAuth,
-  opts: {
-    preRegistered: ReadonlyArray<{ issuer: string; clientId: string; clientSecret?: string }>;
-    stored: ReadonlyArray<{
-      issuer: string;
-      clientId: string;
-      clientSecret?: string;
-      method: "cimd" | "dcr";
-    }>;
-    urls: ConnectorOAuthUrls;
-    clientName: string;
-    /**
-     * False when the admin turned the client ID metadata document off for this server (WINDOWS #179: its
-     * authorization server cannot read the instance's URL, e.g. behind a private CA): a pre-registered client or
-     * dynamic registration is used instead. Default true.
-     */
-    allowCimd?: boolean;
-  },
-): Promise<ClientChoice> {
+  serverUrl: string,
+): Promise<TokenEndpointDiscovery> {
+  const { mcp, sameOrigin, fetchFn, found } = await protectedResource(egress, serverUrl, {
+    allowMissing: true,
+  });
+  const where = { sameOrigin, mcpOrigin: mcp.origin };
+  if (!found) {
+    return {
+      resource: resourceUrlFromServerUrl(serverUrl).href,
+      issuer: null,
+      tokenEndpoint: null,
+      revocationEndpoint: null,
+      authMethods: [],
+      scopes: undefined,
+      ...where,
+    };
+  }
+  const metadata = await tokenEndpointMetadata(fetchFn, found.asUrl);
+  if (stripSlash(metadata.issuer) !== stripSlash(found.asUrl)) {
+    throw new ConnectorOAuthError("discovery_failed", { step: "issuer_mismatch" });
+  }
+  if (
+    !trusted(metadata.token_endpoint, mcp.origin) ||
+    (metadata.revocation_endpoint !== undefined && !trusted(metadata.revocation_endpoint, mcp.origin))
+  ) {
+    throw new ConnectorOAuthError("discovery_failed", { step: "token_endpoint_untrusted" });
+  }
+  return {
+    resource: found.prm.resource,
+    issuer: metadata.issuer,
+    tokenEndpoint: metadata.token_endpoint,
+    revocationEndpoint: metadata.revocation_endpoint ?? null,
+    authMethods: metadata.token_endpoint_auth_methods_supported ?? [],
+    scopes: found.prm.scopes_supported,
+    ...where,
+  };
+}
+
+// ---------------------------------------------------------------- client choice
+
+export interface ClientPreviewOptions {
+  preRegistered: ReadonlyArray<{ issuer: string; clientId: string; clientSecret?: string }>;
+  stored: ReadonlyArray<{
+    issuer: string;
+    clientId: string;
+    clientSecret?: string;
+    method: "cimd" | "dcr";
+  }>;
+  urls: ConnectorOAuthUrls;
+  /**
+   * False when the admin turned the client ID metadata document off for this server (WINDOWS #179: its
+   * authorization server cannot read the instance's URL, e.g. behind a private CA): a pre-registered client or
+   * dynamic registration is used instead. Default true.
+   */
+  allowCimd?: boolean;
+}
+
+/** Which client `chooseClient` would use; `dcr.stored` is the stored DCR client of this issuer, null for a new one. */
+export type ClientPreview =
+  | { method: "pre_registered"; clientId: string; clientSecret?: string }
+  | { method: "cimd"; clientId: string }
+  | {
+      method: "dcr";
+      stored: { clientId: string; clientSecret?: string } | null;
+    };
+
+/**
+ * The client decision without a request (07.14 D-18), in the spec's order: a pre-registered client for this exact
+ * issuer, else a client ID metadata document (the instance has an https CIMD URL, the admin left it on and the server
+ * advertises support), else dynamic registration when the server has a `registration_endpoint` (a stored client of
+ * this issuer or a new one), else `needs_client`. `chooseClient` decides with it, so the Test sign-in's dry run and the
+ * real choice never drift; it never registers anything.
+ */
+export function previewClient(d: DiscoveredAuth, opts: ClientPreviewOptions): ClientPreview {
   const pre = opts.preRegistered.find((c) => c.issuer === d.issuer);
   if (pre) {
     return {
       method: "pre_registered",
-      issuer: d.issuer,
       clientId: pre.clientId,
       ...(pre.clientSecret ? { clientSecret: pre.clientSecret } : {}),
     };
   }
-  if (!opts.urls.oauthAvailable || !opts.urls.redirectUri) throw new ConnectorOAuthError("https_required");
-
-  const cimd = clientMetadataDocument(opts.urls, opts.clientName);
+  if (!opts.urls.oauthAvailable || !opts.urls.redirectUri) {
+    throw new ConnectorOAuthError("https_required", { step: "https_required" });
+  }
+  // The document's existence depends on the URLs only (the client name is just its content).
   if (
     opts.allowCimd !== false &&
-    cimd &&
+    clientMetadataDocument(opts.urls, "") &&
     opts.urls.clientMetadataUrl &&
     d.metadata.client_id_metadata_document_supported === true
   ) {
-    return { method: "cimd", issuer: d.issuer, clientId: opts.urls.clientMetadataUrl };
+    return { method: "cimd", clientId: opts.urls.clientMetadataUrl };
   }
-
-  if (!d.metadata.registration_endpoint) throw new ConnectorOAuthError("needs_client");
+  if (!d.metadata.registration_endpoint) {
+    throw new ConnectorOAuthError("needs_client", { step: "client_registration_unavailable" });
+  }
   const stored = opts.stored.find((c) => c.issuer === d.issuer && c.method === "dcr");
-  if (stored) {
-    return {
-      method: "dcr",
-      issuer: d.issuer,
-      clientId: stored.clientId,
-      ...(stored.clientSecret ? { clientSecret: stored.clientSecret } : {}),
-      isNew: false,
-    };
-  }
+  return {
+    method: "dcr",
+    stored: stored
+      ? { clientId: stored.clientId, ...(stored.clientSecret ? { clientSecret: stored.clientSecret } : {}) }
+      : null,
+  };
+}
+
+/**
+ * The client for the discovered issuer: `previewClient`'s decision, then a dynamic registration (RFC 7591) only when
+ * it says DCR and no client of this issuer is stored. Credentials are matched by issuer only: a client registered at
+ * another authorization server is never used ("MUST NOT reuse").
+ */
+export async function chooseClient(
+  egress: Egress,
+  d: DiscoveredAuth,
+  opts: ClientPreviewOptions & { clientName: string },
+): Promise<ClientChoice> {
+  const preview = previewClient(d, opts);
+  if (preview.method !== "dcr") return { ...preview, issuer: d.issuer };
+  if (preview.stored) return { method: "dcr", issuer: d.issuer, ...preview.stored, isNew: false };
   const supported = d.metadata.token_endpoint_auth_methods_supported ?? [];
   // A server-side app can keep a secret: ask for a confidential client when the server allows one.
   const authMethod =
@@ -441,9 +703,9 @@ export async function chooseClient(
     });
   } catch (err) {
     const refusal = findRefusal(err);
-    throw new ConnectorOAuthError(
-      refusal && POLICY_REFUSALS.has(refusal.code) ? "egress_refused" : "needs_client",
-    );
+    throw refusal && POLICY_REFUSALS.has(refusal.code)
+      ? new ConnectorOAuthError("egress_refused", { step: "token_endpoint_untrusted" })
+      : new ConnectorOAuthError("needs_client", { step: "client_registration_unavailable" });
   }
   return {
     method: "dcr",
@@ -478,7 +740,9 @@ export function chooseScope(
 // ---------------------------------------------------------------- authorization
 
 function assertSameIssuer(d: DiscoveredAuth, client: ClientChoice) {
-  if (client.issuer !== d.issuer) throw new ConnectorOAuthError("issuer_mismatch");
+  if (client.issuer !== d.issuer) {
+    throw new ConnectorOAuthError("issuer_mismatch", { step: "issuer_mismatch" });
+  }
 }
 
 /** The authorization URL with PKCE S256, `resource` and a fresh state; the caller keeps verifier and state. */
@@ -488,7 +752,9 @@ export async function buildAuthorization(
   urls: ConnectorOAuthUrls,
   scope: string | undefined,
 ): Promise<{ authorizationUrl: string; codeVerifier: string; state: string }> {
-  if (!urls.oauthAvailable || !urls.redirectUri) throw new ConnectorOAuthError("https_required");
+  if (!urls.oauthAvailable || !urls.redirectUri) {
+    throw new ConnectorOAuthError("https_required", { step: "https_required" });
+  }
   assertSameIssuer(d, client);
   const state = random(STATE_BYTES);
   let started: { authorizationUrl: URL; codeVerifier: string };
@@ -502,7 +768,7 @@ export async function buildAuthorization(
       resource: d.resource,
     });
   } catch {
-    throw new ConnectorOAuthError("discovery_failed");
+    throw new ConnectorOAuthError("discovery_failed", { step: "discovery_failed" });
   }
   return { authorizationUrl: started.authorizationUrl.href, codeVerifier: started.codeVerifier, state };
 }
@@ -517,15 +783,16 @@ export function checkCallbackIssuer(
   flowIssuer: string,
   iss: string | null,
 ): void {
+  const mismatch = () => new ConnectorOAuthError("issuer_mismatch", { step: "issuer_mismatch" });
   if (iss !== null) {
-    if (iss !== flowIssuer) throw new ConnectorOAuthError("issuer_mismatch");
+    if (iss !== flowIssuer) throw mismatch();
     return;
   }
   if (
     (metadata as { authorization_response_iss_parameter_supported?: unknown })
       .authorization_response_iss_parameter_supported === true
   ) {
-    throw new ConnectorOAuthError("issuer_mismatch");
+    throw mismatch();
   }
 }
 
@@ -569,6 +836,23 @@ export async function exchangeCode(
 
 // ---------------------------------------------------------------- refresh and revocation
 
+/**
+ * Whether a token granted for the RFC 8707 `resource` may be sent to this MCP server URL (07.14 review CR-01): the
+ * resource is the server URL or a path prefix of it on the same origin, as discovery required at grant time. A server
+ * URL changed since the grant (another origin or another path) is not covered, nor a missing or malformed one.
+ */
+export function resourceCovers(resource: string, serverUrl: string | null): boolean {
+  if (!serverUrl) return false;
+  try {
+    return checkResourceAllowed({
+      requestedResource: resourceUrlFromServerUrl(serverUrl),
+      configuredResource: resource,
+    });
+  } catch {
+    return false;
+  }
+}
+
 /** The resource's origin and `host:port` (the OAuth calls' only private / plain-http target). */
 function resourceOrigin(bundle: TokenBundle): { origin: string; sameOrigin: string } | null {
   try {
@@ -589,13 +873,17 @@ export async function refreshTokens(
   bundle: TokenBundle,
   clientSecret?: string,
 ): Promise<TokenBundle> {
-  if (!bundle.refreshToken) throw new ConnectorOAuthError("needs_reconnect", { terminal: true });
+  if (!bundle.refreshToken) {
+    throw new ConnectorOAuthError("needs_reconnect", { terminal: true, step: "token_exchange_failed" });
+  }
   const where = resourceOrigin(bundle);
   if (!where || !trusted(bundle.tokenEndpoint, where.origin)) {
-    throw new ConnectorOAuthError("token_exchange_failed");
+    throw new ConnectorOAuthError("token_exchange_failed", { step: "token_endpoint_untrusted" });
   }
-  if (bundle.authMethod !== "none" && !clientSecret)
-    throw new ConnectorOAuthError("needs_client", { terminal: true });
+  // A confidential client whose secret is gone: the token request cannot be made (not a registration problem).
+  if (bundle.authMethod !== "none" && !clientSecret) {
+    throw new ConnectorOAuthError("needs_client", { terminal: true, step: "token_exchange_failed" });
+  }
   // Only what the SDK's token request reads: the endpoint and the auth method chosen at the code exchange.
   const metadata: OAuthMetadata = {
     issuer: bundle.issuer,
@@ -629,6 +917,75 @@ export async function refreshTokens(
     bundle.scopes,
     accountLabelOf(tokens.id_token) ?? bundle.accountLabel,
   );
+}
+
+// ---------------------------------------------------------------- client credentials
+
+/**
+ * The RFC 6749 §4.4 client-credentials grant (07.14 D-03, the MCP extension
+ * `io.modelcontextprotocol/oauth-client-credentials`, stable 2026-07-28; no `_meta` capability is sent, RESEARCH
+ * A5). The endpoint passes `trusted()` before anything is sent (https, or http on the MCP URL's own origin); the
+ * caller passes the issuer pinned at save time, so the secret only ever goes to that authorization server's token
+ * endpoint. Client authentication is the SDK's choice (Basic unless the metadata lists only `client_secret_post`);
+ * `resource` (RFC 8707) is always sent; empty `scopes` send no `scope`. A response without `expires_in` lasts
+ * `CC_DEFAULT_TTL_S`. Terminal errors: `CC_TERMINAL_OAUTH_ERRORS` (`invalid_scope` → step `scope_rejected`).
+ */
+export async function clientCredentialsGrant(
+  egress: Egress,
+  p: ClientCredentialsGrantInput,
+): Promise<ClientCredentialsToken> {
+  if (!trusted(p.tokenEndpoint, p.mcpOrigin)) {
+    throw new ConnectorOAuthError("token_exchange_failed", { step: "token_endpoint_untrusted" });
+  }
+  const failed = () => new ConnectorOAuthError("token_exchange_failed", { step: "token_exchange_failed" });
+  const authMethod = selectClientAuthMethod(
+    { client_id: p.clientId, client_secret: p.clientSecret },
+    p.authMethods,
+  );
+  // A server that takes no client secret (only `none` or `private_key_jwt`) cannot be used with one.
+  if (authMethod !== "client_secret_basic" && authMethod !== "client_secret_post") throw failed();
+  let issuer: string;
+  let resource: URL;
+  try {
+    issuer = p.issuer ?? new URL(p.tokenEndpoint).origin;
+    resource = new URL(p.resource);
+  } catch {
+    throw failed();
+  }
+  // Only what the SDK's token request reads, as for `refreshTokens()`: the endpoint and the chosen auth method.
+  const metadata: OAuthMetadata = {
+    issuer,
+    authorization_endpoint: p.tokenEndpoint,
+    token_endpoint: p.tokenEndpoint,
+    response_types_supported: ["code"],
+    token_endpoint_auth_methods_supported: [authMethod],
+  };
+  const provider = new ClientCredentialsProvider({
+    clientId: p.clientId,
+    clientSecret: p.clientSecret,
+    ...(p.scopes.length > 0 ? { scope: p.scopes.join(" ") } : {}),
+  });
+  let tokens: OAuthTokens;
+  try {
+    tokens = await fetchToken(provider, issuer, {
+      metadata,
+      resource,
+      fetchFn: egress.bound(oauthPolicy(p.sameOrigin)),
+    });
+  } catch (err) {
+    throw tokenError(err, CC_TERMINAL_OAUTH_ERRORS);
+  }
+  assertBearer(tokens);
+  const ttl =
+    typeof tokens.expires_in === "number" && Number.isFinite(tokens.expires_in) && tokens.expires_in > 0
+      ? tokens.expires_in
+      : CC_DEFAULT_TTL_S;
+  return {
+    accessToken: tokens.access_token,
+    expiresAt: Date.now() + ttl * 1000,
+    scopes: tokens.scope ? tokens.scope.split(/\s+/u).filter(Boolean) : [...p.scopes],
+    authMethod,
+  };
 }
 
 /**

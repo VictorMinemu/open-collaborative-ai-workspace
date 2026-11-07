@@ -2,28 +2,40 @@ import { randomUUID } from "node:crypto";
 import {
   AgentChannelEventTypes,
   type AgentChannelMcpProbeResult,
+  CELL_MODES,
   type CellMcpServer,
+  type ConnectorAuthFailure,
   type ConnectorAuthMode,
   type ConnectorOAuthClientInput,
   type ConnectorOAuthClientMethod,
   type ConnectorOAuthStatus,
+  type ConnectorReconnectReason,
   type CreateMcpServerRequest,
   cellTopic,
   connectorOAuthUrls,
   isAllowedInjectionHeader,
   isDangerousToolName,
+  isOrgCredentialMode,
+  isPerMemberMode,
   jsonBytes,
   MCP_INPUT_SCHEMA_MAX_BYTES,
   type McpHeaderInput,
   type McpServer,
+  type OrgConnection,
+  type OrgConnectionMethod,
+  rendersInCell,
   type UpdateMcpServerRequest,
+  usesConnectorProxy,
+  usesOAuthSignIn,
 } from "@ocw/contracts";
 import {
   agents,
   botToolGrants,
   connectorOAuthClients,
+  connectorOrgConnections,
   mcpServers,
   mcpServerTools,
+  orgMembers,
   streamEvents,
   type Tx,
   tenantOf,
@@ -71,11 +83,82 @@ const HEADER_VALUE_RE = /^[\t\x20-\x7e\x80-\xff]+$/;
 
 type ClientRow = typeof connectorOAuthClients.$inferSelect;
 
-/** What a DTO needs beyond the server row: its tools, OAuth clients and member-connection count. */
+/**
+ * What a DTO needs beyond the server row: its tools, OAuth clients, member-connection count and the organization's
+ * connection (07.14, D-06).
+ */
 interface DtoExtras {
   tools: readonly ToolRow[];
   clients: readonly ClientRow[];
   connections: ReadonlyMap<string, number>;
+  orgConnections: ReadonlyMap<string, OrgConnection>;
+}
+
+/** Scopes are asked for by the two sign-in modes and by client credentials (07.14 D-03); the other modes take none. */
+function takesScopes(mode: ConnectorAuthMode): boolean {
+  return usesOAuthSignIn(mode) || mode === "org_client_credentials";
+}
+
+/**
+ * Why a credential needs reconnecting, from the stored terminal error code (R2). The one table for both principals:
+ * the connectors module's member view delegates here through `mcp/index.ts` (mcp never imports connectors).
+ */
+export function reconnectReasonOfCode(lastError: string | null): ConnectorReconnectReason {
+  switch (lastError) {
+    case "invalid_grant":
+    case "refresh_token_reused":
+    case "access_denied":
+    case "invalid_client":
+    case "unauthorized_client":
+    case "upstream_unauthorized":
+      return "revoked";
+    case "issuer_changed":
+    case "url_changed":
+      return "provider_changed";
+    default:
+      return "expired";
+  }
+}
+
+const iso = (t: string | null) => (t ? new Date(t).toISOString() : null);
+
+/**
+ * The organization's connection per server (all, or one), as the `mcp.manage` DTO shows it (D-06, D-11): the state,
+ * the account label, the client-credential identifiers and who connected it, by name from the organization's members.
+ * Never the sealed bundle or its id: only whether one is stored. Tenant RLS scopes it to this organization.
+ */
+async function orgConnectionsOf(tx: Tx, serverId?: string): Promise<Map<string, OrgConnection>> {
+  const rows = await tx
+    .select({ c: connectorOrgConnections, connectedByName: orgMembers.displayName })
+    .from(connectorOrgConnections)
+    .leftJoin(
+      orgMembers,
+      and(
+        eq(orgMembers.organizationId, connectorOrgConnections.organizationId),
+        eq(orgMembers.userId, connectorOrgConnections.connectedBy),
+      ),
+    )
+    .where(serverId ? eq(connectorOrgConnections.serverId, serverId) : undefined);
+  const out = new Map<string, OrgConnection>();
+  for (const { c, connectedByName } of rows) {
+    const cc = c.method === "client_credentials";
+    out.set(c.serverId, {
+      method: c.method,
+      status: c.status,
+      accountLabel: c.accountLabel,
+      clientId: cc ? c.clientId : null,
+      tokenEndpoint: cc ? c.tokenEndpoint : null,
+      scopes: [...c.scopes],
+      // The admin who connected it, while they are still a member of the organization.
+      connectedBy:
+        c.connectedBy && connectedByName !== null ? { id: c.connectedBy, name: connectedByName } : null,
+      connectedAt: iso(c.connectedAt),
+      lastUsedAt: iso(c.lastUsedAt),
+      reconnectReason: c.status === "needs_reconnect" ? reconnectReasonOfCode(c.lastError) : null,
+      hasSecret: c.secretId !== null,
+    });
+  }
+  return out;
 }
 
 /** Read options: `oauthAvailable` (from `OCW_PUBLIC_API_URL`) turns a sign-in connector's status into `https_required`. */
@@ -89,13 +172,12 @@ export function mcpReadOptions(core: Core): McpReadOptions {
 }
 
 function oauthStatusOf(row: ServerRow, opts: McpReadOptions): ConnectorOAuthStatus | null {
-  if (row.authMode !== "per_member_oauth") return null;
+  if (!usesOAuthSignIn(row.authMode)) return null;
   if (opts.oauthAvailable === false) return "https_required";
   return row.oauthStatus ?? "ready";
 }
 
 function toDto(row: ServerRow, extras: DtoExtras, opts: McpReadOptions): McpServer {
-  const perMember = row.authMode !== "org_secret";
   return {
     id: row.id,
     name: row.name,
@@ -129,7 +211,7 @@ function toDto(row: ServerRow, extras: DtoExtras, opts: McpReadOptions): McpServ
     authMode: row.authMode,
     memberHeaderName: row.authMode === "per_member_secret" ? row.memberHeaderName : null,
     memberHeaderPrefix: row.authMode === "per_member_secret" ? row.memberHeaderPrefix : null,
-    oauthScopes: row.authMode === "per_member_oauth" ? (row.oauthScopes ?? null) : null,
+    oauthScopes: takesScopes(row.authMode) ? (row.oauthScopes ?? null) : null,
     oauthStatus: oauthStatusOf(row, opts),
     oauthUseCimd: row.oauthUseCimd,
     // The client secret is never returned: only whether one is stored.
@@ -142,12 +224,20 @@ function toDto(row: ServerRow, extras: DtoExtras, opts: McpReadOptions): McpServ
         hasSecret: c.clientSecretId !== null,
         method: c.method,
       })),
-    memberConnections: perMember ? (extras.connections.get(row.id) ?? 0) : 0,
+    memberConnections: isPerMemberMode(row.authMode) ? (extras.connections.get(row.id) ?? 0) : 0,
+    orgConnection: isOrgCredentialMode(row.authMode) ? (extras.orgConnections.get(row.id) ?? null) : null,
+    authFailure: row.authFailure ?? null,
   };
 }
 
-async function findServer(tx: Tx, id: string): Promise<ServerRow> {
-  const [row] = await tx.select().from(mcpServers).where(eq(mcpServers.id, id));
+/**
+ * The server of the tx's organization (RLS), or 404. `lock` takes the row (`for update`): an edit or a delete holds it
+ * while it reads the connections it may destroy, so an organization connect holding the same row (07.14-07) has either
+ * committed and is seen, or waits until this transaction ends (07.14-09).
+ */
+async function findServer(tx: Tx, id: string, lock = false): Promise<ServerRow> {
+  const q = tx.select().from(mcpServers).where(eq(mcpServers.id, id));
+  const [row] = lock ? await q.for("update") : await q;
   if (!row) throw notFound("MCP server not found", "mcp_server_not_found");
   return row;
 }
@@ -173,7 +263,8 @@ export async function listMcpServers(tx: Tx, opts: McpReadOptions = {}): Promise
   const tools = await tx.select().from(mcpServerTools);
   const clients = await tx.select().from(connectorOAuthClients);
   const connections = await connectionCounts(tx);
-  return rows.map((r) => toDto(r, { tools, clients, connections }, opts));
+  const orgConnections = await orgConnectionsOf(tx);
+  return rows.map((r) => toDto(r, { tools, clients, connections, orgConnections }, opts));
 }
 
 /** 404 `mcp_server_not_found` when absent, including another tenant's server (RLS). */
@@ -182,7 +273,12 @@ export async function getMcpServer(tx: Tx, id: string, opts: McpReadOptions = {}
   const clients = await tx.select().from(connectorOAuthClients).where(eq(connectorOAuthClients.serverId, id));
   return toDto(
     row,
-    { tools: await toolsOf(tx, id), clients, connections: await connectionCounts(tx, id) },
+    {
+      tools: await toolsOf(tx, id),
+      clients,
+      connections: await connectionCounts(tx, id),
+      orgConnections: await orgConnectionsOf(tx, id),
+    },
     opts,
   );
 }
@@ -221,6 +317,21 @@ export async function setOAuthStatus(
   await tx
     .update(mcpServers)
     .set({ oauthStatus: status, updatedAt: new Date().toISOString() })
+    .where(eq(mcpServers.id, serverId));
+}
+
+/**
+ * Records the step where the organization's sign-in last failed (07.14 D-10), or clears it (null) once a sign-in or a
+ * grant succeeds. A closed code only (the column's check), never provider text.
+ */
+export async function setAuthFailure(
+  tx: Tx,
+  serverId: string,
+  code: ConnectorAuthFailure | null,
+): Promise<void> {
+  await tx
+    .update(mcpServers)
+    .set({ authFailure: code, updatedAt: new Date().toISOString() })
     .where(eq(mcpServers.id, serverId));
 }
 
@@ -314,7 +425,10 @@ async function resolveHeaders(
 
 // ---------------------------------------------------------------- connector auth modes (07.4, D-01)
 
-const STDIO_MEMBER = "Member accounts need a remote server (streamable HTTP or SSE), not the stdio sandbox";
+/** The API calls the proxied modes (member and organization accounts); the stdio sandbox is reachable only by the cell. */
+const STDIO_PROXIED =
+  "Member and organization accounts need a remote server (streamable HTTP or SSE), not the stdio sandbox";
+const HEADERS_PROXIED = "Only an organization-headers server takes organization headers";
 
 /**
  * The header a member's key is sent in. The contract checks only its shape (`mcp.ts` cannot import keychain's rule:
@@ -399,6 +513,9 @@ async function putPreRegisteredClient(
   });
 }
 
+/** Why the registry destroyed stored credentials (audited): a mode switch, a URL change (07.14 CR-01) or a delete. */
+type ClearReason = "mode_changed" | "url_changed" | "server_deleted";
+
 /** 409 `connections_exist` with the count, so the admin confirms before members are disconnected (D-01, R4). */
 function connectionsExist(count: number, what: string): HttpError {
   return new HttpError(
@@ -414,12 +531,7 @@ function connectionsExist(count: number, what: string): HttpError {
  * count. Tokens are destroyed locally; nothing is revoked at the provider (mcp does not depend on the connectors
  * module; a member's own disconnect revokes there).
  */
-async function clearConnections(
-  core: Core,
-  tx: Tx,
-  serverId: string,
-  reason: "mode_changed" | "server_deleted",
-): Promise<number> {
+async function clearConnections(core: Core, tx: Tx, serverId: string, reason: ClearReason): Promise<number> {
   // Every member's row, past the owner-only policy, through the `mcp.manage` path (WINDOWS #186): the function deletes
   // the tenant's rows of this server and hands back only the ids of their sealed secrets.
   const res = await tx.execute(sql`select secret_id from app.clear_connector_connections(${serverId}::uuid)`);
@@ -434,6 +546,56 @@ async function clearConnections(
     });
   }
   return removed.length;
+}
+
+/** The method of a server's organization connection, if one is stored (07.14 PD-05; tenant RLS). */
+async function orgConnectionMethodOf(tx: Tx, serverId: string): Promise<OrgConnectionMethod | null> {
+  const [row] = await tx
+    .select({ method: connectorOrgConnections.method })
+    .from(connectorOrgConnections)
+    .where(eq(connectorOrgConnections.serverId, serverId));
+  return row?.method ?? null;
+}
+
+/** 409 `org_connection_exists` with the method, so the admin confirms before the organization's account goes (D-08). */
+function orgConnectionExists(method: OrgConnectionMethod, what: string): HttpError {
+  return new HttpError(
+    409,
+    "org_connection_exists",
+    `The organization's account is connected. Confirm to ${what} and disconnect it.`,
+    { method },
+  );
+}
+
+/**
+ * Deletes the organization's connection of a server and its sealed bundle in the caller's transaction (07.14 D-08,
+ * PD-11), as `clearConnections` does for members, and audits the disconnect with its reason. Nothing is revoked at the
+ * provider (`revoked: false`): only the admin's Disconnect in the connectors module revokes. Returns the method, or
+ * null when there was no connection.
+ */
+async function clearOrgConnection(
+  core: Core,
+  tx: Tx,
+  serverId: string,
+  reason: ClearReason,
+): Promise<OrgConnectionMethod | null> {
+  const [removed] = await tx
+    .delete(connectorOrgConnections)
+    .where(eq(connectorOrgConnections.serverId, serverId))
+    .returning({
+      id: connectorOrgConnections.id,
+      method: connectorOrgConnections.method,
+      secretId: connectorOrgConnections.secretId,
+    });
+  if (!removed) return null;
+  if (removed.secretId) await core.secrets.remove(tx, removed.secretId);
+  await core.audit.record(tx, {
+    action: "connector.org_disconnected",
+    resourceType: "connector_org_connection",
+    resourceId: removed.id,
+    metadata: { serverId, method: removed.method, revoked: false, reason },
+  });
+  return removed.method;
 }
 
 // ---------------------------------------------------------------- probe
@@ -586,7 +748,7 @@ export async function recordProbeResult(
   r: AgentChannelMcpProbeResult,
 ): Promise<{ applied: boolean }> {
   const row = await findServer(tx, r.serverId);
-  if (row.authMode !== "org_secret") return { applied: false };
+  if (!rendersInCell(row.authMode)) return { applied: false };
   if ((await latestProbeId(tx, row.id)) !== r.probeId) return { applied: false };
 
   if (r.ok) {
@@ -629,12 +791,14 @@ export async function recordProbeResult(
 
 export async function createMcpServer(core: Core, tx: Tx, input: CreateMcpServerRequest): Promise<McpServer> {
   const ctx = tenantOf(tx);
-  const mode: ConnectorAuthMode = input.authMode;
-  const perMember = mode !== "org_secret";
+  const mode = input.authMode;
+  // Member and organization accounts are called by the API (the connectors proxy), never rendered in the cell.
+  const proxied = usesConnectorProxy(mode);
+  const signIn = usesOAuthSignIn(mode);
   let url: string | null = null;
   let sandboxServer: string | null = null;
   if (input.transport === "sandboxed-stdio") {
-    if (perMember) throw badRequest(STDIO_MEMBER, "per_member_needs_remote");
+    if (proxied) throw badRequest(STDIO_PROXIED, "per_member_needs_remote");
     if (input.url) throw badRequest("A sandboxed server has no URL", "url_not_allowed");
     sandboxServer = assertSandboxServer(core, input.sandboxServer);
   } else {
@@ -644,15 +808,16 @@ export async function createMcpServer(core: Core, tx: Tx, input: CreateMcpServer
     url = assertUrl(input.url);
   }
   // The contract refuses these; checked again so no caller of the service can mix the modes.
-  if (perMember && input.headers.length > 0) {
-    throw badRequest("A per-member connector has no organization headers", "headers_not_allowed");
-  }
+  if (proxied && input.headers.length > 0) throw badRequest(HEADERS_PROXIED, "headers_not_allowed");
   const memberHeaderName = mode === "per_member_secret" ? assertMemberHeader(input.memberHeaderName) : null;
   const memberHeaderPrefix = mode === "per_member_secret" ? input.memberHeaderPrefix || null : null;
-  const oauthScopes = mode === "per_member_oauth" ? normalizeScopes(input.oauthScopes) : null;
-  if (mode !== "per_member_oauth" && (input.oauthClient || input.oauthUseCimd === false)) {
-    throw badRequest("Only a member sign-in connector takes an OAuth client", "oauth_not_allowed");
+  if (!signIn && (input.oauthClient || input.oauthUseCimd === false)) {
+    throw badRequest("Only a sign-in connector takes an OAuth client", "oauth_not_allowed");
   }
+  if (!takesScopes(mode) && input.oauthScopes && input.oauthScopes.length > 0) {
+    throw badRequest("Only sign-in and client-credential connectors take scopes", "oauth_not_allowed");
+  }
+  const oauthScopes = takesScopes(mode) ? normalizeScopes(input.oauthScopes) : null;
 
   const id = randomUUID();
   const taken = new Set((await tx.select({ s: mcpServers.safeName }).from(mcpServers)).map((r) => r.s));
@@ -673,19 +838,20 @@ export async function createMcpServer(core: Core, tx: Tx, input: CreateMcpServer
       orgEnabled: input.orgEnabled,
       personalAllowed: input.personalAllowed,
       trustedChaining: input.trustedChaining,
-      // The cell never probes a per-member connector: it waits for the first member (07.4-10's API-side probe).
-      status: !perMember && input.orgEnabled ? "probing" : "pending",
+      // The cell never probes a proxied connector: it waits for the first member (07.4-10's API-side probe) or for
+      // the organization's connection (07.14: probed with that token).
+      status: !proxied && input.orgEnabled ? "probing" : "pending",
       createdBy: ctx.userId ?? null,
       authMode: mode,
       memberHeaderName,
       memberHeaderPrefix,
       oauthScopes,
-      oauthStatus: mode === "per_member_oauth" ? "ready" : null,
-      oauthUseCimd: mode === "per_member_oauth" ? (input.oauthUseCimd ?? true) : true,
+      oauthStatus: signIn ? "ready" : null,
+      oauthUseCimd: signIn ? (input.oauthUseCimd ?? true) : true,
     })
     .returning();
   if (!row) throw new Error("mcp server insert failed");
-  if (mode === "per_member_oauth" && input.oauthClient) {
+  if (signIn && input.oauthClient) {
     await putPreRegisteredClient(core, tx, row, input.oauthClient);
   }
 
@@ -706,11 +872,11 @@ export async function createMcpServer(core: Core, tx: Tx, input: CreateMcpServer
       // Never a client secret, key or token: the mode, the member header name and whether a client was entered.
       authMode: mode,
       ...(memberHeaderName ? { memberHeaderName } : {}),
-      ...(mode === "per_member_oauth" ? { preRegisteredClient: Boolean(input.oauthClient) } : {}),
-      ...(mode === "per_member_oauth" && input.oauthUseCimd === false ? { oauthUseCimd: false } : {}),
+      ...(signIn ? { preRegisteredClient: Boolean(input.oauthClient) } : {}),
+      ...(signIn && input.oauthUseCimd === false ? { oauthUseCimd: false } : {}),
     },
   });
-  if (row.orgEnabled && !perMember) {
+  if (row.orgEnabled && rendersInCell(mode)) {
     // The cell refetches `/cell` (connection details), then discovers the tools.
     await notifyCellConfig(core, tx, "tools.updated", null);
     await requestProbe(core, tx, row.id);
@@ -718,38 +884,61 @@ export async function createMcpServer(core: Core, tx: Tx, input: CreateMcpServer
   return getMcpServer(tx, row.id, mcpReadOptions(core));
 }
 
+/**
+ * Edits a server; each field is checked against the resulting mode and the stored transport. A credential change that
+ * would orphan credentials answers 409 until `UpdateMcpServerRequest.clearConnections` confirms it: `connections_exist`
+ * (with the count) for a member mode, `org_connection_exists` (with the method) for an organization mode while its
+ * connection is stored (07.14 PD-11). A credential change is a mode switch, or a new URL on a proxied server (07.14
+ * review CR-01: a token or key belongs to the URL it was granted for, so the new URL never receives it). Confirmed,
+ * they are destroyed in this transaction, never revoked.
+ */
 export async function updateMcpServer(
   core: Core,
   tx: Tx,
   id: string,
   input: UpdateMcpServerRequest,
 ): Promise<McpServer> {
-  const row = await findServer(tx, id);
+  const row = await findServer(tx, id, true);
   const from = row.authMode;
-  const to: ConnectorAuthMode = input.authMode ?? from;
+  const to = input.authMode ?? from;
   const modeChanged = to !== from;
-  const perMember = to !== "org_secret";
+  // Member and organization accounts are proxied by the API: no stdio sandbox, no organization headers.
+  const proxied = usesConnectorProxy(to);
+  const signIn = usesOAuthSignIn(to);
 
   // ---- the resulting mode's rules, against the stored server (the contract only sees the body)
-  if (perMember && row.transport === "sandboxed-stdio")
-    throw badRequest(STDIO_MEMBER, "per_member_needs_remote");
-  if (perMember && input.headers !== undefined && input.headers.length > 0) {
-    throw badRequest("A per-member connector has no organization headers", "headers_not_allowed");
+  if (proxied && row.transport === "sandboxed-stdio")
+    throw badRequest(STDIO_PROXIED, "per_member_needs_remote");
+  if (proxied && input.headers !== undefined && input.headers.length > 0) {
+    throw badRequest(HEADERS_PROXIED, "headers_not_allowed");
   }
   if (to !== "per_member_secret" && typeof input.memberHeaderName === "string") {
     throw badRequest("Only a member key connector takes a header", "member_header_not_allowed");
   }
-  if (
-    to !== "per_member_oauth" &&
-    (input.oauthClient || (input.oauthScopes && input.oauthScopes.length > 0) || input.oauthUseCimd === false)
-  ) {
-    throw badRequest("Only a member sign-in connector takes an OAuth client or scopes", "oauth_not_allowed");
+  if (!signIn && (input.oauthClient || input.oauthUseCimd === false)) {
+    throw badRequest("Only a sign-in connector takes an OAuth client", "oauth_not_allowed");
   }
-  // Leaving a per-member mode orphans every member's credential: refuse until the admin confirms (D-01, R4).
+  if (!takesScopes(to) && input.oauthScopes && input.oauthScopes.length > 0) {
+    throw badRequest("Only sign-in and client-credential connectors take scopes", "oauth_not_allowed");
+  }
+  // A proxied server's credentials were granted for its URL: a new URL is a credential change (07.14 review CR-01).
+  const urlChanged = input.url !== undefined && input.url !== row.url && row.transport !== "sandboxed-stdio";
+  const credentialChange = modeChanged || (urlChanged && usesConnectorProxy(from));
+  const what = modeChanged ? "switch the mode" : "change the URL";
+  const reason: ClearReason = modeChanged ? "mode_changed" : "url_changed";
+  // Leaving a member mode, or moving its URL, orphans every member's credential: refuse until the admin confirms
+  // (D-01, R4).
   const connectionCount =
-    from !== "org_secret" && modeChanged ? ((await connectionCounts(tx, id)).get(id) ?? 0) : 0;
+    isPerMemberMode(from) && credentialChange ? ((await connectionCounts(tx, id)).get(id) ?? 0) : 0;
   if (connectionCount > 0 && input.clearConnections !== true) {
-    throw connectionsExist(connectionCount, "switch the mode");
+    throw connectionsExist(connectionCount, what);
+  }
+  // Leaving an organization mode (to any other mode, the other organization mode included), or moving its URL,
+  // destroys the organization's account: the same confirmation (07.14 D-08, PD-11, CR-01).
+  const orgMethod =
+    isOrgCredentialMode(from) && credentialChange ? await orgConnectionMethodOf(tx, id) : null;
+  if (orgMethod !== null && input.clearConnections !== true) {
+    throw orgConnectionExists(orgMethod, what);
   }
 
   const patch: Partial<typeof mcpServers.$inferInsert> = {};
@@ -780,8 +969,8 @@ export async function updateMcpServer(
   }
   let orphaned: string[] = [];
   let headers = row.headers;
-  if (perMember) {
-    // A per-member connector keeps no organization credential: the stored headers go with the switch.
+  if (proxied) {
+    // A proxied connector keeps no organization headers: the stored headers go with the switch.
     if (row.headers.length > 0) {
       orphaned = row.headers.map((h) => h.secretId);
       headers = [];
@@ -829,8 +1018,7 @@ export async function updateMcpServer(
     patch.memberHeaderName = null;
     patch.memberHeaderPrefix = null;
   }
-  let clientChanged = false;
-  if (to === "per_member_oauth") {
+  if (takesScopes(to)) {
     if (input.oauthScopes !== undefined) {
       const scopes = normalizeScopes(input.oauthScopes);
       if (!sameList(scopes, row.oauthScopes)) {
@@ -838,6 +1026,12 @@ export async function updateMcpServer(
         changed.push("oauthScopes");
       }
     }
+  } else if (row.oauthScopes !== null) {
+    patch.oauthScopes = null;
+  }
+  let clientChanged = false;
+  // OAuth client registrations belong to the issuer, not to who signs in: kept between the two sign-in modes (D-14).
+  if (signIn) {
     if (input.oauthClient === null) {
       clientChanged = (await removeOAuthClients(core, tx, id, "pre_registered")) > 0;
     } else if (input.oauthClient !== undefined) {
@@ -851,9 +1045,9 @@ export async function updateMcpServer(
     }
     // A new mode starts ready; an admin's new client answers a `needs_client`.
     if (modeChanged || (clientChanged && row.oauthStatus === "needs_client")) patch.oauthStatus = "ready";
-  } else if (from === "per_member_oauth") {
+  } else if (usesOAuthSignIn(from)) {
+    // Leaving both sign-in modes: the registrations go.
     await removeOAuthClients(core, tx, id);
-    patch.oauthScopes = null;
     patch.oauthStatus = null;
     patch.oauthUseCimd = true;
   }
@@ -864,18 +1058,25 @@ export async function updateMcpServer(
   const connectionChanged = changed.some(
     (k) => k === "url" || k === "sandboxServer" || k === "headers" || k === "authMode",
   );
-  // Only an organization-secret server is probed by the cell; a per-member one waits for a member again.
-  const reprobe = !perMember && enabled && (connectionChanged || (changed.includes("orgEnabled") && enabled));
-  if (perMember && modeChanged) {
+  // Only an organization-headers server is probed by the cell; a proxied one waits for a member or the organization's
+  // connection again.
+  const reprobe =
+    rendersInCell(to) && enabled && (connectionChanged || (changed.includes("orgEnabled") && enabled));
+  // A proxied server with a new mode or URL waits for a member or the organization's connection again (CR-01).
+  const credentialsMoved = proxied && (modeChanged || changed.includes("url"));
+  if (credentialsMoved) {
     patch.status = "pending";
     patch.statusDetail = null;
   } else if (!enabled && connectionChanged) patch.status = "pending";
+  // The last sign-in failure described the previous mode's (or URL's) account (07.14 D-10).
+  if (modeChanged || (credentialsMoved && row.authFailure !== null)) patch.authFailure = null;
   await tx
     .update(mcpServers)
     .set({ ...patch, updatedAt: new Date().toISOString() })
     .where(eq(mcpServers.id, id));
   for (const secretId of orphaned) await core.secrets.remove(tx, secretId);
-  if (connectionCount > 0) await clearConnections(core, tx, id, "mode_changed");
+  if (connectionCount > 0) await clearConnections(core, tx, id, reason);
+  if (orgMethod !== null) await clearOrgConnection(core, tx, id, reason);
 
   await core.audit.record(tx, {
     action: "mcp.server.updated",
@@ -905,7 +1106,8 @@ export async function updateMcpServer(
 
 /**
  * Deletes a server with its tools, grants, header secrets and OAuth clients. With member connections it answers 409
- * `connections_exist` unless `clearConnections` confirms; then every connection and its sealed credential go too.
+ * `connections_exist`, with the organization's connection 409 `org_connection_exists` (07.14 D-08), unless
+ * `clearConnections` confirms; then every connection and its sealed credential go too (locally, never revoked).
  */
 export async function deleteMcpServer(
   core: Core,
@@ -913,9 +1115,13 @@ export async function deleteMcpServer(
   id: string,
   opts: { clearConnections?: boolean } = {},
 ): Promise<void> {
-  const row = await findServer(tx, id);
+  const row = await findServer(tx, id, true);
   const connections = (await connectionCounts(tx, id)).get(id) ?? 0;
   if (connections > 0 && opts.clearConnections !== true) throw connectionsExist(connections, "delete it");
+  const orgMethod = await orgConnectionMethodOf(tx, id);
+  if (orgMethod !== null && opts.clearConnections !== true) throw orgConnectionExists(orgMethod, "delete it");
+  // Before the server row: its cascade would drop the connection row but leave the sealed bundle behind.
+  await clearOrgConnection(core, tx, id, "server_deleted");
   await clearConnections(core, tx, id, "server_deleted");
   await removeOAuthClients(core, tx, id);
   await tx
@@ -933,11 +1139,21 @@ export async function deleteMcpServer(
   await notifyCellConfig(core, tx, "tools.updated", null);
 }
 
-/** Admin "probe again": 409 for an org-disabled server (the cell does not know it) or a per-member connector. */
+/**
+ * Admin "probe again" (the cell's probe): 409 for an org-disabled server (the cell does not know it), a per-member
+ * connector (`member_connector`) or an organization-account one (`org_connector`, 07.14), which the API probes with
+ * the member's or the organization's own token.
+ */
 export async function probeMcpServer(core: Core, tx: Tx, id: string): Promise<McpServer> {
   const row = await findServer(tx, id);
-  if (row.authMode !== "org_secret") {
+  if (isPerMemberMode(row.authMode)) {
     throw conflict("A member connector is probed with a member's own account", "member_connector");
+  }
+  if (!rendersInCell(row.authMode)) {
+    throw conflict(
+      "A connector with the organization's account is probed with that connection",
+      "org_connector",
+    );
   }
   if (!row.orgEnabled) throw conflict("Enable the server for the organization first", "server_disabled");
   const probeId = await requestProbe(core, tx, id);
@@ -954,9 +1170,10 @@ export async function probeMcpServer(core: Core, tx: Tx, id: string): Promise<Mc
 
 /**
  * The admin-set headers of an org-enabled, organization-secret server, for the API's own MCP call through the egress
- * guard (07.6 watched records read with the workspace's access, D-07). Null for a per-member connector, a disabled or
- * unknown server (RLS: another organization's id is never resolved). The caller sends them only as request headers and
- * redacts every value from what comes back (`callTool`); it never logs, stores or returns them.
+ * guard (07.6 watched records read with the workspace's access, D-07). Null for a proxied connector (member or
+ * organization account, 07.14: its token never leaves the connectors module), a disabled or unknown server (RLS:
+ * another organization's id is never resolved). The caller sends them only as request headers and redacts every value
+ * from what comes back (`callTool`); it never logs, stores or returns them.
  */
 export async function orgSecretHeaders(
   core: Core,
@@ -964,7 +1181,7 @@ export async function orgSecretHeaders(
   serverId: string,
 ): Promise<Array<{ name: string; value: string }> | null> {
   const [row] = await tx.select().from(mcpServers).where(eq(mcpServers.id, serverId)).limit(1);
-  if (row?.authMode !== "org_secret" || !row.orgEnabled) return null;
+  if (!row || !rendersInCell(row.authMode) || !row.orgEnabled) return null;
   const out: Array<{ name: string; value: string }> = [];
   for (const h of row.headers) out.push({ name: h.name, value: await core.secrets.reveal(tx, h.secretId) });
   return out;
@@ -973,7 +1190,8 @@ export async function orgSecretHeaders(
 // ---------------------------------------------------------------- cell snapshot
 
 /**
- * The org-enabled, organization-secret servers as the cell renders them (D-13; 07.4 C-01: never a per-member one). Header values are revealed only here and in `orgSecretHeaders`; the caller
+ * The org-enabled, organization-headers servers as the cell renders them (D-13; 07.4 C-01: never a per-member one;
+ * 07.14: never an organization-account one, whose token stays in the API). Header values are revealed only here and in `orgSecretHeaders`; the caller
  * must send the result over the authenticated Agent Channel and never log it. `tools` (the server's
  * `toolFilter.include`) = MCP tool names granted on any live bot, minus dangerous names; per-bot exposure is
  * still decided by each agent's `alsoAllow` and every turn.
@@ -982,8 +1200,8 @@ export async function cellMcpServers(core: Core, tx: Tx): Promise<CellMcpServer[
   const rows = await tx
     .select()
     .from(mcpServers)
-    // Per-member connectors never reach the cell: the API calls them with the asking member's credential (C-01).
-    .where(and(eq(mcpServers.orgEnabled, true), eq(mcpServers.authMode, "org_secret")))
+    // Proxied connectors never reach the cell: the API calls them with the member's or the organization's credential.
+    .where(and(eq(mcpServers.orgEnabled, true), inArray(mcpServers.authMode, [...CELL_MODES])))
     .orderBy(asc(mcpServers.safeName));
   if (rows.length === 0) return [];
   const granted = await tx

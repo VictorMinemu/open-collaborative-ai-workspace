@@ -11,24 +11,26 @@ import {
   type MemberConnector,
   MemberConnectorList,
   MemberConnector as MemberConnectorSchema,
+  PER_MEMBER_MODES,
   ReadersPreview,
+  usesConnectorProxy,
 } from "@ocw/contracts";
-import { connectorConnections, connectorOAuthClients, mcpServers, mcpServerTools, type Tx } from "@ocw/db";
-import { and, asc, eq, ne } from "drizzle-orm";
-import type { FastifyRequest } from "fastify";
+import { connectorConnections, mcpServers, mcpServerTools, type Tx } from "@ocw/db";
+import { asc, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { markDecided } from "../../authz";
 import { type App, authOf, type Core, tenant } from "../../core";
 import { egressFor } from "../../lib/egress";
 import { conflict, HttpError, notFound } from "../../lib/errors";
 import { createConversationAccess } from "../chat";
-import { getMcpServer, mcpReadOptions, oauthClientsOf, setOAuthStatus } from "../mcp";
+import { getMcpServer, mcpReadOptions, setOAuthStatus } from "../mcp";
 import type { PermissionService } from "../organization";
 import { clientMetadataDocument } from "./client-metadata";
 import {
   accessTokenFor,
   ConnectorTokenUnavailableError,
   clientSecretFor,
+  credentialKeyOf,
   disconnect,
   oauthBundleOf,
   perMemberServer,
@@ -36,58 +38,31 @@ import {
   storeConnection,
 } from "./credentials";
 import {
-  buildAuthorization,
-  type ClientChoice,
+  CONNECTOR_CLIENT_NAME,
+  connectFlowKey,
+  credentialError,
+  FlowRecord,
+  flowAuth,
+  STATE_RE,
+  settingsUrl,
+  startOAuthFlow,
+} from "./flow";
+import {
   ConnectorOAuthError,
   checkCallbackIssuer,
-  chooseClient,
-  chooseScope,
   type DiscoveredAuth,
-  discover,
   exchangeCode,
   revokeToken,
   type TokenBundle,
 } from "./oauth";
+import { completeOrgSignIn, orgSignInFailed } from "./org-routes";
 import { probeConnector } from "./probe";
 import { createShare, listShares, previewReaders, revokeShare, type SharesDeps } from "./shares";
 
 const tags = ["connectors"];
 
-/** The client name the instance presents to authorization servers (CIMD and dynamic registration). */
-export const CONNECTOR_CLIENT_NAME = "Open Collaborative AI Workspace";
-
-/** A started sign-in lives this long, single use (GETDEL), bound to the member, organization and connector. */
-export const CONNECT_FLOW_TTL_S = 600;
-export const connectFlowKey = (state: string) => `ocw:conn:oauth:${state}`;
-/** `buildAuthorization` states are 32 random bytes, base64url: anything else is never looked up. */
-const STATE_RE = /^[A-Za-z0-9_-]{43}$/u;
-
-/**
- * Server-side state of one sign-in (Redis only: the verifier never reaches the browser). The discovered authorization
- * server travels with it so the callback checks `iss` and redeems the code against the exact issuer the flow started
- * with; a client secret never does (it is read again from `connector_oauth_clients`).
- */
-const FlowRecord = z.object({
-  organizationId: z.string(),
-  userId: z.string(),
-  serverId: z.string(),
-  verifier: z.string(),
-  redirectUri: z.string(),
-  scope: z.string().nullable(),
-  client: z.object({
-    method: z.enum(["pre_registered", "cimd", "dcr"]),
-    issuer: z.string(),
-    clientId: z.string(),
-  }),
-  discovered: z.object({
-    serverUrl: z.string(),
-    resource: z.string(),
-    issuer: z.string(),
-    sameOrigin: z.string(),
-    metadata: z.record(z.string(), z.unknown()),
-  }),
-});
-type FlowRecord = z.infer<typeof FlowRecord>;
+// Moved to `flow.ts` (07.14 PD-06); re-exported so existing imports keep working.
+export { CONNECT_FLOW_TTL_S, CONNECTOR_CLIENT_NAME, connectFlowKey } from "./flow";
 
 /** Query of the authorization response. Only these fields are read; `error_description` is never used or shown. */
 const CallbackQuery = z.object({
@@ -96,22 +71,6 @@ const CallbackQuery = z.object({
   iss: z.string().max(2048).optional(),
   error: z.string().max(256).optional(),
 });
-
-const MESSAGES: Record<ConnectorErrorCode, string> = {
-  https_required: "Member sign-in needs HTTPS on this workspace.",
-  discovery_failed: "Couldn't reach this connector's sign-in.",
-  pkce_unsupported: "This connector's sign-in doesn't meet OCW's security requirements.",
-  needs_client: "This connector isn't ready for sign-in yet. An admin has to finish setting it up.",
-  egress_refused: "This connector's sign-in points to an address OCW won't contact.",
-  flow_expired: "That sign-in took too long or was already used.",
-  session_mismatch: "This sign-in was started from another account.",
-  access_denied: "Access was not allowed.",
-  issuer_mismatch: "The sign-in came back from an unexpected server.",
-  token_exchange_failed: "The connector didn't finish the sign-in.",
-  not_connected: "You aren't connected to this connector.",
-  needs_reconnect: "Your sign-in stopped working. Reconnect to keep using it.",
-};
-const connectError = (code: ConnectorErrorCode) => new HttpError(409, code, MESSAGES[code]);
 
 type ServerRow = typeof mcpServers.$inferSelect;
 type ConnectionRow = typeof connectorConnections.$inferSelect;
@@ -144,8 +103,8 @@ function memberConnectorOf(core: Core, server: ServerRow, row: ConnectionRow | n
 const missing = () => notFound("Connector not found", "connector_not_found");
 
 /** A per-member connector of the caller's organization in the expected mode: 404 when absent, 409 in another mode. */
-async function serverIn(tx: Tx, id: string, mode?: ServerRow["authMode"]): Promise<ServerRow> {
-  const server = await perMemberServer(tx, id);
+async function serverIn(tx: Tx, id: string, mode?: ServerRow["authMode"], lock = false): Promise<ServerRow> {
+  const server = await perMemberServer(tx, id, lock);
   if (!server) throw missing();
   if (mode && server.authMode !== mode) {
     throw conflict(
@@ -175,12 +134,7 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
     preHandler: [core.identity.requireUser, perms.requirePermission("connector.connect")],
   };
   const urls = () => connectorOAuthUrls(core.env.OCW_PUBLIC_API_URL);
-  const webUrl = (query: Record<string, string>) =>
-    `${core.env.OCW_PUBLIC_WEB_URL.replace(/\/+$/u, "")}/settings/connections?${new URLSearchParams(query)}`;
-
-  /** Records an OAuth status in its own transaction (the request's own transaction rolls back with its 409). */
-  const recordOAuthStatus = (req: FastifyRequest, serverId: string, status: "needs_client" | "error") =>
-    core.db.withTenant(tenant(req), (tx) => setOAuthStatus(tx, serverId, status)).catch(() => {});
+  const webUrl = (query: Record<string, string>) => settingsUrl(core, "member", query);
 
   // Listing is decided here, not by a preHandler: without `connector.connect` (Bots off, a deny rule) the member still
   // sees their OWN connections so they can withdraw them (WINDOWS #196; DELETE below), and nothing else.
@@ -200,7 +154,8 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
         const servers = await tx
           .select()
           .from(mcpServers)
-          .where(ne(mcpServers.authMode, "org_secret"))
+          // Member modes only: an organization-account server is the organization's, never a member's (07.14).
+          .where(inArray(mcpServers.authMode, [...PER_MEMBER_MODES]))
           .orderBy(asc(mcpServers.name), asc(mcpServers.createdAt));
         const rows = await tx
           .select()
@@ -225,133 +180,17 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
       schema: { tags, params: IdParams, response: { 200: ConnectStartResponse } },
     },
     async (req) => {
-      const auth = authOf(req);
-      const oauthUrls = urls();
-      const loaded = await core.db.withTenant(tenant(req), async (tx) => {
-        const server = await serverIn(tx, req.params.id, "per_member_oauth");
-        const clients = await oauthClientsOf(tx, server.id);
-        const reveal = async (id: string | null) =>
-          id ? await core.secrets.reveal(tx, id).catch(() => undefined) : undefined;
-        const preRegistered = [];
-        const stored = [];
-        for (const c of clients) {
-          const clientSecret = await reveal(c.clientSecretId);
-          const entry = { issuer: c.issuer, clientId: c.clientId, ...(clientSecret ? { clientSecret } : {}) };
-          if (c.method === "pre_registered") preRegistered.push(entry);
-          else stored.push({ ...entry, method: c.method });
-        }
-        return { server, preRegistered, stored };
-      });
-      const { server } = loaded;
-      if (!oauthUrls.oauthAvailable || !oauthUrls.redirectUri) throw connectError("https_required");
-      if (!server.url) throw connectError("discovery_failed");
-
-      const egress = egressFor(core.env);
-      let d: DiscoveredAuth;
-      let client: ClientChoice;
-      try {
-        d = await discover(egress, server.url);
-        client = await chooseClient(egress, d, {
-          preRegistered: loaded.preRegistered,
-          stored: loaded.stored,
-          urls: oauthUrls,
-          clientName: CONNECTOR_CLIENT_NAME,
-          // WINDOWS #179: the admin turned the client metadata document off for this server.
-          allowCimd: server.oauthUseCimd,
-        });
-      } catch (err) {
-        const e = err instanceof ConnectorOAuthError ? err : new ConnectorOAuthError("discovery_failed");
-        req.log.info({ serverId: server.id, code: e.code }, "connector connect refused");
-        // Admin-visible states: no usable client, or a server that cannot be signed in to as it is (UI: Sign-in error).
-        if (e.code === "needs_client") await recordOAuthStatus(req, server.id, "needs_client");
-        else if (e.code === "pkce_unsupported" || (e.code === "discovery_failed" && e.terminal)) {
-          await recordOAuthStatus(req, server.id, "error");
-        }
-        throw connectError(e.code);
-      }
-
-      if (client.method === "dcr" && client.isNew) {
-        // Keep the registration per issuer; a concurrent registration for the same issuer wins and is used instead.
-        client = await core.db.withTenant(tenant(req), async (tx) => {
-          const secretId =
-            client.method === "dcr" && client.clientSecret
-              ? await core.secrets.put(tx, {
-                  name: "Connector OAuth client",
-                  kind: "mcp_credential",
-                  provider: server.id,
-                  value: client.clientSecret,
-                })
-              : null;
-          const inserted = await tx
-            .insert(connectorOAuthClients)
-            .values({
-              organizationId: auth.organizationId,
-              serverId: server.id,
-              issuer: client.issuer,
-              clientId: client.clientId,
-              clientSecretId: secretId,
-              method: "dcr",
-            })
-            .onConflictDoNothing()
-            .returning({ id: connectorOAuthClients.id });
-          if (inserted.length > 0) return { ...client, isNew: false } as ClientChoice;
-          if (secretId) await core.secrets.remove(tx, secretId);
-          const [existing] = await tx
-            .select()
-            .from(connectorOAuthClients)
-            .where(
-              and(
-                eq(connectorOAuthClients.serverId, server.id),
-                eq(connectorOAuthClients.issuer, client.issuer),
-              ),
-            )
-            .limit(1);
-          if (!existing) throw connectError("needs_client");
-          const clientSecret = existing.clientSecretId
-            ? await core.secrets.reveal(tx, existing.clientSecretId).catch(() => undefined)
-            : undefined;
-          return {
-            method: "dcr",
-            issuer: existing.issuer,
-            clientId: existing.clientId,
-            ...(clientSecret ? { clientSecret } : {}),
-            isNew: false,
-          } as ClientChoice;
-        });
-      }
-
-      const scope = chooseScope(d, undefined, server.oauthScopes);
-      let started: Awaited<ReturnType<typeof buildAuthorization>>;
-      try {
-        started = await buildAuthorization(d, client, oauthUrls, scope);
-      } catch (err) {
-        throw connectError(err instanceof ConnectorOAuthError ? err.code : "discovery_failed");
-      }
-      const flow: FlowRecord = {
-        organizationId: auth.organizationId,
-        userId: auth.userId,
-        serverId: server.id,
-        verifier: started.codeVerifier,
-        redirectUri: oauthUrls.redirectUri,
-        scope: scope ?? null,
-        client: { method: client.method, issuer: client.issuer, clientId: client.clientId },
-        discovered: {
-          serverUrl: d.serverUrl,
-          resource: d.resource,
-          issuer: d.issuer,
-          sameOrigin: d.sameOrigin,
-          metadata: d.metadata as unknown as Record<string, unknown>,
-        },
-      };
-      await redis.set(connectFlowKey(started.state), JSON.stringify(flow), {
-        expiration: { type: "EX", value: CONNECT_FLOW_TTL_S },
-      });
-      return { authorizeUrl: started.authorizationUrl };
+      const server = await core.db.withTenant(tenant(req), (tx) =>
+        serverIn(tx, req.params.id, "per_member_oauth"),
+      );
+      return startOAuthFlow(core, req, { server, principal: "member" });
     },
   );
 
-  // The authorization server sends the member's browser here (D-02). Public: the session is checked by hand against
-  // the flow, which is consumed FIRST so a mismatch or a replay can never be retried (T-07.4-10-01/02).
+  // The authorization server sends the browser here (D-02): a member's own sign-in, or an admin's sign-in for the
+  // organization (07.14, `FlowRecord.principal`). Public: the session is checked by hand against the flow, which is
+  // consumed FIRST so a mismatch or a replay can never be retried (T-07.4-10-01/02, T-07.14-07-01). An unknown or used
+  // state names no flow, so it goes back to the member page.
   app.get(
     "/connectors/oauth/callback",
     { config: { authz: "public" }, logLevel: "info", schema: { tags, hide: true } },
@@ -388,19 +227,23 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
           .catch(() => {});
         return fail(code, f.serverId);
       };
+      // The checks both principals share fail on the flow's own page.
+      const sharedFailed = (code: "session_mismatch" | "issuer_mismatch") =>
+        f.principal === "organization" ? orgSignInFailed(core, req, reply, f, code) : failed(code);
 
-      // Account binding (T-07.4-10-01): only the member who started the flow, in the same organization, completes it.
+      // Account binding (T-07.4-10-01): only the user who started the flow, in the same organization, completes it.
       const session = await core.identity.authenticate(req.headers).catch(() => null);
       if (!session || session.userId !== f.userId || session.organizationId !== f.organizationId) {
-        return failed("session_mismatch");
+        return sharedFailed("session_mismatch");
       }
       // RFC 9207 before anything else in the response: on a mix-up its error fields are not trusted either.
       const metadata = f.discovered.metadata as unknown as DiscoveredAuth["metadata"];
       try {
         checkCallbackIssuer(metadata, f.discovered.issuer, q.iss ?? null);
       } catch {
-        return failed("issuer_mismatch");
+        return sharedFailed("issuer_mismatch");
       }
+      if (f.principal === "organization") return completeOrgSignIn(core, perms, req, reply, f, session, q);
       if (q.error) return failed(q.error === "access_denied" ? "access_denied" : "token_exchange_failed");
       if (!q.code) return failed("token_exchange_failed");
 
@@ -412,24 +255,13 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
       };
       const prepared = await core.db.withTenant(ctx, async (tx) => {
         const server = await perMemberServer(tx, f.serverId);
-        if (server?.authMode !== "per_member_oauth") return null;
+        // A server whose URL changed since the flow started is another target: the code is never redeemed (CR-01).
+        if (server?.authMode !== "per_member_oauth" || server.url !== f.discovered.serverUrl) return null;
         const clientSecret = await clientSecretFor(tx, core, f.serverId, f.client.issuer, f.client.clientId);
         return { server, clientSecret };
       });
       if (!prepared) return failed("flow_expired");
-      const d: DiscoveredAuth = {
-        serverUrl: f.discovered.serverUrl,
-        resource: f.discovered.resource,
-        issuer: f.discovered.issuer,
-        metadata,
-        scopes: undefined,
-        sameOrigin: f.discovered.sameOrigin,
-      };
-      const client = {
-        ...f.client,
-        ...(prepared.clientSecret ? { clientSecret: prepared.clientSecret } : {}),
-        ...(f.client.method === "dcr" ? { isNew: false } : {}),
-      } as ClientChoice;
+      const { d, client } = flowAuth(f, prepared.clientSecret);
       const egress = egressFor(core.env);
       let bundle: TokenBundle;
       try {
@@ -443,11 +275,12 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
         return failed(err instanceof ConnectorOAuthError ? err.code : "token_exchange_failed");
       }
 
-      let needsProbe = false;
+      let stored: "gone" | { needsProbe: boolean };
       try {
-        needsProbe = await core.db.withTenant(ctx, async (tx) => {
-          const server = await perMemberServer(tx, f.serverId);
-          if (!server) throw missing();
+        stored = await core.db.withTenant(ctx, async (tx): Promise<"gone" | { needsProbe: boolean }> => {
+          // Held until commit: a concurrent URL or mode change waits, or has already happened and is read here.
+          const server = await perMemberServer(tx, f.serverId, true);
+          if (server?.authMode !== "per_member_oauth" || server.url !== f.discovered.serverUrl) return "gone";
           const row = await storeConnection(tx, core, {
             userId: f.userId,
             serverId: f.serverId,
@@ -467,17 +300,22 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
             .from(mcpServerTools)
             .where(eq(mcpServerTools.serverId, f.serverId))
             .limit(1);
-          return tool === undefined;
+          return { needsProbe: tool === undefined };
         });
       } catch {
         // Nothing was stored: do not leave a live grant behind at the provider.
         await revokeToken(egress, bundle, prepared.clientSecret);
         return failed("token_exchange_failed");
       }
-      if (needsProbe) {
+      if (stored === "gone") {
+        await revokeToken(egress, bundle, prepared.clientSecret);
+        return failed("flow_expired");
+      }
+      if (stored.needsProbe) {
         await probeConnector(core, f, {
           headerName: "Authorization",
           headerValue: `Bearer ${bundle.accessToken}`,
+          url: f.discovered.serverUrl,
         });
       }
       return reply.redirect(webUrl({ connected: f.serverId }), 302);
@@ -511,14 +349,15 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
       const auth = authOf(req);
       const value = req.body.value.trim();
       const stored = await core.db.withTenant(tenant(req), async (tx) => {
-        const server = await serverIn(tx, req.params.id, "per_member_secret");
+        const server = await serverIn(tx, req.params.id, "per_member_secret", true);
         if (!value || !HEADER_VALUE_RE.test(`${server.memberHeaderPrefix ?? ""}${value}`)) {
           throw new HttpError(400, "invalid_key", "Enter your key without line breaks");
         }
         const row = await storeConnection(tx, core, {
           userId: auth.userId,
           serverId: server.id,
-          bundle: { kind: "secret", value },
+          // The key goes only to the URL it was entered for (CR-01).
+          bundle: { kind: "secret", value, ...(server.url ? { serverUrl: server.url } : {}) },
         });
         await core.audit.record(tx, {
           action: "connector.connected",
@@ -538,7 +377,11 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
         await probeConnector(
           core,
           { organizationId: auth.organizationId, userId: auth.userId, serverId: stored.server.id },
-          { headerName: stored.server.memberHeaderName ?? "Authorization", headerValue: header },
+          {
+            headerName: stored.server.memberHeaderName ?? "Authorization",
+            headerValue: header,
+            url: stored.server.url ?? "",
+          },
         );
       }
       return memberConnectorOf(core, stored.server, stored.row);
@@ -569,7 +412,8 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
     },
   );
 
-  // Settings › MCP servers "Re-probe" for a per-member connector (UI-SPEC R6): with the admin's OWN connection only.
+  // Settings › MCP servers "Re-probe" of a proxied connector (UI-SPEC R6; 07.14 D-05): a member-mode connector with the
+  // admin's OWN connection only, an organization-account one with the organization's credential.
   app.post(
     "/connectors/:id/probe",
     {
@@ -579,8 +423,12 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
     },
     async (req) => {
       const auth = authOf(req);
-      await core.db.withTenant(tenant(req), (tx) => serverIn(tx, req.params.id));
-      const key = { organizationId: auth.organizationId, userId: auth.userId, serverId: req.params.id };
+      const server = await core.db.withTenant(tenant(req), async (tx) => {
+        const [row] = await tx.select().from(mcpServers).where(eq(mcpServers.id, req.params.id)).limit(1);
+        if (!row || !usesConnectorProxy(row.authMode)) throw missing();
+        return row;
+      });
+      const key = credentialKeyOf(server, auth);
       const token = await accessTokenFor(core, key).catch((err) => {
         if (err instanceof ConnectorTokenUnavailableError) {
           throw new HttpError(
@@ -591,8 +439,12 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
         }
         throw err;
       });
-      if (!token.ok) throw connectError(token.reason);
-      await probeConnector(core, key, token);
+      if (!token.ok) throw credentialError(token.reason, server);
+      await probeConnector(
+        core,
+        { organizationId: auth.organizationId, userId: auth.userId, serverId: server.id },
+        token,
+      );
       return core.db.withTenant(tenant(req), (tx) => getMcpServer(tx, req.params.id, mcpReadOptions(core)));
     },
   );

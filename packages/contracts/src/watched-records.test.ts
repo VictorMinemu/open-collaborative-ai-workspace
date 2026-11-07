@@ -3,11 +3,13 @@ import { AgentChannelRecordUpdate, AgentChannelRecordUpdateResponse } from "./ag
 import {
   CheckWatchedRecordRequest,
   CreateWatchedRecordRequest,
+  isWorkspaceAccess,
   PreviewWatchedRecordRequest,
   PreviewWatchedRecordResponse,
   projectFields,
   UpdateWatchedRecordRequest,
   WATCHED_LIMITS,
+  WatchedConnectorAccess,
   WatchedField,
   WatchedRecord,
   WatchedRecordList,
@@ -242,5 +244,14 @@ describe("watch dialog options (07.6-17, D-07, Pitfall 8)", () => {
     ).toBe(false);
     const parsed = WatchOptions.parse({ ...options, connectors: [{ ...perMember, headers: ["x"] }] });
     expect(Object.keys(parsed.connectors[0] ?? {})).not.toContain("headers");
+  });
+});
+
+describe("watched connector access (07.14 PD-03)", () => {
+  it("one named enum, the same wire values, and the workspace-access helper", () => {
+    expect(WatchedConnectorAccess.options).toEqual(["org_secret", "per_member"]);
+    expect(WatchedRecord.shape.connector.shape.authMode.options).toEqual(WatchedConnectorAccess.options);
+    expect(isWorkspaceAccess("org_secret")).toBe(true);
+    expect(isWorkspaceAccess("per_member")).toBe(false);
   });
 });

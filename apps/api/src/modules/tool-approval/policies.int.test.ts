@@ -745,3 +745,40 @@ describe("organization B never sees or changes organization A's rules (C-02)", (
     expect(aPage.policies.map((p: Json) => p.id)).toEqual([aOrg.id]);
   });
 });
+
+describe("the approvable groups by the server's mode (07.14 D-04, PD-09)", () => {
+  it("organization-account servers are listed under mcp, member connectors under connector", async () => {
+    const extra = [
+      [randomUUID(), "Org Drive", "m0a0b0c01", "org_oauth"],
+      [randomUUID(), "Org Billing", "m0a0b0c02", "org_client_credentials"],
+    ] as const;
+    try {
+      for (const [id, name, safe, mode] of extra) {
+        await su.query(
+          `insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, status, auth_mode)
+           values ($1, $2, $3, $4, 'streamable-http', $5, 'ready', $6)`,
+          [id, orgA, name, safe, `https://${safe}.example.test/mcp`, mode],
+        );
+        await su.query(
+          `insert into app.mcp_server_tools (organization_id, server_id, name, openclaw_name, read_only)
+           values ($1, $2, 'sync', $3, false)`,
+          [orgA, id, `${safe}__sync`],
+        );
+      }
+      const page = await ok(victor.request("GET", "/api/v1/tool-approval-policies?scope=org"));
+      const kindOf = (name: string) => page.catalog.find((g: Json) => g.source.name === name)?.source.kind;
+      expect(kindOf("Org Drive")).toBe("mcp");
+      expect(kindOf("Org Billing")).toBe("mcp");
+      expect(kindOf("Acme CRM")).toBe("mcp");
+      expect(kindOf("Linear")).toBe("connector");
+      for (const [id, name, safe] of extra) {
+        expect(page.catalog.find((g: Json) => g.source.id === id)).toEqual({
+          source: { kind: "mcp", id, name, safeName: safe },
+          tools: [{ name: `${safe}__sync`, sideEffecting: true }],
+        });
+      }
+    } finally {
+      await su.query("delete from app.mcp_servers where id = any($1)", [extra.map(([id]) => id)]);
+    }
+  });
+});

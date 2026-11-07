@@ -419,6 +419,21 @@ async function seedOrg(c: pg.Client, org: string) {
     "insert into app.member_account_shares (organization_id, user_id, conversation_id, resource_kind, resource_id, readers_at_grant) values ($1, $2, $3, 'connector', $4, 1)",
     [org, user, conv, crm],
   );
+  // Phase 07.14 (D-06): the organization's own account on an `org_oauth` server; only state, the bundle is sealed.
+  const ops = randomUUID();
+  const orgConnSecret = randomUUID();
+  await q(
+    "insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, auth_mode) values ($1, $2, 'Ops', $3, 'streamable-http', 'https://ops.example.test/mcp', 'org_oauth')",
+    [ops, org, `m${ops.replace(/-/g, "").slice(0, 8)}`],
+  );
+  await q(
+    "insert into app.secrets (id, organization_id, name, kind, ciphertext, iv, tag) values ($1, $2, 'org conn', 'connector_credential', 'c', 'i', 't')",
+    [orgConnSecret, org],
+  );
+  await q(
+    "insert into app.connector_org_connections (organization_id, server_id, method, status, secret_id, issuer, client_id, scopes, account_label, connected_by, access_expires_at) values ($1, $2, 'oauth', 'connected', $3, 'https://auth.ops.example.test', 'ocw-client', '{ops.read}', 'ops@example.test', $4, now() + interval '1 hour')",
+    [org, ops, orgConnSecret, user],
+  );
   await q(
     `insert into app.vault_items (id, organization_id, scope, owner_user_id, name, handle, kind, injection, allowed_hosts, secret_ref, created_by) values ($1, $2, 'personal', $3, 'ERP key', 'k_abcdefghij', 'api_key', '{"header":"Authorization","scheme":"bearer"}', '{erp.example.test}', $4::jsonb, $3)`,
     [vaultItem, org, user, JSON.stringify({ provider: "db", secretId: vaultSecret, organizationId: org })],

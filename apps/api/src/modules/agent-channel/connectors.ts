@@ -6,12 +6,14 @@ import {
   AgentChannelConnectorListResponse,
   type AgentChannelToolRefusal,
   BUILTIN_TOOLS,
+  CONNECTOR_PROXY_MODES,
   CONNECTOR_TOOL_LIMITS,
+  isOrgCredentialMode,
   type ToolApprovalRefusal,
   TurnToolFlags,
 } from "@ocw/contracts";
 import { agentTurns, mcpServers, mcpServerTools, type Tx } from "@ocw/db";
-import { and, asc, eq, inArray, ne } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import type { App, Core } from "../../core";
 import { egressFor } from "../../lib/egress";
 import { HttpError } from "../../lib/errors";
@@ -22,10 +24,14 @@ import {
   accessTokenFor,
   callTool,
   connectionStatusFor,
+  credentialKeyOf,
+  credentialStatusFor,
   forceRefresh,
   McpUpstreamError,
   markNeedsReconnect,
-  touchConnection,
+  orgCredentialSentence,
+  stripControl,
+  touchCredential,
 } from "../connectors";
 import type { PermissionService } from "../organization";
 import { type CellPrincipal, cellOf } from "./auth";
@@ -69,6 +75,14 @@ import {
  * included), with the asker's connection status and argument schemas, and the keys the bot may use here (handle, name,
  * hosts). Never a credential. Claimed like any tool with the turn's `ocw_connector_list` flags: once it lists
  * per-member connectors their third-party descriptions taint the turn (WINDOWS #184).
+ *
+ * Phase 07.14 (D-04, D-07, D-08, D-13): an organization-account server (`org_oauth`, `org_client_credentials`) is
+ * proxied the same way with the ORGANIZATION's credential. The principal comes only from the server's stored mode
+ * (`credentialKeyOf`): an org-mode server never uses a member's credential and a member-mode server never the
+ * organization's (no fallback either way). The turn's human is still the acting user (the tenant transaction, the
+ * claim and the audit), audits say `credential: "organization"`, and the organization's token never reaches the cell.
+ * Without a usable organization credential the 409 names the server and an admin as the one who can fix it (PD-10), and
+ * no connect card is posted (no member can connect it).
  */
 
 const tags = ["agent-channel"];
@@ -111,7 +125,25 @@ const MESSAGES: Record<Refusal | Failure, string> = {
 type ServerRow = typeof mcpServers.$inferSelect;
 type ToolRow = typeof mcpServerTools.$inferSelect;
 
-/** A per-member connector of the tx's organization by its safe name, and its catalog tool by logical name. */
+/** Who the audit says the call ran as: the server's stored mode decides, never a body field. */
+const credentialOf = (server: ServerRow) =>
+  isOrgCredentialMode(server.authMode) ? "organization" : "member";
+
+/** A server's admin-set name for a sentence: control characters removed, whitespace collapsed, bounded. */
+const sentenceName = (server: ServerRow) =>
+  stripControl(server.name).replace(/\s+/gu, " ").trim().slice(0, 80) || "this server";
+
+/**
+ * Why there is no usable credential (07.14 PD-10). A member mode keeps 07.4's sentence (the connect card tells the
+ * member what to do); an org mode names the server and who can fix it, an admin, since no member can.
+ */
+function credentialMessage(reason: "not_connected" | "needs_reconnect", server: ServerRow): string {
+  if (!isOrgCredentialMode(server.authMode)) return MESSAGES[reason];
+  // One sentence for the proxy and Re-probe (07.14 review IN-01).
+  return orgCredentialSentence(reason, sentenceName(server));
+}
+
+/** A proxied connector of the tx's organization by its safe name, and its catalog tool by logical name. */
 async function connectorTool(
   tx: Tx,
   safeName: string,
@@ -120,7 +152,7 @@ async function connectorTool(
   const [server] = await tx
     .select()
     .from(mcpServers)
-    .where(and(eq(mcpServers.safeName, safeName), ne(mcpServers.authMode, "org_secret")))
+    .where(and(eq(mcpServers.safeName, safeName), inArray(mcpServers.authMode, [...CONNECTOR_PROXY_MODES])))
     .limit(1);
   if (!server) return null;
   const [tool] = await tx
@@ -175,13 +207,27 @@ function missingScopes(challenge: string | undefined): string[] {
     .slice(0, 10);
 }
 
-/** What the model reads when the member's account lacks a permission (CONN-02): the scopes, never a token. */
-function insufficientScopeAnswer(err: McpUpstreamError): AgentChannelConnectorCallResponse {
+/**
+ * What the model reads when the account lacks a permission (CONN-02): the scopes, never a token. The member's account
+ * is reconnected by the member; the organization's (07.14 PD-10) by an admin.
+ */
+function insufficientScopeAnswer(
+  err: McpUpstreamError,
+  server: ServerRow,
+): AgentChannelConnectorCallResponse {
   const scopes = missingScopes(err.wwwAuthenticate);
+  const asks = scopes.length > 0 ? ` (it asks for: ${scopes.join(", ")})` : "";
+  if (isOrgCredentialMode(server.authMode)) {
+    return {
+      content: `The service refused this: the organization's account is missing a permission it needs${asks}. An admin can reconnect it in Settings › MCP servers.`,
+      truncated: false,
+      isError: true,
+    };
+  }
   return {
     content:
       "The service refused this: the account of the person who asked is missing a permission it needs" +
-      (scopes.length > 0 ? ` (it asks for: ${scopes.join(", ")})` : "") +
+      asks +
       ". They can reconnect in Settings › Connections and allow it, or ask an admin.",
     truncated: false,
     isError: true,
@@ -203,6 +249,8 @@ type CallDecided =
       card?: { turn: AgentTurnRow; server: ServerRow; reason: ConnectCardReason };
       /** 07.5-11: the 409's `details` (the approval waited on, or who denied it). */
       details?: Record<string, unknown>;
+      /** 07.14 PD-10: the 409's sentence when it is not the code's fixed one (an org mode's missing credential). */
+      message?: string;
     }
   | { go: { turn: AgentTurnRow; server: ServerRow; tool: ToolRow; callId: string } };
 
@@ -218,12 +266,13 @@ const stricter = (a: TurnToolFlags | undefined, b: TurnToolFlags | undefined): T
 });
 
 /**
- * The per-member connectors whose logical tools are in `tools`, each with those tools (catalog order) and the asker's
- * connection status. Descriptions and schemas are the probe's (third-party) values, bounded by the contract.
+ * The proxied connectors whose logical tools are in `tools`, each with those tools (catalog order) and the status of the
+ * credential a call would use: the asker's own connection for a member mode, the organization's for an org mode
+ * (07.14). Descriptions and schemas are the probe's (third-party) values, bounded by the contract.
  */
 async function listedConnectors(
   tx: Tx,
-  userId: string,
+  ctx: { organizationId: string; userId: string },
   tools: readonly string[],
 ): Promise<AgentChannelConnectorEntry[]> {
   const offered = new Set(tools.filter((t) => /^m[0-9a-f]{8}__/u.test(t)));
@@ -232,7 +281,12 @@ async function listedConnectors(
     .select({ server: mcpServers, tool: mcpServerTools })
     .from(mcpServerTools)
     .innerJoin(mcpServers, eq(mcpServers.id, mcpServerTools.serverId))
-    .where(and(ne(mcpServers.authMode, "org_secret"), inArray(mcpServerTools.openclawName, [...offered])))
+    .where(
+      and(
+        inArray(mcpServers.authMode, [...CONNECTOR_PROXY_MODES]),
+        inArray(mcpServerTools.openclawName, [...offered]),
+      ),
+    )
     .orderBy(asc(mcpServers.name), asc(mcpServerTools.openclawName));
   const byServer = new Map<string, { server: ServerRow; tools: ToolRow[] }>();
   for (const r of rows) {
@@ -241,11 +295,16 @@ async function listedConnectors(
     byServer.set(r.server.id, entry);
   }
   const groups = [...byServer.values()].slice(0, CONNECTOR_TOOL_LIMITS.connectors);
+  const isOrg = (g: { server: ServerRow }) => isOrgCredentialMode(g.server.authMode);
+  // Member modes in one query; each org-mode server reads its one organization row.
   const statuses = await connectionStatusFor(
     tx,
-    userId,
-    groups.map((g) => g.server.id),
+    ctx.userId,
+    groups.filter((g) => !isOrg(g)).map((g) => g.server.id),
   );
+  for (const g of groups.filter(isOrg)) {
+    statuses.set(g.server.id, await credentialStatusFor(tx, credentialKeyOf(g.server, ctx)));
+  }
   return groups.map(({ server, tools: serverTools }) => ({
     connector: server.safeName,
     name: server.name,
@@ -279,10 +338,10 @@ export function registerConnectorRoutes(
       const cell = cellOf(req);
       const body = req.body;
       const logical = `${body.connector}__${body.tool}`;
-      // Ids and names only: never the arguments.
-      const meta = { eventId: body.eventId, connector: body.connector, credential: "member" };
+      // Ids and names only: never the arguments. Whose credential (`credential`) is named once the server is known.
+      const meta: Record<string, unknown> = { eventId: body.eventId, connector: body.connector };
 
-      // 1. The turn's human, from the ledger: the credential is always theirs.
+      // 1. The turn's human, from the ledger: a member-mode credential is always theirs.
       const humanUserId = await turnHuman(core, cell, body, logical, meta);
       if (!humanUserId) throw noTrigger();
 
@@ -296,6 +355,7 @@ export function registerConnectorRoutes(
             return { refused: "no_trigger" };
           }
           const found = await connectorTool(tx, body.connector, logical);
+          const callMeta = found ? { ...meta, credential: credentialOf(found.server) } : meta;
           const refuse = async (
             reason: Refusal,
             flags: TurnToolFlags = UNKNOWN_FLAGS,
@@ -311,7 +371,7 @@ export function registerConnectorRoutes(
               sourceId: found?.server.id ?? null,
               target: body.connector,
               reason,
-              metadata: { ...meta, ...extra },
+              metadata: { ...callMeta, ...extra },
             });
             return { refused: reason };
           };
@@ -332,11 +392,19 @@ export function registerConnectorRoutes(
           if (!now.tools.includes(logical)) return refuse("policy_changed");
           const flags = now.toolFlags[logical] ?? UNKNOWN_FLAGS;
 
-          // No connection (or a dead one): refused before the claim, so the turn is neither counted nor tainted.
-          const status = (await connectionStatusFor(tx, turn.userId, [server.id])).get(server.id);
+          // No connection (or a dead one): refused before the claim, so the turn is neither counted nor tainted. The
+          // credential is the one the server's mode names: the asker's own, or the organization's (07.14).
+          const status = await credentialStatusFor(
+            tx,
+            credentialKeyOf(server, { organizationId: cell.organizationId, userId: turn.userId }),
+          );
           if (status !== "connected") {
             const reason = status === "needs_reconnect" ? "needs_reconnect" : "not_connected";
             await refuse(reason, flags);
+            // 07.14 PD-10: no member can fix the organization's credential, so no connect card asks one to.
+            if (isOrgCredentialMode(server.authMode)) {
+              return { refused: reason, message: credentialMessage(reason, server) };
+            }
             return { refused: reason, card: { turn, server, reason } };
           }
 
@@ -369,7 +437,7 @@ export function registerConnectorRoutes(
             sourceId: server.id,
             target: body.connector,
             reason: null,
-            metadata: meta,
+            metadata: callMeta,
             grantApprovalId: verdict.grantApprovalId,
           });
           if (!claim.allowed) return { refused: claim.reason as Refusal };
@@ -389,14 +457,14 @@ export function registerConnectorRoutes(
         throw new HttpError(
           409,
           decided.refused,
-          MESSAGES[decided.refused],
+          ("message" in decided ? decided.message : undefined) ?? MESSAGES[decided.refused],
           "details" in decided ? decided.details : undefined,
         );
       }
 
-      // 3. The member's token and the MCP call, outside any transaction.
+      // 3. The token (the member's, or the organization's for an org mode) and the MCP call, outside any transaction.
       const { turn, server, tool, callId } = decided.go;
-      const key = { organizationId: cell.organizationId, userId: turn.userId, serverId: server.id };
+      const key = credentialKeyOf(server, { organizationId: cell.organizationId, userId: turn.userId });
       const target = {
         url: server.url ?? "",
         transport: server.transport === "sse" ? ("sse" as const) : ("streamable-http" as const),
@@ -418,10 +486,14 @@ export function registerConnectorRoutes(
         );
       };
       const unauthorized = (err: unknown) => err instanceof McpUpstreamError && err.code === "unauthorized";
+      // 07.14 review CR-01: a credential checked against another URL than the one about to be called is never sent.
+      const elsewhere = (t: Extract<AccessToken, { ok: true }>) => t.url !== target.url;
       try {
         const token: AccessToken = await accessTokenFor(core, key);
         if (!token.ok) {
           refusal = token.reason;
+        } else if (elsewhere(token)) {
+          refusal = "needs_reconnect";
         } else {
           try {
             answer = await run(token);
@@ -429,15 +501,18 @@ export function registerConnectorRoutes(
             if (!unauthorized(err)) throw err;
             // A 401 on a token that still looked valid: exactly one forced refresh and one retry (D-01).
             const fresh = await forceRefresh(core, key);
-            if (!fresh.ok) {
+            if (!fresh.ok || elsewhere(fresh)) {
               refusal = "needs_reconnect";
             } else {
               try {
                 answer = await run(fresh);
               } catch (retryErr) {
                 if (!unauthorized(retryErr)) throw retryErr;
-                await markNeedsReconnect(core, { ...key, code: "upstream_unauthorized" });
-                refusal = "needs_reconnect";
+                const marked = await markNeedsReconnect(core, { ...key, code: "upstream_unauthorized" });
+                // Client credentials (07.14 review WR-03): only the token was dropped, the connection stands and the
+                // next call re-grants; this call is the server's error, not an admin's reconnect.
+                if (marked === "token_dropped") failure = { code: "upstream_error", outcome: "error" };
+                else refusal = "needs_reconnect";
               }
             }
           }
@@ -445,7 +520,7 @@ export function registerConnectorRoutes(
       } catch (err) {
         // Codes only: an upstream error (which may carry response text) is never logged or returned.
         if (err instanceof McpUpstreamError && err.code === "insufficient_scope") {
-          answer = insufficientScopeAnswer(err);
+          answer = insufficientScopeAnswer(err, server);
           scopeRefused = true;
         } else {
           failure = failureOf(err);
@@ -462,20 +537,23 @@ export function registerConnectorRoutes(
           durationMs,
           metadata: {
             connector: body.connector,
-            credential: "member",
+            credential: credentialOf(server),
             reason: refusal ?? failure?.code ?? (scopeRefused ? "insufficient_scope" : null),
           },
         });
-        if (sent) await touchConnection(tx, { userId: turn.userId, serverId: server.id });
+        if (sent) await touchCredential(tx, key);
       });
       if (refusal) {
-        await postConnectCard(core, {
-          organizationId: cell.organizationId,
-          turn,
-          server,
-          reason: refusal,
-        });
-        throw new HttpError(409, refusal, MESSAGES[refusal]);
+        // A member reconnects their own account from the card; the organization's is an admin's to fix (07.14 PD-10).
+        if (!isOrgCredentialMode(server.authMode)) {
+          await postConnectCard(core, {
+            organizationId: cell.organizationId,
+            turn,
+            server,
+            reason: refusal,
+          });
+        }
+        throw new HttpError(409, refusal, credentialMessage(refusal, server));
       }
       if (failure || !answer) {
         const code = failure?.code ?? "upstream_error";
@@ -538,7 +616,11 @@ export function registerConnectorRoutes(
           const started = Date.now();
           const claim = await claimWith(null);
           if (!claim.allowed) return { refused: claim.reason as Refusal };
-          const connectors = await listedConnectors(tx, turn.userId, now.tools);
+          const connectors = await listedConnectors(
+            tx,
+            { organizationId: cell.organizationId, userId: turn.userId },
+            now.tools,
+          );
           const keys = now.keys.usable.slice(0, CONNECTOR_TOOL_LIMITS.keys).map((k) => ({
             handle: k.handle,
             name: k.name,

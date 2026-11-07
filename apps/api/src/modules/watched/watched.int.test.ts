@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { mcpServers, watchedRecords } from "@ocw/db";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   createFakeErpMcp,
@@ -11,13 +13,19 @@ import {
   assertNoGlobalFetch,
   auditRows,
   type ConnectorsStack,
+  connectOrgOAuth,
   fails,
+  fakeStats,
   type Json,
   ok,
+  orgBundleOf,
+  orgConnectionRow,
+  registerOrgConnector,
   startConnectorsStack,
 } from "../../testing-connectors";
 import { callTool, markNeedsReconnect } from "../connectors";
 import { replaceServerTools } from "../mcp";
+import { compareAndSet, preflight } from "./write";
 
 /**
  * 07.6-07 (AUTO-04, D-04, D-07, P-13; Pattern 8, Pitfalls 8 and 9): watched records. A board card is linked to a record
@@ -947,5 +955,305 @@ describe("edit, unlink, refusals and cross-tenant", () => {
     const tracer = (list.records as Json[]).find((r) => r.cardMessageId === card.messageId) as Json;
     expect((await s.victor.request("DELETE", `/api/v1/watched-records/${tracer.id}`)).status).toBe(204);
     expect(((await thread(card.messageId)).replies as Json[]).filter((m) => m.card)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------- 07.14-10: organization-account connectors
+
+describe("organization-account connectors (07.14)", () => {
+  let drive: Json;
+  let dc: Json;
+  let w: Json;
+
+  const driveLink = (cardMessageId: string, extra: Json = {}) => ({
+    cardMessageId,
+    mcpServerId: drive.id,
+    externalRef: "me",
+    readTool: "whoami",
+    idArg: "id",
+    fields: [
+      { pointer: "/subject", label: "Subject" },
+      { pointer: "/title", label: "Title" },
+    ],
+    checkIntervalMinutes: 60,
+    agentId: opsId,
+    ...extra,
+  });
+
+  /** The subject the fake issued to the organization's grant: its account label is `<subject>@fake-mcp.test`. */
+  const orgSubject = async () =>
+    String((await orgConnectionRow(s, s.orgA, drive.id))?.account_label ?? "").replace(
+      /@fake-mcp\.test$/u,
+      "",
+    );
+
+  const memberRows = async () =>
+    (
+      await s.su.query(
+        `select (select count(*)::int from app.connector_connections where server_id = $1) as connections,
+                (select count(*)::int from app.member_account_shares where resource_id = $1) as shares`,
+        [drive.id],
+      )
+    ).rows[0] as { connections: number; shares: number };
+
+  const reconnectCards = async () =>
+    (
+      await s.su.query(
+        `select m.id from app.messages m join app.message_cards mc on mc.message_id = m.id
+          where m.author_kind = 'agent' and m.author_id = $1 and mc.title like 'Reconnect Acme Drive%'`,
+        [opsId],
+      )
+    ).rows as Json[];
+
+  const lastFailure = async (id: string) =>
+    (await auditRows(s, s.orgA, ["watched_record.check_failed", "watched_record.paused"]))
+      .filter((a) => a.resource_id === id)
+      .at(-1);
+
+  beforeAll(async () => {
+    // Víctor (admin) registers the organization's sign-in server and connects it once (07.14-07's real route); the
+    // probe fills its catalog with the organization's token.
+    drive = await registerOrgConnector(s, {
+      name: "Acme Drive",
+      oauthScopes: ["records:read", "records:write"],
+    });
+    expect((await connectOrgOAuth(s, s.victor, drive.id)).status).toBe(302);
+    const caps = await ok(s.victor.request("GET", `/api/v1/agents/${opsId}/capabilities`));
+    await ok(
+      s.victor.request("PATCH", `/api/v1/agents/${opsId}/capabilities`, {
+        tools: [
+          ...(caps.tools as Json[])
+            .filter((t) => t.granted)
+            .map((t) => ({ sourceKind: t.sourceKind, sourceId: t.sourceId, tool: t.tool })),
+          ...["whoami", "create_record"].map((t) => ({
+            sourceKind: "mcp",
+            sourceId: drive.id,
+            tool: `${drive.safeName}__${t}`,
+          })),
+        ],
+      }),
+    );
+    dc = await humanCard(ordersId, "EXP-0050 Read with the organization's drive account");
+  });
+
+  afterEach(() => {
+    s.fake.setScenario({});
+  });
+
+  it("the watch options list it as workspace access for any member: no connection, no share needed", async () => {
+    for (const who of [s.victor, s.sam]) {
+      const o = await ok(who.request("GET", `/api/v1/watched-records/options?conversationId=${ordersId}`));
+      const listed = (o.connectors as Json[]).find((c) => c.id === drive.id);
+      expect(listed).toMatchObject({
+        name: "Acme Drive",
+        authMode: "org_secret",
+        connection: null,
+        shared: true,
+      });
+    }
+  });
+
+  it("Sam links without any share: 201 as workspace access; the baseline is read with the organization's token", async () => {
+    const before = await fakeStats(s);
+    w = await ok(s.sam.request("POST", "/api/v1/watched-records", driveLink(dc.messageId)), 201);
+    expect(w.connector).toEqual({ id: drive.id, name: "Acme Drive", authMode: "org_secret" });
+    expect(await drain("watched.check")).toBe(1);
+    const r = await row(w.id);
+    expect(r).toMatchObject({ last_status: "ok", check_as_user_id: s.samId });
+    const subject = await orgSubject();
+    expect(subject).not.toBe("");
+    expect(r.snapshot).toEqual({ "/subject": subject, "/title": null });
+    expect((await fakeStats(s)).mcpCalls).toBe(before.mcpCalls + 1);
+    // No member's own credential or share exists for, or was made for, an organization-account server.
+    expect(await memberRows()).toEqual({ connections: 0, shares: 0 });
+    // The organization's credential was used: its last use is stamped.
+    expect((await orgConnectionRow(s, s.orgA, drive.id))?.last_used_at).not.toBeNull();
+  });
+
+  it("an upstream 401 gets one forced refresh and one retry; then connector_unavailable and no Reconnect DM", async () => {
+    s.fake.setScenario({ reject_access_tokens: true });
+    const before = await fakeStats(s);
+    await forceCheck(w.id);
+    const after = await fakeStats(s);
+    expect(after.tokenRequests.refresh_token).toBe(before.tokenRequests.refresh_token + 1);
+    expect(after.mcpRequests - before.mcpRequests).toBeGreaterThanOrEqual(2);
+    expect((await row(w.id)).last_status).toBe("error");
+    expect((await lastFailure(w.id))?.metadata).toMatchObject({
+      status: "error",
+      code: "connector_unavailable",
+    });
+    // The organization's credential is an admin's to fix (D-08): needs_reconnect, and no member is asked.
+    expect((await orgConnectionRow(s, s.orgA, drive.id))?.status).toBe("needs_reconnect");
+    expect(await reconnectCards()).toEqual([]);
+    expect(await memberRows()).toEqual({ connections: 0, shares: 0 });
+  });
+
+  it("not usable for the organization: connector_unavailable with no request; connected again, it resumes", async () => {
+    const before = await fakeStats(s);
+    await forceCheck(w.id);
+    expect((await fakeStats(s)).mcpRequests).toBe(before.mcpRequests);
+    expect((await row(w.id)).last_status).toBe("error");
+    expect(await reconnectCards()).toEqual([]);
+
+    expect((await connectOrgOAuth(s, s.victor, drive.id)).status).toBe(302);
+    await forceCheck(w.id);
+    const r = await row(w.id);
+    // A new grant has a new subject: reported as a change, read with the organization's new token.
+    expect(r.last_status).toBe("changed");
+    expect(r.snapshot["/subject"]).toBe(await orgSubject());
+
+    // The admin disconnects: the next check sends nothing and fails closed, and still no member is asked.
+    await ok(s.victor.request("DELETE", `/api/v1/connectors/${drive.id}/org-connection`), 204);
+    const gone = await fakeStats(s);
+    await forceCheck(w.id);
+    expect((await fakeStats(s)).mcpRequests).toBe(gone.mcpRequests);
+    expect((await row(w.id)).last_status).toBe("error");
+    expect((await lastFailure(w.id))?.metadata).toMatchObject({ code: "connector_unavailable" });
+    expect(await reconnectCards()).toEqual([]);
+    expect((await connectOrgOAuth(s, s.victor, drive.id)).status).toBe(302);
+  });
+
+  it("switched off for the organization: absent from the options, a new link 409 connector_disabled, checks fail closed", async () => {
+    await ok(s.victor.request("PATCH", `/api/v1/mcp-servers/${drive.id}`, { orgEnabled: false }));
+    try {
+      const o = await ok(s.sam.request("GET", `/api/v1/watched-records/options?conversationId=${ordersId}`));
+      expect((o.connectors as Json[]).map((c) => c.id)).not.toContain(drive.id);
+      const other = await humanCard(ordersId, "EXP-0051 Not while the drive is off");
+      await fails(
+        s.sam.request("POST", "/api/v1/watched-records", driveLink(other.messageId)),
+        409,
+        "connector_disabled",
+      );
+      const before = await fakeStats(s);
+      await forceCheck(w.id);
+      expect((await fakeStats(s)).mcpRequests).toBe(before.mcpRequests);
+      expect((await row(w.id)).last_status).toBe("error");
+      expect((await lastFailure(w.id))?.metadata).toMatchObject({ code: "connector_unavailable" });
+    } finally {
+      await ok(s.victor.request("PATCH", `/api/v1/mcp-servers/${drive.id}`, { orgEnabled: true }));
+    }
+    await forceCheck(w.id);
+    expect(["ok", "changed"]).toContain((await row(w.id)).last_status);
+  });
+
+  describe("write-back (compare-and-set) with the organization's account", () => {
+    let ww: Json;
+    const changes = { "/title": "Q3 report" } as const;
+
+    const cas = async () =>
+      compareAndSet(
+        core(),
+        {},
+        {
+          organizationId: s.orgA,
+          watchedRecordId: ww.id,
+          base: (await row(ww.id)).snapshot_hash as string,
+          requesterUserId: s.samId,
+          requesterName: "Sam",
+          agent: { id: opsId, displayName: "Ops helper" },
+          changes,
+        },
+      );
+
+    /** The watch's rules as the Agent Channel route decides them in its claim transaction. */
+    const rules = () =>
+      core().db.withTenant({ organizationId: s.orgA, userId: s.samId }, async (tx) => {
+        const [wr] = await tx.select().from(watchedRecords).where(eq(watchedRecords.id, ww.id));
+        const [server] = await tx.select().from(mcpServers).where(eq(mcpServers.id, drive.id));
+        if (!wr || !server) throw new Error("watch or server missing");
+        return preflight(tx, { w: wr, server, requesterUserId: s.samId, agentId: opsId, changes });
+      });
+
+    beforeAll(async () => {
+      const c = await humanCard(ordersId, "EXP-0052 Written back with the organization's account");
+      ww = await ok(
+        s.sam.request(
+          "POST",
+          "/api/v1/watched-records",
+          driveLink(c.messageId, { writeTool: "create_record" }),
+        ),
+        201,
+      );
+      expect(await drain("watched.check")).toBe(1);
+      expect((await row(ww.id)).last_status).toBe("ok");
+    });
+
+    it("a bot's write succeeds with the organization's token: no member connection or share", async () => {
+      expect(await rules()).toBeNull();
+      const before = await fakeStats(s);
+      expect(await cas()).toEqual({ kind: "written", recordId: "me" });
+      // Read, write (create_record needs the organization grant's records:write), read: all with the organization's
+      // token, which needed no refresh.
+      const after = await fakeStats(s);
+      expect(after.mcpCalls).toBe(before.mcpCalls + 3);
+      expect(after.tokenRequests).toEqual(before.tokenRequests);
+      expect(await memberRows()).toEqual({ connections: 0, shares: 0 });
+      const written = (await auditRows(s, s.orgA, ["watched_record.written"])).filter(
+        (a) => a.resource_id === ww.id,
+      );
+      expect(written).toHaveLength(1);
+      expect(written[0]).toMatchObject({ user_id: s.samId });
+    });
+
+    it("switched off for the organization: refused connector_error before any request", async () => {
+      await ok(s.victor.request("PATCH", `/api/v1/mcp-servers/${drive.id}`, { orgEnabled: false }));
+      try {
+        expect(await rules()).toBe("connector_error");
+        const before = await fakeStats(s);
+        expect(await cas()).toEqual({ kind: "refused", code: "connector_error" });
+        expect((await fakeStats(s)).mcpRequests).toBe(before.mcpRequests);
+      } finally {
+        await ok(s.victor.request("PATCH", `/api/v1/mcp-servers/${drive.id}`, { orgEnabled: true }));
+      }
+    });
+
+    it("the organization's connection needs reconnecting: refused connector_error, nothing sent upstream", async () => {
+      await markNeedsReconnect(core(), {
+        organizationId: s.orgA,
+        serverId: drive.id,
+        principal: "organization",
+        actingUserId: null,
+        code: "upstream_unauthorized",
+      });
+      expect((await orgConnectionRow(s, s.orgA, drive.id))?.status).toBe("needs_reconnect");
+      // Never "connect your own account": the organization's credential is an admin's to fix (D-08).
+      expect(await rules()).toBe("connector_error");
+      const before = await fakeStats(s);
+      expect(await cas()).toEqual({ kind: "refused", code: "connector_error" });
+      const after = await fakeStats(s);
+      expect(after.mcpRequests).toBe(before.mcpRequests);
+      expect(after.tokenRequests).toEqual(before.tokenRequests);
+      expect(await memberRows()).toEqual({ connections: 0, shares: 0 });
+    });
+  });
+
+  it("07.14 review CR-01: a URL moved behind the registry: the check fails closed and the new origin gets nothing", async () => {
+    expect((await connectOrgOAuth(s, s.victor, drive.id)).status).toBe(302);
+    const token = (await orgBundleOf(s, s.orgA, drive.id))?.accessToken as string;
+    const hits: string[] = [];
+    const canary = createServer((req, res) => {
+      hits.push(`${req.method} ${req.url} ${req.headers.authorization ?? ""}`);
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => canary.listen(0, "127.0.0.1", resolve));
+    const original = drive.url as string;
+    try {
+      const moved = `http://fake-mcp:${(canary.address() as AddressInfo).port}/mcp-oauth/mcp`;
+      await s.su.query("update app.mcp_servers set url = $2 where id = $1", [drive.id, moved]);
+      await forceCheck(w.id);
+      expect((await row(w.id)).last_status).toBe("error");
+      expect((await lastFailure(w.id))?.metadata).toMatchObject({ code: "connector_unavailable" });
+      expect(hits).toEqual([]);
+      expect(JSON.stringify(hits)).not.toContain(token);
+      expect(await orgConnectionRow(s, s.orgA, drive.id)).toMatchObject({
+        status: "needs_reconnect",
+        last_error: "url_changed",
+      });
+    } finally {
+      await s.su.query("update app.mcp_servers set url = $2 where id = $1", [drive.id, original]);
+      canary.closeAllConnections();
+      await new Promise<void>((resolve) => canary.close(() => resolve()));
+    }
   });
 });

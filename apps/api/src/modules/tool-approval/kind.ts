@@ -6,6 +6,7 @@ import {
   BUILTIN_TOOLS,
   canonicalJson,
   isAgentCardRoute,
+  isPerMemberMode,
   TOOL_APPROVAL_LIMITS,
   TOOL_CALL_KIND,
   type ToolCallApprovalView,
@@ -165,7 +166,9 @@ export async function sourceOf(
       .from(mcpServers)
       .where(eq(mcpServers.id, t.sourceId))
       .limit(1);
-    const connector = !!s?.authMode && s.authMode !== "org_secret";
+    // 07.14 D-04, PD-09: member modes are the requester's own account; organization modes, like organization
+    // headers, are the organization's (never "your account").
+    const connector = !!s?.authMode && isPerMemberMode(s.authMode);
     return {
       kind: connector ? "connector" : "mcp",
       name: s?.name ?? "A removed server",

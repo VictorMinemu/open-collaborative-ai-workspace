@@ -38,6 +38,8 @@
 /packages/contracts/src/keychain.ts                @VictorMinemu
 /packages/contracts/src/agent-templates.ts         @VictorMinemu
 /apps/openclaw-channel/src/connector-tools.ts      @VictorMinemu
+# Phase 07.14 (ADR-0036): the organization's connector credentials (organization sign-in, client credentials, Test
+# sign-in) live in /apps/api/src/modules/connectors/ and the contracts above, already owned.
 
 # Phase 07.5 (ADR-0026): per-tool approval policies and grants, the claim that consumes them, the Work Zone start path
 # and proposals, the approve-and-apply primitive, and the cell gate with its params pin.

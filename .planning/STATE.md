@@ -1,19 +1,19 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 07.7
-current_phase_name: agent-to-agent-collaboration
-status: verifying
-stopped_at: Phase 03.1 complete, ready to plan Phase 1
-last_updated: "2026-11-03T20:00:00.000Z"
-last_activity: 2026-11-03
-last_activity_desc: Phase 07.7 built, reviewed and gated (ADR-0027 Accepted); PR next
-state_head: 1311b4c5eb19bb6a843b5ade877c30ec6d677ed4
+current_phase: 1
+current_phase_name: MVP 0 — Collaborative Workspace Demo Slice
+status: planning
+stopped_at: Phase 07.14 complete, ready to plan Phase 1
+last_updated: "2026-11-07T07:05:55.907Z"
+last_activity: 2026-11-07
+last_activity_desc: Phase 07.14 complete, transitioned to Phase 1
+state_head: b5a4d2ce9386ee81270ada7c2feeedb2abe76c50
 progress:
   total_phases: 12
-  completed_phases: 4
-  total_plans: 281
-  completed_plans: 246
+  completed_phases: 5
+  total_plans: 295
+  completed_plans: 295
 ---
 
 # Project State
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-02)
 
 **Core value:** AI sessions are multiplayer — a private AI chat or coding session can be shared live with colleagues, the model knows who each participant is, and everything stays attributed and auditable.
-**Current focus:** Phase 07.7 — agent-to-agent-collaboration
+**Current focus:** Phase 07.14 — Organization connector auth
 
 ## Current Position
 
-Phase: 07.7 (agent-to-agent-collaboration) — GATED (owner check in docs/DEMO.md)
-Plan: 11 of 11
-Status: Phase 07.7 complete; PR next; owner check in docs/DEMO.md (two bots helping one person)
-Last activity: 2026-11-03 — Phase 07.7 built (11 plans), code review A/B/C (24 findings, 0 Critical) fixed, gate green
+Phase: 1 — MVP 0 — Collaborative Workspace Demo Slice
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-11-07 — Phase 07.14 complete, transitioned to Phase 1
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -38,7 +38,7 @@ Progress: [░░░░░░░░░░] 0%
 
 **Velocity:**
 
-- Total plans completed: 15
+- Total plans completed: 29
 - Average duration: — min
 - Total execution time: 0.0 hours
 
@@ -47,6 +47,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 03.1 | 15 | - | - |
+| 07.14 | 14 | - | - |
 
 **Recent Trend:**
 
@@ -101,6 +102,8 @@ Recent decisions affecting current work:
 - Phase 07.10 inserted after Phase 07.9: Work Zone sidebar by team like chat channels (owner request 2026-10-27)
 - Phase 07.11 inserted after Phase 07.10: Runtime CLI auto-updates for Claude Code and Codex on every device, server-type shared devices first (modeled on T3 Code) (URGENT)
 - Phase 07.12 inserted after Phase 07.11: Headless Work Zone server: install, terminal pairing, service and doctor from the CLI, no desktop app (URGENT)
+- Phase 07.13 inserted after Phase 07.12: Work Zone local browser: Claude Code and Codex sessions get a browser on the session's own device (localhost reachable), governed like the bots' browser, live in the web, delivered to existing teams by the upgrade
+- Phase 07.14 inserted after Phase 07.12: Organization connector auth: organization OAuth sign-in and client credentials for MCP servers, OAuth diagnosis; runs before 07.13 (owner: MCPs with OAuth could not be configured)
 
 ## Deferred Items
 
@@ -113,5 +116,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-10-04
-Stopped at: Phase 03.1 complete, ready to plan Phase 1
+Stopped at: Phase 07.14 complete, ready to plan Phase 1
 Resume file: None
