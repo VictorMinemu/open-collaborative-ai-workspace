@@ -1,19 +1,19 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 07.7
-current_phase_name: agent-to-agent-collaboration
-status: verifying
-stopped_at: Phase 03.1 complete, ready to plan Phase 1
-last_updated: "2026-11-06T14:50:44.118Z"
-last_activity: 2026-11-03
-last_activity_desc: Phase 07.7 built, reviewed and gated (ADR-0027 Accepted); PR next
-state_head: e389da49edc26a004af3ec6d0561d20846e68567
+current_phase: 1
+current_phase_name: MVP 0 — Collaborative Workspace Demo Slice
+status: planning
+stopped_at: Phase 07.14 complete, ready to plan Phase 1
+last_updated: "2026-11-07T07:05:55.907Z"
+last_activity: 2026-11-07
+last_activity_desc: Phase 07.14 complete, transitioned to Phase 1
+state_head: b5a4d2ce9386ee81270ada7c2feeedb2abe76c50
 progress:
   total_phases: 12
-  completed_phases: 4
-  total_plans: 281
-  completed_plans: 281
+  completed_phases: 5
+  total_plans: 295
+  completed_plans: 295
 ---
 
 # Project State
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-02)
 
 **Core value:** AI sessions are multiplayer — a private AI chat or coding session can be shared live with colleagues, the model knows who each participant is, and everything stays attributed and auditable.
-**Current focus:** Phase 07.7 — agent-to-agent-collaboration
+**Current focus:** Phase 07.14 — Organization connector auth
 
 ## Current Position
 
-Phase: 07.7 (agent-to-agent-collaboration) — GATED (owner check in docs/DEMO.md)
-Plan: 11 of 11
-Status: Phase 07.7 complete; PR next; owner check in docs/DEMO.md (two bots helping one person)
-Last activity: 2026-11-03 — Phase 07.7 built (11 plans), code review A/B/C (24 findings, 0 Critical) fixed, gate green
+Phase: 1 — MVP 0 — Collaborative Workspace Demo Slice
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-11-07 — Phase 07.14 complete, transitioned to Phase 1
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -38,7 +38,7 @@ Progress: [░░░░░░░░░░] 0%
 
 **Velocity:**
 
-- Total plans completed: 15
+- Total plans completed: 29
 - Average duration: — min
 - Total execution time: 0.0 hours
 
@@ -47,6 +47,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 03.1 | 15 | - | - |
+| 07.14 | 14 | - | - |
 
 **Recent Trend:**
 
@@ -115,5 +116,5 @@ Items acknowledged and deferred at milestone close, most recent first:
 ## Session Continuity
 
 Last session: 2026-10-04
-Stopped at: Phase 03.1 complete, ready to plan Phase 1
+Stopped at: Phase 07.14 complete, ready to plan Phase 1
 Resume file: None

@@ -389,11 +389,11 @@ Deferred to later milestones. Tracked but not in the current roadmap.
 
 ### Organization Connector Auth (COA) — added 2026-11-06 by the owner
 
-- [ ] **COA-01**: An MCP server (remote transport) can use `org_oauth`: an admin with `mcp.manage` connects it once with the authorization code flow (the 07.4 OAuth client: RFC 9728/8414 discovery, issuer check, PKCE S256, RFC 8707 `resource`, RFC 9207 `iss`, per-issuer client choice pre-registered → CIMD → DCR); the organization's bots then call its tools with that account wherever organization-secret servers are offered, through the API connector proxy, never in the cell
-- [ ] **COA-02**: An MCP server can use `org_client_credentials` (RFC 6749 §4.4): client id and write-only secret, token endpoint discovered from the server's metadata or entered by the admin (HTTPS or same-origin), optional scopes, RFC 8707 `resource`; the API fetches and refreshes tokens itself
-- [ ] **COA-03**: Organization credentials follow ADR-0025 custody: sealed in `app.secrets` with an organization-scoped AAD, readable only through admin-guarded functions, refresh serialized across instances, `needs_reconnect` with a reason on terminal failures, revocation at the provider on disconnect, destruction on a mode switch or delete after a confirmation; connect, disconnect, reconnect-needed and each proxied call are audited without tokens; tenant isolation proven by tests
-- [ ] **COA-04**: The MCP server dialog offers every mode (organization headers, organization sign-in, client credentials, member sign-in, member key) and, when OAuth cannot start or finish, names the failed step (discovery, issuer, PKCE, client registration, HTTPS, token exchange, scopes) with one fix line and the redirect URI and client metadata URL to copy; the server row shows the organization connection (account label, connected by, when) and Connect / Reconnect / Disconnect for admins; 1440/390, light/dark
-- [ ] **COA-05**: Existing modes are unchanged and existing servers keep working after the upgrade; integration tests against a fake OAuth MCP server cover both new flows, refresh, revoke, reconnect and the bots' proxied call; an e2e spec covers the admin connecting an organization account and a bot using it; ADR-0036 records the decisions
+- [x] **COA-01**: An MCP server (remote transport) can use `org_oauth`: an admin with `mcp.manage` connects it once with the authorization code flow (the 07.4 OAuth client: RFC 9728/8414 discovery, issuer check, PKCE S256, RFC 8707 `resource`, RFC 9207 `iss`, per-issuer client choice pre-registered → CIMD → DCR); the organization's bots then call its tools with that account wherever organization-secret servers are offered, through the API connector proxy, never in the cell
+- [x] **COA-02**: An MCP server can use `org_client_credentials` (RFC 6749 §4.4): client id and write-only secret, token endpoint discovered from the server's metadata or entered by the admin (HTTPS or same-origin), optional scopes, RFC 8707 `resource`; the API fetches and refreshes tokens itself
+- [x] **COA-03**: Organization credentials follow ADR-0025 custody: sealed in `app.secrets` with an organization-scoped AAD, readable only through admin-guarded functions, refresh serialized across instances, `needs_reconnect` with a reason on terminal failures, revocation at the provider on disconnect, destruction on a mode switch or delete after a confirmation; connect, disconnect, reconnect-needed and each proxied call are audited without tokens; tenant isolation proven by tests
+- [x] **COA-04**: The MCP server dialog offers every mode (organization headers, organization sign-in, client credentials, member sign-in, member key) and, when OAuth cannot start or finish, names the failed step (discovery, issuer, PKCE, client registration, HTTPS, token exchange, scopes) with one fix line and the redirect URI and client metadata URL to copy; the server row shows the organization connection (account label, connected by, when) and Connect / Reconnect / Disconnect for admins; 1440/390, light/dark
+- [x] **COA-05**: Existing modes are unchanged and existing servers keep working after the upgrade; integration tests against a fake OAuth MCP server cover both new flows, refresh, revoke, reconnect and the bots' proxied call; an e2e spec covers the admin connecting an organization account and a bot using it; ADR-0036 records the decisions
 
 ### Operations backlog (from the 2026-10-08 research, not yet scheduled)
 
@@ -618,11 +618,11 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | HSR-05 | Phase 07.12 | Complete (owner checks in docs/DEMO.md: human_needed) | New (owner, 2026-10-29; plans 07.12-05, 08, 09, 10, 11) |
 | HSR-06 | Phase 07.12 | Complete (owner checks in docs/DEMO.md: human_needed) | New (owner, 2026-10-29; plans 07.12-09, 10, 11) |
 | HSR-07 | Phase 07.12 | Complete (owner checks in docs/DEMO.md: human_needed) | New (owner, 2026-10-29; plans 07.12-10, 11) |
-| COA-01 | Phase 07.14 | Pending | New (owner, 2026-11-06) |
-| COA-02 | Phase 07.14 | Pending | New (owner, 2026-11-06) |
-| COA-03 | Phase 07.14 | Pending | New (owner, 2026-11-06) |
-| COA-04 | Phase 07.14 | Pending | New (owner, 2026-11-06) |
-| COA-05 | Phase 07.14 | Pending | New (owner, 2026-11-06) |
+| COA-01 | Phase 07.14 | Complete | New (owner, 2026-11-06) |
+| COA-02 | Phase 07.14 | Complete | New (owner, 2026-11-06) |
+| COA-03 | Phase 07.14 | Complete | New (owner, 2026-11-06) |
+| COA-04 | Phase 07.14 | Complete | New (owner, 2026-11-06) |
+| COA-05 | Phase 07.14 | Complete | New (owner, 2026-11-06) |
 | DEV-01 | Phase 8 | Partial | Session events + Device Link frames in `packages/contracts`; no `packages/protocol`; capability flags only inside the daemon |
 | DEV-02 | Phase 8 | Partial | One-time code + hashed bearer token (SLICE-13); no Ed25519 signed challenge or RFC 8628 |
 | DEV-03 | Phase 8 | Partial | Device list + immediate revocation (SLICE-13); no active sessions, no admin view |
