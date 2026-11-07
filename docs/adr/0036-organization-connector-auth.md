@@ -281,3 +281,7 @@ Amended in place while the phase is unmerged, after `07.14-REVIEW.md`. Each item
   record `issuedAt`. A token that lives 60 s or less (some client-credentials issuers) used to be never fresh: every
   call, and every waiter of a serialized refresh, minted its own token (one rotation spent per call for rotating
   refresh tokens). Bundles stored before `issuedAt` keep the fixed 60 s window until their next refresh.
+- **The dialog's public-URL warning follows the server's rule (WR-05).** It warned on any difference between the
+  redirect URI's host and the page's host, so a supported split-host install (the API on its own HTTPS host, the web
+  origin in `OCW_TRUSTED_ORIGINS`) always showed a wrong fix. It now warns only when the redirect URI is loopback and
+  the page is not, or when the redirect URI is plain http on a non-loopback host (which providers refuse anywhere).

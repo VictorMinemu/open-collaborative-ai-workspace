@@ -80,10 +80,16 @@ export function oauthTestRequest(v: AuthTestValues, pageOrigin: string): OAuthTe
   return req;
 }
 
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
 /**
- * The public-URL check (RESEARCH Pitfall 1): providers return to the redirect URI's host, so a workspace opened at
- * another host (a proxy in front, a LAN name) has the wrong `OCW_PUBLIC_API_URL`. Hosts only: the API and the web may
- * use different ports on one host. Null when they match or the URI is missing.
+ * The public-URL check (RESEARCH Pitfall 1), the server's rule (diagnosis `public_url`; 07.14 review WR-05): providers
+ * return the browser to the redirect URI, so a workspace opened from another machine (behind a proxy or tunnel) whose
+ * redirect URI is still loopback (`OCW_PUBLIC_API_URL` left at its default) sends the admin to their own machine, and
+ * a plain-http redirect URI on a non-loopback host is refused by providers wherever the page is. Only then does it
+ * warn. An API on its own HTTPS host beside the web is a supported layout (`docs/self-hosting/reverse-proxy.md` rule
+ * 1) and never warns; nor does a loopback redirect URI on a local page. Null when nothing is wrong or the URI is
+ * missing.
  */
 export function publicUrlMismatch(
   redirectUri: string,
@@ -97,9 +103,10 @@ export function publicUrlMismatch(
   } catch {
     return null;
   }
-  return redirect.hostname === page.hostname
-    ? null
-    : { redirectHost: redirect.hostname, pageHost: page.hostname };
+  const loopback = LOOPBACK_HOSTS.has(redirect.hostname);
+  // Plain http on a non-loopback host is refused by providers wherever the page is; loopback works only locally.
+  const unreachable = loopback ? !LOOPBACK_HOSTS.has(page.hostname) : redirect.protocol !== "https:";
+  return unreachable ? { redirectHost: redirect.hostname, pageHost: page.hostname } : null;
 }
 
 /** The result line: ready / a token issued, or the first failed step and its fix line. */

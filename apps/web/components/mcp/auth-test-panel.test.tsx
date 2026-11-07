@@ -139,6 +139,37 @@ describe("publicUrlMismatch", () => {
     ).toEqual({ redirectHost: "localhost", pageHost: "ocw.acme.example" });
   });
 
+  // 07.14 review WR-05: the server's rule (diagnosis `public_url`). The API on its own HTTPS host beside the web
+  // (`docs/self-hosting/reverse-proxy.md` rule 1) is a supported layout, never a wrong public URL.
+  it("does not warn for a split-host install with an HTTPS API", () => {
+    expect(
+      publicUrlMismatch(
+        "https://api.acme.example/api/v1/connectors/oauth/callback",
+        "https://ocw.acme.example/x",
+      ),
+    ).toBe(null);
+  });
+
+  it("warns for a loopback redirect URI on a page that is not local, and for plain http on another host", () => {
+    expect(
+      publicUrlMismatch(
+        "http://127.0.0.1:4000/api/v1/connectors/oauth/callback",
+        "https://ocw.acme.example/x",
+      ),
+    ).toEqual({ redirectHost: "127.0.0.1", pageHost: "ocw.acme.example" });
+    expect(
+      publicUrlMismatch("http://ocw-lan:4000/api/v1/connectors/oauth/callback", "https://ocw.acme.example/x"),
+    ).toEqual({ redirectHost: "ocw-lan", pageHost: "ocw.acme.example" });
+    // Providers refuse plain http on a non-loopback host, wherever the admin opened the page.
+    expect(
+      publicUrlMismatch("http://ocw-lan:4000/api/v1/connectors/oauth/callback", "http://127.0.0.1:3000/x"),
+    ).toEqual({ redirectHost: "ocw-lan", pageHost: "127.0.0.1" });
+    // A loopback redirect URI on a local page (the dev stack, the admin on the server itself) is not warned.
+    expect(
+      publicUrlMismatch("http://localhost:4000/api/v1/connectors/oauth/callback", "http://127.0.0.1:3000/x"),
+    ).toBe(null);
+  });
+
   it("is null without a redirect URI or with an unparsable one", () => {
     expect(publicUrlMismatch("", "https://ocw.acme.example/")).toBe(null);
     expect(publicUrlMismatch("not a url", "https://ocw.acme.example/")).toBe(null);
