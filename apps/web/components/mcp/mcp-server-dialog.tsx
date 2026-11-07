@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  authFailureFix,
+  type ClientCredentialsInput,
   type ConnectorAuthMode,
   type CreateMcpServerRequest,
   isAllowedInjectionHeader,
@@ -11,8 +13,11 @@ import {
   type McpServer,
   type McpServerList,
   type McpTransport,
+  type OrgConnection,
   rendersInCell,
   type UpdateMcpServerRequest,
+  usesConnectorProxy,
+  usesOAuthSignIn,
 } from "@ocw/contracts";
 import {
   Check,
@@ -54,7 +59,14 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { useCopy } from "@/hooks/use-copy";
 import { errorMessage, isApiError } from "@/lib/api";
-import { connectionsExistCount, useCreateMcpServer, useUpdateMcpServer } from "@/lib/mcp-queries";
+import {
+  CredentialsRefusedError,
+  connectionsExistCount,
+  useCreateMcpServer,
+  useSaveClientCredentials,
+  useUpdateMcpServer,
+} from "@/lib/mcp-queries";
+import { stepLabel, stepOfFailure } from "@/lib/org-connection-format";
 import { cn } from "@/lib/utils";
 
 export const TRANSPORTS: Array<{ value: McpTransport; label: string; hint: string }> = [
@@ -63,28 +75,94 @@ export const TRANSPORTS: Array<{ value: McpTransport; label: string; hint: strin
   { value: "sandboxed-stdio", label: "Sandboxed stdio", hint: "A vetted local server in the sandbox" },
 ];
 
+interface AuthCard {
+  value: ConnectorAuthMode;
+  label: string;
+  hint: string;
+}
+
 /**
- * The Authentication radio cards (07.4-UI-SPEC § 1), same markup as Transport. Test ids: `mcp-auth-mode-org_secret`,
- * `mcp-auth-mode-per_member_oauth`, `mcp-auth-mode-per_member_secret`.
+ * The Authentication radio cards (07.4-UI-SPEC § 1, 07.14 PD-12), same markup as Transport, in two groups in this
+ * fixed order: the organization's own account first, then each member's. Test ids `mcp-auth-group-<key>` and
+ * `mcp-auth-mode-<mode>`.
  */
-export const AUTH_MODES: Array<{ value: ConnectorAuthMode; label: string; hint: string }> = [
-  { value: "org_secret", label: "Organization secret", hint: "Uses one secret for everyone" },
+export const AUTH_GROUPS: ReadonlyArray<{
+  key: "org" | "member";
+  legend: string;
+  cards: readonly AuthCard[];
+}> = [
   {
-    value: "per_member_oauth",
-    label: "Each member signs in",
-    hint: "Each person signs in with their own account",
+    key: "org",
+    legend: "For the whole organization",
+    cards: [
+      { value: "org_secret", label: "Organization headers", hint: "Fixed headers, like an API key" },
+      { value: "org_oauth", label: "Organization sign-in", hint: "An admin signs in once for everyone" },
+      {
+        value: "org_client_credentials",
+        label: "Client credentials",
+        hint: "A client ID and secret, no browser sign-in",
+      },
+    ],
   },
-  { value: "per_member_secret", label: "Each member's own key", hint: "Each person pastes their own key" },
+  {
+    key: "member",
+    legend: "Each member's own account",
+    cards: [
+      {
+        value: "per_member_oauth",
+        label: "Member sign-in",
+        hint: "Each person signs in with their own account",
+      },
+      { value: "per_member_secret", label: "Member key", hint: "Each person pastes their own key" },
+    ],
+  },
 ];
 
+export const AUTH_MODES: readonly AuthCard[] = AUTH_GROUPS.flatMap((g) => g.cards);
+
 function modeExplanation(mode: ConnectorAuthMode, server: string): string {
-  if (mode === "per_member_oauth") {
-    return "Each member connects in Settings › Connections. Bots act with the account of whoever asks; results stay in that person's private chats unless they allow a conversation.";
+  switch (mode) {
+    case "per_member_oauth":
+      return "Each member connects in Settings › Connections. Bots act with the account of whoever asks; results stay in that person's private chats unless they allow a conversation.";
+    case "per_member_secret":
+      return "Each member adds a key in Settings › Connections. OCW sends it as the header below; bots never see it.";
+    case "org_oauth":
+      return "An admin signs in once with the organization's account. Every member's bots use it wherever organization tools are allowed. The token stays on the server.";
+    case "org_client_credentials":
+      return `OCW gets tokens from ${server}'s sign-in server with this client ID and secret. Every member's bots use them wherever organization tools are allowed.`;
+    default:
+      return `Bots call ${server} with the headers below, whoever asks. Use it for shared tools.`;
   }
-  if (mode === "per_member_secret") {
-    return "Each member adds a key in Settings › Connections. OCW sends it as the header below; bots never see it.";
+}
+
+/** The modes that take Scopes: both sign-in modes and client credentials (the contract's `checkConnectorAuth`). */
+const takesScopes = (mode: ConnectorAuthMode) => usesOAuthSignIn(mode) || mode === "org_client_credentials";
+
+/**
+ * The client-side twin of the API's `trusted()` for an admin-entered Token URL: https, or http to the MCP server's own
+ * origin; never credentials or a fragment in the URL. The API checks it again before any request.
+ */
+export function trustedTokenUrl(endpoint: string, serverUrl: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(endpoint);
+  } catch {
+    return false;
   }
-  return `Bots call ${server} with the headers below, whoever asks. Use it for shared tools.`;
+  if (u.username || u.password || u.hash) return false;
+  if (u.protocol === "https:") return true;
+  if (u.protocol !== "http:") return false;
+  try {
+    return u.origin === new URL(serverUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+/** The stored client credentials of a server (client id, whether a secret is set); null when none are stored. */
+function storedCredentials(server: McpServer | null): OrgConnection | null {
+  const c = server?.orgConnection ?? null;
+  return server?.authMode === "org_client_credentials" && c?.method === "client_credentials" ? c : null;
 }
 
 /** No OAuth URLs from an older API: assume nothing (no redirect URI to show, sign-in unavailable). */
@@ -116,7 +194,12 @@ type Errors = Partial<
     | "memberPrefix"
     | "issuer"
     | "clientId"
-    | "scopes",
+    | "scopes"
+    | "ccClientId"
+    | "ccSecret"
+    | "ccTokenUrl"
+    /** A second line under `form`: the fix line of a refused client-credentials save. */
+    | "formFix",
     string
   >
 > & {
@@ -147,7 +230,7 @@ export function McpServerDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent data-testid="mcp-server-dialog" className="sm:max-w-lg">
+      <DialogContent data-testid="mcp-server-dialog" className="sm:max-w-xl">
         {open ? (
           <ServerForm
             key={server?.id ?? "new"}
@@ -174,8 +257,15 @@ function ServerForm({
   onDone: () => void;
 }) {
   const create = useCreateMcpServer();
-  const update = useUpdateMcpServer(server?.id ?? "");
-  const editing = server !== null;
+  /**
+   * The server as last saved by this dialog: a Save whose credentials were refused has already created or updated the
+   * server, so the next Save edits that state (it never adds the server twice).
+   */
+  const [saved, setSaved] = useState<McpServer | null>(null);
+  const base = saved ?? server;
+  const update = useUpdateMcpServer(base?.id ?? "");
+  const saveCredentials = useSaveClientCredentials();
+  const editing = base !== null;
   const [name, setName] = useState(server?.name ?? "");
   const [transport, setTransport] = useState<McpTransport>(server?.transport ?? "streamable-http");
   const [url, setUrl] = useState(server?.url ?? "");
@@ -206,14 +296,31 @@ function ServerForm({
   const [scopes, setScopes] = useState((server?.oauthScopes ?? []).join(" "));
   // WINDOWS #179: identify OCW with its client metadata URL (default), or not when the provider cannot reach it.
   const [useCimd, setUseCimd] = useState(server?.oauthUseCimd ?? true);
+  // Client credentials (07.14 D-03): the client id is an identifier and is shown; the secret is write-only, never
+  // prefilled (a stored one reads "Secret set" + Replace) and cleared after a save and when the dialog closes.
+  const [ccClientId, setCcClientId] = useState(storedCredentials(server)?.clientId ?? "");
+  const [ccSecret, setCcSecret] = useState("");
+  const [ccReplace, setCcReplace] = useState(false);
+  const [ccTokenUrl, setCcTokenUrl] = useState("");
+  const savedCc = storedCredentials(base);
+  /** A stored secret is kept only for the same client: another client id needs its own secret (the API's rule). */
+  const keepsStoredSecret =
+    savedCc?.hasSecret === true && !ccReplace && ccClientId.trim() === savedCc.clientId;
   const [errors, setErrors] = useState<Errors>({});
   /** The mode-switch confirmation: how many members it disconnects and the PATCH it will send. */
   const [confirm, setConfirm] = useState<{ count: number; body: UpdateMcpServerRequest } | null>(null);
-  const pending = create.isPending || update.isPending;
+  const pending = create.isPending || update.isPending || saveCredentials.isPending;
   const sandboxed = transport === "sandboxed-stdio";
-  /** Sign-in stays selectable for a server already in that mode, so an admin can still edit it. */
-  const oauthBlocked = !oauth.oauthAvailable && server?.authMode !== "per_member_oauth";
   const serverLabel = name.trim() || "this server";
+
+  /** Why a card can't be picked (it replaces the card's hint), or null. */
+  function disabledReason(mode: ConnectorAuthMode): string | null {
+    // Accounts (the organization's or a member's) go through the API proxy: never the stdio sandbox.
+    if (sandboxed && usesConnectorProxy(mode)) return "Needs a remote server";
+    // Sign-in stays selectable for a server already in that mode, so an admin can still edit it.
+    if (usesOAuthSignIn(mode) && !oauth.oauthAvailable && base?.authMode !== mode) return "Needs HTTPS";
+    return null;
+  }
 
   const clearError = (...keys: Array<keyof Errors>) =>
     setErrors((e) => {
@@ -268,8 +375,16 @@ function ServerForm({
         if (!c.clientId) next.clientId = "Enter the client ID";
       }
     }
-    if (authMode === "per_member_oauth" && scopeList().some((s) => s.length > 200)) {
+    if (takesScopes(authMode) && scopeList().some((s) => s.length > 200)) {
       next.scopes = "Each scope is at most 200 characters";
+    }
+    if (authMode === "org_client_credentials") {
+      if (!ccClientId.trim()) next.ccClientId = "Enter the client ID";
+      if (!keepsStoredSecret && !ccSecret) next.ccSecret = "Enter the client secret";
+      const tokenUrl = ccTokenUrl.trim();
+      if (tokenUrl && !trustedTokenUrl(tokenUrl, url.trim())) {
+        next.ccTokenUrl = "Use an https address (or this server's own address)";
+      }
     }
     if (!rendersInCell(authMode)) return next;
     const headerErrors: Record<number, string> = {};
@@ -311,6 +426,10 @@ function ServerForm({
         ...(useCimd ? {} : { oauthUseCimd: false }),
       };
     }
+    if (authMode === "org_client_credentials") {
+      const list = scopeList();
+      return list.length > 0 ? { oauthScopes: list } : {};
+    }
     return {};
   }
 
@@ -345,7 +464,54 @@ function ServerForm({
       }
       if (useCimd !== (modeChanged ? true : (saved.oauthUseCimd ?? true))) out.oauthUseCimd = useCimd;
     }
+    if (authMode === "org_client_credentials") {
+      // The server keeps the scopes across the modes that take them; the DTO has none for the others.
+      const list = scopeList();
+      if (list.join(" ") !== (saved.oauthScopes ?? []).join(" "))
+        out.oauthScopes = list.length === 0 ? null : list;
+    }
     return out;
+  }
+
+  /** The credentials to send: a new server or client, a typed secret or Token URL; null = nothing changed. */
+  function credentialsToSave(target: McpServer): ClientCredentialsInput | null {
+    if (authMode !== "org_client_credentials") return null;
+    const stored = storedCredentials(target);
+    const clientId = ccClientId.trim();
+    const tokenEndpoint = ccTokenUrl.trim();
+    if (stored && clientId === stored.clientId && !ccSecret && !tokenEndpoint) return null;
+    return {
+      clientId,
+      ...(ccSecret ? { clientSecret: ccSecret } : {}),
+      ...(tokenEndpoint ? { tokenEndpoint } : {}),
+    };
+  }
+
+  /**
+   * Saves the client credentials after the server (create or update) when they changed. A refused grant keeps the
+   * dialog open with the step and its fix line (closed codes only, never the provider's text); false = stop there.
+   */
+  async function persistCredentials(target: McpServer): Promise<boolean> {
+    const body = credentialsToSave(target);
+    if (!body) return true;
+    try {
+      await saveCredentials.mutateAsync({ serverId: target.id, body });
+      setCcSecret("");
+      return true;
+    } catch (err) {
+      if (err instanceof CredentialsRefusedError) {
+        setErrors({
+          form: `Client credentials failed at: ${stepLabel(stepOfFailure(err.failure))}.`,
+          formFix: authFailureFix(err.failure, target.name),
+        });
+      } else if (isApiError(err) && err.code === "secret_required") {
+        setCcReplace(true);
+        setErrors({ ccSecret: errorMessage(err) });
+      } else {
+        showError(err);
+      }
+      return false;
+    }
   }
 
   function showError(err: unknown) {
@@ -367,11 +533,18 @@ function ServerForm({
   function finish() {
     setHeaders([]);
     setClientSecret("");
+    setCcSecret("");
     onDone();
   }
 
-  async function saveUpdate(body: UpdateMcpServerRequest) {
-    if (Object.keys(body).length > 0) await update.mutateAsync(body);
+  /** The PATCH (when anything changed), then the client credentials; throws the PATCH's error for the caller. */
+  async function saveUpdate(target: McpServer, body: UpdateMcpServerRequest) {
+    let current = target;
+    if (Object.keys(body).length > 0) {
+      current = await update.mutateAsync(body);
+      setSaved(current);
+    }
+    if (!(await persistCredentials(current))) return;
     toast.success(`${name.trim()} saved`, {
       description:
         rendersInCell(authMode) && (body.url || body.headers || body.sandboxServer || body.authMode)
@@ -381,34 +554,41 @@ function ServerForm({
     finish();
   }
 
+  function addedDescription(mode: ConnectorAuthMode): string {
+    if (rendersInCell(mode)) return "Your bots' runtime is discovering its tools.";
+    if (mode === "org_oauth") return "Connect the organization's account from its row to use its tools.";
+    if (mode === "org_client_credentials") return "Its client credentials work. Bots can use its tools.";
+    return "Its tools appear after the first member connects.";
+  }
+
   async function submit(e: FormEvent) {
     e.preventDefault();
     const next = validate();
     setErrors(next);
     if (Object.keys(next).length > 0) return;
-    if (server) {
+    if (base) {
       const body: UpdateMcpServerRequest = {};
-      if (name.trim() !== server.name) body.name = name.trim();
-      if (!sandboxed && url.trim() !== (server.url ?? "")) body.url = url.trim();
-      if (sandboxed && sandboxServer !== server.sandboxServer) body.sandboxServer = sandboxServer;
-      const modeChanged = authMode !== server.authMode;
+      if (name.trim() !== base.name) body.name = name.trim();
+      if (!sandboxed && url.trim() !== (base.url ?? "")) body.url = url.trim();
+      if (sandboxed && sandboxServer !== base.sandboxServer) body.sandboxServer = sandboxServer;
+      const modeChanged = authMode !== base.authMode;
       if (modeChanged) body.authMode = authMode;
       if (rendersInCell(authMode)) {
         const headersChanged =
-          headers.length !== server.headers.length ||
+          headers.length !== base.headers.length ||
           headers.some((h) => !h.stored || h.replace) ||
-          headers.some((h, i) => h.name.trim() !== server.headers[i]?.name);
+          headers.some((h, i) => h.name.trim() !== base.headers[i]?.name);
         if (headersChanged) body.headers = headerInputs();
       }
-      Object.assign(body, updateConnectorFields(server, modeChanged));
+      Object.assign(body, updateConnectorFields(base, modeChanged));
       // Leaving a member mode deletes every member's sign-in or key: ask first, with the count the list already has
       // (R4). Nothing is sent until the admin confirms.
-      if (modeChanged && isPerMemberMode(server.authMode) && server.memberConnections > 0) {
-        setConfirm({ count: server.memberConnections, body });
+      if (modeChanged && isPerMemberMode(base.authMode) && base.memberConnections > 0) {
+        setConfirm({ count: base.memberConnections, body });
         return;
       }
       try {
-        await saveUpdate(body);
+        await saveUpdate(base, body);
       } catch (err) {
         // Fallback: members connected since the list loaded. The same confirmation opens with the server's count.
         const count = connectionsExistCount(err);
@@ -417,46 +597,73 @@ function ServerForm({
       }
       return;
     }
+    const body: CreateMcpServerRequest = {
+      name: name.trim(),
+      transport,
+      ...(sandboxed ? { sandboxServer } : { url: url.trim() }),
+      // Values typed in a hidden block are discarded: only the chosen mode's fields are sent.
+      headers: rendersInCell(authMode) ? headerInputs() : [],
+      orgEnabled: true,
+      personalAllowed: false,
+      trustedChaining: false,
+      authMode,
+      ...createConnectorFields(),
+    };
+    let created: McpServer;
     try {
-      const body: CreateMcpServerRequest = {
-        name: name.trim(),
-        transport,
-        ...(sandboxed ? { sandboxServer } : { url: url.trim() }),
-        // Values typed in a hidden block are discarded: only the chosen mode's fields are sent.
-        headers: rendersInCell(authMode) ? headerInputs() : [],
-        orgEnabled: true,
-        personalAllowed: false,
-        trustedChaining: false,
-        authMode,
-        ...createConnectorFields(),
-      };
-      await create.mutateAsync(body);
-      toast.success(`${body.name} added`, {
-        description: rendersInCell(authMode)
-          ? "Your bots' runtime is discovering its tools."
-          : "Its tools appear after the first member connects.",
-      });
-      finish();
+      created = await create.mutateAsync(body);
     } catch (err) {
+      showError(err);
+      return;
+    }
+    setSaved(created);
+    // The server exists from here on; refused credentials keep the dialog open on it (the next Save edits it).
+    if (!(await persistCredentials(created))) return;
+    toast.success(`${body.name} added`, { description: addedDescription(authMode) });
+    finish();
+  }
+
+  async function confirmSwitch() {
+    if (!confirm || !base) return;
+    try {
+      await saveUpdate(base, { ...confirm.body, clearConnections: true });
+      setConfirm(null);
+    } catch (err) {
+      setConfirm(null);
       showError(err);
     }
   }
 
-  async function confirmSwitch() {
-    if (!confirm) return;
-    try {
-      await saveUpdate({ ...confirm.body, clearConnections: true });
-      setConfirm(null);
-    } catch (err) {
-      setConfirm(null);
-      showError(err);
-    }
-  }
+  /** Scopes: one field shared by both sign-in modes and client credentials (only one block renders at a time). */
+  const scopesField = (
+    <FormField
+      id="mcp-oauth-scopes"
+      label="Scopes"
+      hint="Optional. Separate with spaces."
+      error={errors.scopes}
+    >
+      <Input
+        id="mcp-oauth-scopes"
+        value={scopes}
+        placeholder="crm.read crm.write"
+        onChange={(e) => {
+          setScopes(e.target.value);
+          clearError("scopes");
+        }}
+        aria-invalid={!!errors.scopes}
+        aria-describedby={describedBy("mcp-oauth-scopes", errors.scopes, "x")}
+        autoComplete="off"
+        spellCheck={false}
+        className={cn("font-mono text-[13px]", TOUCH)}
+        data-testid="mcp-oauth-scopes"
+      />
+    </FormField>
+  );
 
   return (
     <form onSubmit={submit} noValidate className="flex min-h-0 flex-col">
       <DialogHeader>
-        <DialogTitle>{editing ? `Edit ${server.name}` : "Add an MCP server"}</DialogTitle>
+        <DialogTitle>{base ? `Edit ${base.name}` : "Add an MCP server"}</DialogTitle>
         <DialogDescription>
           Its tools become available to bots. Each tool stays off until someone who manages a bot turns it on.
         </DialogDescription>
@@ -560,51 +767,61 @@ function ServerForm({
           </FormField>
         )}
 
-        <fieldset className="grid gap-2" data-testid="mcp-auth-modes">
+        <fieldset className="grid gap-3" data-testid="mcp-auth-modes">
           <legend className="mb-2 font-medium text-sm">Authentication</legend>
-          <div className="grid gap-2 sm:grid-cols-3">
-            {AUTH_MODES.map((m) => {
-              const stdioBlocked = !rendersInCell(m.value) && sandboxed;
-              const httpsBlocked = m.value === "per_member_oauth" && oauthBlocked;
-              const disabled = stdioBlocked || httpsBlocked;
-              const selected = authMode === m.value;
-              return (
-                <label
-                  key={m.value}
-                  className={cn(
-                    "flex cursor-pointer items-start gap-2.5 rounded-lg border bg-card p-2.5 transition-colors max-md:min-h-11 sm:flex-col sm:gap-1",
-                    selected && "border-primary/50 bg-brand-soft/40 ring-1 ring-primary/30",
-                    disabled && "cursor-not-allowed opacity-60",
-                  )}
-                  data-testid={`mcp-auth-mode-${m.value}`}
-                >
-                  <input
-                    type="radio"
-                    name="mcp-auth-mode"
-                    value={m.value}
-                    checked={selected}
-                    disabled={disabled}
-                    onChange={() => {
-                      setAuthMode(m.value);
-                      clearError("memberHeader", "memberPrefix", "issuer", "clientId", "scopes");
-                    }}
-                    className="mt-0.5 size-4 shrink-0 accent-primary sm:sr-only"
-                  />
-                  <span className="min-w-0">
-                    <span className="block font-medium text-[13px]">{m.label}</span>
-                    {/* A disabled option's reason replaces its hint, so it is read with the option. */}
-                    <span className="block text-[11.5px] text-muted-foreground leading-snug">
-                      {stdioBlocked
-                        ? "Member accounts need a remote server"
-                        : httpsBlocked
-                          ? "Needs HTTPS"
-                          : m.hint}
-                    </span>
-                  </span>
-                </label>
-              );
-            })}
-          </div>
+          {AUTH_GROUPS.map((g) => (
+            <fieldset key={g.key} className="grid min-w-0 gap-1.5" data-testid={`mcp-auth-group-${g.key}`}>
+              <legend className="mb-1.5 font-semibold text-muted-foreground text-xs">{g.legend}</legend>
+              <div className={cn("grid gap-2", g.cards.length === 3 ? "sm:grid-cols-3" : "sm:grid-cols-2")}>
+                {g.cards.map((m) => {
+                  const reason = disabledReason(m.value);
+                  const disabled = reason !== null;
+                  const selected = authMode === m.value;
+                  return (
+                    <label
+                      key={m.value}
+                      className={cn(
+                        "flex cursor-pointer items-start gap-2.5 rounded-lg border bg-card p-2.5 transition-colors max-md:min-h-11 sm:flex-col sm:gap-1",
+                        selected && "border-primary/50 bg-brand-soft/40 ring-1 ring-primary/30",
+                        disabled && "cursor-not-allowed opacity-60",
+                      )}
+                      data-testid={`mcp-auth-mode-${m.value}`}
+                    >
+                      <input
+                        type="radio"
+                        name="mcp-auth-mode"
+                        value={m.value}
+                        checked={selected}
+                        disabled={disabled}
+                        onChange={() => {
+                          setAuthMode(m.value);
+                          clearError(
+                            "memberHeader",
+                            "memberPrefix",
+                            "issuer",
+                            "clientId",
+                            "scopes",
+                            "ccClientId",
+                            "ccSecret",
+                            "ccTokenUrl",
+                            "formFix",
+                          );
+                        }}
+                        className="mt-0.5 size-4 shrink-0 accent-primary sm:sr-only"
+                      />
+                      <span className="min-w-0">
+                        <span className="block font-medium text-[13px]">{m.label}</span>
+                        {/* A disabled option's reason replaces its hint, so it is read with the option. */}
+                        <span className="block text-[11.5px] text-muted-foreground leading-snug">
+                          {reason ?? m.hint}
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </fieldset>
+          ))}
           {!oauth.oauthAvailable ? (
             <p
               role="note"
@@ -795,31 +1012,123 @@ function ServerForm({
                       </FormField>
                     </>
                   )}
-                  <FormField
-                    id="mcp-oauth-scopes"
-                    label="Scopes"
-                    hint="Optional. Separate with spaces."
-                    error={errors.scopes}
-                  >
-                    <Input
-                      id="mcp-oauth-scopes"
-                      value={scopes}
-                      placeholder="crm.read crm.write"
-                      onChange={(e) => {
-                        setScopes(e.target.value);
-                        clearError("scopes");
-                      }}
-                      aria-invalid={!!errors.scopes}
-                      aria-describedby={describedBy("mcp-oauth-scopes", errors.scopes, "x")}
-                      autoComplete="off"
-                      spellCheck={false}
-                      className={cn("font-mono text-[13px]", TOUCH)}
-                      data-testid="mcp-oauth-scopes"
-                    />
-                  </FormField>
+                  {scopesField}
                 </div>
               ) : null}
             </div>
+          </div>
+        ) : null}
+
+        {authMode === "org_client_credentials" ? (
+          <div className="grid gap-4" data-testid="mcp-cc-fields">
+            <FormField id="mcp-cc-client-id" label="Client ID" error={errors.ccClientId}>
+              <Input
+                id="mcp-cc-client-id"
+                value={ccClientId}
+                maxLength={256}
+                placeholder="ocw-production"
+                onChange={(e) => {
+                  setCcClientId(e.target.value);
+                  clearError("ccClientId", "ccSecret", "formFix");
+                }}
+                aria-invalid={!!errors.ccClientId}
+                aria-describedby={describedBy("mcp-cc-client-id", errors.ccClientId)}
+                autoComplete="off"
+                spellCheck={false}
+                className={cn("font-mono text-[13px]", TOUCH)}
+                data-testid="mcp-cc-client-id"
+              />
+            </FormField>
+            {keepsStoredSecret ? (
+              <div className="grid gap-2">
+                <span className="font-medium text-sm">Client secret</span>
+                <div
+                  className="flex min-w-0 items-center gap-2 rounded-lg border border-dashed px-3 py-1.5 text-xs max-md:min-h-11"
+                  data-testid="mcp-cc-secret-stored"
+                >
+                  <Lock className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="min-w-0 flex-1 truncate text-muted-foreground">Secret set</span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className={TOUCH}
+                    onClick={() => setCcReplace(true)}
+                    data-testid="mcp-cc-secret-replace"
+                  >
+                    Replace
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <FormField
+                id="mcp-cc-client-secret"
+                label="Client secret"
+                hint="Write-only. Never shown again."
+                error={errors.ccSecret}
+                action={
+                  ccReplace && savedCc?.hasSecret ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className={cn("-my-1", TOUCH)}
+                      onClick={() => {
+                        setCcReplace(false);
+                        setCcSecret("");
+                        clearError("ccSecret");
+                      }}
+                      data-testid="mcp-cc-secret-keep"
+                    >
+                      Keep the saved secret
+                    </Button>
+                  ) : null
+                }
+              >
+                <Input
+                  id="mcp-cc-client-secret"
+                  type="password"
+                  value={ccSecret}
+                  maxLength={4096}
+                  onChange={(e) => {
+                    setCcSecret(e.target.value);
+                    clearError("ccSecret", "formFix");
+                  }}
+                  aria-invalid={!!errors.ccSecret}
+                  aria-describedby={describedBy("mcp-cc-client-secret", errors.ccSecret, "x")}
+                  autoComplete="new-password"
+                  spellCheck={false}
+                  className={cn("font-mono text-[13px]", TOUCH)}
+                  data-testid="mcp-cc-client-secret"
+                />
+              </FormField>
+            )}
+            <FormField
+              id="mcp-cc-token-url"
+              label="Token URL (optional)"
+              hint="Leave empty to use the server's published sign-in information."
+              error={errors.ccTokenUrl}
+            >
+              <Input
+                id="mcp-cc-token-url"
+                type="url"
+                inputMode="url"
+                value={ccTokenUrl}
+                maxLength={2000}
+                placeholder="https://auth.example.com/oauth/token"
+                onChange={(e) => {
+                  setCcTokenUrl(e.target.value);
+                  clearError("ccTokenUrl", "formFix");
+                }}
+                aria-invalid={!!errors.ccTokenUrl}
+                aria-describedby={describedBy("mcp-cc-token-url", errors.ccTokenUrl, "x")}
+                autoComplete="off"
+                spellCheck={false}
+                className={cn("font-mono text-[13px]", TOUCH)}
+                data-testid="mcp-cc-token-url"
+              />
+            </FormField>
+            {scopesField}
           </div>
         ) : null}
 
@@ -984,7 +1293,8 @@ function ServerForm({
             className="rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-[13px] text-destructive"
             data-testid="mcp-form-error"
           >
-            {errors.form}
+            <span className="block font-medium">{errors.form}</span>
+            {errors.formFix ? <span className="mt-0.5 block">{errors.formFix}</span> : null}
           </p>
         ) : null}
       </DialogBody>
@@ -997,11 +1307,11 @@ function ServerForm({
           {editing ? "Save" : "Add server"}
         </Button>
       </DialogFooter>
-      {server ? (
+      {base ? (
         <ClearConnectionsDialog
           open={confirm !== null}
           count={confirm?.count ?? 0}
-          serverName={server.name}
+          serverName={base.name}
           toMode={authMode}
           pending={update.isPending}
           onCancel={() => setConfirm(null)}
