@@ -28,3 +28,15 @@
   after 10 s waiting for the Redis container's ports, before any test ran (other worktrees were running suites on the
   same Docker daemon). Re-run alone right after: 29/29 passed. This plan does not touch that module. A likely fix is a
   longer port-binding wait in `packages/db/src/testing.ts` for Redis.
+
+## From 07.14-14 (the phase gate)
+
+- **`organization/module-access.int.test.ts` failed to start under the full `pnpm verify` load.** Testcontainers timed
+  out after 10 s waiting for the Redis container's ports (the same start-up timeout as in 08 and 13; other worktrees'
+  suites shared the Docker daemon). Re-run alone right after: 22/22. Not touched by this phase; the likely fix is the
+  longer port-binding wait in `packages/db/src/testing.ts` named above.
+- **`e2e/tests/automation-triggers.spec.ts` › "Víctor creates “Shopify orders”…" failed once on the mobile project**
+  (e2e run 2 only; green on desktop in both runs, on mobile in run 1, and on both projects when the spec was re-run
+  alone, 9 passed). axe reported `color-contrast` 1.17 inside the automation agent card (`#e2edea` on `#fafefc`, a
+  colour caught mid-transition), so the check ran while the card was still fading in. 07.6 owns the spec and the card;
+  the likely fix is to let the card's transition end before the axe check.
