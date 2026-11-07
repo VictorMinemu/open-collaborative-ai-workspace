@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import type { FastifyBaseLogger } from "fastify";
 import { describe, expect, it } from "vitest";
+import { GARBAGE_PDF, makeEncryptedPdf, makePdf } from "../../../testing-pdf";
 import type { AttachmentRow } from "../model";
 import { type AttachmentPart, attachmentKey, type ObjectStorage } from "../storage";
 import { EXTRACT_LIMITS } from "./limits";
@@ -337,5 +338,66 @@ describe("readAttachmentForAgent: images", () => {
     });
     const { storage } = memoryStorage(r, { original: enc(body) });
     expect(await readAttachmentForAgent(storage, r, CAPS)).toMatchObject({ kind: "text", text: body });
+  });
+});
+
+describe("readAttachmentForAgent: PDF", () => {
+  const pdfRow = (bytes: Uint8Array) =>
+    row({
+      filename: "invoice.pdf",
+      declaredType: "application/pdf",
+      contentType: "application/pdf",
+      sizeBytes: bytes.length,
+    });
+
+  it("returns a stored PDF's text with its page count, streaming the original once", async () => {
+    const bytes = makePdf(["Invoice 42 total 1300 EUR", "Second page: paid"]);
+    const pdf = pdfRow(bytes);
+    const { storage, calls } = memoryStorage(pdf, { original: bytes });
+    const read = await readAttachmentForAgent(storage, pdf, CAPS);
+    expect(read).toMatchObject({ kind: "text", pages: 2, truncated: false });
+    if (read.kind !== "text") throw new Error("expected text");
+    expect(read.text).toContain("Invoice 42 total 1300 EUR");
+    expect(read.text).toContain("Second page: paid");
+    expect(read.chars).toBe(read.text.length);
+    expect(calls).toEqual([{ method: "stream", key: keyOf(pdf, "original") }]);
+  });
+
+  it("answers too_large when the stored PDF is larger than the caller's byte cap", async () => {
+    const bytes = makePdf(["Too big for this deployment"]);
+    const pdf = pdfRow(bytes);
+    const { storage } = memoryStorage(pdf, { original: bytes });
+    expect(await readAttachmentForAgent(storage, pdf, { ...CAPS, maxBytes: bytes.length - 1 })).toEqual({
+      kind: "refused",
+      code: "too_large",
+    });
+  });
+
+  it("answers unavailable when the store fails", async () => {
+    const pdf = pdfRow(makePdf(["x"]));
+    const { storage } = memoryStorage(pdf, {}, { stream: new Error("socket hang up") });
+    expect(await readAttachmentForAgent(storage, pdf, CAPS)).toEqual({
+      kind: "refused",
+      code: "unavailable",
+    });
+  });
+
+  it("marks a PDF cut at the page limit as truncated", async () => {
+    const bytes = makePdf(Array.from({ length: 105 }, (_, i) => `page${i + 1}`));
+    const pdf = pdfRow(bytes);
+    const { storage } = memoryStorage(pdf, { original: bytes });
+    const read = await readAttachmentForAgent(storage, pdf, CAPS);
+    expect(read).toMatchObject({ kind: "text", pages: EXTRACT_LIMITS.pdfPages, truncated: true });
+  });
+
+  it.each([
+    ["a PDF with no text on any page", () => makePdf(["", ""]), "no_text_layer"],
+    ["a password-protected PDF", () => makeEncryptedPdf(), "encrypted"],
+    ["random bytes behind a PDF header", () => GARBAGE_PDF, "extraction_failed"],
+  ] as const)("refuses %s with a fixed code", async (_label, make, code) => {
+    const bytes = make();
+    const pdf = pdfRow(bytes);
+    const { storage } = memoryStorage(pdf, { original: bytes });
+    expect(await readAttachmentForAgent(storage, pdf, CAPS)).toEqual({ kind: "refused", code });
   });
 });

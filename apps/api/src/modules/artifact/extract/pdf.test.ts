@@ -1,6 +1,6 @@
 import { getResolvedPDFJS } from "unpdf";
 import { describe, expect, it } from "vitest";
-import { makePdf } from "../../../testing-pdf";
+import { GARBAGE_PDF, makeEncryptedPdf, makePdf } from "../../../testing-pdf";
 import { pdfText } from "./pdf";
 
 /**
@@ -44,5 +44,36 @@ describe("pdfText", () => {
     expect(bytes.byteLength).toBe(before);
     expect(bytes.buffer.byteLength).toBeGreaterThan(0);
     expect(new TextDecoder().decode(bytes.subarray(0, 8))).toBe("%PDF-1.4");
+  });
+});
+
+describe("pdfText bounds and failures", () => {
+  it("reads only the first 100 pages and reports the total", async () => {
+    const bytes = makePdf(Array.from({ length: 105 }, (_, i) => `page${i + 1}`));
+    const out = await pdfText(bytes, CAPS);
+    expect(out).toMatchObject({ ok: true, pages: 100, totalPages: 105, truncated: true });
+    if (!out.ok) throw new Error("expected text");
+    expect(out.text).toContain("page100");
+    expect(out.text).not.toContain("page101");
+  });
+
+  it("returns at most chars code units and marks the text truncated", async () => {
+    const pages = ["a", "b", "c"].map((c) => c.repeat(30_000));
+    const out = await pdfText(makePdf(pages), { ...CAPS, chars: 64_000 });
+    expect(out).toMatchObject({ ok: true, truncated: true });
+    if (!out.ok) throw new Error("expected text");
+    expect(out.text.length).toBe(64_000);
+  });
+
+  it("answers no_text_layer for a PDF whose pages have no text", async () => {
+    expect(await pdfText(makePdf(["", ""]), CAPS)).toEqual({ ok: false, code: "no_text_layer" });
+  });
+
+  it("answers encrypted for a password-protected PDF", async () => {
+    expect(await pdfText(makeEncryptedPdf(), CAPS)).toEqual({ ok: false, code: "encrypted" });
+  });
+
+  it("answers extraction_failed for random bytes behind a PDF header", async () => {
+    expect(await pdfText(GARBAGE_PDF, CAPS)).toEqual({ ok: false, code: "extraction_failed" });
   });
 });

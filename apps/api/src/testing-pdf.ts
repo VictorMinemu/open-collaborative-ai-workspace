@@ -15,9 +15,19 @@ function literal(text: string): string {
   return text.replace(/[\\()]/g, (c) => `\\${c}`);
 }
 
+/** Glyphs per line at 2 pt: at most 500 pt wide even for Helvetica's widest glyph, so all of it is on the page. */
+const LINE = 250;
+
+/**
+ * One text object; long text is wrapped into lines that stay on the page (PDF.js drops glyphs outside the page box,
+ * so a single 30 000-character line would come back as its first few dozen characters).
+ */
 function contentStream(text: string): string {
   if (text === "") return "";
-  return `BT /F1 12 Tf 72 720 Td (${literal(text)}) Tj ET`;
+  if (text.length <= 40) return `BT /F1 12 Tf 72 720 Td (${literal(text)}) Tj ET`;
+  const lines: string[] = [];
+  for (let i = 0; i < text.length; i += LINE) lines.push(`(${literal(text.slice(i, i + LINE))}) Tj T*`);
+  return `BT /F1 2 Tf 2.4 TL 36 780 Td ${lines.join(" ")} ET`;
 }
 
 /** Objects numbered from 1, joined with a correct cross-reference table and trailer. */
