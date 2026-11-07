@@ -682,4 +682,37 @@ describe("07.15-07 (D-02, D-14): a persona's turn lists the files of the chat's 
     expect(refused.status).toBe(400);
     expect(errorCode(refused)).toBe("attachment_not_supported");
   });
+
+  it("07.15-11 (D-14): a message that only addresses the persona meets the same gate; a readable file still goes", async () => {
+    const created = await ok(createChat(victor, "Review the build with me"), 201);
+    const chat = (created.chat as Json).id as string;
+    await settled((created.generation as Json).id as string);
+    await ok(addAgent(victor, chat, backendId), 201);
+
+    // The chat model is not asked (202), yet a file it cannot read is refused exactly as when it is: 400, nothing written.
+    const archive = await uploadAttachment(victor, chat, {
+      name: "build.zip",
+      type: "application/zip",
+      bytes: new Uint8Array([0x00, 0x9f, 0x92, 0x96, 0x01, 0x02, 0x03, 0xfe, 0xff, 0x00]),
+    });
+    const refused = await send(victor, chat, "@backend unpack it", { attachmentIds: [archive] });
+    expect(refused.status).toBe(400);
+    expect(errorCode(refused)).toBe("attachment_not_supported");
+    const { rows: linked } = await su.query("select message_id from app.attachments where id = $1", [
+      archive,
+    ]);
+    expect(linked[0]?.message_id ?? null).toBeNull();
+
+    // A file the chat's model reads still reaches the persona, listed on its turn.
+    const notes = await uploadAttachment(victor, chat, {
+      name: "notes.txt",
+      type: "text/plain",
+      bytes: new TextEncoder().encode("build 42 failed on step lint\n"),
+    });
+    const posted = await send(victor, chat, "@backend what failed?", { attachmentIds: [notes] });
+    expect(posted.status).toBe(202);
+    const messageId = ((posted.body as Json).userMessage as Json).id as string;
+    const [ev] = await deliveriesOf(messageId);
+    expect(ev?.turn.attachments?.map((a: { id: string }) => a.id)).toContain(notes);
+  });
 });

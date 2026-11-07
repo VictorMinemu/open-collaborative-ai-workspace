@@ -727,10 +727,14 @@ export function createAiChatService(deps: AiChatDeps) {
     const dir = await loadDirectory(tx);
     const mentions = resolveMentions(body.body, dir);
     const addressed = addressedOf(body.askAi, mentions);
-    if (addressed) {
-      // Files the sender's model cannot read are refused as in Phase 5; a refused model is skipped by the queue.
+    // Files the sender's model cannot read are refused as in Phase 5, whether or not the model is asked: a message
+    // that only addresses a persona meets the same gate (07.15-11, D-14: a persona never widens what the chat's model
+    // accepts). A refused model is skipped by the queue.
+    if (files.length > 0) {
       const resolved = await senderModel(tx, body.model, auth.userId);
       if (resolved) assertReadableBy(files, resolved.caps, resolved.label);
+    }
+    if (addressed) {
       if ((await pendingCount(tx, conv.id)) >= AI_QUEUE_MAX) {
         throw new HttpError(429, "ai_queue_full", `At most ${AI_QUEUE_MAX} messages can wait for an answer`);
       }
