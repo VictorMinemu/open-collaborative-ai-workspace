@@ -26,7 +26,7 @@ import {
   BoardColumn,
   WaitingOn,
 } from "./board";
-import { SearchProvider, TurnContext } from "./bot-capabilities";
+import { ATTACHMENT_READ_LIMITS, SearchProvider, TurnContext } from "./bot-capabilities";
 import { ConversationKind, Mention, MessageBody } from "./chat";
 import { Id, IsoDateTime, MemberKind, PrincipalKind } from "./common";
 import { ConnectionStatus, jsonBytes } from "./connectors";
@@ -44,6 +44,7 @@ import {
   SensitiveFinding,
 } from "./memory";
 import { ServerFrame } from "./realtime";
+import { SANDBOX_LIMITS } from "./sandbox";
 import { TOOL_APPROVAL_LIMITS } from "./tool-approvals";
 
 /**
@@ -930,6 +931,101 @@ export const AgentChannelMemoryProposeResponse = z.union([
   }),
 ]);
 export type AgentChannelMemoryProposeResponse = z.infer<typeof AgentChannelMemoryProposeResponse>;
+
+// ---------------------------------------------------------------- attachment reads (Phase 07.15, D-03, D-04, additive)
+
+/*
+ * The `ocw_attachment_read` tool (`POST /agent-channel/v1/attachments/read`). Bound to a delivered turn like the memory
+ * tools: the body names only the delivery, the agent and the attachment. The conversation, the thread and the human the
+ * bot reads for are always the stored turn's, and every call is re-decided (the turn is live, the tool is on it, the
+ * file is in the turn's scope). The file's bytes travel only inside the answer, never as a presigned URL, a storage key
+ * or a path (ADR-0015).
+ */
+
+/** `POST /agent-channel/v1/attachments/read`. Strict: a model-supplied `userId`, `url` or `path` is refused. */
+export const AgentChannelAttachmentRead = z.strictObject({ eventId: Id, agentId: Id, attachmentId: Id });
+export type AgentChannelAttachmentRead = z.infer<typeof AgentChannelAttachmentRead>;
+
+/** Why a read was refused (D-04). The bot reads the fixed sentence and tells the person; never provider or file text. */
+export const AttachmentReadRefusal = z.enum([
+  "not_found",
+  "policy_changed",
+  "model_no_images",
+  "unsupported_type",
+  "too_large",
+  "no_text_layer",
+  "encrypted",
+  "extraction_failed",
+  "timeout",
+  "busy",
+  "cap_reached",
+  "unavailable",
+]);
+export type AttachmentReadRefusal = z.infer<typeof AttachmentReadRefusal>;
+
+/** One fixed sentence per refusal code (D-04): no placeholders, no URLs, no paths. */
+export const ATTACHMENT_READ_SENTENCES: Readonly<Record<AttachmentReadRefusal, string>> = {
+  not_found: "This file is not available in this conversation (it may have been deleted).",
+  policy_changed: "Reading files is not available on this turn.",
+  model_no_images: "This bot's model can't see images, so it can't read this image. Tell the person.",
+  unsupported_type:
+    "This type of file can't be read as text. If the sandbox is available, copy it with ocw_sandbox_import and use the sandbox tools.",
+  too_large: "This file is too large to read.",
+  no_text_layer: "This PDF has no text layer (it looks scanned). OCR is not available.",
+  encrypted: "This PDF is password-protected, so it can't be read.",
+  extraction_failed: "This file couldn't be read (it may be damaged).",
+  timeout: "Reading this file took too long and was stopped.",
+  busy: "Too many files are being read right now. Try again in a moment.",
+  cap_reached:
+    "This turn has read as many files (or as much text) as it may. Ask the person to send the question again for more.",
+  unavailable: "File storage is not available right now.",
+};
+
+/** The inline image types a read returns (the `large.webp` rendition or a small original); never SVG. */
+export const AttachmentImageType = z.enum(["image/webp", "image/png", "image/jpeg", "image/gif"]);
+export type AttachmentImageType = z.infer<typeof AttachmentImageType>;
+
+/** A labelled file name (`labelName`: at most 120 characters, no delimiters). */
+const AttachmentLabel = z.string().max(120);
+/** Base64 of at most `SANDBOX_LIMITS.previewImageMaxBytes` bytes. */
+const ATTACHMENT_IMAGE_DATA_MAX = Math.ceil((SANDBOX_LIMITS.previewImageMaxBytes * 4) / 3) + 4;
+
+/**
+ * The answer of `POST /attachments/read`. `text` is the API's untrusted block (`untrustedFileBlock`: the labelled name
+ * and the extracted text, cut to `ATTACHMENT_READ_LIMITS.charsPerFile`), data for the model, never instructions; `chars`
+ * counts what the read charged. An image carries its bytes as base64. Every refusal is a 200 answer with its code and
+ * fixed sentence so the bot can tell the person; only a turn that is no longer live is a 403 `no_trigger` (PD-06).
+ */
+export const AgentChannelAttachmentReadResponse = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("text"),
+    attachmentId: Id,
+    name: AttachmentLabel,
+    text: z.string().max(ATTACHMENT_READ_LIMITS.charsPerFile + 512),
+    chars: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+    pages: z.number().int().min(1).optional(),
+  }),
+  z.object({
+    kind: z.literal("image"),
+    attachmentId: Id,
+    name: AttachmentLabel,
+    mimeType: AttachmentImageType,
+    data: z
+      .string()
+      .max(ATTACHMENT_IMAGE_DATA_MAX)
+      .regex(/^[A-Za-z0-9+/]*={0,2}$/, "base64"),
+    width: z.number().int().positive().nullable(),
+    height: z.number().int().positive().nullable(),
+  }),
+  z.object({
+    kind: z.literal("refused"),
+    attachmentId: Id,
+    code: AttachmentReadRefusal,
+    sentence: z.string().max(300),
+  }),
+]);
+export type AgentChannelAttachmentReadResponse = z.infer<typeof AgentChannelAttachmentReadResponse>;
 
 // ---------------------------------------------------------------- boards (Phase 07.1, D-07, P-03, additive)
 
