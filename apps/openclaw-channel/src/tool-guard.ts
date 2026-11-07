@@ -1,6 +1,8 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/channel-core";
 import {
   type AgentChannelToolCallRequest,
+  ATTACHMENT_READ_LIMITS,
+  ATTACHMENT_READ_SENTENCES,
   CONFINED_TOOL_FLAGS,
   CONNECTOR_SAFE_NAME,
   CONNECTOR_TOOL_LIMITS,
@@ -46,6 +48,9 @@ import { workZoneTaintedSentence } from "./work-zone-tools.js";
  * Confined tools (07.8, D-11 F-7): the fifteen `ocw_sandbox_*` / `ocw_browser_*` tools are self-validated by their own
  * routes, take their static flags (`CONFINED_TOOL_FLAGS`; a turn's flags only ever add restrictions or an approval
  * mode), and count against their own per-turn budget (`turn.maxSandboxCalls`, 40), never the cap of 8.
+ * Attachment reads (07.15 D-08, D-17): `ocw_attachment_read` is self-validated by `/attachments/read`, takes its static
+ * flags (untrusted output, never side-effecting; a turn's flags only add restrictions), and counts against its own
+ * per-turn budget (`turn.maxAttachmentReads`, 20), never the cap of 8.
  * Logs never include params, arguments or results.
  */
 
@@ -73,6 +78,8 @@ export interface ActiveTurn {
   webCalls: number;
   /** 07.8: confined (sandbox and browser) calls this turn, against `turn.maxSandboxCalls`. */
   sandboxCalls: number;
+  /** 07.15 (D-17): `ocw_attachment_read` calls this turn, against `turn.maxAttachmentReads`; never `calls`. */
+  attachmentReads: number;
   tainted: boolean;
 }
 
@@ -125,7 +132,14 @@ const SELF_VALIDATED_TOOLS: ReadonlySet<string> = new Set([
   "ocw_record_update",
   // 07.7 (ADR-0027): validated by `/consultations` (the claim, the decision, the chain guards); never `/tool-calls`.
   "ocw_consult_agent",
+  // 07.15 (D-03, D-08, D-17): `/attachments/read` re-decides the turn, the tool on it and the file, claims the read on
+  // its own budget and taints the turn itself; never `/tool-calls`.
+  "ocw_attachment_read",
 ]);
+/** 07.15: the read tool, counted on its own budget (`ActiveTurn.attachmentReads`). */
+const ATTACHMENT_READ_TOOL = "ocw_attachment_read";
+/** Contracts `ATTACHMENT_READ_FLAGS`: a read returns a person's file (untrusted) and changes nothing. */
+const ATTACHMENT_READ_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: false };
 /**
  * 07.6 (D-04, D-07): side-effecting whatever flags a turn carries, but, unlike `ALWAYS_SIDE_EFFECTING`, a turn's 07.5
  * approval policy still lets a tainted turn's call reach its route, which decides (a person may approve the write).
@@ -241,6 +255,15 @@ function callFlags(
       untrustedOutput: base.untrustedOutput || delivered?.untrustedOutput === true,
       sideEffecting: base.sideEffecting || delivered?.sideEffecting === true,
       ...(delivered?.approval ? { approval: delivered.approval } : {}),
+    };
+  }
+  if (tool === ATTACHMENT_READ_TOOL) {
+    // 07.15 (D-08): the static flags, made stricter (never looser) by the turn's. Never approvable (PD-08), so a turn's
+    // approval mode is ignored.
+    const delivered = t.turn.toolFlags[tool];
+    return {
+      untrustedOutput: ATTACHMENT_READ_FLAGS.untrustedOutput || delivered?.untrustedOutput === true,
+      sideEffecting: ATTACHMENT_READ_FLAGS.sideEffecting || delivered?.sideEffecting === true,
     };
   }
   if (tool === "ocw_http_request") {
@@ -447,6 +470,7 @@ export function createToolGuard(
         calls: 0,
         webCalls: 0,
         sandboxCalls: 0,
+        attachmentReads: 0,
         tainted: tainted === true,
       });
       signal?.addEventListener(
@@ -520,7 +544,13 @@ export function createToolGuard(
           `Tool ${tool} blocked: this turn reached its limit of ${maxConfined} sandbox and browser calls.`,
         );
       }
-      if (!confined && t.calls >= t.turn.maxToolCalls) {
+      // 07.15 (D-17, Pitfall 2): reads have their own budget; the API counts and refuses `cap_reached` too.
+      const attachmentRead = tool === ATTACHMENT_READ_TOOL;
+      const maxReads = t.turn.maxAttachmentReads ?? ATTACHMENT_READ_LIMITS.readsPerTurn;
+      if (attachmentRead && t.attachmentReads >= maxReads) {
+        return block(ATTACHMENT_READ_SENTENCES.cap_reached);
+      }
+      if (!confined && !attachmentRead && t.calls >= t.turn.maxToolCalls) {
         return block(
           `Tool ${tool} blocked: the turn reached its limit of ${t.turn.maxToolCalls} tool calls.`,
         );
@@ -560,6 +590,7 @@ export function createToolGuard(
       }
       // Count before awaiting the API so concurrent calls of one turn can never exceed the caps.
       if (confined) t.sandboxCalls++;
+      else if (attachmentRead) t.attachmentReads++;
       else t.calls++;
       if (web) t.webCalls++;
 

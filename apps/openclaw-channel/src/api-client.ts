@@ -2,6 +2,8 @@ import {
   AGENT_CHANNEL_BASE_PATH,
   type AgentChannelApprovalDenial,
   AgentChannelApprovalRefusalDetails,
+  type AgentChannelAttachmentRead,
+  AgentChannelAttachmentReadResponse,
   type AgentChannelAutomationPropose,
   AgentChannelAutomationProposeResponse,
   AgentChannelBoardCardResponse,
@@ -596,6 +598,19 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
     ): Promise<BrowserToolResponses[T]> {
       const raw = await request("POST", BROWSER_TOOL_ROUTES[tool], body, signal, 1, confinedTimeoutMs(tool));
       return BROWSER_TOOL_RESPONSES[tool].parse(raw) as BrowserToolResponses[T];
+    },
+    /**
+     * `ocw_attachment_read` (07.15 D-03, PD-10): one read of a file the turn lists, with the turn's ids and the attachment
+     * id only (the API derives the conversation and the human from the stored turn). One attempt, 20 s: the route claims
+     * the read against the turn's own budget. Every refusal is a 200 `{kind: "refused", code, sentence}`; only a turn that
+     * ended throws (403 `no_trigger`). Never logs the file's name or content.
+     */
+    async attachmentRead(
+      body: AgentChannelAttachmentRead,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelAttachmentReadResponse> {
+      const raw = await request("POST", "/attachments/read", body, signal, 1, CONFINED_TIMEOUT_MS);
+      return AgentChannelAttachmentReadResponse.parse(raw);
     },
     /**
      * A marketplace install / uninstall outcome (D-14). Three attempts at most: the API applies a report only to the
