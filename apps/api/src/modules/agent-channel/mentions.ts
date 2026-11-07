@@ -24,6 +24,7 @@ import type { Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import { agentDirectory } from "../agent";
 import { answerModelsOf, audienceOf, participantsOf } from "../ai-chat";
+import { type AttachmentRow, attachmentRowsForMessages } from "../artifact";
 import {
   claimChannelNotice,
   effectiveCapabilities,
@@ -256,6 +257,21 @@ export async function buildMentionEvents(
   // D-12: an automation run's turn has nobody present (no browser tools); a person's message never is one. Phase 07.7
   // (D-13): neither has a consult hop turn (the question to a consulted bot, the answer back to the asker).
   const unattended = mention.trigger === "automation" || mention.trigger === "consult";
+
+  // Phase 07.15 (D-02, PD-04): the files of the messages this turn reads (the current message and the history window
+  // above: the same thread filter, live messages only), ready and linked, in listing order: the current message's in
+  // upload order, then the history newest first. Automation runs and consult hops list none (PD-04). `turnPolicy` decides
+  // per bot how each can be read.
+  const attachments: AttachmentRow[] = [];
+  if (!unattended) {
+    const byMessage = await attachmentRowsForMessages(tx, [
+      mention.messageId,
+      ...historyRows.map((m) => m.id),
+    ]);
+    for (const id of [mention.messageId, ...historyRows.map((m) => m.id).reverse()]) {
+      attachments.push(...(byMessage.get(id) ?? []));
+    }
+  }
   // Phase 07.7 (D-04, D-08, D-09): consults are offered only where one can succeed: never on a reply-mode turn, only in
   // a channel (or its thread), below the depth limit and on a turn that does not start tainted. The targets are decided
   // per delivered bot with the canonical `agent.message` decision (`consultTargets`).
@@ -302,6 +318,7 @@ export async function buildMentionEvents(
             }
           : null,
         consultTargets: targets,
+        attachments,
       },
       {
         audience,

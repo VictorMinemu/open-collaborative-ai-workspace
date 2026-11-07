@@ -1,6 +1,8 @@
 import {
   A2A_MAX_DEPTH,
   A2A_MAX_TARGETS,
+  ATTACHMENT_READ_FLAGS,
+  ATTACHMENT_READ_LIMITS,
   type BotCapabilities,
   type BotCapabilityView,
   BROWSER_TOOL_NAMES,
@@ -15,6 +17,7 @@ import {
   MAX_WEB_CALLS_PER_TURN,
   modelAcceptsImages,
   SANDBOX_TOOL_NAMES,
+  type TurnAttachment,
   type TurnContext,
   type TurnMemoryFile,
   type TurnNow,
@@ -37,12 +40,15 @@ import {
 import { and, eq, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import type { Env } from "../../config/env";
 import type { Core } from "../../core";
-import { channelFacts } from "../chat";
+import { type AttachmentRow, objectStorageConfigured } from "../artifact";
+import { channelFacts, createConversationAccess } from "../chat";
 // Types only: the memory service is injected by the caller (a value import would be a module cycle).
 import { type EffectiveVaultItem, effectiveVaultItems, unitAudienceAllows } from "../keychain";
 import type { MemoryAudience, MemoryService } from "../memory";
 import {
   agentResource,
+  audienceCoverFacts,
+  audienceCovers,
   channelResource,
   orgResource,
   type PermissionService,
@@ -56,6 +62,7 @@ import { stickyMemberData } from "./member-data";
 import { loadTurnMemory } from "./memory";
 import { internetConfigured, loadPolicy, type SearchEnv } from "./policy";
 import { findBot, loadBotFacts } from "./routes";
+import { buildTurnAttachments } from "./turn-attachments";
 import { consumeTurn, effectiveDailyLimit, limitNotice } from "./usage";
 
 /**
@@ -355,6 +362,8 @@ interface ComputedTurn extends TurnTools {
   withheld: Withheld;
   /** The sandbox tools are offered (07.8-05): the turn carries `maxSandboxCalls`. */
   sandboxOffered: boolean;
+  /** The bot's model reads images (`modelAcceptsImages`): what a listed image's access depends on (07.15 PD-04). */
+  imageModel: boolean;
 }
 
 /**
@@ -619,6 +628,7 @@ async function computeTurn(
     withheld,
     keys: { usable, memberAccount, unitAudience },
     sandboxOffered,
+    imageModel: modelAcceptsImages(row.modelProvider, row.modelId),
     ...assembled,
   };
 }
@@ -961,6 +971,11 @@ export async function turnPolicy(
      * target, below `A2A_MAX_DEPTH`, in a channel or a channel's thread, and when it does not start tainted.
      */
     consultTargets?: ConsultTarget[];
+    /**
+     * Phase 07.15 (D-02, PD-04): the ready attachment rows of the messages this turn reads (the current message's, then
+     * the history window's newest first, each in upload order), already in listing order. Absent or empty = none.
+     */
+    attachments?: AttachmentRow[];
   },
   opts: {
     /** AI chat deliveries only (06-10): the chat's readers, for scoped tools and `turn.withheld`. */
@@ -1040,6 +1055,15 @@ export async function turnPolicy(
     computed.toolFlags[BUILTIN_TOOLS.consultAgent] = CONSULT_FLAGS;
   }
 
+  // Phase 07.15 (D-02, D-04, PD-03, PD-04): the files of the messages this turn reads, metadata only, with how this bot
+  // can read each; `ocw_attachment_read` is a turn-scoped tool offered only when one of them reads, while object storage
+  // is configured. The read route re-decides every call (the one row rule, the asker, the model, the budget).
+  const files = await turnAttachments(tx, core, perms, p, computed);
+  if (files.offerRead && !computed.toolFlags[BUILTIN_TOOLS.attachmentRead]) {
+    computed.tools.push(BUILTIN_TOOLS.attachmentRead);
+    computed.toolFlags[BUILTIN_TOOLS.attachmentRead] = ATTACHMENT_READ_FLAGS;
+  }
+
   const turn: TurnContext = {
     tools: computed.tools,
     toolFlags: computed.toolFlags,
@@ -1064,6 +1088,14 @@ export async function turnPolicy(
     // Member-account entries (07.4-11, R7) travel on every delivery, so the persona can offer the share link.
     ...(opts.audience || computed.withheld.length > 0 ? { withheld: computed.withheld } : {}),
     ...(memoryFiles.length > 0 ? { memoryFiles } : {}),
+    ...(files.attachments.length > 0 ? { attachments: files.attachments } : {}),
+    ...(files.more > 0 ? { attachmentsMore: files.more } : {}),
+    ...(files.offerRead
+      ? {
+          maxAttachmentReads: ATTACHMENT_READ_LIMITS.readsPerTurn,
+          maxAttachmentChars: ATTACHMENT_READ_LIMITS.charsPerTurn,
+        }
+      : {}),
   };
   // 07.8-28 (WINDOWS #292, ADR-0029): a member's session loaded earlier by this bot in this conversation keeps its
   // member data for every later turn here (the bot's history may hold what it read signed in).
@@ -1091,6 +1123,52 @@ export async function turnPolicy(
       : {}),
   });
   return { deliver: true, turn };
+}
+
+/** Conversation kinds whose turns read their messages' files (07.15 PD-03). */
+const ATTACHMENT_KINDS = new Set(["channel", "thread", "dm", "group", "ai_chat"]);
+
+/**
+ * The attachments one delivered turn lists and whether it is offered `ocw_attachment_read` (07.15 D-02, PD-03, PD-04).
+ * Nothing without rows, outside the conversation kinds above, or while object storage is not configured (nothing could
+ * be read). `importCovered` is the import route's F-8 decision (`audienceCoverFacts` + `audienceCovers` with the chat's
+ * readable set), loaded at most once and only when a file that cannot be read needs it.
+ */
+async function turnAttachments(
+  tx: Tx,
+  core: Core,
+  perms: PermissionService,
+  p: { agentId: string; conversationId: string; conversationKind: string; attachments?: AttachmentRow[] },
+  computed: ComputedTurn,
+): Promise<{ attachments: TurnAttachment[]; more: number; offerRead: boolean }> {
+  const none = { attachments: [], more: 0, offerRead: false };
+  const rows = p.attachments ?? [];
+  if (rows.length === 0 || !ATTACHMENT_KINDS.has(p.conversationKind)) return none;
+  if (!objectStorageConfigured(core.env, core.secretStore)) return none;
+  let covered: Promise<boolean> | null = null;
+  const importCovered = () => {
+    covered ??= (async () => {
+      const access = createConversationAccess(core);
+      const isReadable = (t: Tx, userId: string, conversationId: string) =>
+        access.isReadable(t, userId, conversationId, { kinds: ["channel", "dm", "group", "ai_chat"] });
+      const facts = await audienceCoverFacts(
+        tx,
+        { perms, isReadable },
+        { conversationId: p.conversationId, agentId: p.agentId },
+      );
+      return audienceCovers(facts);
+    })();
+    return covered;
+  };
+  const listed = await buildTurnAttachments(rows, {
+    imageModel: computed.imageModel,
+    importOffered: computed.tools.includes(BUILTIN_TOOLS.sandboxImport),
+    importCovered,
+  });
+  const offerRead =
+    listed.attachments.some((a) => a.access === "read") &&
+    (computed.tools.length < MAX_TURN_TOOLS || computed.tools.includes(BUILTIN_TOOLS.attachmentRead));
+  return { ...listed, offerRead };
 }
 
 /**
