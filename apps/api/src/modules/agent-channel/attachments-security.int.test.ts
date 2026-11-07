@@ -321,6 +321,65 @@ describe("WR-03: a change during the read is seen before the answer", () => {
   });
 });
 
+/**
+ * WR-04 (07.15 review): a turn reads only while it is live (not reported done, younger than an hour, its bot neither
+ * turned off nor deleted) and only the files of messages up to its own trigger. An old event id is no fresh budget.
+ */
+describe("WR-04: a turn's reads are bounded in time and to its trigger", () => {
+  /** 403 `no_trigger`, nothing counted, nothing tainted. */
+  async function noLongerLive(ev: Json, agentId: string, attachmentId: string): Promise<void> {
+    const r = await read(ev, agentId, attachmentId);
+    expect(r.status).toBe(403);
+    expect(codeOf(r)).toBe("no_trigger");
+    expect(await turnRow(ev.eventId as string)).toMatchObject({ tainted: false, attachment_reads: 0 });
+  }
+
+  it("a turn older than an hour (a stale event id) answers 403 no_trigger", async () => {
+    const { ev, ids } = await scoutTurn([txt("old.txt", "from yesterday")]);
+    await s.su.query(
+      "update app.agent_turns set created_at = now() - interval '61 minutes' where event_id = $1",
+      [ev.eventId],
+    );
+    await noLongerLive(ev, scout.id, ids[0] as string);
+  });
+
+  it("a turn the cell reported done answers 403 no_trigger", async () => {
+    const { ev, ids } = await scoutTurn([txt("done.txt", "already answered")]);
+    await s.su.query("update app.agent_turns set done_at = now() where event_id = $1", [ev.eventId]);
+    await noLongerLive(ev, scout.id, ids[0] as string);
+  });
+
+  it("a bot turned off, or deleted, after its turn was delivered answers 403 no_trigger", async () => {
+    const { ev, ids } = await scoutTurn([txt("off.txt", "bot turned off")]);
+    const id = ids[0] as string;
+    const { rows } = await s.su.query("select status from app.agents where id = $1", [scout.id]);
+    const status = rows[0]?.status as string;
+    try {
+      await s.su.query("update app.agents set status = 'disabled' where id = $1", [scout.id]);
+      await noLongerLive(ev, scout.id, id);
+      await s.su.query("update app.agents set status = $2, deleted_at = now() where id = $1", [
+        scout.id,
+        status,
+      ]);
+      await noLongerLive(ev, scout.id, id);
+    } finally {
+      await s.su.query("update app.agents set status = $2, deleted_at = null where id = $1", [
+        scout.id,
+        status,
+      ]);
+    }
+    expect((await ok(read(ev, scout.id, id))).kind).toBe("text");
+  });
+
+  it("a file posted after the turn's own message is not_found for that turn; the turn's file still reads", async () => {
+    const { ev, ids } = await scoutTurn([txt("before.txt", "sent with the question")]);
+    const later = await uploadAttachment(s.sam, scout.dm, txt("after.txt", "sent after the question"));
+    await post(s.sam, scout.dm, "one more file", { attachmentIds: [later] });
+    await refusedAsMissing(ev, scout.id, later);
+    expect(await ok(read(ev, scout.id, ids[0] as string))).toMatchObject({ kind: "text" });
+  });
+});
+
 describe("E7: the caps hold under parallel reads", () => {
   it("25 parallel reads of one file in one turn: exactly 20 read, 5 cap_reached", async () => {
     const { ev, ids } = await scoutTurn([txt("small.txt", "small")]);

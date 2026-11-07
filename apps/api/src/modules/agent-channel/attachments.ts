@@ -9,7 +9,7 @@ import {
   modelAcceptsImages,
 } from "@ocw/contracts";
 import { agents, agentTurns, type Tx } from "@ocw/db";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, isNull, ne, sql } from "drizzle-orm";
 import type { App, Core } from "../../core";
 import {
   type AgentRead,
@@ -41,7 +41,8 @@ import { turnHumanOf } from "./sandbox";
  * `ocw_attachment_read`. A bot reads a file of the conversation it answers in, decided at call time as the turn's
  * human (never a field of the request: the body is strict), counted on the turn's own attachment budget, tainting the
  * turn, audited without content. In this order:
- *   1. tx1 AS the human: the live turn (`liveTurn`, else 403 `no_trigger`, audited by `auditUnknownTurn`); the tool on
+ *   1. tx1 AS the human: the live turn (`readableTurn`: `liveTurn`, not done, at most an hour old, its bot on; else
+ *      403 `no_trigger`, audited by `auditUnknownTurn`); the tool on
  *      the turn (`policy_changed`); the one row rule `attachmentForTurn` (`not_found`, the same rule as the import);
  *      the kind and the bot's model (`model_no_images`, `unsupported_type`, `too_large`); then the claim with the
  *      attachment budget (20 reads, 200 000 characters; `cap_reached`), which also taints the turn. A refusal decided
@@ -98,6 +99,42 @@ async function imageModel(tx: Tx, agentId: string): Promise<boolean> {
     .where(eq(agents.id, agentId))
     .limit(1);
   return bot ? modelAcceptsImages(bot.provider, bot.modelId) : false;
+}
+
+/**
+ * How long a delivered turn may read files (07.15 WR-04): an hour, far past any real turn (the sandbox's longest exec
+ * is 10 minutes), so an old event id is never a fresh read budget.
+ */
+const READ_TURN_WINDOW_SECONDS = 3600;
+
+/**
+ * The turn as a read sees it (07.15 WR-04): `liveTurn` (the asker still reads the conversation), the asker the
+ * request's human, and the turn still running: not reported done, younger than `READ_TURN_WINDOW_SECONDS`, its bot
+ * neither turned off nor deleted. Null otherwise (403 `no_trigger` in tx1, `not_found` at commit).
+ */
+async function readableTurn(
+  tx: Tx,
+  core: Core,
+  p: { eventId: string; agentId: string },
+  human: string,
+): Promise<AgentTurnRow | null> {
+  const turn = await liveTurn(tx, core, p);
+  if (!turn || turn.userId !== human) return null;
+  const [running] = await tx
+    .select({ eventId: agentTurns.eventId })
+    .from(agentTurns)
+    .innerJoin(agents, eq(agents.id, agentTurns.agentId))
+    .where(
+      and(
+        eq(agentTurns.eventId, turn.eventId),
+        isNull(agentTurns.doneAt),
+        sql`${agentTurns.createdAt} > now() - make_interval(secs => ${READ_TURN_WINDOW_SECONDS})`,
+        ne(agents.status, "disabled"),
+        isNull(agents.deletedAt),
+      ),
+    )
+    .limit(1);
+  return running ? turn : null;
 }
 
 type Decided =
@@ -206,8 +243,8 @@ export function registerAttachmentRoutes(scope: App, core: Core): void {
 
       // 1. tx1: everything decided as the turn's human; no storage call.
       const decided = await core.db.withTenant(ctx, async (tx): Promise<Decided | null> => {
-        const turn = await liveTurn(tx, core, body);
-        if (!turn || turn.userId !== human) {
+        const turn = await readableTurn(tx, core, body, human);
+        if (!turn) {
           await auditUnknownTurn(tx, core, {
             cell,
             tool: TOOL,
@@ -271,9 +308,8 @@ export function registerAttachmentRoutes(scope: App, core: Core): void {
         const left = Math.max(0, ATTACHMENT_READ_LIMITS.charsPerTurn - (locked?.chars ?? 0));
         // WR-03: tx1 decided before the store read and the extraction; what changed since (the message deleted, the
         // file swept, the asker gone from the conversation) is decided again here, before anything is returned.
-        const stillTurn = await liveTurn(tx, core, body);
-        const stillRow =
-          stillTurn && stillTurn.userId === human ? await attachmentForTurn(tx, stillTurn, row.id) : null;
+        const stillTurn = await readableTurn(tx, core, body, human);
+        const stillRow = stillTurn ? await attachmentForTurn(tx, stillTurn, row.id) : null;
         const name = labelName(row.filename);
         let answer: ReadResponse;
         let outcome: Outcome = "ok";

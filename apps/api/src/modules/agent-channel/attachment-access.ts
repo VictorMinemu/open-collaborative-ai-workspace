@@ -1,5 +1,5 @@
 import { conversations, messages, type Tx } from "@ocw/db";
-import { and, eq, isNull, or, type SQL, sql } from "drizzle-orm";
+import { and, eq, isNull, lte, or, type SQL, sql } from "drizzle-orm";
 import { type AgentReadKind, type AttachmentRow, attachmentKindOf, attachmentRowsByIds } from "../artifact";
 import type { AgentTurnRow } from "./claim";
 
@@ -68,7 +68,9 @@ export async function turnThreadRoot(
  * - that message present and live (a tombstone decides, whatever the file's own status says), in the turn's
  *   conversation;
  * - in a channel, that message inside the turn's thread (`messageScopeFilter` with `turnThreadRoot`); a DM, group
- *   DM, AI chat or thread conversation is read whole, so an earlier message's file there is the turn's too.
+ *   DM, AI chat or thread conversation is read whole, so an earlier message's file there is the turn's too;
+ * - that message no later than the turn's own message (07.15 WR-04: its `seq` on the conversation stream): a file
+ *   posted after the turn was delivered belongs to a later turn, never to this one.
  */
 export async function attachmentForTurn(
   tx: Tx,
@@ -84,6 +86,13 @@ export async function attachmentForTurn(
     .where(eq(conversations.id, turn.conversationId))
     .limit(1);
   if (!conv || !TURN_KINDS.has(conv.kind)) return null;
+  // The turn's own message bounds what it reads (one stream per conversation, so `seq` orders its messages).
+  const [trigger] = await tx
+    .select({ seq: messages.seq })
+    .from(messages)
+    .where(and(eq(messages.id, turn.messageId), eq(messages.conversationId, turn.conversationId)))
+    .limit(1);
+  if (!trigger) return null;
   // A channel turn reads only its thread; every other kind is read whole (its scope is the conversation).
   let scope: SQL = eq(messages.conversationId, conv.id);
   if (conv.kind === "channel") {
@@ -99,6 +108,7 @@ export async function attachmentForTurn(
         eq(messages.id, row.messageId),
         eq(messages.conversationId, turn.conversationId),
         isNull(messages.deletedAt),
+        lte(messages.seq, trigger.seq),
         scope,
       ),
     )
