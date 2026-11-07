@@ -105,7 +105,6 @@ type Decided =
 export function registerAttachmentRoutes(scope: App, core: Core): void {
   // Bytes come from the artifact storage with the server's credentials (ADR-0015); null = not configured.
   const storage = createObjectStorage(core.env, core.secretStore);
-  const maxBytes = core.env.OCW_ATTACHMENT_MAX_BYTES;
 
   /** `bot.attachment_read` (PD-09): actor and agent the bot, user the asker, resource the attachment; no content. */
   async function auditRead(
@@ -166,7 +165,8 @@ export function registerAttachmentRoutes(scope: App, core: Core): void {
         }
         break;
       case "pdf":
-        if (row.sizeBytes > maxBytes) return { row, refusal: "too_large" };
+        // WR-06: the fixed PDF bound, not the deployment's upload limit.
+        if (row.sizeBytes > EXTRACT_LIMITS.pdfMaxBytes) return { row, refusal: "too_large" };
         break;
       case "text":
         break;
@@ -254,7 +254,6 @@ export function registerAttachmentRoutes(scope: App, core: Core): void {
             row,
             {
               charsPerFile: Math.max(0, Math.min(ATTACHMENT_READ_LIMITS.charsPerFile, decided.go.charsLeft)),
-              maxBytes,
             },
             { log: core.log },
           )

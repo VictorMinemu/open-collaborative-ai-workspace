@@ -15,7 +15,7 @@ import { readAttachmentForAgent } from "./read";
 
 const ORG = "00000000-0000-7000-8000-00000000000a";
 const CONV = "00000000-0000-7000-8000-00000000000b";
-const CAPS = { charsPerFile: 64_000, maxBytes: 25 * 1024 * 1024 };
+const CAPS = { charsPerFile: 64_000 };
 
 let n = 0;
 function row(over: Partial<AttachmentRow>): AttachmentRow {
@@ -365,22 +365,31 @@ describe("readAttachmentForAgent: PDF", () => {
     expect(calls).toEqual([{ method: "stream", key: keyOf(pdf, "original") }]);
   });
 
-  it("answers too_large when the stored PDF is larger than the caller's byte cap", async () => {
-    const bytes = makePdf(["Too big for this deployment"]);
-    const pdf = pdfRow(bytes);
+  // WR-06: the PDF bound is a fixed 25 MiB, whatever the deployment's upload limit (here raised to 1 GiB).
+  const RAISED = { ...CAPS, maxBytes: 1024 * 1024 * 1024 };
+
+  it("is bounded at a fixed 25 MiB for PDFs", () => {
+    expect(EXTRACT_LIMITS.pdfMaxBytes).toBe(25 * 1024 * 1024);
+  });
+
+  it("answers too_large before any read for a PDF over 25 MiB, even with a 1 GiB upload limit", async () => {
+    const bytes = makePdf(["The row says this PDF is large"]);
+    const pdf = row({ ...pdfRow(bytes), sizeBytes: 25 * 1024 * 1024 + 1 });
     const { storage, calls } = memoryStorage(pdf, { original: bytes });
-    expect(await readAttachmentForAgent(storage, pdf, { ...CAPS, maxBytes: bytes.length - 1 })).toEqual({
+    expect(await readAttachmentForAgent(storage, pdf, RAISED)).toEqual({
       kind: "refused",
       code: "too_large",
     });
     expect(calls).toEqual([]);
   });
 
-  it("answers too_large when the stored object is larger than the cap, whatever the row says", async () => {
-    const bytes = makePdf(["The row says this PDF is small"]);
-    const pdf = row({ ...pdfRow(bytes), sizeBytes: 10 });
+  it("answers too_large once the stored object passes 25 MiB, whatever the row says", async () => {
+    const head = makePdf(["The row says this PDF is small"]);
+    const bytes = new Uint8Array(25 * 1024 * 1024 + 1);
+    bytes.set(head);
+    const pdf = row({ ...pdfRow(head), sizeBytes: 10 });
     const { storage, calls } = memoryStorage(pdf, { original: bytes });
-    expect(await readAttachmentForAgent(storage, pdf, { ...CAPS, maxBytes: 100 })).toEqual({
+    expect(await readAttachmentForAgent(storage, pdf, RAISED)).toEqual({
       kind: "refused",
       code: "too_large",
     });

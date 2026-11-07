@@ -8,6 +8,9 @@ import { SANDBOX_LIMITS } from "@ocw/contracts";
  *   256 KiB of UTF-8), never the whole object.
  * - `pdfPages`, `pdfMs`, `pdfHeapMb`, `pdfConcurrency`: the PDF text extractor's page limit, wall clock, JavaScript
  *   heap and the number of extractor processes one API process runs at once (07.15-05).
+ * - `pdfMaxBytes` (WR-06): the largest PDF a bot read parses, fixed (the research's 25 MiB input), whatever the
+ *   deployment's upload limit (`OCW_ATTACHMENT_MAX_BYTES` can be raised to 1 GiB); larger is `too_large` before any
+ *   storage read.
  * - `pdfRssMb` (CR-01): the extractor process is killed once its resident memory passes this, polled every few tens
  *   of milliseconds by the API (a PDF.js inflated stream is ArrayBuffer memory, outside any heap limit).
  * - `pdfAddressSpaceMb` (CR-01): on Linux, where `prlimit` exists, the kernel's hard address-space limit of that
@@ -19,6 +22,7 @@ export const EXTRACT_LIMITS = {
   pdfPages: 100,
   pdfMs: 10_000,
   pdfHeapMb: 256,
+  pdfMaxBytes: 25 * 1024 * 1024,
   pdfRssMb: 512,
   pdfAddressSpaceMb: 4096,
   pdfConcurrency: 2,

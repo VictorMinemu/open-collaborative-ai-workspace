@@ -31,5 +31,12 @@ export async function readAttachmentBytes(
   } finally {
     stream.destroy();
   }
-  return new Uint8Array(Buffer.concat(chunks, total));
+  // One copy into a buffer of its own (never a Buffer-pool view), not a concatenation copied again (WR-06).
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
 }

@@ -37,8 +37,6 @@ export type AgentRead =
 export interface AgentReadCaps {
   /** Code units this read may return (the route passes `min(charsPerFile, what the turn has left)`). */
   charsPerFile: number;
-  /** The deployment's attachment size limit (`OCW_ATTACHMENT_MAX_BYTES`): the most a whole-object read may buffer. */
-  maxBytes: number;
 }
 
 const refused = (code: ExtractRefusal): AgentRead => ({ kind: "refused", code });
@@ -75,10 +73,11 @@ export async function readAttachmentForAgent(
         return failed(err);
       }
     case "pdf": {
-      if (row.sizeBytes > caps.maxBytes) return refused("too_large");
+      // WR-06: a fixed bound, never the deployment's upload limit; the stream is cut there too, whatever the row says.
+      if (row.sizeBytes > EXTRACT_LIMITS.pdfMaxBytes) return refused("too_large");
       let bytes: Uint8Array;
       try {
-        bytes = await readAttachmentBytes(storage, row, "original", caps.maxBytes);
+        bytes = await readAttachmentBytes(storage, row, "original", EXTRACT_LIMITS.pdfMaxBytes);
       } catch (err) {
         if (err instanceof AttachmentTooLargeError) return refused("too_large");
         return failed(err);
