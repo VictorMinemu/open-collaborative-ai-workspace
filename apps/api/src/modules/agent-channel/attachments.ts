@@ -48,8 +48,10 @@ import { turnHumanOf } from "./sandbox";
  *      here never reads storage and never counts or taints;
  *   2. outside any transaction: `readAttachmentForAgent` (the store with server credentials, bounded extraction), for
  *      at most what the turn has left of its characters;
- *   3. tx2 AS the human: the turn row locked, the characters granted (never past 200 000, even for parallel reads),
- *      added, the call finished and `bot.attachment_read` written.
+ *   3. tx2 AS the human: the turn row locked; the turn and the one row rule decided again (WR-03: a message deleted,
+ *      a file swept or an asker removed during the read answers `not_found`, nothing returned, no character charged);
+ *      the characters granted (never past 200 000, even for parallel reads), added, the call finished and
+ *      `bot.attachment_read` written.
  * Every refusal answers 200 with its code and fixed sentence (D-04); only `no_trigger` is a 403. No answer, audit row
  * or log line carries the file's name (the answer's labelled name aside), content, a storage key, a URL or a path.
  * Nothing is cached (D-06): every read re-decides and re-reads.
@@ -267,13 +269,21 @@ export function registerAttachmentRoutes(scope: App, core: Core): void {
           .where(eq(agentTurns.eventId, turn.eventId))
           .for("update");
         const left = Math.max(0, ATTACHMENT_READ_LIMITS.charsPerTurn - (locked?.chars ?? 0));
+        // WR-03: tx1 decided before the store read and the extraction; what changed since (the message deleted, the
+        // file swept, the asker gone from the conversation) is decided again here, before anything is returned.
+        const stillTurn = await liveTurn(tx, core, body);
+        const stillRow =
+          stillTurn && stillTurn.userId === human ? await attachmentForTurn(tx, stillTurn, row.id) : null;
         const name = labelName(row.filename);
         let answer: ReadResponse;
         let outcome: Outcome = "ok";
         let chars = 0;
         let truncated = false;
         let pages: number | undefined;
-        if (got.kind === "refused") {
+        if (!stillRow) {
+          outcome = "not_found";
+          answer = refusedAnswer(attachmentId, outcome);
+        } else if (got.kind === "refused") {
           outcome = readRefusalOf(got.code);
           answer = refusedAnswer(attachmentId, outcome);
         } else if (got.kind === "image") {
@@ -311,10 +321,12 @@ export function registerAttachmentRoutes(scope: App, core: Core): void {
             ...(pages !== undefined ? { pages } : {}),
           };
         }
+        // A budget or access refusal at commit is a denial; an extraction or store failure is an error.
+        const denied = outcome === "cap_reached" || outcome === "not_found";
         await finishToolCall(tx, core, {
           cell,
           callId,
-          status: outcome === "ok" ? "ok" : outcome === "cap_reached" ? "blocked" : "error",
+          status: outcome === "ok" ? "ok" : denied ? "blocked" : "error",
           durationMs: Date.now() - started,
           metadata: { eventId: turn.eventId, attachmentId, outcome, chars },
         });
@@ -323,7 +335,7 @@ export function registerAttachmentRoutes(scope: App, core: Core): void {
           attachmentId,
           row,
           outcome,
-          result: outcome === "ok" ? "success" : outcome === "cap_reached" ? "denied" : "error",
+          result: outcome === "ok" ? "success" : denied ? "denied" : "error",
           chars,
           truncated,
           ...(pages !== undefined ? { pages } : {}),

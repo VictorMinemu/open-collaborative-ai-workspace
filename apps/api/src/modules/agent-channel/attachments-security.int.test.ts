@@ -1,4 +1,6 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { sha256Hex } from "../../lib/crypto";
 import type { TestClient } from "../../testing";
@@ -225,6 +227,92 @@ describe("the audience rule: only a file the turn reads (D-10, D-16, P4)", () =>
       expect(imp.status).toBe(403);
       expect(codeOf(imp)).toBe("no_trigger");
       expect(await turnRow(ev.eventId as string)).toMatchObject({ tainted: false, attachment_reads: 0 });
+    } finally {
+      await ok(
+        s.victor.request("POST", `/api/v1/channels/${channel}/members`, { kind: "user", id: s.samId }),
+      );
+    }
+  });
+});
+
+/**
+ * WR-03 (07.15 review): the decision (tx1) and the commit (tx2) are apart by the store read and the extraction. The
+ * store is paused (`docker pause` on Garage) so the read waits there deterministically while the test changes what the
+ * asker may read; tx2 re-runs the turn and row rules, refuses `not_found`, charges no characters and audits `denied`.
+ */
+describe("WR-03: a change during the read is seen before the answer", () => {
+  const docker = promisify(execFile);
+  let safety: NodeJS.Timeout | undefined;
+  const unpause = async () => {
+    clearTimeout(safety);
+    await docker("docker", ["unpause", storage.container.getId()]).catch(() => undefined);
+  };
+  const pause = async () => {
+    await docker("docker", ["pause", storage.container.getId()]);
+    // Never leave the store paused for the rest of the file, whatever happens in the test.
+    safety = setTimeout(() => void unpause(), 20_000);
+  };
+
+  /** Starts a read with the store paused and resolves once tx1 has claimed it (the read is waiting on the store). */
+  async function readWaitingOnStore(ev: Json, agentId: string, attachmentId: string) {
+    await pause();
+    try {
+      const pending = read(ev, agentId, attachmentId);
+      for (let i = 0; i < 200; i++) {
+        // Wrapped: an async function returning the bare promise would wait for the read itself.
+        if ((await turnRow(ev.eventId as string)).attachment_reads === 1) return { pending };
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      throw new Error("the read was never claimed");
+    } catch (err) {
+      await unpause();
+      throw err;
+    }
+  }
+
+  async function refusedAfterTheRead(ev: Json, res: Json, attachmentId: string): Promise<void> {
+    expect(res).toMatchObject({ kind: "refused", attachmentId, code: "not_found" });
+    expect(JSON.stringify(res)).not.toContain("OCW-MARKER-0715-w");
+    expect(await turnRow(ev.eventId as string)).toMatchObject({ attachment_reads: 1, attachment_chars: 0 });
+    const audits = (
+      await s.su.query(
+        "select result, metadata from app.audit_events where action = 'bot.attachment_read' and metadata->>'eventId' = $1",
+        [ev.eventId],
+      )
+    ).rows as Json[];
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ result: "denied", metadata: { outcome: "not_found", chars: 0 } });
+  }
+
+  it("the file's message deleted while the store is read: not_found, nothing charged, audited denied", async () => {
+    const { ev, ids } = await scoutTurn([txt("w.txt", "OCW-MARKER-0715-w deleted during the read")]);
+    const id = ids[0] as string;
+    const { pending } = await readWaitingOnStore(ev, scout.id, id);
+    try {
+      // The tombstone the delete route writes (the route itself also removes the stored objects, which are paused).
+      await s.su.query("update app.messages set deleted_at = now() where id = $1", [ev.message.id]);
+    } finally {
+      await unpause();
+    }
+    await refusedAfterTheRead(ev, await ok(pending), id);
+  });
+
+  it("the asker removed from the channel while the store is read: not_found, nothing charged, audited denied", async () => {
+    const file = await uploadAttachment(s.sam, channel, txt("w2.txt", "OCW-MARKER-0715-w before Sam left"));
+    const ev = await deliveredTo(
+      await post(s.sam, channel, "@ops read this", { attachmentIds: [file] }),
+      ops.id,
+    );
+    const { pending } = await readWaitingOnStore(ev, ops.id, file);
+    try {
+      await ok(
+        s.victor.request("DELETE", `/api/v1/channels/${channel}/members/user/${s.samId}`) as Promise<Res>,
+      );
+    } finally {
+      await unpause();
+    }
+    try {
+      await refusedAfterTheRead(ev, await ok(pending), file);
     } finally {
       await ok(
         s.victor.request("POST", `/api/v1/channels/${channel}/members`, { kind: "user", id: s.samId }),
