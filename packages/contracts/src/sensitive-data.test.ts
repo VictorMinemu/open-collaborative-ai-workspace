@@ -249,22 +249,39 @@ describe("detectSensitive()", () => {
     expect(detectSensitive("Plain notes about the roadmap, 2026-10-12, v1.2.3.").findings).toEqual([]);
   });
 
-  it("scans a 256 KiB adversarial input in under 200 ms", () => {
-    const chunk = 64 * 1024;
-    const text = [
-      "1".repeat(chunk),
-      "1 ".repeat(chunk / 2),
-      "a@".repeat(chunk / 2),
-      "+3 ".repeat(chunk / 6),
-      fake("-----BEGIN RSA ", "PRIVATE KEY-----\n"),
-      "-----BEGIN ",
-      "A".repeat(chunk),
-    ].join("");
-    expect(text.length).toBeGreaterThanOrEqual(256 * 1024);
-    detectSensitive(text.slice(0, 1024));
-    const t0 = performance.now();
-    detectSensitive(text);
-    expect(performance.now() - t0).toBeLessThan(200);
+  it("scans a 256 KiB adversarial input in linear time (4x the input stays well under 16x the time)", () => {
+    const adversarial = (chunk: number) =>
+      [
+        "1".repeat(chunk),
+        "1 ".repeat(chunk / 2),
+        "a@".repeat(chunk / 2),
+        "+3 ".repeat(chunk / 6),
+        fake("-----BEGIN RSA ", "PRIVATE KEY-----\n"),
+        "-----BEGIN ",
+        "A".repeat(chunk),
+      ].join("");
+    const small = adversarial(16 * 1024);
+    const large = adversarial(64 * 1024);
+    expect(small.length).toBeGreaterThanOrEqual(64 * 1024);
+    expect(large.length).toBeGreaterThanOrEqual(256 * 1024);
+    // The check is for catastrophic backtracking, not the host's speed (pipeline 157: 202.9 ms against a fixed 200 ms
+    // on a loaded runner). Warm up, then the best of five interleaved passes per size, so a busy host slows both alike.
+    detectSensitive(small);
+    detectSensitive(large);
+    let a = Number.POSITIVE_INFINITY;
+    let b = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < 5; i++) {
+      let t0 = performance.now();
+      detectSensitive(small);
+      a = Math.min(a, performance.now() - t0);
+      t0 = performance.now();
+      detectSensitive(large);
+      b = Math.min(b, performance.now() - t0);
+    }
+    // Linear: about 4x; quadratic: about 16x. The 2 ms floor keeps a tiny baseline from inflating the ratio; the 2 s
+    // ceiling is the backstop for a rule that is slow at every size.
+    expect(b / Math.max(a, 2)).toBeLessThan(8);
+    expect(b).toBeLessThan(2000);
   });
 });
 
