@@ -380,7 +380,8 @@ export function Composer({
                 title="Attach files"
                 data-testid="attach-button"
                 onClick={() => fileInput.current?.click()}
-                className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40"
+                // Phones: a 44 px target whose extra height overlaps the composer's padding, so the row keeps its height.
+                className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/40 max-md:-my-1.5 max-md:size-11"
               >
                 <Paperclip className="size-4" />
               </button>
@@ -497,7 +498,7 @@ function MemberOption({
 
 export function ComposerHint() {
   return (
-    <p className="mt-1.5 hidden px-1 text-[11px] text-muted-foreground/80 md:block">
+    <p className="mt-1.5 hidden px-1 text-[11px] text-muted-foreground md:block">
       <kbd className="font-sans font-medium">Enter</kbd> to send ·{" "}
       <kbd className="font-sans font-medium">Shift + Enter</kbd> for a new line ·{" "}
       <kbd className="font-sans font-medium">@</kbd> to mention people or bots

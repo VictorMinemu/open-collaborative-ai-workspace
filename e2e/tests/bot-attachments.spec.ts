@@ -1,9 +1,11 @@
 import { type APIRequestContext, expect, type Locator, type Page, request, test } from "@playwright/test";
+import { expectNoSeriousA11y } from "../support/a11y";
 import { type Actor, apiAs, BASE_URL, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
-import { cellToken, freshPersonalBot, freshTeamBot } from "../support/bot-tools";
+import { bothThemes, cellToken, freshPersonalBot, freshTeamBot } from "../support/bot-tools";
 import { ALEX, freshChannel, postAs } from "../support/chat";
 import { FakeCellPlugin, type MentionPayload } from "../support/fake-cell-plugin";
 import { dropFiles, type FileSpec, mockup } from "../support/files";
+import { expectNoSidewaysScroll } from "../support/layout";
 import { enableBotSandbox, enableSandboxOrg, resume } from "../support/sandbox";
 import { asSuperuser } from "../support/superuser";
 import { ADMIN, API_URL } from "./env";
@@ -55,8 +57,40 @@ const INVOICE_LINE = "Invoice 42 total 1300 EUR";
 const PHOTO: FileSpec = { name: "photo.png", type: "image/png", bytes: mockup(640, 400) };
 const INVOICE: FileSpec = { name: "invoice.pdf", type: "application/pdf", bytes: pdfWith(INVOICE_LINE) };
 
+/** A file name far longer than any tray chip or file card (under `labelName`'s 120 characters). */
+const LONG_NAME =
+  "Quarterly-revenue-by-region-and-product-line-2026-final-reviewed-by-finance-and-operations-v3.pdf";
+
+/**
+ * A name shown shortened (the middle ellipsis, full name in `title`; what still does not fit ends in a CSS ellipsis)
+ * and kept inside its chip or card: nothing spills over or widens the row.
+ */
+async function expectShortened(name: Locator, box: Locator) {
+  await expect(name).toBeVisible();
+  const shown = (await name.textContent()) ?? "";
+  expect(shown).toContain("…");
+  expect(shown.length).toBeLessThan(LONG_NAME.length);
+  const style = await name.evaluate((el) => {
+    const s = getComputedStyle(el);
+    return { overflow: s.overflowX, ellipsis: s.textOverflow };
+  });
+  expect(style).toEqual({ overflow: "hidden", ellipsis: "ellipsis" });
+  const inner = await name.boundingBox();
+  const outer = await box.boundingBox();
+  expect(inner && outer && inner.x + inner.width <= outer.x + outer.width + 0.5).toBe(true);
+}
+
+/** Waits until an `<img>` decoded (natural width > 0). */
+async function expectLoaded(img: Locator) {
+  await expect
+    .poll(() => img.evaluate((el) => (el as HTMLImageElement).naturalWidth), { timeout: 10_000 })
+    .toBeGreaterThan(0);
+}
+
 /** Adds files the way the device does: a drop on desktop, the paperclip's picker on a phone. */
 async function addFiles(page: Page, files: FileSpec[], mobile: boolean) {
+  // The paperclip and the drop target appear together once the attachments config has loaded.
+  await expect(page.getByTestId("attach-button").first()).toBeVisible();
   if (mobile) {
     await page
       .getByTestId("attach-file")
@@ -182,6 +216,7 @@ test("a member attaches an image and a PDF in their personal bot's DM and the bo
   test.setTimeout(150_000);
   const project = info.project.name;
   const mobile = project === "mobile";
+  const size = mobile ? "390" : "1440";
   const bot = await personalBot();
   const from = cell.attachmentRequests.length;
   const s = await openAs(browser, SAM, project);
@@ -191,10 +226,19 @@ test("a member attaches an image and a PDF in their personal bot's DM and the bo
     const clip = s.page.getByTestId("attach-button");
     await expect(clip).toBeVisible();
     await expect(clip).toBeEnabled();
+    if (mobile) {
+      // A finger-sized target on phones (44 × 44), without making the composer taller.
+      const box = await clip.boundingBox();
+      expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
+      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
 
     await addFiles(s.page, [PHOTO, INVOICE], mobile);
     await expectReady(s.page, 2);
-    await sendInDm(s.page, `What do these say? ${reads(0, 1)}`);
+    await s.page.getByTestId("composer").fill(`What do these say? ${reads(0, 1)}`);
+    await s.page.mouse.move(0, 0);
+    await bothThemes(s.page, `bot-dm-attachments-${size}`);
+    await sendInDm(s.page, "");
 
     const reply = botReply(
       s.page,
@@ -208,6 +252,46 @@ test("a member attaches an image and a PDF in their personal bot's DM and the bo
     const sent = cell.attachmentRequests.slice(from);
     expect(sent.map((r) => r.status)).toEqual([200, 200]);
     expect(new Set(sent.map((r) => r.eventId)).size).toBe(1);
+
+    // ---- review: the sent message with its previews and the bot's reply; axe in both themes, nothing sideways
+    await expectLoaded(s.page.getByTestId("attachment-image").last());
+    await s.page.mouse.move(0, 0);
+    await bothThemes(s.page, `bot-dm-attachment-reply-${size}`);
+    for (const theme of ["light", "dark"] as const) {
+      await s.page.emulateMedia({ colorScheme: theme });
+      await expectNoSeriousA11y(s.page, '[data-testid="dm-view"]');
+      await expectNoSidewaysScroll(s.page, `bot DM ${theme}`);
+    }
+    await s.page.emulateMedia({ colorScheme: "light" });
+  } finally {
+    await s.context.close();
+  }
+});
+
+test("a long file name truncates in the tray and on the sent card without widening the DM", async ({
+  browser,
+}, info) => {
+  test.setTimeout(120_000);
+  const project = info.project.name;
+  const mobile = project === "mobile";
+  const size = mobile ? "390" : "1440";
+  const bot = await personalBot();
+  const s = await openAs(browser, SAM, project);
+  try {
+    await s.page.goto(`${BASE_URL}/chat/dm/${bot.dmId}`);
+    await addFiles(s.page, [{ ...INVOICE, name: LONG_NAME }], mobile);
+    await expectReady(s.page, 1);
+    const chip = s.page.getByTestId("attachment-item").first();
+    await expectShortened(chip.locator(`p[title="${LONG_NAME}"]`), chip);
+    await expectNoSidewaysScroll(s.page, "tray with a long name");
+
+    await sendInDm(s.page, `Read this one ${reads(0)}`);
+    await expect(botReply(s.page, `read ${LONG_NAME}: ${INVOICE_LINE}`)).toBeVisible({ timeout: 20_000 });
+    const card = s.page.getByTestId("file-card").last();
+    await expectShortened(card.locator(`p[title="${LONG_NAME}"]`), card);
+    await expectNoSidewaysScroll(s.page, "sent card with a long name");
+    await s.page.mouse.move(0, 0);
+    await bothThemes(s.page, `bot-dm-attachment-long-name-${size}`);
   } finally {
     await s.context.close();
   }

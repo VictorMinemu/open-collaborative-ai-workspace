@@ -758,7 +758,7 @@ function DmConversation({
                   onSend={(body, _ids, files) => send(body, files)}
                   autoFocus
                   footer={
-                    <p className="mt-1.5 hidden px-1 text-[11px] text-muted-foreground/80 md:block">
+                    <p className="mt-1.5 hidden px-1 text-[11px] text-muted-foreground md:block">
                       <kbd className="font-sans font-medium">Enter</kbd> to send ·{" "}
                       <kbd className="font-sans font-medium">Shift + Enter</kbd> for a new line
                     </p>
