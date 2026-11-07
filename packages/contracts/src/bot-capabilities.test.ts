@@ -660,7 +660,7 @@ describe("turn attachments (07.15 D-02, D-04, D-05, PD-03, PD-04)", () => {
     ]);
   });
 
-  it("the five fixed notes, each at most 200 characters", () => {
+  it("the six fixed notes, each at most 200 characters", () => {
     expect(TURN_ATTACHMENT_NOTES).toEqual({
       modelNoImages: "This bot's model can't see images.",
       cannotReadImport: "Can't be read as text; copy it into the sandbox with ocw_sandbox_import.",
@@ -668,6 +668,8 @@ describe("turn attachments (07.15 D-02, D-04, D-05, PD-03, PD-04)", () => {
       cannotReadNarrower:
         "Can't be read as text, and this bot's sandbox is shared more widely than this conversation, so it can't be copied there.",
       tooLarge: "Too large to read.",
+      // 07.15 IN-01: a turn with no slot left for ocw_attachment_read.
+      readNotOffered: "Can't be read on this turn: it already has the most tools a turn can offer.",
     });
     for (const note of Object.values(TURN_ATTACHMENT_NOTES)) {
       expect(note.length).toBeLessThanOrEqual(200);
