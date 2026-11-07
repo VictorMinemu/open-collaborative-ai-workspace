@@ -515,8 +515,9 @@ export async function completeOrgSignIn(
     await revokeToken(egress, bundle, prepared.clientSecret);
     return failed(stored === "gone" ? "flow_expired" : "token_exchange_failed");
   }
-  // Always probe with the organization's new token (D-05): the catalog follows the account that is now connected.
-  await probeConnector(
+  // Always probe with the organization's new token (D-05): the catalog follows the account that is now connected. It
+  // never throws (IN-05): the connection is stored, so the admin lands on the page, with a note when it failed.
+  const probe = await probeConnector(
     core,
     { organizationId: flow.organizationId, userId: flow.userId, serverId: flow.serverId },
     {
@@ -525,5 +526,11 @@ export async function completeOrgSignIn(
       url: flow.discovered.serverUrl,
     },
   );
-  return reply.redirect(settingsUrl(core, "organization", { connected: flow.serverId }), 302);
+  return reply.redirect(
+    settingsUrl(core, "organization", {
+      connected: flow.serverId,
+      ...(probe.ok ? {} : { probe: "failed" }),
+    }),
+    302,
+  );
 }

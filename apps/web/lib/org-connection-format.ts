@@ -187,11 +187,19 @@ const OUTCOME: Record<"access_denied" | "flow_expired" | "session_mismatch", (se
  * from a URL: only the closed set renders, through fixed copy; anything else is ignored (null, T-07.14-11-01).
  */
 export function arrivalBanner(
-  params: { connected?: string | null; error?: string | null },
+  params: { connected?: string | null; error?: string | null; probe?: string | null },
   server: string,
 ): ArrivalBanner | null {
   if (params.connected) {
-    return { kind: "success", title: `Connected ${server} for the organization.`, body: null };
+    return {
+      kind: "success",
+      title: `Connected ${server} for the organization.`,
+      // IN-05: the connection is stored even when listing its tools failed right after.
+      body:
+        params.probe === "failed"
+          ? "Its tools couldn't be listed yet. Use Re-probe on its row to try again."
+          : null,
+    };
   }
   if (!params.error) return null;
   const parsed = OrgSignInError.safeParse(params.error);

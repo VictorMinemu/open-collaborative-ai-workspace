@@ -94,8 +94,14 @@ const MEMBER_PENDING = { label: "Waiting for a member to connect", variant: "out
 const ORG_PENDING = { label: "Waiting for an admin to connect", variant: "outline", busy: false } as const;
 
 /** Query parameters of an organization sign-in's return (07.14 PD-06), read once and removed from the URL. */
-const ARRIVAL_PARAMS = ["connected", "error", "connector"] as const;
-type Arrival = { connected: string | null; error: string | null; connector: string | null };
+const ARRIVAL_PARAMS = ["connected", "error", "connector", "probe"] as const;
+type Arrival = {
+  connected: string | null;
+  error: string | null;
+  connector: string | null;
+  /** `failed`: connected, but listing its tools right after failed (IN-05). */
+  probe: string | null;
+};
 
 const MODE_BADGE: Record<McpServer["authMode"], string | null> = {
   org_secret: null,
@@ -163,6 +169,7 @@ export function McpServersSettings() {
     if (!ARRIVAL_PARAMS.some((p) => params.has(p))) return;
     setArrival({
       connected: params.get("connected"),
+      probe: params.get("probe"),
       error: params.get("error"),
       connector: params.get("connector"),
     });

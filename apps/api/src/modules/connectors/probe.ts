@@ -9,11 +9,28 @@ import { listTools, McpUpstreamError } from "./mcp-client";
 /**
  * The API-side probe of a proxied connector (07.4 D-02; 07.14 D-05): the cell never probes these servers, so the
  * first member who connects, the admin who connects the organization's account, or an admin's Re-probe
- * (`POST /connectors/:id/probe`) lists the tools with that credential, through the egress guard, and the catalog records names, flags and input schemas (`replaceServerTools`).
+ * (`POST /connectors/:id/probe`) lists the tools with that credential, through the egress guard, and the catalog
+ * records names, flags and input schemas (`replaceServerTools`).
  * `auth.url` is the server URL the credential is bound to: a server whose URL changed since is never called.
  * A failure sets the server's status to `error` with a coded detail; it never fails the member's connection.
+ *
+ * It never throws (07.14 review IN-05): it runs after a credential was stored and audited, so a failure, even of the
+ * write that records it, answers `{ ok: false }` and the caller still redirects or responds.
  */
 export async function probeConnector(
+  core: Core,
+  p: { organizationId: string; userId: string; serverId: string },
+  auth: { headerName: string; headerValue: string; url: string },
+): Promise<{ ok: boolean; code?: string }> {
+  try {
+    return await probe(core, p, auth);
+  } catch {
+    core.log.warn({ serverId: p.serverId, code: "probe_failed" }, "connector probe could not complete");
+    return { ok: false, code: "probe_failed" };
+  }
+}
+
+async function probe(
   core: Core,
   p: { organizationId: string; userId: string; serverId: string },
   auth: { headerName: string; headerValue: string; url: string },

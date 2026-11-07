@@ -130,6 +130,16 @@ describe("arrivalBanner", () => {
     });
   });
 
+  it("IN-05: a connection whose tool listing failed is still confirmed, with a Re-probe note", () => {
+    expect(arrivalBanner({ connected: "x", probe: "failed" }, "Acme")).toEqual({
+      kind: "success",
+      title: "Connected Acme for the organization.",
+      body: "Its tools couldn't be listed yet. Use Re-probe on its row to try again.",
+    });
+    // Anything else in `probe` is ignored (fixed copy only).
+    expect(arrivalBanner({ connected: "x", probe: "<b>x</b>" }, "Acme")?.body).toBeNull();
+  });
+
   it("names the failed step with its fix line", () => {
     expect(arrivalBanner({ error: "pkce_unsupported" }, "Acme")).toEqual({
       kind: "error",

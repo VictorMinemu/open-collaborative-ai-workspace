@@ -285,3 +285,8 @@ Amended in place while the phase is unmerged, after `07.14-REVIEW.md`. Each item
   redirect URI's host and the page's host, so a supported split-host install (the API on its own HTTPS host, the web
   origin in `OCW_TRUSTED_ORIGINS`) always showed a wrong fix. It now warns only when the redirect URI is loopback and
   the page is not, or when the redirect URI is plain http on a non-loopback host (which providers refuse anywhere).
+- **Smaller fixes.** Re-probe of an organization server without a usable credential answers the organization's
+  sentence, as the proxy does (IN-01). `accountLabel` is bounded at the column's 200 characters in the contracts
+  (IN-02). The post-commit probe never throws: a stored connection whose tool listing (or the write recording its
+  failure) fails still redirects to `?connected=<id>&probe=failed`, and the banner adds "Its tools couldn't be listed
+  yet. Use Re-probe on its row to try again." (IN-05).

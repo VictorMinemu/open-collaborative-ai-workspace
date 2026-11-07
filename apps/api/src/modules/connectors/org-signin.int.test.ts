@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { TestClient } from "../../testing";
 import {
   assertNoGlobalFetch,
@@ -359,6 +359,28 @@ describe("organization callback binding and failures", () => {
     expect(label).toHaveLength(200);
     // biome-ignore lint/suspicious/noControlCharactersInRegex: asserting that none are left
     expect(label).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/u);
+  });
+
+  it("IN-05: a probe that fails after the connection is stored still lands on the page, connected, with a note", async () => {
+    const probed = await registerOrgConnector(s);
+    const { core } = s.stack.built;
+    // The tools cannot be listed (403 on every authenticated MCP request), and recording that failure fails too.
+    s.fake.setScenario({ insufficient_scope: true });
+    const record = core.audit.record.bind(core.audit);
+    const spy = vi.spyOn(core.audit, "record").mockImplementation(async (tx, event) => {
+      if (event.action === "mcp.server.probed") throw new Error("audit store unavailable");
+      return record(tx, event);
+    });
+    try {
+      expect(await connectOrgOAuth(s, s.victor, probed.id)).toEqual({
+        status: 302,
+        location: `${MCP_WEB}?connected=${probed.id}&probe=failed`,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await orgConnectionRow(s, s.orgA, probed.id)).toMatchObject({ status: "connected" });
+    s.fake.setScenario({});
   });
 
   it("GET /connectors (Settings › Connections) lists no organization-account server for any member", async () => {
