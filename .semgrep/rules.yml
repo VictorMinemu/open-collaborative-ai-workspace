@@ -131,6 +131,39 @@ rules:
         # pinned after deciding every answer with the shared 07.4 rules.
         - /apps/sandboxd/src/egress/proxy.ts
 
+  - id: ocw.raw-auth-mode
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      A raw comparison against the organization-headers auth mode reads every other mode as one kind, so a new mode
+      (organization sign-in, client credentials) is silently treated as a member's account or rendered in the cell
+      (ADR-0036, 07.14 D-16). Ask the question with a predicate from @ocw/contracts connectors.ts: rendersInCell,
+      usesConnectorProxy, isPerMemberMode, isOrgCredentialMode or usesOAuthSignIn; in SQL use
+      inArray(mcpServers.authMode, CELL_MODES | CONNECTOR_PROXY_MODES | PER_MEMBER_MODES | ORG_CREDENTIAL_MODES).
+    patterns:
+      - pattern-either:
+          - pattern: $X === "$MODE"
+          - pattern: '"$MODE" === $X'
+          - pattern: $X !== "$MODE"
+          - pattern: '"$MODE" !== $X'
+          - pattern: eq($COLUMN, "$MODE")
+          - pattern: ne($COLUMN, "$MODE")
+      - metavariable-regex:
+          metavariable: $MODE
+          regex: ^org_secret$
+      # Semgrep 1.178 derives no prefilter from string literals or a metavariable-regex, so without this conjunct it
+      # parses every target as TypeScript and breaks the SQL fixture's rule test (rules.sql). The regex lets it skip
+      # files that never name the mode.
+      - pattern-regex: org_secret
+    paths:
+      # packages/contracts/src/connectors.ts holds the predicates themselves and lies outside apps/.
+      include:
+        - /apps/
+      exclude:
+        - "*.test.ts"
+        - "*.test.tsx"
+        - "*.spec.ts"
+
   - id: ocw.live-input-logging
     languages: [typescript]
     severity: ERROR

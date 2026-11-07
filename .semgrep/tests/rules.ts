@@ -91,3 +91,28 @@ const r4 = await egress.bound(policy)(url);
 import { BlockList, isIP } from "node:net";
 // ok: ocw.raw-egress
 import type { Socket } from "node:net";
+
+// ruleid: ocw.raw-auth-mode
+const inCell = server.authMode === "org_secret";
+// ruleid: ocw.raw-auth-mode
+const proxied = server.authMode !== "org_secret";
+// ruleid: ocw.raw-auth-mode
+const leftSide = "org_secret" === mode;
+// ruleid: ocw.raw-auth-mode
+const leftSideNot = "org_secret" !== input.authMode;
+// ruleid: ocw.raw-auth-mode
+const cellRows = await tx.select().from(mcpServers).where(eq(mcpServers.authMode, "org_secret"));
+// ruleid: ocw.raw-auth-mode
+const proxyRows = await tx.select().from(mcpServers).where(ne(mcpServers.authMode, "org_secret"));
+// ok: ocw.raw-auth-mode
+const rendered = rendersInCell(server.authMode);
+// ok: ocw.raw-auth-mode
+const perMember = isPerMemberMode(m);
+// ok: ocw.raw-auth-mode
+const cellModes = await tx.select().from(mcpServers).where(inArray(mcpServers.authMode, CELL_MODES));
+// ok: ocw.raw-auth-mode
+const defaultMode: ConnectorAuthMode = "org_secret";
+// ok: ocw.raw-auth-mode
+const memberKey = server.authMode === "per_member_secret";
+// ok: ocw.raw-auth-mode
+setAuthMode("org_secret");
