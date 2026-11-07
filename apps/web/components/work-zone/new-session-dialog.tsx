@@ -309,7 +309,7 @@ export function NewSessionDialog({
     if (!desktop) return;
     const res = await desktop.addProject();
     if (res.ok) {
-      toast.success(`Added ${res.project.name}`);
+      toast.success(`Added ${res.project.name}`, res.notice ? { description: res.notice } : undefined);
       await qc.invalidateQueries({ queryKey: wzKeys.projects });
     } else if (!res.canceled) toast.error(res.error);
   }

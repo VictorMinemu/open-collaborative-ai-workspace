@@ -93,3 +93,53 @@ describe("git adapter", () => {
     expect(sanitizeRemoteUrl("git@github.com:a/b.git")).toBe("git@github.com:a/b.git");
   });
 });
+
+describe("git adapter on a folder without git, and on a repository with no commit", () => {
+  let plain: string;
+  let fresh: string;
+  beforeAll(() => {
+    plain = realpathSync(mkdtempSync(join(tmpdir(), "ocw-nogit-")));
+    writeFileSync(join(plain, "notes.md"), "hello\n");
+    fresh = realpathSync(mkdtempSync(join(tmpdir(), "ocw-unborn-")));
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: fresh });
+  });
+  afterAll(() => {
+    rmSync(plain, { recursive: true, force: true });
+    rmSync(fresh, { recursive: true, force: true });
+  });
+
+  it("repoInfo reports no git instead of failing", async () => {
+    expect(await repoInfo(plain)).toEqual({
+      isRepo: false,
+      branch: null,
+      headSha: null,
+      remote: null,
+      defaultBranch: null,
+      dirty: false,
+    });
+  });
+
+  it("an isolated worktree on a folder without git is refused with a clear message, creating nothing", async () => {
+    await expect(ensureSessionWorktree(plain, "0190f3c2-aaaa-bbbb-cccc-123456789abc")).rejects.toThrow(
+      "this project has no git repository; isolated worktrees need git",
+    );
+    expect(existsSync(join(plain, ".ocw-worktrees"))).toBe(false);
+    expect(existsSync(join(plain, ".git"))).toBe(false);
+  });
+
+  it("repoInfo on an unborn branch: the branch is known, there is no head", async () => {
+    expect(await repoInfo(fresh)).toMatchObject({
+      isRepo: true,
+      branch: "main",
+      defaultBranch: "main",
+      headSha: null,
+    });
+  });
+
+  it("an isolated worktree on a repository with no commit is refused clearly and leaves nothing behind", async () => {
+    await expect(ensureSessionWorktree(fresh, "0190f3c2-dddd-eeee-ffff-123456789abc")).rejects.toThrow(
+      /no commits yet/,
+    );
+    expect(existsSync(join(fresh, ".ocw-worktrees"))).toBe(false);
+  });
+});

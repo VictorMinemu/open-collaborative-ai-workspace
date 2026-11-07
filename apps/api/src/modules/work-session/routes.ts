@@ -732,6 +732,8 @@ export function registerWorkSessionRoutes(
         branch: result.branch ?? null,
         headSha: result.headSha ?? null,
         generatedAt: new Date().toISOString(),
+        // A project without git (absent from older devices): nothing to compare.
+        ...(result.git === false ? { git: false } : {}),
       };
     },
   );

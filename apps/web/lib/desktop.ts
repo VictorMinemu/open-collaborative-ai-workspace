@@ -15,7 +15,8 @@ export interface DesktopProject {
 }
 
 export type DesktopAddProjectResult =
-  | { ok: true; project: DesktopProject }
+  /** `notice`: a short note to show (e.g. the folder has no git repository). Absent in older desktop builds. */
+  | { ok: true; project: DesktopProject; notice?: string }
   | { ok: false; canceled: true }
   | { ok: false; canceled: false; error: string };
 
