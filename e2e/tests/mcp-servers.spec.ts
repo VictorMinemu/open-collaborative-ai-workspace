@@ -964,3 +964,236 @@ test("admin: client credentials in the dialog, saved, edited and refused, at bot
     await admin.dispose();
   }
 });
+
+const DRIVE = "Acme Drive";
+const PAYROLL = "Acme Payroll";
+const ORG_SERVERS = [DRIVE, PAYROLL];
+/** The five cards in PD-12 order: the organization's own account first, then each member's. */
+const MODE_ORDER = [
+  "mcp-auth-mode-org_secret",
+  "mcp-auth-mode-org_oauth",
+  "mcp-auth-mode-org_client_credentials",
+  "mcp-auth-mode-per_member_oauth",
+  "mcp-auth-mode-per_member_secret",
+];
+const CARD_COPY: Record<string, [string, string]> = {
+  org_secret: ["Organization headers", "Fixed headers, like an API key"],
+  org_oauth: ["Organization sign-in", "An admin signs in once for everyone"],
+  org_client_credentials: ["Client credentials", "A client ID and secret, no browser sign-in"],
+  per_member_oauth: ["Member sign-in", "Each person signs in with their own account"],
+  per_member_secret: ["Member key", "Each person pastes their own key"],
+};
+
+/** Seeds the organization's connection on a server (UI state only: no token is sealed, ids and labels only). */
+async function seedOrgConnection(serverId: string, method: "oauth" | "client_credentials") {
+  await asSuperuser(
+    `insert into app.connector_org_connections (organization_id, server_id, method, status, account_label, client_id)
+     select organization_id, id, $2, 'connected', $3, $4 from app.mcp_servers where id = $1`,
+    [
+      serverId,
+      method,
+      method === "oauth" ? "ops@acme.example" : null,
+      method === "oauth" ? null : "ocw-payroll",
+    ],
+  );
+}
+
+test("admin: five grouped modes with their reasons, the HTTPS notice and the organization's switch confirmation, at both widths and themes", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  const mobile = info.project.name === "mobile";
+  const tag = mobile ? "390" : "1440";
+  const admin = await apiAs(ADMIN);
+  await removeServers(admin, ORG_SERVERS);
+  try {
+    // ---- seed: a connected Organization sign-in server, and a client-credentials one the list shows unconnected
+    for (const [name, authMode, method] of [
+      [DRIVE, "org_oauth", "oauth"],
+      [PAYROLL, "org_client_credentials", "client_credentials"],
+    ] as const) {
+      const res = await admin.post("/api/v1/mcp-servers", {
+        data: {
+          name,
+          transport: "streamable-http",
+          url: `https://${name.split(" ")[1]?.toLowerCase()}.acme.example/mcp`,
+          authMode,
+        },
+      });
+      expect(res.ok(), `create ${name}: ${await res.text()}`).toBe(true);
+      await seedOrgConnection(((await res.json()) as { id: string }).id, method);
+    }
+
+    const boss = await openAs(browser, ADMIN, info.project.name);
+    const page = boss.page;
+    let oauthAvailable = true;
+    let payrollStale = false;
+    const METADATA_URL = "https://ocw.acme.example/api/v1/connectors/oauth/client-metadata.json";
+    await page.route("**/api/v1/mcp-servers", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const res = await route.fetch();
+      const json = (await res.json()) as ListJson & {
+        servers: Array<ServerJson & { orgConnection: unknown }>;
+      };
+      json.sandbox = { available: true, servers: ["everything"] };
+      if (json.oauth) json.oauth = { ...json.oauth, clientMetadataUrl: METADATA_URL, oauthAvailable };
+      // The list loaded before an admin connected Payroll elsewhere: the PATCH answers 409 org_connection_exists.
+      if (payrollStale) for (const s of json.servers) if (s.name === PAYROLL) s.orgConnection = null;
+      await route.fulfill({ response: res, json });
+    });
+    const patches = captureBodies(page, "PATCH", /^\/api\/v1\/mcp-servers\/[^/]+$/u);
+    await page.goto(`${BASE_URL}/settings/mcp-servers`);
+    await expect(serverCard(page, DRIVE).getByTestId("mcp-org-connection")).toHaveAttribute(
+      "data-status",
+      "connected",
+    );
+
+    // ---- five cards, two groups, PD-12's order and copy at this width
+    await page.getByTestId("mcp-add").first().click();
+    const dialog = page.getByTestId("mcp-server-dialog");
+    await dialog.getByTestId("mcp-name").fill("Acme Docs");
+    await dialog.getByTestId("mcp-url").fill("https://docs.acme.example/mcp");
+    const modes = dialog.getByTestId("mcp-auth-modes");
+    await expect(modes.locator("> legend")).toHaveText("Authentication");
+    await expect(modes.getByTestId("mcp-auth-group-org").locator("> legend")).toHaveText(
+      "For the whole organization",
+    );
+    await expect(modes.getByTestId("mcp-auth-group-member").locator("> legend")).toHaveText(
+      "Each member's own account",
+    );
+    expect(
+      await modes
+        .locator('[data-testid^="mcp-auth-mode-"]')
+        .evaluateAll((els) => els.map((e) => e.dataset.testid)),
+    ).toEqual(MODE_ORDER);
+    expect(
+      await modes
+        .getByTestId("mcp-auth-group-org")
+        .locator('[data-testid^="mcp-auth-mode-"]')
+        .evaluateAll((els) => els.map((e) => e.dataset.testid)),
+    ).toEqual(MODE_ORDER.slice(0, 3));
+    for (const [mode, [label, hint]] of Object.entries(CARD_COPY)) {
+      await expect(dialog.getByTestId(`mcp-auth-mode-${mode}`)).toContainText(label);
+      await expect(dialog.getByTestId(`mcp-auth-mode-${mode}`)).toContainText(hint);
+    }
+    // Reading order on screen: one row per group at 1440, one card per row at 390.
+    const boxes = await Promise.all(
+      MODE_ORDER.map(async (id) => (await dialog.getByTestId(id).boundingBox()) ?? { x: 0, y: 0 }),
+    );
+    for (let i = 1; i < boxes.length; i++) {
+      const [prev, cur] = [boxes[i - 1], boxes[i]] as [{ x: number; y: number }, { x: number; y: number }];
+      const sameRow = !mobile && i !== 3;
+      if (sameRow) expect(cur.x, `${MODE_ORDER[i]} right of the previous card`).toBeGreaterThan(prev.x);
+      else expect(cur.y, `${MODE_ORDER[i]} below the previous card`).toBeGreaterThan(prev.y);
+    }
+
+    // ---- Organization sign-in: the member sign-in fields, and they survive a switch between the two sign-in modes
+    await dialog.getByTestId("mcp-auth-mode-org_oauth").click();
+    await expect(dialog.getByTestId("mcp-auth-explanation")).toContainText(
+      "An admin signs in once with the organization's account. Every member's bots use it wherever organization tools are allowed. The token stays on the server.",
+    );
+    await expect(dialog.getByTestId("mcp-redirect-uri")).toHaveValue(
+      /\/api\/v1\/connectors\/oauth\/callback$/,
+    );
+    await expect(dialog.getByTestId("mcp-client-metadata-url")).toHaveValue(METADATA_URL);
+    await expect(dialog.getByTestId("mcp-oauth-cimd-switch")).toBeChecked();
+    await expect(dialog.getByTestId("mcp-add-header")).toHaveCount(0);
+    await dialog.getByTestId("mcp-oauth-client-toggle").click();
+    await dialog.getByTestId("mcp-oauth-issuer").fill("https://auth.acme.example");
+    await dialog.getByTestId("mcp-oauth-client-id").fill("ocw-docs");
+    await dialog.getByTestId("mcp-oauth-scopes").fill("docs.read");
+    await dialog.getByTestId("mcp-auth-mode-per_member_oauth").click();
+    await expect(dialog.getByTestId("mcp-oauth-client-id")).toHaveValue("ocw-docs");
+    await dialog.getByTestId("mcp-auth-mode-org_oauth").click();
+    await expect(dialog.getByTestId("mcp-oauth-issuer")).toHaveValue("https://auth.acme.example");
+    await expect(dialog.getByTestId("mcp-oauth-scopes")).toHaveValue("docs.read");
+    await modes.scrollIntoViewIfNeeded();
+    await bothThemes(page, `mcp-org-modes-${tag}`);
+    await a11yBothThemes(page, '[data-testid="mcp-server-dialog"]');
+    if (mobile) await expectTouchTargets(dialog.locator("form"), "the organization sign-in dialog");
+
+    // ---- the stdio sandbox: every account mode needs a remote server; Organization headers stays
+    await dialog.getByTestId("mcp-transport-sandboxed-stdio").click();
+    await expect(dialog.getByTestId("mcp-auth-mode-org_secret").locator("input")).toBeChecked();
+    for (const mode of ["org_oauth", "org_client_credentials", "per_member_oauth", "per_member_secret"]) {
+      await expect(dialog.getByTestId(`mcp-auth-mode-${mode}`).locator("input")).toBeDisabled();
+      await expect(dialog.getByTestId(`mcp-auth-mode-${mode}`)).toContainText("Needs a remote server");
+    }
+    await expect(dialog.getByTestId("mcp-auth-mode-org_secret").locator("input")).toBeEnabled();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+
+    // ---- no HTTPS: both sign-in modes disabled, the notice says how to fix it
+    oauthAvailable = false;
+    await page.reload();
+    await page.getByTestId("mcp-add").first().click();
+    for (const mode of ["org_oauth", "per_member_oauth"]) {
+      await expect(dialog.getByTestId(`mcp-auth-mode-${mode}`).locator("input")).toBeDisabled();
+      await expect(dialog.getByTestId(`mcp-auth-mode-${mode}`)).toContainText("Needs HTTPS");
+    }
+    await expect(dialog.getByTestId("mcp-auth-mode-org_client_credentials").locator("input")).toBeEnabled();
+    const hint = dialog.getByTestId("mcp-oauth-https-hint");
+    await expect(hint).toHaveText(
+      "Sign-in needs HTTPS. Run pnpm ocw enable proxy on the server, then reload this page.",
+    );
+    await hint.scrollIntoViewIfNeeded();
+    await bothThemes(page, `mcp-org-https-${tag}`);
+    await a11yBothThemes(page, '[data-testid="mcp-server-dialog"]');
+    await page.keyboard.press("Escape");
+    oauthAvailable = true;
+    await page.reload();
+
+    // ---- leaving Organization sign-in with a connected account: ask first, focus on Cancel, nothing sent
+    const drive = serverCard(page, DRIVE);
+    await drive.getByTestId("mcp-edit").click();
+    await dialog.getByTestId("mcp-auth-mode-org_secret").click();
+    await dialog.getByTestId("mcp-save").click();
+    const confirm = page.getByTestId("mcp-clear-connections-confirm");
+    await expect(confirm).toHaveAttribute("data-kind", "org");
+    await expect(confirm).toContainText("Disconnect the organization's account?");
+    await expect(confirm).toContainText(
+      `Switching ${DRIVE} to Organization headers deletes the organization's saved sign-in. Bots stop using it.`,
+    );
+    await expect(confirm.getByRole("button", { name: "Cancel" })).toBeFocused();
+    await expect(confirm.getByTestId("mcp-clear-connections-submit")).toHaveText("Switch and disconnect");
+    expect(patches).toEqual([]);
+    await bothThemes(page, `mcp-org-switch-confirm-${tag}`);
+    await a11yBothThemes(page, '[data-testid="mcp-clear-connections-confirm"]');
+    await confirm.getByRole("button", { name: "Cancel" }).click();
+    await expect(confirm).toBeHidden();
+    await expect(dialog).toBeVisible();
+    expect(patches).toEqual([]);
+    await dialog.getByTestId("mcp-save").click();
+    await confirm.getByTestId("mcp-clear-connections-submit").click();
+    await expect(dialog).toBeHidden();
+    expect(patches).toEqual([{ authMode: "org_secret", clearConnections: true }]);
+    await expect(drive.getByTestId("mcp-org-connection")).toHaveCount(0);
+    const driveJson = (await (await admin.get("/api/v1/mcp-servers")).json()) as {
+      servers: Array<{ name: string; authMode: string; orgConnection: unknown }>;
+    };
+    expect(driveJson.servers.find((s) => s.name === DRIVE)).toMatchObject({
+      authMode: "org_secret",
+      orgConnection: null,
+    });
+
+    // ---- fallback: the list says nobody connected Payroll, the API answers 409 org_connection_exists
+    payrollStale = true;
+    await page.reload();
+    patches.length = 0;
+    await serverCard(page, PAYROLL).getByTestId("mcp-edit").click();
+    await dialog.getByTestId("mcp-auth-mode-org_oauth").click();
+    await dialog.getByTestId("mcp-save").click();
+    await expect(confirm).toHaveAttribute("data-kind", "org");
+    await expect(confirm).toContainText(
+      `Switching ${PAYROLL} to Organization sign-in deletes the organization's saved sign-in. Bots stop using it.`,
+    );
+    await confirm.getByTestId("mcp-clear-connections-submit").click();
+    await expect(dialog).toBeHidden();
+    expect(patches).toEqual([{ authMode: "org_oauth" }, { authMode: "org_oauth", clearConnections: true }]);
+    payrollStale = false;
+    await boss.context.close();
+  } finally {
+    await removeServers(admin, ORG_SERVERS).catch(() => undefined);
+    await admin.dispose();
+  }
+});
