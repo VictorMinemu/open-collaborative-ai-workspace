@@ -211,6 +211,9 @@ test("admin: reconnect, disconnect, failures and delete, at both widths and them
       await expect(row).toHaveAttribute("data-status", "connected");
       await page.getByTestId("mcp-arrival-banner").getByRole("button", { name: "Dismiss" }).click();
       await fakeScenario({ revoke_all: true });
+      // Past the 1 s token's life: a token is reused for the first half of its life (07.14 review WR-04), so only an
+      // expired one makes Re-probe refresh.
+      await page.waitForTimeout(1_100);
       await card.getByTestId("mcp-reprobe").click();
       await expect(row).toHaveAttribute("data-status", "needs_reconnect", { timeout: 15_000 });
       await expect(row.getByTestId("mcp-org-status")).toHaveText("Needs reconnect");
