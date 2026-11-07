@@ -132,6 +132,7 @@ const HEAD_ONLY = [
   "20261103183822_agent_chain_hops_parent_depth",
   "20261103184214_agent_chain_hops_question_org_fk",
   "20261106163356_org_connector_auth",
+  "20261107092259_agent_turns_attachment_budget",
 ];
 /** Tables the seed fills; each must keep its exact row count. */
 const SEEDED = [
@@ -722,6 +723,28 @@ describe("N-1 → N upgrade on a real PostgreSQL 18", () => {
         expect(
           (await c.query("select count(*)::int as n from app.secrets where id = $1", [SECRET_ID])).rows,
         ).toEqual([{ n: 1 }]);
+      } finally {
+        await c.end();
+      }
+    });
+
+    it("starts every bot turn with an empty attachment budget and keeps its other counters (Phase 07.15, D-11, D-17)", async () => {
+      const c = new pg.Client({ connectionString: urls.migrator });
+      await c.connect();
+      try {
+        const turns = await c.query(
+          "select event_id, tool_calls, sandbox_calls, tainted, attachment_reads, attachment_chars from app.agent_turns order by event_id",
+        );
+        expect(turns.rows).toEqual([
+          {
+            event_id: N1_TURN,
+            tool_calls: 2,
+            sandbox_calls: 0,
+            tainted: true,
+            attachment_reads: 0,
+            attachment_chars: 0,
+          },
+        ]);
       } finally {
         await c.end();
       }
