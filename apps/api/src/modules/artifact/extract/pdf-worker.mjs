@@ -9,7 +9,9 @@
 // argv: <unpdf entry URL> <maxPages> <maxChars> <maxBytes>
 // stdin: the PDF bytes, at most maxBytes.
 // The IPC channel carries exactly one answer and nothing else:
-//   { ok: true, totalPages, pages, text, truncated }   pages read = min(numPages, maxPages), cut early past maxChars
+//   { ok: true, totalPages, pages, text, truncated, hasText }   pages read = min(numPages, maxPages), cut early past
+//     maxChars; hasText: a page of those had a non-space character, even past the cut (IN-03: a short cut of leading
+//     blank lines is not a PDF without a text layer)
 //   { ok: false, error: "encrypted" | "invalid" | "failed" }
 // The error is chosen by `err.name` only. PDF.js messages can quote document strings, so no message, warning or
 // document string ever leaves this process except the extracted text itself (P3): the console is silenced and the
@@ -74,20 +76,27 @@ try {
   let text = "";
   let pages = 0;
   let cut = false;
+  let hasText = false;
   for (let i = 1; i <= last; i++) {
     const page = await doc.getPage(i);
     const chunk = pageText(await page.getTextContent());
     page.cleanup();
+    if (!hasText && chunk.trim() !== "") hasText = true;
+    // Past the cut the pages are only looked at for whether any text exists.
+    if (cut) {
+      if (hasText) break;
+      continue;
+    }
     text += pages === 0 ? chunk : `\n\n${chunk}`;
     pages = i;
     if (text.length > maxChars) {
       // One code unit past the cap, so the parent's surrogate-safe cut (cutChars) sees the overflow.
       text = text.slice(0, maxChars + 1);
       cut = true;
-      break;
+      if (hasText) break;
     }
   }
-  answer({ ok: true, totalPages, pages, text, truncated: cut || pages < totalPages });
+  answer({ ok: true, totalPages, pages, text, truncated: cut || pages < totalPages, hasText });
 } catch (err) {
   answer({ ok: false, error: code(err) });
 } finally {

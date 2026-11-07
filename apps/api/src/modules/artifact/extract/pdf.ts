@@ -49,6 +49,8 @@ const ExtractorAnswer = z.discriminatedUnion("ok", [
       pages: z.number().int().nonnegative(),
       text: z.string(),
       truncated: z.boolean(),
+      /** A non-space character was seen on the pages read (IN-03), even past the character cut. */
+      hasText: z.boolean(),
     })
     .strict(),
   z.object({ ok: z.literal(false), error: z.enum(["encrypted", "invalid", "failed"]) }).strict(),
@@ -234,7 +236,8 @@ function outcome(settled: Settled, caps: PdfCaps): PdfOutcome {
   const answer = parsed.data;
   if (!answer.ok)
     return { ok: false, code: answer.error === "encrypted" ? "encrypted" : "extraction_failed" };
-  if (answer.text.trim() === "") return { ok: false, code: "no_text_layer" };
+  // IN-03: decided from every page read, never from the cut prefix (a short cut of blank lines is not a scan).
+  if (!answer.hasText) return { ok: false, code: "no_text_layer" };
   const cut = cutChars(answer.text, caps.chars);
   return {
     ok: true,

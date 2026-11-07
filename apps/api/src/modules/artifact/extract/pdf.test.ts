@@ -68,6 +68,14 @@ describe("pdfText bounds and failures", () => {
     expect(out.text.length).toBe(64_000);
   });
 
+  it("IN-03: a PDF with text is never no_text_layer because the turn had only a few characters left", async () => {
+    // Page 1 has no text, so the extracted text starts with the blank line between pages.
+    const out = await pdfText(makePdf(["", "Second page has the text"]), { ...CAPS, chars: 1 });
+    expect(out).toMatchObject({ ok: true, truncated: true });
+    if (!out.ok) throw new Error("expected text");
+    expect(out.text).toHaveLength(1);
+  });
+
   it("answers no_text_layer for a PDF whose pages have no text", async () => {
     expect(await pdfText(makePdf(["", ""]), CAPS)).toEqual({ ok: false, code: "no_text_layer" });
   });

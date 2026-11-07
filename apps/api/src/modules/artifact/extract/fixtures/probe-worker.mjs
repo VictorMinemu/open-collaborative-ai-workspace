@@ -32,4 +32,11 @@ const facts = {
   addon: allowed("addon"),
   codeGeneration,
 };
-process.send({ ok: true, totalPages: 1, pages: 1, text: JSON.stringify(facts), truncated: false });
+process.send({
+  ok: true,
+  totalPages: 1,
+  pages: 1,
+  text: JSON.stringify(facts),
+  truncated: false,
+  hasText: true,
+});
