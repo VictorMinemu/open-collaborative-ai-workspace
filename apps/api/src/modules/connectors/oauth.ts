@@ -836,6 +836,23 @@ export async function exchangeCode(
 
 // ---------------------------------------------------------------- refresh and revocation
 
+/**
+ * Whether a token granted for the RFC 8707 `resource` may be sent to this MCP server URL (07.14 review CR-01): the
+ * resource is the server URL or a path prefix of it on the same origin, as discovery required at grant time. A server
+ * URL changed since the grant (another origin or another path) is not covered, nor a missing or malformed one.
+ */
+export function resourceCovers(resource: string, serverUrl: string | null): boolean {
+  if (!serverUrl) return false;
+  try {
+    return checkResourceAllowed({
+      requestedResource: resourceUrlFromServerUrl(serverUrl),
+      configuredResource: resource,
+    });
+  } catch {
+    return false;
+  }
+}
+
 /** The resource's origin and `host:port` (the OAuth calls' only private / plain-http target). */
 function resourceOrigin(bundle: TokenBundle): { origin: string; sameOrigin: string } | null {
   try {

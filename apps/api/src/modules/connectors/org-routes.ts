@@ -339,7 +339,9 @@ async function saveClientCredentials(
   const saved = await core.db.withTenant(ctx, async (tx) => {
     // The server row is held until commit: a concurrent mode switch or delete waits, or has already happened.
     const current = await orgAccountServer(tx, serverId, true);
-    if (current?.authMode !== "org_client_credentials") return false;
+    if (current?.authMode !== "org_client_credentials") return "wrong_mode";
+    // The token was granted for the URL read before the grant: a URL changed since is another target (CR-01).
+    if (current.url !== server.url) return "url_changed";
     const row = await storeOrgConnection(tx, core, {
       serverId,
       connectedBy: auth.userId,
@@ -353,14 +355,22 @@ async function saveClientCredentials(
       resourceId: row.id,
       metadata: { serverId, method: "client_credentials", issuer: bundle.issuer },
     });
-    return true;
+    return "stored";
   });
-  if (!saved) throw conflict("This connector no longer uses client credentials", "wrong_auth_mode");
+  if (saved === "wrong_mode") {
+    throw conflict("This connector no longer uses client credentials", "wrong_auth_mode");
+  }
+  if (saved === "url_changed") {
+    throw conflict(
+      "This connector's URL changed while saving. Save its client credentials again.",
+      "url_changed",
+    );
+  }
   // Always probe with the organization's new token (D-05): the catalog follows the client now in use.
   await probeConnector(
     core,
     { organizationId: auth.organizationId, userId: auth.userId, serverId },
-    { headerName: "Authorization", headerValue: `Bearer ${token.accessToken}` },
+    { headerName: "Authorization", headerValue: `Bearer ${token.accessToken}`, url: server.url ?? "" },
   );
   return core.db.withTenant(ctx, (tx) => getMcpServer(tx, serverId, mcpReadOptions(core)));
 }
@@ -403,8 +413,9 @@ export async function orgSignInFailed(
  * `session_mismatch`). `error=invalid_scope` is `scope_rejected` here (members keep `token_exchange_failed`). Redeems
  * the code against the flow's issuer, seals the bundle for the organization (`storeOrgConnection`, `connected_by` = the admin) and audits
  * `connector.org_connected` in one tenant transaction that holds the server row, then lists the tools with the new
- * token and sends the admin back to Settings › MCP servers. A server that left `org_oauth` meanwhile stores nothing
- * (`flow_expired`); a grant that could not be stored is revoked at its issuer.
+ * token and sends the admin back to Settings › MCP servers. A server that left `org_oauth`, or whose URL is no longer
+ * the one the flow started on (CR-01), stores nothing (`flow_expired`); a grant that could not be stored is revoked at
+ * its issuer.
  */
 export async function completeOrgSignIn(
   core: Core,
@@ -442,7 +453,8 @@ export async function completeOrgSignIn(
 
   const prepared = await core.db.withTenant(ctx, async (tx) => {
     const server = await orgAccountServer(tx, flow.serverId);
-    if (server?.authMode !== "org_oauth") return null;
+    // A server whose URL changed since the flow started is another target: the code is never redeemed (CR-01).
+    if (server?.authMode !== "org_oauth" || server.url !== flow.discovered.serverUrl) return null;
     return {
       clientSecret: await clientSecretFor(tx, core, flow.serverId, flow.client.issuer, flow.client.clientId),
     };
@@ -467,7 +479,7 @@ export async function completeOrgSignIn(
     stored = await core.db.withTenant(ctx, async (tx) => {
       // The server row is held until commit: a concurrent mode switch or delete waits, or has already happened.
       const server = await orgAccountServer(tx, flow.serverId, true);
-      if (server?.authMode !== "org_oauth") return "gone";
+      if (server?.authMode !== "org_oauth" || server.url !== flow.discovered.serverUrl) return "gone";
       const row = await storeOrgConnection(tx, core, {
         serverId: flow.serverId,
         connectedBy: flow.userId,
@@ -497,7 +509,11 @@ export async function completeOrgSignIn(
   await probeConnector(
     core,
     { organizationId: flow.organizationId, userId: flow.userId, serverId: flow.serverId },
-    { headerName: "Authorization", headerValue: `Bearer ${bundle.accessToken}` },
+    {
+      headerName: "Authorization",
+      headerValue: `Bearer ${bundle.accessToken}`,
+      url: flow.discovered.serverUrl,
+    },
   );
   return reply.redirect(settingsUrl(core, "organization", { connected: flow.serverId }), 302);
 }

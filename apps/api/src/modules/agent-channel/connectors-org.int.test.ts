@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   assertNoGlobalFetch,
@@ -479,5 +481,49 @@ describe("the organization's failures: the admin's sentence, never a connect car
       reason: "insufficient_scope",
       credential: "organization",
     });
+  });
+});
+
+describe("07.14 review CR-01: the organization's token goes only to the URL it was granted for", () => {
+  it("a URL moved behind the registry: the call fails needs_reconnect and the new origin never gets the token", async () => {
+    const hits: Array<{ authorization: string | undefined; body: string }> = [];
+    const canary = createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => {
+        body += String(c);
+      });
+      req.on("end", () => {
+        hits.push({ authorization: req.headers.authorization, body });
+        res.writeHead(404);
+        res.end();
+      });
+    });
+    await new Promise<void>((resolve) => canary.listen(0, "127.0.0.1", resolve));
+    const canaryUrl = `http://fake-mcp:${(canary.address() as AddressInfo).port}/mcp-oauth/mcp`;
+    try {
+      const token = (await orgBundleOf(s, s.orgA, server.id))?.accessToken as string;
+      expect(token).toMatch(/^fakeat_/u);
+      // The race the registry's confirm-and-destroy closes: the URL changes after the credential was stored.
+      await s.su.query("update app.mcp_servers set url = $2 where id = $1", [server.id, canaryUrl]);
+      const ev = await turnOf(s.alex, alexDm);
+      const r = await call(ev);
+      expect(r.status, JSON.stringify(r.body)).toBe(409);
+      expect(codeOf(r)).toBe("needs_reconnect");
+      expect(hits).toEqual([]);
+      expect(JSON.stringify(hits)).not.toContain(token);
+      expect(await orgConnectionRow(s, s.orgA, server.id)).toMatchObject({
+        status: "needs_reconnect",
+        last_error: "url_changed",
+        secret_id: null,
+      });
+    } finally {
+      await s.su.query("update app.mcp_servers set url = $2 where id = $1", [
+        server.id,
+        `${s.fakeBase}/mcp-oauth/mcp`,
+      ]);
+      canary.closeAllConnections();
+      await new Promise<void>((resolve) => canary.close(() => resolve()));
+    }
+    expect((await connectOrgOAuth(s, s.victor, server.id)).status).toBe(302);
   });
 });

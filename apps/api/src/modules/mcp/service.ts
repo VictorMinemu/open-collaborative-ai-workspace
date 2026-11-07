@@ -113,6 +113,7 @@ export function reconnectReasonOfCode(lastError: string | null): ConnectorReconn
     case "upstream_unauthorized":
       return "revoked";
     case "issuer_changed":
+    case "url_changed":
       return "provider_changed";
     default:
       return "expired";
@@ -512,6 +513,9 @@ async function putPreRegisteredClient(
   });
 }
 
+/** Why the registry destroyed stored credentials (audited): a mode switch, a URL change (07.14 CR-01) or a delete. */
+type ClearReason = "mode_changed" | "url_changed" | "server_deleted";
+
 /** 409 `connections_exist` with the count, so the admin confirms before members are disconnected (D-01, R4). */
 function connectionsExist(count: number, what: string): HttpError {
   return new HttpError(
@@ -527,12 +531,7 @@ function connectionsExist(count: number, what: string): HttpError {
  * count. Tokens are destroyed locally; nothing is revoked at the provider (mcp does not depend on the connectors
  * module; a member's own disconnect revokes there).
  */
-async function clearConnections(
-  core: Core,
-  tx: Tx,
-  serverId: string,
-  reason: "mode_changed" | "server_deleted",
-): Promise<number> {
+async function clearConnections(core: Core, tx: Tx, serverId: string, reason: ClearReason): Promise<number> {
   // Every member's row, past the owner-only policy, through the `mcp.manage` path (WINDOWS #186): the function deletes
   // the tenant's rows of this server and hands back only the ids of their sealed secrets.
   const res = await tx.execute(sql`select secret_id from app.clear_connector_connections(${serverId}::uuid)`);
@@ -578,7 +577,7 @@ async function clearOrgConnection(
   core: Core,
   tx: Tx,
   serverId: string,
-  reason: "mode_changed" | "server_deleted",
+  reason: ClearReason,
 ): Promise<OrgConnectionMethod | null> {
   const [removed] = await tx
     .delete(connectorOrgConnections)
@@ -886,10 +885,12 @@ export async function createMcpServer(core: Core, tx: Tx, input: CreateMcpServer
 }
 
 /**
- * Edits a server; each field is checked against the resulting mode and the stored transport. A mode switch that would
- * orphan credentials answers 409 until `UpdateMcpServerRequest.clearConnections` confirms it: `connections_exist`
- * (with the count) when leaving a member mode, `org_connection_exists` (with the method) when leaving an organization
- * mode while its connection is stored (07.14 PD-11). Confirmed, they are destroyed in this transaction, never revoked.
+ * Edits a server; each field is checked against the resulting mode and the stored transport. A credential change that
+ * would orphan credentials answers 409 until `UpdateMcpServerRequest.clearConnections` confirms it: `connections_exist`
+ * (with the count) for a member mode, `org_connection_exists` (with the method) for an organization mode while its
+ * connection is stored (07.14 PD-11). A credential change is a mode switch, or a new URL on a proxied server (07.14
+ * review CR-01: a token or key belongs to the URL it was granted for, so the new URL never receives it). Confirmed,
+ * they are destroyed in this transaction, never revoked.
  */
 export async function updateMcpServer(
   core: Core,
@@ -920,17 +921,24 @@ export async function updateMcpServer(
   if (!takesScopes(to) && input.oauthScopes && input.oauthScopes.length > 0) {
     throw badRequest("Only sign-in and client-credential connectors take scopes", "oauth_not_allowed");
   }
-  // Leaving a member mode orphans every member's credential: refuse until the admin confirms (D-01, R4).
+  // A proxied server's credentials were granted for its URL: a new URL is a credential change (07.14 review CR-01).
+  const urlChanged = input.url !== undefined && input.url !== row.url && row.transport !== "sandboxed-stdio";
+  const credentialChange = modeChanged || (urlChanged && usesConnectorProxy(from));
+  const what = modeChanged ? "switch the mode" : "change the URL";
+  const reason: ClearReason = modeChanged ? "mode_changed" : "url_changed";
+  // Leaving a member mode, or moving its URL, orphans every member's credential: refuse until the admin confirms
+  // (D-01, R4).
   const connectionCount =
-    isPerMemberMode(from) && modeChanged ? ((await connectionCounts(tx, id)).get(id) ?? 0) : 0;
+    isPerMemberMode(from) && credentialChange ? ((await connectionCounts(tx, id)).get(id) ?? 0) : 0;
   if (connectionCount > 0 && input.clearConnections !== true) {
-    throw connectionsExist(connectionCount, "switch the mode");
+    throw connectionsExist(connectionCount, what);
   }
-  // Leaving an organization mode (to any other mode, the other organization mode included) destroys the
-  // organization's account: the same confirmation (07.14 D-08, PD-11).
-  const orgMethod = isOrgCredentialMode(from) && modeChanged ? await orgConnectionMethodOf(tx, id) : null;
+  // Leaving an organization mode (to any other mode, the other organization mode included), or moving its URL,
+  // destroys the organization's account: the same confirmation (07.14 D-08, PD-11, CR-01).
+  const orgMethod =
+    isOrgCredentialMode(from) && credentialChange ? await orgConnectionMethodOf(tx, id) : null;
   if (orgMethod !== null && input.clearConnections !== true) {
-    throw orgConnectionExists(orgMethod, "switch the mode");
+    throw orgConnectionExists(orgMethod, what);
   }
 
   const patch: Partial<typeof mcpServers.$inferInsert> = {};
@@ -1054,19 +1062,21 @@ export async function updateMcpServer(
   // connection again.
   const reprobe =
     rendersInCell(to) && enabled && (connectionChanged || (changed.includes("orgEnabled") && enabled));
-  if (proxied && modeChanged) {
+  // A proxied server with a new mode or URL waits for a member or the organization's connection again (CR-01).
+  const credentialsMoved = proxied && (modeChanged || changed.includes("url"));
+  if (credentialsMoved) {
     patch.status = "pending";
     patch.statusDetail = null;
   } else if (!enabled && connectionChanged) patch.status = "pending";
-  // The last sign-in failure described the previous mode's account (07.14 D-10).
-  if (modeChanged) patch.authFailure = null;
+  // The last sign-in failure described the previous mode's (or URL's) account (07.14 D-10).
+  if (modeChanged || (credentialsMoved && row.authFailure !== null)) patch.authFailure = null;
   await tx
     .update(mcpServers)
     .set({ ...patch, updatedAt: new Date().toISOString() })
     .where(eq(mcpServers.id, id));
   for (const secretId of orphaned) await core.secrets.remove(tx, secretId);
-  if (connectionCount > 0) await clearConnections(core, tx, id, "mode_changed");
-  if (orgMethod !== null) await clearOrgConnection(core, tx, id, "mode_changed");
+  if (connectionCount > 0) await clearConnections(core, tx, id, reason);
+  if (orgMethod !== null) await clearOrgConnection(core, tx, id, reason);
 
   await core.audit.record(tx, {
     action: "mcp.server.updated",

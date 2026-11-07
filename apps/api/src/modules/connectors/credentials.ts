@@ -27,6 +27,7 @@ import {
   discover,
   discoverTokenEndpoint,
   refreshTokens,
+  resourceCovers,
   revokeToken,
   type TokenBundle,
   type TokenEndpointDiscovery,
@@ -98,7 +99,16 @@ const OAuthBundle = z.object({
   /** Epoch ms of the last refresh (a forced refresh within the lock window reuses it). */
   refreshedAt: z.number().optional(),
 });
-const SecretBundle = z.object({ kind: z.literal("secret"), value: z.string().min(1) });
+/**
+ * A member's key. `serverUrl` is the server URL it was entered for (07.14 review CR-01): it is sent only while the
+ * server still has that URL. Keys stored before it was recorded have none; a URL change on their server destroys them
+ * (the registry's confirmation), so they never meet another URL.
+ */
+const SecretBundle = z.object({
+  kind: z.literal("secret"),
+  value: z.string().min(1),
+  serverUrl: z.string().optional(),
+});
 /**
  * The organization's client credentials (07.14 D-03, PD-07): the client and where its secret may go (the token endpoint
  * of the issuer pinned at save time; null = an admin-entered Token URL without metadata), with the current token. There
@@ -242,9 +252,13 @@ export function credentialKeyOf(
     : { organizationId: ctx.organizationId, userId: ctx.userId, serverId: server.id };
 }
 
-/** What the connector proxy sends upstream. `secretParts` = every string to redact from what comes back. */
+/**
+ * What the connector proxy sends upstream. `secretParts` = every string to redact from what comes back. `url` = the
+ * server URL the credential was checked against (07.14 review CR-01): the caller sends it there and nowhere else, and
+ * refuses when the server it is about to call has another URL.
+ */
 export type AccessToken =
-  | { ok: true; headerName: string; headerValue: string; secretParts: string[] }
+  | { ok: true; headerName: string; headerValue: string; secretParts: string[]; url: string }
   | { ok: false; reason: "not_connected" | "needs_reconnect" };
 
 /** The authorization server could not be reached for a refresh: nothing was cleared, try again later. */
@@ -260,8 +274,11 @@ export class ConnectorTokenUnavailableError extends Error {
 // ---------------------------------------------------------------- lookups
 
 /** A per-member connector of the tx's organization (RLS), or null: another organization's id is never resolved. */
-export async function perMemberServer(tx: Tx, serverId: string): Promise<ServerRow | null> {
-  const [row] = await tx.select().from(mcpServers).where(eq(mcpServers.id, serverId)).limit(1);
+export async function perMemberServer(tx: Tx, serverId: string, lock = false): Promise<ServerRow | null> {
+  const q = tx.select().from(mcpServers).where(eq(mcpServers.id, serverId)).limit(1);
+  // `for share`: members store concurrently, while the registry's URL or mode change (`for update`) waits, or has
+  // already committed and is the version read here.
+  const [row] = lock ? await q.for("share") : await q;
   return row && isPerMemberMode(row.authMode) ? row : null;
 }
 
@@ -437,7 +454,22 @@ export async function clientSecretFor(
   return core.secrets.reveal(tx, client.secretId).catch(() => undefined);
 }
 
+/**
+ * Whether a credential may be sent to the server's current URL (07.14 review CR-01): an OAuth or client-credentials
+ * token only while its RFC 8707 `resource` covers that URL, a member's key only while the URL is the one it was entered
+ * for. A URL changed behind the credential's back (a race with the registry's confirm-and-destroy) is refused.
+ */
+export function boundTo(server: Pick<ServerRow, "url">, bundle: StoredBundle): boolean {
+  if (!server.url) return false;
+  if (bundle.kind === "secret") return bundle.serverUrl === undefined || bundle.serverUrl === server.url;
+  return resourceCovers(bundle.resource, server.url);
+}
+
+/** The terminal code of a credential whose server URL changed since it was stored (maps to `provider_changed`). */
+const URL_CHANGED = "url_changed";
+
 function headerFor(server: ServerRow, bundle: StoredBundle): AccessToken {
+  const url = server.url ?? "";
   if (bundle.kind === "oauth") {
     const headerValue = `Bearer ${bundle.accessToken}`;
     return {
@@ -445,6 +477,7 @@ function headerFor(server: ServerRow, bundle: StoredBundle): AccessToken {
       headerName: "Authorization",
       headerValue,
       secretParts: [bundle.accessToken, headerValue],
+      url,
     };
   }
   if (bundle.kind === "client_credentials") {
@@ -457,6 +490,7 @@ function headerFor(server: ServerRow, bundle: StoredBundle): AccessToken {
       headerName: "Authorization",
       headerValue,
       secretParts: [bundle.accessToken, headerValue, bundle.clientSecret],
+      url,
     };
   }
   const headerValue = `${server.memberHeaderPrefix ?? ""}${bundle.value}`;
@@ -465,6 +499,7 @@ function headerFor(server: ServerRow, bundle: StoredBundle): AccessToken {
     headerName: server.memberHeaderName ?? "Authorization",
     headerValue,
     secretParts: [...new Set([bundle.value, headerValue])],
+    url,
   };
 }
 
@@ -832,6 +867,11 @@ async function refreshAttempt(
     if (row.status !== "connected") return refused("needs_reconnect");
     const bundle = await openBundle(tx, core, store, row);
     if (!bundle) return refused("needs_reconnect");
+    // Never refreshed, re-granted or sent for a server URL the credential was not granted for (CR-01).
+    if (!boundTo(server, bundle)) {
+      const dropped = await markInTx(tx, core, store, row, URL_CHANGED, { bundle, refreshRefused: false });
+      return refused("needs_reconnect", dropped);
+    }
     if (bundle.kind === "secret") return { kind: "token", token: headerFor(server, bundle) };
     if (force) {
       // Someone refreshed since the caller's 401, or within the lock window: reuse that token.
@@ -935,7 +975,11 @@ async function refreshSerialized(
   }
 }
 
-/** The principal's connection and opened bundle, read in one tenant transaction (no refresh). */
+/**
+ * The principal's connection and opened bundle, read in one tenant transaction (no refresh). A credential that is not
+ * bound to the server's current URL (CR-01) is dropped there and then (`needs_reconnect`, `url_changed`, re-checked
+ * under the row lock) and its grant is revoked at its issuer after the commit: it is never sent.
+ */
 async function current(
   core: Core,
   store: CredentialStore,
@@ -943,16 +987,41 @@ async function current(
   | { kind: "refused"; reason: "not_connected" | "needs_reconnect" }
   | { kind: "ready"; server: ServerRow; row: CredentialRow; bundle: StoredBundle }
 > {
-  return core.db.withTenant(store.tenant, async (tx) => {
-    const server = await store.server(tx);
-    if (!server) return { kind: "refused", reason: "not_connected" };
-    const row = await store.row(tx);
-    if (!row) return { kind: "refused", reason: "not_connected" };
-    if (row.status !== "connected") return { kind: "refused", reason: "needs_reconnect" };
-    const bundle = await openBundle(tx, core, store, row);
-    if (!bundle) return { kind: "refused", reason: "needs_reconnect" };
-    return { kind: "ready", server, row, bundle };
-  });
+  let dropped: DroppedGrant | null = null;
+  const out = await core.db.withTenant(
+    store.tenant,
+    async (
+      tx,
+    ): Promise<
+      | { kind: "refused"; reason: "not_connected" | "needs_reconnect" }
+      | { kind: "ready"; server: ServerRow; row: CredentialRow; bundle: StoredBundle }
+    > => {
+      const server = await store.server(tx);
+      if (!server) return { kind: "refused", reason: "not_connected" };
+      const row = await store.row(tx);
+      if (!row) return { kind: "refused", reason: "not_connected" };
+      if (row.status !== "connected") return { kind: "refused", reason: "needs_reconnect" };
+      const bundle = await openBundle(tx, core, store, row);
+      if (!bundle) return { kind: "refused", reason: "needs_reconnect" };
+      if (!boundTo(server, bundle)) {
+        // Re-read under the row lock: drop only the credential that is still unbound (a reconnect may have landed).
+        const locked = await store.row(tx, true);
+        if (locked?.id === row.id && locked.status === "connected") {
+          const lockedBundle = await openBundle(tx, core, store, locked);
+          if (lockedBundle && !boundTo(server, lockedBundle)) {
+            dropped = await markInTx(tx, core, store, locked, URL_CHANGED, {
+              bundle: lockedBundle,
+              refreshRefused: false,
+            });
+          }
+        }
+        return { kind: "refused", reason: "needs_reconnect" };
+      }
+      return { kind: "ready", server, row, bundle };
+    },
+  );
+  await revokeDropped(core, store.serverId, dropped);
+  return out;
 }
 
 /**

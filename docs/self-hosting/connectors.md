@@ -218,6 +218,10 @@ host, listed or not, and OCW's own services stay refused even if listed.
   first ("Disconnect the organization's account?" / "Switching {server} to {mode} deletes the organization's saved
   sign-in. Bots stop using it."; on delete, "The organization's sign-in to {server} is deleted too." and **Delete and
   disconnect**). The change is audited as `connector.org_disconnected` with the reason.
+- **Changing the URL** of a server in any of the four member or organization account modes deletes its saved
+  sign-ins and keys the same way, after the same confirmation ("Changing the URL of {server} deletes …", **Change URL
+  and disconnect**), audited with `reason: "url_changed"`. A token or key is only ever sent to the URL it was granted
+  for, so members and the organization connect again for the new URL. Organization headers keep their headers.
 
 These tokens are destroyed in OCW only: they stay valid at the provider until they expire. A member who disconnects
 themselves, an admin who presses **Disconnect** on an organization account, or a sign-in that stops working is also

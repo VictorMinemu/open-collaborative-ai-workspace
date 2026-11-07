@@ -3,9 +3,12 @@ import {
   authFailureFix,
   type ConnectorAuthFailure,
   type ConnectorReconnectReason,
+  isOrgCredentialMode,
+  isPerMemberMode,
   type McpServer,
   type OrgConnection,
   OrgSignInError,
+  usesConnectorProxy,
 } from "@ocw/contracts";
 import { relativeTime } from "./utils";
 
@@ -100,6 +103,64 @@ export function disconnectCopy(server: string): { title: string; body: string } 
   return {
     title: `Disconnect ${server}?`,
     body: `Bots stop using the organization's account on ${server}. OCW also signs it out at the provider when it can.`,
+  };
+}
+
+/**
+ * A PATCH that deletes saved accounts, asked before it is sent (PD-11; 07.14 review CR-01): `kind` = whose accounts
+ * (`members` with their count, or the organization's), `reason` = a mode switch, or a new URL on a proxied server (a
+ * token or key belongs to the URL it was granted for, so the server deletes it).
+ */
+export interface CredentialConfirm {
+  kind: "members" | "org";
+  count: number;
+  reason: "mode" | "url";
+}
+
+/** Whether this edit of `base` needs the confirmation, from what the list already knows (the server's 409 is the fallback). */
+export function credentialConfirmation(
+  base: Pick<McpServer, "authMode" | "memberConnections" | "orgConnection">,
+  body: { authMode?: McpServer["authMode"]; url?: string; name?: string },
+): CredentialConfirm | null {
+  const modeChanged = body.authMode !== undefined && body.authMode !== base.authMode;
+  const urlChanged = body.url !== undefined && usesConnectorProxy(base.authMode);
+  if (!modeChanged && !urlChanged) return null;
+  const reason = modeChanged ? "mode" : "url";
+  if (isPerMemberMode(base.authMode) && base.memberConnections > 0) {
+    return { kind: "members", count: base.memberConnections, reason };
+  }
+  if (isOrgCredentialMode(base.authMode) && base.orgConnection !== null)
+    return { kind: "org", count: 0, reason };
+  return null;
+}
+
+/** The confirmation dialog's copy; nothing is revoked at the provider, so it promises only the deletion. */
+export function clearConnectionsCopy(
+  c: CredentialConfirm,
+  server: string,
+  to: { mode: McpServer["authMode"]; label: string },
+): { title: string; body: string; action: string } {
+  const title =
+    c.kind === "org"
+      ? "Disconnect the organization's account?"
+      : c.count === 1
+        ? "Disconnect 1 member?"
+        : `Disconnect ${c.count} members?`;
+  const change = c.reason === "url" ? `Changing the URL of ${server}` : `Switching ${server} to ${to.label}`;
+  const after =
+    c.kind === "org"
+      ? c.reason === "url"
+        ? "Connect it again for the new URL."
+        : "Bots stop using it."
+      : c.reason === "mode" && !isPerMemberMode(to.mode)
+        ? "Bots stop acting with members' own accounts."
+        : "They'll need to connect again.";
+  const what = c.kind === "org" ? "the organization's saved sign-in" : "every member's saved sign-in or key";
+  const verb = c.reason === "url" ? "Change URL and disconnect" : "Switch and disconnect";
+  return {
+    title,
+    body: `${change} deletes ${what}. ${after}`,
+    action: c.kind === "org" ? verb : `${verb} ${c.count}`,
   };
 }
 

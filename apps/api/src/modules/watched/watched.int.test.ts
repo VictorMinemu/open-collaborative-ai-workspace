@@ -18,6 +18,7 @@ import {
   fakeStats,
   type Json,
   ok,
+  orgBundleOf,
   orgConnectionRow,
   registerOrgConnector,
   startConnectorsStack,
@@ -1224,5 +1225,35 @@ describe("organization-account connectors (07.14)", () => {
       expect(after.tokenRequests).toEqual(before.tokenRequests);
       expect(await memberRows()).toEqual({ connections: 0, shares: 0 });
     });
+  });
+
+  it("07.14 review CR-01: a URL moved behind the registry: the check fails closed and the new origin gets nothing", async () => {
+    expect((await connectOrgOAuth(s, s.victor, drive.id)).status).toBe(302);
+    const token = (await orgBundleOf(s, s.orgA, drive.id))?.accessToken as string;
+    const hits: string[] = [];
+    const canary = createServer((req, res) => {
+      hits.push(`${req.method} ${req.url} ${req.headers.authorization ?? ""}`);
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => canary.listen(0, "127.0.0.1", resolve));
+    const original = drive.url as string;
+    try {
+      const moved = `http://fake-mcp:${(canary.address() as AddressInfo).port}/mcp-oauth/mcp`;
+      await s.su.query("update app.mcp_servers set url = $2 where id = $1", [drive.id, moved]);
+      await forceCheck(w.id);
+      expect((await row(w.id)).last_status).toBe("error");
+      expect((await lastFailure(w.id))?.metadata).toMatchObject({ code: "connector_unavailable" });
+      expect(hits).toEqual([]);
+      expect(JSON.stringify(hits)).not.toContain(token);
+      expect(await orgConnectionRow(s, s.orgA, drive.id)).toMatchObject({
+        status: "needs_reconnect",
+        last_error: "url_changed",
+      });
+    } finally {
+      await s.su.query("update app.mcp_servers set url = $2 where id = $1", [drive.id, original]);
+      canary.closeAllConnections();
+      await new Promise<void>((resolve) => canary.close(() => resolve()));
+    }
   });
 });

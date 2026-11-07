@@ -487,10 +487,14 @@ export function registerConnectorRoutes(
         );
       };
       const unauthorized = (err: unknown) => err instanceof McpUpstreamError && err.code === "unauthorized";
+      // 07.14 review CR-01: a credential checked against another URL than the one about to be called is never sent.
+      const elsewhere = (t: Extract<AccessToken, { ok: true }>) => t.url !== target.url;
       try {
         const token: AccessToken = await accessTokenFor(core, key);
         if (!token.ok) {
           refusal = token.reason;
+        } else if (elsewhere(token)) {
+          refusal = "needs_reconnect";
         } else {
           try {
             answer = await run(token);
@@ -498,7 +502,7 @@ export function registerConnectorRoutes(
             if (!unauthorized(err)) throw err;
             // A 401 on a token that still looked valid: exactly one forced refresh and one retry (D-01).
             const fresh = await forceRefresh(core, key);
-            if (!fresh.ok) {
+            if (!fresh.ok || elsewhere(fresh)) {
               refusal = "needs_reconnect";
             } else {
               try {

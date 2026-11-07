@@ -319,6 +319,8 @@ describe("the secret mode", () => {
       headerName: "X-Api-Key",
       headerValue: KEY_CANARY,
       secretParts: [KEY_CANARY],
+      // 07.14 review CR-01: the URL the key was checked against; the proxy sends it there only.
+      url: keyServer.url,
     });
     // The probe of a server that refuses the key failed, but the connection stands.
     expect((await ok(s.victor.request("GET", `/api/v1/mcp-servers/${keyServer.id}`))).status).toBe("error");

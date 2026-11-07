@@ -10,12 +10,13 @@ import { listTools, McpUpstreamError } from "./mcp-client";
  * The API-side probe of a proxied connector (07.4 D-02; 07.14 D-05): the cell never probes these servers, so the
  * first member who connects, the admin who connects the organization's account, or an admin's Re-probe
  * (`POST /connectors/:id/probe`) lists the tools with that credential, through the egress guard, and the catalog records names, flags and input schemas (`replaceServerTools`).
+ * `auth.url` is the server URL the credential is bound to: a server whose URL changed since is never called.
  * A failure sets the server's status to `error` with a coded detail; it never fails the member's connection.
  */
 export async function probeConnector(
   core: Core,
   p: { organizationId: string; userId: string; serverId: string },
-  auth: { headerName: string; headerValue: string },
+  auth: { headerName: string; headerValue: string; url: string },
 ): Promise<{ ok: boolean; code?: string }> {
   const ctx = { organizationId: p.organizationId, userId: p.userId };
   const server = await core.db.withTenant(ctx, async (tx) => {
@@ -25,12 +26,17 @@ export async function probeConnector(
   if (!server?.url || rendersInCell(server.authMode) || server.transport === "sandboxed-stdio") {
     return { ok: false, code: "not_probeable" };
   }
+  // The credential goes only to the URL it was granted for (07.14 review CR-01): a URL changed since sends nothing.
+  if (server.url !== auth.url) return { ok: false, code: "url_changed" };
   const target = {
     url: server.url,
     transport: server.transport === "sse" ? ("sse" as const) : ("streamable-http" as const),
   };
   try {
-    const tools = await listTools(egressFor(core.env), target, auth);
+    const tools = await listTools(egressFor(core.env), target, {
+      headerName: auth.headerName,
+      headerValue: auth.headerValue,
+    });
     await core.db.withTenant(ctx, (tx) =>
       replaceServerTools(
         core,

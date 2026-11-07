@@ -103,8 +103,8 @@ function memberConnectorOf(core: Core, server: ServerRow, row: ConnectionRow | n
 const missing = () => notFound("Connector not found", "connector_not_found");
 
 /** A per-member connector of the caller's organization in the expected mode: 404 when absent, 409 in another mode. */
-async function serverIn(tx: Tx, id: string, mode?: ServerRow["authMode"]): Promise<ServerRow> {
-  const server = await perMemberServer(tx, id);
+async function serverIn(tx: Tx, id: string, mode?: ServerRow["authMode"], lock = false): Promise<ServerRow> {
+  const server = await perMemberServer(tx, id, lock);
   if (!server) throw missing();
   if (mode && server.authMode !== mode) {
     throw conflict(
@@ -255,7 +255,8 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
       };
       const prepared = await core.db.withTenant(ctx, async (tx) => {
         const server = await perMemberServer(tx, f.serverId);
-        if (server?.authMode !== "per_member_oauth") return null;
+        // A server whose URL changed since the flow started is another target: the code is never redeemed (CR-01).
+        if (server?.authMode !== "per_member_oauth" || server.url !== f.discovered.serverUrl) return null;
         const clientSecret = await clientSecretFor(tx, core, f.serverId, f.client.issuer, f.client.clientId);
         return { server, clientSecret };
       });
@@ -274,11 +275,12 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
         return failed(err instanceof ConnectorOAuthError ? err.code : "token_exchange_failed");
       }
 
-      let needsProbe = false;
+      let stored: "gone" | { needsProbe: boolean };
       try {
-        needsProbe = await core.db.withTenant(ctx, async (tx) => {
-          const server = await perMemberServer(tx, f.serverId);
-          if (!server) throw missing();
+        stored = await core.db.withTenant(ctx, async (tx): Promise<"gone" | { needsProbe: boolean }> => {
+          // Held until commit: a concurrent URL or mode change waits, or has already happened and is read here.
+          const server = await perMemberServer(tx, f.serverId, true);
+          if (server?.authMode !== "per_member_oauth" || server.url !== f.discovered.serverUrl) return "gone";
           const row = await storeConnection(tx, core, {
             userId: f.userId,
             serverId: f.serverId,
@@ -298,17 +300,22 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
             .from(mcpServerTools)
             .where(eq(mcpServerTools.serverId, f.serverId))
             .limit(1);
-          return tool === undefined;
+          return { needsProbe: tool === undefined };
         });
       } catch {
         // Nothing was stored: do not leave a live grant behind at the provider.
         await revokeToken(egress, bundle, prepared.clientSecret);
         return failed("token_exchange_failed");
       }
-      if (needsProbe) {
+      if (stored === "gone") {
+        await revokeToken(egress, bundle, prepared.clientSecret);
+        return failed("flow_expired");
+      }
+      if (stored.needsProbe) {
         await probeConnector(core, f, {
           headerName: "Authorization",
           headerValue: `Bearer ${bundle.accessToken}`,
+          url: f.discovered.serverUrl,
         });
       }
       return reply.redirect(webUrl({ connected: f.serverId }), 302);
@@ -342,14 +349,15 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
       const auth = authOf(req);
       const value = req.body.value.trim();
       const stored = await core.db.withTenant(tenant(req), async (tx) => {
-        const server = await serverIn(tx, req.params.id, "per_member_secret");
+        const server = await serverIn(tx, req.params.id, "per_member_secret", true);
         if (!value || !HEADER_VALUE_RE.test(`${server.memberHeaderPrefix ?? ""}${value}`)) {
           throw new HttpError(400, "invalid_key", "Enter your key without line breaks");
         }
         const row = await storeConnection(tx, core, {
           userId: auth.userId,
           serverId: server.id,
-          bundle: { kind: "secret", value },
+          // The key goes only to the URL it was entered for (CR-01).
+          bundle: { kind: "secret", value, ...(server.url ? { serverUrl: server.url } : {}) },
         });
         await core.audit.record(tx, {
           action: "connector.connected",
@@ -369,7 +377,11 @@ export function registerConnectorRoutes(app: App, core: Core, perms: PermissionS
         await probeConnector(
           core,
           { organizationId: auth.organizationId, userId: auth.userId, serverId: stored.server.id },
-          { headerName: stored.server.memberHeaderName ?? "Authorization", headerValue: header },
+          {
+            headerName: stored.server.memberHeaderName ?? "Authorization",
+            headerValue: header,
+            url: stored.server.url ?? "",
+          },
         );
       }
       return memberConnectorOf(core, stored.server, stored.row);

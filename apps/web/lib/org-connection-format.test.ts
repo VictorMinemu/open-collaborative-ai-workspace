@@ -2,6 +2,8 @@ import { AUTH_FAILURE_FIX, authFailureFix, type OrgConnection, OrgSignInError } 
 import { describe, expect, it } from "vitest";
 import {
   arrivalBanner,
+  clearConnectionsCopy,
+  credentialConfirmation,
   disconnectCopy,
   failureBox,
   notConnectedLine,
@@ -179,6 +181,81 @@ describe("disconnect and delete copy", () => {
     expect(disconnectCopy("Acme")).toEqual({
       title: "Disconnect Acme?",
       body: "Bots stop using the organization's account on Acme. OCW also signs it out at the provider when it can.",
+    });
+  });
+});
+
+describe("credentialConfirmation (07.14 review CR-01): a new URL on a proxied server deletes its saved accounts", () => {
+  const org = { authMode: "org_oauth" as const, memberConnections: 0, orgConnection: conn() };
+  const members = { authMode: "per_member_oauth" as const, memberConnections: 2, orgConnection: null };
+
+  it("asks before a URL change on a connected organization or member server", () => {
+    expect(credentialConfirmation(org, { url: "https://new.example/mcp" })).toEqual({
+      kind: "org",
+      count: 0,
+      reason: "url",
+    });
+    expect(credentialConfirmation(members, { url: "https://new.example/mcp" })).toEqual({
+      kind: "members",
+      count: 2,
+      reason: "url",
+    });
+  });
+
+  it("a mode switch still asks as a mode switch, also when the URL changes with it", () => {
+    expect(credentialConfirmation(org, { authMode: "org_secret", url: "https://new.example/mcp" })).toEqual({
+      kind: "org",
+      count: 0,
+      reason: "mode",
+    });
+  });
+
+  it("asks nothing without saved accounts, for organization headers, or without a URL or mode change", () => {
+    expect(
+      credentialConfirmation({ ...org, orgConnection: null }, { url: "https://x.example/mcp" }),
+    ).toBeNull();
+    expect(
+      credentialConfirmation({ ...members, memberConnections: 0 }, { url: "https://x.example/mcp" }),
+    ).toBeNull();
+    expect(
+      credentialConfirmation(
+        { authMode: "org_secret", memberConnections: 0, orgConnection: null },
+        { url: "https://x.example/mcp" },
+      ),
+    ).toBeNull();
+    expect(credentialConfirmation(org, { name: "Renamed" })).toBeNull();
+  });
+
+  it("the dialog copy says what changes", () => {
+    expect(
+      clearConnectionsCopy({ kind: "org", count: 0, reason: "url" }, "Acme", {
+        mode: "per_member_oauth",
+        label: "Member sign-in",
+      }),
+    ).toEqual({
+      title: "Disconnect the organization's account?",
+      body: "Changing the URL of Acme deletes the organization's saved sign-in. Connect it again for the new URL.",
+      action: "Change URL and disconnect",
+    });
+    expect(
+      clearConnectionsCopy({ kind: "members", count: 1, reason: "url" }, "Acme", {
+        mode: "per_member_oauth",
+        label: "Member sign-in",
+      }),
+    ).toEqual({
+      title: "Disconnect 1 member?",
+      body: "Changing the URL of Acme deletes every member's saved sign-in or key. They'll need to connect again.",
+      action: "Change URL and disconnect 1",
+    });
+    expect(
+      clearConnectionsCopy({ kind: "org", count: 0, reason: "mode" }, "Acme", {
+        mode: "per_member_oauth",
+        label: "Member sign-in",
+      }),
+    ).toEqual({
+      title: "Disconnect the organization's account?",
+      body: "Switching Acme to Member sign-in deletes the organization's saved sign-in. Bots stop using it.",
+      action: "Switch and disconnect",
     });
   });
 });

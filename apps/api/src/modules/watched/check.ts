@@ -162,6 +162,8 @@ export async function callWith(
   try {
     const token = await accessTokenFor(core, key);
     if (!token.ok) return refusedCredential(token.reason);
+    // 07.14 review CR-01: a credential checked against another URL than the target's is never sent.
+    if (token.url !== target.url) return refusedCredential("needs_reconnect");
     let result: Awaited<ReturnType<typeof run>>;
     try {
       result = await withToken(token);
@@ -169,7 +171,7 @@ export async function callWith(
       if (!unauthorized(err)) throw err;
       // A 401 on a token that still looked valid: exactly one forced refresh and one retry (07.4 D-01).
       const fresh = await forceRefresh(core, key);
-      if (!fresh.ok) return refusedCredential("needs_reconnect");
+      if (!fresh.ok || fresh.url !== target.url) return refusedCredential("needs_reconnect");
       try {
         result = await withToken(fresh);
       } catch (retryErr) {

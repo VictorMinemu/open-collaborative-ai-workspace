@@ -164,8 +164,9 @@ to render it in the cell.
 ### Audit (D-09, D-13, PD-10)
 
 - `connector.org_connected { serverId, method, issuer }`, `connector.org_disconnected { serverId, method, revoked,
-  reason: "admin" | "mode_changed" | "server_deleted" }` and `connector.org_needs_reconnect { serverId, code,
-  revokeAtIssuer }`. `connector.connect_failed` gains `principal: "organization"` for organization flows.
+  reason: "admin" | "mode_changed" | "url_changed" | "server_deleted" }` and `connector.org_needs_reconnect
+  { serverId, code, revokeAtIssuer }`. `connector.connect_failed` gains `principal: "organization"` for organization
+  flows.
 - **D-13:** there is no `connector.called` action. Proxied calls keep today's `bot.tool_call` and
   `bot.tool_call.completed`, now with `credential: "organization"` or `"member"`, set from the server's mode once the
   server is resolved. No arguments or results are recorded.
@@ -228,3 +229,30 @@ leak sweep), the Semgrep rule's fixtures, the web unit tests, the isolated e2e o
 (`mcp-servers.spec`, `connectors-org.spec`) and `pnpm gate:compose`; recorded in `07.14-VALIDATION.md`. **Owner check
 pending:** `docs/DEMO.md` › Organization connector auth (Phase 07.14): a real OAuth-only MCP server on the real instance
 behind Cloudflare.
+
+## Amendment: code review fixes (2026-11-07, before merge)
+
+Amended in place while the phase is unmerged, after `07.14-REVIEW.md`. Each item names its finding.
+
+- **A credential belongs to the server URL it was granted for (CR-01).** This extends the 07.14-09 rule ("a stored
+  secret only goes to the target it was saved for") from the client secret to every stored token and key, for both
+  principals:
+  - **A URL change on a proxied server is a credential change.** `PATCH /mcp-servers/:id { url }` on a member or
+    organization account mode answers 409 `connections_exist { count }` / `org_connection_exists { method }`, exactly
+    like a mode switch, until `clearConnections: true` confirms it. Then the members' rows, the organization's row and
+    their sealed bundles are destroyed in that transaction, with no provider revoke, audited with
+    `reason: "url_changed"` (`connector.connections_cleared`, `connector.org_disconnected`). The server goes back to
+    `pending`. Organization headers keep their headers (the admin typed them for the new URL in the same form).
+  - **Use-time binding (defense in depth).** Before any token is sent, refreshed or re-granted, `current()` and
+    `refreshAttempt()` check that the bundle's RFC 8707 `resource` still covers the server's current URL
+    (`checkResourceAllowed`), and that a member's key was stored for that URL (`SecretBundle.serverUrl`; keys stored
+    before it have none, and a URL change on their server destroys them). Otherwise the credential is marked
+    `needs_reconnect` with `url_changed` (shown as `provider_changed`), its sealed bundle goes, and nothing is sent:
+    no MCP call, no refresh, no client-credentials grant. `AccessToken` now carries the URL it was checked against;
+    the proxy, watched records, Re-probe and the API-side probe refuse to send it to another URL.
+  - **Sign-ins.** Both callbacks (member and organization) require the server's current URL to equal
+    `flow.discovered.serverUrl`, before redeeming the code and again in the storing transaction, which holds the
+    server row (`for update` for the organization, `for share` for members, so a concurrent URL change waits). On a
+    mismatch the code is never redeemed (`flow_expired`), or a grant already redeemed is revoked and nothing is
+    stored. A client-credentials save whose server URL changed during the grant stores nothing (409 `url_changed`).
+    A member's key store holds the same `for share` lock.
