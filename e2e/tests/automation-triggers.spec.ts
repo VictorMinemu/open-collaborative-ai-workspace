@@ -112,6 +112,19 @@ test.afterAll(async () => {
   await admin?.dispose();
 });
 
+/**
+ * `openAs` with `prefers-reduced-motion: reduce`. The inbound card's status pill re-mounts and fades in when the Ops
+ * helper (the fake cell) moves it from Received to Done, which happens on its own clock: an axe run that starts just
+ * before the change measures the pill mid-fade (a blend of its text and background, 1.17:1 in the 07.14 gate) after
+ * `expectNoSeriousA11y` has already waited for the running animations. The card's pills are `motion-reduce:animate-none`,
+ * so with reduced motion every colour axe reads is a final one; `review()`'s colour-scheme switches keep the setting.
+ */
+async function openStill(...args: Parameters<typeof openAs>): ReturnType<typeof openAs> {
+  const opened = await openAs(...args);
+  await opened.page.emulateMedia({ reducedMotion: "reduce" });
+  return opened;
+}
+
 const editor = (page: Page) => page.getByTestId("automation-editor");
 
 async function pick(page: Page, trigger: Locator, option: string | RegExp): Promise<void> {
@@ -173,7 +186,7 @@ test("Víctor creates “Shopify orders”, copies the secret once, and a signed
 }, info) => {
   test.setTimeout(240_000);
   const w = widthOf(info.project.name);
-  const { context, page } = await openAs(browser, ADMIN, info.project.name);
+  const { context, page } = await openStill(browser, ADMIN, info.project.name);
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: BASE_URL });
   await recordToasts(page);
   try {
@@ -334,7 +347,7 @@ test("rotation with its grace line, a forged request's notice, a duplicate, and 
   test.setTimeout(240_000);
   expect(run.automationId, "the first test created the automation").not.toBe("");
   const w = widthOf(info.project.name);
-  const { context, page } = await openAs(browser, ADMIN, info.project.name);
+  const { context, page } = await openStill(browser, ADMIN, info.project.name);
   await recordToasts(page);
   try {
     const ep = await webhookEndpoint(admin, run.automationId);
@@ -417,7 +430,7 @@ test("rotation with its grace line, a forged request's notice, a duplicate, and 
 test("Sam (a member) sees Webhook disabled with its reason", async ({ browser }, info) => {
   test.setTimeout(120_000);
   const w = widthOf(info.project.name);
-  const { context, page } = await openAs(browser, SAM, info.project.name);
+  const { context, page } = await openStill(browser, SAM, info.project.name);
   try {
     await openAutomations(page, "?new=1");
     const card = editor(page).getByTestId("trigger-kind-webhook");
@@ -443,7 +456,7 @@ test("mail through Keychain: test, save, a mail arrives as a Received card; fail
     username: address,
     password: PASSWORD_CANARY,
   });
-  const { context, page } = await openAs(browser, ADMIN, info.project.name);
+  const { context, page } = await openStill(browser, ADMIN, info.project.name);
   await recordToasts(page);
   try {
     await openAutomations(page, "?new=1");
@@ -610,7 +623,7 @@ test("Sam has no username and password keys: the panel sends him to Keychain", a
   test.setTimeout(120_000);
   const w = widthOf(info.project.name);
   await clearBasicKeychainItems(sam);
-  const { context, page } = await openAs(browser, SAM, info.project.name);
+  const { context, page } = await openStill(browser, SAM, info.project.name);
   try {
     await openAutomations(page, "?new=1");
     const sheet = editor(page);

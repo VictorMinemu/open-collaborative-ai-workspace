@@ -7,6 +7,9 @@
 // approves everything itself (no approval.requested), like the real runtimes' bypass modes.
 // OCW_RUNTIME_FAKE_ECHO=1 (renderer e2e only): the answer repeats the whole prompt, so a test can stream
 // arbitrary Markdown (fenced code, tables) through the real Work Zone pipeline.
+// OCW_RUNTIME_FAKE_HOLD_FILE=<path> (e2e only): a turn that would ask for approval stays "running" just before asking
+// until <path> exists (or the turn is interrupted), so a spec can see "Working" without racing the clock and then
+// release it by creating the file. Turns that start after the file exists are not held.
 // Images (06.1, P-10): it takes images (`supportsImages: true`) and, when a prompt carries some, its footer gains
 // `Images: <n> (<mediaType>, …)` after the `Mode:` line, so end-to-end tests can see they arrived. It never looks at
 // the bytes and never writes them anywhere.
@@ -15,7 +18,7 @@
 // `fake`. `retireIdle()` marks idle sessions dormant and `wakeUps` counts how many woke again.
 
 import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   ApprovalDecision,
@@ -180,6 +183,7 @@ export class FakeRuntime implements AgentRuntime {
   private readonly sessions = new Map<string, FakeSession>();
   private readonly allowFullAccess: () => boolean;
   private readonly echoPrompt = process.env.OCW_RUNTIME_FAKE_ECHO === "1";
+  private readonly holdFile = process.env.OCW_RUNTIME_FAKE_HOLD_FILE || null;
   /** How many retired sessions were woken by a prompt or settings change (07.11 D-03a; tests read it). */
   wakeUps = 0;
 
@@ -424,6 +428,22 @@ export class FakeRuntime implements AgentRuntime {
     this.emit(s, { type: "assistant.message", messageId, text: acc });
   }
 
+  /** OCW_RUNTIME_FAKE_HOLD_FILE: wait (still "running") until the file exists or the turn is interrupted. */
+  private async holdUntilReleased(s: FakeSession) {
+    const file = this.holdFile;
+    if (!file) return;
+    while (!s.aborted) {
+      if (
+        await access(file).then(
+          () => true,
+          () => false,
+        )
+      )
+        return;
+      await sleep(50);
+    }
+  }
+
   private async askApproval(
     s: FakeSession,
     mode: PermissionMode,
@@ -493,6 +513,7 @@ export class FakeRuntime implements AgentRuntime {
         });
       }
       const target = `notes/ocw-change-${turn}.md`;
+      if (!s.aborted && mode !== "plan") await this.holdUntilReleased(s);
       if (!s.aborted && mode !== "plan") {
         const { outcome, comment } = await this.askApproval(s, mode, "Write", `Create ${target}`, [target]);
         if (s.aborted) {

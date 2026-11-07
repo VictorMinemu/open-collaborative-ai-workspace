@@ -25,7 +25,7 @@ import { cn } from "@/lib/utils";
 import { ChatgptConnectDialog } from "./chatgpt-connect-dialog";
 import { ChatgptWelcomeModal } from "./chatgpt-welcome-modal";
 
-/** Failures that move the member's credential (not eligible, needs reconnect): the plan state is re-read live. */
+/** Failures that move the member's credential (not eligible, needs reconnect): the plan state is re-read once. */
 const CREDENTIAL_CODES: ReadonlySet<AiErrorCode> = new Set(["user_not_eligible", "invalid_credential"]);
 
 /**
@@ -75,9 +75,24 @@ const streamedHere = new Set<string>();
 /** Messages whose usage-limit dialog already opened once. */
 const dialogShown = new Set<string>();
 
+/** Credential failures whose plan state this page already re-read. */
+const planRefreshed = new Set<string>();
+
 /** Called while an answer renders as streaming; its failure (if any) is then treated as live. */
 export function markStreamed(messageId: string): void {
   streamedHere.add(messageId);
+}
+
+/**
+ * Whether this failure should re-read the member's plan state now: once per message for a code that moves the
+ * credential (not eligible, needs reconnect). Not tied to having seen the answer stream: a failure that arrives before
+ * streaming (a 403 not-eligible) is often in the page's first snapshot already, and the plan state this page holds
+ * still says "connected" until it is re-read. A failure seen again after a reload only refetches the same state.
+ */
+export function shouldRefreshPlan(messageId: string, code: AiErrorCode | null): boolean {
+  if (!code || !CREDENTIAL_CODES.has(code) || planRefreshed.has(messageId)) return false;
+  planRefreshed.add(messageId);
+  return true;
 }
 
 /** The organization model "Use an organization model" switches to: the recommended one, else the first available. */
@@ -200,10 +215,10 @@ export function GenerationError({
     if (dialogOpen) dialogShown.add(messageId);
   }, [dialogOpen, messageId]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: once per live failure
+  // biome-ignore lint/correctness/useExhaustiveDependencies: once per credential failure (shouldRefreshPlan)
   useEffect(() => {
-    if (live && code && CREDENTIAL_CODES.has(code)) refreshPlan();
-  }, [live, code]);
+    if (shouldRefreshPlan(messageId, code)) refreshPlan();
+  }, [messageId, code]);
 
   function useOrg() {
     if (!org) return;

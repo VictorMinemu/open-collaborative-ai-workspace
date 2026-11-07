@@ -70,7 +70,7 @@ RUN set -eu \
 
 COPY --from=agent /opt/chromium /opt/chromium
 COPY --from=agent /app/node_modules /app/node_modules
-COPY package.json agent.mjs redact.mjs capture.mjs /app/
+COPY package.json agent.mjs redact.mjs capture.mjs world.mjs /app/
 ENV NODE_ENV=production \
     HOME=/tmp \
     OCW_BROWSER_EXECUTABLE=/opt/chromium/chrome-headless-shell \

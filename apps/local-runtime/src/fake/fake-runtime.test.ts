@@ -92,6 +92,57 @@ describe("FakeRuntime", () => {
     expect(await answerOf(true)).toContain("```ts\nconst a = 1;\n```");
     expect(await answerOf(false)).not.toContain("```");
   });
+
+  it("OCW_RUNTIME_FAKE_HOLD_FILE holds the turn in running before its approval until the file exists (e2e)", async () => {
+    const cwd = tmp();
+    const hold = join(tmp(), "release");
+    const prev = process.env.OCW_RUNTIME_FAKE_HOLD_FILE;
+    process.env.OCW_RUNTIME_FAKE_HOLD_FILE = hold;
+    try {
+      const events: SessionEvent[] = [];
+      const rt = new FakeRuntime("claude-code", 1);
+      await rt.start({ sessionId: "h1", cwd, permissionMode: "default" }, (e) => events.push(e));
+      await rt.prompt("h1", { promptId: "p1", text: "add notes" });
+      await until(events, (e) => e.type === "tool.completed");
+      // Far longer than the whole turn takes at 1 ms: still running, no approval asked.
+      await new Promise((r) => setTimeout(r, 300));
+      expect(events.some((e) => e.type === "approval.requested")).toBe(false);
+      expect(events.filter((e) => e.type === "session.state").at(-1)).toEqual({
+        type: "session.state",
+        status: "running",
+      });
+      writeFileSync(hold, "");
+      const req = await until(events, (e) => e.type === "approval.requested");
+      if (req.type !== "approval.requested") throw new Error("unreachable");
+      rt.resolveApproval("h1", req.approvalId, "once");
+      await until(events, (e) => e.type === "prompt.completed");
+      // Once released, later turns are not held.
+      await rt.prompt("h1", { promptId: "p2", text: "again" });
+      await until(events, (e) => e.type === "approval.requested" && e.approvalId !== req.approvalId);
+    } finally {
+      if (prev === undefined) delete process.env.OCW_RUNTIME_FAKE_HOLD_FILE;
+      else process.env.OCW_RUNTIME_FAKE_HOLD_FILE = prev;
+    }
+  });
+
+  it("an interrupt ends a held turn without waiting for the file", async () => {
+    const prev = process.env.OCW_RUNTIME_FAKE_HOLD_FILE;
+    process.env.OCW_RUNTIME_FAKE_HOLD_FILE = join(tmp(), "never");
+    try {
+      const events: SessionEvent[] = [];
+      const rt = new FakeRuntime("claude-code", 1);
+      await rt.start({ sessionId: "h2", cwd: tmp(), permissionMode: "default" }, (e) => events.push(e));
+      await rt.prompt("h2", { promptId: "p1", text: "add notes" });
+      await until(events, (e) => e.type === "tool.completed");
+      await rt.interrupt("h2");
+      const done = await until(events, (e) => e.type === "prompt.completed");
+      expect(done).toMatchObject({ interrupted: true });
+      expect(events.some((e) => e.type === "approval.requested")).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.OCW_RUNTIME_FAKE_HOLD_FILE;
+      else process.env.OCW_RUNTIME_FAKE_HOLD_FILE = prev;
+    }
+  });
 });
 
 describe("FakeRuntime settings (03.2-01, D-07, D-14)", () => {
