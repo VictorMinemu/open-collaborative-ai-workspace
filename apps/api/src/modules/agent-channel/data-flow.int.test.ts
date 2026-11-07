@@ -324,12 +324,17 @@ async function rerunOf(approvalId: string): Promise<Json> {
 }
 
 /** The bot's reply for a turn (links the files the turn stored for the conversation). */
-const replyTo = (ev: Json, agentId: string, text = "Here it is.") =>
+const replyTo = (
+  ev: Json,
+  agentId: string,
+  text = "Here it is.",
+  threadRootMessageId: string | null = null,
+) =>
   ok(
     s.cell("/messages", {
       agentId,
       conversationId: ev.conversation.id,
-      threadRootMessageId: null,
+      threadRootMessageId,
       eventId: ev.eventId,
       text,
       idempotencyKey: `reply-${randomUUID()}`,
@@ -558,28 +563,72 @@ describe("ocw_sandbox_import: only when the conversation's audience covers the w
     expect((await turnRow(ev.eventId)).sandbox_calls).toBe(0);
   });
 
-  it("Ops in #sales-all, read by everyone Ops serves, imports; an attachment of another conversation is 404 not_found", async () => {
-    const mention = async () => {
-      const msg = await ok(
-        s.sam.request("POST", `/api/v1/conversations/${salesAll}/messages`, {
-          body: `@ops please ${randomUUID().slice(0, 6)}`,
-        }) as Promise<Res>,
-      );
-      const rows = (
-        await s.su.query(
-          "select payload from app.stream_events where stream_id = $1 and type = 'agent.mention.v1' and payload->'message'->>'id' = $2 and payload->'agent'->>'id' = $3",
-          [`cell:${s.orgA}`, msg.id, ops.id],
-        )
-      ).rows;
-      expect(rows).toHaveLength(1);
-      return rows[0].payload as Json;
-    };
+  /** Sam mentions Ops in #sales-all (a thread reply when `threadRootId` is set); returns Ops' turn. */
+  const mention = async (opts: { threadRootId?: string; attachmentIds?: string[] } = {}) => {
+    const msg = await ok(
+      s.sam.request("POST", `/api/v1/conversations/${salesAll}/messages`, {
+        body: `@ops please ${randomUUID().slice(0, 6)}`,
+        ...(opts.threadRootId ? { threadRootId: opts.threadRootId } : {}),
+        ...(opts.attachmentIds ? { attachmentIds: opts.attachmentIds } : {}),
+      }) as Promise<Res>,
+    );
+    const rows = (
+      await s.su.query(
+        "select payload from app.stream_events where stream_id = $1 and type = 'agent.mention.v1' and payload->'message'->>'id' = $2 and payload->'agent'->>'id' = $3",
+        [`cell:${s.orgA}`, msg.id, ops.id],
+      )
+    ).rows;
+    expect(rows).toHaveLength(1);
+    return rows[0].payload as Json;
+  };
+
+  /** A person's upload into `conv` (presign, PUT, complete): `ready`, not sent with any message yet. */
+  const upload = async (who: TestClient, conv: string, content: string): Promise<string> => {
+    const bytes = Buffer.from(content);
+    const p = await ok(
+      who.request("POST", `/api/v1/conversations/${conv}/attachments`, {
+        filename: `up-${randomUUID().slice(0, 6)}.csv`,
+        contentType: "text/csv",
+        size: bytes.length,
+      }) as Promise<Res>,
+    );
+    const put = await fetch(p.upload.url, { method: "PUT", headers: p.upload.headers, body: bytes });
+    expect(put.status).toBe(200);
+    await ok(who.request("POST", `/api/v1/attachments/${p.attachment.id}/complete`) as Promise<Res>);
+    return p.attachment.id as string;
+  };
+
+  /** `who` posts a message in `conv` carrying a fresh upload; returns the message and attachment ids. */
+  const posted = async (who: TestClient, conv: string, content: string, threadRootId?: string) => {
+    const attachmentId = await upload(who, conv, content);
+    const msg = await ok(
+      who.request("POST", `/api/v1/conversations/${conv}/messages`, {
+        body: "a file",
+        attachmentIds: [attachmentId],
+        ...(threadRootId ? { threadRootId } : {}),
+      }) as Promise<Res>,
+    );
+    return { messageId: msg.id as string, attachmentId };
+  };
+
+  /** The import is refused exactly like a missing file, and nothing reaches sandboxd. */
+  const refusedAsMissing = async (ev: Json, attachmentId: string) => {
+    const before = fakeCalls("filesImport");
+    const r = await sandbox("import", ev, ops.id, { attachmentId });
+    expect(r.status, JSON.stringify(r.body)).toBe(404);
+    expect(codeOf(r)).toBe("not_found");
+    expect(fakeCalls("filesImport")).toBe(before);
+  };
+
+  it("Ops in #sales-all, read by everyone Ops serves, imports a file of the turn's thread; an attachment of another conversation is 404 not_found", async () => {
     const share = await mention();
+    const root = share.message.id as string;
     await seedFile(ops.id, "out/q3.csv", "q,3\n");
     const shared = await ok(sandbox("share", share, ops.id, { path: "out/q3.csv" }));
-    await replyTo(share, ops.id);
+    // The bot answers a channel mention in the mention's thread (the delivery's `threadRootId`).
+    await replyTo(share, ops.id, "Here it is.", root);
 
-    const ev = await mention();
+    const ev = await mention({ threadRootId: root });
     const imported = await ok(
       sandbox("import", ev, ops.id, { attachmentId: shared.attachmentId, path: "q3.csv" }),
     );
@@ -591,6 +640,76 @@ describe("ocw_sandbox_import: only when the conversation's audience covers the w
     expect(codeOf(other)).toBe("not_found");
     const missing = await sandbox("import", ev, ops.id, { attachmentId: randomUUID() });
     expect(codeOf(missing)).toBe("not_found");
+  });
+
+  it("a person's file in the turn's thread imports: the root message's and a reply's (the messages the turn reads)", async () => {
+    const rootFile = await upload(s.sam, salesAll, "root,1\n");
+    const first = await mention({ attachmentIds: [rootFile] });
+    const root = first.message.id as string;
+    const reply = await posted(s.alex, salesAll, "reply,2\n", root);
+    // The root's own turn reads its message and its thread.
+    expect(await ok(sandbox("import", first, ops.id, { attachmentId: rootFile, path: "root.csv" }))).toEqual({
+      path: "root.csv",
+      size: 7,
+    });
+    // A later turn in the same thread reads the root and every reply.
+    const ev = await mention({ threadRootId: root });
+    expect(
+      await ok(sandbox("import", ev, ops.id, { attachmentId: reply.attachmentId, path: "reply.csv" })),
+    ).toEqual({ path: "reply.csv", size: 8 });
+    expect(await ok(sandbox("read", ev, ops.id, { path: "reply.csv" }))).toMatchObject({
+      content: "reply,2\n",
+    });
+  });
+
+  it("another member's upload not sent with any message yet (ready, unlinked) → 404 not_found", async () => {
+    const draft = await upload(s.alex, salesAll, "draft,secret\n");
+    expect(await attachmentRow(draft)).toMatchObject({ status: "ready", message_id: null });
+    const ev = await mention();
+    await refusedAsMissing(ev, draft);
+  });
+
+  it("a deleted message's file → 404 not_found (deleted through the API, and a tombstone whose file is still ready)", async () => {
+    const first = await mention();
+    const root = first.message.id as string;
+    const gone = await posted(s.alex, salesAll, "gone,1\n", root);
+    await ok(s.alex.request("DELETE", `/api/v1/messages/${gone.messageId}`) as Promise<Res>);
+    // A tombstone whose attachment row was left `ready`: the message decides, not only the file's status.
+    const stale = await posted(s.alex, salesAll, "stale,2\n", root);
+    await s.su.query("update app.messages set deleted_at = now() where id = $1", [stale.messageId]);
+    expect((await attachmentRow(stale.attachmentId))?.status).toBe("ready");
+
+    const ev = await mention({ threadRootId: root });
+    await refusedAsMissing(ev, gone.attachmentId);
+    await refusedAsMissing(ev, stale.attachmentId);
+  });
+
+  it("a file of another thread in the same channel → 404 not_found (top-level, and a reply in another thread)", async () => {
+    const elsewhere = await posted(s.alex, salesAll, "other,1\n");
+    const otherReply = await posted(s.alex, salesAll, "other,2\n", elsewhere.messageId);
+    const ev = await mention();
+    await refusedAsMissing(ev, elsewhere.attachmentId);
+    await refusedAsMissing(ev, otherReply.attachmentId);
+  });
+
+  it("a file of a conversation the asker cannot read (a private channel Ops is in, Sam is not) → 404 not_found", async () => {
+    const leads = (
+      await ok(
+        s.victor.request("POST", "/api/v1/channels", {
+          name: `sales-leads-${randomUUID().slice(0, 4)}`,
+          visibility: "private",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    for (const [kind, id] of [
+      ["user", s.alexId],
+      ["agent", ops.id],
+    ] as const) {
+      await ok(s.victor.request("POST", `/api/v1/channels/${leads}/members`, { kind, id }) as Promise<Res>);
+    }
+    const hidden = await posted(s.alex, leads, "leads,1\n");
+    const ev = await mention();
+    await refusedAsMissing(ev, hidden.attachmentId);
   });
 
   it("the resolver's facts in another organization's tenant know neither bot nor conversation: not covered", async () => {
