@@ -201,6 +201,20 @@ describe("readAttachmentForAgent: text", () => {
       code: "unsupported_type",
     });
   });
+
+  it("WR-05: a store that answers more than the range is cut at textReadBytes, and the read is marked truncated", async () => {
+    const big = row({ filename: "big.txt", declaredType: "text/plain", sizeBytes: 300_000 });
+    const { storage } = memoryStorage(big, { original: enc("q".repeat(300_000)) });
+    // A store (or proxy) that ignores Range: the whole object, whatever was asked.
+    const ignoring: ObjectStorage = {
+      ...storage,
+      async rangeGet(key) {
+        return storage.rangeGet(key, Number.MAX_SAFE_INTEGER);
+      },
+    };
+    const read = await readAttachmentForAgent(ignoring, big, { charsPerFile: 400_000 });
+    expect(read).toMatchObject({ kind: "text", chars: EXTRACT_LIMITS.textReadBytes, truncated: true });
+  });
 });
 
 describe("readAttachmentForAgent: images", () => {

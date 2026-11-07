@@ -164,10 +164,13 @@ async function readImage(storage: ObjectStorage, row: AttachmentRow): Promise<Ag
 async function readText(storage: ObjectStorage, row: AttachmentRow, caps: AgentReadCaps): Promise<AgentRead> {
   // An empty object has no byte 0: S3 answers 416 InvalidRange to `bytes=0-…`, so a 0-byte file is read as nothing.
   if (row.sizeBytes === 0) return { kind: "text", text: "", chars: 0, truncated: false };
-  const bytes = await storage.rangeGet(
+  const got = await storage.rangeGet(
     attachmentKey(row.organizationId, row.conversationId, row.id, "original"),
     EXTRACT_LIMITS.textReadBytes,
   );
+  // WR-05: whatever a store returns, at most the range is decoded (the store layer stops the transfer there too).
+  const bytes =
+    got.length > EXTRACT_LIMITS.textReadBytes ? got.subarray(0, EXTRACT_LIMITS.textReadBytes) : got;
   const complete = row.sizeBytes <= bytes.length;
   const decoded = decodeText(bytes, { complete });
   if (decoded === null) return refused("unsupported_type");
