@@ -21,3 +21,10 @@
   inject mail through GreenMail failed with nodemailer's `Greeting never received` (30 s timeouts). The same file run
   alone right after passed 18/18. This plan does not touch that module, so it was not changed. A likely fix is a longer
   SMTP greeting timeout, or waiting for GreenMail's SMTP banner in that suite's setup before the first inject.
+
+## From 07.14-13
+
+- **`agent-channel/browser.int.test.ts` failed to start under the full `pnpm verify` load.** Testcontainers timed out
+  after 10 s waiting for the Redis container's ports, before any test ran (other worktrees were running suites on the
+  same Docker daemon). Re-run alone right after: 29/29 passed. This plan does not touch that module. A likely fix is a
+  longer port-binding wait in `packages/db/src/testing.ts` for Redis.
