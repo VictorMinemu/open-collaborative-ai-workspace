@@ -1,7 +1,7 @@
 import { ATTACHMENT_READ_LIMITS, TURN_ATTACHMENT_NOTES } from "@ocw/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { type AttachmentRow, EXTRACT_LIMITS } from "../artifact";
-import { buildTurnAttachments } from "./turn-attachments";
+import { buildTurnAttachments, withoutReadTool } from "./turn-attachments";
 
 /**
  * 07.15-07 (D-04, D-09, D-13, PD-04): how each listed file can be read by THIS bot on THIS turn, and the fixed note
@@ -191,5 +191,19 @@ describe("buildTurnAttachments: the cap, the order and the metadata", () => {
     const emoji = row({ filename: `${"y".repeat(254)}😀.txt`, declaredType: "text/plain" });
     const [cut] = (await buildTurnAttachments([emoji], ctx(true, false, false))).attachments;
     expect(cut?.name).toBe("y".repeat(254));
+  });
+});
+
+describe("withoutReadTool (IN-01): a turn that cannot offer ocw_attachment_read", () => {
+  it("lists no file as read: each says why, and the other entries stay as they were", async () => {
+    const { attachments } = await buildTurnAttachments([text(), pdf(), zip()], ctx(true, true, true));
+    expect(attachments.map((a) => a.access)).toEqual(["read", "read", "import"]);
+    const downgraded = withoutReadTool(attachments);
+    expect(downgraded.map((a) => [a.access, a.note])).toEqual([
+      ["none", N.readNotOffered],
+      ["none", N.readNotOffered],
+      ["import", N.cannotReadImport],
+    ]);
+    expect(N.readNotOffered.length).toBeLessThanOrEqual(200);
   });
 });

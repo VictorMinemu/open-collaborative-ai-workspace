@@ -88,3 +88,13 @@ export async function buildTurnAttachments(
   }
   return { attachments, more: rows.length - listed.length };
 }
+
+/**
+ * The entries of a turn that cannot offer `ocw_attachment_read` (07.15 IN-01: the turn already has `MAX_TURN_TOOLS`
+ * tools): no file says `read`, each of those says why instead (`readNotOffered`); the other entries are unchanged.
+ */
+export function withoutReadTool(attachments: readonly TurnAttachment[]): TurnAttachment[] {
+  return attachments.map((a) =>
+    a.access === "read" ? { ...a, access: "none", note: TURN_ATTACHMENT_NOTES.readNotOffered } : a,
+  );
+}

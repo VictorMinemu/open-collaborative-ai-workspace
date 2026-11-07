@@ -385,6 +385,7 @@ export const TURN_ATTACHMENT_NOTES = {
   cannotReadNarrower:
     "Can't be read as text, and this bot's sandbox is shared more widely than this conversation, so it can't be copied there.",
   tooLarge: "Too large to read.",
+  readNotOffered: "Can't be read on this turn: it already has the most tools a turn can offer.",
 } as const;
 export type TurnAttachmentNote = (typeof TURN_ATTACHMENT_NOTES)[keyof typeof TURN_ATTACHMENT_NOTES];
 

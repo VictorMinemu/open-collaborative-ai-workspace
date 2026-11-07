@@ -62,7 +62,7 @@ import { stickyMemberData } from "./member-data";
 import { loadTurnMemory } from "./memory";
 import { internetConfigured, loadPolicy, type SearchEnv } from "./policy";
 import { findBot, loadBotFacts } from "./routes";
-import { buildTurnAttachments } from "./turn-attachments";
+import { buildTurnAttachments, withoutReadTool } from "./turn-attachments";
 import { consumeTurn, effectiveDailyLimit, limitNotice } from "./usage";
 
 /**
@@ -1165,9 +1165,13 @@ async function turnAttachments(
     importOffered: computed.tools.includes(BUILTIN_TOOLS.sandboxImport),
     importCovered,
   });
+  const readable = listed.attachments.some((a) => a.access === "read");
   const offerRead =
-    listed.attachments.some((a) => a.access === "read") &&
+    readable &&
     (computed.tools.length < MAX_TURN_TOOLS || computed.tools.includes(BUILTIN_TOOLS.attachmentRead));
+  // IN-01: a full tool list leaves no slot for the read tool; the files then say so instead of `read`.
+  if (readable && !offerRead)
+    return { ...listed, attachments: withoutReadTool(listed.attachments), offerRead };
   return { ...listed, offerRead };
 }
 
