@@ -366,11 +366,23 @@ describe("readAttachmentForAgent: PDF", () => {
   it("answers too_large when the stored PDF is larger than the caller's byte cap", async () => {
     const bytes = makePdf(["Too big for this deployment"]);
     const pdf = pdfRow(bytes);
-    const { storage } = memoryStorage(pdf, { original: bytes });
+    const { storage, calls } = memoryStorage(pdf, { original: bytes });
     expect(await readAttachmentForAgent(storage, pdf, { ...CAPS, maxBytes: bytes.length - 1 })).toEqual({
       kind: "refused",
       code: "too_large",
     });
+    expect(calls).toEqual([]);
+  });
+
+  it("answers too_large when the stored object is larger than the cap, whatever the row says", async () => {
+    const bytes = makePdf(["The row says this PDF is small"]);
+    const pdf = row({ ...pdfRow(bytes), sizeBytes: 10 });
+    const { storage, calls } = memoryStorage(pdf, { original: bytes });
+    expect(await readAttachmentForAgent(storage, pdf, { ...CAPS, maxBytes: 100 })).toEqual({
+      kind: "refused",
+      code: "too_large",
+    });
+    expect(calls.map((c) => c.method)).toEqual(["stream"]);
   });
 
   it("answers unavailable when the store fails", async () => {

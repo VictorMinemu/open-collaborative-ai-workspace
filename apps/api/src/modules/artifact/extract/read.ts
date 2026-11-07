@@ -5,6 +5,7 @@ import { AttachmentTooLargeError, readAttachmentBytes } from "../read-bytes";
 import { RENDITIONS } from "../renditions";
 import { attachmentKey, type ObjectStorage } from "../storage";
 import { EXTRACT_LIMITS } from "./limits";
+import { pdfText } from "./pdf";
 import { attachmentKindOf, cutChars, decodeText } from "./text";
 
 /**
@@ -73,10 +74,50 @@ export async function readAttachmentForAgent(
         if (err instanceof AttachmentTooLargeError) return refused("too_large");
         return failed(err);
       }
+    case "pdf": {
+      if (row.sizeBytes > caps.maxBytes) return refused("too_large");
+      let bytes: Uint8Array;
+      try {
+        bytes = await readAttachmentBytes(storage, row, "original", caps.maxBytes);
+      } catch (err) {
+        if (err instanceof AttachmentTooLargeError) return refused("too_large");
+        return failed(err);
+      }
+      return readPdf(bytes, caps, opts.log);
+    }
     default:
-      // `pdf` joins in 07.15-05 (pdfText); everything else cannot be read as text.
       return refused("unsupported_type");
   }
+}
+
+/**
+ * A PDF's text from the bounded worker (`pdfText`, 07.15-05): the first `EXTRACT_LIMITS.pdfPages` pages, at most
+ * `charsPerFile` code units, within `pdfMs` and `pdfHeapMb`. Truncated when pages or characters were cut; any
+ * failure is the worker's fixed code.
+ */
+async function readPdf(
+  bytes: Uint8Array,
+  caps: AgentReadCaps,
+  log: Pick<FastifyBaseLogger, "warn"> | undefined,
+): Promise<AgentRead> {
+  const out = await pdfText(
+    bytes,
+    {
+      pages: EXTRACT_LIMITS.pdfPages,
+      chars: caps.charsPerFile,
+      ms: EXTRACT_LIMITS.pdfMs,
+      heapMb: EXTRACT_LIMITS.pdfHeapMb,
+    },
+    { log },
+  );
+  if (!out.ok) return refused(out.code);
+  return {
+    kind: "text",
+    text: out.text,
+    chars: out.text.length,
+    truncated: out.truncated || out.pages < out.totalPages,
+    pages: out.pages,
+  };
 }
 
 type ImageType = Extract<AgentRead, { kind: "image" }>["mimeType"];
