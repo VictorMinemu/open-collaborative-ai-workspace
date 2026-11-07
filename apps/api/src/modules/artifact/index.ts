@@ -32,7 +32,9 @@ export {
   attachmentKindOf,
   cutChars,
   decodeText,
+  labelName,
   TEXT_EXTENSIONS,
+  untrustedFileBlock,
 } from "./extract/text";
 export { type AttachmentRow, toAttachment } from "./model";
 export { fitImageWithin } from "./renditions";
