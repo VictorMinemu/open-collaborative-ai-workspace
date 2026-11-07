@@ -159,13 +159,15 @@ describe("readAttachmentForAgent: text", () => {
 
   it("reads a 0-byte text file as empty text", async () => {
     const empty = row({ filename: "empty.txt", declaredType: "text/plain", sizeBytes: 0 });
-    const { storage } = memoryStorage(empty, { original: new Uint8Array() });
+    const { storage, calls } = memoryStorage(empty, { original: new Uint8Array() });
     expect(await readAttachmentForAgent(storage, empty, CAPS)).toEqual({
       kind: "text",
       text: "",
       chars: 0,
       truncated: false,
     });
+    // S3 answers 416 InvalidRange to `bytes=0-…` on an empty object (07.15-08, found on Garage): no read at all.
+    expect(calls).toEqual([]);
   });
 
   it("decodes a UTF-8 file whose last character the range cut split, trimming the partial tail", async () => {

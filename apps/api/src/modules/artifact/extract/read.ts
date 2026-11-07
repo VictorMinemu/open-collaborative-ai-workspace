@@ -163,6 +163,8 @@ async function readImage(storage: ObjectStorage, row: AttachmentRow): Promise<Ag
  * (T-07.15-04-01). Truncated when the file is larger than what was read or the text exceeds `charsPerFile`.
  */
 async function readText(storage: ObjectStorage, row: AttachmentRow, caps: AgentReadCaps): Promise<AgentRead> {
+  // An empty object has no byte 0: S3 answers 416 InvalidRange to `bytes=0-…`, so a 0-byte file is read as nothing.
+  if (row.sizeBytes === 0) return { kind: "text", text: "", chars: 0, truncated: false };
   const bytes = await storage.rangeGet(
     attachmentKey(row.organizationId, row.conversationId, row.id, "original"),
     EXTRACT_LIMITS.textReadBytes,
