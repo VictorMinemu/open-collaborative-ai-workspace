@@ -117,3 +117,17 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   repositories, installs a systemd user or system unit or a macOS LaunchAgent (never as root, one runtime per
   `~/.ocw`, `~/.ocw/service.env` read by the daemon) and runs `ocw-runtime doctor` (13 checks with headless sign-in
   lines, safe to paste); sharing stays in the web (ADR-0033, docs/SERVER.md).
+- **07.14 Organization connector auth:** MCP servers take five auth modes. Besides Organization headers and the two
+  member modes, **Organization sign-in** (an admin with `mcp.manage` signs in once with the 07.4 OAuth client: PKCE
+  S256, `resource`, `iss`, pre-registered → CIMD → DCR; only that admin completes the flow and `mcp.manage` is
+  re-decided at the callback) and **Client credentials** (RFC 6749 §4.4, the MCP extension: client ID and write-only
+  secret, token endpoint from RFC 9728 → RFC 8414 metadata or an admin Token URL, Basic or post, issuer pinned, a new
+  grant before expiry, a stored secret sent only to the target it was saved for). The organization's credential is
+  one sealed bundle per server (AAD `<org>:org:connector:<server>`) with state in `app.connector_org_connections`
+  (tenant RLS), refreshed one at a time, revoked on Disconnect, destroyed after a confirmation on a mode switch or
+  delete; it is used only through the API connector proxy, never in the cell, offered wherever organization tools
+  are (no member audience rule), audited as `bot.tool_call` with `credential: "organization"`. Test sign-in names
+  the first failing step from eight closed codes with one fix line each (including the public-URL check behind a
+  proxy and the Cloudflare CIMD hint), never registers and never stores; the last failure shows on the server row.
+  Mode questions go through shared predicates in `packages/contracts` (Semgrep `ocw.raw-auth-mode`) (ADR-0036,
+  docs/self-hosting/connectors.md).

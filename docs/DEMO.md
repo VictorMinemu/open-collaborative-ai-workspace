@@ -541,7 +541,7 @@ people start their own agent from a team template. The demo has no real provider
 `localhost` it works and on a LAN name it reads *Needs HTTPS*.
 
 1. **A per-member connector (Víctor).** Settings › MCP servers › **Add**: a remote MCP server you have an account on,
-   **Authentication › Each member signs in**. Copy the **Redirect URI** into the provider's app registration, then
+   **Authentication › Member sign-in**. Copy the **Redirect URI** into the provider's app registration, then
    open **Pre-registered client (optional)** and paste its issuer and client id (and secret, if any). The card reads
    *Waiting for a member to connect*. Grant one of its tools to a team bot (Bots › the bot › Capabilities).
 2. **Connect from the card.** As Marta, DM that bot and ask something that needs the tool. The bot answers that you
@@ -927,6 +927,45 @@ in ADR-0027 › Validation). On your own stack, with two team bots on real model
 4. Run the audit query of step 6 above: the `agent.consult.*` and `agent.chain.cancelled` rows carry the chain id (the
    same `chainId` on the request, the answer and the Stop), and none shows the question or the answer.
 5. Turn the switch off again: mention A with the same request; A no longer offers to ask B.
+
+## Organization connector auth (Phase 07.14)
+
+Phase 07.14 (ADR-0036, [self-hosting/connectors.md](self-hosting/connectors.md)). An MCP server can now use one shared
+account for the whole organization, through an admin's OAuth sign-in or a client ID and secret, and the dialog explains
+why an OAuth sign-in fails before anything is saved:
+
+- **Five modes, two groups.** Settings › MCP servers › **Add** › *Authentication*: *For the whole organization*
+  (**Organization headers**, **Organization sign-in**, **Client credentials**) and *Each member's own account*
+  (**Member sign-in**, **Member key**).
+- **Test sign-in.** Runs the checks in order (this workspace's address, sign-in information, sign-in server identity,
+  secure endpoints, PKCE, client registration, token) and names the first one that fails, with one fix line. It never
+  registers OCW at the provider and never saves anything.
+- **Connect once.** An **Organization sign-in** server's row has **Connect**: an admin signs in once, the row reads
+  *Connected as … · by … · just now*, and every member's bots use that account wherever organization tools are allowed.
+  **Reconnect** and **Disconnect** live on the same row. **Client credentials** connect on Save.
+- **Never in the cell.** The API calls these servers itself; the token and the client secret never reach the bot's
+  container. A bot that hits a disconnected server says an admin must connect or reconnect it, never "connect your
+  account".
+
+The demo has no real provider: the automated tests use the fake OAuth MCP server.
+
+**Owner check** (never run by an agent: it needs a real provider and your live domain; record each result in
+`.planning/phases/07.14-organization-connector-auth/07.14-VALIDATION.md` › Manual-Only Verifications). On
+`https://ocw.autofy.ing` (behind Cloudflare), signed in as an Organization Admin:
+
+1. **Test sign-in on a real server.** Settings › MCP servers › **Add**: a real OAuth-only MCP server (for example Notion
+   or Linear), **Authentication › Organization sign-in**. Press **Test sign-in** before saving and note which steps
+   pass and which one fails, if any.
+2. **Connect and use it as a member.** Save, then **Connect** on the server's row and finish the provider's sign-in:
+   the row reads *Connected as …*. Grant one of its tools to a team bot. As a member who is not an admin, ask that bot
+   in a channel to use the tool: the answer comes from the organization's account, with no connect card.
+3. **Follow the fix line.** If Test sign-in (or Connect) names a step, apply its fix line (for example
+   `OCW_PUBLIC_API_URL`, the client metadata URL behind Cloudflare, or a pre-registered client) and repeat from 1.
+   Note what fixed it.
+4. **Disconnect.** Press **Disconnect** on the row and confirm. Ask the bot again as the member: it must say an admin
+   has to connect the server, and the provider must no longer list OCW's access.
+5. **Client credentials** (if a provider gives you a client ID and secret): the same with **Authentication › Client
+   credentials**: Test sign-in, Save (the row turns *Ready* with *Client …*), a member's bot uses a tool, Disconnect.
 
 ## Troubleshooting
 
