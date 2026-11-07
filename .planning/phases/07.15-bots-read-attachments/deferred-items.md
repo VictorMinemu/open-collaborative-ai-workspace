@@ -44,3 +44,18 @@
   `md` (the control this phase turns on in bot DMs) without changing the composer's height. Send and @ predate the
   phase and are shared by every channel, thread and DM composer; growing the filled Send square is a visible change
   across all chats, so it was left for a UI pass (the same `max-md:size-11 max-md:-my-1.5` would do it).
+
+## Resolved at the gate (07.15-11, orchestrator decisions)
+
+- Persona-only message in a shared AI chat: fixed (`b19b6a02`, `sendShared` gates every message with files; ADR-0037).
+- Default import path in the activity tab: kept by decision, reasoning in ADR-0037. No code change.
+- Real-cell smoke boot race: fixed (`7da6f9e3`, the smoke waits for OpenClaw's boot hot reload, bounded at 90 s).
+- Send and @ at 32 px on phones: fixed (`ed2a6cc3`, 44 px targets, Send keeps its 32 px square, composer height
+  unchanged).
+
+## Found during 07.15-11 (out of scope)
+
+- **An error toast covers the sandbox package review sheet's Approve button at 1440.** "This version changed upstream"
+  (Sonner, bottom right) sits over the sheet's footer for its lifetime, and stays while the pointer rests on it. The
+  e2e test now waits it out (`c0517a9a`); a person also has to wait or close the toast. A UI pass could place the
+  toast elsewhere while a sheet is open, or show the refresh notice inside the sheet.
