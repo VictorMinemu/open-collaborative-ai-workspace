@@ -26,3 +26,14 @@
   "conversation's model" to check against cheaply. The `.zip` from 07-07's item is already refused at read time
   (`unsupported_type`, kind `other`). The remaining gap is the shared send route's persona-only branch skipping
   `assertReadableBy`, and it stays for 07.15-11.
+
+## Found during 07.15-10
+
+- **The real-cell smoke can race OpenClaw's boot hot reload when the first scenario starts at once.** One of six
+  `SMOKE_ONLY=bot_attachments` runs (host loaded by a parallel `pnpm test`) failed its first case: the first turn
+  arrived while OpenClaw 2026.9.7 hot-reloaded the config the plugin wrote at sync, the plugin's per-run load reported
+  `Plugin source changed while preparing its reload; retry after the edit finishes`, the run had no callable tools
+  (`No callable tools remain after resolving explicit tool allowlist`), and the plugin's three turn attempts within 8 s
+  all failed. The rerun passed. Nothing in it is attachment-specific; any scenario that runs first (`mention` in a full
+  run) is exposed the same way. A follow-up could make the smoke wait for the boot reload to settle (e.g. the first
+  `tool gate registered (discovery registry …)` line after `config hot reload applied`) before its first turn.
