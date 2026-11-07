@@ -22,9 +22,14 @@ export function parseSpec(spec) {
   return { listen: { host: m[1], port: listenPort }, target: { host: m[3], port: targetPort } };
 }
 
+// Both legs of every connection: no Nagle (Node's default is on; docker-proxy, which host networking used, is Go and
+// sets TCP_NODELAY). With Nagle, a request written in pieces (Postgres Parse/Bind/Execute then Sync, Redis pipelines)
+// waits for the peer's delayed ACK, 40 ms per round trip on Linux. Keepalive for the long-lived pub/sub sockets.
+const SOCKET_OPTIONS = { noDelay: true, keepAlive: true };
+
 /** Pipes one accepted connection to `target`; either side closing or failing closes both. */
 function relay(client, target, log) {
-  const upstream = net.connect(target.port, target.host);
+  const upstream = net.connect({ host: target.host, port: target.port, ...SOCKET_OPTIONS });
   const close = (err) => {
     if (err && !client.destroyed)
       log(`tcp-forward: ${target.host}:${target.port}: ${err.code ?? err.message}`);
@@ -42,7 +47,7 @@ export async function forward(pairs, { log = console.error } = {}) {
     pairs.map(
       ({ listen, target }) =>
         new Promise((resolve, reject) => {
-          const server = net.createServer((client) => relay(client, target, log));
+          const server = net.createServer(SOCKET_OPTIONS, (client) => relay(client, target, log));
           server.once("error", reject);
           server.listen(listen.port, listen.host, () => {
             const { port } = server.address();

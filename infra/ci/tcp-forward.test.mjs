@@ -81,6 +81,41 @@ describe("tcp-forward: the e2e step's loopback ports reach the stack on the comp
     assert.equal(await roundTrip(a.address().port, "three"), "pg:three");
   });
 
+  it("adds no Nagle delay: a request sent in two writes and answered after the second stays fast", async () => {
+    // The Postgres extended protocol (Parse/Bind/Execute, then Sync) and Redis pipelines write small pieces and wait.
+    // With Nagle on the forwarder's sockets, the second piece waits for the peer's delayed ACK (40 ms on Linux) on
+    // every round trip; pipeline 150's e2e specs ran up to 2x slower that way. Direct, a round trip is ~1 ms.
+    const server = net.createServer((socket) => {
+      socket.setNoDelay(true);
+      let seen = "";
+      socket.on("data", (d) => {
+        seen += d;
+        if (seen.includes("S")) {
+          seen = "";
+          socket.write("Z");
+        }
+      });
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    closers.push(() => new Promise((resolve) => server.close(resolve)));
+    const [s] = await start([`127.0.0.1:0=127.0.0.1:${server.address().port}`]);
+    const client = net.connect(s.address().port, "127.0.0.1");
+    client.setNoDelay(true);
+    await new Promise((resolve) => client.once("connect", resolve));
+    const rounds = 30;
+    const t0 = performance.now();
+    for (let i = 0; i < rounds; i++) {
+      await new Promise((resolve) => {
+        client.once("data", resolve);
+        client.write("Q".repeat(40));
+        setTimeout(() => client.write("S"), 0);
+      });
+    }
+    const perRound = (performance.now() - t0) / rounds;
+    client.destroy();
+    assert.ok(perRound < 15, `${perRound.toFixed(1)} ms per round trip through the forwarder`);
+  });
+
   it("closes the client when its target refuses, instead of leaving it hanging, and keeps listening", async () => {
     const dead = await freePort();
     const [s] = await start([`127.0.0.1:0=127.0.0.1:${dead}`]);
