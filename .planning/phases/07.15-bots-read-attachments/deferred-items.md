@@ -37,3 +37,10 @@
   all failed. The rerun passed. Nothing in it is attachment-specific; any scenario that runs first (`mention` in a full
   run) is exposed the same way. A follow-up could make the smoke wait for the boot reload to settle (e.g. the first
   `tool gate registered (discovery registry …)` line after `config hot reload applied`) before its first turn.
+
+## Found during 07.15-09
+
+- **The chat composer's Send (and @ mention) buttons are 32 × 32 on phones.** 09 made the paperclip 44 × 44 below
+  `md` (the control this phase turns on in bot DMs) without changing the composer's height. Send and @ predate the
+  phase and are shared by every channel, thread and DM composer; growing the filled Send square is a visible change
+  across all chats, so it was left for a UI pass (the same `max-md:size-11 max-md:-my-1.5` would do it).
