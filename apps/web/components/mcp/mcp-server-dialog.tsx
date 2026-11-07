@@ -6,6 +6,7 @@ import {
   type ConnectorAuthMode,
   type CreateMcpServerRequest,
   isAllowedInjectionHeader,
+  isOrgCredentialMode,
   isPerMemberMode,
   type McpHeaderInput,
   McpHeaderName,
@@ -62,6 +63,7 @@ import { errorMessage, isApiError } from "@/lib/api";
 import {
   CredentialsRefusedError,
   connectionsExistCount,
+  isOrgConnectionExists,
   useCreateMcpServer,
   useSaveClientCredentials,
   useUpdateMcpServer,
@@ -83,16 +85,17 @@ interface AuthCard {
 
 /**
  * The Authentication radio cards (07.4-UI-SPEC § 1, 07.14 PD-12), same markup as Transport, in two groups in this
- * fixed order: the organization's own account first, then each member's. Test ids `mcp-auth-group-<key>` and
- * `mcp-auth-mode-<mode>`.
+ * fixed order: the organization's own account first, then each member's. Card test ids `mcp-auth-mode-<mode>`.
  */
 export const AUTH_GROUPS: ReadonlyArray<{
   key: "org" | "member";
+  testId: string;
   legend: string;
   cards: readonly AuthCard[];
 }> = [
   {
     key: "org",
+    testId: "mcp-auth-group-org",
     legend: "For the whole organization",
     cards: [
       { value: "org_secret", label: "Organization headers", hint: "Fixed headers, like an API key" },
@@ -106,6 +109,7 @@ export const AUTH_GROUPS: ReadonlyArray<{
   },
   {
     key: "member",
+    testId: "mcp-auth-group-member",
     legend: "Each member's own account",
     cards: [
       {
@@ -308,7 +312,12 @@ function ServerForm({
     savedCc?.hasSecret === true && !ccReplace && ccClientId.trim() === savedCc.clientId;
   const [errors, setErrors] = useState<Errors>({});
   /** The mode-switch confirmation: how many members it disconnects and the PATCH it will send. */
-  const [confirm, setConfirm] = useState<{ count: number; body: UpdateMcpServerRequest } | null>(null);
+  const [confirm, setConfirm] = useState<{
+    /** `members`: leaving a member mode with connected members; `org`: leaving an organization mode with its account. */
+    kind: "members" | "org";
+    count: number;
+    body: UpdateMcpServerRequest;
+  } | null>(null);
   const pending = create.isPending || update.isPending || saveCredentials.isPending;
   const sandboxed = transport === "sandboxed-stdio";
   const serverLabel = name.trim() || "this server";
@@ -368,7 +377,7 @@ function ServerForm({
         next.memberPrefix = "The prefix can't contain line breaks";
       }
     }
-    if (authMode === "per_member_oauth" && clientState === "edit") {
+    if (usesOAuthSignIn(authMode) && clientState === "edit") {
       const c = typedClient();
       if (c) {
         if (!/^https?:\/\/\S+$/.test(c.issuer)) next.issuer = "Enter the issuer's URL";
@@ -417,7 +426,7 @@ function ServerForm({
         ...(memberPrefix ? { memberHeaderPrefix: memberPrefix } : {}),
       };
     }
-    if (authMode === "per_member_oauth") {
+    if (usesOAuthSignIn(authMode)) {
       const list = scopeList();
       const client = typedClient();
       return {
@@ -452,17 +461,20 @@ function ServerForm({
         out.memberHeaderPrefix = memberPrefix || null;
       }
     }
-    if (authMode === "per_member_oauth") {
+    if (usesOAuthSignIn(authMode)) {
+      // The server keeps the scopes, the CIMD choice and the issuer's clients between the two sign-in modes (D-14) and
+      // resets them when it leaves both, so the saved DTO is the baseline in every case.
       const list = scopeList();
-      const before = modeChanged ? [] : (saved.oauthScopes ?? []);
-      if (list.join(" ") !== before.join(" ")) out.oauthScopes = list.length === 0 ? null : list;
+      if (list.join(" ") !== (saved.oauthScopes ?? []).join(" ")) {
+        out.oauthScopes = list.length === 0 ? null : list;
+      }
       if (clientState === "edit") {
         const c = typedClient();
         if (c) out.oauthClient = c;
-      } else if (clientState === "removed" && !modeChanged) {
+      } else if (clientState === "removed") {
         out.oauthClient = null;
       }
-      if (useCimd !== (modeChanged ? true : (saved.oauthUseCimd ?? true))) out.oauthUseCimd = useCimd;
+      if (useCimd !== (saved.oauthUseCimd ?? true)) out.oauthUseCimd = useCimd;
     }
     if (authMode === "org_client_credentials") {
       // The server keeps the scopes across the modes that take them; the DTO has none for the others.
@@ -584,15 +596,21 @@ function ServerForm({
       // Leaving a member mode deletes every member's sign-in or key: ask first, with the count the list already has
       // (R4). Nothing is sent until the admin confirms.
       if (modeChanged && isPerMemberMode(base.authMode) && base.memberConnections > 0) {
-        setConfirm({ count: base.memberConnections, body });
+        setConfirm({ kind: "members", count: base.memberConnections, body });
+        return;
+      }
+      // Leaving an organization mode deletes the organization's account (D-08, PD-11): the same rule.
+      if (modeChanged && isOrgCredentialMode(base.authMode) && base.orgConnection !== null) {
+        setConfirm({ kind: "org", count: 0, body });
         return;
       }
       try {
         await saveUpdate(base, body);
       } catch (err) {
-        // Fallback: members connected since the list loaded. The same confirmation opens with the server's count.
+        // Fallback: members or the organization connected since the list loaded. The same confirmation opens.
         const count = connectionsExistCount(err);
-        if (count !== null) setConfirm({ count, body });
+        if (count !== null) setConfirm({ kind: "members", count, body });
+        else if (isOrgConnectionExists(err)) setConfirm({ kind: "org", count: 0, body });
         else showError(err);
       }
       return;
@@ -770,7 +788,7 @@ function ServerForm({
         <fieldset className="grid gap-3" data-testid="mcp-auth-modes">
           <legend className="mb-2 font-medium text-sm">Authentication</legend>
           {AUTH_GROUPS.map((g) => (
-            <fieldset key={g.key} className="grid min-w-0 gap-1.5" data-testid={`mcp-auth-group-${g.key}`}>
+            <fieldset key={g.key} className="grid min-w-0 gap-1.5" data-testid={g.testId}>
               <legend className="mb-1.5 font-semibold text-muted-foreground text-xs">{g.legend}</legend>
               <div className={cn("grid gap-2", g.cards.length === 3 ? "sm:grid-cols-3" : "sm:grid-cols-2")}>
                 {g.cards.map((m) => {
@@ -830,9 +848,8 @@ function ServerForm({
             >
               <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-warning" aria-hidden />
               <span>
-                Member sign-in needs HTTPS. Run{" "}
-                <code className="font-mono text-[12px]">pnpm ocw enable proxy</code> on the server, then
-                reload this page.
+                Sign-in needs HTTPS. Run <code className="font-mono text-[12px]">pnpm ocw enable proxy</code>{" "}
+                on the server, then reload this page.
               </span>
             </p>
           ) : null}
@@ -845,7 +862,7 @@ function ServerForm({
           </p>
         </fieldset>
 
-        {authMode === "per_member_oauth" ? (
+        {usesOAuthSignIn(authMode) ? (
           <div className="grid gap-4" data-testid="mcp-oauth-fields">
             {oauth.redirectUri ? (
               <CopyField
@@ -1310,10 +1327,11 @@ function ServerForm({
       {base ? (
         <ClearConnectionsDialog
           open={confirm !== null}
+          kind={confirm?.kind ?? "members"}
           count={confirm?.count ?? 0}
           serverName={base.name}
           toMode={authMode}
-          pending={update.isPending}
+          pending={pending}
           onCancel={() => setConfirm(null)}
           onConfirm={() => void confirmSwitch()}
         />
@@ -1371,11 +1389,13 @@ function CopyField({
 }
 
 /**
- * "Disconnect {n} members?" before a mode switch (UI-SPEC § 1): focus starts on Cancel; nothing is revoked at the
- * provider, so the copy promises only that the saved sign-ins and keys are deleted.
+ * The confirmation before a mode switch that deletes saved accounts (UI-SPEC § 1, 07.14 PD-11/PD-12): `members` =
+ * "Disconnect {n} members?", `org` = the organization's account (PD-12 copy). Focus starts on Cancel; nothing is
+ * revoked at the provider, so the copy promises only that the saved sign-ins and keys are deleted.
  */
 function ClearConnectionsDialog({
   open,
+  kind,
   count,
   serverName,
   toMode,
@@ -1384,6 +1404,7 @@ function ClearConnectionsDialog({
   onConfirm,
 }: {
   open: boolean;
+  kind: "members" | "org";
   count: number;
   serverName: string;
   toMode: ConnectorAuthMode;
@@ -1393,21 +1414,36 @@ function ClearConnectionsDialog({
 }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
   const mode = AUTH_MODES.find((m) => m.value === toMode)?.label ?? toMode;
+  const org = kind === "org";
   return (
     <PlainDialog open={open} onOpenChange={(o) => !o && !pending && onCancel()}>
-      <PlainDialogContent data-testid="mcp-clear-connections-confirm" initialFocus={cancelRef}>
+      <PlainDialogContent
+        data-testid="mcp-clear-connections-confirm"
+        data-kind={kind}
+        initialFocus={cancelRef}
+      >
         <PlainDialogHeader>
           <span className="mb-1 flex size-10 items-center justify-center rounded-xl border border-destructive/25 bg-destructive/10 text-destructive shadow-xs">
             <Unplug className="size-5" strokeWidth={1.75} aria-hidden />
           </span>
           <PlainDialogTitle>
-            {count === 1 ? "Disconnect 1 member?" : `Disconnect ${count} members?`}
+            {org
+              ? "Disconnect the organization's account?"
+              : count === 1
+                ? "Disconnect 1 member?"
+                : `Disconnect ${count} members?`}
           </PlainDialogTitle>
           <PlainDialogDescription>
-            Switching {serverName} to {mode} deletes every member's saved sign-in or key.{" "}
-            {!isPerMemberMode(toMode)
-              ? "Bots stop acting with members' own accounts."
-              : "They'll need to connect again."}
+            {org ? (
+              `Switching ${serverName} to ${mode} deletes the organization's saved sign-in. Bots stop using it.`
+            ) : (
+              <>
+                Switching {serverName} to {mode} deletes every member's saved sign-in or key.{" "}
+                {!isPerMemberMode(toMode)
+                  ? "Bots stop acting with members' own accounts."
+                  : "They'll need to connect again."}
+              </>
+            )}
           </PlainDialogDescription>
         </PlainDialogHeader>
         <PlainDialogFooter>
@@ -1422,7 +1458,7 @@ function ClearConnectionsDialog({
             data-testid="mcp-clear-connections-submit"
           >
             {pending ? <Spinner /> : <Unplug />}
-            Switch and disconnect {count}
+            {org ? "Switch and disconnect" : `Switch and disconnect ${count}`}
           </Button>
         </PlainDialogFooter>
       </PlainDialogContent>
