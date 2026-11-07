@@ -8,14 +8,15 @@
 //
 // argv: <unpdf entry URL> <maxPages> <maxChars> <maxBytes>
 // stdin: the PDF bytes, at most maxBytes.
-// The IPC channel carries exactly one answer and nothing else:
+// stdout carries exactly one JSON answer and nothing else (no IPC channel; the parent reads at most 1 MiB):
 //   { ok: true, totalPages, pages, text, truncated, hasText }   pages read = min(numPages, maxPages), cut early past
 //     maxChars; hasText: a page of those had a non-space character, even past the cut (IN-03: a short cut of leading
 //     blank lines is not a PDF without a text layer)
 //   { ok: false, error: "encrypted" | "invalid" | "failed" }
 // The error is chosen by `err.name` only. PDF.js messages can quote document strings, so no message, warning or
-// document string ever leaves this process except the extracted text itself (P3): the console is silenced and the
-// parent drops stdout and stderr anyway. Eval is off (CVE-2024-4367 class) and nothing is rendered.
+// document string ever leaves this process except the extracted text itself (P3): the console is silenced (so nothing
+// else reaches stdout; stray output would only break the parse) and the parent drops stderr. Eval is off (CVE-2024-4367
+// class) and nothing is rendered.
 for (const method of ["log", "info", "warn", "error", "debug", "trace", "dir"])
   console[method] = () => undefined;
 
@@ -24,11 +25,11 @@ const maxPages = Number(maxPagesArg);
 const maxChars = Number(maxCharsArg);
 const maxBytes = Number(maxBytesArg);
 
-// The parent went away: nothing is left to answer.
-process.on("disconnect", () => process.exit(0));
+// The parent went away (its end of stdout closed): nothing is left to answer.
+process.stdout.on("error", () => process.exit(0));
 
 function answer(message) {
-  process.send(message, () => process.exit(0));
+  process.stdout.write(JSON.stringify(message), () => process.exit(0));
 }
 
 function code(err) {

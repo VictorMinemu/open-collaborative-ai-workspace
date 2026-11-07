@@ -10,6 +10,7 @@ const allowed = (scope, reference) => {
     return true;
   }
 };
+const ipc = typeof process.send === "function";
 let codeGeneration = false;
 try {
   codeGeneration = new Function("return true")();
@@ -31,12 +32,14 @@ const facts = {
   worker: allowed("worker"),
   addon: allowed("addon"),
   codeGeneration,
+  ipc,
 };
-process.send({
+const answer = {
   ok: true,
   totalPages: 1,
   pages: 1,
   text: JSON.stringify(facts),
   truncated: false,
   hasText: true,
-});
+};
+process.stdout.write(JSON.stringify(answer), () => process.exit(0));

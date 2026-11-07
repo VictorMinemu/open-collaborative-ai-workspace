@@ -60,6 +60,12 @@ const DEFAULT_EXTRACTOR = new URL("./pdf-worker.mjs", import.meta.url);
 /** The young generation's semi-space (the old worker's 32 MB young generation, in V8's own unit). */
 const SEMI_SPACE_MB = 16;
 const MIB = 1024 * 1024;
+/**
+ * The most the answer channel (the extractor's stdout) may carry: 64 001 code units as JSON are at most about 385 KB
+ * (six bytes per escaped unit). More is a broken or hostile extractor: it is killed and the read fails, and the API never
+ * buffers past this.
+ */
+const ANSWER_MAX_BYTES = 1024 * 1024;
 /** How often the extractor's resident memory is read: `/proc` is cheap; `ps` (macOS, development) is not. */
 const RSS_POLL_MS = process.platform === "linux" ? 20 : 50;
 
@@ -117,7 +123,7 @@ async function residentBytes(pid: number): Promise<number | null> {
 }
 
 type Settled =
-  | { kind: "message"; value: unknown }
+  | { kind: "answer"; value: unknown }
   | { kind: "failed" }
   | { kind: "timeout" }
   | { kind: "memory" };
@@ -154,7 +160,8 @@ function commandLine(script: string, bytes: number, caps: PdfCaps): { command: s
  * (Linux, `prlimit`), pages (`caps.pages`) and output (`caps.chars`, cut again here). It gets no environment (no
  * secret, no `_FILE` path, no NODE_OPTIONS), none of the API's flags, a fresh temporary working directory, the
  * permission model (read access to its script and unpdf only), no code generation from strings, the bytes on stdin,
- * stdout and stderr discarded (PDF.js can echo document strings) and one IPC answer, Zod-parsed. At most
+ * no IPC channel, stderr discarded and one JSON answer on stdout, read up to `ANSWER_MAX_BYTES` and Zod-parsed (the
+ * extractor silences its console, so stray PDF.js output only breaks the parse: `extraction_failed`). At most
  * `EXTRACT_LIMITS.pdfConcurrency` run per API process (`busy` otherwise, no queue). The promise settles only once the
  * process has exited. Nothing from PDF.js reaches a log or the answer except the text: failures are fixed codes and
  * only an error's name is logged.
@@ -172,13 +179,12 @@ export async function pdfText(bytes: Uint8Array, caps: PdfCaps, opts: PdfOptions
     const c = spawn(command, args, {
       cwd: workDir(),
       env: {},
-      stdio: ["pipe", "ignore", "ignore", "ipc"],
-      serialization: "json",
+      stdio: ["pipe", "pipe", "ignore"],
       windowsHide: true,
     });
     child = c;
-    // 'close' comes after the exit and after the IPC channel is drained, so an answer sent just before exiting is
-    // never lost; a spawn that failed has no pid and never closes.
+    // 'close' comes after the exit and after stdout is drained, so the whole answer is in by then; a spawn that failed
+    // has no pid and never closes.
     gone = new Promise<void>((resolve) => {
       c.once("close", () => resolve());
       c.once("error", () => {
@@ -188,12 +194,29 @@ export async function pdfText(bytes: Uint8Array, caps: PdfCaps, opts: PdfOptions
     if (c.pid !== undefined) opts.onSpawn?.(c.pid);
     const settled = await new Promise<Settled>((resolve) => {
       timer = setTimeout(() => resolve({ kind: "timeout" }), caps.ms);
-      c.once("message", (value: unknown) => resolve({ kind: "message", value }));
+      const chunks: Buffer[] = [];
+      let size = 0;
+      c.stdout?.on("data", (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > ANSWER_MAX_BYTES) {
+          c.kill("SIGKILL");
+          c.stdout?.destroy();
+          resolve({ kind: "failed" });
+          return;
+        }
+        chunks.push(chunk);
+      });
       c.once("error", (err: Error) => {
         opts.log?.warn({ err: { name: err?.name } }, "pdf text extractor failed");
         resolve({ kind: "failed" });
       });
-      c.once("close", () => resolve({ kind: "failed" }));
+      c.once("close", () => {
+        try {
+          resolve({ kind: "answer", value: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
+        } catch {
+          resolve({ kind: "failed" });
+        }
+      });
       const pid = c.pid;
       if (pid !== undefined) {
         const cap = (caps.rssMb ?? EXTRACT_LIMITS.pdfRssMb) * MIB;

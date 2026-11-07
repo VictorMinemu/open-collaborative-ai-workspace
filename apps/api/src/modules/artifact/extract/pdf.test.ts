@@ -208,6 +208,21 @@ describe("pdfText out of the API process (CR-01)", () => {
     expect(pdfWorkersInFlight()).toBe(0);
   }, 30_000);
 
+  it("an extractor that answers far more than an answer can be is cut off: extraction_failed, this process stays small", async () => {
+    const FLOOD = new URL("./fixtures/flood-worker.mjs", import.meta.url);
+    const pids: number[] = [];
+    const { value, growthMb } = await withRss(() =>
+      pdfText(new TextEncoder().encode("flood"), CAPS, {
+        workerUrl: FLOOD,
+        onSpawn: (pid) => pids.push(pid),
+      }),
+    );
+    expect(value).toEqual({ ok: false, code: "extraction_failed" });
+    expect(growthMb).toBeLessThan(48);
+    expect(alive(pids[0] as number)).toBe(false);
+    expect(pdfWorkersInFlight()).toBe(0);
+  }, 30_000);
+
   it("the extractor has no environment, no inherited flags, a temporary cwd and the permission model on", async () => {
     const before = process.env.OCW_PROBE_SECRET;
     process.env.OCW_PROBE_SECRET = "must-not-reach-the-extractor";
@@ -233,6 +248,7 @@ describe("pdfText out of the API process (CR-01)", () => {
         worker: false,
         addon: false,
         codeGeneration: false,
+        ipc: false,
       });
       expect(out.text).not.toContain("must-not-reach-the-extractor");
     } finally {
