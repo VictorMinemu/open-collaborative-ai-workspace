@@ -53,11 +53,12 @@ function wordEnds(text: string): number[] {
 }
 
 const QUOTES = `"'\`“”‘’«»„‚「」『』`;
-const TRAILING_PUNCT_RE = /[\s.,;:!?…。，；：！？、·\-–—]+$/u;
+/** One character each (all in the BMP, so one UTF-16 unit): the trailing runs are trimmed by `trimEndWhere`. */
+const TRAILING_PUNCT_CHAR = /[\s.,;:!?…。，；：！？、·\-–—]/u;
 const LEADING_JUNK_RE = /^[\s#>*_\-–—•·]+/u;
 const LABEL_RE = /^(?:title|t[ií]tulo)\s*[:：]\s*/iu;
 const WRAP_QUOTES_LEAD_RE = new RegExp(`^[${QUOTES}\\s]+`, "u");
-const WRAP_QUOTES_TRAIL_RE = new RegExp(`[${QUOTES}\\s]+$`, "u");
+const WRAP_QUOTES_TRAIL_CHAR = new RegExp(`[${QUOTES}\\s]`, "u");
 const CONTROL_RE = /[\p{Cc}\p{Cf}]/gu;
 /** A home directory (`/Users/…`, `/home/…`, `/root/…`, `~/`) or a Windows drive (`C:\`). */
 const HOST_PATH_RE = /(?:[\\/](?:Users|home|root)[\\/]|~[\\/]|(?:^|[^\p{L}\p{N}])[A-Za-z]:[\\/])/u;
@@ -80,19 +81,45 @@ function toSentenceCase(text: string): string {
   return [words[0]!, ...words.slice(1).map((w) => (isCapitalized(w) ? w.toLowerCase() : w))].join(" ");
 }
 
+/*
+ * The title is built from untrusted text (a member's first message, a model's answer). `/[…]+$/u` and `/<[^>]*>/g`
+ * rescan a run from every start position (quadratic: seconds of a blocked event loop on a long run of `…` or `<`), so
+ * those two steps are linear scans with the same result.
+ */
+
+/** `s` without its trailing run of characters matching `oneChar` (a single-character class, no `g` flag). */
+function trimEndWhere(s: string, oneChar: RegExp): string {
+  let end = s.length;
+  while (end > 0 && oneChar.test(s.charAt(end - 1))) end--;
+  return s.slice(0, end);
+}
+
+/** `s.replace(/<[^>]*>/g, " ")`: each `<` up to the next `>` becomes a space; with no `>` left, nothing more matches. */
+function tagsToSpaces(s: string): string {
+  let out = "";
+  let from = 0;
+  for (;;) {
+    const open = s.indexOf("<", from);
+    if (open < 0) break;
+    const close = s.indexOf(">", open + 1);
+    if (close < 0) break;
+    out += `${s.slice(from, open)} `;
+    from = close + 1;
+  }
+  return out + s.slice(from);
+}
+
 function stripMarks(line: string): string {
   let s = line;
   for (let i = 0; i < 4; i++) {
     const before = s;
-    s = s
-      .replace(/<[^>]*>/g, " ")
+    s = tagsToSpaces(s)
       .replace(/[<>*`]/g, "")
       .replace(/__/g, "")
       .replace(LEADING_JUNK_RE, "")
       .replace(LABEL_RE, "")
-      .replace(WRAP_QUOTES_LEAD_RE, "")
-      .replace(WRAP_QUOTES_TRAIL_RE, "")
-      .replace(TRAILING_PUNCT_RE, "");
+      .replace(WRAP_QUOTES_LEAD_RE, "");
+    s = trimEndWhere(trimEndWhere(s, WRAP_QUOTES_TRAIL_CHAR), TRAILING_PUNCT_CHAR);
     if (s === before) break;
   }
   return s;
