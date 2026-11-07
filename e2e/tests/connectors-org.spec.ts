@@ -1,8 +1,11 @@
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 import { expectNoSeriousA11y } from "../support/a11y";
-import { apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
+import { apiAs, BASE_URL, createChannel, ensureMember, openAs, SAM } from "../support/actors";
 import { FAKE_MCP_HOST, FAKE_URL } from "../support/bot-tools";
-import { ADMIN, shot } from "./env";
+import { cellToken } from "../support/cell-token";
+import { FakeCellPlugin, type MentionPayload } from "../support/fake-cell-plugin";
+import { apiRequests, finishedBodies } from "../support/responses";
+import { ADMIN, API_URL, shot } from "./env";
 
 /**
  * Phase 07.14 Settings › MCP servers, the organization's account (07.14-11; D-08, D-10, D-11, COA-01, COA-04, PD-12 ›
@@ -13,6 +16,10 @@ import { ADMIN, shot } from "./env";
  * The server is registered as http://fake-mcp:4291/mcp-oauth/mcp, the name the API reaches through its egress guard
  * (`OCW_EGRESS_TEST_HOSTS`, scripts/e2e-isolated.sh) and the browser through Chromium's host resolver rules, so both
  * sides see one issuer.
+ *
+ * 07.14-13 adds the bot: a member's team bot uses the organization's account in a channel, through the simulated cell
+ * (`FakeCellPlugin`, which calls `POST /agent-channel/v1/connectors/call` exactly like apps/openclaw-channel), and
+ * stops when the admin disconnects it (COA-01, COA-02, D-04, D-08, PD-10).
  */
 
 test.use({ launchOptions: { args: ["--host-resolver-rules=MAP fake-mcp 127.0.0.1"] } });
@@ -323,6 +330,239 @@ test("admin: reconnect, disconnect, failures and delete, at both widths and them
     }
   } finally {
     await removeServers(admin, [DOCS]);
+    await admin.dispose();
+  }
+});
+
+// ---------------------------------------------------------------- 07.14-13: the bot uses the organization's account
+
+const CRM = "Company CRM";
+const BILLING = "Billing API";
+const BOT = "Relay";
+/** The e2e fake's pre-registered confidential client (infra/fake-model/server.mjs). */
+const CC_CLIENT = "ocw-e2e-cc";
+const CC_SECRET = "e2e-cc-secret-canary";
+/** Every token, refresh token and code the fake issues starts with one of these (fake-mcp-oauth.mjs). */
+const FAKE_SECRETS = /fakeat_|fakert_|fakecode_/u;
+const SUBJECT = /"subject":"(sub_[A-Za-z0-9_-]+)"/u;
+
+/** The team bot Relay on the never-metered mock model (the journey's; created once, shared by both projects). */
+async function ensureRelay(api: APIRequestContext): Promise<string> {
+  const listed = (await (await api.get("/api/v1/agents")).json()) as {
+    agents: Array<{ id: string; name: string }>;
+  };
+  const found = listed.agents.find((a) => a.name === BOT);
+  if (found) return found.id;
+  const res = await api.post("/api/v1/agents", {
+    data: {
+      name: BOT,
+      username: "relay",
+      description: "Looks things up in the pipeline.",
+      instructions: "You are Relay.",
+      modelProvider: "mock",
+      modelId: "mock-1",
+    },
+  });
+  expect(res.ok(), `create Relay: ${res.status()}`).toBe(true);
+  return ((await res.json()) as { id: string }).id;
+}
+
+/** The organization's client-credentials server, saved in the dialog exactly as 12's test does: one Save. */
+async function saveCcInDialog(page: Page, name: string) {
+  await page.getByTestId("mcp-add").first().click();
+  const dialog = page.getByTestId("mcp-server-dialog");
+  await dialog.getByTestId("mcp-name").fill(name);
+  await dialog.getByTestId("mcp-url").fill(OAUTH_MCP_URL);
+  await dialog.getByTestId("mcp-auth-mode-org_client_credentials").click();
+  const fields = dialog.getByTestId("mcp-cc-fields");
+  await fields.getByTestId("mcp-cc-client-id").fill(CC_CLIENT);
+  await fields.getByTestId("mcp-cc-client-secret").fill(CC_SECRET);
+  await dialog.getByTestId("mcp-save").click();
+  await expect(dialog).toBeHidden({ timeout: 30_000 });
+}
+
+test("a member's bot uses the organization's account in a channel; Disconnect stops it", async ({
+  browser,
+}, info) => {
+  test.setTimeout(300_000);
+  const token = cellToken();
+  test.skip(!token, "OCW_CELL_TOKEN is not configured");
+  expect(FAKE_URL, "OCW_E2E_FAKE_URL (the fake OAuth MCP server) is set by scripts/e2e-isolated.sh").not.toBe(
+    "",
+  );
+  const w = info.project.name === "mobile" ? "390" : "1440";
+  const admin = await apiAs(ADMIN);
+  const samId = await ensureMember(admin, SAM, "developer");
+  const relayId = await ensureRelay(admin);
+  await removeServers(admin, [CRM, BILLING]);
+  const servers: Record<string, ServerJson> = {};
+
+  /** Relay's decisions, as the real model would make them: the CRM's or the billing API's `whoami`. */
+  const toolCallsFor = (m: MentionPayload) => {
+    if (m.agent.id !== relayId) return [];
+    const target = /crm/iu.test(m.message.text)
+      ? servers[CRM]
+      : /billing/iu.test(m.message.text)
+        ? servers[BILLING]
+        : undefined;
+    return target
+      ? [{ tool: "ocw_connector_call", args: { connector: target.safeName, tool: "whoami", arguments: {} } }]
+      : [];
+  };
+  const plugin = new FakeCellPlugin({ apiUrl: API_URL, token, autoAck: true, autoReply: true, toolCallsFor });
+  await plugin.start();
+  try {
+    // ---- the admin: Company CRM connected from its row, Billing API saved in the dialog; both Ready
+    let crmSubject = "";
+    const boss = await openAs(browser, ADMIN, info.project.name);
+    try {
+      const page = boss.page;
+      const crmServer = await orgOAuthServer(admin, CRM);
+      servers[CRM] = crmServer;
+      await page.goto(`${BASE_URL}/settings/mcp-servers`);
+      const crm = serverCard(page, CRM);
+      await connectFromRow(page, crm, crmServer);
+      const account = (await crm.getByTestId("mcp-org-account").textContent()) ?? "";
+      crmSubject = /Connected as (sub_[A-Za-z0-9_-]+)@fake-mcp\.test/u.exec(account)?.[1] ?? "";
+      expect(crmSubject, "the organization grant's subject").toMatch(/^sub_/);
+      await expect(crm.getByTestId("mcp-status")).toHaveText("Ready");
+
+      await saveCcInDialog(page, BILLING);
+      const billing = serverCard(page, BILLING);
+      await expect(billing.getByTestId("mcp-status")).toHaveText("Ready");
+      await expect(billing.getByTestId("mcp-org-connection")).toHaveAttribute("data-status", "connected");
+    } finally {
+      await boss.context.close();
+    }
+    const list = (await (await admin.get("/api/v1/mcp-servers")).json()) as { servers: ServerJson[] };
+    const billingServer = list.servers.find((s) => s.name === BILLING);
+    expect(billingServer, BILLING).toBeTruthy();
+    if (billingServer) servers[BILLING] = billingServer;
+
+    // ---- Relay may use each server's read-only `whoami` (the bot's tool choice; the account stays the organization's)
+    const granted = await admin.patch(`/api/v1/agents/${relayId}/capabilities`, {
+      data: {
+        tools: [CRM, BILLING].map((n) => ({
+          sourceKind: "mcp",
+          sourceId: servers[n]?.id,
+          tool: `${servers[n]?.safeName}__whoami`,
+        })),
+      },
+    });
+    expect(granted.ok(), `grant whoami to Relay: ${granted.status()}`).toBe(true);
+
+    // ---- the cell never sees the organization's servers, their tokens or the client secret (D-04)
+    const snapshot = await plugin.fetchCell();
+    const cellServers = (snapshot.mcpServers ?? []).map((s) => s.id);
+    expect(cellServers).not.toContain(servers[CRM]?.id);
+    expect(cellServers).not.toContain(servers[BILLING]?.id);
+    expect(JSON.stringify(snapshot)).not.toMatch(FAKE_SECRETS);
+    expect(JSON.stringify(snapshot)).not.toContain(CC_SECRET);
+
+    // ---- #sales: Sam (a member, not an admin), Víctor and Relay
+    const sales = `sales-${w}-${Date.now().toString(36)}`;
+    const salesId = await createChannel(admin, sales, "private");
+    for (const member of [
+      { kind: "user", id: samId },
+      { kind: "agent", id: relayId },
+    ]) {
+      const added = await admin.post(`/api/v1/channels/${salesId}/members`, { data: member });
+      expect(added.ok(), `add ${member.kind} to #${sales}`).toBe(true);
+    }
+
+    const sam = await openAs(browser, SAM, info.project.name);
+    try {
+      const page = sam.page;
+      const bodies = finishedBodies(page, apiRequests());
+      /** Sam @mentions Relay from #sales' composer; returns Relay's reply, opened in its thread. */
+      const ask = async (text: string): Promise<Locator> => {
+        await page.goto(`${BASE_URL}/chat/${salesId}`);
+        const before = plugin.replies.length;
+        const box = page.getByTestId("composer");
+        await box.click();
+        await box.pressSequentially("@rel");
+        await page.getByTestId("mention-option").filter({ hasText: BOT }).first().click();
+        await expect(box).toHaveValue("@relay ");
+        await box.pressSequentially(text);
+        await box.press("Enter");
+        await plugin.waitUntil(() => plugin.replies.length > before, 20_000);
+        const last = plugin.replies.at(-1);
+        expect(last?.mention.message.author.id, "the turn is Sam's").toBe(samId);
+        await page.goto(
+          `${BASE_URL}/chat/${salesId}?thread=${last?.mention.thread.rootMessageId}&m=${last?.messageId}`,
+        );
+        const reply = page
+          .getByTestId("thread-panel")
+          .locator(`[data-testid="message"][data-message-id="${last?.messageId}"]`);
+        await expect(reply).toBeVisible({ timeout: 15_000 });
+        return reply;
+      };
+
+      // ---- the organization's sign-in: Relay answers Sam with the account the admin connected (COA-01, COA-02)
+      const crmReply = await ask("who are we in the CRM?");
+      await expect(crmReply).toContainText(`Tool ocw_connector_call: {"subject":"${crmSubject}"`);
+      await expect(page.getByTestId("agent-card")).toHaveCount(0);
+      await crmReply.scrollIntoViewIfNeeded();
+      await bothThemes(page, `connectors-org-bot-${w}`);
+
+      // ---- the organization's client credentials: the client's own subject
+      const billingReply = await ask("which billing account is this?");
+      await expect(billingReply).toContainText(`Tool ocw_connector_call: {"subject":"sub_cc_${CC_CLIENT}"`);
+      await expect(page.getByTestId("agent-card")).toHaveCount(0);
+      expect(SUBJECT.exec((await billingReply.textContent()) ?? "")?.[1]).not.toBe(crmSubject);
+
+      // ---- Sam's own pages: neither server among his accounts, no token or secret in anything he received (COA-05)
+      await page.goto(`${BASE_URL}/settings/connections`);
+      await expect(page.getByRole("heading", { name: "Your accounts" })).toBeVisible();
+      for (const n of [CRM, BILLING]) {
+        await expect(page.getByTestId(`connector-row-${servers[n]?.id}`)).toHaveCount(0);
+        await expect(page.getByText(n)).toHaveCount(0);
+      }
+      const received = (await bodies()).join("\n");
+      expect(received).not.toMatch(FAKE_SECRETS);
+      expect(received).not.toContain(CC_SECRET);
+      expect(await page.content()).not.toMatch(FAKE_SECRETS);
+
+      // ---- the admin disconnects Company CRM from its row
+      const again = await openAs(browser, ADMIN, info.project.name);
+      try {
+        await again.page.goto(`${BASE_URL}/settings/mcp-servers`);
+        const row = serverCard(again.page, CRM).getByTestId("mcp-org-connection");
+        await row.getByTestId("mcp-org-disconnect").click();
+        const dialog = again.page.getByTestId("mcp-org-disconnect-dialog");
+        await dialog.getByTestId("mcp-org-disconnect-confirm").click();
+        await expect(dialog).toBeHidden();
+        await expect(row).toHaveAttribute("data-status", "not_connected");
+      } finally {
+        await again.context.close();
+      }
+
+      // ---- Sam asks again: refused with the admin sentence (PD-10), and still no connect card for him
+      const refused = await ask("and now, who are we in the CRM?");
+      await expect(refused).toContainText("Tool ocw_connector_call: refused (not_connected)");
+      await expect(refused).not.toContainText(crmSubject);
+      const call = plugin.connectorRequests.filter((r) => r.route === "/connectors/call").at(-1);
+      expect(call?.status).toBe(409);
+      expect(call?.body).toMatchObject({
+        error: {
+          code: "not_connected",
+          message: `The organization hasn't connected ${CRM} yet. An admin can connect it in Settings › MCP servers.`,
+        },
+      });
+      await expect(page.getByTestId("agent-card")).toHaveCount(0);
+      expect((await bodies()).join("\n")).not.toMatch(FAKE_SECRETS);
+    } finally {
+      await sam.context.close();
+    }
+
+    // ---- nothing the cell received carries a token or the secret
+    for (const seen of [plugin.events, plugin.connectorRequests]) {
+      expect(JSON.stringify(seen)).not.toMatch(FAKE_SECRETS);
+      expect(JSON.stringify(seen)).not.toContain(CC_SECRET);
+    }
+  } finally {
+    await plugin.stop();
+    await removeServers(admin, [CRM, BILLING]);
     await admin.dispose();
   }
 });
