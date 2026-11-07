@@ -1110,11 +1110,34 @@ already read the conversation.
   5. Proven by integration tests and an e2e spec (fake model) on desktop and mobile; README's known limitation removed;
      ADR-0037 records the decisions
 
-**Plans:** 0 plans
+**Plans:** 11 plans
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 07.15 to break down)
+- [ ] 07.15-01-PLAN.md — Wave 1: Contracts (turn attachments with per-bot access and notes, the turn's budget fields, `ocw_attachment_read`, the read request, answer, refusal codes and sentences) and the plugin mirror; the phase hub (plan map, shared files, PD-01…PD-18, edge coverage)
+- [ ] 07.15-02-PLAN.md — Wave 1: Migration: `agent_turns.attachment_reads` / `attachment_chars` (additive, defaults), schema and upgrade tests
+- [ ] 07.15-03-PLAN.md — Wave 1: The one row rule (D-16) in `agent-channel/attachment-access.ts`, `ocw_sandbox_import` fixed with it and audited as `bot.attachment_imported`, the test upload helpers
+- [ ] 07.15-04-PLAN.md — Wave 1: The bot read layer in `artifact/extract` (kind, text decode and cut, untrusted block shared with AI chats, image rendition)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 07.15-05-PLAN.md — Wave 2: PDF text in a bounded Worker with `unpdf@1.9.1` (deadline, heap, pages, characters, concurrency)
+- [ ] 07.15-06-PLAN.md — Wave 2: Cell plugin: `ocw_attachment_read`, its own guard budget, the Attachments block, the files-only body, manifest and turn-scoped registration
+- [ ] 07.15-07-PLAN.md — Wave 2: Delivery: the turn lists the files of the messages it reads, per bot, and offers the read tool only then
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 07.15-08-PLAN.md — Wave 3: The read route `POST /agent-channel/v1/attachments/read` (phase API end-to-end tracer): decision, budget claim, extraction, audit; tenant, audience, concurrency, taint and leak proofs
+- [ ] 07.15-10-PLAN.md — Wave 3: Real-cell smoke `bot_attachments` (files-only message, read with the turn's ids, image part, refusals, reads past the cap of 8)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 07.15-09-PLAN.md — Wave 4: Web paperclip in bot DMs and the browser end to end (fake cell, desktop and mobile; text-only model, channel thread, CSV into the sandbox; screenshots 1440/390 light/dark, axe)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 07.15-11-PLAN.md — Wave 5: Phase gate: full gate, smoke, `gate:compose` (unpdf and the worker in the image), ADR-0037, README limitation removed, DEMO owner check, STATUS, AGENTS, CODEOWNERS, signed VALIDATION
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 
