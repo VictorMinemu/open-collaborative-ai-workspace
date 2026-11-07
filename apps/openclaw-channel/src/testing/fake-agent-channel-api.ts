@@ -85,6 +85,13 @@
  *                                          contract the plugin must never render; screenshot a masked 8×8 JPEG. 400 for
  *                                          any key beyond the contract's (a selector, a script, a cookie). POST
  *                                          /__test/browser {results?, refusal?} replaces the knobs ({} resets them)
+ *   POST /agent-channel/v1/attachments/read  (07.15) records every body (`attachments.calls`, refused ones included) and
+ *                                          answers `attachments.results[attachmentId]`, else 200 `{kind: "refused", code:
+ *                                          "not_found", sentence}`; 400 for any key beyond the contract's (a conversation, a
+ *                                          user, a URL). POST /__test/attachments {results?, noTrigger?} replaces the knobs
+ *                                          ({} resets them): `results` per attachment id (a text, image or refused answer),
+ *                                          `noTrigger` makes every read answer 403 `no_trigger` (the body carries
+ *                                          FAKE_ERROR_CANARY, which must never reach the model)
  *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
  *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
  *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
@@ -357,6 +364,20 @@ export type FakeBrowser = {
   /** When set, every browser route refuses with this code and its contract status. */
   refusal?: string;
 };
+/** 07.15: the attachment read route's records and knobs (`POST /__test/attachments` replaces the knobs). */
+export type FakeAttachments = {
+  /** Every POST /attachments/read body, in order (refused ones included). */
+  calls: Array<Record<string, unknown>>;
+  /** Attachment id → what the route answers for it (default: refused `not_found`). */
+  results: Record<string, unknown>;
+  /** When true, every read answers 403 `no_trigger` (the turn ended). */
+  noTrigger?: boolean;
+};
+/** The keys a read body may carry (contracts `AgentChannelAttachmentRead`, a strict object). */
+const ATTACHMENT_READ_KEYS: readonly string[] = ["eventId", "agentId", "attachmentId"];
+/** Contracts `ATTACHMENT_READ_SENTENCES.not_found` (the fake imports types only). */
+const ATTACHMENT_NOT_FOUND_SENTENCE =
+  "This file is not available in this conversation (it may have been deleted).";
 /** A password the fake browser "saw": only in a field outside the contract, so it must never reach the model (P-10). */
 export const FAKE_PASSWORD_SENTINEL = "OCW-SENTINEL-PW-5521";
 /** An 8×8 grey JPEG: what the fake browser's masked screenshot answers. */
@@ -499,6 +520,8 @@ export type FakeAgentChannelApi = {
   turnsDone: StoredTurnDone[];
   /** The browser routes' records and knobs (07.8). */
   browser: FakeBrowser;
+  /** The attachment read route's records and knobs (07.15). */
+  attachments: FakeAttachments;
   /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
   mcpServers: CellMcpServer[];
   /** Every POST /mcp/probe-results, in order. */
@@ -732,6 +755,7 @@ export async function startFakeAgentChannelApi(
     automations: { proposals: [], recordUpdates: [] } as FakeAutomations,
     sandbox: { calls: [], results: {} } as FakeSandbox,
     browser: { calls: [], results: {} } as FakeBrowser,
+    attachments: { calls: [], results: {} } as FakeAttachments,
     consultations: [] as Array<Record<string, unknown>>,
     consultOutcome: undefined as ConsultOutcome | undefined,
     turnsDone: [] as StoredTurnDone[],
@@ -849,6 +873,15 @@ export async function startFakeAgentChannelApi(
           else delete br.refusal;
           return json(res, 200, { ok: true });
         }
+        if (req.method === "POST" && url.pathname === "/__test/attachments") {
+          // 07.15: replace the attachment read knobs ({} resets them; the records stay).
+          const body = ((await readJson(req)) ?? {}) as Partial<FakeAttachments>;
+          const at = state.attachments;
+          at.results = body.results && typeof body.results === "object" ? body.results : {};
+          if (body.noTrigger === true) at.noTrigger = true;
+          else delete at.noTrigger;
+          return json(res, 200, { ok: true });
+        }
         if (req.method === "POST" && url.pathname === "/__test/consult-outcome") {
           // 07.7: the consult route's answer ({} resets it; the records stay).
           const body = ((await readJson(req)) ?? {}) as { status?: unknown; body?: unknown };
@@ -915,6 +948,7 @@ export async function startFakeAgentChannelApi(
             automations: state.automations,
             sandbox: state.sandbox,
             browser: state.browser,
+            attachments: state.attachments,
             consultations: state.consultations,
             turnsDone: state.turnsDone,
             mcpProbes: state.mcpProbes,
@@ -1195,6 +1229,35 @@ export async function startFakeAgentChannelApi(
         }
         const canned = sandboxRoute === "exec" && sb.exec ? sb.exec : sb.results[sandboxRoute];
         return json(res, 200, canned ?? fakeSandboxResult(sandboxRoute, body));
+      }
+      if (req.method === "POST" && route === "/attachments/read") {
+        // 07.15 (D-03): only the turn's ids and the attachment id; the real API derives everything else.
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        const at = state.attachments;
+        at.calls.push({ ...body });
+        if (
+          typeof body.eventId !== "string" ||
+          typeof body.agentId !== "string" ||
+          typeof body.attachmentId !== "string" ||
+          Object.keys(body).some((k) => !ATTACHMENT_READ_KEYS.includes(k))
+        ) {
+          return json(res, 400, { error: { code: "bad_request", message: `bad body ${FAKE_ERROR_CANARY}` } });
+        }
+        if (at.noTrigger) {
+          return json(res, 403, {
+            error: { code: "no_trigger", message: `turn ended ${FAKE_ERROR_CANARY}` },
+          });
+        }
+        return json(
+          res,
+          200,
+          at.results[body.attachmentId] ?? {
+            kind: "refused",
+            attachmentId: body.attachmentId,
+            code: "not_found",
+            sentence: ATTACHMENT_NOT_FOUND_SENTENCE,
+          },
+        );
       }
       const browserRoute = /^\/browser\/(open|snapshot|act|screenshot|wait|signin|close)$/u.exec(route)?.[1];
       if (req.method === "POST" && browserRoute) {
@@ -1753,6 +1816,9 @@ export async function startFakeAgentChannelApi(
     },
     get browser() {
       return state.browser;
+    },
+    get attachments() {
+      return state.attachments;
     },
     get mcpServers() {
       return state.mcpServers;
