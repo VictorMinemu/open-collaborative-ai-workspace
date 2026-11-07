@@ -471,8 +471,9 @@ function DmConversation({
       : `@${person?.handle} · only the two of you can see this`;
   const disabled = bot?.status === "disabled";
   const deactivated = person?.deactivated === true;
-  // Bots read text only for now, so a DM with a bot offers no files; people and groups do (CHAT-12, P-10).
-  const canAttach = !bot && !disabled && !deactivated && !dm.archivedAt;
+  // Every live DM takes files, bot DMs included: since 07.15 bots read attachments through the Agent Channel API
+  // (ADR-0037), with the same limits and upload path as a person DM (CHAT-12, P-10).
+  const canAttach = !disabled && !deactivated && !dm.archivedAt;
   const canDrop = canAttach && filesConfig.data?.enabled === true;
   const headerAvatar = bot ? (
     <PrincipalAvatar

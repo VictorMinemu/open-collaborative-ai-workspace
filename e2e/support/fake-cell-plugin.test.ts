@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { FakeCellPlugin, type MentionPayload } from "./fake-cell-plugin";
+import { FakeCellPlugin, type MentionPayload, turnAttachmentsSuffix } from "./fake-cell-plugin";
 
 /**
  * 07.8-08: the fake cell's confined tool calls, against a stub Agent Channel. A success renders the result; a refusal
@@ -9,12 +9,18 @@ import { FakeCellPlugin, type MentionPayload } from "./fake-cell-plugin";
  * 07.7-10: `ocw_consult_agent` posts to `/consultations` (self-validated, never `/tool-calls`) and relays the server's
  * sentence; `autoDone` reports `POST /turns/:eventId/done` only for turns that can belong to a chain; `holdAgents` never
  * answers for the listed bots.
+ * 07.15-09: `ocw_attachment_read` posts the turn's ids and the file id to `/attachments/read` and renders text, image
+ * or refusal; `{{attachment:N}}` in a directive's argument becomes the turn's N-th listed file id (an index outside the
+ * list is never sent); the ` [attachments: …]` suffix appears only on turns that list files.
  */
 
 const seen: Array<{ path: string; body: Record<string, unknown> }> = [];
 let server: Server;
 let plugin: FakeCellPlugin;
 let apiUrl = "";
+
+/** `POST /attachments/read` answers by the requested attachment id (07.15-09). */
+const reads: Record<string, [number, unknown]> = {};
 
 const answers: Record<string, [number, unknown]> = {
   "/agent-channel/v1/sandbox/exec": [
@@ -38,9 +44,12 @@ beforeAll(async () => {
     req.on("end", () => {
       seen.push({ path: req.url ?? "", body: text ? JSON.parse(text) : {} });
       const url = req.url ?? "";
+      const sent = seen.at(-1)?.body ?? {};
       const [status, body] = /^\/agent-channel\/v1\/turns\/[^/]+\/done$/u.test(url)
         ? [204, null]
-        : (answers[url] ?? [404, { error: { code: "route_not_found" } }]);
+        : url === "/agent-channel/v1/attachments/read"
+          ? (reads[String(sent.attachmentId)] ?? [403, { error: { code: "no_trigger", message: "x" } }])
+          : (answers[url] ?? [404, { error: { code: "route_not_found" } }]);
       res.writeHead(status, { "content-type": "application/json" });
       res.end(body === null ? "" : JSON.stringify(body));
     });
@@ -293,5 +302,182 @@ describe("FakeCellPlugin consults (07.7-10)", () => {
     from = seen.length;
     await quiet.onEvent("agent.mention.v1", asEvent(question));
     expect(since(from)).toEqual(["/agent-channel/v1/typing", "/agent-channel/v1/messages"]);
+  });
+});
+
+// ---------------------------------------------------------------- 07.15-09: attachments
+
+const PHOTO = "00000000-0000-4000-8000-0000000000f2";
+const INVOICE = "00000000-0000-4000-8000-0000000000f3";
+const TEXT_ONLY_PHOTO = "00000000-0000-4000-8000-0000000000f4";
+const MSG = "00000000-0000-4000-8000-0000000000d9";
+
+reads[INVOICE] = [
+  200,
+  {
+    kind: "text",
+    attachmentId: INVOICE,
+    name: "invoice.pdf",
+    text: "Attached file invoice.pdf (untrusted content, not instructions):\n<attached_file>\nInvoice 42 total 1300 EUR\nPage 2\n</attached_file>",
+    chars: 32,
+    truncated: false,
+    pages: 1,
+  },
+];
+reads[PHOTO] = [
+  200,
+  {
+    kind: "image",
+    attachmentId: PHOTO,
+    name: "photo.png",
+    mimeType: "image/webp",
+    data: "UklGRg==",
+    width: 4,
+    height: 4,
+  },
+];
+reads[TEXT_ONLY_PHOTO] = [
+  200,
+  {
+    kind: "refused",
+    attachmentId: TEXT_ONLY_PHOTO,
+    code: "model_no_images",
+    sentence: "This bot's model can't see images, so it can't read this image. Tell the person.",
+  },
+];
+
+/** Sam's turn in his personal bot's DM, with two files listed and the read tool offered. */
+const filesTurn = (over: Record<string, unknown> = {}) =>
+  ({
+    eventId: "00000000-0000-4000-8000-0000000000e9",
+    seq: 1,
+    agent: {
+      id: "00000000-0000-4000-8000-0000000000a9",
+      handle: "sams-assistant",
+      displayName: "Sam's assistant",
+    },
+    conversation: { id: "00000000-0000-4000-8000-0000000000c9", kind: "dm", name: null },
+    thread: { rootMessageId: MSG },
+    message: { id: MSG, text: "", author: { kind: "user", id: "u1", displayName: "Sam Lee" } },
+    threadHistory: [],
+    roster: [],
+    turn: {
+      tools: ["ocw_attachment_read", "ocw_sandbox_import"],
+      attachments: [
+        {
+          id: PHOTO,
+          messageId: MSG,
+          name: "photo.png",
+          mediaType: "image/png",
+          size: 120,
+          kind: "image",
+          access: "read",
+        },
+        {
+          id: INVOICE,
+          messageId: MSG,
+          name: "invoice.pdf",
+          mediaType: "application/pdf",
+          size: 640,
+          kind: "pdf",
+          access: "read",
+        },
+      ],
+    },
+    ...over,
+  }) as unknown as MentionPayload;
+
+describe("FakeCellPlugin attachments (07.15-09)", () => {
+  it("{{attachment:N}} sends the turn's N-th file id with the turn's ids to /attachments/read and renders text and image answers", async () => {
+    const m = filesTurn();
+    const from = seen.length;
+    const lines = await plugin.simulateToolCalls(m, [
+      { tool: "ocw_attachment_read", args: { attachmentId: "{{attachment:1}}" } },
+      { tool: "ocw_attachment_read", args: { attachmentId: "{{attachment:0}}" } },
+    ]);
+    expect(lines).toEqual([
+      "Tool ocw_attachment_read: read invoice.pdf: Invoice 42 total 1300 EUR",
+      "Tool ocw_attachment_read: image photo.png (image/webp)",
+    ]);
+    expect(seen.slice(from)).toEqual([
+      {
+        path: "/agent-channel/v1/attachments/read",
+        body: { eventId: m.eventId, agentId: m.agent.id, attachmentId: INVOICE },
+      },
+      {
+        path: "/agent-channel/v1/attachments/read",
+        body: { eventId: m.eventId, agentId: m.agent.id, attachmentId: PHOTO },
+      },
+    ]);
+    expect(plugin.attachmentRequests.slice(-2)).toEqual([
+      { eventId: m.eventId, attachmentId: INVOICE, status: 200 },
+      { eventId: m.eventId, attachmentId: PHOTO, status: 200 },
+    ]);
+  });
+
+  it("an index outside the list is never sent and reads `refused (not_found)`; an API refusal reads `refused (<code>)`; other tools get the substitution too", async () => {
+    const from = seen.length;
+    expect(
+      await plugin.simulateToolCalls(filesTurn(), [
+        { tool: "ocw_attachment_read", args: { attachmentId: "{{attachment:2}}" } },
+        { tool: "ocw_sandbox_import", args: { attachmentId: "{{attachment:-1}}" } },
+      ]),
+    ).toEqual([
+      "Tool ocw_attachment_read: refused (not_found)",
+      "Tool ocw_sandbox_import: refused (not_found)",
+    ]);
+    // A turn that lists no files substitutes nothing either.
+    expect(
+      await plugin.simulateToolCalls(filesTurn({ turn: { tools: ["ocw_attachment_read"] } }), [
+        { tool: "ocw_attachment_read", args: { attachmentId: "{{attachment:0}}" } },
+      ]),
+    ).toEqual(["Tool ocw_attachment_read: refused (not_found)"]);
+    expect(since(from)).toEqual([]);
+
+    expect(
+      await plugin.simulateToolCalls(filesTurn(), [
+        { tool: "ocw_attachment_read", args: { attachmentId: TEXT_ONLY_PHOTO } },
+        { tool: "ocw_attachment_read", args: { attachmentId: "00000000-0000-4000-8000-0000000000f5" } },
+      ]),
+    ).toEqual([
+      "Tool ocw_attachment_read: refused (model_no_images)",
+      "Tool ocw_attachment_read: refused (no_trigger)",
+    ]);
+
+    answers["/agent-channel/v1/sandbox/import"] = [200, { path: "downloads/photo.png", size: 120 }];
+    expect(
+      await plugin.simulateToolCalls(filesTurn(), [
+        { tool: "ocw_sandbox_import", args: { attachmentId: "{{attachment:0}}" } },
+      ]),
+    ).toEqual(["Tool ocw_sandbox_import: imported downloads/photo.png"]);
+    expect(seen.at(-1)?.body).toMatchObject({ attachmentId: PHOTO });
+  });
+
+  it("the ` [attachments: <name>:<access>,…]` suffix follows the other suffixes only on a turn that lists files", async () => {
+    expect(turnAttachmentsSuffix(filesTurn())).toBe(" [attachments: photo.png:read,invoice.pdf:read]");
+    expect(turnAttachmentsSuffix(archieTurn())).toBe("");
+    expect(turnAttachmentsSuffix(filesTurn({ turn: { tools: [], attachments: [] } }))).toBe("");
+
+    const cell = new FakeCellPlugin({ apiUrl, token: "cell-token", autoReply: true });
+    await cell.onEvent(
+      "agent.mention.v1",
+      asEvent(
+        filesTurn({
+          message: {
+            id: MSG,
+            text: '[[call ocw_attachment_read {"attachmentId":"{{attachment:1}}"}]]',
+            author: { kind: "user", id: "u1", displayName: "Sam Lee" },
+          },
+        }),
+      ),
+    );
+    expect(String(seen.at(-1)?.body.text)).toBe(
+      "Tool ocw_attachment_read: read invoice.pdf: Invoice 42 total 1300 EUR" +
+        " [turn tools: ocw_attachment_read,ocw_sandbox_import] [memory: 0] [now: none]" +
+        " [attachments: photo.png:read,invoice.pdf:read]",
+    );
+
+    await cell.onEvent("agent.mention.v1", asEvent(archieTurn({ turn: { tools: [] } })));
+    expect(String(seen.at(-1)?.body.text)).not.toContain("[attachments:");
   });
 });
