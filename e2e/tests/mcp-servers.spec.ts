@@ -552,9 +552,7 @@ test("admin: every connector mode, the HTTPS notice, list badges and the disconn
     await dialog.getByTestId("mcp-transport-sandboxed-stdio").click();
     for (const mode of ["per_member_oauth", "per_member_secret"]) {
       await expect(dialog.getByTestId(`mcp-auth-mode-${mode}`).locator("input")).toBeDisabled();
-      await expect(dialog.getByTestId(`mcp-auth-mode-${mode}`)).toContainText(
-        "Member accounts need a remote server",
-      );
+      await expect(dialog.getByTestId(`mcp-auth-mode-${mode}`)).toContainText("Needs a remote server");
     }
     await dialog.getByTestId("mcp-transport-streamable-http").click();
     await dialog.getByTestId("mcp-url").fill("https://ledger.acme.example/mcp");
@@ -629,7 +627,7 @@ test("admin: every connector mode, the HTTPS notice, list badges and the disconn
     const confirm = page.getByTestId("mcp-clear-connections-confirm");
     await expect(confirm).toContainText("Disconnect 3 members?");
     await expect(confirm).toContainText(
-      "Switching Acme CRM to Organization secret deletes every member's saved sign-in or key. Bots stop acting with members' own accounts.",
+      "Switching Acme CRM to Organization headers deletes every member's saved sign-in or key. Bots stop acting with members' own accounts.",
     );
     await expect(confirm.getByRole("button", { name: "Cancel" })).toBeFocused();
     expect(patches).toEqual([]);
@@ -800,6 +798,169 @@ test("admin: turn the client metadata URL off for one connector, and see a conne
     await boss.context.close();
   } finally {
     await removeServers(admin, [VAULT, LEGACY]).catch(() => undefined);
+    await admin.dispose();
+  }
+});
+
+// ---------------------------------------------------------------- 07.14-12: the dialog's organization modes (D-11)
+
+/** The fake's OAuth-protected MCP server; the API reaches `fake-mcp` through OCW_EGRESS_TEST_HOSTS. */
+const OAUTH_MCP_URL = `http://${FAKE_MCP_HOST}/mcp-oauth/mcp`;
+/** The e2e fake's pre-registered confidential client (infra/fake-model/server.mjs). */
+const CC_CLIENT = "ocw-e2e-cc";
+const CC_SECRET = "e2e-cc-secret-canary";
+const RECORDS = "Acme Records";
+const RECORDS_RENAMED = "Acme Records Prod";
+const BILLING = "Acme Billing";
+const CC_SERVERS = [RECORDS, RECORDS_RENAMED, BILLING];
+
+/** Every request the page sends to `pattern` with `method`, with its JSON body. */
+function captureBodies(page: Page, method: string, pattern: RegExp): Array<Record<string, unknown>> {
+  const bodies: Array<Record<string, unknown>> = [];
+  page.on("request", (r) => {
+    if (r.method() === method && pattern.test(new URL(r.url()).pathname)) {
+      bodies.push(JSON.parse(r.postData() ?? "{}") as Record<string, unknown>);
+    }
+  });
+  return bodies;
+}
+
+test("admin: client credentials in the dialog, saved, edited and refused, at both widths and themes", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  expect(FAKE_URL, "OCW_E2E_FAKE_URL (the fake OAuth MCP server) is set by scripts/e2e-isolated.sh").not.toBe(
+    "",
+  );
+  const mobile = info.project.name === "mobile";
+  const tag = mobile ? "390" : "1440";
+  const admin = await apiAs(ADMIN);
+  await removeServers(admin, CC_SERVERS);
+  try {
+    const boss = await openAs(browser, ADMIN, info.project.name);
+    const page = boss.page;
+    const puts = captureBodies(page, "PUT", /\/org-connection\/client-credentials$/u);
+    const creates = captureBodies(page, "POST", /^\/api\/v1\/mcp-servers$/u);
+    await page.goto(`${BASE_URL}/settings/mcp-servers`);
+
+    // ---- Add server → Client credentials: client ID, write-only secret, optional Token URL and the shared Scopes
+    await page.getByTestId("mcp-add").first().click();
+    const dialog = page.getByTestId("mcp-server-dialog");
+    await dialog.getByTestId("mcp-name").fill(RECORDS);
+    await dialog.getByTestId("mcp-url").fill(OAUTH_MCP_URL);
+    await dialog.getByTestId("mcp-auth-mode-org_client_credentials").click();
+    await expect(dialog.getByTestId("mcp-auth-mode-org_client_credentials").locator("input")).toBeChecked();
+    const fields = dialog.getByTestId("mcp-cc-fields");
+    await expect(fields).toBeVisible();
+    await expect(fields.getByTestId("mcp-cc-client-id")).toHaveValue("");
+    await expect(fields.getByTestId("mcp-cc-client-secret")).toHaveValue("");
+    await expect(fields.getByTestId("mcp-cc-client-secret")).toHaveAttribute("type", "password");
+    await expect(fields.getByTestId("mcp-cc-client-secret")).toHaveAttribute("autocomplete", "new-password");
+    await expect(fields.getByTestId("mcp-cc-token-url")).toHaveValue("");
+    await expect(fields).toContainText("Leave empty to use the server's published sign-in information.");
+    await expect(fields).toContainText("Write-only. Never shown again.");
+    await expect(fields.getByTestId("mcp-oauth-scopes")).toBeVisible();
+    await expect(dialog.getByTestId("mcp-add-header")).toHaveCount(0);
+    await expect(dialog.getByTestId("mcp-auth-explanation")).toContainText(
+      `OCW gets tokens from ${RECORDS}'s sign-in server with this client ID and secret.`,
+    );
+
+    // ---- client-side checks: both fields, and a Token URL that is neither https nor this server's own address
+    await dialog.getByTestId("mcp-save").click();
+    await expect(fields).toContainText("Enter the client ID");
+    await expect(fields).toContainText("Enter the client secret");
+    await fields.getByTestId("mcp-cc-token-url").fill("http://tokens.acme.example/token");
+    await dialog.getByTestId("mcp-save").click();
+    await expect(fields).toContainText("Use an https address (or this server's own address)");
+    await fields.getByTestId("mcp-cc-token-url").fill("");
+    expect(creates).toEqual([]);
+    await fields.getByTestId("mcp-cc-client-id").fill(CC_CLIENT);
+    await fields.getByTestId("mcp-cc-client-secret").fill(CC_SECRET);
+    await fields.scrollIntoViewIfNeeded();
+    await bothThemes(page, `mcp-org-cc-${tag}`);
+    await a11yBothThemes(page, '[data-testid="mcp-server-dialog"]');
+    if (mobile) await expectTouchTargets(dialog.locator("form"), "the client-credentials dialog");
+
+    // ---- one Save: the server, then its credentials; the row turns Ready with the fake's tools
+    await dialog.getByTestId("mcp-save").click();
+    await expect(dialog).toBeHidden({ timeout: 30_000 });
+    expect(creates).toHaveLength(1);
+    expect(creates[0]).toMatchObject({ name: RECORDS, authMode: "org_client_credentials", headers: [] });
+    expect(JSON.stringify(creates[0])).not.toContain(CC_SECRET);
+    expect(puts).toEqual([{ clientId: CC_CLIENT, clientSecret: CC_SECRET }]);
+    const card = serverCard(page, RECORDS);
+    await expect(card.getByTestId("mcp-auth-badge")).toHaveText("Client credentials");
+    await expect(card.getByTestId("mcp-status")).toHaveText("Ready");
+    await expect(card).toContainText("3 tools");
+    const row = card.getByTestId("mcp-org-connection");
+    await expect(row).toHaveAttribute("data-status", "connected");
+    await expect(row.getByTestId("mcp-org-account")).toHaveText(
+      `Client ${CC_CLIENT} · by ${ADMIN.name} · just now`,
+    );
+    expect(await page.content()).not.toContain(CC_SECRET);
+
+    // ---- Edit: the secret is never shown, only "Secret set" + Replace; a rename sends no credentials call
+    await card.getByTestId("mcp-edit").click();
+    await expect(fields.getByTestId("mcp-cc-client-id")).toHaveValue(CC_CLIENT);
+    await expect(fields.getByTestId("mcp-cc-secret-stored")).toContainText("Secret set");
+    await expect(fields.getByTestId("mcp-cc-client-secret")).toHaveCount(0);
+    await fields.getByTestId("mcp-cc-secret-replace").click();
+    await expect(fields.getByTestId("mcp-cc-client-secret")).toHaveValue("");
+    await fields.getByTestId("mcp-cc-secret-keep").click();
+    await expect(fields.getByTestId("mcp-cc-client-secret")).toHaveCount(0);
+    await dialog.getByTestId("mcp-name").fill(RECORDS_RENAMED);
+    await dialog.getByTestId("mcp-save").click();
+    await expect(dialog).toBeHidden();
+    await expect(serverCard(page, RECORDS_RENAMED).getByTestId("mcp-org-connection")).toHaveAttribute(
+      "data-status",
+      "connected",
+    );
+    expect(puts).toHaveLength(1);
+
+    // ---- a refused grant: the server exists, the dialog stays open with the failed step and its fix line
+    await page.getByTestId("mcp-add").first().click();
+    await dialog.getByTestId("mcp-name").fill(BILLING);
+    await dialog.getByTestId("mcp-url").fill(OAUTH_MCP_URL);
+    await dialog.getByTestId("mcp-auth-mode-org_client_credentials").click();
+    await fields.getByTestId("mcp-cc-client-id").fill(CC_CLIENT);
+    await fields.getByTestId("mcp-cc-client-secret").fill("e2e-wrong-secret");
+    await dialog.getByTestId("mcp-save").click();
+    const formError = dialog.getByTestId("mcp-form-error");
+    await expect(formError).toContainText("Client credentials failed at: Token.", { timeout: 30_000 });
+    await expect(formError).toContainText(
+      "The provider didn't finish the sign-in. Check the client ID and secret, then try again.",
+    );
+    await expect(dialog).toBeVisible();
+    // Saved already: Save again retries the credentials only, it never adds the server twice.
+    await dialog.getByTestId("mcp-save").click();
+    await expect(formError).toContainText("Client credentials failed at: Token.");
+    expect(puts).toHaveLength(3);
+    expect(creates).toHaveLength(2);
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog).toBeHidden();
+    const billing = serverCard(page, BILLING);
+    await expect(billing).toHaveCount(1);
+    await expect(billing.getByTestId("mcp-auth-failure")).toHaveAttribute(
+      "data-code",
+      "token_exchange_failed",
+    );
+    await expect(billing.getByTestId("mcp-org-connection")).toHaveAttribute("data-status", "not_connected");
+
+    // ---- the right secret from Edit clears the failure and connects
+    await billing.getByTestId("mcp-edit").click();
+    // Nothing was stored for a refused client: its fields start empty.
+    await expect(fields.getByTestId("mcp-cc-secret-stored")).toHaveCount(0);
+    await expect(fields.getByTestId("mcp-cc-client-id")).toHaveValue("");
+    await fields.getByTestId("mcp-cc-client-id").fill(CC_CLIENT);
+    await fields.getByTestId("mcp-cc-client-secret").fill(CC_SECRET);
+    await dialog.getByTestId("mcp-save").click();
+    await expect(dialog).toBeHidden({ timeout: 30_000 });
+    await expect(billing.getByTestId("mcp-org-connection")).toHaveAttribute("data-status", "connected");
+    await expect(billing.getByTestId("mcp-auth-failure")).toHaveCount(0);
+    expect(await page.content()).not.toContain(CC_SECRET);
+    await boss.context.close();
+  } finally {
+    await removeServers(admin, CC_SERVERS).catch(() => undefined);
     await admin.dispose();
   }
 });
