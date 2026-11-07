@@ -7,6 +7,7 @@ import { recordMemberData, stickyMemberData } from "../bot-capabilities";
 import { keepForSite, sealSession } from "../browser/sessions";
 import { createConversationAccess } from "../chat";
 import { audienceCoverFacts, audienceCovers, createPermissionService } from "../organization";
+import { attachmentForTurn } from "./attachment-access";
 
 /**
  * 07.8-25 (BRW-04, SBX-02; D-11 F-8, D-13; P-11, P-18; Pitfall 13): what a bot saw with a member's sign-in stays with
@@ -790,6 +791,146 @@ describe("07.15 D-16: a bot imports only a file its turn reads; every import is 
       all.filter((a) => a.action === "bot.tool_call" && a.metadata.tool === "ocw_sandbox_import"),
     ).toHaveLength(1);
     expect(JSON.stringify(all)).not.toContain("numbers");
+  });
+
+  /** A refused import: 404 `not_found`, nothing reaches sandboxd, and its `bot.attachment_imported` says so. */
+  const refusedNotFound = async (ev: Json, agentId: string, attachmentId: string) => {
+    const before = fakeCalls("filesImport");
+    const r = await sandbox("import", ev, agentId, { attachmentId });
+    expect(r.status, JSON.stringify(r.body)).toBe(404);
+    expect(codeOf(r)).toBe("not_found");
+    expect(fakeCalls("filesImport")).toBe(before);
+    const audits = (await auditOf("bot.attachment_imported", ev.eventId)).filter(
+      (a) => a.metadata.attachmentId === attachmentId,
+    );
+    expect(audits.at(-1)).toMatchObject({ agent_id: agentId, user_id: s.samId, result: "denied" });
+    expect(audits.at(-1)?.metadata).toEqual({
+      eventId: ev.eventId,
+      conversationId: ev.conversation.id,
+      attachmentId,
+      mediaType: null,
+      bytes: 0,
+      outcome: "not_found",
+    });
+  };
+
+  /** Sam mentions Ops in `conv` (a reply in `threadRootId`'s thread when set); returns Ops' turn. */
+  const opsTurn = async (conv: string, opts: { threadRootId?: string } = {}) => {
+    const msg = await ok(
+      s.sam.request("POST", `/api/v1/conversations/${conv}/messages`, {
+        body: `@ops look ${randomUUID().slice(0, 6)}`,
+        ...(opts.threadRootId ? { threadRootId: opts.threadRootId } : {}),
+      }) as Promise<Res>,
+    );
+    const rows = (
+      await s.su.query(
+        "select payload from app.stream_events where stream_id = $1 and type = 'agent.mention.v1' and payload->'message'->>'id' = $2 and payload->'agent'->>'id' = $3",
+        [`cell:${s.orgA}`, msg.id, ops.id],
+      )
+    ).rows;
+    expect(rows).toHaveLength(1);
+    return rows[0].payload as Json;
+  };
+
+  it("a channel member's upload never sent (ready, unlinked) and a presigned upload never completed (pending) → 404 not_found, audited denied", async () => {
+    const team = (
+      await ok(
+        s.victor.request("POST", "/api/v1/channels", {
+          name: `sales-team-${randomUUID().slice(0, 4)}`,
+          visibility: "private",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    for (const [kind, id] of [
+      ["user", s.samId],
+      ["user", s.alexId],
+      ["agent", ops.id],
+    ] as const) {
+      await ok(s.victor.request("POST", `/api/v1/channels/${team}/members`, { kind, id }) as Promise<Res>);
+    }
+    const draft = await uploadAttachment(s.alex, team, csv("draft.csv", "draft,secret\n"));
+    expect(await attachmentRow(draft)).toMatchObject({ status: "ready", message_id: null });
+    const pending = await uploadAttachment(s.alex, team, csv("half.csv", "half,1\n"), { complete: false });
+    expect((await attachmentRow(pending))?.status).toBe("pending");
+    const ev = await opsTurn(team);
+    await refusedNotFound(ev, ops.id, draft);
+    await refusedNotFound(ev, ops.id, pending);
+    // In a DM too: Sam's own upload, presigned and never completed.
+    const mine = await uploadAttachment(s.sam, scout.dm, csv("mine.csv", "m,1\n"), { complete: false });
+    const dmTurn = await s.turnOf(s.sam, scout.dm, scout.id);
+    await refusedNotFound(dmTurn, scout.id, mine);
+  });
+
+  it("Sam deletes the message that carried the file: its own turn and a later one get 404 not_found (E8)", async () => {
+    const attachmentId = await uploadAttachment(s.sam, scout.dm, csv("gone.csv", "gone,1\n"));
+    const first = await s.turnOf(s.sam, scout.dm, scout.id, { attachmentIds: [attachmentId] });
+    await ok(s.sam.request("DELETE", `/api/v1/messages/${first.message.id}`) as Promise<Res>);
+    await refusedNotFound(first, scout.id, attachmentId);
+    const later = await s.turnOf(s.sam, scout.dm, scout.id);
+    await refusedNotFound(later, scout.id, attachmentId);
+  });
+
+  it("a DM is read whole: a file of an earlier message imports on a later turn; a second import onto the same path is 07.8's refusal and the first copy stays (E8)", async () => {
+    const path = `inbox/e8-${randomUUID().slice(0, 6)}.csv`;
+    const firstFile = await uploadAttachment(s.sam, scout.dm, csv("first.csv", "first,1\n"));
+    await s.turnOf(s.sam, scout.dm, scout.id, { attachmentIds: [firstFile] });
+    const secondFile = await uploadAttachment(s.sam, scout.dm, csv("second.csv", "second,22\n"));
+    await s.turnOf(s.sam, scout.dm, scout.id, { attachmentIds: [secondFile] });
+
+    const ev = await s.turnOf(s.sam, scout.dm, scout.id);
+    expect(await ok(sandbox("import", ev, scout.id, { attachmentId: firstFile, path }))).toEqual({
+      path,
+      size: 8,
+    });
+    const before = fakeCalls("filesImport");
+    const again = await sandbox("import", ev, scout.id, { attachmentId: secondFile, path });
+    expect(codeOf(again), JSON.stringify(again.body)).toBe("busy");
+    expect(fakeCalls("filesImport")).toBe(before + 1);
+    expect((await ok(sandbox("read", ev, scout.id, { path }))).content).toBe("first,1\n");
+
+    const audits = await auditOf("bot.attachment_imported", ev.eventId);
+    expect(
+      audits.map((a) => [a.metadata.attachmentId, a.result, a.metadata.outcome, a.metadata.bytes]),
+    ).toEqual([
+      [firstFile, "success", "imported", 8],
+      [secondFile, "error", "busy", 10],
+    ]);
+  });
+
+  it("team bot Ops in Sam's DM is still refused audience_narrower for a file Sam sent there (F-8), audited with the file's type and size", async () => {
+    const attachmentId = await uploadAttachment(s.sam, ops.dm, csv("ops.csv", "ops,1\n"));
+    const ev = await s.turnOf(s.sam, ops.dm, ops.id, { attachmentIds: [attachmentId] });
+    const before = fakeCalls("filesImport");
+    const r = await sandbox("import", ev, ops.id, { attachmentId });
+    expect(r.status).toBe(403);
+    expect(codeOf(r)).toBe("audience_narrower");
+    expect(fakeCalls("filesImport")).toBe(before);
+    const audits = await auditOf("bot.attachment_imported", ev.eventId);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({ agent_id: ops.id, user_id: s.samId, result: "denied" });
+    expect(audits[0]?.metadata).toEqual({
+      eventId: ev.eventId,
+      conversationId: ops.dm,
+      attachmentId,
+      mediaType: await mediaTypeOf(attachmentId),
+      bytes: 6,
+      outcome: "audience_narrower",
+    });
+  });
+
+  it("attachmentForTurn in organization B's tenant sees no file of organization A; the same call in A returns it", async () => {
+    const attachmentId = await uploadAttachment(s.sam, scout.dm, csv("tenant.csv", "t,1\n"));
+    const ev = await s.turnOf(s.sam, scout.dm, scout.id, { attachmentIds: [attachmentId] });
+    const turn = { conversationId: scout.dm, messageId: ev.message.id as string };
+    const core = s.stack.built.core;
+    const inB = await core.db.withTenant({ organizationId: s.orgB, userId: s.eveId }, (tx) =>
+      attachmentForTurn(tx, turn, attachmentId),
+    );
+    expect(inB).toBeNull();
+    const inA = await core.db.withTenant({ organizationId: s.orgA, userId: s.samId }, (tx) =>
+      attachmentForTurn(tx, turn, attachmentId),
+    );
+    expect(inA?.id).toBe(attachmentId);
   });
 });
 

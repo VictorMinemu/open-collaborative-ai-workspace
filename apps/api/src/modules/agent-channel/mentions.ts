@@ -19,7 +19,7 @@ import {
   type Tx,
   tenantOf,
 } from "@ocw/db";
-import { and, desc, eq, inArray, isNull, ne, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import { agentDirectory } from "../agent";
@@ -36,6 +36,7 @@ import { REPLY_MODE_PER_MINUTE } from "../chat";
 import type { MemoryService } from "../memory";
 import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
 import { consultTargets } from "./agent-message";
+import { messageScopeFilter } from "./attachment-access";
 import { inboundRooted } from "./inbound-origin";
 import { conversationAudience } from "./memory-files";
 
@@ -128,14 +129,8 @@ export async function buildMentionEvents(
   // D-06, P-10: flat)
   const root = mention.threadRootId;
   const aiChat = conv.kind === "ai_chat";
-  const threadFilter =
-    conv.kind === "dm" || conv.kind === "group" || aiChat
-      ? eq(messages.conversationId, conv.id)
-      : or(
-          eq(messages.id, root),
-          eq(messages.threadId, root),
-          ...(conv.kind === "thread" ? [eq(messages.conversationId, conv.id)] : []),
-        );
+  // 07.15 D-16: the same filter decides which files the turn may read or import (attachment-access.ts).
+  const threadFilter = messageScopeFilter(conv, root);
   const historyRows = (
     await tx
       .select()
