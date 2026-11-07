@@ -1197,3 +1197,185 @@ test("admin: five grouped modes with their reasons, the HTTPS notice and the org
     await admin.dispose();
   }
 });
+
+const ACME_NOTES = "Acme Notes";
+/** The fake's issuer and its pre-registered public client (redirect = this run's API callback). */
+const FAKE_ISSUER = `http://${FAKE_MCP_HOST}/mcp-oauth`;
+const FAKE_PUBLIC_CLIENT = "ocw-e2e";
+
+async function fakeOAuthScenario(s: Record<string, unknown>) {
+  const res = await fetch(`${FAKE_URL}/mcp-oauth/__scenario`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(s),
+  });
+  expect(res.ok, "fake scenario").toBe(true);
+}
+
+test("admin: Test sign-in explains OAuth before saving, at both widths and themes", async ({
+  browser,
+}, info) => {
+  test.setTimeout(180_000);
+  expect(FAKE_URL, "OCW_E2E_FAKE_URL (the fake OAuth MCP server) is set by scripts/e2e-isolated.sh").not.toBe(
+    "",
+  );
+  const mobile = info.project.name === "mobile";
+  const tag = mobile ? "390" : "1440";
+  const admin = await apiAs(ADMIN);
+  await removeServers(admin, [ACME_NOTES]);
+  const boss = await openAs(browser, ADMIN, info.project.name);
+  try {
+    const page = boss.page;
+    await boss.context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: BASE_URL });
+    // The e2e stack is plain http on loopback: the list says the instance serves a client metadata document, and later
+    // that it tells providers to return to another host than the one this page is on.
+    const METADATA_URL = "https://ocw.acme.example/api/v1/connectors/oauth/client-metadata.json";
+    let redirectOverride: string | null = null;
+    await page.route("**/api/v1/mcp-servers", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      const res = await route.fetch();
+      const json = (await res.json()) as ListJson;
+      if (json.oauth) {
+        json.oauth = {
+          ...json.oauth,
+          clientMetadataUrl: METADATA_URL,
+          ...(redirectOverride ? { redirectUri: redirectOverride } : {}),
+        };
+      }
+      await route.fulfill({ response: res, json });
+    });
+    // Slow the answer a little so the busy label can be seen.
+    await page.route("**/api/v1/connectors/oauth-test", async (route) => {
+      await new Promise((r) => setTimeout(r, 600));
+      await route.fallback();
+    });
+    const tests = captureBodies(page, "POST", /^\/api\/v1\/connectors\/oauth-test$/u);
+    await page.goto(`${BASE_URL}/settings/mcp-servers`);
+
+    // ---- Organization sign-in with the fake's pre-registered client: every step but the token one is ok
+    await page.getByTestId("mcp-add").first().click();
+    const dialog = page.getByTestId("mcp-server-dialog");
+    await dialog.getByTestId("mcp-name").fill(ACME_NOTES);
+    await dialog.getByTestId("mcp-url").fill(OAUTH_MCP_URL);
+    await dialog.getByTestId("mcp-auth-mode-org_oauth").click();
+    await expect(dialog.getByTestId("mcp-public-url-warning")).toHaveCount(0);
+    await dialog.getByTestId("mcp-oauth-client-toggle").click();
+    await dialog.getByTestId("mcp-oauth-issuer").fill(FAKE_ISSUER);
+    await dialog.getByTestId("mcp-oauth-client-id").fill(FAKE_PUBLIC_CLIENT);
+    const run = dialog.getByTestId("mcp-auth-test");
+    await expect(run).toHaveText("Test sign-in");
+    await run.click();
+    await expect(run).toHaveText("Testing…");
+    const result = dialog.getByTestId("mcp-auth-test-result");
+    const steps = result.getByTestId("mcp-auth-test-step");
+    await expect(steps).toHaveCount(7);
+    expect(await steps.evaluateAll((els) => els.map((e) => `${e.dataset.step}:${e.dataset.status}`))).toEqual(
+      [
+        "public_url:ok",
+        "discovery:ok",
+        "issuer:ok",
+        "endpoints:ok",
+        "pkce:ok",
+        "client_registration:ok",
+        "token:skipped",
+      ],
+    );
+    await expect(result).toContainText(`${ACME_NOTES}'s sign-in looks ready. Save, then Connect.`);
+    await expect(steps.first()).toContainText("This workspace's address");
+    await expect(result.getByTestId("mcp-auth-test-fix")).toHaveCount(0);
+    expect(tests.at(-1)).toMatchObject({
+      url: OAUTH_MCP_URL,
+      authMode: "org_oauth",
+      oauthClient: { issuer: FAKE_ISSUER, clientId: FAKE_PUBLIC_CLIENT },
+      pageOrigin: new URL(BASE_URL).origin,
+    });
+    // The copy fields sit under the result, with labelled copy buttons that announce the copy.
+    const redirect = dialog.getByTestId("mcp-redirect-uri");
+    expect((await redirect.boundingBox())?.y ?? 0).toBeGreaterThan((await result.boundingBox())?.y ?? 0);
+    const liveOf = (id: string) => dialog.getByTestId(id).locator("xpath=..").locator('[aria-live="polite"]');
+    await dialog.getByRole("button", { name: "Copy redirect URI" }).click();
+    await expect(liveOf("mcp-redirect-uri")).toHaveText("Copied");
+    await dialog.getByRole("button", { name: "Copy client metadata URL" }).click();
+    await expect(liveOf("mcp-client-metadata-url")).toHaveText("Copied");
+    await expect(dialog.getByTestId("mcp-cimd-hint")).toHaveText(
+      `If ${ACME_NOTES}'s sign-in can't load this address (a firewall, Cloudflare bot protection or Access in front of this workspace), allow this path or turn off the client metadata URL.`,
+    );
+    await result.scrollIntoViewIfNeeded();
+    await bothThemes(page, `mcp-org-test-ok-${tag}`);
+    await a11yBothThemes(page, '[data-testid="mcp-server-dialog"]');
+    if (mobile) await expectTouchTargets(dialog.locator("form"), "the dialog with the Test sign-in result");
+
+    // ---- no automatic registration and no client: the step, its label and the fix line
+    await fakeOAuthScenario({ no_registration: true });
+    await dialog.getByTestId("mcp-oauth-issuer").fill("");
+    await dialog.getByTestId("mcp-oauth-client-id").fill("");
+    await run.click();
+    await expect(result.locator('[data-step="client_registration"]')).toHaveAttribute(
+      "data-status",
+      "failed",
+      {
+        timeout: 30_000,
+      },
+    );
+    await expect(result.locator('[data-step="token"]')).toHaveAttribute("data-status", "skipped");
+    await expect(result).toContainText("Sign-in fails at: Client registration");
+    await expect(result.getByTestId("mcp-auth-test-fix")).toHaveText(
+      `${ACME_NOTES} doesn't let OCW register itself. Create an OAuth app at the provider with the redirect URI below, then enter its client ID and secret under Pre-registered client.`,
+    );
+    await result.scrollIntoViewIfNeeded();
+    await bothThemes(page, `mcp-org-test-fail-${tag}`);
+    await a11yBothThemes(page, '[data-testid="mcp-server-dialog"]');
+    await fakeOAuthScenario({});
+
+    // ---- client credentials: a wrong secret fails at Token with its fix line; the right one gets a token
+    await dialog.getByTestId("mcp-auth-mode-org_client_credentials").click();
+    await expect(result).toHaveCount(0);
+    const fields = dialog.getByTestId("mcp-cc-fields");
+    await fields.getByTestId("mcp-cc-client-id").fill(CC_CLIENT);
+    await fields.getByTestId("mcp-cc-client-secret").fill("e2e-wrong-secret");
+    await run.click();
+    await expect(result.locator('[data-step="token"]')).toHaveAttribute("data-status", "failed", {
+      timeout: 30_000,
+    });
+    await expect(result).toContainText("Sign-in fails at: Token");
+    await expect(result.getByTestId("mcp-auth-test-fix")).toHaveText(
+      "The provider didn't finish the sign-in. Check the client ID and secret, then try again.",
+    );
+    const panelHtml = () => dialog.getByTestId("mcp-auth-test-panel").evaluate((el) => el.outerHTML);
+    for (const text of ["fake:", "invalid_client", "error_description", CC_SECRET, "e2e-wrong-secret"]) {
+      expect(await panelHtml(), text).not.toContain(text);
+    }
+    await fields.getByTestId("mcp-cc-client-secret").fill(CC_SECRET);
+    await run.click();
+    await expect(result).toContainText(`${ACME_NOTES} issued a token. Save to use it.`, { timeout: 30_000 });
+    await expect(result.locator('[data-step="token"]')).toHaveAttribute("data-status", "ok");
+    expect(await panelHtml()).not.toContain(CC_SECRET);
+    expect(tests.at(-1)).toMatchObject({
+      authMode: "org_client_credentials",
+      clientCredentials: { clientId: CC_CLIENT, clientSecret: CC_SECRET },
+    });
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog).toBeHidden();
+
+    // ---- the workspace tells providers another host than the page's: the warning names both
+    redirectOverride = "http://ocw-internal.acme.example:4290/api/v1/connectors/oauth/callback";
+    await page.reload();
+    await page.getByTestId("mcp-add").first().click();
+    await dialog.getByTestId("mcp-name").fill(ACME_NOTES);
+    await dialog.getByTestId("mcp-url").fill(OAUTH_MCP_URL);
+    await dialog.getByTestId("mcp-auth-mode-org_oauth").click();
+    await expect(dialog.getByTestId("mcp-public-url-warning")).toHaveText(
+      `This workspace tells providers to return to ocw-internal.acme.example, but you opened it at ${new URL(BASE_URL).hostname}. Set OCW_PUBLIC_API_URL to this workspace's public HTTPS address (pnpm ocw enable proxy), then reload.`,
+    );
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    // Nothing was saved by any test.
+    const list = (await (await admin.get("/api/v1/mcp-servers")).json()) as ListJson;
+    expect(list.servers.map((s) => s.name)).not.toContain(ACME_NOTES);
+  } finally {
+    await fakeOAuthScenario({}).catch(() => undefined);
+    await boss.context.close();
+    await removeServers(admin, [ACME_NOTES]).catch(() => undefined);
+    await admin.dispose();
+  }
+});
