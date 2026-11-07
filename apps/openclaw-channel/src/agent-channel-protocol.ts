@@ -426,6 +426,50 @@ export const TurnConsult = z.object({
 });
 export type TurnConsult = z.infer<typeof TurnConsult>;
 
+// ---------------------------------------------------------------- turn attachments (07.15, mirror of contracts
+// bot-capabilities.ts; parity: plugin-contract.test.ts)
+
+/** `image`, `text` (always returned as text, never rendered), `pdf` or `other` (sandbox import only). */
+export const TurnAttachmentKind = z.enum(["image", "text", "pdf", "other"]);
+export type TurnAttachmentKind = z.infer<typeof TurnAttachmentKind>;
+/** Decided by the API per bot: `read` (`ocw_attachment_read`), `import` (`ocw_sandbox_import` only) or `none`. */
+export const TurnAttachmentAccess = z.enum(["read", "import", "none"]);
+export type TurnAttachmentAccess = z.infer<typeof TurnAttachmentAccess>;
+
+/** The contracts' fixed notes (D-04); the API sends one of them as `TurnAttachment.note`. */
+export const TURN_ATTACHMENT_NOTES = {
+  modelNoImages: "This bot's model can't see images.",
+  cannotReadImport: "Can't be read as text; copy it into the sandbox with ocw_sandbox_import.",
+  cannotReadNoSandbox: "Can't be read as text, and this bot has no sandbox here.",
+  cannotReadNarrower:
+    "Can't be read as text, and this bot's sandbox is shared more widely than this conversation, so it can't be copied there.",
+  tooLarge: "Too large to read.",
+} as const;
+
+/**
+ * One attachment of the messages the turn reads: metadata only (never content, a URL, a storage key or a path). The
+ * plugin labels `name` again before the model sees it.
+ */
+export const TurnAttachment = z.object({
+  id: Id,
+  messageId: Id,
+  name: z.string().max(255),
+  mediaType: z.string().max(127),
+  size: z.number().int().nonnegative(),
+  kind: TurnAttachmentKind,
+  access: TurnAttachmentAccess,
+  note: z.string().max(200).optional(),
+});
+export type TurnAttachment = z.infer<typeof TurnAttachment>;
+
+/** The contracts' `ATTACHMENT_READ_LIMITS` (characters = UTF-16 code units); the guard's local read budget reads it. */
+export const ATTACHMENT_READ_LIMITS = {
+  listPerTurn: 20,
+  readsPerTurn: 20,
+  charsPerTurn: 200_000,
+  charsPerFile: 64_000,
+} as const;
+
 export const TurnContext = z.object({
   tools: z.array(z.string()),
   toolFlags: z.record(z.string(), TurnToolFlags).default({}),
@@ -459,6 +503,21 @@ export const TurnContext = z.object({
    * invalidates the whole turn block, so the run gets no tools at all (fail closed, never untainted by accident).
    */
   tainted: z.boolean().optional(),
+  /**
+   * 07.15 (D-02): the attachments of the messages this turn reads (at most `ATTACHMENT_READ_LIMITS.listPerTurn`).
+   * Additive: an older API sends none; an invalid list is dropped, the turn is kept (the bot then lists no files, and
+   * the API still decides every read).
+   */
+  attachments: z.array(TurnAttachment).max(ATTACHMENT_READ_LIMITS.listPerTurn).optional().catch(undefined),
+  /** 07.15 (D-05): conversation files not listed because of the cap. Absent or invalid → none mentioned. */
+  attachmentsMore: z.number().int().nonnegative().optional().catch(undefined),
+  /**
+   * 07.15 (D-17): `ocw_attachment_read` calls this turn may make, counted apart from `maxToolCalls`. Absent (an older
+   * API) or invalid → `ATTACHMENT_READ_LIMITS.readsPerTurn`; the API counts and refuses `cap_reached` either way.
+   */
+  maxAttachmentReads: z.number().int().nonnegative().optional().catch(undefined),
+  /** 07.15 (D-17): characters all reads of this turn may return. Informational: the API enforces it. */
+  maxAttachmentChars: z.number().int().nonnegative().optional().catch(undefined),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 

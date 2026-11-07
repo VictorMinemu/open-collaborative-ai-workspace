@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   AgentChannelMemorySave,
   AgentChannelToolCallRequest,
+  AgentMentionEvent,
   ATTACHMENT_READ_FLAGS,
   ATTACHMENT_READ_LIMITS,
-  AgentMentionEvent,
   BotCapabilities,
   BotCapabilityView,
   BotPolicy,
@@ -647,7 +647,15 @@ describe("turn attachments (07.15 D-02, D-04, D-05, PD-03, PD-04)", () => {
       path: "/Users/x/photo.png",
       content: "secret",
     });
-    expect(Object.keys(parsed).sort()).toEqual(["access", "id", "kind", "mediaType", "messageId", "name", "size"]);
+    expect(Object.keys(parsed).sort()).toEqual([
+      "access",
+      "id",
+      "kind",
+      "mediaType",
+      "messageId",
+      "name",
+      "size",
+    ]);
   });
 
   it("the five fixed notes, each at most 200 characters", () => {
