@@ -70,6 +70,7 @@ import {
 } from "@/lib/mcp-queries";
 import { stepLabel, stepOfFailure } from "@/lib/org-connection-format";
 import { cn } from "@/lib/utils";
+import { AuthTestPanel } from "./auth-test-panel";
 
 export const TRANSPORTS: Array<{ value: McpTransport; label: string; hint: string }> = [
   { value: "streamable-http", label: "Streamable HTTP", hint: "Most current MCP servers" },
@@ -678,6 +679,29 @@ function ServerForm({
     </FormField>
   );
 
+  /** Test sign-in with the dialog's current values (the saved server fills what the form leaves empty). */
+  const testMode =
+    authMode === "per_member_oauth" || authMode === "org_oauth" || authMode === "org_client_credentials"
+      ? authMode
+      : null;
+  const authTest =
+    testMode && !sandboxed ? (
+      <AuthTestPanel
+        server={serverLabel}
+        redirectUri={oauth.redirectUri}
+        values={{
+          serverId: base?.id ?? null,
+          url,
+          transport,
+          mode: testMode,
+          useCimd,
+          oauthClient: clientState === "edit" ? typedClient() : undefined,
+          cc: { clientId: ccClientId, clientSecret: ccSecret, tokenUrl: ccTokenUrl },
+          scopes: scopeList(),
+        }}
+      />
+    ) : null;
+
   return (
     <form onSubmit={submit} noValidate className="flex min-h-0 flex-col">
       <DialogHeader>
@@ -864,6 +888,7 @@ function ServerForm({
 
         {usesOAuthSignIn(authMode) ? (
           <div className="grid gap-4" data-testid="mcp-oauth-fields">
+            {authTest}
             {oauth.redirectUri ? (
               <CopyField
                 id="mcp-redirect-uri"
@@ -874,13 +899,19 @@ function ServerForm({
               />
             ) : null}
             {oauth.clientMetadataUrl ? (
-              <CopyField
-                id="mcp-client-metadata-url"
-                label="Client metadata URL"
-                value={oauth.clientMetadataUrl}
-                hint="Providers that accept client metadata documents need nothing else."
-                copyLabel="Copy client metadata URL"
-              />
+              <div className="grid gap-2">
+                <CopyField
+                  id="mcp-client-metadata-url"
+                  label="Client metadata URL"
+                  value={oauth.clientMetadataUrl}
+                  hint="Providers that accept client metadata documents need nothing else."
+                  copyLabel="Copy client metadata URL"
+                />
+                <p className="text-[13px] text-muted-foreground leading-snug" data-testid="mcp-cimd-hint">
+                  If {serverLabel}'s sign-in can't load this address (a firewall, Cloudflare bot protection or
+                  Access in front of this workspace), allow this path or turn off the client metadata URL.
+                </p>
+              </div>
             ) : null}
             {oauth.clientMetadataUrl ? (
               // biome-ignore lint/a11y/noLabelWithoutControl: the Switch renders the control inside the label
@@ -1146,6 +1177,7 @@ function ServerForm({
               />
             </FormField>
             {scopesField}
+            {authTest}
           </div>
         ) : null}
 
