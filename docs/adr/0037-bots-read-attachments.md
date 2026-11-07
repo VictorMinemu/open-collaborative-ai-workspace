@@ -167,3 +167,79 @@ conversation. This also fixes the import precheck that accepted unsent or other-
   security fix may need a new `unpdf` pin.
 - The real-cell smoke waits for OpenClaw's boot hot reload to settle before its first turn, because a turn inside that
   window can find the plugin mid-reload (07.15-11).
+
+## Amendment (2026-11-07, 07.15 code review fixes)
+
+*Amended 2026-11-07, before the phase merged, from `07.15-REVIEW.md` (CR-01 … IN-05). The decisions above stand; these
+points replace the parts they name.*
+
+**PDF extraction runs in a child process (CR-01, WR-06, WR-07).** This replaces "in a `worker_threads` Worker" above
+and "in the API process's worker threads" under Costs and risks. A worker's `resourceLimits` bound only its
+JavaScript heap. PDF.js inflates streams into ArrayBuffers, which belonged to the API process, so a 1 MB PDF that
+inflates to 1 GiB grew the shared API to about 2 GB. Now:
+
+- **Spawning.** `pdfText` spawns `node` on `pdf-worker.mjs` for each read (the file kept its name). The child runs
+  with:
+  - `--max-old-space-size=256`;
+  - the permission model (`--permission`): read access to that script and the `unpdf` package directory only; no
+    writes, child processes, workers, addons or WASI;
+  - `--disallow-code-generation-from-strings`;
+  - an empty environment (no secret, no `_FILE` path, no `NODE_OPTIONS`) and none of the API's flags;
+  - a fresh temporary working directory;
+  - the bytes on stdin; stdout and stderr are dropped. The one IPC answer is still Zod-parsed.
+- **Memory watchdog.** The API polls the child's resident memory and kills it past `EXTRACT_LIMITS.pdfRssMb`
+  (512 MiB). It reads `/proc/<pid>/status` every 20 ms on Linux and runs `ps` every 50 ms on macOS. The read then
+  answers `too_large`.
+- **Kernel backstop (Linux).** When `/usr/bin/prlimit` exists, the child runs under `prlimit --as` of 4 GiB, in case
+  the watchdog is late. `prlimit` comes with util-linux and is present in the API's `node:24-bookworm-slim` image.
+  The value is generous on purpose: V8 reserves 1 to 1.7 GB of address space before it allocates anything (measured
+  on arm64 and amd64), so a tight value would stop every extractor from starting. Elsewhere only the watchdog and the
+  deadline apply.
+- **Unchanged bounds.** The 10 s deadline (now SIGKILL), 100 pages, 64 000 characters and the two-per-process `busy`
+  rule stay. A call settles only after its process has closed.
+- **Input bound.** A PDF is parsed only up to `EXTRACT_LIMITS.pdfMaxBytes`, a fixed 25 MiB, whatever the upload limit.
+  A larger one is `too_large` before any storage read, and the listing says so (`tooLarge`). The API holds one copy of
+  the bytes.
+- **No text layer.** `no_text_layer` is decided from every page read, not from the cut prefix (IN-03).
+
+**What remains of WR-07:**
+
+- The extractor is a separate process, but it runs as the same OS user, in the same container and network namespace
+  as the API.
+- Node 24's permission model does not restrict the network (`--allow-net` arrived in Node 25). A PDF.js
+  code-execution bug could therefore open sockets to PostgreSQL, Redis or Garage. It has no credentials to use there:
+  the child has no environment and cannot read files outside its script and `unpdf`.
+- PDF.js has no option to bound one inflated stream, so the bound is the process's memory, not the stream's size.
+- If that ever matters, the next step is a separate container or OS user with no network.
+
+**Text reads (WR-05).** "At most a 256 KiB range read" now holds even against a store that ignores `Range`.
+`rangeGet` copies at most the bytes it asked for from the body stream, then destroys the stream.
+
+**The untrusted block (CR-02, WR-01, WR-02).**
+
+- The content may contain something a model could read as the block's own tag: any case, whitespace around the
+  slash, attributes, or no closing bracket. The `<` that starts it is replaced with U+FF1C.
+- U+FF1C is one code unit, like `<`, so the block is the content plus a fixed overhead and always fits the answer.
+- The trailing trim is `trimEnd()`, linear in the input.
+- AI chats use the same block.
+
+**What a turn may read (WR-03, WR-04).**
+
+- A read is decided again when it commits. If the message is deleted, the file swept or the asker removed during the
+  store read or the extraction, the read answers `not_found`: nothing is returned, no character is charged and the
+  audit says `denied`.
+- A turn reads only while it runs: not reported done, at most an hour old, and its bot neither turned off nor
+  deleted. Otherwise the answer is 403 `no_trigger`.
+- The one row rule (read and import) takes only files of messages up to the turn's own message (by `seq`). A file
+  posted later belongs to a later turn and is `not_found` here.
+- Other `liveTurn` tools keep their rule.
+
+**Listing and gates (IN-01, IN-02, IN-04, WR-08, IN-05).**
+
+- A turn whose tool list is full (64) is not offered `ocw_attachment_read`. Its readable files then say `none`, with
+  the fixed note `readNotOffered`.
+- The listing keeps only the conversation's own files.
+- AI chats decode attached text with the bot read's decoder: BOM, UTF-16, strict UTF-8, then windows-1252.
+- In a shared AI chat, a sender's model that cannot be resolved fails closed: only text goes, and images and PDFs are
+  refused with `attachment_not_supported`.
+- The plugin waits 35 s for one read, past the API's worst case.
