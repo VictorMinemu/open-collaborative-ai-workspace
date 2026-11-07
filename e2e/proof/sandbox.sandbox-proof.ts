@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -27,8 +27,10 @@ import { ADMIN, API_URL } from "../tests/env";
  *      agent entries allow the confined tools of each bot's switches (`alsoAllow`, from `GET /cell`) while the turn
  *      offers only what the API decides (no browser tool before 07.8-14);
  *   2. Echo (Sam's bot) cannot see that file; the two `sbx` containers sit on different networks and volumes;
- *   3. a running command is stopped by the admin's kill switch within 5 s; a turn delivered before the kill whose
- *      exec reaches the API after it answers the killed sentence; a turn after the kill is offered no sandbox tool;
+ *   3. a running command is stopped by the admin's kill switch within 5 s (Docker's SIGKILL and the command's exit,
+ *      read from Docker's events; `docker ps` may lag by the daemon's own exit bookkeeping); a turn delivered before
+ *      the kill whose exec reaches the API after it answers the killed sentence; a turn after the kill is offered no
+ *      sandbox tool;
  *   4. `sandbox.exec` / `sandbox.killed` audit rows carry ids, codes and durations only;
  *   5. after the resume, `env` in the sandbox holds neither the cell token, nor the sandbox token, nor any `OCW_` name.
  *
@@ -44,7 +46,16 @@ const NS = process.env.OCW_E2E_SANDBOX_NAMESPACE ?? "ocw-e2e";
 const NONCE = randomBytes(5).toString("hex");
 const MARK = `proof-${NONCE}`;
 const KILLED_SENTENCE = "An admin stopped all sandboxes"; // sandbox-tools.ts SANDBOX_REFUSAL_SENTENCE.killed
+/** ADR-0029 §Switches: the kill switch SIGKILLs every container of the organization at once; commands stop in 5 s. */
 const KILL_BUDGET_MS = 5_000;
+/**
+ * How long Docker itself may take to report a SIGKILLed container as not running. `POST /containers/{id}/kill` (and
+ * `docker ps`) flip only after the daemon's exit handling: containerd task delete, network release and unmounts
+ * (moby daemon/monitor.go `handleContainerExit`). The daemon waits 10 s for that, then sends a direct SIGKILL and waits
+ * 2 s more (moby daemon/kill.go). On a loaded CI daemon this took 12.7 s and 13.6 s for two killed containers whose
+ * processes were long dead (p146): Docker's bookkeeping, not the command.
+ */
+const DOCKER_KILL_WAIT_MS = 12_000;
 
 const state = {
   org: "",
@@ -57,7 +68,12 @@ const state = {
   coldStartMs: 0,
   /** Asks until the switch change reached the cell's agent entry (1 = the first message already had the tool). */
   firstExecAttempts: 0,
+  /** Kill switch → Docker's SIGKILL of the last running container of the organization (`kill` events). */
   killLatencyMs: 0,
+  /** Kill switch → the running command's exec died (`exec_die`). */
+  killCommandMs: 0,
+  /** Kill switch → Docker lists no running container of the organization (its exit bookkeeping). */
+  killContainersMs: 0,
   /** The steps that passed, read by scripts/sandbox-proof.sh for its PASS lines. */
   passed: [] as number[],
 };
@@ -79,6 +95,7 @@ function docker(...args: string[]): string {
 }
 
 type Inspect = {
+  Id: string;
   Name: string;
   State: { Running: boolean };
   Config: { Labels: Record<string, string>; Env: string[] | null };
@@ -119,6 +136,57 @@ const confinedOf = (tools: string[]) =>
 
 const runningOfOrg = () =>
   docker("ps", "-q", "--filter", `label=ocw.org=${state.org}`).split("\n").filter(Boolean);
+
+type DockerEvent = { at: number; action: string; id: string; signal?: string };
+
+/**
+ * Docker's own record of a kill as it happens (arrival time here, no clock comparison): `kill` when the daemon has sent
+ * the signal, `exec_die` when a command run by exec has exited. Both come before the daemon's exit bookkeeping that
+ * `docker ps` waits for (DOCKER_KILL_WAIT_MS).
+ */
+function watchKillEvents(org: string): { seen: DockerEvent[]; stop: () => void } {
+  const child = spawn(
+    "docker",
+    [
+      "events",
+      "--filter",
+      `label=ocw.org=${org}`,
+      "--filter",
+      "event=kill",
+      "--filter",
+      "event=exec_die",
+      "--format",
+      "{{json .}}",
+    ],
+    { stdio: ["ignore", "pipe", "ignore"] },
+  );
+  const seen: DockerEvent[] = [];
+  let buf = "";
+  child.stdout.on("data", (chunk: Buffer) => {
+    buf += chunk.toString("utf8");
+    for (let i = buf.indexOf("\n"); i >= 0; i = buf.indexOf("\n")) {
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      try {
+        const e = JSON.parse(line) as {
+          Action?: string;
+          status?: string;
+          id?: string;
+          Actor?: { ID?: string; Attributes?: Record<string, string> };
+        };
+        seen.push({
+          at: Date.now(),
+          action: e.Action ?? e.status ?? "",
+          id: e.Actor?.ID ?? e.id ?? "",
+          signal: e.Actor?.Attributes?.signal,
+        });
+      } catch {
+        // not an event line
+      }
+    }
+  });
+  return { seen, stop: () => child.kill() };
+}
 
 // ---------------------------------------------------------------- chat through the API
 
@@ -320,7 +388,10 @@ test("3. the kill switch stops a running command within 5 s; the next exec answe
   // A long command: the exec yields after 25 s with a process id while it keeps running.
   const long = await ask(ana, state.scoutDm, `wait ${exec(["sleep", "120"])}`);
   expect(long.reply).toMatch(/still running as process [A-Za-z0-9_-]+/);
-  expect(runningOfOrg().length).toBeGreaterThan(0);
+  const running = runningOfOrg();
+  expect(running.length).toBeGreaterThan(0);
+  const scoutSbx = sbxOf(state.scoutId).Id;
+  const watch = watchKillEvents(state.org);
 
   // A turn delivered BEFORE the kill whose model thinks 8 s before calling exec, so the call reaches the API after it.
   const late = await post(ana, state.scoutDm, `after the kill [[pause:8]] ${exec(["echo", "after-kill"])}`);
@@ -331,13 +402,37 @@ test("3. the kill switch stops a running command within 5 s; the next exec answe
   const started = Date.now();
   const killed = await killSwitch(ana);
   expect(killed.killed).toMatchObject({ by: { id: state.anaId } });
-  await expect.poll(() => runningOfOrg().length, { timeout: KILL_BUDGET_MS, intervals: [100] }).toBe(0);
-  state.killLatencyMs = Date.now() - started;
+  // What ADR-0029 promises: every running container SIGKILLed and the running command gone, within 5 s.
+  const signalled = () =>
+    running.map((id) =>
+      watch.seen.find((e) => e.action === "kill" && e.signal === "9" && e.id.startsWith(id)),
+    );
+  const commandEnd = () => watch.seen.find((e) => e.action === "exec_die" && e.id === scoutSbx);
+  try {
+    await expect
+      .poll(() => signalled().every(Boolean) && commandEnd() !== undefined, {
+        timeout: KILL_BUDGET_MS + DOCKER_KILL_WAIT_MS,
+        intervals: [100],
+      })
+      .toBe(true);
+  } finally {
+    watch.stop();
+  }
+  state.killLatencyMs = Math.max(...signalled().map((e) => (e?.at ?? Number.POSITIVE_INFINITY) - started));
+  state.killCommandMs = (commandEnd()?.at ?? Number.POSITIVE_INFINITY) - started;
+  // Docker's own bookkeeping after that (DOCKER_KILL_WAIT_MS): its kill call answers, and `docker ps` drops the
+  // containers, only once their exit is handled.
+  await expect
+    .poll(() => runningOfOrg().length, { timeout: KILL_BUDGET_MS + DOCKER_KILL_WAIT_MS, intervals: [250] })
+    .toBe(0);
+  state.killContainersMs = Date.now() - started;
   console.log(
-    `[proof] kill switch: no running container of the organization after ${state.killLatencyMs} ms`,
+    `[proof] kill switch: ${running.length} container(s) SIGKILLed after ${state.killLatencyMs} ms, the running command exited after ${state.killCommandMs} ms; Docker listed none running after ${state.killContainersMs} ms`,
   );
-  expect(state.killLatencyMs).toBeLessThanOrEqual(KILL_BUDGET_MS);
   record();
+  expect(state.killLatencyMs).toBeLessThanOrEqual(KILL_BUDGET_MS);
+  expect(state.killCommandMs).toBeLessThanOrEqual(KILL_BUDGET_MS);
+  expect(state.killContainersMs).toBeLessThanOrEqual(KILL_BUDGET_MS + DOCKER_KILL_WAIT_MS);
 
   const lateReply = await replyTo(ana, state.scoutDm, late);
   console.log(`[proof] late exec reply: ${lateReply}`);
