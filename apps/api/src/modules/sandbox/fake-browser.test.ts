@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { decodeFrameHeader, FRAME_HEADER_BYTES, FRAME_TYPES, SandboxdFrameControl } from "@ocw/contracts";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { type FakeSandboxdServer, startFakeSandboxd } from "../../testing-sandbox";
 import { createSandboxdClient, SandboxdRefusedError, SandboxdUnavailableError } from "./client";
 
@@ -138,6 +138,21 @@ describe("fake sandboxd browser ops parse with the contract (createSandboxdClien
     await expect(client.call("contextSnapshot", { target, contextId: randomUUID() })).rejects.toMatchObject({
       code: "no_context",
     });
+  });
+
+  it("a delay `after` runs the op at once and holds only its answer: a close ends the page before the caller hears", async () => {
+    const contextId = await open();
+    expect((await control("delay", { op: "contextClose", ms: 2000, after: true })).status).toBe(200);
+    let answered = false;
+    const answer = client.call("contextClose", { target, contextId }).finally(() => {
+      answered = true;
+    });
+    await vi.waitFor(
+      () => expect(fake.stats().browser.contexts.some((c) => c.contextId === contextId)).toBe(false),
+      { timeout: 1500, interval: 20 },
+    );
+    expect(answered).toBe(false);
+    expect(await answer).toEqual({ closed: true });
   });
 
   it("the leak control's snapshot fails the contract parse (a redacted node may only carry [redacted])", async () => {
