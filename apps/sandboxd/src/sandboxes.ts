@@ -57,6 +57,11 @@ const RUN_TIMEOUT_MS = 60_000;
 const STDIN_CHUNK = 64 * 1024;
 /** A broker-caused stop is matched to its `die` event within this window. */
 const EXPECTED_STOP_MS = 60_000;
+/** `ocw-run --kill` exits 3 when it holds no record of the id: the command has not recorded its group yet. */
+const KILL_NO_RECORD = 3;
+/** How long a process kill keeps retrying a command that has not recorded its group yet, and how often. */
+const PROCESS_KILL_BUDGET_MS = 5_000;
+const KILL_RETRY_MS = 100;
 /** The longest a kill waits for the container's last usage sample (best-effort; the kill never waits longer). */
 const KILL_SAMPLE_BUDGET_MS = 250;
 const WATCH_RETRY_MS = 2_000;
@@ -969,10 +974,22 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     if (res.status !== 204 && res.status !== 404) throw dockerDown();
   }
 
+  /**
+   * SIGKILLs the process group `ocw-run` recorded for this process. Docker answers the exec start before runc has
+   * spawned the command, so on a loaded daemon the helper can run before the command recorded its group; it then exits
+   * `KILL_NO_RECORD` and the kill is tried again until it lands, the command ends, or `PROCESS_KILL_BUDGET_MS` runs
+   * out (CI p144: a single attempt left `sleep 300` running and the kill answered `running`).
+   */
   async function killRecord(rec: ProcessRecord): Promise<void> {
-    if (rec.ended) return;
-    const c = await inspectContainer(nameFor("sbx", ns, rec.agentId));
-    if (c?.State?.Running) await runIn(c.Id, [OCW_RUN, "--kill", rec.id], { timeoutMs: 10_000 });
+    const deadline = clock.now() + PROCESS_KILL_BUDGET_MS;
+    for (;;) {
+      if (rec.ended) return;
+      const c = await inspectContainer(nameFor("sbx", ns, rec.agentId));
+      if (!c?.State?.Running) return;
+      const res = await runIn(c.Id, [OCW_RUN, "--kill", rec.id], { timeoutMs: 10_000 });
+      if (res.exitCode !== KILL_NO_RECORD || rec.ended || clock.now() >= deadline) return;
+      await sleep(KILL_RETRY_MS);
+    }
   }
 
   return {
