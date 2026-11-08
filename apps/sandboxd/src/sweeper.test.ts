@@ -318,3 +318,29 @@ describe("policy and usage routes", () => {
     }
   });
 });
+
+describe("sweeper and the kill switch (D-09)", () => {
+  it("a pass that listed a sandbox just before the kill starts nothing for it afterwards (no files helper)", async () => {
+    const t = setup();
+    await t.sandboxes.ensure(target);
+    // The pass lists the running shell, then the admin's kill lands (the push and the kill run at once, CI p164).
+    const sweeper = createSweeper({
+      sandboxes: {
+        ...t.sandboxes,
+        listRunning: async () => {
+          const listed = await t.sandboxes.listRunning();
+          t.sandboxes.setPolicy({ ...policy({ killed: true }), version: 2 });
+          await t.sandboxes.killOrg(ORG);
+          return listed;
+        },
+      },
+      quota: t.quota,
+      clock: t.clock,
+      intervalMs: 60_000,
+    });
+    const creates = t.docker.containerCreates.length;
+    await sweeper.tick();
+    expect(t.docker.containerCreates.slice(creates)).toEqual([]);
+    expect([...t.docker.containers.values()].filter((c) => c.Running).map((c) => c.Name)).toEqual([]);
+  });
+});
