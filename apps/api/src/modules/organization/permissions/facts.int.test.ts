@@ -365,6 +365,37 @@ describe("batch facts and usersAllowed (Phase 07.2: reader counts and deciders)"
     expect(await allowed("memory.read", "notes/x.md", [])).toEqual([]);
   });
 
+  it("usersDecider loads once (three queries) and decides each resource as usersAllowed does; never an id it did not load", async () => {
+    const service = perms();
+    const everyone = [ada, amy, bob, dan, ali, dot, old, gus, randomUUID()];
+    const resourceFor = (path: string) => (userId: string) =>
+      memoryResource(scopeOf([D_, A_]), path, { kind: "user", id: userId });
+    await withF(async (tx) => {
+      const spy = vi.spyOn(tx, "select");
+      const decider = await service.usersDecider(tx, everyone);
+      expect(spy.mock.calls.length, "members, unit memberships, rules").toBe(3);
+      for (const permission of ["memory.read", "memory.promote"] as const) {
+        for (const path of ["notes/x.md", "MEMORY.md"]) {
+          for (const candidates of [everyone, [bob, amy, old, gus, amy], []]) {
+            spy.mockClear();
+            const got = decider.allowed(candidates, permission, resourceFor(path));
+            expect(spy.mock.calls.length, "decided in memory").toBe(0);
+            expect(got).toEqual(
+              await service.usersAllowed(tx, { candidates, permission, resourceFor: resourceFor(path) }),
+            );
+          }
+        }
+      }
+      spy.mockRestore();
+      // Loaded with Amy only: Ada (an admin who would read it) is never returned (fail closed).
+      const amyOnly = await service.usersDecider(tx, [amy]);
+      expect(amyOnly.allowed([ada, amy], "memory.read", resourceFor("notes/x.md"))).toEqual([amy]);
+      expect((await service.usersDecider(tx, [])).allowed([ada], "memory.read", resourceFor("x.md"))).toEqual(
+        [],
+      );
+    });
+  });
+
   it("a folder deny for one member removes exactly that member under that folder", async () => {
     const service = perms();
     await q(

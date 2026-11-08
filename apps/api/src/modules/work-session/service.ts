@@ -57,14 +57,14 @@ import {
   storedSettings,
   turnMode,
 } from "./controls";
-import { type SessionFactsRow, sessionAccessSql, sessionFactsForUsers, sessionResourceOf } from "./facts";
+import { type SessionFactsRow, sessionAccessSql, sessionFactsForSessions, sessionResourceOf } from "./facts";
 import {
   currentSessionModel,
   hydratePromptImages,
   type PromptImagesPlan,
   preparePromptImages,
 } from "./images";
-import { OrgQueue, type OrgQueueOptions, type OrgTask } from "./org-queue";
+import { eachBounded, OrgQueue, type OrgQueueOptions, type OrgTask } from "./org-queue";
 import { loadWorkZonePolicy } from "./policy";
 import { decideTitleRequest, heuristicTitle, loadTitleContext } from "./title";
 import {
@@ -80,6 +80,12 @@ import {
 const PUBLISH_BATCH = 200;
 /** Sessions decided per read of a delivery (one short system transaction each, never a snapshot of thousands). */
 const DELIVER_BATCH = 50;
+/**
+ * Reads of one delivery at once (WINDOWS #311): the SQL rule per (session, member) is CPU in PostgreSQL, so batches run
+ * on separate connections. With the queue's two organizations at once, background deliveries hold at most six of the
+ * pool's ten connections.
+ */
+export const DELIVER_CONCURRENCY = 3;
 /** Sessions re-checked per transaction of a sweep: short row locks, so the device's own events interleave. */
 const SWEEP_CHUNK = 50;
 /** Shutdown: how long the background queue may drain before what still waits is dropped (07.9 fan-out). */
@@ -496,7 +502,7 @@ export class WorkSessionService implements DeviceSessionHandler {
 
   /**
    * In the background queue, in a fresh read: each session's current DTO goes to the people the resolver lets read it,
-   * decided exactly as the detail route decides one person (`work_session.read` on `sessionFactsForUsers`), each frame
+   * decided exactly as the detail route decides one person (`work_session.read` on `sessionFactsForSessions`), each frame
    * shaped for its recipient (Phase 07.10, PD-03, PD-04: never one shared DTO naming a project to someone who may not
    * see it named). Candidates are the people the SQL rule names with a seeing relation (creator, creator who left,
    * device owner, viewer: the set `app.work_session_viewers` enumerates) and the active admins (never enumerated by the
@@ -506,14 +512,18 @@ export class WorkSessionService implements DeviceSessionHandler {
    * it removed. Throws: the queue retries (07.9 fan-out). Sessions are decided DELIVER_BATCH at a time, each batch in
    * its own read.
    *
-   * 07.9-12 (WINDOWS #311, measured in list-perf.int.test.ts): the rule runs once per active member and session, through
-   * `sessionFactsForUsers` (the reasons `work_session_viewers` adds for the panel cost four times more and are not needed
-   * here), and the frames are published concurrently in bounded batches.
+   * 07.9-12 (WINDOWS #311, measured in list-perf.int.test.ts): the rule runs once per active member and session (the
+   * reasons `work_session_viewers` adds for the panel cost four times more and are not needed here), and the frames are
+   * published concurrently in bounded batches. Batching (pinned by delivery-batching.int.test.ts): a batch costs a fixed
+   * number of round trips whatever its size (every member's facts on all its sessions in one query, the members' resolver
+   * facts and the rules loaded once), and up to DELIVER_CONCURRENCY batches are read at once.
    */
   private async deliverNow(organizationId: string, sessionIds: readonly string[]): Promise<void> {
+    const batches: Array<readonly string[]> = [];
     for (let i = 0; i < sessionIds.length; i += DELIVER_BATCH) {
-      await this.deliverBatch(organizationId, sessionIds.slice(i, i + DELIVER_BATCH));
+      batches.push(sessionIds.slice(i, i + DELIVER_BATCH));
     }
+    await eachBounded(batches, DELIVER_CONCURRENCY, (batch) => this.deliverBatch(organizationId, batch));
   }
 
   private async deliverBatch(organizationId: string, sessionIds: readonly string[]): Promise<void> {
@@ -534,27 +544,31 @@ export class WorkSessionService implements DeviceSessionHandler {
             .where(and(eq(orgMembers.role, "admin"), isNull(orgMembers.deactivatedAt)))
         ).map((a) => a.userId),
       );
+      // Every member's audience facts on every session of the batch (one query), then the members' resolver facts and
+      // the rules (once): each session is decided in memory exactly as `usersAllowed` decides it.
+      const factsBySession = await sessionFactsForSessions(
+        tx,
+        sources.map((s) => s.dto),
+        members,
+      );
+      const decider = await this.deps.perms.usersDecider(tx, members);
       const out: DeliverySource[] = [];
       for (const { dto, project } of sources) {
-        const facts = await sessionFactsForUsers(tx, dto, members);
+        const facts = factsBySession.get(dto.id) ?? new Map<string, ResourceFacts>();
         const candidates = members.filter((id) => {
           const f = facts.get(id);
           return f !== undefined && (admins.has(id) || seesSession(f));
         });
-        const recipients = await this.deps.perms.usersAllowed(tx, {
-          candidates,
-          permission: "work_session.read",
-          resourceFor: (userId) => {
-            const f = facts.get(userId);
-            if (!f) throw new Error("session facts missing for a candidate");
-            return f;
-          },
+        const recipients = decider.allowed(candidates, "work_session.read", (userId) => {
+          const f = facts.get(userId);
+          if (!f) throw new Error("session facts missing for a candidate");
+          return f;
         });
         out.push({ dto, project, recipients, facts });
       }
       // Phase 07.10 (PD-03, PD-04, PD-05): each recipient gets the session as they read it (its project named or
       // hidden, what in it waits on them), decided for the whole batch.
-      const fields = await loadViewerFieldsForRecipients(tx, this.deps.perms, out);
+      const fields = await loadViewerFieldsForRecipients(tx, decider, out);
       return out.map(({ dto, recipients }) => ({
         frames: recipients.map((userId) => ({
           userId,

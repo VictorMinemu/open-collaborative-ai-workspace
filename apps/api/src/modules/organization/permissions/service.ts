@@ -28,6 +28,20 @@ export interface DecideOptions {
   onBehalfOfResource?: ResourceFacts;
 }
 
+/** Decisions over preloaded people (`PermissionService.usersDecider`). */
+export interface UsersDecider {
+  /**
+   * The people (sorted user ids) among `candidates` who hold `permission`, each on their own `resourceFor(userId)`: what
+   * `usersAllowed` returns for these candidates. Deactivated members, ids outside the tenant and ids the decider was not
+   * loaded with are never returned (fail closed).
+   */
+  allowed(
+    candidates: readonly string[],
+    permission: Permission,
+    resourceFor: (userId: string) => ResourceFacts,
+  ): string[];
+}
+
 export interface PermissionService {
   /** Decide without a request (background jobs, tests). Loads facts in `tx`. */
   decide(
@@ -84,6 +98,11 @@ export interface PermissionService {
       resourceFor: (userId: string) => ResourceFacts;
     },
   ): Promise<string[]>;
+  /**
+   * `usersAllowed` for many resources at once (the live session fan-out, WINDOWS #311): the facts of `userIds` and the
+   * rules load once (three queries), then every `allowed` call decides in memory exactly as `usersAllowed` does.
+   */
+  usersDecider(tx: Tx, userIds: readonly string[]): Promise<UsersDecider>;
   /** The subset of `candidates` the caller holds on `resource` (drives per-resource `viewerCan`). */
   viewerCan(
     req: FastifyRequest,
@@ -256,15 +275,25 @@ export function createPermissionService(deps: PermissionDeps): PermissionService
             ).map((m) => m.userId)
           : candidates;
       if (ids.length === 0) return [];
-      const people = await loadPrincipalFactsMany(tx, ids);
-      if (people.size === 0) return [];
-      const rules = await loadRules(tx);
-      const allowed: string[] = [];
-      for (const p of people.values()) {
-        if (p.deactivated) continue;
-        if (decideFacts(p, resourceFor(p.id), rules, permission).allowed) allowed.push(p.id);
-      }
-      return allowed.sort();
+      return (await service.usersDecider(tx, ids)).allowed(ids, permission, resourceFor);
+    },
+
+    async usersDecider(tx, userIds) {
+      const people: Map<string, PrincipalFacts> =
+        userIds.length === 0 ? new Map() : await loadPrincipalFactsMany(tx, userIds);
+      const rules: RuleFact[] = people.size === 0 ? [] : await loadRules(tx);
+      return {
+        allowed(candidates, permission, resourceFor) {
+          // Over the loaded people (ids as the database prints them), as `usersAllowed` always iterated.
+          const wanted = new Set(candidates.map((id) => id.toLowerCase()));
+          const allowed: string[] = [];
+          for (const p of people.values()) {
+            if (p.deactivated || !wanted.has(p.id)) continue;
+            if (decideFacts(p, resourceFor(p.id), rules, permission).allowed) allowed.push(p.id);
+          }
+          return allowed.sort();
+        },
+      };
     },
 
     async viewerCan(req, tx, resource, candidates) {

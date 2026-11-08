@@ -67,6 +67,7 @@ export {
   principalOf,
   principalTenant,
   recordAuthzDenial,
+  type UsersDecider,
 } from "./permissions/service";
 export { createUnit, orgTopic, requireUnit, type UnitRow, uuidArray } from "./units";
 
