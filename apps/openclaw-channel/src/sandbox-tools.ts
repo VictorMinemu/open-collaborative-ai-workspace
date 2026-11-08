@@ -120,6 +120,7 @@ export const SANDBOX_REFUSAL_SENTENCE: Record<SandboxRefusal, string> = {
   too_large: "That is too large for my sandbox tools.",
   invalid_path: "That path is not valid. Use a path relative to /workspace, without .. or a leading /.",
   busy: "My sandbox is busy with another call. Try again in a moment.",
+  starting: "My sandbox is still starting. Try the same call again in a moment.",
 };
 
 /** A refusal family: its codes and their fixed sentences. */

@@ -21,6 +21,7 @@ import {
   MAX_SANDBOX_CALLS_PER_TURN,
   SANDBOX_LIMITS,
   SANDBOX_REFUSAL_STATUS,
+  SANDBOX_TIMEOUTS_MS,
   type SandboxdErrorCode,
   type SandboxdTarget,
   type SandboxFileEntry,
@@ -61,6 +62,7 @@ import {
   markState,
   reserveSandbox,
   type SandboxContainer,
+  type SandboxdCallOptions,
   type SandboxdClient,
   SandboxdRefusedError,
   sandboxAvailable,
@@ -110,10 +112,11 @@ const EXEC = BUILTIN_TOOLS.sandboxExec;
 /** Default deadline of one command when the bot names none. */
 const DEFAULT_EXEC_TIMEOUT_SECONDS = 120;
 /** How much longer than the yield the API waits for sandboxd's answer. */
-const EXEC_ANSWER_MARGIN_MS = 15_000;
-const ENSURE_TIMEOUT_MS = 60_000;
+const EXEC_ANSWER_MARGIN_MS = SANDBOX_TIMEOUTS_MS.execAnswerMargin;
 /** A shared file comes back from sandboxd as base64 JSON (up to the attachment limit). */
 const SHARE_DOWNLOAD_TIMEOUT_MS = 60_000;
+/** How much longer than the start's share the transport may wait, so the share (`starting`) always decides first. */
+const START_BACKSTOP_MS = 1_000;
 
 /** Every code a sandbox call can be refused with. */
 export type SandboxCallRefusal =
@@ -145,6 +148,7 @@ const MESSAGES: Record<SandboxCallRefusal, string> = {
   too_large: "Too large for the sandbox",
   invalid_path: "That path is not inside the workspace",
   busy: "The sandbox is busy",
+  starting: "The sandbox is still starting",
 };
 
 /**
@@ -492,19 +496,23 @@ export async function finishSandboxCall(
 
 /**
  * What the API records about the bot's container after a call: running once sandboxd ensured it; unavailable when the
- * service failed; `disk_full` when sandboxd said so; nothing otherwise. A `starting` slot taken by the decision is
- * always released by one of these (so a failed start never holds the organization's cap).
+ * service failed; `disk_full` when sandboxd said so; `killed` when the kill switch won the race with the start; nothing
+ * otherwise. A `starting` slot taken by the decision is always released by one of these (so a failed start never holds
+ * the organization's cap), except a start the call's share cut (`starting`): sandboxd is still starting it, so the
+ * reservation stays until sandboxd's state event, the next call's ensure or the stale-reservation sweep settles it.
  */
 export function containerStateAfter(p: {
   reserved: boolean;
   ensured: boolean;
   failure: SandboxRefusal | null;
 }): {
-  state: "running" | "unavailable" | "disk_full";
-  stopReason: "service_down" | "disk_full" | null;
+  state: "running" | "unavailable" | "disk_full" | "killed";
+  stopReason: "service_down" | "disk_full" | "kill_switch" | null;
 } | null {
+  if (p.failure === "starting") return null;
   if (p.failure === "service_unavailable") return { state: "unavailable", stopReason: "service_down" };
   if (p.failure === "disk_full") return { state: "disk_full", stopReason: "disk_full" };
+  if (p.failure === "killed") return { state: "killed", stopReason: "kill_switch" };
   if (p.ensured) return { state: "running", stopReason: null };
   if (p.reserved) return { state: "unavailable", stopReason: "service_down" };
   return null;
@@ -516,6 +524,80 @@ class LocalRefusal extends Error {
     super(code);
     this.name = "LocalRefusal";
   }
+}
+
+// ---------------------------------------------------------------- the call's deadline (CI p142/p164/p178)
+
+/** Test hook: shorter budgets than contracts SANDBOX_TIMEOUTS_MS (never read from the environment). */
+export interface SandboxBudgets {
+  /** One sandbox call end to end. */
+  apiCall?: number;
+  /** The start's share of it. */
+  ensure?: number;
+}
+
+export function sandboxCallBudgets(b: SandboxBudgets = {}): { apiCall: number; ensure: number } {
+  return {
+    apiCall: b.apiCall ?? SANDBOX_TIMEOUTS_MS.apiCall,
+    ensure: b.ensure ?? SANDBOX_TIMEOUTS_MS.ensure,
+  };
+}
+
+/**
+ * The bot's shell started within `ms`, or the call's `starting` (CI p142/p164/p178: a contended Docker daemon held a
+ * cold start for 15-42 s). `start` gets the share as a signal and a transport deadline just past it, so the share always
+ * decides first. sandboxd is not told: the start it is running finishes, and the bot's next call finds the shell
+ * running. Any refusal or failure inside the share (a killed organization included) is kept as it is.
+ */
+export async function startWithin<T>(
+  ms: number,
+  start: (signal: AbortSignal, backstopMs: number) => Promise<T>,
+): Promise<T> {
+  const share = Math.max(0, ms);
+  const cut = AbortSignal.timeout(share);
+  try {
+    return await start(cut, share + START_BACKSTOP_MS);
+  } catch (err) {
+    throw cut.aborted ? new LocalRefusal("starting") : err;
+  }
+}
+
+/**
+ * Every sandboxd call of one sandbox call under its deadline (an absolute time): a call the deadline cut, or one asked
+ * after it, is the call's `timeout`; each keeps its own budget too. The deadline is below the cell's budget (contracts
+ * SANDBOX_TIMEOUTS_MS), so the API's own answer always arrives first.
+ */
+export function sandboxUnderDeadline(client: SandboxdClient, deadlineAt: number): SandboxdClient {
+  const expired = AbortSignal.timeout(Math.max(0, deadlineAt - Date.now()));
+  const bounded = (o: SandboxdCallOptions = {}): SandboxdCallOptions => ({
+    ...o,
+    signal: o.signal ? AbortSignal.any([o.signal, expired]) : expired,
+  });
+  async function run<T>(go: (o: SandboxdCallOptions) => Promise<T>, o?: SandboxdCallOptions): Promise<T> {
+    if (expired.aborted || Date.now() >= deadlineAt) throw new LocalRefusal("timeout");
+    try {
+      return await go(bounded(o));
+    } catch (err) {
+      throw expired.aborted ? new LocalRefusal("timeout") : err;
+    }
+  }
+  return {
+    call(op, input, o) {
+      return run((b) => client.call(op, input, b), o);
+    },
+    stream(op, input, o) {
+      return run((b) => client.stream(op, input, b), o);
+    },
+  };
+}
+
+/**
+ * How long a command may run before it yields a process id: the whole yield on a warm call, what the call's deadline
+ * leaves (less the answer's margin) after a slow start, never negative; a background command never waits.
+ */
+export function execYieldMs(background: boolean, leftMs: number): number {
+  if (background) return 0;
+  return Math.max(0, Math.min(SANDBOX_LIMITS.execYieldMs, leftMs - EXEC_ANSWER_MARGIN_MS));
 }
 
 /** The approval codes a step shows as waiting ("Needs approval"); every other refusal is a blocked step. */
@@ -575,8 +657,10 @@ interface SandboxCallSpec<Raw, R> {
   precheck?: (tx: Tx, turn: AgentTurnRow) => Promise<SandboxCallRefusal | null>;
   /** Ids every audit row of this call carries (an import's attachment id); never a path or content. */
   auditIds?: Record<string, unknown>;
-  /** sandboxd, outside any transaction. */
-  call: (client: SandboxdClient, target: SandboxdTarget) => Promise<Raw>;
+  /**
+   * sandboxd, outside any transaction, under the call's deadline (`leftMs` of it remain: an exec yields within them).
+   */
+  call: (client: SandboxdClient, target: SandboxdTarget, leftMs: number) => Promise<Raw>;
   /** In the outcome transaction (a savepoint: a throw undoes only its own writes). */
   finish: (tx: Tx, raw: Raw, turn: AgentTurnRow) => Promise<CallOutcome<R>>;
 }
@@ -620,6 +704,7 @@ async function runSandboxCall<Raw, R>(
     perms: Pick<PermissionService, "decide">;
     toolApproval: ToolApprovalGate;
     client: SandboxdClient | null;
+    budgets?: SandboxBudgets;
   },
   cell: CellPrincipal,
   spec: SandboxCallSpec<Raw, R>,
@@ -677,28 +762,37 @@ async function runSandboxCall<Raw, R>(
   const client = deps.client;
   if (!client) throw sandboxRefusal("service_unavailable");
 
-  // 3. sandboxd, outside any transaction.
+  // 3. sandboxd, outside any transaction, under the call's deadline (contracts SANDBOX_TIMEOUTS_MS, CI p142/p164/p178):
+  // the API answers before the cell gives up, so the model reads `starting` or `timeout`, never "could not be reached".
   const target = { orgId: cell.organizationId, agentId: turn.agentId };
   const started = Date.now();
+  const budgets = sandboxCallBudgets(deps.budgets);
+  const deadlineAt = started + budgets.apiCall;
+  const bounded = sandboxUnderDeadline(client, deadlineAt);
   const box: { ensured: boolean; runtime: SandboxRuntime | null } = { ensured: false, runtime: null };
   const ensure = async () => {
-    // 07.8-18: a start also brings the bot's sandbox packages up to date (never failing the call).
-    const status = await ensureSandbox(core, client, target, { timeoutMs: ENSURE_TIMEOUT_MS });
+    // The start's share of the call (a cold start on a loaded daemon took 42 s); past it: `starting`. 07.8-18: a start
+    // also brings the bot's sandbox packages up to date (never failing the call, outside the share).
+    const share = Math.min(budgets.ensure, deadlineAt - Date.now());
+    const status = await startWithin(share, (signal, timeoutMs) =>
+      ensureSandbox(core, client, target, { timeoutMs, signal }),
+    );
     box.ensured = true;
     box.runtime = status.runtime;
   };
+  const run = () => spec.call(bounded, target, deadlineAt - Date.now());
   let raw: { value: Raw } | null = null;
   let failure: SandboxRefusal | null = null;
   try {
     if (decision.claim.ensure) await ensure();
     try {
-      raw = { value: await spec.call(client, target) };
+      raw = { value: await run() };
     } catch (err) {
       // The container went away behind the API's back (idle stop, a restart): ensure it once and retry.
       const gone = err instanceof SandboxdRefusedError && (err.code === "not_found" || err.code === "killed");
       if (!spec.retryOnGone || !gone || box.ensured) throw err;
       await ensure();
-      raw = { value: await spec.call(client, target) };
+      raw = { value: await run() };
     }
   } catch (err) {
     // Codes only: the error never names the argv, a path or content, and it is never logged with a body.
@@ -870,6 +964,8 @@ export function registerSandboxRoutes(
     perms: Pick<PermissionService, "decide" | "usersAllowed">;
     toolApproval: ToolApprovalGate;
     client: SandboxdClient | null;
+    /** Test hook: shorter call budgets (contracts SANDBOX_TIMEOUTS_MS otherwise); never read from the environment. */
+    budgets?: SandboxBudgets;
   },
 ): void {
   // Shared files land in the conversation through the artifact storage (server credentials); null = not configured.
@@ -885,7 +981,6 @@ export function registerSandboxRoutes(
     route(AgentChannelSandboxExec, AgentChannelSandboxExecResponse),
     async (req) => {
       const body = req.body;
-      const yieldMs = body.background ? 0 : SANDBOX_LIMITS.execYieldMs;
       return runSandboxCall(core, deps, cellOf(req), {
         tool: EXEC,
         body,
@@ -900,8 +995,10 @@ export function registerSandboxRoutes(
         auditAction: "sandbox.exec",
         failureAudit: (reason) => ({ status: "error", exitCode: null, reason }),
         retryOnGone: true,
-        call: (client, target) =>
-          client.call(
+        call: (client, target, leftMs) => {
+          // After a slow start the command yields within what the call's deadline leaves (a process id to poll).
+          const yieldMs = execYieldMs(body.background === true, leftMs);
+          return client.call(
             "exec",
             {
               target,
@@ -911,7 +1008,8 @@ export function registerSandboxRoutes(
               yieldMs,
             },
             { timeoutMs: yieldMs + EXEC_ANSWER_MARGIN_MS },
-          ),
+          );
+        },
         finish: async (_tx, result) => ({
           response: result,
           stepResult: result,

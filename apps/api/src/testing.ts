@@ -5,7 +5,7 @@ import { RedisContainer, type StartedRedisContainer } from "@testcontainers/redi
 import { type BuiltApp, buildApp } from "./app";
 import { type Env, loadEnv } from "./config/env";
 import { createEnvFileSecretStore } from "./lib/secret-store";
-import type { BrowserBudgets } from "./modules/agent-channel";
+import type { BrowserBudgets, SandboxBudgets } from "./modules/agent-channel";
 
 export const TEST_SETUP_TOKEN = "test-setup-token-0123456789";
 export const WEB_ORIGIN = "http://localhost:3999";
@@ -30,6 +30,8 @@ export interface TestStackOptions {
   runtimeManifest?: RuntimeCompatibilityManifest;
   /** Shorter bot browser call deadlines for this stack (CI p64/p66 deadline tests). */
   browserBudgetsMs?: BrowserBudgets;
+  /** Shorter bot sandbox call budgets for this stack (CI p142/p164/p178 cold-start tests). */
+  sandboxBudgetsMs?: SandboxBudgets;
 }
 
 /** Real PostgreSQL 18 + Redis 8 (testcontainers) and the full API listening on a random port. */
@@ -73,6 +75,7 @@ async function buildStack(
     ...(opts.deviceFrameMaxBytes ? { deviceFrameMaxBytes: opts.deviceFrameMaxBytes } : {}),
     ...(opts.runtimeManifest ? { runtimeManifest: opts.runtimeManifest } : {}),
     ...(opts.browserBudgetsMs ? { browserBudgetsMs: opts.browserBudgetsMs } : {}),
+    ...(opts.sandboxBudgetsMs ? { sandboxBudgetsMs: opts.sandboxBudgetsMs } : {}),
   });
   try {
     await built.app.listen({ host: "127.0.0.1", port: 0 });
