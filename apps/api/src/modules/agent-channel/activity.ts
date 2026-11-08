@@ -78,7 +78,11 @@ function outputTailOf(stdout: unknown, stderr: unknown): string {
   const out = typeof stdout === "string" ? stdout : "";
   const err = typeof stderr === "string" ? stderr : "";
   const joined = err ? `${out}${out && !out.endsWith("\n") ? "\n" : ""}${err}` : out;
-  let lines = joined.replace(/\n+$/, "").split("\n").slice(-OUTPUT_LINES);
+  // The trailing newlines go by a scan from the end: `/\n+$/` rescans a newline run from every start position, so
+  // output of newlines then one character blocked the event loop for seconds.
+  let end = joined.length;
+  while (end > 0 && joined.charCodeAt(end - 1) === 10) end--;
+  let lines = joined.slice(0, end).split("\n").slice(-OUTPUT_LINES);
   lines = maskActivityText(lines.join("\n")).split("\n");
   while (lines.length > 1 && utf8(lines.join("\n")) > SANDBOX_LIMITS.activityOutputBytes) lines.shift();
   let tail = lines.join("\n");
