@@ -2,12 +2,18 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   type AgentChannelSandboxExecResponse,
   SANDBOX_REFUSALS,
+  SANDBOX_TIMEOUTS_MS,
   SANDBOX_TOOL_NAMES,
   type SandboxToolBodies,
   type SandboxToolName,
   type TurnContext,
 } from "./agent-channel-protocol.js";
-import { type AgentChannelClient, AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
+import {
+  type AgentChannelClient,
+  AgentChannelHttpError,
+  confinedTimeoutMs,
+  createAgentChannelClient,
+} from "./api-client.js";
 import { openClawAgentIdFor } from "./mention-mapper.js";
 import {
   type ConfinedToolContext,
@@ -307,6 +313,28 @@ describe("sandbox refusal sentences: an exhaustive record over the contract enum
       expect(sentence.length).toBeGreaterThan(10);
       expect(sentence.length).toBeLessThan(220);
       expect(sentence).not.toMatch(/\{(?!requester\})/u);
+    }
+  });
+
+  it("a shell still starting reads as a retry in a moment, never as an unreachable workspace", () => {
+    expect(SANDBOX_REFUSAL_SENTENCE.starting).toMatch(/starting/u);
+    expect(SANDBOX_REFUSAL_SENTENCE.starting).toMatch(/again/u);
+    expect(SANDBOX_REFUSAL_SENTENCE.starting).not.toBe(UNREACHABLE);
+  });
+});
+
+describe("sandbox call budgets (contracts SANDBOX_TIMEOUTS_MS, CI p142/p164/p178)", () => {
+  it("every ocw_sandbox_* tool waits longer than the API's deadline of the call, under OpenClaw's 90 s", async () => {
+    const contracts = (await import(
+      new URL("../../../packages/contracts/src/sandbox.ts", import.meta.url).href
+    )) as { SANDBOX_TIMEOUTS_MS: { apiCall: number; cellCall: number } };
+    const t = contracts.SANDBOX_TIMEOUTS_MS;
+    expect(SANDBOX_TIMEOUTS_MS.cellCall).toBe(t.cellCall);
+    for (const tool of SANDBOX_TOOL_NAMES) {
+      // A first call of any of them may start the bot's shell (35 s / 20 s before: the cold start outlived both).
+      expect(confinedTimeoutMs(tool), tool).toBe(t.cellCall);
+      expect(confinedTimeoutMs(tool), tool).toBeGreaterThan(t.apiCall);
+      expect(confinedTimeoutMs(tool), tool).toBeLessThan(90_000);
     }
   });
 });

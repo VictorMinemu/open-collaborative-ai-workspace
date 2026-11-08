@@ -130,6 +130,7 @@ async function main() {
     image: env.OCW_SANDBOX_SBX_IMAGE,
     onEvent: (event) => events.emit(event),
     egress,
+    log: writeLog,
   });
   const browsers = createBrowsers({
     docker,

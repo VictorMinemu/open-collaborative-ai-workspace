@@ -1561,6 +1561,15 @@ export const SANDBOX_LIMITS = {
   callsPerTurn: 40,
 } as const;
 
+/**
+ * The cell's budget of contracts `SANDBOX_TIMEOUTS_MS` (CI p142/p164/p178): longer than the API's deadline of every
+ * sandbox call (a cold start of the bot's shell included), so the API's own answer (`starting`, `timeout` included)
+ * always arrives first; below OpenClaw's 90 s for a Codex-harness tool.
+ */
+export const SANDBOX_TIMEOUTS_MS = {
+  cellCall: 85_000,
+} as const;
+
 /** The eight `ocw_sandbox_*` tools (contracts `SANDBOX_TOOL_NAMES`). */
 export const SANDBOX_TOOL_NAMES = [
   "ocw_sandbox_exec",
@@ -1613,6 +1622,7 @@ export const SANDBOX_REFUSALS = [
   "too_large",
   "invalid_path",
   "busy",
+  "starting",
 ] as const;
 export const SandboxRefusal = z.enum(SANDBOX_REFUSALS);
 export type SandboxRefusal = z.infer<typeof SandboxRefusal>;
