@@ -26,6 +26,7 @@ import {
   ReviewSandboxPackageRequest,
   SANDBOX_LIMITS,
   SANDBOX_REFUSAL_STATUS,
+  SANDBOX_TIMEOUTS_MS,
   SANDBOXD_LABELS,
   SANDBOXD_ROUTES,
   SandboxdError,
@@ -156,6 +157,32 @@ describe("Agent Channel sandbox exec (D-02, T-07.8-01-01)", () => {
     expect(SANDBOX_REFUSAL_STATUS.too_large).toBe(413);
     expect(SANDBOX_REFUSAL_STATUS.invalid_path).toBe(422);
     expect(SANDBOX_REFUSAL_STATUS.service_unavailable).toBe(503);
+    expect(SANDBOX_REFUSAL_STATUS.starting).toBe(503);
+  });
+});
+
+describe("sandbox timeouts (CI p142/p164/p178): a cold start fits one call, and the API answers before the cell gives up", () => {
+  const t = SANDBOX_TIMEOUTS_MS;
+  /** The API's transactions after its last sandboxd call and the HTTP answer, under CI load. */
+  const ANSWER_MARGIN_MS = 10_000;
+  /** OpenClaw 2026.9.7: a Codex-harness turn gives a plugin's dynamic tool 90 s (CODEX_DYNAMIC_TOOL_TIMEOUT_MS). */
+  const OPENCLAW_DYNAMIC_TOOL_MS = 90_000;
+  /** The slowest cold `ensure` CI measured (sandbox-proof p178, Echo: 42,150 ms). */
+  const SLOWEST_COLD_START_MS = 42_150;
+
+  it("a cold start under load fits the ensure budget, with room to spare", () => {
+    expect(t.ensure).toBeGreaterThanOrEqual(SLOWEST_COLD_START_MS + 10_000);
+  });
+
+  it("after the slowest start the API allows, a command still gets a real yield and its answer within the call", () => {
+    expect(t.apiCall - t.ensure - t.execAnswerMargin).toBeGreaterThanOrEqual(10_000);
+    // A warm command keeps the whole yield.
+    expect(SANDBOX_LIMITS.execYieldMs + t.execAnswerMargin).toBeLessThanOrEqual(t.apiCall);
+  });
+
+  it("the cell waits longer than the API's deadline, and stays under OpenClaw's cap for a dynamic tool", () => {
+    expect(t.apiCall + ANSWER_MARGIN_MS).toBeLessThanOrEqual(t.cellCall);
+    expect(t.cellCall).toBeLessThan(OPENCLAW_DYNAMIC_TOOL_MS);
   });
 });
 

@@ -63,7 +63,7 @@ import { registerPluginCellRoutes } from "./plugins";
 import { createCellPresence } from "./presence";
 import { createProviderAuth } from "./provider-auth";
 import { registerRecordRoutes } from "./records";
-import { registerSandboxRoutes } from "./sandbox";
+import { registerSandboxRoutes, type SandboxBudgets } from "./sandbox";
 import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerWorkZoneRoutes } from "./work-zone";
 
@@ -85,6 +85,7 @@ export { cancelChain, deliverConsultReply, noAnswerSentence, recordChainReply } 
 export { CONSULT_SENTENCES, deliverConsultQuestion } from "./consult";
 export { conversationAudience } from "./memory-files";
 export { buildMentionEvents } from "./mentions";
+export type { SandboxBudgets } from "./sandbox";
 
 const tags = ["agent-channel"];
 const bearer = [{ cellToken: [] as string[] }];
@@ -171,6 +172,8 @@ export function createAgentChannelModule(
     sandbox?: { client: SandboxdClient | null } | null;
     /** Test hook: shorter browser call deadlines (contracts BROWSER_TIMEOUTS_MS otherwise); never read from the environment. */
     browserBudgets?: BrowserBudgets;
+    /** Test hook: shorter sandbox call budgets (contracts SANDBOX_TIMEOUTS_MS otherwise); never from the environment. */
+    sandboxBudgets?: SandboxBudgets;
   },
 ): ApiModule {
   const auth = createCellAuth(core);
@@ -577,6 +580,7 @@ export function createAgentChannelModule(
             perms,
             toolApproval: opts.toolApproval,
             client: opts.sandbox?.client ?? null,
+            ...(opts.sandboxBudgets ? { budgets: opts.sandboxBudgets } : {}),
           });
           // Bot browsers (07.8-14, D-05, D-11, D-13): every `ocw_browser_*` call decided like a sandbox call (kind
           // `browser`), the signed-in approval floor, the D-13 cross-site approvals and the API's snapshot second pass.

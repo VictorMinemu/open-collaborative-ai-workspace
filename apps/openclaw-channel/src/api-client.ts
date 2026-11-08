@@ -59,6 +59,7 @@ import {
   type BrowserToolName,
   type BrowserToolResponses,
   CellSnapshot,
+  SANDBOX_TIMEOUTS_MS,
   SANDBOX_TOOL_RESPONSES,
   SANDBOX_TOOL_ROUTES,
   type SandboxToolBodies,
@@ -182,21 +183,20 @@ export const CONSULT_TIMEOUT_MS = 10_000;
 export const TURN_DONE_TIMEOUT_MS = 10_000;
 
 /**
- * 07.8: per-call budgets of the confined tools. Exec and process yield after 25 s server side (a process id), so they
- * get 35 s; every other sandbox call 20 s. A browser call waits longer than the API's deadline for it (contracts
- * `BROWSER_TIMEOUTS_MS`, CI p64/p66): 85 s for an open, which may start the bot's browser cold, 65 s otherwise, so the
- * model reads what the API answered, never "the workspace could not be reached" while the page opens anyway. One attempt
- * each: the route counts the call against the turn's budget, and an open is not idempotent (it may create the page).
+ * 07.8: per-call budgets of the confined tools, each longer than the API's deadline of that call, so the model reads
+ * what the API answered, never "the workspace could not be reached" while the call completes anyway. A sandbox call
+ * waits 85 s (contracts `SANDBOX_TIMEOUTS_MS`, CI p142/p164/p178: any first call may start the bot's shell, and a cold
+ * start on a loaded Docker daemon took up to 42 s, beyond the 35 s exec and 20 s file budgets of before). A browser call
+ * waits 85 s for an open, which may start the bot's browser cold, 65 s otherwise (contracts `BROWSER_TIMEOUTS_MS`, CI
+ * p64/p66). One attempt each: the route counts the call against the turn's budget, and neither an exec nor an open is
+ * idempotent.
  */
-export const CONFINED_LONG_TIMEOUT_MS = 35_000;
-export const CONFINED_TIMEOUT_MS = 20_000;
-const LONG_CONFINED_TOOLS: ReadonlySet<string> = new Set(["ocw_sandbox_exec", "ocw_sandbox_process"]);
 const BROWSER_TOOLS: ReadonlySet<string> = new Set(BROWSER_TOOL_NAMES);
 /** The budget of one confined call. */
 export function confinedTimeoutMs(tool: string): number {
   if (tool === "ocw_browser_open") return BROWSER_TIMEOUTS_MS.cellOpen;
   if (BROWSER_TOOLS.has(tool)) return BROWSER_TIMEOUTS_MS.cellCall;
-  return LONG_CONFINED_TOOLS.has(tool) ? CONFINED_LONG_TIMEOUT_MS : CONFINED_TIMEOUT_MS;
+  return SANDBOX_TIMEOUTS_MS.cellCall;
 }
 
 export function trimTrailingSlash(url: string): string {
@@ -573,8 +573,8 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
     },
     /**
      * `ocw_sandbox_*` (07.8, D-02 b): one call to the tool's own route with the turn's ids and the tool's contract body
-     * only. One attempt, 35 s (exec, process) or 20 s budget. A refusal throws AgentChannelHttpError with its
-     * `SandboxRefusal` code. Never logs argv, paths, content or output.
+     * only. One attempt, 85 s budget, above the API's deadline of the call. A refusal throws AgentChannelHttpError
+     * with its `SandboxRefusal` code. Never logs argv, paths, content or output.
      */
     async sandboxCall<T extends SandboxToolName>(
       tool: T,

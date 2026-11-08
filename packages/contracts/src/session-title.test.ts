@@ -174,3 +174,64 @@ describe("title constants", () => {
     expect(titleWords("Fix API rate-limit, now!")).toEqual(["Fix", "API", "rate", "limit", "now"]);
   });
 });
+
+/**
+ * Best of five interleaved passes per size after a warm-up, so a busy host slows both sizes alike. A pass over
+ * `ceiling` ms ends the measurement at once, so a quadratic rule (tens of seconds at 256 KiB) fails in seconds.
+ */
+function bestPair(
+  fn: (text: string) => unknown,
+  small: string,
+  large: string,
+  ceiling: number,
+): [number, number] {
+  const time = (text: string) => {
+    const t0 = performance.now();
+    fn(text);
+    return performance.now() - t0;
+  };
+  let a = Number.POSITIVE_INFINITY;
+  let b = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < 6; i++) {
+    const ta = time(small);
+    if (ta > ceiling) return [ta, ta];
+    const tb = time(large);
+    if (tb > ceiling) return [ta, tb];
+    if (i === 0) continue; // warm-up
+    a = Math.min(a, ta);
+    b = Math.min(b, tb);
+  }
+  return [a, b];
+}
+
+describe("normalizeSessionTitle: linear on hostile runs (the API titles a chat from its first message)", () => {
+  // `/[…]+$/u` trims and `/<[^>]*>/g` rescanned a run from every start position: ~0.9 s at 20 000 `…` (the chat body
+  // cap), ~2.4 s at 32 000.
+  const SHAPES = [".", "…", " .", "- ", '"', "« ", "<", "< "];
+  const sized = (shape: string, size: number) =>
+    `a${shape.repeat(Math.ceil(size / shape.length)).slice(0, size)}x`;
+  for (const shape of SHAPES) {
+    it(`a run of ${JSON.stringify(shape)} then one character scales linearly (64 000 → 256 KiB)`, () => {
+      const CEILING = 2000;
+      const [small, large] = bestPair(
+        normalizeSessionTitle,
+        sized(shape, 64_000),
+        sized(shape, 256 * 1024),
+        CEILING,
+      );
+      // ~4x the input: about 4x the time when linear, ~17x when quadratic. The 2 ms floor keeps a tiny baseline from
+      // inflating the ratio; the ceiling is the backstop for a rule that is slow at every size.
+      expect(large).toBeLessThan(CEILING);
+      expect(large / Math.max(small, 2)).toBeLessThan(10);
+    }, 60_000);
+  }
+
+  it("keeps stripping trailing punctuation, trailing quotes and tags as before", () => {
+    expect(normalizeSessionTitle("Fix the login bug …!?. ")).toBe("Fix the login bug");
+    expect(normalizeSessionTitle("«Fix the login bug» ")).toBe("Fix the login bug");
+    expect(normalizeSessionTitle("Fix <b>login</b> redirect")).toBe("Fix login redirect");
+    expect(normalizeSessionTitle("Fix <a<b> login redirect")).toBe("Fix login redirect");
+    expect(normalizeSessionTitle("Fix <b login redirect")).toBe("Fix b login redirect");
+    expect(normalizeSessionTitle("Fix a > b redirect")).toBe("Fix a b redirect");
+  });
+});
