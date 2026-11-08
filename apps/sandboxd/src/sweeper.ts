@@ -60,6 +60,9 @@ export function createSweeper(deps: SweeperDeps): Sweeper {
       onError("list", err);
     }
     for (const { target } of shells) {
+      // A kill switch that landed after the listing: the shell is gone or going, and measuring it now would start a
+      // `files` helper for it (CI p164: one per killed bot, still running after the kill). The kill sampled its usage.
+      if (sandboxes.limitsFor(target.orgId)?.killed) continue;
       try {
         // The soft quota first: over it, the sandbox stops with reason disk_full (and one usage sample).
         await quota.measure(target);

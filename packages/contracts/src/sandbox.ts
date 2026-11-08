@@ -41,6 +41,27 @@ export const SANDBOX_LIMITS = {
   packageLockfileMaxBytes: 2_097_152,
 } as const;
 
+/**
+ * The time budgets of one bot sandbox call (`ocw_sandbox_*`), innermost first (CI p142/p164/p178). A bot's first call
+ * starts its shell (`ensure`): the network and the proxy's attach take under a second, then a contended Docker daemon
+ * held the shell's create and start for 15-42 s, while the cell gave the whole exec 35 s, so the model read "the
+ * workspace could not be reached" and the command ran anyway. The API now runs every sandbox call under one deadline
+ * (`apiCall`) below the cell's budget (`cellCall`), so the model always reads the API's own outcome. The start has its
+ * own share of it (`ensure`); past it the call is `starting`, and the start keeps going in sandboxd, so the bot's next
+ * call finds the shell running. A command's yield is what the deadline leaves after the start (never more than
+ * `SANDBOX_LIMITS.execYieldMs`). Mirrored by the cell (`agent-channel-protocol.ts`), pinned by tests.
+ */
+export const SANDBOX_TIMEOUTS_MS = {
+  /** API → sandboxd: one `ensure`, a cold start on a loaded daemon included (CI p178: 42 s). */
+  ensure: 55_000,
+  /** API → sandboxd: how much longer than a command's yield the API waits for an exec's (or a poll's) answer. */
+  execAnswerMargin: 10_000,
+  /** API: one sandbox call end to end (the start, then the call's own op); every sandboxd call runs under it. */
+  apiCall: 75_000,
+  /** Cell → API: one sandbox call. Below the 90 s an OpenClaw Codex-harness turn gives a plugin's dynamic tool. */
+  cellCall: 85_000,
+} as const;
+
 const utf8Bytes = (s: string) => new TextEncoder().encode(s).length;
 
 /** A string of at most `max` UTF-8 bytes. */
@@ -167,13 +188,14 @@ export const SandboxRefusal = z.enum([
   "too_large",
   "invalid_path",
   "busy",
+  "starting",
 ]);
 export type SandboxRefusal = z.infer<typeof SandboxRefusal>;
 
 /**
  * HTTP status per refusal: 403 for decisions (switches, modules, the resolver, taint, D-13 member data, budgets), 404
  * for no live turn and unknown objects, 409 for state and approvals, 413 too large, 422 invalid input, 503 when
- * sandboxd does not answer.
+ * sandboxd does not answer (`starting`: the bot's shell is still starting past the call's share for it).
  */
 export const SANDBOX_REFUSAL_STATUS: Record<SandboxRefusal, 403 | 404 | 409 | 413 | 422 | 503> = {
   no_trigger: 403,
@@ -201,6 +223,7 @@ export const SANDBOX_REFUSAL_STATUS: Record<SandboxRefusal, 403 | 404 | 409 | 41
   too_large: 413,
   invalid_path: 422,
   busy: 409,
+  starting: 503,
 };
 
 // ---------------------------------------------------------------- Agent Channel bodies (the ocw_sandbox_* tools)

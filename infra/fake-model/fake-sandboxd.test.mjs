@@ -496,11 +496,32 @@ describe("fake sandboxd: browser ops", () => {
     assert.equal((await stats()).browser.contexts.find((c) => c.contextId === fresh).holdReason, "signin");
   });
 
+  it("a delayed ensure is a slow cold start: it finishes even when the caller stopped waiting (CI p142/p164/p178)", async () => {
+    assert.equal((await control("delay", { op: "ensure", ms: 400 })).status, 200);
+    const t = { orgId: ORG, agentId: randomUUID() };
+    const gaveUp = await fetch(`${base}/v1/sandboxes/ensure`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ target: t }),
+      signal: AbortSignal.timeout(100),
+    }).catch((e) => e);
+    assert.ok(gaveUp instanceof Error, "the caller stopped waiting");
+    await new Promise((r) => setTimeout(r, 500));
+    const again = await ensure(t);
+    assert.equal(again.status, 200);
+    assert.equal(again.body.state, "running");
+    // The start the caller left finished: one state event, not a second start.
+    const starts = (await op("/v1/events?after=0&waitMs=0", undefined, TOKEN, "GET")).body.events.filter(
+      (e) => e.type === "state" && e.target.agentId === t.agentId && e.state === "running",
+    );
+    assert.equal(starts.length, 1);
+  });
+
   it("the delay control holds the next call of one context op only, while the frame stream keeps running", async () => {
     const ctx = await browser(A);
     await ctxOp("navigate", A, ctx, { url: "https://panel.fake.test/app" });
     assert.equal((await control("delay", { op: "contextLock", ms: 600 })).status, 200);
-    assert.equal((await control("delay", { op: "ensure", ms: 600 })).status, 400);
+    assert.equal((await control("delay", { op: "exec", ms: 600 })).status, 400);
     assert.equal((await control("delay", { op: "contextLock", ms: 60_000 })).status, 400);
     const member = randomUUID();
     const started = Date.now();

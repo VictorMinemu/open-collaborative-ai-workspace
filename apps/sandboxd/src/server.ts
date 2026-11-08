@@ -475,7 +475,7 @@ export function createServer(options: ServerOptions): http.Server {
       else res.destroy();
     });
   });
-  // Exec yields after at most 25 s and a process kill waits up to 5 s; leave room for both.
+  // Exec yields after at most 25 s; a process kill retries up to 5 s and then waits up to 5 s; leave room for both.
   server.requestTimeout = 120_000;
   server.headersTimeout = 30_000;
   return server;

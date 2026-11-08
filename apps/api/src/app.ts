@@ -27,7 +27,12 @@ import { redisRateLimitStore } from "./lib/rate-limit-store";
 import { RedisBus } from "./lib/redis";
 import { createEnvFileSecretStore, type SecretStore } from "./lib/secret-store";
 import { createAgentModule } from "./modules/agent";
-import { type BrowserBudgets, createAgentChannelModule, currentPhrase } from "./modules/agent-channel";
+import {
+  type BrowserBudgets,
+  createAgentChannelModule,
+  currentPhrase,
+  type SandboxBudgets,
+} from "./modules/agent-channel";
 import { createAiChatModule } from "./modules/ai-chat";
 import { type ApprovalService, createApprovalModule } from "./modules/approval";
 import { createArtifactModule, type ObjectStorage } from "./modules/artifact";
@@ -102,6 +107,8 @@ export async function buildApp(
     runtimeManifest?: RuntimeCompatibilityManifest;
     /** Test hook: shorter bot browser call deadlines (CI p64/p66); never read from the environment. */
     browserBudgetsMs?: BrowserBudgets;
+    /** Test hook: shorter bot sandbox call budgets (CI p142/p164/p178); never read from the environment. */
+    sandboxBudgetsMs?: SandboxBudgets;
   } = {},
 ): Promise<BuiltApp> {
   const app = Fastify({
@@ -385,6 +392,7 @@ export async function buildApp(
       toolApproval: toolApproval.service, // 07.5-11: the approval decision of every agent action (D-04)
       sandbox, // 07.8-05: the sandboxd client of the bots' sandbox routes
       ...(opts.browserBudgetsMs ? { browserBudgets: opts.browserBudgetsMs } : {}),
+      ...(opts.sandboxBudgetsMs ? { sandboxBudgets: opts.sandboxBudgetsMs } : {}),
     }),
     deviceModule, // B3
     workSession, // B3 (built above)
