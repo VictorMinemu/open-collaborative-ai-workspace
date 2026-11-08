@@ -516,14 +516,25 @@ section_core() {
     fail "killOrg → ${status} A=$(running_of "$CID_A") B=$(running_of "$CID_B") other=$(running_of "$D_NAME")"
   fi
 
+  # B's objects right before the purge: at least its shell, workspace and packages volumes and network (07.8-17), plus
+  # the files helper when a sweep's quota measurement of the stopped bot created one. A measurement already in flight
+  # can still create that helper after this count (purge then removes it too), so one more is accepted, and only
+  # when no helper was counted (its name is fixed: there is at most one).
+  b_objects() {
+    echo $(($(docker ps -aq --filter "label=ocw.agent=${B}" | wc -l) + $(docker volume ls -q --filter "label=ocw.agent=${B}" | wc -l) + $(docker network ls -q --filter "label=ocw.agent=${B}" | wc -l)))
+  }
+  before_b="$(b_objects)"
+  helper_b="$(docker ps -aq --filter "label=ocw.agent=${B}" --filter "label=ocw.kind=files" | wc -l | tr -d ' ')"
   status="$(api POST /v1/sandboxes/purge "{\"target\":$(target "$ORG" "$B")}")"
-  left_b=$(($(docker ps -aq --filter "label=ocw.agent=${B}" | wc -l) + $(docker volume ls -q --filter "label=ocw.agent=${B}" | wc -l) + $(docker network ls -q --filter "label=ocw.agent=${B}" | wc -l)))
-  # 07.8-17: four objects since the bot's packages volume exists (container, workspace, packages volume, network).
-  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" removed)" = 4 ] && [ "$left_b" = 0 ] && [ "$(running_of "$CID_A")" = false ]; then
-    ok "purge B removes its container, workspace and packages volumes and network (A's objects stay)"
+  removed_b="$(jfield "$WORK/body.json" removed)"
+  left_b="$(b_objects)"
+  if [ "$status" = 200 ] && [ "$before_b" -ge 4 ] && [ "$left_b" = 0 ] &&
+    { [ "$removed_b" = "$before_b" ] || { [ "$helper_b" = 0 ] && [ "$removed_b" = "$((before_b + 1))" ]; }; } &&
+    [ "$(running_of "$CID_A")" = false ]; then
+    ok "purge B removes its container, workspace and packages volumes and network (${removed_b} of ${before_b} counted before; A's objects stay)"
   else
-    fail "purge B → ${status} $(cat "$WORK/body.json"), ${left_b} object(s) left"
-    # Intermittent (2 of ~13 CI runs, always "removed 3, 2 left"): name what stayed so the next one is diagnosable.
+    fail "purge B → ${status} $(cat "$WORK/body.json") of ${before_b} counted before (files helper ${helper_b}), ${left_b} object(s) left"
+    # Name what stayed so a failure is diagnosable (it once was a files helper a measurement created mid-purge).
     docker ps -a --filter "label=ocw.agent=${B}" --format '     left container {{.Names}} kind={{.Label "ocw.kind"}} {{.Status}}' || true
     docker volume ls --filter "label=ocw.agent=${B}" --format '     left volume {{.Name}}' || true
     for n in $(docker network ls -q --filter "label=ocw.agent=${B}"); do
