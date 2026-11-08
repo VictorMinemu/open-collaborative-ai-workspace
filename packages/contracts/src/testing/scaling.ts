@@ -5,6 +5,11 @@ export interface ScalingOptions {
   rounds?: number;
   /** A small run faster than this counts as this long, so a tiny baseline cannot inflate the ratio. */
   floorMs?: number;
+  /**
+   * A single run (warm-up included) slower than this ends the measurement at once: `largeMs` is that run's time and
+   * `ratio` is infinite, so the absolute cap fails in seconds instead of after minutes of quadratic work.
+   */
+  ceilingMs?: number;
 }
 
 export interface Scaling {
@@ -12,7 +17,7 @@ export interface Scaling {
   ratio: number;
   /** Every round's ratio, for the failure message. */
   ratios: number[];
-  /** The fastest large run, for the absolute cap on a rule that is slow at every size. */
+  /** The fastest large run (or the run that crossed `ceilingMs`), for the absolute cap. */
   largeMs: number;
 }
 
@@ -26,19 +31,25 @@ export interface Scaling {
 export function measureScaling(
   small: () => unknown,
   large: () => unknown,
-  { rounds = 5, floorMs = 2 }: ScalingOptions = {},
+  { rounds = 5, floorMs = 2, ceilingMs = Number.POSITIVE_INFINITY }: ScalingOptions = {},
 ): Scaling {
-  small();
-  large();
   const ratios: number[] = [];
+  const time = (fn: () => unknown) => {
+    const t0 = performance.now();
+    fn();
+    return performance.now() - t0;
+  };
+  const tooSlow = (ms: number): Scaling => ({ ratio: Number.POSITIVE_INFINITY, ratios, largeMs: ms });
+  for (const fn of [small, large]) {
+    const ms = time(fn);
+    if (ms > ceilingMs) return tooSlow(ms);
+  }
   let largeMs = Number.POSITIVE_INFINITY;
   for (let i = 0; i < rounds; i++) {
-    let t0 = performance.now();
-    small();
-    const smallMs = performance.now() - t0;
-    t0 = performance.now();
-    large();
-    const roundLargeMs = performance.now() - t0;
+    const smallMs = time(small);
+    if (smallMs > ceilingMs) return tooSlow(smallMs);
+    const roundLargeMs = time(large);
+    if (roundLargeMs > ceilingMs) return tooSlow(roundLargeMs);
     ratios.push(roundLargeMs / Math.max(smallMs, floorMs));
     largeMs = Math.min(largeMs, roundLargeMs);
   }
