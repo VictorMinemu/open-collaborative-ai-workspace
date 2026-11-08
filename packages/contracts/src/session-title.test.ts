@@ -184,12 +184,14 @@ describe("normalizeSessionTitle: linear on hostile runs (the API titles a chat f
     `a${shape.repeat(Math.ceil(size / shape.length)).slice(0, size)}x`;
   for (const shape of SHAPES) {
     it(`a run of ${JSON.stringify(shape)} then one character scales linearly (64 000 → 256 KiB)`, () => {
-      const CEILING = 2000;
+      // Only catches a catastrophic rule fast: the quadratic trim took 22.9 s at 256 KiB of "." while the linear one takes
+      // milliseconds, and a starved CI runner stretched one linear run past a 2 s ceiling (pipeline 204: 2073.7 ms). A
+      // rule slow enough to matter but under 10 s is the per-round ratio's job.
+      const CEILING = 10_000;
       const small = sized(shape, 64_000);
       const large = sized(shape, 256 * 1024);
       // The smallest ratio of five small-then-large rounds after a warm-up, so one noisy round (pipeline 202: 11.95
-      // from the best times of different rounds) cannot fail it; a run over the ceiling ends the measurement at once,
-      // so a quadratic rule (tens of seconds at 256 KiB) fails in seconds.
+      // from the best times of different rounds) cannot fail it; a run over the ceiling ends the measurement at once.
       const { ratio, ratios, largeMs } = measureScaling(
         () => normalizeSessionTitle(small),
         () => normalizeSessionTitle(large),

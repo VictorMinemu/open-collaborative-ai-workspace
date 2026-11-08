@@ -208,12 +208,14 @@ describe("untrustedFileBlock: linear on a hostile whitespace run (a run could bl
   for (const run of RUNS) {
     it(`a run of ${JSON.stringify(run)} then one character scales linearly (64 000 → 256 KiB)`, () => {
       const wrap = (text: string) => untrustedFileBlock("f.txt", text);
-      const CEILING = 2000;
+      // Only catches a catastrophic trim fast: the quadratic one took ~1.5 s at 64 000 characters and ~25 s at 256 KiB
+      // while the linear one takes milliseconds, and a starved CI runner stretched one linear run past a 2 s ceiling
+      // (pipeline 204: 2073.7 ms). A trim slow enough to matter but under 10 s is the per-round ratio's job.
+      const CEILING = 10_000;
       const small = sized(run, 64_000);
       const large = sized(run, 256 * 1024);
-      // The smallest ratio of five small-then-large rounds after a warm-up, so one noisy round cannot fail it. A run
-      // over the ceiling ends the measurement at once: the quadratic trim took ~1.5 s at 64 000 characters and ~25 s at
-      // 256 KiB, so the failing case reports in seconds instead of minutes.
+      // The smallest ratio of five small-then-large rounds after a warm-up, so one noisy round cannot fail it; a run
+      // over the ceiling ends the measurement at once, so the failing case reports in seconds instead of minutes.
       const { ratio, ratios, largeMs } = measureScaling(
         () => wrap(small),
         () => wrap(large),

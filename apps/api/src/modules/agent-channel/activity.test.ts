@@ -267,11 +267,14 @@ describe("exec output tail: linear on a hostile newline run (sandbox output is t
   const sized = (run: string, size: number) => `${run.repeat(size)}x`;
 
   it("a run of newlines then one character scales linearly (64 000 → 256 KiB)", () => {
-    const CEILING = 2000;
+    // Only catches a catastrophic rule fast: the quadratic trim took ~1.4 s at 64 000 newlines (about 16x that, ~23 s,
+    // at 256 KiB) while the linear one takes milliseconds, and a starved CI runner stretched one linear run past a 2 s
+    // ceiling (pipeline 204: 2073.7 ms). A rule slow enough to matter but under 10 s is the per-round ratio's job.
+    const CEILING = 10_000;
     const small = sized("\n", 64_000);
     const large = sized("\n", 256 * 1024);
     // The smallest ratio of five small-then-large rounds after a warm-up, so one noisy round cannot fail it; a run over
-    // the ceiling ends the measurement at once, so a quadratic rule (tens of seconds at 256 KiB) fails in seconds.
+    // the ceiling ends the measurement at once.
     const { ratio, ratios, largeMs } = measureScaling(
       () => exec(small),
       () => exec(large),
