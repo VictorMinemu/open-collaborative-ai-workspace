@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { expectChannelLanding } from "../support/actors";
 import { ADMIN } from "./env";
 
 /**
@@ -19,7 +20,7 @@ test("the drawer opened before /chat's redirect stays open; a navigation from it
     .getByTestId("login-form")
     .getByRole("button", { name: /sign in|log in/i })
     .click();
-  await expect(page).toHaveURL(/\/chat\/[0-9a-f-]{36}$/);
+  await expectChannelLanding(page);
 
   let release: () => void = () => {};
   const held = new Promise<void>((r) => {
