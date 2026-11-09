@@ -18,10 +18,24 @@ import {
   type TurnAttachment,
   type TurnContext,
   type TurnWithheld,
+  type TurnWorkZone,
   type WorkSessionTransition,
 } from "./agent-channel-protocol.js";
 import { SIGNIN_SENTENCES } from "./signin-sentences.js";
-import { ATTACHMENT_TOOL_NAME, CONSULT_TOOL_NAME, withTurnScopedTools } from "./turn-scoped-tools.js";
+import {
+  ATTACHMENT_TOOL_NAME,
+  CONSULT_TOOL_NAME,
+  WORK_SESSION_PROMPT_TOOL,
+  WORK_SESSION_READ_TOOL,
+  WORK_SESSION_START_TOOL,
+  WORK_SESSION_STOP_TOOL,
+  withTurnScopedTools,
+} from "./turn-scoped-tools.js";
+import {
+  WORK_SESSION_STATUS_LABELS,
+  WORK_ZONE_MODE_LABELS,
+  WORK_ZONE_RUNTIME_LABELS,
+} from "./work-zone-labels.js";
 
 export const CHANNEL_ID = "ocw";
 
@@ -299,7 +313,81 @@ function turnContextBlocks(
       payload: { text: `Bots you may consult here with ${CONSULT_TOOL_NAME}:`, targets },
     });
   }
+  // 07.16 (D-05, PD-17): what this bot may start in the Work Zone, only on a turn the API gave a `workZone` (a bot with
+  // an active profile); every other turn is unchanged (BWZ-06).
+  if (turn.workZone) blocks.push(workZoneBlock(turn.workZone));
   return blocks;
+}
+
+// ---------------------------------------------------------------- the bot's Work Zone (07.16 D-05, PD-17)
+
+/** A device, project or session name inside the Work Zone block: one line, without the block's `·` separator. */
+function workZoneName(name: string): string {
+  return (
+    blockName(name, 120)
+      .replace(/·/gu, "")
+      .replace(/\s{2,}/gu, " ")
+      .trim() || "unknown"
+  );
+}
+
+/**
+ * A model or effort value the bot passes back as is: the characters model ids use only (no space, comma or control),
+ * so a value is always one token of its list.
+ */
+function workZoneValue(value: string): string {
+  return value.replace(/[^\p{L}\p{N}._:/@[\]+-]/gu, "").slice(0, 200) || "unknown";
+}
+
+const LEAVE_IT_OUT = "Leave it out; the session uses the runtime's default.";
+
+const FAST_MODE_TEXT: Record<TurnWorkZone["fastMode"], string> = {
+  off: "Off.",
+  allowed: "Off by default; you may turn it on.",
+  on: "On by default.",
+};
+
+function workZoneBlock(wz: TurnWorkZone): ContextBlock {
+  const defaultModel = wz.defaultModel === null ? null : workZoneValue(wz.defaultModel);
+  const models = [...new Set(wz.models.map(workZoneValue))].map((m) =>
+    m === defaultModel ? `${m} (default)` : m,
+  );
+  const efforts = [...new Set(wz.efforts.map(workZoneValue))];
+  const more = wz.projectsMore;
+  return {
+    label: "Your Work Zone",
+    source: "ocw",
+    type: "work_zone",
+    payload: {
+      device: `${workZoneName(wz.device.name)} (${wz.device.online ? "online" : "offline"})`,
+      runtime: WORK_ZONE_RUNTIME_LABELS[wz.runtime],
+      projects: wz.projects.map((p) => `${blockId(p.id)} · ${workZoneName(p.name)}`),
+      ...(more > 0
+        ? {
+            projectsMore:
+              more === 1 ? "1 more project is not listed." : `${more} more projects are not listed.`,
+          }
+        : {}),
+      models: models.length > 0 ? models.join(", ") : LEAVE_IT_OUT,
+      efforts: efforts.length > 0 ? efforts.join(", ") : LEAVE_IT_OUT,
+      fastMode: FAST_MODE_TEXT[wz.fastMode],
+      modes: `${WORK_ZONE_MODE_LABELS[wz.defaultMode]} by default; at most ${WORK_ZONE_MODE_LABELS[wz.maxMode]}.`,
+      outsideContent: wz.outsideContent
+        ? "After outside content: you can still start and prompt."
+        : "After outside content: you can't start or prompt; you'll propose instead.",
+      sessions:
+        wz.sessions.length > 0
+          ? wz.sessions.map(
+              (s) =>
+                `${blockId(s.id)} · ${workZoneName(s.projectName)} · ${WORK_SESSION_STATUS_LABELS[s.status]}`,
+            )
+          : "You have no sessions in this conversation.",
+      text:
+        `Start a session with ${WORK_SESSION_START_TOOL}, send it more work with ${WORK_SESSION_PROMPT_TOOL}, ` +
+        `check it with ${WORK_SESSION_READ_TOOL} and stop it with ${WORK_SESSION_STOP_TOOL}. ` +
+        "You can only control sessions you started.",
+    },
+  };
 }
 
 // ---------------------------------------------------------------- attachments (07.15, D-02, D-04, PD-10)
@@ -928,17 +1016,51 @@ const TRANSITION_PHRASES: Record<WorkSessionTransition, string> = {
   offline: "lost its device",
 };
 
+/** D-10 (T-07.16-09-03): the bot has no way to approve a runtime request; the wake says so in these words. */
+const CANNOT_APPROVE = "You can't approve runtime requests";
+
+/** The wake's sentences: what happened, the status, the waiting approvals, who can decide, where to read more. */
+function workSessionUpdateText(
+  sessionId: string,
+  ws: AgentWorkSessionEvent["workSession"],
+  deciders: readonly string[],
+  tools: readonly string[],
+): string {
+  const parts = [
+    `Your Work Zone session ${sessionId} ${TRANSITION_PHRASES[ws.transition]}.`,
+    `Status: ${WORK_SESSION_STATUS_LABELS[ws.status]}.`,
+  ];
+  if (ws.pendingApprovals > 0) {
+    parts.push(
+      ws.pendingApprovals === 1 ? "1 approval is waiting." : `${ws.pendingApprovals} approvals are waiting.`,
+    );
+  }
+  if (deciders.length > 0) {
+    parts.push(
+      `People who can decide: ${deciders.join(", ")}.`,
+      `${CANNOT_APPROVE}; mention one of these people when the session waits.`,
+    );
+  } else if (ws.pendingApprovals > 0) {
+    parts.push(`${CANNOT_APPROVE}.`);
+  }
+  if (tools.includes(WORK_SESSION_READ_TOOL)) parts.push(`Read more with ${WORK_SESSION_READ_TOOL}.`);
+  return parts.join(" ");
+}
+
 /**
- * `agent.work_session.v1` (07.16 D-09, D-10, PD-16): a Work Zone session this bot started changed state. Mapped exactly
- * like a mention of the bot on the session's card message (the person who asked is the sender, the reply lands in the
- * card's thread with `inReplyToMessageId` = the card message, the turn's tools, flags, taint and Work Zone as delivered),
- * plus a "Work Zone session update" block (server data: the session id, a fixed sentence per transition, the status
- * and the API's summary, composed from structured facts only). Throws on a malformed event (the bridge validates first).
+ * `agent.work_session.v1` (07.16 D-09, D-10, D-11, PD-16): a Work Zone session this bot started changed state. Mapped
+ * exactly like a mention of the bot on the session's card message (the person who asked is the sender, the reply lands
+ * in the card's thread with `inReplyToMessageId` = the card message, the turn's tools, flags, taint and Work Zone as
+ * delivered), plus a first "Work Zone session update" block (server data): the session id, a fixed sentence per
+ * transition, the status, the pending approval count, the people who can decide as `@handle` (the bot mentions them,
+ * D-11; it cannot approve, D-10) and the API's summary as data (composed from structured facts, never runtime text).
+ * Throws on a malformed event (the bridge validates first).
  */
 export function mapWorkSessionEvent(event: AgentWorkSessionEvent, bot: CellAgent | undefined): MappedMention {
   const { workSession, ...rest } = AgentWorkSessionEvent.parse(event);
   const base = mapMention({ ...rest, type: AgentChannelEventTypes.mention }, bot);
   const sessionId = blockId(workSession.workSessionId);
+  const deciders = [...new Set(workSession.deciders.map((d) => `@${blockHandle(d.handle)}`))];
   const block: ContextBlock = {
     label: "Work Zone session update",
     source: "ocw",
@@ -948,7 +1070,9 @@ export function mapWorkSessionEvent(event: AgentWorkSessionEvent, bot: CellAgent
       transition: workSession.transition,
       status: workSession.status,
       summary: oneLine(workSession.summary, BOT_WORK_ZONE_LIMITS.summaryChars),
-      text: `Your Work Zone session ${sessionId} ${TRANSITION_PHRASES[workSession.transition]}.`,
+      pendingApprovals: workSession.pendingApprovals,
+      ...(deciders.length > 0 ? { deciders } : {}),
+      text: workSessionUpdateText(sessionId, workSession, deciders, base.allowedTools),
     },
   };
   return { ...base, contextBlocks: [block, ...base.contextBlocks] };
