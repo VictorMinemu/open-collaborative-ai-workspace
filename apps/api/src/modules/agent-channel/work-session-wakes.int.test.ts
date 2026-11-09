@@ -49,6 +49,7 @@ let atlasId: string;
 let engId: string;
 let server: FakeDevice;
 let serverId: string;
+let serverToken: string;
 let billingId: string;
 
 const core = () => stack.built.core;
@@ -215,6 +216,23 @@ const wakesOf = async (workSessionId: string) =>
     )
   ).map((r) => r.payload as Json);
 
+/** One wake-worthy step, then its job: the debounce collapses transitions that happen before the job runs. */
+async function settle(workSessionId: string, status: string) {
+  await eventually(async () => (await statusOf(workSessionId)) === status);
+  return drainWakes();
+}
+
+/** Ana asks Atlas again in #eng: a fresh delivered turn the bot can call its tools from. */
+const askAgain = (text = "how is it going") =>
+  freshBotTurn(su, ana, engId, `@atlas ${text} ${randomUUID().slice(0, 6)}`);
+
+/**
+ * A person queues a prompt on the session over HTTP, with their own rights. Víctor (the sponsor) sees it; Ana does not
+ * (billing-api is a personal repository of his device, so the audience is his), yet the wakes still run as her.
+ */
+const personPrompt = (client: TestClient, workSessionId: string, body = "also update the changelog") =>
+  ok(client.request("POST", `/api/v1/work-sessions/${workSessionId}/prompts`, { body }));
+
 const auditsFor = (action: string, workSessionId: string) =>
   rowsOf(
     "select actor_kind, actor_id, agent_id, user_id, device_id, session_id, result, metadata from app.audit_events where action = $1 and metadata->>'workSessionId' = $2 order by occurred_at",
@@ -241,6 +259,8 @@ async function quiesce() {
 const logs: string[] = [];
 
 beforeAll(async () => {
+  // The offline case: the hub marks the device offline 300 ms after it disconnects (10 s by default).
+  process.env.OCW_DEVICE_OFFLINE_GRACE_MS = "300";
   stack = await startTestStack({
     env: { OCW_CELL_TOKEN: CELL_TOKEN, OCW_MODEL_PROVIDER: "mock", LOG_LEVEL: "debug" },
     logStream: { write: (line: string) => void logs.push(line) },
@@ -270,6 +290,7 @@ beforeAll(async () => {
   await ok(victor.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: true, allowFastMode: true }));
   const paired = await pairDevice(stack, victor, "billing-server");
   serverId = paired.deviceId;
+  serverToken = paired.token;
   server = await FakeDevice.connect(stack.baseUrl, paired.token, undefined, {
     host: "service",
     isolatedServer: true,
@@ -299,6 +320,7 @@ afterAll(async () => {
   await server?.close().catch(() => {});
   await su?.end();
   await stack?.stop();
+  delete process.env.OCW_DEVICE_OFFLINE_GRACE_MS;
 });
 
 beforeEach(async () => {
@@ -418,5 +440,241 @@ describe("tracer: a finished turn wakes Atlas in its card's thread and the card 
       requesterUserId: anaId,
       wakesUsed: 1,
     });
+  });
+});
+
+// ---------------------------------------------------------------- every transition (PD-16, D-09, D-10)
+
+describe("every meaningful transition wakes Atlas once; the card always shows the session", () => {
+  it("waiting_approval: the card says Approval, the deciders are named (sponsor first) and the bot can't approve", async () => {
+    const s = await botSession();
+    await drainWakes();
+    server.emitApproval(s.workSessionId, {
+      approvalId: randomUUID(),
+      tool: "Bash",
+      paths: ["scripts/test.sh"],
+    });
+    expect(await settle(s.workSessionId, "waiting_approval")).toBe(1);
+
+    const card = await cardOf(s.cardMessageId);
+    expect(card.status).toBe("pending");
+    expect(card.status_label).toBe("Approval");
+    expect(fieldOf(card, WORK_SESSION_CARD_LABELS.step)).toBe("Waiting for approval");
+    const [ev] = await wakesOf(s.workSessionId);
+    expect(ev!.workSession).toMatchObject({
+      transition: "waiting_approval",
+      status: "waiting_approval",
+      pendingApprovals: 1,
+    });
+    const deciders = ev!.workSession.deciders as Json[];
+    expect(deciders.length).toBeGreaterThanOrEqual(1);
+    expect(deciders.length).toBeLessThanOrEqual(3);
+    // The sponsor first (Víctor is also the device's owner), each with a handle the bot can @mention.
+    expect(deciders[0]).toMatchObject({ id: victorId, displayName: "Víctor Ruiz" });
+    for (const d of deciders) expect(d.handle).toMatch(/\S/);
+    expect(ev!.workSession.summary).toContain("Bash");
+    expect(
+      (ev!.workSession.summary as string).endsWith(
+        "The bot can't approve it; mention one of the people listed.",
+      ),
+    ).toBe(true);
+  });
+
+  it("failed: a session.state failed frame wakes Atlas and the card says failed", async () => {
+    const s = await botSession();
+    await drainWakes();
+    server.event(s.workSessionId, { type: "session.state", status: "failed" });
+    expect(await settle(s.workSessionId, "failed")).toBe(1);
+    expect((await cardOf(s.cardMessageId)).status).toBe("failed");
+    const wakes = await wakesOf(s.workSessionId);
+    expect(wakes.map((w) => w.workSession.transition)).toEqual(["failed"]);
+  });
+
+  it("completed: the device ends the session, Atlas hears ended and the card says succeeded", async () => {
+    const s = await botSession();
+    await finishTurn(s.workSessionId, s.first);
+    await settle(s.workSessionId, "idle");
+    server.event(s.workSessionId, { type: "session.state", status: "completed" });
+    expect(await settle(s.workSessionId, "completed")).toBe(1);
+    expect((await cardOf(s.cardMessageId)).status).toBe("succeeded");
+    const wakes = await wakesOf(s.workSessionId);
+    expect(wakes.map((w) => w.workSession.transition)).toEqual(["turn_done", "ended"]);
+    expect(wakes[1]!.workSession.status).toBe("completed");
+  });
+
+  it("archived by a person: Víctor archives over HTTP, Atlas hears ended, the card says Stopped", async () => {
+    const s = await botSession();
+    await drainWakes();
+    await ok(victor.request("POST", `/api/v1/work-sessions/${s.workSessionId}/archive`));
+    expect(await settle(s.workSessionId, "archived")).toBe(1);
+    const card = await cardOf(s.cardMessageId);
+    expect(card.status).toBe("cancelled");
+    expect(card.status_label).toBe("Stopped");
+    const wakes = await wakesOf(s.workSessionId);
+    expect(wakes.map((w) => [w.workSession.transition, w.workSession.status])).toEqual([
+      ["ended", "archived"],
+    ]);
+  });
+
+  it("the bot's own stop refreshes the card and wakes nobody", async () => {
+    const s = await botSession();
+    await drainWakes();
+    const r = await cell("/work-sessions/stop", {
+      eventId: await askAgain("stop it"),
+      agentId: atlasId,
+      workSessionId: s.workSessionId,
+    });
+    expect(r.body.kind, JSON.stringify(r.body)).toBe("stopped");
+    expect(await settle(s.workSessionId, "archived")).toBe(1);
+    const card = await cardOf(s.cardMessageId);
+    expect(card.status).toBe("cancelled");
+    expect(card.status_label).toBe("Stopped");
+    expect(await wakesOf(s.workSessionId)).toEqual([]);
+    expect(await auditsFor("bot.work_session_woken", s.workSessionId)).toEqual([]);
+    expect((await botRowOf(s.workSessionId)).stopped_by_agent).toBe(true);
+  });
+
+  it("E6: a completed turn with another prompt queued goes straight back to running: no wake, Working · turn 2", async () => {
+    const s = await botSession();
+    await drainWakes();
+    await personPrompt(victor, s.workSessionId);
+    await finishTurn(s.workSessionId, s.first);
+    const second = (await server.command("prompt", s.workSessionId)) as Cmd;
+    server.ack(second.id);
+    // idle → running happened in the prompt.completed transaction: one job, and it sees running.
+    expect(await settle(s.workSessionId, "running")).toBe(1);
+    expect(await wakesOf(s.workSessionId)).toEqual([]);
+    const card = await cardOf(s.cardMessageId);
+    expect(card.status).toBe("running");
+    expect(fieldOf(card, WORK_SESSION_CARD_LABELS.step)).toBe("Working · turn 2");
+    expect(await botRowOf(s.workSessionId)).toMatchObject({ wakes_used: 0, last_woken_status: null });
+  });
+});
+
+// ---------------------------------------------------------------- debounce, idempotency, budget (E7, E8, PD-22)
+
+describe("bounded and idempotent: one pending wake, one wake per state, a daily budget", () => {
+  it("debounce: transitions before the job runs collapse into one job (the row flag)", async () => {
+    const s = await botSession();
+    // The start's idle → running already flipped the flag; the approval does not queue another job.
+    server.emitApproval(s.workSessionId, { approvalId: randomUUID(), tool: "Edit", paths: ["src/a.ts"] });
+    await eventually(async () => (await statusOf(s.workSessionId)) === "waiting_approval");
+    expect(await jobsOf(s.workSessionId)).toHaveLength(1);
+    expect(await drainWakes()).toBe(1);
+    expect((await wakesOf(s.workSessionId)).map((w) => w.workSession.transition)).toEqual([
+      "waiting_approval",
+    ]);
+  });
+
+  it("E8: the same job run again, or its payload sent again, delivers no second wake", async () => {
+    const s = await botSession();
+    await drainWakes();
+    await finishTurn(s.workSessionId, s.first);
+    await settle(s.workSessionId, "idle");
+    expect(await wakesOf(s.workSessionId)).toHaveLength(1);
+    for (let i = 0; i < 2; i++) {
+      await core().db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+        core().jobs.sendInTx(tx, QUEUE, { organizationId: orgId, workSessionId: s.workSessionId }),
+      );
+    }
+    expect(await drainWakes()).toBe(2);
+    expect(await wakesOf(s.workSessionId)).toHaveLength(1);
+    expect(await auditsFor("bot.work_session_woken", s.workSessionId)).toHaveLength(1);
+    expect((await botRowOf(s.workSessionId)).wakes_used).toBe(1);
+  });
+
+  it("E8: a state that is not a finished turn (failed) is woken for once, whatever re-runs", async () => {
+    const s = await botSession();
+    await drainWakes();
+    server.event(s.workSessionId, { type: "session.state", status: "failed" });
+    await settle(s.workSessionId, "failed");
+    for (let i = 0; i < 2; i++) {
+      await core().db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+        core().jobs.sendInTx(tx, QUEUE, { organizationId: orgId, workSessionId: s.workSessionId }),
+      );
+      expect(await drainWakes()).toBe(1);
+    }
+    expect((await wakesOf(s.workSessionId)).map((w) => w.workSession.transition)).toEqual(["failed"]);
+    expect(await botRowOf(s.workSessionId)).toMatchObject({ wakes_used: 1, last_woken_status: "failed" });
+  });
+
+  it("E7: at the profile's daily budget the next wake is skipped with a card notice; the next day it resets", async () => {
+    await su.query("update app.bot_work_zone_profiles set wakes_per_session_day = 2 where agent_id = $1", [
+      atlasId,
+    ]);
+    try {
+      const s = await botSession();
+      await drainWakes();
+      // Wake 1: the first turn is done.
+      await finishTurn(s.workSessionId, s.first);
+      await settle(s.workSessionId, "idle");
+      // Wake 2: Víctor's prompt runs and asks for an approval.
+      await personPrompt(victor, s.workSessionId);
+      const second = (await server.command("prompt", s.workSessionId)) as Cmd;
+      server.ack(second.id);
+      await settle(s.workSessionId, "running");
+      server.emitApproval(s.workSessionId, { approvalId: randomUUID(), tool: "Bash", paths: [] });
+      await settle(s.workSessionId, "waiting_approval");
+      expect(await wakesOf(s.workSessionId)).toHaveLength(2);
+      expect((await botRowOf(s.workSessionId)).wakes_used).toBe(2);
+
+      // The third wake-worthy transition the same day: skipped.
+      server.event(s.workSessionId, { type: "session.state", status: "failed" });
+      await settle(s.workSessionId, "failed");
+      expect(await wakesOf(s.workSessionId)).toHaveLength(2);
+      const card = await cardOf(s.cardMessageId);
+      expect(card.status).toBe("failed");
+      expect(card.notices).toEqual([{ tone: "neutral", text: "Wake-up limit reached for today." }]);
+      const skipped = await auditsFor("bot.work_session_wake_skipped", s.workSessionId);
+      expect(skipped).toHaveLength(1);
+      expect(skipped[0]!.metadata).toMatchObject({ reason: "budget", transition: "failed" });
+      expect((await botRowOf(s.workSessionId)).wakes_used).toBe(2);
+
+      // The next day the budget starts again: Víctor archives the session and Atlas hears it.
+      await su.query(
+        "update app.bot_work_sessions set wakes_day = current_date - 1 where work_session_id = $1",
+        [s.workSessionId],
+      );
+      await ok(victor.request("POST", `/api/v1/work-sessions/${s.workSessionId}/archive`));
+      await settle(s.workSessionId, "archived");
+      const wakes = await wakesOf(s.workSessionId);
+      expect(wakes.map((w) => w.workSession.transition)).toEqual(["turn_done", "waiting_approval", "ended"]);
+      const row = await botRowOf(s.workSessionId);
+      expect(row.wakes_used).toBe(1);
+      expect(row.wakes_day).toBe(((await rowsOf("select current_date::text as d"))[0] as Json).d);
+      // A delivered wake lifts yesterday's budget notice.
+      expect((await cardOf(s.cardMessageId)).notices).toEqual([]);
+    } finally {
+      await su.query("update app.bot_work_zone_profiles set wakes_per_session_day = 20 where agent_id = $1", [
+        atlasId,
+      ]);
+    }
+  });
+});
+
+// ---------------------------------------------------------------- the device goes offline (last: it reconnects)
+
+describe("host_offline", () => {
+  it("the device disconnects: Atlas hears offline and the card says Offline", async () => {
+    const s = await botSession();
+    await drainWakes();
+    await server.close();
+    try {
+      expect(await settle(s.workSessionId, "host_offline")).toBe(1);
+      const card = await cardOf(s.cardMessageId);
+      expect(card.status).toBe("pending");
+      expect(card.status_label).toBe("Offline");
+      expect(fieldOf(card, WORK_SESSION_CARD_LABELS.step)).toBe("Device offline");
+      const wakes = await wakesOf(s.workSessionId);
+      expect(wakes.map((w) => [w.workSession.transition, w.workSession.status])).toEqual([
+        ["offline", "host_offline"],
+      ]);
+    } finally {
+      server = await FakeDevice.connect(stack.baseUrl, serverToken, undefined, {
+        host: "service",
+        isolatedServer: true,
+      });
+      server.capabilities([CLAUDE_CATALOG, CODEX_CATALOG], true, true);
+    }
   });
 });
