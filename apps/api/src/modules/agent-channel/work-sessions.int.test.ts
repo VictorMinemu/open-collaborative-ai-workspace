@@ -701,7 +701,7 @@ describe("the claim's outside-content and session-output options (D-08, D-20, PD
     expect(audit.map((a) => a.metadata.outcome)).toEqual(["session_output"]);
   });
 
-  it("a start on a tainted turn answers outside_content (the proposal fallback is 07.16-19's)", async () => {
+  it("a start on a tainted turn whose asker may not use the device answers outside_content (07.16-19's fallback)", async () => {
     const eventId = await askAtlas();
     await su.query("update app.agent_turns set tainted = true where event_id = $1", [eventId]);
     const before = await counts();
@@ -709,6 +709,8 @@ describe("the claim's outside-content and session-output options (D-08, D-20, PD
     expect(await counts()).toEqual(before);
     const audit = await auditsOf("bot.work_session_refused", eventId);
     expect(audit.map((a) => a.metadata.outcome)).toEqual(["outside_content"]);
+    // The proposal fallback ran for Ana, who may not use the server (work-session-taint.int.test.ts covers it).
+    expect(audit[0]!.metadata).toMatchObject({ outsideContent: true, proposalRefusal: "device_not_shared" });
   });
 });
 

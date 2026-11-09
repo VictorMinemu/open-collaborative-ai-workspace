@@ -133,6 +133,7 @@ export function refusedAnswer(
 /** The audit actions of a bot's Work Zone tools (PD-21): one per success, one for every refusal. */
 export type BotWorkSessionAuditAction =
   | "bot.work_session_started"
+  | "bot.work_session_proposed"
   | "bot.work_session_prompted"
   | "bot.work_session_stopped"
   | "bot.work_session_refused";
@@ -141,6 +142,9 @@ export type BotWorkSessionAuditAction =
  * The one audit builder of the bot's Work Zone routes (PD-21, D-14): the bot is the actor, the asker the user; ids,
  * the mode, the model, the outcome and the prompt's length only. Never the prompt, a title, a name or a path. A
  * success names the session as its resource and audit session; a refusal names the bot and the tool it refused.
+ * 07.16-19 (D-08, PD-15): every row of a turn that read outside content says `outsideContent: true`, whatever the
+ * outcome; a start that became a proposal (`bot.work_session_proposed`) names the approval, a refused fallback the
+ * proposal's own refusal code (`proposalRefusal`).
  */
 export async function auditBotWorkSession(
   tx: Tx,
@@ -149,7 +153,7 @@ export async function auditBotWorkSession(
     action: BotWorkSessionAuditAction;
     turn: AgentTurnRow;
     auditBase: { clientKind: string; sessionId: string };
-    outcome: "started" | "prompted" | "stopped" | BotWorkSessionRefusal;
+    outcome: "started" | "proposed" | "prompted" | "stopped" | BotWorkSessionRefusal;
     /** The tool refused (refusals only: a success is told apart by its action). */
     tool?: string;
     sponsorUserId: string | null;
@@ -161,20 +165,25 @@ export async function auditBotWorkSession(
     promptChars?: number;
     reason?: string;
     field?: string;
+    /** The proposal a tainted start became (`bot.work_session_proposed`). */
+    approvalId?: string;
+    /** Why that proposal could not be made (a `WorkZoneProposalRefusal` code). */
+    proposalRefusal?: string;
   },
 ): Promise<void> {
   const ok = p.action !== "bot.work_session_refused";
+  const onSession = ok && p.workSessionId !== undefined;
   await core.audit.record(tx, {
     clientKind: p.auditBase.clientKind,
-    sessionId: ok && p.workSessionId ? p.workSessionId : p.auditBase.sessionId,
+    sessionId: onSession && p.workSessionId ? p.workSessionId : p.auditBase.sessionId,
     action: p.action,
     actorKind: "agent",
     actorId: p.turn.agentId,
     agentId: p.turn.agentId,
     userId: p.turn.userId,
     deviceId: p.deviceId,
-    resourceType: ok ? "work_session" : "agent",
-    resourceId: ok && p.workSessionId ? p.workSessionId : p.turn.agentId,
+    resourceType: onSession ? "work_session" : "agent",
+    resourceId: onSession && p.workSessionId ? p.workSessionId : p.turn.agentId,
     result: ok ? "success" : "denied",
     metadata: {
       eventId: p.turn.eventId,
@@ -188,6 +197,9 @@ export async function auditBotWorkSession(
       ...(p.reason ? { reason: p.reason } : {}),
       ...(p.field ? { field: p.field } : {}),
       ...(p.promptChars !== undefined ? { promptChars: p.promptChars } : {}),
+      ...(p.turn.tainted ? { outsideContent: true } : {}),
+      ...(p.approvalId ? { approvalId: p.approvalId } : {}),
+      ...(p.proposalRefusal ? { proposalRefusal: p.proposalRefusal } : {}),
     },
   });
 }

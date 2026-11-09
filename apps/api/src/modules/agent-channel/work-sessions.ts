@@ -5,6 +5,7 @@ import {
   AgentChannelWorkSessionStartResponse,
   AgentChannelWorkSessionStop,
   AgentChannelWorkSessionStopResponse,
+  BOT_WORK_SESSION_PROPOSED_SENTENCE,
   type BotProfileInactiveReason,
   type BotWorkSessionRefusal,
   type BotWorkSessionRefused,
@@ -25,6 +26,7 @@ import {
   profileStatus,
   refusedAnswer,
   type WorkSessionModule,
+  type WorkZoneProposalService,
 } from "../work-session";
 import { type CellPrincipal, cellOf } from "./auth";
 import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, claimToolCall, liveTurn } from "./claim";
@@ -45,6 +47,13 @@ import { conversationAudience } from "./memory-files";
  *   (`not_in_turn`) → the profile's status (`profile_inactive` + `reason`) → the turn's outside content and session
  *   output (`outside_content`, `session_output`; D-08, D-20) → the claim (caps, taint; the call counts) →
  *   `bots.start` (caps under locks, settings, audience, `createWorkSession`, the card).
+ *
+ * 07.16-19 (D-08, D-18, PD-15): a start from a turn that read outside content, when the profile's admin flag
+ * (`actOnOutsideContent`) is off, creates no session: tx1 writes nothing and hands over to tx2, AS THE ASKER, which
+ * claims the call with `outsideContent` (metadata `fallback: "proposal"`) and creates today's Work Zone proposal for
+ * the profile's device and runtime, stored `tainted` with a warning notice on its card; the answer is `proposed` and the
+ * person's Start marks the first prompt tainted. A proposal the asker cannot make answers `outside_content` (the
+ * proposal's code in the audit). The `ocw_start_work_zone` route is untouched: it still refuses tainted turns.
  *
  * 07.16-16 (D-05 … D-08, PD-13, PD-15): `POST /work-sessions/prompt` (`ocw_work_session_prompt`) and
  * `POST /work-sessions/stop` (`ocw_work_session_stop`) keep the bot orchestrating a session it started, and only such a
@@ -93,6 +102,9 @@ interface CallRecord {
   promptChars?: number;
 }
 
+/** tx1's hand-over to the proposal fallback (D-18): nothing was written as the sponsor. */
+type Propose = { propose: { askerUserId: string; profile: BotProfileRow } };
+
 /** The bot's own session as tx0 found it (user-less: the whole tenant), with the ids its records name. */
 type OwnSession = NonNullable<Awaited<ReturnType<typeof ownBotSession>>>;
 
@@ -134,6 +146,8 @@ export function registerBotWorkSessionRoutes(
   scope: App,
   core: Core,
   workSession: Pick<WorkSessionModule, "bots">,
+  /** 07.16-19 (D-18): the Work Zone proposals a tainted start falls back to; null = refused `outside_content`. */
+  proposals: WorkZoneProposalService | null = null,
 ): void {
   const perms = createPermissionService(core);
   const access = createConversationAccess(core);
@@ -141,7 +155,13 @@ export function registerBotWorkSessionRoutes(
   /** `bot.work_session_refused` for `call` (after the claim, or with the denied row of `refuseBeforeClaim`). */
   async function auditRefusal(
     tx: Tx,
-    p: { cell: CellPrincipal; turn: AgentTurnRow; call: CallRecord; answer: BotWorkSessionRefused },
+    p: {
+      cell: CellPrincipal;
+      turn: AgentTurnRow;
+      call: CallRecord;
+      answer: BotWorkSessionRefused;
+      proposalRefusal?: string;
+    },
   ): Promise<BotWorkSessionRefused> {
     const { call, answer } = p;
     await auditBotWorkSession(tx, core, {
@@ -157,6 +177,7 @@ export function registerBotWorkSessionRoutes(
       ...(call.promptChars !== undefined ? { promptChars: call.promptChars } : {}),
       ...(answer.reason ? { reason: answer.reason } : {}),
       ...(answer.field ? { field: answer.field } : {}),
+      ...(p.proposalRefusal ? { proposalRefusal: p.proposalRefusal } : {}),
     });
     return answer;
   }
@@ -311,7 +332,7 @@ export function registerBotWorkSessionRoutes(
       // tx1, as the sponsor.
       const out = await core.db.withTenant(
         { organizationId: cell.organizationId, userId: sponsorUserId },
-        async (tx) => {
+        async (tx): Promise<AgentChannelWorkSessionStartResponse | typeof UNKNOWN | Propose> => {
           const turn = await liveTurn(tx, core, body);
           if (!turn) return unknownTurn(tx);
           // The profile as it is now; a profile re-saved by someone else since tx0 has another sponsor: ask again.
@@ -325,9 +346,14 @@ export function registerBotWorkSessionRoutes(
           if (!status.active) return refuse("profile_inactive", status.reason);
           // D-20: a turn that read a session's output never starts another one (prompt, read and stop only).
           if (turn.sessionOutputRead) return refuse("session_output");
-          // D-08: a turn that read outside content does not start a session on its own. The profile's flag path and
-          // the proposal fallback (`proposed`) are 07.16-19's; until then a person must ask again.
-          if (turn.tainted) return refuse("outside_content");
+          // D-08, D-18 (PD-15): a turn that read outside content starts nothing on its own unless the profile's admin
+          // flag allows it. Without it, the start becomes a proposal a person reviews (in the asker's transaction,
+          // below), for one of the profile's projects only; nothing is written here.
+          if (turn.tainted && !profile.actOnOutsideContent) {
+            if (!status.projectIds.includes(body.projectId)) return refuse("project_not_allowed");
+            if (!proposals) return refuse("outside_content");
+            return { propose: { askerUserId: turn.userId, profile } };
+          }
 
           const refused = await claim(tx, { cell, turn, call });
           if (refused) return refused;
@@ -346,7 +372,65 @@ export function registerBotWorkSessionRoutes(
         },
       );
       if (out === UNKNOWN) throw notFound(UNKNOWN_TURN, "unknown_turn");
-      return out;
+      if (!("propose" in out)) return out;
+
+      // tx2, AS THE ASKER (the person the proposal is for, the `onTurn` pattern of `ocw_start_work_zone`): the live turn,
+      // the claim on the tainted turn (`outsideContent`, the call counts; metadata `fallback: "proposal"`), then today's
+      // proposal for the profile's device and runtime, stored `tainted` with the card's warning notice (D-18).
+      const { askerUserId, profile } = out.propose;
+      const fallback = await core.db.withTenant(
+        { organizationId: cell.organizationId, userId: askerUserId },
+        async (tx): Promise<AgentChannelWorkSessionStartResponse | typeof UNKNOWN> => {
+          const turn = await liveTurn(tx, core, body);
+          if (!turn || turn.userId !== askerUserId || !proposals) return unknownTurn(tx);
+          const call: CallRecord = {
+            ...startRecord(profile),
+            metadata: { ...metadata, fallback: "proposal" },
+          };
+          const refused = await claim(tx, { cell, turn, call, outsideContent: true });
+          if (refused) return refused;
+          const res = await proposals.propose(tx, {
+            turn,
+            input: {
+              eventId: body.eventId,
+              agentId: body.agentId,
+              projectId: body.projectId,
+              deviceId: profile.deviceId,
+              prompt: body.prompt,
+              runtime: profile.runtime,
+            },
+            tainted: true,
+          });
+          if ("refused" in res) {
+            return auditRefusal(tx, {
+              cell,
+              turn,
+              call,
+              answer: refusedAnswer("outside_content"),
+              proposalRefusal: res.refused,
+            });
+          }
+          await auditBotWorkSession(tx, core, {
+            action: "bot.work_session_proposed",
+            turn,
+            auditBase: cellAuditBase(cell),
+            outcome: "proposed",
+            sponsorUserId: profile.sponsorUserId,
+            projectId: body.projectId,
+            deviceId: profile.deviceId,
+            promptChars: body.prompt.length,
+            approvalId: res.approvalId,
+          });
+          return {
+            kind: "proposed",
+            approvalId: res.approvalId,
+            reason: "outside_content",
+            sentence: BOT_WORK_SESSION_PROPOSED_SENTENCE,
+          };
+        },
+      );
+      if (fallback === UNKNOWN) throw notFound(UNKNOWN_TURN, "unknown_turn");
+      return fallback;
     },
   );
 

@@ -80,9 +80,13 @@ export interface WorkZoneProposalDeps {
 
 /** What the Agent Channel routes call (the work-session module's `proposals`). */
 export interface WorkZoneProposalService {
+  /**
+   * `tainted` (07.16 D-18, PD-15): only the bot start route's fallback after outside content sets it; the
+   * `ocw_start_work_zone` route never does (its claim refuses a tainted turn).
+   */
   propose(
     tx: Tx,
-    p: { turn: AgentTurnRow; input: AgentChannelWorkZonePropose },
+    p: { turn: AgentTurnRow; input: AgentChannelWorkZonePropose; tainted?: boolean },
   ): Promise<AgentChannelWorkZoneProposeResponse>;
   listProjects(tx: Tx, p: { turn: AgentTurnRow }): Promise<AgentChannelWorkZoneProjectsResponse>;
 }
@@ -93,6 +97,9 @@ const DEFAULT_RUNTIME: RuntimeId = "claude-code";
 /** `permissionModeMeta("default").label` (UI-SPEC R8): the only mode a proposal ever starts in. */
 const MODE_LABEL = "Supervised";
 const GONE_TITLE = "This proposal no longer exists.";
+/** 07.16 D-18 (PD-15): the notice of a proposal made after the bot read outside content. */
+export const TAINTED_PROPOSAL_NOTICE =
+  "Proposed after reading outside content. Read the prompt before you start it.";
 const MAX_PROJECTS = 50;
 
 const runtimesOf = (d: DeviceRow): RuntimeInfo[] => z.array(RuntimeInfo).catch([]).parse(d.runtimeInfo);
@@ -345,6 +352,8 @@ export function workZoneStartKind(deps: Pick<WorkZoneProposalDeps, "perms" | "st
           status: "pending",
           actions: [{ kind: "open", label: "Review", target: `/approvals/${row.id}` }],
           summary: shown,
+          // D-18: the person reviews the exact prompt knowing the bot read outside content first.
+          ...(p.tainted ? { notices: [{ tone: "warning" as const, text: TAINTED_PROPOSAL_NOTICE }] } : {}),
         },
         labels: { approve: "Start session", deny: "Dismiss", open: "Review" },
       };
@@ -356,12 +365,17 @@ export function workZoneStartKind(deps: Pick<WorkZoneProposalDeps, "perms" | "st
       // Defence in depth: `canDecide` already required the requester; the session is theirs or nobody's.
       if (ctx.deciderUserId !== p.requestedForUserId) return { ok: false, code: "not_allowed" };
       const { organizationId } = tenantOf(tx);
-      // Only these four fields: no mode, model or setting, so the session starts at `default` (or lower).
+      // Only these four fields: no mode, model or setting, so the session starts at `default` (or lower). A proposal
+      // made after outside content marks the first prompt tainted (D-18); the session is the person's, never tainted.
       const res = await deps.start(
         tx,
         { userId: ctx.deciderUserId, organizationId, clientKind: null },
         { projectId: p.projectId, deviceId: p.deviceId, runtime: p.runtime, prompt: p.prompt },
-        { proposedByAgentId: p.agentId, approvalId: row.id },
+        {
+          proposedByAgentId: p.agentId,
+          approvalId: row.id,
+          ...(p.tainted ? { firstPromptTainted: true } : {}),
+        },
       );
       if (!res.ok) return { ok: false, code: res.code };
       await tx
@@ -381,18 +395,29 @@ export function workZoneStartKind(deps: Pick<WorkZoneProposalDeps, "perms" | "st
  * `work_session.create` → slash-command prompt → project on `deviceId` → `device.use` → online → runtime installed and
  * signed in → an identical proposal (same approval back) → at most 3 pending per (bot, human) → store, request, card.
  * A refusal stores and posts nothing and is audited with its code.
+ *
+ * 07.16 (D-18, PD-15): `tainted` is the bot start route's fallback after outside content (the route claimed the call
+ * with `outsideContent`): the same checks for the same human; the row is stored `tainted = true`, its card carries the
+ * warning notice and its audits say `tainted: true`.
  */
 export async function proposeWorkZone(
   tx: Tx,
   deps: WorkZoneProposalDeps,
-  p: { turn: AgentTurnRow; input: AgentChannelWorkZonePropose },
+  p: { turn: AgentTurnRow; input: AgentChannelWorkZonePropose; tainted?: boolean },
 ): Promise<AgentChannelWorkZoneProposeResponse> {
   const { core, perms } = deps;
   const { turn, input } = p;
   const human = turn.userId;
   const runtime = input.runtime ?? DEFAULT_RUNTIME;
   const prompt = input.prompt.trim();
-  const ids = { eventId: turn.eventId, projectId: input.projectId, deviceId: input.deviceId, runtime };
+  const tainted = p.tainted === true;
+  const ids = {
+    eventId: turn.eventId,
+    projectId: input.projectId,
+    deviceId: input.deviceId,
+    runtime,
+    ...(tainted ? { tainted: true } : {}),
+  };
 
   const refuse = async (code: WorkZoneProposalRefusal): Promise<AgentChannelWorkZoneProposeResponse> => {
     await core.audit.record(tx, {
@@ -490,6 +515,7 @@ export async function proposeWorkZone(
       runtime,
       prompt,
       promptSha256,
+      tainted,
     })
     .returning({ id: workZoneProposals.id });
   if (!proposal) throw new Error("work zone proposal insert returned no row");

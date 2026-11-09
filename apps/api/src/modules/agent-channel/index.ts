@@ -571,7 +571,8 @@ export function createAgentChannelModule(
           if (opts.workZone) registerWorkZoneRoutes(scope, core, opts.workZone);
           // A bot's own Work Zone sessions (07.16-15, D-05, PD-03): started in its sponsor's name, within its profile.
           if (opts.workSession) {
-            registerBotWorkSessionRoutes(scope, core, opts.workSession);
+            // 07.16-19 (D-18): a tainted start without the profile's flag becomes a Work Zone proposal.
+            registerBotWorkSessionRoutes(scope, core, opts.workSession, opts.workZone ?? null);
             // 07.16-17 (PD-14, D-20): what the bot's own session did, bounded and redacted; the read marks the turn.
             registerWorkSessionReadRoute(scope, core, opts.workSession);
           }

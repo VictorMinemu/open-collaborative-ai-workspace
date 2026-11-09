@@ -713,7 +713,7 @@ describe("every outcome of prompt and stop has exactly one audit, by ids only (P
       expect(row!.metadata.outcome).toBe(c.outcome === "queued" ? "prompted" : c.outcome);
       expect(row!.metadata.eventId).toBe(c.eventId);
       if (!success) expect(row!.metadata.tool).toBe(`ocw_work_session_${c.tool}`);
-      // Ids, the outcome, a reason code and a length: no other key can carry content.
+      // Ids, the outcome, a reason code, a length and (07.16-19) the outside-content mark: no key can carry content.
       const allowed = [
         "eventId",
         "tool",
@@ -723,6 +723,7 @@ describe("every outcome of prompt and stop has exactly one audit, by ids only (P
         "outcome",
         "reason",
         "promptChars",
+        "outsideContent",
       ];
       expect(Object.keys(row!.metadata).filter((k) => !allowed.includes(k))).toEqual([]);
       expect(typeof row!.metadata.promptChars).toBe(c.tool === "prompt" ? "number" : "undefined");
