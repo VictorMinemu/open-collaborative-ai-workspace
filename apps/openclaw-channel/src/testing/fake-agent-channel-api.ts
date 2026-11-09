@@ -94,8 +94,8 @@
  *                                          FAKE_ERROR_CANARY, which must never reach the model)
  *   POST /agent-channel/v1/work-sessions/start  (07.16) records every body (`workSessions.starts`, refused ones
  *                                          included) and answers `workSessions.answers.start`, else a `started` answer for
- *                                          FAKE_WORK_SESSION in billing-api (the model and mode asked, else none and
- *                                          `default`). POST /agent-channel/v1/work-sessions/{prompt,read,stop} likewise
+ *                                          FAKE_WORK_SESSION in billing-api, card FAKE_WORK_SESSION_CARD (the model and
+ *                                          mode asked, else none and `default`). POST /agent-channel/v1/work-sessions/{prompt,read,stop} likewise
  *                                          (`prompts`, `reads`, `stops`; default: queued at position 1, an empty read of the
  *                                          session at cursor 0, stopped). All four: 400 for any key beyond the contract's (a device, a user, an audience,
  *                                          a worktree), 404 `unknown_turn` for a turn ended with `endTurn`. The
@@ -402,6 +402,8 @@ export type FakeWorkSessions = {
 };
 /** The session every default `started` answer names. */
 export const FAKE_WORK_SESSION = "0199a6f0-0000-7000-8000-00000000e5f1";
+/** The live card message every default `started` answer names (fixed, so a smoke's wake-up can reply to it). */
+export const FAKE_WORK_SESSION_CARD = "0199a6f0-0000-7000-8000-00000000d0f6";
 /** The keys each body may carry (contracts `AgentChannelWorkSession*`, strict objects) and the ones it needs. */
 const WORK_SESSION_BODIES: Record<
   FakeWorkSessionRoute,
@@ -447,7 +449,7 @@ function fakeWorkSessionAnswer(route: FakeWorkSessionRoute, body: Record<string,
         kind: "started",
         workSessionId: FAKE_WORK_SESSION,
         status: "provisioning",
-        cardMessageId: randomUUID(),
+        cardMessageId: FAKE_WORK_SESSION_CARD,
         model: typeof body.model === "string" ? body.model : null,
         mode: typeof body.permissionMode === "string" ? body.permissionMode : "default",
         projectName: "billing-api",

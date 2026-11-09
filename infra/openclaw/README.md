@@ -277,6 +277,14 @@ carries one turn only:
 - no URL, Garage key (`/att/`, `X-Amz-`) or file content outside a read's tool result in any model request, and no file
   content, file name, URL or key in the cell's logs.
 
+`bot_work_sessions` (07.16-14) runs the working-tree plugin's `ocw_work_session_*` tools in the real cell against the
+fake API (`POST /__test/work-sessions` sets each route's answer) and the fake model (fixture
+`test/mention-work-sessions.json`, a DM turn that carries `turn.workZone`):
+- turn-scoped: the four names are in the bot's `alsoAllow`, and the turn offers exactly them;
+- start and read with the turn's ids only: one `POST /work-sessions/start` with `agentId,eventId,projectId,prompt`
+  and one `POST /work-sessions/read` with `agentId,eventId,workSessionId`, never a device, user, visibility, worktree
+  or audience key and never `/tool-calls`; the reply relays the started sentence and the read's header.
+
 The script `docker cp`s the working-tree `install-policy.mjs` into a reused image instead of bind-mounting it:
 OpenClaw refuses a policy script owned by the runner's uid.
 

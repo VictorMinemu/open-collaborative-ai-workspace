@@ -1,0 +1,100 @@
+{
+  "eventId": "0199a6f0-0000-7000-8000-00000000e0f3",
+  "agent": {
+    "id": "0199a6f0-0000-7000-8000-00000000a001",
+    "handle": "archie",
+    "displayName": "Archie"
+  },
+  "conversation": {
+    "id": "0199a6f0-0000-7000-8000-00000000c0f3",
+    "kind": "dm",
+    "name": null
+  },
+  "thread": {
+    "rootMessageId": "0199a6f0-0000-7000-8000-00000000d0f3"
+  },
+  "message": {
+    "id": "0199a6f0-0000-7000-8000-00000000d0f3",
+    "text": "fix the rounding bug [[call ocw_work_session_start {\"projectId\":\"0199a6f0-0000-7000-8000-00000000b111\",\"prompt\":\"Fix the rounding error in invoice totals.\"}]] [[call ocw_work_session_read {\"workSessionId\":\"0199a6f0-0000-7000-8000-00000000e5f1\"}]]",
+    "createdAt": "2026-11-09T18:00:00.000Z",
+    "author": {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f3",
+      "displayName": "Sam Lee"
+    },
+    "mentions": [
+      {
+        "kind": "agent",
+        "id": "0199a6f0-0000-7000-8000-00000000a001"
+      }
+    ]
+  },
+  "threadHistory": [],
+  "roster": [
+    {
+      "kind": "user",
+      "id": "0199a6f0-0000-7000-8000-0000000000f3",
+      "displayName": "Sam Lee",
+      "role": "member"
+    },
+    {
+      "kind": "agent",
+      "id": "0199a6f0-0000-7000-8000-00000000a001",
+      "displayName": "Archie",
+      "handle": "archie"
+    }
+  ],
+  "turn": {
+    "tools": [
+      "ocw_work_session_start",
+      "ocw_work_session_prompt",
+      "ocw_work_session_read",
+      "ocw_work_session_stop"
+    ],
+    "toolFlags": {
+      "ocw_work_session_start": {
+        "untrustedOutput": false,
+        "sideEffecting": true
+      },
+      "ocw_work_session_prompt": {
+        "untrustedOutput": false,
+        "sideEffecting": true
+      },
+      "ocw_work_session_read": {
+        "untrustedOutput": false,
+        "sideEffecting": false
+      },
+      "ocw_work_session_stop": {
+        "untrustedOutput": false,
+        "sideEffecting": true
+      }
+    },
+    "memory": [],
+    "now": null,
+    "maxToolCalls": 8,
+    "maxWebCalls": 5,
+    "workZone": {
+      "runtime": "claude-code",
+      "device": {
+        "id": "0199a6f0-0000-7000-8000-00000000d111",
+        "name": "MacBook Pro",
+        "online": true
+      },
+      "projects": [
+        {
+          "id": "0199a6f0-0000-7000-8000-00000000b111",
+          "name": "billing-api"
+        }
+      ],
+      "projectsMore": 0,
+      "models": ["claude-opus-4"],
+      "defaultModel": "claude-opus-4",
+      "efforts": [],
+      "fastMode": "off",
+      "defaultMode": "default",
+      "maxMode": "acceptEdits",
+      "outsideContent": false,
+      "sessions": []
+    }
+  }
+}

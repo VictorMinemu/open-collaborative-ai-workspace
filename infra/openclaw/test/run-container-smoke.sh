@@ -84,12 +84,17 @@
 # who asked and for whom; the chain's human is the turn's asker, Archie only relays) and answers in the thread; Archie gets `agent.consult_reply.v1` (her answer only inside its attributed untrusted block, never the message body) and replies to it; each
 # turn reports done; a return turn delivered tainted (`turn.tainted`) cannot consult again (blocked in the cell: no
 # consultation, no `/tool-calls`); no model request lists a session or agent-to-agent tool.
+# Scenario bot_work_sessions (07.16-14 / BWZ-02, BWZ-03, BWZ-05, D-05, PD-09): the four `ocw_work_session_*` tools are
+# in the bot's alsoAllow (turn-scoped); a DM turn carrying `turn.workZone` makes the model start a session and read it,
+# and the fake API records one start body (`agentId,eventId,projectId,prompt`) and one read body
+# (`agentId,eventId,workSessionId`), never a device, user, visibility or worktree key and never `/tool-calls`; the
+# reply relays the started sentence and the read's header.
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
 #                            dm-isolation, memory, memory-files, card, board, connectors, mcp, approval, work_zone,
 #                            marketplace, breaker, bot_sandbox, bot_browser, bot_attachments, automation,
-#                            automation-tools, consult
+#                            automation-tools, consult, bot_work_sessions
 #                            and sandbox (runs when it is listed, with SMOKE_BUILD=1, or when ocw-mcp-sandbox:local
 #                            exists; otherwise it prints "SKIP sandbox (image not built)")
 #   FAKE_MODEL_DEBUG=1       the fake model logs a preview of each tool-offering request (off by default)
@@ -2355,6 +2360,99 @@ const ok =
   m.text.includes("after reading outside content") &&
   proposals.length === 0 && !gated.includes("ocw_start_work_zone");
 if (!ok) { console.log("FAIL: a tainted turn must not propose a Work Zone session"); process.exit(1); }
+'
+fi
+
+if want bot_work_sessions; then
+# 07.16 (D-05, PD-09, PD-17; RESEARCH risk 3): the bot's Work Zone session tools inside the real cell. The four are
+# plugin tools that post only the turn's ids and their own fields to `/work-sessions/*` (self-validated, never
+# `/tool-calls`); the fake API's knobs (`POST /__test/work-sessions`) set what each route answers.
+BWS_AGENT=0199a6f0-0000-7000-8000-00000000a001
+BWS_PROJECT=0199a6f0-0000-7000-8000-00000000b111
+# The fake's default `started` answer names this session (FAKE_WORK_SESSION).
+BWS_SESSION=0199a6f0-0000-7000-8000-00000000e5f1
+# The session's output: it may reach the model only inside a read's tool result (D-20, P1).
+BWS_OUTPUT=OCW-SMOKE-WS-OUTPUT-0716
+# A prompt a person wrote in the session and an absolute host path, both only in fields outside the contracts (the read
+# answer's and the wake event's): they must never reach the model or the cell log (P1, P2).
+BWS_PERSON=OCW-SMOKE-PERSON-PROMPT-0716
+BWS_HOST_PATH=/Users/ana/src/billing-api
+# Marks the model's captures so far (`bws_requests <mark>` then returns only the ones written after it).
+bws_mark() { docker exec "${P}-model" sh -c "mkdir -p /tmp/capture && ls /tmp/capture > /tmp/bws-mark-$1"; }
+bws_requests() { # <mark> → JSON [{file, text}] of the fake model's captures written since the mark
+  docker exec -i "${P}-model" node -e '
+const fs = require("fs");
+const before = new Set(fs.readFileSync(`/tmp/bws-mark-${process.argv[1]}`, "utf8").split("\n"));
+const files = fs.readdirSync("/tmp/capture").filter((f) => !before.has(f)).sort();
+process.stdout.write(JSON.stringify(files.map((file) => ({ file, text: fs.readFileSync(`/tmp/capture/${file}`, "utf8") }))));
+' "$1"
+}
+# The read answer of every case: one output text and one changed file (plus the out-of-contract canaries).
+bws_answers() { # <extra JS object entries for `answers`, e.g. "start: {...}"> → sets the knobs ({} would reset them)
+  api_exec "
+const read = {
+  kind: 'read',
+  session: { id: '$BWS_SESSION', status: 'idle', runtime: 'claude-code', model: 'claude-opus-4', mode: 'default',
+    worktree: true, title: 'Work Zone session', projectName: 'billing-api', updatedAt: '2026-11-09T18:01:00.000Z',
+    hostPath: '$BWS_HOST_PATH' },
+  queue: { queued: 0, running: 0, completed: 1, failed: 0, cancelled: 0, mine: [], humanPrompts: [{ text: '$BWS_PERSON' }] },
+  output: { texts: [{ seq: 7, text: '$BWS_OUTPUT: totals now round half-up on cents.' }], truncated: false },
+  tools: [],
+  changes: { files: [{ path: 'src/invoice.ts', status: 'modified', additions: 3, deletions: 1 }], branch: 'fix/rounding', truncated: false },
+  approvals: [],
+  deciders: [],
+  error: null,
+  cursor: 7,
+};
+await fetch('http://127.0.0.1:4000/__test/work-sessions', { method: 'POST', headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ answers: { read, $1 } }) });
+"
+}
+bws_mark all
+
+echo "== [bot_work_sessions] the four session tools are in the bot's alsoAllow (turn-scoped, like ocw_start_work_zone)"
+ALSO="$(docker exec "${P}-openclaw" cat /home/node/.openclaw/openclaw.json | node -e '
+const cfg = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const lists = Object.values(cfg.agents?.entries ?? {}).map((a) => a.tools?.alsoAllow ?? []);
+console.log(JSON.stringify(lists.map((l) => l.filter((t) => t.startsWith("ocw_work_session_")).sort())));
+')"
+echo "   alsoAllow  : $ALSO"
+[[ "$ALSO" == *'["ocw_work_session_prompt","ocw_work_session_read","ocw_work_session_start","ocw_work_session_stop"]'* ]] ||
+  { echo "FAIL: the four Work Zone session tools are not in the bot's alsoAllow"; exit 1; }
+
+echo "== [bot_work_sessions] the model starts a session and reads it: the turn's ids and the tool's fields only"
+bws_answers ""
+STATE="$(inject_and_wait "$ROOT/infra/openclaw/test/mention-work-sessions.json" 0199a6f0-0000-7000-8000-00000000d0f3)"
+echo "$STATE" | BWS_SESSION="$BWS_SESSION" BWS_PROJECT="$BWS_PROJECT" BWS_AGENT="$BWS_AGENT" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e0f3";
+const WS = process.env.BWS_SESSION;
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0f3");
+if (!m) { console.log("FAIL: no reply to the Work Zone session mention"); process.exit(1); }
+const ws = s.workSessions;
+const starts = ws.starts.filter((b) => b.eventId === EV);
+const reads = ws.reads.filter((b) => b.eventId === EV);
+const keys = (b) => Object.keys(b).sort().join();
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   bodies     :", JSON.stringify({ starts: starts.map(keys), reads: reads.map(keys) }));
+const forbidden = ["deviceId", "userId", "visibility", "worktree", "audience"];
+// Optional keys the model may add (the profile decides their values); this directive sends none.
+const START = ["agentId", "eventId", "projectId", "prompt"];
+const OPTIONAL = ["contextWindow", "effort", "fastMode", "model", "permissionMode"];
+const startOk = starts.length === 1 && START.every((k) => k in starts[0]) &&
+  Object.keys(starts[0]).every((k) => START.includes(k) || OPTIONAL.includes(k));
+const ok =
+  /\[tools: 4 \| ocw_work_session_prompt,ocw_work_session_read,ocw_work_session_start,ocw_work_session_stop\]/.test(m.text) &&
+  startOk &&
+  starts[0].agentId === process.env.BWS_AGENT && starts[0].projectId === process.env.BWS_PROJECT &&
+  starts[0].prompt === "Fix the rounding error in invoice totals." &&
+  reads.length === 1 && keys(reads[0]) === "agentId,eventId,workSessionId" && reads[0].workSessionId === WS &&
+  [...ws.starts, ...ws.prompts, ...ws.reads, ...ws.stops].every((b) => forbidden.every((k) => !(k in b))) &&
+  // Self-validated: none of the four ever goes to /tool-calls.
+  s.toolCalls.filter((c) => c.eventId === EV).length === 0 &&
+  m.text.includes(`Tool ocw_work_session_start said: Started a Work Zone session in billing-api (Supervised). Session ${WS}. Its card is in this conversation`) &&
+  m.text.includes(`Tool ocw_work_session_read said: Session ${WS} · idle · Claude Code · Supervised · claude-opus-4 · billing-api`);
+if (!ok) { console.log("FAIL: expected one start and one read with the turn ids and the tool fields only, relayed in the reply"); process.exit(1); }
 '
 fi
 
