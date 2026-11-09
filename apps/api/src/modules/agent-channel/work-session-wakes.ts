@@ -45,8 +45,9 @@ import { buildMentionEvents } from "./mentions";
  * 1. tx1, user-less (the session's audience backstop hides it from people outside it, Pitfall 2): locks the bot row,
  *    clears `wake_pending`, reads the session as it is NOW, refreshes the live card when its fields changed (the only
  *    writer of the card after the start, bounded by transitions) and decides the wake (PD-16's table). The pair
- *    (status, last finished prompt) already woken never wakes again (E8, retries included); the daily budget is
- *    reserved here (E7); a requester who left the organization is skipped here.
+ *    (state key, last finished prompt) already woken never wakes again (E8, retries included; the key is the status,
+ *    or the newest pending approval while waiting, `wakeStateKey`); the daily budget is reserved here (E7); a
+ *    requester who left the organization is skipped here.
  * 2. tx2, as the requester (D-17): they must still read the conversation, the bot must be live and a member; the wake is
  *    a mention of the bot on its card message with `trigger: "work_session"` (unattended, tainted from the start when
  *    the session is, offered the four Work Zone tools when the profile is active), then `agent.work_session.v1` on
@@ -168,6 +169,18 @@ export function wakeTransition(p: {
 }
 
 /**
+ * What `bot_work_sessions.last_woken_status` records for a woken state: the session status, except while approvals are
+ * pending, where it is `waiting_approval:<newest pending approval id>`. A later approval inside the same prompt (approve,
+ * running, ask again) is a new state and wakes the bot again so it can name who decides; the same approval never does.
+ * Every other transition stays keyed on (status, last finished prompt), PD-16's column pair.
+ */
+export function wakeStateKey(status: WorkSessionStatus, newestPendingApprovalId: string | null): string {
+  return status === "waiting_approval" && newestPendingApprovalId
+    ? `waiting_approval:${newestPendingApprovalId}`
+    : status;
+}
+
+/**
  * The card's notices with `text` added (neutral, once): an outside-content warning stays first (UI-SPEC), then the
  * newest neutral notices, at most three in all (the card contract's bound).
  */
@@ -274,10 +287,10 @@ async function decide(
     .orderBy(desc(workPrompts.position), desc(workPrompts.completedAt))
     .limit(1);
   const approvals = await tx
-    .select({ tool: sql<string>`${workApprovals.request}->>'tool'` })
+    .select({ id: workApprovals.id, tool: sql<string>`${workApprovals.request}->>'tool'` })
     .from(workApprovals)
     .where(and(eq(workApprovals.workSessionId, s.id), eq(workApprovals.status, "pending")))
-    .orderBy(asc(workApprovals.createdAt));
+    .orderBy(asc(workApprovals.createdAt), asc(workApprovals.id));
 
   // The live card follows the session (PD-12): only when one of its fields (Updated aside) or its pill changed.
   const card = await composeWorkSessionCard(
@@ -334,8 +347,9 @@ async function decide(
     stoppedByAgent: bot.stoppedByAgent,
   });
   if (!transition) return null;
-  // Idempotent across retries and repeated jobs (E8): the same (status, last finished prompt) wakes once.
-  if (bot.lastWokenStatus === s.status && bot.lastWokenPromptId === lastDonePromptId) return null;
+  const wakeKey = wakeStateKey(s.status, approvals.at(-1)?.id ?? null);
+  // Idempotent across retries and repeated jobs (E8): the same (state key, last finished prompt) wakes once.
+  if (bot.lastWokenStatus === wakeKey && bot.lastWokenPromptId === lastDonePromptId) return null;
 
   const previous = {
     day: bot.wakesDay,
@@ -351,7 +365,7 @@ async function decide(
       .set({
         wakesDay: today,
         wakesUsed: used,
-        lastWokenStatus: s.status,
+        lastWokenStatus: wakeKey,
         lastWokenPromptId: lastDonePromptId,
       })
       .where(eq(botWorkSessions.workSessionId, s.id));
@@ -428,7 +442,7 @@ async function decide(
     pendingApprovals: approvals.length,
     deciders,
     cardMessageId: bot.cardMessageId,
-    reserved: { day: today, used: usedToday + 1, status: s.status, promptId: lastDonePromptId },
+    reserved: { day: today, used: usedToday + 1, status: wakeKey, promptId: lastDonePromptId },
     previous,
   };
 }
