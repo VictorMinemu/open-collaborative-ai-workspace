@@ -465,11 +465,11 @@ describe("the offer: the caller's live controls for the device and runtime (Task
     expect(removed).toEqual(["GPT-4", "High", "1M", "Full access"]);
     // Nothing to drop: the same draft back and no names.
     expect(reconcile(next, offerFrom(RICH))).toEqual({ draft: next, removed: [] });
-    // A device whose models offer no fast mode turns it off.
+    // A device whose only model offers no fast mode, effort or window: all three go, and are named.
     const noFast = { ...RICH, models: [model({ id: "gpt-5", displayName: "GPT-5" })] };
     expect(reconcile(next, offerFrom(noFast))).toMatchObject({
-      draft: { fastMode: "off" },
-      removed: ["Fast mode"],
+      draft: { fastMode: "off", allowedEfforts: [], allowedContextWindows: [] },
+      removed: ["Low", "200k", "Fast mode"],
     });
   });
 
