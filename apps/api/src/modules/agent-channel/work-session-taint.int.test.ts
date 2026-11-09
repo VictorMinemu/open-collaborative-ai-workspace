@@ -751,3 +751,165 @@ describe("with the admin's flag the bot acts on outside content, never in bypass
     expect((await promptsOf(workSessionId)).at(-1)).toMatchObject({ id: q.promptId, tainted: false });
   });
 });
+
+// ---------------------------------------------------------------- audits without content; bots without a profile
+
+const MARKER = "OCW-MARKER-0716-taint";
+
+describe("every tainted outcome is audited with the outside-content mark and never the prompt (PD-21, P1)", () => {
+  it("proposed, started, queued, outside_content and outside_content_bypass: one bot audit each, no marker anywhere", async () => {
+    const text = `${PROMPT} ${MARKER}`;
+    // Sessions to prompt, from untainted asks: Atlas on the server (no flag), Echo on the laptop (flag).
+    const atlasSession = await untaintedSession("atlas");
+    const echoSession = await untaintedSession("echo", {}, "fullAccess");
+
+    const cases: Array<{ eventId: string; action: string; outcome: string }> = [];
+    const proposedEv = await taintedAsk("atlas");
+    const proposed = await start("atlas", proposedEv, { prompt: text });
+    expect(proposed.body.kind, JSON.stringify(proposed.body)).toBe("proposed");
+    cases.push({ eventId: proposedEv, action: "bot.work_session_proposed", outcome: "proposed" });
+
+    const startedEv = await taintedAsk("echo");
+    const startedBody = await started("echo", startedEv, { prompt: text });
+    cases.push({ eventId: startedEv, action: "bot.work_session_started", outcome: "started" });
+
+    const queuedEv = await taintedAsk("echo");
+    await queued("echo", queuedEv, echoSession.workSessionId, text);
+    cases.push({ eventId: queuedEv, action: "bot.work_session_prompted", outcome: "prompted" });
+
+    const refusedEv = await taintedAsk("atlas");
+    await refusedWith(promptCall("atlas", refusedEv, atlasSession.workSessionId, text), "outside_content");
+    cases.push({ eventId: refusedEv, action: "bot.work_session_refused", outcome: "outside_content" });
+
+    const bypassEv = await taintedAsk("echo");
+    await refusedWith(
+      start("echo", bypassEv, { prompt: text, permissionMode: "fullAccess" }),
+      "outside_content_bypass",
+    );
+    cases.push({ eventId: bypassEv, action: "bot.work_session_refused", outcome: "outside_content_bypass" });
+
+    // Ids, the outcome, codes, lengths, the mode, the model and the outside-content mark: no key can carry content.
+    const allowed = [
+      "eventId",
+      "tool",
+      "sponsorUserId",
+      "projectId",
+      "workSessionId",
+      "mode",
+      "model",
+      "outcome",
+      "reason",
+      "field",
+      "promptChars",
+      "outsideContent",
+      "approvalId",
+      "proposalRefusal",
+    ];
+    for (const c of cases) {
+      const rows = await botAuditsOf(c.eventId);
+      expect(rows, c.outcome).toHaveLength(1);
+      expect(rows[0]!.action, c.outcome).toBe(c.action);
+      expect(rows[0]!.metadata).toMatchObject({
+        outcome: c.outcome,
+        outsideContent: true,
+        promptChars: text.length,
+      });
+      expect(Object.keys(rows[0]!.metadata).filter((k) => !allowed.includes(k))).toEqual([]);
+    }
+
+    // The marker: only in the prompts themselves (the sessions' queues and the proposal a person reviews).
+    const like = `%${MARKER}%`;
+    expect(
+      await rowsOf("select action from app.audit_events where to_jsonb(audit_events)::text like $1", [like]),
+    ).toEqual([]);
+    expect(
+      await rowsOf("select id from app.agent_tool_calls where to_jsonb(agent_tool_calls)::text like $1", [
+        like,
+      ]),
+    ).toEqual([]);
+    expect(
+      await rowsOf("select 1 from app.bot_work_sessions where to_jsonb(bot_work_sessions)::text like $1", [
+        like,
+      ]),
+    ).toEqual([]);
+    expect(
+      await rowsOf("select 1 from app.approval_requests where to_jsonb(approval_requests)::text like $1", [
+        like,
+      ]),
+    ).toEqual([]);
+    // The proposal card shows the prompt only in its Prompt field (and its summary): the person reviews it there.
+    const { approval } = await proposalOf(proposedEv);
+    const proposalCard = AgentCard.parse(
+      await ok(ana.request("GET", `/api/v1/cards/${approval!.card_message_id}`)),
+    );
+    expect(proposalCard.fields.filter((f) => f.value.includes(MARKER)).map((f) => f.label)).toEqual([
+      "Prompt",
+    ]);
+    expect(JSON.stringify(proposalCard.notices)).not.toContain(MARKER);
+    expect(proposalCard.title).not.toContain(MARKER);
+    // No other message or card holds it: the started session's live card never shows the prompt.
+    expect(
+      await rowsOf("select id from app.messages where to_jsonb(messages)::text like $1 and id <> $2", [
+        like,
+        approval!.card_message_id,
+      ]),
+    ).toEqual([]);
+    expect(
+      await rowsOf(
+        "select message_id from app.message_cards where to_jsonb(message_cards)::text like $1 and message_id <> $2",
+        [like, approval!.card_message_id],
+      ),
+    ).toEqual([]);
+    const live = await ok(ana.request("GET", `/api/v1/cards/${startedBody.cardMessageId}`));
+    expect(JSON.stringify(live)).not.toContain(MARKER);
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs.filter((l) => l.includes(MARKER))).toEqual([]);
+  });
+});
+
+describe("bots without a profile keep today's behaviour after outside content (BWZ-06, D-14, P7, E16)", () => {
+  it("ocw_start_work_zone on a tainted turn is still refused tainted and posts no card", async () => {
+    const eventId = await taintedAsk("kit");
+    const [turn] = await rowsOf("select tools from app.agent_turns where event_id = $1", [eventId]);
+    expect(turn!.tools).toContain("ocw_start_work_zone");
+    expect(turn!.tools).not.toContain("ocw_work_session_start");
+    const before = await counts();
+    const r = await cell("/work-zone/proposals", {
+      eventId,
+      agentId: kitId,
+      projectId: billingId,
+      deviceId: serverId,
+      prompt: PROMPT,
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body).toEqual({ refused: "tainted" });
+    expect(await counts()).toEqual(before);
+    expect(await toolCallsOf(eventId, "ocw_start_work_zone")).toEqual([
+      { decision: "denied", reason: "tainted" },
+    ]);
+    expect(
+      await rowsOf("select 1 from app.approval_requests where event_id = $1 or requested_by_agent_id = $2", [
+        eventId,
+        kitId,
+      ]),
+    ).toEqual([]);
+    expect(
+      await rowsOf("select id from app.messages where author_kind = 'agent' and author_id = $1", [kitId]),
+    ).toEqual([]);
+    expect(await botAuditsOf(eventId)).toEqual([]);
+  });
+
+  it("the start route stays closed to a bot without a profile, tainted or not: profile_inactive, nothing proposed", async () => {
+    const eventId = await taintedAsk("kit");
+    const before = await counts();
+    const r = await cell("/work-sessions/start", {
+      eventId,
+      agentId: kitId,
+      projectId: billingId,
+      prompt: PROMPT,
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body).toMatchObject({ kind: "refused", code: "profile_inactive" });
+    expect(await counts()).toEqual(before);
+  });
+});
