@@ -2210,6 +2210,7 @@ const PLUGIN_TOOLS = [
   "ocw_http_request",
   "ocw_work_zone_projects",
   "ocw_start_work_zone",
+  "ocw_work_session_start",
   "ocw_sandbox_exec",
   "ocw_sandbox_process",
   "ocw_sandbox_read",
@@ -3423,6 +3424,7 @@ describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts b
       BotProfileInactiveReason: { options: string[] };
       BOT_WORK_SESSION_SENTENCES: Record<string, string>;
       BOT_WORK_SESSION_PROPOSED_SENTENCE: string;
+      BOT_PROFILE_STATUS_SENTENCES: Record<string, string>;
     };
     expect({ ...m.BOT_WORK_ZONE_LIMITS }).toEqual({ ...c.BOT_WORK_ZONE_LIMITS });
     expect([...m.BotFastMode.options]).toEqual([...c.BotFastMode.options]);
@@ -3430,6 +3432,8 @@ describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts b
     expect([...m.BotProfileInactiveReason.options]).toEqual([...c.BotProfileInactiveReason.options]);
     expect({ ...m.BOT_WORK_SESSION_SENTENCES }).toEqual({ ...c.BOT_WORK_SESSION_SENTENCES });
     expect(m.BOT_WORK_SESSION_PROPOSED_SENTENCE).toBe(c.BOT_WORK_SESSION_PROPOSED_SENTENCE);
+    // 07.16-08: the start tool appends the status line of a `profile_inactive` refusal's reason.
+    expect({ ...m.BOT_PROFILE_STATUS_SENTENCES }).toEqual({ ...c.BOT_PROFILE_STATUS_SENTENCES });
   });
 
   it("a turn with workZone parses identically in both copies, alone and inside a mention", async () => {

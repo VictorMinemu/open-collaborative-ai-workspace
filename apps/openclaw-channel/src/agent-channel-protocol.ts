@@ -671,6 +671,21 @@ export const BotProfileInactiveReason = z.enum([
 export type BotProfileInactiveReason = z.infer<typeof BotProfileInactiveReason>;
 
 /**
+ * The contracts' status line of an inactive profile, one per reason. A `profile_inactive` refusal carries the reason; the
+ * start tool tells the model why after the refusal's own sentence.
+ */
+export const BOT_PROFILE_STATUS_SENTENCES: Readonly<Record<BotProfileInactiveReason, string>> = {
+  bot_disabled: "The bot is disabled.",
+  no_consent: "The device's owner has not allowed this bot to run sessions there.",
+  device_revoked: "The device was removed from the organization.",
+  sponsor_inactive: "The person who saved the profile is no longer an active member.",
+  sponsor_not_allowed: "The person who saved the profile can no longer start Work Zone sessions.",
+  sponsor_device_access: "The person who saved the profile can no longer use the device.",
+  no_projects: "None of the profile's projects can be used any more.",
+  org_disabled: "The organization does not let bots start Work Zone sessions.",
+};
+
+/**
  * A refused call. A code from a newer API stays a string (its sentence still reaches the model); an unknown reason or
  * field reads as absent.
  */

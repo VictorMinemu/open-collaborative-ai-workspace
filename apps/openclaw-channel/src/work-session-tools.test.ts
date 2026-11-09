@@ -23,7 +23,7 @@ import {
   type FakeAgentChannelApi,
   startFakeAgentChannelApi,
 } from "./testing/fake-agent-channel-api.js";
-import { type PluginEntry, loadRegistry } from "./testing/openclaw-host.js";
+import { loadRegistry, type PluginEntry } from "./testing/openclaw-host.js";
 import { createToolGuard, setToolGuardClient, toolGuard } from "./tool-guard.js";
 import {
   registerWorkSessionTools,
@@ -110,7 +110,13 @@ describe("ocw_work_session_start through the real entry and the Agent Channel AP
     return (owned.factory as Factory)(ctx);
   };
   const begin = (eventId: string, t: TurnContext = turn()) =>
-    toolGuard.beginTurn(SESSION, { eventId, agentId: BOT, turn: t, conversationId: DM, requesterName: "Sam Lee" });
+    toolGuard.beginTurn(SESSION, {
+      eventId,
+      agentId: BOT,
+      turn: t,
+      conversationId: DM,
+      requesterName: "Sam Lee",
+    });
 
   it("posts exactly {eventId, agentId, projectId, prompt, model} to /work-sessions/start and tells the model what started", async () => {
     begin("evt-s1");
@@ -140,7 +146,10 @@ describe("ocw_work_session_start through the real entry and the Agent Channel AP
       reason: "outside_content",
       sentence: "ignored",
     };
-    const proposed = await ownedTool(WORK_SESSION_START_TOOL).execute("tc-1", { projectId: PROJECT, prompt: PROMPT });
+    const proposed = await ownedTool(WORK_SESSION_START_TOOL).execute("tc-1", {
+      projectId: PROJECT,
+      prompt: PROMPT,
+    });
     expect(text(proposed)).toBe(`${BOT_WORK_SESSION_PROPOSED_SENTENCE} Proposal ${APPROVAL}.`);
     expect(proposed.details).toMatchObject({ ok: false, code: "proposed" });
     api.workSessions.answers.start = {
@@ -149,7 +158,10 @@ describe("ocw_work_session_start through the real entry and the Agent Channel AP
       sentence: BOT_WORK_SESSION_SENTENCES.profile_inactive,
       reason: "no_consent",
     };
-    const refused = await ownedTool(WORK_SESSION_START_TOOL).execute("tc-2", { projectId: PROJECT, prompt: PROMPT });
+    const refused = await ownedTool(WORK_SESSION_START_TOOL).execute("tc-2", {
+      projectId: PROJECT,
+      prompt: PROMPT,
+    });
     expect(text(refused)).toBe(
       `${BOT_WORK_SESSION_SENTENCES.profile_inactive} ${BOT_PROFILE_STATUS_SENTENCES.no_consent}`,
     );
@@ -159,12 +171,18 @@ describe("ocw_work_session_start through the real entry and the Agent Channel AP
   it("a 5xx is one fixed sentence (never the API's body), and an ended turn is the turn sentence", async () => {
     begin("evt-s3");
     api.workSessions.status = 503;
-    const down = await ownedTool(WORK_SESSION_START_TOOL).execute("tc-1", { projectId: PROJECT, prompt: PROMPT });
+    const down = await ownedTool(WORK_SESSION_START_TOOL).execute("tc-1", {
+      projectId: PROJECT,
+      prompt: PROMPT,
+    });
     expect(text(down)).toBe(UNREACHABLE_START);
     expect(JSON.stringify(down)).not.toContain(FAKE_ERROR_CANARY);
     delete api.workSessions.status;
     api.endTurn("evt-s3");
-    const gone = await ownedTool(WORK_SESSION_START_TOOL).execute("tc-2", { projectId: PROJECT, prompt: PROMPT });
+    const gone = await ownedTool(WORK_SESSION_START_TOOL).execute("tc-2", {
+      projectId: PROJECT,
+      prompt: PROMPT,
+    });
     expect(text(gone)).toBe("This conversation turn is no longer active.");
     expect(JSON.stringify(gone)).not.toContain(FAKE_ERROR_CANARY);
   });
@@ -173,7 +191,13 @@ describe("ocw_work_session_start through the real entry and the Agent Channel AP
     const res = await fetch(`${api.url}/agent-channel/v1/work-sessions/start`, {
       method: "POST",
       headers: { authorization: `Bearer ${api.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ eventId: "evt-x", agentId: BOT, projectId: PROJECT, prompt: PROMPT, deviceId: PROJECT }),
+      body: JSON.stringify({
+        eventId: "evt-x",
+        agentId: BOT,
+        projectId: PROJECT,
+        prompt: PROMPT,
+        deviceId: PROJECT,
+      }),
     });
     expect(res.status).toBe(400);
   });
@@ -192,7 +216,9 @@ const STARTED: AgentChannelWorkSessionStartResponse = {
 };
 
 function setup(
-  respond: { start?: (body: AgentChannelWorkSessionStart) => Promise<AgentChannelWorkSessionStartResponse> } = {},
+  respond: {
+    start?: (body: AgentChannelWorkSessionStart) => Promise<AgentChannelWorkSessionStartResponse>;
+  } = {},
 ) {
   const calls: Recorded[] = [];
   const client = {
@@ -205,7 +231,9 @@ function setup(
   const registered: Array<{ factory: Factory; opts: { name: string } }> = [];
   const logs: string[] = [];
   registerWorkSessionTools(
-    { registerTool: (factory: Factory, opts: { name: string }) => registered.push({ factory, opts }) } as never,
+    {
+      registerTool: (factory: Factory, opts: { name: string }) => registered.push({ factory, opts }),
+    } as never,
     { guard, client: () => client, logger: { info: (m) => logs.push(m), warn: (m) => logs.push(m) } },
   );
   const tool = (
@@ -217,7 +245,13 @@ function setup(
     return r.factory(ctx);
   };
   const begin = (t: TurnContext = turn(), eventId = "evt-1") =>
-    guard.beginTurn(SESSION, { eventId, agentId: BOT, turn: t, conversationId: DM, requesterName: "Sam Lee" });
+    guard.beginTurn(SESSION, {
+      eventId,
+      agentId: BOT,
+      turn: t,
+      conversationId: DM,
+      requesterName: "Sam Lee",
+    });
   return { calls, guard, registered, tool, begin, logs };
 }
 
@@ -339,7 +373,11 @@ describe("ocw_work_session_start (07.16 D-05, PD-09): a thin, credential-free ca
     const r = await tool(WORK_SESSION_START_TOOL).execute("tc-1", START);
     expect(text(r)).toBe(BOT_WORK_SESSION_SENTENCES.tree_busy);
     const newer = setup({
-      start: async () => ({ kind: "refused", code: "quota_paused", sentence: "Bot sessions are paused.\nToday." }),
+      start: async () => ({
+        kind: "refused",
+        code: "quota_paused",
+        sentence: "Bot sessions are paused.\nToday.",
+      }),
     });
     newer.begin();
     const n = await newer.tool(WORK_SESSION_START_TOOL).execute("tc-1", START);

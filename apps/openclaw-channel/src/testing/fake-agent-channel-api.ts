@@ -92,6 +92,14 @@
  *                                          ({} resets them): `results` per attachment id (a text, image or refused answer),
  *                                          `noTrigger` makes every read answer 403 `no_trigger` (the body carries
  *                                          FAKE_ERROR_CANARY, which must never reach the model)
+ *   POST /agent-channel/v1/work-sessions/start  (07.16) records every body (`workSessions.starts`, refused ones
+ *                                          included) and answers `workSessions.answers.start`, else a `started` answer for
+ *                                          FAKE_WORK_SESSION in billing-api (the model and mode asked, else none and
+ *                                          `default`); 400 for any key beyond the contract's (a device, a user, an audience,
+ *                                          a worktree), 404 `unknown_turn` for a turn ended with `endTurn`. The
+ *                                          `workSessions.status` knob makes every route answer that status with an error
+ *                                          body carrying FAKE_ERROR_CANARY. POST /__test/work-sessions {answers?, status?}
+ *                                          replaces the knobs ({} resets them; the records stay)
  *   POST /agent-channel/v1/mcp/probe-results  records the probe report (`mcpProbes`)
  *   POST /agent-channel/v1/plugins/report     records the report (`pluginReports`) and moves the row's status
  *   POST /agent-channel/v1/plugins/verify-install  approves only a row `installing` with the same package, version
@@ -373,6 +381,60 @@ export type FakeAttachments = {
   /** When true, every read answers 403 `no_trigger` (the turn ended). */
   noTrigger?: boolean;
 };
+/** 07.16: a bot's Work Zone session routes (`/work-sessions/<route>`). */
+export type FakeWorkSessionRoute = "start";
+/** 07.16: the bot Work Zone session routes' records and knobs (`POST /__test/work-sessions` replaces the knobs). */
+export type FakeWorkSessions = {
+  /** Every POST /work-sessions/start body, in order (refused ones included). */
+  starts: Array<Record<string, unknown>>;
+  /** What each route answers instead of its default. */
+  answers: Partial<Record<FakeWorkSessionRoute, unknown>>;
+  /** When set, every route answers this HTTP status with an error body (FAKE_ERROR_CANARY). */
+  status?: number;
+};
+/** The session every default `started` answer names. */
+export const FAKE_WORK_SESSION = "0199a6f0-0000-7000-8000-00000000e5f1";
+/** The keys each body may carry (contracts `AgentChannelWorkSession*`, strict objects) and the ones it needs. */
+const WORK_SESSION_BODIES: Record<
+  FakeWorkSessionRoute,
+  { keys: readonly string[]; required: readonly string[] }
+> = {
+  start: {
+    keys: [
+      "eventId",
+      "agentId",
+      "projectId",
+      "prompt",
+      "model",
+      "effort",
+      "fastMode",
+      "contextWindow",
+      "permissionMode",
+    ],
+    required: ["projectId", "prompt"],
+  },
+};
+const fakeWorkSessions = (): FakeWorkSessions => ({ starts: [], answers: {} });
+/** The record list of each route. */
+const WORK_SESSION_RECORDS = { start: "starts" } as const satisfies Record<
+  FakeWorkSessionRoute,
+  keyof FakeWorkSessions
+>;
+/** A route's default answer (the real API's shapes, ids from the body). */
+function fakeWorkSessionAnswer(route: FakeWorkSessionRoute, body: Record<string, unknown>): unknown {
+  switch (route) {
+    case "start":
+      return {
+        kind: "started",
+        workSessionId: FAKE_WORK_SESSION,
+        status: "provisioning",
+        cardMessageId: randomUUID(),
+        model: typeof body.model === "string" ? body.model : null,
+        mode: typeof body.permissionMode === "string" ? body.permissionMode : "default",
+        projectName: "billing-api",
+      };
+  }
+}
 /** The keys a read body may carry (contracts `AgentChannelAttachmentRead`, a strict object). */
 const ATTACHMENT_READ_KEYS: readonly string[] = ["eventId", "agentId", "attachmentId"];
 /** Contracts `ATTACHMENT_READ_SENTENCES.not_found` (the fake imports types only). */
@@ -522,6 +584,8 @@ export type FakeAgentChannelApi = {
   browser: FakeBrowser;
   /** The attachment read route's records and knobs (07.15). */
   attachments: FakeAttachments;
+  /** The bot Work Zone session routes' records and knobs (07.16). */
+  workSessions: FakeWorkSessions;
   /** Snapshot `mcpServers` (header values included, as the real API sends them); `[]` = none. */
   mcpServers: CellMcpServer[];
   /** Every POST /mcp/probe-results, in order. */
@@ -756,6 +820,7 @@ export async function startFakeAgentChannelApi(
     sandbox: { calls: [], results: {} } as FakeSandbox,
     browser: { calls: [], results: {} } as FakeBrowser,
     attachments: { calls: [], results: {} } as FakeAttachments,
+    workSessions: fakeWorkSessions(),
     consultations: [] as Array<Record<string, unknown>>,
     consultOutcome: undefined as ConsultOutcome | undefined,
     turnsDone: [] as StoredTurnDone[],
@@ -882,6 +947,15 @@ export async function startFakeAgentChannelApi(
           else delete at.noTrigger;
           return json(res, 200, { ok: true });
         }
+        if (req.method === "POST" && url.pathname === "/__test/work-sessions") {
+          // 07.16: replace the session route knobs ({} resets them; the records stay).
+          const body = ((await readJson(req)) ?? {}) as Partial<FakeWorkSessions>;
+          const ws = state.workSessions;
+          ws.answers = body.answers && typeof body.answers === "object" ? body.answers : {};
+          if (typeof body.status === "number") ws.status = body.status;
+          else delete ws.status;
+          return json(res, 200, { ok: true });
+        }
         if (req.method === "POST" && url.pathname === "/__test/consult-outcome") {
           // 07.7: the consult route's answer ({} resets it; the records stay).
           const body = ((await readJson(req)) ?? {}) as { status?: unknown; body?: unknown };
@@ -949,6 +1023,7 @@ export async function startFakeAgentChannelApi(
             sandbox: state.sandbox,
             browser: state.browser,
             attachments: state.attachments,
+            workSessions: state.workSessions,
             consultations: state.consultations,
             turnsDone: state.turnsDone,
             mcpProbes: state.mcpProbes,
@@ -1229,6 +1304,35 @@ export async function startFakeAgentChannelApi(
         }
         const canned = sandboxRoute === "exec" && sb.exec ? sb.exec : sb.results[sandboxRoute];
         return json(res, 200, canned ?? fakeSandboxResult(sandboxRoute, body));
+      }
+      const workSessionRoute = /^\/work-sessions\/(start)$/u.exec(route)?.[1] as
+        | FakeWorkSessionRoute
+        | undefined;
+      if (req.method === "POST" && workSessionRoute) {
+        // 07.16 (PD-09): only the turn's ids and the tool's own fields; the real API derives everything else.
+        const body = ((await readJson(req)) ?? {}) as Record<string, unknown>;
+        const ws = state.workSessions;
+        ws[WORK_SESSION_RECORDS[workSessionRoute]].push({ ...body });
+        const shape = WORK_SESSION_BODIES[workSessionRoute];
+        if (
+          typeof body.eventId !== "string" ||
+          typeof body.agentId !== "string" ||
+          shape.required.some((k) => body[k] === undefined) ||
+          Object.keys(body).some((k) => !shape.keys.includes(k))
+        ) {
+          return json(res, 400, { error: { code: "bad_request", message: `bad body ${FAKE_ERROR_CANARY}` } });
+        }
+        if (ws.status !== undefined) {
+          return json(res, ws.status, {
+            error: { code: "internal", message: `failed by test ${FAKE_ERROR_CANARY}` },
+          });
+        }
+        if (state.endedTurns.has(body.eventId)) {
+          return json(res, 404, {
+            error: { code: "unknown_turn", message: `turn ended ${FAKE_ERROR_CANARY}` },
+          });
+        }
+        return json(res, 200, ws.answers[workSessionRoute] ?? fakeWorkSessionAnswer(workSessionRoute, body));
       }
       if (req.method === "POST" && route === "/attachments/read") {
         // 07.15 (D-03): only the turn's ids and the attachment id; the real API derives everything else.
@@ -1819,6 +1923,9 @@ export async function startFakeAgentChannelApi(
     },
     get attachments() {
       return state.attachments;
+    },
+    get workSessions() {
+      return state.workSessions;
     },
     get mcpServers() {
       return state.mcpServers;

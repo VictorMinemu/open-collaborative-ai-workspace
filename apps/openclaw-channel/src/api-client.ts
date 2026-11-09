@@ -49,6 +49,8 @@ import {
   type AgentChannelToolCallResult,
   type AgentChannelTurnDone,
   type AgentChannelTyping,
+  type AgentChannelWorkSessionStart,
+  AgentChannelWorkSessionStartResponse,
   type AgentChannelWorkZoneProjects,
   AgentChannelWorkZoneProjectsResponse,
   type AgentChannelWorkZonePropose,
@@ -190,6 +192,13 @@ export const TURN_DONE_TIMEOUT_MS = 10_000;
  * answered (and charged), never the transport sentence for a read that was counted anyway.
  */
 export const ATTACHMENT_READ_TIMEOUT_MS = 35_000;
+
+/**
+ * 07.16 (PD-09): one attempt of a bot's Work Zone session call. Starting, prompting and stopping are not idempotent (a
+ * retry after a lost answer could start a second session or queue the prompt twice), and the start route waits for the
+ * device's first answer; 30 s waits past it, so the bot reads what the API decided.
+ */
+export const WORK_SESSION_REQUEST_TIMEOUT_MS = 30_000;
 
 /**
  * 07.8: per-call budgets of the confined tools, each longer than the API's deadline of that call, so the model reads
@@ -619,6 +628,26 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
     ): Promise<AgentChannelAttachmentReadResponse> {
       const raw = await request("POST", "/attachments/read", body, signal, 1, ATTACHMENT_READ_TIMEOUT_MS);
       return AgentChannelAttachmentReadResponse.parse(raw);
+    },
+    /**
+     * `ocw_work_session_start` (07.16 D-05, PD-09): the turn's ids, a project and the bot's optional choices; the API
+     * takes the device, the runtime, the sponsor, the audience and the worktree from the bot's profile. One attempt of
+     * `WORK_SESSION_REQUEST_TIMEOUT_MS`. Every refusal is a 200 `{kind: "refused", code, sentence}`; an ended turn
+     * throws (404 `unknown_turn`). Never logs the prompt.
+     */
+    async workSessionStart(
+      body: AgentChannelWorkSessionStart,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelWorkSessionStartResponse> {
+      const raw = await request(
+        "POST",
+        "/work-sessions/start",
+        body,
+        signal,
+        1,
+        WORK_SESSION_REQUEST_TIMEOUT_MS,
+      );
+      return AgentChannelWorkSessionStartResponse.parse(raw);
     },
     /**
      * A marketplace install / uninstall outcome (D-14). Three attempts at most: the API applies a report only to the
