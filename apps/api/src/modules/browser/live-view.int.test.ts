@@ -336,17 +336,32 @@ describe("every ended reason the UI names (UI-SPEC §1.4)", () => {
     }
   });
 
-  it("closed_by_bot: the bot's close ends the page", async () => {
-    const { ev, sam } = await watchedPage();
+  it("closed_by_bot: the bot's close ends the page, even when sandboxd's own close signals arrive first", async () => {
+    const { ev, contextId, sam, alex } = await watchedPage();
     try {
+      // Like the real broker, sandboxd ends the frame streams and emits `closed` before its answer reaches the API: the
+      // fake holds the answer 1.5 s after closing, so the live view always hears the stream's close first (pipeline 201
+      // recorded `idle` here when that happened by chance under load).
+      await control("/browser/delay", { op: "contextClose", ms: 1500, after: true });
       await ok(l.browser("close", ev));
-      expect(await waitState(sam, "ended")).toMatchObject({
-        endReason: "closed_by_bot",
-        host: "panel.fake.test",
-      });
+      for (const s of [sam, alex]) {
+        expect(await waitState(s, "ended")).toMatchObject({
+          endReason: "closed_by_bot",
+          host: "panel.fake.test",
+        });
+      }
       await noFrameAfter(sam);
+      // The feed's `closed` event for the same close changes nothing either.
+      await pumpEvents();
+      expect(await contextRow(contextId)).toMatchObject({ state: "ended", end_reason: "closed_by_bot" });
+      const audited = await l.s.su.query(
+        "select actor_kind, metadata->>'reason' as reason from app.audit_events where action = 'browser.closed' and resource_id = $1",
+        [contextId],
+      );
+      expect(audited.rows).toEqual([{ actor_kind: "agent", reason: "closed_by_bot" }]);
     } finally {
       sam.close();
+      alex.close();
     }
   });
 

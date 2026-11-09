@@ -248,9 +248,14 @@ export async function ensureSandbox(
   core: Pick<Core, "db" | "audit" | "log">,
   client: SandboxdClient,
   target: { orgId: string; agentId: string },
-  opts: { timeoutMs: number },
+  /** `signal` ends the wait for the start only (the caller's share of its deadline); the packages keep their budgets. */
+  opts: { timeoutMs: number; signal?: AbortSignal },
 ): Promise<{ state: SandboxState; runtime: SandboxRuntime | null }> {
-  const status = await client.call("ensure", { target }, { timeoutMs: opts.timeoutMs });
+  const status = await client.call(
+    "ensure",
+    { target },
+    { timeoutMs: opts.timeoutMs, ...(opts.signal ? { signal: opts.signal } : {}) },
+  );
   await applyInstalls(core, client, target);
   return status;
 }

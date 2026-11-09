@@ -284,6 +284,73 @@ describe("files helper reaping", () => {
   });
 });
 
+describe("purge and the files helper (a measurement never recreates what a purge removes)", () => {
+  const nothingLeft = (t: ReturnType<typeof setup>) => {
+    expect([...t.docker.containers.keys()]).toEqual([]);
+    expect([...t.docker.volumes.keys()]).toEqual([]);
+    expect([...t.docker.networks.keys()]).toEqual([]);
+  };
+
+  it("a measurement that starts while purge runs waits for it and finds no workspace", async () => {
+    const t = setup();
+    await t.sandboxes.ensure(target);
+    await t.sandboxes.stop({ target, reason: "user" });
+    const request = t.docker.request.bind(t.docker);
+    let measuring: Promise<unknown> | null = null;
+    t.docker.request = async (method, path, body, options) => {
+      const res = await request(method, path, body, options);
+      // Purge has just listed the bot's containers: a sweep's measurement of the stopped bot starts now and gets
+      // every chance to create its files helper before purge goes on.
+      if (!measuring && method === "GET" && path.startsWith("/containers/json?all=1")) {
+        measuring = t.quota.measure(target).then(
+          () => "measured",
+          (err: unknown) => err,
+        );
+        for (let i = 0; i < 50 && !t.docker.container(nameFor("files", NS, AGENT))?.Running; i++) {
+          await new Promise((r) => setImmediate(r));
+        }
+      }
+      return res;
+    };
+    await t.sandboxes.purge(target);
+    const outcome = await measuring;
+    nothingLeft(t);
+    expect(outcome).toMatchObject({ code: "not_found", status: 404 });
+  });
+
+  it("a files helper started before purge is removed with the workspace", async () => {
+    const t = setup();
+    await t.sandboxes.ensure(target);
+    await t.sandboxes.stop({ target, reason: "user" });
+    await t.quota.measure(target);
+    expect(t.docker.container(nameFor("files", NS, AGENT))?.Running).toBe(true);
+    await t.sandboxes.purge(target);
+    nothingLeft(t);
+  });
+
+  it("the sweeper skips a bot purged between its listing and its measurement: no warning, nothing recreated", async () => {
+    const t = setup();
+    await t.sandboxes.ensure(target);
+    const warnings: string[] = [];
+    const sweeper = createSweeper({
+      sandboxes: {
+        ...t.sandboxes,
+        listRunning: async () => {
+          const listed = await t.sandboxes.listRunning();
+          await t.sandboxes.purge(target);
+          return listed;
+        },
+      },
+      quota: t.quota,
+      clock: t.clock,
+      onError: (step, err) => warnings.push(`${step}:${(err as { code?: string }).code ?? "?"}`),
+    });
+    await sweeper.tick();
+    expect(warnings).toEqual([]);
+    nothingLeft(t);
+  });
+});
+
 describe("policy and usage routes", () => {
   it("POST /v1/policy stores the limits (400 on a bad body); POST /v1/usage answers the contract", async () => {
     const { createServer } = await import("./server");
@@ -316,5 +383,31 @@ describe("policy and usage routes", () => {
     } finally {
       server.close();
     }
+  });
+});
+
+describe("sweeper and the kill switch (D-09)", () => {
+  it("a pass that listed a sandbox just before the kill starts nothing for it afterwards (no files helper)", async () => {
+    const t = setup();
+    await t.sandboxes.ensure(target);
+    // The pass lists the running shell, then the admin's kill lands (the push and the kill run at once, CI p164).
+    const sweeper = createSweeper({
+      sandboxes: {
+        ...t.sandboxes,
+        listRunning: async () => {
+          const listed = await t.sandboxes.listRunning();
+          t.sandboxes.setPolicy({ ...policy({ killed: true }), version: 2 });
+          await t.sandboxes.killOrg(ORG);
+          return listed;
+        },
+      },
+      quota: t.quota,
+      clock: t.clock,
+      intervalMs: 60_000,
+    });
+    const creates = t.docker.containerCreates.length;
+    await sweeper.tick();
+    expect(t.docker.containerCreates.slice(creates)).toEqual([]);
+    expect([...t.docker.containers.values()].filter((c) => c.Running).map((c) => c.Name)).toEqual([]);
   });
 });

@@ -1,5 +1,5 @@
 import type { Quota } from "./quota";
-import type { Clock, Sandboxes } from "./sandboxes";
+import { type Clock, SandboxdFailure, type Sandboxes } from "./sandboxes";
 
 /**
  * The broker's periodic pass (07.8-09, D-01, D-09, F-9): every interval (60 s by default) it measures each running
@@ -60,6 +60,9 @@ export function createSweeper(deps: SweeperDeps): Sweeper {
       onError("list", err);
     }
     for (const { target } of shells) {
+      // A kill switch that landed after the listing: the shell is gone or going, and measuring it now would start a
+      // `files` helper for it (CI p164: one per killed bot, still running after the kill). The kill sampled its usage.
+      if (sandboxes.limitsFor(target.orgId)?.killed) continue;
       try {
         // The soft quota first: over it, the sandbox stops with reason disk_full (and one usage sample).
         await quota.measure(target);
@@ -75,6 +78,8 @@ export function createSweeper(deps: SweeperDeps): Sweeper {
         }
         await sandboxes.sampleUsage(target);
       } catch (err) {
+        // Purged between the listing and its measurement: nothing left to measure, nothing to warn about.
+        if (err instanceof SandboxdFailure && err.code === "not_found") continue;
         onError("sandbox", err);
       }
     }
