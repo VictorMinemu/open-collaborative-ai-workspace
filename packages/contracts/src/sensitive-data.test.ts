@@ -10,6 +10,7 @@ import {
   redactSecrets,
   SECRET_RULES,
 } from "./sensitive-data";
+import { measureScaling } from "./testing/scaling";
 
 // Fake credentials are assembled at runtime so secret scanners do not flag this file.
 const fake = (...parts: string[]) => parts.join("");
@@ -265,23 +266,16 @@ describe("detectSensitive()", () => {
     expect(small.length).toBeGreaterThanOrEqual(64 * 1024);
     expect(large.length).toBeGreaterThanOrEqual(256 * 1024);
     // The check is for catastrophic backtracking, not the host's speed (pipeline 157: 202.9 ms against a fixed 200 ms
-    // on a loaded runner). Warm up, then the best of five interleaved passes per size, so a busy host slows both alike.
-    detectSensitive(small);
-    detectSensitive(large);
-    let a = Number.POSITIVE_INFINITY;
-    let b = Number.POSITIVE_INFINITY;
-    for (let i = 0; i < 5; i++) {
-      let t0 = performance.now();
-      detectSensitive(small);
-      a = Math.min(a, performance.now() - t0);
-      t0 = performance.now();
-      detectSensitive(large);
-      b = Math.min(b, performance.now() - t0);
-    }
+    // on a loaded runner). Warm up, then the smallest ratio of five small-then-large rounds, so noise has to hit every
+    // round to fail the check while a super-linear rule is slow in all of them.
+    const { ratio, ratios, largeMs } = measureScaling(
+      () => detectSensitive(small),
+      () => detectSensitive(large),
+    );
     // Linear: about 4x; quadratic: about 16x. The 2 ms floor keeps a tiny baseline from inflating the ratio; the 2 s
     // ceiling is the backstop for a rule that is slow at every size.
-    expect(b / Math.max(a, 2)).toBeLessThan(8);
-    expect(b).toBeLessThan(2000);
+    expect(ratio, `per-round ratios ${ratios.map((r) => r.toFixed(1)).join(", ")}`).toBeLessThan(8);
+    expect(largeMs).toBeLessThan(2000);
   });
 });
 
@@ -304,34 +298,25 @@ const ADVERSARIAL_SHAPES = [
 
 describe("linear time on adversarial runs", () => {
   const sized = (shape: string, size: number) => shape.repeat(Math.ceil(size / shape.length)).slice(0, size);
-  /**
-   * Best of seven interleaved passes per size, after a warm-up. Interleaving makes a busy shared CI runner slow both
-   * sizes alike, so the ratio stays stable; a super-linear rule is slow on every pass.
-   */
-  const bestPair = (fn: (text: string) => unknown, small: string, large: string): [number, number] => {
-    fn(small);
-    fn(large);
-    let a = Number.POSITIVE_INFINITY;
-    let b = Number.POSITIVE_INFINITY;
-    for (let i = 0; i < 5; i++) {
-      let t0 = performance.now();
-      fn(small);
-      a = Math.min(a, performance.now() - t0);
-      t0 = performance.now();
-      fn(large);
-      b = Math.min(b, performance.now() - t0);
-    }
-    return [a, b];
-  };
   for (const shape of ADVERSARIAL_SHAPES) {
     it(`detectSensitive and redactSecrets scale linearly on ${JSON.stringify(shape)} repeated`, () => {
       for (const fn of [detectSensitive, redactSecrets]) {
         // 1 MiB → 4 MiB keeps both timings at several milliseconds, where scheduler noise cannot swing the ratio.
-        const [small, large] = bestPair(fn, sized(shape, 1024 * 1024), sized(shape, 4 * 1024 * 1024));
+        const small = sized(shape, 1024 * 1024);
+        const large = sized(shape, 4 * 1024 * 1024);
+        // The smallest ratio of five small-then-large rounds after a warm-up: one noisy round (pipeline 174: 15.9 from
+        // the best times of different rounds) cannot fail it, while a super-linear rule is slow in every round.
+        const { ratio, ratios, largeMs } = measureScaling(
+          () => fn(small),
+          () => fn(large),
+        );
         // 4x the input: about 4x the time when linear, 16x when quadratic (the ReDoS took 17 s at 256 KiB). The 2 ms
         // floor stops a tiny baseline from inflating the ratio; the absolute cap still catches a catastrophic rule.
-        expect(large / Math.max(small, 2)).toBeLessThan(12);
-        expect(large).toBeLessThan(4000);
+        expect(
+          ratio,
+          `${fn.name} per-round ratios ${ratios.map((r) => r.toFixed(1)).join(", ")}`,
+        ).toBeLessThan(12);
+        expect(largeMs).toBeLessThan(4000);
       }
       // Two functions × (warm-up + 5 interleaved rounds) of 1 + 4 MiB: about 9 s on a laptop and more on a shared CI
       // runner (pipeline 75 hit the 15 s default). The budget is the assertions above, not this timeout.

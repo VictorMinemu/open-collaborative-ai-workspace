@@ -13,6 +13,7 @@ import {
   titleProblems,
   titleWords,
 } from "./index";
+import { measureScaling } from "./testing/scaling";
 
 describe("normalizeSessionTitle (D-20, P-16)", () => {
   it("drops wrapping quotes and trailing punctuation", () => {
@@ -175,35 +176,6 @@ describe("title constants", () => {
   });
 });
 
-/**
- * Best of five interleaved passes per size after a warm-up, so a busy host slows both sizes alike. A pass over
- * `ceiling` ms ends the measurement at once, so a quadratic rule (tens of seconds at 256 KiB) fails in seconds.
- */
-function bestPair(
-  fn: (text: string) => unknown,
-  small: string,
-  large: string,
-  ceiling: number,
-): [number, number] {
-  const time = (text: string) => {
-    const t0 = performance.now();
-    fn(text);
-    return performance.now() - t0;
-  };
-  let a = Number.POSITIVE_INFINITY;
-  let b = Number.POSITIVE_INFINITY;
-  for (let i = 0; i < 6; i++) {
-    const ta = time(small);
-    if (ta > ceiling) return [ta, ta];
-    const tb = time(large);
-    if (tb > ceiling) return [ta, tb];
-    if (i === 0) continue; // warm-up
-    a = Math.min(a, ta);
-    b = Math.min(b, tb);
-  }
-  return [a, b];
-}
-
 describe("normalizeSessionTitle: linear on hostile runs (the API titles a chat from its first message)", () => {
   // `/[…]+$/u` trims and `/<[^>]*>/g` rescanned a run from every start position: ~0.9 s at 20 000 `…` (the chat body
   // cap), ~2.4 s at 32 000.
@@ -212,17 +184,23 @@ describe("normalizeSessionTitle: linear on hostile runs (the API titles a chat f
     `a${shape.repeat(Math.ceil(size / shape.length)).slice(0, size)}x`;
   for (const shape of SHAPES) {
     it(`a run of ${JSON.stringify(shape)} then one character scales linearly (64 000 → 256 KiB)`, () => {
-      const CEILING = 2000;
-      const [small, large] = bestPair(
-        normalizeSessionTitle,
-        sized(shape, 64_000),
-        sized(shape, 256 * 1024),
-        CEILING,
+      // Only catches a catastrophic rule fast: the quadratic trim took 22.9 s at 256 KiB of "." while the linear one takes
+      // milliseconds, and a starved CI runner stretched one linear run past a 2 s ceiling (pipeline 204: 2073.7 ms). A
+      // rule slow enough to matter but under 10 s is the per-round ratio's job.
+      const CEILING = 10_000;
+      const small = sized(shape, 64_000);
+      const large = sized(shape, 256 * 1024);
+      // The smallest ratio of five small-then-large rounds after a warm-up, so one noisy round (pipeline 202: 11.95
+      // from the best times of different rounds) cannot fail it; a run over the ceiling ends the measurement at once.
+      const { ratio, ratios, largeMs } = measureScaling(
+        () => normalizeSessionTitle(small),
+        () => normalizeSessionTitle(large),
+        { ceilingMs: CEILING },
       );
       // ~4x the input: about 4x the time when linear, ~17x when quadratic. The 2 ms floor keeps a tiny baseline from
       // inflating the ratio; the ceiling is the backstop for a rule that is slow at every size.
-      expect(large).toBeLessThan(CEILING);
-      expect(large / Math.max(small, 2)).toBeLessThan(10);
+      expect(largeMs).toBeLessThan(CEILING);
+      expect(ratio, `per-round ratios ${ratios.map((r) => r.toFixed(1)).join(", ")}`).toBeLessThan(10);
     }, 60_000);
   }
 
