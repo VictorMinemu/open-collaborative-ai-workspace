@@ -20,6 +20,7 @@ Type=simple
 ExecStart="/usr/local/bin/node" "/home/alice/.ocw/runtime/current/ocw-runtime.mjs" run
 WorkingDirectory=/home/alice
 Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Environment="OCW_RUNTIME_HOST=service"
 Restart=on-failure
 RestartSec=5
 KillMode=mixed
@@ -147,6 +148,7 @@ User=build
 ExecStart="/usr/bin/node" "/srv/build home/.ocw/runtime/current/ocw-runtime.mjs" run
 WorkingDirectory=/srv/build home
 Environment="PATH=/usr/bin:/bin"
+Environment="OCW_RUNTIME_HOST=service"
 Restart=on-failure
 RestartSec=5
 KillMode=mixed

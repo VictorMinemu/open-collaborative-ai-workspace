@@ -64,6 +64,21 @@ describe("buildDaemonEnv", () => {
   });
 });
 
+describe("buildDaemonEnv host kind (07.16, PD-18, A-02)", () => {
+  it("tells the daemon it runs under the desktop app, replacing an inherited value", () => {
+    expect(buildDaemonEnv({}, { token: null, apiUrl: null, electronAsNode: false }).OCW_RUNTIME_HOST).toBe(
+      "desktop",
+    );
+    const env = buildDaemonEnv(
+      { OCW_RUNTIME_HOST: "service", PATH: "/usr/bin" },
+      { token: "ocwdt_x", apiUrl: "http://localhost:4000", electronAsNode: true },
+    );
+    expect(env.OCW_RUNTIME_HOST).toBe("desktop");
+    expect(env.OCW_SERVER_URL).toBe("http://localhost:4000");
+    expect(env.OCW_DEVICE_TOKEN).toBe("ocwdt_x");
+  });
+});
+
 describe("augmentPath", () => {
   it("does not duplicate entries", () => {
     expect(augmentPath("/opt/homebrew/bin:/usr/bin", "/h")).toBe(
