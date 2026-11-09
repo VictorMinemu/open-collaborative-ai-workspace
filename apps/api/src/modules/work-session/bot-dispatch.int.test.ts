@@ -1,0 +1,466 @@
+import { randomUUID } from "node:crypto";
+import { type BotWorkZoneProfileInput, isExposed, type RuntimeCatalog } from "@ocw/contracts";
+import type { Tx } from "@ocw/db";
+import pg from "pg";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { HttpError } from "../../lib/errors";
+import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
+import { eventually, FakeDevice, type Frame, sleep } from "../../testing-device";
+import {
+  CLAUDE_CATALOG,
+  CODEX_CATALOG,
+  connectWithProject,
+  createBotProfile,
+  grantBotConsent,
+  invite,
+  pairDevice,
+  settled,
+  startSession,
+} from "../../testing-workzone";
+import { createPermissionService } from "../organization";
+import { loadBotProfile, profileStatus } from "./bot-profile";
+import { archiveWorkSession, submitWorkPrompt } from "./controller";
+import type { WorkSessionService } from "./service";
+import type { WorkSessionStartDeps } from "./start";
+
+/**
+ * Phase 07.16-10 (D-02, D-04, D-07, D-08, PD-07, PD-08, PD-13, PD-23; E4, E5, E12): a bot's turn is re-decided by the
+ * ONE arbiter against its live profile (its cap, `bot_not_allowed` when the profile stopped working, no Full access
+ * after outside content off an isolated server), re-authorization is agent-aware for bot sessions (a revoked consent,
+ * a lowered profile or isolation turned off interrupts the bot's turn, never a person's), and people and bots queue
+ * into the same session through the same `submitWorkPrompt` / `archiveWorkSession`. Real PostgreSQL + Redis.
+ */
+
+// biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
+type Json = Record<string, any>;
+type Cmd = Frame & { id: string; payload: Record<string, unknown>; sessionId: string };
+
+const FULL: RuntimeCatalog[] = [CLAUDE_CATALOG, CODEX_CATALOG];
+/** The highest mode below Full access the catalog offers (Auto only once the inventory confirms it). */
+const BELOW_FULL = isExposed("claude-code", "mode.auto") ? "auto" : "acceptEdits";
+
+let stack: TestStack;
+let su: pg.Client;
+let victor: TestClient;
+let sam: TestClient;
+let samId: string;
+let dana: TestClient;
+let danaId: string;
+let orgId: string;
+// Sam's MacBook (a desktop: never an isolated server) with billing-api; Scout works there.
+let mac: FakeDevice;
+let macId: string;
+let billingId: string;
+let scoutId: string;
+// Sam's build server (a `service` host marked isolated) with infra; Rex works there.
+let server: FakeDevice;
+let serverToken: string;
+let serverId: string;
+let infraId: string;
+let rexId: string;
+// A person's own session on the MacBook: no bot sweep may touch it.
+let human: string;
+
+const svc = () => stack.built.deviceHub.sessionHandler as unknown as WorkSessionService;
+
+const deps = () => {
+  const core = stack.built.core;
+  const startDeps: WorkSessionStartDeps = {
+    core,
+    perms: createPermissionService(core),
+    svc: svc(),
+    hub: stack.built.deviceHub,
+  };
+  return { core, svc: svc(), startDeps };
+};
+
+const asSam = <T>(fn: (tx: Tx) => Promise<T>) =>
+  stack.built.core.db.withTenant({ organizationId: orgId, userId: samId }, fn);
+const samActor = () => ({ userId: samId, organizationId: orgId, clientKind: null });
+
+async function ok(res: Promise<{ status: number; body: Record<string, unknown> | null }>, status = 200) {
+  const r = await res;
+  if (r.status !== status) throw new Error(`expected ${status}, got ${r.status}: ${JSON.stringify(r.body)}`);
+  return r.body as Json;
+}
+
+/** A profile for `agentId` on `deviceId` with `projectId`; each test overrides what it is about. */
+const profile = (
+  deviceId: string,
+  projectId: string,
+  over: Partial<BotWorkZoneProfileInput> = {},
+): BotWorkZoneProfileInput => ({
+  deviceId,
+  runtime: "claude-code",
+  projectIds: [projectId],
+  defaultModel: "opus",
+  allowedModels: [],
+  defaultEffort: null,
+  allowedEfforts: [],
+  defaultContextWindow: null,
+  allowedContextWindows: [],
+  fastMode: "off",
+  defaultMode: "default",
+  maxMode: "acceptEdits",
+  worktree: true,
+  maxConcurrent: 10,
+  promptsPerHour: 120,
+  wakesPerSessionDay: 20,
+  actOnOutsideContent: false,
+  ...over,
+});
+
+const scoutProfile = (over: Partial<BotWorkZoneProfileInput> = {}) => profile(macId, billingId, over);
+const rexProfile = (over: Partial<BotWorkZoneProfileInput> = {}) => profile(serverId, infraId, over);
+
+/**
+ * Start a bot session the way the bot's route does (07.16-06): Sam's tenant transaction, the bot's live layer from
+ * `profileStatus`, then the device brings it to `idle`. `tainted` stands for a start turn that read outside content.
+ */
+async function botSession(
+  agentId: string,
+  device: FakeDevice,
+  projectId: string,
+  deviceId: string,
+  permissionMode: string,
+  tainted = false,
+): Promise<string> {
+  const id = await asSam(async (tx) => {
+    const p = await loadBotProfile(tx, agentId);
+    if (!p) throw new Error("no profile");
+    const status = await profileStatus(tx, createPermissionService(stack.built.core), p);
+    if (!status.active) throw new Error(`profile inactive: ${status.reason}`);
+    const res = await stack.built.workSession.start(
+      tx,
+      samActor(),
+      { projectId, deviceId, runtime: "claude-code", permissionMode: permissionMode as never },
+      { agent: { layer: { ...status.layer, tainted } } },
+    );
+    if (!res.ok) throw new Error(JSON.stringify(res));
+    return res.session.id;
+  });
+  const start = (await device.command("session.start", id)) as Cmd;
+  device.ack(start.id);
+  device.event(id, {
+    type: "session.started",
+    runtime: "claude-code",
+    runtimeSessionId: `rt-${id}`,
+    model: "claude-opus-5-5",
+    permissionMode,
+  });
+  device.event(id, { type: "session.state", status: "idle" });
+  await idle(id);
+  return id;
+}
+
+/** The bot prompts its session in its sponsor's name, through the ONE body people use (PD-13). */
+const agentPrompt = (sessionId: string, agentId: string, body: string, tainted = false) =>
+  asSam(async (tx) => {
+    const s = await svc().lock(tx, sessionId);
+    if (!s) throw new Error("no session");
+    const p = await submitWorkPrompt(tx, deps(), samActor(), s, body, {
+      authorAgentId: agentId,
+      ...(tainted ? { tainted: true } : {}),
+    });
+    return p.id;
+  });
+
+async function prompt(as: TestClient, sessionId: string, body: string): Promise<string> {
+  return (await ok(as.request("POST", `/api/v1/work-sessions/${sessionId}/prompts`, { body }))).id as string;
+}
+
+/** Ack a dispatched prompt and mark its turn started on the device (the session is `running`). */
+function start(device: FakeDevice, cmd: Cmd) {
+  device.ack(cmd.id);
+  device.event(cmd.sessionId, { type: "prompt.started", promptId: cmd.payload.promptId as string });
+}
+
+/** Ack a dispatched prompt and run its whole turn on the device. */
+function finish(device: FakeDevice, cmd: Cmd) {
+  device.ack(cmd.id);
+  device.emitTurn(cmd.sessionId, { promptId: cmd.payload.promptId as string, text: "done" });
+}
+
+/** The device reports the turn in flight ended by an interrupt. */
+function interrupted(device: FakeDevice, sessionId: string, promptId: string) {
+  device.event(sessionId, {
+    type: "prompt.completed",
+    promptId,
+    interrupted: true,
+    usage: { inputTokens: 1, outputTokens: 1 },
+  });
+}
+
+async function sessionRow(id: string) {
+  return (
+    await su.query("select status, permission_mode, settings_pending from app.work_sessions where id = $1", [
+      id,
+    ])
+  ).rows[0] as { status: string; permission_mode: string; settings_pending: boolean };
+}
+
+const idle = (id: string) => eventually(async () => (await sessionRow(id)).status === "idle");
+
+async function promptRow(id: string) {
+  return (
+    await su.query(
+      "select status, permission_mode, author_user_id, author_agent_id from app.work_prompts where id = $1",
+      [id],
+    )
+  ).rows[0] as {
+    status: string;
+    permission_mode: string | null;
+    author_user_id: string;
+    author_agent_id: string | null;
+  };
+}
+
+async function auditOf(action: string, where: { promptId?: string; sessionId?: string }) {
+  return (
+    await su.query(
+      `select result, metadata, user_id, actor_id, device_id, session_id from app.audit_events where action = $1
+         and ($2::text is null or metadata->>'promptId' = $2) and ($3::text is null or session_id = $3)
+       order by occurred_at`,
+      [action, where.promptId ?? null, where.sessionId ?? null],
+    )
+  ).rows as Json[];
+}
+
+/** Commands the device got for `sessionId` and did not consume yet. */
+const pendingFor = (device: FakeDevice, kind: string, sessionId: string) =>
+  device.pending(kind).filter((f) => f.sessionId === sessionId);
+
+async function putPolicy(body: Record<string, unknown>) {
+  await ok(victor.request("PUT", "/api/v1/work-zone-policy", body));
+}
+
+/** The person's own session on the MacBook kept its settings and got no command from a bot sweep. */
+async function humanUntouched() {
+  await settled(stack, orgId);
+  expect(await sessionRow(human)).toMatchObject({ status: "idle", permission_mode: "fullAccess" });
+  expect(pendingFor(mac, "session.configure", human)).toHaveLength(0);
+  expect(pendingFor(mac, "interrupt", human)).toHaveLength(0);
+  expect(pendingFor(mac, "session.stop", human)).toHaveLength(0);
+}
+
+/** End a test's session over HTTP (the person's archive route) and consume its stop. */
+async function archive(device: FakeDevice, sessionId: string) {
+  await ok(sam.request("POST", `/api/v1/work-sessions/${sessionId}/archive`));
+  device.ack(((await device.command("session.stop", sessionId)) as Cmd).id);
+}
+
+beforeAll(async () => {
+  stack = await startTestStack({ env: { OCW_MODEL_PROVIDER: "mock" } });
+  su = new pg.Client({ connectionString: stack.db.superuserUrl });
+  await su.connect();
+  victor = new TestClient(stack.baseUrl);
+  const setup = await ok(
+    victor.request("POST", "/api/v1/setup", {
+      token: TEST_SETUP_TOKEN,
+      name: "Víctor Ruiz",
+      email: "victor@example.test",
+      password: "correct-horse-battery",
+      orgName: "Autofy Labs",
+    }),
+  );
+  orgId = setup.organization.id;
+  ({ client: sam, userId: samId } = await invite(stack, victor, "sam@example.test", "Sam Lee", "developer"));
+  ({ client: dana, userId: danaId } = await invite(
+    stack,
+    victor,
+    "dana@example.test",
+    "Dana Kim",
+    "developer",
+  ));
+  await putPolicy({ allowFullAccess: true });
+
+  const pairedMac = await pairDevice(stack, sam, "MacBook Pro");
+  macId = pairedMac.deviceId;
+  ({ device: mac, projectId: billingId } = await connectWithProject(stack, sam, pairedMac.token, {
+    localId: "lp_billing",
+    name: "billing-api",
+  }));
+  mac.capabilities(FULL, true);
+  await eventually(async () => {
+    const r = await su.query("select runtime_catalog, full_access_opt_in from app.devices where id = $1", [
+      macId,
+    ]);
+    return (r.rows[0].runtime_catalog as unknown[]).length === 2 && r.rows[0].full_access_opt_in === true;
+  });
+  // Dana may use the MacBook up to `default`: she is in a bot session's audience (the members who may use the device)
+  // and her turns run at her own cap.
+  await su.query(
+    `insert into app.device_grants (organization_id, device_id, principal_kind, principal_id, max_mode)
+     values ($1, $2, 'user', $3, 'default')`,
+    [orgId, macId, danaId],
+  );
+
+  const pairedServer = await pairDevice(stack, sam, "Build server");
+  serverId = pairedServer.deviceId;
+  serverToken = pairedServer.token;
+  server = await FakeDevice.connect(stack.baseUrl, serverToken, undefined, {
+    host: "service",
+    isolatedServer: true,
+  });
+  server.send({
+    type: "projects.sync",
+    projects: [{ localId: "lp_infra", name: "infra", gitRemote: null, defaultBranch: "main" }],
+  });
+  await server.next((f) => f.type === "projects.ack");
+  server.capabilities(FULL, true, true);
+  await eventually(async () => {
+    const r = await su.query(
+      "select runtime_catalog, full_access_opt_in, host_kind, isolated_server from app.devices where id = $1",
+      [serverId],
+    );
+    const d = r.rows[0];
+    return (
+      (d.runtime_catalog as unknown[]).length === 2 &&
+      d.full_access_opt_in === true &&
+      d.host_kind === "service" &&
+      d.isolated_server === true
+    );
+  });
+  const projects = (await ok(sam.request("GET", "/api/v1/projects"))).projects as Array<{
+    id: string;
+    name: string;
+  }>;
+  infraId = projects.find((p) => p.name === "infra")!.id;
+
+  scoutId = (await ok(sam.request("POST", "/api/v1/agents/personal", { name: "Scout" }))).agent.id;
+  // A second bot of Sam's, seeded directly (one personal bot per member through the route; no cell is involved).
+  rexId = randomUUID();
+  await su.query(
+    `insert into app.agents (id, organization_id, name, username, instructions, model_provider, model_id, status, scope, owner_user_id)
+     values ($1, $2, 'Rex', 'rex', '', 'mock', 'mock', 'ready', 'personal', $3)`,
+    [rexId, orgId, samId],
+  );
+  await createBotProfile(sam, scoutId, scoutProfile());
+  await grantBotConsent(sam, macId, scoutId, { allowFullAccess: false });
+  await createBotProfile(sam, rexId, rexProfile({ maxMode: "fullAccess" }));
+  await grantBotConsent(sam, serverId, rexId, { allowFullAccess: true });
+
+  human = await startSession(sam, mac, billingId, { title: "Sam's own", permissionMode: "fullAccess" });
+  await settled(stack, orgId);
+}, 180_000);
+
+afterAll(async () => {
+  await mac?.close().catch(() => {});
+  await server?.close().catch(() => {});
+  await su?.end();
+  await stack?.stop();
+});
+
+// ---------------------------------------------------------------- Task 1: the bot's cap through the one arbiter
+
+describe("tracer: a bot's prompt runs at its own cap through the one arbiter (D-04, D-07, PD-07, PD-13)", () => {
+  it("the bot's turns run at min(session mode, its cap); a person's turn in the same session at theirs", async () => {
+    const sid = await botSession(scoutId, mac, billingId, macId, "acceptEdits");
+    const first = await agentPrompt(sid, scoutId, "look at the failing test");
+    let cmd = (await mac.command("prompt", sid)) as Cmd;
+    expect(cmd.payload).toMatchObject({ promptId: first, permissionMode: "acceptEdits" });
+    const second = await agentPrompt(sid, scoutId, "next step");
+    const danas = await prompt(dana, sid, "also check the logs");
+    expect((await promptRow(second)).status).toBe("queued");
+    expect((await promptRow(danas)).status).toBe("queued");
+
+    finish(mac, cmd);
+    cmd = (await mac.command("prompt", sid)) as Cmd;
+    expect(cmd.payload).toMatchObject({ promptId: second, permissionMode: "acceptEdits" });
+    expect(await promptRow(second)).toMatchObject({
+      status: "dispatched",
+      permission_mode: "acceptEdits",
+      author_user_id: samId,
+      author_agent_id: scoutId,
+    });
+    const [audit] = await auditOf("work_prompt.dispatched", { promptId: second });
+    expect(audit).toMatchObject({ result: "success", user_id: samId, device_id: macId, session_id: sid });
+    expect(audit!.metadata).toMatchObject({
+      promptId: second,
+      authorUserId: samId,
+      authorAgentId: scoutId,
+      requestedMode: "acceptEdits",
+      effectiveMode: "acceptEdits",
+      capped: false,
+    });
+
+    finish(mac, cmd);
+    cmd = (await mac.command("prompt", sid)) as Cmd;
+    // Dana's own cap on the MacBook is `default`: her turn is hers, never the bot's.
+    expect(cmd.payload).toMatchObject({ promptId: danas, permissionMode: "default" });
+    const [human] = await auditOf("work_prompt.dispatched", { promptId: danas });
+    expect(human!.metadata).toMatchObject({ authorUserId: danaId, effectiveMode: "default", capped: true });
+    expect(human!.metadata).not.toHaveProperty("authorAgentId");
+    finish(mac, cmd);
+    await idle(sid);
+    await archive(mac, sid);
+  });
+
+  it("a person raises the bot's session above its cap: the bot's turns stay at its cap, the person's do not", async () => {
+    const sid = await botSession(scoutId, mac, billingId, macId, "acceptEdits");
+    await ok(sam.request("PATCH", `/api/v1/work-sessions/${sid}/settings`, { permissionMode: "fullAccess" }));
+    mac.ack(((await mac.command("session.configure", sid)) as Cmd).id);
+    const bots = await agentPrompt(sid, scoutId, "refactor the module");
+    let cmd = (await mac.command("prompt", sid)) as Cmd;
+    expect(cmd.payload).toMatchObject({ promptId: bots, permissionMode: "acceptEdits" });
+    expect((await auditOf("work_prompt.dispatched", { promptId: bots }))[0]!.metadata).toMatchObject({
+      authorAgentId: scoutId,
+      requestedMode: "fullAccess",
+      effectiveMode: "acceptEdits",
+      capped: true,
+    });
+    expect((await auditOf("work_prompt.dispatched", { promptId: bots }))[0]!.metadata).not.toHaveProperty(
+      "fullAccess",
+    );
+    finish(mac, cmd);
+    const sams = await prompt(sam, sid, "now run it with everything");
+    cmd = (await mac.command("prompt", sid)) as Cmd;
+    expect(cmd.payload).toMatchObject({ promptId: sams, permissionMode: "fullAccess" });
+    finish(mac, cmd);
+    await idle(sid);
+    await archive(mac, sid);
+  });
+
+  it("the shared bodies keep the routes' answers: archived, slash commands, and the archive itself", async () => {
+    const sid = await botSession(scoutId, mac, billingId, macId, "default");
+    // A slash command never enters the queue (the route's 400, from the same body).
+    await expect(agentPrompt(sid, scoutId, "/model sonnet")).rejects.toMatchObject({
+      statusCode: 400,
+      code: "slash_command",
+    });
+    const running = await agentPrompt(sid, scoutId, "long task");
+    const cmd = (await mac.command("prompt", sid)) as Cmd;
+    start(mac, cmd);
+    const queued = await agentPrompt(sid, scoutId, "after that");
+    // The bot ends its own session through the archive body people use; the audit names the bot.
+    await asSam(async (tx) => {
+      const s = await svc().lock(tx, sid);
+      await archiveWorkSession(tx, deps(), s!, { byAgentId: scoutId });
+    });
+    expect((await promptRow(queued)).status).toBe("cancelled");
+    expect((await sessionRow(sid)).status).toBe("archived");
+    mac.ack(((await mac.command("session.stop", sid)) as Cmd).id);
+    const [archived] = await auditOf("work_session.archived", { sessionId: sid });
+    expect(archived).toMatchObject({ actor_id: samId, session_id: sid, device_id: macId });
+    expect(archived!.metadata).toMatchObject({ byAgentId: scoutId });
+    // Archived: the next prompt is the route's 409, from the same body.
+    const err = await agentPrompt(sid, scoutId, "one more").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HttpError);
+    expect(err).toMatchObject({ statusCode: 409, code: "session_archived" });
+    expect(running).toBeTruthy();
+    // Archiving again is a no-op (the route answers ok), and writes no second audit row.
+    await asSam(async (tx) => {
+      const s = await svc().lock(tx, sid);
+      await archiveWorkSession(tx, deps(), s!, { byAgentId: scoutId });
+    });
+    expect(await auditOf("work_session.archived", { sessionId: sid })).toHaveLength(1);
+  });
+
+  it("a person's archive over HTTP is audited exactly as before (no bot id)", async () => {
+    const sid = await botSession(scoutId, mac, billingId, macId, "default");
+    await archive(mac, sid);
+    const [archived] = await auditOf("work_session.archived", { sessionId: sid });
+    expect(archived).toMatchObject({ actor_id: samId, session_id: sid });
+    expect(archived!.metadata ?? {}).not.toHaveProperty("byAgentId");
+  });
+});
