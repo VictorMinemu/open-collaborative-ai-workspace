@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type BotWorkZoneProfileInput,
+  type SessionAudienceInput,
   TurnWorkZone,
   WORK_SESSION_TOOL_FLAGS,
   WORK_SESSION_TOOL_NAMES,
@@ -17,6 +18,7 @@ import {
   grantBotConsent,
   invite,
   pairDevice,
+  shareDevice,
 } from "../../testing-workzone";
 import { turnPolicy } from "../bot-capabilities";
 import { createPermissionService } from "../organization";
@@ -589,4 +591,159 @@ describe("the four tools need four free slots (MAX_TURN_TOOLS = 64)", () => {
       await grant([]);
     }
   });
+});
+
+// ---------------------------------------------------------------- the bot's sessions and projects, bounded (Task 3)
+
+/** Atlas's live caps, as `profileStatus` hands them to a bot start (07.16-06/07). */
+async function atlasLayer() {
+  return stack.built.core.db.withTenant({ organizationId: orgId, userId: victorId }, async (tx) => {
+    const stored = await loadBotProfile(tx, atlasId);
+    const status = stored ? await profileStatus(tx, perms(), stored) : null;
+    if (!status?.active) throw new Error("Atlas's profile is not active");
+    return status.layer;
+  });
+}
+
+/**
+ * A bot session seeded without the start route (it arrives in 07.16-15): the ONE `createWorkSession` with Atlas's
+ * layer, in the sponsor's name, visible to Ana; then its `bot_work_sessions` row (superuser) naming `agentId` and the
+ * origin conversation.
+ */
+async function botSession(
+  agentId: string,
+  originConversationId: string,
+  projectId: string,
+  visibility: SessionAudienceInput = { kind: "people", userIds: [anaId] },
+): Promise<string> {
+  const layer = await atlasLayer();
+  const res = await stack.built.core.db.withTenant({ organizationId: orgId, userId: victorId }, (tx) =>
+    stack.built.workSession.start(
+      tx,
+      { userId: victorId, organizationId: orgId, clientKind: null },
+      {
+        projectId,
+        deviceId: serverId,
+        runtime: "claude-code",
+        prompt: "fix the totals",
+        worktree: true,
+        visibility,
+      },
+      { agent: { layer } },
+    ),
+  );
+  if (!res.ok) throw new Error(`start refused: ${JSON.stringify(res)}`);
+  await su.query(
+    `insert into app.bot_work_sessions (work_session_id, organization_id, agent_id, sponsor_user_id, requester_user_id,
+       origin_conversation_id, origin_message_id, origin_event_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [res.session.id, orgId, agentId, victorId, anaId, originConversationId, randomUUID(), randomUUID()],
+  );
+  return res.session.id;
+}
+
+describe("the bot's own sessions in this conversation (D-05, PD-17)", () => {
+  it("two active sessions from #eng are listed newest first with status and repo; archived, other-channel and other-bot sessions are not", async () => {
+    // Ana may use the build server (so its repos, and a session shared with her, are hers to see).
+    await shareDevice(victor, serverId, anaId);
+    const opsId = await channel("ops", [atlasId], [anaId]);
+    const first = await botSession(atlasId, engId, billingId);
+    const second = await botSession(atlasId, engId, ledgerId);
+    const archived = await botSession(atlasId, engId, billingId);
+    await su.query("update app.work_sessions set status = 'archived' where id = $1", [archived]);
+    const elsewhere = await botSession(atlasId, opsId, billingId);
+    const echoSession = await botSession(echoId, engId, ledgerId);
+    // A session Ana's transaction cannot see (only its creator's audience) is never listed in her turn (T-07.16-11-02).
+    const hidden = await botSession(atlasId, engId, ledgerId, { kind: "owner" });
+
+    const wz = await expectOffer(await mentionTurn(atlasId));
+    expect(wz.sessions).toEqual([
+      { id: second, status: expect.any(String), projectName: "ledger" },
+      { id: first, status: expect.any(String), projectName: "billing-api" },
+    ]);
+    for (const s of wz.sessions)
+      expect(["provisioning", "idle", "running", "waiting_approval", "host_offline"]).toContain(s.status);
+    const listed = wz.sessions.map((s) => s.id);
+    for (const id of [archived, elsewhere, echoSession, hidden]) expect(listed).not.toContain(id);
+
+    // In #ops, Atlas sees only the session that started there.
+    const inOps = await expectOffer(await mentionTurn(atlasId, { conversationId: opsId }));
+    expect(inOps.sessions.map((s) => s.id)).toEqual([elsewhere]);
+  });
+});
+
+describe("the profile's projects in the turn: bounded, ordered, live", () => {
+  it("24 repos in the profile, one removed from the device: 20 listed by name then id, projectsMore 3", async () => {
+    const repos = [
+      "billing-api",
+      "ledger",
+      ...Array.from({ length: 22 }, (_, i) => `repo-${String(i).padStart(2, "0")}`),
+    ];
+    const sync = async (names: string[]) => {
+      server.send({
+        type: "projects.sync",
+        projects: names.map((name) => ({
+          localId: `lp_${name}`,
+          name,
+          gitRemote: null,
+          defaultBranch: "main",
+        })),
+      });
+      await server.next((f) => f.type === "projects.ack");
+    };
+    await sync(repos);
+    const ids = new Map(
+      ((await ok(victor.request("GET", "/api/v1/projects"))).projects as Json[])
+        .filter((p) => p.deviceId === serverId)
+        .map((p) => [p.name as string, p.id as string]),
+    );
+    expect(ids.size).toBe(24);
+    await createBotProfile(victor, atlasId, profile({ projectIds: repos.map((r) => ids.get(r)!) }));
+    try {
+      // repo-21 leaves the device: the profile still names it, the turn never lists it.
+      await sync(repos.filter((r) => r !== "repo-21"));
+      const wz = await expectOffer(await mentionTurn(atlasId));
+      expect(wz.projects).toHaveLength(20);
+      expect(wz.projectsMore).toBe(3);
+      expect(wz.projects.map((p) => p.name)).toEqual(repos.slice(0, 20));
+      expect(wz.projects.map((p) => p.id)).toEqual(repos.slice(0, 20).map((r) => ids.get(r)));
+      expect(wz.projects.map((p) => p.id)).not.toContain(ids.get("repo-21"));
+    } finally {
+      await sync(repos);
+      await createBotProfile(victor, atlasId, profile());
+    }
+  });
+});
+
+describe("the device's live facts in the turn", () => {
+  it("an allowed model the device stopped reporting is not in models", async () => {
+    await createBotProfile(victor, atlasId, profile({ allowedModels: ["opus", "sonnet"] }));
+    const report = async (catalog: typeof CLAUDE_CATALOG) => {
+      server.capabilities([catalog, CODEX_CATALOG], true);
+      await eventually(async () => {
+        const r = await su.query("select runtime_catalog from app.devices where id = $1", [serverId]);
+        const claude = (r.rows[0].runtime_catalog as Json[]).find((c) => c.runtime === "claude-code");
+        return claude?.models.length === catalog.models.length;
+      });
+    };
+    try {
+      expect((await expectOffer(await mentionTurn(atlasId))).models).toEqual(["opus", "sonnet"]);
+      await report({ ...CLAUDE_CATALOG, models: CLAUDE_CATALOG.models.filter((m) => m.id !== "sonnet") });
+      expect((await expectOffer(await mentionTurn(atlasId))).models).toEqual(["opus"]);
+    } finally {
+      await report(CLAUDE_CATALOG);
+      await createBotProfile(victor, atlasId, profile());
+    }
+  });
+
+  it("the device offline: the offer stays with device.online false (the start route answers device_offline)", async () => {
+    await server.close();
+    // The hub marks a device offline after its reconnect grace (10 s).
+    await eventually(async () => {
+      const r = await su.query("select status from app.devices where id = $1", [serverId]);
+      return r.rows[0].status !== "online";
+    }, 20_000);
+    const wz = await expectOffer(await mentionTurn(atlasId));
+    expect(wz.device).toEqual({ id: serverId, name: "billing-server", online: false });
+  }, 40_000);
 });
