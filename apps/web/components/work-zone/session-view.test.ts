@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { accessLostCopy, leftProjectLine } from "./session-view";
+import { accessLostCopy, leftProjectLine, sessionBackLink } from "./session-view";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: () => undefined }) }));
 
@@ -34,5 +34,56 @@ describe("session view words", () => {
       leftProjectLine("Customer portal"),
     ].join(" ");
     expect(words).not.toMatch(/\b(acl|grant|grants|audience|scope|visibility rule)\b/i);
+  });
+});
+
+/** 07.16-18 (D-13, PD-19): "Back to <conversation>" from the server's per-viewer origin, never a client return URL. */
+describe("session back link", () => {
+  const conv = "11111111-1111-4111-8111-111111111111";
+  const root = "22222222-2222-4222-8222-222222222222";
+  const card = "33333333-3333-4333-8333-333333333333";
+
+  it("a channel thread: '#name' and the permalink of the card in its thread", () => {
+    expect(
+      sessionBackLink({
+        conversationId: conv,
+        kind: "channel",
+        name: "eng",
+        threadRootId: root,
+        messageId: card,
+      }),
+    ).toEqual({ label: "Back to #eng", href: `/chat/${conv}?thread=${root}&m=${card}` });
+  });
+
+  it("a channel message without a thread: the channel permalink", () => {
+    expect(
+      sessionBackLink({
+        conversationId: conv,
+        kind: "channel",
+        name: "eng",
+        threadRootId: null,
+        messageId: card,
+      }).href,
+    ).toBe(`/chat/${conv}?m=${card}`);
+  });
+
+  it("a DM or a group: the name as the DM list shows it, the DM permalink", () => {
+    for (const kind of ["dm", "group"] as const) {
+      expect(
+        sessionBackLink({ conversationId: conv, kind, name: "Atlas", threadRootId: root, messageId: card }),
+      ).toEqual({ label: "Back to Atlas", href: `/chat/dm/${conv}?m=${card}` });
+    }
+  });
+
+  it("an AI chat: its title and the AI chat route", () => {
+    expect(
+      sessionBackLink({
+        conversationId: conv,
+        kind: "ai_chat",
+        name: "Invoice bug",
+        threadRootId: null,
+        messageId: card,
+      }),
+    ).toEqual({ label: "Back to Invoice bug", href: `/chat/ai/${conv}` });
   });
 });
