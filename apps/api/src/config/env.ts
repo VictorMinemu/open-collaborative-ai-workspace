@@ -223,19 +223,23 @@ export const EnvSchema = z
       .transform((v) => v || null),
     /**
      * Web search plugins bundled in the cell image (mirrors the cell's variable): comma list, `none` = nothing
-     * bundled. Internet is `configured` only when the chosen provider is bundled or installed (D-06, D-09).
+     * bundled. Internet is `configured` only when the chosen provider is bundled or installed (D-06, D-09). Empty or
+     * whitespace (compose's `${OCW_BUNDLED_PLUGINS:-}`) means unset, as in the cell (render-config.mjs): the default.
      */
-    OCW_BUNDLED_PLUGINS: z
-      .string()
-      .default("duckduckgo,searxng")
-      .transform((s) =>
-        s.trim().toLowerCase() === "none"
-          ? []
-          : s
-              .split(",")
-              .map((x) => x.trim().toLowerCase())
-              .filter(Boolean),
-      ),
+    OCW_BUNDLED_PLUGINS: z.preprocess(
+      (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+      z
+        .string()
+        .default("duckduckgo,searxng")
+        .transform((s) =>
+          s.trim().toLowerCase() === "none"
+            ? []
+            : s
+                .split(",")
+                .map((x) => x.trim().toLowerCase())
+                .filter(Boolean),
+        ),
+    ),
     /**
      * Base URL of the optional stdio MCP sandbox sidecar (`ocw-mcp-sandbox`, D-13), as seen from the cell. Without
      * it admins cannot register `sandboxed-stdio` servers; the sidecar serves each vetted server at

@@ -605,3 +605,32 @@ describe("OCW_JOBS_WORKER (07.6-03, AUTO-01)", () => {
     expect(() => loadEnv({ ...base, OCW_JOBS_WORKER: "yes" })).toThrow(/OCW_JOBS_WORKER/);
   });
 });
+
+describe("OCW_BUNDLED_PLUGINS (D-06, D-09)", () => {
+  const base = {
+    DATABASE_URL: "postgres://app:x@localhost:5432/ocw",
+    AUTH_DATABASE_URL: "postgres://auth:x@localhost:5432/ocw",
+    REDIS_URL: "redis://localhost:6379",
+    BETTER_AUTH_SECRET: "b".repeat(32),
+    OCW_SETUP_TOKEN: "s".repeat(16),
+    OCW_ENCRYPTION_KEY: "a".repeat(64),
+  };
+  const bundled = (value?: string) =>
+    loadEnv(value === undefined ? base : { ...base, OCW_BUNDLED_PLUGINS: value }).OCW_BUNDLED_PLUGINS;
+
+  it("unset means every bundled search plugin", () => {
+    expect(bundled()).toEqual(["duckduckgo", "searxng"]);
+  });
+
+  it("compose's empty value (and whitespace) means unset, as in the cell", () => {
+    expect(bundled("")).toEqual(["duckduckgo", "searxng"]);
+    expect(bundled("   ")).toEqual(["duckduckgo", "searxng"]);
+  });
+
+  it("`none` bundles nothing and a comma list picks plugins (trimmed, lower-cased)", () => {
+    expect(bundled("none")).toEqual([]);
+    expect(bundled(" None ")).toEqual([]);
+    expect(bundled("duckduckgo")).toEqual(["duckduckgo"]);
+    expect(bundled(" SearXNG , ")).toEqual(["searxng"]);
+  });
+});

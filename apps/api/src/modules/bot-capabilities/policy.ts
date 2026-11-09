@@ -44,10 +44,22 @@ export async function loadPolicy(tx: Tx): Promise<BotPolicy> {
   return fromRow(row);
 }
 
+/**
+ * Search providers the cell can run from its bundled plugins plus `installed` plugin names (pure). Must match what
+ * infra/openclaw/render-config.mjs loads for the same env (parity test: search-parity.test.ts).
+ */
+export function searchProvidersFor(env: SearchEnv, installed: Iterable<string> = []): Set<SearchProvider> {
+  const out = new Set<SearchProvider>();
+  const names = new Set(env.OCW_BUNDLED_PLUGINS);
+  for (const name of installed) names.add(name.toLowerCase());
+  if (names.has("duckduckgo")) out.add("duckduckgo");
+  if (names.has("searxng") && env.OCW_SEARXNG_URL) out.add("searxng");
+  return out;
+}
+
 /** Search providers the cell can run right now: bundled in the image or installed from the marketplace. */
 export async function availableSearchProviders(tx: Tx, env: SearchEnv): Promise<Set<SearchProvider>> {
-  const out = new Set<SearchProvider>();
-  const bundled = new Set(env.OCW_BUNDLED_PLUGINS);
+  const names: string[] = [];
   const installed = await tx
     .select({ declared: cellPlugins.declared })
     .from(cellPlugins)
@@ -55,11 +67,9 @@ export async function availableSearchProviders(tx: Tx, env: SearchEnv): Promise<
   for (const p of installed) {
     const declared = (p.declared as { webSearchProviders?: unknown }).webSearchProviders;
     if (!Array.isArray(declared)) continue;
-    for (const name of declared) if (typeof name === "string") bundled.add(name.toLowerCase());
+    for (const name of declared) if (typeof name === "string") names.push(name);
   }
-  if (bundled.has("duckduckgo")) out.add("duckduckgo");
-  if (bundled.has("searxng") && env.OCW_SEARXNG_URL) out.add("searxng");
-  return out;
+  return searchProvidersFor(env, names);
 }
 
 /** Internet is `configured` when the policy's search provider is available in the cell. */
