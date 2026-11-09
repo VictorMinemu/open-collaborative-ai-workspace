@@ -318,6 +318,11 @@ function startTool(deps: Deps, ctx: WorkSessionToolContext): OpenClawAgentTool {
       const found = turnFor(name, deps, ctx);
       if ("refused" in found) return found.refused;
       const { turn: t, client } = found;
+      // D-20: a turn that read a session's output never starts another one (the route refuses it too).
+      if (t.sessionOutputRead) {
+        deps.logger?.warn?.(`${name}: ${t.eventId} refused (session_output, local)`);
+        return answer(BOT_WORK_SESSION_SENTENCES.session_output, false, "session_output");
+      }
       const built = workSessionStartOf(t, asParams(params));
       if ("error" in built) return answer(built.error, false, built.code);
       try {
@@ -593,6 +598,9 @@ function readTool(deps: Deps, ctx: WorkSessionToolContext): OpenClawAgentTool {
           signal,
         );
         if (r.kind === "read") {
+          // D-20: the output is the session's work product; from here on the turn only prompts or stops (tool-guard.ts).
+          // A refusal read nothing.
+          t.sessionOutputRead = true;
           const chars = r.output.texts.reduce((n, x) => n + x.text.length, 0);
           deps.logger?.info?.(
             `${name}: ${t.eventId} read (${r.session.id}, cursor ${r.cursor}, ${chars} chars)`,

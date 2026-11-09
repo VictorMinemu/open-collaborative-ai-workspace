@@ -2328,6 +2328,10 @@ describe("board tool (07.1-13, BOARD-02): a board turn → ocw_board_card → PO
         "ocw_record_update",
         "ocw_consult_agent",
         "ocw_attachment_read",
+        "ocw_work_session_start",
+        "ocw_work_session_prompt",
+        "ocw_work_session_read",
+        "ocw_work_session_stop",
       ],
     });
     const boardTurn = {

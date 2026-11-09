@@ -2,7 +2,8 @@
  * Tools the API offers only on some turns, decided per delivery from facts the cell-wide snapshot does not carry
  * (07.1-13, 07.5-10, 07.6-20). `ocw_board_card` is offered only on a board channel's turns (07.1-10), the two Work Zone
  * proposal tools only on turns whose human holds `work_session.create` (07.5-08), the two 07.6 tools and the 07.7 consult
- * tool only where their own rules hold (below), so `GET /cell` (the bot's tools in
+ * tool only where their own rules hold (below), the 07.16 Work Zone session tools only to a bot with an active Work Zone
+ * profile, so `GET /cell` (the bot's tools in
  * any conversation, for no human) never lists them, while OpenClaw can only run a tool the bot's entry configures
  * (`alsoAllow`) and a turn may only narrow that list (`toolsAllow`).
  *
@@ -58,6 +59,7 @@ export function withTurnScopedTools(tools: readonly string[] | undefined): strin
     ...AUTOMATION_TOOLS,
     CONSULT_TOOL_NAME,
     ATTACHMENT_TOOL_NAME,
+    ...WORK_SESSION_TOOL_NAMES,
   ]) {
     if (!list.includes(name)) list.push(name);
   }
