@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   AgentChannelEventTypes,
   AgentChannelWorkSessionStartResponse,
@@ -42,6 +42,8 @@ let stack: TestStack;
 let su: pg.Client;
 let victor: TestClient;
 let ana: TestClient;
+let bea: TestClient;
+let beaId: string;
 let orgId: string;
 let victorId: string;
 let anaId: string;
@@ -124,11 +126,14 @@ interface BotSession {
  * Atlas starts a session on billing-api from a fresh ask of Ana in #eng and the device takes it: `session.start` acked,
  * the runtime reports the session idle, and the start's own prompt reaches the device (the session is `running`).
  */
-async function botSession(prompt = FIRST): Promise<BotSession> {
+async function botSession(
+  opts: { prompt?: string; asker?: TestClient; conversationId?: string } = {},
+): Promise<BotSession> {
+  const prompt = opts.prompt ?? FIRST;
   const eventId = await freshBotTurn(
     su,
-    ana,
-    engId,
+    opts.asker ?? ana,
+    opts.conversationId ?? engId,
     `@atlas please fix the invoice test ${randomUUID().slice(0, 6)}`,
   );
   const [turn] = await rowsOf("select message_id from app.agent_turns where event_id = $1", [eventId]);
@@ -280,12 +285,14 @@ beforeAll(async () => {
   orgId = setup.organization.id;
   victorId = setup.user.id;
   ({ client: ana, userId: anaId } = await invite(stack, victor, "ana@example.test", "Ana Gil", "developer"));
+  ({ client: bea, userId: beaId } = await invite(stack, victor, "bea@example.test", "Bea Sol", "developer"));
   atlasId = await teamBot("Atlas", "atlas");
-  // Public #eng: Víctor and Ana read it; Atlas is a member.
+  // Public #eng: Víctor, Ana and Bea read it; Atlas is a member.
   engId = (await ok(victor.request("POST", "/api/v1/channels", { name: "eng", visibility: "public" })))
     .id as string;
   await ok(victor.request("POST", `/api/v1/channels/${engId}/members`, { kind: "agent", id: atlasId }));
   await ok(victor.request("POST", `/api/v1/channels/${engId}/members`, { kind: "user", id: anaId }));
+  await ok(victor.request("POST", `/api/v1/channels/${engId}/members`, { kind: "user", id: beaId }));
 
   await ok(victor.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: true, allowFastMode: true }));
   const paired = await pairDevice(stack, victor, "billing-server");
@@ -649,6 +656,226 @@ describe("bounded and idempotent: one pending wake, one wake per state, a daily 
         atlasId,
       ]);
     }
+  });
+});
+
+// ---------------------------------------------------------------- who the wake runs as, what it carries (D-17, D-21)
+
+describe("the wake runs as the person who asked, carries what the bot may use, and is bounded by its limits", () => {
+  it("Ana removed from the private channel: no wake, the card says the bot can't post here, the skip is audited", async () => {
+    const opsId = (
+      await ok(victor.request("POST", "/api/v1/channels", { name: "ops", visibility: "private" }))
+    ).id as string;
+    await ok(victor.request("POST", `/api/v1/channels/${opsId}/members`, { kind: "agent", id: atlasId }));
+    await ok(victor.request("POST", `/api/v1/channels/${opsId}/members`, { kind: "user", id: anaId }));
+    const s = await botSession({ conversationId: opsId });
+    await drainWakes();
+    await ok(victor.request("DELETE", `/api/v1/channels/${opsId}/members/user/${anaId}`));
+
+    await finishTurn(s.workSessionId, s.first);
+    await settle(s.workSessionId, "idle");
+    expect(await wakesOf(s.workSessionId)).toEqual([]);
+    const card = await cardOf(s.cardMessageId);
+    expect(card.notices).toEqual([{ tone: "neutral", text: "The bot can't post here any more." }]);
+    // The card still follows the session.
+    expect(fieldOf(card, WORK_SESSION_CARD_LABELS.step)).toBe("Turn 1 done");
+    const skipped = await auditsFor("bot.work_session_wake_skipped", s.workSessionId);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toMatchObject({ agent_id: atlasId, user_id: anaId, result: "denied" });
+    expect(skipped[0]!.metadata).toMatchObject({ reason: "requester_cannot_read", transition: "turn_done" });
+    // Nothing of the day's budget was spent, and the same state is not tried again.
+    expect(await botRowOf(s.workSessionId)).toMatchObject({ wakes_used: 0, last_woken_status: "idle" });
+    await core().db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+      core().jobs.sendInTx(tx, QUEUE, { organizationId: orgId, workSessionId: s.workSessionId }),
+    );
+    await drainWakes();
+    expect(await auditsFor("bot.work_session_wake_skipped", s.workSessionId)).toHaveLength(1);
+  });
+
+  it("the wake turn is Ana's, unattended (no browser tools, no attachment listing) and tainted after outside content", async () => {
+    const s = await botSession();
+    await drainWakes();
+    await su.query("update app.work_sessions set tainted_at = now() where id = $1", [s.workSessionId]);
+    await finishTurn(s.workSessionId, s.first);
+    await settle(s.workSessionId, "idle");
+    const [ev] = await wakesOf(s.workSessionId);
+    expect(ev).toBeDefined();
+    const tools = (ev!.turn?.tools ?? []) as string[];
+    expect(tools.filter((t) => t.startsWith("ocw_browser_"))).toEqual([]);
+    expect(ev!.turn?.attachments).toBeUndefined();
+    const [turn] = await rowsOf(
+      "select user_id, tainted, session_output_read from app.agent_turns where event_id = $1",
+      [ev!.eventId],
+    );
+    expect(turn).toEqual({ user_id: anaId, tainted: true, session_output_read: false });
+  });
+
+  it("with the consent revoked the wake still arrives (the bot can report) but carries none of the four tools", async () => {
+    const s = await botSession();
+    await drainWakes();
+    await ok(victor.request("DELETE", `/api/v1/devices/${serverId}/bot-consents/${atlasId}`));
+    try {
+      await finishTurn(s.workSessionId, s.first);
+      await settle(s.workSessionId, "idle");
+      const [ev] = await wakesOf(s.workSessionId);
+      expect(ev!.workSession.transition).toBe("turn_done");
+      const tools = (ev!.turn?.tools ?? []) as string[];
+      for (const name of WORK_SESSION_TOOL_NAMES) expect(tools).not.toContain(name);
+      expect(ev!.turn?.workZone).toBeUndefined();
+    } finally {
+      await grantBotConsent(victor, serverId, atlasId, { allowFullAccess: true });
+    }
+  });
+
+  it("at the bot's daily turn limit: no cell event, the limit is handled as for any turn, the wake is not spent", async () => {
+    const s = await botSession();
+    await drainWakes();
+    // The ask that started the session counted today's first turn; the limit is now reached.
+    await su.query("update app.agent_usage_daily set turns = 100000 where agent_id = $1", [atlasId]);
+    try {
+      await finishTurn(s.workSessionId, s.first);
+      await settle(s.workSessionId, "idle");
+      expect(await wakesOf(s.workSessionId)).toEqual([]);
+      const limited = (
+        await rowsOf(
+          "select user_id, metadata from app.audit_events where action = 'agent.limit_reached' and agent_id = $1",
+          [atlasId],
+        )
+      ).filter((a) => a.metadata.messageId === s.cardMessageId);
+      expect(limited).toHaveLength(1);
+      expect(limited[0]!.user_id).toBe(anaId);
+      const skipped = await auditsFor("bot.work_session_wake_skipped", s.workSessionId);
+      expect(skipped.map((a) => a.metadata.reason)).toEqual(["daily_limit"]);
+      expect((await botRowOf(s.workSessionId)).wakes_used).toBe(0);
+    } finally {
+      await su.query("delete from app.agent_usage_daily");
+    }
+  });
+
+  it("Bea deactivated: her session's next transition wakes nobody and the card says the bot can't post here", async () => {
+    const s = await botSession({ asker: bea });
+    await drainWakes();
+    await ok(victor.request("POST", `/api/v1/members/${beaId}/deactivate`));
+    server.event(s.workSessionId, { type: "session.state", status: "failed" });
+    await settle(s.workSessionId, "failed");
+    expect(await wakesOf(s.workSessionId)).toEqual([]);
+    expect((await cardOf(s.cardMessageId)).notices).toEqual([
+      { tone: "neutral", text: "The bot can't post here any more." },
+    ]);
+    const skipped = await auditsFor("bot.work_session_wake_skipped", s.workSessionId);
+    expect(skipped.map((a) => [a.user_id, a.metadata.reason])).toEqual([[beaId, "requester_cannot_read"]]);
+  });
+});
+
+// ---------------------------------------------------------------- isolation and the leak sweep (ADR-0028, P1)
+
+describe("ids only, tenant-bound, and no content anywhere", () => {
+  /** Organization B: a bot session with its own device, project, conversation, bot and a pending wake. */
+  async function orgBBotSession(): Promise<{ orgB: string; wsB: string }> {
+    const orgB = randomUUID();
+    const userB = randomUUID();
+    const devB = randomUUID();
+    const projB = randomUUID();
+    const convB = randomUUID();
+    const wsB = randomUUID();
+    const botB = randomUUID();
+    const q = (t: string, v: unknown[]) => su.query(t, v);
+    await q("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [orgB, `o-${orgB}`]);
+    await q("insert into auth.user (id, name, email) values ($1, 'B', $2)", [userB, `${userB}@b.test`]);
+    await q(
+      "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash, shared, status, runtime_info) values ($1, $2, $3, 'B mac', 'darwin', $4, true, 'online', '[]')",
+      [devB, orgB, userB, createHash("sha256").update(randomUUID()).digest("hex")],
+    );
+    await q(
+      "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, 'lb', 'secret')",
+      [projB, orgB, devB],
+    );
+    await q(
+      "insert into app.conversations (id, organization_id, kind, name) values ($1, $2, 'work_session', 'b')",
+      [convB, orgB],
+    );
+    await q(
+      "insert into app.agents (id, organization_id, name, username, instructions, model_provider, model_id, status) values ($1, $2, 'B bot', 'bbot', 'x', 'mock', 'mock-1', 'ready')",
+      [botB, orgB],
+    );
+    await q(
+      "insert into app.work_sessions (id, organization_id, conversation_id, project_id, device_id, title, created_by, status, started_by_agent_id) values ($1, $2, $3, $4, $5, 'B', $6, 'failed', $7)",
+      [wsB, orgB, convB, projB, devB, userB, botB],
+    );
+    await q(
+      "insert into app.bot_work_sessions (work_session_id, organization_id, agent_id, sponsor_user_id, requester_user_id, origin_conversation_id, origin_message_id, origin_event_id, wake_pending) values ($1, $2, $3, $4, $4, $5, $6, $7, true)",
+      [wsB, orgB, botB, userB, convB, randomUUID(), randomUUID()],
+    );
+    return { orgB, wsB };
+  }
+
+  it("a job naming organization B's session under organization A (and the reverse) does nothing", async () => {
+    const { orgB, wsB } = await orgBBotSession();
+    const s = await botSession();
+    await drainWakes();
+    server.event(s.workSessionId, { type: "session.state", status: "failed" });
+    await eventually(async () => (await statusOf(s.workSessionId)) === "failed");
+    await su.query("delete from pgboss.job where name = $1", [QUEUE]);
+    const cardBefore = await cardOf(s.cardMessageId);
+
+    await core().db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+      core().jobs.sendInTx(tx, QUEUE, { organizationId: orgId, workSessionId: wsB }),
+    );
+    await core().db.withTenant({ organizationId: orgB, userId: null }, (tx) =>
+      core().jobs.sendInTx(tx, QUEUE, { organizationId: orgB, workSessionId: s.workSessionId }),
+    );
+    expect(await drainWakes()).toBe(2);
+
+    // B's row is untouched (its wake stays pending), A's session is not woken from B, nothing is posted or audited.
+    expect((await botRowOf(wsB)).wake_pending).toBe(true);
+    expect(await wakesOf(wsB)).toEqual([]);
+    expect(await wakesOf(s.workSessionId)).toEqual([]);
+    expect((await cardOf(s.cardMessageId)).version).toBe(cardBefore.version);
+    expect(await auditsFor("bot.work_session_woken", wsB)).toEqual([]);
+    expect(await auditsFor("bot.work_session_wake_skipped", wsB)).toEqual([]);
+    expect(await auditsFor("bot.work_session_woken", s.workSessionId)).toEqual([]);
+    expect(await rowsOf("select 1 from app.stream_events where stream_id = $1", [`cell:${orgB}`])).toEqual(
+      [],
+    );
+  });
+
+  it("a prompt marker and an output marker appear in no job row, audit row, wake summary or API log line", async () => {
+    const promptMarker = `OCW-MARKER-0720-prompt-${randomUUID().slice(0, 8)}`;
+    const outputMarker = `OCW-MARKER-0720-output-${randomUUID().slice(0, 8)}`;
+    const s = await botSession({ prompt: `fix it ${promptMarker}` });
+    await drainWakes();
+    await finishTurn(s.workSessionId, s.first, `all green ${outputMarker}`);
+    await eventually(async () => (await statusOf(s.workSessionId)) === "idle");
+    // The start's job (already run) and the finished turn's: each is exactly the two ids.
+    const jobs = await jobsOf(s.workSessionId);
+    expect(jobs).toHaveLength(2);
+    for (const j of jobs) expect(j.data).toEqual({ organizationId: orgId, workSessionId: s.workSessionId });
+    await drainWakes();
+    server.event(s.workSessionId, { type: "session.state", status: "failed" });
+    await settle(s.workSessionId, "failed");
+
+    const wakes = await wakesOf(s.workSessionId);
+    expect(wakes.map((w) => w.workSession.transition)).toEqual(["turn_done", "failed"]);
+    for (const marker of [promptMarker, outputMarker]) {
+      for (const w of wakes) {
+        expect(w.workSession.summary).not.toContain(marker);
+        expect(w.message.text).not.toContain(marker);
+      }
+      expect(
+        await rowsOf("select 1 from pgboss.job where name = $1 and data::text like $2", [
+          QUEUE,
+          `%${marker}%`,
+        ]),
+      ).toEqual([]);
+      expect(
+        await rowsOf("select action from app.audit_events where metadata::text like $1", [`%${marker}%`]),
+      ).toEqual([]);
+      expect(logs.filter((line) => line.includes(marker))).toEqual([]);
+    }
+    // The card, read by every reader of the conversation, holds neither.
+    const card = JSON.stringify(await cardOf(s.cardMessageId));
+    expect(card).not.toContain(promptMarker);
+    expect(card).not.toContain(outputMarker);
   });
 });
 
