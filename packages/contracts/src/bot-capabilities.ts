@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AgentScope, AgentStatus, ModelProviderKind } from "./agent";
 import { TurnConsult } from "./agent-chains";
+import { TurnWorkZone } from "./bot-work-zone";
 import { Id, IsoDateTime } from "./common";
 import { MemberAccountResourceKind } from "./connectors";
 import { MEMORY_LIMITS, MemoryPath, MemoryScopeKind } from "./memory";
@@ -460,6 +461,12 @@ export const TurnContext = z.object({
   maxAttachmentReads: z.number().int().optional(),
   /** Phase 07.15 (D-05, D-17): characters all reads of this turn may return together; absent on older payloads. */
   maxAttachmentChars: z.number().int().optional(),
+  /**
+   * Phase 07.16 (D-05, PD-17): present only on turns of a bot whose Work Zone profile is active (offered with the four
+   * `WORK_SESSION_TOOL_NAMES`): the runtime, device, projects, options and the bot's own sessions. Absent on older
+   * payloads and for every bot without a profile (BWZ-06).
+   */
+  workZone: TurnWorkZone.optional(),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -540,7 +547,38 @@ export const BUILTIN_TOOLS = {
    * Offered only on a turn that lists a readable file (PD-03), never in `GET /cell`.
    */
   attachmentRead: "ocw_attachment_read",
+  /**
+   * 07.16 (D-05, PD-09): a bot with an active Work Zone profile starts, prompts, reads and stops its own sessions
+   * through `POST /work-sessions/start|prompt|read|stop`, which decide, claim and audit each call as the profile's
+   * sponsor. Self-validated in the cell, turn-scoped (never in `GET /cell`), never approvable (not in
+   * `APPROVABLE_BUILTINS`: the profile and its sponsor's live controls are their gate).
+   */
+  workSessionStart: "ocw_work_session_start",
+  workSessionPrompt: "ocw_work_session_prompt",
+  workSessionRead: "ocw_work_session_read",
+  workSessionStop: "ocw_work_session_stop",
 } as const;
+
+/** 07.16 (D-05): the four Work Zone session tools, offered together (PD-17). */
+export const WORK_SESSION_TOOL_NAMES = [
+  BUILTIN_TOOLS.workSessionStart,
+  BUILTIN_TOOLS.workSessionPrompt,
+  BUILTIN_TOOLS.workSessionRead,
+  BUILTIN_TOOLS.workSessionStop,
+] as const;
+export type WorkSessionToolName = (typeof WORK_SESSION_TOOL_NAMES)[number];
+
+/**
+ * 07.16 (D-05, D-20): start, prompt and stop act on a device; a read returns the runtime's own work product, which the
+ * API scopes through `agent_turns.session_output_read` (D-20) rather than the general taint, so it is not
+ * `untrustedOutput`.
+ */
+export const WORK_SESSION_TOOL_FLAGS: Readonly<Record<WorkSessionToolName, TurnToolFlags>> = {
+  ocw_work_session_start: { untrustedOutput: false, sideEffecting: true },
+  ocw_work_session_prompt: { untrustedOutput: false, sideEffecting: true },
+  ocw_work_session_read: { untrustedOutput: false, sideEffecting: false },
+  ocw_work_session_stop: { untrustedOutput: false, sideEffecting: true },
+};
 
 /**
  * 07.15 (D-08, PD-08): a read returns a person's file, third-party content: it taints the turn (and its return turns).
