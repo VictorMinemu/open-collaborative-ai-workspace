@@ -14,10 +14,13 @@ import {
   CLAUDE_CATALOG,
   CODEX_CATALOG,
   createBotProfile,
+  createTeamProject,
   freshBotTurn,
   grantBotConsent,
   invite,
+  linkRepo,
   pairDevice,
+  startSession,
 } from "../../testing-workzone";
 
 /**
@@ -389,5 +392,207 @@ describe("tracer: Ana asks Atlas in #eng and Atlas starts the session itself, as
       [eventId],
     );
     expect(calls).toEqual([{ tool: START, user_id: anaId, decision: "allowed", target: billingId }]);
+  });
+});
+
+// ---------------------------------------------------------------- caps, settings and one executor per tree
+
+/** Re-saves Atlas's profile (Víctor stays its sponsor); every case restores the default one afterwards. */
+const saveProfile = (over: Partial<BotWorkZoneProfileInput> = {}) =>
+  createBotProfile(victor, atlasId, profile(over));
+
+const putPolicy = (body: Json) => ok(victor.request("PUT", "/api/v1/work-zone-policy", body));
+
+/** What a refused start must not have written: sessions, prompts, bot rows, started audits. */
+async function counts() {
+  const [r] = await rowsOf(
+    `select (select count(*)::int from app.work_sessions) as sessions,
+            (select count(*)::int from app.work_prompts) as prompts,
+            (select count(*)::int from app.bot_work_sessions) as bots,
+            (select count(*)::int from app.audit_events where action = 'bot.work_session_started') as started`,
+  );
+  return r;
+}
+
+describe("caps under concurrency (D-15, PD-10, E1)", () => {
+  it("max_concurrent 2 with one active session: two parallel starts give one started and one too_many_sessions", async () => {
+    await started(await askAtlas());
+    const a = await askAtlas();
+    const b = await askAtlas();
+    const answers = await Promise.all([start(a), start(b)]);
+    const kinds = answers.map((r) => (r.body.kind === "refused" ? r.body.code : r.body.kind)).sort();
+    expect(kinds).toEqual(["started", "too_many_sessions"]);
+    const [n] = await rowsOf(
+      "select count(*)::int as n from app.work_sessions where started_by_agent_id = $1 and status <> 'archived'",
+      [atlasId],
+    );
+    expect(n!.n).toBe(2);
+    const loser = answers[0]!.body.kind === "refused" ? a : b;
+    const audit = await auditsOf("bot.work_session_refused", loser);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]!.metadata).toMatchObject({ outcome: "too_many_sessions", projectId: billingId });
+  });
+
+  it("the organization's cap: one active session of another bot and botSessionsMax 1 → org_limit", async () => {
+    const other = await started(await askAtlas());
+    // That session now counts as Echo's: Atlas has none of its own, the organization has one.
+    await su.query("update app.work_sessions set started_by_agent_id = $1 where id = $2", [
+      echoId,
+      other.workSessionId,
+    ]);
+    await putPolicy({ botSessionsMax: 1 });
+    try {
+      const before = await counts();
+      await refused(await askAtlas(), "org_limit");
+      expect(await counts()).toEqual(before);
+    } finally {
+      await putPolicy({ botSessionsMax: 10 });
+    }
+  });
+
+  it("prompts_per_hour 2: the start's own prompt counts; the third start in the hour → prompt_rate", async () => {
+    await saveProfile({ promptsPerHour: 2 });
+    try {
+      for (let i = 0; i < 2; i++) {
+        await started(await askAtlas());
+        // The sessions end (the concurrency cap is not what refuses); the hour's prompts stay.
+        await su.query("update app.work_sessions set status = 'archived' where started_by_agent_id = $1", [
+          atlasId,
+        ]);
+      }
+      await refused(await askAtlas(), "prompt_rate");
+    } finally {
+      await saveProfile();
+    }
+  });
+});
+
+describe("the bot chooses only what its profile allows (PD-09, PD-10)", () => {
+  it("a model outside the profile → setting_not_allowed with field model; nothing is written", async () => {
+    const before = await counts();
+    const r = await refused(await askAtlas(), "setting_not_allowed", { model: "haiku" });
+    expect(r.field).toBe("model");
+    expect(await counts()).toEqual(before);
+  });
+
+  it("an effort outside the profile → setting_not_allowed with field effort", async () => {
+    const r = await refused(await askAtlas(), "setting_not_allowed", { effort: "max" });
+    expect(r.field).toBe("effort");
+  });
+
+  it("a mode above the profile → mode_not_allowed", async () => {
+    await saveProfile({ maxMode: "acceptEdits" });
+    try {
+      await refused(await askAtlas(), "mode_not_allowed", { permissionMode: "fullAccess" });
+    } finally {
+      await saveProfile();
+    }
+  });
+
+  it("a project of the same device outside the profile → project_not_allowed", async () => {
+    await refused(await askAtlas(), "project_not_allowed", { projectId: scratchId });
+  });
+
+  it("no model → the profile's default; an allowed effort is used", async () => {
+    const body = await started(await askAtlas(), { effort: "high" });
+    expect(body.model).toBe("opus");
+    const [s] = await rowsOf("select model, settings from app.work_sessions where id = $1", [
+      body.workSessionId,
+    ]);
+    expect(s!.model).toBe("opus");
+    expect(JSON.stringify(s!.settings)).toContain("high");
+  });
+});
+
+describe("one executor per tree (D-15, PD-10)", () => {
+  it("worktree false and a person's active session on the same tree → tree_busy; worktree true → started", async () => {
+    await startSession(victor, server, billingId);
+    await saveProfile({ worktree: false });
+    try {
+      const before = await counts();
+      await refused(await askAtlas(), "tree_busy");
+      expect(await counts()).toEqual(before);
+    } finally {
+      await saveProfile();
+    }
+    const body = await started(await askAtlas());
+    const [s] = await rowsOf("select worktree from app.work_sessions where id = $1", [body.workSessionId]);
+    expect(s!.worktree).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------- audience (D-07, PD-11)
+
+describe("the audience is the server's: readers of the conversation ∩ people of the project (PD-11)", () => {
+  let boId: string;
+  let cyId: string;
+  let deeId: string;
+  let billingChannelId: string;
+  let anaDmId: string;
+
+  beforeAll(async () => {
+    ({ userId: boId } = await invite(stack, victor, "bo@example.test", "Bo Lin", "developer"));
+    ({ userId: cyId } = await invite(stack, victor, "cy@example.test", "Cy Mar", "developer"));
+    ({ userId: deeId } = await invite(stack, victor, "dee@example.test", "Dee Ong", "developer"));
+    // ledger belongs to the team project Ledger: Víctor (lead), Ana, Bo and Dee. Cy is not in it.
+    const { unitId } = await createTeamProject(stack, victor, {
+      name: "Ledger",
+      members: [{ userId: victorId, role: "lead" }, { userId: anaId }, { userId: boId }, { userId: deeId }],
+    });
+    await linkRepo(stack, {
+      organizationId: orgId,
+      unitId,
+      projectId: ledgerId,
+      deviceId: serverId,
+      linkedBy: victorId,
+    });
+    // Private #billing: Víctor, Ana, Bo and Cy (Dee is not in it).
+    billingChannelId = await channel("billing", [atlasId], [anaId, boId, cyId], "private");
+    const dm = await ok(
+      ana.request("POST", "/api/v1/dms", { participants: [{ kind: "agent", id: atlasId }] }),
+    );
+    anaDmId = dm.id as string;
+  });
+
+  const audienceOf = async (workSessionId: string) => {
+    const [s] = await rowsOf("select visibility from app.work_sessions where id = $1", [workSessionId]);
+    const grants = await rowsOf(
+      "select subject_id from app.work_session_grants where work_session_id = $1 and subject_kind = 'user' and revoked_at is null",
+      [workSessionId],
+    );
+    return { kind: s!.visibility as string, userIds: grants.map((g) => g.subject_id as string).sort() };
+  };
+
+  it("public #eng read by every project member → project", async () => {
+    const body = await started(await askAtlas(), { projectId: ledgerId });
+    expect(await audienceOf(body.workSessionId)).toEqual({ kind: "project", userIds: [] });
+  });
+
+  it("private #billing: its members with project access, the sponsor excluded → people [Ana, Bo]", async () => {
+    const body = await started(await askAtlas(ana, billingChannelId), { projectId: ledgerId });
+    expect(await audienceOf(body.workSessionId)).toEqual({ kind: "people", userIds: [anaId, boId].sort() });
+  });
+
+  it("Ana's DM with Atlas: people [Ana] when she has project access, owner when she has none", async () => {
+    const inProject = await started(await askAtlas(ana, anaDmId), { projectId: ledgerId });
+    expect(await audienceOf(inProject.workSessionId)).toEqual({ kind: "people", userIds: [anaId] });
+    // billing-api is a personal repository of Víctor's unshared server: only he may use it, so only he sees it.
+    await quiesce();
+    const outside = await started(await askAtlas(ana, anaDmId));
+    expect(await audienceOf(outside.workSessionId)).toEqual({ kind: "owner", userIds: [] });
+  });
+
+  it("the bot cannot pass an audience, a device, a user or a worktree (strict body: 400)", async () => {
+    const eventId = await askAtlas();
+    for (const extra of [
+      { visibility: { kind: "project" } },
+      { deviceId: serverId },
+      { userId: anaId },
+      { worktree: false },
+    ]) {
+      const r = await start(eventId, extra);
+      expect(r.status, JSON.stringify(extra)).toBe(400);
+    }
+    expect(await rowsOf("select 1 from app.agent_tool_calls where event_id = $1", [eventId])).toEqual([]);
   });
 });
