@@ -153,16 +153,18 @@ async function gateTurn(
       and(
         eq(agentTurns.eventId, known.eventId),
         eq(agentTurns.tainted, false),
+        // 07.16 D-20 (PD-15): after a Work Zone session read the turn changes nothing else (the claim's rule).
+        eq(agentTurns.sessionOutputRead, false),
         lt(agentTurns.toolCalls, MAX_TOOL_CALLS_PER_TURN),
       ),
     )
     .returning({ eventId: agentTurns.eventId });
   if (counted.length === 0) {
     const [after] = await tx
-      .select({ tainted: agentTurns.tainted })
+      .select({ tainted: agentTurns.tainted, sessionOutputRead: agentTurns.sessionOutputRead })
       .from(agentTurns)
       .where(eq(agentTurns.eventId, known.eventId));
-    return refuse(after?.tainted ? "tainted" : "cap_reached");
+    return refuse(after?.tainted || after?.sessionOutputRead ? "tainted" : "cap_reached");
   }
   return { turn };
 }

@@ -394,6 +394,8 @@ export async function decideSandboxCall(
     eq(agentTurns.eventId, turn.eventId),
     lt(agentTurns.sandboxCalls, MAX_SANDBOX_CALLS_PER_TURN),
     flags.sideEffecting && !verdict.grantApprovalId ? eq(agentTurns.tainted, false) : undefined,
+    // 07.16 D-20 (PD-15): after a Work Zone session read no other side effect (the claim's rule; a grant lifts it).
+    flags.sideEffecting && !verdict.grantApprovalId ? eq(agentTurns.sessionOutputRead, false) : undefined,
   ];
   const updated = await tx
     .update(agentTurns)
@@ -407,10 +409,12 @@ export async function decideSandboxCall(
   if (updated.length > 0 && flags.untrustedOutput) await taintReturnTurns(tx, turn.eventId);
   if (updated.length === 0) {
     const [after] = await tx
-      .select({ tainted: agentTurns.tainted })
+      .select({ tainted: agentTurns.tainted, sessionOutputRead: agentTurns.sessionOutputRead })
       .from(agentTurns)
       .where(eq(agentTurns.eventId, turn.eventId));
-    return refuse(flags.sideEffecting && after?.tainted ? "tainted" : "budget_exhausted");
+    return refuse(
+      flags.sideEffecting && (after?.tainted || after?.sessionOutputRead) ? "tainted" : "budget_exhausted",
+    );
   }
   const callId = await recordCall(tx, deps.core, {
     cell: deps.cell,
