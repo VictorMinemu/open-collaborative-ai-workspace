@@ -35,10 +35,15 @@ import { type DeviceAccess, type DeviceHub, deviceFacts, loadDeviceAccess } from
 import { AuthzDeniedError, createPermissionService, type ResourceFacts } from "../organization";
 import { loadControlsContext } from "./context";
 import {
+  archiveWorkSession,
+  assertNotSlashCommand,
+  submitWorkPrompt,
+  type WorkSessionControllerDeps,
+} from "./controller";
+import {
   buildRuntimeControls,
   buildSessionControls,
   type ControlsContext,
-  catalogFor,
   decideSettings,
   pickSettings,
   requestedSettings,
@@ -46,17 +51,12 @@ import {
 } from "./controls";
 import { sessionFacts as sharedSessionFacts } from "./facts";
 import { sessionNotFound } from "./hidden";
-import { currentSessionModel, imagesNotSupported } from "./images";
 import { knownModels, loadWorkZonePolicy, saveWorkZonePolicy } from "./policy";
 import { type SessionRow, type WorkSessionService, wsTopic } from "./service";
 import { runSessionCommand } from "./slash";
 import {
   createWorkSession,
   deviceUnusableMessage,
-  isSessionCommand,
-  joinConversation,
-  queueWorkPrompt,
-  SLASH_COMMAND_MESSAGE,
   settingsDenied,
   type WorkSessionStartDeps,
   type WorkSessionStartFailure,
@@ -99,6 +99,8 @@ export function registerWorkSessionRoutes(
   const perms = createPermissionService(core);
   /** Session creation (07.5-05): the route and Work Zone proposals start sessions through `createWorkSession`. */
   const startDeps: WorkSessionStartDeps = { core, perms, svc, hub };
+  /** 07.16 PD-13: the prompt and archive bodies people and bots share. */
+  const controllerDeps: WorkSessionControllerDeps = { core, svc, startDeps };
 
   /** The request's own resolver decisions for its viewer (the per-viewer session fields, Phase 07.10). */
   const filterFor =
@@ -372,33 +374,16 @@ export function registerWorkSessionRoutes(
 
   /**
    * Queue a prompt from the caller and dispatch it (or restart a finished session). Call with the session LOCKED
-   * and `work_session.prompt` asserted.
+   * and `work_session.prompt` asserted. The body is `submitWorkPrompt`, shared with the bot's routes (07.16 PD-13).
    */
-  async function submitPrompt(
+  function submitPrompt(
     req: FastifyRequest,
     tx: Tx,
     s: SessionRow,
     body: string,
     attachmentIds: readonly string[] = [],
   ): Promise<WorkPrompt> {
-    const auth = authOf(req);
-    if (s.status === "archived") throw conflict("This session is archived", "session_archived");
-    assertNotSlashCommand(body, s.runtime);
-    if (attachmentIds.length > 0) {
-      // D-05, P-08: a model that says it cannot read images is refused before anything is queued or linked.
-      const [d] = await tx
-        .select({ catalog: devices.runtimeCatalog })
-        .from(devices)
-        .where(eq(devices.id, s.deviceId));
-      const current = currentSessionModel(catalogFor(d?.catalog, s.runtime), s);
-      if (current?.imageInput === false) throw imagesNotSupported(current);
-    }
-    await joinConversation(tx, auth, s);
-    const p = await queueWorkPrompt(tx, startDeps, auth, s, body, attachmentIds);
-    if (s.status === "failed" || s.status === "completed") await svc.restart(tx, s);
-    else await svc.tryDispatch(tx, s);
-    await svc.emitSession(tx, s.id);
-    return (await svc.prompts(tx, s.id)).find((x) => x.id === p.id)!;
+    return submitWorkPrompt(tx, controllerDeps, authOf(req), s, body, { attachmentIds });
   }
 
   app.get(
@@ -796,41 +781,13 @@ export function registerWorkSessionRoutes(
       core.db.withTenant(tenant(req), async (tx) => {
         const { s, facts } = await visible(req, tx, req.params.id);
         await perms.assertCan(req, tx, "work_session.archive", facts);
-        if (s.status === "archived") return { ok: true as const };
-        const cancelled = await tx
-          .update(workPrompts)
-          .set({ status: "cancelled", completedAt: sql`now()` })
-          .where(and(eq(workPrompts.workSessionId, s.id), eq(workPrompts.status, "queued")))
-          .returning();
-        for (const p of cancelled) await svc.emitPrompt(tx, p);
-        await hub.enqueue(tx, {
-          deviceId: s.deviceId,
-          workSessionId: s.id,
-          kind: "session.stop",
-          payload: {},
-        });
-        await core.audit.record(tx, {
-          action: "work_session.archived",
-          resourceType: "work_session",
-          resourceId: s.id,
-          sessionId: s.id,
-          deviceId: s.deviceId,
-        });
-        await svc.setStatus(tx, s, "archived");
+        await archiveWorkSession(tx, controllerDeps, s);
         return { ok: true as const };
       }),
   );
 
   // Phase 07.9-06 (D-04): who can see a session, its people search and the new-session draft preview.
   registerVisibilityRoutes(app, core, { perms, svc });
-}
-
-/**
- * D-13: a prompt body that starts with a settings or refused slash command never enters the queue; it must go
- * through `POST /work-sessions/:id/commands`. Passthrough commands and slashes later in the text are prompts.
- */
-function assertNotSlashCommand(body: string, runtime: RuntimeId): void {
-  if (isSessionCommand(body, runtime)) throw new HttpError(400, "slash_command", SLASH_COMMAND_MESSAGE);
 }
 
 /** A refused start as the error `POST /work-sessions` has always answered with (status, code, message, denial). */

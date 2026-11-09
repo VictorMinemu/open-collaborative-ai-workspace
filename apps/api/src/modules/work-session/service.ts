@@ -47,7 +47,8 @@ import type { AuditService } from "../audit";
 import type { DeviceCommandRow, DeviceHub, DeviceRef, DeviceSessionHandler } from "../device";
 import { memberDirectory, type PermissionService, type ResourceFacts, uuidArray } from "../organization";
 import type { RealtimeService } from "../realtime";
-import { loadControlsContext } from "./context";
+import { botLayerForSession } from "./bot-profile";
+import { type AgentControlsLayer, loadControlsContext } from "./context";
 import {
   buildRuntimeControls,
   clampToControls,
@@ -701,12 +702,25 @@ export class WorkSessionService implements DeviceSessionHandler {
       // P-07: re-checked on every turn: min(session mode, the author's cap = org policy ∩ device opt-in ∩ the
       // author's device cap (floor for unlisted controllers, nothing for revoked ones) ∩ grain ∩ catalog).
       policy ??= await loadWorkZonePolicy(tx);
+      // 07.16 (D-04, PD-07, Pitfall 10): a bot's prompt (written in its sponsor's name) is re-decided against the bot's
+      // live profile on every turn: no active profile for this session → refused; else its caps join the sponsor's.
+      // A prompt written after outside content counts as tainted even before the session is marked (D-08).
+      let agent: AgentControlsLayer | undefined;
+      if (next.authorAgentId) {
+        const layer = await botLayerForSession(tx, this.deps.perms, s);
+        if (!layer || layer.agentId !== next.authorAgentId) {
+          await this.refusePrompt(tx, s, next, "bot_not_allowed");
+          continue;
+        }
+        agent = next.tainted ? { ...layer, tainted: true } : layer;
+      }
       const author = await loadControlsContext(tx, this.deps.perms, {
         deviceId: s.deviceId,
         runtime: s.runtime,
         userId: next.authorUserId,
         inSession: true,
         policy,
+        ...(agent ? { agent } : {}),
       });
       const cap = author ? highestAvailableMode(author.ctx, s.model, s.permissionMode) : null;
       const mode = turnMode(s.permissionMode, cap);
@@ -746,11 +760,13 @@ export class WorkSessionService implements DeviceSessionHandler {
         resourceType: "work_prompt",
         resourceId: next.id,
         userId: next.authorUserId,
+        ...(next.authorAgentId ? { agentId: next.authorAgentId } : {}),
         deviceId: s.deviceId,
         sessionId: s.id,
         metadata: {
           promptId: next.id,
           authorUserId: next.authorUserId,
+          ...(next.authorAgentId ? { authorAgentId: next.authorAgentId } : {}),
           requestedMode: s.permissionMode,
           effectiveMode: mode,
           capped: mode !== s.permissionMode,
@@ -765,14 +781,15 @@ export class WorkSessionService implements DeviceSessionHandler {
   }
 
   /**
-   * A turn that may not run (P-07: its author's access; 06.1 P-08: images for a model that cannot read them): failed,
-   * audited, never sent; the arbiter moves to the next prompt.
+   * A turn that may not run (P-07: its author's access; 06.1 P-08: images for a model that cannot read them; 07.16
+   * Pitfall 10, `bot_not_allowed`: the bot's profile is not active for this turn): failed, audited, never sent; the
+   * arbiter moves to the next prompt.
    */
   private async refusePrompt(
     tx: Tx,
     s: SessionRow,
     p: PromptRow,
-    reason: "access_revoked" | "mode_not_allowed" | "images_not_supported",
+    reason: "access_revoked" | "mode_not_allowed" | "images_not_supported" | "bot_not_allowed",
   ): Promise<void> {
     const [row] = await tx
       .update(workPrompts)
@@ -784,12 +801,14 @@ export class WorkSessionService implements DeviceSessionHandler {
       resourceType: "work_prompt",
       resourceId: p.id,
       userId: p.authorUserId,
+      ...(p.authorAgentId ? { agentId: p.authorAgentId } : {}),
       deviceId: s.deviceId,
       sessionId: s.id,
       result: "denied",
       metadata: {
         promptId: p.id,
         authorUserId: p.authorUserId,
+        ...(p.authorAgentId ? { authorAgentId: p.authorAgentId } : {}),
         requestedMode: s.permissionMode,
         reason,
       },
