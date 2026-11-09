@@ -7,7 +7,7 @@ import {
 } from "@ocw/contracts";
 import { type Tx, workPrompts } from "@ocw/db";
 import { and, desc, inArray, isNotNull, sql } from "drizzle-orm";
-import { type PermissionService, type ResourceFacts, uuidArray, workProjectResource } from "../organization";
+import { type ResourceFacts, type UsersDecider, uuidArray, workProjectResource } from "../organization";
 
 /**
  * Per-viewer session fields (Phase 07.10, PD-03, PD-04, PD-05; UI-SPEC R2).
@@ -234,12 +234,13 @@ export async function loadViewerFields(
 /**
  * The per-viewer fields of each delivered session for EACH of its recipients (the `user:` fan-out), by session id then
  * user id. One project-access query over every (project, recipient) pair of the batch and one last-turn query over its
- * sessions; then one resolver decision per distinct project over its recipients and one per session with a pending
- * approval over its recipients (`usersAllowed`, on the facts the delivery already built).
+ * sessions; then one in-memory resolver decision per distinct project over its recipients and one per session with a
+ * pending approval over its recipients (on the facts the delivery already built), through the delivery's `decider`,
+ * which must be loaded with every recipient (one it was not loaded with is never named nor asked: fail closed).
  */
 export async function loadViewerFieldsForRecipients(
   tx: Tx,
-  perms: Pick<PermissionService, "usersAllowed">,
+  decider: UsersDecider,
   deliveries: readonly DeliverySource[],
 ): Promise<Map<string, Map<string, ViewerFields>>> {
   // Recipients to decide per project: the session's creator is named without a decision (D-12).
@@ -277,15 +278,12 @@ export async function loadViewerFieldsForRecipients(
     );
     for (const { project, users: us } of byProject.values()) {
       if (us.size === 0) continue;
-      const allowed = await perms.usersAllowed(tx, {
-        candidates: [...us],
-        permission: "work_session.read",
-        resourceFor: (uid) =>
-          workProjectResource(
-            { id: project.id, path: project.path, access: access.get(key(project.id, uid)) ?? null },
-            uid,
-          ),
-      });
+      const allowed = decider.allowed([...us], "work_session.read", (uid) =>
+        workProjectResource(
+          { id: project.id, path: project.path, access: access.get(key(project.id, uid)) ?? null },
+          uid,
+        ),
+      );
       for (const uid of allowed) open.add(key(project.id, uid));
     }
   }
@@ -293,14 +291,10 @@ export async function loadViewerFieldsForRecipients(
   const approves = new Set<string>();
   for (const d of deliveries) {
     if (d.dto.pendingApprovals === 0 || d.recipients.length === 0) continue;
-    const allowed = await perms.usersAllowed(tx, {
-      candidates: [...d.recipients],
-      permission: "work_session.approve",
-      resourceFor: (uid) => {
-        const f = d.facts.get(uid);
-        if (!f) throw new Error("session facts missing for a recipient");
-        return f;
-      },
+    const allowed = decider.allowed([...d.recipients], "work_session.approve", (uid) => {
+      const f = d.facts.get(uid);
+      if (!f) throw new Error("session facts missing for a recipient");
+      return f;
     });
     for (const uid of allowed) approves.add(key(d.dto.id, uid));
   }

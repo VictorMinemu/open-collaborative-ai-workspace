@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { OrgQueue, type OrgTask } from "./org-queue";
+import { eachBounded, OrgQueue, type OrgTask } from "./org-queue";
 
 /** Phase 07.9 fan-out: the per-organization background queue of the work-session module, without a database. */
 
@@ -225,5 +225,78 @@ describe("OrgQueue", () => {
     const q = new OrgQueue({ log: quietLog() });
     await q.whenIdle(A);
     await q.whenIdle();
+  });
+});
+
+describe("eachBounded: one task's work items at bounded concurrency (07.9 fan-out, WINDOWS #311)", () => {
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+
+  it("runs every item, never more than the limit at once, in order of start", async () => {
+    const opens: Array<() => void> = [];
+    const gates = Array.from(
+      { length: 7 },
+      (_, i) =>
+        new Promise<void>((resolve) => {
+          opens[i] = resolve;
+        }),
+    );
+    const started: number[] = [];
+    let running = 0;
+    let most = 0;
+    const done = eachBounded([0, 1, 2, 3, 4, 5, 6], 3, async (i) => {
+      started.push(i);
+      running++;
+      most = Math.max(most, running);
+      await gates[i];
+      running--;
+    });
+    await tick();
+    expect(started).toEqual([0, 1, 2]);
+    for (let i = 0; i < 7; i++) {
+      opens[i]?.();
+      await tick();
+    }
+    await done;
+    expect(started).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(most).toBe(3);
+  });
+
+  it("a limit above the item count starts each item once; nothing runs for an empty list", async () => {
+    const seen: number[] = [];
+    await eachBounded([1, 2], 8, async (i) => {
+      seen.push(i);
+    });
+    expect(seen).toEqual([1, 2]);
+    await eachBounded([], 3, async () => {
+      throw new Error("never");
+    });
+  });
+
+  it("a failure starts nothing new, waits for the items already running, then rethrows the first error", async () => {
+    const started: number[] = [];
+    let slowDone = false;
+    let release!: () => void;
+    const slow = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const done = eachBounded([0, 1, 2, 3, 4], 2, async (i) => {
+      started.push(i);
+      if (i === 0) {
+        await slow;
+        slowDone = true;
+        return;
+      }
+      throw new Error(`item ${i}`);
+    });
+    let settled = false;
+    done.catch(() => {
+      settled = true;
+    });
+    await tick();
+    expect(settled, "still waiting for the item in flight").toBe(false);
+    release();
+    await expect(done).rejects.toThrow("item 1");
+    expect(slowDone).toBe(true);
+    expect(started).toEqual([0, 1]);
   });
 });
