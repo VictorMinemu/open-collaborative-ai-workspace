@@ -1,8 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   AgentChannelWorkSessionPromptResponse,
   AgentChannelWorkSessionStartResponse,
   AgentChannelWorkSessionStopResponse,
+  BOT_WORK_SESSION_SENTENCES,
+  type BotWorkSessionRefusal,
   type BotWorkZoneProfileInput,
 } from "@ocw/contracts";
 import pg from "pg";
@@ -13,10 +15,13 @@ import {
   CLAUDE_CATALOG,
   CODEX_CATALOG,
   createBotProfile,
+  createTeamProject,
   freshBotTurn,
   grantBotConsent,
   invite,
+  linkRepo,
   pairDevice,
+  startSession,
 } from "../../testing-workzone";
 
 /**
@@ -40,9 +45,11 @@ let stack: TestStack;
 let su: pg.Client;
 let victor: TestClient;
 let ana: TestClient;
+let bob: TestClient;
 let orgId: string;
 let victorId: string;
 let anaId: string;
+let bobId: string;
 let atlasId: string;
 let echoId: string;
 let engId: string;
@@ -140,6 +147,16 @@ async function stopped(eventId: string, workSessionId: string) {
   return body;
 }
 
+/** A prompt or stop answer that must be the refusal `code`, with its fixed sentence. */
+async function refusedWith(res: Promise<{ status: number; body: Json }>, code: BotWorkSessionRefusal) {
+  const r = await res;
+  expect(r.status, JSON.stringify(r.body)).toBe(200);
+  expect(r.body.kind, JSON.stringify(r.body)).toBe("refused");
+  expect(r.body.code, JSON.stringify(r.body)).toBe(code);
+  expect(r.body.sentence).toContain(BOT_WORK_SESSION_SENTENCES[code]);
+  return r.body;
+}
+
 const rowsOf = async (q: string, args: unknown[] = []) => (await su.query(q, args)).rows as Json[];
 
 const auditsOf = (action: string, eventId: string) =>
@@ -230,14 +247,18 @@ beforeAll(async () => {
   orgId = setup.organization.id;
   victorId = setup.user.id;
   ({ client: ana, userId: anaId } = await invite(stack, victor, "ana@example.test", "Ana Gil", "developer"));
+  ({ client: bob, userId: bobId } = await invite(stack, victor, "bob@example.test", "Bob Ros", "developer"));
   atlasId = await teamBot("Atlas", "atlas");
   echoId = await teamBot("Echo", "echo");
+  // Public #eng: Víctor, Ana and Bob read it.
   engId = (await ok(victor.request("POST", "/api/v1/channels", { name: "eng", visibility: "public" })))
     .id as string;
   for (const botId of [atlasId, echoId]) {
     await ok(victor.request("POST", `/api/v1/channels/${engId}/members`, { kind: "agent", id: botId }));
   }
-  await ok(victor.request("POST", `/api/v1/channels/${engId}/members`, { kind: "user", id: anaId }));
+  for (const userId of [anaId, bobId]) {
+    await ok(victor.request("POST", `/api/v1/channels/${engId}/members`, { kind: "user", id: userId }));
+  }
 
   await ok(victor.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: true, allowFastMode: true }));
   const paired = await pairDevice(stack, victor, "billing-server");
@@ -268,6 +289,18 @@ beforeAll(async () => {
   const list = (await ok(victor.request("GET", "/api/v1/projects"))).projects as Json[];
   billingId = list.find((p) => p.name === "billing-api")!.id as string;
   ledgerId = list.find((p) => p.name === "ledger")!.id as string;
+  // ledger belongs to the team project Ledger (Víctor lead, Ana member); Bob is not in it.
+  const { unitId } = await createTeamProject(stack, victor, {
+    name: "Ledger",
+    members: [{ userId: victorId, role: "lead" }, { userId: anaId }],
+  });
+  await linkRepo(stack, {
+    organizationId: orgId,
+    unitId,
+    projectId: ledgerId,
+    deviceId: serverId,
+    linkedBy: victorId,
+  });
 
   // Víctor (admin) gives Atlas and Echo their profiles (he is their sponsor); the server allows both.
   await createBotProfile(victor, atlasId, profile());
@@ -378,5 +411,228 @@ describe("tracer: Atlas sends a follow-up prompt to the session it started, then
       workSessionId,
       outcome: "stopped",
     });
+  });
+});
+
+// ---------------------------------------------------------------- only its own sessions (D-06, PD-13, E3, E15)
+
+/** What a refused prompt or stop must not have changed in `workSessionId`: its status and its prompts. */
+const stateOf = async (workSessionId: string) => ({
+  status: (await rowsOf("select status from app.work_sessions where id = $1", [workSessionId]))[0]?.status,
+  prompts: (await promptsOf(workSessionId)).map((p) => [p.id, p.status]),
+});
+
+describe("the bot controls only the sessions it started (E3)", () => {
+  /** Organization B's idle session, with its own device, project and creator (a guessed id from Atlas's side). */
+  async function orgBSession(): Promise<string> {
+    const orgB = randomUUID();
+    const userB = randomUUID();
+    const devB = randomUUID();
+    const projB = randomUUID();
+    const convB = randomUUID();
+    const wsB = randomUUID();
+    const q = (t: string, v: unknown[]) => su.query(t, v);
+    await q("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [orgB, `o-${orgB}`]);
+    await q("insert into auth.user (id, name, email) values ($1, 'B', $2)", [userB, `${userB}@b.test`]);
+    await q(
+      "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash, shared, status, runtime_info) values ($1, $2, $3, 'B mac', 'darwin', $4, true, 'online', '[]')",
+      [devB, orgB, userB, createHash("sha256").update(randomUUID()).digest("hex")],
+    );
+    await q(
+      "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, 'lb', 'secret')",
+      [projB, orgB, devB],
+    );
+    await q(
+      "insert into app.conversations (id, organization_id, kind, name) values ($1, $2, 'work_session', 'b')",
+      [convB, orgB],
+    );
+    await q(
+      "insert into app.work_sessions (id, organization_id, conversation_id, project_id, device_id, title, created_by, status) values ($1, $2, $3, $4, $5, 'B', $6, 'idle')",
+      [wsB, orgB, convB, projB, devB, userB],
+    );
+    return wsB;
+  }
+
+  it("a session a person started, one another bot started and one of organization B → not_your_session each; nothing changes", async () => {
+    const personal = await startSession(victor, server, billingId);
+    const echo = (await botSession({ id: echoId, handle: "echo" })).workSessionId;
+    const foreign = await orgBSession();
+    for (const workSessionId of [personal, echo, foreign]) {
+      const before = await stateOf(workSessionId);
+      await refusedWith(promptCall(await ask(), workSessionId), "not_your_session");
+      await refusedWith(stopCall(await ask(), workSessionId), "not_your_session");
+      expect(await stateOf(workSessionId)).toEqual(before);
+    }
+    const [bots] = await rowsOf(
+      "select count(*)::int as n from app.bot_work_sessions where work_session_id = any($1::uuid[]) and stopped_by_agent",
+      [[personal, echo, foreign]],
+    );
+    expect(bots!.n).toBe(0);
+  });
+
+  it("the refusal is recorded as a denied call that does not count against the turn, and audited without content", async () => {
+    const personal = await startSession(victor, server, billingId);
+    const eventId = await ask();
+    await refusedWith(promptCall(eventId, personal), "not_your_session");
+    expect(
+      await rowsOf("select tool, decision, reason from app.agent_tool_calls where event_id = $1", [eventId]),
+    ).toEqual([{ tool: "ocw_work_session_prompt", decision: "denied", reason: "not_your_session" }]);
+    const [turn] = await rowsOf("select tool_calls from app.agent_turns where event_id = $1", [eventId]);
+    expect(turn!.tool_calls).toBe(0);
+    const [audit] = await auditsOf("bot.work_session_refused", eventId);
+    expect(audit!.metadata).toEqual({
+      eventId,
+      tool: "ocw_work_session_prompt",
+      sponsorUserId: victorId,
+      workSessionId: personal,
+      outcome: "not_your_session",
+      promptChars: FOLLOW_UP.length,
+    });
+  });
+});
+
+// ---------------------------------------------------------------- people keep control (D-07, principle 4, E13)
+
+describe("people in the session's audience keep control of the bot's session (one executor, many controllers)", () => {
+  it("Ana prompts Atlas's session over HTTP: queued after Atlas's, dispatched as her own turn", async () => {
+    const { workSessionId, first } = await botSession(undefined, ledgerId);
+    const atlasFollowUp = await queued(await ask(), workSessionId);
+    const res = await ana.request("POST", `/api/v1/work-sessions/${workSessionId}/prompts`, {
+      body: "also update the changelog",
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const anaPrompt = res.body as Json;
+    expect(anaPrompt.authorUserId).toBe(anaId);
+    expect(anaPrompt.position).toBeGreaterThan(atlasFollowUp.position);
+    const [row] = await rowsOf("select author_agent_id from app.work_prompts where id = $1", [anaPrompt.id]);
+    expect(row!.author_agent_id).toBeNull();
+
+    // One executor: Atlas's first turn, then its follow-up, then Ana's, one at a time.
+    await finishTurn(workSessionId, first);
+    const second = (await server.command("prompt", workSessionId)) as Cmd;
+    expect(second.payload.promptId).toBe(atlasFollowUp.promptId);
+    server.ack(second.id);
+    await finishTurn(workSessionId, second);
+    const third = (await server.command("prompt", workSessionId)) as Cmd;
+    expect(third.payload.promptId).toBe(anaPrompt.id);
+    server.ack(third.id);
+    const [dispatched] = await rowsOf(
+      "select user_id, agent_id, metadata from app.audit_events where action = 'work_prompt.dispatched' and resource_id = $1",
+      [anaPrompt.id],
+    );
+    expect(dispatched).toMatchObject({ user_id: anaId, agent_id: null });
+    expect(dispatched!.metadata).not.toHaveProperty("authorAgentId");
+  });
+
+  it("a person with the archive right archives Atlas's session over HTTP: archived, stopped_by_agent stays false", async () => {
+    const { workSessionId } = await botSession(undefined, ledgerId);
+    // Ana keeps exactly her own rights: a developer in the audience prompts and interrupts, but archiving is the
+    // creator's, the device owner's or an admin's (unchanged by the phase).
+    const denied = await ana.request("POST", `/api/v1/work-sessions/${workSessionId}/archive`);
+    expect(denied.status, JSON.stringify(denied.body)).toBe(403);
+    // Carla, an admin who is neither the sponsor nor the device owner, archives it.
+    const { client: carla, userId: carlaId } = await invite(
+      stack,
+      victor,
+      `carla-${randomUUID().slice(0, 6)}@example.test`,
+      "Carla Paz",
+      "admin",
+    );
+    await ok(carla.request("POST", `/api/v1/work-sessions/${workSessionId}/archive`));
+    const [s] = await rowsOf("select status from app.work_sessions where id = $1", [workSessionId]);
+    expect(s!.status).toBe("archived");
+    const [bot] = await rowsOf(
+      "select stopped_by_agent from app.bot_work_sessions where work_session_id = $1",
+      [workSessionId],
+    );
+    expect(bot!.stopped_by_agent).toBe(false);
+    const [archived] = await rowsOf(
+      "select user_id, agent_id from app.audit_events where action = 'work_session.archived' and resource_id = $1",
+      [workSessionId],
+    );
+    expect(archived).toMatchObject({ user_id: carlaId, agent_id: null });
+  });
+
+  it("Bob reads #eng but is outside the session's audience: 404 on the session, nothing he can prompt", async () => {
+    const { workSessionId } = await botSession(undefined, ledgerId);
+    expect((await bob.request("GET", `/api/v1/work-sessions/${workSessionId}`)).status).toBe(404);
+    const res = await bob.request("POST", `/api/v1/work-sessions/${workSessionId}/prompts`, { body: "hi" });
+    expect(res.status).toBe(404);
+    // Ana, in the audience, sees it.
+    expect((await ana.request("GET", `/api/v1/work-sessions/${workSessionId}`)).status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------- refusals (PD-13, PD-15, E2, E5)
+
+const saveProfile = (over: Partial<BotWorkZoneProfileInput> = {}) =>
+  createBotProfile(victor, atlasId, profile(over));
+
+describe("prompt refusals; a stop stays allowed", () => {
+  it("an archived session → session_ended for prompt and stop", async () => {
+    const { workSessionId } = await botSession();
+    await stopped(await ask(), workSessionId);
+    const before = await stateOf(workSessionId);
+    await refusedWith(promptCall(await ask(), workSessionId), "session_ended");
+    await refusedWith(stopCall(await ask(), workSessionId), "session_ended");
+    expect(await stateOf(workSessionId)).toEqual(before);
+  });
+
+  it("consent revoked → prompt profile_inactive with reason no_consent; the stop still stops", async () => {
+    const { workSessionId } = await botSession();
+    // The turn was delivered with the tools; the device's owner revokes the consent while it runs (E5's shape).
+    const eventId = await ask();
+    await ok(victor.request("DELETE", `/api/v1/devices/${serverId}/bot-consents/${atlasId}`));
+    try {
+      const r = await refusedWith(promptCall(eventId, workSessionId), "profile_inactive");
+      expect(r.reason).toBe("no_consent");
+      await stopped(eventId, workSessionId);
+    } finally {
+      await grantBotConsent(victor, serverId, atlasId, { allowFullAccess: true });
+    }
+  });
+
+  it("prompts_per_hour 3: the start and two prompts are queued, the fourth → prompt_rate (E2)", async () => {
+    await saveProfile({ promptsPerHour: 3 });
+    try {
+      const { workSessionId } = await botSession();
+      await queued(await ask(), workSessionId);
+      await queued(await ask(), workSessionId, "and the lint");
+      const before = await stateOf(workSessionId);
+      await refusedWith(promptCall(await ask(), workSessionId, "one more"), "prompt_rate");
+      expect(await stateOf(workSessionId)).toEqual(before);
+    } finally {
+      await saveProfile();
+    }
+  });
+
+  it("a slash command → prompt_not_allowed; nothing is queued", async () => {
+    const { workSessionId } = await botSession();
+    const before = await stateOf(workSessionId);
+    await refusedWith(promptCall(await ask(), workSessionId, "/model opus"), "prompt_not_allowed");
+    expect(await stateOf(workSessionId)).toEqual(before);
+  });
+
+  it("a tainted turn's prompt → outside_content; the same turn's stop → stopped", async () => {
+    const { workSessionId } = await botSession();
+    const eventId = await ask();
+    await su.query("update app.agent_turns set tainted = true where event_id = $1", [eventId]);
+    const before = await stateOf(workSessionId);
+    await refusedWith(promptCall(eventId, workSessionId), "outside_content");
+    expect(await stateOf(workSessionId)).toEqual(before);
+    await stopped(eventId, workSessionId);
+    const [stopCallRow] = await rowsOf(
+      "select decision from app.agent_tool_calls where event_id = $1 and tool = 'ocw_work_session_stop'",
+      [eventId],
+    );
+    expect(stopCallRow!.decision).toBe("allowed");
+  });
+
+  it("after the turn read a session's output, prompt and stop are still allowed (D-20)", async () => {
+    const { workSessionId } = await botSession();
+    const eventId = await ask();
+    await su.query("update app.agent_turns set session_output_read = true where event_id = $1", [eventId]);
+    await queued(eventId, workSessionId);
+    await stopped(eventId, workSessionId);
   });
 });
