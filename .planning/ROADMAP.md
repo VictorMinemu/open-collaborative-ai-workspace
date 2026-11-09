@@ -998,7 +998,7 @@ opens the session and comes back.
   5. A bot without a profile behaves exactly as today; integration tests, tenant isolation tests and an e2e spec
      (fake runtime) pass; ADR-0038 records the decisions
 
-**Plans:** 20/22 plans executed in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
+**Plans:** 21/22 plans executed in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
 
 Plans:
 **Wave 1**
@@ -1041,7 +1041,7 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
-- [ ] 07.16-21-PLAN.md — Wave 7: The browser journey e2e (fake cell, fake runtime, desktop 1440 and mobile 390, light and dark)
+- [x] 07.16-21-PLAN.md — Wave 7: The browser journey e2e (fake cell, fake runtime, desktop 1440 and mobile 390, light and dark)
 
 **Wave 8** *(blocked on Wave 7 completion)*
 
