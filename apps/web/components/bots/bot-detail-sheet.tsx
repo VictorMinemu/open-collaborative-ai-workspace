@@ -33,6 +33,7 @@ import {
 import { CapabilitiesPanel } from "./capabilities-panel";
 import { TemplateUpdateDialog } from "./template-update-dialog";
 import { ConnectorRows } from "./templates-section";
+import { WorkZoneProfileSection } from "./work-zone-profile-section";
 
 function toPlacement(a: Agent): PlacementValues {
   return {
@@ -56,7 +57,7 @@ function toValues(a: Agent): BotFormValues {
 /**
  * One bot's sheet. `variant="gallery"` (Bots page): profile, Message, Add to channel. `variant="dm"` (Bot
  * settings from the bot's private chat): the same controls minus Message and Add to channel. Both show the
- * Capabilities section when the API grants `bot.configure` on this bot.
+ * Capabilities and Work Zone sections when the API grants `bot.configure` on this bot.
  */
 export function BotDetailSheet({
   agent,
@@ -322,6 +323,12 @@ export function BotDetailSheet({
           {canConfigure ? (
             <SheetSection title="Capabilities">
               <CapabilitiesPanel agentId={agent.id} />
+            </SheetSection>
+          ) : null}
+
+          {canConfigure ? (
+            <SheetSection title="Work Zone">
+              <WorkZoneProfileSection agent={agent} />
             </SheetSection>
           ) : null}
 

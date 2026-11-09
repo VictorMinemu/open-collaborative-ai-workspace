@@ -15,7 +15,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/lib/api";
 import { botWorkZoneKeys, saveProfileMutation } from "@/lib/bot-work-zone-queries";
 import { wzKeys } from "@/lib/workzone-queries";
-import { newDraft, toProfileInput, WORK_ZONE_COPY, WorkZoneProfileSection } from "./work-zone-profile-section";
+import {
+  newDraft,
+  toProfileInput,
+  WORK_ZONE_COPY,
+  WorkZoneProfileSection,
+} from "./work-zone-profile-section";
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
@@ -177,8 +182,11 @@ const text = (markup: string) =>
 const tagsOf = (html: string, id: string) =>
   html.match(new RegExp(`<[a-z]+[^>]*data-testid="${id}"[^>]*>`, "g")) ?? [];
 
-/** The markup of the first element with `data-testid` = `id`, up to the end of the document (enough for `contains`). */
-const from = (html: string, id: string) => html.slice(Math.max(0, html.indexOf(`data-testid="${id}"`)));
+/** The markup inside the first element with `data-testid` = `id`, up to the end of the document. */
+const from = (html: string, id: string) => {
+  const at = html.indexOf(`data-testid="${id}"`);
+  return at < 0 ? "" : html.slice(html.indexOf(">", at) + 1);
+};
 
 beforeEach(() => {
   vi.mocked(api.put).mockReset();
