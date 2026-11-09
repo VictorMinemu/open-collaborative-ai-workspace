@@ -36,6 +36,7 @@ import {
 import { REPLY_MODE_PER_MINUTE } from "../chat";
 import type { MemoryService } from "../memory";
 import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
+import { workZoneOfferFor } from "../work-session";
 import { consultTargets } from "./agent-message";
 import { messageScopeFilter } from "./attachment-access";
 import { inboundRooted } from "./inbound-origin";
@@ -296,6 +297,16 @@ export async function buildMentionEvents(
           chain: chain ? { rootAgentId: chain.rootAgentId, usedTargetIds: chain.usedTargetIds } : null,
         })
       : [];
+    // Phase 07.16 (D-05, D-21, PD-17): a person's delivery (a mention or reply mode, never an automation run or a
+    // consult hop) of a bot whose Work Zone profile is active, for an asker who passes the Work Zone module gate.
+    const workZone = unattended
+      ? null
+      : await workZoneOfferFor(tx, deps.perms, {
+          agentId: a.id,
+          askerUserId: mention.author.id,
+          conversationId: conv.id,
+          tainted: taintedAtStart,
+        });
     const decision = await turnPolicy(
       tx,
       deps.core,
@@ -321,6 +332,7 @@ export async function buildMentionEvents(
           : null,
         consultTargets: targets,
         attachments,
+        workZone,
       },
       {
         audience,

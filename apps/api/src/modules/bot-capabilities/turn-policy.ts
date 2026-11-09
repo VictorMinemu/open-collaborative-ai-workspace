@@ -23,7 +23,10 @@ import {
   type TurnNow,
   type TurnToolFlags,
   type TurnWithheldResource,
+  type TurnWorkZone,
   usesConnectorProxy,
+  WORK_SESSION_TOOL_FLAGS,
+  WORK_SESSION_TOOL_NAMES,
 } from "@ocw/contracts";
 import {
   agents,
@@ -976,6 +979,12 @@ export async function turnPolicy(
      * the history window's newest first, each in upload order), already in listing order. Absent or empty = none.
      */
     attachments?: AttachmentRow[];
+    /**
+     * Phase 07.16 (D-05, D-21, PD-17): the Work Zone offer of this turn, computed by the caller (`workZoneOfferFor`;
+     * bot-capabilities never imports work-session). Present = the four `ocw_work_session_*` tools and `turn.workZone`,
+     * when four tool slots remain. Absent or null = the turn is exactly what it was before the phase (BWZ-06).
+     */
+    workZone?: TurnWorkZone | null;
   },
   opts: {
     /** AI chat deliveries only (06-10): the chat's readers, for scoped tools and `turn.withheld`. */
@@ -1064,6 +1073,20 @@ export async function turnPolicy(
     computed.toolFlags[BUILTIN_TOOLS.attachmentRead] = ATTACHMENT_READ_FLAGS;
   }
 
+  // Phase 07.16 (D-05, PD-17): the four Work Zone session tools are turn-scoped, all or none: offered only with the
+  // caller's offer and room for the four. The routes re-decide every call (the live turn, the profile, the sponsor).
+  const workZone =
+    p.workZone && computed.tools.length + WORK_SESSION_TOOL_NAMES.length <= MAX_TURN_TOOLS
+      ? p.workZone
+      : null;
+  if (workZone) {
+    for (const name of WORK_SESSION_TOOL_NAMES) {
+      if (computed.toolFlags[name]) continue;
+      computed.tools.push(name);
+      computed.toolFlags[name] = WORK_SESSION_TOOL_FLAGS[name];
+    }
+  }
+
   const turn: TurnContext = {
     tools: computed.tools,
     toolFlags: computed.toolFlags,
@@ -1096,6 +1119,7 @@ export async function turnPolicy(
           maxAttachmentChars: ATTACHMENT_READ_LIMITS.charsPerTurn,
         }
       : {}),
+    ...(workZone ? { workZone } : {}),
   };
   // 07.8-28 (WINDOWS #292, ADR-0029): a member's session loaded earlier by this bot in this conversation keeps its
   // member data for every later turn here (the bot's history may hold what it read signed in).
