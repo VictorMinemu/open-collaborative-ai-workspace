@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CapabilitiesFrame,
+  ControlDenialReason,
   DEFAULT_WORK_ZONE_POLICY,
   DeviceToServerFrame,
   EFFORT_LABELS,
@@ -146,6 +147,21 @@ describe("Device Link additions (P-05)", () => {
         fullAccessOptIn: false,
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("control denial reasons (P-08, 07.16 D-04)", () => {
+  it("bot_profile comes last; the member reasons keep their order", () => {
+    expect(ControlDenialReason.options).toEqual([
+      "org_policy",
+      "device_opt_in",
+      "device_grant",
+      "denied_for_you",
+      "runtime",
+      "not_in_catalog",
+      "not_confirmed",
+      "bot_profile",
+    ]);
   });
 });
 
