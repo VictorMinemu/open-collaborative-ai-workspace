@@ -72,6 +72,9 @@ export function buildDaemonEnv(
   if (opts.electronAsNode) env.ELECTRON_RUN_AS_NODE = "1";
   if (opts.apiUrl) env.OCW_SERVER_URL = opts.apiUrl;
   if (opts.token) env.OCW_DEVICE_TOKEN = opts.token;
+  // 07.16 PD-18: tells the daemon it runs under the desktop app (an inherited value is replaced); the server honours
+  // the isolated-server mark only for headless services.
+  env.OCW_RUNTIME_HOST = "desktop";
   return env;
 }
 

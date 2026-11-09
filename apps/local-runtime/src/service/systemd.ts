@@ -95,6 +95,9 @@ export function renderSystemdUnit(opts: SystemdUnitOptions): string {
     `ExecStart=${systemdQuote(opts.nodePath)} ${systemdQuote(opts.bundlePath)} run`,
     `WorkingDirectory=${systemdPathValue(opts.workingDirectory)}`,
     `Environment=${systemdEnvQuote("PATH", opts.path)}`,
+    // 07.16 PD-18: tells the daemon it runs as a headless service; the server honours the isolated-server mark only
+    // for services.
+    `Environment=${systemdEnvQuote("OCW_RUNTIME_HOST", "service")}`,
     ...(opts.ocwHome ? [`Environment=${systemdEnvQuote("OCW_HOME", opts.ocwHome)}`] : []),
     "Restart=on-failure",
     "RestartSec=5",
