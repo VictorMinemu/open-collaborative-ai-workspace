@@ -453,3 +453,117 @@ describe("bot Work Zone schema (07.16, D-01, D-03, D-06, D-15, D-16)", () => {
     expect(await count("app.bot_work_sessions where work_session_id = $1", [sid])).toBe(0);
   });
 });
+
+/** Runs `fn` as ocw_app with withTenant()'s two settings (`null` user = a user-less system transaction); rolled back. */
+async function as<T>(org: string, userId: string | null, fn: (q: Q) => Promise<T>): Promise<T> {
+  await app.query("begin");
+  try {
+    await app.query(
+      "select set_config('app.organization_id', $1, true), set_config('app.user_id', $2, true)",
+      [org, userId ?? ""],
+    );
+    return await fn(app.query.bind(app) as Q);
+  } finally {
+    await app.query("rollback");
+  }
+}
+
+/** The SQLSTATE of a statement that must fail, or null when it succeeded. */
+async function errorCode(fn: () => Promise<unknown>): Promise<string | null> {
+  try {
+    await fn();
+    return null;
+  } catch (err) {
+    return (err as { code?: string }).code ?? "unknown";
+  }
+}
+
+const NEW_TABLES = [
+  "app.bot_work_zone_profiles",
+  "app.bot_work_zone_profile_projects",
+  "app.device_bot_consents",
+  "app.bot_work_sessions",
+] as const;
+
+describe("bot Work Zone isolation as ocw_app (07.16, D-07, D-16)", () => {
+  let profileA: string;
+
+  beforeAll(async () => {
+    profileA = await profile(A, A.agent);
+    await profileProject(A, profileA, A.device, A.project);
+    await consent(A, A.agent);
+    await botSession(A, A.session, A.agent, profileA);
+  });
+
+  it("organization B reads, updates and deletes none of organization A's rows, and cannot insert one naming A", async () => {
+    for (const tbl of NEW_TABLES) {
+      expect(await count(`${tbl} where organization_id = $1`, [A.id]), `${tbl} seeded`).toBeGreaterThan(0);
+      const own = await as(A.id, null, (q) => q(`select count(*)::int as n from ${tbl}`));
+      expect(own.rows[0].n, `${tbl} own`).toBeGreaterThan(0);
+      const cross = await as(B.id, null, (q) =>
+        q(`select count(*)::int as n from ${tbl} where organization_id = $1`, [A.id]),
+      );
+      expect(cross.rows[0].n, `${tbl} cross-tenant select`).toBe(0);
+      for (const stmt of [
+        `update ${tbl} set organization_id = organization_id where organization_id = $1`,
+        `delete from ${tbl} where organization_id = $1`,
+      ]) {
+        const r = await as(B.id, null, (q) => q(stmt, [A.id]));
+        expect(r.rowCount, `${tbl}: ${stmt}`).toBe(0);
+      }
+    }
+    // Inserts naming organization A from B's transaction.
+    const agent = await bot(A.id, "intruder");
+    const sid = await workSession(A, { startedBy: agent });
+    const inserts: Array<[string, (q: Q) => Promise<unknown>]> = [
+      ["app.bot_work_zone_profiles", (q) => profile(A, agent, {}, q)],
+      ["app.bot_work_zone_profile_projects", (q) => profileProject(A, profileA, A.device, A.otherProject, q)],
+      ["app.device_bot_consents", (q) => consent(A, agent, {}, q)],
+      ["app.bot_work_sessions", (q) => botSession(A, sid, agent, null, q)],
+    ];
+    for (const [tbl, insert] of inserts) {
+      await expect(as(B.id, null, insert), `${tbl} cross-tenant insert`).rejects.toThrow(
+        /row-level security/,
+      );
+    }
+  });
+
+  it("a bot session follows its session's audience: an outsider sees none, the creator and a system transaction see it", async () => {
+    const read = (userId: string | null) =>
+      as(
+        A.id,
+        userId,
+        async (q) =>
+          (
+            await q("select count(*)::int as n from app.bot_work_sessions where work_session_id = $1", [
+              A.session,
+            ])
+          ).rows[0].n as number,
+      );
+    expect(await read(A.outsider)).toBe(0);
+    expect(await read(A.sponsor)).toBe(1);
+    expect(await read(null)).toBe(1);
+    // The outsider cannot change it or write one for the session either.
+    const changed = await as(A.id, A.outsider, (q) =>
+      q("update app.bot_work_sessions set wake_pending = true where work_session_id = $1", [A.session]),
+    );
+    expect(changed.rowCount).toBe(0);
+    const sid = await workSession(A, { startedBy: A.agent });
+    expect(await errorCode(() => as(A.id, A.outsider, (q) => botSession(A, sid, A.agent, profileA, q)))).toBe(
+      "42501",
+    );
+    // The session's creator may.
+    expect(
+      await errorCode(() => as(A.id, A.sponsor, (q) => botSession(A, sid, A.agent, profileA, q))),
+    ).toBeNull();
+  });
+
+  it("the app role cannot TRUNCATE the four tables (TRUNCATE ignores RLS)", async () => {
+    for (const tbl of NEW_TABLES) {
+      expect(await errorCode(() => as(A.id, null, (q) => q(`truncate ${tbl}`))), tbl).toBe("42501");
+    }
+    for (const tbl of NEW_TABLES) {
+      expect(await count(`${tbl} where organization_id = $1`, [A.id]), `${tbl} kept`).toBeGreaterThan(0);
+    }
+  });
+});
