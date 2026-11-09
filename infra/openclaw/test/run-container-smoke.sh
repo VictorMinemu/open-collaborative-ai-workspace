@@ -88,7 +88,11 @@
 # in the bot's alsoAllow (turn-scoped); a DM turn carrying `turn.workZone` makes the model start a session and read it,
 # and the fake API records one start body (`agentId,eventId,projectId,prompt`) and one read body
 # (`agentId,eventId,workSessionId`), never a device, user, visibility or worktree key and never `/tool-calls`; the
-# reply relays the started sentence and the read's header.
+# reply relays the started sentence and the read's header. A turn that read outside content still sends its start to
+# the route (answered `proposed`) while `ocw_start_work_zone` is refused in the cell (D-08, D-18); after a read,
+# `ocw_memory_save` is blocked in the cell and `ocw_work_session_prompt` still reaches its route (D-20); an
+# `agent.work_session.v1` is answered on the session's card with the "Work Zone session update" block (D-09); no
+# person's prompt, host path or session output outside a read's answer reaches a model request or the cell log (P1, P2).
 #
 # Usage (repo root):  infra/openclaw/test/run-container-smoke.sh [--keep]
 #   SMOKE_ONLY=<comma list>  run only these scenarios (unset = all): mention, signin, dm, capabilities,
@@ -2454,6 +2458,162 @@ const ok =
   m.text.includes(`Tool ocw_work_session_read said: Session ${WS} · idle · Claude Code · Supervised · claude-opus-4 · billing-api`);
 if (!ok) { console.log("FAIL: expected one start and one read with the turn ids and the tool fields only, relayed in the reply"); process.exit(1); }
 '
+# The fixture as another DM (`…c0f<n>`, mention `…d0f<n>`, event `…e0f<n>`): its own conversation, so its model requests
+# carry one turn only. The turn offers the given tools with the flags the API sends for them.
+bws_variant() { # <n: one hex digit> <message text> <tools JSON> → the fixture's path
+  local out="$SECRETS/mention-work-sessions-$1.json"
+  node -e '
+const fs = require("fs");
+const [src, out, n, text, tools] = process.argv.slice(1);
+const FLAGS = {
+  web_search: { untrustedOutput: true, sideEffecting: false },
+  ocw_start_work_zone: { untrustedOutput: false, sideEffecting: true },
+  ocw_memory_save: { untrustedOutput: false, sideEffecting: true },
+  ocw_work_session_start: { untrustedOutput: false, sideEffecting: true },
+  ocw_work_session_prompt: { untrustedOutput: false, sideEffecting: true },
+  ocw_work_session_read: { untrustedOutput: false, sideEffecting: false },
+  ocw_work_session_stop: { untrustedOutput: false, sideEffecting: true },
+};
+const e = JSON.parse(fs.readFileSync(src, "utf8"));
+const names = JSON.parse(tools);
+e.eventId = `0199a6f0-0000-7000-8000-00000000e0f${n}`;
+e.conversation.id = `0199a6f0-0000-7000-8000-00000000c0f${n}`;
+e.thread.rootMessageId = e.message.id = `0199a6f0-0000-7000-8000-00000000d0f${n}`;
+e.message.text = text;
+e.turn = { ...e.turn, tools: names, toolFlags: Object.fromEntries(names.map((t) => [t, FLAGS[t]])) };
+fs.writeFileSync(out, JSON.stringify(e));
+' "$ROOT/infra/openclaw/test/mention-work-sessions.json" "$out" "$1" "$2" "$3"
+  printf '%s' "$out"
+}
+
+echo "== [bot_work_sessions] outside content: the start still reaches its route (proposed), ocw_start_work_zone is refused in the cell"
+# D-08, D-18, Pitfall 7: the route decides a tainted start (here the profile has no outside-content flag, so it proposes);
+# the 07.5 proposal tool keeps its local block.
+bws_answers "start: { kind: 'proposed', approvalId: '0199a6f0-0000-7000-8000-00000000a0f4', reason: 'outside_content', sentence: 'The bot proposed the session instead: a person must review the prompt and press Start.' }"
+FIXTURE="$(bws_variant 4 "look it up, then start it [[call web_search {\"query\":\"invoice rounding\"}]] [[call ocw_work_session_start {\"projectId\":\"$BWS_PROJECT\",\"prompt\":\"Fix it as the page says.\"}]] [[call ocw_start_work_zone {\"projectId\":\"$BWS_PROJECT\",\"deviceId\":\"0199a6f0-0000-7000-8000-00000000d111\",\"prompt\":\"Fix it as the page says.\"}]]" '["web_search","ocw_work_session_start","ocw_start_work_zone"]')"
+STATE="$(inject_and_wait "$FIXTURE" 0199a6f0-0000-7000-8000-00000000d0f4)"
+echo "$STATE" | node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e0f4";
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0f4");
+if (!m) { console.log("FAIL: no reply to the tainted Work Zone session mention"); process.exit(1); }
+const starts = s.workSessions.starts.filter((b) => b.eventId === EV);
+const proposals = s.workZone.proposals.filter((b) => b.eventId === EV);
+const gated = s.toolCalls.filter((c) => c.eventId === EV).map((c) => c.tool);
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   bodies     :", JSON.stringify({ starts: starts.map((b) => Object.keys(b).sort().join()), proposals: proposals.length, gated }));
+const ok =
+  m.text.includes("Tool web_search said:") &&
+  starts.length === 1 && Object.keys(starts[0]).sort().join() === "agentId,eventId,projectId,prompt" &&
+  m.text.includes("Tool ocw_work_session_start said: The bot proposed the session instead: a person must review the prompt and press Start.") &&
+  proposals.length === 0 && /Tool ocw_start_work_zone said: [^\n]*after reading outside content/.test(m.text) &&
+  !gated.includes("ocw_work_session_start") && !gated.includes("ocw_start_work_zone");
+if (!ok) { console.log("FAIL: a tainted start must reach its route (proposed) and the proposal tool must stay blocked in the cell"); process.exit(1); }
+'
+
+echo "== [bot_work_sessions] session output: after a read, ocw_memory_save is blocked in the cell and the prompt still reaches its route"
+# D-20: a read makes the turn's other side-effecting calls read-only, except prompt and stop.
+bws_answers ""
+FIXTURE="$(bws_variant 5 "check it, note it, then ask for a test [[call ocw_work_session_read {\"workSessionId\":\"$BWS_SESSION\"}]] [[call ocw_memory_save {\"text\":\"The rounding fix is in review.\"}]] [[call ocw_work_session_prompt {\"workSessionId\":\"$BWS_SESSION\",\"prompt\":\"Also add a test for half-cent totals.\"}]]" '["ocw_work_session_read","ocw_memory_save","ocw_work_session_prompt"]')"
+STATE="$(inject_and_wait "$FIXTURE" 0199a6f0-0000-7000-8000-00000000d0f5)"
+echo "$STATE" | BWS_SESSION="$BWS_SESSION" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e0f5";
+const WS = process.env.BWS_SESSION;
+const m = s.messages.find((x) => x.inReplyToMessageId === "0199a6f0-0000-7000-8000-00000000d0f5");
+if (!m) { console.log("FAIL: no reply to the session-output mention"); process.exit(1); }
+const reads = s.workSessions.reads.filter((b) => b.eventId === EV);
+const prompts = s.workSessions.prompts.filter((b) => b.eventId === EV);
+const saves = (s.memories ?? []).filter((b) => b.eventId === EV);
+const gated = s.toolCalls.filter((c) => c.eventId === EV).map((c) => c.tool);
+console.log("   reply      :", m.text.replace(/\n/g, " / "));
+console.log("   bodies     :", JSON.stringify({ reads: reads.length, saves: saves.length, prompts: prompts.map((b) => Object.keys(b).sort().join()), gated }));
+const ok =
+  reads.length === 1 && saves.length === 0 &&
+  m.text.includes("Tool ocw_memory_save said: Tool ocw_memory_save blocked: this turn is read-only after untrusted content") &&
+  prompts.length === 1 && Object.keys(prompts[0]).sort().join() === "agentId,eventId,prompt,workSessionId" &&
+  prompts[0].workSessionId === WS && prompts[0].prompt === "Also add a test for half-cent totals." &&
+  m.text.includes(`Tool ocw_work_session_prompt said: Queued in session ${WS} at position 1.`) &&
+  gated.length === 0;
+if (!ok) { console.log("FAIL: after a read only the prompt may act: no note saved, one prompt posted"); process.exit(1); }
+'
+
+echo "== [bot_work_sessions] wake-up: an agent.work_session.v1 is answered on the session's card, with the update block"
+# D-09, D-10, PD-16: the API wakes the bot on its card message (the person who asked is the sender). The event also
+# carries a person's prompt and a host path in fields outside the contract: the plugin's parse drops them (P1, P2).
+BWS_CARD=0199a6f0-0000-7000-8000-00000000d0f6
+BWS_WAKE="$SECRETS/work-session-wake.json"
+bws_mark wake
+BWS_SESSION="$BWS_SESSION" BWS_CARD="$BWS_CARD" BWS_PERSON="$BWS_PERSON" BWS_HOST_PATH="$BWS_HOST_PATH" node -e '
+const fs = require("fs");
+const e = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const summary = "The session in billing-api finished turn 1. 1 file changed.";
+const data = {
+  ...e,
+  eventId: "0199a6f0-0000-7000-8000-00000000e0f6",
+  // The card was posted in the start turn'"'"'s conversation (FAKE_WORK_SESSION_CARD); the wake is a mention on it.
+  message: { ...e.message, id: process.env.BWS_CARD, text: summary, createdAt: "2026-11-09T18:05:00.000Z" },
+  turn: { ...e.turn, workZone: { ...e.turn.workZone, sessions: [{ id: process.env.BWS_SESSION, status: "idle", projectName: "billing-api" }] } },
+  workSession: {
+    workSessionId: process.env.BWS_SESSION,
+    transition: "turn_done",
+    status: "idle",
+    summary,
+    pendingApprovals: 0,
+    deciders: [{ id: "0199a6f0-0000-7000-8000-0000000000f4", handle: "ana", displayName: "Ana Ruiz" }],
+    lastPrompt: process.env.BWS_PERSON,
+    worktreePath: process.env.BWS_HOST_PATH,
+  },
+};
+fs.writeFileSync(process.argv[2], JSON.stringify({ type: "agent.work_session.v1", data }));
+' "$ROOT/infra/openclaw/test/mention-work-sessions.json" "$BWS_WAKE"
+STATE="$(inject_and_wait "$BWS_WAKE" "$BWS_CARD" /__test/event)"
+echo "$STATE" | BWS_CARD="$BWS_CARD" node -e '
+const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const EV = "0199a6f0-0000-7000-8000-00000000e0f6";
+const replies = s.messages.filter((x) => x.inReplyToMessageId === process.env.BWS_CARD);
+const m = replies[0];
+if (!m) { console.log("FAIL: no reply to the Work Zone session wake-up"); process.exit(1); }
+console.log("   reply      :", m.text);
+console.log("   anchor     :", m.threadRootMessageId, "inReplyTo", m.inReplyToMessageId, "event", m.eventId);
+const ok =
+  replies.length === 1 && m.eventId === EV && m.idempotencyKey === `evt:${EV}` &&
+  m.conversationId === "0199a6f0-0000-7000-8000-00000000c0f3" &&
+  // The person who asked is the sender; the turn offers the four session tools.
+  m.text.startsWith("Hi Sam Lee!") &&
+  /\[tools: 4 \| ocw_work_session_prompt,ocw_work_session_read,ocw_work_session_start,ocw_work_session_stop\]/.test(m.text);
+if (!ok) { console.log("FAIL: expected exactly one reply on the card, bound to the wake event"); process.exit(1); }
+'
+bws_requests wake | node -e '
+const reqs = JSON.parse(require("fs").readFileSync(0, "utf8")).filter((r) => /-(openai|anthropic)\.json$/.test(r.file));
+const woken = reqs.filter((r) => r.text.includes("0199a6f0-0000-7000-8000-00000000c0f3") &&
+  r.text.includes("Work Zone session update") && r.text.includes("People who can decide: @ana"));
+console.log(`   update     : ${woken.length} model request(s) of the wake carry the Work Zone session update block`);
+if (woken.length === 0) { console.log("FAIL: the model never saw the Work Zone session update block"); process.exit(1); }
+'
+
+echo "== [bot_work_sessions] P1, P2: no person's prompt, host path or session output outside a read's answer in any model request or cell log"
+bws_requests all | BWS_OUTPUT="$BWS_OUTPUT" BWS_PERSON="$BWS_PERSON" node -e '
+const all = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const O = process.env.BWS_OUTPUT;
+const leaks = all.filter((r) => r.text.includes(process.env.BWS_PERSON) || r.text.includes("/Users/"));
+let outside = 0;
+let inside = 0;
+for (const r of all.filter((x) => /-(openai|anthropic)\.json$/.test(x.file) && x.text.includes(O))) {
+  const { messages, ...rest } = JSON.parse(r.text);
+  if (JSON.stringify(rest).includes(O) || (messages ?? []).some((msg) => msg.role !== "tool" && JSON.stringify(msg).includes(O))) outside++;
+  else inside++;
+}
+console.log(`   captures   : ${all.length} file(s), ${leaks.length} with a person'"'"'s prompt or a host path, ${inside} with the output in a tool result, ${outside} outside one`);
+if (leaks.length > 0 || outside > 0 || inside === 0) { console.log("FAIL: a person'"'"'s prompt, a host path or the session output reached the model outside a read'"'"'s answer"); process.exit(1); }
+'
+BWS_LOGS="$(docker logs "${P}-openclaw" 2>&1 | grep -cE "$BWS_OUTPUT|$BWS_PERSON|/Users/" || true)"
+echo "   cell logs  : $BWS_LOGS line(s) carry the session output, a person's prompt or a host path"
+[[ "$BWS_LOGS" -eq 0 ]] || { echo "FAIL: the cell logged Work Zone session data"; exit 1; }
+api_exec "
+await fetch('http://127.0.0.1:4000/__test/work-sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+"
+echo "PASS bot_work_sessions"
 fi
 
 if [[ "$SANDBOX" == "1" ]]; then
