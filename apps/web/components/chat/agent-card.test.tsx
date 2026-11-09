@@ -879,6 +879,18 @@ describe("AgentCardView: a linked Work Zone proposal card (07.5-14, D-03, UI-SPE
     expect(textOf(html, "agent-card-state-line")).toBe("No one started it within 24 hours.");
     expect(buttons(html)).toEqual([]);
   });
+
+  it("07.16 (D-18, PD-15): a proposal made after outside content shows the server's warning notice, for every reader", () => {
+    const notice = "Proposed after reading outside content. Read the prompt before you start it.";
+    const tainted = wzCard({ notices: [{ tone: "warning", text: notice }] });
+    for (const html of [renderWz(tainted), renderWz({ ...tainted, viewerCan: [] }, OTHER)]) {
+      expect(textOf(html, "agent-card-notice")).toBe(notice);
+      expect(html).toContain('data-tone="warning"');
+    }
+    // Without notices nothing is added; a bot's own card never shows one (T-07.6-15-03).
+    expect(renderWz(wzCard())).not.toContain("agent-card-notice");
+    expect(renderWz({ ...tainted, platformOwned: false })).not.toContain("agent-card-notice");
+  });
 });
 
 describe("cardExpiresIn (UI-SPEC Timer)", () => {

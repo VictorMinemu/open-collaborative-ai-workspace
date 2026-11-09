@@ -1576,10 +1576,17 @@ function WorkZoneProposalCard({
       {value}
     </WzField>
   );
+  // 07.16 (D-18, PD-15): the server's notices (a proposal made after outside content says so), for every reader. Only a
+  // platform-composed card carries them; a bot's own card never does (T-07.6-15-03).
+  const notices = card.platformOwned === true ? (card.notices ?? []) : [];
 
   return (
     <>
       <div className="grid gap-3 px-3.5 pb-3.5">
+        {notices.map((n, i) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: notices have no id and are replaced as a whole
+          <NoticeLine key={i} notice={n} />
+        ))}
         {link.status === "failed" ? (
           <p
             data-testid="agent-card-failed-reason"
