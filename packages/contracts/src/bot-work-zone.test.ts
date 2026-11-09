@@ -31,7 +31,7 @@ import {
   workSessionCardStatus,
   workSessionStepLabel,
 } from "./bot-work-zone";
-import type { WorkSessionStatus } from "./session-events";
+import { RUNTIME_BYPASS_LITERALS, type WorkSessionStatus } from "./session-events";
 
 const EVENT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f01";
 const AGENT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f02";
@@ -111,9 +111,9 @@ describe("bot Work Zone limits and offer (07.16 D-05, PD-17, PD-22)", () => {
       false,
     );
     expect(TurnWorkZone.safeParse({ ...WORK_ZONE_FIXTURE, runtime: "opencode" }).success).toBe(false);
-    expect(TurnWorkZone.safeParse({ ...WORK_ZONE_FIXTURE, maxMode: "bypassPermissions" }).success).toBe(
-      false,
-    );
+    expect(
+      TurnWorkZone.safeParse({ ...WORK_ZONE_FIXTURE, maxMode: RUNTIME_BYPASS_LITERALS[0] }).success,
+    ).toBe(false);
     expect(TurnWorkZone.safeParse({ ...WORK_ZONE_FIXTURE, projectsMore: -1 }).success).toBe(false);
     expect(TurnWorkZone.safeParse({ ...WORK_ZONE_FIXTURE, models: Array(21).fill("m") }).success).toBe(false);
   });
@@ -181,9 +181,16 @@ describe("ocw_work_session_start body (07.16 D-05, D-07, PD-09, P6)", () => {
   });
 
   it("refuses a runtime bypass literal, an empty model and non-uuid ids", () => {
-    expect(
-      AgentChannelWorkSessionStart.safeParse({ ...minimal, permissionMode: "bypassPermissions" }).success,
-    ).toBe(false);
+    expect(RUNTIME_BYPASS_LITERALS.length).toBeGreaterThan(0);
+    for (const literal of RUNTIME_BYPASS_LITERALS) {
+      expect(
+        AgentChannelWorkSessionStart.safeParse({ ...minimal, permissionMode: literal }).success,
+        literal,
+      ).toBe(false);
+      expect(TurnWorkZone.safeParse({ ...WORK_ZONE_FIXTURE, defaultMode: literal }).success, literal).toBe(
+        false,
+      );
+    }
     expect(AgentChannelWorkSessionStart.safeParse({ ...minimal, model: " " }).success).toBe(false);
     expect(AgentChannelWorkSessionStart.safeParse({ ...minimal, projectId: "billing-api" }).success).toBe(
       false,
@@ -289,7 +296,7 @@ describe("start answers, refusal codes and their sentences (07.16 D-05, D-08)", 
       { ...refused, field: "worktree" },
       { ...refused, reason: "expired" },
       { ...proposed, reason: "tainted" },
-      { ...started, mode: "danger-full-access" },
+      { ...started, mode: RUNTIME_BYPASS_LITERALS[2] },
       { ...started, kind: "queued" },
     ]) {
       expect(AgentChannelWorkSessionStartResponse.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
@@ -479,7 +486,7 @@ describe("the redacted read model and the answers (07.16 D-05, D-10, PD-14, prin
         changes: { ...fullRead.changes, files: [{ ...fullRead.changes.files[0], path: "../etc/passwd" }] },
       },
       { ...fullRead, queue: { ...fullRead.queue, mine: Array(21).fill(fullRead.queue.mine[0]) } },
-      { ...fullRead, session: { ...fullRead.session, mode: "bypassPermissions" } },
+      { ...fullRead, session: { ...fullRead.session, mode: RUNTIME_BYPASS_LITERALS[0] } },
     ]) {
       expect(AgentChannelWorkSessionReadResponse.safeParse(bad).success).toBe(false);
     }
@@ -590,7 +597,7 @@ describe("profile and consent views (07.16 D-01, D-03, D-04, PD-04, PD-05, PD-06
       { promptsPerHour: 0 },
       { promptsPerHour: 121 },
       { wakesPerSessionDay: 101 },
-      { maxMode: "bypassPermissions" },
+      { maxMode: RUNTIME_BYPASS_LITERALS[0] },
       { fastMode: "always" },
     ]) {
       expect(

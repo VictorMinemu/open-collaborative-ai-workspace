@@ -3333,6 +3333,8 @@ describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts b
     caps: (await import(contracts("bot-capabilities.ts"))) as { TurnContext: Schema },
     channel: (await import(contracts("agent-channel.ts"))) as Record<string, Schema>,
     wz: (await import(contracts("bot-work-zone.ts"))) as Record<string, Schema>,
+    bypass: ((await import(contracts("session-events.ts"))) as { RUNTIME_BYPASS_LITERALS: readonly string[] })
+      .RUNTIME_BYPASS_LITERALS,
     m: await import("./agent-channel-protocol.js"),
   });
 
@@ -3431,7 +3433,7 @@ describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts b
   });
 
   it("a turn with workZone parses identically in both copies, alone and inside a mention", async () => {
-    const { caps, wz, m } = await load();
+    const { caps, wz, bypass, m } = await load();
     const contract = caps.TurnContext.safeParse(offered);
     expect(contract.success).toBe(true);
     expect(m.TurnContext.parse(offered)).toEqual(contract.data);
@@ -3444,7 +3446,7 @@ describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts b
       { ...workZone, runtime: "codex", defaultModel: null, fastMode: "off", sessions: [] },
       { ...workZone, projects: Array.from({ length: 21 }, () => first) },
       { ...workZone, sessions: Array.from({ length: 11 }, () => session) },
-      { ...workZone, maxMode: "bypassPermissions" },
+      ...bypass.map((maxMode) => ({ ...workZone, maxMode })),
       { ...workZone, runtime: "opencode" },
       { ...workZone, device: { ...workZone.device, name: "x".repeat(121) } },
       { ...workZone, hostPath: "/Users/ana/billing-api" },
@@ -3493,7 +3495,7 @@ describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts b
       { ...base, visibility: "project" },
       { ...base, worktree: false },
       { ...base, audience: { kind: "owner" } },
-      { ...base, permissionMode: "bypassPermissions" },
+      ...(await load()).bypass.map((permissionMode) => ({ ...base, permissionMode })),
       { ...base, contextWindow: 999 },
     ]);
   });
@@ -3535,7 +3537,7 @@ describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts b
     expectSameVerdicts(m.AgentChannelWorkSessionStartResponse, contract, [
       started,
       { ...started, cardMessageId: null, model: null },
-      { ...started, mode: "danger-full-access" },
+      ...(await load()).bypass.map((mode) => ({ ...started, mode })),
       { ...started, projectName: "x".repeat(201) },
       proposed,
       { ...proposed, sentence: "x".repeat(301) },
