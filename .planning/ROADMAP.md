@@ -998,15 +998,15 @@ opens the session and comes back.
   5. A bot without a profile behaves exactly as today; integration tests, tenant isolation tests and an e2e spec
      (fake runtime) pass; ADR-0038 records the decisions
 
-**Plans:** 22 plans in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
+**Plans:** 4/22 plans executed in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
 
 Plans:
 **Wave 1**
 
-- [ ] 07.16-01-PLAN.md — Wave 1: Bot-facing contracts (four `ocw_work_session_*` tools, `TurnContext.workZone`, refusals and sentences, redacted read model, `agent.work_session.v1`, profile/consent views, card helpers), the plugin mirror, and the phase hub (plan map, shared files, PD-01…PD-30)
-- [ ] 07.16-02-PLAN.md — Wave 1: Control-plane contracts: `bot_profile` denial reason, device host kind and isolated server, prompt/session agent and taint fields, per-viewer origin, org bot-session cap, `AgentControlsLayer`
-- [ ] 07.16-03-PLAN.md — Wave 1: The one additive migration (profiles, profile projects, consents, bot session side table, agent/taint/device/policy/turn columns), RLS backstop, `work_session.bot_sync` queue, upgrade proof
-- [ ] 07.16-04-PLAN.md — Wave 1: ADR-0038 (Accepted; supersedes the quoted ADR-0026/0030/0028 clauses for bots) and AGENTS.md rows
+- [x] 07.16-01-PLAN.md — Wave 1: Bot-facing contracts (four `ocw_work_session_*` tools, `TurnContext.workZone`, refusals and sentences, redacted read model, `agent.work_session.v1`, profile/consent views, card helpers), the plugin mirror, and the phase hub (plan map, shared files, PD-01…PD-30)
+- [x] 07.16-02-PLAN.md — Wave 1: Control-plane contracts: `bot_profile` denial reason, device host kind and isolated server, prompt/session agent and taint fields, per-viewer origin, org bot-session cap, `AgentControlsLayer`
+- [x] 07.16-03-PLAN.md — Wave 1: The one additive migration (profiles, profile projects, consents, bot session side table, agent/taint/device/policy/turn columns), RLS backstop, `work_session.bot_sync` queue, upgrade proof
+- [x] 07.16-04-PLAN.md — Wave 1: ADR-0038 (Accepted; supersedes the quoted ADR-0026/0030/0028 clauses for bots) and AGENTS.md rows
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
