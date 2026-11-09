@@ -20,6 +20,7 @@ import {
   type WorkSession,
   type WorkZonePolicy,
 } from "@ocw/contracts";
+import type { AgentControlsLayer } from "./context";
 
 /**
  * Work Zone session controls (PURE, Phase 03.2, D-07 … D-12, P-03, P-07, P-08). Everything a controller may
@@ -28,7 +29,8 @@ import {
  * `ControlsContext` for a member on a device; routes and the dispatcher only decide through these functions.
  *
  * Reason precedence (the upper layer wins, principle 6): `org_policy` → `device_opt_in` → `device_grant` →
- * `denied_for_you` → `runtime` / `not_in_catalog` → `not_confirmed` (an inventory row that is not exposed).
+ * `denied_for_you` → `runtime` / `not_in_catalog` → `not_confirmed` (an inventory row that is not exposed) →
+ * `bot_profile` (07.16 PD-07: a bot's caps, checked last so a member's own limit keeps its reason).
  */
 
 export interface ControlsContext {
@@ -48,6 +50,11 @@ export interface ControlsContext {
    * `isExposed(<runtime>, uiKey)`. Nothing the inventory has not confirmed is ever offered (WZC-06, P-09).
    */
   exposed?: (uiKey: string) => boolean;
+  /**
+   * 07.16 PD-07: a bot starting or prompting in its sponsor's name; the sponsor's layers above stay as they are and
+   * every builder adds the bot's caps as its last check (`bot_profile`). Absent on every human path.
+   */
+  agent?: AgentControlsLayer;
 }
 
 /** P-07: the upper bound of the floor for in-session controllers with no relation to the device. */
@@ -149,8 +156,19 @@ function modeControl(
   else if (mode === "auto" && model && !model.supportsAutoMode)
     option = no("runtime", `${model.displayName} does not support Auto`);
   else if (!exposedFor(ctx, runtime)(`mode.${mode}`)) option = no("not_confirmed");
+  else if (ctx.agent && !agentAllowsMode(ctx.agent, mode)) option = no("bot_profile");
   else option = OK;
   return { ...option, value: mode };
+}
+
+/**
+ * 07.16 PD-07, PD-08 (ADR-0012): a bot's mode is at most its profile's max, and Full access also needs the per-bot
+ * consent (`allowFullAccess`) and a session that never read outside content unless the host is an isolated server.
+ */
+function agentAllowsMode(agent: AgentControlsLayer, mode: PermissionMode): boolean {
+  if (PERMISSION_MODE_RANK[mode] > PERMISSION_MODE_RANK[agent.maxMode]) return false;
+  if (mode === "fullAccess") return agent.allowFullAccess && (!agent.tainted || agent.isolated);
+  return true;
 }
 
 /** The model a session runs when it names none (or a model the catalog no longer lists). */

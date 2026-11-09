@@ -33,7 +33,8 @@ export interface MemberControls {
 /**
  * 07.16 (PD-05, PD-07): a bot's Work Zone caps, intersected into the ONE controls context so a bot's start or prompt
  * never goes above its profile (refusals carry `bot_profile`). Built only by `profileStatus` / `botLayerForSession`
- * in `bot-profile.ts`; consumed by `loadControlsContext` (07.16-06). Type only here: nothing reads it yet.
+ * in `bot-profile.ts`; `loadControlsContext` copies it into `ControlsContext.agent` and the control builders decide
+ * against it (07.16-06).
  */
 export interface AgentControlsLayer {
   agentId: string;
@@ -61,6 +62,8 @@ export interface LoadControlsOptions {
   /** Preloaded inputs (loops over many sessions). */
   policy?: WorkZonePolicy;
   access?: DeviceAccess;
+  /** 07.16 PD-07: the bot's caps when a bot starts or prompts in its sponsor's name; absent on every human path. */
+  agent?: AgentControlsLayer;
 }
 
 /** null when the device is not visible in this tenant. */
@@ -98,6 +101,8 @@ export async function loadControlsContext(
       modeCap: authorModeCap({ cap, revoked, floor: access.floorOf(d) }, o.inSession),
       fullAccessGrain: grain.allowed,
       exposed: (uiKey) => isExposed(o.runtime, uiKey),
+      // The member's own computations above are unchanged (`modeCap` stays the sponsor's); the bot's caps come last.
+      ...(o.agent ? { agent: o.agent } : {}),
     },
     cap,
     revoked,

@@ -26,7 +26,7 @@ import type { Core } from "../../core";
 import { linkWorkPromptAttachments } from "../artifact";
 import { type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { AuthzDeniedError, orgResource, type PermissionService } from "../organization";
-import { loadControlsContext } from "./context";
+import { type AgentControlsLayer, loadControlsContext } from "./context";
 import { buildRuntimeControls, decideSettings, highestAvailableMode, storedSettings } from "./controls";
 import { checkImageBudget } from "./images";
 import { defaultVisibilityOf } from "./projects";
@@ -111,6 +111,12 @@ export interface WorkSessionStartOptions {
   proposedByAgentId?: string;
   /** The approval that started it (audit only). */
   approvalId?: string;
+  /**
+   * 07.16 PD-03, PD-07: a bot's start in its sponsor's tenant transaction (the actor is the sponsor). Its caps join the
+   * one controls context (`bot_profile` refusals); the session and its first prompt are recorded as the bot's
+   * (`started_by_agent_id`, `author_agent_id`). Absent on every human path.
+   */
+  agent?: { layer: AgentControlsLayer };
 }
 
 const RUNTIME_LABEL = { "claude-code": "Claude Code", codex: "Codex" } as const;
@@ -280,6 +286,7 @@ export async function createWorkSession(
     userId: actor.userId,
     inSession: false,
     access,
+    ...(opts.agent ? { agent: opts.agent.layer } : {}),
   });
   if (!loaded) return { ok: false, code: "project_not_found", message: "Device not found" };
   const ctx = loaded.ctx;
@@ -352,6 +359,7 @@ export async function createWorkSession(
       titleSource: input.title ? "user" : "heuristic",
       createdBy: actor.userId,
       visibility: audience.kind,
+      startedByAgentId: opts.agent?.layer.agentId ?? null,
     })
     .returning();
   // The chosen teams or people as grants (the same writer as the visibility PUT).
@@ -382,11 +390,13 @@ export async function createWorkSession(
       visibility: audience.kind,
       ...(opts.proposedByAgentId ? { proposedByAgentId: opts.proposedByAgentId } : {}),
       ...(opts.approvalId ? { approvalId: opts.approvalId } : {}),
+      ...(opts.agent ? { startedByAgentId: opts.agent.layer.agentId } : {}),
     },
   });
   if (prompt) {
     await queueWorkPrompt(tx, deps, actor, s!, prompt, [], {
       ...(opts.proposedByAgentId ? { proposedByAgentId: opts.proposedByAgentId } : {}),
+      ...(opts.agent ? { authorAgentId: opts.agent.layer.agentId } : {}),
     });
   }
   const dto = await svc.emitSession(tx, s!.id);
@@ -421,7 +431,8 @@ export async function joinConversation(tx: Tx, actor: WorkSessionActor, s: Sessi
 
 /**
  * Queue a prompt authored by `actor` at the end of the session's queue (images linked and budget-checked), audit
- * and emit it, and ask for a title on the session's first prompt. `proposedByAgentId` marks a bot's proposal.
+ * and emit it, and ask for a title on the session's first prompt. `proposedByAgentId` marks a bot's proposal;
+ * `authorAgentId` (07.16 D-06) a prompt a bot sent in its sponsor's name (`actor`); never both (the DB check).
  */
 export async function queueWorkPrompt(
   tx: Tx,
@@ -430,7 +441,7 @@ export async function queueWorkPrompt(
   s: SessionRow,
   body: string,
   attachmentIds: readonly string[] = [],
-  opts: { proposedByAgentId?: string } = {},
+  opts: { proposedByAgentId?: string; authorAgentId?: string } = {},
 ) {
   const { core, svc } = deps;
   const [{ pos } = { pos: 0 }] = await tx
@@ -447,6 +458,7 @@ export async function queueWorkPrompt(
       body,
       position: Number(pos ?? 0) + 1,
       ...(opts.proposedByAgentId ? { proposedByAgentId: opts.proposedByAgentId } : {}),
+      ...(opts.authorAgentId ? { authorAgentId: opts.authorAgentId } : {}),
     })
     .returning();
   // 06.1 (P-05): the sender's own ready images of this session's conversation, or one uniform 409 (the whole
@@ -474,6 +486,7 @@ export async function queueWorkPrompt(
       executionDeviceId: s.deviceId,
       workSessionId: s.id,
       length: body.length,
+      ...(opts.authorAgentId ? { authorAgentId: opts.authorAgentId } : {}),
       // Ids and a count only, never bytes (D-03).
       ...(images.length > 0 ? { attachmentIds: images.map((a) => a.id), imageCount: images.length } : {}),
     },
