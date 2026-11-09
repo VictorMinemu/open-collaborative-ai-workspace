@@ -687,4 +687,36 @@ describe("per-turn policy (D-07, SC4)", () => {
       ...AUTOMATIONS,
     ]);
   });
+
+  it("07.16 BWZ-06: a bot without a Work Zone profile is never offered the ocw_work_session_* tools", async () => {
+    const SESSION_TOOLS = [
+      "ocw_work_session_start",
+      "ocw_work_session_prompt",
+      "ocw_work_session_read",
+      "ocw_work_session_stop",
+    ];
+    const profiles = await su.query("select 1 from app.bot_work_zone_profiles where organization_id = $1", [
+      orgId,
+    ]);
+    expect(profiles.rows).toEqual([]);
+    const inDm = await say(sam, samDmId, "anything to run?");
+    const dm = await lastMention(samBotId, inDm);
+    const inChannel = await say(admin, channelId, "@archie anything to run?", [
+      { kind: "agent", id: teamBotId },
+    ]);
+    const channel = await lastMention(teamBotId, inChannel);
+    for (const ev of [dm, channel]) {
+      for (const name of SESSION_TOOLS) {
+        expect(ev.turn.tools).not.toContain(name);
+        expect(ev.turn.toolFlags).not.toHaveProperty(name);
+      }
+      expect(ev.turn).not.toHaveProperty("workZone");
+      // The proposal stays the bot's Work Zone path (D-05), under its unchanged rule.
+      expect(ev.turn.tools).toEqual(expect.arrayContaining(WORK_ZONE));
+    }
+    const snap = await cellSnapshot();
+    for (const a of snap.agents as Json[]) {
+      for (const name of SESSION_TOOLS) expect(a.capabilities.tools).not.toContain(name);
+    }
+  });
 });
