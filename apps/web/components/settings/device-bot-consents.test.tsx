@@ -357,3 +357,58 @@ describe("the Isolated server fact (Task 2)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------- Task 3: the block on a phone
+
+describe("on a phone (Task 3)", () => {
+  const both: DeviceBotConsentsView = {
+    ...ALLOWED,
+    requests: REQUEST.requests.map((r) => ({ ...r, agentId: SCOUT })),
+  };
+
+  it("rows stack name over actions below 768 and sit side by side above", () => {
+    const html = render(<DeviceBotConsents device={device({ fullAccessOptIn: true })} />, client(both));
+    for (const id of ["bot-consent-request-main", "bot-consent-row-main"]) {
+      const tag = tagsOf(html, id)[0] ?? "";
+      expect(tag, id).toContain("flex-col");
+      expect(tag, id).toContain("md:flex-row");
+    }
+  });
+
+  it("buttons are full width on a phone and 44 px below 1024; the checkbox row too", () => {
+    const html = render(<DeviceBotConsents device={device({ fullAccessOptIn: true })} />, client(both));
+    for (const id of ["bot-consent-allow", "bot-consent-revoke"]) {
+      const tag = tagsOf(html, id)[0] ?? "";
+      expect(tag, id).toContain("w-full");
+      expect(tag, id).toContain("md:w-auto");
+      expect(tag, id).toContain("max-lg:h-11");
+    }
+    const label = html.match(/<label[^>]*>(?=<input[^>]*data-testid="bot-consent-full-access")/)?.[0] ?? "";
+    expect(label).toContain("max-lg:min-h-11");
+  });
+
+  it("long names truncate and keep the whole name in a title", () => {
+    const long = "A bot with a very long name that cannot fit on a phone screen";
+    const consent = ALLOWED.consents[0] as DeviceBotConsentsView["consents"][number];
+    const request = REQUEST.requests[0] as DeviceBotConsentsView["requests"][number];
+    const view: DeviceBotConsentsView = {
+      consents: [{ ...consent, displayName: long }],
+      requests: [{ ...request, agentId: SCOUT, displayName: long }],
+      viewerCan: { grant: true },
+    };
+    const html = render(<DeviceBotConsents device={device()} />, client(view));
+    expect(html).toContain(`title="${long}"`);
+    expect(html).toContain(`title="${long} · asked by Ana"`);
+    expect(html.match(/class="[^"]*truncate[^"]*"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+  });
+
+  it("uses theme tokens and the existing amber pairs only (no raw colours)", () => {
+    const source = readFileSync(join(__dirname, "device-bot-consents.tsx"), "utf8");
+    expect(source).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+    for (const m of source.matchAll(/\bamber-\d{3}/g)) {
+      const at = m.index ?? 0;
+      const line = source.slice(source.lastIndexOf("\n", at), source.indexOf("\n", at));
+      expect(line, line).toContain("dark:");
+    }
+  });
+});
