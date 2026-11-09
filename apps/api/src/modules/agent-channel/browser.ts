@@ -1666,6 +1666,15 @@ export function registerBrowserRoutes(scope: App, core: Core, rootDeps: BrowserD
       const target = targetOf(b, d.turn.agentId);
       // The member's session is sealed once more before its page goes (07.8-21, the rolling re-seal).
       await resealAfter(core, deps.client, b, d.context);
+      // The bot's close is recorded before sandboxd closes the page, as a replaced page or a refused first navigation
+      // is. sandboxd ends the page's frame streams and emits its own `closed` event before its answer reaches us; both
+      // close a still-open row as `idle` (the broker's idle stop), so recording afterwards let either one win the row
+      // and its audit under load. Once the row is ended they change nothing. If sandboxd cannot be reached the page is
+      // still ended here (nobody watches or drives it any more) and the broker's idle stop removes it.
+      await core.db.withTenant(b.tenant, async (tx) => {
+        const row = await closeContext(tx, d.context.id, "closed_by_bot");
+        if (row) await auditClosed(tx, core, row, "closed_by_bot", { eventId: d.turn.eventId });
+      });
       const run = await runInSandboxd(core, deps.client, target, false, async (client) => {
         try {
           await client.call(
@@ -1682,9 +1691,7 @@ export function registerBrowserRoutes(scope: App, core: Core, rootDeps: BrowserD
       return conclude(core, b, d, CLOSE, run, {
         client: deps.client,
         auditAction: null,
-        finish: async (tx) => {
-          const row = await closeContext(tx, d.context.id, "closed_by_bot");
-          if (row) await auditClosed(tx, core, row, "closed_by_bot", { eventId: d.turn.eventId });
+        finish: async () => {
           return {
             response: { closed: true as const },
             audit: { host: d.context.host },

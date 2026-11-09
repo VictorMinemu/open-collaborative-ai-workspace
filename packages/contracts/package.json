@@ -6,7 +6,8 @@
   "type": "module",
   "description": "Zod schemas shared by every OCW app: domain entities, REST DTOs, realtime envelope, Unified Session Event Protocol, Device Link protocol and Agent Channel API.",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./testing/scaling": "./src/testing/scaling.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"

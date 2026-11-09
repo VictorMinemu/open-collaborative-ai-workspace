@@ -1,4 +1,5 @@
 import { type APIRequestContext, type Browser, expect, type Page, request, test } from "@playwright/test";
+import { expectChannelLanding } from "../support/actors";
 import { ADMIN, API_URL, shot } from "./env";
 
 /**
@@ -473,7 +474,7 @@ test("anyone opens a member's profile from Members and from a channel", async ({
 
   // From a channel's member list.
   await d.goto(`${BASE_URL}/chat`);
-  await expect(d).toHaveURL(/\/chat\/[0-9a-f-]{36}/);
+  await expectChannelLanding(d);
   const channelId = d.url().match(/\/chat\/([0-9a-f-]{36})/)?.[1];
   await admin.post(`/api/v1/channels/${channelId}/members`, { data: { kind: "user", id: samId } });
   await d.reload();

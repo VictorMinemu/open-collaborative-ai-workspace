@@ -1,4 +1,5 @@
 import { ActivityStep, BotTurnActivity, SANDBOX_LIMITS } from "@ocw/contracts";
+import { measureScaling } from "@ocw/contracts/testing/scaling";
 import { describe, expect, it } from "vitest";
 import { currentPhrase, maskActivityText, mergeStep, stepFor } from "./activity";
 
@@ -255,35 +256,6 @@ describe("browser steps (07.8-14, UI-SPEC Surface 5)", () => {
   });
 });
 
-/**
- * Best of five interleaved passes per size after a warm-up, so a busy host slows both sizes alike. A pass over
- * `ceiling` ms ends the measurement at once, so a quadratic rule (tens of seconds at 256 KiB) fails in seconds.
- */
-function bestPair(
-  fn: (text: string) => unknown,
-  small: string,
-  large: string,
-  ceiling: number,
-): [number, number] {
-  const time = (text: string) => {
-    const t0 = performance.now();
-    fn(text);
-    return performance.now() - t0;
-  };
-  let a = Number.POSITIVE_INFINITY;
-  let b = Number.POSITIVE_INFINITY;
-  for (let i = 0; i < 6; i++) {
-    const ta = time(small);
-    if (ta > ceiling) return [ta, ta];
-    const tb = time(large);
-    if (tb > ceiling) return [ta, tb];
-    if (i === 0) continue; // warm-up
-    a = Math.min(a, ta);
-    b = Math.min(b, tb);
-  }
-  return [a, b];
-}
-
 describe("exec output tail: linear on a hostile newline run (sandbox output is the bot's)", () => {
   // `/\n+$/` rescanned a run of newlines from every start position (quadratic: ~1.4 s at 64 000).
   const exec = (stdout: string) =>
@@ -295,10 +267,21 @@ describe("exec output tail: linear on a hostile newline run (sandbox output is t
   const sized = (run: string, size: number) => `${run.repeat(size)}x`;
 
   it("a run of newlines then one character scales linearly (64 000 → 256 KiB)", () => {
-    const CEILING = 2000;
-    const [small, large] = bestPair(exec, sized("\n", 64_000), sized("\n", 256 * 1024), CEILING);
-    expect(large).toBeLessThan(CEILING);
-    expect(large / Math.max(small, 2)).toBeLessThan(10);
+    // Only catches a catastrophic rule fast: the quadratic trim took ~1.4 s at 64 000 newlines (about 16x that, ~23 s,
+    // at 256 KiB) while the linear one takes milliseconds, and a starved CI runner stretched one linear run past a 2 s
+    // ceiling (pipeline 204: 2073.7 ms). A rule slow enough to matter but under 10 s is the per-round ratio's job.
+    const CEILING = 10_000;
+    const small = sized("\n", 64_000);
+    const large = sized("\n", 256 * 1024);
+    // The smallest ratio of five small-then-large rounds after a warm-up, so one noisy round cannot fail it; a run over
+    // the ceiling ends the measurement at once.
+    const { ratio, ratios, largeMs } = measureScaling(
+      () => exec(small),
+      () => exec(large),
+      { ceilingMs: CEILING },
+    );
+    expect(largeMs).toBeLessThan(CEILING);
+    expect(ratio, `per-round ratios ${ratios.map((r) => r.toFixed(1)).join(", ")}`).toBeLessThan(10);
   }, 60_000);
 
   it("only the trailing newlines go", () => {
