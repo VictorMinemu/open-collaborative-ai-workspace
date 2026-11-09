@@ -1,0 +1,393 @@
+import { createHash, randomUUID } from "node:crypto";
+import {
+  AgentCard,
+  AgentChannelWorkSessionStartResponse,
+  BOT_WORK_SESSION_SENTENCES,
+  type BotWorkZoneProfileInput,
+  WORK_SESSION_CARD_LABELS,
+} from "@ocw/contracts";
+import pg from "pg";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
+import { eventually, FakeDevice } from "../../testing-device";
+import {
+  CLAUDE_CATALOG,
+  CODEX_CATALOG,
+  createBotProfile,
+  freshBotTurn,
+  grantBotConsent,
+  invite,
+  pairDevice,
+} from "../../testing-workzone";
+
+/**
+ * Phase 07.16-15 (D-01 … D-08, D-12, D-14, D-15, D-20; PD-03, PD-08 … PD-12, PD-15, PD-21; BWZ-01, BWZ-02, BWZ-04,
+ * BWZ-05): `POST /agent-channel/v1/work-sessions/start`, the phase's API end to end. A member asks a team bot in a
+ * channel; the bot starts a Work Zone session itself, in its sponsor's name, within its profile's caps, with the
+ * audience the server decides and a live platform card in the asker's thread. Nobody presses Start. Real PostgreSQL +
+ * Redis; the device is a FakeDevice reporting a `service` host with the isolated-server mark.
+ */
+
+const CELL_TOKEN = "ocw-test-cell-token-bot-work-sessions-0123456789";
+const PROMPT = "fix the failing invoice test";
+const START = "ocw_work_session_start";
+
+// biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
+type Json = Record<string, any>;
+
+let stack: TestStack;
+let su: pg.Client;
+let victor: TestClient;
+let ana: TestClient;
+let orgId: string;
+let victorId: string;
+let anaId: string;
+let atlasId: string;
+let echoId: string;
+let engId: string;
+let server: FakeDevice;
+let serverId: string;
+let billingId: string;
+let ledgerId: string;
+let scratchId: string;
+
+async function ok(res: Promise<{ status: number; body: Record<string, unknown> | null }>, status = 200) {
+  const r = await res;
+  if (r.status !== status) throw new Error(`expected ${status}, got ${r.status}: ${JSON.stringify(r.body)}`);
+  return r.body as Json;
+}
+
+async function cell(
+  path: string,
+  body: unknown,
+  token = CELL_TOKEN,
+): Promise<{ status: number; body: Json }> {
+  const res = await fetch(`${stack.baseUrl}/agent-channel/v1${path}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, body: (await res.json()) as Json };
+}
+
+/** A team bot of the whole organization, ready (no OpenClaw cell runs in this suite). */
+async function teamBot(name: string, username: string): Promise<string> {
+  const bot = await ok(
+    victor.request("POST", "/api/v1/agents", {
+      name,
+      username,
+      instructions: `You are ${name}.`,
+      modelProvider: "mock",
+      modelId: "mock-1",
+    }),
+  );
+  await su.query("update app.agents set status = 'ready' where id = $1", [bot.id]);
+  return bot.id as string;
+}
+
+/** A channel of `visibility` holding `botIds` and `userIds` (Víctor creates it, so he is a member). */
+async function channel(
+  name: string,
+  botIds: string[],
+  userIds: string[],
+  visibility: "public" | "private" = "public",
+): Promise<string> {
+  const id = (await ok(victor.request("POST", "/api/v1/channels", { name, visibility }))).id as string;
+  for (const botId of botIds) {
+    await ok(victor.request("POST", `/api/v1/channels/${id}/members`, { kind: "agent", id: botId }));
+  }
+  for (const userId of userIds) {
+    await ok(victor.request("POST", `/api/v1/channels/${id}/members`, { kind: "user", id: userId }));
+  }
+  return id;
+}
+
+/** Atlas's profile on the build server: two repositories, Claude Code, Opus only, up to Full access. */
+const profile = (over: Partial<BotWorkZoneProfileInput> = {}): BotWorkZoneProfileInput => ({
+  deviceId: serverId,
+  runtime: "claude-code",
+  projectIds: [billingId, ledgerId],
+  defaultModel: "opus",
+  allowedModels: ["opus"],
+  defaultEffort: "medium",
+  allowedEfforts: ["medium", "high"],
+  defaultContextWindow: null,
+  allowedContextWindows: [],
+  fastMode: "off",
+  defaultMode: "default",
+  maxMode: "fullAccess",
+  worktree: true,
+  maxConcurrent: 2,
+  promptsPerHour: 30,
+  wakesPerSessionDay: 20,
+  actOnOutsideContent: false,
+  ...over,
+});
+
+/** `as` asks Atlas in `conversationId` (a mention in a channel, plain text in a DM); the delivered turn's event id. */
+const askAtlas = (as = ana, conversationId = engId, text = "please fix the invoice test") =>
+  freshBotTurn(su, as, conversationId, `@atlas ${text} ${randomUUID().slice(0, 6)}`);
+
+const start = (eventId: string, over: Json = {}, token = CELL_TOKEN) =>
+  cell(
+    "/work-sessions/start",
+    { eventId, agentId: atlasId, projectId: billingId, prompt: PROMPT, ...over },
+    token,
+  );
+
+/** The answer of a start that must have started. */
+async function started(eventId: string, over: Json = {}) {
+  const r = await start(eventId, over);
+  expect(r.status, JSON.stringify(r.body)).toBe(200);
+  const body = AgentChannelWorkSessionStartResponse.parse(r.body);
+  if (body.kind !== "started") throw new Error(`not started: ${JSON.stringify(body)}`);
+  return body;
+}
+
+/** The answer of a start that must have been refused with `code`. */
+async function refused(eventId: string, code: string, over: Json = {}) {
+  const r = await start(eventId, over);
+  expect(r.status, JSON.stringify(r.body)).toBe(200);
+  expect(r.body.kind, JSON.stringify(r.body)).toBe("refused");
+  expect(r.body.code).toBe(code);
+  expect(r.body.sentence).toBe(BOT_WORK_SESSION_SENTENCES[code as keyof typeof BOT_WORK_SESSION_SENTENCES]);
+  return r.body;
+}
+
+const rowsOf = async (q: string, args: unknown[] = []) => (await su.query(q, args)).rows as Json[];
+
+const auditsOf = (action: string, eventId: string) =>
+  rowsOf(
+    "select actor_kind, actor_id, agent_id, user_id, device_id, session_id, result, metadata from app.audit_events where action = $1 and metadata->>'eventId' = $2 order by occurred_at",
+    [action, eventId],
+  );
+
+/**
+ * Every bot session of these tests ends before the next test, and the hour's prompts are forgotten, so each case
+ * starts from zero active sessions and an empty prompt budget (the caps are what some cases test).
+ */
+async function quiesce() {
+  await su.query(
+    "update app.work_sessions set status = 'archived' where organization_id = $1 and status <> 'archived'",
+    [orgId],
+  );
+  await su.query(
+    "update app.work_prompts set created_at = now() - interval '2 hours' where organization_id = $1",
+    [orgId],
+  );
+}
+
+beforeAll(async () => {
+  stack = await startTestStack({ env: { OCW_CELL_TOKEN: CELL_TOKEN, OCW_MODEL_PROVIDER: "mock" } });
+  su = new pg.Client({ connectionString: stack.db.superuserUrl });
+  await su.connect();
+  victor = new TestClient(stack.baseUrl);
+  const setup = await ok(
+    victor.request("POST", "/api/v1/setup", {
+      token: TEST_SETUP_TOKEN,
+      name: "Víctor Ruiz",
+      email: "victor@example.test",
+      password: "correct-horse-battery",
+      orgName: "Autofy Labs",
+    }),
+  );
+  orgId = setup.organization.id;
+  victorId = setup.user.id;
+  ({ client: ana, userId: anaId } = await invite(stack, victor, "ana@example.test", "Ana Gil", "developer"));
+  atlasId = await teamBot("Atlas", "atlas");
+  echoId = await teamBot("Echo", "echo");
+  engId = await channel("eng", [atlasId, echoId], [anaId]);
+
+  // Full access allowed by the organization; Víctor's build server is a service host with the isolated-server mark
+  // and its own Full access opt-in.
+  await ok(victor.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: true, allowFastMode: true }));
+  const paired = await pairDevice(stack, victor, "billing-server");
+  serverId = paired.deviceId;
+  server = await FakeDevice.connect(stack.baseUrl, paired.token, undefined, {
+    host: "service",
+    isolatedServer: true,
+  });
+  server.send({
+    type: "projects.sync",
+    projects: ["billing-api", "ledger", "scratch"].map((name) => ({
+      localId: `lp_${name}`,
+      name,
+      gitRemote: null,
+      defaultBranch: "main",
+    })),
+  });
+  await server.next((f) => f.type === "projects.ack");
+  server.capabilities([CLAUDE_CATALOG, CODEX_CATALOG], true, true);
+  await eventually(async () => {
+    const r = await su.query(
+      "select runtime_catalog, full_access_opt_in, host_kind, isolated_server from app.devices where id = $1",
+      [serverId],
+    );
+    const d = r.rows[0];
+    return (
+      (d.runtime_catalog as unknown[]).length === 2 &&
+      d.full_access_opt_in === true &&
+      d.host_kind === "service" &&
+      d.isolated_server === true
+    );
+  });
+  const list = (await ok(victor.request("GET", "/api/v1/projects"))).projects as Json[];
+  billingId = list.find((p) => p.name === "billing-api")!.id as string;
+  ledgerId = list.find((p) => p.name === "ledger")!.id as string;
+  scratchId = list.find((p) => p.name === "scratch")!.id as string;
+
+  // The admin gives Atlas its profile (he becomes its sponsor); the device allows Atlas with Full access.
+  await createBotProfile(victor, atlasId, profile());
+  await grantBotConsent(victor, serverId, atlasId, { allowFullAccess: true });
+}, 180_000);
+
+afterAll(async () => {
+  await server?.close().catch(() => {});
+  await su?.end();
+  await stack?.stop();
+});
+
+beforeEach(async () => {
+  await quiesce();
+});
+
+// ---------------------------------------------------------------- the phase's API end to end (success criterion 1)
+
+describe("tracer: Ana asks Atlas in #eng and Atlas starts the session itself, as its sponsor", () => {
+  it("answers started; the session is the sponsor's, started by Atlas in Full access, and the device runs the prompt", async () => {
+    const eventId = await askAtlas();
+    const [turn] = await rowsOf(
+      "select message_id, conversation_id, tools from app.agent_turns where event_id = $1",
+      [eventId],
+    );
+    expect(turn!.tools).toContain(START);
+
+    const body = await started(eventId, { permissionMode: "fullAccess" });
+    expect(body).toMatchObject({
+      kind: "started",
+      mode: "fullAccess",
+      model: "opus",
+      projectName: "billing-api",
+    });
+    expect(body.cardMessageId).not.toBeNull();
+
+    const [s] = await rowsOf(
+      "select created_by, started_by_agent_id, permission_mode, project_id, device_id, worktree, tainted_at from app.work_sessions where id = $1",
+      [body.workSessionId],
+    );
+    expect(s).toMatchObject({
+      created_by: victorId,
+      started_by_agent_id: atlasId,
+      permission_mode: "fullAccess",
+      project_id: billingId,
+      device_id: serverId,
+      worktree: true,
+      tainted_at: null,
+    });
+    const prompts = await rowsOf(
+      "select author_user_id, author_agent_id, body, tainted from app.work_prompts where work_session_id = $1",
+      [body.workSessionId],
+    );
+    expect(prompts).toEqual([
+      { author_user_id: victorId, author_agent_id: atlasId, body: PROMPT, tainted: false },
+    ]);
+
+    // Dispatched to the device without anyone pressing Start: session.start, then the bot's prompt.
+    const cmd = await server.command("session.start", body.workSessionId);
+    server.ack(cmd.id as string);
+    server.event(body.workSessionId, {
+      type: "session.started",
+      runtime: "claude-code",
+      runtimeSessionId: `rt-${body.workSessionId}`,
+      model: "opus",
+      permissionMode: "fullAccess",
+    });
+    server.event(body.workSessionId, { type: "session.state", status: "idle" });
+    const prompt = (await server.command("prompt", body.workSessionId)) as Json;
+    expect(prompt.payload).toMatchObject({ text: PROMPT, permissionMode: "fullAccess" });
+  });
+
+  it("writes one bot_work_sessions row and posts one platform work_zone card in Ana's thread, without the prompt", async () => {
+    const eventId = await askAtlas();
+    const [turn] = await rowsOf("select message_id from app.agent_turns where event_id = $1", [eventId]);
+    const body = await started(eventId);
+
+    const bots = await rowsOf("select * from app.bot_work_sessions where work_session_id = $1", [
+      body.workSessionId,
+    ]);
+    expect(bots).toHaveLength(1);
+    expect(bots[0]).toMatchObject({
+      agent_id: atlasId,
+      sponsor_user_id: victorId,
+      requester_user_id: anaId,
+      origin_conversation_id: engId,
+      origin_thread_root_id: turn!.message_id,
+      origin_message_id: turn!.message_id,
+      origin_event_id: eventId,
+      card_message_id: body.cardMessageId,
+    });
+    expect(bots[0]!.profile_id).not.toBeNull();
+
+    const [msg] = await rowsOf(
+      "select conversation_id, thread_id, author_kind, author_id from app.messages where id = $1",
+      [body.cardMessageId],
+    );
+    expect(msg).toMatchObject({
+      conversation_id: engId,
+      thread_id: turn!.message_id,
+      author_kind: "agent",
+      author_id: atlasId,
+    });
+
+    const card = AgentCard.parse(await ok(ana.request("GET", `/api/v1/cards/${body.cardMessageId}`)));
+    expect(card.kind).toBe("work_zone");
+    expect(card.platformOwned).toBe(true);
+    expect(card.title).toBe("Work Zone · billing-api");
+    expect(card.status).toBe("running");
+    expect(card.fields.map((f) => f.label)).toEqual(Object.values(WORK_SESSION_CARD_LABELS));
+    const field = (label: string) => card.fields.find((f) => f.label === label)?.value;
+    expect(field("Runtime")).toBe("Claude Code");
+    expect(field("Project")).toBe("billing-api");
+    expect(field("Device")).toBe("billing-server");
+    expect(field("Model")).toBe("opus");
+    expect(field("Mode")).toBe("Supervised");
+    expect(field("Step")).toBe("Starting");
+    expect(Number.isNaN(Date.parse(field("Updated") ?? ""))).toBe(false);
+    expect(card.actions).toEqual([
+      { kind: "open", label: "Open session", target: `/work-zone/${body.workSessionId}` },
+      { kind: "follow", label: "Follow" },
+    ]);
+    // Viewer-neutral (ADR-0031): never the prompt, the title or a team project name.
+    expect(JSON.stringify(card)).not.toContain("invoice");
+  });
+
+  it("audits bot.work_session_started with ids, mode, model and promptChars, and claims one tool call for Ana", async () => {
+    const eventId = await askAtlas();
+    const body = await started(eventId, { permissionMode: "fullAccess" });
+    const audits = await auditsOf("bot.work_session_started", eventId);
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      actor_kind: "agent",
+      actor_id: atlasId,
+      agent_id: atlasId,
+      user_id: anaId,
+      device_id: serverId,
+      result: "success",
+    });
+    expect(audits[0]!.metadata).toEqual({
+      eventId,
+      sponsorUserId: victorId,
+      projectId: billingId,
+      workSessionId: body.workSessionId,
+      mode: "fullAccess",
+      model: "opus",
+      outcome: "started",
+      promptChars: PROMPT.length,
+    });
+    const calls = await rowsOf(
+      "select tool, user_id, decision, target from app.agent_tool_calls where event_id = $1",
+      [eventId],
+    );
+    expect(calls).toEqual([{ tool: START, user_id: anaId, decision: "allowed", target: billingId }]);
+  });
+});
