@@ -39,7 +39,7 @@ import {
   workPrompts,
   workSessions,
 } from "@ocw/db";
-import { and, asc, count, desc, eq, inArray, isNull, min, type SQL, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNotNull, isNull, min, type SQL, sql } from "drizzle-orm";
 import type { FastifyBaseLogger } from "fastify";
 import type { Jobs } from "../../lib/jobs";
 import { attachmentRowsForWorkPrompt, attachmentsForWorkPrompts, type ObjectStorage } from "../artifact";
@@ -51,6 +51,7 @@ import { botLayerForSession } from "./bot-profile";
 import { type AgentControlsLayer, loadControlsContext } from "./context";
 import {
   buildRuntimeControls,
+  type ControlsContext,
   clampToControls,
   highestAvailableMode,
   pickSettings,
@@ -824,6 +825,11 @@ export class WorkSessionService implements DeviceSessionHandler {
    * what the creator may pick now (policy ∩ opt-in ∩ cap ∩ grain ∩ catalog ∩ inventory) and the device is told
    * (`session.configure`); a Full access turn in flight is interrupted when Full access is left. `actorUserId` is the
    * person whose change caused the re-check (the audit actor; the transaction's own user otherwise).
+   *
+   * 07.16 (D-04, PD-08, E4): a bot's session (`started_by_agent_id`) is decided with the bot's live layer joined to its
+   * sponsor's controls while the profile is active, and with the sponsor's own controls when it is not (people keep
+   * their control of the session); a bot turn in flight that its layer no longer allows is interrupted, a person's turn
+   * never is by the bot's layer. A person's session takes the branch it always took.
    */
   async reauthorize(
     tx: Tx,
@@ -834,12 +840,14 @@ export class WorkSessionService implements DeviceSessionHandler {
   ): Promise<void> {
     const actor = actorUserId ? { userId: actorUserId } : {};
     if (!ACTIVE_STATES.includes(s.status)) return;
+    const layer = s.startedByAgentId ? await botLayerForSession(tx, this.deps.perms, s) : null;
     const creator = await loadControlsContext(tx, this.deps.perms, {
       deviceId: s.deviceId,
       runtime: s.runtime,
       userId: s.createdBy,
       inSession: false,
       ...(policy ? { policy } : {}),
+      ...(layer ? { agent: layer } : {}),
     });
     if (!creator) return;
     if (creator.cap === null) {
@@ -867,9 +875,13 @@ export class WorkSessionService implements DeviceSessionHandler {
     }
     const current = requestedSettings(s);
     const { next, changed } = clampToControls(current, buildRuntimeControls(s.runtime, creator.ctx, s.model));
-    if (changed.length === 0) return;
+    if (changed.length === 0) {
+      if (s.startedByAgentId) await this.interruptBotTurn(tx, s, creator.ctx, layer, reason, actor);
+      return;
+    }
     const from = current.permissionMode;
     const to = next.permissionMode ?? from;
+    let interruptSent = false;
     await tx
       .update(workSessions)
       .set({
@@ -925,9 +937,72 @@ export class WorkSessionService implements DeviceSessionHandler {
           kind: "interrupt",
           payload: {},
         });
+        interruptSent = true;
       }
     }
+    if (s.startedByAgentId && !interruptSent) {
+      await this.interruptBotTurn(tx, s, creator.ctx, layer, reason, actor);
+    }
     await this.emitSession(tx, s.id);
+  }
+
+  /**
+   * 07.16 (E4, PD-08): the bot's turn in flight in its session, interrupted when the bot may no longer run it at its
+   * mode: the profile is not active (or names another bot), or the layer (with the turn's own taint) no longer allows
+   * the mode. A person's turn is left alone. Audited like an interrupt, with the turn and the bot.
+   */
+  private async interruptBotTurn(
+    tx: Tx,
+    s: SessionRow,
+    ctx: ControlsContext,
+    layer: AgentControlsLayer | null,
+    reason: ReauthorizeReason,
+    actor: { userId?: string },
+  ): Promise<void> {
+    const [turn] = await tx
+      .select({
+        id: workPrompts.id,
+        permissionMode: workPrompts.permissionMode,
+        authorAgentId: workPrompts.authorAgentId,
+        tainted: workPrompts.tainted,
+      })
+      .from(workPrompts)
+      .where(
+        and(
+          eq(workPrompts.workSessionId, s.id),
+          inArray(workPrompts.status, IN_FLIGHT),
+          isNotNull(workPrompts.authorAgentId),
+        ),
+      )
+      .limit(1);
+    if (!turn) return;
+    if (layer && layer.agentId === turn.authorAgentId && turn.permissionMode) {
+      const agent = turn.tainted ? { ...layer, tainted: true } : layer;
+      const allowed = highestAvailableMode({ ...ctx, agent }, s.model, turn.permissionMode);
+      if (allowed === turn.permissionMode) return;
+    }
+    await this.deps.hub.enqueue(tx, {
+      deviceId: s.deviceId,
+      workSessionId: s.id,
+      kind: "interrupt",
+      payload: {},
+    });
+    await this.deps.audit.record(tx, {
+      ...actor,
+      action: "work_session.interrupted",
+      resourceType: "work_session",
+      resourceId: s.id,
+      ...(turn.authorAgentId ? { agentId: turn.authorAgentId } : {}),
+      deviceId: s.deviceId,
+      sessionId: s.id,
+      metadata: {
+        reason,
+        promptId: turn.id,
+        authorAgentId: turn.authorAgentId,
+        mode: turn.permissionMode,
+        botActive: layer !== null,
+      },
+    });
   }
 
   /**
@@ -1116,9 +1191,17 @@ export class WorkSessionService implements DeviceSessionHandler {
         .select({ id: workSessions.id })
         .from(workSessions)
         .where(and(eq(workSessions.deviceId, device.deviceId), inArray(workSessions.status, ACTIVE_STATES)));
+      let policy: WorkZonePolicy | undefined;
       for (const { id } of rows) {
         const s = await this.lock(tx, id);
         if (!s) continue;
+        // 07.16 (D-19, PD-08): the hello rewrote the device's opt-in and isolated mark without a sweep; a bot session
+        // is re-decided now (lowered, its bot turn interrupted), before anything is re-attached or dispatched.
+        if (s.startedByAgentId) {
+          policy ??= await loadWorkZonePolicy(tx);
+          await this.reauthorize(tx, s, "device_opt_out", policy);
+          if (!ACTIVE_STATES.includes(s.status)) continue;
+        }
         if (alive === null || alive.has(s.id)) {
           if (s.status !== "host_offline") continue;
           if (await this.hasPendingApprovals(tx, s.id)) await this.setStatus(tx, s, "waiting_approval");
