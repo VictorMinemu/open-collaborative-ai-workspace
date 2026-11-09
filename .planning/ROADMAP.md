@@ -976,7 +976,7 @@ opens the session and comes back.
 - **Control:** `ocw_*` tools to start, prompt, read and stop, decided in the Agent Channel API; humans keep prompting
   the same session; one executor.
 - **Wake-ups:** session transitions (turn done, waiting for approval, failed, ended) wake the bot in the originating
-  conversation, bounded and paid by the sponsor.
+  conversation, bounded by the profile; the wake runs as the original asker (D-17).
 - **Outside content (owner decision 2026-11-09, option 1):** from a tainted turn only with the admin-only "act on outside
   content" profile flag, and bypass then only on a device marked as an isolated server; otherwise the proposal card.
 - **Card:** live Work Zone card in the conversation, back link from the session; desktop and mobile.
