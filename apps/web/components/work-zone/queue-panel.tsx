@@ -111,7 +111,13 @@ export function QueuePanel({ sessionId, prompts }: { sessionId: string; prompts:
 function PromptMeta({ p }: { p: WorkPrompt }) {
   const name = p.authorName ?? "Someone";
   return (
-    <span className="flex items-center gap-1.5 text-muted-foreground text-xs">
+    <span
+      className={cn(
+        "flex items-center gap-1.5 text-muted-foreground text-xs",
+        // A bot line with its marks may not fit a narrow queue: it wraps (a person's line is unchanged).
+        (p.authorAgent || p.tainted) && "flex-wrap gap-y-1",
+      )}
+    >
       {/* 07.16 (D-06): a bot's prompt names the bot and the person it works for; a person's stays as it was. */}
       {p.authorAgent ? (
         <AgentAuthorLine agent={p.authorAgent} forName={p.authorName} />
@@ -122,8 +128,9 @@ function PromptMeta({ p }: { p: WorkPrompt }) {
         </>
       )}
       {p.proposedBy ? <ProposedByLine agent={p.proposedBy} /> : null}
-      {p.tainted ? <OutsideContentChip /> : null}
       <span>· {relativeTime(p.createdAt)}</span>
+      {/* 07.16 (D-08): last, so a narrow queue wraps it onto its own line. */}
+      {p.tainted ? <OutsideContentChip /> : null}
     </span>
   );
 }

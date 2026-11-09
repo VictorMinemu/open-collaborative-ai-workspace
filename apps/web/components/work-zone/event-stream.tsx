@@ -391,7 +391,13 @@ function PromptBubble({ item, session }: { item: Extract<Item, { kind: "prompt" 
   // Multiplayer attribution stays on every prompt (an intentional difference from ref-4).
   return (
     <div className="flex flex-col items-end gap-1.5 pl-8 sm:pl-20" data-testid="prompt-bubble">
-      <p className="flex items-center gap-1.5 text-muted-foreground text-xs">
+      <p
+        className={cn(
+          "flex items-center gap-1.5 text-muted-foreground text-xs",
+          // A bot line with its marks may not fit at 390: it wraps, right-aligned (a person's line is unchanged).
+          (p?.authorAgent || p?.tainted) && "flex-wrap justify-end gap-y-1",
+        )}
+      >
         {/* 07.16 (D-08): visible to everyone in the session. */}
         {p?.tainted ? <OutsideContentChip /> : null}
         {item.pending ? (

@@ -1,5 +1,7 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { accessLostCopy, leftProjectLine, sessionBackLink } from "./session-view";
+import { accessLostCopy, leftProjectLine, SessionBackLink, sessionBackLink } from "./session-view";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: () => undefined }) }));
 
@@ -85,5 +87,17 @@ describe("session back link", () => {
         messageId: card,
       }),
     ).toEqual({ label: "Back to Invoice bug", href: `/chat/ai/${conv}` });
+  });
+
+  it("SessionBackLink: a link to the built target, 44 px on mobile, truncating its label", () => {
+    const html = renderToStaticMarkup(
+      createElement(SessionBackLink, {
+        origin: { conversationId: conv, kind: "channel", name: "eng", threadRootId: null, messageId: card },
+      }),
+    );
+    expect(html).toContain('data-testid="session-back"');
+    expect(html).toContain(`href="/chat/${conv}?m=${card}"`);
+    expect(html).toContain("max-md:h-11");
+    expect(html).toContain('<span class="truncate">Back to #eng</span>');
   });
 });

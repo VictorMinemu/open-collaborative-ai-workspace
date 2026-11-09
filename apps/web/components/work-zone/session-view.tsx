@@ -104,6 +104,25 @@ export function sessionBackLink(origin: WorkSessionOrigin): { label: string; hre
   };
 }
 
+/** D-13: the way back to the conversation the bot's card came from; above the breadcrumb, 44 px on mobile. */
+export function SessionBackLink({ origin }: { origin: WorkSessionOrigin }) {
+  const back = sessionBackLink(origin);
+  return (
+    <Link
+      href={back.href}
+      data-testid="session-back"
+      title={back.label}
+      className={cn(
+        buttonVariants({ variant: "ghost", size: "sm" }),
+        "-ml-2 h-7 max-w-full justify-start px-2 font-normal text-[12.5px] text-muted-foreground hover:text-foreground max-md:h-11 max-md:text-[13px] [&_svg]:size-3.5",
+      )}
+    >
+      <ArrowLeft aria-hidden />
+      <span className="truncate">{back.label}</span>
+    </Link>
+  );
+}
+
 export function SessionView({ id }: { id: string }) {
   // A session given back after it was taken away (Undo of a narrowing) is opened again on a fresh live view.
   const [epoch, setEpoch] = useState(0);
@@ -512,7 +531,6 @@ function SessionHeader({
   origin: WorkSessionOrigin | null;
 }) {
   const router = useRouter();
-  const back = origin ? sessionBackLink(origin) : null;
   const archive = useArchiveSession(session.id);
   const participants = useMemo(() => {
     const m = new Map<string, string>();
@@ -587,21 +605,7 @@ function SessionHeader({
 
   return (
     <header className="shrink-0 px-3 pt-1 pb-2 sm:px-5 md:pt-3" data-testid="session-header">
-      {back ? (
-        // D-13: the way back to the conversation the bot's card came from; above the breadcrumb, 44 px on mobile.
-        <Link
-          href={back.href}
-          data-testid="session-back"
-          title={back.label}
-          className={cn(
-            buttonVariants({ variant: "ghost", size: "sm" }),
-            "-ml-2 h-7 max-w-full justify-start px-2 font-normal text-[12.5px] text-muted-foreground hover:text-foreground max-md:h-11 max-md:text-[13px] [&_svg]:size-3.5",
-          )}
-        >
-          <ArrowLeft aria-hidden />
-          <span className="truncate">{back.label}</span>
-        </Link>
-      ) : null}
+      {origin ? <SessionBackLink origin={origin} /> : null}
       <div className="flex min-h-11 items-center gap-2 md:min-h-9">
         {/* ref-4 breadcrumb: project / session title; below 768 the title has its own line under it. */}
         <nav aria-label="Breadcrumb" className="flex min-w-24 flex-1 items-center md:min-w-0 md:gap-2.5">
