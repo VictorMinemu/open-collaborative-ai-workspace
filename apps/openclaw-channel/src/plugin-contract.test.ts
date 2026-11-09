@@ -3323,3 +3323,235 @@ describe("attachments mirror parity (07.15-01: plugin ↔ packages/contracts bot
     );
   });
 });
+
+describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts bot-work-zone.ts, bot-capabilities.ts, agent-channel.ts; Pitfall 9)", () => {
+  // Non-literal specifiers: the contracts package lives outside this package (and is not type-checked from here).
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean; data?: unknown } };
+  const load = async () => ({
+    caps: (await import(contracts("bot-capabilities.ts"))) as { TurnContext: Schema },
+    channel: (await import(contracts("agent-channel.ts"))) as Record<string, Schema>,
+    wz: (await import(contracts("bot-work-zone.ts"))) as Record<string, Schema>,
+    m: await import("./agent-channel-protocol.js"),
+  });
+
+  /** Same verdict (and, when accepted, the same canonical output) from the mirror and the contract. */
+  function expectSameVerdicts(mirror: Schema, contract: Schema, samples: unknown[]) {
+    for (const v of samples) {
+      const a = mirror.safeParse(v);
+      const b = contract.safeParse(v);
+      expect(a.success, JSON.stringify(v)?.slice(0, 160)).toBe(b.success);
+      if (a.success && b.success) expect(a.data).toEqual(b.data);
+    }
+  }
+
+  const EVENT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f11";
+  const AGENT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f12";
+  const PROJECT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f13";
+  const DEVICE = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f14";
+  const SESSION = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f15";
+  const CARD = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f16";
+  const APPROVAL = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f17";
+  const MSG = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f18";
+  const ANA = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f1d";
+
+  const workZone = {
+    runtime: "claude-code",
+    device: { id: DEVICE, name: "build-server", online: true },
+    projects: [
+      { id: PROJECT, name: "billing-api" },
+      { id: "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f19", name: "web" },
+    ],
+    projectsMore: 0,
+    models: ["claude-sonnet-4-5", "claude-opus-4-1"],
+    defaultModel: "claude-sonnet-4-5",
+    efforts: ["low", "high"],
+    fastMode: "allowed",
+    defaultMode: "default",
+    maxMode: "fullAccess",
+    outsideContent: false,
+    sessions: [{ id: SESSION, status: "running", projectName: "billing-api" }],
+  };
+  const turn = { tools: [], toolFlags: {}, memory: [], now: null, maxToolCalls: 8, maxWebCalls: 5 };
+  /** The one fixture turn both copies must read the same way. */
+  const offered = {
+    ...turn,
+    tools: [
+      "ocw_work_session_start",
+      "ocw_work_session_prompt",
+      "ocw_work_session_read",
+      "ocw_work_session_stop",
+    ],
+    toolFlags: {
+      ocw_work_session_start: { untrustedOutput: false, sideEffecting: true },
+      ocw_work_session_prompt: { untrustedOutput: false, sideEffecting: true },
+      ocw_work_session_read: { untrustedOutput: false, sideEffecting: false },
+      ocw_work_session_stop: { untrustedOutput: false, sideEffecting: true },
+    },
+    workZone,
+  };
+  const mention = (t: unknown) => ({
+    eventId: EVENT,
+    seq: 1,
+    type: "agent.mention.v1",
+    organizationId: "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f1a",
+    cellId: "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f1b",
+    agent: { id: AGENT, handle: "scout", displayName: "Scout" },
+    conversation: { id: "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f1c", kind: "channel", name: "billing" },
+    thread: { rootMessageId: MSG },
+    message: {
+      id: MSG,
+      text: "@scout fix the invoice test",
+      createdAt: "2026-11-09T10:00:00.000Z",
+      author: { kind: "user", id: ANA, displayName: "Ana" },
+      mentions: [],
+    },
+    threadHistory: [],
+    roster: [],
+    turn: t,
+  });
+
+  it("the limits, fast modes, refusal codes and sentences are the contracts'", async () => {
+    const { wz, m } = await load();
+    const c = wz as unknown as {
+      BOT_WORK_ZONE_LIMITS: Record<string, number>;
+      BotFastMode: { options: string[] };
+      BotWorkSessionRefusal: { options: string[] };
+      BotProfileInactiveReason: { options: string[] };
+      BOT_WORK_SESSION_SENTENCES: Record<string, string>;
+      BOT_WORK_SESSION_PROPOSED_SENTENCE: string;
+    };
+    expect({ ...m.BOT_WORK_ZONE_LIMITS }).toEqual({ ...c.BOT_WORK_ZONE_LIMITS });
+    expect([...m.BotFastMode.options]).toEqual([...c.BotFastMode.options]);
+    expect([...m.BotWorkSessionRefusal.options]).toEqual([...c.BotWorkSessionRefusal.options]);
+    expect([...m.BotProfileInactiveReason.options]).toEqual([...c.BotProfileInactiveReason.options]);
+    expect({ ...m.BOT_WORK_SESSION_SENTENCES }).toEqual({ ...c.BOT_WORK_SESSION_SENTENCES });
+    expect(m.BOT_WORK_SESSION_PROPOSED_SENTENCE).toBe(c.BOT_WORK_SESSION_PROPOSED_SENTENCE);
+  });
+
+  it("a turn with workZone parses identically in both copies, alone and inside a mention", async () => {
+    const { caps, wz, m } = await load();
+    const contract = caps.TurnContext.safeParse(offered);
+    expect(contract.success).toBe(true);
+    expect(m.TurnContext.parse(offered)).toEqual(contract.data);
+    expect(m.TurnContext.parse(offered)).toEqual(offered);
+    expect(m.AgentMentionEvent.parse(mention(offered)).turn).toEqual(offered);
+    const first = workZone.projects[0];
+    const session = workZone.sessions[0];
+    expectSameVerdicts(m.TurnWorkZone, wz.TurnWorkZone as Schema, [
+      workZone,
+      { ...workZone, runtime: "codex", defaultModel: null, fastMode: "off", sessions: [] },
+      { ...workZone, projects: Array.from({ length: 21 }, () => first) },
+      { ...workZone, sessions: Array.from({ length: 11 }, () => session) },
+      { ...workZone, maxMode: "bypassPermissions" },
+      { ...workZone, runtime: "opencode" },
+      { ...workZone, device: { ...workZone.device, name: "x".repeat(121) } },
+      { ...workZone, hostPath: "/Users/ana/billing-api" },
+    ]);
+  });
+
+  it("a 07.15 turn and EMPTY_TURN parse unchanged in the mirror (no workZone appears)", async () => {
+    const { caps, m } = await load();
+    expect(caps.TurnContext.safeParse(turn).success).toBe(true);
+    const parsed = m.TurnContext.parse(turn);
+    expect(parsed).toEqual(turn);
+    expect("workZone" in parsed).toBe(false);
+    expect(m.TurnContext.parse(m.EMPTY_TURN)).toEqual(m.EMPTY_TURN);
+  });
+
+  it("an invalid offer is refused by the contract; the mirror drops it and keeps the turn", async () => {
+    const { caps, m } = await load();
+    const projects = Array.from({ length: 21 }, () => workZone.projects[0]);
+    const bad = { ...offered, workZone: { ...workZone, projects } };
+    expect(caps.TurnContext.safeParse(bad).success).toBe(false);
+    const parsed = m.TurnContext.safeParse(bad);
+    expect(parsed.success).toBe(true);
+    expect(parsed.data?.workZone).toBeUndefined();
+    expect(parsed.data?.tools).toEqual(offered.tools);
+  });
+
+  it("the start request: the mirror accepts and refuses what the contract does (strict, never a device or a user)", async () => {
+    const { wz, m } = await load();
+    const base = { eventId: EVENT, agentId: AGENT, projectId: PROJECT, prompt: "Fix the invoice test" };
+    expectSameVerdicts(m.AgentChannelWorkSessionStart, wz.AgentChannelWorkSessionStart as Schema, [
+      base,
+      {
+        ...base,
+        model: "claude-opus-4-1",
+        effort: "high",
+        fastMode: true,
+        contextWindow: 200_000,
+        permissionMode: "fullAccess",
+      },
+      { ...base, prompt: "  padded  " },
+      { ...base, prompt: "   " },
+      { ...base, prompt: "x".repeat(50_000) },
+      { ...base, prompt: "x".repeat(50_001) },
+      { ...base, deviceId: DEVICE },
+      { ...base, userId: AGENT },
+      { ...base, visibility: "project" },
+      { ...base, worktree: false },
+      { ...base, audience: { kind: "owner" } },
+      { ...base, permissionMode: "bypassPermissions" },
+      { ...base, contextWindow: 999 },
+    ]);
+  });
+
+  it("the start answers parse identically in both copies", async () => {
+    const { wz, m } = await load();
+    const started = {
+      kind: "started",
+      workSessionId: SESSION,
+      status: "provisioning",
+      cardMessageId: CARD,
+      model: "claude-sonnet-4-5",
+      mode: "acceptEdits",
+      projectName: "billing-api",
+    };
+    const proposed = {
+      kind: "proposed",
+      approvalId: APPROVAL,
+      reason: "outside_content",
+      sentence: m.BOT_WORK_SESSION_PROPOSED_SENTENCE,
+    };
+    const refused = {
+      kind: "refused",
+      code: "setting_not_allowed",
+      sentence: m.BOT_WORK_SESSION_SENTENCES.setting_not_allowed,
+      field: "model",
+    };
+    const inactive = {
+      kind: "refused",
+      code: "profile_inactive",
+      sentence: m.BOT_WORK_SESSION_SENTENCES.profile_inactive,
+      reason: "no_consent",
+    };
+    const contract = wz.AgentChannelWorkSessionStartResponse as Schema;
+    for (const answer of [started, proposed, refused, inactive]) {
+      expect(contract.safeParse(answer).success).toBe(true);
+      expect(m.AgentChannelWorkSessionStartResponse.parse(answer)).toEqual(answer);
+    }
+    expectSameVerdicts(m.AgentChannelWorkSessionStartResponse, contract, [
+      started,
+      { ...started, cardMessageId: null, model: null },
+      { ...started, mode: "danger-full-access" },
+      { ...started, projectName: "x".repeat(201) },
+      proposed,
+      { ...proposed, sentence: "x".repeat(301) },
+      refused,
+      inactive,
+      { ...refused, sentence: "x".repeat(301) },
+    ]);
+  });
+
+  it("a refusal code from a newer API stays a string in the mirror (the sentence still reaches the model)", async () => {
+    const { wz, m } = await load();
+    const newer = { kind: "refused", code: "quota_moved", sentence: "Bot sessions are paused." };
+    expect((wz.AgentChannelWorkSessionStartResponse as Schema).safeParse(newer).success).toBe(false);
+    expect(m.AgentChannelWorkSessionStartResponse.parse(newer)).toEqual(newer);
+    expect(m.AgentChannelWorkSessionStartResponse.safeParse({ ...newer, code: "Not A Code" }).success).toBe(
+      false,
+    );
+  });
+});
