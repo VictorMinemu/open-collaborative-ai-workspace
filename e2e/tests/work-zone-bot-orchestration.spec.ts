@@ -235,10 +235,11 @@ async function expectFingerSized(target: Locator) {
 }
 
 /**
- * One screen of the journey (PD-20): axe in light and dark on `selector`, no sideways scroll in either theme, 44 px
- * targets under each of `touch` on phones; then `<name>-<width>` captured in light and dark.
+ * The invariants of one screen of the journey (PD-20): axe in light and dark on `selector`, no sideways scroll in
+ * either theme, 44 px targets under each of `touch` on phones. The screen's `0716-<screen>-<width>` capture (light and
+ * dark, `captureReview`) follows each call.
  */
-async function review(page: Page, name: string, selector: string, touch: Array<string | Locator> = []) {
+async function checkScreen(page: Page, name: string, selector: string, touch: Array<string | Locator> = []) {
   for (const theme of ["light", "dark"] as const) {
     await page.emulateMedia({ colorScheme: theme });
     await expectNoSeriousA11y(page, selector);
@@ -246,7 +247,6 @@ async function review(page: Page, name: string, selector: string, touch: Array<s
   }
   await page.emulateMedia({ colorScheme: "light" });
   for (const root of touch) await expectTouchTargets(page, root);
-  await captureReview(page, `${name}-${w}`);
 }
 
 // biome-ignore lint/correctness/noEmptyPattern: Playwright requires a destructured fixtures argument before testInfo
@@ -371,7 +371,8 @@ test("desktop: the admin saves Atlas's Work Zone profile in its sheet and allows
     });
     expect(saved?.projects.map((p) => p.id).sort()).toEqual([billingId, ledgerId].sort());
     await section.scrollIntoViewIfNeeded();
-    await review(s.page, "0716-profile", '[data-testid="work-zone-profile"]');
+    await checkScreen(s.page, "0716-profile", '[data-testid="work-zone-profile"]');
+    await captureReview(s.page, `0716-profile-${w}`);
 
     // Settings › Devices: the server is isolated; Atlas asks first; allow it, then its Full access checkbox.
     const { card, block } = await openDeviceBots(s.page);
@@ -388,7 +389,8 @@ test("desktop: the admin saves Atlas's Work Zone profile in its sheet and allows
     await expect(full).toBeChecked({ timeout: 15_000 });
     await expectProfileActive(admin, atlas.id);
     await block.scrollIntoViewIfNeeded();
-    await review(s.page, "0716-consent", '[data-testid="device-bot-consents"]');
+    await checkScreen(s.page, "0716-consent", '[data-testid="device-bot-consents"]');
+    await captureReview(s.page, `0716-consent-${w}`);
 
     // The sheet now says Active.
     const again = await openBotSheet(s.page, atlas.name);
@@ -415,17 +417,19 @@ test("phone: the bot's Work Zone section and the device's bot block are 44 px ta
     await expect(section.getByTestId("work-zone-status")).toContainText("Active", { timeout: 15_000 });
     await expect(section.getByTestId("work-zone-device")).toContainText(deviceName);
     await expectFingerSized(section.getByTestId("work-zone-save"));
-    await review(s.page, "0716-profile", '[data-testid="work-zone-profile"]', [
+    await checkScreen(s.page, "0716-profile", '[data-testid="work-zone-profile"]', [
       '[data-testid="work-zone-profile"]',
     ]);
+    await captureReview(s.page, `0716-profile-${w}`);
 
     const { block } = await openDeviceBots(s.page);
     const allowed = block.locator(`[data-testid="bot-consent-row"][data-agent-id="${atlas.id}"]`);
     await expect(allowed.getByTestId("bot-consent-full-access")).toBeChecked();
     await block.scrollIntoViewIfNeeded();
-    await review(s.page, "0716-consent", '[data-testid="device-bot-consents"]', [
+    await checkScreen(s.page, "0716-consent", '[data-testid="device-bot-consents"]', [
       '[data-testid="device-bot-consents"]',
     ]);
+    await captureReview(s.page, `0716-consent-${w}`);
   } finally {
     await s.context.close();
   }
@@ -481,7 +485,8 @@ test("Ana asks @Atlas in the channel: the live card, Open session and back, the 
     await expect(card.getByTestId("wz-live-step")).toContainText("Working", { timeout: 30_000 });
     await expect(card.getByTestId("wz-live-device")).toContainText(deviceName);
     await expect(card.getByTestId("wz-live-sub")).toContainText("Claude Code");
-    await review(page, "0716-card", THREAD, [card]);
+    await checkScreen(page, "0716-card", THREAD, [card]);
+    await captureReview(page, `0716-card-${w}`);
 
     // ---- Open session: the session page says where it came from
     await card.getByTestId("agent-card-open").click();
@@ -492,7 +497,8 @@ test("Ana asks @Atlas in the channel: the live card, Open session and back, the 
     await expect(back).toHaveAttribute("href", `/chat/${eng.id}?thread=${rootId}&m=${cardId}`);
     await expect(page.getByTestId("prompt-bubble").first()).toContainText(PROMPT, { timeout: 30_000 });
     await expectFingerSized(back);
-    await review(page, "0716-session-back", '[data-testid="session-header"]');
+    await checkScreen(page, "0716-session-back", '[data-testid="session-header"]');
+    await captureReview(page, `0716-session-back-${w}`);
 
     // ---- back to the thread, the card highlighted
     await back.click();
@@ -526,7 +532,8 @@ test("Ana asks @Atlas in the channel: the live card, Open session and back, the 
     });
     if (mobile) await page.keyboard.press("Escape");
     await reply.scrollIntoViewIfNeeded();
-    await review(page, "0716-reply", THREAD, [row.getByTestId("agent-card")]);
+    await checkScreen(page, "0716-reply", THREAD, [row.getByTestId("agent-card")]);
+    await captureReview(page, `0716-reply-${w}`);
   } finally {
     await ana.context.close();
   }
@@ -564,7 +571,8 @@ test("a Supervised session asks for an approval: the card says Approval and the 
     expect(cell.workSessionWakes.find((x) => x.workSessionId === sessionId)?.transition).toBe(
       "waiting_approval",
     );
-    await review(page, "0716-approval", THREAD, [card]);
+    await checkScreen(page, "0716-approval", THREAD, [card]);
+    await captureReview(page, `0716-approval-${w}`);
 
     // The bot never approves: the session still waits for a person, and the card still says so.
     await page.goto(`${BASE_URL}/work-zone/${sessionId}`);
@@ -615,7 +623,8 @@ test("after reading an attachment the bot only proposes: the notice on the card,
     const proposal = panel.getByTestId("agent-card").filter({ hasText: `Start a session in billing-${w}` });
     await expect(proposal).toBeVisible({ timeout: 20_000 });
     await expect(proposal.getByTestId("agent-card-notice")).toContainText(TAINTED_NOTICE);
-    await review(page, "0716-proposal", THREAD, [proposal]);
+    await checkScreen(page, "0716-proposal", THREAD, [proposal]);
+    await captureReview(page, `0716-proposal-${w}`);
 
     // Ana reviews and starts it: Supervised, in her name; its first prompt carries the outside-content chip.
     await page.goto(`${BASE_URL}/approvals/${approvalId}`);
