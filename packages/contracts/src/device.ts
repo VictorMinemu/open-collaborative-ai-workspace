@@ -7,6 +7,14 @@ import { RepoTeamProject } from "./work-projects";
 
 export const DevicePlatform = z.enum(["darwin", "linux", "win32"]);
 export type DevicePlatform = z.infer<typeof DevicePlatform>;
+/**
+ * How the daemon runs (07.16, D-03, PD-18): `service` = a headless daemon run by systemd or launchd (ADR-0033);
+ * `desktop` = supervised by the desktop app. Reported by the device only (`DeviceInfo.host` on the Device Link hello);
+ * no server or web route sets it. Lives here, not in `device-link.ts`, because `device-link.ts` imports this module.
+ */
+export const DeviceHostKind = z.enum(["desktop", "service"]);
+export type DeviceHostKind = z.infer<typeof DeviceHostKind>;
+
 export const DeviceStatus = z.enum(["online", "offline"]);
 export type DeviceStatus = z.infer<typeof DeviceStatus>;
 
@@ -44,6 +52,16 @@ export const Device = z.object({
   shared: z.boolean(),
   /** The device owner enabled full access on the device itself (reported by the daemon only, ADR-0012). */
   fullAccessOptIn: z.boolean(),
+  /**
+   * 07.16 (D-03, PD-18): how the daemon runs (`service` = headless systemd/launchd, `desktop` = desktop app); reported by
+   * the daemon only. null = not reported yet (older daemons); absent on older payloads.
+   */
+  hostKind: DeviceHostKind.nullable().optional(),
+  /**
+   * 07.16 (D-19): the device owner marked it an isolated server (reported by the daemon only; the API honours it only
+   * for `service` hosts). Absent = false.
+   */
+  isolatedServer: z.boolean().optional(),
   /** Cap for everyone when `shared` (and the floor for unlisted controllers, P-07). */
   shareMaxMode: PermissionMode,
   /** The caller's cap on this device (Plan 05 fills it). */
