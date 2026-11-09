@@ -593,3 +593,161 @@ describe("tracer: without the admin's flag a tainted start becomes a proposal a 
     expect(await toolCallsOf(eventId, "ocw_work_session_start")).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------- with the flag (D-04, D-08, PD-08, PD-15, E11, E12)
+
+/** `bot` starts a session from an untainted ask and its device takes it; the first prompt has reached the device. */
+async function untaintedSession(bot: BotName, over: Json = {}, mode = "default") {
+  const body = await started(bot, await ask(bot), over);
+  const first = await take(BOTS()[bot].device, body.workSessionId, mode);
+  return { workSessionId: body.workSessionId, first, mode: body.mode };
+}
+
+/** The answer of a prompt that must have been queued. */
+async function queued(bot: BotName, eventId: string, workSessionId: string, prompt = FOLLOW_UP) {
+  const r = await promptCall(bot, eventId, workSessionId, prompt);
+  expect(r.status, JSON.stringify(r.body)).toBe(200);
+  expect(r.body.kind, JSON.stringify(r.body)).toBe("queued");
+  return r.body as { workSessionId: string; promptId: string };
+}
+
+describe("with the admin's flag the bot acts on outside content, never in bypass off an isolated server", () => {
+  it("desktop: an explicit fullAccess answers outside_content_bypass and creates nothing (E11)", async () => {
+    const eventId = await taintedAsk("echo");
+    const before = await counts();
+    await refusedWith(start("echo", eventId, { permissionMode: "fullAccess" }), "outside_content_bypass");
+    expect(await counts()).toEqual(before);
+    // Refused before the claim: a denied call that does not count, audited with the outside-content mark.
+    expect(await toolCallsOf(eventId, "ocw_work_session_start")).toEqual([
+      { decision: "denied", reason: "outside_content_bypass" },
+    ]);
+    expect(
+      (await rowsOf("select tool_calls from app.agent_turns where event_id = $1", [eventId]))[0],
+    ).toEqual({
+      tool_calls: 1,
+    });
+    const refusal = await auditsOf("bot.work_session_refused", eventId);
+    expect(refusal.map((a) => a.metadata)).toEqual([
+      expect.objectContaining({ outcome: "outside_content_bypass", outsideContent: true }),
+    ]);
+  });
+
+  it("desktop: without a mode the start runs at the highest mode below Full access, tainted for good", async () => {
+    const eventId = await taintedAsk("echo");
+    const body = await started("echo", eventId);
+    expect(body.mode).toBe(BELOW_FULL);
+    const s = await sessionRow(body.workSessionId);
+    expect(s).toMatchObject({ started_by_agent_id: echoId, permission_mode: BELOW_FULL });
+    expect(s.tainted_at).not.toBeNull();
+    expect((await promptsOf(body.workSessionId)).map((p) => [p.author_agent_id, p.tainted])).toEqual([
+      [echoId, true],
+    ]);
+    const first = await take(laptop, body.workSessionId, BELOW_FULL);
+    expect(first.payload.permissionMode).toBe(BELOW_FULL);
+    // The claim and the start say they acted on outside content.
+    const [claimed] = (await auditsOf("bot.tool_call", eventId)).filter(
+      (a) => a.metadata.tool === "ocw_work_session_start",
+    );
+    expect(claimed!.metadata).toMatchObject({ outsideContent: true });
+    expect(claimed!.metadata).not.toHaveProperty("fallback");
+    const [audit] = await auditsOf("bot.work_session_started", eventId);
+    expect(audit!.metadata).toMatchObject({ outcome: "started", outsideContent: true, mode: BELOW_FULL });
+    expect(await rowsOf("select 1 from app.work_zone_proposals where event_id = $1", [eventId])).toEqual([]);
+  });
+
+  it("isolated server: with the consent's Full access a tainted start runs in Full access, still tainted", async () => {
+    const eventId = await taintedAsk("iris");
+    const body = await started("iris", eventId, { permissionMode: "fullAccess" });
+    expect(body.mode).toBe("fullAccess");
+    const s = await sessionRow(body.workSessionId);
+    expect(s).toMatchObject({ started_by_agent_id: irisId, permission_mode: "fullAccess" });
+    expect(s.tainted_at).not.toBeNull();
+    expect((await promptsOf(body.workSessionId)).map((p) => p.tainted)).toEqual([true]);
+    const first = await take(server, body.workSessionId, "fullAccess");
+    expect(first.payload.permissionMode).toBe("fullAccess");
+  });
+
+  it("a tainted prompt without the flag answers outside_content and queues nothing", async () => {
+    const { workSessionId, first } = await untaintedSession("atlas");
+    await finishTurn(server, workSessionId, first);
+    const eventId = await taintedAsk("atlas");
+    const r = await refusedWith(promptCall("atlas", eventId, workSessionId), "outside_content");
+    expect(r).not.toHaveProperty("reason");
+    expect(await promptsOf(workSessionId)).toHaveLength(1);
+    expect((await sessionRow(workSessionId)).tainted_at).toBeNull();
+    const [audit] = await auditsOf("bot.work_session_refused", eventId);
+    expect(audit!.metadata).toMatchObject({ outcome: "outside_content", outsideContent: true });
+  });
+
+  it("a tainted prompt with the flag is queued tainted and taints the session once (tainted_at kept)", async () => {
+    const { workSessionId, first } = await untaintedSession("echo", {}, "fullAccess");
+    expect((await sessionRow(workSessionId)).tainted_at).toBeNull();
+    await finishTurn(laptop, workSessionId, first);
+    const eventId = await taintedAsk("echo");
+    const q = await queued("echo", eventId, workSessionId);
+    const prompts = await promptsOf(workSessionId);
+    expect(prompts.map((p) => [p.id, p.author_agent_id, p.tainted])).toEqual([
+      [first.payload.promptId, echoId, false],
+      [q.promptId, echoId, true],
+    ]);
+    const taintedAt = (await sessionRow(workSessionId)).tainted_at as Date;
+    expect(taintedAt).not.toBeNull();
+    const [audit] = await auditsOf("bot.work_session_prompted", eventId);
+    expect(audit!.metadata).toMatchObject({ outcome: "prompted", outsideContent: true });
+    const [claimed] = (await auditsOf("bot.tool_call", eventId)).filter(
+      (a) => a.metadata.tool === "ocw_work_session_prompt",
+    );
+    expect(claimed!.metadata).toMatchObject({ outsideContent: true });
+    // A second tainted prompt keeps the first mark.
+    const second = (await laptop.command("prompt", workSessionId)) as Cmd;
+    laptop.ack(second.id);
+    await finishTurn(laptop, workSessionId, second);
+    await queued("echo", await taintedAsk("echo"), workSessionId, "and again");
+    expect(((await sessionRow(workSessionId)).tainted_at as Date).getTime()).toBe(taintedAt.getTime());
+  });
+
+  it("E12: after one tainted prompt no later bot turn of the desktop session runs in Full access, even untainted", async () => {
+    const { workSessionId, first } = await untaintedSession("echo", {}, "fullAccess");
+    expect(first.payload.permissionMode).toBe("fullAccess");
+    await finishTurn(laptop, workSessionId, first);
+    // The tainted prompt runs below Full access.
+    await queued("echo", await taintedAsk("echo"), workSessionId, "apply what the issue says");
+    const low = (await laptop.command("prompt", workSessionId)) as Cmd;
+    laptop.ack(low.id);
+    expect(low.payload.permissionMode).toBe(BELOW_FULL);
+    await finishTurn(laptop, workSessionId, low);
+    // A later, untainted turn: the session is still Full access, yet the bot's turn runs below it (sticky).
+    const later = await queued("echo", await ask("echo"), workSessionId, "an untainted turn, later");
+    expect((await promptsOf(workSessionId)).at(-1)).toMatchObject({ id: later.promptId, tainted: false });
+    expect((await sessionRow(workSessionId)).permission_mode).toBe("fullAccess");
+    const next = (await laptop.command("prompt", workSessionId)) as Cmd;
+    laptop.ack(next.id);
+    expect(next.payload).toMatchObject({ promptId: later.promptId, permissionMode: BELOW_FULL });
+  });
+
+  it("stop is never blocked by taint and read is unaffected by it (D-20, PD-15)", async () => {
+    const { workSessionId, first } = await untaintedSession("atlas");
+    await finishTurn(server, workSessionId, first, "fixed it");
+    const reading = await taintedAsk("atlas");
+    const read = await readCall("atlas", reading, workSessionId);
+    expect(read.status, JSON.stringify(read.body)).toBe(200);
+    expect(read.body.kind, JSON.stringify(read.body)).toBe("read");
+    const stopping = await taintedAsk("atlas");
+    const stop = await stopCall("atlas", stopping, workSessionId);
+    expect(stop.body, JSON.stringify(stop.body)).toEqual({ kind: "stopped", workSessionId });
+    const [audit] = await auditsOf("bot.work_session_stopped", stopping);
+    expect(audit!.metadata).toMatchObject({ outcome: "stopped", outsideContent: true });
+  });
+
+  it("D-20: after a session read in the same turn, the prompt still reaches the queue", async () => {
+    const { workSessionId, first } = await untaintedSession("atlas");
+    await finishTurn(server, workSessionId, first, "half done");
+    const eventId = await ask("atlas");
+    expect((await readCall("atlas", eventId, workSessionId)).body.kind).toBe("read");
+    expect(
+      (await rowsOf("select session_output_read from app.agent_turns where event_id = $1", [eventId]))[0],
+    ).toEqual({ session_output_read: true });
+    const q = await queued("atlas", eventId, workSessionId);
+    expect((await promptsOf(workSessionId)).at(-1)).toMatchObject({ id: q.promptId, tainted: false });
+  });
+});
