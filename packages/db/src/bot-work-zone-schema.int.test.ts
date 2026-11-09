@@ -246,7 +246,7 @@ describe("bot Work Zone schema (07.16, D-01, D-03, D-06, D-15, D-16)", () => {
       [{ wakes_per_session_day: 101 }, "bot_work_zone_profiles_wakes_per_session_day_ck"],
       [{ runtime: "gemini" }, "bot_work_zone_profiles_runtime_ck"],
       [{ max_mode: "yolo" }, "bot_work_zone_profiles_max_mode_ck"],
-      [{ default_mode: "bypassPermissions" }, "bot_work_zone_profiles_default_mode_ck"],
+      [{ default_mode: "dontAsk" }, "bot_work_zone_profiles_default_mode_ck"],
       [{ fast_mode: "sometimes" }, "bot_work_zone_profiles_fast_mode_ck"],
     ];
     for (const [cols, constraint] of cases) {
