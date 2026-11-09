@@ -101,8 +101,13 @@ function modelControl(m: RuntimeModel, runtime: RuntimeId, ctx: ControlsContext)
   const exposed = exposedFor(ctx, runtime);
   const confirmed = (uiKey: string, option: ControlOption): ControlOption =>
     option.available && !exposed(uiKey) ? no("not_confirmed") : option;
+  // 07.16 PD-07: a bot's profile sets are the last check, so the member's, the runtime's and the inventory's own
+  // reasons are reported first; absent agent = no change.
+  const agent = ctx.agent;
+  const inProfile = (option: ControlOption, allows: (a: AgentControlsLayer) => boolean): ControlOption =>
+    option.available && agent && !allows(agent) ? no("bot_profile") : option;
   return {
-    ...base,
+    ...inProfile(base, (a) => a.models.includes(m.id)),
     id: m.id,
     displayName: m.displayName,
     description: m.description,
@@ -111,23 +116,32 @@ function modelControl(m: RuntimeModel, runtime: RuntimeId, ctx: ControlsContext)
     isDefault: m.isDefault,
     badge: m.badge,
     efforts: m.efforts.map((e) => ({
-      ...(maxEffort !== null && effortRank(e.value) > effortRank(maxEffort)
-        ? no("org_policy")
-        : DEFERRED_EFFORTS.includes(e.value)
-          ? no("not_confirmed", "Deferred to the multi-agent phase")
-          : confirmed("effort", OK)),
+      ...inProfile(
+        maxEffort !== null && effortRank(e.value) > effortRank(maxEffort)
+          ? no("org_policy")
+          : DEFERRED_EFFORTS.includes(e.value)
+            ? no("not_confirmed", "Deferred to the multi-agent phase")
+            : confirmed("effort", OK),
+        (a) => a.efforts.includes(e.value),
+      ),
       value: e.value,
       description: e.description,
     })),
     defaultEffort: m.defaultEffort,
-    contextWindows: m.contextWindows.map((value) => ({ ...confirmed("context.window", OK), value })),
+    contextWindows: m.contextWindows.map((value) => ({
+      ...inProfile(confirmed("context.window", OK), (a) => a.contextWindows.includes(value)),
+      value,
+    })),
     defaultContextWindow: m.defaultContextWindow,
     fastMode: {
-      ...(!ctx.policy.allowFastMode
-        ? no("org_policy")
-        : m.fastMode.supported
-          ? confirmed("fast.mode", OK)
-          : no("runtime", m.fastMode.reason)),
+      ...inProfile(
+        !ctx.policy.allowFastMode
+          ? no("org_policy")
+          : m.fastMode.supported
+            ? confirmed("fast.mode", OK)
+            : no("runtime", m.fastMode.reason),
+        (a) => a.fastMode !== "off",
+      ),
       supported: m.fastMode.supported,
     },
     supportsAutoMode: m.supportsAutoMode,
