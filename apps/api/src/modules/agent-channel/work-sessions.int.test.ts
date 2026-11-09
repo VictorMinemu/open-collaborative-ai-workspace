@@ -1,11 +1,15 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   AgentCard,
   AgentChannelWorkSessionStartResponse,
   BOT_WORK_SESSION_SENTENCES,
   type BotWorkZoneProfileInput,
+  BUILTIN_TOOLS,
+  type TurnToolFlags,
   WORK_SESSION_CARD_LABELS,
 } from "@ocw/contracts";
+import { agentTurns, type Tx } from "@ocw/db";
+import { eq } from "drizzle-orm";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -22,6 +26,7 @@ import {
   pairDevice,
   startSession,
 } from "../../testing-workzone";
+import { claimToolCall } from "./claim";
 
 /**
  * Phase 07.16-15 (D-01 … D-08, D-12, D-14, D-15, D-20; PD-03, PD-08 … PD-12, PD-15, PD-21; BWZ-01, BWZ-02, BWZ-04,
@@ -180,8 +185,14 @@ async function quiesce() {
   );
 }
 
+/** Every API log line (LOG_LEVEL debug): the leak sweep reads them. */
+const logs: string[] = [];
+
 beforeAll(async () => {
-  stack = await startTestStack({ env: { OCW_CELL_TOKEN: CELL_TOKEN, OCW_MODEL_PROVIDER: "mock" } });
+  stack = await startTestStack({
+    env: { OCW_CELL_TOKEN: CELL_TOKEN, OCW_MODEL_PROVIDER: "mock", LOG_LEVEL: "debug" },
+    logStream: { write: (line: string) => void logs.push(line) },
+  });
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
   victor = new TestClient(stack.baseUrl);
@@ -594,5 +605,221 @@ describe("the audience is the server's: readers of the conversation ∩ people o
       expect(r.status, JSON.stringify(extra)).toBe(400);
     }
     expect(await rowsOf("select 1 from app.agent_tool_calls where event_id = $1", [eventId])).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------- outside content and session output (D-08, D-20)
+
+const SIDE: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
+const READ_ONLY: TurnToolFlags = { untrustedOutput: false, sideEffecting: false };
+const CELL = { organizationId: "", cellId: "test", credentialId: "env", source: "env" as const };
+
+/** `claimToolCall` on `eventId`'s turn, as the turn's human (what the routes do), with `opts`. */
+async function claimOn(
+  eventId: string,
+  tool: string,
+  flags: TurnToolFlags,
+  opts: { outsideContent?: boolean; sessionOutputExempt?: boolean; grantApprovalId?: string } = {},
+) {
+  return stack.built.core.db.withTenant({ organizationId: orgId, userId: anaId }, async (tx: Tx) => {
+    const [turn] = await tx.select().from(agentTurns).where(eq(agentTurns.eventId, eventId));
+    return claimToolCall(tx, stack.built.core, {
+      cell: { ...CELL, organizationId: orgId },
+      turn: turn!,
+      tool,
+      flags,
+      web: false,
+      sourceKind: "builtin",
+      sourceId: null,
+      target: null,
+      reason: null,
+      metadata: { eventId },
+      ...opts,
+    });
+  });
+}
+
+const toolAudit = async (eventId: string, tool: string) =>
+  (
+    await rowsOf(
+      "select result, metadata from app.audit_events where action = 'bot.tool_call' and metadata->>'eventId' = $1 and metadata->>'tool' = $2 order by occurred_at",
+      [eventId, tool],
+    )
+  ).at(-1);
+
+const turnRow = async (eventId: string) =>
+  (
+    await rowsOf("select tool_calls, tainted, session_output_read from app.agent_turns where event_id = $1", [
+      eventId,
+    ])
+  )[0]!;
+
+describe("the claim's outside-content and session-output options (D-08, D-20, PD-15)", () => {
+  it("outsideContent claims a side-effecting call on a tainted turn and audits outsideContent: true; without it, tainted", async () => {
+    const eventId = await askAtlas();
+    await su.query("update app.agent_turns set tainted = true where event_id = $1", [eventId]);
+    const refusedClaim = await claimOn(eventId, "ocw_board_move", SIDE);
+    expect(refusedClaim).toMatchObject({ allowed: false, reason: "tainted" });
+    const allowed = await claimOn(eventId, "ocw_board_move", SIDE, { outsideContent: true });
+    expect(allowed).toMatchObject({ allowed: true, reason: null });
+    expect((await toolAudit(eventId, "ocw_board_move"))!.metadata).toMatchObject({ outsideContent: true });
+  });
+
+  it("after a session read every other side-effecting call is refused tainted, prompt and stop are exempt", async () => {
+    const eventId = await askAtlas();
+    await su.query("update app.agent_turns set session_output_read = true where event_id = $1", [eventId]);
+    expect(await claimOn(eventId, BUILTIN_TOOLS.memorySave, SIDE)).toMatchObject({
+      allowed: false,
+      reason: "tainted",
+    });
+    expect(
+      await claimOn(eventId, BUILTIN_TOOLS.workSessionPrompt, SIDE, { sessionOutputExempt: true }),
+    ).toMatchObject({ allowed: true });
+    // A read-only call is not a side effect: unaffected.
+    expect(await claimOn(eventId, BUILTIN_TOOLS.workZoneProjects, READ_ONLY)).toMatchObject({
+      allowed: true,
+    });
+    // A person's one-use grant lifts it exactly as it lifts the taint (ADR-0026).
+    expect(
+      await claimOn(eventId, BUILTIN_TOOLS.memorySave, SIDE, { grantApprovalId: randomUUID() }),
+    ).toMatchObject({ allowed: true });
+    // The turn's own taint is untouched: only the session-output flag refuses.
+    expect(await turnRow(eventId)).toMatchObject({ tainted: false, session_output_read: true });
+  });
+
+  it("a start on a turn that read a session's output answers session_output, recorded without counting the call", async () => {
+    const eventId = await askAtlas();
+    await su.query("update app.agent_turns set session_output_read = true where event_id = $1", [eventId]);
+    const before = await counts();
+    await refused(eventId, "session_output");
+    expect(await counts()).toEqual(before);
+    expect((await turnRow(eventId)).tool_calls).toBe(0);
+    expect(
+      await rowsOf("select decision, reason from app.agent_tool_calls where event_id = $1", [eventId]),
+    ).toEqual([{ decision: "denied", reason: "session_output" }]);
+    const audit = await auditsOf("bot.work_session_refused", eventId);
+    expect(audit.map((a) => a.metadata.outcome)).toEqual(["session_output"]);
+  });
+
+  it("a start on a tainted turn answers outside_content (the proposal fallback is 07.16-19's)", async () => {
+    const eventId = await askAtlas();
+    await su.query("update app.agent_turns set tainted = true where event_id = $1", [eventId]);
+    const before = await counts();
+    await refused(eventId, "outside_content");
+    expect(await counts()).toEqual(before);
+    const audit = await auditsOf("bot.work_session_refused", eventId);
+    expect(audit.map((a) => a.metadata.outcome)).toEqual(["outside_content"]);
+  });
+});
+
+// ---------------------------------------------------------------- tenant and identity (D-14, E15)
+
+describe("tenant and identity: a start only for a live turn of this bot in this organization", () => {
+  let tokenB: string;
+
+  beforeAll(async () => {
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+      orgB,
+      `evil-${orgB}`,
+    ]);
+    tokenB = `ocw_cell_${randomUUID()}${randomUUID()}`;
+    await su.query(
+      "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
+      [orgB, createHash("sha256").update(tokenB).digest("hex")],
+    );
+  });
+
+  const expectUnknown = async (r: { status: number; body: Json }, eventId: string) => {
+    expect(r.status, JSON.stringify(r.body)).toBe(404);
+    expect(r.body.error.code).toBe("unknown_turn");
+    expect(await rowsOf("select 1 from app.agent_tool_calls where event_id = $1", [eventId])).toEqual([]);
+    expect(await rowsOf("select 1 from app.bot_work_sessions where origin_event_id = $1", [eventId])).toEqual(
+      [],
+    );
+  };
+
+  it("organization B's cell token with organization A's event → 404 unknown_turn, nothing claimed or started", async () => {
+    const eventId = await askAtlas();
+    await expectUnknown(await start(eventId, {}, tokenB), eventId);
+  });
+
+  it("another bot's event → 404 unknown_turn", async () => {
+    const eventId = await freshBotTurn(su, ana, engId, `@echo please look ${randomUUID().slice(0, 6)}`);
+    await expectUnknown(await start(eventId), eventId);
+  });
+
+  it("a turn whose asker no longer reads the conversation → 404 unknown_turn", async () => {
+    const opsId = await channel(`ops-${randomUUID().slice(0, 4)}`, [atlasId], [anaId], "private");
+    const eventId = await askAtlas(ana, opsId);
+    await su.query("delete from app.conversation_members where conversation_id = $1 and member_id = $2", [
+      opsId,
+      anaId,
+    ]);
+    await expectUnknown(await start(eventId), eventId);
+  });
+
+  it("a profile deleted after delivery → profile_inactive; a disabled bot → profile_inactive with its reason", async () => {
+    const eventId = await askAtlas();
+    await ok(victor.request("DELETE", `/api/v1/agents/${atlasId}/work-zone-profile`));
+    try {
+      const r = await refused(eventId, "profile_inactive");
+      expect(r).not.toHaveProperty("reason");
+    } finally {
+      await saveProfile();
+    }
+    const again = await askAtlas();
+    await su.query("update app.agents set status = 'disabled' where id = $1", [atlasId]);
+    try {
+      const r = await start(again);
+      expect(r.body).toMatchObject({ kind: "refused", code: "profile_inactive", reason: "bot_disabled" });
+      expect(r.body.sentence).toContain(BOT_WORK_SESSION_SENTENCES.profile_inactive);
+    } finally {
+      await su.query("update app.agents set status = 'ready' where id = $1", [atlasId]);
+    }
+  });
+});
+
+// ---------------------------------------------------------------- leak sweep (D-14, PD-21, P1)
+
+describe("the prompt is in no record: audit, tool calls, the card or a log line (P1)", () => {
+  it("a prompt holding OCW-MARKER-0716-start is stored only as the prompt", async () => {
+    const MARKER = "OCW-MARKER-0716-start";
+    const eventId = await askAtlas();
+    const body = await started(eventId, { prompt: `please ${MARKER} fix it` });
+    const [prompt] = await rowsOf("select body from app.work_prompts where work_session_id = $1", [
+      body.workSessionId,
+    ]);
+    expect(prompt!.body).toContain(MARKER);
+    const like = `%${MARKER}%`;
+    expect(
+      await rowsOf("select action from app.audit_events where to_jsonb(audit_events)::text like $1", [like]),
+    ).toEqual([]);
+    expect(
+      await rowsOf("select id from app.agent_tool_calls where to_jsonb(agent_tool_calls)::text like $1", [
+        like,
+      ]),
+    ).toEqual([]);
+    expect(
+      await rowsOf("select id from app.messages where id = $1 and to_jsonb(messages)::text like $2", [
+        body.cardMessageId,
+        like,
+      ]),
+    ).toEqual([]);
+    expect(
+      await rowsOf(
+        "select 1 from app.message_cards where message_id = $1 and to_jsonb(message_cards)::text like $2",
+        [body.cardMessageId, like],
+      ),
+    ).toEqual([]);
+    expect(
+      await rowsOf("select 1 from app.bot_work_sessions where to_jsonb(bot_work_sessions)::text like $1", [
+        like,
+      ]),
+    ).toEqual([]);
+    const card = await ok(ana.request("GET", `/api/v1/cards/${body.cardMessageId}`));
+    expect(JSON.stringify(card)).not.toContain(MARKER);
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs.filter((l) => l.includes(MARKER))).toEqual([]);
   });
 });
