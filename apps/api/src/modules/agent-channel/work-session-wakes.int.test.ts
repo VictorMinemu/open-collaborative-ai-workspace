@@ -605,6 +605,49 @@ describe("bounded and idempotent: one pending wake, one wake per state, a daily 
     expect(await botRowOf(s.workSessionId)).toMatchObject({ wakes_used: 1, last_woken_status: "failed" });
   });
 
+  it("a later approval inside the same prompt wakes Atlas again (keyed on the newest approval), once per approval", async () => {
+    const s = await botSession();
+    await drainWakes();
+    const first = randomUUID();
+    server.emitApproval(s.workSessionId, { approvalId: first, tool: "Bash", paths: ["scripts/test.sh"] });
+    await settle(s.workSessionId, "waiting_approval");
+    // The runtime's first request is decided on the device; the same prompt keeps running and asks again.
+    server.event(s.workSessionId, { type: "approval.resolved", approvalId: first, decision: "once" });
+    await settle(s.workSessionId, "running");
+    const second = randomUUID();
+    server.emitApproval(s.workSessionId, { approvalId: second, tool: "Edit", paths: ["src/invoice.ts"] });
+    expect(await settle(s.workSessionId, "waiting_approval")).toBe(1);
+
+    const wakes = await wakesOf(s.workSessionId);
+    expect(wakes.map((w) => w.workSession.transition)).toEqual(["waiting_approval", "waiting_approval"]);
+    expect(wakes[1]!.workSession.summary).toContain("Edit");
+    expect((wakes[1]!.workSession.deciders as Json[])[0]).toMatchObject({ id: victorId });
+    expect((await botRowOf(s.workSessionId)).wakes_used).toBe(2);
+
+    // The same approval never wakes twice, whatever re-runs (the debounce and the budget are unchanged).
+    await core().db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+      core().jobs.sendInTx(tx, QUEUE, { organizationId: orgId, workSessionId: s.workSessionId }),
+    );
+    expect(await drainWakes()).toBe(1);
+    expect(await wakesOf(s.workSessionId)).toHaveLength(2);
+    expect(await auditsFor("bot.work_session_woken", s.workSessionId)).toHaveLength(2);
+
+    // Once decided, the prompt finishes and the finished turn still wakes as before.
+    server.event(s.workSessionId, { type: "approval.resolved", approvalId: second, decision: "once" });
+    await settle(s.workSessionId, "running");
+    await finishTurn(s.workSessionId, s.first);
+    await settle(s.workSessionId, "idle");
+    expect((await wakesOf(s.workSessionId)).map((w) => w.workSession.transition)).toEqual([
+      "waiting_approval",
+      "waiting_approval",
+      "turn_done",
+    ]);
+    expect(await botRowOf(s.workSessionId)).toMatchObject({
+      last_woken_status: "idle",
+      last_woken_prompt_id: s.first.payload.promptId,
+    });
+  });
+
   it("E7: at the profile's daily budget the next wake is skipped with a card notice; the next day it resets", async () => {
     await su.query("update app.bot_work_zone_profiles set wakes_per_session_day = 2 where agent_id = $1", [
       atlasId,
