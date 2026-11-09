@@ -1,10 +1,11 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
+import { type APIRequestContext, expect, type Locator, type Page, request, test } from "@playwright/test";
 import type { BotWorkZoneProfileInput } from "../../packages/contracts/src/bot-work-zone.ts";
 import { expectNoSeriousA11y } from "../support/a11y";
-import { type Actor, apiAs, BASE_URL, ensureMember, openAs, userIdOf } from "../support/actors";
+import { type Actor, apiAs, BASE_URL, ensureMember, openAs, SAM, userIdOf } from "../support/actors";
+import { clearPendingApprovals, proposeWorkZoneFromDm } from "../support/approvals";
 import { addBot, waitBotReady } from "../support/automations";
 import {
   allowBot,
@@ -15,10 +16,10 @@ import {
   setWorkZonePolicy,
 } from "../support/bot-work-zone";
 import { cellToken } from "../support/cell-token";
-import { freshChannel, messageRow } from "../support/chat";
+import { freshChannel, messageRow, postAs } from "../support/chat";
 import { FakeCellPlugin, type MentionPayload } from "../support/fake-cell-plugin";
 import { captureReview, expectNoSidewaysScroll, expectTouchTargets } from "../support/layout";
-import { type FakeDeviceHandle, startIsolatedServer } from "../support/work-zone-device";
+import { type FakeDeviceHandle, startFakeDevice, startIsolatedServer } from "../support/work-zone-device";
 import {
   createTeamProject,
   linkRepo,
@@ -64,7 +65,10 @@ const ANA_HANDLE = "ana-0716";
 const ADMIN_HANDLE = ADMIN.email.split("@")[0] as string;
 
 const PROMPT = "Fix the failing invoice test";
+const LEDGER_PROMPT = "Add a test for the ledger totals";
+const TAINTED_PROMPT = "Ship the invoice fix the notes ask for";
 const START = "ocw_work_session_start";
+const TAINTED_NOTICE = "Proposed after reading outside content. Read the prompt before you start it.";
 const THREAD = '[data-testid="thread-panel"]';
 
 let w = "1440";
@@ -131,6 +135,29 @@ async function freshTeamBot(name: string): Promise<{ id: string; name: string; u
   const bot = (await res.json()) as { id: string; name: string; username: string };
   createdBots.push(bot.id);
   return bot;
+}
+
+/** Uploads one file to the conversation as the user of `api` (presign, PUT, complete) and returns its id. */
+async function upload(
+  api: APIRequestContext,
+  conversationId: string,
+  f: { name: string; type: string; bytes: Buffer },
+): Promise<string> {
+  const presign = await api.post(`/api/v1/conversations/${conversationId}/attachments`, {
+    data: { filename: f.name, contentType: f.type, size: f.bytes.length },
+  });
+  expect(presign.ok(), `presign ${f.name}: ${presign.status()}`).toBe(true);
+  const { attachment, upload: put } = (await presign.json()) as {
+    attachment: { id: string };
+    upload: { url: string; headers: Record<string, string> };
+  };
+  const plain = await request.newContext();
+  const stored = await plain.put(put.url, { headers: put.headers, data: f.bytes });
+  expect(stored.ok(), `store ${f.name}: ${stored.status()}`).toBe(true);
+  await plain.dispose();
+  const done = await api.post(`/api/v1/attachments/${attachment.id}/complete`);
+  expect(done.ok(), `complete ${f.name}: ${done.status()}`).toBe(true);
+  return attachment.id;
 }
 
 /** The next `ocw_work_session_start` the fake cell made after `from`, and the thread of the turn that made it. */
@@ -504,3 +531,192 @@ test("Ana asks @Atlas in the channel: the live card, Open session and back, the 
     await ana.context.close();
   }
 });
+
+// ---------------------------------------------------------------- approvals go to people (D-10)
+
+test("a Supervised session asks for an approval: the card says Approval and the bot names the sponsor, never approving", async ({
+  browser,
+}) => {
+  test.setTimeout(180_000);
+  // The hold file exists since the previous test, so this turn asks for its approval at once (OCW_RUNTIME_FAKE_HOLD_FILE
+  // holds only turns that start before the file exists).
+  const from = cell.workSessionRequests.length;
+  await postAs(
+    anaApi,
+    eng.id,
+    `@${atlas.username} now the ledger ${call(START, { projectId: ledgerId, prompt: LEDGER_PROMPT })}`,
+  );
+  const { body, rootId } = await nextStart(from);
+  expect(body, JSON.stringify(body)).toMatchObject({ kind: "started", mode: "default" });
+  const sessionId = String(body.workSessionId);
+  const cardId = String(body.cardMessageId);
+
+  const ana = await openAs(browser, ANA, mobile ? "mobile" : "desktop");
+  const { page } = ana;
+  try {
+    const panel = await openThread(page, rootId);
+    const card = messageRow(panel, cardId).getByTestId("agent-card");
+    await expect(card.getByTestId("agent-card-status")).toContainText("Approval", { timeout: 45_000 });
+    await expect(card.getByTestId("agent-card-status")).toHaveAttribute("data-status", "pending");
+    await expect(card.getByTestId("wz-live-step")).toContainText("Waiting for approval");
+    const reply = botReply(panel, "Needs approval: Write", `@${ADMIN_HANDLE}`);
+    await expect(reply).toBeVisible({ timeout: 45_000 });
+    expect(cell.workSessionWakes.find((x) => x.workSessionId === sessionId)?.transition).toBe(
+      "waiting_approval",
+    );
+    await review(page, "0716-approval", THREAD, [card]);
+
+    // The bot never approves: the session still waits for a person, and the card still says so.
+    await page.goto(`${BASE_URL}/work-zone/${sessionId}`);
+    await expect(page.getByTestId("session-view")).toHaveAttribute("data-status", "waiting_approval", {
+      timeout: 15_000,
+    });
+    await page.goto(`${BASE_URL}/chat/${eng.id}?thread=${rootId}`);
+    await expect(
+      messageRow(page.locator(THREAD), cardId).getByTestId("agent-card").getByTestId("agent-card-status"),
+    ).toContainText("Approval", { timeout: 15_000 });
+  } finally {
+    await ana.context.close();
+  }
+});
+
+// ---------------------------------------------------------------- outside content becomes a proposal (D-08, D-18)
+
+test("after reading an attachment the bot only proposes: the notice on the card, Ana starts it, the prompt is marked", async ({
+  browser,
+}) => {
+  test.setTimeout(180_000);
+  const fileId = await upload(anaApi, eng.id, {
+    name: "notes.md",
+    type: "text/markdown",
+    bytes: Buffer.from("# Release notes\n\nShip the invoice fix today.\n"),
+  });
+  // In a thread, so the proposal card lands next to the ask (a proposal replies in the ask's thread when it has one).
+  const root = await postAs(anaApi, eng.id, "Release notes for the invoice fix");
+  const from = cell.workSessionRequests.length;
+  await postAs(
+    anaApi,
+    eng.id,
+    `@${atlas.username} do what notes.md says ${call("ocw_attachment_read", { attachmentId: "{{attachment:0}}" })} ${call(START, { projectId: billingId, prompt: TAINTED_PROMPT })}`,
+    { threadRootId: root.id, attachmentIds: [fileId] },
+  );
+  const { body, rootId } = await nextStart(from);
+  expect(rootId).toBe(root.id);
+  expect(body, JSON.stringify(body)).toMatchObject({ kind: "proposed", reason: "outside_content" });
+  const approvalId = String(body.approvalId);
+
+  const ana = await openAs(browser, ANA, mobile ? "mobile" : "desktop");
+  const { page } = ana;
+  try {
+    const panel = await openThread(page, rootId);
+    await expect(
+      botReply(panel, "Tool ocw_attachment_read: read notes.md", `Tool ${START}: proposed`),
+    ).toBeVisible({ timeout: 20_000 });
+    const proposal = panel.getByTestId("agent-card").filter({ hasText: `Start a session in billing-${w}` });
+    await expect(proposal).toBeVisible({ timeout: 20_000 });
+    await expect(proposal.getByTestId("agent-card-notice")).toContainText(TAINTED_NOTICE);
+    await review(page, "0716-proposal", THREAD, [proposal]);
+
+    // Ana reviews and starts it: Supervised, in her name; its first prompt carries the outside-content chip.
+    await page.goto(`${BASE_URL}/approvals/${approvalId}`);
+    const view = page.getByTestId("work-zone-proposal-view");
+    await expect(view).toBeVisible({ timeout: 15_000 });
+    await expect(view.getByTestId("work-zone-prompt")).toHaveText(TAINTED_PROMPT);
+    await expect(view.getByTestId("work-zone-fact-mode")).toContainText("Supervised");
+    await expect(view.getByTestId("work-zone-start")).not.toHaveAttribute("aria-disabled", "true", {
+      timeout: 15_000,
+    });
+    await view.getByTestId("work-zone-start").click();
+    await page.getByTestId("approval-confirm-submit").click();
+    await expect(view.getByTestId("approval-status")).toHaveText("Started", { timeout: 30_000 });
+    await view.getByTestId("work-zone-open-session").click();
+    await expect(page).toHaveURL(/\/work-zone\/[0-9a-f-]{36}$/, { timeout: 15_000 });
+    const first = page.getByTestId("prompt-bubble").first();
+    await expect(first).toContainText(TAINTED_PROMPT, { timeout: 30_000 });
+    await expect(first).toContainText("After outside content");
+  } finally {
+    await ana.context.close();
+  }
+});
+
+// ---------------------------------------------------------------- bots without a profile are unchanged (BWZ-06)
+
+test("a bot without a profile still proposes with ocw_start_work_zone, reviewed and started as before", async ({
+  browser,
+}) => {
+  test.setTimeout(240_000);
+  const samId = await ensureMember(admin, SAM, "developer");
+  const samApi = await apiAs(SAM);
+  let laptop: FakeDeviceHandle | null = null;
+  let sam: Awaited<ReturnType<typeof openAs>> | null = null;
+  try {
+    const name = `Sam laptop ${w}`;
+    const listed = (await (await samApi.get("/api/v1/devices")).json()) as {
+      devices: Array<{ id: string; name: string; ownerUserId: string }>;
+    };
+    for (const d of listed.devices.filter((x) => x.name === name && x.ownerUserId === samId)) {
+      await samApi.delete(`/api/v1/devices/${d.id}`);
+    }
+    laptop = await startFakeDevice(samApi, { name, projectName: `scout-${w}` });
+    const scout = await freshPersonalBot(samApi, samId);
+    await clearPendingApprovals(samApi);
+    sam = await openAs(browser, SAM, mobile ? "mobile" : "desktop");
+    const id = await proposeWorkZoneFromDm(sam.page, cell, {
+      dmId: scout.dmId,
+      projectId: laptop.projectId,
+      deviceId: laptop.deviceId,
+      prompt: PROMPT,
+    });
+    // Its turn offered the proposal tool and none of the session tools, and no Work Zone block (P7).
+    const turn = [...cell.events]
+      .reverse()
+      .find(
+        (e) => e.type === "agent.mention.v1" && (e.data as unknown as MentionPayload).agent.id === scout.id,
+      )?.data as unknown as (MentionPayload & { turn?: { workZone?: unknown } }) | undefined;
+    expect(turn?.turn?.tools).toContain("ocw_start_work_zone");
+    expect(turn?.turn?.tools).not.toContain(START);
+    expect(turn?.turn?.workZone).toBeUndefined();
+
+    await sam.page.goto(`${BASE_URL}/approvals/${id}`);
+    const view = sam.page.getByTestId("work-zone-proposal-view");
+    await expect(view).toBeVisible({ timeout: 15_000 });
+    await expect(view.getByTestId("approval-title")).toHaveText(`Start a session in scout-${w}`);
+    await expect(view.getByTestId("approval-status")).toHaveText("Proposed");
+    await expect(view.getByTestId("work-zone-fact-mode")).toContainText("Supervised");
+    await expect(view.getByTestId("work-zone-prompt")).toHaveText(PROMPT);
+    await expect(view).toContainText(
+      "Bots never choose Full access. You can change the mode after the session starts.",
+    );
+    await view.getByTestId("work-zone-start").click();
+    await sam.page.getByTestId("approval-confirm-submit").click();
+    await expect(view.getByTestId("approval-status")).toHaveText("Started", { timeout: 30_000 });
+    await view.getByTestId("work-zone-open-session").click();
+    await expect(sam.page.getByTestId("prompt-bubble").first()).toContainText(PROMPT, { timeout: 30_000 });
+    // A person's own session from a proposal: no outside-content mark on its prompt.
+    await expect(sam.page.getByTestId("prompt-bubble").first()).not.toContainText("After outside content");
+  } finally {
+    await sam?.context.close();
+    await laptop?.stop();
+    await clearPendingApprovals(samApi).catch(() => undefined);
+    await samApi.dispose();
+  }
+});
+
+/** The member's only personal bot, recreated (deleting the old ones closes their proposals), and its private chat. */
+async function freshPersonalBot(
+  api: APIRequestContext,
+  userId: string,
+): Promise<{ id: string; dmId: string }> {
+  const listed = (await (await api.get("/api/v1/agents")).json()) as {
+    agents: Array<{ id: string; scope: string; ownerUserId: string | null }>;
+  };
+  for (const a of listed.agents.filter((x) => x.scope === "personal" && x.ownerUserId === userId)) {
+    expect((await api.delete(`/api/v1/agents/${a.id}`)).ok()).toBe(true);
+  }
+  const res = await api.post("/api/v1/agents/personal", {
+    data: { instructions: "Answer briefly.", modelProvider: "mock", modelId: "mock-1" },
+  });
+  expect(res.ok(), "create the personal bot").toBe(true);
+  const body = (await res.json()) as { agent: { id: string }; dmId: string };
+  return { id: body.agent.id, dmId: body.dmId };
+}
