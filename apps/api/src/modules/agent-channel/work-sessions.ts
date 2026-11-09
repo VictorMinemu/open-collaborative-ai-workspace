@@ -176,6 +176,11 @@ export function registerBotWorkSessionRoutes(
           if (!profile || profile.sponsorUserId !== sponsorUserId) return refuse("profile_inactive");
           const status = await profileStatus(tx, perms, profile);
           if (!status.active) return refuse("profile_inactive", status.reason);
+          // D-20: a turn that read a session's output never starts another one (prompt, read and stop only).
+          if (turn.sessionOutputRead) return refuse("session_output");
+          // D-08: a turn that read outside content does not start a session on its own. The profile's flag path and
+          // the proposal fallback (`proposed`) are 07.16-19's; until then a person must ask again.
+          if (turn.tainted) return refuse("outside_content");
 
           const claim = await claimToolCall(tx, core, {
             cell,

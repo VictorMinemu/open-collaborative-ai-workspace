@@ -66,6 +66,17 @@ export async function claimToolCall(
      * (not `tool_calls`) and adds one read. The characters a read returns are added by its route afterwards.
      */
     attachmentRead?: { maxReads: number; maxChars: number };
+    /**
+     * 07.16 D-08 (PD-15): the bot's profile lets it act on outside content, so a side-effecting call is claimed on a
+     * tainted turn: the taint condition is omitted for this one UPDATE (like `grantApprovalId`) and the audit says
+     * `outsideContent: true`. The caps and the session-output condition below still apply.
+     */
+    outsideContent?: boolean;
+    /**
+     * 07.16 D-20 (PD-15): once a turn read a Work Zone session's output (`agent_turns.session_output_read`), every
+     * other side-effecting call of the turn is refused as `tainted`; prompting and stopping that session are exempt.
+     */
+    sessionOutputExempt?: boolean;
   },
 ): Promise<ClaimedCall> {
   const { turn, flags } = p;
@@ -80,7 +91,13 @@ export async function claimToolCall(
           ]
         : [lt(agentTurns.toolCalls, MAX_TOOL_CALLS_PER_TURN)]),
       p.web ? lt(agentTurns.webCalls, MAX_WEB_CALLS_PER_TURN) : undefined,
-      flags.sideEffecting && !p.grantApprovalId ? eq(agentTurns.tainted, false) : undefined,
+      flags.sideEffecting && !p.grantApprovalId && !p.outsideContent
+        ? eq(agentTurns.tainted, false)
+        : undefined,
+      // D-20: false only after a session read; a person's one-use grant lifts it as it lifts the taint.
+      flags.sideEffecting && !p.grantApprovalId && !p.sessionOutputExempt
+        ? eq(agentTurns.sessionOutputRead, false)
+        : undefined,
     ];
     const updated = await tx
       .update(agentTurns)
@@ -96,10 +113,12 @@ export async function claimToolCall(
     if (updated.length === 0) {
       // Nothing updated: say why from a fresh read (only on the denial path).
       const [after] = await tx
-        .select({ tainted: agentTurns.tainted })
+        .select({ tainted: agentTurns.tainted, sessionOutputRead: agentTurns.sessionOutputRead })
         .from(agentTurns)
         .where(eq(agentTurns.eventId, turn.eventId));
-      reason = flags.sideEffecting && after?.tainted ? "tainted" : "cap_reached";
+      const taintRefused = after?.tainted === true && !p.grantApprovalId && !p.outsideContent;
+      const outputRefused = after?.sessionOutputRead === true && !p.grantApprovalId && !p.sessionOutputExempt;
+      reason = flags.sideEffecting && (taintRefused || outputRefused) ? "tainted" : "cap_reached";
     }
   }
 
@@ -141,6 +160,7 @@ export async function claimToolCall(
       reason,
       ...p.metadata,
       ...(p.grantApprovalId ? { approvalId: p.grantApprovalId, grant: true } : {}),
+      ...(p.outsideContent ? { outsideContent: true } : {}),
     },
   });
   return { callId: row.id, allowed: reason === null, reason };
