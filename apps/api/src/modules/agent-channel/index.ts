@@ -66,6 +66,7 @@ import { createProviderAuth } from "./provider-auth";
 import { registerRecordRoutes } from "./records";
 import { registerSandboxRoutes, type SandboxBudgets } from "./sandbox";
 import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
+import { registerWorkSessionReadRoute } from "./work-session-read";
 import { registerBotWorkSessionRoutes } from "./work-sessions";
 import { registerWorkZoneRoutes } from "./work-zone";
 
@@ -156,7 +157,7 @@ export function createAgentChannelModule(
      * A bot's own Work Zone sessions (07.16-15, PD-03): the work-session module, whose `bots` start sessions in the bot's
      * sponsor's name; absent = the `/work-sessions/*` routes are not served.
      */
-    workSession?: Pick<WorkSessionModule, "bots"> | null;
+    workSession?: Pick<WorkSessionModule, "bots" | "botRead"> | null;
     /**
      * Natural-language automations (07.6-12): the automation module's proposal entry point; absent = the
      * `/automations/propose` route is not served.
@@ -569,7 +570,11 @@ export function createAgentChannelModule(
           // Work Zone proposals (07.5-08, D-03): the projects a turn's human may use, and a session proposed as a card.
           if (opts.workZone) registerWorkZoneRoutes(scope, core, opts.workZone);
           // A bot's own Work Zone sessions (07.16-15, D-05, PD-03): started in its sponsor's name, within its profile.
-          if (opts.workSession) registerBotWorkSessionRoutes(scope, core, opts.workSession);
+          if (opts.workSession) {
+            registerBotWorkSessionRoutes(scope, core, opts.workSession);
+            // 07.16-17 (PD-14, D-20): what the bot's own session did, bounded and redacted; the read marks the turn.
+            registerWorkSessionReadRoute(scope, core, opts.workSession);
+          }
           // Natural-language automations (07.6-12, D-02, D-03): a proposal card only the turn's person confirms.
           if (opts.automations) registerAutomationProposalRoutes(scope, core, opts.automations);
           // Agent-to-agent consults (07.7-04, D-07, D-08): a visible question in the turn's thread and a turn for the

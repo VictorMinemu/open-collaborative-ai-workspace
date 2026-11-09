@@ -1,4 +1,9 @@
-import { EventTypes, WorkProjectUpdatedEvent, type WorkSession } from "@ocw/contracts";
+import {
+  type BotWorkSessionReadModel,
+  EventTypes,
+  WorkProjectUpdatedEvent,
+  type WorkSession,
+} from "@ocw/contracts";
 import { orgMembers, permissionRules, type Tx, workSessions } from "@ocw/db";
 import { eq, sql } from "drizzle-orm";
 import type { ApiModule, Core } from "../../core";
@@ -7,6 +12,7 @@ import type { ObjectStorage } from "../artifact";
 import type { DeviceHub } from "../device";
 import { createPermissionService } from "../organization";
 import { registerBotProfileRoutes } from "./bot-profile";
+import { type BotReadParams, readBotWorkSession } from "./bot-read";
 import { type BotSessions, createBotSessions } from "./bot-sessions";
 import { sessionFacts } from "./facts";
 import { loadWorkZonePolicy } from "./policy";
@@ -39,6 +45,8 @@ export {
   loadBotProfile,
   profileStatus,
 } from "./bot-profile";
+// 07.16-17 (PD-14, D-10): what a bot reads about its own session; 07.16-20's wake names the same deciders.
+export { type BotReadParams, sessionDeciders } from "./bot-read";
 // 07.16-15 (PD-03, PD-10 … PD-13): a bot's own start, its audience, its card and the one ownership rule; 07.16-16 its
 // prompt and stop, and the one audit builder of the bot's Work Zone routes.
 export {
@@ -97,6 +105,11 @@ export interface WorkSessionModule extends ApiModule {
    * tenant transaction; every start goes through `start` above (`createWorkSession` with the agent layer).
    */
   bots: BotSessions;
+  /**
+   * 07.16-17 (PD-14): the bounded, redacted, repo-relative read of a bot's own session (`ocw_work_session_read`), in
+   * the sponsor's tenant transaction, after the Agent Channel route found the session and claimed the call.
+   */
+  botRead(tx: Tx, p: BotReadParams): Promise<BotWorkSessionReadModel>;
 }
 
 /**
@@ -223,6 +236,7 @@ export function createWorkSessionModule(
     start,
     proposals,
     bots,
+    botRead: (tx, p) => readBotWorkSession(tx, { core, perms }, p),
     // Shutdown (07.9 fan-out): the background queue drains for a bounded time, then what still waits is dropped.
     close: () => service.close(),
   };
