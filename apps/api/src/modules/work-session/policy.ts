@@ -1,4 +1,5 @@
 import {
+  BOT_WORK_ZONE_LIMITS,
   DEFAULT_WORK_ZONE_POLICY,
   EffortLevel,
   PermissionMode,
@@ -28,7 +29,9 @@ const ModelIds = z.array(z.string().max(200)).max(100);
 /** Tolerant read: every stored key that no longer parses falls back to its default. */
 function fromRow(row: PolicyRow | undefined): WorkZonePolicy {
   const d = structuredClone(DEFAULT_WORK_ZONE_POLICY);
-  if (!row) return { ...d, updatedAt: null };
+  // 07.16 (D-15, PD-22): the org cap on bot-started sessions; absent row = the default (10).
+  const botSessionsMax = BOT_WORK_ZONE_LIMITS.orgSessionsDefault;
+  if (!row) return { ...d, botSessionsMax, updatedAt: null };
   const modes = z.array(ListedMode).min(1).max(4).safeParse(row.allowedPermissionModes);
   const models = (row.allowedModels ?? {}) as Record<string, unknown>;
   const efforts = (row.maxEffort ?? {}) as Record<string, unknown>;
@@ -48,6 +51,7 @@ function fromRow(row: PolicyRow | undefined): WorkZonePolicy {
     maxEffort,
     allowFastMode: row.allowFastMode,
     runtimeUpdates: runtimeUpdates.success ? runtimeUpdates.data : d.runtimeUpdates,
+    botSessionsMax: row.botSessionsMax,
     updatedAt: new Date(row.updatedAt).toISOString(),
   };
 }
@@ -71,6 +75,7 @@ function changedKeys(before: WorkZonePolicy, after: WorkZonePolicy): string[] {
   if (RUNTIMES.some((rt) => before.maxEffort[rt] !== after.maxEffort[rt])) out.push("maxEffort");
   if (before.allowFastMode !== after.allowFastMode) out.push("allowFastMode");
   if (before.runtimeUpdates !== after.runtimeUpdates) out.push("runtimeUpdates");
+  if (before.botSessionsMax !== after.botSessionsMax) out.push("botSessionsMax");
   return out;
 }
 
@@ -104,6 +109,7 @@ export async function saveWorkZonePolicy(
       : before.maxEffort,
     allowFastMode: patch.allowFastMode ?? before.allowFastMode,
     runtimeUpdates: patch.runtimeUpdates ?? before.runtimeUpdates,
+    botSessionsMax: patch.botSessionsMax ?? before.botSessionsMax ?? BOT_WORK_ZONE_LIMITS.orgSessionsDefault,
     updatedAt: before.updatedAt,
   };
   if (next.allowedPermissionModes.length === 0) {
@@ -119,6 +125,7 @@ export async function saveWorkZonePolicy(
     maxEffort: next.maxEffort,
     allowFastMode: next.allowFastMode,
     runtimeUpdates: next.runtimeUpdates,
+    botSessionsMax: next.botSessionsMax ?? BOT_WORK_ZONE_LIMITS.orgSessionsDefault,
     updatedBy: actorUserId,
     updatedAt: new Date().toISOString(),
   };
