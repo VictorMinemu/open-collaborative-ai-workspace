@@ -8,9 +8,12 @@ import {
   SessionAudienceInput,
   UpdateWorkSessionVisibilityRequest,
   UpdateWorkSessionVisibilityResult,
+  WorkPrompt,
   WorkSession,
+  WorkSessionAgentRef,
   WorkSessionAttention,
   WorkSessionDetail,
+  WorkSessionOrigin,
   WorkSessionRemovedEvent,
   WorkSessionVisibilityChangedEvent,
   WorkSessionVisibilityView,
@@ -358,5 +361,69 @@ describe("Project.teamProject (07.9-01, R5)", () => {
     expect(
       Project.safeParse({ ...project, teamProject: { ...teamProject, defaultVisibility: "teams" } }).success,
     ).toBe(false);
+  });
+});
+
+describe("bot-authored prompts, the session's bot and the per-viewer origin (07.16 D-06, D-08, D-13, PD-19)", () => {
+  /** A `prompt.updated` payload as 07.15 stored it (no agent author, no taint). */
+  const oldPrompt = {
+    id: uuid(300),
+    workSessionId: oldSession.id,
+    authorUserId: uuid(104),
+    authorName: "Ana",
+    originDeviceId: null,
+    body: "Run the tests",
+    status: "queued",
+    position: 1,
+    createdAt: now,
+    dispatchedAt: null,
+    completedAt: null,
+  };
+  const scout = { agentId: uuid(400), displayName: "Scout", handle: "scout" };
+
+  it("a prompt written by a bot carries the bot and the taint; the author stays the sponsor", () => {
+    const parsed = WorkPrompt.parse({ ...oldPrompt, authorAgent: scout, tainted: true });
+    expect(parsed.authorAgent).toEqual(scout);
+    expect(parsed.tainted).toBe(true);
+    expect(parsed.authorUserId).toBe(uuid(104));
+    expect(WorkPrompt.parse({ ...oldPrompt, authorAgent: null }).authorAgent).toBeNull();
+  });
+
+  it("a stored 07.15 prompt without them still parses", () => {
+    const parsed = WorkPrompt.parse(oldPrompt);
+    expect(parsed.authorAgent).toBeUndefined();
+    expect(parsed.tainted).toBeUndefined();
+  });
+
+  it("the agent ref is bounded", () => {
+    expect(WorkSessionAgentRef.safeParse(scout).success).toBe(true);
+    expect(WorkSessionAgentRef.safeParse({ ...scout, handle: "x".repeat(65) }).success).toBe(false);
+    expect(WorkSessionAgentRef.safeParse({ ...scout, agentId: "scout" }).success).toBe(false);
+  });
+
+  it("a session names the bot that started it; older payloads parse without it", () => {
+    expect(WorkSession.parse({ ...oldSession, startedByAgent: scout }).startedByAgent).toEqual(scout);
+    expect(WorkSession.parse({ ...oldSession, startedByAgent: null }).startedByAgent).toBeNull();
+    expect(WorkSession.parse(oldSession).startedByAgent).toBeUndefined();
+  });
+
+  it("the detail carries an optional, nullable origin; threads are channels with a root", () => {
+    const detail = { session: oldSession, prompts: [oldPrompt], approvals: [], events: [], lastSeq: 0 };
+    const origin = {
+      conversationId: uuid(500),
+      kind: "channel",
+      name: "billing",
+      threadRootId: uuid(501),
+      messageId: uuid(502),
+    };
+    expect(WorkSessionDetail.parse({ ...detail, origin }).origin).toEqual(origin);
+    expect(WorkSessionDetail.parse({ ...detail, origin: null }).origin).toBeNull();
+    expect(WorkSessionDetail.parse(detail).origin).toBeUndefined();
+    for (const kind of ["channel", "dm", "group", "ai_chat"]) {
+      expect(WorkSessionOrigin.safeParse({ ...origin, kind, threadRootId: null }).success, kind).toBe(true);
+    }
+    expect(WorkSessionDetail.safeParse({ ...detail, origin: { ...origin, kind: "thread" } }).success).toBe(
+      false,
+    );
   });
 });

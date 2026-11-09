@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   CapabilitiesFrame,
   ControlDenialReason,
+  Device,
+  DeviceHostKind,
   DEFAULT_WORK_ZONE_POLICY,
   DeviceToServerFrame,
   EFFORT_LABELS,
@@ -183,5 +185,81 @@ describe("Work Zone policy (D-02, D-11)", () => {
       false,
     );
     expect(UpdateWorkZonePolicyRequest.safeParse({ allowFullAccess: true }).success).toBe(true);
+  });
+
+  it("botSessionsMax is an optional integer 0..1000 (07.16 D-15)", () => {
+    const policy = { ...DEFAULT_WORK_ZONE_POLICY, updatedAt: null };
+    expect(WorkZonePolicy.parse(policy).botSessionsMax).toBeUndefined();
+    expect(WorkZonePolicy.parse({ ...policy, botSessionsMax: 0 }).botSessionsMax).toBe(0);
+    expect(WorkZonePolicy.parse({ ...policy, botSessionsMax: 1000 }).botSessionsMax).toBe(1000);
+    expect(WorkZonePolicy.safeParse({ ...policy, botSessionsMax: 1001 }).success).toBe(false);
+    expect(WorkZonePolicy.safeParse({ ...policy, botSessionsMax: -1 }).success).toBe(false);
+    expect(WorkZonePolicy.safeParse({ ...policy, botSessionsMax: 2.5 }).success).toBe(false);
+    expect(UpdateWorkZonePolicyRequest.parse({ botSessionsMax: 5 })).toEqual({ botSessionsMax: 5 });
+  });
+});
+
+describe("device host kind and isolated server (07.16 D-03, D-19, PD-18)", () => {
+  const hello = {
+    type: "hello",
+    protocolVersion: 1,
+    device: { name: "build-box", platform: "linux" },
+    runtimes: [],
+  };
+
+  it("a service host's hello carries the host kind and the isolated-server mark", () => {
+    const parsed = HelloFrame.parse({
+      ...hello,
+      device: { ...hello.device, host: "service" },
+      isolatedServer: true,
+    });
+    expect(parsed.device.host).toBe("service");
+    expect(parsed.isolatedServer).toBe(true);
+    expect(DeviceHostKind.options).toEqual(["desktop", "service"]);
+  });
+
+  it("an older daemon's hello without either still parses", () => {
+    const parsed = HelloFrame.parse(hello);
+    expect(parsed.device.host).toBeUndefined();
+    expect(parsed.isolatedServer).toBeUndefined();
+  });
+
+  it("an unknown host kind is refused", () => {
+    expect(HelloFrame.safeParse({ ...hello, device: { ...hello.device, host: "laptop" } }).success).toBe(
+      false,
+    );
+  });
+
+  it("capabilities frames parse with and without isolatedServer", () => {
+    const caps = { type: "capabilities", catalogs: [catalog(1)], fullAccessOptIn: false };
+    expect(CapabilitiesFrame.parse(caps).isolatedServer).toBeUndefined();
+    expect(CapabilitiesFrame.parse({ ...caps, isolatedServer: false }).isolatedServer).toBe(false);
+    expect(DeviceToServerFrame.safeParse({ ...caps, isolatedServer: true }).success).toBe(true);
+  });
+
+  it("the device DTO carries the reported facts, both optional", () => {
+    const device = {
+      id: "00000000-0000-4000-8000-000000000001",
+      ownerUserId: "00000000-0000-4000-8000-000000000002",
+      ownerName: "Ana",
+      name: "build-box",
+      platform: "linux",
+      status: "online",
+      shared: false,
+      fullAccessOptIn: false,
+      shareMaxMode: "default",
+      lastSeenAt: null,
+      runtimes: [],
+      daemonVersion: null,
+      projectCount: 0,
+      revokedAt: null,
+      createdAt: "2026-11-09T10:00:00.000Z",
+    };
+    expect(Device.safeParse(device).success).toBe(true);
+    expect(Device.parse({ ...device, hostKind: null }).hostKind).toBeNull();
+    const service = Device.parse({ ...device, hostKind: "service", isolatedServer: true });
+    expect(service.hostKind).toBe("service");
+    expect(service.isolatedServer).toBe(true);
+    expect(Device.safeParse({ ...device, hostKind: "laptop" }).success).toBe(false);
   });
 });
