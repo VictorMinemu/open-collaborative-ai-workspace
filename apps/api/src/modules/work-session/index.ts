@@ -6,6 +6,7 @@ import type { ApprovalService } from "../approval";
 import type { ObjectStorage } from "../artifact";
 import type { DeviceHub } from "../device";
 import { createPermissionService } from "../organization";
+import { registerBotProfileRoutes } from "./bot-profile";
 import { sessionFacts } from "./facts";
 import { loadWorkZonePolicy } from "./policy";
 import { registerProjectRoutes } from "./projects";
@@ -27,6 +28,14 @@ import {
 } from "./start";
 import { withoutViewerFields } from "./viewer-fields";
 
+// 07.16-07 (PD-04 … PD-06): the start route, the arbiter, the offer and the web read a bot's profile status.
+export {
+  type BotProfileRow,
+  type BotProfileStatus,
+  botLayerForSession,
+  loadBotProfile,
+  profileStatus,
+} from "./bot-profile";
 export { sessionFacts, sessionFactsForUsers } from "./facts";
 export { createWorkSessionAttachmentScope } from "./images";
 export type { OrgQueueOptions, OrgTask } from "./org-queue";
@@ -181,6 +190,8 @@ export function createWorkSessionModule(
     register(app) {
       registerWorkSessionRoutes(app, core, hub, service);
       registerProjectRoutes(app, core, perms);
+      // 07.16 (D-01 … D-03): a bot's Work Zone profile and the per-bot device consent; changes sweep the device.
+      registerBotProfileRoutes(app, core, perms, service);
     },
     start,
     proposals,

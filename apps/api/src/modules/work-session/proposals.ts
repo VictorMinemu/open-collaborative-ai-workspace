@@ -113,20 +113,28 @@ async function loadProposal(tx: Tx, id: string): Promise<ProposalRow | null> {
   return p ?? null;
 }
 
-/** `work_session.create` for a member, decided by the resolver (07.3's Work Zone module deny included). */
-async function mayCreate(tx: Tx, perms: PermissionService, userId: string): Promise<boolean> {
+/**
+ * `work_session.create` for a member, decided by the resolver (07.3's Work Zone module deny included). Exported for the
+ * bot profile's sponsor checks (07.16, PD-04, PD-05): one copy of each sponsor rule.
+ */
+export async function mayCreate(tx: Tx, perms: PermissionService, userId: string): Promise<boolean> {
   return (await perms.decide(tx, { kind: "user", userId }, "work_session.create", orgResource())).allowed;
 }
 
 /** `device.use` for a member on a device (own, shared or granted; never revoked), as a human start decides it. */
-async function mayUse(tx: Tx, perms: PermissionService, userId: string, d: DeviceRow): Promise<boolean> {
+export async function mayUse(
+  tx: Tx,
+  perms: PermissionService,
+  userId: string,
+  d: DeviceRow,
+): Promise<boolean> {
   const access = await loadDeviceAccess(tx, userId);
   return (await perms.decide(tx, { kind: "user", userId }, "device.use", deviceFacts(d, userId, access)))
     .allowed;
 }
 
 /** Project access for a repository linked to a team project (D-13), as `createWorkSession` decides it; true for others. */
-async function mayStartIn(
+export async function mayStartIn(
   tx: Tx,
   perms: PermissionService,
   userId: string,
@@ -514,7 +522,7 @@ export async function proposeWorkZone(
 }
 
 /** D-13: whether `userId` has access to the team project repository `projectId` is linked to (true when personal). */
-async function mayOpenRepoProject(
+export async function mayOpenRepoProject(
   tx: Tx,
   perms: PermissionService,
   userId: string,
