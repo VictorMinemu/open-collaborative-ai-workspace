@@ -3592,11 +3592,29 @@ describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts b
       projectName: "billing-api",
       updatedAt: "2026-11-09T10:00:00.000Z",
     },
-    queue: { queued: 1, running: 0, completed: 2, failed: 0, cancelled: 0, mine: [{ id: MSG, status: "queued", position: 1 }] },
-    output: { texts: [{ seq: 12, text: "a".repeat(3_000) }, { seq: 13, text: "b".repeat(3_000) }], truncated: false },
+    queue: {
+      queued: 1,
+      running: 0,
+      completed: 2,
+      failed: 0,
+      cancelled: 0,
+      mine: [{ id: MSG, status: "queued", position: 1 }],
+    },
+    output: {
+      texts: [
+        { seq: 12, text: "a".repeat(3_000) },
+        { seq: 13, text: "b".repeat(3_000) },
+      ],
+      truncated: false,
+    },
     tools: Array.from({ length: 10 }, () => ({ name: "Edit", ok: true, summary: "edited a file" })),
     changes: {
-      files: Array.from({ length: 50 }, (_, i) => ({ path: `src/f${i}.ts`, status: "added", additions: 1, deletions: 0 })),
+      files: Array.from({ length: 50 }, (_, i) => ({
+        path: `src/f${i}.ts`,
+        status: "added",
+        additions: 1,
+        deletions: 0,
+      })),
       branch: null,
       truncated: false,
     },
@@ -3610,31 +3628,48 @@ describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts b
     const { wz, m } = await load();
     const queued = { kind: "queued", workSessionId: SESSION, promptId: MSG, position: 1, status: "queued" };
     const stopped = { kind: "stopped", workSessionId: SESSION };
-    const refused = { kind: "refused", code: "session_ended", sentence: m.BOT_WORK_SESSION_SENTENCES.session_ended };
-    expectSameVerdicts(m.AgentChannelWorkSessionPromptResponse, wz.AgentChannelWorkSessionPromptResponse as Schema, [
-      queued,
-      refused,
-      { ...queued, status: "waiting" },
-      stopped,
-    ]);
-    expectSameVerdicts(m.AgentChannelWorkSessionStopResponse, wz.AgentChannelWorkSessionStopResponse as Schema, [
-      stopped,
-      refused,
-      queued,
-    ]);
+    const refused = {
+      kind: "refused",
+      code: "session_ended",
+      sentence: m.BOT_WORK_SESSION_SENTENCES.session_ended,
+    };
+    expectSameVerdicts(
+      m.AgentChannelWorkSessionPromptResponse,
+      wz.AgentChannelWorkSessionPromptResponse as Schema,
+      [queued, refused, { ...queued, status: "waiting" }, stopped],
+    );
+    expectSameVerdicts(
+      m.AgentChannelWorkSessionStopResponse,
+      wz.AgentChannelWorkSessionStopResponse as Schema,
+      [stopped, refused, queued],
+    );
     const first = fullRead.changes.files[0];
-    expectSameVerdicts(m.AgentChannelWorkSessionReadResponse, wz.AgentChannelWorkSessionReadResponse as Schema, [
-      fullRead,
-      refused,
-      { ...fullRead, output: { texts: [], truncated: false }, changes: null, tools: [], approvals: [], deciders: [] },
-      { ...fullRead, output: { texts: [...fullRead.output.texts, { seq: 14, text: "c" }], truncated: true } },
-      { ...fullRead, changes: { ...fullRead.changes, files: [{ ...first, path: "/Users/x/repo/a.ts" }] } },
-      { ...fullRead, changes: { ...fullRead.changes, files: [{ ...first, path: "C:\\repo\\a.ts" }] } },
-      { ...fullRead, approvals: [{ ...fullRead.approvals[0], paths: ["~/repo/a.ts"] }] },
-      { ...fullRead, tools: [...fullRead.tools, fullRead.tools[0]] },
-      { ...fullRead, deciders: Array(4).fill(fullRead.deciders[0]) },
-      { ...fullRead, error: "x".repeat(501) },
-    ]);
+    expectSameVerdicts(
+      m.AgentChannelWorkSessionReadResponse,
+      wz.AgentChannelWorkSessionReadResponse as Schema,
+      [
+        fullRead,
+        refused,
+        {
+          ...fullRead,
+          output: { texts: [], truncated: false },
+          changes: null,
+          tools: [],
+          approvals: [],
+          deciders: [],
+        },
+        {
+          ...fullRead,
+          output: { texts: [...fullRead.output.texts, { seq: 14, text: "c" }], truncated: true },
+        },
+        { ...fullRead, changes: { ...fullRead.changes, files: [{ ...first, path: "/Users/x/repo/a.ts" }] } },
+        { ...fullRead, changes: { ...fullRead.changes, files: [{ ...first, path: "C:\\repo\\a.ts" }] } },
+        { ...fullRead, approvals: [{ ...fullRead.approvals[0], paths: ["~/repo/a.ts"] }] },
+        { ...fullRead, tools: [...fullRead.tools, fullRead.tools[0]] },
+        { ...fullRead, deciders: Array(4).fill(fullRead.deciders[0]) },
+        { ...fullRead, error: "x".repeat(501) },
+      ],
+    );
     for (const answer of [queued, stopped, refused, fullRead]) {
       const mirror =
         answer.kind === "queued"
@@ -3649,7 +3684,10 @@ describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts b
   it("the wake event parses identically in both copies; older types are untouched", async () => {
     const { channel, m } = await load();
     expect(m.AgentChannelEventTypes.workSession).toBe("agent.work_session.v1");
-    const c = channel as unknown as { WorkSessionTransition: { options: string[] }; AgentWorkSessionEvent: Schema };
+    const c = channel as unknown as {
+      WorkSessionTransition: { options: string[] };
+      AgentWorkSessionEvent: Schema;
+    };
     expect([...m.WorkSessionTransition.options]).toEqual([...c.WorkSessionTransition.options]);
     const event = {
       ...mention(offered),
@@ -3669,7 +3707,10 @@ describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts b
       event,
       { ...event, workSession: { ...event.workSession, transition: "started" } },
       { ...event, workSession: { ...event.workSession, summary: "x".repeat(501) } },
-      { ...event, workSession: { ...event.workSession, deciders: Array(4).fill(event.workSession.deciders[0]) } },
+      {
+        ...event,
+        workSession: { ...event.workSession, deciders: Array(4).fill(event.workSession.deciders[0]) },
+      },
       { ...event, type: "agent.mention.v1" },
     ]);
   });

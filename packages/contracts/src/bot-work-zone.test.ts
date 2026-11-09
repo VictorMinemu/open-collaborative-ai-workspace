@@ -345,7 +345,11 @@ const fullRead = {
     ],
     truncated: true,
   },
-  tools: Array.from({ length: 10 }, (_, i) => ({ name: `Edit${i}`, ok: i % 2 === 0 ? true : null, summary: "edited" })),
+  tools: Array.from({ length: 10 }, (_, i) => ({
+    name: `Edit${i}`,
+    ok: i % 2 === 0 ? true : null,
+    summary: "edited",
+  })),
   changes: {
     files: Array.from({ length: 50 }, (_, i) => ({
       path: `src/invoices/f${i}.ts`,
@@ -362,13 +366,22 @@ const fullRead = {
     paths: ["scripts/migrate.sh"],
     summary: "Run the migration script",
   })),
-  deciders: Array.from({ length: 3 }, (_, i) => ({ id: PERSON, handle: `p${i}`, displayName: `Person ${i}` })),
+  deciders: Array.from({ length: 3 }, (_, i) => ({
+    id: PERSON,
+    handle: `p${i}`,
+    displayName: `Person ${i}`,
+  })),
   error: null,
   cursor: 57,
 };
 
 describe("prompt, read and stop bodies (07.16 D-05, PD-13, PD-14, P6)", () => {
-  const prompt = { eventId: EVENT, agentId: AGENT, workSessionId: SESSION, prompt: "Now run the whole suite" };
+  const prompt = {
+    eventId: EVENT,
+    agentId: AGENT,
+    workSessionId: SESSION,
+    prompt: "Now run the whole suite",
+  };
   const read = { eventId: EVENT, agentId: AGENT, workSessionId: SESSION };
   const stop = { eventId: EVENT, agentId: AGENT, workSessionId: SESSION };
 
@@ -392,7 +405,9 @@ describe("prompt, read and stop bodies (07.16 D-05, PD-13, PD-14, P6)", () => {
   it("the prompt has the start's bounds; the read cursor is a non-negative integer", () => {
     expect(AgentChannelWorkSessionPrompt.parse({ ...prompt, prompt: " go " }).prompt).toBe("go");
     expect(AgentChannelWorkSessionPrompt.safeParse({ ...prompt, prompt: "" }).success).toBe(false);
-    expect(AgentChannelWorkSessionPrompt.safeParse({ ...prompt, prompt: "x".repeat(50_001) }).success).toBe(false);
+    expect(AgentChannelWorkSessionPrompt.safeParse({ ...prompt, prompt: "x".repeat(50_001) }).success).toBe(
+      false,
+    );
     expect(AgentChannelWorkSessionRead.parse({ ...read, cursor: 0 })).toEqual({ ...read, cursor: 0 });
     expect(AgentChannelWorkSessionRead.safeParse({ ...read, cursor: -1 }).success).toBe(false);
     expect(AgentChannelWorkSessionRead.safeParse({ ...read, cursor: 1.5 }).success).toBe(false);
@@ -440,10 +455,16 @@ describe("the redacted read model and the answers (07.16 D-05, D-10, PD-14, prin
     for (const bad of [
       { ...fullRead, error: "x".repeat(501) },
       { ...fullRead, tools: [{ name: "Edit", ok: true, summary: "x".repeat(201) }] },
-      { ...fullRead, changes: { ...fullRead.changes, files: [...fullRead.changes.files, fullRead.changes.files[0]] } },
+      {
+        ...fullRead,
+        changes: { ...fullRead.changes, files: [...fullRead.changes.files, fullRead.changes.files[0]] },
+      },
       { ...fullRead, approvals: [...fullRead.approvals, fullRead.approvals[0]] },
       { ...fullRead, approvals: [{ ...fullRead.approvals[0], paths: Array(11).fill("a.ts") }] },
-      { ...fullRead, changes: { ...fullRead.changes, files: [{ ...fullRead.changes.files[0], path: "../etc/passwd" }] } },
+      {
+        ...fullRead,
+        changes: { ...fullRead.changes, files: [{ ...fullRead.changes.files[0], path: "../etc/passwd" }] },
+      },
       { ...fullRead, queue: { ...fullRead.queue, mine: Array(21).fill(fullRead.queue.mine[0]) } },
       { ...fullRead, session: { ...fullRead.session, mode: "bypassPermissions" } },
     ]) {
@@ -458,7 +479,13 @@ describe("the redacted read model and the answers (07.16 D-05, D-10, PD-14, prin
   });
 
   it("prompt and stop answers parse queued, stopped and refused", () => {
-    const queued = { kind: "queued", workSessionId: SESSION, promptId: PROMPT_ID, position: 2, status: "queued" };
+    const queued = {
+      kind: "queued",
+      workSessionId: SESSION,
+      promptId: PROMPT_ID,
+      position: 2,
+      status: "queued",
+    };
     const stopped = { kind: "stopped", workSessionId: SESSION };
     const refused = {
       kind: "refused",
@@ -470,7 +497,9 @@ describe("the redacted read model and the answers (07.16 D-05, D-10, PD-14, prin
     expect(AgentChannelWorkSessionStopResponse.parse(stopped)).toEqual(stopped);
     expect(AgentChannelWorkSessionStopResponse.parse(refused)).toEqual(refused);
     expect(AgentChannelWorkSessionReadResponse.parse(refused)).toEqual(refused);
-    expect(AgentChannelWorkSessionPromptResponse.safeParse({ ...queued, status: "waiting" }).success).toBe(false);
+    expect(AgentChannelWorkSessionPromptResponse.safeParse({ ...queued, status: "waiting" }).success).toBe(
+      false,
+    );
     expect(AgentChannelWorkSessionStopResponse.safeParse(queued).success).toBe(false);
   });
 

@@ -174,7 +174,10 @@ describe("Work Zone wake event (07.16 D-09, D-10, PD-16)", () => {
   const SESSION = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a60";
   const MSG = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a61";
   const PERSON = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a62";
-  const wake = (transition: string, summary = "Work Zone session in billing-api finished turn 2; nothing is queued.") => ({
+  const wake = (
+    transition: string,
+    summary = "Work Zone session in billing-api finished turn 2; nothing is queued.",
+  ) => ({
     eventId: EVENT,
     seq: 7,
     type: "agent.work_session.v1",
@@ -204,7 +207,13 @@ describe("Work Zone wake event (07.16 D-09, D-10, PD-16)", () => {
 
   it("has its own event type on the cell stream", () => {
     expect(AgentChannelEventTypes.workSession).toBe("agent.work_session.v1");
-    expect([...WorkSessionTransition.options]).toEqual(["turn_done", "waiting_approval", "failed", "ended", "offline"]);
+    expect([...WorkSessionTransition.options]).toEqual([
+      "turn_done",
+      "waiting_approval",
+      "failed",
+      "ended",
+      "offline",
+    ]);
   });
 
   it("a mention-shaped event with workSession parses for each of the five transitions", () => {
@@ -227,7 +236,8 @@ describe("Work Zone wake event (07.16 D-09, D-10, PD-16)", () => {
       }).success,
     ).toBe(false);
     expect(
-      AgentWorkSessionEvent.safeParse({ ...base, workSession: { ...base.workSession, pendingApprovals: -1 } }).success,
+      AgentWorkSessionEvent.safeParse({ ...base, workSession: { ...base.workSession, pendingApprovals: -1 } })
+        .success,
     ).toBe(false);
     expect(AgentWorkSessionEvent.safeParse({ ...base, type: "agent.mention.v1" }).success).toBe(false);
     expect(AgentMentionEvent.safeParse(base).success).toBe(false);
