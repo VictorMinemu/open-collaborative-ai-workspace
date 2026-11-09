@@ -52,6 +52,7 @@ let anaId: string;
 let bobId: string;
 let eveId: string;
 let atlasId: string;
+let echoId: string;
 let engId: string;
 let anaDmId: string;
 let server: FakeDevice;
@@ -228,11 +229,14 @@ beforeAll(async () => {
   ({ client: bob, userId: bobId } = await invite(stack, victor, "bob@example.test", "Bob Ros", "developer"));
   ({ client: eve, userId: eveId } = await invite(stack, victor, "eve@example.test", "Eve Moss", "developer"));
   atlasId = await teamBot("Atlas", "atlas");
+  echoId = await teamBot("Echo", "echo");
 
   // Private #eng: Atlas, Ana and Bob. Víctor (admin, Atlas's sponsor) creates it and leaves: he does not read it.
   engId = (await ok(victor.request("POST", "/api/v1/channels", { name: "eng", visibility: "private" })))
     .id as string;
-  await ok(victor.request("POST", `/api/v1/channels/${engId}/members`, { kind: "agent", id: atlasId }));
+  for (const botId of [atlasId, echoId]) {
+    await ok(victor.request("POST", `/api/v1/channels/${engId}/members`, { kind: "agent", id: botId }));
+  }
   for (const userId of [anaId, bobId]) {
     await ok(victor.request("POST", `/api/v1/channels/${engId}/members`, { kind: "user", id: userId }));
   }
@@ -279,8 +283,10 @@ beforeAll(async () => {
     linkedBy: victorId,
   });
 
-  await createBotProfile(victor, atlasId, profile());
-  await grantBotConsent(victor, serverId, atlasId, { allowFullAccess: true });
+  for (const botId of [atlasId, echoId]) {
+    await createBotProfile(victor, botId, profile());
+    await grantBotConsent(victor, serverId, botId, { allowFullAccess: true });
+  }
   await moveToOrgB(eveId);
 }, 180_000);
 
@@ -428,5 +434,83 @@ describe("origin never rides a shared surface", () => {
     );
     expect(listed).toBeDefined();
     expect(JSON.stringify(listed)).not.toMatch(/"origin"\s*:/);
+  });
+});
+
+// ---------------------------------------------------------------- who wrote each prompt (D-06, D-08, PD-20)
+
+const ATLAS = () => ({ agentId: atlasId, displayName: "Atlas", handle: "atlas" });
+
+describe("the DTO names a bot's prompts, their taint and the bot that started the session", () => {
+  it("Atlas's prompt: authorAgent Atlas (the sponsor stays the author), not tainted; the session's startedByAgent", async () => {
+    const id = await botSession();
+    const d = await detail(ana, id);
+    expect(d.session.startedByAgent).toEqual(ATLAS());
+    expect(d.prompts).toHaveLength(1);
+    expect(d.prompts[0]).toMatchObject({
+      authorUserId: victorId,
+      authorAgent: ATLAS(),
+      tainted: false,
+      body: FIRST,
+    });
+    // The shared surfaces carry the same viewer-neutral marks: the ws: prompt frames and the list row.
+    const frames = (
+      await su.query(
+        "select payload from app.stream_events where stream_id = $1 and type = 'prompt.updated'",
+        [`ws:${id}`],
+      )
+    ).rows as Json[];
+    expect(frames.length).toBeGreaterThan(0);
+    for (const f of frames) expect(f.payload).toMatchObject({ authorAgent: ATLAS(), tainted: false });
+    const listed = ((await ok(ana.request("GET", "/api/v1/work-sessions"))).sessions as Json[]).find(
+      (s) => s.id === id,
+    );
+    expect(listed!.startedByAgent).toEqual(ATLAS());
+  });
+
+  it("a person's prompt in the same session: authorAgent null, tainted false", async () => {
+    const id = await botSession();
+    const mine = await ok(
+      ana.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body: "also check the CSV export" }),
+    );
+    const d = await detail(ana, id);
+    const p = d.prompts.find((x) => x.id === mine.id)!;
+    expect(p).toMatchObject({ authorUserId: anaId, authorAgent: null, tainted: false });
+  });
+
+  it("a person-started session: startedByAgent null, its prompts authorAgent null", async () => {
+    const id = await startSession(victor, server, ledgerId);
+    await ok(victor.request("POST", `/api/v1/work-sessions/${id}/prompts`, { body: "run the tests" }));
+    const d = await detail(victor, id);
+    expect(d.session.startedByAgent).toBeNull();
+    for (const p of d.prompts) expect(p).toMatchObject({ authorAgent: null, tainted: false });
+  });
+
+  it("taint as stored: a prompt sent after outside content reads tainted", async () => {
+    const id = await botSession();
+    await su.query("update app.work_prompts set tainted = true where work_session_id = $1", [id]);
+    const [p] = (await detail(ana, id)).prompts;
+    expect(p).toMatchObject({ authorAgent: ATLAS(), tainted: true });
+  });
+
+  it("a deleted bot names nothing: soft-deleted, or its column cleared by the hard delete", async () => {
+    const id = await startedFrom(
+      await freshBotTurn(su, ana, engId, `@echo please fix it ${randomUUID().slice(0, 6)}`),
+      ledgerId,
+      echoId,
+    );
+    const echo = { agentId: echoId, displayName: "Echo", handle: "echo" };
+    expect((await detail(ana, id)).prompts[0]!.authorAgent).toEqual(echo);
+    await su.query("update app.agents set deleted_at = now() where id = $1", [echoId]);
+    try {
+      const gone = await detail(ana, id);
+      expect(gone.prompts[0]).toMatchObject({ authorUserId: victorId, authorAgent: null });
+      expect(gone.session.startedByAgent).toBeNull();
+    } finally {
+      await su.query("update app.agents set deleted_at = null where id = $1", [echoId]);
+    }
+    // A hard delete sets the column null (ON DELETE SET NULL): the prompt then names no bot either.
+    await su.query("update app.work_prompts set author_agent_id = null where work_session_id = $1", [id]);
+    expect((await detail(ana, id)).prompts[0]!.authorAgent).toBeNull();
   });
 });
