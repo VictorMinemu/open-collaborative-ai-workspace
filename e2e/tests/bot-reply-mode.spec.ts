@@ -1,7 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
-import { apiAs, BASE_URL, createChannel, ensureMember, openAs, SAM } from "../support/actors";
+import {
+  apiAs,
+  BASE_URL,
+  createChannel,
+  ensureMember,
+  expectChannelLanding,
+  openAs,
+  SAM,
+} from "../support/actors";
 import { FakeCellPlugin, type MentionPayload } from "../support/fake-cell-plugin";
 import { ADMIN, API_URL, shot } from "./env";
 
@@ -178,7 +186,7 @@ test("date/time: every post carries the browser's time zone, and the bot's turn 
       .getByTestId("login-form")
       .getByRole("button", { name: /sign in|log in/i })
       .click();
-    await expect(page).toHaveURL(/\/chat\/[0-9a-f-]{36}/);
+    await expectChannelLanding(page);
     await page.goto(`${BASE_URL}/chat/${channelId}`);
     await expect(page.getByTestId("composer")).toBeVisible();
 

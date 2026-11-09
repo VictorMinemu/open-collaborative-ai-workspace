@@ -1,3 +1,4 @@
+import { measureScaling } from "@ocw/contracts/testing/scaling";
 import { DrizzleQueryError } from "drizzle-orm/errors";
 import { describe, expect, it } from "vitest";
 import { HttpError } from "../../lib/errors";
@@ -21,27 +22,24 @@ describe("lineChanges", () => {
     const doc = (n: number, word: string) => Array.from({ length: n }, (_, i) => `${word} ${i}`).join("\n");
     const small = { before: doc(3_000, "old"), after: doc(3_000, "new") };
     const large = { before: doc(12_000, "old"), after: doc(12_000, "new") };
-    // Warm-up (JIT), then the interleaved best of three: a busy shared CI runner stalls single passes (one took 2.9 s
-    // for 3,000 lines), but quadratic work is slow on every pass of the large rewrite relative to the small one.
-    lineChanges(small.before, small.after);
-    lineChanges(large.before, large.after);
-    let smallMs = Number.POSITIVE_INFINITY;
-    let largeMs = Number.POSITIVE_INFINITY;
+    // Warm-up (JIT), then the smallest ratio of three small-then-large rounds: a busy shared CI runner stalls single
+    // passes (one took 2.9 s for 3,000 lines), but quadratic work is slow in every round of the large rewrite relative
+    // to the small one.
     let out = { added: 0, removed: 0, addedLines: [] as number[] };
-    for (let i = 0; i < 3; i++) {
-      let started = performance.now();
-      lineChanges(small.before, small.after);
-      smallMs = Math.min(smallMs, performance.now() - started);
-      started = performance.now();
-      out = lineChanges(large.before, large.after);
-      largeMs = Math.min(largeMs, performance.now() - started);
-    }
+    const { ratio, ratios, largeMs } = measureScaling(
+      () => lineChanges(small.before, small.after),
+      () => {
+        out = lineChanges(large.before, large.after);
+      },
+      // The 1 ms floor keeps a tiny baseline from inflating the ratio.
+      { rounds: 3, floorMs: 1 },
+    );
     expect(out.added).toBe(12_000);
     expect(out.removed).toBe(12_000);
     expect(out.addedLines).toHaveLength(12_000);
     // The edit budget bounds the diff, so 4x the lines costs at most about 4x (in practice about the same); an
-    // unbounded diff of a full rewrite is quadratic: 16x. The 1 ms floor keeps a tiny baseline from inflating the ratio.
-    expect(largeMs / Math.max(smallMs, 1)).toBeLessThan(10);
+    // unbounded diff of a full rewrite is quadratic: 16x.
+    expect(ratio, `per-round ratios ${ratios.map((r) => r.toFixed(1)).join(", ")}`).toBeLessThan(10);
     // A generous absolute cap still catches catastrophic work (about 0.13 s on a laptop; unbounded, about 9 s).
     expect(largeMs).toBeLessThan(8_000);
     // Eight rewrites on a loaded shared CI runner outlast vitest's 5 s default; the budget is the assertions above.

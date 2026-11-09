@@ -222,6 +222,19 @@ export class FakeDocker implements Docker {
       this.networks.delete(n.Name);
       return json(204);
     }
+    m = /^\/volumes\/([^/]+)$/.exec(path);
+    if (method === "DELETE" && m) {
+      const v = this.find(this.volumes, m[1] as string);
+      if (!v) return json(404);
+      // Like the real daemon: a volume any container (running or not) mounts is in use.
+      const inUse = [...this.containers.values()].some((c) => {
+        const mounts = (c.Spec?.HostConfig as { Mounts?: { Source?: string }[] } | undefined)?.Mounts ?? [];
+        return mounts.some((mount) => mount.Source === v.Name);
+      });
+      if (inUse) return json(409, { message: "volume is in use" });
+      this.volumes.delete(v.Name);
+      return json(204);
+    }
     if (method === "GET" && path === "/volumes") {
       const want = (JSON.parse(url.searchParams.get("filters") ?? "{}").label ?? []) as string[];
       return json(200, {

@@ -1,7 +1,7 @@
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
 // The catalog is code (ADR-0024): the spec checks the rows the panel writes against the catalog's patterns.
 import { MODULE_CATALOG, type ModuleId } from "../../packages/contracts/src/module-access.ts";
-import { type Actor, apiAs, BASE_URL, ensureMember, openAs } from "../support/actors";
+import { type Actor, apiAs, BASE_URL, ensureMember, expectChannelLanding, openAs } from "../support/actors";
 import { bothThemes } from "../support/files";
 import { ADMIN } from "./env";
 
@@ -270,7 +270,7 @@ test("a lead manages modules for people of the team she leads; an admin's module
     await m.page.goto(`${BASE_URL}/settings/ai-chat`);
     await expect(m.page.getByTestId("module-off")).toHaveAttribute("data-module", "ai_chats");
     await m.page.goto(`${BASE_URL}/chat`);
-    await expect(m.page).toHaveURL(/\/chat\/[0-9a-f-]{36}/);
+    await expectChannelLanding(m.page);
 
     // ---- an organization admin in the team: listed, switches disabled, and why
     const ada = await pickPerson(l.page, card, ADA.name);
