@@ -56,6 +56,13 @@ const KILL_BUDGET_MS = 5_000;
  * processes were long dead (p146): Docker's bookkeeping, not the command.
  */
 const DOCKER_KILL_WAIT_MS = 12_000;
+/**
+ * How long, from the kill switch, `docker ps` may keep listing a SIGKILLed container of the organization: Docker's
+ * 10 s + 2 s kill fallback (DOCKER_KILL_WAIT_MS) plus its exit cleanup (network release, unmounts) on the shared,
+ * loaded CI daemon, observed up to 27.2 s (Woodpecker p207) with the SIGKILL and the command's death inside 5 s. Not the
+ * ADR-0029 guarantee (KILL_BUDGET_MS stays strict for those); a bound so a container that never stops still fails.
+ */
+const DOCKER_PS_ALLOWANCE_MS = 90_000;
 
 const state = {
   org: "",
@@ -430,10 +437,10 @@ test("3. the kill switch stops a running command within 5 s; the next exec answe
   }
   state.killLatencyMs = Math.max(...signalled().map((e) => (e?.at ?? Number.POSITIVE_INFINITY) - started));
   state.killCommandMs = (commandEnd()?.at ?? Number.POSITIVE_INFINITY) - started;
-  // Docker's own bookkeeping after that (DOCKER_KILL_WAIT_MS): its kill call answers, and `docker ps` drops the
+  // Docker's own bookkeeping after that (DOCKER_PS_ALLOWANCE_MS): its kill call answers, and `docker ps` drops the
   // containers, only once their exit is handled.
   await expect
-    .poll(() => runningOfOrg().length, { timeout: KILL_BUDGET_MS + DOCKER_KILL_WAIT_MS, intervals: [250] })
+    .poll(() => runningOfOrg().length, { timeout: DOCKER_PS_ALLOWANCE_MS, intervals: [250] })
     .toBe(0);
   state.killContainersMs = Date.now() - started;
   console.log(
@@ -442,7 +449,7 @@ test("3. the kill switch stops a running command within 5 s; the next exec answe
   record();
   expect(state.killLatencyMs).toBeLessThanOrEqual(KILL_BUDGET_MS);
   expect(state.killCommandMs).toBeLessThanOrEqual(KILL_BUDGET_MS);
-  expect(state.killContainersMs).toBeLessThanOrEqual(KILL_BUDGET_MS + DOCKER_KILL_WAIT_MS);
+  expect(state.killContainersMs).toBeLessThanOrEqual(DOCKER_PS_ALLOWANCE_MS);
 
   const lateReply = await replyTo(ana, state.scoutDm, late);
   console.log(`[proof] late exec reply: ${lateReply}`);
@@ -458,7 +465,7 @@ test("3. the kill switch stops a running command within 5 s; the next exec answe
   // more second (CI p164 found two containers started after `docker ps` had already emptied, one per bot, with no
   // sandboxd op that starts one: a sweeper pass that listed the shells just before the kill and then started a files
   // helper to measure each; fixed in sweeper.ts). A failure names what runs, its kind and how long after the kill.
-  const deadline = Math.max(started + KILL_BUDGET_MS + DOCKER_KILL_WAIT_MS, Date.now() + 1_000);
+  const deadline = Math.max(started + DOCKER_PS_ALLOWANCE_MS, Date.now() + 1_000);
   let leftover: string[] = runningOfOrg();
   while (leftover.length > 0 && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 250));

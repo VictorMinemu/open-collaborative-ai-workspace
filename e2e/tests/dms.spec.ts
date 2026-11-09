@@ -1,7 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type APIRequestContext, expect, type Page, test } from "@playwright/test";
-import { type Actor, apiAs, BASE_URL, ensureMember, openAs, SAM } from "../support/actors";
+import {
+  type Actor,
+  apiAs,
+  BASE_URL,
+  ensureMember,
+  expectChannelLanding,
+  openAs,
+  SAM,
+} from "../support/actors";
 import { postAs } from "../support/chat";
 import { FakeCellPlugin } from "../support/fake-cell-plugin";
 import { ADMIN, API_URL, shot } from "./env";
@@ -144,7 +152,7 @@ test("a member opens a DM with a colleague from New message; both chat live; sea
 
   // ---- search palette: the colleague's card → Message → the same DM
   await me.page.goto(`${BASE_URL}/chat`);
-  await expect(me.page).toHaveURL(/\/chat\/[0-9a-f-]{36}$/);
+  await expectChannelLanding(me.page);
   await expect(me.page.getByTestId("composer")).toBeVisible();
   const palette = await openPalette(me.page, mobile);
   await palette

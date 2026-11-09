@@ -336,14 +336,39 @@ section_core() {
     fail "process kill → ${status} $(cat "$WORK/body.json")"
   fi
 
+  # timeoutMs is the command's own budget: ocw-run runs argv under `timeout -s KILL`, counted from when it starts in the
+  # container. Docker answers the exec start before runc has spawned it, so on a loaded daemon the start itself can lag
+  # by seconds (CI p202: answered in 6492 ms, exit 137, inside sandboxd's 5 s backstop). The check times the command,
+  # not the request: its first line prints its start (ms, the same kernel clock as the daemon's), and Docker's
+  # `exec_die` for that exit code is when it was killed. It may live at most its 2 s plus 1 s for ocw-run and `date`.
   s0=$(node -e 'process.stdout.write(String(Date.now()))')
-  status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sleep","10"]' 2000 25000)")"
+  docker events --since "$((s0 / 1000))" --filter "container=${CID_A}" --filter event=exec_die \
+    --format '{{json .}}' >"$WORK/exec-die.jsonl" 2>/dev/null &
+  EVENTS_PID=$!
+  status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sh","-c","date +%s%3N; exec sleep 10"]' 2000 25000)")"
   s1=$(node -e 'process.stdout.write(String(Date.now()))')
   code="$(jfield "$WORK/body.json" exitCode)"
-  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" status)" = exited ] && [ "$code" != 0 ] && [ $((s1 - s0)) -lt 3000 ]; then
-    ok "timeoutMs 2000 on sleep 10 → exited ${code} in $((s1 - s0)) ms"
+  began="$(jfield "$WORK/body.json" stdout | tr -d '\n')"
+  died=""
+  for _ in $(seq 1 50); do
+    died="$(node -e '
+      const [file, code, began] = process.argv.slice(1);
+      const lines = require("fs").readFileSync(file, "utf8").split("\n").filter(Boolean);
+      const hit = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).find((e) =>
+        e && e.Actor?.Attributes?.exitCode === code && Number(e.timeNano) / 1e6 >= Number(began));
+      process.stdout.write(hit ? String(Math.round(Number(hit.timeNano) / 1e6)) : "");
+    ' "$WORK/exec-die.jsonl" "$code" "${began:-0}")"
+    [ -n "$died" ] && break
+    sleep 0.1
+  done
+  kill "$EVENTS_PID" 2>/dev/null || true
+  wait "$EVENTS_PID" 2>/dev/null || true
+  lived=$((${died:-0} - ${began:-0}))
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" status)" = exited ] && [ "$code" != 0 ] &&
+    [[ "$began" =~ ^[0-9]{13}$ ]] && [ -n "$died" ] && [ "$lived" -ge 0 ] && [ "$lived" -lt 3000 ]; then
+    ok "timeoutMs 2000 on sleep 10 → killed ${lived} ms after it started, exited ${code}; answered in $((s1 - s0)) ms"
   else
-    fail "timeout → ${status} in $((s1 - s0)) ms $(cat "$WORK/body.json")"
+    fail "timeout → ${status}, lived ${lived} ms (exec_die ${died:-none}), answered in $((s1 - s0)) ms $(cat "$WORK/body.json")"
   fi
 
   status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sh","-c","yes a | head -c 40000; echo END"]')")"
@@ -516,14 +541,25 @@ section_core() {
     fail "killOrg → ${status} A=$(running_of "$CID_A") B=$(running_of "$CID_B") other=$(running_of "$D_NAME")"
   fi
 
+  # B's objects right before the purge: at least its shell, workspace and packages volumes and network (07.8-17), plus
+  # the files helper when a sweep's quota measurement of the stopped bot created one. A measurement already in flight
+  # can still create that helper after this count (purge then removes it too), so one more is accepted, and only
+  # when no helper was counted (its name is fixed: there is at most one).
+  b_objects() {
+    echo $(($(docker ps -aq --filter "label=ocw.agent=${B}" | wc -l) + $(docker volume ls -q --filter "label=ocw.agent=${B}" | wc -l) + $(docker network ls -q --filter "label=ocw.agent=${B}" | wc -l)))
+  }
+  before_b="$(b_objects)"
+  helper_b="$(docker ps -aq --filter "label=ocw.agent=${B}" --filter "label=ocw.kind=files" | wc -l | tr -d ' ')"
   status="$(api POST /v1/sandboxes/purge "{\"target\":$(target "$ORG" "$B")}")"
-  left_b=$(($(docker ps -aq --filter "label=ocw.agent=${B}" | wc -l) + $(docker volume ls -q --filter "label=ocw.agent=${B}" | wc -l) + $(docker network ls -q --filter "label=ocw.agent=${B}" | wc -l)))
-  # 07.8-17: four objects since the bot's packages volume exists (container, workspace, packages volume, network).
-  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" removed)" = 4 ] && [ "$left_b" = 0 ] && [ "$(running_of "$CID_A")" = false ]; then
-    ok "purge B removes its container, workspace and packages volumes and network (A's objects stay)"
+  removed_b="$(jfield "$WORK/body.json" removed)"
+  left_b="$(b_objects)"
+  if [ "$status" = 200 ] && [ "$before_b" -ge 4 ] && [ "$left_b" = 0 ] &&
+    { [ "$removed_b" = "$before_b" ] || { [ "$helper_b" = 0 ] && [ "$removed_b" = "$((before_b + 1))" ]; }; } &&
+    [ "$(running_of "$CID_A")" = false ]; then
+    ok "purge B removes its container, workspace and packages volumes and network (${removed_b} of ${before_b} counted before; A's objects stay)"
   else
-    fail "purge B → ${status} $(cat "$WORK/body.json"), ${left_b} object(s) left"
-    # Intermittent (2 of ~13 CI runs, always "removed 3, 2 left"): name what stayed so the next one is diagnosable.
+    fail "purge B → ${status} $(cat "$WORK/body.json") of ${before_b} counted before (files helper ${helper_b}), ${left_b} object(s) left"
+    # Name what stayed so a failure is diagnosable (it once was a files helper a measurement created mid-purge).
     docker ps -a --filter "label=ocw.agent=${B}" --format '     left container {{.Names}} kind={{.Label "ocw.kind"}} {{.Status}}' || true
     docker volume ls --filter "label=ocw.agent=${B}" --format '     left volume {{.Name}}' || true
     for n in $(docker network ls -q --filter "label=ocw.agent=${B}"); do
