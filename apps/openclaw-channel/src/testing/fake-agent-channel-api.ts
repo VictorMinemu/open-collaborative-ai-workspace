@@ -95,7 +95,9 @@
  *   POST /agent-channel/v1/work-sessions/start  (07.16) records every body (`workSessions.starts`, refused ones
  *                                          included) and answers `workSessions.answers.start`, else a `started` answer for
  *                                          FAKE_WORK_SESSION in billing-api (the model and mode asked, else none and
- *                                          `default`); 400 for any key beyond the contract's (a device, a user, an audience,
+ *                                          `default`). POST /agent-channel/v1/work-sessions/{prompt,read,stop} likewise
+ *                                          (`prompts`, `reads`, `stops`; default: queued at position 1, an empty read of the
+ *                                          session at cursor 0, stopped). All four: 400 for any key beyond the contract's (a device, a user, an audience,
  *                                          a worktree), 404 `unknown_turn` for a turn ended with `endTurn`. The
  *                                          `workSessions.status` knob makes every route answer that status with an error
  *                                          body carrying FAKE_ERROR_CANARY. POST /__test/work-sessions {answers?, status?}
@@ -382,11 +384,17 @@ export type FakeAttachments = {
   noTrigger?: boolean;
 };
 /** 07.16: a bot's Work Zone session routes (`/work-sessions/<route>`). */
-export type FakeWorkSessionRoute = "start";
+export type FakeWorkSessionRoute = "start" | "prompt" | "read" | "stop";
 /** 07.16: the bot Work Zone session routes' records and knobs (`POST /__test/work-sessions` replaces the knobs). */
 export type FakeWorkSessions = {
   /** Every POST /work-sessions/start body, in order (refused ones included). */
   starts: Array<Record<string, unknown>>;
+  /** Every POST /work-sessions/prompt body, in order. */
+  prompts: Array<Record<string, unknown>>;
+  /** Every POST /work-sessions/read body, in order. */
+  reads: Array<Record<string, unknown>>;
+  /** Every POST /work-sessions/stop body, in order. */
+  stops: Array<Record<string, unknown>>;
   /** What each route answers instead of its default. */
   answers: Partial<Record<FakeWorkSessionRoute, unknown>>;
   /** When set, every route answers this HTTP status with an error body (FAKE_ERROR_CANARY). */
@@ -413,13 +421,24 @@ const WORK_SESSION_BODIES: Record<
     ],
     required: ["projectId", "prompt"],
   },
+  prompt: { keys: ["eventId", "agentId", "workSessionId", "prompt"], required: ["workSessionId", "prompt"] },
+  read: { keys: ["eventId", "agentId", "workSessionId", "cursor"], required: ["workSessionId"] },
+  stop: { keys: ["eventId", "agentId", "workSessionId"], required: ["workSessionId"] },
 };
-const fakeWorkSessions = (): FakeWorkSessions => ({ starts: [], answers: {} });
+const fakeWorkSessions = (): FakeWorkSessions => ({
+  starts: [],
+  prompts: [],
+  reads: [],
+  stops: [],
+  answers: {},
+});
 /** The record list of each route. */
-const WORK_SESSION_RECORDS = { start: "starts" } as const satisfies Record<
-  FakeWorkSessionRoute,
-  keyof FakeWorkSessions
->;
+const WORK_SESSION_RECORDS = {
+  start: "starts",
+  prompt: "prompts",
+  read: "reads",
+  stop: "stops",
+} as const satisfies Record<FakeWorkSessionRoute, keyof FakeWorkSessions>;
 /** A route's default answer (the real API's shapes, ids from the body). */
 function fakeWorkSessionAnswer(route: FakeWorkSessionRoute, body: Record<string, unknown>): unknown {
   switch (route) {
@@ -433,6 +452,39 @@ function fakeWorkSessionAnswer(route: FakeWorkSessionRoute, body: Record<string,
         mode: typeof body.permissionMode === "string" ? body.permissionMode : "default",
         projectName: "billing-api",
       };
+    case "prompt":
+      return {
+        kind: "queued",
+        workSessionId: body.workSessionId,
+        promptId: randomUUID(),
+        position: 1,
+        status: "queued",
+      };
+    case "read":
+      return {
+        kind: "read",
+        session: {
+          id: body.workSessionId,
+          status: "idle",
+          runtime: "claude-code",
+          model: null,
+          mode: "default",
+          worktree: true,
+          title: "Work Zone session",
+          projectName: "billing-api",
+          updatedAt: new Date(0).toISOString(),
+        },
+        queue: { queued: 0, running: 0, completed: 1, failed: 0, cancelled: 0, mine: [] },
+        output: { texts: [], truncated: false },
+        tools: [],
+        changes: null,
+        approvals: [],
+        deciders: [],
+        error: null,
+        cursor: typeof body.cursor === "number" ? body.cursor : 0,
+      };
+    case "stop":
+      return { kind: "stopped", workSessionId: body.workSessionId };
   }
 }
 /** The keys a read body may carry (contracts `AgentChannelAttachmentRead`, a strict object). */
@@ -1305,7 +1357,7 @@ export async function startFakeAgentChannelApi(
         const canned = sandboxRoute === "exec" && sb.exec ? sb.exec : sb.results[sandboxRoute];
         return json(res, 200, canned ?? fakeSandboxResult(sandboxRoute, body));
       }
-      const workSessionRoute = /^\/work-sessions\/(start)$/u.exec(route)?.[1] as
+      const workSessionRoute = /^\/work-sessions\/(start|prompt|read|stop)$/u.exec(route)?.[1] as
         | FakeWorkSessionRoute
         | undefined;
       if (req.method === "POST" && workSessionRoute) {

@@ -49,8 +49,14 @@ import {
   type AgentChannelToolCallResult,
   type AgentChannelTurnDone,
   type AgentChannelTyping,
+  type AgentChannelWorkSessionPrompt,
+  AgentChannelWorkSessionPromptResponse,
+  type AgentChannelWorkSessionRead,
+  AgentChannelWorkSessionReadResponse,
   type AgentChannelWorkSessionStart,
   AgentChannelWorkSessionStartResponse,
+  type AgentChannelWorkSessionStop,
+  AgentChannelWorkSessionStopResponse,
   type AgentChannelWorkZoneProjects,
   AgentChannelWorkZoneProjectsResponse,
   type AgentChannelWorkZonePropose,
@@ -648,6 +654,58 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
         WORK_SESSION_REQUEST_TIMEOUT_MS,
       );
       return AgentChannelWorkSessionStartResponse.parse(raw);
+    },
+    /**
+     * `ocw_work_session_prompt` (07.16 PD-13): one more prompt to a session this bot started, queued like a person's.
+     * One attempt (a retry could queue it twice). Refusals are a 200 `{kind: "refused"}`. Never logs the prompt.
+     */
+    async workSessionPrompt(
+      body: AgentChannelWorkSessionPrompt,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelWorkSessionPromptResponse> {
+      const raw = await request(
+        "POST",
+        "/work-sessions/prompt",
+        body,
+        signal,
+        1,
+        WORK_SESSION_REQUEST_TIMEOUT_MS,
+      );
+      return AgentChannelWorkSessionPromptResponse.parse(raw);
+    },
+    /**
+     * `ocw_work_session_read` (07.16 PD-14): the session's bounded, repo-relative state and output after `cursor`. One
+     * attempt: the route counts the read against the turn's tool cap and audits it. The parse enforces the contract's
+     * bounds, so an oversized answer never reaches the model. Never logs the output.
+     */
+    async workSessionRead(
+      body: AgentChannelWorkSessionRead,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelWorkSessionReadResponse> {
+      const raw = await request(
+        "POST",
+        "/work-sessions/read",
+        body,
+        signal,
+        1,
+        WORK_SESSION_REQUEST_TIMEOUT_MS,
+      );
+      return AgentChannelWorkSessionReadResponse.parse(raw);
+    },
+    /** `ocw_work_session_stop` (07.16 PD-13): archives a session this bot started. One attempt. */
+    async workSessionStop(
+      body: AgentChannelWorkSessionStop,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelWorkSessionStopResponse> {
+      const raw = await request(
+        "POST",
+        "/work-sessions/stop",
+        body,
+        signal,
+        1,
+        WORK_SESSION_REQUEST_TIMEOUT_MS,
+      );
+      return AgentChannelWorkSessionStopResponse.parse(raw);
     },
     /**
      * A marketplace install / uninstall outcome (D-14). Three attempts at most: the API applies a report only to the
