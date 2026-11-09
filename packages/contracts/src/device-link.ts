@@ -123,7 +123,7 @@ export const CapabilitiesFrame = z.object({
   fullAccessOptIn: z.boolean(),
   /**
    * 07.16 (D-19): the device owner's local isolated-server mark, re-sent when it changes; honoured by the API only for
-   * `service` hosts, never settable from the server or the web. Optional for older daemons (absent = unchanged).
+   * `service` hosts, never settable from the server or the web. Optional for older daemons (absent = off).
    */
   isolatedServer: z.boolean().optional(),
 });
