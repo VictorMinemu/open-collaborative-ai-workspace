@@ -6,20 +6,32 @@ import {
   type BotWorkZoneProfileInput,
   type BotWorkZoneProfileView,
   type Device,
+  type ModelControl,
+  OUTSIDE_CONTENT_WARNING,
   type Project,
   type RuntimeControls,
 } from "@ocw/contracts";
 import { MutationObserver, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "@/lib/api";
-import { botWorkZoneKeys, saveProfileMutation } from "@/lib/bot-work-zone-queries";
+import { ApiRequestError, api } from "@/lib/api";
+import { botWorkZoneKeys, removeProfileMutation, saveProfileMutation } from "@/lib/bot-work-zone-queries";
 import { wzKeys } from "@/lib/workzone-queries";
 import {
+  addable,
+  FAST_MODE_OPTIONS,
+  fieldError,
+  LIMIT_FIELDS,
   newDraft,
+  offerFrom,
+  RemoveProfileButton,
+  reconcile,
   toProfileInput,
   WORK_ZONE_COPY,
+  WorkZoneProfileEditor,
   WorkZoneProfileSection,
+  withDefaultMode,
+  withMaxMode,
 } from "./work-zone-profile-section";
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -306,5 +318,287 @@ describe("the bot sheet (Task 1)", () => {
     expect(sheet).toMatch(
       /\{canConfigure \? \(\s*<SheetSection title="Work Zone">\s*<WorkZoneProfileSection agent=\{agent\} \/>/,
     );
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: every field within the caller's controls
+
+function model(over: Partial<ModelControl> & Pick<ModelControl, "id" | "displayName">): ModelControl {
+  return {
+    available: true,
+    reason: null,
+    detail: null,
+    description: null,
+    resolvedModel: null,
+    legacy: false,
+    isDefault: false,
+    badge: null,
+    efforts: [],
+    defaultEffort: null,
+    contextWindows: [],
+    defaultContextWindow: null,
+    fastMode: { available: false, reason: "runtime", detail: null, supported: false },
+    supportsAutoMode: false,
+    imageInput: true,
+    ...over,
+  } as ModelControl;
+}
+
+const option = <V,>(value: V, reason: ModelControl["reason"] = null) => ({
+  value,
+  available: reason === null,
+  reason,
+  detail: null,
+});
+
+const RICH: RuntimeControls = {
+  runtime: "codex",
+  catalog: { runtimeVersion: "0.60.0", collectedAt: T },
+  models: [
+    model({
+      id: "gpt-5",
+      displayName: "GPT-5",
+      isDefault: true,
+      efforts: [
+        { ...option("low"), description: null },
+        { ...option("medium"), description: null },
+        { ...option("high", "org_policy"), description: null },
+      ],
+      contextWindows: [option(200_000), option(1_000_000, "runtime")],
+      fastMode: { available: true, reason: null, detail: null, supported: true },
+    }),
+    model({ id: "gpt-4", displayName: "GPT-4", available: false, reason: "org_policy", legacy: true }),
+    model({ id: "gpt-x", displayName: "GPT-X", available: false, reason: "not_confirmed" }),
+  ],
+  otherRuntimes: [],
+  permissionModes: [
+    option("default" as const),
+    option("acceptEdits" as const),
+    option("auto" as const, "not_confirmed"),
+    option("fullAccess" as const, "device_opt_in"),
+    option("plan" as const),
+  ],
+  fastModeCost: null,
+};
+
+function editor(
+  view: BotWorkZoneProfileView,
+  initial?: Parameters<typeof WorkZoneProfileEditor>[0]["initial"],
+  controls: RuntimeControls = RICH,
+): string {
+  const qc = client(view);
+  qc.setQueryData(wzKeys.runtimeControls(MAC, "codex"), controls);
+  return renderToStaticMarkup(
+    <QueryClientProvider client={qc}>
+      <WorkZoneProfileEditor agent={SCOUT_AGENT} view={view} devices={DEVICES} initial={initial} />
+    </QueryClientProvider>,
+  );
+}
+
+const active = () => saved({ active: true, reason: null, sentence: null });
+
+describe("the offer: the caller's live controls for the device and runtime (Task 2)", () => {
+  it("lists the models; unavailable ones are disabled with their reason, unconfirmed ones are not shown", () => {
+    const offer = offerFrom(RICH);
+    expect(offer.models.map((m) => [m.value, m.label, m.available, m.reason])).toEqual([
+      ["gpt-5", "GPT-5", true, null],
+      ["gpt-4", "GPT-4", false, "Not allowed by your organization"],
+    ]);
+    expect(offer.efforts.map((e) => [e.value, e.label, e.available, e.reason])).toEqual([
+      ["low", "Low", true, null],
+      ["medium", "Medium", true, null],
+      ["high", "High", false, "Not allowed by your organization"],
+    ]);
+    expect(offer.contextWindows.map((c) => [c.value, c.label, c.available, c.reason])).toEqual([
+      [200_000, "200k", true, null],
+      [1_000_000, "1M", false, "Codex does not offer this here"],
+    ]);
+    expect(offer.fast).toEqual({ available: true, reason: null });
+    expect(FAST_MODE_OPTIONS.map((o) => o.label)).toEqual(["Off", "Bot may turn it on", "On"]);
+  });
+
+  it("Full access keeps its warning style and is disabled with the reason; unconfirmed modes are not shown", () => {
+    const modes = offerFrom(RICH).modes;
+    expect(modes.map((m) => m.value)).toEqual(["default", "acceptEdits", "fullAccess", "plan"]);
+    const full = modes.find((m) => m.value === "fullAccess");
+    expect(full).toMatchObject({ label: "Full access", available: false, warning: true });
+    expect(full?.reason).toBe(
+      "Full access is off on this device. Its owner can turn it on in the desktop app.",
+    );
+    expect(modes.find((m) => m.value === "default")?.label).toBe("Supervised");
+  });
+
+  it("“Bot may also use” never offers an unavailable value, the default or one already chosen", () => {
+    const offer = offerFrom(RICH);
+    expect(addable(offer.models, [], null).map((m) => m.value)).toEqual(["gpt-5"]);
+    expect(addable(offer.models, [], "gpt-5")).toEqual([]);
+    expect(addable(offer.efforts, ["low"], null).map((e) => e.value)).toEqual(["medium"]);
+  });
+
+  it("another device or runtime drops what it no longer offers, and names it", () => {
+    const base = newDraft(DEVICES);
+    if (!base) throw new Error("no draft");
+    const draft = {
+      ...base,
+      defaultModel: "gpt-5",
+      allowedModels: ["gpt-4", "gpt-5"],
+      defaultEffort: "high",
+      allowedEfforts: ["low", "high"],
+      defaultContextWindow: 1_000_000,
+      allowedContextWindows: [200_000],
+      fastMode: "on" as const,
+      defaultMode: "fullAccess" as const,
+      maxMode: "fullAccess" as const,
+    };
+    const { draft: next, removed } = reconcile(draft, offerFrom(RICH));
+    expect(next).toMatchObject({
+      defaultModel: "gpt-5",
+      allowedModels: ["gpt-5"],
+      defaultEffort: null,
+      allowedEfforts: ["low"],
+      defaultContextWindow: null,
+      allowedContextWindows: [200_000],
+      fastMode: "on",
+      defaultMode: "default",
+      maxMode: "default",
+    });
+    expect(removed).toEqual(["GPT-4", "High", "1M", "Full access"]);
+    // Nothing to drop: the same draft back and no names.
+    expect(reconcile(next, offerFrom(RICH))).toEqual({ draft: next, removed: [] });
+    // A device whose models offer no fast mode turns it off.
+    const noFast = { ...RICH, models: [model({ id: "gpt-5", displayName: "GPT-5" })] };
+    expect(reconcile(next, offerFrom(noFast))).toMatchObject({
+      draft: { fastMode: "off" },
+      removed: ["Fast mode"],
+    });
+  });
+
+  it("a default mode above the highest raises the highest to it; a lower highest lowers the default", () => {
+    const base = newDraft(DEVICES);
+    if (!base) throw new Error("no draft");
+    expect(withDefaultMode(base, "acceptEdits")).toMatchObject({
+      defaultMode: "acceptEdits",
+      maxMode: "acceptEdits",
+    });
+    const high = { ...base, defaultMode: "acceptEdits" as const, maxMode: "fullAccess" as const };
+    expect(withDefaultMode(high, "default")).toMatchObject({ defaultMode: "default", maxMode: "fullAccess" });
+    expect(withMaxMode(high, "default")).toMatchObject({ defaultMode: "default", maxMode: "default" });
+  });
+});
+
+describe("the form (Task 2)", () => {
+  it("renders every group with the current values: models, options, modes, worktree and the three limits", () => {
+    const html = editor(active());
+    for (const id of [
+      "work-zone-default-model",
+      "work-zone-allowed-models",
+      "work-zone-default-effort",
+      "work-zone-allowed-efforts",
+      "work-zone-default-context",
+      "work-zone-allowed-contexts",
+      "work-zone-fast",
+      "work-zone-default-mode",
+      "work-zone-max-mode",
+      "work-zone-worktree",
+    ]) {
+      expect(tagsOf(html, id), id).toHaveLength(1);
+    }
+    expect(text(from(html, "work-zone-default-model"))).toContain("Runtime default");
+    expect(text(from(html, "work-zone-fast"))).toContain("Off");
+    expect(text(from(html, "work-zone-default-mode"))).toContain("Supervised");
+    // No default and nothing listed: the API lets the bot use any model the device offers.
+    expect(text(html)).toContain("Any model this device offers");
+    expect(tagsOf(html, "work-zone-worktree")[0]).toContain('aria-checked="true"');
+  });
+
+  it("the limits are number fields bounded by BOT_WORK_ZONE_LIMITS", () => {
+    expect(LIMIT_FIELDS.map((f) => [f.key, f.min, f.max])).toEqual([
+      ["maxConcurrent", 1, BOT_WORK_ZONE_LIMITS.maxConcurrentMax],
+      ["promptsPerHour", 1, BOT_WORK_ZONE_LIMITS.promptsPerHourMax],
+      ["wakesPerSessionDay", 0, BOT_WORK_ZONE_LIMITS.wakesPerSessionDayMax],
+    ]);
+    expect([BOT_WORK_ZONE_LIMITS.maxConcurrentMax, BOT_WORK_ZONE_LIMITS.promptsPerHourMax]).toEqual([
+      10, 120,
+    ]);
+    expect(BOT_WORK_ZONE_LIMITS.wakesPerSessionDayMax).toBe(100);
+    const html = editor(active());
+    for (const [key, value] of [
+      ["maxConcurrent", 2],
+      ["promptsPerHour", 30],
+      ["wakesPerSessionDay", 20],
+    ] as const) {
+      const input = tagsOf(html, `work-zone-limit-${key}`)[0] ?? "";
+      const f = LIMIT_FIELDS.find((x) => x.key === key);
+      expect(input).toContain('type="number"');
+      expect(input).toContain(`min="${f?.min}"`);
+      expect(input).toContain(`max="${f?.max}"`);
+      expect(input).toContain(`value="${value}"`);
+    }
+  });
+
+  it("an admin gets the switch with the warning in an amber callout; others read the value", () => {
+    const admin = active();
+    admin.viewerCan = { edit: true, setOutsideContent: true };
+    const html = editor(admin);
+    expect(tagsOf(html, "work-zone-outside-switch")).toHaveLength(1);
+    expect(text(from(html, "work-zone-outside-warning"))).toContain(OUTSIDE_CONTENT_WARNING.slice(0, 60));
+    expect(tagsOf(html, "work-zone-outside-warning")[0]).toContain("amber");
+
+    const lead = editor(active());
+    expect(tagsOf(lead, "work-zone-outside-switch")).toHaveLength(0);
+    const row = text(from(lead, "work-zone-outside"));
+    expect(row).toContain("Off");
+    expect(row).toContain(WORK_ZONE_COPY.adminOnly);
+    expect(WORK_ZONE_COPY.adminOnly).toBe("Only an admin can change this");
+  });
+
+  it("a refused save marks its field with the API's message and keeps the form", () => {
+    const refused = new ApiRequestError(400, "invalid_work_zone_profile", "GPT-4 is not available to you", {
+      field: "allowedModels",
+    });
+    expect(fieldError(refused)).toEqual({ field: "allowedModels", message: "GPT-4 is not available to you" });
+    const flag = new ApiRequestError(403, "outside_content_admin_only", "Only an admin can change whether …");
+    expect(fieldError(flag)).toEqual({
+      field: "actOnOutsideContent",
+      message: "Only an admin can change whether …",
+    });
+    expect(fieldError(new ApiRequestError(500, "internal", "boom"))).toBeNull();
+
+    const html = editor(active(), {
+      errors: {
+        allowedModels: "GPT-4 is not available to you",
+        actOnOutsideContent: "Only an admin can change whether …",
+      },
+    });
+    expect(text(from(html, "work-zone-allowed-models-field"))).toContain("GPT-4 is not available to you");
+    expect(text(from(html, "work-zone-outside"))).toContain("Only an admin can change whether …");
+    expect(tagsOf(html, "work-zone-save")).toHaveLength(1);
+  });
+
+  it("shows what a device or runtime change removed in a muted line", () => {
+    const html = editor(active(), { removed: ["GPT-4", "High"] });
+    expect(text(from(html, "work-zone-removed"))).toContain("Removed: GPT-4, High");
+  });
+
+  it("Remove profile asks once, then DELETE answers the empty state", async () => {
+    const button = (confirming: boolean) =>
+      text(
+        renderToStaticMarkup(
+          <RemoveProfileButton confirming={confirming} pending={false} onClick={() => {}} />,
+        ),
+      );
+    expect(button(false)).toBe(WORK_ZONE_COPY.remove);
+    expect(button(true)).toBe(WORK_ZONE_COPY.confirmRemove);
+    expect([WORK_ZONE_COPY.remove, WORK_ZONE_COPY.confirmRemove]).toEqual([
+      "Remove profile",
+      "Confirm remove",
+    ]);
+    vi.mocked(api.del).mockResolvedValue(EMPTY);
+    const qc = client(active());
+    await new MutationObserver(qc, removeProfileMutation(qc, SCOUT)).mutate();
+    expect(api.del).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.del).mock.calls[0]?.[0]).toBe(`/api/v1/agents/${SCOUT}/work-zone-profile`);
+    expect(qc.getQueryData(botWorkZoneKeys.profile(SCOUT))).toEqual(EMPTY);
+    expect(text(from(render(EMPTY, qc), "work-zone-status"))).toContain(WORK_ZONE_COPY.empty);
   });
 });
