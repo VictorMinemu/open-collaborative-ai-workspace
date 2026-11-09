@@ -703,6 +703,27 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $f
   )
 $fn$;
 
+-- A bot's start caps (Phase 07.16, D-15, PD-10), whatever the sponsor can see: the start runs in the sponsor's
+-- transaction, where the backstop hides other people's sessions, but the caps count every one of the caller's
+-- organization. Counts and one flag only (never a title, a person or a prompt): this bot's active sessions, the
+-- organization's active bot sessions, this bot's prompts of the last hour, and whether an active session works on the
+-- project's own tree (`worktree = false`). `p_states` are the API's active states (`ACTIVE_STATES`, one copy).
+CREATE OR REPLACE FUNCTION app.bot_work_session_load(p_agent uuid, p_project uuid, p_states text[])
+RETURNS TABLE (bot_active integer, org_active integer, bot_prompts_hour integer, tree_busy boolean)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $fn$
+  WITH org AS (SELECT nullif(current_setting('app.organization_id', true), '')::uuid AS id)
+  SELECT
+    (SELECT count(*)::int FROM app.work_sessions ws, org
+      WHERE ws.organization_id = org.id AND ws.started_by_agent_id = p_agent AND ws.status = ANY (p_states)),
+    (SELECT count(*)::int FROM app.work_sessions ws, org
+      WHERE ws.organization_id = org.id AND ws.started_by_agent_id IS NOT NULL AND ws.status = ANY (p_states)),
+    (SELECT count(*)::int FROM app.work_prompts wp, org
+      WHERE wp.organization_id = org.id AND wp.author_agent_id = p_agent AND wp.created_at > now() - interval '1 hour'),
+    EXISTS (SELECT 1 FROM app.work_sessions ws, org
+      WHERE ws.organization_id = org.id AND ws.project_id = p_project AND NOT ws.worktree
+        AND ws.status = ANY (p_states))
+$fn$;
+
 REVOKE ALL ON FUNCTION app.work_project_access(uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app.work_session_access(uuid, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app.work_project_team_via(uuid, uuid, uuid) FROM PUBLIC;
@@ -712,6 +733,7 @@ REVOKE ALL ON FUNCTION app.work_session_visibility_summary(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app.work_project_repo_session_count(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app.work_session_exists(uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION app.work_session_shape(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION app.bot_work_session_load(uuid, uuid, text[]) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION app.work_project_access(uuid, uuid) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.work_session_access(uuid, uuid) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.work_project_people(uuid) TO ocw_app;
@@ -720,6 +742,7 @@ GRANT EXECUTE ON FUNCTION app.work_session_visibility_summary(uuid) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.work_project_repo_session_count(uuid) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.work_session_exists(uuid) TO ocw_app;
 GRANT EXECUTE ON FUNCTION app.work_session_shape(uuid) TO ocw_app;
+GRANT EXECUTE ON FUNCTION app.bot_work_session_load(uuid, uuid, text[]) TO ocw_app;
 
 -- The audience backstop (Phase 07.9, D-09, D-13, P-10; ADR-0030): the database's second line of defence under the
 -- resolver, so a route that forgets the resolver still cannot read or change a session outside the user's relations.

@@ -3,6 +3,7 @@ import {
   type AgentChannelWorkSessionStartResponse,
   BOT_PROFILE_STATUS_SENTENCES,
   BOT_WORK_SESSION_SENTENCES,
+  BOT_WORK_ZONE_LIMITS,
   type BotProfileInactiveReason,
   type BotWorkSessionRefusal,
   type BotWorkSessionRefused,
@@ -16,8 +17,9 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { composeWorkSessionCard } from "./bot-card";
 import type { BotProfileRow, BotProfileStatus } from "./bot-profile";
+import { loadWorkZonePolicy } from "./policy";
 import type { WorkSessionStartFn } from "./proposals";
-import type { SessionRow } from "./service";
+import { ACTIVE_STATES, type SessionRow } from "./service";
 import type { WorkSessionStartFailure, WorkSessionStartInput } from "./start";
 import { audienceTarget, checkAudience } from "./visibility";
 
@@ -275,6 +277,31 @@ function settingsOf(profile: BotProfileRow, input: AgentChannelWorkSessionStart)
   };
 }
 
+/**
+ * The caps' counts (`app.bot_work_session_load`, SECURITY DEFINER): the sponsor's transaction hides other people's
+ * sessions behind the audience backstop, but every cap counts the whole organization. Numbers and one flag only.
+ */
+async function botSessionLoad(
+  tx: Tx,
+  agentId: string,
+  projectId: string,
+): Promise<{ botActive: number; orgActive: number; botPromptsHour: number; treeBusy: boolean }> {
+  const states = `{${ACTIVE_STATES.join(",")}}`;
+  const res = await tx.execute(
+    sql`select bot_active, org_active, bot_prompts_hour, tree_busy
+          from app.bot_work_session_load(${agentId}::uuid, ${projectId}::uuid, ${states}::text[])`,
+  );
+  const row = res.rows[0] as
+    | { bot_active: number; org_active: number; bot_prompts_hour: number; tree_busy: boolean }
+    | undefined;
+  return {
+    botActive: Number(row?.bot_active ?? 0),
+    orgActive: Number(row?.org_active ?? 0),
+    botPromptsHour: Number(row?.bot_prompts_hour ?? 0),
+    treeBusy: row?.tree_busy === true,
+  };
+}
+
 export function createBotSessions(deps: BotSessionsDeps): BotSessions {
   const { core } = deps;
 
@@ -297,8 +324,24 @@ export function createBotSessions(deps: BotSessionsDeps): BotSessions {
         return answer;
       };
 
-      // The project must be one of the profile's that the sponsor can still start in (PD-10).
+      // PD-10: this bot's starts, then the organization's bot starts, are serialised (always in this order), so the
+      // counts below are exact under concurrency: a second start waits here until the first one commits, then counts
+      // its session. The counts see every session of the organization, not only those the sponsor sees.
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`bot_ws:${turn.agentId}`}, 0))`);
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`bot_ws_org:${turn.organizationId}`}, 0))`,
+      );
+      const load = await botSessionLoad(tx, turn.agentId, input.projectId);
+      if (load.botActive >= profile.maxConcurrent) return refuse(refusedAnswer("too_many_sessions"));
+      const policy = await loadWorkZonePolicy(tx);
+      const orgMax = policy.botSessionsMax ?? BOT_WORK_ZONE_LIMITS.orgSessionsDefault;
+      if (load.orgActive >= orgMax) return refuse(refusedAnswer("org_limit"));
+      // The start's own prompt counts against the hour (the first prompt is a prompt).
+      if (load.botPromptsHour >= profile.promptsPerHour) return refuse(refusedAnswer("prompt_rate"));
+      // The project must be one of the profile's that the sponsor can still start in.
       if (!status.projectIds.includes(input.projectId)) return refuse(refusedAnswer("project_not_allowed"));
+      // One executor per tree (D-15): without a worktree, never next to another active session on the project's tree.
+      if (!profile.worktree && load.treeBusy) return refuse(refusedAnswer("tree_busy"));
 
       const visibility = await botSessionAudience(tx, {
         projectId: input.projectId,
