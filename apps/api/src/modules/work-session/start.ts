@@ -20,7 +20,7 @@ import {
   workPrompts,
   workSessions,
 } from "@ocw/db";
-import { eq, max } from "drizzle-orm";
+import { eq, max, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Core } from "../../core";
 import { linkWorkPromptAttachments } from "../artifact";
@@ -114,9 +114,14 @@ export interface WorkSessionStartOptions {
   /**
    * 07.16 PD-03, PD-07: a bot's start in its sponsor's tenant transaction (the actor is the sponsor). Its caps join the
    * one controls context (`bot_profile` refusals); the session and its first prompt are recorded as the bot's
-   * (`started_by_agent_id`, `author_agent_id`). Absent on every human path.
+   * (`started_by_agent_id`, `author_agent_id`); a tainted layer sets `tainted_at` (D-08). Absent on every human path.
    */
   agent?: { layer: AgentControlsLayer };
+  /**
+   * 07.16 D-18, PD-15: a person started a proposal a bot made after reading outside content. Only the first prompt is
+   * marked tainted; the session is the person's and is not tainted.
+   */
+  firstPromptTainted?: boolean;
 }
 
 const RUNTIME_LABEL = { "claude-code": "Claude Code", codex: "Codex" } as const;
@@ -279,7 +284,8 @@ export async function createWorkSession(
     };
   }
   // The start settings go through the same decision as a change (ADR-0012: full access needs policy ∩
-  // opt-in ∩ grain). The model keeps today's free choice here; a change inside the session is catalog-checked.
+  // opt-in ∩ grain). A person's model keeps today's free choice here (a change inside the session is
+  // catalog-checked); a bot's model is decided here (07.16 PD-09, below).
   const loaded = await loadControlsContext(tx, perms, {
     deviceId: d.id,
     runtime: runtimeId,
@@ -303,14 +309,19 @@ export async function createWorkSession(
     if (!lower) return settingsFailure("permissionMode", startOption?.reason ?? "runtime");
     startMode = lower;
   }
+  // 07.16 PD-09: a bot's model is decided like a change (in the device's catalog and in its profile's set); a
+  // person's model stays out of the patch (today's free choice). The bot's baseline names no model, so it counts as
+  // changed and is checked.
+  const botModel = opts.agent !== undefined && input.model !== undefined;
   const startPatch: SessionSettingsPatch = {
     permissionMode: startMode,
+    ...(botModel ? { model: input.model } : {}),
     ...(input.effort !== undefined ? { effort: input.effort } : {}),
     ...(input.fastMode !== undefined ? { fastMode: input.fastMode } : {}),
     ...(input.contextWindow !== undefined ? { contextWindow: input.contextWindow } : {}),
   };
   const baseline = {
-    model: input.model ?? null,
+    model: opts.agent ? null : (input.model ?? null),
     effort: null,
     contextWindow: null,
     fastMode: false,
@@ -360,6 +371,8 @@ export async function createWorkSession(
       createdBy: actor.userId,
       visibility: audience.kind,
       startedByAgentId: opts.agent?.layer.agentId ?? null,
+      // D-08: sticky from the start; Full access after this needs an isolated server (the context decides it).
+      ...(opts.agent?.layer.tainted ? { taintedAt: sql`now()` } : {}),
     })
     .returning();
   // The chosen teams or people as grants (the same writer as the visibility PUT).
@@ -391,12 +404,14 @@ export async function createWorkSession(
       ...(opts.proposedByAgentId ? { proposedByAgentId: opts.proposedByAgentId } : {}),
       ...(opts.approvalId ? { approvalId: opts.approvalId } : {}),
       ...(opts.agent ? { startedByAgentId: opts.agent.layer.agentId } : {}),
+      ...(opts.agent?.layer.tainted ? { tainted: true } : {}),
     },
   });
   if (prompt) {
     await queueWorkPrompt(tx, deps, actor, s!, prompt, [], {
       ...(opts.proposedByAgentId ? { proposedByAgentId: opts.proposedByAgentId } : {}),
       ...(opts.agent ? { authorAgentId: opts.agent.layer.agentId } : {}),
+      ...(opts.agent?.layer.tainted === true || opts.firstPromptTainted === true ? { tainted: true } : {}),
     });
   }
   const dto = await svc.emitSession(tx, s!.id);
@@ -433,6 +448,7 @@ export async function joinConversation(tx: Tx, actor: WorkSessionActor, s: Sessi
  * Queue a prompt authored by `actor` at the end of the session's queue (images linked and budget-checked), audit
  * and emit it, and ask for a title on the session's first prompt. `proposedByAgentId` marks a bot's proposal;
  * `authorAgentId` (07.16 D-06) a prompt a bot sent in its sponsor's name (`actor`); never both (the DB check).
+ * `tainted` (07.16 D-08, D-18) marks a prompt written after outside content was read.
  */
 export async function queueWorkPrompt(
   tx: Tx,
@@ -441,7 +457,7 @@ export async function queueWorkPrompt(
   s: SessionRow,
   body: string,
   attachmentIds: readonly string[] = [],
-  opts: { proposedByAgentId?: string; authorAgentId?: string } = {},
+  opts: { proposedByAgentId?: string; authorAgentId?: string; tainted?: boolean } = {},
 ) {
   const { core, svc } = deps;
   const [{ pos } = { pos: 0 }] = await tx
@@ -459,6 +475,7 @@ export async function queueWorkPrompt(
       position: Number(pos ?? 0) + 1,
       ...(opts.proposedByAgentId ? { proposedByAgentId: opts.proposedByAgentId } : {}),
       ...(opts.authorAgentId ? { authorAgentId: opts.authorAgentId } : {}),
+      ...(opts.tainted ? { tainted: true } : {}),
     })
     .returning();
   // 06.1 (P-05): the sender's own ready images of this session's conversation, or one uniform 409 (the whole
@@ -487,6 +504,7 @@ export async function queueWorkPrompt(
       workSessionId: s.id,
       length: body.length,
       ...(opts.authorAgentId ? { authorAgentId: opts.authorAgentId } : {}),
+      ...(opts.tainted ? { tainted: true } : {}),
       // Ids and a count only, never bytes (D-03).
       ...(images.length > 0 ? { attachmentIds: images.map((a) => a.id), imageCount: images.length } : {}),
     },
