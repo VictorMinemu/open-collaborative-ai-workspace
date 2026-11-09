@@ -6,12 +6,14 @@ import { chmod, mkdir, readFile, realpath, rename, stat, writeFile } from "node:
 import { homedir, hostname } from "node:os";
 import { basename, join, resolve } from "node:path";
 import {
+  DeviceHostKind,
   type DeviceProjectAnnouncement,
   RuntimeUpdatesLevel,
   type RuntimeUpdatesLevelSource,
 } from "@ocw/contracts";
 import { z } from "zod";
 import { isGitRepo, repoInfo } from "./git.js";
+import { installedBundlePath, installInfoPath } from "./install-info.js";
 
 export function ocwHome(env: NodeJS.ProcessEnv = process.env): string {
   return env.OCW_HOME ? resolve(env.OCW_HOME) : join(homedir(), ".ocw");
@@ -64,6 +66,12 @@ export const RuntimeConfigSchema = z.object({
   runtimeUpdates: z
     .object({ level: RuntimeUpdatesLevel.default("automatic") })
     .default({ level: "automatic" }),
+  /**
+   * Phase 07.16 (D-19): the device owner's LOCAL isolated-server mark (default off): bots that read outside content may
+   * run Full access sessions here. Honoured by the server only for headless service daemons (`resolveHostKind`); set
+   * only on this device (`ocw-runtime isolated-server on|off`, or `OCW_ISOLATED_SERVER`), never by the server or the web.
+   */
+  isolatedServer: z.object({ on: z.boolean().default(false) }).default({ on: false }),
 });
 export type RuntimeConfig = z.infer<typeof RuntimeConfigSchema>;
 
@@ -97,6 +105,47 @@ export function resolveRuntimeUpdates(
   return { level: config.runtimeUpdates?.level ?? "automatic", source: "config" };
 }
 
+/** Where the effective isolated-server mark comes from: the environment wins over runtime.json. */
+export type IsolatedServerSource = "env" | "config";
+
+/**
+ * Phase 07.16 (D-19): the effective isolated-server mark. `OCW_ISOLATED_SERVER` = "1"/"true" → on, "0"/"false" → off;
+ * any other value is ignored and runtime.json decides (default off). Like `resolveFullAccess`.
+ */
+export function resolveIsolatedServer(
+  config: Partial<Pick<RuntimeConfig, "isolatedServer">>,
+  env: NodeJS.ProcessEnv = process.env,
+): { on: boolean; source: IsolatedServerSource } {
+  const raw = env.OCW_ISOLATED_SERVER?.trim().toLowerCase();
+  if (raw === "1" || raw === "true") return { on: true, source: "env" };
+  if (raw === "0" || raw === "false") return { on: false, source: "env" };
+  return { on: config.isolatedServer?.on === true, source: "config" };
+}
+
+/**
+ * Phase 07.16 (PD-18): how this daemon runs. `OCW_RUNTIME_HOST` = `desktop` | `service` decides (the desktop app's
+ * launcher sets `desktop`; the systemd and launchd units set `service`); otherwise `service` when `install.sh`'s record
+ * (`<home>/runtime/install.json`) exists and `entry` (the running script) is the installed bundle; otherwise unknown
+ * (null). Both paths are compared on this device only: only the answer is reported to the server.
+ */
+export async function resolveHostKind(p: {
+  env: NodeJS.ProcessEnv;
+  home: string;
+  entry: string | undefined;
+}): Promise<DeviceHostKind | null> {
+  const fromEnv = DeviceHostKind.safeParse(p.env.OCW_RUNTIME_HOST?.trim().toLowerCase());
+  if (fromEnv.success) return fromEnv.data;
+  if (!p.entry) return null;
+  try {
+    await stat(installInfoPath(p.home));
+  } catch {
+    return null;
+  }
+  const real = (path: string) => realpath(path).catch(() => resolve(path));
+  const [entry, bundle] = await Promise.all([real(p.entry), real(installedBundlePath(p.home))]);
+  return entry === bundle ? "service" : null;
+}
+
 export function fullAccessOptIn(
   config: Pick<RuntimeConfig, "fullAccess">,
   env: NodeJS.ProcessEnv = process.env,
@@ -122,10 +171,19 @@ export async function setRuntimeUpdatesLevel(home: string, level: RuntimeUpdates
   await patchRuntimeJsonSection(home, "runtimeUpdates", { level: RuntimeUpdatesLevel.parse(level) });
 }
 
+/**
+ * Phase 07.16 (D-19): writes `isolatedServer.on` into `<home>/runtime.json` (atomic, 0600), keeping every other key,
+ * exactly like `setFullAccessOptIn`. Local callers only (the CLI, tests). A running daemon applies it on the value-less
+ * `reloadConfig`; `OCW_ISOLATED_SERVER` still wins.
+ */
+export async function setIsolatedServer(home: string, on: boolean): Promise<void> {
+  await patchRuntimeJsonSection(home, "isolatedServer", { on });
+}
+
 /** Merges `patch` into one object section of runtime.json; a malformed file is never overwritten. */
 async function patchRuntimeJsonSection(
   home: string,
-  section: "fullAccess" | "runtimeUpdates",
+  section: "fullAccess" | "runtimeUpdates" | "isolatedServer",
   patch: Record<string, unknown>,
 ): Promise<void> {
   await ensureOcwHome(home);

@@ -24,6 +24,7 @@ import {
   type CommandFrame,
   DEVICE_LINK_PROTOCOL_VERSION,
   DeviceAccessToken,
+  type DeviceHostKind,
   type DeviceToServerFrame,
   DiffRequestPayload,
   type PermissionMode,
@@ -49,6 +50,7 @@ import {
   deviceName,
   ensureOcwHome,
   type FullAccessSource,
+  type IsolatedServerSource,
   type LocalProject,
   loadConfig,
   loadDeviceToken,
@@ -56,6 +58,8 @@ import {
   ProjectRegistry,
   type RuntimeConfig,
   resolveFullAccess,
+  resolveHostKind,
+  resolveIsolatedServer,
   resolveRuntimeUpdates,
   toWebSocketUrl,
 } from "./config.js";
@@ -213,6 +217,10 @@ export type ReloadConfigResult = {
   runtimeUpdatesSource: RuntimeUpdatesLevelSource;
   /** The lower of the organization's and this device's levels; absent where runtime updates are not maintained. */
   runtimeUpdatesEffectiveLevel?: RuntimeUpdatesLevel;
+  /** 07.16 (D-19): the owner's local isolated-server mark and where it comes from; `host` decides if it is reported. */
+  isolatedServer: boolean;
+  isolatedServerSource: IsolatedServerSource;
+  host: DeviceHostKind | null;
 };
 
 export class Daemon {
@@ -241,6 +249,10 @@ export class Daemon {
   /** The current device JWT (never logged). */
   private accessToken: { token: string; expiresAtMs: number } | null = null;
   private legacyServerWarned = false;
+  /** 07.16 (PD-18): how this daemon runs, resolved once at start (`resolveHostKind`). */
+  private hostKind: DeviceHostKind | null = null;
+  /** 07.16 (D-19): the owner's local isolated-server mark, re-read on `reloadConfig`. */
+  private isolated: { on: boolean; source: IsolatedServerSource } = { on: false, source: "config" };
 
   private constructor(
     readonly home: string,
@@ -294,6 +306,11 @@ export class Daemon {
         }),
       ];
     const daemon = new Daemon(home, config, token, runtimes, log, opts, env, gate);
+    // 07.16 (PD-18): the entry is the running script; it is compared with the installed bundle here only.
+    daemon.hostKind = await resolveHostKind({ env, home, entry: process.argv[1] });
+    daemon.isolated = resolveIsolatedServer(config, env);
+    if (daemon.reportedIsolated)
+      log.warn("This device is marked as an isolated server", { source: daemon.isolated.source });
     await daemon.registry.load();
     const scope = maintenanceScope(opts, env, fake && opts.runtimes === undefined);
     if (scope) daemon.maintenance = daemon.buildMaintenance(scope);
@@ -334,6 +351,14 @@ export class Daemon {
       userHome: scope.userHome,
       requireScratchHome: scope.requireScratchHome,
     });
+  }
+
+  /**
+   * 07.16 (D-19, PD-18): what the daemon reports as its isolated-server mark: the owner's local mark, only on a headless
+   * service host (the server applies the same rule again).
+   */
+  private get reportedIsolated(): boolean {
+    return this.hostKind === "service" && this.isolated.on;
   }
 
   /** The device's own Full access opt-in, as the daemon enforces it right now. */
@@ -402,6 +427,9 @@ export class Daemon {
       projects: this.registry.list().length,
       fullAccessOptIn: this.gate.optIn,
       fullAccessSource: this.gate.source,
+      isolatedServer: this.isolated.on,
+      isolatedServerSource: this.isolated.source,
+      host: this.hostKind,
       ...(this.maintenance ? { runtimeUpdates: this.runtimeUpdatesStatus(this.maintenance) } : {}),
       sessions: [...this.sessions.values()].map((s) => ({
         sessionId: s.sessionId,
@@ -525,11 +553,14 @@ export class Daemon {
           platform: platform(),
           arch: arch(),
           daemonVersion: DAEMON_VERSION,
+          ...(this.hostKind ? { host: this.hostKind } : {}),
         },
         runtimes: await this.detectRuntimes(),
         sessions: [...this.sessions.keys()],
         // ADR-0012 / P-12: the device owner's local opt-in, reported as is; the server never sets it.
         fullAccessOptIn: this.gate.optIn,
+        // 07.16 (D-19): the owner's isolated-server mark, reported only for a service host; the server never sets it.
+        isolatedServer: this.reportedIsolated,
       },
       { type: "projects.sync", projects: this.registry.toSynced() },
       await this.capabilitiesFrame(),
@@ -539,7 +570,12 @@ export class Daemon {
 
   private async capabilitiesFrame(): Promise<DeviceToServerFrame> {
     const catalogs = await this.collectCatalogs();
-    return { type: "capabilities", catalogs, fullAccessOptIn: this.gate.optIn };
+    return {
+      type: "capabilities",
+      catalogs,
+      fullAccessOptIn: this.gate.optIn,
+      isolatedServer: this.reportedIsolated,
+    };
   }
 
   private send(frame: DeviceToServerFrame): void {
@@ -664,6 +700,9 @@ export class Daemon {
    * 07.11 (D-02): it also re-reads the device's runtime updates level (`OCW_RUNTIME_UPDATES` still wins) and hands a
    * change to maintenance, which drops a pending (not running) automatic update when the effective level falls below
    * `automatic`, stops registry requests at `off`, and sends the server a fresh `runtime.maintenance` snapshot.
+   *
+   * 07.16 (D-19): it also re-reads the isolated-server mark (`OCW_ISOLATED_SERVER` still wins); when what is reported
+   * changes (service hosts only), the server gets `capabilities` at once, so turning it off lowers bot sessions now.
    */
   async reloadConfig(): Promise<ReloadConfigResult> {
     const loaded = await loadConfig(this.home, this.env);
@@ -676,6 +715,18 @@ export class Daemon {
         source: updates.source,
       });
       m.setLocalLevel(updates.level, updates.source);
+    }
+    // 07.16 (D-19): the isolated-server mark; a change of what is reported reaches the server at once.
+    const wasIsolated = this.reportedIsolated;
+    this.isolated = resolveIsolatedServer(merged, this.env);
+    const isolatedChanged = wasIsolated !== this.reportedIsolated;
+    if (isolatedChanged) {
+      this.log.warn(
+        this.reportedIsolated
+          ? "This device is marked as an isolated server"
+          : "The isolated-server mark is off",
+        { source: this.isolated.source },
+      );
     }
     const next = resolveFullAccess(merged, this.env);
     const was = this.gate.optIn;
@@ -704,6 +755,8 @@ export class Daemon {
       // the update ends (the adapters refuse its fullAccess turns meanwhile); the reload answers now rather than then.
       const lowering = Promise.all(full.map((s) => this.leaveFullAccess(s).catch(() => undefined)));
       if (full.every((s) => this.gates.get(s.runtime.id)?.isOpen !== false)) await lowering;
+    } else if (isolatedChanged && this.isConnected) {
+      this.send(await this.capabilitiesFrame());
     }
     return {
       fullAccessOptIn: next.optIn,
@@ -711,6 +764,9 @@ export class Daemon {
       runtimeUpdatesLevel: updates.level,
       runtimeUpdatesSource: updates.source,
       ...(m ? { runtimeUpdatesEffectiveLevel: m.effectiveLevel } : {}),
+      isolatedServer: this.isolated.on,
+      isolatedServerSource: this.isolated.source,
+      host: this.hostKind,
     };
   }
 
