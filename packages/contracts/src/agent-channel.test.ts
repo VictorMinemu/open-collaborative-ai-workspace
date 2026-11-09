@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   AgentChannelAttachmentRead,
   AgentChannelAttachmentReadResponse,
+  AgentChannelEventTypes,
+  AgentMentionEvent,
+  AgentWorkSessionEvent,
   ATTACHMENT_READ_LIMITS,
   ATTACHMENT_READ_SENTENCES,
   AttachmentImageType,
   AttachmentReadRefusal,
   SANDBOX_LIMITS,
+  WorkSessionTransition,
 } from "./index";
 
 const EVENT = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
@@ -163,5 +167,69 @@ describe("attachment reads (07.15 D-03, D-04, PD-06; ADR-0015)", () => {
 
   it("images are the four inline types the read layer returns, never SVG", () => {
     expect(AttachmentImageType.options).toEqual(["image/webp", "image/png", "image/jpeg", "image/gif"]);
+  });
+});
+
+describe("Work Zone wake event (07.16 D-09, D-10, PD-16)", () => {
+  const SESSION = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a60";
+  const MSG = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a61";
+  const PERSON = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a62";
+  const wake = (transition: string, summary = "Work Zone session in billing-api finished turn 2; nothing is queued.") => ({
+    eventId: EVENT,
+    seq: 7,
+    type: "agent.work_session.v1",
+    organizationId: FILE,
+    cellId: FILE,
+    agent: { id: AGENT, handle: "scout", displayName: "Scout" },
+    conversation: { id: FILE, kind: "channel", name: "billing" },
+    thread: { rootMessageId: MSG },
+    message: {
+      id: MSG,
+      text: "Work Zone session in billing-api finished turn 2; nothing is queued.",
+      createdAt: "2026-11-09T10:00:00.000Z",
+      author: { kind: "user", id: PERSON, displayName: "Ana" },
+      mentions: [],
+    },
+    threadHistory: [],
+    roster: [],
+    workSession: {
+      workSessionId: SESSION,
+      transition,
+      status: "idle",
+      summary,
+      pendingApprovals: 0,
+      deciders: [{ id: PERSON, handle: "ana", displayName: "Ana" }],
+    },
+  });
+
+  it("has its own event type on the cell stream", () => {
+    expect(AgentChannelEventTypes.workSession).toBe("agent.work_session.v1");
+    expect([...WorkSessionTransition.options]).toEqual(["turn_done", "waiting_approval", "failed", "ended", "offline"]);
+  });
+
+  it("a mention-shaped event with workSession parses for each of the five transitions", () => {
+    for (const t of WorkSessionTransition.options) {
+      const event = wake(t);
+      expect(AgentWorkSessionEvent.parse(event)).toEqual(event);
+    }
+  });
+
+  it("refuses a sixth transition, a 501-character summary, 4 deciders and the mention type", () => {
+    expect(AgentWorkSessionEvent.safeParse(wake("started")).success).toBe(false);
+    expect(AgentWorkSessionEvent.safeParse(wake("turn_done", "x".repeat(500))).success).toBe(true);
+    expect(AgentWorkSessionEvent.safeParse(wake("turn_done", "x".repeat(501))).success).toBe(false);
+    const base = wake("waiting_approval");
+    const decider = base.workSession.deciders[0];
+    expect(
+      AgentWorkSessionEvent.safeParse({
+        ...base,
+        workSession: { ...base.workSession, deciders: [decider, decider, decider, decider] },
+      }).success,
+    ).toBe(false);
+    expect(
+      AgentWorkSessionEvent.safeParse({ ...base, workSession: { ...base.workSession, pendingApprovals: -1 } }).success,
+    ).toBe(false);
+    expect(AgentWorkSessionEvent.safeParse({ ...base, type: "agent.mention.v1" }).success).toBe(false);
+    expect(AgentMentionEvent.safeParse(base).success).toBe(false);
   });
 });

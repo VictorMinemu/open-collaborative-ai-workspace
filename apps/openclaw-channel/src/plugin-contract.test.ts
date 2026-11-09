@@ -3554,4 +3554,123 @@ describe("bot Work Zone mirror parity (07.16-01: plugin ↔ packages/contracts b
       false,
     );
   });
+
+  it("the prompt, read and stop requests: the mirror accepts and refuses what the contract does", async () => {
+    const { wz, m } = await load();
+    const ids = { eventId: EVENT, agentId: AGENT, workSessionId: SESSION };
+    expectSameVerdicts(m.AgentChannelWorkSessionPrompt, wz.AgentChannelWorkSessionPrompt as Schema, [
+      { ...ids, prompt: "Run the whole suite" },
+      { ...ids, prompt: " " },
+      { ...ids, prompt: "x".repeat(50_001) },
+      { ...ids, prompt: "go", userId: ANA },
+      { ...ids, prompt: "go", deviceId: DEVICE },
+    ]);
+    expectSameVerdicts(m.AgentChannelWorkSessionRead, wz.AgentChannelWorkSessionRead as Schema, [
+      ids,
+      { ...ids, cursor: 0 },
+      { ...ids, cursor: 41 },
+      { ...ids, cursor: -1 },
+      { ...ids, userId: ANA },
+    ]);
+    expectSameVerdicts(m.AgentChannelWorkSessionStop, wz.AgentChannelWorkSessionStop as Schema, [
+      ids,
+      { ...ids, deviceId: DEVICE },
+      { ...ids, prompt: "stop" },
+    ]);
+  });
+
+  const fullRead = {
+    kind: "read",
+    session: {
+      id: SESSION,
+      status: "idle",
+      runtime: "codex",
+      model: null,
+      mode: "default",
+      worktree: true,
+      title: "Fix the invoice test",
+      projectName: "billing-api",
+      updatedAt: "2026-11-09T10:00:00.000Z",
+    },
+    queue: { queued: 1, running: 0, completed: 2, failed: 0, cancelled: 0, mine: [{ id: MSG, status: "queued", position: 1 }] },
+    output: { texts: [{ seq: 12, text: "a".repeat(3_000) }, { seq: 13, text: "b".repeat(3_000) }], truncated: false },
+    tools: Array.from({ length: 10 }, () => ({ name: "Edit", ok: true, summary: "edited a file" })),
+    changes: {
+      files: Array.from({ length: 50 }, (_, i) => ({ path: `src/f${i}.ts`, status: "added", additions: 1, deletions: 0 })),
+      branch: null,
+      truncated: false,
+    },
+    approvals: [{ id: APPROVAL, tool: "Bash", paths: ["scripts/a.sh"], summary: "Run a script" }],
+    deciders: [{ id: ANA, handle: "ana", displayName: "Ana" }],
+    error: null,
+    cursor: 13,
+  };
+
+  it("the prompt, stop and read answers parse identically in both copies; the read model's bounds are the contracts'", async () => {
+    const { wz, m } = await load();
+    const queued = { kind: "queued", workSessionId: SESSION, promptId: MSG, position: 1, status: "queued" };
+    const stopped = { kind: "stopped", workSessionId: SESSION };
+    const refused = { kind: "refused", code: "session_ended", sentence: m.BOT_WORK_SESSION_SENTENCES.session_ended };
+    expectSameVerdicts(m.AgentChannelWorkSessionPromptResponse, wz.AgentChannelWorkSessionPromptResponse as Schema, [
+      queued,
+      refused,
+      { ...queued, status: "waiting" },
+      stopped,
+    ]);
+    expectSameVerdicts(m.AgentChannelWorkSessionStopResponse, wz.AgentChannelWorkSessionStopResponse as Schema, [
+      stopped,
+      refused,
+      queued,
+    ]);
+    const first = fullRead.changes.files[0];
+    expectSameVerdicts(m.AgentChannelWorkSessionReadResponse, wz.AgentChannelWorkSessionReadResponse as Schema, [
+      fullRead,
+      refused,
+      { ...fullRead, output: { texts: [], truncated: false }, changes: null, tools: [], approvals: [], deciders: [] },
+      { ...fullRead, output: { texts: [...fullRead.output.texts, { seq: 14, text: "c" }], truncated: true } },
+      { ...fullRead, changes: { ...fullRead.changes, files: [{ ...first, path: "/Users/x/repo/a.ts" }] } },
+      { ...fullRead, changes: { ...fullRead.changes, files: [{ ...first, path: "C:\\repo\\a.ts" }] } },
+      { ...fullRead, approvals: [{ ...fullRead.approvals[0], paths: ["~/repo/a.ts"] }] },
+      { ...fullRead, tools: [...fullRead.tools, fullRead.tools[0]] },
+      { ...fullRead, deciders: Array(4).fill(fullRead.deciders[0]) },
+      { ...fullRead, error: "x".repeat(501) },
+    ]);
+    for (const answer of [queued, stopped, refused, fullRead]) {
+      const mirror =
+        answer.kind === "queued"
+          ? m.AgentChannelWorkSessionPromptResponse
+          : answer.kind === "stopped"
+            ? m.AgentChannelWorkSessionStopResponse
+            : m.AgentChannelWorkSessionReadResponse;
+      expect(mirror.parse(answer)).toEqual(answer);
+    }
+  });
+
+  it("the wake event parses identically in both copies; older types are untouched", async () => {
+    const { channel, m } = await load();
+    expect(m.AgentChannelEventTypes.workSession).toBe("agent.work_session.v1");
+    const c = channel as unknown as { WorkSessionTransition: { options: string[] }; AgentWorkSessionEvent: Schema };
+    expect([...m.WorkSessionTransition.options]).toEqual([...c.WorkSessionTransition.options]);
+    const event = {
+      ...mention(offered),
+      type: "agent.work_session.v1",
+      workSession: {
+        workSessionId: SESSION,
+        transition: "waiting_approval",
+        status: "waiting_approval",
+        summary: "Work Zone session in billing-api is waiting for approval of Bash.",
+        pendingApprovals: 1,
+        deciders: [{ id: ANA, handle: "ana", displayName: "Ana" }],
+      },
+    };
+    expect(c.AgentWorkSessionEvent.safeParse(event).success).toBe(true);
+    expect(m.AgentWorkSessionEvent.parse(event)).toEqual(event);
+    expectSameVerdicts(m.AgentWorkSessionEvent, c.AgentWorkSessionEvent, [
+      event,
+      { ...event, workSession: { ...event.workSession, transition: "started" } },
+      { ...event, workSession: { ...event.workSession, summary: "x".repeat(501) } },
+      { ...event, workSession: { ...event.workSession, deciders: Array(4).fill(event.workSession.deciders[0]) } },
+      { ...event, type: "agent.mention.v1" },
+    ]);
+  });
 });
