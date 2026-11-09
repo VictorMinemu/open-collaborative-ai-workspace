@@ -7,7 +7,7 @@ import {
   OUTSIDE_CONTENT_WARNING,
 } from "@ocw/contracts";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 import { eventually, FakeDevice } from "../../testing-device";
 import {
@@ -22,7 +22,7 @@ import {
   pairDevice,
 } from "../../testing-workzone";
 import { createPermissionService } from "../organization";
-import { loadBotProfile, profileStatus } from "./bot-profile";
+import { botLayerForSession, loadBotProfile, profileStatus } from "./bot-profile";
 
 /**
  * Phase 07.16-07 (D-01 … D-04, D-08, D-14 … D-16, D-22; PD-04 … PD-06, PD-21): a bot's Work Zone profile and the
@@ -645,5 +645,333 @@ describe("tenant isolation (organization B, BWZ-05)", () => {
       code: "invalid_work_zone_profile",
       field: "projectIds",
     });
+  });
+
+  it("organization B cannot read or change organization A's device consents (404)", async () => {
+    const consentPath = `/api/v1/devices/${samDeviceId}/bot-consents`;
+    expect((await orgB.client.request("GET", consentPath)).status).toBe(404);
+    expect(
+      (await orgB.client.request("PUT", `${consentPath}/${scoutId}`, { allowFullAccess: true })).status,
+    ).toBe(404);
+    expect((await orgB.client.request("DELETE", `${consentPath}/${scoutId}`)).status).toBe(404);
+    const live = await su.query(
+      "select allow_full_access from app.device_bot_consents where device_id = $1 and agent_id = $2 and revoked_at is null",
+      [samDeviceId, scoutId],
+    );
+    expect(live.rows).toEqual([{ allow_full_access: false }]);
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: consent, every inactive reason, the layer
+
+const consentPath = (deviceId: string, agentId?: string) =>
+  `/api/v1/devices/${deviceId}/bot-consents${agentId ? `/${agentId}` : ""}`;
+
+const consentRows = async (deviceId: string, agentId: string) =>
+  (
+    await su.query(
+      "select granted_by, revoked_at, revoked_by, allow_full_access from app.device_bot_consents where device_id = $1 and agent_id = $2 order by granted_at",
+      [deviceId, agentId],
+    )
+  ).rows as Json[];
+
+/** The device sweeps (`onAccessChanged`) `fn` triggers, through the work-session service the hub calls. */
+async function sweepsDuring(fn: () => Promise<unknown>) {
+  const handler = stack.built.deviceHub.sessionHandler!;
+  const spy = vi.spyOn(handler, "onAccessChanged");
+  try {
+    await fn();
+    return spy.mock.calls.map(([device, reason]) => ({ ...device, reason }));
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+const setHost = (deviceId: string, hostKind: string | null, isolated = false) =>
+  su.query("update app.devices set host_kind = $2, isolated_server = $3 where id = $1", [
+    deviceId,
+    hostKind,
+    isolated,
+  ]);
+
+describe("device consent: the owner always, an admin only on a server (D-03, D-22, PD-06)", () => {
+  it("a plain member can neither read nor change a device's consents (403)", async () => {
+    expect((await mia.request("GET", consentPath(samDeviceId))).status).toBe(403);
+    const res = await mia.request("PUT", consentPath(samDeviceId, scoutId), { allowFullAccess: true });
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+  });
+
+  it("an admin cannot consent on someone's desktop (no host kind, or desktop): 403", async () => {
+    for (const kind of [null, "desktop"]) {
+      await setHost(samDeviceId, kind);
+      const res = await victor.request("PUT", consentPath(samDeviceId, scoutId), { allowFullAccess: true });
+      expect(res.status, `${kind}: ${JSON.stringify(res.body)}`).toBe(403);
+      expect((await victor.request("DELETE", consentPath(samDeviceId, scoutId))).status).toBe(403);
+      // An admin reads the list, but may not grant there.
+      const list = DeviceBotConsentsView.parse(await ok(victor.request("GET", consentPath(samDeviceId))));
+      expect(list.viewerCan).toEqual({ grant: false });
+    }
+    await setHost(samDeviceId, null);
+    expect(await consentRows(samDeviceId, scoutId)).toEqual([
+      expect.objectContaining({ granted_by: samId, revoked_at: null, allow_full_access: false }),
+    ]);
+  });
+
+  it("the owner turns on Full access for the bot: audited as an update, one device sweep", async () => {
+    const sweeps = await sweepsDuring(() =>
+      grantBotConsent(sam, samDeviceId, scoutId, { allowFullAccess: true }),
+    );
+    expect(sweeps).toEqual([{ deviceId: samDeviceId, organizationId: orgId, reason: "access_changed" }]);
+    const [updated] = await audits("device.bot_consent_updated");
+    expect(updated).toMatchObject({
+      actor_id: samId,
+      agent_id: scoutId,
+      metadata: { deviceId: samDeviceId, agentId: scoutId, allowFullAccess: true },
+    });
+    // The same value again is no change: no audit, no sweep.
+    const again = await sweepsDuring(() =>
+      grantBotConsent(sam, samDeviceId, scoutId, { allowFullAccess: true }),
+    );
+    expect(again).toEqual([]);
+    expect(await audits("device.bot_consent_updated")).toHaveLength(1);
+  });
+
+  it("revoking is soft and audited, sweeps the device once, and leaves the profile without consent", async () => {
+    const sweeps = await sweepsDuring(() => ok(sam.request("DELETE", consentPath(samDeviceId, scoutId))));
+    expect(sweeps).toEqual([{ deviceId: samDeviceId, organizationId: orgId, reason: "access_changed" }]);
+    expect(await consentRows(samDeviceId, scoutId)).toEqual([
+      expect.objectContaining({ granted_by: samId, revoked_at: expect.any(Date), revoked_by: samId }),
+    ]);
+    const [revoked] = await audits("device.bot_consent_revoked");
+    expect(revoked).toMatchObject({
+      actor_id: samId,
+      agent_id: scoutId,
+      metadata: { deviceId: samDeviceId, agentId: scoutId, allowFullAccess: true },
+    });
+    expect(await statusOf(scoutId)).toEqual({ active: false, reason: "no_consent" });
+    const view = await getProfile(sam, scoutId);
+    expect(view.status).toEqual({
+      active: false,
+      reason: "no_consent",
+      sentence: BOT_PROFILE_STATUS_SENTENCES.no_consent,
+    });
+    // The bot now shows as a request on the device.
+    const list = DeviceBotConsentsView.parse(await ok(sam.request("GET", consentPath(samDeviceId))));
+    expect(list.consents).toEqual([]);
+    expect(list.requests).toEqual([
+      expect.objectContaining({
+        agentId: scoutId,
+        displayName: "Scout",
+        sponsor: { id: samId, displayName: "Sam Lee" },
+      }),
+    ]);
+    const missing = await sam.request("DELETE", consentPath(samDeviceId, scoutId));
+    expect(missing.status).toBe(404);
+    expect(errorCode(missing)).toBe("bot_consent_not_found");
+  });
+
+  it("on a service host an admin grants; a new grant after a revocation is a new live row", async () => {
+    await setHost(samDeviceId, "service");
+    try {
+      const list = await grantBotConsent(victor, samDeviceId, scoutId, { allowFullAccess: false });
+      expect(list.viewerCan).toEqual({ grant: true });
+      expect(list.consents).toEqual([
+        expect.objectContaining({
+          agentId: scoutId,
+          grantedBy: { id: victorId, displayName: "Víctor Ruiz" },
+        }),
+      ]);
+      expect(list.requests).toEqual([]);
+      const rows = await consentRows(samDeviceId, scoutId);
+      expect(rows).toHaveLength(2);
+      expect(rows.filter((r) => r.revoked_at === null)).toEqual([
+        expect.objectContaining({ granted_by: victorId, allow_full_access: false }),
+      ]);
+      expect((await statusOf(scoutId)).active).toBe(true);
+    } finally {
+      await setHost(samDeviceId, null);
+    }
+  });
+
+  it("the server's owner lists a team bot's request, then grants it", async () => {
+    await createBotProfile(noa, atlasId, serverBody());
+    const before = DeviceBotConsentsView.parse(await ok(victor.request("GET", consentPath(serverId))));
+    expect(before).toMatchObject({ consents: [], viewerCan: { grant: true } });
+    expect(before.requests).toEqual([
+      expect.objectContaining({
+        agentId: atlasId,
+        displayName: "Atlas",
+        sponsor: { id: noaId, displayName: "Noa Levi" },
+      }),
+    ]);
+    const after = await grantBotConsent(victor, serverId, atlasId, { allowFullAccess: false });
+    expect(after.consents.map((c) => c.agentId)).toEqual([atlasId]);
+    expect(after.requests).toEqual([]);
+    expect((await statusOf(atlasId)).active).toBe(true);
+  });
+});
+
+describe("profile saves and deletes sweep the devices they touch (PD-06)", () => {
+  it("a save on the same device sweeps it once; a move sweeps the old and the new device", async () => {
+    const same = await sweepsDuring(() => createBotProfile(sam, scoutId, body()));
+    expect(same).toEqual([{ deviceId: samDeviceId, organizationId: orgId, reason: "access_changed" }]);
+    const moved = await sweepsDuring(() =>
+      createBotProfile(sam, scoutId, body({ deviceId: serverId, projectIds: [infraId] })),
+    );
+    expect(moved).toEqual([
+      { deviceId: samDeviceId, organizationId: orgId, reason: "access_changed" },
+      { deviceId: serverId, organizationId: orgId, reason: "access_changed" },
+    ]);
+    const [last] = (await audits("bot.work_zone_profile_saved")).slice(-1);
+    expect(last!.metadata).toMatchObject({ deviceId: serverId, previousDeviceId: samDeviceId });
+    // Back on the MacBook, where Scout's consent lives.
+    await createBotProfile(sam, scoutId, body());
+    expect((await statusOf(scoutId)).active).toBe(true);
+  });
+});
+
+describe("every inactive reason, in PD-05's order (D-02, D-16, Pitfall 10)", () => {
+  it("bot_disabled", async () => {
+    await su.query("update app.agents set status = 'disabled' where id = $1", [scoutId]);
+    try {
+      expect(await statusOf(scoutId)).toEqual({ active: false, reason: "bot_disabled" });
+    } finally {
+      await su.query("update app.agents set status = 'ready' where id = $1", [scoutId]);
+    }
+  });
+
+  it("device_revoked", async () => {
+    await su.query("update app.devices set revoked_at = now() where id = $1", [samDeviceId]);
+    try {
+      expect(await statusOf(scoutId)).toEqual({ active: false, reason: "device_revoked" });
+    } finally {
+      await su.query("update app.devices set revoked_at = null where id = $1", [samDeviceId]);
+    }
+  });
+
+  it("sponsor_inactive", async () => {
+    await su.query("update app.org_members set deactivated_at = now() where user_id = $1", [samId]);
+    try {
+      expect(await statusOf(scoutId)).toEqual({ active: false, reason: "sponsor_inactive" });
+    } finally {
+      await su.query("update app.org_members set deactivated_at = null where user_id = $1", [samId]);
+    }
+  });
+
+  it("sponsor_not_allowed (a role without work_session.create)", async () => {
+    await su.query("update app.org_members set role = 'standard' where user_id = $1", [samId]);
+    try {
+      expect(await statusOf(scoutId)).toEqual({ active: false, reason: "sponsor_not_allowed" });
+    } finally {
+      await su.query("update app.org_members set role = 'developer' where user_id = $1", [samId]);
+    }
+  });
+
+  it("sponsor_device_access (the device is no longer shared with the sponsor)", async () => {
+    expect((await statusOf(atlasId)).active).toBe(true);
+    await ok(victor.request("PATCH", `/api/v1/devices/${serverId}`, { shared: false }));
+    try {
+      expect(await statusOf(atlasId)).toEqual({ active: false, reason: "sponsor_device_access" });
+    } finally {
+      await ok(victor.request("PATCH", `/api/v1/devices/${serverId}`, { shared: true }));
+    }
+  });
+
+  it("no_projects", async () => {
+    await su.query("update app.projects set removed_at = now() where id = $1", [billingId]);
+    try {
+      expect(await statusOf(scoutId)).toEqual({ active: false, reason: "no_projects" });
+    } finally {
+      await su.query("update app.projects set removed_at = null where id = $1", [billingId]);
+    }
+  });
+
+  it("org_disabled (the organization's cap is 0)", async () => {
+    await putPolicy({ botSessionsMax: 0 });
+    try {
+      expect(await statusOf(scoutId)).toEqual({ active: false, reason: "org_disabled" });
+      const view = await getProfile(sam, scoutId);
+      expect(view.status.sentence).toBe(BOT_PROFILE_STATUS_SENTENCES.org_disabled);
+    } finally {
+      await putPolicy({ botSessionsMax: 10 });
+    }
+  });
+
+  it("the first failing reason wins", async () => {
+    await su.query("update app.devices set revoked_at = now() where id = $1", [samDeviceId]);
+    await su.query("update app.org_members set deactivated_at = now() where user_id = $1", [samId]);
+    await putPolicy({ botSessionsMax: 0 });
+    try {
+      expect(await statusOf(scoutId)).toEqual({ active: false, reason: "device_revoked" });
+      await su.query("update app.agents set status = 'disabled' where id = $1", [scoutId]);
+      expect(await statusOf(scoutId)).toEqual({ active: false, reason: "bot_disabled" });
+    } finally {
+      await su.query("update app.agents set status = 'ready' where id = $1", [scoutId]);
+      await su.query("update app.devices set revoked_at = null where id = $1", [samDeviceId]);
+      await su.query("update app.org_members set deactivated_at = null where user_id = $1", [samId]);
+      await putPolicy({ botSessionsMax: 10 });
+    }
+    expect((await statusOf(scoutId)).active).toBe(true);
+  });
+});
+
+describe("the bot's caps (PD-05)", () => {
+  const layerOf = async (agentId: string) => {
+    const s = await statusOf(agentId);
+    if (!s.active) throw new Error(`inactive: ${s.reason}`);
+    return s.layer;
+  };
+
+  it("Full access needs the profile's max mode and the per-bot consent checkbox", async () => {
+    await putPolicy({ allowFullAccess: true });
+    try {
+      await createBotProfile(sam, scoutId, body({ maxMode: "fullAccess" }));
+      expect(await layerOf(scoutId)).toMatchObject({ maxMode: "fullAccess", allowFullAccess: false });
+      await grantBotConsent(sam, samDeviceId, scoutId, { allowFullAccess: true });
+      expect(await layerOf(scoutId)).toMatchObject({ maxMode: "fullAccess", allowFullAccess: true });
+    } finally {
+      await createBotProfile(sam, scoutId, body());
+      await grantBotConsent(sam, samDeviceId, scoutId, { allowFullAccess: false });
+      await putPolicy({ allowFullAccess: false });
+    }
+    expect(await layerOf(scoutId)).toMatchObject({ maxMode: "acceptEdits", allowFullAccess: false });
+  });
+
+  it("isolated only on a service host marked as an isolated server", async () => {
+    try {
+      await setHost(samDeviceId, "service", true);
+      expect((await layerOf(scoutId)).isolated).toBe(true);
+      await setHost(samDeviceId, "desktop", true);
+      expect((await layerOf(scoutId)).isolated).toBe(false);
+      await setHost(samDeviceId, "service", false);
+      expect((await layerOf(scoutId)).isolated).toBe(false);
+    } finally {
+      await setHost(samDeviceId, null);
+    }
+  });
+
+  it("botLayerForSession: null for a person's session or another device, tainted from the session", async () => {
+    const perms = createPermissionService(stack.built.core);
+    const layerFor = (s: Parameters<typeof botLayerForSession>[2]) =>
+      stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+        botLayerForSession(tx, perms, s),
+      );
+    const id = randomUUID();
+    expect(await layerFor({ id, startedByAgentId: null, deviceId: samDeviceId, taintedAt: null })).toBeNull();
+    expect(await layerFor({ id, startedByAgentId: scoutId, deviceId: serverId, taintedAt: null })).toBeNull();
+    expect(
+      await layerFor({ id, startedByAgentId: scoutId, deviceId: samDeviceId, taintedAt: null }),
+    ).toMatchObject({ agentId: scoutId, tainted: false });
+    expect(
+      await layerFor({ id, startedByAgentId: scoutId, deviceId: samDeviceId, taintedAt: new Date() }),
+    ).toMatchObject({ agentId: scoutId, tainted: true });
+    await putPolicy({ botSessionsMax: 0 });
+    try {
+      expect(
+        await layerFor({ id, startedByAgentId: scoutId, deviceId: samDeviceId, taintedAt: null }),
+      ).toBeNull();
+    } finally {
+      await putPolicy({ botSessionsMax: 10 });
+    }
   });
 });
