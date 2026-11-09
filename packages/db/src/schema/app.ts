@@ -736,6 +736,11 @@ export const agentTurns = appSchema.table(
      * the hop timeout: an older one is taken as lost). Null for every turn outside a chain.
      */
     doneAt: ts("done_at"),
+    /**
+     * Phase 07.16 (D-20): this turn read a Work Zone session's output (`ocw_work_session_read`), so what it does next
+     * may carry outside content into a session.
+     */
+    sessionOutputRead: boolean("session_output_read").notNull().default(false),
   },
   (t) => [
     index("agent_turns_org_agent_time_idx").on(t.organizationId, t.agentId, t.createdAt),
@@ -1383,10 +1388,22 @@ export const devices = appSchema.table(
     runtimeMaintenance: jsonb("runtime_maintenance").$type<unknown>(),
     revokedAt: ts("revoked_at"),
     createdAt: createdAt(),
+    /**
+     * Phase 07.16 (D-03, D-19, PD-18): how the daemon runs, `desktop` (beside the desktop app) or `service` (a headless
+     * systemd/launchd service); null = an older daemon that never said. Written only from the device's own
+     * hello/capabilities frames, never from a web route (as `full_access_opt_in`).
+     */
+    hostKind: text("host_kind", { enum: ["desktop", "service"] }),
+    /**
+     * Phase 07.16 (D-08, D-19, PD-18): the owner marked this host as an isolated server on the device itself. Written
+     * only from the device's own frames; honoured only when `host_kind = 'service'`.
+     */
+    isolatedServer: boolean("isolated_server").notNull().default(false),
   },
   (t) => [
     index("devices_org_idx").on(t.organizationId),
     modeCheck("devices_share_max_mode_ck", t.shareMaxMode),
+    check("devices_host_kind_ck", sql`${t.hostKind} in ('desktop','service')`),
     /** Phase 07.5: target of composite foreign keys that carry the organization (FKs bypass RLS). */
     unique("devices_org_id_uq").on(t.organizationId, t.id),
   ],
@@ -1440,9 +1457,15 @@ export const workZonePolicies = appSchema.table(
       .default("automatic"),
     updatedBy: uuid("updated_by"),
     updatedAt: ts("updated_at").notNull().defaultNow(),
+    /**
+     * Phase 07.16 (D-15, PD-22): the most bot-started sessions active at once in the organization; 0 = bots never start
+     * sessions (the admin's kill switch).
+     */
+    botSessionsMax: integer("bot_sessions_max").notNull().default(10),
   },
   (t) => [
     check("work_zone_policies_runtime_updates_ck", sql`${t.runtimeUpdates} in ('automatic','notify','off')`),
+    check("work_zone_policies_bot_sessions_max_ck", sql`${t.botSessionsMax} between 0 and 1000`),
   ],
 );
 
@@ -1554,6 +1577,16 @@ export const workSessions = appSchema.table(
       .default("project"),
     createdAt: createdAt(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
+    /**
+     * Phase 07.16 (D-06): the bot that started this session for its sponsor (`created_by`); null for every session a
+     * person started. A bot controls only the sessions it started; a deleted bot only unlinks.
+     */
+    startedByAgentId: uuid("started_by_agent_id"),
+    /**
+     * Phase 07.16 (D-08): when outside content first entered the runtime's context. Sticky (never cleared), so later
+     * Full access turns need an isolated server.
+     */
+    taintedAt: ts("tainted_at"),
   },
   (t) => [
     index("work_sessions_org_idx").on(t.organizationId, t.projectId),
@@ -1564,6 +1597,17 @@ export const workSessions = appSchema.table(
     check("work_sessions_visibility_ck", sql`${t.visibility} in ('owner','project','teams','people')`),
     /** Phase 07.5: target of composite foreign keys that carry the organization (FKs bypass RLS). */
     unique("work_sessions_org_id_uq").on(t.organizationId, t.id),
+    // Phase 07.16: composite with the organization (FKs bypass RLS). The migration narrows the action to
+    // `SET NULL ("started_by_agent_id")` (no drizzle builder for the column list), so a deleted bot never nulls
+    // `organization_id`.
+    foreignKey({
+      name: "work_sessions_started_by_agent_fk",
+      columns: [t.organizationId, t.startedByAgentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("set null"),
+    index("work_sessions_started_by_agent_idx")
+      .on(t.organizationId, t.startedByAgentId)
+      .where(sql`started_by_agent_id is not null`),
   ],
 );
 
@@ -1719,6 +1763,13 @@ export const workPrompts = appSchema.table(
      * `author_user_id` is the person who started it. Null for every prompt a person wrote; a deleted bot only unlinks.
      */
     proposedByAgentId: uuid("proposed_by_agent_id"),
+    /**
+     * Phase 07.16 (D-06): the bot that wrote this prompt itself ("@bot for Ana"); `author_user_id` stays its sponsor.
+     * Null for every prompt a person wrote; never set together with `proposed_by_agent_id`; a deleted bot only unlinks.
+     */
+    authorAgentId: uuid("author_agent_id"),
+    /** Phase 07.16 (D-08): the prompt carried outside content into the session (shown to people in its history). */
+    tainted: boolean("tainted").notNull().default(false),
   },
   (t) => [
     index("work_prompts_session_idx").on(t.organizationId, t.workSessionId, t.position),
@@ -1734,6 +1785,16 @@ export const workPrompts = appSchema.table(
     index("work_prompts_proposed_by_idx")
       .on(t.organizationId, t.proposedByAgentId)
       .where(sql`proposed_by_agent_id is not null`),
+    // Phase 07.16: narrowed to `SET NULL ("author_agent_id")` in the migration, as the proposer key above.
+    foreignKey({
+      name: "work_prompts_author_agent_fk",
+      columns: [t.organizationId, t.authorAgentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("set null"),
+    index("work_prompts_author_agent_idx")
+      .on(t.organizationId, t.authorAgentId)
+      .where(sql`author_agent_id is not null`),
+    check("work_prompts_agent_author_ck", sql`${t.authorAgentId} is null or ${t.proposedByAgentId} is null`),
   ],
 );
 
@@ -1756,6 +1817,203 @@ export const workApprovals = appSchema.table(
     decidedAt: ts("decided_at"),
   },
   (t) => [index("work_approvals_session_idx").on(t.organizationId, t.workSessionId)],
+);
+
+// ---------------------------------------------------------------- bot Work Zone orchestration (Phase 07.16)
+//
+// A bot with a Work Zone profile starts and drives sessions for its sponsor on one consented device. Bots without a
+// profile behave exactly as before (D-16). Every reference is composite with the organization (FKs bypass RLS, 07.4
+// #169); tenant isolation comes from post-migrate, `bot_work_sessions` also follows its session's audience there. No
+// column holds prompt text, output, a title or a path (ids, flags, limits and counters only).
+
+/**
+ * D-01, D-02, D-15, PD-22: a bot's Work Zone profile, at most one per bot. The sponsor is the member the bot works for
+ * (`work_sessions.created_by` of what it starts); the device is the one machine it may use. Allowed lists empty = every
+ * value the runtime reports within the member's own controls. The limits are per bot; the org cap is
+ * `work_zone_policies.bot_sessions_max`. `act_on_outside_content` is the sponsor's explicit opt-in (D-07), with who set it.
+ */
+export const botWorkZoneProfiles = appSchema.table(
+  "bot_work_zone_profiles",
+  {
+    id: id(),
+    organizationId: orgId(),
+    agentId: uuid("agent_id").notNull(),
+    sponsorUserId: uuid("sponsor_user_id").notNull(),
+    deviceId: uuid("device_id").notNull(),
+    runtime: text("runtime", { enum: ["claude-code", "codex"] }).notNull(),
+    defaultModel: text("default_model"),
+    allowedModels: text("allowed_models").array().notNull().default(sql`'{}'::text[]`),
+    defaultEffort: text("default_effort"),
+    allowedEfforts: text("allowed_efforts").array().notNull().default(sql`'{}'::text[]`),
+    defaultContextWindow: text("default_context_window"),
+    allowedContextWindows: text("allowed_context_windows").array().notNull().default(sql`'{}'::text[]`),
+    fastMode: text("fast_mode", { enum: ["off", "allowed", "on"] })
+      .notNull()
+      .default("off"),
+    defaultMode: text("default_mode", { enum: PERMISSION_MODES }).notNull().default("default"),
+    maxMode: text("max_mode", { enum: PERMISSION_MODES }).notNull().default("default"),
+    worktree: boolean("worktree").notNull().default(true),
+    maxConcurrent: smallint("max_concurrent").notNull().default(2),
+    promptsPerHour: smallint("prompts_per_hour").notNull().default(30),
+    wakesPerSessionDay: smallint("wakes_per_session_day").notNull().default(20),
+    actOnOutsideContent: boolean("act_on_outside_content").notNull().default(false),
+    actOnOutsideContentBy: uuid("act_on_outside_content_by"),
+    actOnOutsideContentAt: ts("act_on_outside_content_at"),
+    enabled: boolean("enabled").notNull().default(true),
+    updatedBy: uuid("updated_by").notNull(),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    unique("bot_work_zone_profiles_agent_uq").on(t.organizationId, t.agentId),
+    /** Target of the bot session's profile key. */
+    unique("bot_work_zone_profiles_org_id_uq").on(t.organizationId, t.id),
+    /** Target of the profile projects' key: pins every allowed project to the profile's device. */
+    unique("bot_work_zone_profiles_org_id_device_uq").on(t.organizationId, t.id, t.deviceId),
+    foreignKey({
+      name: "bot_work_zone_profiles_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "bot_work_zone_profiles_device_fk",
+      columns: [t.organizationId, t.deviceId],
+      foreignColumns: [devices.organizationId, devices.id],
+    }).onDelete("cascade"),
+    index("bot_work_zone_profiles_device_idx").on(t.organizationId, t.deviceId),
+    check("bot_work_zone_profiles_runtime_ck", sql`${t.runtime} in ('claude-code','codex')`),
+    check("bot_work_zone_profiles_fast_mode_ck", sql`${t.fastMode} in ('off','allowed','on')`),
+    modeCheck("bot_work_zone_profiles_default_mode_ck", t.defaultMode),
+    modeCheck("bot_work_zone_profiles_max_mode_ck", t.maxMode),
+    check("bot_work_zone_profiles_max_concurrent_ck", sql`${t.maxConcurrent} between 1 and 10`),
+    check("bot_work_zone_profiles_prompts_per_hour_ck", sql`${t.promptsPerHour} between 1 and 120`),
+    check("bot_work_zone_profiles_wakes_per_session_day_ck", sql`${t.wakesPerSessionDay} between 0 and 100`),
+  ],
+);
+
+/**
+ * D-01: the projects (device repos) a profile may open. Both keys carry the profile's device, so a repo of another
+ * device is unrepresentable; a removed repo, device or profile takes its rows with it. At most 50 per profile (API).
+ */
+export const botWorkZoneProfileProjects = appSchema.table(
+  "bot_work_zone_profile_projects",
+  {
+    organizationId: orgId(),
+    profileId: uuid("profile_id").notNull(),
+    deviceId: uuid("device_id").notNull(),
+    projectId: uuid("project_id").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.profileId, t.projectId] }),
+    foreignKey({
+      name: "bot_work_zone_profile_projects_profile_fk",
+      columns: [t.organizationId, t.profileId, t.deviceId],
+      foreignColumns: [
+        botWorkZoneProfiles.organizationId,
+        botWorkZoneProfiles.id,
+        botWorkZoneProfiles.deviceId,
+      ],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "bot_work_zone_profile_projects_project_fk",
+      columns: [t.organizationId, t.projectId, t.deviceId],
+      foreignColumns: [projects.organizationId, projects.id, projects.deviceId],
+    }).onDelete("cascade"),
+    index("bot_work_zone_profile_projects_project_idx").on(t.organizationId, t.projectId),
+  ],
+);
+
+/**
+ * D-03, D-04: the device owner's consent that a bot may run sessions on the device, and whether it may use Full access
+ * there. Soft revocation like `device_grants`: revoking sets `revoked_at`, so at most one live consent per (device, bot)
+ * and the history stays.
+ */
+export const deviceBotConsents = appSchema.table(
+  "device_bot_consents",
+  {
+    id: id(),
+    organizationId: orgId(),
+    deviceId: uuid("device_id").notNull(),
+    agentId: uuid("agent_id").notNull(),
+    allowFullAccess: boolean("allow_full_access").notNull().default(false),
+    grantedBy: uuid("granted_by").notNull(),
+    grantedAt: ts("granted_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+    revokedAt: ts("revoked_at"),
+    revokedBy: uuid("revoked_by"),
+  },
+  (t) => [
+    foreignKey({
+      name: "device_bot_consents_device_fk",
+      columns: [t.organizationId, t.deviceId],
+      foreignColumns: [devices.organizationId, devices.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "device_bot_consents_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    uniqueIndex("device_bot_consents_live_uq")
+      .on(t.organizationId, t.deviceId, t.agentId)
+      .where(sql`revoked_at is null`),
+    index("device_bot_consents_agent_idx").on(t.organizationId, t.agentId).where(sql`revoked_at is null`),
+  ],
+);
+
+/**
+ * D-05, D-09, D-10, D-17: the bot side of a bot-started session, kept off the hot `work_sessions` row and its DTO. Where
+ * it was asked for (the origin conversation, thread, message and turn: the card and the back link), who asked
+ * (`requester_user_id`) and for whom it runs (`sponsor_user_id`), the live card, and the wake state (pending flag, the
+ * day's budget, the last status and prompt a wake was sent for). Follows its session's audience (post-migrate backstop).
+ * A deleted profile only unlinks; a deleted bot, session or origin conversation removes the row.
+ */
+export const botWorkSessions = appSchema.table(
+  "bot_work_sessions",
+  {
+    workSessionId: uuid("work_session_id").primaryKey(),
+    organizationId: orgId(),
+    agentId: uuid("agent_id").notNull(),
+    profileId: uuid("profile_id"),
+    sponsorUserId: uuid("sponsor_user_id").notNull(),
+    requesterUserId: uuid("requester_user_id").notNull(),
+    originConversationId: uuid("origin_conversation_id").notNull(),
+    originThreadRootId: uuid("origin_thread_root_id"),
+    originMessageId: uuid("origin_message_id").notNull(),
+    originEventId: uuid("origin_event_id").notNull(),
+    cardMessageId: uuid("card_message_id"),
+    wakePending: boolean("wake_pending").notNull().default(false),
+    wakesDay: date("wakes_day", { mode: "string" }),
+    wakesUsed: smallint("wakes_used").notNull().default(0),
+    lastWokenStatus: text("last_woken_status"),
+    lastWokenPromptId: uuid("last_woken_prompt_id"),
+    stoppedByAgent: boolean("stopped_by_agent").notNull().default(false),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    foreignKey({
+      name: "bot_work_sessions_session_fk",
+      columns: [t.organizationId, t.workSessionId],
+      foreignColumns: [workSessions.organizationId, workSessions.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "bot_work_sessions_agent_fk",
+      columns: [t.organizationId, t.agentId],
+      foreignColumns: [agents.organizationId, agents.id],
+    }).onDelete("cascade"),
+    // Narrowed to `SET NULL ("profile_id")` in the migration (no drizzle builder for the column list).
+    foreignKey({
+      name: "bot_work_sessions_profile_fk",
+      columns: [t.organizationId, t.profileId],
+      foreignColumns: [botWorkZoneProfiles.organizationId, botWorkZoneProfiles.id],
+    }).onDelete("set null"),
+    foreignKey({
+      name: "bot_work_sessions_origin_conversation_fk",
+      columns: [t.organizationId, t.originConversationId],
+      foreignColumns: [conversations.organizationId, conversations.id],
+    }).onDelete("cascade"),
+    index("bot_work_sessions_agent_idx").on(t.organizationId, t.agentId),
+    check("bot_work_sessions_wakes_used_ck", sql`${t.wakesUsed} >= 0`),
+  ],
 );
 
 /**
@@ -3225,6 +3483,8 @@ export const workZoneProposals = appSchema.table(
     promptSha256: text("prompt_sha256").notNull(),
     workSessionId: uuid("work_session_id"),
     createdAt: createdAt(),
+    /** Phase 07.16 (D-18): the proposing turn had read outside content (its card says so). Set once, at insert. */
+    tainted: boolean("tainted").notNull().default(false),
   },
   (t) => [
     // Composite with the organization (FKs bypass RLS). The migration narrows the session action to
