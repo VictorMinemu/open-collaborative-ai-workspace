@@ -998,7 +998,7 @@ opens the session and comes back.
   5. A bot without a profile behaves exactly as today; integration tests, tenant isolation tests and an e2e spec
      (fake runtime) pass; ADR-0038 records the decisions
 
-**Plans:** 4/22 plans executed in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
+**Plans:** 9/22 plans executed in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
 
 Plans:
 **Wave 1**
@@ -1010,11 +1010,11 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 07.16-05-PLAN.md — Wave 2: Device facts end to end: `ocw-runtime isolated-server`, host kind, hello/capabilities → hub → `GET /devices`; FakeDevice turn/approval helpers
-- [ ] 07.16-06-PLAN.md — Wave 2: The agent layer in the one controls context and `createWorkSession({ agent })` / `queueWorkPrompt` agent author and taint
-- [ ] 07.16-07-PLAN.md — Wave 2: Profile and consent API (`bot-profile.ts`, `profileStatus`, admin-only outside-content flag, device-owner/admin consent, org cap)
-- [ ] 07.16-08-PLAN.md — Wave 2: Plugin tools `ocw_work_session_start|prompt|read|stop`, guard sets (route decides taint, session-output mark), turn scoping, manifest
-- [ ] 07.16-09-PLAN.md — Wave 2: Plugin wake event and the "Your Work Zone" / "Work Zone session update" blocks
+- [x] 07.16-05-PLAN.md — Wave 2: Device facts end to end: `ocw-runtime isolated-server`, host kind, hello/capabilities → hub → `GET /devices`; FakeDevice turn/approval helpers
+- [x] 07.16-06-PLAN.md — Wave 2: The agent layer in the one controls context and `createWorkSession({ agent })` / `queueWorkPrompt` agent author and taint
+- [x] 07.16-07-PLAN.md — Wave 2: Profile and consent API (`bot-profile.ts`, `profileStatus`, admin-only outside-content flag, device-owner/admin consent, org cap)
+- [x] 07.16-08-PLAN.md — Wave 2: Plugin tools `ocw_work_session_start|prompt|read|stop`, guard sets (route decides taint, session-output mark), turn scoping, manifest
+- [x] 07.16-09-PLAN.md — Wave 2: Plugin wake event and the "Your Work Zone" / "Work Zone session update" blocks
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
