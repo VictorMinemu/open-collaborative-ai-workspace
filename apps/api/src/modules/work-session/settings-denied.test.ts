@@ -7,7 +7,11 @@ describe("settingsDenied", () => {
     const err = settingsDenied("permissionMode", "bot_profile");
     expect(err.statusCode).toBe(403);
     expect(err.code).toBe("bot_profile");
-    expect(err.denial).toEqual({ permission: "work_session.configure", layer: "agent", reason: "bot_profile" });
+    expect(err.denial).toEqual({
+      permission: "work_session.configure",
+      layer: "agent",
+      reason: "bot_profile",
+    });
     expect(err.message).toBe("Permission mode: Above this bot's Work Zone profile");
   });
 

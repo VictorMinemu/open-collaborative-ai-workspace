@@ -1,4 +1,11 @@
-import { isExposed, type PermissionMode, type RuntimeId, type WorkZonePolicy } from "@ocw/contracts";
+import {
+  type ContextWindow,
+  type EffortLevel,
+  isExposed,
+  type PermissionMode,
+  type RuntimeId,
+  type WorkZonePolicy,
+} from "@ocw/contracts";
 import { devices, type Tx } from "@ocw/db";
 import { eq } from "drizzle-orm";
 import { type DeviceAccess, loadDeviceAccess } from "../device";
@@ -21,6 +28,28 @@ export interface MemberControls {
   revoked: boolean;
   /** Resolver facts of the device for the member (with the cap). */
   facts: ResourceFacts;
+}
+
+/**
+ * 07.16 (PD-05, PD-07): a bot's Work Zone caps, intersected into the ONE controls context so a bot's start or prompt
+ * never goes above its profile (refusals carry `bot_profile`). Built only by `profileStatus` / `botLayerForSession`
+ * in `bot-profile.ts`; consumed by `loadControlsContext` (07.16-06). Type only here: nothing reads it yet.
+ */
+export interface AgentControlsLayer {
+  agentId: string;
+  /** The profile's highest permission mode. */
+  maxMode: PermissionMode;
+  /** The device owner's consent allows Full access for this bot and the profile's max mode is Full access (PD-05). */
+  allowFullAccess: boolean;
+  /** The session (`tainted_at`) or the start turn read outside content (D-08). */
+  tainted: boolean;
+  /** A service host whose owner marked it an isolated server (D-19). */
+  isolated: boolean;
+  /** The profile's model, effort and context window sets and its fast mode (PD-07 decides against them). */
+  models: readonly string[];
+  efforts: readonly EffortLevel[];
+  contextWindows: readonly ContextWindow[];
+  fastMode: "off" | "allowed" | "on";
 }
 
 export interface LoadControlsOptions {

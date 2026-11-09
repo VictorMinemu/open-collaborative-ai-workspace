@@ -160,6 +160,8 @@ export const ControlDenialReason = z.enum([
   "not_in_catalog",
   /** Awaiting confirmation by a recorded fixture (inventory row deferred). */
   "not_confirmed",
+  /** Above the Work Zone profile of the bot whose prompt or start this is (07.16, D-01, D-04). */
+  "bot_profile",
 ]);
 export type ControlDenialReason = z.infer<typeof ControlDenialReason>;
 

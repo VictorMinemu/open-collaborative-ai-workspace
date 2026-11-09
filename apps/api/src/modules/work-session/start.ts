@@ -126,6 +126,7 @@ const DENIAL_LAYER: Record<ControlDenialReason, AuthzDenial["layer"]> = {
   runtime: "resource",
   not_in_catalog: "resource",
   not_confirmed: "resource",
+  bot_profile: "agent",
 };
 
 const DENIAL_MESSAGE: Record<ControlDenialReason, string> = {
@@ -136,6 +137,7 @@ const DENIAL_MESSAGE: Record<ControlDenialReason, string> = {
   runtime: "The runtime on this device does not offer this",
   not_in_catalog: "The runtime on this device did not report this option",
   not_confirmed: "This option is not available yet",
+  bot_profile: "Above this bot's Work Zone profile",
 };
 
 const FIELD_LABEL: Record<string, string> = {
