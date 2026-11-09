@@ -23,8 +23,10 @@
 // bot), /__control/browser/event {target, contextId, event: crashed|closed|focus_sensitive|download}
 // (focus_sensitive also writes the control `{kind: "focus", sensitive: true}` on the context's open frame streams),
 // /__control/browser/delay {op, ms} (the next call of that context op answers only after `ms`, ≤ 10 s, while the page's
-// frame streams keep running: it holds a privacy transition open, e.g. the hand back's `contextLock`; `browserEnsure` is a
-// slow cold start, which completes even when the caller stopped waiting, like sandboxd's).
+// frame streams keep running: it holds a privacy transition open, e.g. the hand back's `contextLock`; `browserEnsure` and
+// `ensure` are a slow cold start, which completes even when the caller stopped waiting, like sandboxd's; with
+// `after: true` the op runs at once and only its answer waits, e.g. a `contextClose` whose frame streams and `closed`
+// event go out before the caller hears back, as with the real broker).
 //
 // Like sandboxd, it holds no default policy: until the API pushes an organization's policy, `ensure`, `restart`,
 // `exec`, the browser context ops and the package ops (they would start or run a container) and `filesWrite`,
@@ -322,7 +324,10 @@ export function createFakeSandboxd(opts = {}) {
   let streams = new Set();
   let leakNext = false;
   let failLockNext = false;
-  /** op → ms: the next call of that context op waits this long before it answers (`/__control/browser/delay`). */
+  /**
+   * op → { ms, after }: the next call of that context op waits this long before it runs, or (after) between running and
+   * answering (`/__control/browser/delay`).
+   */
   let delayNext = new Map();
   /** 07.8-28: text every signed-in page shows (`/__control/browser/site-data {text}`), null for none. */
   let siteData = null;
@@ -1401,13 +1406,13 @@ export function createFakeSandboxd(opts = {}) {
         const op = typeof body?.op === "string" ? body.op : "";
         const ms = Number(body?.ms);
         if (
-          !(op.startsWith("context") || op === "browserEnsure") ||
+          !(op.startsWith("context") || op === "browserEnsure" || op === "ensure") ||
           !Number.isInteger(ms) ||
           ms < 0 ||
           ms > 10_000
         )
           return send(res, 400, { error: "delay" });
-        delayNext.set(op, ms);
+        delayNext.set(op, { ms, after: body.after === true });
         return send(res, 200, { ok: true });
       }
       case "POST /__control/browser/event": {
@@ -1465,11 +1470,11 @@ export function createFakeSandboxd(opts = {}) {
         if (RUN_OPS.has(op) && held.killed) throw new OpError(409, "killed", "this organization is stopped");
       }
       const delay = delayNext.get(op);
-      if (delay !== undefined) {
-        delayNext.delete(op);
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      }
-      return send(res, 200, await dispatch(op, body, url));
+      if (delay !== undefined) delayNext.delete(op);
+      if (delay && !delay.after) await new Promise((resolve) => setTimeout(resolve, delay.ms));
+      const result = await dispatch(op, body, url);
+      if (delay?.after) await new Promise((resolve) => setTimeout(resolve, delay.ms));
+      return send(res, 200, result);
     } catch (err) {
       if (err instanceof OpError) {
         return send(res, err.status, { error: { code: err.code, message: err.message } });

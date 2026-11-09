@@ -153,6 +153,11 @@ export interface SandboxesOptions {
    * removes the bot's networks. Without it a shell has no way out at all (every mode behaves as `off`).
    */
   egress?: Egress | null;
+  /**
+   * One line per `ensure`: the target's ids, whether it created or started the shell, and the milliseconds of each phase
+   * (CI p142/p164/p178: a cold start's time is Docker's create and start, not the proxy's attach). Never a spec.
+   */
+  log?: (line: { level: "info"; msg: string; [key: string]: unknown }) => void;
 }
 
 /** Where a file operation runs: the bot's running `sbx`, or its network-none `files` helper on the same volume. */
@@ -1006,13 +1011,28 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
       if (diskFull.has(targetKey(target))) {
         throw failure("disk_full", 409, "the workspace is over its quota");
       }
+      // Wall-clock phase timings for the log line (the injected clock is the broker's idea of time, not a stopwatch).
+      const t0 = Date.now();
+      let mark = t0;
+      const ms = { runtime: 0, network: 0, egress: 0, create: 0, start: 0, total: 0 };
+      const lap = (phase: Exclude<keyof typeof ms, "total">) => {
+        const now = Date.now();
+        ms[phase] += now - mark;
+        mark = now;
+      };
       const dockerRuntime = await chooseRuntime();
+      lap("runtime");
       return locked(targetKey(target), async () => {
+        mark = Date.now(); // time spent waiting for another call of this bot is nobody's phase
+        let created = false;
+        let startedNow = false;
         let c = await ownedShell(target);
         const network = await ensureNetwork(target);
+        lap("network");
         // The proxy on the shell network before the shell runs (idempotent; a restarted proxy is re-attached here),
         // and its address there now, for the shell's /etc/hosts.
         const egressAddress = options.egress ? await options.egress.attach(target, "sbx", network) : null;
+        lap("egress");
         if (
           c &&
           !c.State?.Running &&
@@ -1023,16 +1043,40 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
           await removeShell(c);
           c = null;
         }
-        if (!c) c = await createShell(target, lim.container, dockerRuntime, network, egressAddress);
+        if (!c) {
+          c = await createShell(target, lim.container, dockerRuntime, network, egressAddress);
+          created = true;
+        }
+        lap("create");
         if (!c.State?.Running) {
+          // A cold start can wait tens of seconds on a loaded daemon (CI p178: 41 s), and the kill switch may be pushed
+          // meanwhile: a killed organization never gets a shell started, and one that started during the kill is
+          // killed at once (killOrg listed the running containers before this one ran).
+          requirePolicy(target.orgId, { runnable: true });
           const started = await call("POST", `/containers/${encodeURIComponent(c.Id)}/start`);
           if (started.status !== 204 && started.status !== 304) throw dockerDown();
+          if (limitsFor(target.orgId)?.killed) {
+            await killListed([{ Id: c.Id, Labels: c.Config?.Labels ?? {} }]);
+            throw failure("killed", 409, "this organization's sandboxes are stopped");
+          }
           c = await ownedShell(target);
           stopReasons.delete(targetKey(target));
           cpuLast.delete(targetKey(target));
+          startedNow = true;
           emit({ type: "state", target, kind: "sbx", state: "running", reason: null });
         }
+        lap("start");
         lastActive.set(targetKey(target), clock.now());
+        ms.total = Date.now() - t0;
+        options.log?.({
+          level: "info",
+          msg: "ensure",
+          orgId: target.orgId,
+          agentId: target.agentId,
+          created,
+          started: startedNow,
+          ms,
+        });
         return statusOf(target, c);
       });
     },
@@ -1175,44 +1219,49 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     },
 
     async purge(target) {
-      return locked(targetKey(target), async () => {
-        await ownedShell(target);
-        const labels = ownerLabels({ ns, orgId: target.orgId, agentId: target.agentId });
-        let removed = 0;
-        let hadShell = false;
-        for (const c of await listContainers(labels, true)) {
-          expectStop(c.Id);
-          const res = await call("DELETE", `/containers/${encodeURIComponent(c.Id)}?force=1`);
-          if (res.status === 204) removed++;
-          if (c.Labels?.[SANDBOXD_LABELS.kind] === "sbx") hadShell = true;
-          filesUsed.delete(c.Id);
-        }
-        for (const v of await listVolumes(labels)) {
-          const res = await call("DELETE", `/volumes/${encodeURIComponent(v.Name)}`);
-          if (res.status === 204) removed++;
-        }
-        // A network with the proxy still on it cannot be removed.
-        if (options.egress) await options.egress.detachTarget(target);
-        for (const n of await listNetworks(labels)) {
-          const res = await call("DELETE", `/networks/${encodeURIComponent(n.Id)}`);
-          if (res.status === 204) removed++;
-        }
-        for (const [id, rec] of processes) {
-          if (rec.orgId === target.orgId && rec.agentId === target.agentId) {
-            if (rec.timer) clearTimeout(rec.timer);
-            rec.stream.destroy();
-            processes.delete(id);
+      // The files helper's lock too, always inside the bot's own (workspace() never takes them the other way round):
+      // a measurement or a file op on a stopped bot cannot create its helper between the listing below and the volume
+      // removal (the volume would stay, in use). One that comes later waits and finds no workspace (`not_found`).
+      return locked(targetKey(target), () =>
+        locked(`files:${targetKey(target)}`, async () => {
+          await ownedShell(target);
+          const labels = ownerLabels({ ns, orgId: target.orgId, agentId: target.agentId });
+          let removed = 0;
+          let hadShell = false;
+          for (const c of await listContainers(labels, true)) {
+            expectStop(c.Id);
+            const res = await call("DELETE", `/containers/${encodeURIComponent(c.Id)}?force=1`);
+            if (res.status === 204) removed++;
+            if (c.Labels?.[SANDBOXD_LABELS.kind] === "sbx") hadShell = true;
+            filesUsed.delete(c.Id);
           }
-        }
-        const key = targetKey(target);
-        lastActive.delete(key);
-        diskBytes.delete(key);
-        diskFull.delete(key);
-        stopReasons.delete(key);
-        cpuLast.delete(key);
-        if (hadShell) emit({ type: "state", target, kind: "sbx", state: "absent", reason: null });
-        return { removed };
-      });
+          for (const v of await listVolumes(labels)) {
+            const res = await call("DELETE", `/volumes/${encodeURIComponent(v.Name)}`);
+            if (res.status === 204) removed++;
+          }
+          // A network with the proxy still on it cannot be removed.
+          if (options.egress) await options.egress.detachTarget(target);
+          for (const n of await listNetworks(labels)) {
+            const res = await call("DELETE", `/networks/${encodeURIComponent(n.Id)}`);
+            if (res.status === 204) removed++;
+          }
+          for (const [id, rec] of processes) {
+            if (rec.orgId === target.orgId && rec.agentId === target.agentId) {
+              if (rec.timer) clearTimeout(rec.timer);
+              rec.stream.destroy();
+              processes.delete(id);
+            }
+          }
+          const key = targetKey(target);
+          lastActive.delete(key);
+          diskBytes.delete(key);
+          diskFull.delete(key);
+          stopReasons.delete(key);
+          cpuLast.delete(key);
+          if (hadShell) emit({ type: "state", target, kind: "sbx", state: "absent", reason: null });
+          return { removed };
+        }),
+      );
     },
 
     async workspace(target, opts = {}) {
@@ -1222,6 +1271,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         if (opts.touch !== false) lastActive.set(targetKey(target), clock.now());
         return { containerId: c.Id, kind: "sbx" };
       }
+      // Never takes the bot's own lock while holding this one (purge holds both, the bot's first).
       return locked(`files:${targetKey(target)}`, async () => {
         const volume = nameFor("ws", ns, target.agentId);
         const vol = await call("GET", `/volumes/${encodeURIComponent(volume)}`);

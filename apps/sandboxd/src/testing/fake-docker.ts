@@ -51,6 +51,11 @@ export class FakeDocker implements Docker {
   onExec: ExecHandler = () => ({ exitCode: 0 });
   /** How long a stats call takes (a loaded Docker daemon can take seconds per one-shot sample). */
   statsDelayMs = 0;
+  /**
+   * Runs before a request is answered (after it is logged): a test holds one call, as a contended daemon does (CI p178
+   * took 41 s from the proxy's attach to the shell's start), or changes something while it waits.
+   */
+  beforeRequest: ((method: DockerMethod, path: string) => void | Promise<void>) | null = null;
   /** The Docker events stream the broker follows (push JSON lines with `emitEvent`). */
   eventStreams: PassThrough[] = [];
   private seq = 0;
@@ -82,6 +87,7 @@ export class FakeDocker implements Docker {
     this.calls.push({ method, path: rawPath, body });
     const url = new URL(rawPath, "http://docker");
     const path = decodeURIComponent(url.pathname);
+    if (this.beforeRequest) await this.beforeRequest(method, path);
     const json = (status: number, b: unknown = null) => ({ status, body: b });
     if (method === "GET" && path === "/version") return json(200, { Version: this.version });
     if (method === "GET" && path === "/info") {
@@ -214,6 +220,19 @@ export class FakeDocker implements Docker {
       const n = this.find(this.networks, m[1] as string);
       if (!n) return json(404);
       this.networks.delete(n.Name);
+      return json(204);
+    }
+    m = /^\/volumes\/([^/]+)$/.exec(path);
+    if (method === "DELETE" && m) {
+      const v = this.find(this.volumes, m[1] as string);
+      if (!v) return json(404);
+      // Like the real daemon: a volume any container (running or not) mounts is in use.
+      const inUse = [...this.containers.values()].some((c) => {
+        const mounts = (c.Spec?.HostConfig as { Mounts?: { Source?: string }[] } | undefined)?.Mounts ?? [];
+        return mounts.some((mount) => mount.Source === v.Name);
+      });
+      if (inUse) return json(409, { message: "volume is in use" });
+      this.volumes.delete(v.Name);
       return json(204);
     }
     if (method === "GET" && path === "/volumes") {

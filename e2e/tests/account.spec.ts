@@ -1,4 +1,5 @@
 import { type APIRequestContext, expect, type Page, request, test } from "@playwright/test";
+import { expectChannelLanding } from "../support/actors";
 import { ADMIN, API_URL, shot } from "./env";
 
 /**
@@ -104,7 +105,14 @@ async function scrollTop(page: Page) {
   });
 }
 
+/**
+ * Waits for every toast to time out. The pointer is parked in the bottom-left corner first: Sonner pauses a toast's
+ * timer while it is hovered, and on a phone the stack drops from the top over the header, so a pointer left on a
+ * toast (or a click aimed at the header under it) would keep it there forever.
+ */
 async function toastsGone(page: Page) {
+  const size = page.viewportSize();
+  if (size) await page.mouse.move(1, size.height - 1);
   await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, { timeout: 10_000 });
 }
 
@@ -172,18 +180,21 @@ test("profile: edit name, emoji avatar and status; visible across the app", asyn
   await expect(page.getByTestId("user-menu-status")).toContainText("Back Monday");
   await page.keyboard.press("Escape");
   await page.goto("/settings");
-  const row = page.getByTestId("member-row").filter({ hasText: newName });
+  // By id, not by name: a retry of this serial group runs with the first attempt's member still renamed.
+  const row = page.locator(`[data-testid="member-row"][data-user-id="${user.id}"]`);
   await expect(row).toBeVisible();
+  await expect(row).toContainText(newName);
   await expect(row.locator('[data-avatar="emoji"]')).toHaveText("🦊");
 
   // Chat shows the emoji avatar next to the user's messages.
   await page.goto("/chat");
-  await expect(page).toHaveURL(/\/chat\/[0-9a-f-]{36}/);
+  await expectChannelLanding(page);
   const composer = page.getByTestId("composer");
+  const hello = `Hello from ${newName} (${user.id})`;
   await composer.click();
-  await composer.fill(`Hello from ${newName}`);
+  await composer.fill(hello);
   await composer.press("Enter");
-  const message = page.getByTestId("message").filter({ hasText: `Hello from ${newName}` });
+  const message = page.getByTestId("message").filter({ hasText: hello });
   await expect(message.locator('[data-avatar="emoji"]').first()).toHaveText("🦊");
 
   // Survives a reload; Clear removes the status.
@@ -273,7 +284,9 @@ test("security: sessions with client identity, revoke one, sign out everywhere e
   await expect(toast(page, "Password updated")).toBeVisible();
   await expect(form.getByLabel("Current password")).toHaveValue("");
 
-  // Sign out; only the new password signs in.
+  // Sign out; only the new password signs in. On a phone the "Password updated" toast sits over the header's
+  // account menu, and the click's own hover would pause it there until the test times out.
+  await toastsGone(page);
   await userMenu(page).click();
   await page.getByTestId("sign-out").click();
   await expect(page).toHaveURL(/\/login/);

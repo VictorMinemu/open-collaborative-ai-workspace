@@ -85,6 +85,28 @@ export async function joinChannel(api: APIRequestContext, id: string): Promise<v
 }
 
 /**
+ * How long a sign-in (or a visit to `/chat`) may take to land on a channel. The landing is three serial hops, each
+ * needing the one before: the sign-in POST and `/me`, the `/chat` route (RSC + chunks) that waits for
+ * `GET /api/v1/channels`, then the `/chat/<id>` route (RSC + chunks) whose commit is when the URL changes. CI traces of
+ * the failures at the 5 s default (pipeline 204: watched-records mobile, signin-card desktop) show every hop
+ * completing and the channel page mounting 4.9-5.2 s after the click, with `/channels` alone taking 0.6-0.9 s and the
+ * renderer starved (1 s expect polls arriving 1.6 s apart). It is the app's real latency under a shared, loaded
+ * agent, not a redirect that never happens: three times the worst measured landing keeps a regression to "never"
+ * failing well inside the test timeout.
+ */
+export const CHANNEL_LANDING_TIMEOUT_MS = 15_000;
+
+/**
+ * Waits for `/chat`'s redirect to the default (or first joined) channel. A member in no channel never gets one (the
+ * empty state stays on `/chat`), so this still fails for that case, with the URL in the message.
+ */
+export async function expectChannelLanding(page: Page): Promise<void> {
+  await expect(page, "lands on a channel (/chat redirects to #general)").toHaveURL(/\/chat\/[0-9a-f-]{36}/, {
+    timeout: CHANNEL_LANDING_TIMEOUT_MS,
+  });
+}
+
+/**
  * A fresh browser context signed in as `user` through the login form, sized like the Playwright project
  * (desktop 1440×900, mobile 390×844 with touch).
  */
@@ -106,6 +128,6 @@ export async function openAs(
     .getByTestId("login-form")
     .getByRole("button", { name: /sign in|log in/i })
     .click();
-  await expect(page).toHaveURL(/\/chat\/[0-9a-f-]{36}/);
+  await expectChannelLanding(page);
   return { context, page };
 }
