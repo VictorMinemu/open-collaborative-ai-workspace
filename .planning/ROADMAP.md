@@ -998,7 +998,7 @@ opens the session and comes back.
   5. A bot without a profile behaves exactly as today; integration tests, tenant isolation tests and an e2e spec
      (fake runtime) pass; ADR-0038 records the decisions
 
-**Plans:** 18/22 plans executed in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
+**Plans:** 20/22 plans executed in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
 
 Plans:
 **Wave 1**
@@ -1036,8 +1036,8 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
-- [ ] 07.16-19-PLAN.md — Wave 6: Outside content: admin-flag path, isolated-only bypass, sticky taint, the proposal fallback
-- [ ] 07.16-20-PLAN.md — Wave 6: Wake-ups and card refresh (`setStatus` hook → `work_session.bot_sync` → card + `agent.work_session.v1`)
+- [x] 07.16-19-PLAN.md — Wave 6: Outside content: admin-flag path, isolated-only bypass, sticky taint, the proposal fallback
+- [x] 07.16-20-PLAN.md — Wave 6: Wake-ups and card refresh (`setStatus` hook → `work_session.bot_sync` → card + `agent.work_session.v1`)
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
