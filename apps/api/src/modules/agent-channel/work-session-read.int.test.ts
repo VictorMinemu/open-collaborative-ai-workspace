@@ -555,7 +555,8 @@ describe("what the bot reads is bounded, relative and scrubbed (PD-14, principle
   });
 
   it("a secret in the output, a tool summary or the error is redacted before it is returned", async () => {
-    const KEY = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4";
+    // Fake, built at runtime so secret scanners do not read it as a real key; it still matches redactSecrets.
+    const KEY = ["sk", "proj", "FAKE0716readNotASecret01"].join("-");
     const { workSessionId, first } = await botSession();
     await turnWith(workSessionId, first, [
       { type: "tool.started", toolUseId: "t1", name: "Bash", summary: `export OPENAI_API_KEY=${KEY}` },
@@ -569,7 +570,7 @@ describe("what the bot reads is bounded, relative and scrubbed (PD-14, principle
   });
 
   it("a failed session → its error, redacted and cut to 500 characters", async () => {
-    const KEY = "sk-proj-Z9y8X7w6V5u4T3s2R1q0P9o8N7m6";
+    const KEY = ["sk", "proj", "FAKE0716errorNotASecret02"].join("-");
     const { workSessionId } = await botSession();
     await su.query("update app.work_sessions set status = 'failed', last_error = $2 where id = $1", [
       workSessionId,
