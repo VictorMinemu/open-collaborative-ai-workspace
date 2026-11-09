@@ -998,11 +998,54 @@ opens the session and comes back.
   5. A bot without a profile behaves exactly as today; integration tests, tenant isolation tests and an e2e spec
      (fake runtime) pass; ADR-0038 records the decisions
 
-**Plans:** 0 plans
+**Plans:** 22 plans in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
 
 Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 07.16 to break down)
+- [ ] 07.16-01-PLAN.md — Wave 1: Bot-facing contracts (four `ocw_work_session_*` tools, `TurnContext.workZone`, refusals and sentences, redacted read model, `agent.work_session.v1`, profile/consent views, card helpers), the plugin mirror, and the phase hub (plan map, shared files, PD-01…PD-30)
+- [ ] 07.16-02-PLAN.md — Wave 1: Control-plane contracts: `bot_profile` denial reason, device host kind and isolated server, prompt/session agent and taint fields, per-viewer origin, org bot-session cap, `AgentControlsLayer`
+- [ ] 07.16-03-PLAN.md — Wave 1: The one additive migration (profiles, profile projects, consents, bot session side table, agent/taint/device/policy/turn columns), RLS backstop, `work_session.bot_sync` queue, upgrade proof
+- [ ] 07.16-04-PLAN.md — Wave 1: ADR-0038 (Accepted; supersedes the quoted ADR-0026/0030/0028 clauses for bots) and AGENTS.md rows
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 07.16-05-PLAN.md — Wave 2: Device facts end to end: `ocw-runtime isolated-server`, host kind, hello/capabilities → hub → `GET /devices`; FakeDevice turn/approval helpers
+- [ ] 07.16-06-PLAN.md — Wave 2: The agent layer in the one controls context and `createWorkSession({ agent })` / `queueWorkPrompt` agent author and taint
+- [ ] 07.16-07-PLAN.md — Wave 2: Profile and consent API (`bot-profile.ts`, `profileStatus`, admin-only outside-content flag, device-owner/admin consent, org cap)
+- [ ] 07.16-08-PLAN.md — Wave 2: Plugin tools `ocw_work_session_start|prompt|read|stop`, guard sets (route decides taint, session-output mark), turn scoping, manifest
+- [ ] 07.16-09-PLAN.md — Wave 2: Plugin wake event and the "Your Work Zone" / "Work Zone session update" blocks
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 07.16-10-PLAN.md — Wave 3: Per-turn dispatch under the bot's cap, `bot_not_allowed`, agent-aware re-authorization, `submitWorkPrompt`/`archiveWorkSession` extraction
+- [ ] 07.16-11-PLAN.md — Wave 3: The turn offer (`workZoneOfferFor`, four turn-scoped tools, `workZone`); bots without a profile byte-identical
+- [ ] 07.16-12-PLAN.md — Wave 3: Web: the bot sheet's Work Zone profile section
+- [ ] 07.16-13-PLAN.md — Wave 3: Web: device bot consents, the Isolated server fact, "Bot sessions at once"
+- [ ] 07.16-14-PLAN.md — Wave 3: Real-cell smoke `bot_work_sessions`
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 07.16-15-PLAN.md — Wave 4: The start route as the sponsor (caps, audience, live card, claim options, D-20 start rule): the phase's API end to end
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 07.16-16-PLAN.md — Wave 5: Prompt and stop routes; own sessions only; people keep control
+- [ ] 07.16-17-PLAN.md — Wave 5: The redacted read route and the session-output flag
+- [ ] 07.16-18-PLAN.md — Wave 5: Back link (per-viewer origin), agent author and taint marks, the live Work Zone card in chat
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [ ] 07.16-19-PLAN.md — Wave 6: Outside content: admin-flag path, isolated-only bypass, sticky taint, the proposal fallback
+- [ ] 07.16-20-PLAN.md — Wave 6: Wake-ups and card refresh (`setStatus` hook → `work_session.bot_sync` → card + `agent.work_session.v1`)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [ ] 07.16-21-PLAN.md — Wave 7: The browser journey e2e (fake cell, fake runtime, desktop 1440 and mobile 390, light and dark)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+
+- [ ] 07.16-22-PLAN.md — Wave 8: Phase gate: every CI workflow green, README/DEMO/STATUS/SERVER, CODEOWNERS and guard, signed VALIDATION
 
 ### Phase 07.17: Automation fan-out and team mentions (INSERTED)
 
