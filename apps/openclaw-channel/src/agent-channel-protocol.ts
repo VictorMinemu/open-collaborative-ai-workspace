@@ -49,6 +49,9 @@
  *                                and the same body)
  *   POST /turns/:eventId/done  ← AgentChannelTurnDone (07.7: a turn that can belong to a consult chain ended; replied |
  *                                failed; idempotent server side)
+ *   POST /attachments/read     ← AgentChannelAttachmentRead → AgentChannelAttachmentReadResponse (ocw_attachment_read,
+ *                                07.15: one file of the turn's conversation as text, an image or a refusal with its
+ *                                sentence; always 200 except 403 `no_trigger` when the turn ended)
  *   POST /mcp/probe-results    ← AgentChannelMcpProbeResult (the tools an `mcp.probe` discovered; D-13)
  *   POST /plugins/report       ← AgentChannelPluginReport (a marketplace install / uninstall outcome; D-14)
  *   POST /plugins/verify-install, GET /plugins: used by infra/openclaw (install gate, boot render), not here
@@ -426,6 +429,51 @@ export const TurnConsult = z.object({
 });
 export type TurnConsult = z.infer<typeof TurnConsult>;
 
+// ---------------------------------------------------------------- turn attachments (07.15, mirror of contracts
+// bot-capabilities.ts; parity: plugin-contract.test.ts)
+
+/** `image`, `text` (always returned as text, never rendered), `pdf` or `other` (sandbox import only). */
+export const TurnAttachmentKind = z.enum(["image", "text", "pdf", "other"]);
+export type TurnAttachmentKind = z.infer<typeof TurnAttachmentKind>;
+/** Decided by the API per bot: `read` (`ocw_attachment_read`), `import` (`ocw_sandbox_import` only) or `none`. */
+export const TurnAttachmentAccess = z.enum(["read", "import", "none"]);
+export type TurnAttachmentAccess = z.infer<typeof TurnAttachmentAccess>;
+
+/** The contracts' fixed notes (D-04); the API sends one of them as `TurnAttachment.note`. */
+export const TURN_ATTACHMENT_NOTES = {
+  modelNoImages: "This bot's model can't see images.",
+  cannotReadImport: "Can't be read as text; copy it into the sandbox with ocw_sandbox_import.",
+  cannotReadNoSandbox: "Can't be read as text, and this bot has no sandbox here.",
+  cannotReadNarrower:
+    "Can't be read as text, and this bot's sandbox is shared more widely than this conversation, so it can't be copied there.",
+  tooLarge: "Too large to read.",
+  readNotOffered: "Can't be read on this turn: it already has the most tools a turn can offer.",
+} as const;
+
+/**
+ * One attachment of the messages the turn reads: metadata only (never content, a URL, a storage key or a path). The
+ * plugin labels `name` again before the model sees it.
+ */
+export const TurnAttachment = z.object({
+  id: Id,
+  messageId: Id,
+  name: z.string().max(255),
+  mediaType: z.string().max(127),
+  size: z.number().int().nonnegative(),
+  kind: TurnAttachmentKind,
+  access: TurnAttachmentAccess,
+  note: z.string().max(200).optional(),
+});
+export type TurnAttachment = z.infer<typeof TurnAttachment>;
+
+/** The contracts' `ATTACHMENT_READ_LIMITS` (characters = UTF-16 code units); the guard's local read budget reads it. */
+export const ATTACHMENT_READ_LIMITS = {
+  listPerTurn: 20,
+  readsPerTurn: 20,
+  charsPerTurn: 200_000,
+  charsPerFile: 64_000,
+} as const;
+
 export const TurnContext = z.object({
   tools: z.array(z.string()),
   toolFlags: z.record(z.string(), TurnToolFlags).default({}),
@@ -459,6 +507,21 @@ export const TurnContext = z.object({
    * invalidates the whole turn block, so the run gets no tools at all (fail closed, never untainted by accident).
    */
   tainted: z.boolean().optional(),
+  /**
+   * 07.15 (D-02): the attachments of the messages this turn reads (at most `ATTACHMENT_READ_LIMITS.listPerTurn`).
+   * Additive: an older API sends none; an invalid list is dropped, the turn is kept (the bot then lists no files, and
+   * the API still decides every read).
+   */
+  attachments: z.array(TurnAttachment).max(ATTACHMENT_READ_LIMITS.listPerTurn).optional().catch(undefined),
+  /** 07.15 (D-05): conversation files not listed because of the cap. Absent or invalid → none mentioned. */
+  attachmentsMore: z.number().int().nonnegative().optional().catch(undefined),
+  /**
+   * 07.15 (D-17): `ocw_attachment_read` calls this turn may make, counted apart from `maxToolCalls`. Absent (an older
+   * API) or invalid → `ATTACHMENT_READ_LIMITS.readsPerTurn`; the API counts and refuses `cap_reached` either way.
+   */
+  maxAttachmentReads: z.number().int().nonnegative().optional().catch(undefined),
+  /** 07.15 (D-17): characters all reads of this turn may return. Informational: the API enforces it. */
+  maxAttachmentChars: z.number().int().nonnegative().optional().catch(undefined),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -1542,6 +1605,97 @@ export const AgentChannelSentenceAnswer = z.object({
   sentence: z.string().min(1).max(500),
 });
 export type AgentChannelSentenceAnswer = z.infer<typeof AgentChannelSentenceAnswer>;
+
+// ---------------------------------------------------------------- attachment reads (07.15, mirror of contracts
+// agent-channel.ts; parity: plugin-contract.test.ts)
+
+/**
+ * `POST /attachments/read` (`ocw_attachment_read`, D-03): only the turn's event, the agent and the attachment id from
+ * the turn's list. Strict: the API derives the conversation and the human from the stored turn.
+ */
+export const AgentChannelAttachmentRead = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  attachmentId: z.uuid(),
+});
+export type AgentChannelAttachmentRead = z.infer<typeof AgentChannelAttachmentRead>;
+
+/** The contracts' refusal codes (D-04), in their order. */
+export const AttachmentReadRefusal = z.enum([
+  "not_found",
+  "policy_changed",
+  "model_no_images",
+  "unsupported_type",
+  "too_large",
+  "no_text_layer",
+  "encrypted",
+  "extraction_failed",
+  "timeout",
+  "busy",
+  "cap_reached",
+  "unavailable",
+]);
+export type AttachmentReadRefusal = z.infer<typeof AttachmentReadRefusal>;
+
+/** The contracts' fixed sentence per code; the guard uses them for the refusals it decides locally (its read budget). */
+export const ATTACHMENT_READ_SENTENCES: Readonly<Record<AttachmentReadRefusal, string>> = {
+  not_found: "This file is not available in this conversation (it may have been deleted).",
+  policy_changed: "Reading files is not available on this turn.",
+  model_no_images: "This bot's model can't see images, so it can't read this image. Tell the person.",
+  unsupported_type:
+    "This type of file can't be read as text. If the sandbox is available, copy it with ocw_sandbox_import and use the sandbox tools.",
+  too_large: "This file is too large to read.",
+  no_text_layer: "This PDF has no text layer (it looks scanned). OCR is not available.",
+  encrypted: "This PDF is password-protected, so it can't be read.",
+  extraction_failed: "This file couldn't be read (it may be damaged).",
+  timeout: "Reading this file took too long and was stopped.",
+  busy: "Too many files are being read right now. Try again in a moment.",
+  cap_reached:
+    "This turn has read as many files (or as much text) as it may. Ask the person to send the question again for more.",
+  unavailable: "File storage is not available right now.",
+};
+
+/** The inline image types a read may return; anything else (SVG included) never reaches the model as an image. */
+export const AttachmentImageType = z.enum(["image/webp", "image/png", "image/jpeg", "image/gif"]);
+export type AttachmentImageType = z.infer<typeof AttachmentImageType>;
+
+/** Base64 of at most contracts `SANDBOX_LIMITS.previewImageMaxBytes` (5 MiB). */
+const ATTACHMENT_IMAGE_DATA_MAX = Math.ceil((5_242_880 * 4) / 3) + 4;
+
+/**
+ * The read's answer: the API's untrusted text block (data, never instructions), an image as base64, or a refusal whose
+ * `sentence` the model reads. A refusal code from a newer API stays a string, so its sentence still reaches the model.
+ */
+export const AgentChannelAttachmentReadResponse = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("text"),
+    attachmentId: Id,
+    name: z.string().max(120),
+    text: z.string().max(ATTACHMENT_READ_LIMITS.charsPerFile + 512),
+    chars: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+    pages: z.number().int().min(1).optional(),
+  }),
+  z.object({
+    kind: z.literal("image"),
+    attachmentId: Id,
+    name: z.string().max(120),
+    mimeType: AttachmentImageType,
+    data: z
+      .string()
+      .max(ATTACHMENT_IMAGE_DATA_MAX)
+      .regex(/^[A-Za-z0-9+/]*={0,2}$/u),
+    width: z.number().int().positive().nullable(),
+    height: z.number().int().positive().nullable(),
+  }),
+  z.object({
+    kind: z.literal("refused"),
+    attachmentId: Id,
+    code: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/u),
+    sentence: z.string().max(300),
+  }),
+]);
+export type AgentChannelAttachmentReadResponse = z.infer<typeof AgentChannelAttachmentReadResponse>;
 
 // ---------------------------------------------------------------- confined sandbox tools (07.8, mirror of contracts
 // sandbox.ts and bot-capabilities.ts; parity test in sandbox-tools.test.ts)

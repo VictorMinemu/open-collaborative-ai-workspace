@@ -395,6 +395,14 @@ Deferred to later milestones. Tracked but not in the current roadmap.
 - [x] **COA-04**: The MCP server dialog offers every mode (organization headers, organization sign-in, client credentials, member sign-in, member key) and, when OAuth cannot start or finish, names the failed step (discovery, issuer, PKCE, client registration, HTTPS, token exchange, scopes) with one fix line and the redirect URI and client metadata URL to copy; the server row shows the organization connection (account label, connected by, when) and Connect / Reconnect / Disconnect for admins; 1440/390, light/dark
 - [x] **COA-05**: Existing modes are unchanged and existing servers keep working after the upgrade; integration tests against a fake OAuth MCP server cover both new flows, refresh, revoke, reconnect and the bots' proxied call; an e2e spec covers the admin connecting an organization account and a bot using it; ADR-0036 records the decisions
 
+### Bots Read Attachments (BRA) — added 2026-11-07 by the owner
+
+- [ ] **BRA-01**: Members can attach files in every conversation where a bot answers (personal and team bot DMs, channels and threads with bots, AI chats with personas); the composer enables the paperclip there with the existing size and type limits
+- [ ] **BRA-02**: A bot's turn receives the attachments of the messages it reads, decided server-side by the conversation's audience and the asker (never another conversation's files): images as image input for image-capable models, text-like documents as extracted, size-capped text; a model or bot that cannot read a type gets an explicit note so it tells the person
+- [ ] **BRA-03**: A bot can copy a readable attachment into its sandbox workspace through an `ocw_*` tool decided in the Agent Channel API (same caps, quotas and lifecycle as the workspace), so its sandbox tools can process it; nothing reaches Garage except through the API
+- [ ] **BRA-04**: Every attachment read or copy is audited (actor, bot, conversation, attachment id, kind, bytes) without content; extraction never executes the file, is bounded in time and size, and marks the turn tainted; tenant isolation and the F-8 audience rule are proven by tests
+- [ ] **BRA-05**: Proven by integration tests and an e2e spec (fake model, desktop and mobile); README's "bots cannot read attachments" limitation removed; ADR-0037 records the decisions
+
 ### Operations backlog (from the 2026-10-08 research, not yet scheduled)
 
 - **OPS-BL-01**: Organization groups — several organizations per user with a switcher, and consolidated aggregate reporting computed per organization under its own tenant context (needs an identity/tenancy ADR)
@@ -623,6 +631,11 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | COA-03 | Phase 07.14 | Complete | New (owner, 2026-11-06) |
 | COA-04 | Phase 07.14 | Complete | New (owner, 2026-11-06) |
 | COA-05 | Phase 07.14 | Complete | New (owner, 2026-11-06) |
+| BRA-01 | Phase 07.15 | Pending | New (owner, 2026-11-07) |
+| BRA-02 | Phase 07.15 | Pending | New (owner, 2026-11-07) |
+| BRA-03 | Phase 07.15 | Pending | New (owner, 2026-11-07) |
+| BRA-04 | Phase 07.15 | Pending | New (owner, 2026-11-07) |
+| BRA-05 | Phase 07.15 | Pending | New (owner, 2026-11-07) |
 | DEV-01 | Phase 8 | Partial | Session events + Device Link frames in `packages/contracts`; no `packages/protocol`; capability flags only inside the daemon |
 | DEV-02 | Phase 8 | Partial | One-time code + hashed bearer token (SLICE-13); no Ed25519 signed challenge or RFC 8628 |
 | DEV-03 | Phase 8 | Partial | Device list + immediate revocation (SLICE-13); no active sessions, no admin view |

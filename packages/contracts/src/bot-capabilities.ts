@@ -357,6 +357,71 @@ export const TurnMemoryFile = z.object({
 });
 export type TurnMemoryFile = z.infer<typeof TurnMemoryFile>;
 
+// ---------------------------------------------------------------- turn attachments (Phase 07.15, D-02, D-04, D-05)
+
+/**
+ * How the API classifies an attachment for a bot (07.15 PD-07): `image` by sniffed type, `pdf` by sniffed
+ * `application/pdf`, `text` for text-like files (text, Markdown, CSV, JSON, code, SVG, HTML, XML: always returned as text,
+ * never rendered), `other` for everything else (archives, office documents, audio, video).
+ */
+export const TurnAttachmentKind = z.enum(["image", "text", "pdf", "other"]);
+export type TurnAttachmentKind = z.infer<typeof TurnAttachmentKind>;
+
+/**
+ * How this bot can use the file on this turn, decided server-side per bot (D-02, D-04, PD-04): `read` through
+ * `ocw_attachment_read`, `import` only by copying it into the bot's sandbox with `ocw_sandbox_import`, `none` neither.
+ */
+export const TurnAttachmentAccess = z.enum(["read", "import", "none"]);
+export type TurnAttachmentAccess = z.infer<typeof TurnAttachmentAccess>;
+
+/**
+ * The only notes a turn attachment may carry (D-04): a fixed server sentence that tells the bot up front why it cannot
+ * read a file, so it can tell the person. Never provider text or file content.
+ */
+export const TURN_ATTACHMENT_NOTES = {
+  modelNoImages: "This bot's model can't see images.",
+  cannotReadImport: "Can't be read as text; copy it into the sandbox with ocw_sandbox_import.",
+  cannotReadNoSandbox: "Can't be read as text, and this bot has no sandbox here.",
+  cannotReadNarrower:
+    "Can't be read as text, and this bot's sandbox is shared more widely than this conversation, so it can't be copied there.",
+  tooLarge: "Too large to read.",
+  readNotOffered: "Can't be read on this turn: it already has the most tools a turn can offer.",
+} as const;
+export type TurnAttachmentNote = (typeof TURN_ATTACHMENT_NOTES)[keyof typeof TURN_ATTACHMENT_NOTES];
+
+/**
+ * One attachment of the messages a turn reads (07.15, D-02): metadata only, decided server-side per bot at delivery.
+ * Never file content, a presigned URL, a storage key or a path (ADR-0015); the bot fetches the content through
+ * `ocw_attachment_read`, which the API re-decides on every call. `name` was sanitized at upload; the plugin labels it
+ * again before the model sees it.
+ */
+export const TurnAttachment = z.object({
+  id: Id,
+  /** The message the file is attached to (the current one or one of the turn's history window). */
+  messageId: Id,
+  name: z.string().max(255),
+  mediaType: z.string().max(127),
+  size: z.number().int().nonnegative(),
+  kind: TurnAttachmentKind,
+  access: TurnAttachmentAccess,
+  /** One of `TURN_ATTACHMENT_NOTES` when the bot cannot read the file as listed (D-04). */
+  note: z.string().max(200).optional(),
+});
+export type TurnAttachment = z.infer<typeof TurnAttachment>;
+
+/**
+ * Bounds of the attachment reads (D-05, D-17; defaults changed in code, A-02). Characters are UTF-16 code units
+ * (PD-07). `listPerTurn`: files listed on one turn (the rest are counted in `attachmentsMore`); `readsPerTurn` and
+ * `charsPerTurn`: the turn's read budget, counted by the API apart from the cap of 8 tool calls; `charsPerFile`: the
+ * longest text one read returns.
+ */
+export const ATTACHMENT_READ_LIMITS = {
+  listPerTurn: 20,
+  readsPerTurn: 20,
+  charsPerTurn: 200_000,
+  charsPerFile: 64_000,
+} as const;
+
 export const TurnContext = z.object({
   tools: z.array(z.string()).max(64),
   toolFlags: z.record(z.string(), TurnToolFlags),
@@ -383,6 +448,18 @@ export const TurnContext = z.object({
    * consult answer that read web or MCP content); the plugin starts its local taint from it. Absent = untainted.
    */
   tainted: z.boolean().optional(),
+  /**
+   * Phase 07.15 (D-02, PD-04): the attachments of the messages this turn reads, the current message's files first, then
+   * the history newest first, at most `ATTACHMENT_READ_LIMITS.listPerTurn`. Absent on older payloads and on turns
+   * without files.
+   */
+  attachments: z.array(TurnAttachment).max(ATTACHMENT_READ_LIMITS.listPerTurn).optional(),
+  /** Phase 07.15 (D-05): files of the conversation not listed because of the cap; absent when none. */
+  attachmentsMore: z.number().int().nonnegative().optional(),
+  /** Phase 07.15 (D-05, D-17): `ocw_attachment_read` calls this turn may make; absent on older payloads. */
+  maxAttachmentReads: z.number().int().optional(),
+  /** Phase 07.15 (D-05, D-17): characters all reads of this turn may return together; absent on older payloads. */
+  maxAttachmentChars: z.number().int().optional(),
 });
 export type TurnContext = z.infer<typeof TurnContext>;
 
@@ -456,7 +533,20 @@ export const BUILTIN_TOOLS = {
    * side-effecting, never approvable (not in `APPROVABLE_BUILTINS`, D-10). Offered only with `TurnContext.consult`.
    */
   consultAgent: "ocw_consult_agent",
+  /**
+   * 07.15 (D-03, ADR-0037): read one attachment of the turn's conversation through `POST /attachments/read`, which
+   * decides, claims, extracts and audits each call (the bytes travel only in its answer, never a URL or key).
+   * Self-validated in the cell, counted apart from the cap of 8, never approvable (not in `APPROVABLE_BUILTINS`, PD-08).
+   * Offered only on a turn that lists a readable file (PD-03), never in `GET /cell`.
+   */
+  attachmentRead: "ocw_attachment_read",
 } as const;
+
+/**
+ * 07.15 (D-08, PD-08): a read returns a person's file, third-party content: it taints the turn (and its return turns).
+ * Nothing leaves the platform, so it is not side-effecting.
+ */
+export const ATTACHMENT_READ_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffecting: false };
 
 export const MAX_TOOL_CALLS_PER_TURN = 8;
 export const MAX_WEB_CALLS_PER_TURN = 5;

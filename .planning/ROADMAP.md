@@ -407,7 +407,7 @@ of the thin Work Zone that Phase 1 already ships.
 **Operations features (inserted 2026-10-08, owner).** Phases 07.1–07.7 turn the 2026-10-06 operations meeting into
 generic capabilities for any organization (research: `.planning/research/OPS-FEATURES.md`). Each feature is owned by the
 Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits → Agent Card when a human approves);
-OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.12 → 07.14 → 07.13 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 and 07.12 added 2026-10-29 and 07.13 and 07.14 added 2026-11-06 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
+OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.12 → 07.14 → 07.15 → 07.13 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 and 07.12 added 2026-10-29 and 07.13 and 07.14 added 2026-11-06 and 07.15 added 2026-11-07 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
 (F17), ERP-driven board columns beyond watched records.
 
 ### Phase 07.1: Board channels and record templates (INSERTED)
@@ -1077,6 +1077,67 @@ Plans:
 **Wave 7** *(blocked on Wave 6 completion)*
 
 - [x] 07.14-14-PLAN.md — Wave 7: Phase gate: full gate, `gate:compose`, ADR-0036, connectors and reverse-proxy docs, DEMO owner check, STATUS, AGENTS, CODEOWNERS, signed VALIDATION
+
+### Phase 07.15: Bots read attachments (INSERTED)
+
+**Goal**: People can attach files where they talk to bots (a personal bot's DM, a team bot's DM, a channel or thread with a
+bot, an AI chat with a persona) and the bot actually reads them: images as images for models that see, text-like
+documents (text, Markdown, CSV, JSON, code, PDF, Office documents where extraction is reliable) as extracted text, and any
+file inside the bot's sandbox workspace so its tools can work on it. Nothing becomes readable to anyone who could not
+already read the conversation.
+
+- **Composer:** the paperclip is enabled in bot DMs and channels with bots (today `dm-view.tsx` disables it for bots).
+- **What the bot gets:** the turn carries the attachments of the messages it reads; images go to image-capable models
+  (as AI chats do, ADR-0018), text is extracted server-side with size caps, other files are offered to the sandbox.
+- **Rules:** the bot reads only attachments of the conversation it answers in, acting for the asker, through the Agent
+  Channel API (never Garage directly); results stay in that conversation (F-8, ADR-0029); every read is audited without
+  content; attachments are untrusted input (taint).
+- **Honest limits:** when a model or bot cannot read a type, the bot says so instead of ignoring the file.
+
+**Requirements**: BRA-01, BRA-02, BRA-03, BRA-04, BRA-05
+**Depends on:** Phase 07.8 (sandbox), Phase 06.1 (image attachments in the Work Zone), Phase 4 (chat attachments)
+**ADR:** 0037
+**Success Criteria** (what must be TRUE):
+
+  1. A member attaches an image and a PDF in their personal bot's DM; the bot describes the image (image-capable model)
+     and answers from the PDF's text; with a text-only model it says it cannot see the image
+  2. In a channel with a team bot, a file attached to the message that mentions the bot (or earlier in the thread it
+     reads) reaches the bot under the same audience rules; a file in a conversation the asker cannot read never does
+  3. A CSV attached in a DM lands in the bot's sandbox workspace on request and the bot's sandbox tools can process it;
+     the copy follows the workspace's existing lifecycle and quotas
+  4. Every read is audited (who, bot, attachment id, kind, bytes) without content; extraction is size-capped and never
+     executes the file; the leak/taint rules hold
+  5. Proven by integration tests and an e2e spec (fake model) on desktop and mobile; README's known limitation removed;
+     ADR-0037 records the decisions
+
+**Plans:** 11 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 07.15-01-PLAN.md — Wave 1: Contracts (turn attachments with per-bot access and notes, the turn's budget fields, `ocw_attachment_read`, the read request, answer, refusal codes and sentences) and the plugin mirror; the phase hub (plan map, shared files, PD-01…PD-18, edge coverage)
+- [ ] 07.15-02-PLAN.md — Wave 1: Migration: `agent_turns.attachment_reads` / `attachment_chars` (additive, defaults), schema and upgrade tests
+- [ ] 07.15-03-PLAN.md — Wave 1: The one row rule (D-16) in `agent-channel/attachment-access.ts`, `ocw_sandbox_import` fixed with it and audited as `bot.attachment_imported`, the test upload helpers
+- [ ] 07.15-04-PLAN.md — Wave 1: The bot read layer in `artifact/extract` (kind, text decode and cut, untrusted block shared with AI chats, image rendition)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 07.15-05-PLAN.md — Wave 2: PDF text in a bounded Worker with `unpdf@1.9.1` (deadline, heap, pages, characters, concurrency)
+- [ ] 07.15-06-PLAN.md — Wave 2: Cell plugin: `ocw_attachment_read`, its own guard budget, the Attachments block, the files-only body, manifest and turn-scoped registration
+- [ ] 07.15-07-PLAN.md — Wave 2: Delivery: the turn lists the files of the messages it reads, per bot, and offers the read tool only then
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 07.15-08-PLAN.md — Wave 3: The read route `POST /agent-channel/v1/attachments/read` (phase API end-to-end tracer): decision, budget claim, extraction, audit; tenant, audience, concurrency, taint and leak proofs
+- [ ] 07.15-10-PLAN.md — Wave 3: Real-cell smoke `bot_attachments` (files-only message, read with the turn's ids, image part, refusals, reads past the cap of 8)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 07.15-09-PLAN.md — Wave 4: Web paperclip in bot DMs and the browser end to end (fake cell, desktop and mobile; text-only model, channel thread, CSV into the sandbox; screenshots 1440/390 light/dark, axe)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 07.15-11-PLAN.md — Wave 5: Phase gate: full gate, smoke, `gate:compose` (unpdf and the worker in the image), ADR-0037, README limitation removed, DEMO owner check, STATUS, AGENTS, CODEOWNERS, signed VALIDATION
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 

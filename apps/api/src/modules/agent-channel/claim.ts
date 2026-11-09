@@ -60,6 +60,12 @@ export async function claimToolCall(
      * still apply, and untrusted output still taints the turn afterwards; every other call of the turn is unchanged.
      */
     grantApprovalId?: string | null;
+    /**
+     * 07.15 D-17 (PD-06): a file read (`ocw_attachment_read`) is counted on the turn's own attachment counters instead
+     * of the cap of 8: the conditional UPDATE checks `attachment_reads < maxReads` and `attachment_chars < maxChars`
+     * (not `tool_calls`) and adds one read. The characters a read returns are added by its route afterwards.
+     */
+    attachmentRead?: { maxReads: number; maxChars: number };
   },
 ): Promise<ClaimedCall> {
   const { turn, flags } = p;
@@ -67,7 +73,12 @@ export async function claimToolCall(
   if (!reason) {
     const conditions: Array<SQL | undefined> = [
       eq(agentTurns.eventId, turn.eventId),
-      lt(agentTurns.toolCalls, MAX_TOOL_CALLS_PER_TURN),
+      ...(p.attachmentRead
+        ? [
+            lt(agentTurns.attachmentReads, p.attachmentRead.maxReads),
+            lt(agentTurns.attachmentChars, p.attachmentRead.maxChars),
+          ]
+        : [lt(agentTurns.toolCalls, MAX_TOOL_CALLS_PER_TURN)]),
       p.web ? lt(agentTurns.webCalls, MAX_WEB_CALLS_PER_TURN) : undefined,
       flags.sideEffecting && !p.grantApprovalId ? eq(agentTurns.tainted, false) : undefined,
     ];
@@ -77,6 +88,7 @@ export async function claimToolCall(
         toolCalls: p.countCall === false ? sql`${agentTurns.toolCalls}` : sql`${agentTurns.toolCalls} + 1`,
         webCalls: p.web ? sql`${agentTurns.webCalls} + 1` : sql`${agentTurns.webCalls}`,
         tainted: flags.untrustedOutput ? true : sql`${agentTurns.tainted}`,
+        ...(p.attachmentRead ? { attachmentReads: sql`${agentTurns.attachmentReads} + 1` } : {}),
       })
       .where(and(...conditions))
       .returning({ eventId: agentTurns.eventId });

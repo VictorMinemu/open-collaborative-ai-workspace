@@ -196,7 +196,9 @@ MVP 1 is for testing with your team, not yet for production-critical work:
 
 - **Desktop app:** builds for macOS on Apple silicon, Windows x64 and Linux x64, none of them signed yet. Signed
   builds are MVP 2 (Phase 9).
-- **Attachments:** bots cannot read them yet.
+- **Attachments and bots:** bots read text, code, CSV, JSON, PDFs with a text layer and images (image-capable models);
+  no OCR for scanned PDFs, no audio or video; Office files only through a bot's sandbox; bots on a ChatGPT plan cannot
+  see images yet.
 - **Claude:** works through an org API key only. Some ChatGPT Business or Enterprise seats cannot sign in with their
   plan.
 - **HTTPS required:** a plain-HTTP remote address breaks attachments, sign-ins to connectors and the runtime

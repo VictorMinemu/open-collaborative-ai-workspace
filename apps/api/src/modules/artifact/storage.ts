@@ -42,7 +42,7 @@ export interface ObjectStorage {
   ): Promise<string>;
   /** Object size, or null when the object does not exist. */
   head(key: string): Promise<{ size: number } | null>;
-  /** The first `bytes` bytes (fewer when the object is smaller). */
+  /** The first `bytes` bytes (fewer when the object is smaller), never more, even from a store that ignores Range. */
   rangeGet(key: string, bytes: number): Promise<Uint8Array>;
   stream(key: string): Promise<Readable>;
   put(key: string, body: Uint8Array, contentType: string): Promise<void>;
@@ -80,6 +80,27 @@ const isNotFound = (err: unknown) => {
   const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
   return e?.name === "NotFound" || e?.name === "NoSuchKey" || e?.$metadata?.httpStatusCode === 404;
 };
+
+/**
+ * At most `max` bytes of `stream`, then the stream is destroyed (the transfer stops): what `rangeGet` returns, however
+ * much the store sends (WR-05). Fewer when the stream ends first.
+ */
+async function readAtMost(stream: Readable, max: number): Promise<Uint8Array> {
+  const out = new Uint8Array(max);
+  let filled = 0;
+  try {
+    for await (const chunk of stream) {
+      const buf = chunk as Uint8Array;
+      const take = Math.min(buf.length, max - filled);
+      out.set(take === buf.length ? buf : buf.subarray(0, take), filled);
+      filled += take;
+      if (filled >= max) break;
+    }
+  } finally {
+    stream.destroy();
+  }
+  return filled === max ? out : out.slice(0, filled);
+}
 
 /** Whether `createObjectStorage` would return a store (endpoint, key id and secret all set), without building one. */
 export function objectStorageConfigured(env: ObjectStorageEnv, secrets: SecretStore): boolean {
@@ -154,7 +175,8 @@ export function createObjectStorage(env: ObjectStorageEnv, secrets: SecretStore)
     async rangeGet(key, bytes) {
       const res = await s3.send(new GetObjectCommand({ Bucket, Key: key, Range: `bytes=0-${bytes - 1}` }));
       if (!res.Body) return new Uint8Array();
-      return res.Body.transformToByteArray();
+      // WR-05: never trust the store to honour Range (one that ignores it answers 200 with the whole object).
+      return readAtMost(res.Body as Readable, bytes);
     },
 
     async stream(key) {

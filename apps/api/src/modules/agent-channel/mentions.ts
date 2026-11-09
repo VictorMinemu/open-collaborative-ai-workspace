@@ -19,11 +19,12 @@ import {
   type Tx,
   tenantOf,
 } from "@ocw/db";
-import { and, desc, eq, inArray, isNull, ne, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import { agentDirectory } from "../agent";
 import { answerModelsOf, audienceOf, participantsOf } from "../ai-chat";
+import { type AttachmentRow, attachmentRowsForMessages } from "../artifact";
 import {
   claimChannelNotice,
   effectiveCapabilities,
@@ -36,6 +37,7 @@ import { REPLY_MODE_PER_MINUTE } from "../chat";
 import type { MemoryService } from "../memory";
 import { createPermissionService, memberDirectory, type PermissionService } from "../organization";
 import { consultTargets } from "./agent-message";
+import { messageScopeFilter } from "./attachment-access";
 import { inboundRooted } from "./inbound-origin";
 import { conversationAudience } from "./memory-files";
 
@@ -128,14 +130,8 @@ export async function buildMentionEvents(
   // D-06, P-10: flat)
   const root = mention.threadRootId;
   const aiChat = conv.kind === "ai_chat";
-  const threadFilter =
-    conv.kind === "dm" || conv.kind === "group" || aiChat
-      ? eq(messages.conversationId, conv.id)
-      : or(
-          eq(messages.id, root),
-          eq(messages.threadId, root),
-          ...(conv.kind === "thread" ? [eq(messages.conversationId, conv.id)] : []),
-        );
+  // 07.15 D-16: the same filter decides which files the turn may read or import (attachment-access.ts).
+  const threadFilter = messageScopeFilter(conv, root);
   const historyRows = (
     await tx
       .select()
@@ -261,6 +257,23 @@ export async function buildMentionEvents(
   // D-12: an automation run's turn has nobody present (no browser tools); a person's message never is one. Phase 07.7
   // (D-13): neither has a consult hop turn (the question to a consulted bot, the answer back to the asker).
   const unattended = mention.trigger === "automation" || mention.trigger === "consult";
+
+  // Phase 07.15 (D-02, PD-04): the files of the messages this turn reads (the current message and the history window
+  // above: the same thread filter, live messages only), ready and linked, in listing order: the current message's in
+  // upload order, then the history newest first. Automation runs and consult hops list none (PD-04). `turnPolicy` decides
+  // per bot how each can be read.
+  const attachments: AttachmentRow[] = [];
+  if (!unattended) {
+    const byMessage = await attachmentRowsForMessages(tx, [
+      mention.messageId,
+      ...historyRows.map((m) => m.id),
+    ]);
+    for (const id of [mention.messageId, ...historyRows.map((m) => m.id).reverse()]) {
+      // 07.15 IN-02: only the conversation's own files, as `attachmentForTurn` decides (a thread conversation's root
+      // message, and so its files, belongs to the parent channel).
+      attachments.push(...(byMessage.get(id) ?? []).filter((r) => r.conversationId === conv.id));
+    }
+  }
   // Phase 07.7 (D-04, D-08, D-09): consults are offered only where one can succeed: never on a reply-mode turn, only in
   // a channel (or its thread), below the depth limit and on a turn that does not start tainted. The targets are decided
   // per delivered bot with the canonical `agent.message` decision (`consultTargets`).
@@ -307,6 +320,7 @@ export async function buildMentionEvents(
             }
           : null,
         consultTargets: targets,
+        attachments,
       },
       {
         audience,

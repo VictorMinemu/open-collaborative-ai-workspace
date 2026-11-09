@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolveOcwAccount } from "./account.js";
-import { AgentChannelHttpError, createAgentChannelClient, isRetryableStatus } from "./api-client.js";
+import {
+  AgentChannelHttpError,
+  ATTACHMENT_READ_TIMEOUT_MS,
+  createAgentChannelClient,
+  isRetryableStatus,
+} from "./api-client.js";
 import { chunkText } from "./bridge.js";
 
 function scriptedFetch(responses: Array<{ status: number; body?: unknown }>) {
@@ -669,5 +674,30 @@ describe("AgentChannelHttpError across module instances (07.2-15, real-cell smok
       false,
     );
     expect((null as unknown as object) instanceof AgentChannelHttpError).toBe(false);
+  });
+});
+
+describe("attachmentRead's budget (07.15 IN-05)", () => {
+  it("waits longer than the API's worst case: one attempt of ATTACHMENT_READ_TIMEOUT_MS, at least 30 s", async () => {
+    // The API's worst case is a 25 MiB store read, the PDF extractor's 10 s deadline and two transactions; a shorter
+    // budget let the API charge and audit a read the bot never received.
+    expect(ATTACHMENT_READ_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000);
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const { fetchImpl, calls } = scriptedFetch([
+        { status: 200, body: { kind: "refused", attachmentId: "a", code: "busy", sentence: "s" } },
+      ]);
+      const client = createAgentChannelClient({ apiUrl: "http://api", token: () => "t", fetch: fetchImpl });
+      const body = {
+        eventId: "00000000-0000-7000-8000-000000000001",
+        agentId: "00000000-0000-7000-8000-000000000002",
+        attachmentId: "00000000-0000-7000-8000-000000000003",
+      };
+      await client.attachmentRead(body).catch(() => undefined);
+      expect(calls).toHaveLength(1);
+      expect(timeout).toHaveBeenCalledWith(ATTACHMENT_READ_TIMEOUT_MS);
+    } finally {
+      timeout.mockRestore();
+    }
   });
 });

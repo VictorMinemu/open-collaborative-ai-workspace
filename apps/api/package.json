@@ -64,6 +64,7 @@
     "standardwebhooks": "1.1.1",
     "tsx": "4.23.15",
     "undici": "8.11.2",
+    "unpdf": "1.9.1",
     "zod": "4.6.5"
   },
   "devDependencies": {

@@ -1,5 +1,6 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/channel-core";
 import type { AgentChannelClient } from "./api-client.js";
+import { registerAttachmentTools } from "./attachment-tool.js";
 import { registerAutomationTool } from "./automation-tool.js";
 import { type AutostartGuardDeps, registerAutostartGuard } from "./autostart-guard.js";
 import { registerBoardTool } from "./board-tool.js";
@@ -19,7 +20,8 @@ import { registerWorkZoneTools } from "./work-zone-tools.js";
  * "tool-discovery"): our tools `ocw_memory_save` (D-10), `ocw_memory_list|read|write|propose` (07.2-07),
  * `ocw_agent_card` (06-14), `ocw_board_card` (07.1-13), the per-member connector and keychain tools (07.4-09), the
  * Work Zone proposal tools `ocw_work_zone_projects|ocw_start_work_zone` (07.5-10), the confined sandbox and browser
- * tools `ocw_sandbox_*` / `ocw_browser_*` (07.8, sandbox-tools.ts, browser-tools.ts), the 07.6 tools
+ * tools `ocw_sandbox_*` / `ocw_browser_*` (07.8, sandbox-tools.ts, browser-tools.ts), the 07.15 read tool
+ * `ocw_attachment_read` (attachment-tool.ts), the 07.6 tools
  * `ocw_automation_propose` (automation-tool.ts) and `ocw_record_update` (record-tool.ts), the 07.7 consult tool
  * `ocw_consult_agent` (consult-tool.ts), and the restart-loop breaker guard on
  * `gateway_start` (autostart-guard.ts; fired from the boot registry, which is "full"). OpenClaw resolves plugin tools
@@ -41,6 +43,7 @@ export function registerFull(
   registerWorkZoneTools(api, { guard, client });
   registerSandboxTools(api, { guard, client });
   registerBrowserTools(api, { guard, client });
+  registerAttachmentTools(api, { guard, client });
   registerAutomationTool(api, { guard, client });
   registerRecordTool(api, { guard, client });
   registerConsultTool(api, { guard, client });

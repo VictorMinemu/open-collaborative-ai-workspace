@@ -1,6 +1,11 @@
 // The confined tools' names and refusal codes come from the contracts' source (07.8-08: shared markers, never copied
 // strings). A relative import keeps this file free of package dependencies, so Playwright specs can load it too.
-import { BROWSER_TOOL_NAMES, SANDBOX_TOOL_NAMES } from "../../packages/contracts/src/bot-capabilities";
+import {
+  BROWSER_TOOL_NAMES,
+  BUILTIN_TOOLS,
+  SANDBOX_TOOL_NAMES,
+  type TurnAttachment,
+} from "../../packages/contracts/src/bot-capabilities";
 import { BrowserRefusal } from "../../packages/contracts/src/browser";
 import { SandboxRefusal } from "../../packages/contracts/src/sandbox";
 
@@ -14,6 +19,11 @@ import { SandboxRefusal } from "../../packages/contracts/src/sandbox";
  *   await plugin.start();            // GET /cell, acks bots, opens /ws, subscribes live
  *   await plugin.waitFor((e) => e.type === "agent.mention.v1");
  *   await plugin.stop();
+ *
+ * Attachments (07.15-09): `[[call ocw_attachment_read {"attachmentId":"{{attachment:1}}"}]]` reads the turn's second
+ * listed file through `POST /agent-channel/v1/attachments/read` (any tool's `{{attachment:N}}` argument becomes that
+ * file's id; an index outside the list is not sent and reads `refused (not_found)`), and a turn that lists files ends its
+ * reply with ` [attachments: <name>:<access>,…]`.
  */
 
 export interface FakeCellEvent {
@@ -101,6 +111,11 @@ export interface MentionPayload {
     };
     /** 07.7 D-09: the turn starts tainted (e.g. a consult reply after the consulted bot read web content). */
     tainted?: boolean;
+    /**
+     * 07.15 D-02: the files of the messages this turn reads (metadata only); absent on turns without files. Directives
+     * name them by position (`{{attachment:N}}`), and the reply lists them (`turnAttachmentsSuffix`).
+     */
+    attachments?: TurnAttachment[];
   };
   /** 07.7 D-01: the turn answers a question another bot asked (the asking bot, its chain and this hop's depth). */
   origin?: Record<string, unknown>;
@@ -177,7 +192,8 @@ export interface FakeCellOptions {
   /**
    * Answer every mention with `replyText(mention)` (default: an identity-aware deterministic reply), or with the
    * simulated tool calls when the message carries `[[call …]]` directives (`simulateToolCalls`), followed by the
-   * turn-tools suffix (`turnToolsSuffix`) and the turn-context suffix (`turnContextSuffix`).
+   * turn-tools suffix (`turnToolsSuffix`), the turn-context suffix (`turnContextSuffix`) and, on a turn that lists
+   * files only, the attachments suffix (`turnAttachmentsSuffix`, 07.15-09).
    */
   autoReply?: boolean;
   replyText?: (m: MentionPayload) => string;
@@ -239,6 +255,53 @@ export function turnToolsSuffix(m: MentionPayload): string {
  */
 export function turnContextSuffix(m: MentionPayload): string {
   return ` [memory: ${m.turn?.memory?.length ?? 0}] [now: ${m.turn?.now?.timeZone ?? "none"}]`;
+}
+
+/**
+ * 07.15-09 (PD-12): appended after the turn-context suffix, only on a turn that lists files: ` [attachments:
+ * <name>:<access>,…]` in the turn's order (the current message's files first, then the history newest first). Lets a
+ * browser spec see which files the API listed for the bot and how it may use each (`read`, `import`, `none`). Empty on
+ * every other turn, so other specs' expected replies are unchanged.
+ */
+export function turnAttachmentsSuffix(m: MentionPayload): string {
+  const files = m.turn?.attachments ?? [];
+  return files.length > 0 ? ` [attachments: ${files.map((f) => `${f.name}:${f.access}`).join(",")}]` : "";
+}
+
+/** `{{attachment:N}}` (the whole string): the turn's N-th listed file, by position from 0 (07.15-09). */
+const ATTACHMENT_REF = /^\{\{attachment:(-?\d+)\}\}$/u;
+
+/**
+ * Replaces every top-level string argument of the exact form `{{attachment:N}}` with the id of
+ * `m.turn.attachments[N]`, so a spec can write a directive before it knows the ids the upload will mint. `null` when an
+ * index is outside the list: the call is then never sent and reads `refused (not_found)`. Test-only: the real plugin
+ * takes ids from the model, which reads them in the turn's Attachments block (T-07.15-09-03).
+ */
+export function withAttachmentIds(
+  m: MentionPayload,
+  args: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const files = m.turn?.attachments ?? [];
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    const ref = typeof value === "string" ? ATTACHMENT_REF.exec(value) : null;
+    if (!ref) {
+      out[key] = value;
+      continue;
+    }
+    const file = files[Number(ref[1])];
+    if (!file) return null;
+    out[key] = file.id;
+  }
+  return out;
+}
+
+/** The first line of a text read's content: the line after the API's `<attached_file>` delimiter (07.15-09). */
+function firstContentLine(block: string): string {
+  const lines = block.split("\n");
+  const open = lines.indexOf("<attached_file>");
+  const line = (open >= 0 ? lines[open + 1] : lines[0]) ?? "";
+  return line === "</attached_file>" ? "" : line.trim();
 }
 
 /** The memory file tools (07.2-07/11) and the Agent Channel route each one calls (`POST /memory/<route>`). */
@@ -610,7 +673,11 @@ export class FakeCellPlugin {
       const links = memberAccountLinks(m);
       await this.reply(
         m,
-        body + (links.length > 0 ? `\n${links.join("\n")}` : "") + turnToolsSuffix(m) + turnContextSuffix(m),
+        body +
+          (links.length > 0 ? `\n${links.join("\n")}` : "") +
+          turnToolsSuffix(m) +
+          turnContextSuffix(m) +
+          turnAttachmentsSuffix(m),
       );
       replied = true;
     } finally {
@@ -691,8 +758,11 @@ export class FakeCellPlugin {
    * `ocw_work_zone_projects` / `ocw_start_work_zone` call `/agent-channel/v1/work-zone/projects|proposals`
    * (`workZoneCall`, 07.5-12); `ocw_sandbox_*` / `ocw_browser_*` call `/agent-channel/v1/sandbox|browser/<verb>`
    * (`sandbox` / `browser`, 07.8-08); `ocw_consult_agent` calls `/agent-channel/v1/consultations` (`consultCall`,
-   * 07.7-10); any other tool asks `/agent-channel/v1/tool-calls` (with the call's `arguments` only when
-   * its delivered flags carry `approval`, 07.5 D-01) and, when allowed, reports a result. One line per call:
+   * 07.7-10); `ocw_attachment_read` calls `/agent-channel/v1/attachments/read` (`attachmentRead`, 07.15-09); any other
+   * tool asks `/agent-channel/v1/tool-calls` (with the call's `arguments` only when
+   * its delivered flags carry `approval`, 07.5 D-01) and, when allowed, reports a result. Before any of that, a
+   * `{{attachment:N}}` argument becomes the turn's N-th file id (`withAttachmentIds`; outside the list the call is not
+   * sent and reads `refused (not_found)`). One line per call:
    * `Tool <offered name>: allowed | denied (<reason>) | approval_required | approval_pending | approval_denied |
    * approval_used`, `Tool <name>: saved | created | moved | waiting set | read | listed | written | proposed |
    * refused (<code>) | not offered`.
@@ -705,7 +775,13 @@ export class FakeCellPlugin {
     const offered = m.turn?.tools ?? [];
     let boardCreates = 0;
     let consults = 0;
-    for (const call of calls) {
+    for (const directive of calls) {
+      const args = withAttachmentIds(m, directive.args);
+      if (args === null) {
+        lines.push(`Tool ${directive.tool}: refused (not_found)`);
+        continue;
+      }
+      const call = { tool: directive.tool, args };
       if (isConnectorTool(call.tool)) {
         // The logical connector tool decides `ocw_connector_call` (connectorCall); list and http are offered by name.
         if (call.tool !== "ocw_connector_call" && !offered.includes(call.tool)) {
@@ -731,6 +807,10 @@ export class FakeCellPlugin {
       }
       if (name === CONSULT_TOOL) {
         lines.push(`Tool ${call.tool}: ${await this.consultCall(m, call.args, ++consults)}`);
+        continue;
+      }
+      if (name === BUILTIN_TOOLS.attachmentRead) {
+        lines.push(`Tool ${call.tool}: ${await this.attachmentRead(m, call.args)}`);
         continue;
       }
       if (isSandboxTool(name)) {
@@ -833,6 +913,33 @@ export class FakeCellPlugin {
     if (res.status === 200 && res.body) return renderSandbox(tool, res.body);
     const code = SandboxRefusal.safeParse(res.body?.error?.code);
     return code.success ? `refused (${code.data})` : `failed (${res.status})`;
+  }
+
+  /** Every `POST /attachments/read` the simulated tool made (07.15-09): the turn, the file id and the status it got. */
+  readonly attachmentRequests: Array<{ eventId: string; attachmentId: string; status: number }> = [];
+
+  /**
+   * `ocw_attachment_read` the way apps/openclaw-channel's attachment-tool.ts sends it (07.15-06): `POST
+   * /agent-channel/v1/attachments/read` with the mention's `eventId` and `agentId` beside the model's `attachmentId`,
+   * nothing else. Answers `read <name>: <first line of the file's content>` for text, `image <name> (<mimeType>)` for an
+   * image (never its bytes), `refused (<code>)` for a refusal (a 200 answer, or the error envelope's code otherwise),
+   * else `failed (<HTTP status>)`.
+   */
+  async attachmentRead(m: MentionPayload, args: Record<string, unknown>): Promise<string> {
+    const attachmentId = typeof args.attachmentId === "string" ? args.attachmentId : "";
+    const res = await this.request<Loose | null>("POST", "/attachments/read", {
+      eventId: m.eventId,
+      agentId: m.agent.id,
+      attachmentId,
+    });
+    this.attachmentRequests.push({ eventId: m.eventId, attachmentId, status: res.status });
+    const b = res.body;
+    if (res.status === 200 && b) {
+      if (b.kind === "text") return `read ${b.name}: ${firstContentLine(String(b.text ?? ""))}`;
+      if (b.kind === "image") return `image ${b.name} (${b.mimeType})`;
+      if (b.kind === "refused") return `refused (${b.code})`;
+    }
+    return b?.error?.code ? `refused (${b.error.code})` : `failed (${res.status})`;
   }
 
   /** `ocw_browser_*` likewise (`/browser/<verb>`), refusals parsed with `BrowserRefusal`. */

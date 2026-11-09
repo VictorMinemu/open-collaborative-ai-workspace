@@ -1,18 +1,18 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.0
-current_phase: 1
-current_phase_name: MVP 0 — Collaborative Workspace Demo Slice
-status: planning
+current_phase: 07.15
+current_phase_name: Bots read attachments
+status: executing
 stopped_at: Phase 07.14 complete, ready to plan Phase 1
-last_updated: "2026-11-07T07:05:55.907Z"
+last_updated: "2026-11-07T08:24:32.029Z"
 last_activity: 2026-11-07
-last_activity_desc: Phase 07.14 complete, transitioned to Phase 1
-state_head: b5a4d2ce9386ee81270ada7c2feeedb2abe76c50
+last_activity_desc: Phase 07.15 execution started
+state_head: cbcf4678eead5d567391c837e995d24b0652b85b
 progress:
   total_phases: 12
   completed_phases: 5
-  total_plans: 295
+  total_plans: 306
   completed_plans: 295
 ---
 
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-02)
 
 **Core value:** AI sessions are multiplayer — a private AI chat or coding session can be shared live with colleagues, the model knows who each participant is, and everything stays attributed and auditable.
-**Current focus:** Phase 07.14 — Organization connector auth
+**Current focus:** Phase 07.15 — Bots read attachments
 
 ## Current Position
 
-Phase: 1 — MVP 0 — Collaborative Workspace Demo Slice
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-11-07 — Phase 07.14 complete, transitioned to Phase 1
+Phase: 07.15 (Bots read attachments) — EXECUTING
+Plan: 1 of 11
+Status: Executing Phase 07.15
+Last activity: 2026-11-07 — Phase 07.15 execution started
 
 Progress: [░░░░░░░░░░] 0%
 

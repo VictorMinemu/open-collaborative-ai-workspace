@@ -61,6 +61,9 @@ export const REQUIRED_AREAS = [
   // Phase 07.14 (ADR-0036): the organization's connector sign-in routes and the OAuth flow state both principals share.
   { area: "organization connector sign-in", file: "apps/api/src/modules/connectors/org-routes.ts" },
   { area: "connector OAuth flow state", file: "apps/api/src/modules/connectors/flow.ts" },
+  // Phase 07.15 (ADR-0037): the bot attachment read route and the row rule shared by reads and sandbox imports.
+  { area: "bot attachment reads", file: "apps/api/src/modules/agent-channel/attachments.ts" },
+  { area: "bot attachment access rule", file: "apps/api/src/modules/agent-channel/attachment-access.ts" },
 ];
 
 /** GitHub CODEOWNERS pattern (gitignore subset) → RegExp over repo-relative paths. */

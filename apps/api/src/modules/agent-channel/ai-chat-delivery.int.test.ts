@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { EventTypes } from "@ocw/contracts";
 import pg from "pg";
+import sharp from "sharp";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { FakeCellPlugin, type MentionPayload } from "../../../../../e2e/support/fake-cell-plugin";
 import { TEST_SETUP_TOKEN, TestClient } from "../../testing";
 import { type AiStack, seedPlan, startAiStack, subscribeConv, withoutTitles } from "../../testing-ai";
+import { startTestStorage, type TestStorage, uploadAttachment } from "../../testing-storage";
 import { errorCode, invite } from "../../testing-workzone";
 
 /**
@@ -23,6 +25,8 @@ const CELL_TOKEN = "ocw-test-cell-token-ai-chat-delivery-0123456789";
 const PLAN_MODEL = { backend: "chatgpt_plan", provider: "openai", modelId: "gpt-6-astra" } as const;
 
 let stack: AiStack;
+/** Garage, so files can be attached in the chats (07.15-07: a persona's turn lists them). */
+let storage: TestStorage;
 let su: pg.Client;
 let victor: TestClient;
 let alex: TestClient;
@@ -127,7 +131,8 @@ async function teamBot(name: string, username: string): Promise<string> {
 }
 
 beforeAll(async () => {
-  stack = await startAiStack({ env: { OCW_CELL_TOKEN: CELL_TOKEN } });
+  storage = await startTestStorage();
+  stack = await startAiStack({ env: { OCW_CELL_TOKEN: CELL_TOKEN, ...storage.env } });
   su = new pg.Client({ connectionString: stack.db.superuserUrl });
   await su.connect();
   victor = new TestClient(stack.baseUrl);
@@ -175,7 +180,11 @@ beforeAll(async () => {
 afterAll(async () => {
   for (const p of plugins) await p.stop();
   await su?.end();
-  await stack?.stop();
+  try {
+    await stack?.stop();
+  } finally {
+    await storage?.stop();
+  }
 });
 
 describe("tracer: Víctor adds @backend to his shared chat, Alex mentions it, the flat reply lands (Task 1)", () => {
@@ -629,5 +638,116 @@ describe("an agent persona in an AI chat counts as sharing it (D-06, orchestrato
     } finally {
       await ok(victor.request("PUT", "/api/v1/me/ai-preferences", { instructions: "" }));
     }
+  });
+});
+
+describe("07.15-07 (D-02, D-14): a persona's turn lists the files of the chat's messages it reads", () => {
+  it("an earlier message's PNG is listed for @backend with the read tool; the send route still refuses a .zip", async () => {
+    const created = await ok(createChat(victor, "Look at this diagram with me"), 201);
+    const chat = (created.chat as Json).id as string;
+    await settled((created.generation as Json).id as string);
+    const bytes = await sharp({ create: { width: 64, height: 48, channels: 3, background: "#36a" } })
+      .png()
+      .toBuffer();
+    const image = await uploadAttachment(victor, chat, { name: "diagram.png", type: "image/png", bytes });
+    const withImage = await ok(send(victor, chat, "what is this?", { attachmentIds: [image] }), 201);
+    await settled((withImage.generation as Json).id as string);
+    await ok(addAgent(victor, chat, backendId), 201);
+
+    const posted = await send(victor, chat, "@backend what does the diagram show?");
+    expect(posted.status).toBe(202);
+    const messageId = ((posted.body as Json).userMessage as Json).id as string;
+    const [ev] = await deliveriesOf(messageId);
+    expect(ev?.conversation).toMatchObject({ id: chat, kind: "ai_chat" });
+    expect(ev?.turn.attachments).toEqual([
+      {
+        id: image,
+        messageId: (withImage.userMessage as Json).id as string,
+        name: "diagram.png",
+        mediaType: "image/png",
+        size: bytes.length,
+        kind: "image",
+        access: "read",
+      },
+    ]);
+    expect(ev?.turn.tools).toContain("ocw_attachment_read");
+
+    // D-14: the chat's model still decides what can be attached; a persona never widens it.
+    const archive = await uploadAttachment(victor, chat, {
+      name: "src.zip",
+      type: "application/zip",
+      bytes: new Uint8Array([0x00, 0x9f, 0x92, 0x96, 0x01, 0x02, 0x03, 0xfe, 0xff, 0x00]),
+    });
+    const refused = await send(victor, chat, "unpack it", { attachmentIds: [archive] });
+    expect(refused.status).toBe(400);
+    expect(errorCode(refused)).toBe("attachment_not_supported");
+  });
+
+  it("07.15-11 (D-14): a message that only addresses the persona meets the same gate; a readable file still goes", async () => {
+    const created = await ok(createChat(victor, "Review the build with me"), 201);
+    const chat = (created.chat as Json).id as string;
+    await settled((created.generation as Json).id as string);
+    await ok(addAgent(victor, chat, backendId), 201);
+
+    // The chat model is not asked (202), yet a file it cannot read is refused exactly as when it is: 400, nothing written.
+    const archive = await uploadAttachment(victor, chat, {
+      name: "build.zip",
+      type: "application/zip",
+      bytes: new Uint8Array([0x00, 0x9f, 0x92, 0x96, 0x01, 0x02, 0x03, 0xfe, 0xff, 0x00]),
+    });
+    const refused = await send(victor, chat, "@backend unpack it", { attachmentIds: [archive] });
+    expect(refused.status).toBe(400);
+    expect(errorCode(refused)).toBe("attachment_not_supported");
+    const { rows: linked } = await su.query("select message_id from app.attachments where id = $1", [
+      archive,
+    ]);
+    expect(linked[0]?.message_id ?? null).toBeNull();
+
+    // A file the chat's model reads still reaches the persona, listed on its turn.
+    const notes = await uploadAttachment(victor, chat, {
+      name: "notes.txt",
+      type: "text/plain",
+      bytes: new TextEncoder().encode("build 42 failed on step lint\n"),
+    });
+    const posted = await send(victor, chat, "@backend what failed?", { attachmentIds: [notes] });
+    expect(posted.status).toBe(202);
+    const messageId = ((posted.body as Json).userMessage as Json).id as string;
+    const [ev] = await deliveriesOf(messageId);
+    expect(ev?.turn.attachments?.map((a: { id: string }) => a.id)).toContain(notes);
+  });
+
+  it("WR-08: a sender's model that cannot be resolved fails closed: only text goes to the persona", async () => {
+    const created = await ok(createChat(victor, "Look at the logs with me"), 201);
+    const chat = (created.chat as Json).id as string;
+    await settled((created.generation as Json).id as string);
+    await ok(addAgent(victor, chat, backendId), 201);
+    // A model the plan's catalog does not have: the gateway answers ModelUnavailableError, so nothing says what it reads.
+    const gone = { model: { ...PLAN_MODEL, modelId: "gpt-not-in-any-catalog" } };
+
+    const bytes = await sharp({ create: { width: 32, height: 32, channels: 3, background: "#a63" } })
+      .png()
+      .toBuffer();
+    const image = await uploadAttachment(victor, chat, { name: "chart.png", type: "image/png", bytes });
+    const archive = await uploadAttachment(victor, chat, {
+      name: "logs.zip",
+      type: "application/zip",
+      bytes: new Uint8Array([0x00, 0x9f, 0x92, 0x96, 0x01, 0x02, 0x03, 0xfe, 0xff, 0x00]),
+    });
+    for (const id of [image, archive]) {
+      const refused = await send(victor, chat, "@backend look", { attachmentIds: [id], ...gone });
+      expect(refused.status).toBe(400);
+      expect(errorCode(refused)).toBe("attachment_not_supported");
+      const { rows } = await su.query("select message_id from app.attachments where id = $1", [id]);
+      expect(rows[0]?.message_id ?? null).toBeNull();
+    }
+
+    // Text is what every model reads: it still goes.
+    const notes = await uploadAttachment(victor, chat, {
+      name: "log.txt",
+      type: "text/plain",
+      bytes: new TextEncoder().encode("step lint failed\n"),
+    });
+    const posted = await send(victor, chat, "@backend what failed?", { attachmentIds: [notes], ...gone });
+    expect(posted.status).toBe(202);
   });
 });

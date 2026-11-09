@@ -261,6 +261,22 @@ ClawHub on the fake model. The fake ClawHub serves the `npm pack` of the pinned 
 noticed the suppressed channel, reported the pause to the fake API and started the channel itself (the smoke cell
 runs with `OCW_BREAKER_BACKOFF_MS=5000`).
 
+`bot_attachments` (07.15-10) runs the working-tree plugin's `ocw_attachment_read` in the real cell against the fake
+API (`POST /__test/attachments` sets each file's answer) and the fake model. Each case is its own DM, so a model request
+carries one turn only:
+- files-only body: a DM message with empty text that lists two files is answered, and the model gets
+  `(sent 2 attachments; see the Attachments block)` and the metadata-only `Attachments in this conversation` block,
+  never the file's content (OpenClaw 2026.9.7 accepts the placeholder body, research A1);
+- the turn's ids only: the read posts exactly `agentId,attachmentId,eventId` to `POST /attachments/read`, never to
+  `/tool-calls`, and the API's untrusted block reaches the model only as the tool result;
+- refusal sentences: a `model_no_images` answer reaches the model as its fixed sentence;
+- reads outside the cap of 8: after 8 gated MCP `echo` calls and a 9th blocked at the cap, two reads in the same turn
+  still run on their own budget;
+- image part for image models: once the fake API flags the bot's model as image-capable, an image answer reaches the
+  model as an `image_url` part with the exact bytes, after the labelled tool result;
+- no URL, Garage key (`/att/`, `X-Amz-`) or file content outside a read's tool result in any model request, and no file
+  content, file name, URL or key in the cell's logs.
+
 The script `docker cp`s the working-tree `install-policy.mjs` into a reused image instead of bind-mounting it:
 OpenClaw refuses a policy script owned by the runner's uid.
 

@@ -705,6 +705,13 @@ export const agentTurns = appSchema.table(
      */
     sandboxCalls: integer("sandbox_calls").notNull().default(0),
     /**
+     * Phase 07.15 (D-17): the `ocw_attachment_read` reads of this turn and the UTF-16 characters they returned, counted
+     * by the read route against `ATTACHMENT_READ_LIMITS` under a conditional update, separately from `tool_calls` and
+     * `sandbox_calls` (attachment reads never consume the confined-tool cap).
+     */
+    attachmentReads: integer("attachment_reads").notNull().default(0),
+    attachmentChars: integer("attachment_chars").notNull().default(0),
+    /**
      * Phase 07.8 (P-11, P-18, D-13): a member's sealed browser session was loaded in this turn. From then on the turn's
      * cross-site opens and navigations and its egress-capable execs need the requester's approval, and a team bot's
      * workspace writes are refused.
@@ -735,6 +742,8 @@ export const agentTurns = appSchema.table(
     /** The turns of one chain (07.7 completion rule). */
     index("agent_turns_chain_idx").on(t.chainId).where(sql`chain_id is not null`),
     check("agent_turns_sandbox_calls_check", sql`${t.sandboxCalls} >= 0`),
+    check("agent_turns_attachment_reads_check", sql`${t.attachmentReads} >= 0`),
+    check("agent_turns_attachment_chars_check", sql`${t.attachmentChars} >= 0`),
     check("agent_turns_chain_depth_check", sql`${t.chainDepth} between 0 and 2`),
   ],
 );

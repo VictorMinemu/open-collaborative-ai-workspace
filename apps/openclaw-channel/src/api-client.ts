@@ -2,6 +2,8 @@ import {
   AGENT_CHANNEL_BASE_PATH,
   type AgentChannelApprovalDenial,
   AgentChannelApprovalRefusalDetails,
+  type AgentChannelAttachmentRead,
+  AgentChannelAttachmentReadResponse,
   type AgentChannelAutomationPropose,
   AgentChannelAutomationProposeResponse,
   AgentChannelBoardCardResponse,
@@ -181,6 +183,13 @@ export const AUTOMATION_PROPOSE_TIMEOUT_MS = 10_000;
 /** 07.7: per-attempt budget of a consult (two attempts, the key answers the same hop) and of the turn-done signal. */
 export const CONSULT_TIMEOUT_MS = 10_000;
 export const TURN_DONE_TIMEOUT_MS = 10_000;
+
+/**
+ * 07.15 (IN-05): one `ocw_attachment_read` attempt. The API's worst case is a store read of at most 25 MiB (its fixed
+ * PDF bound), the PDF extractor's 10 s deadline and two transactions; 35 s waits past it, so the bot reads what the API
+ * answered (and charged), never the transport sentence for a read that was counted anyway.
+ */
+export const ATTACHMENT_READ_TIMEOUT_MS = 35_000;
 
 /**
  * 07.8: per-call budgets of the confined tools, each longer than the API's deadline of that call, so the model reads
@@ -596,6 +605,20 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
     ): Promise<BrowserToolResponses[T]> {
       const raw = await request("POST", BROWSER_TOOL_ROUTES[tool], body, signal, 1, confinedTimeoutMs(tool));
       return BROWSER_TOOL_RESPONSES[tool].parse(raw) as BrowserToolResponses[T];
+    },
+    /**
+     * `ocw_attachment_read` (07.15 D-03, PD-10): one read of a file the turn lists, with the turn's ids and the attachment
+     * id only (the API derives the conversation and the human from the stored turn). One attempt of
+     * `ATTACHMENT_READ_TIMEOUT_MS` (35 s, past the API's worst case): the route claims
+     * the read against the turn's own budget. Every refusal is a 200 `{kind: "refused", code, sentence}`; only a turn that
+     * ended throws (403 `no_trigger`). Never logs the file's name or content.
+     */
+    async attachmentRead(
+      body: AgentChannelAttachmentRead,
+      signal?: AbortSignal,
+    ): Promise<AgentChannelAttachmentReadResponse> {
+      const raw = await request("POST", "/attachments/read", body, signal, 1, ATTACHMENT_READ_TIMEOUT_MS);
+      return AgentChannelAttachmentReadResponse.parse(raw);
     },
     /**
      * A marketplace install / uninstall outcome (D-14). Three attempts at most: the API applies a report only to the

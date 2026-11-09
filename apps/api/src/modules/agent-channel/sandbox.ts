@@ -36,7 +36,7 @@ import {
   type ToolApprovalRefusal,
   type TurnToolFlags,
 } from "@ocw/contracts";
-import { agentToolCalls, agentTurns, conversations, messages, type Tx, withSavepoint } from "@ocw/db";
+import { agentToolCalls, agentTurns, type Tx, withSavepoint } from "@ocw/db";
 import { and, eq, lt, type SQL, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import type { z } from "zod";
@@ -46,7 +46,6 @@ import { HttpError } from "../../lib/errors";
 import {
   type AttachmentRow,
   AttachmentTooLargeError,
-  attachmentRowsByIds,
   createObjectStorage,
   pendingTurnAttachmentCount,
   readAttachmentBytes,
@@ -70,6 +69,7 @@ import {
 } from "../sandbox";
 import { approvalMessageRouteOf } from "../tool-approval";
 import { recordStep, type StepOutcomeInput, stepFor } from "./activity";
+import { attachmentAuditFields, attachmentForTurn } from "./attachment-access";
 import { type CellPrincipal, cellOf } from "./auth";
 import { noTrigger } from "./cards";
 import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, liveTurn, taintReturnTurns } from "./claim";
@@ -663,7 +663,19 @@ interface SandboxCallSpec<Raw, R> {
   call: (client: SandboxdClient, target: SandboxdTarget, leftMs: number) => Promise<Raw>;
   /** In the outcome transaction (a savepoint: a throw undoes only its own writes). */
   finish: (tx: Tx, raw: Raw, turn: AgentTurnRow) => Promise<CallOutcome<R>>;
+  /**
+   * One more audit row for every outcome of a call on a live turn (07.15-03: an import's `bot.attachment_imported`),
+   * in the transaction that records it: a refusal before or at the decision in tx1 (`denied`), the outcome after
+   * sandboxd in tx2 (`ok`, or `failed` with its code). Ids, counts and codes only.
+   */
+  outcomeAudit?: (tx: Tx, turn: AgentTurnRow, outcome: CallOutcomeAudit) => Promise<void>;
 }
+
+/** What `outcomeAudit` is told: the call succeeded, was refused before sandboxd, or failed after its decision. */
+type CallOutcomeAudit =
+  | { kind: "ok" }
+  | { kind: "denied"; reason: ConfinedCallRefusal }
+  | { kind: "failed"; reason: SandboxRefusal };
 
 /** How the step of a call refused at its decision reads (a waiting one links its approval card, WINDOWS #245). */
 export const refusedOutcome = (
@@ -748,6 +760,7 @@ async function runSandboxCall<Raw, R>(
           kind: "sandbox",
           ...(spec.auditIds ? { metadata: spec.auditIds } : {}),
         });
+    if (!decision.ok) await spec.outcomeAudit?.(tx, turn, { kind: "denied", reason: decision.reason });
     const step = stepFor(
       tool,
       spec.stepInput,
@@ -839,6 +852,11 @@ async function runSandboxCall<Raw, R>(
             reason: failure ?? "service_unavailable",
           }),
     });
+    await spec.outcomeAudit?.(
+      tx,
+      turn,
+      outcome ? { kind: "ok" } : { kind: "failed", reason: failure ?? "service_unavailable" },
+    );
     const step = stepFor(
       tool,
       spec.stepInput,
@@ -896,59 +914,6 @@ async function assertFile(
   const entry = await client.call("filesStat", { target, path });
   if (entry.kind !== "file") throw new LocalRefusal("invalid_path");
   return entry;
-}
-
-/** Conversations whose bot history is the whole conversation (mentions.ts: DMs, group DMs, AI chats are flat). */
-const FLAT_HISTORY_KINDS = new Set(["dm", "group", "ai_chat"]);
-/** Conversation kinds a bot turn reads messages in; a Work Zone session's files are never a chat attachment. */
-const IMPORT_KINDS = new Set(["channel", "thread", ...FLAT_HISTORY_KINDS]);
-
-/**
- * The attachment `ocw_sandbox_import` may take for this turn, or null (the caller answers `not_found`, so a file the
- * turn does not read is indistinguishable from a missing one). Run in the turn's transaction AS its human (RLS), after
- * `liveTurn` checked that the human still reads the turn's conversation; the bot reads only what its delivery gave
- * it. So the file must be exactly one the turn's history shows (`buildMentionEvents` in mentions.ts):
- * - `ready`, of the turn's conversation, sent with a message (never an upload still waiting in someone's composer)
- *   and never a Work Zone prompt's image;
- * - that message live (not a tombstone, whatever the file's own status says) and in the turn's conversation;
- * - in a channel, that message is the turn's thread root or a reply in that thread (the root is the turn message's
- *   thread, or the turn message itself); a DM, group DM or AI chat is read whole.
- */
-async function importableAttachment(
-  tx: Tx,
-  turn: Pick<AgentTurnRow, "conversationId" | "messageId">,
-  attachmentId: string,
-): Promise<AttachmentRow | null> {
-  const [row] = await attachmentRowsByIds(tx, [attachmentId]);
-  if (!row || row.conversationId !== turn.conversationId || row.status !== "ready") return null;
-  if (row.messageId === null || row.workPromptId !== null) return null;
-  const [conv] = await tx
-    .select({ kind: conversations.kind })
-    .from(conversations)
-    .where(eq(conversations.id, turn.conversationId))
-    .limit(1);
-  if (!conv || !IMPORT_KINDS.has(conv.kind)) return null;
-  const [carrier] = await tx
-    .select({
-      id: messages.id,
-      conversationId: messages.conversationId,
-      threadId: messages.threadId,
-      deletedAt: messages.deletedAt,
-    })
-    .from(messages)
-    .where(eq(messages.id, row.messageId))
-    .limit(1);
-  if (!carrier || carrier.deletedAt !== null || carrier.conversationId !== turn.conversationId) return null;
-  // A DM, group DM or AI chat is one flat history; a thread conversation is read whole too (mentions.ts).
-  if (FLAT_HISTORY_KINDS.has(conv.kind) || conv.kind === "thread") return row;
-  const [trigger] = await tx
-    .select({ id: messages.id, threadId: messages.threadId })
-    .from(messages)
-    .where(and(eq(messages.id, turn.messageId), eq(messages.conversationId, turn.conversationId)))
-    .limit(1);
-  if (!trigger) return null;
-  const root = trigger.threadId ?? trigger.id;
-  return carrier.id === root || carrier.threadId === root ? row : null;
 }
 
 /** Where an import lands when the bot names no path: `downloads/<the attachment's name>` (sanitized). */
@@ -1216,9 +1181,10 @@ export function registerSandboxRoutes(
     },
   );
 
-  // 07.8-25 (D-11 F-8, P-11): an attachment the turn reads (a live message of its conversation, in its thread for a
-  // channel: `importableAttachment`) copied into the workspace, only when the conversation's audience already covers
-  // the workspace's (`audienceCovers`, the resolver's rule: refuse when unsure).
+  // 07.8-25 (D-11 F-8, P-11): an attachment the turn reads (07.15 D-16: a live message of its conversation, in its
+  // thread for a channel: `attachmentForTurn`, the one row rule) copied into the workspace, only when the
+  // conversation's audience already covers the workspace's (`audienceCovers`, the resolver's rule: refuse when unsure).
+  // 07.15 D-07: every outcome on a live turn is also `bot.attachment_imported` (ids, type, size and outcome only).
   const access = createConversationAccess(core);
   const isReadable = (tx: Tx, userId: string, conversationId: string) =>
     access.isReadable(tx, userId, conversationId, { kinds: ["channel", "dm", "group", "ai_chat"] });
@@ -1232,6 +1198,8 @@ export function registerSandboxRoutes(
       const body = req.body;
       // The attachment as the precheck resolved it in the turn's transaction (RLS, bound to the turn's conversation).
       let found: AttachmentRow | null = null;
+      // The row the shared rule returned, even when a later check refused it (what the import audit describes).
+      let resolved: AttachmentRow | null = null;
       const stepInput: Record<string, unknown> = { path: body.path ?? "downloads" };
       return runSandboxCall(core, deps, cellOf(req), {
         tool: BUILTIN_TOOLS.sandboxImport,
@@ -1244,9 +1212,10 @@ export function registerSandboxRoutes(
         failureAudit: (reason) => ({ reason, attachmentId: body.attachmentId }),
         precheck: async (tx, turn) => {
           if (!storage) return "service_unavailable";
-          // Only a file the turn reads (`importableAttachment`): anything else reads exactly like a missing file.
-          const row = await importableAttachment(tx, turn, body.attachmentId);
+          // Only a file the turn reads (`attachmentForTurn`): anything else reads exactly like a missing file.
+          const row = await attachmentForTurn(tx, turn, body.attachmentId);
           if (!row) return "not_found";
+          resolved = row;
           if (row.sizeBytes > SANDBOX_LIMITS.uploadMaxBytes) return "too_large";
           const facts = await audienceCoverFacts(
             tx,
@@ -1286,6 +1255,28 @@ export function registerSandboxRoutes(
             ...pathAudit(put.path),
           },
         }),
+        outcomeAudit: (tx, turn, outcome) =>
+          core.audit.record(tx, {
+            ...cellAuditBase(cellOf(req)),
+            action: "bot.attachment_imported",
+            actorKind: "agent",
+            actorId: turn.agentId,
+            agentId: turn.agentId,
+            userId: turn.userId,
+            resourceType: "attachment",
+            resourceId: body.attachmentId,
+            result: outcome.kind === "ok" ? "success" : outcome.kind === "denied" ? "denied" : "error",
+            // Never the file's name, its content or a path (`pathLength` stays on `sandbox.file_imported`).
+            // The fields every bot file access shares with `bot.attachment_read` (07.15-08, PD-09).
+            metadata: {
+              eventId: turn.eventId,
+              ...attachmentAuditFields(resolved, {
+                attachmentId: body.attachmentId,
+                conversationId: turn.conversationId,
+              }),
+              outcome: outcome.kind === "ok" ? "imported" : outcome.reason,
+            },
+          }),
       });
     },
   );

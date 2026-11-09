@@ -14,6 +14,7 @@ import {
   EventTypes,
   type Message,
   type MessagePage,
+  type ModelCaps,
   type ModelRef,
   type Permission,
   type SendAiMessageRequest,
@@ -128,6 +129,8 @@ export interface AiChatDeps {
 
 const VIEWER_CAN: readonly Permission[] = ["ai_chat.use", "ai_chat.web", "ai_chat.manage", "ai_chat.share"];
 const NOT_FOUND = "AI chat not found";
+/** What a sender's model that cannot be resolved is assumed to read (07.15 WR-08): text only, never images or PDFs. */
+const UNRESOLVED_CAPS: ModelCaps = { vision: false, pdf: false, webSearch: "none" };
 
 /** A hidden denial reads exactly like a missing chat (same status, code and message). */
 function asMissing(err: unknown): unknown {
@@ -727,10 +730,16 @@ export function createAiChatService(deps: AiChatDeps) {
     const dir = await loadDirectory(tx);
     const mentions = resolveMentions(body.body, dir);
     const addressed = addressedOf(body.askAi, mentions);
-    if (addressed) {
-      // Files the sender's model cannot read are refused as in Phase 5; a refused model is skipped by the queue.
+    // Files the sender's model cannot read are refused as in Phase 5, whether or not the model is asked: a message
+    // that only addresses a persona meets the same gate (07.15-11, D-14: a persona never widens what the chat's model
+    // accepts). A refused model is skipped by the queue. A model that cannot be resolved fails closed (07.15 WR-08):
+    // nothing says it reads images or PDFs, so only what every model reads (text) goes, to the queue or the persona.
+    if (files.length > 0) {
       const resolved = await senderModel(tx, body.model, auth.userId);
       if (resolved) assertReadableBy(files, resolved.caps, resolved.label);
+      else assertReadableBy(files, UNRESOLVED_CAPS, "This chat's model");
+    }
+    if (addressed) {
       if ((await pendingCount(tx, conv.id)) >= AI_QUEUE_MAX) {
         throw new HttpError(429, "ai_queue_full", `At most ${AI_QUEUE_MAX} messages can wait for an answer`);
       }

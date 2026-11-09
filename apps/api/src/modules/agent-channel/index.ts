@@ -37,6 +37,7 @@ import type { SandboxdClient } from "../sandbox";
 import type { RecordWrites } from "../watched";
 import type { WorkZoneProposalService } from "../work-session";
 import { finishActivity } from "./activity";
+import { registerAttachmentRoutes } from "./attachments";
 import { cellOf, createCellAuth } from "./auth";
 import { registerAutomationProposalRoutes } from "./automation-proposals";
 import { registerBoardAgentRoutes } from "./board";
@@ -574,6 +575,9 @@ export function createAgentChannelModule(
           if (opts.records) {
             registerRecordRoutes(scope, core, { toolApproval: opts.toolApproval, records: opts.records });
           }
+          // Conversation files a bot reads (07.15-08, D-03, D-16, D-17): `ocw_attachment_read`, decided per call as the
+          // turn's human, counted on the turn's attachment budget, tainting, audited without content.
+          registerAttachmentRoutes(scope, core);
           // Bot sandboxes (07.8-05, D-02 (b), D-09): every `ocw_sandbox_*` call decided, approved, counted, capped and
           // audited by the API before sandboxd runs it.
           registerSandboxRoutes(scope, core, {

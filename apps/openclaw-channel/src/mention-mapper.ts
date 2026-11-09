@@ -13,11 +13,12 @@ import {
   CONNECTOR_LOGICAL_TOOL,
   EMPTY_TURN,
   TOOL_APPROVAL_LIMITS,
+  type TurnAttachment,
   type TurnContext,
   type TurnWithheld,
 } from "./agent-channel-protocol.js";
 import { SIGNIN_SENTENCES } from "./signin-sentences.js";
-import { CONSULT_TOOL_NAME, withTurnScopedTools } from "./turn-scoped-tools.js";
+import { ATTACHMENT_TOOL_NAME, CONSULT_TOOL_NAME, withTurnScopedTools } from "./turn-scoped-tools.js";
 
 export const CHANNEL_ID = "ocw";
 
@@ -125,6 +126,8 @@ export type MappedMention = {
     sender_id?: string;
     timestamp_ms?: number;
     body: string;
+    /** 07.15 (PD-10): the labelled names of the message's files the turn lists (read them through the block's ids). */
+    attachments?: string[];
   }>;
   /** Same history as OpenClaw `HistoryEntry[]` (InboundHistory). */
   inboundHistory: Array<{ sender: string; body: string; timestamp?: number; messageId?: string }>;
@@ -252,6 +255,9 @@ function turnContextBlocks(
       payload: { local: turn.now.local, time_zone: turn.now.timeZone, iso: turn.now.iso },
     });
   }
+  // 07.15 (D-02, D-04): the files of the messages this turn reads, metadata only (never content, a URL or a key).
+  const attachments = attachmentsBlock(turn);
+  if (attachments) blocks.push(attachments);
   // Memory files (07.2, D-02): the API sends the private MEMORY.md only in a one-human DM; rendering it only in a DM too
   // is defence in depth (T-07.2-07-04). The notebook is the bot's own. `scope` is the alias ocw_memory_read takes.
   const files = turn.memoryFiles ?? [];
@@ -291,6 +297,101 @@ function turnContextBlocks(
     });
   }
   return blocks;
+}
+
+// ---------------------------------------------------------------- attachments (07.15, D-02, D-04, PD-10)
+
+const SANDBOX_IMPORT_TOOL = "ocw_sandbox_import";
+
+/**
+ * A file name inside the Attachments block or a history entry: `sanitizeName` on one line, without the block's
+ * separator (`·`), brackets or quotes, so a name can never forge another column, file or structure.
+ */
+function attachmentName(name: string): string {
+  const cleaned = oneLine(sanitizeName(name), 80)
+    .replace(/[·[\]{}"\\]/gu, "")
+    .replace(/\s{2,}/gu, " ")
+    .trim();
+  return cleaned || "file";
+}
+
+/** A file size for people: bytes, then KB / MB / GB (binary, one decimal under 10). */
+function fileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} byte${bytes === 1 ? "" : "s"}`;
+  const units = ["KB", "MB", "GB"] as const;
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  const shown = value >= 10 ? Math.round(value) : Math.round(value * 10) / 10;
+  return `${shown} ${units[unit]}`;
+}
+
+/** One file: `<id> · <name> · <kind> · <size> · message <messageId>[ · <note>]`. */
+function attachmentLine(a: TurnAttachment): string {
+  const note = a.note ? oneLine(a.note, 200) : "";
+  const line = `${blockId(a.id)} · ${attachmentName(a.name)} · ${a.kind} · ${fileSize(a.size)} · message ${blockId(a.messageId)}`;
+  return note ? `${line} · ${note}` : line;
+}
+
+/** How the files may be read on this turn: only the tools the turn offers. */
+function attachmentsHowTo(tools: readonly string[]): string {
+  const read = tools.includes(ATTACHMENT_TOOL_NAME);
+  const copy = tools.includes(SANDBOX_IMPORT_TOOL);
+  if (read && copy) {
+    return `Read one with ${ATTACHMENT_TOOL_NAME}; copy one into your sandbox with ${SANDBOX_IMPORT_TOOL}.`;
+  }
+  if (read) return `Read one with ${ATTACHMENT_TOOL_NAME}.`;
+  if (copy) return `Copy one into your sandbox with ${SANDBOX_IMPORT_TOOL}.`;
+  return "None of these files can be read on this turn.";
+}
+
+/** The turn's files (server data only: `turn.attachments`, `turn.attachmentsMore`, `turn.tools`), or none. */
+function attachmentsBlock(turn: TurnContext): ContextBlock | undefined {
+  const files = turn.attachments ?? [];
+  if (files.length === 0) return undefined;
+  const more = turn.attachmentsMore ?? 0;
+  return {
+    label: "Attachments in this conversation",
+    source: "ocw",
+    type: "attachments",
+    payload: {
+      files: files.map(attachmentLine),
+      ...(more > 0
+        ? {
+            more:
+              more === 1
+                ? "1 more file earlier in this conversation is not listed."
+                : `${more} more files earlier in this conversation are not listed.`,
+          }
+        : {}),
+      text: attachmentsHowTo(turn.tools),
+    },
+  };
+}
+
+/**
+ * The turn's body: a message that is only files (empty text) still asks something, so the bot reads which files it got
+ * (E2, A1). The API keeps `message.text` as stored (ADR-0019); this is the cell's rendering of it.
+ */
+function turnBody(text: string, messageId: string, turn: TurnContext): string {
+  if (text.trim() !== "") return text;
+  const sent = (turn.attachments ?? []).filter((a) => a.messageId === messageId).length;
+  if (sent === 0) return text;
+  return `(sent ${sent} attachment${sent === 1 ? "" : "s"}; see the Attachments block)`;
+}
+
+/** History message id → the labelled names of its files the turn lists, in listing order. */
+function attachmentNamesByMessage(turn: TurnContext): Map<string, string[]> {
+  const byMessage = new Map<string, string[]>();
+  for (const a of turn.attachments ?? []) {
+    const names = byMessage.get(a.messageId) ?? [];
+    names.push(attachmentName(a.name));
+    byMessage.set(a.messageId, names);
+  }
+  return byMessage;
 }
 
 // ---------------------------------------------------------------- consults (07.7, D-01, Pitfall 1)
@@ -431,6 +532,7 @@ export function mapMention(
       : event.conversation.name
         ? `#${sanitizeName(event.conversation.name)}`
         : event.conversation.id;
+  const filesOf = attachmentNamesByMessage(turn);
   const history = event.threadHistory.map((line) => ({
     id: line.id,
     sender: principalLabel(line.author),
@@ -459,15 +561,19 @@ export function mapMention(
     conversationLabel,
     groupMembers: formatGroupMembers(event.roster),
     mentionedUserIds: event.message.mentions.filter((m) => m.kind === "user").map((m) => m.id),
-    body: event.message.text,
+    body: turnBody(event.message.text, event.message.id, turn),
     historyLabel: direct || aiChat ? "Conversation history" : "Thread history",
-    chatWindow: history.map((h) => ({
-      message_id: h.id,
-      sender: h.sender,
-      sender_id: h.senderId,
-      ...(h.timestamp !== undefined ? { timestamp_ms: h.timestamp } : {}),
-      body: h.body,
-    })),
+    chatWindow: history.map((h) => {
+      const files = filesOf.get(h.id);
+      return {
+        message_id: h.id,
+        sender: h.sender,
+        sender_id: h.senderId,
+        ...(h.timestamp !== undefined ? { timestamp_ms: h.timestamp } : {}),
+        body: h.body,
+        ...(files ? { attachments: files } : {}),
+      };
+    }),
     inboundHistory: history.map((h) => ({
       sender: h.sender,
       body: h.body,

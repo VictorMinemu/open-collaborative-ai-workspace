@@ -183,10 +183,21 @@ describe("modelPartsFor (bytes from the store, inside the member's message)", ()
     expect((part as { text: string }).text.length).toBeLessThan(500);
   });
 
-  it("bytes that are not UTF-8 text are not inlined", async () => {
-    const { storage } = memoryStorage({ original: new Uint8Array([0xff, 0xfe, 0x00, 0x41]) });
-    const [part] = await modelPartsFor([text({ sizeBytes: 4 })], storage, ALL);
+  it("bytes that are not text (a NUL outside a UTF-16 pattern) are not inlined", async () => {
+    const { storage } = memoryStorage({ original: new Uint8Array([0x61, 0x00, 0x00, 0x62, 0x63, 0x64]) });
+    const [part] = await modelPartsFor([text({ sizeBytes: 6 })], storage, ALL);
     expect((part as { text: string }).text).not.toContain("<attached_file>");
+  });
+
+  // IN-04 (07.15 review): one decoder for a file, whoever reads it: the chat model reads what a persona reads.
+  it.each([
+    ["UTF-16LE with a byte order mark", [0xff, 0xfe, 0x68, 0x00, 0xe9, 0x00], "hé"],
+    ["UTF-8 with a byte order mark", [0xef, 0xbb, 0xbf, 0x68, 0xc3, 0xa9], "hé"],
+    ["windows-1252 (a CSV saved by Excel)", [0x68, 0xe9, 0x3b, 0x31], "hé;1"],
+  ])("decodes %s like a bot read does", async (_label, bytes, expected) => {
+    const { storage } = memoryStorage({ original: new Uint8Array(bytes) });
+    const [part] = await modelPartsFor([text({ sizeBytes: bytes.length })], storage, ALL);
+    expect((part as { text: string }).text).toContain(`<attached_file>\n${expected}\n</attached_file>`);
   });
 
   it("parts keep upload order", async () => {

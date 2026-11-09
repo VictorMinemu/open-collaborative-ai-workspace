@@ -134,6 +134,11 @@
 /apps/api/src/modules/agent-channel/consult-tick.ts @VictorMinemu
 /apps/api/src/modules/organization/agent-messaging.ts @VictorMinemu
 /apps/openclaw-channel/src/consult-tool.ts         @VictorMinemu
+# Phase 07.15 (ADR-0037): bot attachment reads: the read route, the one row rule it shares with sandbox imports, and the
+# bounded extraction (text, images, the PDF worker).
+/apps/api/src/modules/agent-channel/attachments.ts       @VictorMinemu
+/apps/api/src/modules/agent-channel/attachment-access.ts @VictorMinemu
+/apps/api/src/modules/artifact/extract/                  @VictorMinemu
 
 # The guardrails themselves and the decisions they enforce.
 /.semgrep/                                         @VictorMinemu

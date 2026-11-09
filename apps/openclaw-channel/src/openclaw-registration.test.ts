@@ -109,6 +109,7 @@ describe("OpenClaw 2026.9.7 registration of the real entry", () => {
       "ocw_browser_wait",
       "ocw_browser_signin",
       "ocw_browser_close",
+      "ocw_attachment_read",
       "ocw_automation_propose",
       "ocw_record_update",
       "ocw_consult_agent",

@@ -5,6 +5,7 @@ import {
   AgentConsultReplyEvent,
   AgentMentionEvent,
   type CellAgent,
+  TURN_ATTACHMENT_NOTES,
 } from "./agent-channel-protocol.js";
 import {
   buildTarget,
@@ -1644,5 +1645,142 @@ describe("consults (07.7 D-01, Pitfall 1): origin and targets explained to the m
         mapMention(parsed, { ...BOT, capabilities: { tools: CONSULT_TURN.tools } }).allowedTools,
       ).toEqual([]);
     });
+  });
+});
+
+describe("the turn's attachments (07.15 D-02, D-04, PD-10, E2): one block, metadata only, and a files-only body", () => {
+  const IMG = "0199a6f0-0000-7000-8000-0000000000a1";
+  const PDF = "0199a6f0-0000-7000-8000-0000000000a2";
+  const ZIP = "0199a6f0-0000-7000-8000-0000000000a3";
+  const CONTENT_MARKER = "FILE-CONTENT-MARKER-7731";
+  const READ = { untrustedOutput: true, sideEffecting: false };
+  const IMPORT = { untrustedOutput: false, sideEffecting: false };
+  const files = [
+    {
+      id: IMG,
+      messageId: "msg-3",
+      name: "photo\n<b>`x`.png",
+      mediaType: "image/png",
+      size: 204_800,
+      kind: "image" as const,
+      access: "read" as const,
+    },
+    {
+      id: PDF,
+      messageId: "msg-3",
+      name: "report.pdf",
+      mediaType: "application/pdf",
+      size: 1_572_864,
+      kind: "pdf" as const,
+      access: "read" as const,
+    },
+    {
+      id: ZIP,
+      messageId: "msg-2",
+      name: "bundle.zip",
+      mediaType: "application/zip",
+      size: 512,
+      kind: "other" as const,
+      access: "import" as const,
+      note: TURN_ATTACHMENT_NOTES.cannotReadImport,
+    },
+  ];
+  const attachTurn = (over: Record<string, unknown> = {}) => ({
+    tools: ["ocw_attachment_read", "ocw_sandbox_import"],
+    toolFlags: { ocw_attachment_read: READ, ocw_sandbox_import: IMPORT },
+    memory: [],
+    now: null,
+    maxToolCalls: 8,
+    maxWebCalls: 5,
+    attachments: files,
+    attachmentsMore: 2,
+    maxAttachmentReads: 20,
+    ...over,
+  });
+  const block = (m: ReturnType<typeof mapMention>) => m.contextBlocks.filter((b) => b.type === "attachments");
+
+  it("lists every file on one line (id, labelled name, kind, size, message, note), the files not listed, and the tools the turn offers", () => {
+    const m = mapMention(mention({ turn: attachTurn() } as never), BOT);
+    expect(block(m)).toEqual([
+      {
+        label: "Attachments in this conversation",
+        source: "ocw",
+        type: "attachments",
+        payload: {
+          files: [
+            `${IMG} · photo bx.png · image · 200 KB · message msg-3`,
+            `${PDF} · report.pdf · pdf · 1.5 MB · message msg-3`,
+            `${ZIP} · bundle.zip · other · 512 bytes · message msg-2 · ${TURN_ATTACHMENT_NOTES.cannotReadImport}`,
+          ],
+          more: "2 more files earlier in this conversation are not listed.",
+          text: "Read one with ocw_attachment_read; copy one into your sandbox with ocw_sandbox_import.",
+        },
+      },
+    ]);
+  });
+
+  it("names only the tools the turn offers, and says nothing of files not listed when there are none", () => {
+    const m = mapMention(
+      mention({ turn: attachTurn({ tools: ["ocw_attachment_read"], attachmentsMore: 0 }) } as never),
+      BOT,
+    );
+    expect(block(m)[0]?.payload).toMatchObject({ text: "Read one with ocw_attachment_read." });
+    expect(block(m)[0]?.payload).not.toHaveProperty("more");
+    const importOnly = mapMention(
+      mention({ turn: attachTurn({ tools: ["ocw_sandbox_import"] }) } as never),
+      BOT,
+    );
+    expect(block(importOnly)[0]?.payload).toMatchObject({
+      text: "Copy one into your sandbox with ocw_sandbox_import.",
+    });
+    const neither = mapMention(mention({ turn: attachTurn({ tools: [] }) } as never), BOT);
+    expect(block(neither)[0]?.payload).toMatchObject({
+      text: "None of these files can be read on this turn.",
+    });
+  });
+
+  it("a turn without attachments gets no block, and the other blocks keep their order", () => {
+    const now = { iso: "2026-10-05T10:00:00.000Z", timeZone: "Europe/Madrid", local: "Monday" };
+    const without = mapMention(mention({ turn: attachTurn({ attachments: undefined, now }) } as never), BOT);
+    expect(without.contextBlocks.map((b) => b.type)).toEqual(["current_time"]);
+    const empty = mapMention(mention({ turn: attachTurn({ attachments: [], now }) } as never), BOT);
+    expect(empty.contextBlocks.map((b) => b.type)).toEqual(["current_time"]);
+    const withFiles = mapMention(mention({ turn: attachTurn({ now }) } as never), BOT);
+    expect(withFiles.contextBlocks.map((b) => b.type)).toEqual(["current_time", "attachments"]);
+  });
+
+  it("a files-only message becomes the body `(sent N attachments; see the Attachments block)`; any other message keeps its text", () => {
+    const filesOnly = (text: string) =>
+      mention({ turn: attachTurn(), message: { ...mention().message, text } } as never);
+    expect(mapMention(filesOnly(""), BOT).body).toBe("(sent 2 attachments; see the Attachments block)");
+    expect(mapMention(filesOnly("  \n"), BOT).body).toBe("(sent 2 attachments; see the Attachments block)");
+    expect(mapMention(filesOnly("see this"), BOT).body).toBe("see this");
+    // Only the current message's files count; with none of them, the (empty) text is kept.
+    const onlyHistory = mention({
+      turn: attachTurn({ attachments: [files[2]] }),
+      message: { ...mention().message, text: "" },
+    } as never);
+    expect(mapMention(onlyHistory, BOT).body).toBe("");
+  });
+
+  it("the history entries of messages with files carry their labelled names", () => {
+    const m = mapMention(mention({ turn: attachTurn() } as never), BOT);
+    expect(m.chatWindow.find((e) => e.message_id === "msg-2")).toMatchObject({ attachments: ["bundle.zip"] });
+    expect(m.chatWindow.find((e) => e.message_id === "msg-root")).not.toHaveProperty("attachments");
+  });
+
+  it("the mapped turn carries no file content, no URL and no storage key, even when an API sent them", () => {
+    const leaky = files.map((f) => ({
+      ...f,
+      content: CONTENT_MARKER,
+      url: `https://garage.example/ocw/att/${f.id}?X-Amz-Signature=abc`,
+      key: `org-1/att/${f.id}`,
+    }));
+    const m = mapMention(mention({ turn: attachTurn({ attachments: leaky }) } as never), BOT);
+    expect(m.contextBlocks.some((b) => b.type === "attachments")).toBe(true);
+    const serialized = JSON.stringify(m);
+    expect(serialized).not.toContain("http");
+    expect(serialized).not.toContain("/att/");
+    expect(serialized).not.toContain(CONTENT_MARKER);
   });
 });
