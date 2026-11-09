@@ -998,7 +998,7 @@ opens the session and comes back.
   5. A bot without a profile behaves exactly as today; integration tests, tenant isolation tests and an e2e spec
      (fake runtime) pass; ADR-0038 records the decisions
 
-**Plans:** 9/22 plans executed in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
+**Plans:** 14/22 plans executed in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
 
 Plans:
 **Wave 1**
@@ -1018,11 +1018,11 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 07.16-10-PLAN.md — Wave 3: Per-turn dispatch under the bot's cap, `bot_not_allowed`, agent-aware re-authorization, `submitWorkPrompt`/`archiveWorkSession` extraction
-- [ ] 07.16-11-PLAN.md — Wave 3: The turn offer (`workZoneOfferFor`, four turn-scoped tools, `workZone`); bots without a profile byte-identical
-- [ ] 07.16-12-PLAN.md — Wave 3: Web: the bot sheet's Work Zone profile section
-- [ ] 07.16-13-PLAN.md — Wave 3: Web: device bot consents, the Isolated server fact, "Bot sessions at once"
-- [ ] 07.16-14-PLAN.md — Wave 3: Real-cell smoke `bot_work_sessions`
+- [x] 07.16-10-PLAN.md — Wave 3: Per-turn dispatch under the bot's cap, `bot_not_allowed`, agent-aware re-authorization, `submitWorkPrompt`/`archiveWorkSession` extraction
+- [x] 07.16-11-PLAN.md — Wave 3: The turn offer (`workZoneOfferFor`, four turn-scoped tools, `workZone`); bots without a profile byte-identical
+- [x] 07.16-12-PLAN.md — Wave 3: Web: the bot sheet's Work Zone profile section
+- [x] 07.16-13-PLAN.md — Wave 3: Web: device bot consents, the Isolated server fact, "Bot sessions at once"
+- [x] 07.16-14-PLAN.md — Wave 3: Real-cell smoke `bot_work_sessions`
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
