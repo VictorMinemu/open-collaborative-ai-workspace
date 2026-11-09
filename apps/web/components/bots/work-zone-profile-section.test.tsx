@@ -17,6 +17,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiRequestError, api } from "@/lib/api";
 import { botWorkZoneKeys, removeProfileMutation, saveProfileMutation } from "@/lib/bot-work-zone-queries";
 import { wzKeys } from "@/lib/workzone-queries";
+import { onRadioGroupKeyDown } from "../work-zone/new-session-sections";
 import {
   addable,
   FAST_MODE_OPTIONS,
@@ -25,6 +26,7 @@ import {
   newDraft,
   offerFrom,
   RemoveProfileButton,
+  RuntimeChoice,
   reconcile,
   toProfileInput,
   WORK_ZONE_COPY,
@@ -600,5 +602,109 @@ describe("the form (Task 2)", () => {
     expect(vi.mocked(api.del).mock.calls[0]?.[0]).toBe(`/api/v1/agents/${SCOUT}/work-zone-profile`);
     expect(qc.getQueryData(botWorkZoneKeys.profile(SCOUT))).toEqual(EMPTY);
     expect(text(from(render(EMPTY, qc), "work-zone-status"))).toContain(WORK_ZONE_COPY.empty);
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: touch, keyboard, screen reader, both themes
+
+/** A profile with a chip in every "Bot may also use" list, Full access as the highest mode, seen by an admin. */
+function full(): BotWorkZoneProfileView {
+  const v = active();
+  if (!v.profile) throw new Error("no profile");
+  v.profile = {
+    ...v.profile,
+    allowedModels: ["gpt-5"],
+    allowedEfforts: ["low"],
+    allowedContextWindows: [200_000],
+    maxMode: "fullAccess",
+  };
+  v.viewerCan = { edit: true, setOutsideContent: true };
+  return v;
+}
+
+const SOURCE = readFileSync(join(__dirname, "work-zone-profile-section.tsx"), "utf8");
+
+describe("keyboard, touch and screen reader (Task 3)", () => {
+  it("every control has an accessible name", () => {
+    const html = editor(full());
+    const labelled = new Set([...html.matchAll(/<label[^>]*for="([^"]+)"/g)].map((m) => m[1]));
+    const ids = new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]));
+    const unnamed: string[] = [];
+    // Buttons (and Select triggers): a label, a labelledby that exists, a <label for>, or their own text.
+    for (const m of html.matchAll(/<button([^>]*)>([\s\S]*?)<\/button>/g)) {
+      const tag = m[1] ?? "";
+      const by = tag.match(/aria-labelledby="([^"]+)"/)?.[1];
+      const id = tag.match(/\sid="([^"]+)"/)?.[1];
+      const named =
+        /aria-label="[^"]+"/.test(tag) ||
+        (!!by && ids.has(by)) ||
+        (!!id && labelled.has(id)) ||
+        text(m[2] ?? "") !== "";
+      if (!named) unnamed.push(tag.slice(0, 120));
+    }
+    // Switches and number inputs.
+    for (const m of html.matchAll(/<(?:span|button|input)([^>]*(?:role="switch"|type="number")[^>]*)>/g)) {
+      const tag = m[1] ?? "";
+      const by = tag.match(/aria-labelledby="([^"]+)"/)?.[1];
+      const id = tag.match(/\sid="([^"]+)"/)?.[1];
+      if (!(/aria-label="[^"]+"/.test(tag) || (!!by && ids.has(by)) || (!!id && labelled.has(id)))) {
+        unnamed.push(tag.slice(0, 120));
+      }
+    }
+    expect(unnamed).toEqual([]);
+    // The chips name what they remove.
+    expect(html).toContain('aria-label="Remove GPT-5"');
+    expect(html).toContain('aria-label="Remove Low"');
+    expect(html).toContain('aria-label="Remove 200k"');
+  });
+
+  it("the runtime is a radio group moved with the arrow keys; the status is a polite live region", () => {
+    const element = RuntimeChoice({
+      labelId: "rt",
+      value: "codex",
+      device: DEVICES[2] ?? null,
+      disabled: false,
+      onChange: () => {},
+    });
+    expect(element.props.role).toBe("radiogroup");
+    expect(element.props["aria-labelledby"]).toBe("rt");
+    expect(element.props.onKeyDown).toBe(onRadioGroupKeyDown);
+    const status = tagsOf(editor(full()), "work-zone-status")[0] ?? "";
+    expect(status).toContain('aria-live="polite"');
+    expect(status).toContain('role="status"');
+  });
+
+  it("at 390 every control is full width and 44 px tall; the limits stack; long names truncate with a title", () => {
+    const html = editor(full());
+    for (const id of [
+      "work-zone-device",
+      "work-zone-default-model",
+      "work-zone-allowed-models",
+      "work-zone-fast",
+      "work-zone-default-mode",
+      "work-zone-max-mode",
+      "work-zone-limit-maxConcurrent",
+      "work-zone-save",
+      "work-zone-remove",
+    ]) {
+      const tag = tagsOf(html, id)[0] ?? "";
+      expect(tag, id).toContain("w-full");
+      expect(tag, id).toMatch(/max-md:h-11|max-md:min-h-11/);
+    }
+    const chip = html.match(/<button[^>]*aria-label="Remove GPT-5"[^>]*>/)?.[0] ?? "";
+    expect(chip).toContain("max-md:size-11");
+    expect(html).toContain("grid grid-cols-1 gap-4 md:grid-cols-3");
+    expect(html).toMatch(/<span[^>]*title="web-app"[^>]*>web-app<\/span>/);
+    expect(html).toMatch(/<span[^>]*title="Customer portal"/);
+    expect(SOURCE.match(/max-md:h-11|max-md:min-h-11/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+  });
+
+  it("uses theme tokens and the amber/emerald pairs only, each with its dark variant; no raw hex", () => {
+    expect(SOURCE.match(/#[0-9a-fA-F]{6}\b/g) ?? []).toEqual([]);
+    expect(SOURCE.match(/#[0-9a-fA-F]{3}\b/g) ?? []).toEqual([]);
+    // Every class string that sets an amber or emerald text colour also sets its dark variant.
+    for (const cls of SOURCE.match(/"[^"]*\btext-(?:amber|emerald)-\d{3}[^"]*"/g) ?? []) {
+      expect(cls, cls).toMatch(/dark:text-(?:amber|emerald)-\d{3}/);
+    }
   });
 });
