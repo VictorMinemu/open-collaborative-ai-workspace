@@ -39,9 +39,10 @@ export {
   loadBotProfile,
   profileStatus,
 } from "./bot-profile";
-// 07.16-15 (PD-03, PD-10 … PD-13): a bot's own start, its audience, its card and the one ownership rule.
+// 07.16-15 (PD-03, PD-10 … PD-13): a bot's own start, its audience, its card and the one ownership rule; 07.16-16 its
+// prompt and stop, and the one audit builder of the bot's Work Zone routes.
 export {
-  auditBotStart,
+  auditBotWorkSession,
   type BotSessions,
   type BotWorkSessionRow,
   botSessionAudience,
@@ -204,7 +205,12 @@ export function createWorkSessionModule(
   }
 
   // 07.16-15 (PD-03): a bot's start is `createWorkSession` for its sponsor, with the bot's caps as the agent layer.
-  const bots = createBotSessions({ core, start });
+  // 07.16-16 (PD-13): its follow-up prompts and its stop are the bodies people's routes use (`controller.ts`).
+  const bots = createBotSessions({
+    core,
+    start,
+    controller: { core, svc: service, startDeps: { core, perms, svc: service, hub } },
+  });
 
   return {
     name: "work-session",

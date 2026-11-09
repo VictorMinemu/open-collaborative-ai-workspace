@@ -326,9 +326,10 @@ describe("tracer: Atlas sends a follow-up prompt to the session it started, then
     const prompts = await promptsOf(workSessionId);
     expect(prompts.find((p) => p.id === waiting.promptId)!.status).toBe("cancelled");
     await server.command("session.stop", workSessionId);
-    const [bot] = await rowsOf("select stopped_by_agent from app.bot_work_sessions where work_session_id = $1", [
-      workSessionId,
-    ]);
+    const [bot] = await rowsOf(
+      "select stopped_by_agent from app.bot_work_sessions where work_session_id = $1",
+      [workSessionId],
+    );
     expect(bot!.stopped_by_agent).toBe(true);
     const archived = await rowsOf(
       "select agent_id, metadata from app.audit_events where action = 'work_session.archived' and resource_id = $1",
@@ -364,7 +365,12 @@ describe("tracer: Atlas sends a follow-up prompt to the session it started, then
     await stopped(stopEvent, workSessionId);
     const stops = await auditsOf("bot.work_session_stopped", stopEvent);
     expect(stops).toHaveLength(1);
-    expect(stops[0]).toMatchObject({ actor_kind: "agent", agent_id: atlasId, user_id: anaId, result: "success" });
+    expect(stops[0]).toMatchObject({
+      actor_kind: "agent",
+      agent_id: atlasId,
+      user_id: anaId,
+      result: "success",
+    });
     expect(stops[0]!.metadata).toEqual({
       eventId: stopEvent,
       sponsorUserId: victorId,

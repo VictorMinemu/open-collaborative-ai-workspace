@@ -1,12 +1,15 @@
 import {
+  type AgentChannelWorkSessionPromptResponse,
   type AgentChannelWorkSessionStart,
   type AgentChannelWorkSessionStartResponse,
+  type AgentChannelWorkSessionStopResponse,
   BOT_PROFILE_STATUS_SENTENCES,
   BOT_WORK_SESSION_SENTENCES,
   BOT_WORK_ZONE_LIMITS,
   type BotProfileInactiveReason,
   type BotWorkSessionRefusal,
   type BotWorkSessionRefused,
+  BUILTIN_TOOLS,
   type ContextWindow,
   type PermissionMode,
   type SessionAudienceInput,
@@ -15,8 +18,11 @@ import {
 import { type agentTurns, botWorkSessions, messages, orgMembers, type Tx, workSessions } from "@ocw/db";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
+import { HttpError } from "../../lib/errors";
 import { composeWorkSessionCard } from "./bot-card";
 import type { BotProfileRow, BotProfileStatus } from "./bot-profile";
+import { archiveWorkSession, submitWorkPrompt, type WorkSessionControllerDeps } from "./controller";
+import { sessionFacts } from "./facts";
 import { loadWorkZonePolicy } from "./policy";
 import type { WorkSessionStartFn } from "./proposals";
 import { ACTIVE_STATES, type SessionRow } from "./service";
@@ -37,6 +43,12 @@ import { audienceTarget, checkAudience } from "./visibility";
  *   (PD-12), then `bot.work_session_started` with ids, the mode, the model and the prompt's length only (PD-21).
  *
  * `ownBotSession` is the one ownership rule (PD-13) the prompt, stop and read routes use.
+ *
+ * 07.16-16 (D-05 … D-07, PD-13): `prompt` and `stop` keep the bot orchestrating the session it started, through the
+ * bodies people use (`submitWorkPrompt`, `archiveWorkSession`; no copied check). A prompt is queued in the sponsor's
+ * name with the bot as its agent author, so every reader, the arbiter (the bot's caps per turn) and the audit keep
+ * working; a stop archives the session and marks `bot_work_sessions.stopped_by_agent` (no wake for the bot's own stop).
+ * `interrupt` is not exposed to bots (PD-13), and nothing here resolves a runtime approval (P3).
  */
 
 type AgentTurnRow = typeof agentTurns.$inferSelect;
@@ -53,6 +65,8 @@ export interface BotSessionsDeps {
   core: Pick<Core, "audit" | "chatAgent">;
   /** `createWorkSession` with its dependencies bound (the module's `start`). */
   start: WorkSessionStartFn;
+  /** The prompt and archive bodies people use (07.16-10), for the bot's follow-up prompts and its stop. */
+  controller: WorkSessionControllerDeps;
 }
 
 export interface BotStartParams {
@@ -67,8 +81,35 @@ export interface BotStartParams {
   auditBase: { clientKind: string; sessionId: string };
 }
 
+export interface BotPromptParams {
+  turn: AgentTurnRow;
+  /** The bot's profile, active (the route decided its status); its sponsor is the prompt's author. */
+  profile: BotProfileRow;
+  workSessionId: string;
+  prompt: string;
+  /** D-08: written by a turn that read outside content (07.16-19's flag path); marked in the session's history. */
+  tainted: boolean;
+}
+
+export interface BotStopParams {
+  turn: AgentTurnRow;
+  workSessionId: string;
+}
+
 export interface BotSessions {
   start(tx: Tx, p: BotStartParams): Promise<AgentChannelWorkSessionStartResponse>;
+  /**
+   * A follow-up prompt to the bot's own session, in the sponsor's tenant transaction: `not_your_session`,
+   * `session_ended`, `not_allowed` (the sponsor may no longer prompt it), `prompt_rate` (E2), `prompt_not_allowed`
+   * (a slash command), else `queued` through `submitWorkPrompt`.
+   */
+  prompt(tx: Tx, p: BotPromptParams): Promise<AgentChannelWorkSessionPromptResponse>;
+  /**
+   * Stop the bot's own session, in its sponsor's tenant transaction: `not_your_session`, `session_ended`, else
+   * `stopped` through `archiveWorkSession` (`byAgentId`). Allowed with an inactive profile and on a tainted turn: a bot
+   * may always end its own session (PD-13, PD-15).
+   */
+  stop(tx: Tx, p: BotStopParams): Promise<AgentChannelWorkSessionStopResponse>;
 }
 
 /** The refused answer for `code`: its fixed sentence (never runtime text), the inactive reason or the setting. */
@@ -89,33 +130,44 @@ export function refusedAnswer(
   };
 }
 
+/** The audit actions of a bot's Work Zone tools (PD-21): one per success, one for every refusal. */
+export type BotWorkSessionAuditAction =
+  | "bot.work_session_started"
+  | "bot.work_session_prompted"
+  | "bot.work_session_stopped"
+  | "bot.work_session_refused";
+
 /**
- * `bot.work_session_started` / `bot.work_session_refused` (PD-21): the bot is the actor, the asker the user; ids, the
- * mode, the model, the outcome and the prompt's length only. Never the prompt, a title, a name or a path.
+ * The one audit builder of the bot's Work Zone routes (PD-21, D-14): the bot is the actor, the asker the user; ids,
+ * the mode, the model, the outcome and the prompt's length only. Never the prompt, a title, a name or a path. A
+ * success names the session as its resource and audit session; a refusal names the bot and the tool it refused.
  */
-export async function auditBotStart(
+export async function auditBotWorkSession(
   tx: Tx,
   core: Pick<Core, "audit">,
   p: {
+    action: BotWorkSessionAuditAction;
     turn: AgentTurnRow;
     auditBase: { clientKind: string; sessionId: string };
-    outcome: "started" | BotWorkSessionRefusal;
+    outcome: "started" | "prompted" | "stopped" | BotWorkSessionRefusal;
+    /** The tool refused (refusals only: a success is told apart by its action). */
+    tool?: string;
     sponsorUserId: string | null;
-    projectId: string;
+    projectId: string | null;
     deviceId: string | null;
     workSessionId?: string;
     mode?: PermissionMode | null;
     model?: string | null;
-    promptChars: number;
+    promptChars?: number;
     reason?: string;
     field?: string;
   },
 ): Promise<void> {
-  const ok = p.outcome === "started";
+  const ok = p.action !== "bot.work_session_refused";
   await core.audit.record(tx, {
     clientKind: p.auditBase.clientKind,
     sessionId: ok && p.workSessionId ? p.workSessionId : p.auditBase.sessionId,
-    action: ok ? "bot.work_session_started" : "bot.work_session_refused",
+    action: p.action,
     actorKind: "agent",
     actorId: p.turn.agentId,
     agentId: p.turn.agentId,
@@ -126,15 +178,16 @@ export async function auditBotStart(
     result: ok ? "success" : "denied",
     metadata: {
       eventId: p.turn.eventId,
+      ...(!ok && p.tool ? { tool: p.tool } : {}),
       sponsorUserId: p.sponsorUserId,
-      projectId: p.projectId,
+      ...(p.projectId ? { projectId: p.projectId } : {}),
       ...(p.workSessionId ? { workSessionId: p.workSessionId } : {}),
       ...(p.mode ? { mode: p.mode } : {}),
       ...(p.model !== undefined && p.model !== null ? { model: p.model } : {}),
       outcome: p.outcome,
       ...(p.reason ? { reason: p.reason } : {}),
       ...(p.field ? { field: p.field } : {}),
-      promptChars: p.promptChars,
+      ...(p.promptChars !== undefined ? { promptChars: p.promptChars } : {}),
     },
   });
 }
@@ -302,15 +355,35 @@ async function botSessionLoad(
   };
 }
 
+/**
+ * The bot's own lock (PD-10): its starts and its prompts are serialised, so the hour's prompt count (and the start's
+ * session count) is exact under concurrency. Always taken before any session row lock and before the org's lock.
+ */
+async function lockBot(tx: Tx, agentId: string): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`bot_ws:${agentId}`}, 0))`);
+}
+
+/** `submitWorkPrompt`'s refusals of the body as the bot's codes; anything else is not a bot answer. */
+function promptRefusalOf(err: unknown): BotWorkSessionRefused | null {
+  if (!(err instanceof HttpError)) return null;
+  if (err.code === "session_archived") return refusedAnswer("session_ended");
+  if (err.code === "slash_command") return refusedAnswer("prompt_not_allowed");
+  return null;
+}
+
 export function createBotSessions(deps: BotSessionsDeps): BotSessions {
-  const { core } = deps;
+  const { core, controller } = deps;
+  const { svc } = controller;
+  const perms = controller.startDeps.perms;
 
   return {
     async start(tx, p) {
       const { turn, profile, status, input } = p;
       const prompt = input.prompt;
       const refuse = async (answer: BotWorkSessionRefused): Promise<BotWorkSessionRefused> => {
-        await auditBotStart(tx, core, {
+        await auditBotWorkSession(tx, core, {
+          action: "bot.work_session_refused",
+          tool: BUILTIN_TOOLS.workSessionStart,
           turn,
           auditBase: p.auditBase,
           outcome: answer.code,
@@ -327,7 +400,7 @@ export function createBotSessions(deps: BotSessionsDeps): BotSessions {
       // PD-10: this bot's starts, then the organization's bot starts, are serialised (always in this order), so the
       // counts below are exact under concurrency: a second start waits here until the first one commits, then counts
       // its session. The counts see every session of the organization, not only those the sponsor sees.
-      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`bot_ws:${turn.agentId}`}, 0))`);
+      await lockBot(tx, turn.agentId);
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`bot_ws_org:${turn.organizationId}`}, 0))`,
       );
@@ -453,7 +526,8 @@ export function createBotSessions(deps: BotSessionsDeps): BotSessions {
         cardMessageId: posted.messageId,
       });
 
-      await auditBotStart(tx, core, {
+      await auditBotWorkSession(tx, core, {
+        action: "bot.work_session_started",
         turn,
         auditBase: p.auditBase,
         outcome: "started",
@@ -474,6 +548,64 @@ export function createBotSessions(deps: BotSessionsDeps): BotSessions {
         mode: session.permissionMode,
         projectName: card.projectName,
       };
+    },
+
+    async prompt(tx, p) {
+      const { turn, profile } = p;
+      // The bot's lock first (its starts and prompts count the same hour), then the session row, as people do.
+      await lockBot(tx, turn.agentId);
+      const s = await svc.lock(tx, p.workSessionId);
+      // Hidden from the sponsor: a profile re-saved by someone outside the session's audience cannot prompt it.
+      if (!s) return refusedAnswer("not_allowed");
+      if (!(await ownBotSession(tx, { agentId: turn.agentId, workSessionId: s.id }))) {
+        return refusedAnswer("not_your_session");
+      }
+      if (s.status === "archived") return refusedAnswer("session_ended");
+      // The sponsor's own right to prompt this session (principle 6: the bot never prompts above its sponsor).
+      const sponsorUserId = profile.sponsorUserId;
+      const { allowed } = await perms.decide(
+        tx,
+        { kind: "user", userId: sponsorUserId },
+        "work_session.prompt",
+        await sessionFacts(tx, sponsorUserId, s),
+      );
+      if (!allowed) return refusedAnswer("not_allowed");
+      // E2: the hour's prompts of this bot across its sessions, the start's own included (the start cap's count).
+      const load = await botSessionLoad(tx, turn.agentId, s.projectId);
+      if (load.botPromptsHour >= profile.promptsPerHour) return refusedAnswer("prompt_rate");
+      const sponsor = { userId: sponsorUserId, organizationId: turn.organizationId, clientKind: "agent" };
+      try {
+        const queued = await submitWorkPrompt(tx, controller, sponsor, s, p.prompt, {
+          authorAgentId: turn.agentId,
+          tainted: p.tainted,
+        });
+        return {
+          kind: "queued",
+          workSessionId: s.id,
+          promptId: queued.id,
+          position: queued.position,
+          status: queued.status,
+        };
+      } catch (err) {
+        const refused = promptRefusalOf(err);
+        if (refused) return refused;
+        throw err;
+      }
+    },
+
+    async stop(tx, p) {
+      const s = await svc.lock(tx, p.workSessionId);
+      if (!s || !(await ownBotSession(tx, { agentId: p.turn.agentId, workSessionId: s.id }))) {
+        return refusedAnswer("not_your_session");
+      }
+      if (s.status === "archived") return refusedAnswer("session_ended");
+      // Marked before the archive's status change, so the wake handler (07.16-20) never wakes the bot for its own stop.
+      await tx
+        .update(botWorkSessions)
+        .set({ stoppedByAgent: true })
+        .where(eq(botWorkSessions.workSessionId, s.id));
+      await archiveWorkSession(tx, controller, s, { byAgentId: p.turn.agentId });
+      return { kind: "stopped", workSessionId: s.id };
     },
   };
 }
