@@ -424,6 +424,20 @@ describe("share: a sandbox file becomes an attachment of the bot's reply (D-11 F
     expect(await sharedOf(ev.eventId)).toBe(0);
   });
 
+  it("07.16 D-20: after the turn read a Work Zone session's output it is 403 tainted and nothing is stored", async () => {
+    const ev = await s.turnOf(s.sam, s.samDm);
+    await write(ev, "notes.txt", "x");
+    await s.su.query("update app.agent_turns set session_output_read = true where event_id = $1", [
+      ev.eventId,
+    ]);
+    const r = await tool("share", ev, { path: "notes.txt" });
+    expect(r.status).toBe(403);
+    expect(codeOf(r)).toBe("tainted");
+    expect(await sharedOf(ev.eventId)).toBe(0);
+    // The flag alone refused it: the turn itself never read untrusted content.
+    expect((await turnRow(ev.eventId)).tainted).toBe(false);
+  });
+
   it("a 07.5 `when_tainted` rule: the tainted share asks the requester; once approved the re-run shares it once", async () => {
     await s.su.query(
       `insert into app.tool_approval_policies
