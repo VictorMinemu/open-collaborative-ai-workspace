@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   AgentChannelWorkSessionReadResponse,
   AgentChannelWorkSessionStartResponse,
@@ -598,5 +598,241 @@ describe("what the bot reads is bounded, relative and scrubbed (PD-14, principle
     expect(text).not.toContain("hunter2");
     // The bot's own prompts are listed by id, status and position: no prompt text at all.
     expect(Object.keys(body.queue.mine[0]!).sort()).toEqual(["id", "position", "status"]);
+  });
+});
+
+// ---------------------------------------------------------------- who may read, what a read blocks (D-06, D-20, PD-15)
+
+/** Organization B's idle session, with its own device, project and creator (a guessed id from Atlas's side). */
+async function orgBSession(): Promise<string> {
+  const orgB = randomUUID();
+  const userB = randomUUID();
+  const devB = randomUUID();
+  const projB = randomUUID();
+  const convB = randomUUID();
+  const wsB = randomUUID();
+  const q = (t: string, v: unknown[]) => su.query(t, v);
+  await q("insert into auth.organization (id, name, slug) values ($1, 'Other', $2)", [orgB, `o-${orgB}`]);
+  await q("insert into auth.user (id, name, email) values ($1, 'B', $2)", [userB, `${userB}@b.test`]);
+  await q(
+    "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash, shared, status, runtime_info) values ($1, $2, $3, 'B mac', 'darwin', $4, true, 'online', '[]')",
+    [devB, orgB, userB, createHash("sha256").update(randomUUID()).digest("hex")],
+  );
+  await q(
+    "insert into app.projects (id, organization_id, device_id, local_id, name) values ($1, $2, $3, 'lb', 'secret')",
+    [projB, orgB, devB],
+  );
+  await q(
+    "insert into app.conversations (id, organization_id, kind, name) values ($1, $2, 'work_session', 'b')",
+    [convB, orgB],
+  );
+  await q(
+    "insert into app.work_sessions (id, organization_id, conversation_id, project_id, device_id, title, created_by, status) values ($1, $2, $3, $4, $5, 'B', $6, 'idle')",
+    [wsB, orgB, convB, projB, devB, userB],
+  );
+  return wsB;
+}
+
+/** A person's session on the build server (Víctor's own, through the human route). */
+async function personSession(): Promise<string> {
+  const res = await victor.request("POST", "/api/v1/work-sessions", { projectId: billingId });
+  expect(res.status, JSON.stringify(res.body)).toBe(200);
+  const id = res.body!.id as string;
+  const start = await server.command("session.start", id);
+  server.ack(start.id);
+  return id;
+}
+
+describe("the bot reads only the sessions it started (D-06, PD-13, E15)", () => {
+  it("a person's session, another bot's and organization B's → not_your_session; recorded without counting, no mark", async () => {
+    const personal = await personSession();
+    const echo = (await botSession({ id: echoId, handle: "echo" })).workSessionId;
+    const foreign = await orgBSession();
+    for (const workSessionId of [personal, echo, foreign]) {
+      const eventId = await ask();
+      await refusedWith(readCall(eventId, workSessionId), "not_your_session");
+      // A refused read leaves the turn as it was: not counted, not marked.
+      expect(await turnRow(eventId)).toMatchObject({ tool_calls: 0, session_output_read: false });
+      expect(
+        await rowsOf("select tool, decision, reason from app.agent_tool_calls where event_id = $1", [
+          eventId,
+        ]),
+      ).toEqual([{ tool: "ocw_work_session_read", decision: "denied", reason: "not_your_session" }]);
+      const audits = await auditsOf("bot.work_session_refused", eventId);
+      expect(audits.map((a) => a.metadata)).toEqual([
+        {
+          eventId,
+          tool: "ocw_work_session_read",
+          sponsorUserId: null,
+          workSessionId,
+          outcome: "not_your_session",
+        },
+      ]);
+      expect(await auditsOf("bot.work_session_read", eventId)).toEqual([]);
+    }
+  });
+
+  it("the read tool not on the turn → not_in_turn, without the mark", async () => {
+    const { workSessionId } = await botSession();
+    const eventId = await ask();
+    await su.query(
+      "update app.agent_turns set tools = array_remove(tools, 'ocw_work_session_read') where event_id = $1",
+      [eventId],
+    );
+    await refusedWith(readCall(eventId, workSessionId), "not_in_turn");
+    expect(await turnRow(eventId)).toMatchObject({ tool_calls: 0, session_output_read: false });
+  });
+
+  it("with the consent revoked (profile inactive) the bot still reads its own session", async () => {
+    const { workSessionId, first } = await botSession();
+    await finishTurn(workSessionId, first);
+    // The turn was delivered with the tools; the device's owner revokes the consent while it runs.
+    const eventId = await ask();
+    await ok(victor.request("DELETE", `/api/v1/devices/${serverId}/bot-consents/${atlasId}`));
+    try {
+      const body = await read(eventId, workSessionId);
+      expect(body.output.texts.map((t) => t.text)).toEqual([OUTPUT]);
+      expect((await turnRow(eventId)).session_output_read).toBe(true);
+    } finally {
+      await grantBotConsent(victor, serverId, atlasId, { allowFullAccess: true });
+    }
+  });
+});
+
+describe("after a read the turn's other side effects stay blocked (D-20, PD-15)", () => {
+  let dmId: string;
+
+  beforeAll(async () => {
+    await ok(victor.request("PATCH", `/api/v1/agents/${atlasId}/capabilities`, { memory: true }));
+    dmId = (await ok(ana.request("POST", `/api/v1/agents/${atlasId}/dm`))).dmId as string;
+  });
+
+  /** Ana's turn with Atlas in her DM, offered memory and the session read. */
+  async function dmTurn(): Promise<string> {
+    const eventId = await freshBotTurn(su, ana, dmId, `how is it going ${randomUUID().slice(0, 6)}`);
+    const [turn] = await rowsOf("select tools from app.agent_turns where event_id = $1", [eventId]);
+    expect(turn!.tools).toContain("ocw_memory_save");
+    expect(turn!.tools).toContain("ocw_work_session_read");
+    return eventId;
+  }
+
+  const save = (eventId: string, text = "Ana ships on Fridays") =>
+    cell("/memories", { eventId, agentId: atlasId, text });
+
+  it("ocw_memory_save in the same turn → refused tainted; a new turn that did not read saves as before", async () => {
+    const { workSessionId, first } = await botSession();
+    await finishTurn(workSessionId, first);
+    const eventId = await dmTurn();
+    await read(eventId, workSessionId);
+    const refused = await save(eventId);
+    expect(refused.status, JSON.stringify(refused.body)).toBe(409);
+    expect(refused.body.error.code).toBe("tainted");
+    // The turn's own taint is untouched: only the session-output flag refuses.
+    expect(await turnRow(eventId)).toMatchObject({ tainted: false, session_output_read: true });
+
+    const fresh = await dmTurn();
+    const saved = await save(fresh, "Ana reviews on Mondays");
+    expect(saved.status, JSON.stringify(saved.body)).toBe(200);
+  });
+
+  it("ocw_work_session_start in the same turn → session_output; a refused read does not mark the turn", async () => {
+    const { workSessionId } = await botSession();
+    const eventId = await ask();
+    await read(eventId, workSessionId);
+    await refusedWith(
+      cell("/work-sessions/start", { eventId, agentId: atlasId, projectId: billingId, prompt: FIRST }),
+      "session_output",
+    );
+
+    // A turn whose only read was refused starts a session as before.
+    const other = await ask();
+    await refusedWith(readCall(other, await personSession()), "not_your_session");
+    expect((await turnRow(other)).session_output_read).toBe(false);
+    const started = await cell("/work-sessions/start", {
+      eventId: other,
+      agentId: atlasId,
+      projectId: billingId,
+      prompt: FIRST,
+    });
+    expect(started.status, JSON.stringify(started.body)).toBe(200);
+    expect(started.body.kind).toBe("started");
+  });
+});
+
+// ---------------------------------------------------------------- tenant isolation and the leak sweep (D-14, P1, E15)
+
+describe("tenant isolation: organization B's cell cannot read organization A's sessions (E15)", () => {
+  let tokenB: string;
+
+  beforeAll(async () => {
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+      orgB,
+      `evil-${orgB}`,
+    ]);
+    tokenB = `ocw_cell_${randomUUID()}${randomUUID()}`;
+    await su.query(
+      "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
+      [orgB, createHash("sha256").update(tokenB).digest("hex")],
+    );
+  });
+
+  it("organization B's token with organization A's event → 404 unknown_turn; nothing claimed, the turn not marked", async () => {
+    const { workSessionId, first } = await botSession();
+    await finishTurn(workSessionId, first);
+    const eventId = await ask();
+    const r = await readCall(eventId, workSessionId, { token: tokenB });
+    expect(r.status, JSON.stringify(r.body)).toBe(404);
+    expect(r.body.error.code).toBe("unknown_turn");
+    expect(JSON.stringify(r.body)).not.toContain(OUTPUT);
+    expect(await rowsOf("select 1 from app.agent_tool_calls where event_id = $1", [eventId])).toEqual([]);
+    expect(await turnRow(eventId)).toMatchObject({ tool_calls: 0, session_output_read: false });
+    const unknown = await rowsOf(
+      "select organization_id, metadata from app.audit_events where action = 'bot.tool_call' and metadata->>'eventId' = $1",
+      [eventId],
+    );
+    expect(unknown.map((u) => [u.metadata.tool, u.metadata.reason])).toEqual([
+      ["ocw_work_session_read", "unknown_turn"],
+    ]);
+    expect(unknown.every((u) => u.organization_id !== orgId)).toBe(true);
+  });
+
+  it("another bot's event naming Atlas → 404 unknown_turn", async () => {
+    const { workSessionId } = await botSession();
+    const r = await readCall(await ask("echo"), workSessionId);
+    expect(r.status).toBe(404);
+    expect(r.body.error.code).toBe("unknown_turn");
+  });
+});
+
+describe("the output is in no record: audit, tool calls or a log line (P1)", () => {
+  it("an output holding OCW-MARKER-0716-output is returned by the read and stored nowhere else", async () => {
+    const MARKER = "OCW-MARKER-0716-output";
+    const { workSessionId, first } = await botSession();
+    await turnWith(workSessionId, first, [
+      { type: "tool.started", toolUseId: "t1", name: "Bash", summary: `echo ${MARKER}` },
+      { type: "tool.completed", toolUseId: "t1", ok: true, summary: MARKER, output: MARKER },
+      message(`Done: ${MARKER}`),
+    ]);
+    const body = await read(await ask(), workSessionId);
+    expect(body.output.texts.map((t) => t.text)).toEqual([`Done: ${MARKER}`]);
+    expect(body.tools[0]!.summary).toContain(MARKER);
+
+    const like = `%${MARKER}%`;
+    expect(
+      await rowsOf("select action from app.audit_events where to_jsonb(audit_events)::text like $1", [like]),
+    ).toEqual([]);
+    expect(
+      await rowsOf("select id from app.agent_tool_calls where to_jsonb(agent_tool_calls)::text like $1", [
+        like,
+      ]),
+    ).toEqual([]);
+    expect(
+      await rowsOf("select 1 from app.bot_work_sessions where to_jsonb(bot_work_sessions)::text like $1", [
+        like,
+      ]),
+    ).toEqual([]);
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs.filter((l) => l.includes(MARKER))).toEqual([]);
   });
 });
