@@ -398,3 +398,205 @@ describe("tracer: Atlas reads what its session did, and the turn is marked", () 
     ).toEqual([{ tool: "ocw_work_session_read", decision: "allowed", target: workSessionId }]);
   });
 });
+
+// ---------------------------------------------------------------- bounds, cursor, relative paths, redaction (E9, E10)
+
+/**
+ * A row the API stored without its ingestion filters (written as `appendEvent` writes it): the read's own filters must
+ * hold even then (defense in depth over the device's `contain()` and the ingestion's `onlyRelativePaths`).
+ */
+async function appendRaw(workSessionId: string, type: string, payload: unknown) {
+  const topic = `ws:${workSessionId}`;
+  const [row] = await rowsOf(
+    "insert into app.streams (id, organization_id, last_seq) values ($1, $2, 1) on conflict (id) do update set last_seq = app.streams.last_seq + 1 returning last_seq",
+    [topic, orgId],
+  );
+  await su.query(
+    "insert into app.stream_events (stream_id, seq, organization_id, type, payload) values ($1, $2, $3, $4, $5::jsonb)",
+    [topic, row!.last_seq, orgId, type, JSON.stringify(payload)],
+  );
+}
+
+/** The runtime reports one turn of `cmd` with several assistant messages (and optional tool events) in order. */
+async function turnWith(workSessionId: string, cmd: Cmd, events: Array<Record<string, unknown>>) {
+  const promptId = cmd.payload.promptId as string;
+  server.event(workSessionId, { type: "prompt.started", promptId });
+  for (const ev of events) server.event(workSessionId, ev);
+  server.event(workSessionId, {
+    type: "prompt.completed",
+    promptId,
+    usage: { inputTokens: 10, outputTokens: 5 },
+  });
+  await eventually(async () => {
+    const [p] = await rowsOf("select status from app.work_prompts where id = $1", [promptId]);
+    return p?.status === "completed";
+  });
+}
+
+const message = (text: string) => ({ type: "assistant.message", messageId: randomUUID(), text });
+
+describe("what the bot reads is bounded, relative and scrubbed (PD-14, principle 7)", () => {
+  it("E9: a session with no output yet → no texts, no tools, no changes, not truncated, the snapshot cursor", async () => {
+    const { workSessionId } = await botSession();
+    const body = await read(await ask(), workSessionId);
+    expect(body.output).toEqual({ texts: [], truncated: false });
+    expect(body.tools).toEqual([]);
+    expect(body.changes).toBeNull();
+    expect(body.queue).toMatchObject({ running: 1, completed: 0 });
+    expect(body.cursor).toBe(await lastSeqOf(workSessionId));
+  });
+
+  it("E10: 6 001 characters of output → the last 6 000, the newest message whole, truncated; the returned cursor reads nothing new", async () => {
+    const { workSessionId, first } = await botSession();
+    const [a, b, c] = ["a".repeat(2001), "b".repeat(2000), "c".repeat(2000)];
+    await turnWith(workSessionId, first, [message(a), message(b), message(c)]);
+
+    const eventId = await ask();
+    const body = await read(eventId, workSessionId);
+    const texts = body.output.texts.map((t) => t.text);
+    expect(texts.join("").length).toBe(6000);
+    expect(texts).toEqual(["a".repeat(2000), b, c]);
+    expect(body.output.truncated).toBe(true);
+    // Newest last, in stream order.
+    const seqs = body.output.texts.map((t) => t.seq);
+    expect([...seqs].sort((x, y) => x - y)).toEqual(seqs);
+    const [audit] = await auditsOf("bot.work_session_read", eventId);
+    expect(audit!.metadata).toMatchObject({ chars: 6000, truncated: true, cursor: body.cursor });
+
+    const again = await read(await ask(), workSessionId, body.cursor);
+    expect(again.output).toEqual({ texts: [], truncated: false });
+    expect(again.cursor).toBe(body.cursor);
+    // A cursor between the messages returns only the newer ones.
+    const later = await read(await ask(), workSessionId, seqs[1]);
+    expect(later.output.texts.map((t) => t.text)).toEqual([c]);
+  });
+
+  it("tools: names, ok and summaries of the latest uses, never their output", async () => {
+    const { workSessionId, first } = await botSession();
+    const OUT = "OCW-tool-output-never-returned";
+    await turnWith(workSessionId, first, [
+      { type: "tool.started", toolUseId: "t1", name: "Bash", summary: "npm test" },
+      { type: "tool.completed", toolUseId: "t1", ok: true, summary: "12 passed", output: OUT },
+      { type: "tool.started", toolUseId: "t2", name: "Edit", summary: "src/invoice.ts" },
+    ]);
+    const body = await read(await ask(), workSessionId);
+    expect(body.tools).toEqual([
+      { name: "Bash", ok: true, summary: "npm test" },
+      { name: "Edit", ok: null, summary: "src/invoice.ts" },
+    ]);
+    expect(JSON.stringify(body)).not.toContain(OUT);
+  });
+
+  it("changes and approvals carry repo-relative paths only, from the device and from a raw stored row", async () => {
+    const { workSessionId, first } = await botSession();
+    await finishTurn(workSessionId, first);
+    // The FakeDevice sends the absolute path raw (no device-side filtering).
+    await answerChanges(workSessionId, [
+      { path: "/Users/ana/repo/secret.ts", status: "modified", additions: 1, deletions: 0 },
+      { path: "src/a.ts", status: "added", additions: 4, deletions: 0 },
+    ]);
+    server.emitApproval(workSessionId, {
+      approvalId: randomUUID(),
+      tool: "Edit",
+      paths: ["/etc/passwd", "src/b.ts"],
+      summary: "Edit two files",
+    });
+    await eventually(async () => {
+      const [s] = await rowsOf("select status from app.work_sessions where id = $1", [workSessionId]);
+      return s?.status === "waiting_approval";
+    });
+
+    const body = await read(await ask(), workSessionId);
+    expect(body.changes!.files.map((f) => f.path)).toEqual(["src/a.ts"]);
+    expect(body.approvals).toEqual([
+      { id: expect.any(String), tool: "Edit", paths: ["src/b.ts"], summary: "Edit two files" },
+    ]);
+    const text = JSON.stringify(body);
+    expect(text).not.toContain("/Users/ana");
+    expect(text).not.toContain("/etc/passwd");
+
+    // Rows stored without the ingestion filters (an older row, a bypass): the read filters them itself.
+    await appendRaw(workSessionId, "work_session.changes", {
+      files: [
+        { path: "/Users/ana/repo/secret.ts", status: "modified", additions: 1, deletions: 0 },
+        { path: "~/notes.md", status: "modified", additions: 1, deletions: 0 },
+        { path: "../outside.ts", status: "modified", additions: 1, deletions: 0 },
+        { path: "src/c.ts", status: "modified", additions: 2, deletions: 1 },
+      ],
+      branch: "ocw/raw",
+      headSha: null,
+      truncated: false,
+      at: new Date().toISOString(),
+    });
+    await su.query(
+      "insert into app.work_approvals (id, organization_id, work_session_id, request) values ($1, $2, $3, $4::jsonb)",
+      [
+        randomUUID(),
+        orgId,
+        workSessionId,
+        JSON.stringify({
+          tool: "Write",
+          summary: "Write a file",
+          paths: ["/etc/passwd", "C:\\x.ts", "src/d.ts"],
+        }),
+      ],
+    );
+    const raw = await read(await ask(), workSessionId);
+    expect(raw.changes).toEqual({
+      files: [{ path: "src/c.ts", status: "modified", additions: 2, deletions: 1 }],
+      branch: "ocw/raw",
+      truncated: false,
+    });
+    expect(raw.approvals.map((a) => a.paths)).toEqual([["src/b.ts"], ["src/d.ts"]]);
+    const rawText = JSON.stringify(raw);
+    for (const leak of ["/Users/ana", "/etc/passwd", "~/notes", "../outside", "C:\\\\x"]) {
+      expect(rawText).not.toContain(leak);
+    }
+  });
+
+  it("a secret in the output, a tool summary or the error is redacted before it is returned", async () => {
+    const KEY = "sk-proj-A1b2C3d4E5f6G7h8I9j0K1l2M3n4";
+    const { workSessionId, first } = await botSession();
+    await turnWith(workSessionId, first, [
+      { type: "tool.started", toolUseId: "t1", name: "Bash", summary: `export OPENAI_API_KEY=${KEY}` },
+      message(`I used the key ${KEY} to call the API.`),
+    ]);
+    const body = await read(await ask(), workSessionId);
+    const text = JSON.stringify(body);
+    expect(text).not.toContain(KEY);
+    expect(body.output.texts[0]!.text).toContain("[REDACTED:api-key]");
+    expect(body.tools[0]!.summary).toContain("[REDACTED");
+  });
+
+  it("a failed session → its error, redacted and cut to 500 characters", async () => {
+    const KEY = "sk-proj-Z9y8X7w6V5u4T3s2R1q0P9o8N7m6";
+    const { workSessionId } = await botSession();
+    await su.query("update app.work_sessions set status = 'failed', last_error = $2 where id = $1", [
+      workSessionId,
+      `The runtime crashed with ${KEY}. ${"x".repeat(900)}`,
+    ]);
+    const body = await read(await ask(), workSessionId);
+    expect(body.session.status).toBe("failed");
+    expect(body.error).not.toBeNull();
+    expect(body.error!.length).toBe(500);
+    expect(body.error).toContain("[REDACTED:api-key]");
+    expect(body.error).not.toContain(KEY);
+  });
+
+  it("a person's prompt in the queue never appears: only counts and the bot's own prompts", async () => {
+    const SECRET = "my password is hunter2";
+    const { workSessionId, first } = await botSession();
+    // Víctor (the sponsor, in the session's audience) queues his own prompt behind the running turn.
+    const res = await victor.request("POST", `/api/v1/work-sessions/${workSessionId}/prompts`, {
+      body: SECRET,
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const body = await read(await ask(), workSessionId);
+    expect(body.queue).toMatchObject({ queued: 1, running: 1 });
+    expect(body.queue.mine.map((p) => p.id)).toEqual([first.payload.promptId]);
+    const text = JSON.stringify(body);
+    expect(text).not.toContain("hunter2");
+    // The bot's own prompts are listed by id, status and position: no prompt text at all.
+    expect(Object.keys(body.queue.mine[0]!).sort()).toEqual(["id", "position", "status"]);
+  });
+});
