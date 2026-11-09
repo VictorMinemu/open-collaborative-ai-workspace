@@ -636,3 +636,185 @@ describe("prompt refusals; a stop stays allowed", () => {
     await stopped(eventId, workSessionId);
   });
 });
+
+// ---------------------------------------------------------------- audits, tenant and leak sweep (D-14, PD-21, P1, E15)
+
+/** The `bot.work_session_*` audit rows of one call (one event id per call in these cases). */
+const botAuditsOf = (eventId: string) =>
+  rowsOf(
+    "select action, result, metadata from app.audit_events where action like 'bot.work_session_%' and metadata->>'eventId' = $1",
+    [eventId],
+  );
+
+describe("every outcome of prompt and stop has exactly one audit, by ids only (PD-21)", () => {
+  it("queued, stopped and each refusal: one bot.work_session_* row with the outcome and (prompts) promptChars", async () => {
+    const { workSessionId } = await botSession();
+    const person = await startSession(victor, server, billingId);
+    const cases: Array<{ eventId: string; outcome: string; tool: "prompt" | "stop" }> = [];
+    const run = async (
+      tool: "prompt" | "stop",
+      outcome: string,
+      opts: { session?: string; prompt?: string; prepare?: (eventId: string) => Promise<void> } = {},
+    ) => {
+      const eventId = await ask();
+      await opts.prepare?.(eventId);
+      const r =
+        tool === "prompt"
+          ? await promptCall(eventId, opts.session ?? workSessionId, opts.prompt)
+          : await stopCall(eventId, opts.session ?? workSessionId);
+      expect(r.status, JSON.stringify(r.body)).toBe(200);
+      expect(r.body.kind === "refused" ? r.body.code : r.body.kind).toBe(outcome);
+      cases.push({ eventId, outcome, tool });
+    };
+    const withoutTool = (tool: string) => async (eventId: string) => {
+      await su.query("update app.agent_turns set tools = array_remove(tools, $2) where event_id = $1", [
+        eventId,
+        tool,
+      ]);
+    };
+
+    await run("prompt", "queued");
+    await run("prompt", "not_in_turn", { prepare: withoutTool("ocw_work_session_prompt") });
+    await run("stop", "not_in_turn", { prepare: withoutTool("ocw_work_session_stop") });
+    await run("prompt", "not_your_session", { session: person });
+    await run("stop", "not_your_session", { session: person });
+    await run("prompt", "prompt_not_allowed", { prompt: "/model opus" });
+    await run("prompt", "outside_content", {
+      prepare: async (eventId) => {
+        await su.query("update app.agent_turns set tainted = true where event_id = $1", [eventId]);
+      },
+    });
+    const disabled = await ask();
+    await su.query("update app.agents set status = 'disabled' where id = $1", [atlasId]);
+    try {
+      const r = await refusedWith(promptCall(disabled, workSessionId), "profile_inactive");
+      expect(r.reason).toBe("bot_disabled");
+      cases.push({ eventId: disabled, outcome: "profile_inactive", tool: "prompt" });
+    } finally {
+      await su.query("update app.agents set status = 'ready' where id = $1", [atlasId]);
+    }
+    await run("stop", "stopped");
+    await run("prompt", "session_ended");
+    await run("stop", "session_ended");
+
+    for (const c of cases) {
+      const rows = await botAuditsOf(c.eventId);
+      expect(rows, `${c.tool} ${c.outcome}`).toHaveLength(1);
+      const [row] = rows;
+      const success = c.outcome === "queued" || c.outcome === "stopped";
+      expect(row!.action).toBe(
+        success
+          ? c.tool === "prompt"
+            ? "bot.work_session_prompted"
+            : "bot.work_session_stopped"
+          : "bot.work_session_refused",
+      );
+      expect(row!.result).toBe(success ? "success" : "denied");
+      expect(row!.metadata.outcome).toBe(c.outcome === "queued" ? "prompted" : c.outcome);
+      expect(row!.metadata.eventId).toBe(c.eventId);
+      if (!success) expect(row!.metadata.tool).toBe(`ocw_work_session_${c.tool}`);
+      // Ids, the outcome, a reason code and a length: no other key can carry content.
+      const allowed = [
+        "eventId",
+        "tool",
+        "sponsorUserId",
+        "projectId",
+        "workSessionId",
+        "outcome",
+        "reason",
+        "promptChars",
+      ];
+      expect(Object.keys(row!.metadata).filter((k) => !allowed.includes(k))).toEqual([]);
+      expect(typeof row!.metadata.promptChars).toBe(c.tool === "prompt" ? "number" : "undefined");
+    }
+  });
+});
+
+describe("tenant isolation: organization B's cell cannot prompt or stop organization A's sessions (E15)", () => {
+  let tokenB: string;
+
+  beforeAll(async () => {
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+      orgB,
+      `evil-${orgB}`,
+    ]);
+    tokenB = `ocw_cell_${randomUUID()}${randomUUID()}`;
+    await su.query(
+      "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
+      [orgB, createHash("sha256").update(tokenB).digest("hex")],
+    );
+  });
+
+  it("organization B's token with organization A's event → 404 unknown_turn on both routes; nothing changes", async () => {
+    const { workSessionId } = await botSession();
+    const eventId = await ask();
+    const before = await stateOf(workSessionId);
+    for (const r of [
+      await promptCall(eventId, workSessionId, FOLLOW_UP, atlasId, tokenB),
+      await stopCall(eventId, workSessionId, atlasId, tokenB),
+    ]) {
+      expect(r.status, JSON.stringify(r.body)).toBe(404);
+      expect(r.body.error.code).toBe("unknown_turn");
+    }
+    expect(await stateOf(workSessionId)).toEqual(before);
+    expect(await rowsOf("select 1 from app.agent_tool_calls where event_id = $1", [eventId])).toEqual([]);
+    expect(await botAuditsOf(eventId)).toEqual([]);
+    // Recorded as an unknown turn, in organization B, with ids and the prompt's length only.
+    const unknown = await rowsOf(
+      "select organization_id, metadata from app.audit_events where action = 'bot.tool_call' and metadata->>'eventId' = $1 order by occurred_at",
+      [eventId],
+    );
+    expect(unknown.map((u) => [u.metadata.tool, u.metadata.reason])).toEqual([
+      ["ocw_work_session_prompt", "unknown_turn"],
+      ["ocw_work_session_stop", "unknown_turn"],
+    ]);
+    expect(unknown.every((u) => u.organization_id !== orgId)).toBe(true);
+  });
+
+  it("another bot's event naming Atlas → 404 unknown_turn", async () => {
+    const { workSessionId } = await botSession();
+    const echoEvent = await ask("echo");
+    const r = await promptCall(echoEvent, workSessionId);
+    expect(r.status).toBe(404);
+    expect(r.body.error.code).toBe("unknown_turn");
+  });
+});
+
+describe("the prompt is in no record: audit, tool calls or a log line (P1)", () => {
+  it("a bot prompt holding OCW-MARKER-0716-prompt is stored only as the session's prompt", async () => {
+    const MARKER = "OCW-MARKER-0716-prompt";
+    const { workSessionId } = await botSession();
+    const person = await startSession(victor, server, billingId);
+    const prompt = `please ${MARKER} run the tests`;
+    const queuedBody = await queued(await ask(), workSessionId, prompt);
+    // A refused prompt carries the marker too: it must not land anywhere either.
+    await refusedWith(promptCall(await ask(), person, prompt), "not_your_session");
+
+    // People see it in the session: the prompt row and the session's detail.
+    const [row] = await rowsOf("select body from app.work_prompts where id = $1", [queuedBody.promptId]);
+    expect(row!.body).toContain(MARKER);
+    const detail = await ok(victor.request("GET", `/api/v1/work-sessions/${workSessionId}`));
+    expect(JSON.stringify(detail.prompts)).toContain(MARKER);
+
+    const like = `%${MARKER}%`;
+    expect(
+      await rowsOf("select action from app.audit_events where to_jsonb(audit_events)::text like $1", [like]),
+    ).toEqual([]);
+    expect(
+      await rowsOf("select id from app.agent_tool_calls where to_jsonb(agent_tool_calls)::text like $1", [
+        like,
+      ]),
+    ).toEqual([]);
+    expect(
+      await rowsOf("select 1 from app.bot_work_sessions where to_jsonb(bot_work_sessions)::text like $1", [
+        like,
+      ]),
+    ).toEqual([]);
+    expect(
+      await rowsOf("select 1 from app.message_cards where to_jsonb(message_cards)::text like $1", [like]),
+    ).toEqual([]);
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs.filter((l) => l.includes(MARKER))).toEqual([]);
+  });
+});
