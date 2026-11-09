@@ -998,7 +998,7 @@ opens the session and comes back.
   5. A bot without a profile behaves exactly as today; integration tests, tenant isolation tests and an e2e spec
      (fake runtime) pass; ADR-0038 records the decisions
 
-**Plans:** 15/22 plans executed in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
+**Plans:** 18/22 plans executed in 8 waves (CONTEXT/RESEARCH/VALIDATION/COVERAGE in the phase folder; 01 is the hub, 15 the API end-to-end tracer, 21 the browser journey, 22 the gate)
 
 Plans:
 **Wave 1**
@@ -1030,9 +1030,9 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 07.16-16-PLAN.md — Wave 5: Prompt and stop routes; own sessions only; people keep control
-- [ ] 07.16-17-PLAN.md — Wave 5: The redacted read route and the session-output flag
-- [ ] 07.16-18-PLAN.md — Wave 5: Back link (per-viewer origin), agent author and taint marks, the live Work Zone card in chat
+- [x] 07.16-16-PLAN.md — Wave 5: Prompt and stop routes; own sessions only; people keep control
+- [x] 07.16-17-PLAN.md — Wave 5: The redacted read route and the session-output flag
+- [x] 07.16-18-PLAN.md — Wave 5: Back link (per-viewer origin), agent author and taint marks, the live Work Zone card in chat
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
