@@ -373,6 +373,10 @@ describe("on a phone (Task 3)", () => {
       expect(tag, id).toContain("flex-col");
       expect(tag, id).toContain("md:flex-row");
     }
+    // A long name must not widen the card past a phone screen (grid items keep their min-content width otherwise).
+    for (const id of ["bot-consent-request", "bot-consent-row"]) {
+      expect(tagsOf(html, id)[0], id).toContain("min-w-0");
+    }
   });
 
   it("buttons are full width on a phone and 44 px below 1024; the checkbox row too", () => {
@@ -400,6 +404,10 @@ describe("on a phone (Task 3)", () => {
     expect(html).toContain(`title="${long}"`);
     expect(html).toContain(`title="${long} · asked by Ana"`);
     expect(html.match(/class="[^"]*truncate[^"]*"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    // On a phone the request line wraps so "asked by <sponsor>" stays visible; from 768 it truncates.
+    const asked = html.match(/<span[^>]*title="[^"]* · asked by Ana"[^>]*>/)?.[0] ?? "";
+    expect(asked).toContain("break-words");
+    expect(asked).toContain("md:truncate");
   });
 
   it("uses theme tokens and the existing amber pairs only (no raw colours)", () => {

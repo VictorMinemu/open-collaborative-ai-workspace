@@ -60,7 +60,7 @@ export function DeviceBotConsents({ device }: { device: Device }) {
       ) : q.isError ? (
         <div className="flex flex-wrap items-center gap-2 text-muted-foreground text-xs">
           {BOT_CONSENT_COPY.loadError}
-          <Button size="sm" variant="outline" onClick={() => void q.refetch()}>
+          <Button size="sm" variant="outline" onClick={() => void q.refetch()} className="max-lg:h-11">
             Retry
           </Button>
         </div>
@@ -115,38 +115,45 @@ function RequestRow({
 }) {
   const set = useSetDeviceBotConsent(device.id);
   return (
-    <li
-      className="flex items-center gap-3 py-1.5"
-      data-testid="bot-consent-request"
-      data-agent-id={r.agentId}
-    >
-      <span className="flex min-w-0 flex-1 items-center gap-2.5">
-        <PrincipalAvatar kind="agent" name={r.displayName} seed={r.agentId} className="size-6" />
-        <span className="min-w-0">
-          <span className="block truncate text-sm">
-            <span className="font-medium">{r.displayName}</span>
-            <span className="text-muted-foreground"> · asked by {r.sponsor.displayName}</span>
+    <li className="min-w-0 py-1.5" data-testid="bot-consent-request" data-agent-id={r.agentId}>
+      <div
+        className="flex flex-col gap-2 md:flex-row md:items-center md:gap-3"
+        data-testid="bot-consent-request-main"
+      >
+        <span className="flex min-w-0 flex-1 items-center gap-2.5">
+          <PrincipalAvatar kind="agent" name={r.displayName} seed={r.agentId} className="size-6" />
+          <span className="min-w-0">
+            <span
+              className="block break-words text-sm md:truncate"
+              title={`${r.displayName} · asked by ${r.sponsor.displayName}`}
+            >
+              <span className="font-medium">{r.displayName}</span>
+              <span className="text-muted-foreground"> · asked by {r.sponsor.displayName}</span>
+            </span>
+            <span className="block truncate text-muted-foreground text-xs">
+              {BOT_CONSENT_COPY.requestNote}
+            </span>
           </span>
-          <span className="block truncate text-muted-foreground text-xs">{BOT_CONSENT_COPY.requestNote}</span>
         </span>
-      </span>
-      {canGrant ? (
-        <Button
-          size="sm"
-          disabled={set.isPending}
-          data-testid="bot-consent-allow"
-          aria-label={`Allow ${r.displayName} to run sessions on ${device.name}`}
-          onClick={() =>
-            set.mutate(
-              { agentId: r.agentId, allowFullAccess: false },
-              { onError: (err) => toast.error(errorMessage(err)) },
-            )
-          }
-        >
-          {set.isPending ? <Spinner /> : <Check />}
-          {BOT_CONSENT_COPY.allow}
-        </Button>
-      ) : null}
+        {canGrant ? (
+          <Button
+            size="sm"
+            disabled={set.isPending}
+            className="w-full max-lg:h-11 md:w-auto"
+            data-testid="bot-consent-allow"
+            aria-label={`Allow ${r.displayName} to run sessions on ${device.name}`}
+            onClick={() =>
+              set.mutate(
+                { agentId: r.agentId, allowFullAccess: false },
+                { onError: (err) => toast.error(errorMessage(err)) },
+              )
+            }
+          >
+            {set.isPending ? <Spinner /> : <Check />}
+            {BOT_CONSENT_COPY.allow}
+          </Button>
+        ) : null}
+      </div>
     </li>
   );
 }
@@ -174,7 +181,10 @@ export function RevokeConsentButton({
       onBlur={onBlur}
       aria-label={`${confirming ? BOT_CONSENT_COPY.confirmRevoke : BOT_CONSENT_COPY.revoke} ${name}`}
       data-testid="bot-consent-revoke"
-      className={cn(!confirming && "text-muted-foreground hover:text-destructive")}
+      className={cn(
+        "w-full max-lg:h-11 md:w-auto",
+        !confirming && "text-muted-foreground hover:text-destructive",
+      )}
     >
       {pending ? <Spinner /> : <Trash2 aria-hidden />}
       {confirming ? BOT_CONSENT_COPY.confirmRevoke : BOT_CONSENT_COPY.revoke}
@@ -211,60 +221,71 @@ function ConsentRow({
   }
 
   return (
-    <li className="grid gap-2 py-1.5" data-testid="bot-consent-row" data-agent-id={c.agentId}>
-      <div className="flex items-center gap-3">
+    <li className="min-w-0 py-1.5" data-testid="bot-consent-row" data-agent-id={c.agentId}>
+      <div
+        className="flex flex-col gap-2 md:flex-row md:flex-wrap md:items-center md:gap-x-3"
+        data-testid="bot-consent-row-main"
+      >
         <span className="flex min-w-0 flex-1 items-center gap-2.5">
           <PrincipalAvatar kind="agent" name={c.displayName} seed={c.agentId} className="size-6" />
           <span className="min-w-0">
-            <span className="block truncate font-medium text-sm">{c.displayName}</span>
+            <span className="block truncate font-medium text-sm" title={c.displayName}>
+              {c.displayName}
+            </span>
             <span className="block truncate text-muted-foreground text-xs">
               Allowed by {c.grantedBy.displayName} · {relativeTime(c.grantedAt)}
             </span>
           </span>
         </span>
-        {canGrant ? (
-          <RevokeConsentButton
-            name={c.displayName}
-            confirming={confirming}
-            pending={revoke.isPending}
-            onClick={onRevoke}
-            onBlur={() => setConfirming(false)}
-          />
-        ) : null}
-      </div>
-      <label
-        className={cn(
-          "ml-8.5 flex items-start gap-2.5 rounded-lg border bg-background px-3 py-2",
-          optedIn && canGrant ? "cursor-pointer" : "cursor-not-allowed",
-          live && "border-amber-300 dark:border-amber-400/40",
-        )}
-      >
-        <input
-          type="checkbox"
-          checked={c.allowFullAccess}
-          disabled={!optedIn || !canGrant || set.isPending}
-          onChange={(e) => set.mutate({ agentId: c.agentId, allowFullAccess: e.target.checked }, { onError })}
-          data-testid="bot-consent-full-access"
-          data-agent-id={c.agentId}
-          className="mt-0.5 size-4 shrink-0 accent-primary disabled:cursor-not-allowed"
-        />
-        <span className="grid min-w-0 flex-1 gap-0.5">
-          <span
+        <div className="md:order-2 md:basis-full md:pl-8.5">
+          <label
             className={cn(
-              "flex items-center gap-1.5 font-medium text-[13px]",
-              !optedIn && "text-muted-foreground",
+              "flex items-start gap-2.5 rounded-lg border bg-background px-3 py-2 max-lg:min-h-11 max-lg:items-center",
+              optedIn && canGrant ? "cursor-pointer" : "cursor-not-allowed",
+              live && "border-amber-300 dark:border-amber-400/40",
             )}
           >
-            {live ? (
-              <ShieldAlert aria-hidden className="size-3.5 shrink-0 text-amber-700 dark:text-amber-300" />
-            ) : null}
-            {BOT_CONSENT_COPY.fullAccess}
-          </span>
-          <span className="text-muted-foreground text-xs">
-            {optedIn ? BOT_CONSENT_COPY.fullAccessOn : BOT_CONSENT_COPY.fullAccessOff}
-          </span>
-        </span>
-      </label>
+            <input
+              type="checkbox"
+              checked={c.allowFullAccess}
+              disabled={!optedIn || !canGrant || set.isPending}
+              onChange={(e) =>
+                set.mutate({ agentId: c.agentId, allowFullAccess: e.target.checked }, { onError })
+              }
+              data-testid="bot-consent-full-access"
+              data-agent-id={c.agentId}
+              className="mt-0.5 size-4 shrink-0 accent-primary disabled:cursor-not-allowed"
+            />
+            <span className="grid min-w-0 flex-1 gap-0.5">
+              <span
+                className={cn(
+                  "flex items-center gap-1.5 font-medium text-[13px]",
+                  !optedIn && "text-muted-foreground",
+                )}
+              >
+                {live ? (
+                  <ShieldAlert aria-hidden className="size-3.5 shrink-0 text-amber-700 dark:text-amber-300" />
+                ) : null}
+                {BOT_CONSENT_COPY.fullAccess}
+              </span>
+              <span className="text-muted-foreground text-xs">
+                {optedIn ? BOT_CONSENT_COPY.fullAccessOn : BOT_CONSENT_COPY.fullAccessOff}
+              </span>
+            </span>
+          </label>
+        </div>
+        {canGrant ? (
+          <div className="md:order-1">
+            <RevokeConsentButton
+              name={c.displayName}
+              confirming={confirming}
+              pending={revoke.isPending}
+              onClick={onRevoke}
+              onBlur={() => setConfirming(false)}
+            />
+          </div>
+        ) : null}
+      </div>
     </li>
   );
 }

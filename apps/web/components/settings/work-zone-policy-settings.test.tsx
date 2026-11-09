@@ -106,7 +106,7 @@ describe("Bot sessions at once (Task 3)", () => {
     // The form's Save sends exactly that body, and refuses an invalid value first.
     const source = readFileSync(join(__dirname, "work-zone-policy-settings.tsx"), "utf8");
     expect(source).toContain("save.mutateAsync(toPolicyBody(draft, restrict))");
-    expect(source).toMatch(/if \(noModes \|\| botError[^)]*\) return;/);
+    expect(source).toMatch(/if \(noModes \|\| botError \|\|[^\n]*\) return;/);
   });
 
   it("keeps the existing sections in place, the new one after Runtime updates", () => {
