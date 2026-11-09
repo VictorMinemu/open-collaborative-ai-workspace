@@ -22,6 +22,7 @@ import {
   addable,
   FAST_MODE_OPTIONS,
   fieldError,
+  filterProjects,
   LIMIT_FIELDS,
   newDraft,
   offerFrom,
@@ -575,6 +576,27 @@ describe("the form (Task 2)", () => {
     expect(text(from(html, "work-zone-allowed-models-field"))).toContain("GPT-4 is not available to you");
     expect(text(from(html, "work-zone-outside"))).toContain("Only an admin can change whether …");
     expect(tagsOf(html, "work-zone-save")).toHaveLength(1);
+  });
+
+  it("offers a filter above 8 projects, matching the repository or its team project", () => {
+    expect(tagsOf(editor(active()), "work-zone-projects-filter")).toHaveLength(0);
+    const many = Array.from({ length: 9 }, (_, i) =>
+      project(`01a11635-d6e7-7c87-9f17-00000000010${i}`, `repo-${i}`, MAC, i === 0),
+    );
+    const qc = client(active());
+    qc.setQueryData(wzKeys.projects, { projects: many });
+    qc.setQueryData(wzKeys.runtimeControls(MAC, "codex"), RICH);
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={qc}>
+        <WorkZoneProfileEditor agent={SCOUT_AGENT} view={active()} devices={DEVICES} />
+      </QueryClientProvider>,
+    );
+    const filter = tagsOf(html, "work-zone-projects-filter")[0] ?? "";
+    expect(filter).toContain('aria-label="Filter projects"');
+    expect(filter).toContain("max-md:h-11");
+    expect(filterProjects(many, "REPO-3").map((p) => p.name)).toEqual(["repo-3"]);
+    expect(filterProjects(many, "customer").map((p) => p.name)).toEqual(["repo-0"]);
+    expect(filterProjects(many, "  ")).toHaveLength(9);
   });
 
   it("shows what a device or runtime change removed in a muted line", () => {

@@ -1395,6 +1395,20 @@ function OutsideContent({
   );
 }
 
+/** Above this many projects the list gets a filter field (PD-20). */
+const PROJECT_FILTER_FROM = 8;
+
+/** The projects whose name or team project contains `query` (case ignored); all of them for an empty query. */
+export function filterProjects(projects: readonly Project[], query: string): Project[] {
+  const q = query.trim().toLocaleLowerCase();
+  if (!q) return [...projects];
+  return projects.filter(
+    (p) =>
+      p.name.toLocaleLowerCase().includes(q) ||
+      (p.teamProject?.name.toLocaleLowerCase().includes(q) ?? false),
+  );
+}
+
 /** The device's repositories as checkbox rows, grouped by team project like the New session dialog. */
 function ProjectChecks({
   projects,
@@ -1414,11 +1428,25 @@ function ProjectChecks({
   error?: string | undefined;
   onChange: (ids: string[]) => void;
 }) {
-  const groups = groupRepos(projects);
+  const [query, setQuery] = useState("");
+  const searchable = projects.length > PROJECT_FILTER_FROM;
+  const shown = searchable ? filterProjects(projects, query) : [...projects];
+  const groups = groupRepos(shown);
   const chosen = new Set(selected);
   const toggle = (pid: string) =>
     onChange(chosen.has(pid) ? selected.filter((x) => x !== pid) : [...selected, pid]);
   if (loading) return <ProjectsLoading />;
+  const filter = searchable ? (
+    <Input
+      type="search"
+      value={query}
+      onChange={(e) => setQuery(e.target.value)}
+      placeholder="Filter projects"
+      aria-label="Filter projects"
+      data-testid="work-zone-projects-filter"
+      className="max-md:h-11"
+    />
+  ) : null;
   const row = (p: { id: string; name: string }, caption?: string) => (
     <button
       key={p.id}
@@ -1447,9 +1475,14 @@ function ProjectChecks({
   const empty = projects.length === 0 && extra.length === 0;
   return (
     <div className="grid gap-2" data-testid="work-zone-projects">
+      {filter}
       {empty ? (
         <p className="rounded-lg border border-dashed p-3 text-muted-foreground text-sm">
           {WORK_ZONE_COPY.noProjects}
+        </p>
+      ) : shown.length === 0 && extra.length === 0 ? (
+        <p className="rounded-lg border border-dashed p-3 text-muted-foreground text-sm">
+          No project matches.
         </p>
       ) : (
         <div
