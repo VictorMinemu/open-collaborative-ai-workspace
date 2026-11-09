@@ -21,16 +21,28 @@ import {
   WorkSessionDiff,
   WorkSessionEventPayload,
   WorkSessionList,
+  type WorkSessionOrigin,
   type WorkZonePolicy,
   WorkZonePolicyView,
 } from "@ocw/contracts";
-import { devices, projects, streamEvents, type Tx, workApprovals, workPrompts, workSessions } from "@ocw/db";
+import {
+  botWorkSessions,
+  conversations,
+  devices,
+  projects,
+  streamEvents,
+  type Tx,
+  workApprovals,
+  workPrompts,
+  workSessions,
+} from "@ocw/db";
 import { and, asc, desc, eq, lte, ne, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { markDecided } from "../../authz";
 import { type App, type AuthContext, authOf, type Core, tenant } from "../../core";
 import { conflict, HttpError, notFound } from "../../lib/errors";
+import { createConversationAccess, listDms } from "../chat";
 import { type DeviceAccess, type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { AuthzDeniedError, createPermissionService, type ResourceFacts } from "../organization";
 import { loadControlsContext } from "./context";
@@ -76,6 +88,14 @@ const DIFF_TIMEOUT_MS = 20_000;
 /** A session the caller may not know about reads exactly like a missing one (same status, code and message). */
 const SESSION_NOT_FOUND = "Work session not found";
 
+/** The conversation kinds a bot session's origin may be read through (a thread is judged through its channel or DM). */
+const ORIGIN_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
+type OriginKind = (typeof ORIGIN_KINDS)[number];
+const isOriginKind = (kind: string): kind is OriginKind => (ORIGIN_KINDS as readonly string[]).includes(kind);
+
+/** An AI chat nobody titled reads like the AI chat list names it (ai-chat `DEFAULT_CHAT_TITLE`). */
+const UNTITLED_AI_CHAT = "New chat";
+
 /** Permissions a session view renders controls for (`WorkSessionDetail.viewerCan`). */
 const SESSION_VIEWER_CAN = [
   "work_session.prompt",
@@ -101,6 +121,68 @@ export function registerWorkSessionRoutes(
   const startDeps: WorkSessionStartDeps = { core, perms, svc, hub };
   /** 07.16 PD-13: the prompt and archive bodies people and bots share. */
   const controllerDeps: WorkSessionControllerDeps = { core, svc, startDeps };
+
+  const conversationAccess = createConversationAccess(core);
+
+  /**
+   * 07.16 (D-13, PD-19; E14): where a bot-started session came from, as `viewerId` may know it. Only a session with a
+   * `bot_work_sessions` row has one, and only a viewer who reads that conversation (a thread through its channel or
+   * DM) gets it; everyone else gets null. The name is the one the chat already shows this viewer (the channel's name,
+   * their DM list's name, the AI chat's title). The link points at the card (the asker's message once the card is
+   * gone). Built from stored ids only: no client return URL exists (T-07.16-18-03). Per viewer, so only the detail
+   * route answers it, never `ws:` or `user:` frames.
+   */
+  async function originFor(
+    tx: Tx,
+    viewerId: string,
+    workSessionId: string,
+  ): Promise<WorkSessionOrigin | null> {
+    const [bot] = await tx
+      .select({
+        conversationId: botWorkSessions.originConversationId,
+        threadRootId: botWorkSessions.originThreadRootId,
+        messageId: botWorkSessions.originMessageId,
+        cardMessageId: botWorkSessions.cardMessageId,
+      })
+      .from(botWorkSessions)
+      .where(eq(botWorkSessions.workSessionId, workSessionId))
+      .limit(1);
+    if (!bot) return null;
+    const convOf = async (id: string) =>
+      (
+        await tx
+          .select({
+            id: conversations.id,
+            kind: conversations.kind,
+            name: conversations.name,
+            parent: conversations.parentConversationId,
+          })
+          .from(conversations)
+          .where(eq(conversations.id, id))
+          .limit(1)
+      )[0];
+    let conv = await convOf(bot.conversationId);
+    if (conv?.kind === "thread") conv = conv.parent ? await convOf(conv.parent) : undefined;
+    if (!conv || !isOriginKind(conv.kind)) return null;
+    const kind = conv.kind;
+    if (!(await conversationAccess.isReadable(tx, viewerId, conv.id, { kinds: ORIGIN_KINDS }))) return null;
+    let name: string;
+    if (kind === "dm" || kind === "group") {
+      const [dm] = await listDms(tx, viewerId, { ids: [conv.id] });
+      name = dm?.counterpart.name ?? conv.name ?? (kind === "dm" ? "Direct message" : "Group");
+    } else if (kind === "ai_chat") {
+      name = conv.name ?? UNTITLED_AI_CHAT;
+    } else {
+      name = conv.name ?? "channel";
+    }
+    return {
+      conversationId: conv.id,
+      kind,
+      name: name.slice(0, 200),
+      threadRootId: bot.threadRootId,
+      messageId: bot.cardMessageId ?? bot.messageId,
+    };
+  }
 
   /** The request's own resolver decisions for its viewer (the per-viewer session fields, Phase 07.10). */
   const filterFor =
@@ -450,7 +532,8 @@ export function registerWorkSessionRoutes(
             return parsed.success ? { seq: r.seq, at: parsed.data.at, event: parsed.data.event } : null;
           })
           .filter((e) => e !== null);
-        return { session, prompts, approvals, events, lastSeq, viewerCan, viewerState };
+        const origin = await originFor(tx, viewerId, session.id);
+        return { session, prompts, approvals, events, lastSeq, viewerCan, viewerState, origin };
       }),
   );
 
