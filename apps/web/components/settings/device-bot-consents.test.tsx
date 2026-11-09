@@ -195,6 +195,8 @@ describe("who sees the block on a device card (Task 1)", () => {
     const bots = source.indexOf("<DeviceBotConsents device={d} />");
     expect(sharing).toBeGreaterThan(0);
     expect(bots).toBeGreaterThan(sharing);
-    expect(source).toMatch(/showsBotConsents\(d, owned, canManageWorkZone\) \? <DeviceBotConsents device=\{d\} \/>/);
+    expect(source).toMatch(
+      /showsBotConsents\(d, owned, canManageWorkZone\) \? <DeviceBotConsents device=\{d\} \/>/,
+    );
   });
 });

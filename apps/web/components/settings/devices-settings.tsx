@@ -41,6 +41,7 @@ import { useCopy } from "@/hooks/use-copy";
 import { errorMessage } from "@/lib/api";
 import { useRuntimeConfig } from "@/lib/config";
 import { useDesktop } from "@/lib/desktop";
+import { useCan } from "@/lib/permissions";
 import { useMe } from "@/lib/queries";
 import { cn, relativeTime } from "@/lib/utils";
 import {
@@ -51,6 +52,7 @@ import {
   wzKeys,
 } from "@/lib/workzone-queries";
 import { CopyLine } from "./copy-line";
+import { DeviceBotConsents, showsBotConsents } from "./device-bot-consents";
 import { DeviceSharing } from "./device-sharing";
 import { PairApproveDialog, PairCodeField, PLATFORM_LABEL } from "./pair-approve-dialog";
 import { compatFlag, DeviceRuntimeUpdates } from "./runtime-updates";
@@ -223,6 +225,8 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
   // Decided by the API resolver: revoke = owner or admin; update (rename, share) = owner only.
   const canRevoke = d.viewerCan?.includes("device.revoke") ?? false;
   const canUpdate = d.viewerCan?.includes("device.update") ?? false;
+  // 07.16 (D-22): an admin also decides which bots run on a headless server; the API decides again (`viewerCan.grant`).
+  const canManageWorkZone = useCan("work_zone.manage");
   const online = d.status === "online";
 
   return (
@@ -298,6 +302,7 @@ function DeviceCard({ device: d, owned }: { device: Device; owned: boolean }) {
       </div>
       <DeviceFacts device={d} owned={owned} />
       {canUpdate ? <DeviceSharing device={d} /> : null}
+      {showsBotConsents(d, owned, canManageWorkZone) ? <DeviceBotConsents device={d} /> : null}
       <Dialog open={confirm} onOpenChange={setConfirm}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
