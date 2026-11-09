@@ -8,6 +8,8 @@ import {
   type AgentConsultReplyEvent as AgentConsultReplyEventType,
   AgentMentionEvent,
   type AgentMentionEvent as AgentMentionEventType,
+  AgentWorkSessionEvent,
+  type AgentWorkSessionEvent as AgentWorkSessionEventType,
   type CellAgent,
   type CellSnapshot,
   McpProbeEvent,
@@ -27,6 +29,7 @@ import {
   mapCardAction,
   mapConsultReply,
   mapMention,
+  mapWorkSessionEvent,
   replyIdempotencyKey,
 } from "./mention-mapper.js";
 import type { PluginInstaller } from "./plugin-installer.js";
@@ -77,7 +80,10 @@ export type BridgeOptions = {
   plugins?: PluginInstaller;
 };
 
-/** What `runTurn` reads from any delivered turn event (mention, card action, automation run, consult reply). */
+/**
+ * What `runTurn` reads from any delivered turn event (mention, card action, automation run, consult reply, work session
+ * wake-up).
+ */
 type ChainFacts = {
   eventId: string;
   agent: { id: string };
@@ -92,6 +98,7 @@ const TURN_EVENT_TYPES: ReadonlySet<string> = new Set([
   AgentChannelEventTypes.cardAction,
   AgentChannelEventTypes.automationRun,
   AgentChannelEventTypes.consultReply,
+  AgentChannelEventTypes.workSession,
 ]);
 
 const readableId = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 200;
@@ -284,6 +291,16 @@ export function createBridge(opts: BridgeOptions) {
    */
   async function handleConsultReply(event: AgentConsultReplyEventType): Promise<void> {
     await runTurn(event, "consult reply", (agent) => mapConsultReply(event, agent));
+  }
+
+  /**
+   * A session this bot started finished a turn, waits for an approval, failed, ended or lost its device (07.16 D-09,
+   * PD-16): a turn like a mention of the bot on the session's card, in the card's thread, in reply to the card message,
+   * keyed `evt:<eventId>`, with the update in its own block. The bot reads more with `ocw_work_session_read`; it never
+   * polls.
+   */
+  async function handleWorkSession(event: AgentWorkSessionEventType): Promise<void> {
+    await runTurn(event, "work session update", (agent) => mapWorkSessionEvent(event, agent));
   }
 
   /**
@@ -488,6 +505,20 @@ export function createBridge(opts: BridgeOptions) {
         await handleConsultReply(parsed.data);
         return;
       }
+      case AgentChannelEventTypes.workSession: {
+        // agent.work_session.v1 (07.16): untrusted until parsed; the warning names the seq and the field path only
+        // (never the summary, a name or a handle).
+        const parsed = AgentWorkSessionEvent.safeParse(frame.data);
+        if (!parsed.success) {
+          log.warn?.(
+            `seq=${frame.seq}: invalid ${frame.type} payload; skipped (${parsed.error.issues[0]?.path.join(".") || "?"})`,
+          );
+          await skipInvalid(frame);
+          return;
+        }
+        await handleWorkSession(parsed.data);
+        return;
+      }
       case AgentChannelEventTypes.configChanged:
         await refreshCell();
         return;
@@ -578,6 +609,7 @@ export function createBridge(opts: BridgeOptions) {
     handleCardAction,
     handleAutomationRun,
     handleConsultReply,
+    handleWorkSession,
     agents,
     snapshot: () => lastSnapshot,
   };

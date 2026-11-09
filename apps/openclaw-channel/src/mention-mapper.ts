@@ -8,6 +8,8 @@ import {
   AgentConsultReplyEvent,
   type AgentMentionEvent,
   type AgentTurnOrigin,
+  AgentWorkSessionEvent,
+  BOT_WORK_ZONE_LIMITS,
   BROWSER_TOOL_NAMES,
   type CellAgent,
   CONNECTOR_LOGICAL_TOOL,
@@ -16,6 +18,7 @@ import {
   type TurnAttachment,
   type TurnContext,
   type TurnWithheld,
+  type WorkSessionTransition,
 } from "./agent-channel-protocol.js";
 import { SIGNIN_SENTENCES } from "./signin-sentences.js";
 import { ATTACHMENT_TOOL_NAME, CONSULT_TOOL_NAME, withTurnScopedTools } from "./turn-scoped-tools.js";
@@ -912,6 +915,43 @@ export function mapConsultReply(event: AgentConsultReplyEvent, bot: CellAgent | 
     allowedTools: base.allowedTools.filter((t) => !BROWSER_TOOLS.has(t)),
     contextBlocks: [block, ...answerBlocks, ...base.contextBlocks],
   };
+}
+
+// ---------------------------------------------------------------- Work Zone wake-ups (07.16 D-09, D-10, PD-16)
+
+/** What happened to the session, one fixed phrase per transition (never runtime text). */
+const TRANSITION_PHRASES: Record<WorkSessionTransition, string> = {
+  turn_done: "finished a turn and nothing is queued",
+  waiting_approval: "is waiting for an approval",
+  failed: "failed",
+  ended: "ended",
+  offline: "lost its device",
+};
+
+/**
+ * `agent.work_session.v1` (07.16 D-09, D-10, PD-16): a Work Zone session this bot started changed state. Mapped exactly
+ * like a mention of the bot on the session's card message (the person who asked is the sender, the reply lands in the
+ * card's thread with `inReplyToMessageId` = the card message, the turn's tools, flags, taint and Work Zone as delivered),
+ * plus a "Work Zone session update" block (server data: the session id, a fixed sentence per transition, the status
+ * and the API's summary, composed from structured facts only). Throws on a malformed event (the bridge validates first).
+ */
+export function mapWorkSessionEvent(event: AgentWorkSessionEvent, bot: CellAgent | undefined): MappedMention {
+  const { workSession, ...rest } = AgentWorkSessionEvent.parse(event);
+  const base = mapMention({ ...rest, type: AgentChannelEventTypes.mention }, bot);
+  const sessionId = blockId(workSession.workSessionId);
+  const block: ContextBlock = {
+    label: "Work Zone session update",
+    source: "ocw",
+    type: "work_session",
+    payload: {
+      workSessionId: sessionId,
+      transition: workSession.transition,
+      status: workSession.status,
+      summary: oneLine(workSession.summary, BOT_WORK_ZONE_LIMITS.summaryChars),
+      text: `Your Work Zone session ${sessionId} ${TRANSITION_PHRASES[workSession.transition]}.`,
+    },
+  };
+  return { ...base, contextBlocks: [block, ...base.contextBlocks] };
 }
 
 /**
