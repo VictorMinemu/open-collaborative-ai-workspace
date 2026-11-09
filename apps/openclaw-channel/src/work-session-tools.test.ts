@@ -744,3 +744,77 @@ describe("prompt, read and stop through the real entry and the fake Agent Channe
     expect(api.toolCalls).toEqual([]);
   });
 });
+
+describe("the session-output mark (07.16 D-20, PD-15): a read makes the turn's other actions read-only", () => {
+  it("a successful read sets the mark; start then answers session_output without a request, prompt and stop still post", async () => {
+    const { calls, begin, guard, tool } = setup();
+    begin();
+    expect(guard.activeTurn(SESSION)?.sessionOutputRead).toBe(false);
+    await tool(WORK_SESSION_READ_TOOL).execute("tc-1", { workSessionId: WS });
+    expect(guard.activeTurn(SESSION)?.sessionOutputRead).toBe(true);
+    // The read itself never taints the turn: the session tools stay usable (D-20 lists prompt and stop).
+    expect(guard.activeTurn(SESSION)?.tainted).toBe(false);
+    const start = await tool(WORK_SESSION_START_TOOL).execute("tc-2", START);
+    expect(text(start)).toBe(BOT_WORK_SESSION_SENTENCES.session_output);
+    expect(start.details).toMatchObject({ ok: false, code: "session_output" });
+    await tool(WORK_SESSION_PROMPT_TOOL).execute("tc-3", { workSessionId: WS, prompt: PROMPT });
+    await tool(WORK_SESSION_STOP_TOOL).execute("tc-4", { workSessionId: WS });
+    expect(calls.map((c) => c.route)).toEqual(["read", "prompt", "stop"]);
+  });
+
+  it("a refused read, or one that failed, does not set the mark", async () => {
+    const refused = setup({
+      read: async () => ({
+        kind: "refused",
+        code: "not_your_session",
+        sentence: BOT_WORK_SESSION_SENTENCES.not_your_session,
+      }),
+    });
+    refused.begin();
+    await refused.tool(WORK_SESSION_READ_TOOL).execute("tc-1", { workSessionId: WS });
+    expect(refused.guard.activeTurn(SESSION)?.sessionOutputRead).toBe(false);
+    const failed = setup({
+      read: async () => {
+        throw new AgentChannelHttpError(503, "/x", "down");
+      },
+    });
+    failed.begin();
+    await failed.tool(WORK_SESSION_READ_TOOL).execute("tc-1", { workSessionId: WS });
+    expect(failed.guard.activeTurn(SESSION)?.sessionOutputRead).toBe(false);
+    expect(text(await failed.tool(WORK_SESSION_START_TOOL).execute("tc-2", START))).toMatch(
+      /^Started a Work Zone/u,
+    );
+  });
+
+  it("on a tainted turn the start tool still asks its route (Pitfall 7: the route posts the proposal fallback)", async () => {
+    const { calls, guard, tool } = setup({
+      start: async () => ({
+        kind: "proposed",
+        approvalId: APPROVAL,
+        reason: "outside_content",
+        sentence: BOT_WORK_SESSION_PROPOSED_SENTENCE,
+      }),
+    });
+    guard.beginTurn(SESSION, { eventId: "evt-t", agentId: BOT, turn: turn(), tainted: true });
+    const r = await tool(WORK_SESSION_START_TOOL).execute("tc-1", START);
+    expect(calls.map((c) => c.route)).toEqual(["start"]);
+    expect(text(r)).toBe(`${BOT_WORK_SESSION_PROPOSED_SENTENCE} Proposal ${APPROVAL}.`);
+  });
+});
+
+describe("turn scoping and the manifest (07.16 PD-09, PD-17)", () => {
+  it("the four tools are configured for every bot served delivered-turn tools, never from GET /cell alone", async () => {
+    const { withTurnScopedTools } = await import("./turn-scoped-tools.js");
+    const scoped = withTurnScopedTools(["ocw_agent_card"]);
+    for (const name of WORK_SESSION_TOOL_NAMES) expect(scoped).toContain(name);
+    // A bot offered no delivered-turn tool gets none of them (its snapshot alone never lists them).
+    expect(withTurnScopedTools(["web_search"])).toEqual(["web_search"]);
+    expect(withTurnScopedTools([])).toEqual([]);
+  });
+
+  it("the manifest declares the four and the real entry registers them", () => {
+    for (const name of WORK_SESSION_TOOL_NAMES) expect(manifest.contracts?.tools).toContain(name);
+    const registered = loadRegistry(entry, manifest, { mode: "full" }).tools.flatMap((t) => t.names);
+    for (const name of WORK_SESSION_TOOL_NAMES) expect(registered).toContain(name);
+  });
+});
