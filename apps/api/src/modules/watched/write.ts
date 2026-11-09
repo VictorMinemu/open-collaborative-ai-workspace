@@ -1,4 +1,4 @@
-import { projectFields, type WatchedField } from "@ocw/contracts";
+import { isOrgCredentialMode, isPerMemberMode, projectFields, type WatchedField } from "@ocw/contracts";
 import {
   mcpServers,
   mcpServerTools,
@@ -11,7 +11,7 @@ import {
 import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { CanonicalHashError, canonicalHash } from "../../lib/canonical-json";
-import { activeShare, connectionStatusFor } from "../connectors";
+import { activeShare, connectionStatusFor, credentialKeyOf, credentialStatusFor } from "../connectors";
 import { changedFields, conflictCard } from "./cards";
 import { type CallOutcome, callWith, type ReadOutcome, readRecord } from "./check";
 import { emitUpdated, type ServerRow, type WatchedRow } from "./service";
@@ -329,7 +329,9 @@ export async function watchedForTurn(
  * The watch's rules for one write, inside the caller's transaction (the route's claim transaction, and again before
  * the outside calls): its write tool, the changes, the tool rule (read and write tools still allowed for this bot), the
  * connector on, and for a per-member connector the requester's connection and their share on the board (07.4 D-03:
- * values read with their account land in the shared thread). Null when every rule holds.
+ * values read with their account land in the shared thread); for an organization-account connector (07.14) the
+ * organization's connection instead. Null when every rule holds. The calls themselves go through `callWith`, which
+ * picks the credential by the stored mode (the organization's key for the organization modes).
  */
 export async function preflight(
   tx: Tx,
@@ -339,7 +341,8 @@ export async function preflight(
   if (w.agentId !== p.agentId) return "not_watched";
   const plan = writePlan({ writeTool: w.writeTool, idArg: w.idArg, fields: rowFields(w) }, p.changes);
   if (!plan.ok) return plan.code;
-  if (server.authMode === "org_secret" && !server.orgEnabled) return "connector_error";
+  // Every workspace connector (organization headers or the organization's own account) is the admin's to switch off.
+  if (!isPerMemberMode(server.authMode) && !server.orgEnabled) return "connector_error";
   const tools = await refuseTools(tx, {
     serverId: server.id,
     agentId: p.agentId,
@@ -347,7 +350,13 @@ export async function preflight(
     otherTools: [w.writeTool],
   });
   if (tools) return "tool_not_allowed";
-  if (server.authMode !== "org_secret") {
+  // 07.14 (D-04, D-08): the organization's own account needs no member connection or share, only a usable
+  // organization connection. Its refusal is never "connect your account": no member can fix it.
+  if (isOrgCredentialMode(server.authMode)) {
+    const key = credentialKeyOf(server, { organizationId: w.organizationId, userId: p.requesterUserId });
+    if ((await credentialStatusFor(tx, key)) !== "connected") return "connector_error";
+  }
+  if (isPerMemberMode(server.authMode)) {
     const status = (await connectionStatusFor(tx, p.requesterUserId, [server.id])).get(server.id);
     if (status !== "connected") return "not_connected";
     const shared = await activeShare(tx, {

@@ -16,6 +16,7 @@ import {
   type InstantiateAgentTemplateRequest,
   type InstantiateAgentTemplateResponse,
   isDangerousToolName,
+  PER_MEMBER_MODES,
   type Permission,
   type ToolGrant,
   type UpdateAgentTemplateRequest,
@@ -268,11 +269,13 @@ async function assertVersionRefs(
     }
   }
   const connectorIds = [...new Set(body.requiredConnectorIds)];
+  // 07.14 PD-09: only member modes are "required"; an organization account (headers, OAuth or client credentials)
+  // needs nobody to connect, so it is never a member's connector.
   if (connectorIds.length > 0) {
     const found = await tx
       .select({ id: mcpServers.id })
       .from(mcpServers)
-      .where(and(inArray(mcpServers.id, connectorIds), ne(mcpServers.authMode, "org_secret")));
+      .where(and(inArray(mcpServers.id, connectorIds), inArray(mcpServers.authMode, [...PER_MEMBER_MODES])));
     if (found.length !== connectorIds.length) {
       throw badRequest(
         "A required connector must be a connector members connect themselves",
@@ -517,7 +520,7 @@ export async function templateOptions(
   const connectors = await tx
     .select({ serverId: mcpServers.id, name: mcpServers.name })
     .from(mcpServers)
-    .where(ne(mcpServers.authMode, "org_secret"))
+    .where(inArray(mcpServers.authMode, [...PER_MEMBER_MODES]))
     .orderBy(asc(mcpServers.name), asc(mcpServers.id));
   // Id, name and handle only: never the value or its secret reference.
   const keys = await tx

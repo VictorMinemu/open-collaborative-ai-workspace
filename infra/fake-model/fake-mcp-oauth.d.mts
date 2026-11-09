@@ -20,9 +20,10 @@ export const FAKE_MCP_OAUTH_TOOLS: ReadonlyArray<{
 
 export interface FakeMcpOAuthClient {
   client_id: string;
-  /** Absent: a public client (`token_endpoint_auth_method: none`). */
+  /** Absent: a public client (`token_endpoint_auth_method: none`). Present: a confidential client, which may also
+   * use the `client_credentials` grant (subject `sub_cc_<client_id>`, no refresh token; 07.14-03). */
   client_secret?: string;
-  /** Compared exactly at authorize and token. */
+  /** Compared exactly at authorize and token; `[]` for a client-credentials-only client. */
   redirect_uris: string[];
 }
 
@@ -40,24 +41,49 @@ export interface FakeMcpOAuthScenario {
   insufficient_scope?: boolean;
   /** Access token lifetime in seconds (default 3600). */
   expires_in?: number;
+  /** Token responses leave out `expires_in` (the token still lives `expires_in` seconds; 07.14-09). */
+  omit_expires_in?: boolean;
+  /** The protected resource metadata (RFC 9728) answers 404: the server publishes none (07.14-09). */
+  no_prm?: boolean;
   /** Revokes every grant issued so far and rejects every token while set. */
   revoke_all?: boolean;
+  /** Every access token is refused at the MCP endpoint (401 `invalid_token`) while set, but no grant is revoked: a
+   * refresh still succeeds and its new token is refused too (07.14-08: the second 401 after a forced refresh). */
+  reject_access_tokens?: boolean;
   /** Delays each MCP `tools/call` by this many milliseconds. */
   slow_mcp_ms?: number;
+  /** Delays each revocation (RFC 7009) answer by this many milliseconds (07.14 review WR-02: Disconnect races). */
+  slow_revoke_ms?: number;
   /** The PRM names the second authorization server (`<base>/mcp-oauth/alt`). */
   different_issuer?: boolean;
   /** The token endpoint answers 503 `temporarily_unavailable` (the attempt is still counted). */
   fail_token_5xx?: boolean;
   /** The code exchange returns no `id_token`. */
   no_id_token?: boolean;
+  /** The `email` claim of the id_token the code exchange returns (default `<subject>@fake-mcp.test`): the account
+   * label's encoding cases (07.14 COA-04). */
+  id_token_email?: string;
   /** AS metadata advertises neither dynamic registration nor client ID metadata documents (a client must be
    * pre-registered). */
   no_registration?: boolean;
+  /** AS metadata lists `client_secret_post` alone in `token_endpoint_auth_methods_supported`, and the token endpoint
+   * refuses a Basic header with 401 `invalid_client` (07.14 D-10: a client must pick post from the metadata). */
+  cc_post_only?: boolean;
+  /** AS metadata of a client-credentials-only server: `issuer`, `token_endpoint`, `grant_types_supported:
+   * ["client_credentials"]`, `token_endpoint_auth_methods_supported` (and revocation), with no
+   * `authorization_endpoint`, `response_types_supported` or `code_challenge_methods_supported` (07.14 D-17). */
+  no_authorization_endpoint?: boolean;
+  /** AS metadata's `issuer` is `<base>/mcp-oauth-other` while it is served at the `mcp-oauth` well-known path
+   * (07.14 D-10 `issuer_mismatch`). */
+  issuer_mismatch_meta?: boolean;
+  /** authorize redirects to the registered redirect with `error=invalid_scope`, `state` and `iss`, and no code
+   * (07.14 D-10 `scope_rejected`). */
+  invalid_scope_at_authorize?: boolean;
 }
 
 export interface FakeMcpOAuthStats {
   /** Every token request per grant type, refused and 503 ones included. */
-  tokenRequests: { authorization_code: number; refresh_token: number };
+  tokenRequests: { authorization_code: number; refresh_token: number; client_credentials: number };
   /** Rotated refresh tokens presented again (each one revoked its family). */
   refreshReuse: number;
   /** Revocation requests. */
@@ -65,7 +91,16 @@ export interface FakeMcpOAuthStats {
   /** Successful dynamic client registrations. */
   registrations: number;
   /** The `resource` parameter last received on each request kind (null until one arrives). */
-  lastResource: { authorize: string | null; token: string | null; refresh: string | null };
+  lastResource: {
+    authorize: string | null;
+    token: string | null;
+    refresh: string | null;
+    /** The last `client_credentials` token request (07.14-03). */
+    cc: string | null;
+  };
+  /** How the last token request (any grant) presented client credentials: an `Authorization: Basic` header,
+   * `client_secret` in the body, or neither. Never the secret itself; null until one arrives (07.14-03). */
+  lastClientAuth: "basic" | "post" | "none" | null;
   /** Every HTTP request to `/mcp-oauth/mcp`, rejected ones included. */
   mcpRequests: number;
   /** Authenticated `tools/call` requests. */

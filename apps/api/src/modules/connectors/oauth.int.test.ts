@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import { type ConnectorOAuthUrls, connectorOAuthUrls } from "@ocw/contracts";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -8,7 +9,9 @@ import {
   type FakeMcpOAuthStats,
 } from "../../../../../infra/fake-model/fake-mcp-oauth.mjs";
 import { createEgress, type Egress } from "../../lib/egress";
+import { CC_SECRET, PRE_REGISTERED_CC } from "../../testing-connectors";
 import { clientMetadataDocument } from "./client-metadata";
+import { type DiagnoseInput, diagnose } from "./diagnosis";
 import { callTool, listTools, McpUpstreamError } from "./mcp-client";
 import {
   buildAuthorization,
@@ -17,8 +20,10 @@ import {
   checkCallbackIssuer,
   chooseClient,
   chooseScope,
+  clientCredentialsGrant,
   type DiscoveredAuth,
   discover,
+  discoverTokenEndpoint,
   exchangeCode,
   refreshTokens,
   revokeToken,
@@ -53,7 +58,10 @@ const cimdDocs = new Map<string, unknown>();
 
 beforeAll(async () => {
   fake = createFakeMcpOAuth({
-    preRegistered: [{ client_id: PRE_REGISTERED, redirect_uris: [REDIRECT] }],
+    preRegistered: [
+      { client_id: PRE_REGISTERED, redirect_uris: [REDIRECT] },
+      { client_id: PRE_REGISTERED_CC, client_secret: CC_SECRET, redirect_uris: [] },
+    ],
     cimdFetch: async (url) => {
       const doc = cimdDocs.get(url);
       if (!doc) throw new Error("no such client metadata document");
@@ -620,5 +628,292 @@ describe("MCP client against the fake: results and errors", () => {
       ),
     );
     expect(err.code).toBe("egress_refused");
+  });
+});
+
+describe("client credentials against the fake (07.14 D-03, D-17)", () => {
+  /** The grant's inputs from a discovery, with the fake's pre-registered client-credentials client. */
+  const grantInput = (
+    disc: Awaited<ReturnType<typeof discoverTokenEndpoint>>,
+    over: Partial<Parameters<typeof clientCredentialsGrant>[1]> = {},
+  ): Parameters<typeof clientCredentialsGrant>[1] => ({
+    tokenEndpoint: disc.tokenEndpoint ?? "",
+    issuer: disc.issuer,
+    resource: disc.resource,
+    sameOrigin: disc.sameOrigin,
+    mcpOrigin: disc.mcpOrigin,
+    clientId: PRE_REGISTERED_CC,
+    clientSecret: CC_SECRET,
+    scopes: [],
+    authMethods: disc.authMethods,
+    ...over,
+  });
+  const bearerOf = (accessToken: string) => ({
+    headerName: "Authorization",
+    headerValue: `Bearer ${accessToken}`,
+  });
+
+  it("finds the token endpoint through RFC 9728 → RFC 8414, grants with Basic and resource, and lists tools", async () => {
+    const disc = await discoverTokenEndpoint(egress, serverUrl);
+    expect(disc).toMatchObject({
+      resource: serverUrl,
+      issuer: `${base}/mcp-oauth`,
+      tokenEndpoint: `${base}/mcp-oauth/token`,
+      revocationEndpoint: `${base}/mcp-oauth/revoke`,
+      sameOrigin: `fake-mcp:${port}`,
+      mcpOrigin: base,
+    });
+    expect(disc.authMethods).toContain("client_secret_basic");
+
+    const before = Date.now();
+    const token = await clientCredentialsGrant(egress, grantInput(disc));
+    expect(token.accessToken).toMatch(/^fakeat_/);
+    expect(token.authMethod).toBe("client_secret_basic");
+    expect(token.expiresAt).toBeGreaterThan(before);
+
+    const tools = await listTools(egress, target(), bearerOf(token.accessToken));
+    expect(tools.map((t) => t.name)).toContain("whoami");
+
+    const s = await stats();
+    expect(s.tokenRequests.client_credentials).toBe(1);
+    expect(s.lastResource.cc).toBe(serverUrl);
+    expect(s.lastClientAuth).toBe("basic");
+  });
+
+  it("cc_post_only: picks client_secret_post from the metadata", async () => {
+    fake.setScenario({ cc_post_only: true });
+    const disc = await discoverTokenEndpoint(egress, serverUrl);
+    expect(disc.authMethods).toEqual(["client_secret_post"]);
+    const token = await clientCredentialsGrant(egress, grantInput(disc));
+    expect(token.authMethod).toBe("client_secret_post");
+    expect((await stats()).lastClientAuth).toBe("post");
+  });
+
+  it("no_authorization_endpoint: the lenient metadata read still finds the token endpoint and the issuer", async () => {
+    fake.setScenario({ no_authorization_endpoint: true });
+    await expect(discover(egress, serverUrl)).rejects.toBeInstanceOf(ConnectorOAuthError);
+    const disc = await discoverTokenEndpoint(egress, serverUrl);
+    expect(disc).toMatchObject({
+      issuer: `${base}/mcp-oauth`,
+      tokenEndpoint: `${base}/mcp-oauth/token`,
+      revocationEndpoint: `${base}/mcp-oauth/revoke`,
+    });
+    const token = await clientCredentialsGrant(egress, grantInput(disc));
+    expect(token.accessToken).toMatch(/^fakeat_/);
+  });
+
+  it("no metadata: answers nulls, and an admin-entered endpoint on the MCP URL's own origin works", async () => {
+    const bare = `${base}/no-prm/mcp`;
+    const disc = await discoverTokenEndpoint(egress, bare);
+    expect(disc).toEqual({
+      resource: resourceUrlFromServerUrl(bare).href,
+      issuer: null,
+      tokenEndpoint: null,
+      revocationEndpoint: null,
+      authMethods: [],
+      scopes: undefined,
+      sameOrigin: `fake-mcp:${port}`,
+      mcpOrigin: base,
+    });
+    // The fake's own MCP resource, with the token URL an admin typed in (no metadata to pin an issuer).
+    const token = await clientCredentialsGrant(
+      egress,
+      grantInput(disc, { tokenEndpoint: `${base}/mcp-oauth/token`, issuer: null, resource: serverUrl }),
+    );
+    expect(token.authMethod).toBe("client_secret_basic");
+    const tools = await listTools(egress, target(), bearerOf(token.accessToken));
+    expect(tools.length).toBeGreaterThan(0);
+  });
+
+  it("an admin token endpoint on another port or host over http is refused before any request", async () => {
+    const disc = await discoverTokenEndpoint(egress, serverUrl);
+    for (const tokenEndpoint of [
+      `http://fake-mcp:${port + 1}/mcp-oauth/token`,
+      `http://127.0.0.1:${port}/mcp-oauth/token`,
+      `http://user:pw@fake-mcp:${port}/mcp-oauth/token`,
+    ]) {
+      await expect(clientCredentialsGrant(egress, grantInput(disc, { tokenEndpoint }))).rejects.toMatchObject(
+        {
+          step: "token_endpoint_untrusted",
+        },
+      );
+    }
+    expect((await stats()).tokenRequests.client_credentials).toBe(0);
+  });
+
+  it("a wrong secret is terminal (invalid_client); an unknown scope is terminal scope_rejected", async () => {
+    const disc = await discoverTokenEndpoint(egress, serverUrl);
+    await expect(
+      clientCredentialsGrant(egress, grantInput(disc, { clientSecret: "wrong-secret" })),
+    ).rejects.toMatchObject({
+      code: "token_exchange_failed",
+      terminal: true,
+      oauthError: "invalid_client",
+      step: "token_exchange_failed",
+    });
+    await expect(
+      clientCredentialsGrant(egress, grantInput(disc, { scopes: ["unknown"] })),
+    ).rejects.toMatchObject({
+      code: "token_exchange_failed",
+      terminal: true,
+      oauthError: "invalid_scope",
+      step: "scope_rejected",
+    });
+  });
+
+  it("issuer_mismatch_meta: the metadata's issuer is not its URL", async () => {
+    fake.setScenario({ issuer_mismatch_meta: true });
+    await expect(discoverTokenEndpoint(egress, serverUrl)).rejects.toMatchObject({
+      code: "discovery_failed",
+      step: "issuer_mismatch",
+    });
+  });
+});
+
+describe("diagnose against the fake (07.14 D-10, D-18)", () => {
+  const httpsUrls = connectorOAuthUrls("https://ocw.example.test");
+  const run = (over: Partial<DiagnoseInput> = {}, through: Egress = egress) =>
+    diagnose(through, {
+      serverUrl,
+      mode: "org_oauth",
+      urls: httpsUrls,
+      preRegistered: [],
+      storedClients: [],
+      allowCimd: true,
+      scopes: [],
+      ...over,
+    });
+  const statusOf = (r: Awaited<ReturnType<typeof diagnose>>) =>
+    Object.fromEntries(r.steps.map((s) => [s.step, s.status]));
+  /** The guard, counting every request made through it. */
+  const counting = () => {
+    const counter = { requests: 0 };
+    const through: Egress = {
+      fetch: (input, init, policy) => {
+        counter.requests += 1;
+        return egress.fetch(input, init, policy);
+      },
+      bound: (policy) => {
+        const bound = egress.bound(policy);
+        return ((input: string | URL | Request, init?: RequestInit) => {
+          counter.requests += 1;
+          return bound(input, init);
+        }) as typeof fetch;
+      },
+    };
+    return { through, counter };
+  };
+  const cc = { clientId: PRE_REGISTERED_CC, clientSecret: CC_SECRET };
+
+  it("sign-in, CIMD-capable: every step ok but token (skipped), the client method previewed, nothing registered", async () => {
+    const r = await run();
+    expect(statusOf(r)).toEqual({
+      public_url: "ok",
+      discovery: "ok",
+      issuer: "ok",
+      endpoints: "ok",
+      pkce: "ok",
+      client_registration: "ok",
+      token: "skipped",
+    });
+    expect(r).toMatchObject({
+      ok: true,
+      failure: null,
+      clientMethod: "cimd",
+      issuer: `${base}/mcp-oauth`,
+      tokenEndpoint: `${base}/mcp-oauth/token`,
+      redirectUri: httpsUrls.redirectUri,
+      clientMetadataUrl: httpsUrls.clientMetadataUrl,
+    });
+    const dcr = await run({ urls: loopbackUrls, mode: "per_member_oauth" });
+    expect(dcr.clientMethod).toBe("dcr");
+    expect((await stats()).registrations).toBe(0);
+  });
+
+  it("no_registration without a pre-registered client: client_registration fails, token skipped, nothing registered", async () => {
+    fake.setScenario({ no_registration: true });
+    const r = await run({ urls: loopbackUrls });
+    expect(r).toMatchObject({ ok: false, failure: "client_registration_unavailable", clientMethod: null });
+    expect(statusOf(r)).toMatchObject({ client_registration: "failed", token: "skipped", pkce: "ok" });
+    expect((await stats()).registrations).toBe(0);
+  });
+
+  it("no_pkce_meta: pkce fails; client_registration and token are skipped", async () => {
+    fake.setScenario({ no_pkce_meta: true });
+    const r = await run();
+    expect(r.failure).toBe("pkce_unsupported");
+    expect(statusOf(r)).toMatchObject({ pkce: "failed", client_registration: "skipped", token: "skipped" });
+  });
+
+  it("issuer_mismatch_meta: issuer fails and every later step is skipped", async () => {
+    fake.setScenario({ issuer_mismatch_meta: true });
+    const r = await run();
+    expect(r.failure).toBe("issuer_mismatch");
+    expect(statusOf(r)).toEqual({
+      public_url: "ok",
+      discovery: "ok",
+      issuer: "failed",
+      endpoints: "skipped",
+      pkce: "skipped",
+      client_registration: "skipped",
+      token: "skipped",
+    });
+  });
+
+  it("public_url: no OAuth address or a loopback redirect behind another page origin fails before any request", async () => {
+    const { through, counter } = counting();
+    const lan = await run({ urls: connectorOAuthUrls("http://ocw.lan:4290") }, through);
+    expect(lan).toMatchObject({ ok: false, failure: "https_required" });
+    const tunnel = await run(
+      { urls: connectorOAuthUrls("http://localhost:4000"), pageOrigin: "https://ocw.example.com" },
+      through,
+    );
+    expect(tunnel.failure).toBe("https_required");
+    expect(statusOf(tunnel).public_url).toBe("failed");
+    expect(counter.requests).toBe(0);
+
+    const local = await run({ urls: loopbackUrls, pageOrigin: "http://localhost:3000" });
+    expect(statusOf(local).public_url).toBe("ok");
+    expect(local.ok).toBe(true);
+  });
+
+  it("client credentials: a real grant whose token is dropped; wrong secret, unknown scope and an untrusted URL fail", async () => {
+    const good = await run({ mode: "org_client_credentials", cc });
+    expect(statusOf(good)).toEqual({
+      public_url: "skipped",
+      discovery: "ok",
+      issuer: "ok",
+      endpoints: "ok",
+      pkce: "skipped",
+      client_registration: "skipped",
+      token: "ok",
+    });
+    expect(good).toMatchObject({ ok: true, clientMethod: null, tokenEndpoint: `${base}/mcp-oauth/token` });
+    expect((await stats()).tokenRequests.client_credentials).toBe(1);
+    const issued = fake.issuedTokens().access;
+    expect(issued.length).toBeGreaterThan(0);
+
+    const wrong = await run({ mode: "org_client_credentials", cc: { ...cc, clientSecret: "wrong-secret" } });
+    expect(wrong).toMatchObject({ ok: false, failure: "token_exchange_failed" });
+    expect(statusOf(wrong).token).toBe("failed");
+
+    const scope = await run({ mode: "org_client_credentials", cc, scopes: ["unknown"] });
+    expect(scope.failure).toBe("scope_rejected");
+
+    for (const r of [good, wrong, scope]) {
+      const text = JSON.stringify(r);
+      expect(text).not.toContain(CC_SECRET);
+      for (const token of fake.issuedTokens().access) expect(text).not.toContain(token);
+    }
+
+    fake.reset();
+    const untrusted = await run({
+      serverUrl: `${base}/no-prm/mcp`,
+      mode: "org_client_credentials",
+      cc: { ...cc, tokenEndpoint: `http://127.0.0.1:${port}/mcp-oauth/token` },
+    });
+    expect(untrusted).toMatchObject({ ok: false, failure: "token_endpoint_untrusted" });
+    expect(statusOf(untrusted)).toMatchObject({ endpoints: "failed", token: "skipped" });
+    expect((await stats()).tokenRequests.client_credentials).toBe(0);
   });
 });

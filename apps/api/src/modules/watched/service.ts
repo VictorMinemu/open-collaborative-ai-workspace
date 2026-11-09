@@ -1,6 +1,7 @@
 import {
   type CreateWatchedRecordRequest,
   EventTypes,
+  isPerMemberMode,
   type UpdateWatchedRecordRequest,
   type WatchedCheckInterval,
   type WatchedField,
@@ -37,8 +38,9 @@ import { refuseTools, TOOL_REFUSAL_MESSAGES } from "./tools";
  *   (agent ∩ human); the connector exposes the named tools.
  * - Audience (07.4 D-03, Pitfall 8): a per-member connector reads with the linker's own account, so its values may reach
  *   the shared board only through an active `member_account_shares` row for (linker, board, connector), checked at
- *   link, at preview and again at every check (`check.ts`). Organization-secret connectors read with the workspace's
- *   access and need none.
+ *   link, at preview and again at every check (`check.ts`). Workspace connectors read with the workspace's access and
+ *   need none: organization headers, and since 07.14 (D-04) the organization's own account (`org_oauth`,
+ *   `org_client_credentials`), both `org_secret` on the watched wire.
  *
  * Audits carry ids and counts only, never a record value.
  */
@@ -155,7 +157,8 @@ export async function connectorWithTools(
   if (server.transport === "sandboxed-stdio" || !server.url) {
     throw badRequest("Records can be watched only through a remote connector", "connector_unsupported");
   }
-  if (server.authMode === "org_secret" && !server.orgEnabled) {
+  // Every workspace connector (organization headers or the organization's own account) is the admin's to switch off.
+  if (!isPerMemberMode(server.authMode) && !server.orgEnabled) {
     throw conflict("This connector is turned off for the organization", "connector_disabled");
   }
   const refused = await refuseTools(tx, {
@@ -172,12 +175,15 @@ export async function connectorWithTools(
   return server;
 }
 
-/** Pitfall 8: a per-member connector's values reach a shared board only with the linker's active share there. */
+/**
+ * Pitfall 8: a per-member connector's values reach a shared board only with the linker's active share there. A
+ * workspace connector (organization headers or the organization's own account, 07.14 D-04) needs none.
+ */
 export async function assertShared(
   tx: Tx,
   p: { userId: string; conversationId: string; channelName: string | null; server: ServerRow },
 ) {
-  if (p.server.authMode === "org_secret") return;
+  if (!isPerMemberMode(p.server.authMode)) return;
   const shared = await activeShare(tx, {
     userId: p.userId,
     conversationId: p.conversationId,
@@ -269,7 +275,8 @@ async function toDtos(tx: Tx, rows: WatchedRow[], viewer: Viewer): Promise<Watch
       connector: {
         id: r.mcpServerId,
         name: s?.name ?? "Connector",
-        authMode: s?.authMode === "org_secret" ? "org_secret" : "per_member",
+        // Workspace access for organization headers and the organization's own account (07.14 D-04).
+        authMode: s && !isPerMemberMode(s.authMode) ? "org_secret" : "per_member",
       },
       externalRef: r.externalRef,
       readTool: r.readTool,

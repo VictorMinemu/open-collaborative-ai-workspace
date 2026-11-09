@@ -35,7 +35,9 @@ const FAKE_URL = process.env.OCW_E2E_FAKE_URL ?? "";
 const FAKE_ANTHROPIC_KEY = "sk-ant-e2e-fake-key-not-real-0000";
 
 const ANA: Actor = { name: "Ana Ruiz", email: "ana-wzm@ocw.test", password: "ana-e2e-password-123" };
-const MARTA: Actor = { name: "Marta Gil", email: "marta-wzm@ocw.test", password: "marta-e2e-password-123" };
+// Her own display name: the approval specs' Marta Gil (marta@ocw.test) shares this stack, and two members with one
+// name make the mobile approver picker ambiguous after the desktop run (07.14-14 gate).
+const MARTA: Actor = { name: "Marta Vidal", email: "marta-wzm@ocw.test", password: "marta-e2e-password-123" };
 const SAM: Actor = { name: "Sam Ortega", email: "sam-wzm@ocw.test", password: "sam-wzm-password-123" };
 
 const BILLING = "Billing";

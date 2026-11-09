@@ -91,3 +91,51 @@ const r4 = await egress.bound(policy)(url);
 import { BlockList, isIP } from "node:net";
 // ok: ocw.raw-egress
 import type { Socket } from "node:net";
+
+// ruleid: ocw.raw-auth-mode
+const inCell = server.authMode === "org_secret";
+// ruleid: ocw.raw-auth-mode
+const proxied = server.authMode !== "org_secret";
+// ruleid: ocw.raw-auth-mode
+const leftSide = "org_secret" === mode;
+// ruleid: ocw.raw-auth-mode
+const leftSideNot = "org_secret" !== input.authMode;
+// ruleid: ocw.raw-auth-mode
+const cellRows = await tx.select().from(mcpServers).where(eq(mcpServers.authMode, "org_secret"));
+// ruleid: ocw.raw-auth-mode
+const proxyRows = await tx.select().from(mcpServers).where(ne(mcpServers.authMode, "org_secret"));
+// ok: ocw.raw-auth-mode
+const rendered = rendersInCell(server.authMode);
+// ok: ocw.raw-auth-mode
+const perMember = isPerMemberMode(m);
+// ok: ocw.raw-auth-mode
+const cellModes = await tx.select().from(mcpServers).where(inArray(mcpServers.authMode, CELL_MODES));
+// ok: ocw.raw-auth-mode
+const defaultMode: ConnectorAuthMode = "org_secret";
+// ok: ocw.raw-auth-mode
+const memberKey = server.authMode === "per_member_secret";
+// ok: ocw.raw-auth-mode
+setAuthMode("org_secret");
+// 07.14 review IN-03: the loose operators, switch cases and list membership are raw comparisons too.
+// ruleid: ocw.raw-auth-mode
+const loose = server.authMode == "org_secret";
+// ruleid: ocw.raw-auth-mode
+const looseNot = "org_secret" != server.authMode;
+switch (server.authMode) {
+  // ruleid: ocw.raw-auth-mode
+  case "org_secret":
+    break;
+  // ok: ocw.raw-auth-mode
+  case "per_member_oauth":
+    break;
+}
+// ruleid: ocw.raw-auth-mode
+const listed = ["org_secret", "per_member_secret"].includes(server.authMode);
+// ruleid: ocw.raw-auth-mode
+const listedRows = await tx.select().from(mcpServers).where(inArray(mcpServers.authMode, ["org_secret"]));
+// ruleid: ocw.raw-auth-mode
+const notListedRows = await tx.select().from(mcpServers).where(notInArray(mcpServers.authMode, ["org_secret"]));
+// ok: ocw.raw-auth-mode
+const memberListed = ["per_member_oauth", "per_member_secret"].includes(server.authMode);
+// ok: ocw.raw-auth-mode
+const modes: ConnectorAuthMode[] = ["org_secret", "org_oauth"];

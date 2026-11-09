@@ -407,7 +407,7 @@ of the thin Work Zone that Phase 1 already ships.
 **Operations features (inserted 2026-10-08, owner).** Phases 07.1–07.7 turn the 2026-10-06 operations meeting into
 generic capabilities for any organization (research: `.planning/research/OPS-FEATURES.md`). Each feature is owned by the
 Control Plane (an `ocw_*` plugin tool → Agent Channel API decides and audits → Agent Card when a human approves);
-OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.12 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 and 07.12 added 2026-10-29 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
+OpenClaw's in-cell equivalents stay off. **Execution order:** 07.3 → 07.1 → 07.2 → 07.4 → 07.5 → 07.8 → 07.9 → 07.10 → 07.11 → 07.12 → 07.14 → 07.13 → 07.6 → 07.7 (07.8 added 2026-10-14, 07.9 added 2026-10-22 and 07.11 added 2026-10-28 and 07.12 added 2026-10-29 and 07.13 and 07.14 added 2026-11-06 by the owner), one phase at a time, each rebased on main; prerequisite: PR #25 merged. Deferred to the backlog: organization groups (F16), model comparison per task
 (F17), ERP-driven board columns beyond watched records.
 
 ### Phase 07.1: Board channels and record templates (INSERTED)
@@ -963,6 +963,120 @@ Plans:
 **Wave 5** *(blocked on Wave 4 completion)*
 
 - [x] 07.12-11-PLAN.md — Wave 5: Phase gate: full gate, container proof, `gate:compose`, `docs/SERVER.md`, INSTALL, DEMO owner checks, STATUS, AGENTS, CODEOWNERS, ADR-0033, signed VALIDATION
+
+### Phase 07.13: Work Zone local browser (INSERTED)
+
+**Goal**: A Work Zone session can use a browser, the way bots can, but on the session's own device: Claude Code and
+Codex open pages (including the device's own `localhost` dev servers), read them, click, type and take screenshots,
+while everyone who can see the session watches it live in the web. Teams already running OCW get it by upgrading,
+with no manual step on any device.
+
+- **On the device, not the server:** the Local Runtime starts an isolated Chromium (its own throwaway profile per
+  session, never the user's real browser or cookies) on the machine that runs the session, desktop app or headless
+  server, so it reaches `localhost` and the device's network.
+- **One tool set for both runtimes:** the runtime exposes the browser to Claude Code (Agent SDK) and Codex
+  (app-server) as the same tools, normalized at the adapter edge; nothing outside the adapter depends on either.
+- **Governed like the bots' browser (ADR-0029) where it applies:** org policy ∩ device opt-in decides it, per-tool
+  approvals apply, every navigation and action is audited, and page content is treated as untrusted input.
+- **Live view:** the session's audience sees the page (frames) in the session view; no absolute path and no cookie
+  leaves the device.
+- **Delivered by the upgrade:** `ocw upgrade` on the server is enough on the server side; the runtime fetches a pinned,
+  checksum-verified browser build by itself the first time it is needed; headless runtimes update their own bundle from
+  the workspace under the runtime updates level (07.11), and the desktop app tells its user when a newer app is out.
+
+**Requirements**: WZB-01, WZB-02, WZB-03, WZB-04, WZB-05, WZB-06, WZB-07
+**Depends on:** Phase 07.12 (headless runtime, served bundle), Phase 07.8 (browser governance), Phase 07.11 (updates level)
+**ADR:** 0035
+**Success Criteria** (what must be TRUE):
+
+  1. In a Work Zone session on a desktop device and on a headless server, Claude Code and Codex can open a page served
+     on the device's `localhost`, read it, act on it and return a screenshot, through the same browser tools
+  2. The browser is off unless the organization's policy and the device both allow it; each navigation and action is
+     audited without page content, absolute paths or cookies, and per-tool approval rules apply to the browser tools
+  3. Each session gets a fresh, isolated browser profile that is deleted when the session ends; the user's own browser
+     profile and cookies are never read
+  4. Everyone in the session's audience sees the browser live in the session view (light/dark, 1440 and 390 widths)
+  5. A team on `v0.2.x` that runs `ocw upgrade` gets the feature with no manual step on headless devices (the runtime
+     updates itself and fetches the pinned browser on first use, checksum-verified), and desktop users are told a new
+     app version is available; an older runtime shows a clear "update this device" state instead of failing
+  6. Proven by an e2e spec (fake runtime driving the real local browser against a local page) and a container proof on
+     the headless runtime; documented in `docs/SERVER.md`, the README and ADR-0035
+
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 07.13 to break down)
+
+### Phase 07.14: Organization connector auth (INSERTED)
+
+**Goal**: An admin can register any MCP server whatever its authentication, and give the organization's bots one shared
+account on it: sign in once with OAuth for the whole organization, or use OAuth client credentials, besides the
+existing organization headers, member sign-in and member keys. When OAuth cannot work, the admin sees which step failed
+and how to fix it.
+
+- **Organization sign-in (OAuth):** an admin with `mcp.manage` connects the server once (authorization code + PKCE,
+  the existing per-issuer client choice); the organization's bots use that account everywhere organization secrets
+  apply. The token is sealed for the organization and connector, refreshed by the API and never reaches the cell.
+- **Client credentials (OAuth, machine to machine):** client id and secret, token endpoint discovered from the server
+  (or entered), scopes and RFC 8707 `resource`; tokens fetched and refreshed by the API.
+- **Diagnosis:** the dialog and the server row say which OAuth step failed (discovery, issuer, PKCE, client
+  registration, HTTPS, token exchange) with one fix line, and give the redirect URI and client metadata URL to copy.
+- **Same custody and audit as member connectors (ADR-0025):** sealed in `app.secrets`, serialized refresh, reconnect
+  states, revocation on disconnect, every connect/disconnect/use audited, egress guard on every request.
+
+**Requirements**: COA-01, COA-02, COA-03, COA-04, COA-05
+**Depends on:** Phase 07.4 (connectors, OAuth client, custody)
+**ADR:** 0036
+**Success Criteria** (what must be TRUE):
+
+  1. An admin adds an OAuth-only MCP server in organization sign-in mode, connects it once, and a bot in any channel
+     calls its tools with that account; members never see or handle the token
+  2. A server that only offers client credentials works with a client id and secret, including refresh before expiry
+  3. Disconnect revokes at the provider; an expired or revoked grant shows "Reconnect" to admins and the bot's tool
+     fails with a clear reason; switching mode or deleting the server destroys the stored credential after a confirmation
+  4. When a sign-in cannot start or finish, the admin sees the failed step and a fix line; nothing secret is shown
+  5. Existing servers (organization headers, member sign-in, member keys) behave exactly as before; covered by
+     integration tests on a fake OAuth MCP server (authorization code with PKCE, client credentials, refresh, revoke),
+     tenant isolation tests and an e2e spec in the web
+
+**Plans:** 14/14 plans complete
+
+Plans:
+**Wave 1**
+
+- [x] 07.14-01-PLAN.md — Wave 1: Contracts (five modes, shared predicates and mode lists, D-10 failure codes and fix lines, `OrgConnection`, client-credential input, Test sign-in DTOs), the web on the predicates, and the phase hub (plan map, shared files, PD-01…PD-18, edge coverage)
+- [x] 07.14-02-PLAN.md — Wave 1: Migration: `auth_mode` widened, `mcp_servers.auth_failure`, `connector_org_connections` (tenant RLS, composite FK), N-1 → N upgrade test
+- [x] 07.14-03-PLAN.md — Wave 1: Fake OAuth MCP server: client-credentials grant, diagnosis scenarios, pre-registered CC clients for the API stack and e2e
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 07.14-04-PLAN.md — Wave 2: OAuth client: failure `step`, client-credentials discovery and grant, registration-free client preview, `diagnose()`
+- [x] 07.14-05-PLAN.md — Wave 2: Registry: org modes in create/update/delete, `org_connection_exists` confirm and destroy, D-14 clients kept, DTO `orgConnection`/`authFailure`, cell stays org headers only
+- [x] 07.14-06-PLAN.md — Wave 2: Classification consumers: per-tool approvals, templates and member-account shares on the predicates
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 07.14-07-PLAN.md — Wave 3: Organization custody and sign-in: credential module over a principal, `flow.ts`, `org-routes.ts` connect/disconnect, the callback's organization branch, re-probe by mode, AAD and tenant isolation
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 07.14-08-PLAN.md — Wave 4: Bots use the organization's account: proxy credential by mode, turn-policy split, organization messages and audit (phase API end-to-end tracer)
+- [x] 07.14-09-PLAN.md — Wave 4: Client credentials end to end in the API (save, serialized re-grant, issuer pin, revoke) and the Test sign-in route
+- [x] 07.14-10-PLAN.md — Wave 4: Watched records read and write with organization accounts (workspace access)
+- [x] 07.14-11-PLAN.md — Wave 4: Web server row: organization connection, Connect/Reconnect/Disconnect, failure box, arrival banners; 1440/390 light/dark
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [x] 07.14-12-PLAN.md — Wave 5: Web dialog: five grouped modes, client-credential fields, org mode-switch confirm, Test sign-in panel; 1440/390 light/dark
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [x] 07.14-13-PLAN.md — Wave 6: Browser end to end (admin connects, a member's bot uses it, Disconnect bites), leak sweep with organization canaries, Semgrep `ocw.raw-auth-mode`
+
+**Wave 7** *(blocked on Wave 6 completion)*
+
+- [x] 07.14-14-PLAN.md — Wave 7: Phase gate: full gate, `gate:compose`, ADR-0036, connectors and reverse-proxy docs, DEMO owner check, STATUS, AGENTS, CODEOWNERS, signed VALIDATION
 
 ### Phase 8: Device Trust, Protocol and Work Zone Permissions
 

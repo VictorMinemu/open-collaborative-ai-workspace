@@ -70,12 +70,25 @@ Install `ocw-root.crt` in the operating system or browser trust store of each cl
 device management tool. The desktop app uses the operating system's store; Node processes such as the Local Runtime
 daemon also accept `NODE_EXTRA_CA_CERTS=/path/to/ocw-root.crt`. Never disable certificate verification instead.
 
-**Connectors where each member signs in.** An authorization server outside your network cannot read OCW's client
-metadata document (`https://<site>/api/v1/connectors/oauth/client-metadata.json`) behind an internal name. For each
-such connector, turn off **Use the client metadata URL** in Settings › MCP servers; OCW then uses the pre-registered
-client or registers itself (dynamic registration). A connector whose server publishes no OAuth protected resource
-metadata (RFC 9728) or no PKCE support shows **Sign-in error**: members cannot sign in to it, so use **Each member's
-own key** for it instead.
+**Connectors with a sign-in** (**Organization sign-in** or **Member sign-in**). An authorization server outside your
+network cannot read OCW's client metadata document (`https://<site>/api/v1/connectors/oauth/client-metadata.json`)
+behind an internal name. For each such connector, turn off **Use the client metadata URL** in Settings › MCP servers;
+OCW then uses the pre-registered client or registers itself (dynamic registration). A connector whose server
+publishes no OAuth protected resource metadata (RFC 9728) or no PKCE support shows **Sign-in error**: nobody can sign
+in to it, so use **Client credentials**, **Organization headers** or **Member key** for it instead. **Test sign-in** in
+the dialog names the failing step (see [connectors.md](connectors.md#test-sign-in-and-what-each-failure-means)).
+
+## Cloudflare in front of the workspace
+
+When a connector uses the client metadata URL (CIMD), the provider's server fetches
+`/api/v1/connectors/oauth/client-metadata.json` from your workspace. Cloudflare bot protection (Bot Fight Mode), a
+managed challenge or Cloudflare Access in front of the whole host answers that server-side fetch with a challenge, and
+the provider then refuses OCW on its own sign-in page. OCW never hears back, so the failure cannot show in Settings.
+Either keep that one path reachable without a challenge (a WAF skip rule or an Access bypass for
+`/api/v1/connectors/oauth/client-metadata.json`), or turn off **Use the client metadata URL** for that server in
+Settings › MCP servers. The callback `/api/v1/connectors/oauth/callback` is a normal navigation of the person's own
+browser, so it passes Cloudflare like the rest of the workspace. Behind a Cloudflare Tunnel, also set `OCW_PUBLIC_API_URL` to the public `https://` address, or
+providers send people back to `localhost` (Test sign-in reports this; see [connectors.md](connectors.md)).
 
 ## What changes when the proxy is on
 

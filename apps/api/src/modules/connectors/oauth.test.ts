@@ -4,13 +4,18 @@ import { createEgress, type Egress, type EgressPolicy, EgressRefusedError } from
 import { clientMetadataDocument } from "./client-metadata";
 import {
   type AuthServerMetadata,
+  buildAuthorization,
+  CC_DEFAULT_TTL_S,
+  CC_TERMINAL_OAUTH_ERRORS,
   ConnectorOAuthError,
   checkCallbackIssuer,
   chooseClient,
   chooseScope,
+  clientCredentialsGrant,
   type DiscoveredAuth,
   discover,
   exchangeCode,
+  previewClient,
   refreshTokens,
   revokeToken,
   type TokenBundle,
@@ -585,5 +590,317 @@ describe("token errors carry codes, never credentials", () => {
     const form = new URLSearchParams(last?.body);
     expect(form.get("token")).toBe(CANARY.refresh);
     expect(form.get("token_type_hint")).toBe("refresh_token");
+  });
+});
+
+// ---------------------------------------------------------------- 07.14: failure steps, previewClient, client credentials
+
+describe("failure steps (07.14 D-10): the step names the failure, the 07.4 code is unchanged", () => {
+  const failure = async (promise: Promise<unknown>) => {
+    const err = await codeOf(promise);
+    return { code: err.code, step: err.step };
+  };
+
+  it("PRM missing, unparsable, another resource or no authorization server: discovery_failed", async () => {
+    const missing = stubEgress();
+    expect(await failure(discover(missing.egress, MCP))).toEqual({
+      code: "discovery_failed",
+      step: "discovery_failed",
+    });
+    for (const p of [
+      { resource: 42 },
+      prm({ resource: "https://other.test/mcp" }),
+      prm({ authorization_servers: [] }),
+    ]) {
+      const stub = stubEgress();
+      serve(stub, p as Record<string, unknown>);
+      expect(await failure(discover(stub.egress, MCP))).toEqual({
+        code: "discovery_failed",
+        step: "discovery_failed",
+      });
+    }
+  });
+
+  it("a guard refusal on the MCP host is discovery_failed; on the authorization server it is untrusted", async () => {
+    const prmRefused = stubEgress();
+    prmRefused.routes.set(`GET ${PRM_URL}`, () => {
+      throw new EgressRefusedError("private_address", "mcp.test");
+    });
+    expect(await failure(discover(prmRefused.egress, MCP))).toEqual({
+      code: "egress_refused",
+      step: "discovery_failed",
+    });
+
+    const asRefused = stubEgress();
+    serve(asRefused, prm({ authorization_servers: ["https://10.0.0.5/as"] }));
+    expect(await failure(discover(asRefused.egress, MCP))).toEqual({
+      code: "egress_refused",
+      step: "token_endpoint_untrusted",
+    });
+  });
+
+  it("an untrusted authorization server URL or endpoint: token_endpoint_untrusted (code discovery_failed)", async () => {
+    const asUrl = stubEgress();
+    serve(asUrl, prm({ authorization_servers: ["http://other.test/as"] }));
+    expect(await failure(discover(asUrl.egress, MCP))).toEqual({
+      code: "discovery_failed",
+      step: "token_endpoint_untrusted",
+    });
+    for (const field of [
+      "token_endpoint",
+      "authorization_endpoint",
+      "registration_endpoint",
+      "revocation_endpoint",
+    ]) {
+      const stub = stubEgress();
+      serve(stub, prm(), asMeta({ [field]: "http://other.test/x" }));
+      expect(await failure(discover(stub.egress, MCP))).toEqual({
+        code: "discovery_failed",
+        step: "token_endpoint_untrusted",
+      });
+    }
+  });
+
+  it("a metadata issuer that is not its URL: issuer_mismatch (code discovery_failed)", async () => {
+    const stub = stubEgress();
+    serve(stub, prm(), asMeta({ issuer: "https://other.test" }));
+    expect(await failure(discover(stub.egress, MCP))).toEqual({
+      code: "discovery_failed",
+      step: "issuer_mismatch",
+    });
+  });
+
+  it("no S256: pkce_unsupported", async () => {
+    const stub = stubEgress();
+    serve(stub, prm(), asMeta({ code_challenge_methods_supported: undefined }));
+    expect(await failure(discover(stub.egress, MCP))).toEqual({
+      code: "pkce_unsupported",
+      step: "pkce_unsupported",
+    });
+  });
+
+  it("client choice: https_required, and no usable client is client_registration_unavailable (code needs_client)", async () => {
+    const stub = stubEgress();
+    const lan = connectorOAuthUrls("http://ocw.lan:4290");
+    const base = { preRegistered: [], stored: [], clientName: "OCW" };
+    expect(await failure(chooseClient(stub.egress, discovered(), { ...base, urls: lan }))).toEqual({
+      code: "https_required",
+      step: "https_required",
+    });
+    const noReg = discovered(
+      {},
+      { registration_endpoint: undefined, client_id_metadata_document_supported: undefined },
+    );
+    expect(await failure(chooseClient(stub.egress, noReg, { ...base, urls: httpsUrls }))).toEqual({
+      code: "needs_client",
+      step: "client_registration_unavailable",
+    });
+    stub.routes.set(`POST ${AS}/register`, { status: 400, json: { error: "invalid_client_metadata" } });
+    expect(await failure(chooseClient(stub.egress, discovered(), { ...base, urls: loopbackUrls }))).toEqual({
+      code: "needs_client",
+      step: "client_registration_unavailable",
+    });
+  });
+
+  it("the callback's iss and a client of another issuer: issuer_mismatch", async () => {
+    const meta = asMeta() as unknown as AuthServerMetadata;
+    expect(() => checkCallbackIssuer(meta, AS, "https://other.test")).toThrow(
+      expect.objectContaining({ code: "issuer_mismatch", step: "issuer_mismatch" }),
+    );
+    const other = { method: "cimd" as const, issuer: "https://other.test", clientId: "x" };
+    expect(await failure(buildAuthorization(discovered(), other, httpsUrls, undefined))).toEqual({
+      code: "issuer_mismatch",
+      step: "issuer_mismatch",
+    });
+  });
+
+  it("token endpoint invalid_scope is scope_rejected but stays transient for members; other failures are token_exchange_failed", async () => {
+    const client = { method: "pre_registered" as const, issuer: AS, clientId: "pre" };
+    const exchange = (stub: Stub) =>
+      exchangeCode(stub.egress, discovered(), client, {
+        code: "c",
+        codeVerifier: "v",
+        redirectUri: loopbackUrls.redirectUri,
+      });
+    const scope = stubEgress();
+    scope.routes.set(`POST ${AS}/token`, { status: 400, json: { error: "invalid_scope" } });
+    expect(await codeOf(exchange(scope))).toMatchObject({
+      code: "token_exchange_failed",
+      step: "scope_rejected",
+      terminal: false,
+    });
+
+    const grant = stubEgress();
+    grant.routes.set(`POST ${AS}/token`, { status: 400, json: { error: "invalid_grant" } });
+    expect(await codeOf(exchange(grant))).toMatchObject({
+      code: "token_exchange_failed",
+      step: "token_exchange_failed",
+      terminal: true,
+    });
+  });
+
+  it("an error without a step says null", () => {
+    expect(new ConnectorOAuthError("not_connected").step).toBeNull();
+  });
+});
+
+describe("previewClient (07.14 D-18): the client decision without a request", () => {
+  const opts = (over: Partial<Parameters<typeof previewClient>[1]> = {}) => ({
+    preRegistered: [],
+    stored: [],
+    urls: httpsUrls,
+    ...over,
+  });
+
+  it("pre-registered for this exact issuer, else CIMD, else DCR (stored or not), else needs_client", () => {
+    expect(
+      previewClient(
+        discovered(),
+        opts({ preRegistered: [{ issuer: AS, clientId: "pre", clientSecret: "s" }] }),
+      ),
+    ).toMatchObject({ method: "pre_registered", clientId: "pre" });
+    expect(
+      previewClient(
+        discovered(),
+        opts({ preRegistered: [{ issuer: "https://other.test", clientId: "pre" }] }),
+      ),
+    ).toMatchObject({ method: "cimd", clientId: httpsUrls.clientMetadataUrl });
+    expect(previewClient(discovered(), opts({ allowCimd: false }))).toMatchObject({ method: "dcr" });
+    expect(previewClient(discovered(), opts({ urls: loopbackUrls }))).toMatchObject({ method: "dcr" });
+    expect(
+      previewClient(
+        discovered(),
+        opts({ urls: loopbackUrls, stored: [{ issuer: AS, clientId: "dcr_1", method: "dcr" }] }),
+      ),
+    ).toMatchObject({ method: "dcr" });
+    const noReg = discovered(
+      {},
+      { registration_endpoint: undefined, client_id_metadata_document_supported: undefined },
+    );
+    expect(() => previewClient(noReg, opts())).toThrow(
+      expect.objectContaining({ code: "needs_client", step: "client_registration_unavailable" }),
+    );
+    expect(() => previewClient(discovered(), opts({ urls: connectorOAuthUrls("http://ocw.lan") }))).toThrow(
+      expect.objectContaining({ code: "https_required", step: "https_required" }),
+    );
+  });
+
+  it("chooseClient decides through it and registers only for a new DCR client", async () => {
+    const stub = stubEgress();
+    const stored = await chooseClient(stub.egress, discovered(), {
+      preRegistered: [],
+      stored: [{ issuer: AS, clientId: "dcr_1", clientSecret: "s1", method: "dcr" }],
+      urls: loopbackUrls,
+      clientName: "OCW",
+    });
+    expect(stored).toEqual({
+      method: "dcr",
+      issuer: AS,
+      clientId: "dcr_1",
+      clientSecret: "s1",
+      isNew: false,
+    });
+    expect(stub.calls).toHaveLength(0);
+  });
+});
+
+describe("clientCredentialsGrant (07.14 D-03)", () => {
+  const input = (over: Partial<Parameters<typeof clientCredentialsGrant>[1]> = {}) => ({
+    tokenEndpoint: `${AS}/token`,
+    issuer: AS,
+    resource: MCP,
+    sameOrigin: "mcp.test:443",
+    mcpOrigin: "https://mcp.test",
+    clientId: "cc",
+    clientSecret: "cc-secret",
+    scopes: [],
+    authMethods: [],
+    ...over,
+  });
+  const tokenReply = (json: Record<string, unknown>) => ({
+    json: { token_type: "Bearer", access_token: "at", ...json },
+  });
+
+  it("the terminal set is the member set plus invalid_scope", () => {
+    expect([...CC_TERMINAL_OAUTH_ERRORS].sort()).toEqual(
+      [
+        "access_denied",
+        "invalid_client",
+        "invalid_grant",
+        "invalid_scope",
+        "refresh_token_reused",
+        "unauthorized_client",
+      ].sort(),
+    );
+  });
+
+  it("without expires_in the token lasts CC_DEFAULT_TTL_S; empty scopes send no scope; resource is sent", async () => {
+    const stub = stubEgress();
+    stub.routes.set(`POST ${AS}/token`, tokenReply({}));
+    const before = Date.now();
+    const token = await clientCredentialsGrant(stub.egress, input());
+    expect(CC_DEFAULT_TTL_S).toBe(300);
+    expect(token.expiresAt).toBeGreaterThanOrEqual(before + 300_000);
+    expect(token.expiresAt).toBeLessThanOrEqual(Date.now() + 300_000);
+    expect(token.authMethod).toBe("client_secret_basic");
+    const form = new URLSearchParams(stub.calls[0]?.body);
+    expect(form.get("grant_type")).toBe("client_credentials");
+    expect(form.has("scope")).toBe(false);
+    expect(form.get("resource")).toBe(MCP);
+    expect(form.has("client_secret")).toBe(false);
+    expect(stub.calls[0]?.policy?.privateAllow).toEqual(["mcp.test:443"]);
+  });
+
+  it("scopes are sent space-separated; post when the metadata lists only client_secret_post", async () => {
+    const stub = stubEgress();
+    stub.routes.set(`POST ${AS}/token`, tokenReply({ expires_in: 60 }));
+    const token = await clientCredentialsGrant(
+      stub.egress,
+      input({ scopes: ["records:read", "records:write"], authMethods: ["client_secret_post"] }),
+    );
+    expect(token.authMethod).toBe("client_secret_post");
+    expect(token.scopes).toEqual(["records:read", "records:write"]);
+    const form = new URLSearchParams(stub.calls[0]?.body);
+    expect(form.get("scope")).toBe("records:read records:write");
+    expect(form.get("client_secret")).toBe("cc-secret");
+  });
+
+  it("invalid_client, unauthorized_client and invalid_scope are terminal; invalid_scope is scope_rejected", async () => {
+    for (const [error, step] of [
+      ["invalid_client", "token_exchange_failed"],
+      ["unauthorized_client", "token_exchange_failed"],
+      ["invalid_scope", "scope_rejected"],
+    ] as const) {
+      const stub = stubEgress();
+      stub.routes.set(`POST ${AS}/token`, {
+        status: 400,
+        json: { error, error_description: "cc-secret leaked" },
+      });
+      const err = await codeOf(clientCredentialsGrant(stub.egress, input()));
+      expect(err).toMatchObject({ code: "token_exchange_failed", terminal: true, oauthError: error, step });
+      expect(err.message).not.toContain("cc-secret");
+    }
+  });
+
+  it("a non-Latin-1 secret is token_exchange_failed with no request sent", async () => {
+    const stub = stubEgress();
+    const err = await codeOf(clientCredentialsGrant(stub.egress, input({ clientSecret: "pässwörd-€" })));
+    expect(err).toMatchObject({ code: "token_exchange_failed", step: "token_exchange_failed" });
+    expect(stub.calls).toHaveLength(0);
+  });
+
+  it("an untrusted endpoint is refused before any request", async () => {
+    const stub = stubEgress();
+    for (const tokenEndpoint of ["http://other.test/token", "https://u:p@as.test/token", "not a url"]) {
+      const err = await codeOf(clientCredentialsGrant(stub.egress, input({ tokenEndpoint })));
+      expect(err.step).toBe("token_endpoint_untrusted");
+    }
+    expect(stub.calls).toHaveLength(0);
+  });
+
+  it("a non-bearer answer is token_exchange_failed", async () => {
+    const stub = stubEgress();
+    stub.routes.set(`POST ${AS}/token`, { json: { token_type: "mac", access_token: "at" } });
+    expect((await codeOf(clientCredentialsGrant(stub.egress, input()))).step).toBe("token_exchange_failed");
   });
 });
