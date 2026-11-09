@@ -181,7 +181,7 @@ describe("pdfText out of the API process (CR-01)", () => {
   const RSS = new URL("./fixtures/rss-worker.mjs", import.meta.url);
   const PROBE = new URL("./fixtures/probe-worker.mjs", import.meta.url);
 
-  it("a decompression bomb (1 MB inflating to 1 GiB) is too_large, the child is killed, this process stays small", async () => {
+  it("a decompression bomb (1 MB inflating to 1 GiB) is stopped, the child is killed, this process stays small", async () => {
     const bomb = await makeFlateBombPdf(1024 * 1024 * 1024);
     expect(bomb.length).toBeLessThan(2 * 1024 * 1024);
     const pids: number[] = [];
@@ -189,8 +189,13 @@ describe("pdfText out of the API process (CR-01)", () => {
     const { value, growthMb } = await withRss(() =>
       pdfText(bomb, CAPS, { onSpawn: (pid) => pids.push(pid) }),
     );
-    expect(value).toEqual({ ok: false, code: "too_large" });
-    expect(Date.now() - started).toBeLessThan(CAPS.ms);
+    // Whichever bound trips first stops it: the RSS watchdog (too_large) or, on a loaded CI host where the child
+    // inflates slower than the deadline, the 10 s deadline (timeout; CI p230). The RSS kill alone is proven below.
+    expect([
+      { ok: false, code: "too_large" },
+      { ok: false, code: "timeout" },
+    ]).toContainEqual(value);
+    expect(Date.now() - started).toBeLessThan(CAPS.ms + 2_000);
     expect(growthMb).toBeLessThan(128);
     expect(pids).toHaveLength(1);
     expect(alive(pids[0] as number)).toBe(false);
