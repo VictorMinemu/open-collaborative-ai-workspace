@@ -35,6 +35,8 @@ import {
 } from "./start";
 import { withoutViewerFields } from "./viewer-fields";
 
+// 07.16-20 (PD-12, PD-16): the wake handler refreshes the live card with the start's own composer.
+export { composeWorkSessionCard } from "./bot-card";
 // 07.16-11 (PD-17): delivery asks whether a bot's turn is offered the Work Zone tools, and with which context.
 export { workZoneOfferFor } from "./bot-offer";
 // 07.16-07 (PD-04 … PD-06): the start route, the arbiter, the offer and the web read a bot's profile status.

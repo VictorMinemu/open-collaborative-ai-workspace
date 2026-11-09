@@ -256,8 +256,10 @@ export async function buildMentionEvents(
       historyRows.map((m) => m.id),
     ));
   // D-12: an automation run's turn has nobody present (no browser tools); a person's message never is one. Phase 07.7
-  // (D-13): neither has a consult hop turn (the question to a consulted bot, the answer back to the asker).
-  const unattended = mention.trigger === "automation" || mention.trigger === "consult";
+  // (D-13): neither has a consult hop turn (the question to a consulted bot, the answer back to the asker). Phase 07.16
+  // (D-09): nor a Work Zone wake (the bot hears about its session; nobody is there to watch a browser).
+  const workSessionWake = mention.trigger === "work_session";
+  const unattended = mention.trigger === "automation" || mention.trigger === "consult" || workSessionWake;
 
   // Phase 07.15 (D-02, PD-04): the files of the messages this turn reads (the current message and the history window
   // above: the same thread filter, live messages only), ready and linked, in listing order: the current message's in
@@ -298,15 +300,17 @@ export async function buildMentionEvents(
         })
       : [];
     // Phase 07.16 (D-05, D-21, PD-17): a person's delivery (a mention or reply mode, never an automation run or a
-    // consult hop) of a bot whose Work Zone profile is active, for an asker who passes the Work Zone module gate.
-    const workZone = unattended
-      ? null
-      : await workZoneOfferFor(tx, deps.perms, {
-          agentId: a.id,
-          askerUserId: mention.author.id,
-          conversationId: conv.id,
-          tainted: taintedAtStart,
-        });
+    // consult hop) or a wake about the bot's own session (`work_session`, 07.16-20), of a bot whose Work Zone profile is
+    // active, for an asker who passes the Work Zone module gate.
+    const workZone =
+      unattended && !workSessionWake
+        ? null
+        : await workZoneOfferFor(tx, deps.perms, {
+            agentId: a.id,
+            askerUserId: mention.author.id,
+            conversationId: conv.id,
+            tainted: taintedAtStart,
+          });
     const decision = await turnPolicy(
       tx,
       deps.core,

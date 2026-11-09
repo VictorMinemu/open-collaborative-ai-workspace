@@ -654,6 +654,23 @@ export class WorkSessionService implements DeviceSessionHandler {
         { singletonKey: `ws:${s.id}:${s.lastLocalSeq}` },
       );
     }
+    // 07.16 (D-09, PD-16): a bot's session changed state; its card follows and the bot may be woken. The row flag is the
+    // debounce of record (one pending wake per session): standard pg-boss queues do not dedupe by key (Pitfall 4). The
+    // 3 s delay absorbs an `idle → running` flip of the same dispatch; the handler decides on the state it then reads.
+    if (entered && s.startedByAgentId && this.deps.jobs) {
+      const flipped = await tx.execute(sql`
+        update app.bot_work_sessions set wake_pending = true
+         where work_session_id = ${s.id} and not wake_pending
+        returning 1`);
+      if (flipped.rows.length > 0) {
+        await this.deps.jobs.sendInTx(
+          tx,
+          "work_session.bot_sync",
+          { organizationId: s.organizationId, workSessionId: s.id },
+          { startAfter: new Date(Date.now() + 3_000) },
+        );
+      }
+    }
     await this.emitSession(tx, s.id);
   }
 

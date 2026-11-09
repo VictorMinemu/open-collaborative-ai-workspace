@@ -67,6 +67,7 @@ import { registerRecordRoutes } from "./records";
 import { registerSandboxRoutes, type SandboxBudgets } from "./sandbox";
 import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
 import { registerWorkSessionReadRoute } from "./work-session-read";
+import { registerWorkSessionWakes } from "./work-session-wakes";
 import { registerBotWorkSessionRoutes } from "./work-sessions";
 import { registerWorkZoneRoutes } from "./work-zone";
 
@@ -203,6 +204,9 @@ export function createAgentChannelModule(
   // Consult timeouts (07.7-09, D-11): the one-minute `consult.tick` on 07.6's job runtime (workers start and stop with
   // `core.jobs`; no timer of our own).
   registerConsultTick(core, { perms, modelLabel: opts.modelLabel, memory: opts.memory });
+  // Work Zone wakes (07.16-20, PD-16): a bot session's transitions refresh its card and wake the bot in its thread, as
+  // the person who asked (`work_session.bot_sync`, ids only).
+  registerWorkSessionWakes(core, { perms, modelLabel: opts.modelLabel, memory: opts.memory });
 
   async function uiTokenCreatedAt(tx: Tx): Promise<string | null> {
     const [row] = await tx

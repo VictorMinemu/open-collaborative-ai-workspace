@@ -381,7 +381,7 @@ describe("tracer: a finished turn wakes Atlas in its card's thread and the card 
     expect(ev.workSession.summary).toContain("billing-api");
     expect(ev.workSession.summary.length).toBeLessThanOrEqual(500);
     expect(ev.message.text).toBe(ev.workSession.summary);
-    expect(ev.turn.tools).toEqual(expect.arrayContaining([...WORK_SESSION_TOOL_NAMES]));
+    expect(ev.turn?.tools).toEqual(expect.arrayContaining([...WORK_SESSION_TOOL_NAMES]));
 
     // The wake is a recorded turn of Atlas for Ana on the card message (the bot may answer it in the thread).
     const [turn] = await rowsOf(
