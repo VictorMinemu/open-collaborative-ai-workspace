@@ -1,5 +1,5 @@
 import type { Quota } from "./quota";
-import type { Clock, Sandboxes } from "./sandboxes";
+import { type Clock, SandboxdFailure, type Sandboxes } from "./sandboxes";
 
 /**
  * The broker's periodic pass (07.8-09, D-01, D-09, F-9): every interval (60 s by default) it measures each running
@@ -78,6 +78,8 @@ export function createSweeper(deps: SweeperDeps): Sweeper {
         }
         await sandboxes.sampleUsage(target);
       } catch (err) {
+        // Purged between the listing and its measurement: nothing left to measure, nothing to warn about.
+        if (err instanceof SandboxdFailure && err.code === "not_found") continue;
         onError("sandbox", err);
       }
     }

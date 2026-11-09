@@ -1219,44 +1219,49 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
     },
 
     async purge(target) {
-      return locked(targetKey(target), async () => {
-        await ownedShell(target);
-        const labels = ownerLabels({ ns, orgId: target.orgId, agentId: target.agentId });
-        let removed = 0;
-        let hadShell = false;
-        for (const c of await listContainers(labels, true)) {
-          expectStop(c.Id);
-          const res = await call("DELETE", `/containers/${encodeURIComponent(c.Id)}?force=1`);
-          if (res.status === 204) removed++;
-          if (c.Labels?.[SANDBOXD_LABELS.kind] === "sbx") hadShell = true;
-          filesUsed.delete(c.Id);
-        }
-        for (const v of await listVolumes(labels)) {
-          const res = await call("DELETE", `/volumes/${encodeURIComponent(v.Name)}`);
-          if (res.status === 204) removed++;
-        }
-        // A network with the proxy still on it cannot be removed.
-        if (options.egress) await options.egress.detachTarget(target);
-        for (const n of await listNetworks(labels)) {
-          const res = await call("DELETE", `/networks/${encodeURIComponent(n.Id)}`);
-          if (res.status === 204) removed++;
-        }
-        for (const [id, rec] of processes) {
-          if (rec.orgId === target.orgId && rec.agentId === target.agentId) {
-            if (rec.timer) clearTimeout(rec.timer);
-            rec.stream.destroy();
-            processes.delete(id);
+      // The files helper's lock too, always inside the bot's own (workspace() never takes them the other way round):
+      // a measurement or a file op on a stopped bot cannot create its helper between the listing below and the volume
+      // removal (the volume would stay, in use). One that comes later waits and finds no workspace (`not_found`).
+      return locked(targetKey(target), () =>
+        locked(`files:${targetKey(target)}`, async () => {
+          await ownedShell(target);
+          const labels = ownerLabels({ ns, orgId: target.orgId, agentId: target.agentId });
+          let removed = 0;
+          let hadShell = false;
+          for (const c of await listContainers(labels, true)) {
+            expectStop(c.Id);
+            const res = await call("DELETE", `/containers/${encodeURIComponent(c.Id)}?force=1`);
+            if (res.status === 204) removed++;
+            if (c.Labels?.[SANDBOXD_LABELS.kind] === "sbx") hadShell = true;
+            filesUsed.delete(c.Id);
           }
-        }
-        const key = targetKey(target);
-        lastActive.delete(key);
-        diskBytes.delete(key);
-        diskFull.delete(key);
-        stopReasons.delete(key);
-        cpuLast.delete(key);
-        if (hadShell) emit({ type: "state", target, kind: "sbx", state: "absent", reason: null });
-        return { removed };
-      });
+          for (const v of await listVolumes(labels)) {
+            const res = await call("DELETE", `/volumes/${encodeURIComponent(v.Name)}`);
+            if (res.status === 204) removed++;
+          }
+          // A network with the proxy still on it cannot be removed.
+          if (options.egress) await options.egress.detachTarget(target);
+          for (const n of await listNetworks(labels)) {
+            const res = await call("DELETE", `/networks/${encodeURIComponent(n.Id)}`);
+            if (res.status === 204) removed++;
+          }
+          for (const [id, rec] of processes) {
+            if (rec.orgId === target.orgId && rec.agentId === target.agentId) {
+              if (rec.timer) clearTimeout(rec.timer);
+              rec.stream.destroy();
+              processes.delete(id);
+            }
+          }
+          const key = targetKey(target);
+          lastActive.delete(key);
+          diskBytes.delete(key);
+          diskFull.delete(key);
+          stopReasons.delete(key);
+          cpuLast.delete(key);
+          if (hadShell) emit({ type: "state", target, kind: "sbx", state: "absent", reason: null });
+          return { removed };
+        }),
+      );
     },
 
     async workspace(target, opts = {}) {
@@ -1266,6 +1271,7 @@ export function createSandboxes(options: SandboxesOptions): Sandboxes {
         if (opts.touch !== false) lastActive.set(targetKey(target), clock.now());
         return { containerId: c.Id, kind: "sbx" };
       }
+      // Never takes the bot's own lock while holding this one (purge holds both, the bot's first).
       return locked(`files:${targetKey(target)}`, async () => {
         const volume = nameFor("ws", ns, target.agentId);
         const vol = await call("GET", `/volumes/${encodeURIComponent(volume)}`);
