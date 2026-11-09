@@ -12,6 +12,7 @@ import { errorMessage } from "@/lib/api";
 import { useRuntimeConfig } from "@/lib/config";
 import { cn, relativeTime } from "@/lib/utils";
 import { useUpdatePrompt } from "@/lib/workzone-queries";
+import { AgentAuthorLine, OutsideContentChip } from "./agent-author-line";
 import { ProposedByLine } from "./proposed-by-line";
 
 /** The shared queue: anyone can edit, remove or reorder queued prompts (drag, or the arrow buttons). */
@@ -111,9 +112,17 @@ function PromptMeta({ p }: { p: WorkPrompt }) {
   const name = p.authorName ?? "Someone";
   return (
     <span className="flex items-center gap-1.5 text-muted-foreground text-xs">
-      <UserAvatar name={name} seed={p.authorUserId} className="size-4 text-[8px]" />
-      <span className="truncate font-medium text-foreground/80">{name}</span>
+      {/* 07.16 (D-06): a bot's prompt names the bot and the person it works for; a person's stays as it was. */}
+      {p.authorAgent ? (
+        <AgentAuthorLine agent={p.authorAgent} forName={p.authorName} />
+      ) : (
+        <>
+          <UserAvatar name={name} seed={p.authorUserId} className="size-4 text-[8px]" />
+          <span className="truncate font-medium text-foreground/80">{name}</span>
+        </>
+      )}
       {p.proposedBy ? <ProposedByLine agent={p.proposedBy} /> : null}
+      {p.tainted ? <OutsideContentChip /> : null}
       <span>· {relativeTime(p.createdAt)}</span>
     </span>
   );

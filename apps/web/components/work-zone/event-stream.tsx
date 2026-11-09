@@ -28,6 +28,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { useCopy } from "@/hooks/use-copy";
 import type { LiveSession } from "@/lib/use-live-session";
 import { cn } from "@/lib/utils";
+import { AgentAuthorLine, OutsideContentChip } from "./agent-author-line";
 import { Markdown } from "./markdown";
 import { RUNTIMES, RuntimeLogo } from "./meta";
 import { ProposedByLine } from "./proposed-by-line";
@@ -391,15 +392,24 @@ function PromptBubble({ item, session }: { item: Extract<Item, { kind: "prompt" 
   return (
     <div className="flex flex-col items-end gap-1.5 pl-8 sm:pl-20" data-testid="prompt-bubble">
       <p className="flex items-center gap-1.5 text-muted-foreground text-xs">
+        {/* 07.16 (D-08): visible to everyone in the session. */}
+        {p?.tainted ? <OutsideContentChip /> : null}
         {item.pending ? (
           <span className="inline-flex items-center gap-1">
             <Spinner className="size-3" /> sending to {session.deviceName}
           </span>
         ) : null}
         {p ? <span className="tabular-nums">{hhmm(p.createdAt)}</span> : null}
-        <span className="font-medium text-foreground">{name}</span>
-        {p?.proposedBy ? <ProposedByLine agent={p.proposedBy} /> : null}
-        <UserAvatar name={name} seed={p?.authorUserId} className="size-5 text-[9px]" />
+        {/* 07.16 (D-06): a bot's prompt names the bot and the person it works for; a person's stays as it was. */}
+        {p?.authorAgent ? (
+          <AgentAuthorLine agent={p.authorAgent} forName={p.authorName} />
+        ) : (
+          <>
+            <span className="font-medium text-foreground">{name}</span>
+            {p?.proposedBy ? <ProposedByLine agent={p.proposedBy} /> : null}
+            <UserAvatar name={name} seed={p?.authorUserId} className="size-5 text-[9px]" />
+          </>
+        )}
       </p>
       {attachments.length > 0 ? (
         <MessageAttachments

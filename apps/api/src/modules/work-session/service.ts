@@ -18,6 +18,7 @@ import {
   type WorkApproval,
   type WorkPrompt,
   type WorkSession,
+  type WorkSessionAgentRef,
   type WorkSessionChanges,
   type WorkSessionStatus,
   type WorkSessionVisibilitySummary,
@@ -270,7 +271,7 @@ export class WorkSessionService implements DeviceSessionHandler {
     const rows = userId === null ? all : all.filter((r) => (r.access ?? []).length > 0);
     if (rows.length === 0) return [];
     const ids = rows.map((r) => r.s.id);
-    const [queued, pending, running, dir, summaries] = await Promise.all([
+    const [queued, pending, running, dir, summaries, starters] = await Promise.all([
       tx
         .select({ id: workPrompts.workSessionId, n: count() })
         .from(workPrompts)
@@ -288,6 +289,11 @@ export class WorkSessionService implements DeviceSessionHandler {
         .groupBy(workPrompts.workSessionId),
       memberDirectory(tx),
       visibilitySummaries(tx, ids),
+      // 07.16 (D-06): the bots that started these sessions, by the same lookup as the prompts' bots.
+      agentRefs(
+        tx,
+        rows.flatMap((r) => (r.s.startedByAgentId ? [r.s.startedByAgentId] : [])),
+      ),
     ]);
     const q = new Map(queued.map((r) => [r.id, Number(r.n)]));
     const p = new Map(pending.map((r) => [r.id, Number(r.n)]));
@@ -336,6 +342,7 @@ export class WorkSessionService implements DeviceSessionHandler {
           },
           createdAt: new Date(s.createdAt).toISOString(),
           updatedAt: new Date(s.updatedAt).toISOString(),
+          startedByAgent: agentRefOf(s.startedByAgentId, starters),
         };
         return {
           dto,
@@ -365,13 +372,14 @@ export class WorkSessionService implements DeviceSessionHandler {
       tx,
       rows.map((r) => r.id),
     );
-    const bots = await proposerNames(tx, rows);
+    const bots = await promptAgents(tx, rows);
     return rows.map((r) =>
       toPrompt(
         r,
         dir.get(r.authorUserId)?.displayName ?? null,
         images.get(r.id) ?? [],
         proposedByOf(r, bots),
+        agentRefOf(r.authorAgentId, bots),
       ),
     );
   }
@@ -592,7 +600,7 @@ export class WorkSessionService implements DeviceSessionHandler {
 
   async emitPrompt(tx: Tx, row: PromptRow): Promise<void> {
     const [dir, images] = await Promise.all([memberDirectory(tx), attachmentsForWorkPrompts(tx, [row.id])]);
-    const bots = await proposerNames(tx, [row]);
+    const bots = await promptAgents(tx, [row]);
     await this.deps.realtime.appendEvent(
       tx,
       wsTopic(row.workSessionId),
@@ -602,6 +610,7 @@ export class WorkSessionService implements DeviceSessionHandler {
         dir.get(row.authorUserId)?.displayName ?? null,
         images.get(row.id) ?? [],
         proposedByOf(row, bots),
+        agentRefOf(row.authorAgentId, bots),
       ),
     );
   }
@@ -1797,25 +1806,46 @@ export function normalizeEvent(ev: SessionEvent): SessionEvent {
   return ev;
 }
 
+/** A bot as a session or a prompt names it (name and handle), live bots only. */
+type AgentNames = ReadonlyMap<string, { name: string; handle: string }>;
+
 /**
- * Phase 07.5 (D-04, UI-SPEC Surface 3): the names of the bots that proposed these prompts. A deleted bot (soft
- * delete; a hard delete already cleared the column) is gone, so its prompts show no proposer. One query, and only
- * when a prompt has a proposer.
+ * The live bots among `ids`. A deleted bot (soft delete; a hard delete already cleared the column) is gone, so what
+ * it proposed, wrote or started names no bot. One query, and none when no id is given.
  */
-async function proposerNames(tx: Tx, rows: readonly PromptRow[]): Promise<Map<string, string>> {
-  const ids = [...new Set(rows.flatMap((r) => (r.proposedByAgentId ? [r.proposedByAgentId] : [])))];
-  if (ids.length === 0) return new Map();
+async function agentRefs(tx: Tx, ids: readonly string[]): Promise<AgentNames> {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return new Map();
   const found = await tx
-    .select({ id: agents.id, name: agents.name })
+    .select({ id: agents.id, name: agents.name, handle: agents.username })
     .from(agents)
-    .where(and(inArray(agents.id, ids), isNull(agents.deletedAt)));
-  return new Map(found.map((a) => [a.id, a.name]));
+    .where(and(inArray(agents.id, unique), isNull(agents.deletedAt)));
+  return new Map(found.map((a) => [a.id, { name: a.name, handle: a.handle }]));
 }
 
-function proposedByOf(r: PromptRow, names: ReadonlyMap<string, string>): WorkPrompt["proposedBy"] {
-  const name = r.proposedByAgentId ? names.get(r.proposedByAgentId) : undefined;
-  return r.proposedByAgentId && name !== undefined
-    ? { agentId: r.proposedByAgentId, displayName: name.slice(0, 200) }
+/**
+ * Phase 07.5 (D-04, UI-SPEC Surface 3) and 07.16 (D-06): the bots that proposed or wrote these prompts, in one
+ * lookup for both columns.
+ */
+function promptAgents(tx: Tx, rows: readonly PromptRow[]): Promise<AgentNames> {
+  return agentRefs(
+    tx,
+    rows.flatMap((r) => [r.proposedByAgentId, r.authorAgentId].filter((id): id is string => id !== null)),
+  );
+}
+
+function proposedByOf(r: PromptRow, names: AgentNames): WorkPrompt["proposedBy"] {
+  const bot = r.proposedByAgentId ? names.get(r.proposedByAgentId) : undefined;
+  return r.proposedByAgentId && bot !== undefined
+    ? { agentId: r.proposedByAgentId, displayName: bot.name.slice(0, 200) }
+    : null;
+}
+
+/** 07.16 (D-06): `agentId` as a stable reference with its name and handle; null when unset or deleted. */
+function agentRefOf(agentId: string | null, names: AgentNames): WorkSessionAgentRef | null {
+  const bot = agentId ? names.get(agentId) : undefined;
+  return agentId && bot
+    ? { agentId, displayName: bot.name.slice(0, 200), handle: bot.handle.slice(0, 64) }
     : null;
 }
 
@@ -1825,6 +1855,8 @@ export function toPrompt(
   attachments: Attachment[] = [],
   /** Phase 07.5: the bot whose Work Zone proposal created this prompt (`proposedByOf`); null for a person's prompt. */
   proposedBy: WorkPrompt["proposedBy"] = null,
+  /** 07.16 (D-06): the bot that wrote this prompt (`agentRefOf`); the author stays its sponsor. */
+  authorAgent: WorkSessionAgentRef | null = null,
 ): WorkPrompt {
   return {
     id: r.id,
@@ -1840,6 +1872,9 @@ export function toPrompt(
     completedAt: iso(r.completedAt),
     attachments,
     proposedBy,
+    authorAgent,
+    // D-08: sent from a bot turn after outside content (or the first prompt of a proposal made after it).
+    tainted: r.tainted,
   };
 }
 

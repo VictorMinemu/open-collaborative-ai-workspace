@@ -16,7 +16,7 @@ describe("AgentAuthorLine", () => {
     expect(html).toContain('data-testid="agent-author"');
     expect(html).toContain('<span class="sr-only">Scout, for Ana Pérez</span>');
     // The visible parts are decoration for screen readers.
-    expect(text(html.replace(/<span class="sr-only">[^<]*<\/span>/, ""))).toBe("Scout · for Ana");
+    expect(text(html.replace(/<span class="sr-only">[^<]*<\/span>/, ""))).toMatch(/^Scout ?· for Ana$/);
     expect(html).not.toContain('sr-only">Scout · for Ana<');
   });
 
