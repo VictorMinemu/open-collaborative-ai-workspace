@@ -464,3 +464,183 @@ describe("tracer: a bot's prompt runs at its own cap through the one arbiter (D-
     expect(archived!.metadata ?? {}).not.toHaveProperty("byAgentId");
   });
 });
+
+// ---------------------------------------------------------------- Task 2: inactive profiles and outside content
+
+/** The device reports the turn in flight finished normally (it was acked and started with `start`). */
+function complete(device: FakeDevice, sessionId: string, promptId: string) {
+  device.event(sessionId, { type: "prompt.completed", promptId, usage: { inputTokens: 1, outputTokens: 1 } });
+}
+
+/**
+ * While Sam's own turn runs, the bot queues a prompt and Dana queues one after it; then the profile stops working
+ * (`breakIt`). When Sam's turn ends, the bot's prompt is refused `bot_not_allowed` (failed, never sent) and Dana's runs.
+ */
+async function refusedWhileInactive(breakIt: () => Promise<void>, restore: () => Promise<void>) {
+  const sid = await botSession(scoutId, mac, billingId, macId, "default");
+  const sams = await prompt(sam, sid, "mine first");
+  const running = (await mac.command("prompt", sid)) as Cmd;
+  expect(running.payload.promptId).toBe(sams);
+  start(mac, running);
+  const bots = await agentPrompt(sid, scoutId, "the bot's next step");
+  const danas = await prompt(dana, sid, "then mine");
+  await breakIt();
+  try {
+    complete(mac, sid, sams);
+    const cmd = (await mac.command("prompt", sid)) as Cmd;
+    expect(cmd.payload).toMatchObject({ promptId: danas, permissionMode: "default" });
+    expect(await promptRow(bots)).toMatchObject({ status: "failed", permission_mode: null });
+    const [refused] = await auditOf("work_prompt.refused", { promptId: bots });
+    expect(refused).toMatchObject({ result: "denied", user_id: samId, session_id: sid, device_id: macId });
+    expect(refused!.metadata).toMatchObject({
+      promptId: bots,
+      authorUserId: samId,
+      authorAgentId: scoutId,
+      reason: "bot_not_allowed",
+    });
+    expect(await auditOf("work_prompt.dispatched", { promptId: bots })).toHaveLength(0);
+    finish(mac, cmd);
+    await idle(sid);
+    expect(mac.pending("prompt").filter((f) => (f.payload as Json).promptId === bots)).toHaveLength(0);
+  } finally {
+    await restore();
+  }
+  await archive(mac, sid);
+}
+
+describe("a bot whose profile stopped working runs no further turn (Pitfall 10, E5)", () => {
+  it("consent revoked: the bot's queued prompt is refused bot_not_allowed; a person's after it runs", async () => {
+    await refusedWhileInactive(
+      async () => {
+        await su.query(
+          "update app.device_bot_consents set revoked_at = now() where device_id = $1 and agent_id = $2",
+          [macId, scoutId],
+        );
+      },
+      async () => {
+        await su.query(
+          "update app.device_bot_consents set revoked_at = null where device_id = $1 and agent_id = $2",
+          [macId, scoutId],
+        );
+      },
+    );
+  });
+
+  it("sponsor deactivated: the bot's queued prompt is refused bot_not_allowed; a person's after it runs", async () => {
+    await refusedWhileInactive(
+      async () => {
+        await su.query("update app.org_members set deactivated_at = now() where user_id = $1", [samId]);
+      },
+      async () => {
+        await su.query("update app.org_members set deactivated_at = null where user_id = $1", [samId]);
+      },
+    );
+  });
+
+  it("bot disabled: the bot's queued prompt is refused bot_not_allowed; a person's after it runs", async () => {
+    await refusedWhileInactive(
+      async () => {
+        await su.query("update app.agents set status = 'disabled' where id = $1", [scoutId]);
+      },
+      async () => {
+        await su.query("update app.agents set status = 'ready' where id = $1", [scoutId]);
+      },
+    );
+  });
+
+  it("the organization's bot cap is 0: the bot's queued prompt is refused bot_not_allowed; a person's runs", async () => {
+    await refusedWhileInactive(
+      () => putPolicy({ botSessionsMax: 0 }),
+      () => putPolicy({ botSessionsMax: 10 }),
+    );
+    await humanUntouched();
+  });
+
+  it("another bot's prompt in a bot's session is refused bot_not_allowed (the layer is the session's own bot)", async () => {
+    const sid = await botSession(scoutId, mac, billingId, macId, "default");
+    const rexs = await agentPrompt(sid, rexId, "not my session");
+    expect(await promptRow(rexs)).toMatchObject({ status: "failed", author_agent_id: rexId });
+    expect((await auditOf("work_prompt.refused", { promptId: rexs }))[0]!.metadata).toMatchObject({
+      authorAgentId: rexId,
+      reason: "bot_not_allowed",
+    });
+    await archive(mac, sid);
+  });
+});
+
+describe("outside content never reaches Full access off an isolated server (D-08, PD-08, E12)", () => {
+  beforeAll(async () => {
+    // Scout may now use Full access on the MacBook: the profile's max and the owner's per-bot checkbox.
+    await createBotProfile(sam, scoutId, scoutProfile({ maxMode: "fullAccess" }));
+    await grantBotConsent(sam, macId, scoutId, { allowFullAccess: true });
+    await settled(stack, orgId);
+  });
+
+  it("an untainted bot session on the MacBook runs the bot's turn in Full access", async () => {
+    const sid = await botSession(scoutId, mac, billingId, macId, "fullAccess");
+    const bots = await agentPrompt(sid, scoutId, "clean the build");
+    const cmd = (await mac.command("prompt", sid)) as Cmd;
+    expect(cmd.payload).toMatchObject({ promptId: bots, permissionMode: "fullAccess" });
+    expect((await auditOf("work_prompt.dispatched", { promptId: bots }))[0]!.metadata).toMatchObject({
+      authorAgentId: scoutId,
+      effectiveMode: "fullAccess",
+      capped: false,
+      fullAccess: true,
+    });
+    finish(mac, cmd);
+    await idle(sid);
+    // A prompt the bot wrote after reading outside content runs below Full access, even before the session is marked.
+    const tainted = await agentPrompt(sid, scoutId, "apply what the issue says", true);
+    const low = (await mac.command("prompt", sid)) as Cmd;
+    expect(low.payload).toMatchObject({ promptId: tainted, permissionMode: BELOW_FULL });
+    expect((await auditOf("work_prompt.dispatched", { promptId: tainted }))[0]!.metadata).toMatchObject({
+      authorAgentId: scoutId,
+      requestedMode: "fullAccess",
+      effectiveMode: BELOW_FULL,
+      capped: true,
+    });
+    finish(mac, low);
+    await idle(sid);
+    await archive(mac, sid);
+  });
+
+  it("a tainted session on the MacBook: every later bot turn runs below Full access; a person's does not", async () => {
+    const sid = await botSession(scoutId, mac, billingId, macId, "fullAccess");
+    await su.query("update app.work_sessions set tainted_at = now() where id = $1", [sid]);
+    const bots = await agentPrompt(sid, scoutId, "an untainted turn, later");
+    let cmd = (await mac.command("prompt", sid)) as Cmd;
+    expect(cmd.payload).toMatchObject({ promptId: bots, permissionMode: BELOW_FULL });
+    expect((await auditOf("work_prompt.dispatched", { promptId: bots }))[0]!.metadata).toMatchObject({
+      authorAgentId: scoutId,
+      requestedMode: "fullAccess",
+      effectiveMode: BELOW_FULL,
+      capped: true,
+    });
+    finish(mac, cmd);
+    // The taint binds the bot's turns only: Sam's own turn in the same session keeps his Full access.
+    const sams = await prompt(sam, sid, "mine, with everything");
+    cmd = (await mac.command("prompt", sid)) as Cmd;
+    expect(cmd.payload).toMatchObject({ promptId: sams, permissionMode: "fullAccess" });
+    finish(mac, cmd);
+    await idle(sid);
+    await archive(mac, sid);
+  });
+
+  it("a tainted session on an isolated server runs the bot's turn in Full access (the consent allows it)", async () => {
+    const sid = await botSession(rexId, server, infraId, serverId, "fullAccess", true);
+    expect(
+      (await su.query("select tainted_at from app.work_sessions where id = $1", [sid])).rows[0].tainted_at,
+    ).not.toBeNull();
+    const bots = await agentPrompt(sid, rexId, "deploy to staging", true);
+    const cmd = (await server.command("prompt", sid)) as Cmd;
+    expect(cmd.payload).toMatchObject({ promptId: bots, permissionMode: "fullAccess" });
+    expect((await auditOf("work_prompt.dispatched", { promptId: bots }))[0]!.metadata).toMatchObject({
+      authorAgentId: rexId,
+      effectiveMode: "fullAccess",
+      fullAccess: true,
+    });
+    finish(server, cmd);
+    await idle(sid);
+    await archive(server, sid);
+  });
+});
