@@ -26,6 +26,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { describedBy, FormField } from "@/components/ui/form-field";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
@@ -40,7 +41,13 @@ import {
   RUNTIMES,
   RuntimeLogo,
 } from "@/components/work-zone/meta";
-import { ProjectsLoading, RowCheck, radioRowClass } from "@/components/work-zone/new-session-sections";
+import {
+  onRadioGroupKeyDown,
+  ProjectsLoading,
+  RowCheck,
+  radioRowClass,
+  TOUCH,
+} from "@/components/work-zone/new-session-sections";
 import { errorMessage, isApiError } from "@/lib/api";
 import {
   useBotWorkZoneProfile,
@@ -374,12 +381,19 @@ export const FAST_MODE_OPTIONS: ReadonlyArray<{ value: BotFastMode; label: strin
 type LimitKey = "maxConcurrent" | "promptsPerHour" | "wakesPerSessionDay";
 
 /** The three limits (PD-22), bounded exactly as the contract bounds them. */
-export const LIMIT_FIELDS: ReadonlyArray<{ key: LimitKey; label: string; min: number; max: number }> = [
+export const LIMIT_FIELDS: ReadonlyArray<{
+  key: LimitKey;
+  label: string;
+  min: number;
+  max: number;
+  hint?: string;
+}> = [
   { key: "maxConcurrent", label: "Sessions at once", min: 1, max: BOT_WORK_ZONE_LIMITS.maxConcurrentMax },
   { key: "promptsPerHour", label: "Prompts per hour", min: 1, max: BOT_WORK_ZONE_LIMITS.promptsPerHourMax },
   {
     key: "wakesPerSessionDay",
-    label: "Wake-ups per session per day",
+    label: "Wake-ups per day",
+    hint: `Per session, 0 to ${BOT_WORK_ZONE_LIMITS.wakesPerSessionDayMax}`,
     min: 0,
     max: BOT_WORK_ZONE_LIMITS.wakesPerSessionDayMax,
   },
@@ -456,7 +470,12 @@ function StatusRow({ view }: { view: BotWorkZoneProfileView }) {
   const { profile, status } = view;
   const tone = !profile ? "none" : status.active ? "active" : "inactive";
   return (
-    <div className="grid gap-1 rounded-lg border bg-muted/30 p-3" data-testid="work-zone-status">
+    <div
+      className="grid gap-1 rounded-lg border bg-muted/30 p-3"
+      role="status"
+      aria-live="polite"
+      data-testid="work-zone-status"
+    >
       <p className="flex items-start gap-2 text-sm">
         <span
           aria-hidden
@@ -512,7 +531,7 @@ export function RemoveProfileButton({
       onClick={onClick}
       disabled={pending}
       data-testid="work-zone-remove"
-      className="w-full sm:w-auto"
+      className="w-full max-md:h-11 sm:w-auto"
     >
       {pending ? <Spinner /> : <Trash2 aria-hidden />}
       {confirming ? WORK_ZONE_COPY.confirmRemove : WORK_ZONE_COPY.remove}
@@ -577,7 +596,10 @@ export function WorkZoneProfileEditor({
         <div className="grid justify-items-start gap-2 rounded-lg border border-dashed p-4">
           <p className="font-medium text-sm">{WORK_ZONE_COPY.noDevice}</p>
           <p className="text-[13px] text-muted-foreground">{WORK_ZONE_COPY.noDeviceHint}</p>
-          <Link href="/settings/devices" className={buttonVariants({ size: "sm", variant: "outline" })}>
+          <Link
+            href="/settings/devices"
+            className={buttonVariants({ size: "sm", variant: "outline", className: TOUCH })}
+          >
             <Laptop aria-hidden /> Manage devices
           </Link>
         </div>
@@ -657,14 +679,16 @@ export function WorkZoneProfileEditor({
               data-testid="work-zone-device"
               aria-invalid={!!errors.deviceId}
               aria-describedby={describedBy(`${id}-device`, errors.deviceId)}
-              className="w-full"
+              className="w-full max-md:h-11"
             />
             <SelectContent>
               {usable.map((d) => (
-                <SelectItem key={d.id} value={d.id}>
+                <SelectItem className="max-md:min-h-11" key={d.id} value={d.id}>
                   <span className="flex min-w-0 items-center gap-2">
                     <OnlineDot online={d.status === "online"} className="size-1.5" />
-                    <span className="truncate">{d.name}</span>
+                    <span className="truncate" title={d.name}>
+                      {d.name}
+                    </span>
                     {d.hostKind === "service" ? <ServerBadge /> : null}
                   </span>
                 </SelectItem>
@@ -684,41 +708,13 @@ export function WorkZoneProfileEditor({
           <p id={`${id}-runtime`} className="font-medium text-sm">
             Runtime
           </p>
-          <div
-            role="radiogroup"
-            aria-labelledby={`${id}-runtime`}
-            className="grid grid-cols-2 gap-2"
-            data-testid="work-zone-runtime"
-          >
-            {RUNTIME_IDS.map((r) => {
-              const ready = device ? signedIn(device, r) : false;
-              const checked = draft.runtime === r;
-              return (
-                <button
-                  key={r}
-                  type="button"
-                  role="radio"
-                  aria-checked={checked}
-                  tabIndex={checked ? 0 : -1}
-                  disabled={busy || (!ready && !checked)}
-                  onClick={() => pickRuntime(r)}
-                  data-testid={`work-zone-runtime-${r}`}
-                  className={cn(radioRowClass, "rounded-lg border")}
-                >
-                  <RuntimeLogo runtime={r} />
-                  <span className="grid min-w-0 flex-1 gap-0.5">
-                    <span className="truncate font-medium text-sm">{RUNTIMES[r].label}</span>
-                    {!ready ? (
-                      <span className="truncate text-muted-foreground text-xs">
-                        Not signed in on this device
-                      </span>
-                    ) : null}
-                  </span>
-                  <RowCheck checked={checked} />
-                </button>
-              );
-            })}
-          </div>
+          <RuntimeChoice
+            labelId={`${id}-runtime`}
+            value={draft.runtime}
+            device={device}
+            disabled={busy}
+            onChange={pickRuntime}
+          />
           {errors.runtime ? (
             <p role="alert" className="text-[13px] text-destructive">
               {errors.runtime}
@@ -865,7 +861,7 @@ export function WorkZoneProfileEditor({
       </Group>
 
       <Group legend="Limits">
-        <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
           {LIMIT_FIELDS.map((f) => (
             <LimitField
               key={f.key}
@@ -908,7 +904,7 @@ export function WorkZoneProfileEditor({
             onClick={submit}
             disabled={save.isPending}
             data-testid="work-zone-save"
-            className="w-full sm:w-auto"
+            className="w-full max-md:h-11 sm:w-auto"
           >
             {save.isPending ? <Spinner /> : null}
             {WORK_ZONE_COPY.save}
@@ -933,6 +929,63 @@ function fallbackModes(d: ProfileDraft): Choice<PermissionMode>[] {
 
 function deviceLabel(d: Device): string {
   return d.hostKind === "service" ? `${d.name} · Server` : d.name;
+}
+
+/**
+ * The runtime as a two-option segmented control (a WAI-ARIA radio group: one tab stop, arrow keys move and choose).
+ * A runtime not signed in on the device is disabled with that fact, unless it is the stored one.
+ */
+export function RuntimeChoice({
+  labelId,
+  value,
+  device,
+  disabled,
+  onChange,
+}: {
+  labelId: string;
+  value: RuntimeId;
+  device: Device | null;
+  disabled: boolean;
+  onChange: (r: RuntimeId) => void;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-labelledby={labelId}
+      onKeyDown={onRadioGroupKeyDown}
+      className="grid grid-cols-2 gap-2"
+      data-testid="work-zone-runtime"
+    >
+      {RUNTIME_IDS.map((r) => {
+        const ready = device ? signedIn(device, r) : false;
+        const checked = value === r;
+        return (
+          <button
+            key={r}
+            type="button"
+            role="radio"
+            aria-checked={checked}
+            tabIndex={checked ? 0 : -1}
+            disabled={disabled || (!ready && !checked)}
+            onClick={() => onChange(r)}
+            data-testid={`work-zone-runtime-${r}`}
+            className={cn(radioRowClass, "rounded-lg border")}
+          >
+            <RuntimeLogo runtime={r} />
+            <span className="grid min-w-0 flex-1 gap-0.5">
+              <span className="truncate font-medium text-sm">{RUNTIMES[r].label}</span>
+              {!ready ? (
+                <span className="truncate text-muted-foreground text-xs" title="Not signed in on this device">
+                  Not signed in
+                </span>
+              ) : null}
+            </span>
+            <RowCheck checked={checked} />
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 function ServerBadge() {
@@ -1008,7 +1061,7 @@ function DefaultAndAllowed<V extends string | number>({
   const allowedId = `${id}-allowed`;
   return (
     <div className="grid gap-4 md:grid-cols-2">
-      <FormField id={id} label={label} error={defaultError}>
+      <FormField id={id} label={label} error={defaultError} className="content-start">
         <Select
           items={items}
           value={defaultValue === null ? RUNTIME_DEFAULT : String(defaultValue)}
@@ -1023,12 +1076,19 @@ function DefaultAndAllowed<V extends string | number>({
             data-testid={`work-zone-default-${testId}`}
             aria-invalid={!!defaultError}
             aria-describedby={describedBy(id, defaultError)}
-            className="w-full"
+            className="w-full max-md:h-11"
           />
           <SelectContent>
-            <SelectItem value={RUNTIME_DEFAULT}>{WORK_ZONE_COPY.runtimeDefault}</SelectItem>
+            <SelectItem className="max-md:min-h-11" value={RUNTIME_DEFAULT}>
+              {WORK_ZONE_COPY.runtimeDefault}
+            </SelectItem>
             {choices.map((c) => (
-              <SelectItem key={String(c.value)} value={String(c.value)} disabled={!c.available}>
+              <SelectItem
+                className="max-md:min-h-11"
+                key={String(c.value)}
+                value={String(c.value)}
+                disabled={!c.available}
+              >
                 <ChoiceLabel choice={c} />
               </SelectItem>
             ))}
@@ -1036,30 +1096,9 @@ function DefaultAndAllowed<V extends string | number>({
         </Select>
       </FormField>
       <div className="grid content-start gap-2" data-testid={`work-zone-allowed-${pluralTestId}-field`}>
-        <p id={`${allowedId}-label`} className="font-medium text-sm">
+        <Label id={`${allowedId}-label`} htmlFor={allowedId}>
           Bot may also use
-        </p>
-        {others.length > 0 ? (
-          <ul aria-labelledby={`${allowedId}-label`} className="flex flex-wrap gap-1.5">
-            {others.map((v) => (
-              <li key={String(v)}>
-                <Badge variant="outline" className="h-7 gap-0.5 py-0 pr-0.5 pl-2 text-foreground text-xs">
-                  {labelOf(v)}
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label={`Remove ${labelOf(v)}`}
-                    disabled={disabled}
-                    onClick={() => onAllowed(allowed.filter((x) => x !== v))}
-                    className="size-6 text-muted-foreground"
-                  >
-                    <X aria-hidden />
-                  </Button>
-                </Badge>
-              </li>
-            ))}
-          </ul>
-        ) : null}
+        </Label>
         <Select
           items={add.map((c) => ({ value: String(c.value), label: c.label }))}
           value={null}
@@ -1070,21 +1109,46 @@ function DefaultAndAllowed<V extends string | number>({
           disabled={disabled || add.length === 0}
         >
           <SelectTrigger
+            id={allowedId}
             placeholder={`Add a ${noun}…`}
             aria-label={`Add a ${noun} the bot may also use`}
             aria-invalid={!!allowedError}
             aria-describedby={allowedError ? `${allowedId}-error` : hint ? `${allowedId}-hint` : undefined}
             data-testid={`work-zone-allowed-${pluralTestId}`}
-            className="w-full"
+            className="w-full max-md:h-11"
           />
           <SelectContent>
             {add.map((c) => (
-              <SelectItem key={String(c.value)} value={String(c.value)}>
+              <SelectItem className="max-md:min-h-11" key={String(c.value)} value={String(c.value)}>
                 {c.label}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
+        {others.length > 0 ? (
+          <ul aria-labelledby={`${allowedId}-label`} className="flex flex-wrap gap-1.5">
+            {others.map((v) => (
+              <li key={String(v)}>
+                <Badge
+                  variant="outline"
+                  className="h-7 gap-0.5 py-0 pr-0.5 pl-2 text-foreground text-xs max-md:h-11 max-md:text-[13px]"
+                >
+                  {labelOf(v)}
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={`Remove ${labelOf(v)}`}
+                    disabled={disabled}
+                    onClick={() => onAllowed(allowed.filter((x) => x !== v))}
+                    className="size-6 text-muted-foreground max-md:size-11"
+                  >
+                    <X aria-hidden />
+                  </Button>
+                </Badge>
+              </li>
+            ))}
+          </ul>
+        ) : null}
         {allowedError ? (
           <p id={`${allowedId}-error`} role="alert" className="text-[13px] text-destructive">
             {allowedError}
@@ -1120,6 +1184,7 @@ function FastModeField({
       label="Fast mode"
       error={error}
       hint={fast.available ? undefined : (fast.reason ?? undefined)}
+      className="content-start md:w-[calc(50%-0.5rem)]"
     >
       <Select
         items={FAST_MODE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
@@ -1132,11 +1197,16 @@ function FastModeField({
           data-testid="work-zone-fast"
           aria-invalid={!!error}
           aria-describedby={describedBy(id, error, fast.available ? undefined : fast.reason)}
-          className="w-full md:w-1/2"
+          className="w-full max-md:h-11"
         />
         <SelectContent>
           {FAST_MODE_OPTIONS.map((o) => (
-            <SelectItem key={o.value} value={o.value} disabled={o.value !== "off" && !fast.available}>
+            <SelectItem
+              className="max-md:min-h-11"
+              key={o.value}
+              value={o.value}
+              disabled={o.value !== "off" && !fast.available}
+            >
               {o.label}
             </SelectItem>
           ))}
@@ -1171,7 +1241,7 @@ function ModeField({
     ? modes
     : [...modes, ...fallbackModes({ defaultMode: value, maxMode: value } as ProfileDraft)];
   return (
-    <FormField id={id} label={label} error={error} hint={hint}>
+    <FormField id={id} label={label} error={error} hint={hint} className="content-start">
       <Select
         items={items.map((m) => ({ value: m.value, label: m.label }))}
         value={value}
@@ -1183,11 +1253,11 @@ function ModeField({
           data-testid={testId}
           aria-invalid={!!error}
           aria-describedby={describedBy(id, error, hint)}
-          className="w-full"
+          className="w-full max-md:h-11"
         />
         <SelectContent>
           {items.map((m) => (
-            <SelectItem key={m.value} value={m.value} disabled={!m.available}>
+            <SelectItem className="max-md:min-h-11" key={m.value} value={m.value} disabled={!m.available}>
               <span className="flex min-w-0 items-start gap-2">
                 {m.warning ? (
                   <LockOpen
@@ -1223,11 +1293,12 @@ function LimitField({
 }) {
   const [text, setText] = useState(String(value));
   useEffect(() => setText(String(value)), [value]);
-  const hint = `${field.min} to ${field.max}`;
+  const hint = field.hint ?? `${field.min} to ${field.max}`;
   const clamp = (n: number) => Math.min(field.max, Math.max(field.min, n));
   return (
-    <FormField id={id} label={field.label} error={error} hint={hint}>
+    <FormField id={id} label={field.label} error={error} hint={hint} className="content-start">
       <Input
+        className="max-md:h-11"
         id={id}
         type="number"
         inputMode="numeric"
@@ -1364,7 +1435,9 @@ function ProjectChecks({
         className={cn("size-4 shrink-0", chosen.has(p.id) ? "text-primary" : "text-muted-foreground")}
       />
       <span className="grid min-w-0 flex-1 gap-0.5">
-        <span className="truncate font-medium text-sm leading-tight">{p.name}</span>
+        <span className="truncate font-medium text-sm leading-tight" title={p.name}>
+          {p.name}
+        </span>
         {caption ? <span className="truncate text-muted-foreground text-xs">{caption}</span> : null}
       </span>
       <RowCheck checked={chosen.has(p.id)} />
@@ -1388,7 +1461,7 @@ function ProjectChecks({
             <div key={g.project.id} className="divide-y">
               <div className="flex min-w-0 items-center gap-1.5 bg-muted/70 px-3 py-1.5 text-muted-foreground text-xs">
                 <FolderKanban aria-hidden className="size-3.5 shrink-0" />
-                <span className="min-w-0 truncate">
+                <span className="min-w-0 truncate" title={g.project.name}>
                   <span className="font-semibold text-foreground">{g.project.name}</span> · Team project
                 </span>
               </div>
