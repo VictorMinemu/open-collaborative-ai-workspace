@@ -644,3 +644,179 @@ describe("outside content never reaches Full access off an isolated server (D-08
     await archive(server, sid);
   });
 });
+
+// ---------------------------------------------------------------- Task 3: agent-aware re-authorization
+
+/** A bot session in Full access whose bot turn is running on `device`; returns the session and the prompt. */
+async function runningBotTurn(
+  agentId: string,
+  device: FakeDevice,
+  projectId: string,
+  deviceId: string,
+  tainted = false,
+) {
+  const sid = await botSession(agentId, device, projectId, deviceId, "fullAccess", tainted);
+  const pid = await agentPrompt(sid, agentId, "a long Full access task");
+  const cmd = (await device.command("prompt", sid)) as Cmd;
+  expect(cmd.payload).toMatchObject({ promptId: pid, permissionMode: "fullAccess" });
+  start(device, cmd);
+  await eventually(async () => (await sessionRow(sid)).status === "running");
+  return { sid, pid };
+}
+
+const revokeScout = () => ok(sam.request("DELETE", `/api/v1/devices/${macId}/bot-consents/${scoutId}`));
+const regrantScout = () => grantBotConsent(sam, macId, scoutId, { allowFullAccess: true });
+
+describe("re-authorization is agent-aware for bot sessions (E4, PD-08)", () => {
+  it("consent revoked while the bot's Full access turn runs: interrupted, and its next prompt refused", async () => {
+    const { sid, pid } = await runningBotTurn(scoutId, mac, billingId, macId);
+    const next = await agentPrompt(sid, scoutId, "and then this");
+    const sams = await prompt(sam, sid, "mine after");
+    await revokeScout();
+    const interrupt = (await mac.command("interrupt", sid)) as Cmd;
+    mac.ack(interrupt.id);
+    await settled(stack, orgId);
+    // Sam may still use Full access himself: the session keeps his highest mode, people keep their control of it.
+    expect(await sessionRow(sid)).toMatchObject({ permission_mode: "fullAccess" });
+    expect(pendingFor(mac, "session.configure", sid)).toHaveLength(0);
+    const [audit] = await auditOf("work_session.interrupted", { sessionId: sid });
+    expect(audit).toMatchObject({ session_id: sid, device_id: macId });
+    expect(audit!.metadata).toMatchObject({
+      reason: "access_changed",
+      promptId: pid,
+      authorAgentId: scoutId,
+    });
+    interrupted(mac, sid, pid);
+    const cmd = (await mac.command("prompt", sid)) as Cmd;
+    expect(cmd.payload).toMatchObject({ promptId: sams, permissionMode: "fullAccess" });
+    expect((await auditOf("work_prompt.refused", { promptId: next }))[0]!.metadata).toMatchObject({
+      authorAgentId: scoutId,
+      reason: "bot_not_allowed",
+    });
+    finish(mac, cmd);
+    await idle(sid);
+    await archive(mac, sid);
+    await regrantScout();
+    await humanUntouched();
+  });
+
+  it("a person's Full access turn in a bot session is not interrupted by the same revoke", async () => {
+    const sid = await botSession(scoutId, mac, billingId, macId, "fullAccess");
+    const sams = await prompt(sam, sid, "mine, with everything");
+    const cmd = (await mac.command("prompt", sid)) as Cmd;
+    expect(cmd.payload).toMatchObject({ promptId: sams, permissionMode: "fullAccess" });
+    start(mac, cmd);
+    await revokeScout();
+    await settled(stack, orgId);
+    await sleep(200);
+    expect(pendingFor(mac, "interrupt", sid)).toHaveLength(0);
+    expect(pendingFor(mac, "session.configure", sid)).toHaveLength(0);
+    expect(await sessionRow(sid)).toMatchObject({ status: "running", permission_mode: "fullAccess" });
+    expect(await auditOf("work_session.interrupted", { sessionId: sid })).toHaveLength(0);
+    complete(mac, sid, sams);
+    await idle(sid);
+    await archive(mac, sid);
+    await regrantScout();
+    await humanUntouched();
+  });
+
+  it("the profile saved down to acceptEdits lowers the bot's session and interrupts its Full access turn", async () => {
+    const { sid, pid } = await runningBotTurn(scoutId, mac, billingId, macId);
+    await createBotProfile(sam, scoutId, scoutProfile({ maxMode: "acceptEdits" }));
+    const configure = (await mac.command("session.configure", sid)) as Cmd;
+    expect(configure.payload).toEqual({
+      settings: { permissionMode: "acceptEdits" },
+      reason: "access_changed",
+    });
+    mac.ack(configure.id);
+    mac.ack(((await mac.command("interrupt", sid)) as Cmd).id);
+    await settled(stack, orgId);
+    expect((await sessionRow(sid)).permission_mode).toBe("acceptEdits");
+    expect((await auditOf("work_session.full_access_left", { sessionId: sid }))[0]!.metadata).toMatchObject({
+      from: "fullAccess",
+      to: "acceptEdits",
+      source: "access_changed",
+    });
+    interrupted(mac, sid, pid);
+    await idle(sid);
+    await archive(mac, sid);
+    await createBotProfile(sam, scoutId, scoutProfile({ maxMode: "fullAccess" }));
+    await humanUntouched();
+  });
+
+  it("isolation turned off on the server lowers a tainted bot session and interrupts its turn; an untainted one is left", async () => {
+    const clean = await botSession(rexId, server, infraId, serverId, "fullAccess");
+    const { sid, pid } = await runningBotTurn(rexId, server, infraId, serverId, true);
+    server.capabilities(FULL, true, false);
+    const configure = (await server.command("session.configure", sid)) as Cmd;
+    expect(configure.payload).toEqual({ settings: { permissionMode: BELOW_FULL }, reason: "device_opt_out" });
+    server.ack(configure.id);
+    server.ack(((await server.command("interrupt", sid)) as Cmd).id);
+    await settled(stack, orgId);
+    expect((await sessionRow(sid)).permission_mode).toBe(BELOW_FULL);
+    expect(await sessionRow(clean)).toMatchObject({ status: "idle", permission_mode: "fullAccess" });
+    expect(pendingFor(server, "session.configure", clean)).toHaveLength(0);
+    expect(pendingFor(server, "interrupt", clean)).toHaveLength(0);
+    interrupted(server, sid, pid);
+    await idle(sid);
+    server.capabilities(FULL, true, true);
+    await eventually(async () => {
+      const r = await su.query("select isolated_server from app.devices where id = $1", [serverId]);
+      return r.rows[0].isolated_server === true;
+    });
+    await archive(server, sid);
+    await archive(server, clean);
+    await humanUntouched();
+  });
+
+  it("a server that reconnects with the isolated mark off re-authorizes its bot sessions (the hello path)", async () => {
+    const clean = await botSession(rexId, server, infraId, serverId, "fullAccess");
+    const { sid, pid } = await runningBotTurn(rexId, server, infraId, serverId, true);
+    await server.close();
+    // The daemon restarts its link with its Full access opt-in still on and the isolated mark now off.
+    server = await FakeDevice.open(stack.baseUrl, await FakeDevice.exchange(stack.baseUrl, serverToken));
+    server.send({
+      type: "hello",
+      protocolVersion: 1,
+      device: { name: "Build server", platform: "linux", daemonVersion: "0.0.0-test", host: "service" },
+      runtimes: [
+        { id: "claude-code", installed: true, version: "2.1.287", loggedIn: true },
+        { id: "codex", installed: true, version: "0.160.0", loggedIn: false },
+      ],
+      sessions: [clean, sid],
+      fullAccessOptIn: true,
+      isolatedServer: false,
+    });
+    await server.next((f) => f.type === "welcome");
+    const configure = (await server.command("session.configure", sid)) as Cmd;
+    expect(configure.payload).toEqual({ settings: { permissionMode: BELOW_FULL }, reason: "device_opt_out" });
+    server.ack(configure.id);
+    server.ack(((await server.command("interrupt", sid)) as Cmd).id);
+    expect((await sessionRow(sid)).permission_mode).toBe(BELOW_FULL);
+    // The untainted session needs no isolation: untouched.
+    await sleep(200);
+    expect(await sessionRow(clean)).toMatchObject({ status: "idle", permission_mode: "fullAccess" });
+    expect(pendingFor(server, "session.configure", clean)).toHaveLength(0);
+    interrupted(server, sid, pid);
+    await idle(sid);
+    await archive(server, clean);
+    server.capabilities(FULL, true, true);
+    await eventually(async () => {
+      const r = await su.query("select isolated_server from app.devices where id = $1", [serverId]);
+      return r.rows[0].isolated_server === true;
+    });
+    await archive(server, sid);
+  });
+
+  it("no sweep above touched the person's own session on the MacBook", async () => {
+    await humanUntouched();
+    for (const action of [
+      "work_session.settings_downgraded",
+      "work_session.full_access_left",
+      "work_session.interrupted",
+      "work_session.access_revoked",
+    ]) {
+      expect(await auditOf(action, { sessionId: human }), action).toHaveLength(0);
+    }
+  });
+});
