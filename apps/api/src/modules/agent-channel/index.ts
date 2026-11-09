@@ -35,7 +35,7 @@ import { cellApprovedPlugins } from "../plugins";
 import type { SandboxdClient } from "../sandbox";
 // Types only: the watched module reaches modules that import this one (a value import would be a cycle).
 import type { RecordWrites } from "../watched";
-import type { WorkZoneProposalService } from "../work-session";
+import type { WorkSessionModule, WorkZoneProposalService } from "../work-session";
 import { finishActivity } from "./activity";
 import { registerAttachmentRoutes } from "./attachments";
 import { cellOf, createCellAuth } from "./auth";
@@ -66,6 +66,7 @@ import { createProviderAuth } from "./provider-auth";
 import { registerRecordRoutes } from "./records";
 import { registerSandboxRoutes, type SandboxBudgets } from "./sandbox";
 import { registerToolCallRoutes, type ToolApprovalGate } from "./tool-calls";
+import { registerBotWorkSessionRoutes } from "./work-sessions";
 import { registerWorkZoneRoutes } from "./work-zone";
 
 export { currentPhrase } from "./activity";
@@ -151,6 +152,11 @@ export function createAgentChannelModule(
     memory: MemoryService;
     /** Work Zone proposals (07.5-08): the work-session module's service; absent = the two routes are not served. */
     workZone?: WorkZoneProposalService | null;
+    /**
+     * A bot's own Work Zone sessions (07.16-15, PD-03): the work-session module, whose `bots` start sessions in the bot's
+     * sponsor's name; absent = the `/work-sessions/*` routes are not served.
+     */
+    workSession?: Pick<WorkSessionModule, "bots"> | null;
     /**
      * Natural-language automations (07.6-12): the automation module's proposal entry point; absent = the
      * `/automations/propose` route is not served.
@@ -562,6 +568,8 @@ export function createAgentChannelModule(
           registerMemoryFileRoutes(scope, { core, perms, memory: opts.memory });
           // Work Zone proposals (07.5-08, D-03): the projects a turn's human may use, and a session proposed as a card.
           if (opts.workZone) registerWorkZoneRoutes(scope, core, opts.workZone);
+          // A bot's own Work Zone sessions (07.16-15, D-05, PD-03): started in its sponsor's name, within its profile.
+          if (opts.workSession) registerBotWorkSessionRoutes(scope, core, opts.workSession);
           // Natural-language automations (07.6-12, D-02, D-03): a proposal card only the turn's person confirms.
           if (opts.automations) registerAutomationProposalRoutes(scope, core, opts.automations);
           // Agent-to-agent consults (07.7-04, D-07, D-08): a visible question in the turn's thread and a turn for the

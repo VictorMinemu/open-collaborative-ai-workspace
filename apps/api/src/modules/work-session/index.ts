@@ -7,6 +7,7 @@ import type { ObjectStorage } from "../artifact";
 import type { DeviceHub } from "../device";
 import { createPermissionService } from "../organization";
 import { registerBotProfileRoutes } from "./bot-profile";
+import { type BotSessions, createBotSessions } from "./bot-sessions";
 import { sessionFacts } from "./facts";
 import { loadWorkZonePolicy } from "./policy";
 import { registerProjectRoutes } from "./projects";
@@ -38,6 +39,16 @@ export {
   loadBotProfile,
   profileStatus,
 } from "./bot-profile";
+// 07.16-15 (PD-03, PD-10 … PD-13): a bot's own start, its audience, its card and the one ownership rule.
+export {
+  auditBotStart,
+  type BotSessions,
+  type BotWorkSessionRow,
+  botSessionAudience,
+  type ConversationReaders,
+  ownBotSession,
+  refusedAnswer,
+} from "./bot-sessions";
 export { sessionFacts, sessionFactsForUsers } from "./facts";
 export { createWorkSessionAttachmentScope } from "./images";
 export type { OrgQueueOptions, OrgTask } from "./org-queue";
@@ -80,6 +91,11 @@ export interface WorkSessionModule extends ApiModule {
    * Null when the module was built without the approval service (no `work_zone.start` kind to request).
    */
   proposals: WorkZoneProposalService | null;
+  /**
+   * 07.16-15 (PD-03): a bot's own Work Zone sessions. The Agent Channel routes call these inside the bot's sponsor's
+   * tenant transaction; every start goes through `start` above (`createWorkSession` with the agent layer).
+   */
+  bots: BotSessions;
 }
 
 /**
@@ -187,6 +203,9 @@ export function createWorkSessionModule(
     };
   }
 
+  // 07.16-15 (PD-03): a bot's start is `createWorkSession` for its sponsor, with the bot's caps as the agent layer.
+  const bots = createBotSessions({ core, start });
+
   return {
     name: "work-session",
     register(app) {
@@ -197,6 +216,7 @@ export function createWorkSessionModule(
     },
     start,
     proposals,
+    bots,
     // Shutdown (07.9 fan-out): the background queue drains for a bounded time, then what still waits is dropped.
     close: () => service.close(),
   };
