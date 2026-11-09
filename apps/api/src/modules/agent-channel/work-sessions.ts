@@ -60,8 +60,10 @@ import { conversationAudience } from "./memory-files";
  * session (`ownBotSession`, the one rule: `not_your_session` for a person's, another bot's or another organization's).
  * tx0 finds the turn, the profile and the bot's own session; tx1 runs as the sponsor: the profile's for a prompt (the
  * prompt is theirs, `profile_inactive` otherwise), the session's for a stop (its creator always sees it; a stop is
- * allowed with an inactive profile). A prompt from a turn that read outside content answers `outside_content` (07.16-19
- * adds the profile flag path); a stop is never blocked by taint (claimed with `outsideContent`). Both are exempt from
+ * allowed with an inactive profile). A prompt from a turn that read outside content answers `outside_content` unless
+ * the profile's flag allows it (07.16-19: claimed `outsideContent`, queued `tainted`, the session's `tainted_at` set);
+ * a start with the flag is claimed the same way, and an explicit Full access off an isolated server answers
+ * `outside_content_bypass`. A stop is never blocked by taint (claimed with `outsideContent`). Both are exempt from
  * the session-output rule (D-20). `interrupt` is not exposed and nothing here resolves a runtime approval (P3).
  *
  * Every outcome is a 200 `{ kind }` (the plugin reads a refusal's fixed sentence) except an unknown or ended turn (404
@@ -354,8 +356,20 @@ export function registerBotWorkSessionRoutes(
             if (!proposals) return refuse("outside_content");
             return { propose: { askerUserId: turn.userId, profile } };
           }
+          // D-04, PD-08: with the flag, Full access after outside content runs only on an isolated server. An explicit
+          // request elsewhere is told why (the context would refuse it as `bot_profile`); an implicit default is lowered
+          // by the context (`bots.start` passes the turn's taint into the layer).
+          if (turn.tainted && body.permissionMode === "fullAccess" && !status.layer.isolated) {
+            return refuse("outside_content_bypass");
+          }
 
-          const refused = await claim(tx, { cell, turn, call });
+          // D-08: the flag claims the side-effecting start on a tainted turn (audited `outsideContent: true`).
+          const refused = await claim(tx, {
+            cell,
+            turn,
+            call,
+            ...(turn.tainted ? { outsideContent: true } : {}),
+          });
           if (refused) return refused;
 
           const readers = await conversationAudience(tx, turn);
@@ -518,12 +532,19 @@ export function registerBotWorkSessionRoutes(
           if (!profile || profile.sponsorUserId !== sponsorUserId) return refuse("profile_inactive");
           const status = await profileStatus(tx, perms, profile);
           if (!status.active) return refuse("profile_inactive", status.reason);
-          // D-08: a turn that read outside content does not prompt on its own (07.16-19 adds the profile's flag
-          // path). No fallback: a person can prompt the session.
-          if (turn.tainted) return refuse("outside_content");
+          // D-08 (PD-15): a turn that read outside content prompts only with the profile's admin flag. No fallback
+          // without it: a person can prompt the session.
+          if (turn.tainted && !profile.actOnOutsideContent) return refuse("outside_content");
 
-          // D-20: prompting its own session stays allowed after the turn read that session's output.
-          const refused = await claim(tx, { cell, turn, call, sessionOutputExempt: true });
+          // D-20: prompting its own session stays allowed after the turn read that session's output. With the flag, a
+          // tainted turn's prompt is claimed (`outsideContent`), queued `tainted` and marks the session (sticky, E12).
+          const refused = await claim(tx, {
+            cell,
+            turn,
+            call,
+            sessionOutputExempt: true,
+            ...(turn.tainted ? { outsideContent: true } : {}),
+          });
           if (refused) return refused;
 
           const answer = await workSession.bots.prompt(tx, {
@@ -531,7 +552,7 @@ export function registerBotWorkSessionRoutes(
             profile,
             workSessionId: body.workSessionId,
             prompt: body.prompt,
-            tainted: false,
+            tainted: turn.tainted,
           });
           return recordControl(tx, { cell, turn, call: { ...call, tool: PROMPT } }, answer);
         },

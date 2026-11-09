@@ -11,7 +11,8 @@ import {
   type BotWorkSessionRefused,
   BUILTIN_TOOLS,
   type ContextWindow,
-  type PermissionMode,
+  PERMISSION_MODE_RANK,
+  PermissionMode,
   type SessionAudienceInput,
   WORK_PROJECT_LIMITS,
 } from "@ocw/contracts";
@@ -455,8 +456,10 @@ export function createBotSessions(deps: BotSessionsDeps): BotSessions {
         ...(settings.fastMode !== undefined ? { fastMode: settings.fastMode } : {}),
       };
       // A mode the bot asked for is never lowered (refused with its reason). Absent = the profile's default; when that
-      // default is above what the context allows now, the start falls back to the implicit `default`, which the one
-      // controls context lowers to the highest available mode (PD-15: an implicit default is lowered, never refused).
+      // default is above what the context allows now (e.g. Full access after outside content off an isolated server,
+      // PD-15), the start steps down the ladder below it to the highest mode the one controls context allows, ending
+      // with the implicit `default`, which the context lowers itself (an implicit default is lowered, never refused).
+      // Each refused attempt writes nothing (`createWorkSession` decides the settings before any insert).
       const opts = { agent: { layer: { ...status.layer, tainted: turn.tainted } } };
       const explicit =
         input.permissionMode ?? (profile.defaultMode !== "default" ? profile.defaultMode : undefined);
@@ -466,14 +469,21 @@ export function createBotSessions(deps: BotSessionsDeps): BotSessions {
         { ...base, ...(explicit ? { permissionMode: explicit } : {}) },
         opts,
       );
-      if (
-        !result.ok &&
-        result.code === "settings_denied" &&
-        result.field === "permissionMode" &&
-        input.permissionMode === undefined &&
-        explicit !== undefined
-      ) {
-        result = await deps.start(tx, sponsor, base, opts);
+      const modeDenied = (r: typeof result) =>
+        !r.ok && r.code === "settings_denied" && r.field === "permissionMode";
+      if (modeDenied(result) && input.permissionMode === undefined && explicit !== undefined) {
+        const lower = PermissionMode.options
+          .filter(
+            (m) =>
+              PERMISSION_MODE_RANK[m] < PERMISSION_MODE_RANK[explicit] &&
+              PERMISSION_MODE_RANK[m] > PERMISSION_MODE_RANK.default,
+          )
+          .sort((a, b) => PERMISSION_MODE_RANK[b] - PERMISSION_MODE_RANK[a]);
+        for (const mode of lower) {
+          result = await deps.start(tx, sponsor, { ...base, permissionMode: mode }, opts);
+          if (!modeDenied(result)) break;
+        }
+        if (modeDenied(result)) result = await deps.start(tx, sponsor, base, opts);
       }
       // The server's own audience can only be refused by a membership change in between: the creator alone sees it.
       if (!result.ok && (result.code === "audience_outside_project" || result.code === "team_not_assigned")) {
@@ -591,6 +601,15 @@ export function createBotSessions(deps: BotSessionsDeps): BotSessions {
           authorAgentId: turn.agentId,
           tainted: p.tainted,
         });
+        // D-08 (E12): a prompt written after outside content taints the session for good. From now on every bot turn
+        // of it runs in Full access only on an isolated server (`botLayerForSession` reads `tainted_at`). The first mark
+        // is kept.
+        if (p.tainted) {
+          await tx
+            .update(workSessions)
+            .set({ taintedAt: sql`now()` })
+            .where(and(eq(workSessions.id, s.id), isNull(workSessions.taintedAt)));
+        }
         return {
           kind: "queued",
           workSessionId: s.id,
