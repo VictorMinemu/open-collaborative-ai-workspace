@@ -336,14 +336,39 @@ section_core() {
     fail "process kill → ${status} $(cat "$WORK/body.json")"
   fi
 
+  # timeoutMs is the command's own budget: ocw-run runs argv under `timeout -s KILL`, counted from when it starts in the
+  # container. Docker answers the exec start before runc has spawned it, so on a loaded daemon the start itself can lag
+  # by seconds (CI p202: answered in 6492 ms, exit 137, inside sandboxd's 5 s backstop). The check times the command,
+  # not the request: its first line prints its start (ms, the same kernel clock as the daemon's), and Docker's
+  # `exec_die` for that exit code is when it was killed. It may live at most its 2 s plus 1 s for ocw-run and `date`.
   s0=$(node -e 'process.stdout.write(String(Date.now()))')
-  status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sleep","10"]' 2000 25000)")"
+  docker events --since "$((s0 / 1000))" --filter "container=${CID_A}" --filter event=exec_die \
+    --format '{{json .}}' >"$WORK/exec-die.jsonl" 2>/dev/null &
+  EVENTS_PID=$!
+  status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sh","-c","date +%s%3N; exec sleep 10"]' 2000 25000)")"
   s1=$(node -e 'process.stdout.write(String(Date.now()))')
   code="$(jfield "$WORK/body.json" exitCode)"
-  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" status)" = exited ] && [ "$code" != 0 ] && [ $((s1 - s0)) -lt 3000 ]; then
-    ok "timeoutMs 2000 on sleep 10 → exited ${code} in $((s1 - s0)) ms"
+  began="$(jfield "$WORK/body.json" stdout | tr -d '\n')"
+  died=""
+  for _ in $(seq 1 50); do
+    died="$(node -e '
+      const [file, code, began] = process.argv.slice(1);
+      const lines = require("fs").readFileSync(file, "utf8").split("\n").filter(Boolean);
+      const hit = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).find((e) =>
+        e && e.Actor?.Attributes?.exitCode === code && Number(e.timeNano) / 1e6 >= Number(began));
+      process.stdout.write(hit ? String(Math.round(Number(hit.timeNano) / 1e6)) : "");
+    ' "$WORK/exec-die.jsonl" "$code" "${began:-0}")"
+    [ -n "$died" ] && break
+    sleep 0.1
+  done
+  kill "$EVENTS_PID" 2>/dev/null || true
+  wait "$EVENTS_PID" 2>/dev/null || true
+  lived=$((${died:-0} - ${began:-0}))
+  if [ "$status" = 200 ] && [ "$(jfield "$WORK/body.json" status)" = exited ] && [ "$code" != 0 ] &&
+    [[ "$began" =~ ^[0-9]{13}$ ]] && [ -n "$died" ] && [ "$lived" -ge 0 ] && [ "$lived" -lt 3000 ]; then
+    ok "timeoutMs 2000 on sleep 10 → killed ${lived} ms after it started, exited ${code}; answered in $((s1 - s0)) ms"
   else
-    fail "timeout → ${status} in $((s1 - s0)) ms $(cat "$WORK/body.json")"
+    fail "timeout → ${status}, lived ${lived} ms (exec_die ${died:-none}), answered in $((s1 - s0)) ms $(cat "$WORK/body.json")"
   fi
 
   status="$(api POST /v1/sandboxes/exec "$(exec_json "$ORG" "$A" '["sh","-c","yes a | head -c 40000; echo END"]')")"

@@ -1,4 +1,5 @@
 import { type APIRequestContext, type Browser, expect, type Page, request, test } from "@playwright/test";
+import { expectChannelLanding } from "../support/actors";
 import { ADMIN, API_URL, shot } from "./env";
 
 /**
@@ -47,7 +48,7 @@ async function signIn(browser: Browser, user: { email: string; password: string 
     .getByTestId("login-form")
     .getByRole("button", { name: /sign in|log in/i })
     .click();
-  await expect(page).toHaveURL(/\/chat\/[0-9a-f-]{36}/);
+  await expectChannelLanding(page);
   return page;
 }
 
