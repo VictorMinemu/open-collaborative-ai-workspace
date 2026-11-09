@@ -58,6 +58,9 @@ export const REQUIRED_AREAS = [
   { area: "runtime install script", file: "apps/api/src/modules/device/install-script.sh" },
   { area: "runtime distribution", file: "apps/api/src/modules/device/distribution.ts" },
   { area: "runtime service units", file: "apps/local-runtime/src/service/systemd.ts" },
+  // Phase 07.14 (ADR-0036): the organization's connector sign-in routes and the OAuth flow state both principals share.
+  { area: "organization connector sign-in", file: "apps/api/src/modules/connectors/org-routes.ts" },
+  { area: "connector OAuth flow state", file: "apps/api/src/modules/connectors/flow.ts" },
 ];
 
 /** GitHub CODEOWNERS pattern (gitignore subset) → RegExp over repo-relative paths. */

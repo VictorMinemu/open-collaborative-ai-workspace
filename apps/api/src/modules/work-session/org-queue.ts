@@ -70,6 +70,32 @@ function errorCode(err: unknown): string {
 }
 
 /**
+ * Runs `fn` on every item, at most `limit` at once, each started in the order of `items` (07.9 fan-out, WINDOWS #311:
+ * the batches of one session delivery, each its own short read). A failure starts nothing new; the items already
+ * running finish first, then the first error is thrown, so a retry of the whole task never overlaps the failed attempt.
+ */
+export async function eachBounded<T>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const errors: unknown[] = [];
+  const worker = async () => {
+    while (errors.length === 0 && next < items.length) {
+      const item = items[next++] as T;
+      try {
+        await fn(item);
+      } catch (err) {
+        errors.push(err);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker));
+  if (errors.length > 0) throw errors[0];
+}
+
+/**
  * An ordered, per-organization background queue in the API process (07.9 fan-out). Each organization's tasks run one at
  * a time in the order they were queued (so the per-session order of deliveries, removals and sweeps is the commit
  * order on this instance); different organizations run concurrently, at most `concurrency` at once. Repeated work

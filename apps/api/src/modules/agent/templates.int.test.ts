@@ -987,6 +987,43 @@ describe("the public one-click route keeps its contract", () => {
   });
 });
 
+describe("required connectors take member modes only (07.14 PD-09)", () => {
+  it("an organization-account server is refused as required and left out of the editor's connectors", async () => {
+    const orgOauth = randomUUID();
+    const orgCc = randomUUID();
+    const memberOauth = randomUUID();
+    await mcpServer(orgOauth, "Org Drive", "m0a0b0c01", { authMode: "org_oauth" });
+    await mcpServer(orgCc, "Org Billing", "m0a0b0c02", { authMode: "org_client_credentials" });
+    await mcpServer(memberOauth, "Linear", "m0a0b0c03", { authMode: "per_member_oauth" });
+    try {
+      const create = (version: Json) =>
+        riley.request("POST", "/api/v1/agent-templates", {
+          unitId: backend,
+          name: `Org ${randomUUID()}`,
+          version,
+        });
+      // The organization's account needs nobody to connect: it is never a member's connector.
+      for (const id of [orgOauth, orgCc]) {
+        expect((await fails(create(versionBody({ requiredConnectorIds: [id] })), 400)).code).toBe(
+          "unknown_connector",
+        );
+        expect((await fails(create(versionBody({ requiredConnectorIds: [crm, id] })), 400)).code).toBe(
+          "unknown_connector",
+        );
+      }
+      await ok(create(versionBody({ requiredConnectorIds: [memberOauth, crm] })), 201);
+
+      const o = await ok(riley.request("GET", `/api/v1/agent-templates/options?unitId=${backend}`));
+      expect(o.connectors).toEqual([
+        { serverId: crm, name: "Acme CRM" },
+        { serverId: memberOauth, name: "Linear" },
+      ]);
+    } finally {
+      await su.query("delete from app.mcp_servers where id = any($1)", [[orgOauth, orgCc, memberOauth]]);
+    }
+  });
+});
+
 /** A client whose membership moved to a fresh organization B, as its admin (module-access.int.test.ts). */
 async function otherOrgAdmin(): Promise<{ client: TestClient; orgB: string; userB: string }> {
   const [client, userB] = await joinAs(`eve-${randomUUID().slice(0, 8)}@example.test`, "Eve", "standard");

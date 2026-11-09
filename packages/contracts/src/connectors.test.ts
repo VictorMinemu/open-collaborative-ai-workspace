@@ -14,7 +14,13 @@ import {
   AgentTemplateOptions,
   AgentTemplatePreview,
   AgentTemplateVersion,
+  AUTH_FAILURE_FIX,
+  authFailureFix,
+  CELL_MODES,
+  ClientCredentialsInput,
+  CONNECTOR_PROXY_MODES,
   ConnectionStatus,
+  ConnectorAuthFailure,
   ConnectorAuthMode,
   ConnectorErrorCode,
   ConnectorOAuthClientInput,
@@ -25,13 +31,25 @@ import {
   CreateMemberAccountShareRequest,
   connectorOAuthUrls,
   InstantiateAgentTemplateResponse,
+  isOrgCredentialMode,
+  isPerMemberMode,
   McpServer,
   McpServerList,
   MemberAccountShare,
   MemberAccountShareList,
   MemberConnector,
   MemberConnectorList,
+  OAUTH_SIGN_IN_MODES,
+  OAuthTestResponse,
+  ORG_CREDENTIAL_MODES,
+  OrgConnection,
+  OrgConnectionMethod,
+  OrgSignInError,
+  PER_MEMBER_MODES,
   ReadersPreview,
+  rendersInCell,
+  usesConnectorProxy,
+  usesOAuthSignIn,
   VaultItem,
   VaultItemList,
 } from "./index";
@@ -40,8 +58,14 @@ const ID = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 const ID2 = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c";
 
 describe("connector vocabulary (07.4 D-01, CONN-01)", () => {
-  it("names the three auth modes, the OAuth and connection states and the error codes", () => {
-    expect(ConnectorAuthMode.options).toEqual(["org_secret", "per_member_oauth", "per_member_secret"]);
+  it("names the five auth modes (07.14 D-01), the OAuth and connection states and the error codes", () => {
+    expect(ConnectorAuthMode.options).toEqual([
+      "org_secret",
+      "per_member_oauth",
+      "per_member_secret",
+      "org_oauth",
+      "org_client_credentials",
+    ]);
     expect(ConnectorOAuthStatus.options).toEqual(["ready", "needs_client", "https_required", "error"]);
     expect(ConnectionStatus.options).toEqual(["not_connected", "connected", "needs_reconnect"]);
     expect(ConnectorErrorCode.options).toEqual(
@@ -79,6 +103,181 @@ describe("connector vocabulary (07.4 D-01, CONN-01)", () => {
       method: "pre_registered",
     });
     expect(ConnectorOAuthClientView.safeParse({ ...view, method: "manual" }).success).toBe(false);
+  });
+});
+
+describe("auth-mode predicates and mode lists (07.14 D-01, D-16)", () => {
+  // The D-16 table: one row per mode, one column per predicate.
+  const TABLE: Record<
+    ConnectorAuthMode,
+    { cell: boolean; proxy: boolean; member: boolean; orgCredential: boolean; signIn: boolean }
+  > = {
+    org_secret: { cell: true, proxy: false, member: false, orgCredential: false, signIn: false },
+    per_member_oauth: { cell: false, proxy: true, member: true, orgCredential: false, signIn: true },
+    per_member_secret: { cell: false, proxy: true, member: true, orgCredential: false, signIn: false },
+    org_oauth: { cell: false, proxy: true, member: false, orgCredential: true, signIn: true },
+    org_client_credentials: { cell: false, proxy: true, member: false, orgCredential: true, signIn: false },
+  };
+
+  it("the table covers every mode", () => {
+    expect(Object.keys(TABLE).sort()).toEqual([...ConnectorAuthMode.options].sort());
+  });
+
+  describe.each(ConnectorAuthMode.options)("%s", (mode) => {
+    const row = TABLE[mode];
+    it("answers every predicate as the D-16 table says", () => {
+      expect(rendersInCell(mode)).toBe(row.cell);
+      expect(usesConnectorProxy(mode)).toBe(row.proxy);
+      expect(usesConnectorProxy(mode)).toBe(!rendersInCell(mode));
+      expect(isPerMemberMode(mode)).toBe(row.member);
+      expect(isOrgCredentialMode(mode)).toBe(row.orgCredential);
+      expect(usesOAuthSignIn(mode)).toBe(row.signIn);
+    });
+  });
+
+  it("every mode list is the mode options filtered by its predicate, in order, and frozen", () => {
+    const lists: Array<[readonly ConnectorAuthMode[], (m: ConnectorAuthMode) => boolean]> = [
+      [CELL_MODES, rendersInCell],
+      [CONNECTOR_PROXY_MODES, usesConnectorProxy],
+      [PER_MEMBER_MODES, isPerMemberMode],
+      [ORG_CREDENTIAL_MODES, isOrgCredentialMode],
+      [OAUTH_SIGN_IN_MODES, usesOAuthSignIn],
+    ];
+    for (const [list, pred] of lists) {
+      expect(list).toEqual(ConnectorAuthMode.options.filter(pred));
+      expect(Object.isFrozen(list)).toBe(true);
+    }
+    expect(CELL_MODES).toEqual(["org_secret"]);
+    expect(ORG_CREDENTIAL_MODES).toEqual(["org_oauth", "org_client_credentials"]);
+  });
+});
+
+describe("organization connector vocabulary (07.14 D-06, D-10, D-15)", () => {
+  it("the member flows' error codes are byte-identical to 07.4 (COA-05)", () => {
+    expect(ConnectorErrorCode.options).toEqual([
+      "https_required",
+      "discovery_failed",
+      "pkce_unsupported",
+      "needs_client",
+      "egress_refused",
+      "flow_expired",
+      "session_mismatch",
+      "access_denied",
+      "issuer_mismatch",
+      "token_exchange_failed",
+      "not_connected",
+      "needs_reconnect",
+    ]);
+  });
+
+  it("the failure codes are the closed D-10 set in diagnosis order, one fix line each", () => {
+    expect(ConnectorAuthFailure.options).toEqual([
+      "https_required",
+      "discovery_failed",
+      "issuer_mismatch",
+      "token_endpoint_untrusted",
+      "pkce_unsupported",
+      "client_registration_unavailable",
+      "scope_rejected",
+      "token_exchange_failed",
+    ]);
+    expect(Object.keys(AUTH_FAILURE_FIX)).toEqual(ConnectorAuthFailure.options);
+    expect(ConnectorAuthFailure.safeParse("needs_client").success).toBe(false);
+  });
+
+  it("a fix line names the server and carries no URL query, token or placeholder", () => {
+    const pkce = authFailureFix("pkce_unsupported", "Acme");
+    expect(pkce).toContain("Acme");
+    expect(pkce).toContain("PKCE");
+    for (const code of ConnectorAuthFailure.options) {
+      const line = authFailureFix(code, "Acme");
+      expect(line.length, code).toBeGreaterThan(20);
+      expect(line, code).not.toMatch(/[?={}]/);
+      expect(line, code).not.toMatch(/https?:\/\//);
+      expect(line, code).not.toMatch(/[A-Za-z0-9_-]{32,}/);
+    }
+    // A server name is inserted literally, never read as a replacement pattern.
+    expect(authFailureFix("discovery_failed", "$& {x}")).toContain("$& {x} publishes");
+  });
+
+  it("an organization sign-in redirect error is a failure code or one of three flow outcomes", () => {
+    for (const code of [
+      ...ConnectorAuthFailure.options,
+      "access_denied",
+      "flow_expired",
+      "session_mismatch",
+    ]) {
+      expect(OrgSignInError.safeParse(code).success, code).toBe(true);
+    }
+    for (const code of ["needs_client", "egress_refused", "not_connected", ""]) {
+      expect(OrgSignInError.safeParse(code).success, code).toBe(false);
+    }
+  });
+
+  const connection = {
+    method: "client_credentials",
+    status: "connected",
+    accountLabel: null,
+    clientId: "ocw-test-cc",
+    tokenEndpoint: "https://auth.example.com/token",
+    scopes: ["crm.read"],
+    connectedBy: { id: ID, name: "Ada Admin" },
+    connectedAt: "2026-11-06T10:00:00.000Z",
+    lastUsedAt: null,
+    reconnectReason: null,
+    hasSecret: true,
+  } as const;
+
+  it("the organization connection says whether a secret is stored, never the secret", () => {
+    expect(OrgConnectionMethod.options).toEqual(["oauth", "client_credentials"]);
+    expect(OrgConnection.parse(connection)).toEqual(connection);
+    for (const leak of ["clientSecret", "accessToken", "refreshToken", "secretId", "token"]) {
+      expect(OrgConnection.safeParse({ ...connection, [leak]: "x" }).success, leak).toBe(false);
+    }
+    expect(
+      OrgConnection.parse({
+        ...connection,
+        method: "oauth",
+        status: "needs_reconnect",
+        accountLabel: "ops@example.com",
+        clientId: null,
+        tokenEndpoint: null,
+        hasSecret: false,
+        reconnectReason: "revoked",
+      }).reconnectReason,
+    ).toBe("revoked");
+    // IN-02: the column's bound (`account_label <= 200`, oauth.ts `ACCOUNT_LABEL_MAX`), not a looser one.
+    expect(OrgConnection.safeParse({ ...connection, accountLabel: "x".repeat(200) }).success).toBe(true);
+    expect(OrgConnection.safeParse({ ...connection, accountLabel: "x".repeat(201) }).success).toBe(false);
+  });
+
+  it("client-credential input takes a write-only secret, kept by omission", () => {
+    expect(ClientCredentialsInput.parse({ clientId: "  ocw-test-cc " })).toEqual({ clientId: "ocw-test-cc" });
+    expect(
+      ClientCredentialsInput.parse({
+        clientId: "c",
+        clientSecret: "s",
+        tokenEndpoint: "https://auth.example.com/token",
+      }),
+    ).toEqual({ clientId: "c", clientSecret: "s", tokenEndpoint: "https://auth.example.com/token" });
+    expect(ClientCredentialsInput.safeParse({ clientId: "" }).success).toBe(false);
+    expect(ClientCredentialsInput.safeParse({ clientId: "   " }).success).toBe(false);
+    expect(ClientCredentialsInput.safeParse({ clientId: "x".repeat(257) }).success).toBe(false);
+    expect(ClientCredentialsInput.safeParse({ clientId: "c", clientSecret: "" }).success).toBe(false);
+    expect(ClientCredentialsInput.safeParse({ clientId: "c", clientSecret: "s".repeat(4097) }).success).toBe(
+      false,
+    );
+    expect(ClientCredentialsInput.safeParse({ clientId: "c", tokenEndpoint: "not a url" }).success).toBe(
+      false,
+    );
+    expect(ClientCredentialsInput.safeParse({ clientId: "c", tokenEndpoint: "ftp://a.test/t" }).success).toBe(
+      false,
+    );
+    expect(
+      ClientCredentialsInput.safeParse({ clientId: "c", tokenEndpoint: `https://a.test/${"x".repeat(2000)}` })
+        .success,
+    ).toBe(false);
+    expect(ClientCredentialsInput.safeParse({ clientId: "c", extra: true }).success).toBe(false);
   });
 });
 
@@ -225,6 +424,10 @@ describe("member connections (D-01, R1, R2)", () => {
     };
     expect(MemberConnector.parse(key)).toEqual(key);
     expect(MemberConnector.safeParse({ ...memberConnector, authMode: "org_secret" }).success).toBe(false);
+    // IN-02: the same column bound as the organization's (`connector_connections.account_label <= 200`).
+    expect(MemberConnector.safeParse({ ...memberConnector, accountLabel: "x".repeat(201) }).success).toBe(
+      false,
+    );
   });
 
   it("says why a connection needs reconnecting, and nothing else", () => {
@@ -429,6 +632,8 @@ describe("no response schema of 07.4 can carry a secret (D-06, CONN-05)", () => 
     AgentChannelConnectorListResponse,
     AgentChannelConnectorCallResponse,
     AgentChannelHttpResponse,
+    OrgConnection,
+    OAuthTestResponse,
   };
 
   for (const [name, schema] of Object.entries(responses)) {

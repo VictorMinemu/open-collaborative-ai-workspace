@@ -58,7 +58,8 @@
 // Fake OAuth-protected MCP server (fake-mcp-oauth.mjs, 07.4-04): protected resource metadata
 // (`/.well-known/oauth-protected-resource/mcp-oauth/mcp`), AS metadata (`/.well-known/oauth-authorization-server/
 // mcp-oauth`), authorize / token / revoke / register and the bearer-protected MCP endpoint under `/mcp-oauth`, plus the
-// keychain test targets under `/kc`. Pre-registered public client `ocw-e2e` (redirect URIs: FAKE_MCP_OAUTH_REDIRECTS).
+// keychain test targets under `/kc`. Pre-registered public client `ocw-e2e` (redirect URIs: FAKE_MCP_OAUTH_REDIRECTS)
+// and a confidential client-credentials client beside it (07.14, see createFakeModelServer).
 //
 // Fake ERP MCP server (fake-erp-mcp.mjs, 07.6-04): streamable HTTP at `/erp-mcp` behind its own bearer
 // (OCW_FAKE_ERP_TOKEN, default `e2e-erp-token`), tools get_record / update_record (expectedUpdatedAt) / add_note /
@@ -739,7 +740,11 @@ export function createFakeModelServer(opts = {}) {
     .filter(Boolean);
   const mcpOAuth =
     createFakeMcpOAuth?.({
-      preRegistered: [{ client_id: "ocw-e2e", redirect_uris: redirects }],
+      preRegistered: [
+        { client_id: "ocw-e2e", redirect_uris: redirects },
+        // 07.14 client credentials (e2e)
+        { client_id: "ocw-e2e-cc", client_secret: "e2e-cc-secret-canary", redirect_uris: [] },
+      ],
       ...(process.env.FAKE_KC_TOKEN ? { kcToken: process.env.FAKE_KC_TOKEN } : {}),
     }) ?? null;
   const erp = createFakeErpMcp?.({ token: opts.erpToken ?? process.env.OCW_FAKE_ERP_TOKEN ?? "" }) ?? null;

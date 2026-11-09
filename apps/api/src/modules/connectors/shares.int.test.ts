@@ -10,6 +10,7 @@ import {
   join,
   ok,
   registerConnector,
+  registerOrgConnector,
   startConnectorsStack,
 } from "../../testing-connectors";
 import { activeShare } from "./index";
@@ -304,6 +305,8 @@ describe("organization B (WINDOWS #169)", () => {
           )
         ).rows,
       ]);
+    // An organization-account server of org A (07.14): org B reaches none of its routes either.
+    const orgDrive = await registerOrgConnector(s);
     const before = await snapshot();
     const cases: Record<string, () => Promise<void>> = {
       "GET /api/v1/connectors": async () => {
@@ -320,6 +323,31 @@ describe("organization B (WINDOWS #169)", () => {
       },
       "POST /api/v1/connectors/:p/probe": async () => {
         await fails(s.eve.request("POST", `/api/v1/connectors/${crm.id}/probe`), 404);
+      },
+      "DELETE /api/v1/connectors/:p/org-connection": async () => {
+        await fails(s.eve.request("DELETE", `/api/v1/connectors/${orgDrive.id}/org-connection`), 404);
+      },
+      "POST /api/v1/connectors/:p/org-connection/connect": async () => {
+        await fails(s.eve.request("POST", `/api/v1/connectors/${orgDrive.id}/org-connection/connect`), 404);
+      },
+      // 07.14-09: client credentials and the Test sign-in never reach another organization's server.
+      "PUT /api/v1/connectors/:p/org-connection/client-credentials": async () => {
+        await fails(
+          s.eve.request("PUT", `/api/v1/connectors/${orgDrive.id}/org-connection/client-credentials`, {
+            clientId: "x",
+            clientSecret: "y",
+          }),
+          404,
+        );
+      },
+      "POST /api/v1/connectors/oauth-test": async () => {
+        await fails(
+          s.eve.request("POST", "/api/v1/connectors/oauth-test", {
+            serverId: orgDrive.id,
+            authMode: "org_oauth",
+          }),
+          404,
+        );
       },
       "GET /api/v1/connectors/oauth/callback": async () => {
         // Org A's flow, completed with org B's session: refused and consumed.
@@ -371,5 +399,74 @@ describe("organization B (WINDOWS #169)", () => {
     }
     for (const run of Object.values(cases)) await run();
     expect(await snapshot()).toBe(before);
+  });
+});
+
+describe("a member-account share is only for a member's own account (07.14 PD-09)", () => {
+  it("an organization-account server is refused even with a forged member connection; a member-key connector still shares", async () => {
+    const servers = [
+      [randomUUID(), "Org Drive", "m0a0b0c01", "org_oauth"],
+      [randomUUID(), "Org Billing", "m0a0b0c02", "org_client_credentials"],
+      [randomUUID(), "Member Keys", "m0a0b0c03", "per_member_secret"],
+    ] as const;
+    try {
+      for (const [id, name, safe, mode] of servers) {
+        await s.su.query(
+          `insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, status, auth_mode,
+             member_header_name)
+           values ($1, $2, $3, $4, 'streamable-http', $5, 'ready', $6, $7)`,
+          [
+            id,
+            s.orgA,
+            name,
+            safe,
+            `https://${safe}.example.test/mcp`,
+            mode,
+            mode === "per_member_secret" ? "authorization" : null,
+          ],
+        );
+        // The same stray row for every mode: only the server's mode decides whether it is Víctor's account.
+        await s.su.query(
+          "insert into app.connector_connections (organization_id, user_id, server_id, status) values ($1, $2, $3, 'connected')",
+          [s.orgA, s.victorId, id],
+        );
+      }
+      const [[drive], [billing], [keys]] = servers;
+      const shareOf = (resourceId: string) =>
+        s.victor.request("POST", "/api/v1/member-account-shares", {
+          conversationId: ops,
+          resourceKind: "connector",
+          resourceId,
+        });
+      for (const id of [drive, billing]) {
+        await fails(shareOf(id), 404, "not_found");
+        expect(await isActive(s.victorId, ops, "connector", id)).toBe(false);
+      }
+      // A forged share row of the organization's account is never listed as Víctor's.
+      await s.su.query(
+        `insert into app.member_account_shares (organization_id, user_id, conversation_id, resource_kind, resource_id,
+           readers_at_grant)
+         values ($1, $2, $3, 'connector', $4, 5)`,
+        [s.orgA, s.victorId, ops, drive],
+      );
+      const shared = await ok(shareOf(keys), 201);
+      expect(shared).toMatchObject({
+        resourceKind: "connector",
+        resourceId: keys,
+        resourceName: "Member Keys",
+      });
+      const listed = (
+        (await ok(s.victor.request("GET", "/api/v1/member-account-shares"))).shares as Json[]
+      ).map((x) => x.resourceId);
+      expect(listed).toContain(keys);
+      expect(listed).not.toContain(drive);
+      expect(listed).not.toContain(billing);
+      await ok(s.victor.request("DELETE", `/api/v1/member-account-shares/${shared.id}`), 204);
+    } finally {
+      await s.su.query("delete from app.member_account_shares where resource_id = any($1)", [
+        servers.map(([id]) => id),
+      ]);
+      await s.su.query("delete from app.mcp_servers where id = any($1)", [servers.map(([id]) => id)]);
+    }
   });
 });

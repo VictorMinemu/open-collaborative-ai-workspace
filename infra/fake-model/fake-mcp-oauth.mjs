@@ -14,6 +14,9 @@
 //   POST /mcp-oauth/token        authorization_code (single-use 5-minute codes, PKCE S256, `resource` must match,
 //                                an unsigned `id_token` whose email is `<subject>@fake-mcp.test`) and refresh_token
 //                                (`resource` required, rotation; a rotated token → invalid_grant + family revoked)
+//                                and client_credentials (RFC 6749 §4.4, 07.14-03: pre-registered confidential clients
+//                                only, Basic or post auth, `resource` required, no refresh token, subject
+//                                `sub_cc_<client_id>`)
 //   POST /mcp-oauth/revoke       RFC 7009: always 200; an access or refresh token revokes its whole grant
 //   POST /mcp-oauth/register     RFC 7591 dynamic client registration
 //   POST /mcp-oauth/mcp          streamable HTTP MCP behind a bearer (401 + WWW-Authenticate resource_metadata);
@@ -159,11 +162,13 @@ const toolResult = (value) => ({
 
 function freshStats() {
   return {
-    tokenRequests: { authorization_code: 0, refresh_token: 0 },
+    tokenRequests: { authorization_code: 0, refresh_token: 0, client_credentials: 0 },
     refreshReuse: 0,
     revocations: 0,
     registrations: 0,
-    lastResource: { authorize: null, token: null, refresh: null },
+    lastResource: { authorize: null, token: null, refresh: null, cc: null },
+    /** How the last token request authenticated the client: "basic" | "post" | "none" (never the secret). */
+    lastClientAuth: null,
     mcpRequests: 0,
     mcpCalls: 0,
     accessTokenHashes: [],
@@ -252,7 +257,7 @@ export function createFakeMcpOAuth(opts = {}) {
       authorization_response_iss_parameter_supported: true,
       scopes_supported: [...RESOURCE_SCOPES, "offline_access"],
       response_types_supported: ["code"],
-      grant_types_supported: ["authorization_code", "refresh_token"],
+      grant_types_supported: ["authorization_code", "refresh_token", "client_credentials"],
       token_endpoint_auth_methods_supported: AUTH_METHODS,
       revocation_endpoint_auth_methods_supported: AUTH_METHODS,
     };
@@ -260,6 +265,23 @@ export function createFakeMcpOAuth(opts = {}) {
     if (scenario.no_registration) {
       delete meta.registration_endpoint;
       delete meta.client_id_metadata_document_supported;
+    }
+    if (scenario.cc_post_only) meta.token_endpoint_auth_methods_supported = ["client_secret_post"];
+    if (scenario.issuer_mismatch_meta && o.issuer === `${o.origin}${PREFIX}`)
+      meta.issuer = `${o.origin}${PREFIX}-other`;
+    if (scenario.no_authorization_endpoint) {
+      // A client-credentials-only server: no authorize, PKCE, registration or CIMD (07.14 D-17).
+      return {
+        issuer: meta.issuer,
+        token_endpoint: meta.token_endpoint,
+        revocation_endpoint: meta.revocation_endpoint,
+        scopes_supported: RESOURCE_SCOPES,
+        grant_types_supported: ["client_credentials"],
+        token_endpoint_auth_methods_supported: meta.token_endpoint_auth_methods_supported.filter(
+          (m) => m !== "none",
+        ),
+        revocation_endpoint_auth_methods_supported: meta.revocation_endpoint_auth_methods_supported,
+      };
     }
     return meta;
   }
@@ -271,7 +293,10 @@ export function createFakeMcpOAuth(opts = {}) {
       iss: fam.issuer,
       sub: fam.subject,
       aud: fam.clientId,
-      email: `${fam.subject}@fake-mcp.test`,
+      email:
+        typeof scenario.id_token_email === "string"
+          ? scenario.id_token_email
+          : `${fam.subject}@fake-mcp.test`,
       email_verified: true,
       iat: now,
       exp: now + 3600,
@@ -279,19 +304,23 @@ export function createFakeMcpOAuth(opts = {}) {
     return `${b64url({ alg: "none", typ: "JWT" })}.${b64url(claims)}.`;
   }
 
-  function issue(familyId, { withIdToken }) {
+  function issue(familyId, { withIdToken, withRefresh = true }) {
     const fam = families.get(familyId);
     const accessToken = `fakeat_${rand()}`;
-    const refreshToken = `fakert_${rand()}`;
     const expiresIn = typeof scenario.expires_in === "number" ? scenario.expires_in : 3600;
     accessTokens.set(accessToken, { familyId, exp: Date.now() + expiresIn * 1000 });
-    refreshTokens.set(refreshToken, { familyId, state: "active" });
     stats.accessTokenHashes.push(sha256Hex(accessToken));
+    let refreshToken;
+    if (withRefresh) {
+      refreshToken = `fakert_${rand()}`;
+      refreshTokens.set(refreshToken, { familyId, state: "active" });
+    }
     return {
       access_token: accessToken,
       token_type: "Bearer",
-      expires_in: expiresIn,
-      refresh_token: refreshToken,
+      // omit_expires_in: the token still lives `expiresIn`, but the client is not told (07.14-09, the 300 s default).
+      ...(scenario.omit_expires_in ? {} : { expires_in: expiresIn }),
+      ...(refreshToken ? { refresh_token: refreshToken } : {}),
       scope: fam.scope,
       ...(withIdToken && !scenario.no_id_token ? { id_token: idToken(fam) } : {}),
     };
@@ -305,7 +334,7 @@ export function createFakeMcpOAuth(opts = {}) {
 
   /** The grant behind a bearer for this resource, or null when unknown, expired, revoked or for another one. */
   function grantOf(token, o) {
-    if (scenario.revoke_all) return null;
+    if (scenario.revoke_all || scenario.reject_access_tokens) return null;
     const at = accessTokens.get(token);
     if (!at || at.exp <= Date.now()) return null;
     const fam = families.get(at.familyId);
@@ -369,7 +398,8 @@ export function createFakeMcpOAuth(opts = {}) {
       return fail("invalid_target", "resource must be the protected resource");
     const requested = (q.get("scope") ?? "").split(/\s+/u).filter(Boolean);
     const known = [...RESOURCE_SCOPES, "offline_access"];
-    if (requested.some((s) => !known.includes(s))) return fail("invalid_scope", "unknown scope");
+    if (scenario.invalid_scope_at_authorize || requested.some((s) => !known.includes(s)))
+      return fail("invalid_scope", "unknown scope");
     if (scenario.deny) return fail("access_denied", "the user denied the request");
     const scope = requested.filter((s) => s !== "offline_access").join(" ") || DEFAULT_SCOPE;
 
@@ -391,12 +421,49 @@ export function createFakeMcpOAuth(opts = {}) {
   /** Client authentication at the token endpoint: Basic, client_secret_post, or none for public clients. */
   function authenticateClient(req, form) {
     const basic = basicCredentials(req);
+    // cc_post_only: the metadata lists client_secret_post alone, so a Basic header is refused (07.14 D-10).
+    if (scenario.cc_post_only && basic) return null;
     const id = basic ? basic.id : form.get("client_id");
     const secret = basic ? basic.secret : form.get("client_secret");
     const client = clients.get(id ?? "");
     if (!client) return null;
     if (client.client_secret !== undefined && client.client_secret !== secret) return null;
     return client;
+  }
+
+  /** How a token request presents client credentials (stats only, never the secret). */
+  function clientAuthMethod(req, form) {
+    if (/^Basic\s/iu.test(req.headers.authorization ?? "")) return "basic";
+    return form.has("client_secret") ? "post" : "none";
+  }
+
+  /**
+   * RFC 6749 §4.4 for pre-registered confidential clients (07.14-03). Strict like a real server: a public client is
+   * `unauthorized_client`, `resource` must name this MCP (RFC 8707), unknown scopes are `invalid_scope`. Every grant
+   * of one client has the same subject; there is no refresh token, so renewing means a new grant.
+   */
+  function clientCredentials(req, res, form, o, err) {
+    const basic = basicCredentials(req);
+    const known = clients.get((basic ? basic.id : form.get("client_id")) ?? "");
+    if (!known) return err("invalid_client", 401);
+    if (known.client_secret === undefined) return err("unauthorized_client");
+    const client = authenticateClient(req, form);
+    if (!client) return err("invalid_client", 401);
+    if (form.get("resource") !== o.resource) return err("invalid_target");
+    const requested = (form.get("scope") ?? "").split(/\s+/u).filter(Boolean);
+    const supported = [...RESOURCE_SCOPES, "offline_access"];
+    if (requested.some((s) => !supported.includes(s))) return err("invalid_scope");
+    const scope = requested.filter((s) => s !== "offline_access").join(" ") || DEFAULT_SCOPE;
+    const familyId = randomUUID();
+    families.set(familyId, {
+      subject: `sub_cc_${client.client_id}`,
+      clientId: client.client_id,
+      scope,
+      resource: o.resource,
+      issuer: o.issuer,
+      revoked: false,
+    });
+    return send(res, 200, issue(familyId, { withIdToken: false, withRefresh: false }));
   }
 
   async function token(req, res, o) {
@@ -409,10 +476,15 @@ export function createFakeMcpOAuth(opts = {}) {
     } else if (grantType === "refresh_token") {
       stats.tokenRequests.refresh_token += 1;
       stats.lastResource.refresh = form.get("resource");
+    } else if (grantType === "client_credentials") {
+      stats.tokenRequests.client_credentials += 1;
+      stats.lastResource.cc = form.get("resource");
     } else {
       return err("unsupported_grant_type");
     }
+    stats.lastClientAuth = clientAuthMethod(req, form);
     if (scenario.fail_token_5xx) return err("temporarily_unavailable", 503);
+    if (grantType === "client_credentials") return clientCredentials(req, res, form, o, err);
     const client = authenticateClient(req, form);
     if (!client) return err("invalid_client", 401);
 
@@ -462,6 +534,10 @@ export function createFakeMcpOAuth(opts = {}) {
   async function revoke(req, res) {
     const form = new URLSearchParams(await readText(req));
     stats.revocations += 1;
+    // 07.14 review WR-02: a slow revocation endpoint opens the window in which a reconnect can land mid-Disconnect.
+    if (typeof scenario.slow_revoke_ms === "number" && scenario.slow_revoke_ms > 0) {
+      await sleep(scenario.slow_revoke_ms);
+    }
     const t = form.get("token") ?? "";
     const familyId = refreshTokens.get(t)?.familyId ?? accessTokens.get(t)?.familyId;
     if (familyId) revokeFamily(familyId);
@@ -717,7 +793,8 @@ export function createFakeMcpOAuth(opts = {}) {
     const o = origins(req);
     const get = req.method === "GET";
     const post = req.method === "POST";
-    if (get && p === PRM_PATH) return send(res, 200, prm(o));
+    // no_prm: a server that publishes no RFC 9728 metadata (07.14-09: the admin-entered Token URL is used then).
+    if (get && p === PRM_PATH && !scenario.no_prm) return send(res, 200, prm(o));
     if (get && p === AS_META_PATH) return send(res, 200, asMetadata(o));
     if (get && p === `${AS_META_PATH}${ALT}`) return send(res, 200, asMetadata(origins(req, true)));
     if (p === `${PREFIX}/mcp`) return mcpEndpoint(req, res, o);

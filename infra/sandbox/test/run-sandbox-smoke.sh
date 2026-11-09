@@ -873,7 +873,15 @@ section_events() {
   status="$(events_get 0 30001)"
   [ "$status" = 400 ] && ok "events: waitMs over the contract → 400" || fail "events: waitMs 30001 → ${status}"
 
-  # A long poll from the newest cursor resolves on the next event (the ensure of a new bot).
+  # A long poll from the newest cursor resolves promptly on the event it waits for (the ensure of a new bot → its
+  # `running` state event). What is timed is the poll's wake-up against the event's own `at` (sandboxd stamps it at
+  # emit with this host's clock: it runs here as a host process), never Docker's container start: a cold ensure on a
+  # loaded CI daemon has taken up to ~42 s (PR #60), and usage samples and other bots' state changes resolve polls
+  # before it. So the polls run until a bounded 120 s deadline (about 3x that worst cold start), and the check fails if
+  #   - the running event never arrives, or reaches the poller more than 2 s after it was emitted;
+  #   - any poll in flight when its first event was emitted (woken by it) returns more than 2 s after that event;
+  #   - any poll returns empty before its 20 s wait (empty only on timeout), or no poll was woken by an event at all.
+  # The ensure's own status and duration are logged for information only.
   status="$(events_get 0 0)"
   CURSOR="$(node -e '
     const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
@@ -885,25 +893,63 @@ section_events() {
     [ "$next" = "$CURSOR" ] && break
     CURSOR="$next"
   done
-  p0=$(node -e 'process.stdout.write(String(Date.now()))')
-  (sleep 1 && api POST /v1/sandboxes/ensure "{\"target\":$(target "$EO" "$EA")}" >/dev/null) &
+  rm -f "$WORK/ensure.out"
+  (
+    sleep 1
+    e0=$(node -e 'process.stdout.write(String(Date.now()))')
+    s="$(api POST /v1/sandboxes/ensure "{\"target\":$(target "$EO" "$EA")}" || true)"
+    e1=$(node -e 'process.stdout.write(String(Date.now()))')
+    printf '%s in %s ms' "$s" "$((e1 - e0))" >"$WORK/ensure.out"
+  ) &
   ensure_pid=$!
-  found=""
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    status="$(events_get "$CURSOR" 20000)"
-    found="$(node -e '
-      const j = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-      const hit = j.events.find((e) => e.type === "state" && e.target.agentId === process.argv[2] && e.state === "running");
-      process.stdout.write(hit ? "yes" : "");
-    ' "$WORK/events.json" "$EA")"
-    [ -n "$found" ] && break
-    CURSOR="$(jfield "$WORK/events.json" nextSeq)"
-  done
-  p1=$(node -e 'process.stdout.write(String(Date.now()))')
+  verdict="$(node -e '
+    const [port, token, agentId, cursor0] = process.argv.slice(1);
+    const WAIT_MS = 20_000, DEADLINE_MS = 120_000, PROMPT_MS = 2_000;
+    (async () => {
+      const t0 = Date.now();
+      let cursor = Number(cursor0), polls = 0, woken = 0, hit = null;
+      const problems = [];
+      while (!hit && problems.length === 0 && Date.now() - t0 < DEADLINE_MS) {
+        const start = Date.now();
+        const r = await fetch(`http://127.0.0.1:${port}/v1/events?after=${cursor}&waitMs=${WAIT_MS}`, {
+          headers: { authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(40_000),
+        });
+        const j = r.status === 200 ? await r.json() : null;
+        const end = Date.now();
+        polls += 1;
+        if (!j) {
+          problems.push(`poll ${polls} → ${r.status}`);
+          break;
+        }
+        if (j.events.length === 0) {
+          if (end - start < WAIT_MS - 500) problems.push(`poll ${polls} returned empty after ${end - start} ms, before its ${WAIT_MS} ms wait`);
+        } else {
+          // Emitted after this poll started: the poll was waiting and this event woke it.
+          const first = Date.parse(j.events[0].at);
+          if (first >= start) {
+            woken += 1;
+            if (end - first > PROMPT_MS) problems.push(`poll ${polls} returned ${end - first} ms after event seq ${j.events[0].seq} woke it`);
+          }
+          const e = j.events.find((x) => x.type === "state" && x.target.agentId === agentId && x.state === "running");
+          if (e) hit = { seq: e.seq, lag: end - Date.parse(e.at), woke: Date.parse(e.at) >= start, emittedAt: Date.parse(e.at) - t0 };
+        }
+        cursor = j.nextSeq;
+      }
+      const where = `${polls} polls over ${Date.now() - t0} ms, ${woken} woken by an event`;
+      if (problems.length > 0) return console.log(`fail long poll: ${problems.join("; ")} (${where})`);
+      if (!hit) return console.log(`fail long poll: no running event for the new bot within ${DEADLINE_MS} ms (${where})`);
+      if (hit.lag > PROMPT_MS) return console.log(`fail long poll: the running event (seq ${hit.seq}) arrived ${hit.lag} ms after it was emitted (${where})`);
+      if (woken === 0) return console.log(`fail long poll: no poll was woken by an event (${where})`);
+      console.log(`ok a long poll resolves on the next state event: running (seq ${hit.seq}, emitted at +${hit.emittedAt} ms) delivered ${hit.lag} ms after emit${hit.woke ? " by the poll it woke" : ""}; every woken poll within ${PROMPT_MS} ms (${where})`);
+    })().catch((e) => console.log(`fail long poll: ${e.message}`));
+  ' "$PORT" "$TOKEN" "$EA" "$CURSOR")" || verdict="fail long poll: the poll script exited with an error"
   wait "$ensure_pid" || true
-  [ -n "$found" ] && [ $((p1 - p0)) -lt 15000 ] &&
-    ok "events: a long poll resolves on the next state event (ensure → running) in $((p1 - p0)) ms" ||
-    fail "events: long poll → ${status}, found='${found}' in $((p1 - p0)) ms"
+  ensure_info="ensure → $(cat "$WORK/ensure.out" 2>/dev/null || printf 'no result')"
+  case "$verdict" in
+    "ok "*) ok "events: ${verdict#ok } [${ensure_info}]" ;;
+    *) fail "events: ${verdict#fail } [${ensure_info}]" ;;
+  esac
 
   # Content the bot and people handle must never reach the feed.
   run_in "$EO" "$EA" '["sh","-c","echo SENTINEL-argv-3d1c > SENTINEL-file-6b2e.txt"]' >/dev/null

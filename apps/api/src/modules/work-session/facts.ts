@@ -99,21 +99,45 @@ export async function sessionFactsForUsers(
   s: SessionRef,
   userIds: readonly string[],
 ): Promise<Map<string, ResourceFacts>> {
-  const out = new Map<string, ResourceFacts>();
-  if (userIds.length === 0) return out;
+  return (await sessionFactsForSessions(tx, [s], userIds)).get(s.id) ?? new Map();
+}
+
+/**
+ * The facts of many people on many sessions (the per-user delivery, WINDOWS #311), by session id then user id: ONE
+ * query for the whole set, the rule called once per (session, person) exactly as `sessionFactsForUsers` calls it, each
+ * session's shape read once. A session outside the tenant gets no device facts (fail closed).
+ */
+export async function sessionFactsForSessions(
+  tx: Tx,
+  sessions: readonly SessionRef[],
+  userIds: readonly string[],
+): Promise<Map<string, Map<string, ResourceFacts>>> {
+  const out = new Map<string, Map<string, ResourceFacts>>();
+  for (const s of sessions) out.set(s.id, new Map());
+  // By the id PostgreSQL prints (lower case), whatever case the caller's id has.
+  const byId = new Map(sessions.map((s) => [s.id.toLowerCase(), s]));
+  const users = [...new Set(userIds)];
+  if (byId.size === 0 || users.length === 0) return out;
   const res = await tx.execute(sql`
-    select u.id::text as user_id, shape.*, app.work_session_access(${s.id}::uuid, u.id) as access
-      from unnest(${uuidArray([...new Set(userIds)])}) as u(id)
-      left join (${shapeSql(s.id)}) shape on true`);
+    with shape as materialized (
+      select s.id, sh.owner, sh.revoked, sh.unit_path::text[] as unit_path
+        from unnest(${uuidArray([...byId.keys()])}) as s(id)
+        left join lateral app.work_session_shape(s.id) sh on true)
+    select shape.id::text as session_id, u.id::text as user_id, shape.owner, shape.revoked, shape.unit_path,
+           app.work_session_access(shape.id, u.id) as access
+      from shape cross join unnest(${uuidArray(users)}) as u(id)`);
   type Row = Omit<SessionShape, "revoked"> & {
     revoked: boolean | null;
+    session_id: string;
     user_id: string;
     access: string[] | null;
   };
   for (const r of res.rows as Row[]) {
-    // No joined row (the session is not in this tenant): no device facts, fail closed.
+    const s = byId.get(r.session_id);
+    if (!s) continue;
+    // No shape row (the session is not in this tenant): no device facts, fail closed.
     const shape = r.revoked === null ? undefined : { ...r, revoked: r.revoked };
-    out.set(r.user_id, sessionResourceOf(fromShape(s, shape, r.access ?? []), r.user_id));
+    out.get(s.id)?.set(r.user_id, sessionResourceOf(fromShape(s, shape, r.access ?? []), r.user_id));
   }
   return out;
 }

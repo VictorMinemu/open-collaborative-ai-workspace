@@ -1,12 +1,19 @@
 import { z } from "zod";
 import { Id, IsoDateTime } from "./common";
 import {
+  ClientCredentialsInput,
+  ConnectorAuthFailure,
   ConnectorAuthMode,
   ConnectorOAuthClientInput,
+  ConnectorOAuthClientMethod,
   ConnectorOAuthClientView,
   ConnectorOAuthStatus,
   ConnectorOAuthUrls,
   jsonBytes,
+  OrgConnection,
+  rendersInCell,
+  usesConnectorProxy,
+  usesOAuthSignIn,
 } from "./connectors";
 
 /**
@@ -22,6 +29,10 @@ import {
  * Phase 07.4 (D-01) adds the connector auth mode: `org_secret` (the headers above, rendered in the cell) or a
  * per-member mode, where each member connects their own account and the API proxies every call (`connectors.ts`).
  * Every 07.4 field is optional or defaulted, so Phase 3.1 payloads parse unchanged.
+ *
+ * Phase 07.14 (D-01) adds the organization modes `org_oauth` and `org_client_credentials`: one account for the whole
+ * organization, proxied by the API like the member modes and never rendered in the cell. Every 07.14 field is
+ * defaulted, so 3.1 and 07.4 payloads still parse.
  */
 
 export const McpTransport = z.enum(["streamable-http", "sse", "sandboxed-stdio"]);
@@ -97,20 +108,30 @@ export const McpServer = z.object({
   /** `per_member_secret`: the header a member's key goes in, and the prefix before it. */
   memberHeaderName: McpHeaderName.nullable().default(null),
   memberHeaderPrefix: z.string().nullable().default(null),
-  /** `per_member_oauth`: the admin's scope override (null = the server's challenge or advertised scopes). */
+  /**
+   * Sign-in modes (`per_member_oauth`, `org_oauth`) and `org_client_credentials`: the admin's scope override (null =
+   * the server's challenge or advertised scopes).
+   */
   oauthScopes: z.array(z.string()).nullable().default(null),
-  /** `per_member_oauth`: whether members can start a connection; null for the other modes. */
+  /** Sign-in modes: whether a connection can be started; null for the other modes. */
   oauthStatus: ConnectorOAuthStatus.nullable().default(null),
   /**
-   * `per_member_oauth`: identify OCW with its client ID metadata document when the instance has an https URL and the
+   * Sign-in modes: identify OCW with its client ID metadata document when the instance has an https URL and the
    * authorization server supports it (default). False when that server cannot read the instance's URL (e.g. a private
    * CA): a pre-registered client or dynamic registration is used instead (WINDOWS #179).
    */
   oauthUseCimd: z.boolean().default(true),
   /** Client registrations per issuer: the client secret is never returned (`hasSecret`). */
   oauthClients: z.array(ConnectorOAuthClientView).default([]),
-  /** Members connected to it (0 for `org_secret`), shown before a mode switch or a delete clears them (R4). */
+  /**
+   * Members connected to it (member modes only; 0 otherwise), shown before a mode switch or a delete clears them (R4).
+   */
   memberConnections: z.number().int().nonnegative().default(0),
+  // Phase 07.14 (D-06, D-10): defaulted, so 3.1 and 07.4 payloads parse unchanged.
+  /** Organization modes: the organization's shared account (null = not connected, or another mode). */
+  orgConnection: OrgConnection.nullable().default(null),
+  /** Organization modes: why the last organization sign-in or client-credential save failed (null = none). */
+  authFailure: ConnectorAuthFailure.nullable().default(null),
 });
 export type McpServer = z.infer<typeof McpServer>;
 
@@ -133,9 +154,14 @@ const connectorAuthFields = {
 };
 
 const STDIO_MESSAGE =
-  "per-member connectors need a streamable-http or sse server (stdio has no member sign-in)";
+  "member and organization account modes need a streamable-http or sse server (the API cannot call a stdio server)";
 
-/** One issue per broken connector rule of `mode`, the request's resulting mode (D-01, CONN-01). */
+/**
+ * One issue per broken connector rule of `mode`, the request's resulting mode (07.4 D-01, CONN-01; 07.14 D-01 … D-03).
+ * Each rule is decided by a shared predicate (`connectors.ts`, D-16), never a literal mode comparison: stdio only for
+ * the cell-rendered mode, organization headers only there, a member key header only for `per_member_secret`, an OAuth
+ * client and the CIMD opt-out only for the sign-in modes, scopes for the sign-in modes and client credentials.
+ */
 function checkConnectorAuth(
   mode: ConnectorAuthMode,
   v: {
@@ -149,15 +175,15 @@ function checkConnectorAuth(
   ctx: z.RefinementCtx,
   memberHeaderRequired: boolean,
 ): void {
-  const perMember = mode !== "org_secret";
-  if (perMember && v.transport === "sandboxed-stdio") {
+  const proxied = usesConnectorProxy(mode);
+  if (proxied && v.transport === "sandboxed-stdio") {
     ctx.addIssue({ code: "custom", path: ["authMode"], message: STDIO_MESSAGE });
   }
-  if (perMember && v.headers !== undefined && v.headers.length > 0) {
+  if (!rendersInCell(mode) && v.headers !== undefined && v.headers.length > 0) {
     ctx.addIssue({
       code: "custom",
       path: ["headers"],
-      message: "a per-member connector has no organization headers",
+      message: "only the organization-headers mode takes organization headers",
     });
   }
   if (mode === "per_member_secret") {
@@ -175,28 +201,29 @@ function checkConnectorAuth(
       message: "only per_member_secret takes a header",
     });
   }
-  if (mode !== "per_member_oauth") {
+  const signIn = usesOAuthSignIn(mode);
+  if (!signIn) {
     if (v.oauthClient) {
       ctx.addIssue({
         code: "custom",
         path: ["oauthClient"],
-        message: "only per_member_oauth takes an OAuth client",
-      });
-    }
-    if (v.oauthScopes && v.oauthScopes.length > 0) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["oauthScopes"],
-        message: "only per_member_oauth takes OAuth scopes",
+        message: "only sign-in modes take an OAuth client",
       });
     }
     if (v.oauthUseCimd === false) {
       ctx.addIssue({
         code: "custom",
         path: ["oauthUseCimd"],
-        message: "only per_member_oauth uses a client metadata document",
+        message: "only sign-in modes use a client metadata document",
       });
     }
+  }
+  if (!signIn && mode !== "org_client_credentials" && v.oauthScopes && v.oauthScopes.length > 0) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["oauthScopes"],
+      message: "only sign-in and client-credential modes take scopes",
+    });
   }
 }
 
@@ -241,10 +268,101 @@ export const UpdateMcpServerRequest = z
     oauthScopes: McpOAuthScopes.nullable().optional(),
     oauthClient: ConnectorOAuthClientInput.nullable().optional(),
     oauthUseCimd: z.boolean().optional(),
-    /** Confirms deleting every member connection when the mode switch or the delete would orphan them (R4). */
+    /**
+     * Confirms deleting every member connection when the mode switch or the delete would orphan them (R4), and the
+     * organization's connection when leaving an organization mode (07.14 PD-11).
+     */
     clearConnections: z.boolean().optional(),
   })
   .superRefine((v, ctx) => {
     if (v.authMode !== undefined) checkConnectorAuth(v.authMode, v, ctx, false);
   });
 export type UpdateMcpServerRequest = z.infer<typeof UpdateMcpServerRequest>;
+
+// ---------------------------------------------------------------- Test sign-in (07.14 D-10, D-18)
+
+/** The diagnosis steps in order (PD-08): each maps to one `ConnectorAuthFailure`. */
+export const AuthTestStep = z.enum([
+  "public_url",
+  "discovery",
+  "issuer",
+  "endpoints",
+  "pkce",
+  "client_registration",
+  "token",
+]);
+export type AuthTestStep = z.infer<typeof AuthTestStep>;
+
+/** The modes a Test sign-in can check: both sign-in modes and client credentials. */
+export const OAuthTestMode = ConnectorAuthMode.extract([
+  "per_member_oauth",
+  "org_oauth",
+  "org_client_credentials",
+]);
+export type OAuthTestMode = z.infer<typeof OAuthTestMode>;
+
+/**
+ * `POST /api/v1/connectors/oauth-test`: dry-runs a sign-in for an unsaved form (`url`) or a saved server (`serverId`).
+ * Never registers a client and never stores anything (D-18). Field rules follow `checkConnectorAuth`: client
+ * credentials only for `org_client_credentials`, an OAuth client and the CIMD opt-out only for the sign-in modes.
+ */
+export const OAuthTestRequest = z
+  .strictObject({
+    serverId: Id.optional(),
+    url: z.string().max(2000).optional(),
+    transport: z.enum(["streamable-http", "sse"]).optional(),
+    authMode: OAuthTestMode,
+    oauthUseCimd: z.boolean().optional(),
+    oauthClient: ConnectorOAuthClientInput.optional(),
+    clientCredentials: ClientCredentialsInput.optional(),
+    oauthScopes: McpOAuthScopes.optional(),
+    /** The page's origin, to warn when the redirect URI points at another host (RESEARCH Pitfall 1). */
+    pageOrigin: z.string().max(2000).optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.url === undefined && v.serverId === undefined) {
+      ctx.addIssue({ code: "custom", path: ["url"], message: "name a URL or a saved server" });
+    }
+    if (v.clientCredentials !== undefined && v.authMode !== "org_client_credentials") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["clientCredentials"],
+        message: "only the client-credentials mode takes client credentials",
+      });
+    }
+    if (!usesOAuthSignIn(v.authMode)) {
+      if (v.oauthClient !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["oauthClient"],
+          message: "only sign-in modes take an OAuth client",
+        });
+      }
+      if (v.oauthUseCimd !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["oauthUseCimd"],
+          message: "only sign-in modes use a client metadata document",
+        });
+      }
+    }
+  });
+export type OAuthTestRequest = z.infer<typeof OAuthTestRequest>;
+
+/**
+ * The Test sign-in answer: which step failed (the first failure stops the run; later steps are `skipped`) and the
+ * instance's URLs to copy. Never provider text, a token or a secret.
+ */
+export const OAuthTestResponse = z.object({
+  ok: z.boolean(),
+  failure: ConnectorAuthFailure.nullable(),
+  steps: z
+    .array(z.object({ step: AuthTestStep, status: z.enum(["ok", "failed", "skipped"]) }))
+    .max(AuthTestStep.options.length),
+  clientMethod: ConnectorOAuthClientMethod.nullable(),
+  issuer: z.string().nullable(),
+  tokenEndpoint: z.string().nullable(),
+  redirectUri: z.string(),
+  clientMetadataUrl: z.string().nullable(),
+});
+export type OAuthTestResponse = z.infer<typeof OAuthTestResponse>;

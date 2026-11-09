@@ -8,12 +8,66 @@ import { Id, IsoDateTime } from "./common";
  * per member and calls the server itself through the connector proxy, so a token never reaches the cell, the model,
  * a log or an audit row (principles 6, 8, 9).
  *
+ * Phase 07.14 (D-01) adds two organization modes: `org_oauth` (an admin signs in once for the whole organization) and
+ * `org_client_credentials` (an OAuth client ID and secret, no browser). Both are proxied by the API like the member
+ * modes, and their token is sealed for the organization, never for a member; it never reaches the cell either.
+ *
  * Secret material is WRITE-ONLY: request schemas take it (`ConnectorOAuthClientInput.clientSecret`,
- * `ConnectSecretRequest.value`), response schemas only say whether one is stored (`hasSecret`).
+ * `ConnectSecretRequest.value`, `ClientCredentialsInput.clientSecret`), response schemas only say whether one is
+ * stored (`hasSecret`).
  */
 
-export const ConnectorAuthMode = z.enum(["org_secret", "per_member_oauth", "per_member_secret"]);
+/** The three 07.4 values first, unchanged; the two 07.14 organization modes after them. */
+export const ConnectorAuthMode = z.enum([
+  "org_secret",
+  "per_member_oauth",
+  "per_member_secret",
+  "org_oauth",
+  "org_client_credentials",
+]);
 export type ConnectorAuthMode = z.infer<typeof ConnectorAuthMode>;
+
+// ---------------------------------------------------------------- mode predicates (07.14 D-16)
+//
+// Every mode question in the code base is answered by one of these predicates (or its mode list, for SQL `inArray`).
+// This file is the only place a literal comparison against the organization-headers mode is allowed (Semgrep
+// `ocw.raw-auth-mode`, 07.14-13): a new mode then cannot be silently read as a member's account or rendered in the cell.
+
+/** The organization's headers are rendered in the OpenClaw cell (`org_secret` only). No other mode's credential ever is. */
+export function rendersInCell(mode: ConnectorAuthMode): boolean {
+  return mode === "org_secret";
+}
+
+/** The API calls the server itself through the connector proxy with a sealed credential (every mode but `org_secret`). */
+export function usesConnectorProxy(mode: ConnectorAuthMode): boolean {
+  return !rendersInCell(mode);
+}
+
+/** Each member connects their own account (`per_member_oauth`, `per_member_secret`): member lists, shares, audience rule. */
+export function isPerMemberMode(mode: ConnectorAuthMode): boolean {
+  return mode === "per_member_oauth" || mode === "per_member_secret";
+}
+
+/** One shared account sealed for the organization (`org_oauth`, `org_client_credentials`), used by every member's bots. */
+export function isOrgCredentialMode(mode: ConnectorAuthMode): boolean {
+  return mode === "org_oauth" || mode === "org_client_credentials";
+}
+
+/** A browser OAuth sign-in (authorization code + PKCE) obtains the token (`per_member_oauth`, `org_oauth`). */
+export function usesOAuthSignIn(mode: ConnectorAuthMode): boolean {
+  return mode === "per_member_oauth" || mode === "org_oauth";
+}
+
+function modesWhere(pred: (mode: ConnectorAuthMode) => boolean): readonly ConnectorAuthMode[] {
+  return Object.freeze(ConnectorAuthMode.options.filter(pred));
+}
+
+/** The predicates as mode lists, in `ConnectorAuthMode` order, for SQL (`inArray(mcpServers.authMode, LIST)`). */
+export const CELL_MODES: readonly ConnectorAuthMode[] = modesWhere(rendersInCell);
+export const CONNECTOR_PROXY_MODES: readonly ConnectorAuthMode[] = modesWhere(usesConnectorProxy);
+export const PER_MEMBER_MODES: readonly ConnectorAuthMode[] = modesWhere(isPerMemberMode);
+export const ORG_CREDENTIAL_MODES: readonly ConnectorAuthMode[] = modesWhere(isOrgCredentialMode);
+export const OAUTH_SIGN_IN_MODES: readonly ConnectorAuthMode[] = modesWhere(usesOAuthSignIn);
 
 /** Whether members can start an OAuth connection: `needs_client` = no usable client registration for the issuer. */
 export const ConnectorOAuthStatus = z.enum(["ready", "needs_client", "https_required", "error"]);
@@ -39,6 +93,57 @@ export const ConnectorErrorCode = z.enum([
   "needs_reconnect",
 ]);
 export type ConnectorErrorCode = z.infer<typeof ConnectorErrorCode>;
+
+// ---------------------------------------------------------------- sign-in diagnosis (07.14 D-10, D-15)
+
+/**
+ * Why an organization sign-in, a client-credentials grant or a Test sign-in failed: the D-10 closed set, in diagnosis
+ * order (the first failed step wins). Never provider text. Stored as `mcp_servers.auth_failure`. A separate field from
+ * `ConnectorErrorCode`, which the member flows keep unchanged.
+ */
+export const ConnectorAuthFailure = z.enum([
+  "https_required",
+  "discovery_failed",
+  "issuer_mismatch",
+  "token_endpoint_untrusted",
+  "pkce_unsupported",
+  "client_registration_unavailable",
+  "scope_rejected",
+  "token_exchange_failed",
+]);
+export type ConnectorAuthFailure = z.infer<typeof ConnectorAuthFailure>;
+
+/** One fix line per failure (07.14 PD-12, final copy); `{server}` is the server's name (`authFailureFix`). */
+export const AUTH_FAILURE_FIX: Readonly<Record<ConnectorAuthFailure, string>> = Object.freeze({
+  https_required:
+    "Sign-in needs this workspace's public HTTPS address in OCW_PUBLIC_API_URL. Run pnpm ocw enable proxy on the server (or set the URL), then reload this page.",
+  discovery_failed:
+    "{server} publishes no OAuth sign-in information OCW can read. Check the URL, or use Organization headers with an API key.",
+  issuer_mismatch:
+    "{server}'s sign-in server names a different issuer than its address. The provider has to fix its metadata; until then, use Organization headers.",
+  token_endpoint_untrusted:
+    "The sign-in endpoints must use HTTPS (or this MCP server's own address). Check the Token URL, or ask the provider for an HTTPS endpoint.",
+  pkce_unsupported:
+    "{server}'s sign-in doesn't offer PKCE (S256), which OCW requires. Use Client credentials or Organization headers.",
+  client_registration_unavailable:
+    "{server} doesn't let OCW register itself. Create an OAuth app at the provider with the redirect URI below, then enter its client ID and secret under Pre-registered client.",
+  scope_rejected:
+    "The provider refused the requested scopes. Clear Scopes to use the server's own, or enter scopes it accepts.",
+  token_exchange_failed:
+    "The provider didn't finish the sign-in. Check the client ID and secret, then try again.",
+});
+
+/** The fix line for `code` with the server's name in place (inserted literally, never as a replacement pattern). */
+export function authFailureFix(code: ConnectorAuthFailure, serverName: string): string {
+  return AUTH_FAILURE_FIX[code].split("{server}").join(serverName);
+}
+
+/** The `?error=` of an organization sign-in redirect to `/settings/mcp-servers` (07.14 PD-06). */
+export const OrgSignInError = z.union([
+  ConnectorAuthFailure,
+  z.enum(["access_denied", "flow_expired", "session_mismatch"]),
+]);
+export type OrgSignInError = z.infer<typeof OrgSignInError>;
 
 // ---------------------------------------------------------------- OAuth client registration
 
@@ -173,7 +278,7 @@ export const MemberConnector = z.object({
   secretHeaderName: z.string().nullable(),
   secretHeaderPrefix: z.string().nullable(),
   /** "Connected as {account}" (R1): from an ID token's email or preferred_username; null for keys or when unknown. */
-  accountLabel: z.string().max(320).nullable(),
+  accountLabel: z.string().max(200).nullable(),
   /** Only with `needs_reconnect` (R2). */
   reconnectReason: ConnectorReconnectReason.nullable(),
 });
@@ -198,6 +303,51 @@ export type ConnectStartResponse = z.infer<typeof ConnectStartResponse>;
 /** `PUT /api/v1/connectors/:id/secret`: the member's key for a `per_member_secret` connector. Write-only. */
 export const ConnectSecretRequest = z.object({ value: z.string().min(1).max(8192) });
 export type ConnectSecretRequest = z.infer<typeof ConnectSecretRequest>;
+
+// ---------------------------------------------------------------- organization connection (07.14 D-03, D-06, D-11)
+
+/** How the organization's account was obtained: an admin's OAuth sign-in, or OAuth client credentials. */
+export const OrgConnectionMethod = z.enum(["oauth", "client_credentials"]);
+export type OrgConnectionMethod = z.infer<typeof OrgConnectionMethod>;
+
+/**
+ * The organization's shared account on one server (`McpServer.orgConnection`). Served only to `mcp.manage`; never a
+ * token, secret or secret id (strict: an extra key is refused, so none can be added by accident).
+ */
+export const OrgConnection = z.strictObject({
+  method: OrgConnectionMethod,
+  status: ConnectionStatus,
+  /** "Connected as {account}": from an ID token's email or preferred_username; null for client credentials or unknown. */
+  accountLabel: z.string().max(200).nullable(),
+  /** Client credentials only: the client ID (an identifier, not a secret). */
+  clientId: z.string().nullable(),
+  /** Client credentials only: the token endpoint in use (discovered or admin-entered). */
+  tokenEndpoint: z.string().nullable(),
+  scopes: z.array(z.string()),
+  /** The admin who connected it (null once they left the organization). */
+  connectedBy: z.object({ id: Id, name: z.string() }).nullable(),
+  connectedAt: IsoDateTime.nullable(),
+  lastUsedAt: IsoDateTime.nullable(),
+  /** Only with `needs_reconnect`. */
+  reconnectReason: ConnectorReconnectReason.nullable(),
+  /** Client credentials: whether a client secret is stored (it is never returned). */
+  hasSecret: z.boolean(),
+});
+export type OrgConnection = z.infer<typeof OrgConnection>;
+
+/**
+ * `PUT /api/v1/connectors/:id/org-connection/client-credentials` and the Test sign-in's client credentials. The secret
+ * is write-only: omitted = keep the stored one. `tokenEndpoint` omitted = the server's published metadata.
+ */
+export const ClientCredentialsInput = z.strictObject({
+  clientId: z.string().trim().min(1).max(256),
+  clientSecret: z.string().min(1).max(4096).optional(),
+  tokenEndpoint: z
+    .url({ protocol: /^https?$/ })
+    .max(2000)
+    .optional(),
+});
+export type ClientCredentialsInput = z.infer<typeof ClientCredentialsInput>;
 
 /** UTF-8 bytes of `value` serialized as JSON (`Infinity` when it cannot be serialized): the bound of tool payloads. */
 export function jsonBytes(value: unknown): number {

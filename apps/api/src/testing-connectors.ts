@@ -29,6 +29,9 @@ export const CALLBACK_URL = `${PUBLIC_API_URL}/api/v1/connectors/oauth/callback`
 export const PRE_REGISTERED = "ocw-test";
 export const PRE_REGISTERED_CONFIDENTIAL = "ocw-test-confidential";
 export const CONFIDENTIAL_SECRET = "CONFIDENTIAL-CLIENT-SECRET-CANARY";
+/** The fake's pre-registered client-credentials client (07.14 `org_client_credentials`); no redirect URIs. */
+export const PRE_REGISTERED_CC = "ocw-test-cc";
+export const CC_SECRET = "CC-CLIENT-SECRET-CANARY";
 
 // biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
 export type Json = Record<string, any>;
@@ -94,6 +97,7 @@ export async function startConnectorsStack(
         client_secret: CONFIDENTIAL_SECRET,
         redirect_uris: [CALLBACK_URL],
       },
+      { client_id: PRE_REGISTERED_CC, client_secret: CC_SECRET, redirect_uris: [] },
     ],
   });
   let down = false;
@@ -290,6 +294,84 @@ export async function registerConnector(
   );
 }
 
+/**
+ * The admin registers an organization sign-in server (`org_oauth`, 07.14) on the fake, with the pre-registered public
+ * client `ocw-test` unless told otherwise.
+ */
+export async function registerOrgConnector(
+  s: ConnectorsStack,
+  extra: Json = {},
+  as: TestClient = s.victor,
+): Promise<Json> {
+  return registerConnector(
+    s,
+    { name: `Drive ${randomUUID().slice(0, 6)}`, authMode: "org_oauth", ...extra },
+    as,
+  );
+}
+
+/**
+ * The admin registers an organization client-credentials server (`org_client_credentials`, 07.14 D-03) on the fake's
+ * MCP URL, scopes empty unless told otherwise.
+ */
+export async function registerCcConnector(
+  s: ConnectorsStack,
+  extra: Json = {},
+  as: TestClient = s.victor,
+): Promise<Json> {
+  return ok(
+    as.request("POST", "/api/v1/mcp-servers", {
+      name: `Ledger ${randomUUID().slice(0, 6)}`,
+      transport: "streamable-http",
+      url: `${s.fakeBase}/mcp-oauth/mcp`,
+      authMode: "org_client_credentials",
+      ...extra,
+    }),
+  );
+}
+
+/**
+ * `PUT /connectors/:id/org-connection/client-credentials` as `as`, with the fake's pre-registered client-credentials
+ * client unless another body is given. Returns the raw response (`ok()` / `fails()` read it).
+ */
+export async function saveCc(
+  _s: ConnectorsStack,
+  as: TestClient,
+  serverId: string,
+  body: Json = { clientId: PRE_REGISTERED_CC, clientSecret: CC_SECRET },
+): Promise<Res> {
+  return as.request("PUT", `/api/v1/connectors/${serverId}/org-connection/client-credentials`, body);
+}
+
+/** POST org-connection/connect → authorize → callback with the same admin's session; returns the final redirect. */
+export async function connectOrgOAuth(
+  s: ConnectorsStack,
+  as: TestClient,
+  serverId: string,
+): Promise<{ status: number; location: string }> {
+  const start = await ok(as.request("POST", `/api/v1/connectors/${serverId}/org-connection/connect`));
+  return callback(s, await authorize(s, start.authorizeUrl), as);
+}
+
+/** The organization's connection row of a server (superuser read). */
+export const orgConnectionRow = async (s: ConnectorsStack, orgId: string, serverId: string) =>
+  (
+    await s.su.query(
+      "select * from app.connector_org_connections where organization_id = $1 and server_id = $2",
+      [orgId, serverId],
+    )
+  ).rows[0] as Json | undefined;
+
+/** The organization's sealed bundle of a server, opened with the organization AAD (test-only: never printed). */
+export async function orgBundleOf(s: ConnectorsStack, orgId: string, serverId: string): Promise<Json | null> {
+  const row = await orgConnectionRow(s, orgId, serverId);
+  if (!row?.secret_id) return null;
+  const { core } = s.stack.built;
+  return core.db.withTenant({ organizationId: orgId }, async (tx) =>
+    JSON.parse(await core.secrets.revealSealed(tx, row.secret_id, `${orgId}:org:connector:${serverId}`)),
+  );
+}
+
 /** Plays the browser at the authorization server: follows the authorize URL once, returns the redirect. */
 export async function authorize(s: ConnectorsStack, authorizeUrl: string): Promise<string> {
   const res = await s.browser.fetch(authorizeUrl, {}, { privateAllow: [`fake-mcp:${s.fakePort}`] });
@@ -360,6 +442,18 @@ export const auditRows = async (s: ConnectorsStack, orgId: string, actions: stri
       [orgId, actions],
     )
   ).rows as Json[];
+
+/**
+ * Forgets the per-admin rate-limit buckets of the organization-connection routes (Test sign-in, client-credentials
+ * save, organization Connect; 07.14 review WR-01), so a file's many saves are not counted against one minute.
+ */
+export async function resetConnectorRateLimits(s: ConnectorsStack): Promise<void> {
+  const redis = s.stack.built.core.bus.pub;
+  for (const bucket of ["oauth-test", "org-cc", "org-connect"]) {
+    const keys = await redis.keys(`ocw:rl:*${bucket}:*`);
+    if (keys.length > 0) await redis.del(keys);
+  }
+}
 
 /** Fails when an MCP SDK call fell back to the global fetch (#175). */
 export function assertNoGlobalFetch(s: ConnectorsStack): void {

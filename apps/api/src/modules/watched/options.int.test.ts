@@ -7,7 +7,15 @@ import {
   FAKE_ERP_TOOLS,
   type FakeErpMcp,
 } from "../../../../../infra/fake-model/fake-erp-mcp.mjs";
-import { type ConnectorsStack, fails, type Json, ok, startConnectorsStack } from "../../testing-connectors";
+import {
+  type ConnectorsStack,
+  connectOrgOAuth,
+  fails,
+  type Json,
+  ok,
+  registerOrgConnector,
+  startConnectorsStack,
+} from "../../testing-connectors";
 import { replaceServerTools } from "../mcp";
 
 /**
@@ -214,6 +222,44 @@ describe("GET /watched-records/options (the watch dialog)", () => {
       expect(ids).not.toContain(crmConnector.id);
     } finally {
       await ok(s.victor.request("PATCH", `/api/v1/mcp-servers/${erpConnector.id}`, { orgEnabled: true }));
+    }
+  });
+});
+
+describe("an organization-account connector (07.14) is offered as workspace access", () => {
+  let drive: Json;
+
+  beforeAll(async () => {
+    drive = await registerOrgConnector(s, { name: "Acme Drive" });
+    // The admin's one sign-in for the organization; the probe records the tools.
+    expect((await connectOrgOAuth(s, s.victor, drive.id)).status).toBe(302);
+    await grant(opsId, drive, ["whoami"]);
+  });
+
+  it("every member sees it with workspace access, no connection and no share needed", async () => {
+    for (const who of [s.victor, s.sam]) {
+      const listed = ((await ok(options(who))).connectors as Json[]).find((c) => c.id === drive.id) as Json;
+      expect(listed).toMatchObject({
+        name: "Acme Drive",
+        authMode: "org_secret",
+        connection: null,
+        shared: true,
+      });
+      expect((listed.tools as Json[]).find((t) => t.name === "whoami")).toMatchObject({
+        readOnly: true,
+        destructive: false,
+        agentIds: [opsId],
+      });
+      expect(JSON.stringify(listed)).not.toMatch(/fakeat_|fakert_|Bearer|mcp-oauth/u);
+    }
+  });
+
+  it("switched off for the organization: not offered", async () => {
+    await ok(s.victor.request("PATCH", `/api/v1/mcp-servers/${drive.id}`, { orgEnabled: false }));
+    try {
+      expect(((await ok(options(s.sam))).connectors as Json[]).map((c) => c.id)).not.toContain(drive.id);
+    } finally {
+      await ok(s.victor.request("PATCH", `/api/v1/mcp-servers/${drive.id}`, { orgEnabled: true }));
     }
   });
 });

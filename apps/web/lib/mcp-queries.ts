@@ -1,10 +1,15 @@
 "use client";
 
 import {
+  type ClientCredentialsInput,
+  ConnectorAuthFailure,
   type CreateMcpServerRequest,
   McpServer,
   McpServerList,
+  type OAuthTestRequest,
+  OAuthTestResponse,
   Ok,
+  rendersInCell,
   type UpdateMcpServerRequest,
 } from "@ocw/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -25,7 +30,7 @@ const PROBING = new Set(["pending", "probing"]);
  * Only the cell probes, and only organization-secret servers: a per-member connector stays `pending` until a member
  * connects (07.4-10), so it never keeps the list polling.
  */
-const awaitingCellProbe = (s: McpServer) => s.authMode === "org_secret" && PROBING.has(s.status);
+const awaitingCellProbe = (s: McpServer) => rendersInCell(s.authMode) && PROBING.has(s.status);
 
 function noRetryOn4xx(failureCount: number, err: unknown): boolean {
   if (isApiError(err) && err.status >= 400 && err.status < 500) return false;
@@ -120,4 +125,58 @@ export function connectionsExistCount(err: unknown): number | null {
   if (!isApiError(err, 409) || err.code !== "connections_exist") return null;
   const count = (err.details as { count?: unknown } | undefined)?.count;
   return typeof count === "number" && count > 0 ? count : null;
+}
+
+/** A PATCH refused with 409 `org_connection_exists` (the organization connected since the list loaded, PD-11). */
+export function isOrgConnectionExists(err: unknown): boolean {
+  return isApiError(err, 409) && err.code === "org_connection_exists";
+}
+
+/**
+ * A client-credentials save the provider refused (409 whose code is a D-10 failure): the step it stopped at, never the
+ * provider's text. The API also records it as the server's `authFailure`.
+ */
+export class CredentialsRefusedError extends Error {
+  constructor(readonly failure: ConnectorAuthFailure) {
+    super(`client credentials refused: ${failure}`);
+    this.name = "CredentialsRefusedError";
+  }
+}
+
+/**
+ * `PUT /api/v1/connectors/:id/org-connection/client-credentials` (07.14 D-03, mcp.manage): the API discovers the token
+ * endpoint, runs one grant, seals the client and lists the tools; the answer replaces the server in the list. The
+ * secret is write-only (omitted = keep the stored one). A refused grant throws `CredentialsRefusedError`; the list is
+ * refetched either way, so the row shows the stored failure or the connection.
+ */
+export function useSaveClientCredentials() {
+  const replace = useReplaceServer();
+  const invalidate = useInvalidateMcp();
+  return useMutation({
+    mutationFn: async ({ serverId, body }: { serverId: string; body: ClientCredentialsInput }) => {
+      try {
+        return await api.put(`/api/v1/connectors/${serverId}/org-connection/client-credentials`, {
+          body,
+          schema: McpServer,
+        });
+      } catch (err) {
+        const failure = isApiError(err, 409) ? ConnectorAuthFailure.safeParse(err.code) : null;
+        if (failure?.success) throw new CredentialsRefusedError(failure.data);
+        throw err;
+      }
+    },
+    onSuccess: replace,
+    onSettled: invalidate,
+  });
+}
+
+/**
+ * `POST /api/v1/connectors/oauth-test` (07.14 D-10, D-18): dry-runs a sign-in for the dialog's current values or the
+ * saved server. It stores and registers nothing; the answer names steps by closed codes only.
+ */
+export function useOAuthTest() {
+  return useMutation({
+    mutationFn: (body: OAuthTestRequest) =>
+      api.post("/api/v1/connectors/oauth-test", { body, schema: OAuthTestResponse }),
+  });
 }

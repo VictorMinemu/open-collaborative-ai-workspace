@@ -1024,12 +1024,38 @@ export const agentMemories = appSchema.table(
   ],
 );
 
+/** Whose credential an MCP server call uses (`mcp_servers_auth_mode_check`; `ConnectorAuthMode` in contracts). */
+const MCP_AUTH_MODES = [
+  "org_secret",
+  "per_member_oauth",
+  "per_member_secret",
+  "org_oauth",
+  "org_client_credentials",
+] as const;
+
+/** 07.14 D-10: the closed organization sign-in failure codes (`ConnectorAuthFailure` in contracts, same order). */
+const MCP_AUTH_FAILURES = [
+  "https_required",
+  "discovery_failed",
+  "issuer_mismatch",
+  "token_endpoint_untrusted",
+  "pkce_unsupported",
+  "client_registration_unavailable",
+  "scope_rejected",
+  "token_exchange_failed",
+] as const;
+
+/** A fixed literal list declared in this file as SQL (`'a','b'`), for the checks over its `const` enums. */
+const sqlList = (values: readonly string[]) => sql.raw(values.map((v) => `'${v}'`).join(","));
+
 /**
  * Admin MCP server registry (D-13). Header values live in `secrets` (kind `mcp_credential`).
  * Phase 07.4 (D-01): `auth_mode` says whose credential a call uses. `org_secret` = the admin-registered headers (every
  * server before 07.4); `per_member_oauth` / `per_member_secret` = each member's own connection
  * (`connector_connections`), called only through the API's connector proxy and never rendered into the cell, so the
  * stdio sandbox (which only gets org headers) can never be per-member.
+ * Phase 07.14 (D-01): `org_oauth` / `org_client_credentials` = one account the organization connects
+ * (`connector_org_connections`), also called only through the proxy, so the stdio sandbox refuses them too.
  */
 export const mcpServers = appSchema.table(
   "mcp_servers",
@@ -1055,9 +1081,7 @@ export const mcpServers = appSchema.table(
     createdBy: uuid("created_by"),
     createdAt: createdAt(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
-    authMode: text("auth_mode", { enum: ["org_secret", "per_member_oauth", "per_member_secret"] })
-      .notNull()
-      .default("org_secret"),
+    authMode: text("auth_mode", { enum: MCP_AUTH_MODES }).notNull().default("org_secret"),
     /** `per_member_secret`: the header each member's own key is sent in, and an optional value prefix (`Bearer `). */
     memberHeaderName: text("member_header_name"),
     memberHeaderPrefix: text("member_header_prefix"),
@@ -1071,6 +1095,11 @@ export const mcpServers = appSchema.table(
      * private CA, WINDOWS #179); a pre-registered client or dynamic registration is used instead.
      */
     oauthUseCimd: boolean("oauth_use_cimd").notNull().default(true),
+    /**
+     * 07.14 D-15: the last organization sign-in failure, a closed code, never provider text; cleared on success.
+     * Null = no failure recorded (every server before 07.14).
+     */
+    authFailure: text("auth_failure", { enum: MCP_AUTH_FAILURES }),
   },
   (t) => [
     uniqueIndex("mcp_servers_org_safe_name_uq").on(t.organizationId, t.safeName),
@@ -1078,10 +1107,7 @@ export const mcpServers = appSchema.table(
     unique("mcp_servers_org_id_uq").on(t.organizationId, t.id),
     check("mcp_servers_transport_check", sql`${t.transport} in ('streamable-http','sse','sandboxed-stdio')`),
     check("mcp_servers_status_check", sql`${t.status} in ('pending','probing','ready','error')`),
-    check(
-      "mcp_servers_auth_mode_check",
-      sql`${t.authMode} in ('org_secret','per_member_oauth','per_member_secret')`,
-    ),
+    check("mcp_servers_auth_mode_check", sql`${t.authMode} in (${sqlList(MCP_AUTH_MODES)})`),
     check(
       "mcp_servers_auth_mode_transport_check",
       sql`${t.authMode} = 'org_secret' or ${t.transport} <> 'sandboxed-stdio'`,
@@ -1089,6 +1115,10 @@ export const mcpServers = appSchema.table(
     check(
       "mcp_servers_oauth_status_check",
       sql`${t.oauthStatus} is null or ${t.oauthStatus} in ('ready','needs_client','https_required','error')`,
+    ),
+    check(
+      "mcp_servers_auth_failure_check",
+      sql`${t.authFailure} is null or ${t.authFailure} in (${sqlList(MCP_AUTH_FAILURES)})`,
     ),
   ],
 );
@@ -1235,7 +1265,9 @@ export const secrets = appSchema.table(
      * `user_model_credential` (Phase 5): a member's ChatGPT plan token bundle, sealed with AAD
      * `<orgId>:<userId>:chatgpt_plan` and referenced by `user_model_credentials.secret_id` (never pooled, D-01).
      * `connector_credential` (Phase 07.4, D-01): a member's connector token bundle or key, sealed with AAD
-     * `<orgId>:<userId>:connector:<serverId>` and referenced by `connector_connections.secret_id`.
+     * `<orgId>:<userId>:connector:<serverId>` and referenced by `connector_connections.secret_id`. Phase 07.14 (D-06):
+     * also the organization's own connector account, sealed with AAD `<orgId>:org:connector:<serverId>` and referenced
+     * by `connector_org_connections.secret_id` (a member AAD's second segment is a user UUID, never the literal `org`).
      * `vault_item` (Phase 07.4, D-04): a keychain item's value, sealed with AAD `<orgId>:vault:<itemId>` and referenced
      * by `vault_items.secret_ref`.
      * `browser_session` (Phase 07.8, D-08, P-09): a member's browser storage state for one site and bot, sealed with AAD
@@ -2745,6 +2777,65 @@ export const connectorConnections = appSchema.table(
     check(
       "connector_connections_last_error_len_check",
       sql`${t.lastError} is null or char_length(${t.lastError}) <= 64`,
+    ),
+  ],
+);
+
+/**
+ * Phase 07.14 (D-06): the one account an organization connects for an `org_oauth` / `org_client_credentials` server, at
+ * most one per (organization, server). Unlike `connector_connections` it belongs to the organization, not to a member:
+ * it is read inside the tenant (tenant RLS from post-migrate.sql, no owner-only policy, no SECURITY DEFINER function).
+ * The token bundle (or the client-credentials secret and token) is the sealed `secret_id` row in `app.secrets` (kind
+ * `connector_credential`, AAD `<orgId>:org:connector:<serverId>`); this row holds only state and display metadata.
+ * `method` = how it was connected; `token_endpoint` = the client-credentials token URL (discovered or entered);
+ * `connected_by` = the admin who connected it (no FK, like `connector_connections.user_id`); `last_error` = a short
+ * code, never provider text. The composite FK carries the organization (FKs bypass RLS, the 07.6 precedent).
+ */
+export const connectorOrgConnections = appSchema.table(
+  "connector_org_connections",
+  {
+    id: id(),
+    organizationId: orgId(),
+    serverId: uuid("server_id").notNull(),
+    method: text("method", { enum: ["oauth", "client_credentials"] }).notNull(),
+    status: text("status", { enum: ["connected", "needs_reconnect"] }).notNull(),
+    secretId: uuid("secret_id").references(() => secrets.id, { onDelete: "set null" }),
+    issuer: text("issuer"),
+    clientId: text("client_id"),
+    tokenEndpoint: text("token_endpoint"),
+    scopes: text("scopes").array().notNull().default(sql`'{}'::text[]`),
+    accountLabel: text("account_label"),
+    accessExpiresAt: ts("access_expires_at"),
+    lastError: text("last_error"),
+    connectedBy: uuid("connected_by"),
+    connectedAt: ts("connected_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+    lastUsedAt: ts("last_used_at"),
+  },
+  (t) => [
+    unique("connector_org_connections_org_server_uq").on(t.organizationId, t.serverId),
+    foreignKey({
+      name: "connector_org_connections_mcp_server_fk",
+      columns: [t.organizationId, t.serverId],
+      foreignColumns: [mcpServers.organizationId, mcpServers.id],
+    }).onDelete("cascade"),
+    check("connector_org_connections_status_check", sql`${t.status} in ('connected','needs_reconnect')`),
+    check("connector_org_connections_method_check", sql`${t.method} in ('oauth','client_credentials')`),
+    check(
+      "connector_org_connections_account_label_len_check",
+      sql`${t.accountLabel} is null or char_length(${t.accountLabel}) <= 200`,
+    ),
+    check(
+      "connector_org_connections_last_error_len_check",
+      sql`${t.lastError} is null or char_length(${t.lastError}) <= 64`,
+    ),
+    check(
+      "connector_org_connections_client_id_len_check",
+      sql`${t.clientId} is null or char_length(${t.clientId}) <= 256`,
+    ),
+    check(
+      "connector_org_connections_token_endpoint_len_check",
+      sql`${t.tokenEndpoint} is null or char_length(${t.tokenEndpoint}) <= 2000`,
     ),
   ],
 );

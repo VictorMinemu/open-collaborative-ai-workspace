@@ -470,3 +470,160 @@ async function personalDm(): Promise<string> {
   }
   return victorPersonalDm;
 }
+
+// ---------------------------------------------------------------- 07.14-08 (D-04, D-05, PD-09)
+
+describe("organization-account tools (07.14)", () => {
+  const DRIVE = "m8c9d0e1f";
+  const DRIVE_WHOAMI = `${DRIVE}__whoami`;
+  let driveId = "";
+
+  const grantsOf = async (agentId: string) =>
+    (await ok(victor.request("GET", `/api/v1/agents/${agentId}/capabilities`))).tools
+      .filter((t: Json) => t.granted)
+      .map((t: Json) => ({ sourceKind: t.sourceKind, sourceId: t.sourceId, tool: t.tool }));
+
+  /** Superuser-inserted deny of a permission for one user; returns its removal. */
+  async function deny(userId: string, permission: string) {
+    const id = randomUUID();
+    await su.query(
+      `insert into app.permission_rules (id, organization_id, subject_kind, subject_id, permission, effect)
+       values ($1, $2, 'user', $3, $4, 'deny')`,
+      [id, orgId, userId, permission],
+    );
+    return async () => {
+      await su.query("delete from app.permission_rules where id = $1", [id]);
+    };
+  }
+
+  beforeAll(async () => {
+    // An organization sign-in server, probed, never connected: its tools are offered anyway (PD-09; the call fails
+    // with the organization's sentence).
+    driveId = randomUUID();
+    await su.query(
+      `insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, status, auth_mode)
+       values ($1, $2, 'Shared Drive', $3, 'streamable-http', $4, 'ready', 'org_oauth')`,
+      [driveId, orgId, DRIVE, `https://${DRIVE}.example.test/mcp`],
+    );
+    await su.query(
+      `insert into app.mcp_server_tools (organization_id, server_id, name, openclaw_name, read_only)
+       values ($1, $2, 'whoami', $3, true)`,
+      [orgId, driveId, DRIVE_WHOAMI],
+    );
+    await ok(
+      victor.request("PATCH", `/api/v1/agents/${scoutId}/capabilities`, {
+        tools: [...(await grantsOf(scoutId)), { sourceKind: "mcp", sourceId: driveId, tool: DRIVE_WHOAMI }],
+      }),
+    );
+  });
+
+  it("Víctor's DM: the logical tool with ocw_connector_list and ocw_connector_call", async () => {
+    const ev = await turnIn(victor, dmId);
+    expect(ev.turn.tools).toEqual(
+      expect.arrayContaining([DRIVE_WHOAMI, "ocw_connector_list", "ocw_connector_call"]),
+    );
+    expect(ev.turn.toolFlags[DRIVE_WHOAMI]).toEqual({ untrustedOutput: true, sideEffecting: false });
+    expect(ev.turn.withheld).toBeUndefined();
+  });
+
+  it("a channel with Víctor and Sam: offered like an organization-headers tool, never withheld member_account", async () => {
+    const ev = await turnIn(victor, channelId);
+    expect(ev.turn.tools).toEqual(expect.arrayContaining([DRIVE_WHOAMI, ECHO, "ocw_connector_call"]));
+    // Víctor's own CRM account and key are still withheld by the member audience rule; the drive is not.
+    expect(ev.turn.withheld).toEqual([crmWithheld(), keyWithheld()]);
+  });
+
+  it("a shared AI chat: not_every_participant when a reader may not use it, shared_with_group with a group grant", async () => {
+    const created = await ok(
+      victor.request("POST", "/api/v1/ai-chats", {
+        clientMessageId: cid(),
+        body: "Check the drive",
+        model: PLAN_MODEL,
+      }),
+      201,
+    );
+    const chatId = (created.chat as Json).id as string;
+    await settled((created.generation as Json).id as string);
+    await ok(victor.request("POST", `/api/v1/ai-chats/${chatId}/agents`, { agentId: scoutId }), 201);
+    await ok(
+      victor.request("POST", `/api/v1/ai-chats/${chatId}/grants`, {
+        subject: { kind: "user", id: samId },
+        level: "chat",
+      }),
+      201,
+    );
+
+    // Every reader may use it: offered, with no member-account entry for the drive.
+    const shared = await turnInAiChat(victor, chatId);
+    expect(shared.turn.tools).toEqual(expect.arrayContaining([DRIVE_WHOAMI, "ocw_connector_call"]));
+    expect((shared.turn.withheld as Json[]).filter((w) => w.resource?.id === driveId)).toEqual([]);
+
+    // A reader (Sam) may not use bot tools: withheld for everyone asking there.
+    const undo = await deny(samId, "bot.tool.use");
+    try {
+      const denied = await turnInAiChat(victor, chatId);
+      expect(denied.turn.tools).not.toContain(DRIVE_WHOAMI);
+      expect(denied.turn.withheld).toEqual(
+        expect.arrayContaining([{ tool: DRIVE_WHOAMI, reason: "not_every_participant" }]),
+      );
+    } finally {
+      await undo();
+    }
+
+    // The organization reads it (a group grant): withheld shared_with_group.
+    await ok(
+      victor.request("POST", `/api/v1/ai-chats/${chatId}/grants`, {
+        subject: { kind: "org" },
+        level: "chat",
+      }),
+      201,
+    );
+    const group = await turnInAiChat(victor, chatId);
+    expect(group.turn.tools).not.toContain(DRIVE_WHOAMI);
+    expect(group.turn.withheld).toEqual(
+      expect.arrayContaining([{ tool: DRIVE_WHOAMI, reason: "shared_with_group" }]),
+    );
+    expect(JSON.stringify(group.turn.withheld)).not.toContain(`"id":"${driveId}"`);
+  });
+
+  it("/cell alsoAllow: the static names only, never the organization server's logical name", async () => {
+    const agents = (await cellCall("GET", "/cell")).body?.agents as Json[];
+    const scout = agents.find((a) => a.id === scoutId)?.capabilities.tools as string[];
+    expect(scout).toEqual(expect.arrayContaining(["ocw_connector_list", "ocw_connector_call"]));
+    expect(scout.filter((t) => t.startsWith(`${DRIVE}__`))).toEqual([]);
+  });
+
+  it("orgEnabled false: offered in no turn; personalAllowed false: never to a personal bot", async () => {
+    await su.query("update app.mcp_servers set org_enabled = false where id = $1", [driveId]);
+    try {
+      expect((await turnIn(victor, dmId)).turn.tools).not.toContain(DRIVE_WHOAMI);
+      expect((await turnIn(victor, channelId)).turn.tools).not.toContain(DRIVE_WHOAMI);
+    } finally {
+      await su.query("update app.mcp_servers set org_enabled = true where id = $1", [driveId]);
+    }
+    expect((await turnIn(victor, dmId)).turn.tools).toContain(DRIVE_WHOAMI);
+
+    await ok(
+      victor.request("PATCH", `/api/v1/agents/${victorBot}/capabilities`, {
+        tools: [...(await grantsOf(victorBot)), { sourceKind: "mcp", sourceId: driveId, tool: DRIVE_WHOAMI }],
+      }),
+    );
+    const inPersonalDm = async () => {
+      const msg = await ok(
+        victor.request("POST", `/api/v1/conversations/${await personalDm()}/messages`, {
+          body: "the drive?",
+        }),
+      );
+      return deliveryOf(msg.id as string);
+    };
+    // personal_allowed defaults to false.
+    expect((await inPersonalDm()).turn.tools).not.toContain(DRIVE_WHOAMI);
+    await su.query("update app.mcp_servers set personal_allowed = true where id = $1", [driveId]);
+    try {
+      const ev = await inPersonalDm();
+      expect(ev.turn.tools).toEqual(expect.arrayContaining([DRIVE_WHOAMI, "ocw_connector_call"]));
+    } finally {
+      await su.query("update app.mcp_servers set personal_allowed = false where id = $1", [driveId]);
+    }
+  });
+});
