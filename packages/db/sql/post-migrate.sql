@@ -69,6 +69,12 @@ REVOKE UPDATE, TRUNCATE ON app.memory_proposals FROM ocw_app;
 REVOKE TRUNCATE ON app.tool_call_approvals FROM ocw_app;
 REVOKE TRUNCATE ON app.work_zone_proposals FROM ocw_app;
 
+-- Bot Work Zone orchestration (Phase 07.16, D-16): TRUNCATE ignores RLS (and the session audience backstop below), so the
+-- app role never truncates a bot's profile, its projects, the device consents or the bot side of a session. The generic
+-- grant above never includes TRUNCATE; this states it explicitly, as for 07.5. DELETE stays granted for the cascades of
+-- a bot, device, project, session or conversation, and for the API's own profile and consent changes.
+REVOKE TRUNCATE ON app.bot_work_zone_profiles, app.bot_work_zone_profile_projects, app.device_bot_consents, app.bot_work_sessions FROM ocw_app;
+
 -- ADR-0010 ("the human can see and clear the notes; admins cannot" / admins "can never read its chat, memory or
 -- instructions"): every memory row of a personal scope, or of a personal bot's notebook, carries
 -- `personal_owner_user_id`. These SECURITY DEFINER trigger functions (owner ocw_migrator, which bypasses RLS to read the
@@ -763,6 +769,13 @@ DROP POLICY IF EXISTS audience_backstop ON app.work_session_memory;
 CREATE POLICY audience_backstop ON app.work_session_memory AS RESTRICTIVE FOR ALL
   USING (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_session_memory.work_session_id))
   WITH CHECK (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = work_session_memory.work_session_id));
+-- Phase 07.16 (D-05, D-16): the bot side of a bot-started session (origin, card, wake state) follows its session's
+-- audience, as its prompts do: a user request sees and writes it only while it sees the session; a user-less system
+-- transaction (the wake job, Device Link, the cell routes) passes through the session policy's own rule.
+DROP POLICY IF EXISTS audience_backstop ON app.bot_work_sessions;
+CREATE POLICY audience_backstop ON app.bot_work_sessions AS RESTRICTIVE FOR ALL
+  USING (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = bot_work_sessions.work_session_id))
+  WITH CHECK (EXISTS (SELECT 1 FROM app.work_sessions s WHERE s.id = bot_work_sessions.work_session_id));
 
 -- Automations and watched records (Phase 07.6; D-02, D-04, D-07, P-10, Pitfalls 3 and 6; ADR-0028).
 --
