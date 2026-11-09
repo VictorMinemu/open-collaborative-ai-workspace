@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
+import { AgentCard } from "./agent-cards";
 import {
   AgentChannelWorkSessionPrompt,
   AgentChannelWorkSessionPromptResponse,
@@ -9,6 +10,7 @@ import {
   AgentChannelWorkSessionStartResponse,
   AgentChannelWorkSessionStop,
   AgentChannelWorkSessionStopResponse,
+  BOT_PROFILE_STATUS_SENTENCES,
   BOT_WORK_SESSION_PROPOSED_SENTENCE,
   BOT_WORK_SESSION_SENTENCES,
   BOT_WORK_ZONE_LIMITS,
@@ -16,9 +18,20 @@ import {
   BotProfileInactiveReason,
   BotWorkSessionReadModel,
   BotWorkSessionRefusal,
+  BotWorkZoneProfile,
+  BotWorkZoneProfileInput,
+  BotWorkZoneProfileView,
+  DeviceBotConsentsView,
+  OUTSIDE_CONTENT_WARNING,
+  SetDeviceBotConsentRequest,
   TurnWorkZone,
+  WORK_SESSION_CARD_LABELS,
   WorkSessionDecider,
+  workSessionCardOf,
+  workSessionCardStatus,
+  workSessionStepLabel,
 } from "./bot-work-zone";
+import type { WorkSessionStatus } from "./session-events";
 
 const EVENT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f01";
 const AGENT = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4f02";
@@ -515,5 +528,241 @@ describe("the redacted read model and the answers (07.16 D-05, D-10, PD-14, prin
       for (const k of keys) expect(k).not.toMatch(/absolute|abs_path|hostPath|url/i);
     }
     expect(keysOf(AgentChannelWorkSessionReadResponse).has("cursor")).toBe(true);
+  });
+});
+
+describe("profile and consent views (07.16 D-01, D-03, D-04, PD-04, PD-05, PD-06)", () => {
+  const input = {
+    deviceId: DEVICE,
+    runtime: "claude-code",
+    projectIds: [PROJECT, PROJECT_2],
+    defaultModel: "claude-sonnet-4-5",
+    allowedModels: ["claude-sonnet-4-5", "claude-opus-4-1"],
+    defaultEffort: "high",
+    allowedEfforts: ["low", "high"],
+    defaultContextWindow: null,
+    allowedContextWindows: [200_000],
+    fastMode: "allowed",
+    defaultMode: "default",
+    maxMode: "fullAccess",
+    worktree: true,
+    maxConcurrent: 2,
+    promptsPerHour: 30,
+    wakesPerSessionDay: 20,
+    actOnOutsideContent: false,
+  };
+  const { projectIds: _ids, ...rest } = input;
+  const profile = {
+    ...rest,
+    id: CARD,
+    agentId: AGENT,
+    sponsor: { id: PERSON, displayName: "Ana" },
+    device: { id: DEVICE, name: "build-server", online: true, hostKind: "service", isolatedServer: true },
+    projects: [
+      { id: PROJECT, name: "billing-api" },
+      { id: PROJECT_2, name: "web" },
+    ],
+    actOnOutsideContentBy: null,
+    actOnOutsideContentAt: null,
+    updatedAt: "2026-11-09T10:00:00.000Z",
+  };
+
+  it("the profile body parses whole", () => {
+    expect(BotWorkZoneProfileInput.parse(input)).toEqual(input);
+    expect(BotWorkZoneProfileInput.parse({ ...input, wakesPerSessionDay: 0, maxConcurrent: 10 })).toBeTruthy();
+  });
+
+  it("the profile body refuses a sponsor, oversized lists, duplicates and out-of-range limits", () => {
+    const projects51 = Array.from({ length: 51 }, (_, i) => `0190d5e2-7c3a-7cc2-9d2e-${String(i).padStart(12, "0")}`);
+    for (const bad of [
+      { sponsorUserId: PERSON },
+      { projectIds: projects51 },
+      { projectIds: [] },
+      { projectIds: [PROJECT, PROJECT] },
+      { allowedModels: Array(21).fill("m") },
+      { maxConcurrent: 11 },
+      { maxConcurrent: 0 },
+      { promptsPerHour: 0 },
+      { promptsPerHour: 121 },
+      { wakesPerSessionDay: 101 },
+      { maxMode: "bypassPermissions" },
+      { fastMode: "always" },
+    ]) {
+      expect(BotWorkZoneProfileInput.safeParse({ ...input, ...bad }).success, JSON.stringify(bad).slice(0, 80)).toBe(
+        false,
+      );
+    }
+  });
+
+  it("the view parses with no profile and with a full profile", () => {
+    const none = {
+      profile: null,
+      status: { active: false, reason: null, sentence: null },
+      viewerCan: { edit: true, setOutsideContent: false },
+    };
+    expect(BotWorkZoneProfileView.parse(none)).toEqual(none);
+    const inactive = {
+      profile: { ...profile, actOnOutsideContentBy: { id: PERSON, displayName: "Ana" } },
+      status: { active: false, reason: "no_consent", sentence: BOT_PROFILE_STATUS_SENTENCES.no_consent },
+      viewerCan: { edit: true, setOutsideContent: true },
+    };
+    expect(BotWorkZoneProfileView.parse(inactive)).toEqual(inactive);
+    expect(BotWorkZoneProfile.parse(profile)).toEqual(profile);
+    expect(BotWorkZoneProfile.safeParse({ ...profile, device: { ...profile.device, hostKind: "vm" } }).success).toBe(
+      false,
+    );
+  });
+
+  it("one status sentence per inactive reason; it and the warning are short, without placeholders or links", () => {
+    expect(Object.keys(BOT_PROFILE_STATUS_SENTENCES)).toEqual([...BotProfileInactiveReason.options]);
+    for (const s of [...Object.values(BOT_PROFILE_STATUS_SENTENCES), OUTSIDE_CONTENT_WARNING]) {
+      expect(s.length).toBeGreaterThan(0);
+      expect(s.length).toBeLessThanOrEqual(300);
+      expect(s).not.toContain("{");
+      expect(s).not.toContain("http");
+    }
+    expect(OUTSIDE_CONTENT_WARNING).toContain("Full access still needs an isolated server.");
+  });
+
+  it("a consent request names only the per-bot Full access choice; the consents view parses empty and full", () => {
+    expect(SetDeviceBotConsentRequest.parse({ allowFullAccess: true })).toEqual({ allowFullAccess: true });
+    expect(SetDeviceBotConsentRequest.safeParse({ allowFullAccess: true, agentId: AGENT }).success).toBe(false);
+    expect(SetDeviceBotConsentRequest.safeParse({}).success).toBe(false);
+    const empty = { consents: [], requests: [], viewerCan: { grant: false } };
+    expect(DeviceBotConsentsView.parse(empty)).toEqual(empty);
+    const full = {
+      consents: [
+        {
+          agentId: AGENT,
+          displayName: "Scout",
+          handle: "scout",
+          allowFullAccess: false,
+          grantedBy: { id: PERSON, displayName: "Ana" },
+          grantedAt: "2026-11-09T10:00:00.000Z",
+        },
+      ],
+      requests: [
+        {
+          agentId: AGENT,
+          displayName: "Scout",
+          handle: "scout",
+          sponsor: { id: PERSON, displayName: "Ana" },
+          profileUpdatedAt: "2026-11-09T10:00:00.000Z",
+        },
+      ],
+      viewerCan: { grant: true },
+    };
+    expect(DeviceBotConsentsView.parse(full)).toEqual(full);
+  });
+});
+
+describe("live card helpers (07.16 D-12, PD-12, ADR-0031)", () => {
+  it("maps every session status to the card's pill", () => {
+    expect(workSessionCardStatus("provisioning")).toEqual({ status: "running" });
+    expect(workSessionCardStatus("running")).toEqual({ status: "running" });
+    expect(workSessionCardStatus("idle")).toEqual({ status: "info", statusLabel: "Idle" });
+    expect(workSessionCardStatus("waiting_approval")).toEqual({ status: "pending", statusLabel: "Approval" });
+    expect(workSessionCardStatus("host_offline")).toEqual({ status: "pending", statusLabel: "Offline" });
+    expect(workSessionCardStatus("completed")).toEqual({ status: "succeeded" });
+    expect(workSessionCardStatus("failed")).toEqual({ status: "failed" });
+    expect(workSessionCardStatus("archived")).toEqual({ status: "cancelled", statusLabel: "Stopped" });
+  });
+
+  it("names the step of every status", () => {
+    const step = (status: WorkSessionStatus, turn = 0) => workSessionStepLabel({ status, turn, pendingApprovals: 0 });
+    expect(step("provisioning")).toBe("Starting");
+    expect(step("running", 3)).toBe("Working · turn 3");
+    expect(step("waiting_approval", 2)).toBe("Waiting for approval");
+    expect(step("idle", 0)).toBe("Ready");
+    expect(step("idle", 2)).toBe("Turn 2 done");
+    expect(step("host_offline", 2)).toBe("Device offline");
+    expect(step("failed", 2)).toBe("Failed");
+    expect(step("completed", 2)).toBe("Ended");
+    expect(step("archived", 2)).toBe("Stopped");
+  });
+
+  const live = (over: Record<string, unknown> = {}) =>
+    AgentCard.parse({
+      kind: "work_zone",
+      title: "Work Zone · billing-api",
+      fields: [
+        { label: WORK_SESSION_CARD_LABELS.runtime, value: "Claude Code" },
+        { label: WORK_SESSION_CARD_LABELS.project, value: "billing-api" },
+        { label: WORK_SESSION_CARD_LABELS.device, value: "build-server" },
+        { label: WORK_SESSION_CARD_LABELS.model, value: "claude-sonnet-4-5" },
+        { label: WORK_SESSION_CARD_LABELS.mode, value: "Full access" },
+        { label: WORK_SESSION_CARD_LABELS.step, value: "Working · turn 1" },
+        { label: WORK_SESSION_CARD_LABELS.updated, value: "2026-11-09T10:00:00.000Z" },
+      ],
+      status: "running",
+      actions: [
+        { kind: "open", label: "Open session", target: `/work-zone/${SESSION}` },
+        { kind: "follow", label: "Follow" },
+      ],
+      version: 1,
+      decision: null,
+      updatedAt: "2026-11-09T10:00:00.000Z",
+      platformOwned: true,
+      ...over,
+    });
+
+  it("the labels are the hub's, in card order", () => {
+    expect({ ...WORK_SESSION_CARD_LABELS }).toEqual({
+      runtime: "Runtime",
+      project: "Project",
+      device: "Device",
+      model: "Model",
+      mode: "Mode",
+      step: "Step",
+      updated: "Updated",
+    });
+  });
+
+  it("reads a platform-owned live card", () => {
+    expect(workSessionCardOf(live())).toEqual({
+      workSessionId: SESSION,
+      runtime: "claude-code",
+      project: "billing-api",
+      device: "build-server",
+      model: "claude-sonnet-4-5",
+      mode: "Full access",
+      fullAccess: true,
+      step: "Working · turn 1",
+      updatedAt: "2026-11-09T10:00:00.000Z",
+    });
+    const codex = live({
+      fields: [
+        { label: "Runtime", value: "Codex" },
+        { label: "Mode", value: "Supervised" },
+      ],
+    });
+    expect(workSessionCardOf(codex)).toEqual({
+      workSessionId: SESSION,
+      runtime: "codex",
+      project: null,
+      device: null,
+      model: null,
+      mode: "Supervised",
+      fullAccess: false,
+      step: null,
+      updatedAt: null,
+    });
+  });
+
+  it("is null for a proposal card, an agent-owned card, another kind and any other open target", () => {
+    const approval = {
+      id: APPROVAL,
+      actionHash: "a".repeat(64),
+      status: "pending",
+      requestedForUserId: PERSON,
+      warnings: [],
+    };
+    expect(workSessionCardOf(live({ approval }))).toBeNull();
+    expect(workSessionCardOf(live({ platformOwned: false }))).toBeNull();
+    expect(workSessionCardOf(live({ platformOwned: undefined }))).toBeNull();
+    expect(workSessionCardOf(live({ kind: "report" }))).toBeNull();
+    expect(workSessionCardOf(live({ actions: [{ kind: "open", label: "Review", target: `/approvals/${APPROVAL}` }] }))).toBeNull();
+    expect(workSessionCardOf(live({ actions: [{ kind: "open", label: "Open", target: "/work-zone/new" }] }))).toBeNull();
+    expect(workSessionCardOf(live({ actions: [{ kind: "follow", label: "Follow" }] }))).toBeNull();
   });
 });
