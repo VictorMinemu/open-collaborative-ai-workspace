@@ -569,11 +569,16 @@ describe("profile and consent views (07.16 D-01, D-03, D-04, PD-04, PD-05, PD-06
 
   it("the profile body parses whole", () => {
     expect(BotWorkZoneProfileInput.parse(input)).toEqual(input);
-    expect(BotWorkZoneProfileInput.parse({ ...input, wakesPerSessionDay: 0, maxConcurrent: 10 })).toBeTruthy();
+    expect(
+      BotWorkZoneProfileInput.parse({ ...input, wakesPerSessionDay: 0, maxConcurrent: 10 }),
+    ).toBeTruthy();
   });
 
   it("the profile body refuses a sponsor, oversized lists, duplicates and out-of-range limits", () => {
-    const projects51 = Array.from({ length: 51 }, (_, i) => `0190d5e2-7c3a-7cc2-9d2e-${String(i).padStart(12, "0")}`);
+    const projects51 = Array.from(
+      { length: 51 },
+      (_, i) => `0190d5e2-7c3a-7cc2-9d2e-${String(i).padStart(12, "0")}`,
+    );
     for (const bad of [
       { sponsorUserId: PERSON },
       { projectIds: projects51 },
@@ -588,9 +593,10 @@ describe("profile and consent views (07.16 D-01, D-03, D-04, PD-04, PD-05, PD-06
       { maxMode: "bypassPermissions" },
       { fastMode: "always" },
     ]) {
-      expect(BotWorkZoneProfileInput.safeParse({ ...input, ...bad }).success, JSON.stringify(bad).slice(0, 80)).toBe(
-        false,
-      );
+      expect(
+        BotWorkZoneProfileInput.safeParse({ ...input, ...bad }).success,
+        JSON.stringify(bad).slice(0, 80),
+      ).toBe(false);
     }
   });
 
@@ -608,9 +614,9 @@ describe("profile and consent views (07.16 D-01, D-03, D-04, PD-04, PD-05, PD-06
     };
     expect(BotWorkZoneProfileView.parse(inactive)).toEqual(inactive);
     expect(BotWorkZoneProfile.parse(profile)).toEqual(profile);
-    expect(BotWorkZoneProfile.safeParse({ ...profile, device: { ...profile.device, hostKind: "vm" } }).success).toBe(
-      false,
-    );
+    expect(
+      BotWorkZoneProfile.safeParse({ ...profile, device: { ...profile.device, hostKind: "vm" } }).success,
+    ).toBe(false);
   });
 
   it("one status sentence per inactive reason; it and the warning are short, without placeholders or links", () => {
@@ -626,7 +632,9 @@ describe("profile and consent views (07.16 D-01, D-03, D-04, PD-04, PD-05, PD-06
 
   it("a consent request names only the per-bot Full access choice; the consents view parses empty and full", () => {
     expect(SetDeviceBotConsentRequest.parse({ allowFullAccess: true })).toEqual({ allowFullAccess: true });
-    expect(SetDeviceBotConsentRequest.safeParse({ allowFullAccess: true, agentId: AGENT }).success).toBe(false);
+    expect(SetDeviceBotConsentRequest.safeParse({ allowFullAccess: true, agentId: AGENT }).success).toBe(
+      false,
+    );
     expect(SetDeviceBotConsentRequest.safeParse({}).success).toBe(false);
     const empty = { consents: [], requests: [], viewerCan: { grant: false } };
     expect(DeviceBotConsentsView.parse(empty)).toEqual(empty);
@@ -669,7 +677,8 @@ describe("live card helpers (07.16 D-12, PD-12, ADR-0031)", () => {
   });
 
   it("names the step of every status", () => {
-    const step = (status: WorkSessionStatus, turn = 0) => workSessionStepLabel({ status, turn, pendingApprovals: 0 });
+    const step = (status: WorkSessionStatus, turn = 0) =>
+      workSessionStepLabel({ status, turn, pendingApprovals: 0 });
     expect(step("provisioning")).toBe("Starting");
     expect(step("running", 3)).toBe("Working · turn 3");
     expect(step("waiting_approval", 2)).toBe("Waiting for approval");
@@ -749,6 +758,12 @@ describe("live card helpers (07.16 D-12, PD-12, ADR-0031)", () => {
     });
   });
 
+  it("an unknown runtime label reads as no runtime", () => {
+    for (const value of ["OpenCode", "constructor", "claude-code"]) {
+      expect(workSessionCardOf(live({ fields: [{ label: "Runtime", value }] }))?.runtime, value).toBeNull();
+    }
+  });
+
   it("is null for a proposal card, an agent-owned card, another kind and any other open target", () => {
     const approval = {
       id: APPROVAL,
@@ -761,8 +776,14 @@ describe("live card helpers (07.16 D-12, PD-12, ADR-0031)", () => {
     expect(workSessionCardOf(live({ platformOwned: false }))).toBeNull();
     expect(workSessionCardOf(live({ platformOwned: undefined }))).toBeNull();
     expect(workSessionCardOf(live({ kind: "report" }))).toBeNull();
-    expect(workSessionCardOf(live({ actions: [{ kind: "open", label: "Review", target: `/approvals/${APPROVAL}` }] }))).toBeNull();
-    expect(workSessionCardOf(live({ actions: [{ kind: "open", label: "Open", target: "/work-zone/new" }] }))).toBeNull();
+    expect(
+      workSessionCardOf(
+        live({ actions: [{ kind: "open", label: "Review", target: `/approvals/${APPROVAL}` }] }),
+      ),
+    ).toBeNull();
+    expect(
+      workSessionCardOf(live({ actions: [{ kind: "open", label: "Open", target: "/work-zone/new" }] })),
+    ).toBeNull();
     expect(workSessionCardOf(live({ actions: [{ kind: "follow", label: "Follow" }] }))).toBeNull();
   });
 });
