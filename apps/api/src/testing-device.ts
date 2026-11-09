@@ -54,13 +54,22 @@ export class FakeDevice {
       codexVersion?: string | null;
       /** Report Codex as not installed (07.11: a runtime that is not installed has no compatibility). */
       codexInstalled?: boolean;
+      /** 07.16 (PD-18): how the daemon says it runs (`device.host`); sent only when given. */
+      host?: "desktop" | "service";
+      /** 07.16 (D-19): the owner's local isolated-server mark (`isolatedServer`); sent only when given. */
+      isolatedServer?: boolean;
     } = {},
   ): Promise<FakeDevice> {
     const d = await FakeDevice.open(baseUrl, await FakeDevice.exchange(baseUrl, deviceToken));
     d.send({
       type: "hello",
       protocolVersion: 1,
-      device: { name: "Test Mac", platform: "darwin", daemonVersion: "0.0.0-test" },
+      device: {
+        name: "Test Mac",
+        platform: "darwin",
+        daemonVersion: "0.0.0-test",
+        ...(opts.host ? { host: opts.host } : {}),
+      },
       runtimes: [
         {
           id: "claude-code",
@@ -78,6 +87,7 @@ export class FakeDevice {
             },
       ],
       ...(sessions ? { sessions } : {}),
+      ...(opts.isolatedServer !== undefined ? { isolatedServer: opts.isolatedServer } : {}),
     });
     await d.next((f) => f.type === "welcome");
     return d;
@@ -118,9 +128,14 @@ export class FakeDevice {
     this.send({ type: "ack", commandId: id, ...(ok ? { ok: true } : { ok: false, error }) });
   }
 
-  /** Report what the device's runtimes offer (P-05). */
-  capabilities(catalogs: unknown[], fullAccessOptIn = false) {
-    this.send({ type: "capabilities", catalogs, fullAccessOptIn });
+  /** Report what the device's runtimes offer (P-05); `isolatedServer` (07.16, D-19) is sent only when given. */
+  capabilities(catalogs: unknown[], fullAccessOptIn = false, isolatedServer?: boolean) {
+    this.send({
+      type: "capabilities",
+      catalogs,
+      fullAccessOptIn,
+      ...(isolatedServer !== undefined ? { isolatedServer } : {}),
+    });
   }
 
   /** Answer a `session.title` command (P-15); the ack follows separately. */
@@ -181,6 +196,35 @@ export class FakeDevice {
   seq = Date.now() * 1000;
   event(sessionId: string, event: Record<string, unknown>, localSeq = ++this.seq) {
     this.send({ type: "event", sessionId, localSeq, event });
+  }
+
+  /**
+   * 07.16 (Wave 0 helper): one whole turn of `promptId` as a runtime reports it: `prompt.started` →
+   * `assistant.message` (`text`) → `prompt.completed`, each with a fresh `localSeq` (from `localSeq` when given).
+   */
+  emitTurn(workSessionId: string, turn: { promptId: string; text: string; localSeq?: number }) {
+    if (turn.localSeq !== undefined) this.seq = Math.max(this.seq, turn.localSeq - 1);
+    this.event(workSessionId, { type: "prompt.started", promptId: turn.promptId });
+    this.event(workSessionId, { type: "assistant.message", messageId: randomUUID(), text: turn.text });
+    this.event(workSessionId, {
+      type: "prompt.completed",
+      promptId: turn.promptId,
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
+  }
+
+  /** 07.16 (Wave 0 helper): the runtime asks for an approval (`approval.requested`, repo-relative `paths`). */
+  emitApproval(
+    workSessionId: string,
+    a: { approvalId: string; tool: string; paths: string[]; summary?: string },
+  ) {
+    this.event(workSessionId, {
+      type: "approval.requested",
+      approvalId: a.approvalId,
+      tool: a.tool,
+      summary: a.summary ?? `${a.tool} ${a.paths.join(", ")}`.trim(),
+      paths: a.paths,
+    });
   }
 
   async close() {
