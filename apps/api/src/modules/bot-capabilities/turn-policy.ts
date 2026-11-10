@@ -9,6 +9,7 @@ import {
   type BrowserToolName,
   BUILTIN_TOOLS,
   CONFINED_TOOL_FLAGS,
+  CONVERSATION_OPEN_FLAGS,
   type ConfinedToolName,
   type ConsultTarget,
   isPerMemberMode,
@@ -985,6 +986,13 @@ export async function turnPolicy(
      * when four tool slots remain. Absent or null = the turn is exactly what it was before the phase (BWZ-06).
      */
     workZone?: TurnWorkZone | null;
+    /**
+     * Phase 07.17 (D-02, PD-07): the run this turn may open conversations for, computed by the caller
+     * (`deliverAutomationRun`, for runs of fan-out automations only; bot-capabilities never imports automation). Present
+     * = `ocw_conversation_open` with `CONVERSATION_OPEN_FLAGS`, when a tool slot remains. Absent or null = the turn is
+     * exactly what it was before the phase (E9).
+     */
+    conversationOpen?: { automationId: string; runId: string } | null;
   },
   opts: {
     /** AI chat deliveries only (06-10): the chat's readers, for scoped tools and `turn.withheld`. */
@@ -1085,6 +1093,18 @@ export async function turnPolicy(
       computed.tools.push(name);
       computed.toolFlags[name] = WORK_SESSION_TOOL_FLAGS[name];
     }
+  }
+
+  // Phase 07.17 (D-02, PD-07): `ocw_conversation_open` is turn-scoped, offered only with the caller's offer (a fan-out
+  // run) and a free slot; a full turn is still delivered without it. The route re-decides every call (the stored turn,
+  // its run, the automation, the caps under the automation lock).
+  if (
+    p.conversationOpen &&
+    !computed.toolFlags[BUILTIN_TOOLS.conversationOpen] &&
+    computed.tools.length < MAX_TURN_TOOLS
+  ) {
+    computed.tools.push(BUILTIN_TOOLS.conversationOpen);
+    computed.toolFlags[BUILTIN_TOOLS.conversationOpen] = CONVERSATION_OPEN_FLAGS;
   }
 
   const turn: TurnContext = {

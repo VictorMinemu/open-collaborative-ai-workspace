@@ -1,6 +1,6 @@
 import { AUTOMATION_LIMITS, type AutomationRunReason, EventTypes } from "@ocw/contracts";
-import { automationRuns, automations, messageCards, type Tx } from "@ocw/db";
-import { and, eq, sql } from "drizzle-orm";
+import { automationConversations, automationRuns, automations, messageCards, type Tx } from "@ocw/db";
+import { and, count, eq, gte, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import { type JobContext, type JobData, lastAttempt } from "../../lib/jobs";
 import { deliverAutomationRun, updatePlatformCardNotified } from "../agent-channel";
@@ -12,7 +12,7 @@ import type {
   RunRow,
   SettledFireResult,
 } from "./actions";
-import { decideFire, outcomeOf, recordOutcome } from "./budget";
+import { decideFire, localDayStart, outcomeOf, recordOutcome } from "./budget";
 import { inboundDelivery } from "./inbound";
 import { missedPolicy, nextRunAfter } from "./schedule";
 import { isRefusal, postAnchor, reasonSentence, refusalReason, runCardFields, runPeople } from "./targets";
@@ -398,6 +398,29 @@ export async function fireRun(
 }
 
 /**
+ * Phase 07.17 (D-02, PD-07, PD-08): what a run of a fan-out automation may still open, for the turn's offer and the run
+ * event (`automationRun.fanOut`). Null unless fan-out is on. `remainingDay` = the daily cap minus the conversations
+ * the automation opened since its local midnight; `remainingRun` = the per-run cap within what is left of the day. The
+ * offer is informative: the open route counts both again under the automation lock (T-07.17-11-02).
+ */
+export async function fanOutOffer(
+  tx: Tx,
+  a: AutomationRow,
+  now: Date,
+): Promise<{ perRun: number; remainingRun: number; remainingDay: number } | null> {
+  if (!a.fanOutEnabled) return null;
+  const since = localDayStart(now, a.timeZone ?? "UTC").toISOString();
+  const [r] = await tx
+    .select({ n: count() })
+    .from(automationConversations)
+    .where(
+      and(eq(automationConversations.automationId, a.id), gte(automationConversations.createdAt, since)),
+    );
+  const remainingDay = Math.max(0, a.fanOutPerDay - Number(r?.n ?? 0));
+  return { perRun: a.fanOutPerRun, remainingRun: Math.min(a.fanOutPerRun, remainingDay), remainingDay };
+}
+
+/**
  * The built-in `agent_turn` action (D-01, D-03, D-12): the run card at the target, then the run delivered to the cell as
  * the bot's turn for the person (06's primitive: unattended, so the turn has the sandbox under 07.8's decision and
  * 40-call cap and never a browser; the person pays, the bot's daily limit applies). The runner never builds a turn or a
@@ -443,6 +466,7 @@ export function agentTurnAction(core: Core, deps: AutomationSeamDeps): ActionKin
           inbound: inbound?.inbound ?? null,
           taintedAtStart: inbound?.taintedAtStart ?? false,
           timeZone: a.timeZone,
+          fanOut: await fanOutOffer(tx, a, new Date()),
         },
       );
       if (!out.delivered)

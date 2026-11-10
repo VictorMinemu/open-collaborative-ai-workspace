@@ -83,6 +83,12 @@ export interface AgentMention {
    * absent = a fresh random id. Chat never sets it.
    */
   eventId?: string;
+  /**
+   * Phase 07.17 (D-02, PD-07): the fan-out run this turn may open conversations for (`ocw_conversation_open`). Set only
+   * by agent-channel's run delivery (`deliverAutomationRun`) for runs of fan-out automations, and read only on
+   * `trigger: "automation"` deliveries. Chat never sets it.
+   */
+  conversationOpen?: { automationId: string; runId: string } | null;
 }
 
 /**

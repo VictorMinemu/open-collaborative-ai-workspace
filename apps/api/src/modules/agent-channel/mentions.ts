@@ -340,6 +340,8 @@ export async function buildMentionEvents(
         consultTargets: targets,
         attachments,
         workZone,
+        // Phase 07.17 (D-02, PD-07): only a run delivery carries the fan-out offer; every other trigger ignores it.
+        conversationOpen: mention.trigger === "automation" ? (mention.conversationOpen ?? null) : null,
       },
       {
         audience,
