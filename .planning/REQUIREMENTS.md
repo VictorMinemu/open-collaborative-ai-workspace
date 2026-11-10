@@ -414,11 +414,11 @@ Deferred to later milestones. Tracked but not in the current roadmap.
 
 ### Automation Fan-out and Team Mentions (AFO) — added 2026-11-09 by the owner
 
-- [ ] **AFO-01**: A scheduled automation can run every 5 minutes or more (was 15)
-- [ ] **AFO-02**: One automation run can open a new conversation per new item it finds (a new thread in its channel target, or a new card in its board target), capped per run, with a per-automation dedupe key (the item's external id) so the same item never opens twice; each new conversation gets its own bot turn that carries the item as untrusted content and keeps the run's tools, including the Work Zone profile of 07.16
-- [ ] **AFO-03**: A bot can move and set waiting on every card its automation opened, from any turn in that card's thread, also after reading outside content when its profile allows it (BWZ-05)
-- [ ] **AFO-04**: In channel posts (threads and board cards included; not DMs, group DMs or AI chats), people and bots can mention a team (`@team`, an org unit by stable id): its members who can read the conversation get a mention notification; bots still never use `@channel`/`@here`; bot mentions are capped per message
-- [ ] **AFO-05**: Proven by integration tests and an e2e spec (fake MCP of orders → card → Work Zone session → team mention on finish), desktop and mobile; ADR-0039 records the decisions
+- [x] **AFO-01**: A scheduled automation can run every 5 minutes or more (was 15)
+- [x] **AFO-02**: One automation run can open a new conversation per new item it finds (a new thread in its channel target, or a new card in its board target), capped per run, with a per-automation dedupe key (the item's external id) so the same item never opens twice; each new conversation gets its own bot turn that carries the item as untrusted content and keeps the run's tools, including the Work Zone profile of 07.16
+- [x] **AFO-03**: A bot can move and set waiting on every card its automation opened, from any turn in that card's thread, also after reading outside content when its profile allows it (BWZ-05)
+- [x] **AFO-04**: In channel posts (threads and board cards included; not DMs, group DMs or AI chats), people and bots can mention a team (`@team`, an org unit by stable id): its members who can read the conversation get a mention notification; bots still never use `@channel`/`@here`; bot mentions are capped per message
+- [x] **AFO-05**: Proven by integration tests and an e2e spec (fake MCP of orders → card → Work Zone session → team mention on finish), desktop and mobile; ADR-0039 records the decisions
 
 ### Operations backlog (from the 2026-10-08 research, not yet scheduled)
 
@@ -659,11 +659,11 @@ Phase 1 (the thin part is recorded by the SLICE named in the note) and the mappe
 | BWZ-04 | Phase 07.16 | Complete | New (owner, 2026-11-09) |
 | BWZ-05 | Phase 07.16 | Complete | New (owner, 2026-11-09) |
 | BWZ-06 | Phase 07.16 | Complete | New (owner, 2026-11-09) |
-| AFO-01 | Phase 07.17 | Pending | New (owner, 2026-11-09) |
-| AFO-02 | Phase 07.17 | Pending | New (owner, 2026-11-09) |
-| AFO-03 | Phase 07.17 | Pending | New (owner, 2026-11-09) |
-| AFO-04 | Phase 07.17 | Pending | New (owner, 2026-11-09) |
-| AFO-05 | Phase 07.17 | Pending | New (owner, 2026-11-09) |
+| AFO-01 | Phase 07.17 | Complete | New (owner, 2026-11-09) |
+| AFO-02 | Phase 07.17 | Complete | New (owner, 2026-11-09) |
+| AFO-03 | Phase 07.17 | Complete | New (owner, 2026-11-09) |
+| AFO-04 | Phase 07.17 | Complete | New (owner, 2026-11-09) |
+| AFO-05 | Phase 07.17 | Complete | New (owner, 2026-11-09) |
 | DEV-01 | Phase 8 | Partial | Session events + Device Link frames in `packages/contracts`; no `packages/protocol`; capability flags only inside the daemon |
 | DEV-02 | Phase 8 | Partial | One-time code + hashed bearer token (SLICE-13); no Ed25519 signed challenge or RFC 8628 |
 | DEV-03 | Phase 8 | Partial | Device list + immediate revocation (SLICE-13); no active sessions, no admin view |
