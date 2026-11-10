@@ -614,6 +614,11 @@ export interface UpdateBoardCardArgs {
   perms?: PermissionService;
   /** Runs in the transaction right after the root message was rewritten (the route calls chat's edit observers). */
   onTextEdited?: (tx: Tx, edit: CardTextEdit) => Promise<void>;
+  /**
+   * Phase 07.17 D-06 / D-12 (PD-11): the Agent Channel's gate let a tainted or session-read turn move its automation's
+   * card; the flags go on the move's `board.card.moved` / `board.card.updated` audit (booleans only).
+   */
+  auditFlags?: { outsideContent?: true; sessionOutputExempt?: true };
 }
 
 const sameValues = (a: Record<string, unknown>, b: Record<string, unknown>) => {
@@ -794,6 +799,7 @@ export async function updateBoardCard(tx: Tx, deps: ChatDeps, args: UpdateBoardC
         toCategory: toColumn?.category ?? null,
         waitingOnChanged: before.waitingOn !== card.waitingOn,
         version: card.version,
+        ...args.auditFlags,
       },
     });
   }

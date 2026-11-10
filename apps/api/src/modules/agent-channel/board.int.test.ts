@@ -758,3 +758,147 @@ describe("agents cannot leave their turn, their tenant or their budget (Task 2)"
     }
   });
 });
+
+// ---------------------------------------------------------------------------------------------------- 07.17-08
+
+/**
+ * Phase 07.17 D-06 / D-12 (PD-11, ADR-0039, AFO-03): a bot moves and sets waiting on the card its automation opened, from
+ * a turn in that card's thread, after outside content only when an admin set its Work Zone profile's
+ * `actOnOutsideContent`. Seeded with the superuser: Víctor's device, @clerk's and @other's profiles, their fan-out
+ * automations on #ops and the `automation_conversations` rows naming the cards they opened.
+ */
+const cardRow = async (messageId: string) =>
+  (
+    await su.query("select column_id, waiting_on, version from app.board_cards where message_id = $1", [
+      messageId,
+    ])
+  ).rows[0] as { column_id: string; waiting_on: string; version: number };
+
+const setOutsideContent = (agentId: string, on: boolean) =>
+  su.query(
+    `update app.bot_work_zone_profiles
+        set act_on_outside_content = $2,
+            act_on_outside_content_by = case when $2 then $3::uuid end,
+            act_on_outside_content_at = case when $2 then now() end
+      where agent_id = $1`,
+    [agentId, on, victorId],
+  );
+
+type FanOut = { automationId: string; runId: string };
+
+/** A fan-out automation of `agentId` on #ops (Backlog) and one Run now, both seeded. */
+async function seedFanOut(agentId: string, name: string): Promise<FanOut> {
+  const automationId = randomUUID();
+  await su.query(
+    `insert into app.automations (id, organization_id, name, agent_id, run_as_user_id, created_by, trigger_kind,
+       schedule_cron, time_zone, target_kind, conversation_id, board_column_id, fan_out_enabled)
+     values ($1, $2, $3, $4, $5, $5, 'schedule', '*/10 * * * *', 'Europe/Madrid', 'board', $6, $7, true)`,
+    [automationId, orgId, name, agentId, victorId, opsId, columns.backlog],
+  );
+  const runId = randomUUID();
+  await su.query(
+    "insert into app.automation_runs (id, organization_id, automation_id, trigger) values ($1, $2, $3, 'manual')",
+    [runId, orgId, automationId],
+  );
+  return { automationId, runId };
+}
+
+/** The `automation_conversations` row saying `fanOut`'s run opened `messageId` (the item key stored as a hash). */
+const opened = (fanOut: FanOut, messageId: string) =>
+  su.query(
+    `insert into app.automation_conversations (organization_id, automation_id, run_id, external_key_hash, conversation_id,
+       root_message_id, status) values ($1, $2, $3, $4, $5, $6, 'delivered')`,
+    [orgId, fanOut.automationId, fanOut.runId, sha256Hex(randomUUID()), opsId, messageId],
+  );
+
+/** A reply by Víctor in `rootId`'s thread mentioning @clerk, and the turn it delivered. */
+async function threadTurn(rootId: string, text = "@clerk the order shipped, move it"): Promise<Json> {
+  const reply = await ok(
+    victor.request("POST", `/api/v1/conversations/${opsId}/messages`, { body: text, threadRootId: rootId }),
+  );
+  return deliveredFor(clerkId, reply.id as string);
+}
+
+const taint = (eventId: string) =>
+  su.query("update app.agent_turns set tainted = true where event_id = $1", [eventId]);
+
+/** The latest `action` audit row of `messageId`. */
+const cardAudit = async (action: string, messageId: string) =>
+  (await audits(action)).filter((a) => a.metadata.messageId === messageId).at(-1);
+
+const moveTo = async (eventId: string, messageId: string, columnId: string, extra: Json = {}) =>
+  patchCard(eventId, messageId, {
+    expectedVersion: (await cardRow(messageId)).version,
+    move: { columnId, afterCardId: null },
+    ...extra,
+  });
+
+let clerkFanOut: FanOut;
+/** Card C: opened by @clerk's automation. */
+let order: Json;
+
+describe("07.17 D-06: a tainted turn moves the card its automation opened, with the profile's flag (Task 1)", () => {
+  beforeAll(async () => {
+    // Bot turns of every suite above count against @clerk's daily limit, which is not what this suite tests.
+    await su.query("delete from app.agent_usage_daily");
+    const deviceId = randomUUID();
+    await su.query(
+      "insert into app.devices (id, organization_id, owner_user_id, name, platform, token_hash) values ($1, $2, $3, 'mac', 'darwin', $4)",
+      [deviceId, orgId, victorId, sha256Hex(randomUUID())],
+    );
+    for (const agentId of [clerkId, otherId]) {
+      await su.query(
+        "insert into app.bot_work_zone_profiles (organization_id, agent_id, sponsor_user_id, device_id, runtime, updated_by) values ($1, $2, $3, $4, 'claude-code', $3)",
+        [orgId, agentId, victorId, deviceId],
+      );
+    }
+    clerkFanOut = await seedFanOut(clerkId, "Open new orders");
+    order = await humanCard(victor, opsId, "Order #1042: brake pads");
+    await opened(clerkFanOut, order.messageId as string);
+  });
+
+  it("with actOnOutsideContent: move to In progress → 200, waiting on us → 200, both counted, audited outsideContent: true", async () => {
+    await setOutsideContent(clerkId, true);
+    const ev = await threadTurn(order.messageId as string);
+    await taint(ev.eventId);
+    const calls = await toolCalls(ev.eventId);
+
+    const moved = await moveTo(ev.eventId, order.messageId, columns.inProgress);
+    expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+    expect(moved.body.card).toMatchObject({ messageId: order.messageId, columnId: columns.inProgress });
+    const waiting = await patchCard(ev.eventId, order.messageId, {
+      expectedVersion: moved.body.card.version,
+      waitingOn: "us",
+    });
+    expect(waiting.status, JSON.stringify(waiting.body)).toBe(200);
+    expect(await cardRow(order.messageId)).toMatchObject({ column_id: columns.inProgress, waiting_on: "us" });
+    expect(await toolCalls(ev.eventId)).toBe(calls + 2);
+
+    expect(await cardAudit("board.card.moved", order.messageId)).toMatchObject({
+      actor_kind: "agent",
+      agent_id: clerkId,
+      user_id: victorId,
+      metadata: { outsideContent: true, toColumnId: columns.inProgress },
+    });
+    expect(await cardAudit("board.card.updated", order.messageId)).toMatchObject({
+      agent_id: clerkId,
+      metadata: { outsideContent: true, waitingOnChanged: true },
+    });
+  });
+
+  it("without actOnOutsideContent the same move is 403 tainted, the card unchanged and the call uncounted", async () => {
+    await setOutsideContent(clerkId, false);
+    const ev = await threadTurn(order.messageId as string, "@clerk it is delivered");
+    await taint(ev.eventId);
+    const before = await cardRow(order.messageId);
+    const res = await moveTo(ev.eventId, order.messageId, columns.done);
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(codeOf(res)).toBe("tainted");
+    expect(await cardRow(order.messageId)).toEqual(before);
+    expect(await toolCalls(ev.eventId)).toBe(0);
+    expect(await refusedAudit("tainted")).toMatchObject({
+      agent_id: clerkId,
+      metadata: { route: "update", messageId: order.messageId },
+    });
+  });
+});
