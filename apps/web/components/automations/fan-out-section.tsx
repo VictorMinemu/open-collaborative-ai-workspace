@@ -173,13 +173,14 @@ export function FanOutSection({
           checked={value.enabled}
           disabled={disabled}
           onCheckedChange={(enabled) => onChange({ ...value, enabled })}
+          aria-label="Open a conversation for each new item"
           aria-describedby={id("hint")}
           className="mt-0.5"
         />
       </label>
       {value.enabled ? (
         <div className="grid gap-3">
-          <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-4 sm:max-w-md sm:grid-cols-2">
             <FormField id={id("per-run")} label="At most per run" error={errors.perRun}>
               <Input
                 id={id("per-run")}

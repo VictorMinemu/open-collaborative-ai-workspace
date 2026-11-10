@@ -194,6 +194,11 @@ function useInvalidateAutomations() {
   };
 }
 
+/**
+ * A save's body. Since 07.17 it may carry `fanOut` (D-02, PD-05) and `escalation` (D-08, PD-15); the editor sends each
+ * only when its section changed, so automations without them save exactly as before. The API decides both
+ * (`fan_out_not_allowed`, `escalation_not_allowed`).
+ */
 export type SaveAutomationInput =
   | { id?: undefined; body: CreateAutomationRequest }
   | { id: string; body: UpdateAutomationRequest };
@@ -762,6 +767,11 @@ export function automationErrorText(
       return "This proposal expired. Create the automation without it.";
     case "approval_already_decided":
       return "This proposal was already decided.";
+    case "fan_out_not_allowed":
+      return "This automation can't open a conversation per item with this trigger or target.";
+    case "escalation_not_allowed":
+      // The editor shows it under "When it needs people" (07.17, PD-15); the API names no one.
+      return `Someone here can't read ${ctx.conversation} or left the workspace.`;
     default:
       return "Couldn't save the automation. Try again.";
   }

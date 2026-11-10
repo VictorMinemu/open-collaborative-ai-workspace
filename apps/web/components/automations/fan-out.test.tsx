@@ -1,9 +1,29 @@
-import { FAN_OUT_LIMITS } from "@ocw/contracts";
+import {
+  type Automation,
+  type AutomationRun,
+  type EscalationTargetView,
+  FAN_OUT_LIMITS,
+  type Member,
+  type OrgUnit,
+} from "@ocw/contracts";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { defaultSchedule, expectedTurnsPerDay } from "@/lib/automation-queries";
+import { ApiRequestError } from "@/lib/api";
+import {
+  automationErrorText,
+  automationKeys,
+  defaultSchedule,
+  expectedTurnsPerDay,
+} from "@/lib/automation-queries";
 import { targetNamesOf } from "./automation-editor-sheet";
+import {
+  EscalationOptionList,
+  EscalationPicker,
+  escalationForSave,
+  escalationOptions,
+} from "./escalation-picker";
 import {
   FAN_OUT_DEFAULT,
   FanOutSection,
@@ -261,5 +281,261 @@ describe("the target's names in the section's copy", () => {
       conversation: null,
       column: null,
     });
+  });
+});
+
+// ---------------------------------------------------------------- escalation (D-08, PD-15, PD-19)
+
+const uid = (n: number) => `0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d5${String(n).padStart(3, "0")}`;
+
+function member(n: number, name: string, email: string, over: Partial<Member> = {}): Member {
+  return {
+    userId: uid(n),
+    displayName: name,
+    email,
+    avatarUrl: null,
+    role: "standard",
+    status: "active",
+    statusEmoji: null,
+    statusText: null,
+    joinedAt: "2026-10-01T10:00:00.000Z",
+    ...over,
+  };
+}
+
+function unit(n: number, name: string, kind: OrgUnit["kind"], over: Partial<OrgUnit> = {}): OrgUnit {
+  return {
+    id: uid(100 + n),
+    parentId: null,
+    kind,
+    name,
+    path: [uid(100 + n)],
+    memberCount: 2,
+    leadCount: 0,
+    viewerCan: [],
+    createdAt: "2026-10-01T10:00:00.000Z",
+    updatedAt: "2026-10-01T10:00:00.000Z",
+    handle: name.toLowerCase(),
+    reach: 6,
+    ...over,
+  };
+}
+
+const MEMBERS = [
+  member(1, "Cam Ortega", "cam@acme.test"),
+  member(2, "Dan Ruiz", "dan@acme.test"),
+  member(3, "Eva Left", "eva@acme.test", { status: "deactivated" }),
+];
+const UNITS = [
+  unit(1, "Logistics", "team"),
+  unit(2, "Operations", "department", { reach: 24 }),
+  unit(3, "Portal", "project"),
+];
+
+const view = (
+  kind: "user" | "unit",
+  n: number,
+  handle: string,
+  displayName: string,
+): EscalationTargetView => ({
+  kind,
+  id: kind === "user" ? uid(n) : uid(100 + n),
+  handle,
+  displayName,
+});
+
+describe("escalationOptions: People and Teams (PD-19)", () => {
+  it("active members with @handle; teams and departments with @handle and their reach; never projects", () => {
+    const o = escalationOptions(MEMBERS, UNITS);
+    expect(o.people.map((p) => [p.displayName, p.handle])).toEqual([
+      ["Cam Ortega", "cam"],
+      ["Dan Ruiz", "dan"],
+    ]);
+    expect(o.teams.map((t) => [t.displayName, t.handle, t.caption])).toEqual([
+      ["Logistics", "logistics", "Team · 6"],
+      ["Operations", "operations", "Department · 24"],
+    ]);
+    expect(o.teams.some((t) => t.displayName === "Portal")).toBe(false);
+  });
+
+  it("filters by name or handle and leaves out who is already chosen", () => {
+    const o = escalationOptions(MEMBERS, UNITS, { q: "log", exclude: [] });
+    expect(o.people).toEqual([]);
+    expect(o.teams.map((t) => t.displayName)).toEqual(["Logistics"]);
+    const left = escalationOptions(MEMBERS, UNITS, { exclude: [{ kind: "user", id: uid(1) }] });
+    expect(left.people.map((p) => p.displayName)).toEqual(["Dan Ruiz"]);
+  });
+
+  it("the list is grouped People / Teams with handles and the team's caption", () => {
+    const o = escalationOptions(MEMBERS, UNITS);
+    const html = render(
+      <EscalationOptionList listId="x" options={o} active={0} onPick={() => {}} onActive={() => {}} />,
+    );
+    expect(html).toContain('role="listbox"');
+    const t = text(html);
+    expect(t.indexOf("People")).toBeLessThan(t.indexOf("Cam Ortega"));
+    expect(t.indexOf("Teams")).toBeGreaterThan(t.indexOf("Dan Ruiz"));
+    expect(t).toContain("@logistics");
+    expect(t).toContain("Team · 6");
+    expect(t).toContain("Department · 24");
+    expect(html.match(/role="option"/g) ?? []).toHaveLength(4);
+    expect(
+      html.match(/<button[^>]*role="option"[^>]*min-h-11|<button[^>]*min-h-11[^>]*role="option"/g) ?? [],
+    ).toHaveLength(4);
+  });
+});
+
+describe("EscalationPicker (D-08, PD-15)", () => {
+  const picker = (value: EscalationTargetView[], error?: string) =>
+    render(
+      <EscalationPicker
+        value={value}
+        onChange={() => {}}
+        members={MEMBERS}
+        units={UNITS}
+        targetName="#orders"
+        error={error}
+      />,
+    );
+
+  it("two chosen: two wrapping chips, each with a 44 px remove button naming who", () => {
+    const html = picker([view("unit", 1, "logistics", "Logistics"), view("user", 1, "cam", "Cam Ortega")]);
+    expect(html.match(/data-testid="escalation-chip"/g) ?? []).toHaveLength(2);
+    expect(html).toContain('aria-label="Remove Logistics"');
+    expect(html).toContain('aria-label="Remove Cam Ortega"');
+    expect(
+      html.match(/aria-label="Remove [^"]+"[^>]*max-md:size-11|max-md:size-11[^>]*aria-label="Remove /g) ??
+        [],
+    ).toHaveLength(2);
+    expect(html).toMatch(/class="[^"]*flex-wrap[^"]*"/);
+    const t = text(html);
+    expect(t).toContain("Mention when it finishes or needs help");
+    expect(t).toContain("They get a notification only if they can read #orders.");
+    expect(html).toContain('aria-label="Add a person or team"');
+    const add = /<input[^>]*data-testid="escalation-add"[^>]*>/.exec(html)?.[0] ?? "";
+    expect(add).not.toContain('disabled=""');
+    expect(add).toContain('placeholder="Add a person or team"');
+  });
+
+  it("five chosen: the add field is disabled and says Up to 5", () => {
+    const five = [
+      view("user", 1, "cam", "Cam Ortega"),
+      view("user", 2, "dan", "Dan Ruiz"),
+      view("unit", 1, "logistics", "Logistics"),
+      view("unit", 2, "operations", "Operations"),
+      view("user", 9, "zoe", "Zoe"),
+    ];
+    const html = picker(five);
+    const add = /<input[^>]*data-testid="escalation-add"[^>]*>/.exec(html)?.[0] ?? "";
+    expect(add).toContain('disabled=""');
+    expect(add).toContain('placeholder="Up to 5"');
+  });
+
+  it("escalation_not_allowed: the sentence under the picker, in place of the hint", () => {
+    const sentence = automationErrorText(new ApiRequestError(400, "escalation_not_allowed", "x"), {
+      bot: "Atlas",
+      conversation: "#orders",
+    });
+    expect(sentence).toBe("Someone here can't read #orders or left the workspace.");
+    const html = picker([view("user", 1, "cam", "Cam Ortega")], sentence);
+    expect(html).toContain('role="alert"');
+    expect(text(html)).toContain("Someone here can't read #orders or left the workspace.");
+    expect(text(html)).not.toContain("They get a notification only if");
+  });
+
+  it("fan_out_not_allowed has its own sentence", () => {
+    expect(
+      automationErrorText(new ApiRequestError(400, "fan_out_not_allowed", "x"), {
+        bot: "A",
+        conversation: "#o",
+      }),
+    ).toBe("This automation can't open a conversation per item with this trigger or target.");
+  });
+});
+
+describe("what the save sends for escalation (PD-15)", () => {
+  const a = [view("unit", 1, "logistics", "Logistics"), view("user", 1, "cam", "Cam Ortega")];
+
+  it("ids in chip order; a new automation without any sends nothing", () => {
+    expect(escalationForSave({ value: a, initial: null })).toEqual([
+      { kind: "unit", id: uid(101) },
+      { kind: "user", id: uid(1) },
+    ]);
+    expect(escalationForSave({ value: [], initial: null })).toBeUndefined();
+  });
+
+  it("an existing automation sends it only when it changed ([] clears)", () => {
+    expect(escalationForSave({ value: a, initial: a })).toBeUndefined();
+    expect(escalationForSave({ value: [], initial: a })).toEqual([]);
+    expect(escalationForSave({ value: [...a].reverse(), initial: a })).toEqual([
+      { kind: "user", id: uid(1) },
+      { kind: "unit", id: uid(101) },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------- run history (D-10)
+
+describe("run history: what each fan-out run opened", () => {
+  const AID = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e5f";
+  const CONV = "0190d5e2-7c3a-7cc2-9d2e-6a1b2c3d4e60";
+  const automation = {
+    id: AID,
+    name: "Orders",
+    actionKind: "agent_turn",
+    agent: { id: AID, displayName: "Atlas", personal: false },
+    runAs: { id: uid(1), displayName: "Cam Ortega" },
+    instructions: "Check the orders.",
+    trigger: {
+      kind: "schedule",
+      schedule: { cron: "*/10 * * * *", timeZone: "Europe/Madrid" },
+      webhook: null,
+      mailbox: null,
+    },
+    target: { kind: "channel", conversationId: CONV, label: "#orders" },
+    inbound: null,
+    maxRunsPerDay: 144,
+    status: "active",
+    pausedBy: null,
+    pausedAt: null,
+    consecutiveFailures: 0,
+    nextRunAt: null,
+    lastRun: null,
+    inboundToday: 0,
+    version: 1,
+    createdAt: "2026-10-01T10:00:00.000Z",
+    updatedAt: "2026-10-01T10:00:00.000Z",
+    viewerCan: ["edit", "run", "pause", "delete"],
+  } satisfies Automation;
+  const run = (n: number, opened: number | null | undefined): AutomationRun => ({
+    id: uid(500 + n),
+    trigger: "schedule",
+    status: "answered",
+    reason: null,
+    scheduledFor: "2026-10-23T15:00:00.000Z",
+    createdAt: "2026-10-23T15:00:01.000Z",
+    answeredAt: "2026-10-23T15:00:41.000Z",
+    tainted: false,
+    anchor: { conversationId: CONV, messageId: uid(600 + n), threadRootId: uid(600 + n) },
+    ...(opened === undefined ? {} : { opened }),
+  });
+
+  it("Opened 2 conversations, Nothing new, and no chip without fan-out", async () => {
+    const { RunHistory } = await import("./run-history");
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    qc.setQueryData(["me"], { user: { id: uid(1), name: "Cam Ortega" }, organization: { id: AID } });
+    qc.setQueryData(automationKeys.runs(AID), {
+      pages: [{ runs: [run(1, 2), run(2, 0), run(3, null), run(4, undefined), run(5, 1)], nextCursor: null }],
+      pageParams: [null],
+    });
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={qc}>
+        <RunHistory automation={automation} highlight={null} />
+      </QueryClientProvider>,
+    );
+    const chips = [...html.matchAll(/data-testid="run-opened"[^>]*>([^<]*)</g)].map((m) => m[1]);
+    expect(chips).toEqual(["Opened 2 conversations", "Nothing new", "Opened 1 conversation"]);
+    const chip = /<span[^>]*data-testid="run-opened"[^>]*>/.exec(html)?.[0] ?? "";
+    expect(chip).toContain("bg-secondary");
   });
 });

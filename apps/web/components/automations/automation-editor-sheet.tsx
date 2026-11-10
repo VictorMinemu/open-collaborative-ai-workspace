@@ -11,6 +11,8 @@ import {
   type AutomationTriggerKind,
   type CreateAutomationRequest,
   type CreateAutomationResponse,
+  type EscalationTarget,
+  type EscalationTargetView,
   isKnownTimeZone,
   type UpdateAutomationRequest,
 } from "@ocw/contracts";
@@ -80,8 +82,10 @@ import {
   mailboxValueOf,
 } from "@/lib/automation-trigger-queries";
 import { useAgents } from "@/lib/bots-queries";
-import { useMe } from "@/lib/queries";
+import { useUnits } from "@/lib/org-queries";
+import { useMe, useMembers } from "@/lib/queries";
 import { cn } from "@/lib/utils";
+import { EscalationPicker, escalationForSave } from "./escalation-picker";
 import {
   FAN_OUT_DEFAULT,
   type FanOutErrors,
@@ -110,6 +114,8 @@ interface Values {
   mailbox: MailboxValue;
   /** 07.17 (D-02, PD-05): one conversation per new item, with its caps. */
   fanOut: FanOutValue;
+  /** 07.17 (D-08, PD-15): people and teams the bot mentions when it finishes or needs help, in chip order. */
+  escalation: EscalationTargetView[];
 }
 
 type Errors = Partial<Record<"name" | "agent" | "instructions" | "maxRunsPerDay", string>> & {
@@ -118,6 +124,7 @@ type Errors = Partial<Record<"name" | "agent" | "instructions" | "maxRunsPerDay"
   inbound?: InboundErrors;
   mailbox?: MailboxErrors;
   fanOut?: FanOutErrors;
+  escalation?: string;
 };
 
 type Mode = "new" | "edit" | "readonly";
@@ -148,6 +155,7 @@ function valuesOf(a: Automation): Values {
     inbound: inboundValueOf(a.inbound),
     mailbox: mailboxValueOf(a.trigger.mailbox),
     fanOut: fanOutValueOf(a.fanOut),
+    escalation: a.escalation ?? [],
   };
 }
 
@@ -158,6 +166,7 @@ function valuesOfDraft(d: AutomationDraftDefaults): Values {
     inbound: EMPTY_INBOUND,
     mailbox: EMPTY_MAILBOX,
     fanOut: FAN_OUT_DEFAULT,
+    escalation: [],
   };
 }
 
@@ -188,6 +197,7 @@ function blank(): Values {
     inbound: EMPTY_INBOUND,
     mailbox: EMPTY_MAILBOX,
     fanOut: FAN_OUT_DEFAULT,
+    escalation: [],
   };
 }
 
@@ -349,6 +359,7 @@ export function AutomationEditorSheet({
   const caps = options.data?.caps;
   const maxRuns = caps?.maxRunsPerDayCap ?? AUTOMATION_LIMITS.maxRunsPerDayCeiling;
   // "For each new item" shows only where the API allows fan-out (PD-05); the API still decides.
+  const agentTurn = (automation?.actionKind ?? "agent_turn") === "agent_turn";
   const fanOutOn = fanOutAllowed({
     actionKind: automation?.actionKind ?? "agent_turn",
     triggerKind: values.triggerKind,
@@ -398,6 +409,7 @@ export function AutomationEditorSheet({
     target: AutomationTarget;
     runs: number;
     fanOut: AutomationFanOutInput | undefined;
+    escalation: EscalationTarget[] | undefined;
   } | null {
     const e: Errors = {};
     const name = values.name.trim();
@@ -468,12 +480,18 @@ export function AutomationEditorSheet({
       setFormError("Couldn't save the automation. Try again.");
       return null;
     }
-    return { trigger, target, runs, fanOut: fan.ok ? fan.fanOut : undefined };
+    const escalation = agentTurn
+      ? escalationForSave({ value: values.escalation, initial: mode === "new" ? null : initial.escalation })
+      : undefined;
+    return { trigger, target, runs, fanOut: fan.ok ? fan.fanOut : undefined, escalation };
   }
 
   const errorCtx = () => ({
     bot: botName,
-    conversation: values.target.label || (values.target.kind === "dm" ? "your DM" : "this conversation"),
+    conversation:
+      names.conversation ||
+      values.target.label ||
+      (values.target.kind === "dm" ? "your DM" : "this conversation"),
     ...(caps ? { maxAutomations: caps.maxAutomationsPerUser, minMinutes: caps.minScheduleMinutes } : {}),
   });
 
@@ -493,6 +511,7 @@ export function AutomationEditorSheet({
           ...(ok.trigger.kind !== "schedule" ? { inbound: inboundOf(values.inbound, ok.target.kind) } : {}),
           ...(draftId && draftView ? { fromApprovalId: draftId } : {}),
           ...(ok.fanOut ? { fanOut: ok.fanOut } : {}),
+          ...(ok.escalation ? { escalation: ok.escalation } : {}),
         };
         const res = await save.mutateAsync({ body });
         // A webhook's secret leaves the mutation cache at once (07.6-18): it lives only in this sheet's state.
@@ -542,6 +561,7 @@ export function AutomationEditorSheet({
       }
       if (values.maxRunsPerDay.trim() !== initial.maxRunsPerDay.trim()) body.maxRunsPerDay = ok.runs;
       if (ok.fanOut) body.fanOut = ok.fanOut;
+      if (ok.escalation) body.escalation = ok.escalation;
       const res = await save.mutateAsync({ id: automation.id, body });
       if (res.webhookSecret) save.reset();
       setLastSave(res);
@@ -561,6 +581,11 @@ export function AutomationEditorSheet({
         (err.details as { max?: number } | null)?.max
       ) {
         setErrors({ maxRunsPerDay: `Use a whole number from 1 to ${(err.details as { max: number }).max}` });
+        return;
+      }
+      // Someone chosen can't read the target or left (PD-15): said under the picker, not as a form notice.
+      if (isApiError(err, 400) && err.code === "escalation_not_allowed") {
+        setErrors({ escalation: automationErrorText(err, errorCtx()) });
         return;
       }
       setFormError(automationErrorText(err, errorCtx()));
@@ -905,6 +930,18 @@ export function AutomationEditorSheet({
                   </SheetSection>
                 ) : null}
 
+                {agentTurn ? (
+                  <SheetSection title="When it needs people">
+                    <EscalationField
+                      value={values.escalation}
+                      onChange={(escalation) => set({ escalation })}
+                      targetName={names.conversation}
+                      error={errors.escalation}
+                      disabled={readonly}
+                    />
+                  </SheetSection>
+                ) : null}
+
                 <SheetSection title="Runs as">
                   <div className="grid gap-1.5" data-testid="automation-run-as">
                     <p className="flex items-center gap-2 text-sm">
@@ -1034,6 +1071,19 @@ export function AutomationEditorSheet({
       />
     </>
   );
+}
+
+/** The picker with the organization's people and teams, fetched only while the section is on screen. */
+function EscalationField(props: {
+  value: EscalationTargetView[];
+  onChange: (next: EscalationTargetView[]) => void;
+  targetName: string | null;
+  error: string | undefined;
+  disabled: boolean;
+}) {
+  const members = useMembers().data?.members ?? [];
+  const units = useUnits().data?.units ?? [];
+  return <EscalationPicker {...props} members={members} units={units} />;
 }
 
 function botLabel(b: AutomationOptions["bots"][number]): string {
