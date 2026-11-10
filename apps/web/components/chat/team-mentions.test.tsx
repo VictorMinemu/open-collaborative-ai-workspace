@@ -8,7 +8,7 @@ import {
   rankUnitMention,
   type SpecialMention,
 } from "./composer";
-import { MentionContext, type MentionContextValue, MentionChip, type MentionTarget } from "./markdown";
+import { MentionChip, MentionContext, type MentionContextValue, type MentionTarget } from "./markdown";
 import { mentionUnitsOf, type UnitMentionCandidate } from "./use-chat-directory";
 
 /**
@@ -35,7 +35,13 @@ function unit(over: Partial<OrgUnit> & Pick<OrgUnit, "kind" | "name">): OrgUnit 
   };
 }
 
-const LOGISTICS = unit({ kind: "team", name: "Logistics", handle: "logistics", reach: 6, viewerInReach: true });
+const LOGISTICS = unit({
+  kind: "team",
+  name: "Logistics",
+  handle: "logistics",
+  reach: 6,
+  viewerInReach: true,
+});
 const BLOG = unit({ kind: "team", name: "Blog team", handle: "blog-team", reach: 3, viewerInReach: false });
 const OPS = unit({ kind: "department", name: "Operations", handle: "ops", reach: 24, viewerInReach: false });
 const PORTAL = unit({ kind: "project", name: "Logistics portal", handle: "logistics-portal", reach: 2 });
@@ -187,11 +193,15 @@ describe("the unit chip (07.17 PD-19)", () => {
   it("@logistics renders a mention chip titled Logistics · team, amber when the viewer is in it", () => {
     const inReach = chip(
       "logistics",
-      ctx(null, [["logistics", { kind: "unit", displayName: "Logistics", unitKind: "team", viewerInReach: true }]]),
+      ctx(null, [
+        ["logistics", { kind: "unit", displayName: "Logistics", unitKind: "team", viewerInReach: true }],
+      ]),
     );
     const outside = chip(
       "logistics",
-      ctx(null, [["logistics", { kind: "unit", displayName: "Logistics", unitKind: "team", viewerInReach: false }]]),
+      ctx(null, [
+        ["logistics", { kind: "unit", displayName: "Logistics", unitKind: "team", viewerInReach: false }],
+      ]),
     );
     expect(inReach).toContain('data-testid="mention"');
     expect(inReach).toContain('title="Logistics · team"');

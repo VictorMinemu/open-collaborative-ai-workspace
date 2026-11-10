@@ -2,6 +2,7 @@
 
 import { isReservedHandle } from "@ocw/contracts";
 import { code } from "@streamdown/code";
+import { Users } from "lucide-react";
 import Link from "next/link";
 import { createContext, memo, useContext, useMemo } from "react";
 import {
@@ -26,8 +27,12 @@ import { safeUrl } from "./safe-url";
  */
 
 export interface MentionTarget {
-  kind: "user" | "agent";
+  kind: "user" | "agent" | "unit";
   displayName: string;
+  /** Units (07.17 PD-19): a team or a department. */
+  unitKind?: "team" | "department";
+  /** Units: the viewer is among the people a mention of it reaches (the self style). */
+  viewerInReach?: boolean;
 }
 
 export interface MentionContextValue {
@@ -154,6 +159,7 @@ export function MentionChip({ handle, children }: { handle: string; children: Re
   }
   const target = handles.get(handle);
   if (!target) return <>{children}</>;
+  if (target.kind === "unit") return <UnitMentionChip target={target}>{children}</UnitMentionChip>;
   const me = handle === myHandle;
   return (
     <span
@@ -166,6 +172,29 @@ export function MentionChip({ handle, children }: { handle: string; children: Re
           : "bg-primary/10 text-primary dark:bg-primary/20 dark:text-[oklch(0.8_0.11_278)]",
       )}
     >
+      {children}
+    </span>
+  );
+}
+
+/**
+ * A team or department `@handle` (07.17 PD-19): the person chip's base style with a small group icon, so a team reads
+ * apart from a person; amber when the viewer is in its reach, as for one's own handle.
+ */
+function UnitMentionChip({ target, children }: { target: MentionTarget; children: React.ReactNode }) {
+  return (
+    <span
+      data-testid="mention"
+      title={`${target.displayName} · ${target.unitKind ?? "team"}`}
+      data-mention-kind="unit"
+      className={cn(
+        "rounded-[4px] px-0.5 font-medium",
+        target.viewerInReach
+          ? "bg-amber-400/25 text-amber-900 dark:bg-amber-400/20 dark:text-amber-200"
+          : "bg-primary/10 text-primary dark:bg-primary/20 dark:text-[oklch(0.8_0.11_278)]",
+      )}
+    >
+      <Users aria-hidden className="mr-0.5 inline-block size-[0.85em] align-[-0.075em]" strokeWidth={2.4} />
       {children}
     </span>
   );

@@ -23,6 +23,7 @@ import { attachmentLimitsHint, Composer, type ComposerApi, type MentionCandidate
 import { MessageList, type PendingMessage } from "./message-list";
 import { PrincipalAvatar } from "./principal-avatar";
 import { type Typer, TypingIndicator } from "./typing";
+import type { UnitMentionCandidate } from "./use-chat-directory";
 import { useCentreOnce } from "./use-permalink-window";
 import { useStickToBottom } from "./use-stick-to-bottom";
 
@@ -31,6 +32,8 @@ interface ThreadPanelProps {
   rootId: string;
   me: { id: string; name: string };
   candidates: MentionCandidate[];
+  /** Teams and departments for the reply composer (07.17 PD-19; a thread of a channel, board cards included). */
+  unitMentions?: UnitMentionCandidate[];
   typers: Typer[];
   pending: PendingMessage[];
   canPost: boolean;
@@ -51,6 +54,7 @@ function ThreadBody({
   rootId,
   me,
   candidates,
+  unitMentions,
   typers,
   pending,
   canPost,
@@ -253,6 +257,7 @@ function ThreadBody({
             placeholder={canPost ? "Reply…" : "Join the channel to reply"}
             disabled={!canPost}
             candidates={candidates}
+            unitMentions={unitMentions}
             autoFocus
             onTyping={() => onTyping(rootId)}
             conversationId={channel.id}

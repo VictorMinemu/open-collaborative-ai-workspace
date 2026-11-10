@@ -1,9 +1,10 @@
 "use client";
 
 import { type Attachment, MENTION_ALL_WARN_AT, mentionAllOf } from "@ocw/contracts";
-import { ArrowUp, AtSign, Megaphone, Paperclip } from "lucide-react";
+import { ArrowUp, AtSign, Building2, Megaphone, Paperclip, Users } from "lucide-react";
 import {
   type ClipboardEvent,
+  Fragment,
   type KeyboardEvent,
   type ReactNode,
   type RefObject,
@@ -28,7 +29,7 @@ import { cn } from "@/lib/utils";
 import { AttachmentTray, useAttachmentQueue } from "./attachments/attachment-tray";
 import { formatBytes } from "./attachments/files";
 import { BotBadge, PrincipalAvatar } from "./principal-avatar";
-import type { DirEntry } from "./use-chat-directory";
+import type { DirEntry, UnitMentionCandidate } from "./use-chat-directory";
 
 export interface MentionCandidate extends DirEntry {
   inChannel: boolean;
@@ -41,8 +42,18 @@ export interface SpecialMention {
   description: string;
 }
 
-type Suggestion = { type: "special"; s: SpecialMention } | { type: "member"; c: MentionCandidate };
-const keyOf = (x: Suggestion) => (x.type === "special" ? `special:${x.s.handle}` : `${x.c.kind}:${x.c.id}`);
+export type Suggestion =
+  | { type: "special"; s: SpecialMention }
+  | { type: "member"; c: MentionCandidate }
+  | { type: "unit"; u: UnitMentionCandidate };
+const keyOf = (x: Suggestion) =>
+  x.type === "special"
+    ? `special:${x.s.handle}`
+    : x.type === "unit"
+      ? `unit:${x.u.id}`
+      : `${x.c.kind}:${x.c.id}`;
+const handleOf = (x: Suggestion) =>
+  x.type === "special" ? x.s.handle : x.type === "unit" ? x.u.handle : x.c.handle;
 
 export interface ComposerApi {
   /** Focus and start a mention (`@`) at the caret, opening the suggestions. */
@@ -78,6 +89,54 @@ export function rankMention(c: MentionCandidate, q: string): number {
   return score * 10 + (c.inChannel ? 2 : 0) + (c.kind === "agent" ? 1 : 0);
 }
 
+/** Unit ranking (07.17 PD-19): handle prefix, then name prefix, then any word, then anywhere; 0 = no match. */
+export function rankUnitMention(u: UnitMentionCandidate, q: string): number {
+  const handle = u.handle.toLowerCase();
+  const name = u.name.toLowerCase();
+  if (!q) return 10;
+  if (handle.startsWith(q)) return 40;
+  if (name.startsWith(q)) return 30;
+  if (name.split(/\s+/).some((w) => w.startsWith(q))) return 20;
+  return handle.includes(q) || name.includes(q) ? 10 : 0;
+}
+
+/** At most this many teams in the list, so people stay in reach; more only when fewer people match. */
+const MAX_UNIT_SUGGESTIONS = 3;
+
+/**
+ * The autocomplete rows for `@q`: people and bots by `rankMention`, `@channel` / `@here` where allowed (first when
+ * typed, last on a bare `@`), then the "Teams" group (07.17 PD-19) when `unitMentions` is given (channels and their
+ * threads only). At most MAX_SUGGESTIONS rows.
+ */
+export function buildMentionSuggestions(
+  q: string,
+  candidates: readonly MentionCandidate[],
+  specialMentions?: readonly SpecialMention[],
+  unitMentions?: readonly UnitMentionCandidate[],
+): Suggestion[] {
+  const specials = (specialMentions ?? []).filter((s) => s.handle.startsWith(q));
+  const units = (unitMentions ?? [])
+    .map((u) => ({ u, s: rankUnitMention(u, q) }))
+    .filter((x) => x.s > 0)
+    .sort((a, b) => b.s - a.s || a.u.name.localeCompare(b.u.name));
+  const rankedPeople = candidates
+    .map((c) => ({ c, s: rankMention(c, q) }))
+    .filter((x) => x.s > 0)
+    .sort((a, b) => b.s - a.s || a.c.displayName.localeCompare(b.c.displayName));
+  const free = MAX_SUGGESTIONS - specials.length;
+  const people = rankedPeople
+    .slice(0, free - Math.min(units.length, MAX_UNIT_SUGGESTIONS))
+    .map((x): Suggestion => ({ type: "member", c: x.c }));
+  const teams = units.slice(0, free - people.length).map((x): Suggestion => ({ type: "unit", u: x.u }));
+  const special = specials.map((s): Suggestion => ({ type: "special", s }));
+  // Typed "@c…" / "@h…": the broadcast first; a bare "@": people first, the broadcasts after them; teams last.
+  return q ? [...special, ...people, ...teams] : [...people, ...special, ...teams];
+}
+
+/** "Team · 6" / "Department · 24": the unit's kind and how many people a mention of it reaches. */
+export const unitMentionMeta = (u: UnitMentionCandidate) =>
+  `${u.kind === "department" ? "Department" : "Team"} · ${u.reach}`;
+
 /**
  * Message composer: autosizing textarea, Enter to send / Shift+Enter for a newline, `@` autocomplete over
  * channel members and org bots (bots outside the channel are added when mentioned) plus `@channel` / `@here` where
@@ -101,6 +160,7 @@ export function Composer({
   memberCount,
   conversationId,
   attachments = true,
+  unitMentions,
 }: {
   placeholder: string;
   candidates: MentionCandidate[];
@@ -122,6 +182,11 @@ export function Composer({
   conversationId?: string;
   /** false hides the paperclip even when storage is on (e.g. a DM with a bot, which reads text only). */
   attachments?: boolean;
+  /**
+   * Teams and departments offered in a "Teams" group (07.17 PD-19). Channels and their threads only: DMs, group DMs
+   * and AI chats leave it unset. The API resolves and notifies; the composer only suggests and confirms.
+   */
+  unitMentions?: UnitMentionCandidate[];
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState("");
@@ -138,20 +203,11 @@ export function Composer({
   const queue = useAttachmentQueue(conversationId ?? "", canAttach ? filesConfig.data : null);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const suggestions = useMemo<Suggestion[]>(() => {
-    if (!query) return [];
-    const q = query.q.toLowerCase();
-    const specials = (specialMentions ?? []).filter((s) => s.handle.startsWith(q));
-    const people = candidates
-      .map((c) => ({ c, s: rankMention(c, q) }))
-      .filter((x) => x.s > 0)
-      .sort((a, b) => b.s - a.s || a.c.displayName.localeCompare(b.c.displayName))
-      .slice(0, MAX_SUGGESTIONS - specials.length)
-      .map((x): Suggestion => ({ type: "member", c: x.c }));
-    const special = specials.map((s): Suggestion => ({ type: "special", s }));
-    // Typed "@c…" / "@h…": the broadcast first; a bare "@": people first, the broadcasts last.
-    return q ? [...special, ...people] : [...people, ...special];
-  }, [query, candidates, specialMentions]);
+  const suggestions = useMemo<Suggestion[]>(
+    () =>
+      query ? buildMentionSuggestions(query.q.toLowerCase(), candidates, specialMentions, unitMentions) : [],
+    [query, candidates, specialMentions, unitMentions],
+  );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset the highlighted option when the query text changes
   useEffect(() => setActive(0), [query?.q]);
@@ -191,7 +247,7 @@ export function Composer({
     const caret = el.selectionStart ?? value.length;
     const before = value.slice(0, query.start);
     const after = value.slice(caret);
-    const insert = `@${x.type === "special" ? x.s.handle : x.c.handle} `;
+    const insert = `@${handleOf(x)} `;
     const next = `${before}${insert}${after.startsWith(" ") ? after.slice(1) : after}`;
     pendingCaret.current = { pos: before.length + insert.length, detect: false };
     setValue(next);
@@ -284,48 +340,7 @@ export function Composer({
   return (
     <div className="relative">
       {query && suggestions.length > 0 ? (
-        <div
-          role="listbox"
-          data-testid="mention-suggestions"
-          className="absolute inset-x-0 bottom-full z-30 mb-2 overflow-hidden rounded-xl border bg-popover p-1 text-popover-foreground shadow-xl shadow-black/5 dark:shadow-black/40"
-        >
-          <p className="px-2.5 pt-1.5 pb-1 font-medium text-[11px] text-muted-foreground uppercase tracking-wider">
-            Mention someone
-          </p>
-          {suggestions.map((x, i) =>
-            x.type === "special" ? (
-              <button
-                key={keyOf(x)}
-                type="button"
-                role="option"
-                aria-selected={i === active}
-                data-testid="mention-option-special"
-                data-handle={x.s.handle}
-                onMouseDown={(e) => e.preventDefault()}
-                onMouseEnter={() => setActive(i)}
-                onClick={() => pick(x)}
-                className={cn(
-                  "flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm outline-none",
-                  i === active ? "bg-accent text-accent-foreground" : "",
-                )}
-              >
-                <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-amber-400/20 text-amber-700 dark:text-amber-300">
-                  <Megaphone className="size-3.5" />
-                </span>
-                <span className="shrink-0 font-medium">@{x.s.handle}</span>
-                <span className="min-w-0 truncate text-muted-foreground text-xs">{x.s.description}</span>
-              </button>
-            ) : (
-              <MemberOption
-                key={keyOf(x)}
-                c={x.c}
-                active={i === active}
-                onHover={() => setActive(i)}
-                onPick={() => pick(x)}
-              />
-            ),
-          )}
-        </div>
+        <MentionSuggestions suggestions={suggestions} active={active} onHover={setActive} onPick={pick} />
       ) : null}
 
       <div
@@ -456,6 +471,128 @@ export function Composer({
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/** The autocomplete listbox above the composer: people and bots, the broadcasts, then the "Teams" group. */
+export function MentionSuggestions({
+  suggestions,
+  active,
+  onHover,
+  onPick,
+}: {
+  suggestions: Suggestion[];
+  active: number;
+  onHover: (index: number) => void;
+  onPick: (x: Suggestion) => void;
+}) {
+  const firstUnit = suggestions.findIndex((x) => x.type === "unit");
+  return (
+    <div
+      role="listbox"
+      data-testid="mention-suggestions"
+      className="absolute inset-x-0 bottom-full z-30 mb-2 overflow-hidden rounded-xl border bg-popover p-1 text-popover-foreground shadow-xl shadow-black/5 dark:shadow-black/40"
+    >
+      {firstUnit !== 0 ? <SuggestionsHeading>Mention someone</SuggestionsHeading> : null}
+      {suggestions.map((x, i) =>
+        x.type === "special" ? (
+          <button
+            key={keyOf(x)}
+            type="button"
+            role="option"
+            aria-selected={i === active}
+            data-testid="mention-option-special"
+            data-handle={x.s.handle}
+            onMouseDown={(e) => e.preventDefault()}
+            onMouseEnter={() => onHover(i)}
+            onClick={() => onPick(x)}
+            className={cn(
+              "flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm outline-none",
+              i === active ? "bg-accent text-accent-foreground" : "",
+            )}
+          >
+            <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-amber-400/20 text-amber-700 dark:text-amber-300">
+              <Megaphone className="size-3.5" />
+            </span>
+            <span className="shrink-0 font-medium">@{x.s.handle}</span>
+            <span className="min-w-0 truncate text-muted-foreground text-xs">{x.s.description}</span>
+          </button>
+        ) : x.type === "unit" ? (
+          <Fragment key={keyOf(x)}>
+            {i === firstUnit ? (
+              <SuggestionsHeading className={i > 0 ? "mt-1 border-t pt-2" : undefined}>
+                Teams
+              </SuggestionsHeading>
+            ) : null}
+            <UnitOption u={x.u} active={i === active} onHover={() => onHover(i)} onPick={() => onPick(x)} />
+          </Fragment>
+        ) : (
+          <MemberOption
+            key={keyOf(x)}
+            c={x.c}
+            active={i === active}
+            onHover={() => onHover(i)}
+            onPick={() => onPick(x)}
+          />
+        ),
+      )}
+    </div>
+  );
+}
+
+function SuggestionsHeading({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <p
+      className={cn(
+        "px-2.5 pt-1.5 pb-1 font-medium text-[11px] text-muted-foreground uppercase tracking-wider",
+        className,
+      )}
+    >
+      {children}
+    </p>
+  );
+}
+
+/** A team or department row (07.17 PD-19): round muted icon, name, muted `@handle`, kind · reach on the right. */
+function UnitOption({
+  u,
+  active,
+  onHover,
+  onPick,
+}: {
+  u: UnitMentionCandidate;
+  active: boolean;
+  onHover: () => void;
+  onPick: () => void;
+}) {
+  const Icon = u.kind === "department" ? Building2 : Users;
+  return (
+    <button
+      type="button"
+      role="option"
+      aria-selected={active}
+      data-testid="mention-option-unit"
+      data-handle={u.handle}
+      onMouseDown={(e) => e.preventDefault()}
+      onMouseEnter={onHover}
+      onClick={onPick}
+      className={cn(
+        "flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm outline-none max-md:min-h-11",
+        active ? "bg-accent text-accent-foreground" : "",
+      )}
+    >
+      <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+        <Icon className="size-3.5" />
+      </span>
+      <span className="min-w-0 truncate font-medium">{u.name}</span>
+      <span className="min-w-0 shrink-[3] truncate text-muted-foreground text-xs">@{u.handle}</span>
+      <span
+        className="ml-auto shrink-0 pl-1 text-[11px] text-muted-foreground tabular-nums"
+        title={`Reaches ${u.reach} ${u.reach === 1 ? "person" : "people"}`}
+      >
+        {unitMentionMeta(u)}
+      </span>
+    </button>
   );
 }
 
