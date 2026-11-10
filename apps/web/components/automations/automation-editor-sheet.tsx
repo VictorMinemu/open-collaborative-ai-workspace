@@ -1083,7 +1083,13 @@ function EscalationField(props: {
 }) {
   const members = useMembers().data?.members ?? [];
   const units = useUnits().data?.units ?? [];
-  return <EscalationPicker {...props} members={members} units={units} />;
+  // WR-04: the handles team bots hold (personal bots are never @mentioned, so they shadow nothing).
+  const agents = useAgents().data?.agents;
+  const takenHandles = useMemo(
+    () => new Set((agents ?? []).filter((a) => a.scope !== "personal").map((a) => a.username.toLowerCase())),
+    [agents],
+  );
+  return <EscalationPicker {...props} members={members} units={units} takenHandles={takenHandles} />;
 }
 
 function botLabel(b: AutomationOptions["bots"][number]): string {

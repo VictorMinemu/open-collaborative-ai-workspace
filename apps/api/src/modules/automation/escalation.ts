@@ -8,7 +8,7 @@ import { orgMembers, orgUnits, type Tx } from "@ocw/db";
 import { inArray } from "drizzle-orm";
 import type { Core } from "../../core";
 import { HttpError } from "../../lib/errors";
-import { createConversationAccess } from "../chat";
+import { createConversationAccess, loadDirectory } from "../chat";
 import { type PermissionService, unitResource } from "../organization";
 
 /**
@@ -84,6 +84,9 @@ async function resolveTargets(
         ).map((u) => [u.id, u]),
   );
   const access = createConversationAccess(deps.core);
+  // 07.17 code review WR-04: a unit whose handle a person or bot holds never resolves to the unit (agents, then users,
+  // then units, ADR-0039 § 10), so the bot told "mention @x" would name them instead: not a target.
+  const shadowing = unitIds.length > 0 ? (await loadDirectory(tx)).byHandle : new Map<string, unknown>();
   const out: (EscalationTargetView | null)[] = [];
   for (const t of targets) {
     if (t.kind === "user") {
@@ -110,7 +113,7 @@ async function resolveTargets(
       continue;
     }
     const u = units.get(t.id);
-    if (!u || (u.kind !== "team" && u.kind !== "department")) {
+    if (!u || (u.kind !== "team" && u.kind !== "department") || shadowing.has(u.handle)) {
       out.push(null);
       continue;
     }

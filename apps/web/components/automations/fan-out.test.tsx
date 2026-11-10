@@ -358,6 +358,15 @@ describe("escalationOptions: People and Teams (PD-19)", () => {
     expect(o.teams.some((t) => t.displayName === "Portal")).toBe(false);
   });
 
+  it("WR-04: a team whose handle a person or bot holds is not offered (the mention would name them)", () => {
+    const shadowedByPerson = unit(4, "Cam", "team");
+    const shadowedByBot = unit(5, "Atlas", "team");
+    const o = escalationOptions(MEMBERS, [...UNITS, shadowedByPerson, shadowedByBot], {
+      takenHandles: new Set(["atlas"]),
+    });
+    expect(o.teams.map((t) => t.displayName)).toEqual(["Logistics", "Operations"]);
+  });
+
   it("filters by name or handle and leaves out who is already chosen", () => {
     const o = escalationOptions(MEMBERS, UNITS, { q: "log", exclude: [] });
     expect(o.people).toEqual([]);

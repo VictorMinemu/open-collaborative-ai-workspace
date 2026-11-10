@@ -38,7 +38,12 @@ const TEAMS_SHOWN = 6;
 export function escalationOptions(
   members: readonly Member[],
   units: readonly OrgUnit[],
-  opts: { q?: string; exclude?: readonly Pick<EscalationTarget, "kind" | "id">[] } = {},
+  opts: {
+    q?: string;
+    exclude?: readonly Pick<EscalationTarget, "kind" | "id">[];
+    /** Handles bots hold (code review WR-04): a team under one of these, or under a person's, is not offered. */
+    takenHandles?: ReadonlySet<string>;
+  } = {},
 ): EscalationOptions {
   const needle = (opts.q ?? "").trim().toLowerCase().replace(/^@/, "");
   const taken = new Set((opts.exclude ?? []).map((t) => `${t.kind}:${t.id}`));
@@ -59,10 +64,14 @@ export function escalationOptions(
     .filter((p) => hit(p.displayName, p.handle, p.email))
     .slice(0, PEOPLE_SHOWN)
     .map(({ email: _email, ...p }) => p);
+  // WR-04: agents, then users, then units hold a handle (ADR-0039 § 10); a shadowed team would name someone else.
+  const shadowing = new Set([...(opts.takenHandles ?? []), ...members.map((m) => userHandle(m))]);
   const teams = units
     .filter(
       (u): u is OrgUnit & { kind: "team" | "department" } =>
-        (u.kind === "team" || u.kind === "department") && !taken.has(`unit:${u.id}`),
+        (u.kind === "team" || u.kind === "department") &&
+        !taken.has(`unit:${u.id}`) &&
+        !shadowing.has(u.handle ?? ""),
     )
     .filter((u) => hit(u.name, u.handle))
     .slice(0, TEAMS_SHOWN)
@@ -205,6 +214,7 @@ export function EscalationPicker({
   onChange,
   members,
   units,
+  takenHandles,
   targetName,
   disabled,
   error,
@@ -213,6 +223,8 @@ export function EscalationPicker({
   onChange: (next: EscalationTargetView[]) => void;
   members: readonly Member[];
   units: readonly OrgUnit[];
+  /** Handles bots hold (WR-04); absent = none known. */
+  takenHandles?: ReadonlySet<string>;
   /** `#orders`, `Fleet`, `your DM`; null while unknown. */
   targetName: string | null;
   disabled?: boolean;
@@ -224,7 +236,11 @@ export function EscalationPicker({
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const full = value.length >= FAN_OUT_LIMITS.escalationMax;
-  const options = escalationOptions(members, units, { q, exclude: value });
+  const options = escalationOptions(members, units, {
+    q,
+    exclude: value,
+    ...(takenHandles ? { takenHandles } : {}),
+  });
   const flat = [...options.people, ...options.teams];
   const showOptions = open && !full && !disabled;
   const memberById = new Map(members.map((m) => [m.userId, m]));

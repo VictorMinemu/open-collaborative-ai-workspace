@@ -312,3 +312,9 @@ documented behaviour below. The accepted text above stays as written; where it d
   (`profileStatus`, the start route's rule: the bot enabled, a live consent, the device not revoked, the sponsor an
   active member who may still start there, a live project, bot sessions on in the organization) and has
   `actOnOutsideContent`". A profile that lost any of these lifts no taint and no session-output mark.
+- **WR-04, § 9, § 10 and § 12 (shadowed unit handles).** An escalation target is a unit only while no person or bot
+  holds its handle (the mention directory's `byHandle`): a shadowed unit is refused at save and dropped at delivery,
+  and the editor's picker does not offer it. Bot create and rename refuse a username equal to a team's or department's
+  handle (409 `username_taken`), and a name-derived username steps past one (`logistics-2`). The allocator still does
+  not skip people's handles: they are derived from names and e-mails that change after a unit exists, so the
+  resolve-time rule above is what holds; a SQL twin of `userHandle` would also be needed to keep § 9's parity.
