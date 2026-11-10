@@ -16,6 +16,7 @@ import { badRequest } from "../../lib/errors";
 import { authorOf, type ConversationAccess, conversationRefs, loadDirectory } from "../chat";
 import { iso, NOTIFIABLE_KINDS, unreadCountFor, visible } from "./service";
 import { snippetOf } from "./snippet";
+import { teamMentionUnits } from "./team-mentions";
 
 /**
  * The inbox (CHAT-08, Pitfall 9, P-03, P-05): a member's own notifications, only from conversations the resolver
@@ -80,6 +81,11 @@ export function registerNotificationRoutes(app: App, ctx: { core: Core; access: 
         const last = page.at(-1);
         const dir = await loadDirectory(tx);
         const refs = await conversationRefs(tx, [...new Set(page.map((r) => r.n.conversationId))], me, dir);
+        // 07.17 (PD-14): a team mention shows the unit that reached the reader, read now (null once it is gone).
+        const units = await teamMentionUnits(
+          tx,
+          page.filter((r) => r.n.kind === "team_mention").map((r) => r.n.unitId),
+        );
         const items: Notification[] = page.flatMap((r) => {
           const conversation = refs.get(r.n.conversationId);
           if (!conversation) return [];
@@ -95,6 +101,7 @@ export function registerNotificationRoutes(app: App, ctx: { core: Core; access: 
               snippet: snippetOf(r.body),
               createdAt: iso(r.n.createdAt),
               readAt: r.n.readAt ? iso(r.n.readAt) : null,
+              ...(r.n.kind === "team_mention" ? { unit: (r.n.unitId && units.get(r.n.unitId)) || null } : {}),
             },
           ];
         });
