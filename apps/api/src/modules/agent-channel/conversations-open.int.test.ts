@@ -6,7 +6,9 @@ import {
   MAX_TOOL_CALLS_PER_TURN,
 } from "@ocw/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { sha256Hex } from "../../lib/crypto";
 import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
+import { inboundRooted } from "./inbound-origin";
 
 /**
  * 07.17-16 (AFO-02, AFO-05; D-02, D-03, D-05, D-10, D-15; PD-07, PD-08, PD-10, PD-17): the phase's API end to end. A
@@ -615,5 +617,245 @@ describe("refusals (PD-07, E8): each with its fixed sentence, recorded through t
       expect(codeOf(r)).toBe("unknown_turn");
     }
     expect(await conversationRows(automationId)).toEqual([]);
+  });
+
+  it("without a cell token → 401", async () => {
+    const res = await fetch(`${s.stack.baseUrl}/agent-channel/v1/conversations/open`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ eventId: randomUUID(), agentId: atlas.id, items: [] }),
+    });
+    expect(res.status).toBe(401);
+    expect(s.stack.built.authz.routes.get("POST /agent-channel/v1/conversations/open")).toBe("cell");
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: outside content, leaks, tenants
+
+const taint = (eventId: string) =>
+  s.su.query("update app.agent_turns set tainted = true where event_id = $1", [eventId]);
+
+const turnRow = async (eventId: string) =>
+  (await s.su.query("select * from app.agent_turns where event_id = $1", [eventId])).rows[0] as Json;
+
+const rooted = (messageId: string) =>
+  core().db.withTenant({ organizationId: s.orgA, userId: null }, (tx) => inboundRooted(tx, messageId));
+
+describe("outside content (D-05, PD-10, E7)", () => {
+  it("a tainted run turn still opens, audited outsideContent: true; nothing else on the turn is loosened", async () => {
+    const automationId = await createAutomation();
+    const { runId, ev } = await runTurn(automationId);
+    expect(ev.turn.tools).toContain(BUILTIN_TOOLS.boardCard);
+    await taint(ev.eventId as string);
+
+    const out = await openOk(ev, [item("T-1")]);
+    expect((out.results as Json[])[0]?.opened).toBe(true);
+    const [claim] = (
+      await s.su.query(
+        "select metadata, result from app.audit_events where action = 'bot.tool_call' and metadata->>'tool' = $1 and metadata->>'eventId' = $2",
+        [OPEN, ev.eventId],
+      )
+    ).rows as Json[];
+    expect(claim).toMatchObject({
+      result: "success",
+      metadata: { outsideContent: true, runId, automationId },
+    });
+    expect((await audits("automation.conversation_opened", runId))[0]?.metadata).toMatchObject({
+      opened: 1,
+      outsideContent: true,
+    });
+
+    // The turn stays tainted, and a side-effecting board write on it is still refused.
+    expect((await turnRow(ev.eventId as string)).tainted).toBe(true);
+    const write = await s.cell("/board/cards", {
+      eventId: ev.eventId,
+      agentId: atlas.id,
+      idempotencyKey: `${ev.eventId}:board:${randomUUID()}`,
+      description: "A card the tainted turn should not create",
+    });
+    expect(write.status, JSON.stringify(write.body)).toBe(403);
+    expect(codeOf(write)).toBe("tainted");
+  });
+
+  it("an opened root is outside content: later turns in its thread start tainted; the run log root is not", async () => {
+    const automationId = await createAutomation();
+    const { ev } = await runTurn(automationId);
+    const root = ((await openOk(ev, [item("T-2")])).results as Json[])[0]?.threadRootMessageId as string;
+    const runLog = (
+      await s.su.query("select run_log_message_id from app.automations where id = $1", [automationId])
+    ).rows[0].run_log_message_id as string;
+    expect(runLog).toBeTruthy();
+    expect(await rooted(root)).toBe(true);
+    expect(await rooted(runLog)).toBe(false);
+
+    // Víctor asks Atlas in the opened card's thread: the turn starts tainted.
+    const msg = await ok(
+      s.victor.request("POST", `/api/v1/conversations/${fleetId}/messages`, {
+        body: `@atlas what is the status? ${randomUUID().slice(0, 6)}`,
+        mentions: [{ kind: "agent", id: atlas.id }],
+        threadRootId: root,
+      }) as Promise<Res>,
+    );
+    const rows = (
+      await s.su.query(
+        "select payload from app.stream_events where stream_id = $1 and type = 'agent.mention.v1' and payload->'message'->>'id' = $2",
+        [`cell:${s.orgA}`, msg.id],
+      )
+    ).rows;
+    expect(rows).toHaveLength(1);
+    expect((await turnRow(rows[0].payload.eventId as string)).tainted).toBe(true);
+  });
+});
+
+describe("the leak sweep (P1, PD-17)", () => {
+  const KEY = "OCW-MARKER-0717-key";
+  const TITLE = "OCW-MARKER-0717-title";
+  const BODY = "OCW-MARKER-0717-body";
+
+  it("the external key, the title and the body are in no audit row, tool call, job or log line; the row holds the sha256", async () => {
+    const automationId = await createAutomation();
+    const { ev } = await runTurn(automationId);
+    const out = await openOk(ev, [{ externalKey: KEY, title: TITLE, body: BODY }]);
+    const root = (out.results as Json[])[0]?.threadRootMessageId as string;
+    // The posts hold them (the sweep is meaningful).
+    const card = (
+      await s.su.query("select title, description from app.board_cards where message_id = $1", [root])
+    ).rows[0];
+    expect(card.title).toBe(TITLE);
+    expect(card.description).toContain(BODY);
+
+    const [row] = await conversationRows(automationId);
+    expect(row?.external_key_hash).toBe(sha256Hex(KEY));
+    expect(row?.external_key_hash).toBe(sha(KEY));
+    expect(s.logs.length).toBeGreaterThan(20);
+    for (const needle of [KEY, TITLE, BODY, sha(KEY)]) {
+      for (const q of [
+        "select count(*)::int as n from app.audit_events t where strpos(row_to_json(t)::text, $1) > 0",
+        "select count(*)::int as n from app.agent_tool_calls t where strpos(row_to_json(t)::text, $1) > 0",
+        "select count(*)::int as n from pgboss.job t where strpos(row_to_json(t)::text, $1) > 0",
+      ]) {
+        expect((await s.su.query(q, [needle])).rows[0].n, `${needle}: ${q}`).toBe(0);
+      }
+      expect(s.logs.filter((l) => l.includes(needle))).toEqual([]);
+    }
+    // The key's hash is never in clear anywhere but its own row.
+    expect(
+      (
+        await s.su.query(
+          "select count(*)::int as n from app.automation_conversations t where strpos(row_to_json(t)::text, $1) > 0",
+          [KEY],
+        )
+      ).rows[0].n,
+    ).toBe(0);
+  });
+});
+
+describe("tenants (E8, T-07.17-16-01)", () => {
+  let tokenB: string;
+  let wardenId: string;
+  let bBoardId: string;
+  let bBacklogId: string;
+
+  beforeAll(async () => {
+    tokenB = `ocw_cell_${randomUUID()}${randomUUID()}`;
+    await s.su.query(
+      "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
+      [s.orgB, sha256Hex(tokenB)],
+    );
+    wardenId = (
+      await ok(
+        s.eve.request("POST", "/api/v1/agents", {
+          name: "Warden",
+          username: "warden",
+          instructions: "You are Warden.",
+          modelProvider: "mock",
+          modelId: "mock-1",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    bBoardId = (
+      await ok(
+        s.eve.request("POST", "/api/v1/channels", {
+          name: "fleet",
+          visibility: "private",
+          layout: "board",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    await ok(
+      s.eve.request("POST", `/api/v1/channels/${bBoardId}/members`, {
+        kind: "agent",
+        id: wardenId,
+      }) as Promise<Res>,
+    );
+    bBacklogId = (
+      (await ok(s.eve.request("GET", `/api/v1/boards/${bBoardId}`) as Promise<Res>)).columns as Json[]
+    ).find((c) => c.category === "backlog")?.id as string;
+  });
+
+  it("organization B's token with A's event → 404 unknown_turn; B's own call with the same key opens in B only", async () => {
+    const automationA = await createAutomation();
+    const a = await runTurn(automationA);
+    await openOk(a.ev, [item("1042")]);
+    const rowsA = await conversationRows(automationA);
+
+    const foreign = await open(a.ev, [item("1043")], {}, tokenB);
+    expect(foreign.status, JSON.stringify(foreign.body)).toBe(404);
+    expect(codeOf(foreign)).toBe("unknown_turn");
+    expect(await conversationRows(automationA)).toEqual(rowsA);
+
+    // B's own fan-out run, as Eve, with Warden.
+    const automationB = (
+      (
+        await ok(
+          s.eve.request("POST", "/api/v1/automations", {
+            name: "Fleet orders B",
+            agentId: wardenId,
+            instructions: "Find the new orders and open one conversation for each.",
+            trigger: { kind: "schedule", schedule: { cron: "0 17 * * 5", timeZone: "Europe/Madrid" } },
+            target: { kind: "board", conversationId: bBoardId, columnId: bBacklogId },
+            maxRunsPerDay: 24,
+            fanOut: { enabled: true, perRun: 10, perDay: 100 },
+          }) as Promise<Res>,
+          201,
+        )
+      ).automation as Json
+    ).id as string;
+    const runB = (
+      await ok(s.eve.request("POST", `/api/v1/automations/${automationB}/run`) as Promise<Res>, 202)
+    ).runId as string;
+    expect(await core().jobs.drain("automation.fire")).toBe(1);
+    const evB = (
+      await s.su.query(
+        "select payload from app.stream_events where stream_id = $1 and type = 'agent.automation_run.v1' and payload->'automationRun'->>'runId' = $2",
+        [`cell:${s.orgB}`, runB],
+      )
+    ).rows[0]?.payload as Json;
+    expect(evB?.turn?.tools, JSON.stringify(await runRow(runB))).toContain(OPEN);
+
+    // A's token with B's event: unknown in A.
+    const backwards = await s.cell("/conversations/open", {
+      eventId: evB.eventId,
+      agentId: wardenId,
+      items: [],
+    });
+    expect(backwards.status).toBe(404);
+
+    const inB = await ok(
+      s.cell(
+        "/conversations/open",
+        { eventId: evB.eventId, agentId: wardenId, items: [item("1042")] },
+        tokenB,
+      ),
+    );
+    expect((inB.results as Json[])[0]).toMatchObject({ opened: true, conversationId: bBoardId });
+    const rowsB = (
+      await s.su.query(
+        "select organization_id, external_key_hash from app.automation_conversations where automation_id = $1",
+        [automationB],
+      )
+    ).rows;
+    expect(rowsB).toEqual([{ organization_id: s.orgB, external_key_hash: sha("1042") }]);
+    expect(await conversationRows(automationA)).toEqual(rowsA);
   });
 });
