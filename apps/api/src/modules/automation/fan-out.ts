@@ -16,7 +16,7 @@ import {
 } from "@ocw/db";
 import { and, count, eq, gte } from "drizzle-orm";
 import type { Core } from "../../core";
-import type { JobData } from "../../lib/jobs";
+import { type JobContext, type JobData, lastAttempt } from "../../lib/jobs";
 import {
   deliverAutomationItem,
   lockRunAndAutomation,
@@ -338,12 +338,15 @@ export function itemEventId(itemId: string): string {
  * the item is delivered in one transaction as the automation's run-as person (`deliverAutomationItem`: the checks, the
  * skips and the turn). A refusal thrown by chat or the resolver is the item's real outcome and becomes a skip with its
  * reason; anything else (a deadlock, a dropped connection) is retried by pg-boss, and the derived event id keeps the
- * retry from making a second turn.
+ * retry from making a second turn. The last attempt (07.17 code review WR-01) marks the item `failed` with
+ * `delivery_failed` and audits `automation.item_skipped` (result `error`, ids only), so an item never stays queued
+ * forever with no trace.
  */
 export async function deliverItemJob(
   core: Core,
   deps: Pick<AutomationSeamDeps, "perms" | "modelGateway" | "memory">,
   data: JobData<"automation.item">,
+  attempt?: Pick<JobContext, "retryCount" | "retryLimit">,
 ): Promise<void> {
   const { organizationId, itemId } = data;
   const head = await core.db.withTenant({ organizationId }, async (tx) => {
@@ -377,7 +380,13 @@ export async function deliverItemJob(
       { itemId, err: { name: (err as Error)?.name, code: (err as { code?: unknown })?.code } },
       "automation item delivery failed",
     );
-    if (!isRefusal(err)) throw err;
+    if (!isRefusal(err)) {
+      if (!lastAttempt(attempt)) throw err;
+      await core.db.withTenant({ organizationId, userId: head.runAs }, (tx) =>
+        skipAutomationItem(tx, core, itemId, "delivery_failed", "failed"),
+      );
+      return;
+    }
     await core.db.withTenant({ organizationId, userId: head.runAs }, (tx) =>
       skipAutomationItem(tx, core, itemId, refusalReason(err)),
     );
@@ -389,7 +398,7 @@ export async function deliverItemJob(
  * `OCW_JOBS_WORKER=on`; tests drive `core.jobs.drain("automation.item")`.
  */
 export function registerFanOutWorker(core: Core, deps: AutomationSeamDeps): void {
-  core.jobs.work("automation.item", (data) => deliverItemJob(core, deps, data), {
+  core.jobs.work("automation.item", (data, ctx) => deliverItemJob(core, deps, data, ctx), {
     localConcurrency: ITEM_CONCURRENCY,
   });
 }

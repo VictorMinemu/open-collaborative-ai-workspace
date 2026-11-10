@@ -640,6 +640,47 @@ describe("forged and stale jobs (E8; T-07.17-17-01)", () => {
     expect(await allItemEvents()).toBe(eventsBefore);
     expect(await auditsOf("automation.item_skipped", o.itemId)).toEqual([]);
   });
+
+  it("WR-01: a delivery that keeps failing is retried, then its last attempt marks the item failed delivery_failed, audited", async () => {
+    const o = await openedQueued("6003");
+    // A broken write (a deadlock or a dropped connection in production; a trigger here) on every attempt.
+    await s.su.query(`create or replace function app.test_poison_item() returns trigger language plpgsql as $$
+      begin
+        if new.id = '${o.itemId}'::uuid and new.status = 'delivered' then raise exception 'poison item'; end if;
+        return new;
+      end $$`);
+    await s.su.query(
+      "create trigger test_poison_item before update on app.automation_conversations for each row execute function app.test_poison_item()",
+    );
+    try {
+      // Every attempt fails; the earlier ones leave the item queued for the retry (the queue's retries, no backoff
+      // here), and only the last one records it.
+      const limit = Number(
+        (await s.su.query("select retry_limit from pgboss.job where name = $1 limit 1", [QUEUE])).rows[0]
+          .retry_limit,
+      );
+      expect(limit).toBeGreaterThan(0);
+      expect(await drainItems()).toBe(limit + 1);
+      expect(await itemRow(o.itemId)).toMatchObject({
+        status: "failed",
+        reason: "delivery_failed",
+        agent_event_id: null,
+      });
+      expect(await itemEvents(o.itemId)).toEqual([]);
+      const failed = await auditsOf("automation.item_skipped", o.itemId);
+      expect(failed).toHaveLength(1);
+      expect(failed[0]).toMatchObject({ result: "error", actor_kind: "system" });
+      expect(failed[0]?.metadata).toEqual({
+        automationId: o.automationId,
+        runId: o.runId,
+        itemId: o.itemId,
+        reason: "delivery_failed",
+      });
+    } finally {
+      await s.su.query("drop trigger if exists test_poison_item on app.automation_conversations");
+      await s.su.query("drop function if exists app.test_poison_item()");
+    }
+  });
 });
 
 // ---------------------------------------------------------------- Task 3: the per-order journey at the API

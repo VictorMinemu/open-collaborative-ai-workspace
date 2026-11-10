@@ -292,3 +292,6 @@ documented behaviour below. The accepted text above stays as written; where it d
   channel only its user members, since only members read it) are walked in mention order (the first unit that reached
   a person, then user id) through the resolver's `isReadable`, and the first 200 readers are notified. `deliver`'s
   reader check stays as the backstop.
+- **WR-01, § 6 and § 13 (an item whose delivery keeps failing).** A delivery that fails for a reason that is not a
+  refusal is retried by the queue; its last attempt marks the item `failed` with `delivery_failed` and audits
+  `automation.item_skipped` with result `error` (ids and the reason only).

@@ -101,10 +101,15 @@ export async function skipAutomationItem(
   core: Core,
   itemId: string,
   reason: AutomationRunReason,
+  /**
+   * 07.17 code review WR-01: `failed` when the delivery's last attempt failed for a reason that is not a refusal (a
+   * deadlock, a dropped connection), audited with result `error`; `skipped` (result `denied`) otherwise.
+   */
+  outcome: "skipped" | "failed" = "skipped",
 ): Promise<void> {
   const [row] = await tx
     .update(automationConversations)
-    .set({ status: "skipped", reason, updatedAt: sql`now()` })
+    .set({ status: outcome, reason, updatedAt: sql`now()` })
     .where(and(eq(automationConversations.id, itemId), eq(automationConversations.status, "queued")))
     .returning({
       id: automationConversations.id,
@@ -121,7 +126,7 @@ export async function skipAutomationItem(
     action: "automation.item_skipped",
     resourceType: "automation_item",
     resourceId: row.id,
-    result: "denied",
+    result: outcome === "failed" ? "error" : "denied",
     actorKind: "system",
     ...(a ? { agentId: a.agentId, userId: a.runAsUserId } : {}),
     metadata: { automationId: row.automationId, runId: row.runId, itemId: row.id, reason },
