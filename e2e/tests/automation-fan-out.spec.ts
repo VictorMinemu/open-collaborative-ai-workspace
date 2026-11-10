@@ -21,6 +21,7 @@ import {
 } from "../support/automation-fan-out";
 import { addBot, waitBotReady } from "../support/automations";
 import { boardColumn, boardSnapshot, cardTile, openBoard } from "../support/board";
+import { FAKE_MCP_HOST, FAKE_URL } from "../support/bot-tools";
 import { type BotWorkZonePolicy, setWorkZonePolicy } from "../support/bot-work-zone";
 import { cellToken } from "../support/cell-token";
 import { messageRow } from "../support/chat";
@@ -253,6 +254,9 @@ test.beforeAll(async ({}, info) => {
     autoAck: true,
     autoReply: true,
     userHandles: { [adminId]: ADMIN_HANDLE },
+    // The ERP is an organization server rendered in the cell (static headers): the cell calls it itself, after the
+    // gate, on the host the API knows as `fake-mcp` (loopback here). The connector proxy refuses such a server.
+    mcpHostMap: { [FAKE_MCP_HOST]: FAKE_URL ? new URL(FAKE_URL).host : "" },
     // PD-22: this automation's run lists the ERP and keeps this spec's orders (a persona would keep the status-new
     // ones; the fake ERP's seed orders and other specs' records are not this automation's business).
     fanOutFor: (run) =>

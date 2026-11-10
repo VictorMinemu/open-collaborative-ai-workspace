@@ -31,7 +31,8 @@ import { SandboxRefusal } from "../../packages/contracts/src/sandbox";
  * `agent.work_session.v1` wake is answered on the session's card (`Done: …`, `Needs approval: …`, `<transition>: …`).
  *
  * Automation fan-out (07.17-18, PD-22), only for a spec that sets the hooks: a run turn offered `ocw_conversation_open`
- * lists the spec's connector (`fanOutFor`) and opens one conversation per id through `POST
+ * lists the spec's connector (`fanOutFor`; an organization server `GET /cell` renders is called by the cell itself after
+ * `POST /tool-calls`, any other through `ocw_connector_call`) and opens one conversation per id through `POST
  * /agent-channel/v1/conversations/open` (exactly the plugin's body); an `agent.automation_item.v1` turn runs
  * `itemCallsFor` in the item's thread; a `turn_done` wake in such a thread runs `wakeCallsFor` and mentions the item's
  * escalation. Like the plugin's board tool, a tainted or session-read turn never reads the board: it moves its thread's
@@ -250,6 +251,11 @@ export interface FakeCellOptions {
    */
   hostMap?: Record<string, string>;
   /**
+   * The same `host:port` rewrite for the MCP tool calls the cell makes itself (07.17-18: the fan-out run's list of an
+   * organization server `GET /cell` renders), without simulating probes. Unset = the server's own URL.
+   */
+  mcpHostMap?: Record<string, string>;
+  /**
    * The calls the simulated persona decides to make for a mention, in addition to the message's own `[[call …]]`
    * directives (07.4-14: a member asks in plain words, the persona calls `ocw_connector_call`).
    */
@@ -276,8 +282,9 @@ export interface FakeCellOptions {
   userHandles?: Readonly<Record<string, string>>;
   /**
    * 07.17-18 (PD-22): on an `agent.automation_run.v1` whose turn offers `ocw_conversation_open`, the connector (its safe
-   * name) whose `list_records` the persona reads, and the ids it keeps as new (default: every id). The fake then makes
-   * one `ocw_connector_call` and one `ocw_conversation_open` (an item per kept id: key `<id>`, title `Order <id>`, body
+   * name) whose `list_records` the persona reads, and the ids it keeps as new (default: every id). The fake then reads
+   * the list once, as the real cell would (a server `GET /cell` renders: the gate, then the server itself; any other:
+   * `ocw_connector_call`), makes one `ocw_conversation_open` (an item per kept id: key `<id>`, title `Order <id>`, body
    * `Order <id> from the ERP.`) and replies `Opened <opened>, existing <existing>` on the run card. Null = the 07.6 run
    * answer. Unset = every run is answered as before.
    */
@@ -436,6 +443,43 @@ export function idsOf(content: string): string[] | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * One MCP session over streamable HTTP with plain JSON-RPC over fetch (the fake MCP and the fake ERP answer single JSON
+ * responses) to a server of `GET /cell`, with its rendered headers; `hosts` rewrites its `host:port` (e.g.
+ * `fake-mcp:4291` → `127.0.0.1:4291`). The probe and the in-cell tool calls share it.
+ */
+function mcpSession(
+  server: { url: string; headers: Array<{ name: string; value: string }> },
+  hosts: Record<string, string> | undefined,
+) {
+  const url = new URL(server.url);
+  const mapped = hosts?.[url.host];
+  if (mapped) url.host = mapped;
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+  };
+  for (const h of server.headers) headers[h.name] = h.value;
+  let session: string | null = null;
+  return async (id: number | null, method: string, params: Record<string, unknown> = {}) => {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { ...headers, ...(session ? { "mcp-session-id": session } : {}) },
+      body: JSON.stringify({ jsonrpc: "2.0", ...(id === null ? {} : { id }), method, params }),
+      redirect: "error",
+    });
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(
+        `The MCP server refused the credentials (HTTP ${res.status}). Check the header values.`,
+      );
+    }
+    if (!res.ok && res.status !== 202) throw new Error(`The MCP server answered HTTP ${res.status}.`);
+    session = res.headers.get("mcp-session-id") ?? session;
+    const text = await res.text();
+    return text ? (JSON.parse(text) as { result?: Record<string, unknown> }) : {};
+  };
 }
 
 /** The last non-empty line of a read answer's newest output text ("" when it has none). */
@@ -1537,24 +1581,41 @@ export class FakeCellPlugin {
   private readonly escalationByRoot = new Map<string, string[]>();
 
   /**
-   * PD-22: a fan-out run. One `ocw_connector_call` of `<connector>__list_records` (not sent, and nothing opened, when
-   * the turn does not offer it), then exactly the plugin's `ocw_conversation_open` body (`{ eventId, agentId, items }`,
-   * apps/openclaw-channel's conversation-open-tool.ts) with an item per kept id, then one reply on the run card:
-   * `Opened <opened>, existing <existing>`, or the refusal.
+   * PD-22: a fan-out run. One read of `<connector>__list_records` (nothing sent, and nothing opened, when the turn does
+   * not offer it), the way the real cell reaches that server: a server `GET /cell` renders (`org_secret`, the e2e ERP)
+   * is called by the cell itself after the gate (`inCellMcpCall`); any other (per-member or organization account) goes
+   * through `ocw_connector_call`, the API's proxy, which serves only those modes. Then exactly the plugin's
+   * `ocw_conversation_open` body (`{ eventId, agentId, items }`, apps/openclaw-channel's conversation-open-tool.ts) with
+   * an item per kept id, then one reply on the run card: `Opened <opened>, existing <existing>`, or the refusal.
    */
   private async answerFanOutRun(
     r: AutomationRunPayload,
     fanOut: { connector: string; select?: (ids: string[]) => string[] },
   ): Promise<void> {
     if (this.opts.holdAgents?.has(r.agent.id)) return;
-    const listed = await this.connectorCall(r, "ocw_connector_call", {
-      connector: fanOut.connector,
-      tool: "list_records",
-      arguments: {},
-    });
+    const logical = `${fanOut.connector}__list_records`;
+    if (!(r.turn?.tools ?? []).includes(logical)) {
+      const withheld = r.turn?.withheld?.find((w) => w.tool === logical);
+      await this.replyToRun(
+        r,
+        `Tool ocw_connector_call: ${withheld ? `refused (${withheld.reason})` : "not offered"}`,
+      );
+      return;
+    }
+    const cell = await this.request<FakeCellSnapshot | null>("GET", "/cell");
+    const rendered =
+      cell.status === 200 ? cell.body?.mcpServers?.find((s) => s.safeName === fanOut.connector) : undefined;
+    const tool = rendered ? logical : "ocw_connector_call";
+    const listed = rendered
+      ? await this.inCellMcpCall(r, rendered, "list_records", {})
+      : await this.connectorCall(r, "ocw_connector_call", {
+          connector: fanOut.connector,
+          tool: "list_records",
+          arguments: {},
+        });
     const ids = idsOf(listed);
     if (!ids) {
-      await this.replyToRun(r, `Tool ocw_connector_call: ${listed}`);
+      await this.replyToRun(r, `Tool ${tool}: ${listed}`);
       return;
     }
     const kept = fanOut.select ? fanOut.select(ids) : ids;
@@ -1575,6 +1636,67 @@ export class FakeCellPlugin {
     const opened = results.filter((x) => x.opened === true).length;
     const existing = results.filter((x) => x.opened !== true && !x.refused).length;
     await this.replyToRun(r, `Opened ${opened}, existing ${existing}`);
+  }
+
+  /**
+   * A tool of an organization MCP server the cell renders (`GET /cell` → `mcpServers`: `org_secret`, its headers'
+   * values for the cell only), run the way OpenClaw runs it: the plugin's gate first (`POST /tool-calls` with the
+   * offered name `<safe>__<tool>`, the arguments only when the turn flags an approval on it), then the server itself
+   * (`initialize`, `notifications/initialized`, `tools/call` over streamable HTTP with the rendered headers; `mcpHostMap`
+   * rewrites its host), then `POST /tool-calls/:callId/result`. The connector proxy is never used for such a server
+   * (it serves only the per-member and organization-account modes: `not_in_turn`). Returns the tool's text, or
+   * `denied (<reason>)`, `approval_*`, `error: <text>`.
+   */
+  private async inCellMcpCall(
+    m: MentionPayload,
+    server: NonNullable<FakeCellSnapshot["mcpServers"]>[number],
+    tool: string,
+    args: Record<string, unknown>,
+  ): Promise<string> {
+    const name = `${server.safeName}__${tool}`;
+    const flagged = m.turn?.toolFlags?.[name]?.approval !== undefined;
+    this.toolCallRequests.push({ eventId: m.eventId, tool: name, ...(flagged ? { arguments: args } : {}) });
+    const gate = await this.request<{ callId?: string; allowed?: boolean; reason?: string | null } | null>(
+      "POST",
+      "/tool-calls",
+      {
+        eventId: m.eventId,
+        agentId: m.agent.id,
+        tool: name,
+        params: {},
+        ...(flagged ? { arguments: args } : {}),
+      },
+    );
+    const callId = gate.body?.callId;
+    if (gate.status !== 200 || gate.body?.allowed !== true || !callId) {
+      const reason = gate.body?.reason ?? null;
+      return reason?.startsWith("approval_") ? reason : `denied (${reason ?? gate.status})`;
+    }
+    const started = Date.now();
+    let text = "";
+    let isError = false;
+    try {
+      const rpc = mcpSession(server, this.opts.mcpHostMap);
+      await rpc(1, "initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "ocw-fake-cell", version: "1.0.0" },
+      });
+      await rpc(null, "notifications/initialized");
+      const called = await rpc(2, "tools/call", { name: tool, arguments: args });
+      const content = (called.result?.content as Array<{ type?: string; text?: string }> | undefined) ?? [];
+      text = content.map((c) => c.text ?? "").join("\n");
+      isError = called.result?.isError === true;
+    } catch (err) {
+      text = err instanceof Error ? err.message : String(err);
+      isError = true;
+    }
+    await this.request("POST", `/tool-calls/${callId}/result`, {
+      status: isError ? "error" : "ok",
+      resultCount: isError ? 0 : 1,
+      durationMs: Date.now() - started,
+    });
+    return isError ? `error: ${text}` : text;
   }
 
   /** PD-22: an item turn. The spec's calls run in the item's thread (the reply answers the opened root). */
@@ -1646,32 +1768,7 @@ export class FakeCellPlugin {
       await send({ probeId, serverId, ok: false, error: "The cell does not know this MCP server." });
       return;
     }
-    const url = new URL(server.url);
-    const mapped = this.opts.hostMap?.[url.host];
-    if (mapped) url.host = mapped;
-    const headers: Record<string, string> = {
-      "content-type": "application/json",
-      accept: "application/json, text/event-stream",
-    };
-    for (const h of server.headers) headers[h.name] = h.value;
-    let session: string | null = null;
-    const rpc = async (id: number | null, method: string, params: Record<string, unknown> = {}) => {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { ...headers, ...(session ? { "mcp-session-id": session } : {}) },
-        body: JSON.stringify({ jsonrpc: "2.0", ...(id === null ? {} : { id }), method, params }),
-        redirect: "error",
-      });
-      if (res.status === 401 || res.status === 403) {
-        throw new Error(
-          `The MCP server refused the credentials (HTTP ${res.status}). Check the header values.`,
-        );
-      }
-      if (!res.ok && res.status !== 202) throw new Error(`The MCP server answered HTTP ${res.status}.`);
-      session = res.headers.get("mcp-session-id") ?? session;
-      const text = await res.text();
-      return text ? (JSON.parse(text) as { result?: Record<string, unknown> }) : {};
-    };
+    const rpc = mcpSession(server, this.opts.hostMap);
     try {
       await rpc(1, "initialize", {
         protocolVersion: "2025-06-18",

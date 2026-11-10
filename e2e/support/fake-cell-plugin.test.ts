@@ -16,6 +16,8 @@ import { FakeCellPlugin, type MentionPayload, turnAttachmentsSuffix } from "./fa
  */
 
 const seen: Array<{ path: string; body: Record<string, unknown> }> = [];
+/** The `authorization` header of each request in `seen`, by index (07.17: the in-cell MCP call sends the rendered one). */
+const seenAuth: Array<string | undefined> = [];
 let server: Server;
 let plugin: FakeCellPlugin;
 let apiUrl = "";
@@ -52,6 +54,7 @@ beforeAll(async () => {
     });
     req.on("end", () => {
       seen.push({ path: req.url ?? "", body: text ? JSON.parse(text) : {} });
+      seenAuth.push(req.headers.authorization);
       const url = req.url ?? "";
       const sent = seen.at(-1)?.body ?? {};
       const routed = routes.map((r) => r(req.method ?? "GET", url, sent)).find((x) => x !== undefined);
@@ -990,7 +993,7 @@ const openAnswer: Route = (method, url, body) => {
 };
 
 describe("FakeCellPlugin automation fan-out (07.17-18, PD-22)", () => {
-  it("a fan-out run lists the ERP once, posts exactly the plugin's open body with an item per id it keeps, then replies `Opened <n>, existing <m>` on the run card", async () => {
+  it("a fan-out run lists a proxied connector once, posts exactly the plugin's open body with an item per id it keeps, then replies `Opened <n>, existing <m>` on the run card", async () => {
     answers[CONNECTOR_CALL] = [
       200,
       { content: JSON.stringify({ ids: ["SO-10442", "1042", "1043"] }), truncated: false, isError: false },
@@ -1009,15 +1012,17 @@ describe("FakeCellPlugin automation fan-out (07.17-18, PD-22)", () => {
     const from = seen.length;
     await cell.onEvent("agent.automation_run.v1", fanOutRun());
     expect(runs).toEqual([WS]);
+    // `GET /cell` renders no such server (this stub answers 404): the connector proxy reads it.
     expect(since(from)).toEqual([
+      "/agent-channel/v1/cell",
       CONNECTOR_CALL,
       OPEN,
       "/agent-channel/v1/typing",
       "/agent-channel/v1/messages",
     ]);
     const turn = { eventId: RUN_EVENT, agentId: ATLAS_ID };
-    expect(seen[from]?.body).toEqual({ ...turn, connector: "erp", tool: "list_records", arguments: {} });
-    const sent = seen[from + 1]?.body;
+    expect(seen[from + 1]?.body).toEqual({ ...turn, connector: "erp", tool: "list_records", arguments: {} });
+    const sent = seen[from + 2]?.body;
     expect(sent).toEqual({
       ...turn,
       items: [
@@ -1054,7 +1059,7 @@ describe("FakeCellPlugin automation fan-out (07.17-18, PD-22)", () => {
     });
     let from = seen.length;
     await cell.onEvent("agent.automation_run.v1", fanOutRun());
-    expect(seen[from + 1]?.body).toEqual({ eventId: RUN_EVENT, agentId: ATLAS_ID, items: [] });
+    expect(seen[from + 2]?.body).toEqual({ eventId: RUN_EVENT, agentId: ATLAS_ID, items: [] });
     expect(seen.at(-1)?.body.text).toBe("Opened 0, existing 0");
 
     answers[OPEN] = [200, { ok: false, code: "fan_out_off", sentence: "s" }];
@@ -1079,6 +1084,111 @@ describe("FakeCellPlugin automation fan-out (07.17-18, PD-22)", () => {
       expect(String(seen.at(-1)?.body.text)).toMatch(/^Asked by Víctor Ruiz/u);
     }
     delete answers[OPEN];
+  });
+
+  it("an organization server rendered in the cell is listed the real cell's way: the gate, tools/call on the server itself with its headers, the result; never the connector proxy (CI 252/255)", async () => {
+    const CALL_ID = "00000000-0000-4000-8000-000000000f0d";
+    const rpcs: Array<Record<string, unknown>> = [];
+    // GET /cell renders the ERP (org_secret: its headers' values for the cell only), on a host only the API resolves.
+    answers["/agent-channel/v1/cell"] = [
+      200,
+      {
+        agents: [],
+        mcpServers: [
+          {
+            id: "00000000-0000-4000-8000-000000000f0e",
+            safeName: "erp",
+            transport: "streamable-http",
+            url: "http://fake-mcp:4291/erp-mcp",
+            headers: [
+              { name: "Authorization", envName: "OCW_MCP_ERP_AUTHORIZATION", value: "Bearer erp-token" },
+            ],
+            tools: ["list_records"],
+          },
+        ],
+      },
+    ];
+    answers["/agent-channel/v1/tool-calls"] = [200, { callId: CALL_ID, allowed: true, reason: null }];
+    answers[`/agent-channel/v1/tool-calls/${CALL_ID}/result`] = [200, { ok: true }];
+    const erp: Route = (method, url, body) => {
+      if (method !== "POST" || url !== "/erp-mcp") return undefined;
+      rpcs.push(body);
+      if (body.method === "initialize") {
+        return [
+          200,
+          { jsonrpc: "2.0", id: body.id, result: { protocolVersion: "2025-06-18", capabilities: {} } },
+        ];
+      }
+      if (body.method === "tools/call") {
+        const text = JSON.stringify({ ids: ["SO-10442", "1042", "1043"] });
+        return [200, { jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text }] } }];
+      }
+      return [202, null];
+    };
+    routes.push(erp, openAnswer);
+    const cell = new FakeCellPlugin({
+      apiUrl,
+      token: "cell-token",
+      autoReply: true,
+      mcpHostMap: { "fake-mcp:4291": new URL(apiUrl).host },
+      fanOutFor: () => ({ connector: "erp", select: (ids) => ids.filter((id) => !id.startsWith("SO-")) }),
+    });
+    try {
+      const from = seen.length;
+      await cell.onEvent("agent.automation_run.v1", fanOutRun());
+      expect(since(from)).toEqual([
+        "/agent-channel/v1/cell",
+        "/agent-channel/v1/tool-calls",
+        "/erp-mcp",
+        "/erp-mcp",
+        "/erp-mcp",
+        `/agent-channel/v1/tool-calls/${CALL_ID}/result`,
+        OPEN,
+        "/agent-channel/v1/typing",
+        "/agent-channel/v1/messages",
+      ]);
+      const turn = { eventId: RUN_EVENT, agentId: ATLAS_ID };
+      // The gate gets the offered name and no arguments (no approval flag on the turn), like any in-cell tool.
+      expect(seen[from + 1]?.body).toEqual({ ...turn, tool: "erp__list_records", params: {} });
+      expect(cell.toolCallRequests.at(-1)).toEqual({ eventId: RUN_EVENT, tool: "erp__list_records" });
+      // The server itself, with the rendered header: initialize, initialized, then the MCP tool name.
+      expect(rpcs.map((r) => r.method)).toEqual(["initialize", "notifications/initialized", "tools/call"]);
+      expect(rpcs.at(-1)?.params).toEqual({ name: "list_records", arguments: {} });
+      expect(seenAuth.slice(from + 2, from + 5)).toEqual([
+        "Bearer erp-token",
+        "Bearer erp-token",
+        "Bearer erp-token",
+      ]);
+      expect(seen[from + 5]?.body).toMatchObject({ status: "ok" });
+      expect(seen[from + 6]?.body).toEqual({
+        ...turn,
+        items: [
+          { externalKey: "1042", title: "Order 1042", body: "Order 1042 from the ERP." },
+          { externalKey: "1043", title: "Order 1043", body: "Order 1043 from the ERP." },
+        ],
+      });
+      expect(seen.at(-1)?.body.text).toBe("Opened 1, existing 1");
+
+      // A gate that refuses: the server is never called, nothing is opened, the run says why.
+      answers["/agent-channel/v1/tool-calls"] = [
+        200,
+        { callId: CALL_ID, allowed: false, reason: "cap_reached" },
+      ];
+      const refusedFrom = seen.length;
+      await cell.onEvent("agent.automation_run.v1", fanOutRun());
+      expect(since(refusedFrom)).toEqual([
+        "/agent-channel/v1/cell",
+        "/agent-channel/v1/tool-calls",
+        "/agent-channel/v1/typing",
+        "/agent-channel/v1/messages",
+      ]);
+      expect(seen.at(-1)?.body.text).toBe("Tool erp__list_records: denied (cap_reached)");
+    } finally {
+      routes.length = 0;
+      delete answers["/agent-channel/v1/cell"];
+      delete answers["/agent-channel/v1/tool-calls"];
+      delete answers[`/agent-channel/v1/tool-calls/${CALL_ID}/result`];
+    }
   });
 
   it("an item turn runs itemCallsFor in the card's thread: a tainted turn moves its card without reading the board (version 1), then starts the session", async () => {
