@@ -27,6 +27,7 @@ import { openClawAgentIdFor } from "./mention-mapper.js";
 import { recordTaintedSentence } from "./record-tool.js";
 // No imports of its own: safe to read while this module loads (work-session-tools.ts imports this module).
 import {
+  BOARD_TOOL_NAME,
   CONVERSATION_OPEN_TOOL,
   WORK_SESSION_PROMPT_TOOL,
   WORK_SESSION_START_TOOL,
@@ -69,6 +70,10 @@ import { workZoneTaintedSentence } from "./work-zone-tools.js";
  * Automation fan-out (07.17 D-02, D-05, PD-07): `ocw_conversation_open` is self-validated by `/conversations/open`,
  * takes its static flags (side-effecting, never approvable), counts against the cap of 8, and on a tainted run turn
  * still reaches its route, which decides outside content (the run read the MCP it fans out from).
+ * Board moves (07.17 D-06, D-12, PD-11): `ocw_board_card` stays side-effecting and never approvable, but on a tainted
+ * turn or after a session read it reaches its routes, which exempt only a move or waiting change of the turn thread's
+ * card that this bot's automation opened, with the profile's `actOnOutsideContent`; the board tool itself refuses
+ * create and read on such a turn (the routes refuse them too).
  * Logs never include params, arguments or results.
  */
 
@@ -192,12 +197,22 @@ const ROUTE_DECIDES_TAINT: ReadonlySet<string> = new Set([
   // 07.17 (D-05, PD-10): the route allows the open on a tainted run turn (the run read the MCP it fans out from) and
   // only in the run's own target, which the stored turn names (never the model); it claims with `outsideContent`.
   CONVERSATION_OPEN_TOOL,
+  // 07.17 (D-06, PD-11): the board routes exempt from taint only a move or waiting change of the turn thread's card that
+  // this bot's automation opened, when the profile has `actOnOutsideContent`; everything else stays `tainted` there.
+  // `create` (and the read) stays refused by the board tool itself on such a turn (board-tool.ts), never posted.
+  BOARD_TOOL_NAME,
 ]);
 /** 07.16 (D-20): the only side-effecting calls a turn may still make after it read a session's output. */
 const SESSION_OUTPUT_EXEMPT: ReadonlySet<string> = new Set([
   WORK_SESSION_PROMPT_TOOL,
   WORK_SESSION_STOP_TOOL,
 ]);
+/**
+ * 07.17 (D-12, PD-11): side-effecting calls that, after a session read, still reach their route, which decides the
+ * session-output rule itself: only the board tool, whose routes exempt the same automation-opened card move (with the
+ * profile flag) and refuse everything else; the board tool refuses create and read on such a turn before a request.
+ */
+const ROUTE_DECIDES_SESSION_OUTPUT: ReadonlySet<string> = new Set([BOARD_TOOL_NAME]);
 /**
  * Contracts `CONVERSATION_OPEN_FLAGS` (07.17): it posts in the automation's target; the answer is the platform's own
  * ids, never outside content. A turn's flags only add restrictions.
@@ -213,8 +228,15 @@ const ATTACHMENT_READ_FLAGS: TurnToolFlags = { untrustedOutput: true, sideEffect
  */
 const SIDE_EFFECTING_WITH_APPROVAL: ReadonlySet<string> = new Set(["ocw_record_update"]);
 /**
- * Always side-effecting, whatever flags a turn carries: writing memory or changing shared board work after untrusted
- * content is exactly the injection the taint rule exists for (D-08, T-03.1-07-02, 07.1-13, T-07.2-07-02). A memory
+ * 07.1-13 / 07.17 (D-06): the board tool is side-effecting whatever flags a turn carries (changing shared board work
+ * after untrusted content is the injection the taint rule exists for) and never approvable, but it is no longer
+ * `ALWAYS_SIDE_EFFECTING`: its routes decide a tainted or session-read turn (`ROUTE_DECIDES_TAINT`,
+ * `ROUTE_DECIDES_SESSION_OUTPUT`).
+ */
+const BOARD_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
+/**
+ * Always side-effecting, whatever flags a turn carries: writing memory after untrusted content is exactly the
+ * injection the taint rule exists for (D-08, T-03.1-07-02, T-07.2-07-02). A memory
  * proposal is not here: a person approves it before anything is written, so a tainted turn may still propose (flagged by
  * the API). A Work Zone proposal is (07.5 D-03, APPROVE-04): it would run code on a member's device, so a turn that read
  * untrusted content never proposes one, even with a person's click still to come. An automation proposal is too (07.6
@@ -223,7 +245,6 @@ const SIDE_EFFECTING_WITH_APPROVAL: ReadonlySet<string> = new Set(["ocw_record_u
 const ALWAYS_SIDE_EFFECTING: ReadonlySet<string> = new Set([
   "ocw_memory_save",
   "ocw_memory_write",
-  "ocw_board_card",
   "ocw_start_work_zone",
   "ocw_automation_propose",
   // 07.7 (ADR-0027): validated by `/consultations`; a consult after untrusted content is the injection the taint rule
@@ -341,6 +362,13 @@ function callFlags(
     return {
       untrustedOutput: base.untrustedOutput || delivered?.untrustedOutput === true,
       sideEffecting: base.sideEffecting || delivered?.sideEffecting === true,
+    };
+  }
+  if (tool === BOARD_TOOL_NAME) {
+    // 07.17 (D-06): side-effecting whatever the turn says, never approvable; a turn's flags only add untrusted output.
+    return {
+      untrustedOutput: BOARD_FLAGS.untrustedOutput || t.turn.toolFlags[tool]?.untrustedOutput === true,
+      sideEffecting: true,
     };
   }
   if (tool === CONVERSATION_OPEN_TOOL) {
@@ -646,7 +674,8 @@ export function createToolGuard(
         return block(`Tool ${tool} blocked: the turn reached its limit of ${t.turn.maxWebCalls} web calls.`);
       }
       // 07.5 (D-04): a tool with an approval policy is decided by the API after taint (a person approves, or a grant
-      // is used); the memory and board tools keep their local block whatever a turn says.
+      // is used); the memory tools keep their local block whatever a turn says, and the board, session and open tools
+      // are never approvable (their flags carry no approval: `callFlags`).
       const approval =
         ALWAYS_SIDE_EFFECTING.has(tool) || WORK_SESSION_TOOLS.has(tool) ? undefined : flags.approval;
       const taintedBlock = (): ToolBlock => {
@@ -665,11 +694,17 @@ export function createToolGuard(
       };
       if (flags.sideEffecting && !approval) {
         // 07.16 (D-20): after a session's output only prompt and stop act; start reads the route's own sentence.
-        if (t.sessionOutputRead && !SESSION_OUTPUT_EXEMPT.has(tool)) {
+        // 07.17 (D-12): the board routes decide that rule for the board tool.
+        if (
+          t.sessionOutputRead &&
+          !SESSION_OUTPUT_EXEMPT.has(tool) &&
+          !ROUTE_DECIDES_SESSION_OUTPUT.has(tool)
+        ) {
           if (tool === WORK_SESSION_START_TOOL) return block(BOT_WORK_SESSION_SENTENCES.session_output);
           return taintedBlock();
         }
-        // 07.16 (D-08): start, prompt and stop reach their routes, which decide outside content themselves.
+        // 07.16 (D-08): start, prompt and stop reach their routes, which decide outside content themselves; so do the
+        // 07.17 open tool (D-05) and the board tool (D-06).
         if (t.tainted && !ROUTE_DECIDES_TAINT.has(tool)) return taintedBlock();
       }
       const selfValidated = confined || SELF_VALIDATED_TOOLS.has(tool);

@@ -43,7 +43,8 @@
  *   POST /agent-channel/v1/board/cards    records the card (`boardCards`; idempotent on agentId + idempotencyKey, 201
  *                                          then 200, version 1, the first column by default)
  *   PATCH /agent-channel/v1/board/cards/:id  move / waiting state of a stored board card (409
- *                                          board_card_version_conflict, 403 not_author on any text key)
+ *                                          board_card_version_conflict with the current card in details.card, 403
+ *                                          not_author on any text key)
  *   POST /agent-channel/v1/connectors/list  records the body (`connectorLists`) and answers one connected connector
  *                                          (`m1a2b3c4d` "Smoke CRM", tool whoami) and one key (`k_abcdefgh23`)
  *   POST /agent-channel/v1/connectors/call  records the body (`connectorCalls`) and answers `{content: "whoami: sub_smoke"}`
@@ -1861,7 +1862,15 @@ export async function startFakeAgentChannelApi(
         state.boardPatches.push({ ...body, messageId, status });
         if (status === 403) return json(res, 403, { error: { code: "not_author" } });
         if (status === 404) return json(res, 404, { error: { code: "card_not_in_board" } });
-        if (status === 409) return json(res, 409, { error: { code: "board_card_version_conflict" } });
+        // Like the real API: the current card in `details.card` (07.17 D-06: a tainted turn retries with its version).
+        if (status === 409) {
+          return json(res, 409, {
+            error: {
+              code: "board_card_version_conflict",
+              details: { card: boardCardOut(card as StoredBoardCard) },
+            },
+          });
+        }
         const c = card as StoredBoardCard;
         if (body.move) c.columnId = body.move.columnId;
         if (body.waitingOn) c.waitingOn = body.waitingOn;

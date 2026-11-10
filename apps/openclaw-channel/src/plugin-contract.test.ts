@@ -44,6 +44,7 @@ import {
 } from "./agent-channel-protocol.js";
 import { AgentChannelHttpError, createAgentChannelClient } from "./api-client.js";
 import { AUTOMATION_PROPOSE_TOOL, automationProposalOf } from "./automation-tool.js";
+import { resetBoardToolState } from "./board-tool.js";
 import { AUTH_FAILURE_REPLY, createBridge, FAILURE_REPLY, type OpenClawPort } from "./bridge.js";
 import { MEMBER_ACCOUNT, NEEDS_RECONNECT, NOT_CONNECTED, REFUSAL_SENTENCE } from "./connector-tools.js";
 import { CONSULT_TOOL_NAME, consultIdempotencyKey } from "./consult-tool.js";
@@ -63,6 +64,7 @@ import { RECORD_UPDATE_TOOL, recordUpdateOf } from "./record-tool.js";
 import { registerCapabilities } from "./register-capabilities.js";
 import { registerFull } from "./register-full.js";
 import {
+  FAKE_BOARD_COLUMNS,
   FAKE_ERROR_CANARY,
   type FakeAgentChannelApi,
   type MentionInput,
@@ -2412,6 +2414,69 @@ describe("board tool (07.1-13, BOARD-02): a board turn → ocw_board_card → PO
     expect(Object.keys(stored ?? {})).not.toContain("conversationId");
     // A retry of the same call stores no second card.
     await factory.execute("tc-1", { action: "create", description: "Order spare valve" });
+    expect(api.boardCards).toHaveLength(1);
+  });
+
+  it("07.17 D-06: a tainted item turn moves its thread's card without a read: version 1, the 409's current card, one retry", async () => {
+    api.agents = [structuredClone(ARCHIE)];
+    const client = createAgentChannelClient({ apiUrl: api.url, token: () => api.token });
+    const guard = createToolGuard({ client: () => client });
+    type Factory = (ctx: Record<string, unknown>) => {
+      name: string;
+      execute: (id: string, p: unknown) => Promise<{ content: Array<{ text: string }> }>;
+    };
+    const registered: Factory[] = [];
+    registerFull(
+      { on: () => undefined, registerTool: (f: Factory) => registered.push(f) } as never,
+      guard,
+      () => client,
+    );
+    const turn = {
+      tools: ["ocw_agent_card", "ocw_board_card"],
+      toolFlags: { ocw_agent_card: CARD, ocw_board_card: BOARD },
+      memory: [],
+      now: null,
+      maxToolCalls: 8,
+      maxWebCalls: 5,
+    };
+    const board = () =>
+      registered.map((f) => f({ sessionKey: "s-item" })).find((t) => t.name === "ocw_board_card");
+    // The card exists and was moved once since it was opened (version 2).
+    guard.beginTurn("s-item", { eventId: "evt-c1", agentId: ARCHIE.id, turn, conversationId: "conv-board" });
+    await board()?.execute("tc-1", { action: "create", description: "Order 1042" });
+    const cardId = api.boardCards[0]?.messageId as string;
+    await board()?.execute("tc-2", { action: "move", cardId, columnId: FAKE_BOARD_COLUMNS[1]?.id as string });
+    resetBoardToolState();
+    // The item turn in that card's thread starts tainted (an inbound-rooted thread): the gate lets the move through.
+    guard.beginTurn("s-item", {
+      eventId: "evt-i1",
+      agentId: ARCHIE.id,
+      turn,
+      conversationId: "conv-board",
+      threadRootId: cardId,
+      tainted: true,
+    });
+    expect(
+      await guard.beforeToolCall(
+        { toolName: "ocw_board_card", toolCallId: "tc-3" },
+        { sessionKey: "s-item" },
+      ),
+    ).toBeUndefined();
+    const r = await board()?.execute("tc-3", {
+      action: "move",
+      columnId: FAKE_BOARD_COLUMNS[0]?.id as string,
+    });
+    expect(r?.content[0]?.text).toBe("Card moved.");
+    expect(api.boardPatches.slice(1).map((p) => [p.expectedVersion, p.status])).toEqual([
+      [1, 409],
+      [2, 200],
+    ]);
+    expect(api.boardReads).toEqual([]);
+    // Create stays refused locally on that turn: nothing posted.
+    const created = await board()?.execute("tc-4", { action: "create", description: "Injected card" });
+    expect(created?.content[0]?.text).toBe(
+      "Not done: this turn read web or tool content, so it can no longer change the board.",
+    );
     expect(api.boardCards).toHaveLength(1);
   });
 });

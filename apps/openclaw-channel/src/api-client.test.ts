@@ -231,6 +231,28 @@ describe("board calls (07.1-13, ocw_board_card)", () => {
     await expect(failing.c.boardPatchCard("m 1", req)).rejects.toBeDefined();
     expect(failing.calls).toHaveLength(1);
   });
+
+  it("a version conflict carries the current card from error.details.card (07.17 D-06); a malformed one carries none", async () => {
+    const req = { eventId: "e1", agentId: "a1", expectedVersion: 1, waitingOn: "us" as const };
+    const current = { ...CARD, version: 5 };
+    const { c } = client([
+      {
+        status: 409,
+        body: { error: { code: "board_card_version_conflict", message: "x", details: { card: current } } },
+      },
+      {
+        status: 409,
+        body: {
+          error: { code: "board_card_version_conflict", message: "x", details: { card: { version: "5" } } },
+        },
+      },
+    ]);
+    const err = (await c.boardPatchCard("m 1", req).catch((e: unknown) => e)) as AgentChannelHttpError;
+    expect(err.conflictCard).toMatchObject({ messageId: "m 1", version: 5 });
+    const bad = (await c.boardPatchCard("m 1", req).catch((e: unknown) => e)) as AgentChannelHttpError;
+    expect(bad.code).toBe("board_card_version_conflict");
+    expect(bad.conflictCard).toBeUndefined();
+  });
 });
 
 describe("memory file calls (07.2-07, ocw_memory_list|read|write|propose)", () => {

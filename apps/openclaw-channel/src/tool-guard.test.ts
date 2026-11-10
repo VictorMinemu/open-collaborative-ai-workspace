@@ -316,18 +316,28 @@ describe("tool guard under abuse (Task 3)", () => {
     expect(g.activeTurn(SESSION)?.tainted).toBe(false);
   });
 
-  it("ocw_board_card stays side-effecting even when a turn's flags say otherwise (blocked once tainted)", async () => {
+  it("07.17 D-06: once tainted, ocw_board_card still reaches its routes (they decide; the tool refuses create itself), whatever the turn's flags say, and never as an approvable call", async () => {
     const fake = fakeClient();
     const g = createToolGuard({ client: () => fake.client });
     const lying = turn({
-      tools: ["web_search", "ocw_board_card"],
-      toolFlags: { web_search: WEB, ocw_board_card: { untrustedOutput: false, sideEffecting: false } },
+      tools: ["web_search", "ocw_board_card", "ocw_memory_save"],
+      toolFlags: {
+        web_search: WEB,
+        ocw_memory_save: MEMORY,
+        ocw_board_card: { untrustedOutput: false, sideEffecting: false, approval: "always" as const },
+      },
     });
     g.beginTurn(SESSION, { eventId: "evt-1", agentId: "a1", turn: lying });
     expect(await g.beforeToolCall(call("web_search", { query: "q" }), ctx())).toBeUndefined();
-    const board = await g.beforeToolCall(call("ocw_board_card", { action: "create" }), ctx());
-    expect(board?.blockReason).toMatch(/read-only after untrusted content/u);
+    expect(g.activeTurn(SESSION)?.tainted).toBe(true);
+    for (const action of ["move", "set_waiting", "create", "read"]) {
+      expect(await g.beforeToolCall(call("ocw_board_card", { action }), ctx()), action).toBeUndefined();
+    }
+    // The memory tools keep their local block; nothing but the web call went to /tool-calls (no arguments, no approval).
+    const memory = await g.beforeToolCall(call("ocw_memory_save", { text: "planted" }), ctx());
+    expect(memory?.blockReason).toMatch(/read-only after untrusted content/u);
     expect(fake.requests.map((r) => r.tool)).toEqual(["web_search"]);
+    expect(fake.requests[0]).not.toHaveProperty("arguments");
   });
 
   describe("ocw_automation_propose (07.6 AUTO-03, D-02)", () => {
@@ -1697,7 +1707,8 @@ describe("bot Work Zone session tools (07.16 D-08, D-20, PD-09, PD-15, Pitfall 7
     expect((await g.beforeToolCall(call("ocw_memory_save", { text: "x" }), ctx()))?.blockReason).toContain(
       TAINTED,
     );
-    expect((await g.beforeToolCall(call("ocw_board_card", {}), ctx()))?.blockReason).toContain(TAINTED);
+    // 07.17 D-06 / D-12: the board routes decide a move (the tool refuses create itself).
+    expect(await g.beforeToolCall(call("ocw_board_card", { action: "move" }), ctx())).toBeUndefined();
     expect((await g.beforeToolCall(call("ocw_start_work_zone", {}), ctx()))?.blockReason).toBe(
       "I can't propose a Work Zone session after reading outside content in this turn. Tell Sam Lee to ask again in a new message.",
     );
@@ -1725,7 +1736,7 @@ describe("bot Work Zone session tools (07.16 D-08, D-20, PD-09, PD-15, Pitfall 7
     expect(fake.requests).toHaveLength(0);
   });
 
-  it("after a session's output was read (D-20) every other side-effecting call is refused locally; prompt and stop still reach their routes; start answers session_output", async () => {
+  it("after a session's output was read (D-20) every other side-effecting call is refused locally; prompt, stop and (07.17 D-12) the board tool still reach their routes; start answers session_output", async () => {
     const fake = fakeClient();
     const g = createToolGuard({ client: () => fake.client });
     begin(g);
@@ -1735,7 +1746,8 @@ describe("bot Work Zone session tools (07.16 D-08, D-20, PD-09, PD-15, Pitfall 7
     expect((await g.beforeToolCall(call("ocw_memory_save", { text: "x" }), ctx()))?.blockReason).toContain(
       TAINTED,
     );
-    expect((await g.beforeToolCall(call("ocw_board_card", {}), ctx()))?.blockReason).toContain(TAINTED);
+    // 07.17 D-06 / D-12: the board routes decide a move (the tool refuses create itself).
+    expect(await g.beforeToolCall(call("ocw_board_card", { action: "move" }), ctx())).toBeUndefined();
     expect((await g.beforeToolCall(call("ocw_start_work_zone", {}), ctx()))?.blockReason).toBe(
       "I can't propose a Work Zone session after reading outside content in this turn. Tell Sam Lee to ask again in a new message.",
     );
@@ -1822,6 +1834,8 @@ describe("ocw_conversation_open (07.17 D-02, D-05, PD-07, PD-10): self-validated
       /read-only after untrusted content/u,
     );
     expect(await g.beforeToolCall(call("ocw_consult_agent", {}), ctx())).toMatchObject({ block: true });
+    // 07.17 D-06: the board tool's moves reach their route too (it decides the exemption).
+    expect(await g.beforeToolCall(call("ocw_board_card", { action: "move" }), ctx())).toBeUndefined();
     expect(fake.requests).toHaveLength(0);
   });
 

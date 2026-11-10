@@ -6,6 +6,7 @@ import {
   AgentChannelAttachmentReadResponse,
   type AgentChannelAutomationPropose,
   AgentChannelAutomationProposeResponse,
+  AgentChannelBoardCard,
   AgentChannelBoardCardResponse,
   type AgentChannelBoardCreateCard,
   type AgentChannelBoardPatchCard,
@@ -98,6 +99,11 @@ export class AgentChannelHttpError extends Error {
     readonly denial?: AgentChannelApprovalDenial,
     /** 07.6: a refusal whose body carries the server's sentence (`{ok: false, code, sentence}`), if well-formed. */
     readonly answer?: AgentChannelSentenceAnswer,
+    /**
+     * 07.17 (D-06): the current card of a 409 `board_card_version_conflict` (`error.details.card`), if well-formed: a
+     * board move on a turn that may not read the board retries once with its version.
+     */
+    readonly conflictCard?: AgentChannelBoardCard,
   ) {
     super(message);
     this.name = "AgentChannelHttpError";
@@ -153,6 +159,17 @@ export function denialOf(body: string): AgentChannelApprovalDenial | undefined {
 export function sentenceAnswerOf(body: string): AgentChannelSentenceAnswer | undefined {
   try {
     const parsed = AgentChannelSentenceAnswer.safeParse(JSON.parse(body));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `error.details.card` of a board version conflict (07.17 D-06), when well-formed; never any other content. */
+export function conflictCardOf(body: string): AgentChannelBoardCard | undefined {
+  try {
+    const details = (JSON.parse(body) as { error?: { details?: { card?: unknown } } } | null)?.error?.details;
+    const parsed = AgentChannelBoardCard.safeParse(details?.card);
     return parsed.success ? parsed.data : undefined;
   } catch {
     return undefined;
@@ -281,6 +298,7 @@ export function createAgentChannelClient(opts: AgentChannelClientOptions) {
           approvalOf(raw.slice(0, 4_000)),
           denialOf(raw.slice(0, 4_000)),
           sentenceAnswerOf(raw.slice(0, 4_000)),
+          res.status === 409 ? conflictCardOf(raw.slice(0, 64_000)) : undefined,
         );
         if (!isRetryableStatus(res.status)) throw err;
         lastError = err;

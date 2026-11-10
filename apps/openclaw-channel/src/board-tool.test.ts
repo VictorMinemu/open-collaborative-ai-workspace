@@ -191,6 +191,21 @@ function setup(behaviour: Behaviour = {}) {
 
 const text = (r: { content: Array<{ text: string }> }) => r.content.map((c) => c.text).join("");
 
+const NOT_TAINTED = "Not done: this turn read web or tool content, so it can no longer change the board.";
+
+/** The API's 409 `board_card_version_conflict` with the current card in `error.details.card` (07.17 D-06). */
+const conflictAt = (id: string, version: number, cardId = id) =>
+  new AgentChannelHttpError(
+    409,
+    `/board/cards/${id}`,
+    "409",
+    "board_card_version_conflict",
+    undefined,
+    undefined,
+    undefined,
+    card({ messageId: cardId, version }),
+  );
+
 beforeEach(() => resetBoardToolState());
 
 describe("ocw_board_card (07.1-13, BOARD-02, D-07, C-01, P-03)", () => {
@@ -431,28 +446,155 @@ describe("ocw_board_card (07.1-13, BOARD-02, D-07, C-01, P-03)", () => {
     expect(creates).toEqual([]);
   });
 
-  it("a tainted turn is refused locally (and the gate blocks it before the tool runs), with no request", async () => {
-    const { creates, reads, begin, guard, tool } = setup();
+  describe.each([
+    [
+      "tainted",
+      (t: { tainted: boolean; sessionOutputRead: boolean }): void => {
+        t.tainted = true;
+      },
+    ],
+    [
+      "session-read",
+      (t: { tainted: boolean; sessionOutputRead: boolean }): void => {
+        t.sessionOutputRead = true;
+      },
+    ],
+  ] as const)(
+    "a %s turn (07.17 D-06, D-12, PD-11: the route decides moves; create stays refused here)",
+    (_kind, mark) => {
+      const restricted = (s: ReturnType<typeof setup>) => {
+        s.begin();
+        const t = s.guard.activeTurn(SESSION);
+        if (!t) throw new Error("no turn");
+        mark(t);
+        return t;
+      };
+
+      it("create and read are refused locally with the tainted sentence, nothing posted; the gate lets the call reach the tool", async () => {
+        const s = setup();
+        restricted(s);
+        for (const params of [{ action: "create", description: "x" }, { action: "read" }]) {
+          expect(text(await s.tool().execute("tc-1", params))).toBe(NOT_TAINTED);
+        }
+        const gate = await s.guard.beforeToolCall(
+          { toolName: "ocw_board_card", toolCallId: "tc-9", params: { action: "create" } },
+          { sessionKey: SESSION, agentId: openClawAgentIdFor(BOT) },
+        );
+        expect(gate).toBeUndefined();
+        expect(s.creates).toEqual([]);
+        expect(s.reads).toEqual([]);
+        expect(s.patches).toEqual([]);
+      });
+
+      it("move of the thread's card posts its PATCH without a read (the read is refused on such a turn), then set_waiting uses the answered version", async () => {
+        const s = setup();
+        restricted(s);
+        expect(text(await s.tool().execute("tc-1", { action: "move", columnId: IN_PROGRESS }))).toBe(
+          "Card moved.",
+        );
+        expect(s.reads).toEqual([]);
+        expect(s.patches).toEqual([
+          {
+            id: TURN_CARD,
+            body: {
+              eventId: "evt-1",
+              agentId: BOT,
+              expectedVersion: 1,
+              move: { columnId: IN_PROGRESS, afterCardId: null },
+            },
+          },
+        ]);
+        expect(text(await s.tool().execute("tc-2", { action: "set_waiting", waitingOn: "us" }))).toBe(
+          "Waiting state set.",
+        );
+        expect(s.patches[1]?.body).toEqual({
+          eventId: "evt-1",
+          agentId: BOT,
+          expectedVersion: 2,
+          waitingOn: "us",
+        });
+      });
+
+      it("a version conflict is retried ONCE with the current version from the 409's details", async () => {
+        const s = setup({
+          patch: async (id, body) => {
+            if (body.expectedVersion !== 5) throw conflictAt(id, 5);
+            return { card: card({ messageId: id, waitingOn: "customer", version: 6 }) };
+          },
+        });
+        restricted(s);
+        const r = await s.tool().execute("tc-1", { action: "set_waiting", waitingOn: "customer" });
+        expect(text(r)).toBe("Waiting state set.");
+        expect(r.details).toEqual({ ok: true, cardId: TURN_CARD, version: 6 });
+        expect(s.patches.map((p) => p.body.expectedVersion)).toEqual([1, 5]);
+        expect(s.reads).toEqual([]);
+      });
+
+      it("a second conflict, or one whose details carry no card (or another card), answers the conflict text: never a third PATCH", async () => {
+        for (const thrown of [
+          (id: string) => conflictAt(id, 7),
+          (id: string) =>
+            new AgentChannelHttpError(409, `/board/cards/${id}`, "409", "board_card_version_conflict"),
+          (id: string) => conflictAt(id, 7, "0199a6f0-0000-7000-8000-0000000cafff"),
+        ]) {
+          resetBoardToolState();
+          let n = 0;
+          const s = setup({
+            patch: async (id) => {
+              n++;
+              throw thrown(id);
+            },
+          });
+          restricted(s);
+          expect(text(await s.tool().execute("tc-1", { action: "move", columnId: IN_PROGRESS }))).toBe(
+            "Not done: the card changed since you last saw it. Try again.",
+          );
+          expect(n).toBeLessThanOrEqual(2);
+          expect(s.reads).toEqual([]);
+        }
+      });
+
+      it("the route's tainted refusal (no exemption: not this bot's automation card, or no profile flag) reads the tainted sentence", async () => {
+        const s = setup({
+          patch: async (id) => {
+            throw new AgentChannelHttpError(403, `/board/cards/${id}`, "403 secret", "tainted");
+          },
+        });
+        restricted(s);
+        expect(text(await s.tool().execute("tc-1", { action: "move", columnId: IN_PROGRESS }))).toBe(
+          NOT_TAINTED,
+        );
+        expect(s.patches).toHaveLength(1);
+      });
+
+      it("a card id that is neither the thread's card nor one created here is still refused locally", async () => {
+        const s = setup();
+        restricted(s);
+        const r = await s.tool().execute("tc-1", {
+          action: "move",
+          cardId: "0199a6f0-0000-7000-8000-0000000cafff",
+          columnId: IN_PROGRESS,
+        });
+        expect(text(r)).toBe(
+          "Not done: you can change this thread's card or a card you created in this conversation.",
+        );
+        expect(s.patches).toEqual([]);
+      });
+    },
+  );
+
+  it("an untainted turn's conflict is not retried, even when the 409 carries the current card (unchanged)", async () => {
+    const { patches, reads, begin, tool } = setup({
+      patch: async (id) => {
+        throw conflictAt(id, 9);
+      },
+    });
     begin();
-    const t = guard.activeTurn(SESSION);
-    if (!t) throw new Error("no turn");
-    t.tainted = true;
-    for (const params of [
-      { action: "create", description: "x" },
-      { action: "read" },
-      { action: "move", columnId: IN_PROGRESS },
-    ]) {
-      expect(text(await tool().execute("tc-1", params))).toBe(
-        "Not done: this turn read web or tool content, so it can no longer change the board.",
-      );
-    }
-    const blocked = await guard.beforeToolCall(
-      { toolName: "ocw_board_card", toolCallId: "tc-9" },
-      { sessionKey: SESSION, agentId: openClawAgentIdFor(BOT) },
+    expect(text(await tool().execute("tc-1", { action: "move", columnId: IN_PROGRESS }))).toBe(
+      "Not done: the card changed since you last saw it. Try again.",
     );
-    expect(blocked).toMatchObject({ block: true });
-    expect(creates).toEqual([]);
-    expect(reads).toEqual([]);
+    expect(patches.map((p) => p.body.expectedVersion)).toEqual([3]);
+    expect(reads).toHaveLength(1);
   });
 
   it("API refusals answer short fixed texts, never the API body; logs carry ids and status codes only", async () => {
