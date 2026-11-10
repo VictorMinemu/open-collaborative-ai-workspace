@@ -543,6 +543,40 @@ describe("every meaningful transition wakes Atlas once; the card always shows th
     expect((await botRowOf(s.workSessionId)).stopped_by_agent).toBe(true);
   });
 
+  it("WR-07: a mode change without a status change refreshes the card (a person's settings, then a downgrade sweep)", async () => {
+    const s = await botSession();
+    await drainWakes();
+    expect(fieldOf(await cardOf(s.cardMessageId), WORK_SESSION_CARD_LABELS.mode)).toBe("Supervised");
+    // Víctor (in the audience) raises the session to Full access: the status stays running.
+    await ok(
+      victor.request("PATCH", `/api/v1/work-sessions/${s.workSessionId}/settings`, {
+        permissionMode: "fullAccess",
+      }),
+    );
+    expect(await statusOf(s.workSessionId)).toBe("running");
+    expect(await drainWakes()).toBe(1);
+    expect(fieldOf(await cardOf(s.cardMessageId), WORK_SESSION_CARD_LABELS.mode)).toBe("Full access");
+    // The organization turns Full access off: the sweep lowers the mode, the card follows. Nobody is woken.
+    await ok(
+      victor.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: false, allowFastMode: true }),
+    );
+    try {
+      await eventually(async () => {
+        const [row] = await rowsOf("select permission_mode from app.work_sessions where id = $1", [
+          s.workSessionId,
+        ]);
+        return row?.permission_mode !== "fullAccess";
+      });
+      expect(await drainWakes()).toBe(1);
+      expect(fieldOf(await cardOf(s.cardMessageId), WORK_SESSION_CARD_LABELS.mode)).not.toBe("Full access");
+      expect(await wakesOf(s.workSessionId)).toEqual([]);
+    } finally {
+      await ok(
+        victor.request("PUT", "/api/v1/work-zone-policy", { allowFullAccess: true, allowFastMode: true }),
+      );
+    }
+  });
+
   it("E6: a completed turn with another prompt queued goes straight back to running: no wake, Working · turn 2", async () => {
     const s = await botSession();
     await drainWakes();

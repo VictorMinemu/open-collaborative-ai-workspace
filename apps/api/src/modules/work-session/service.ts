@@ -657,21 +657,33 @@ export class WorkSessionService implements DeviceSessionHandler {
     // 07.16 (D-09, PD-16): a bot's session changed state; its card follows and the bot may be woken. The row flag is the
     // debounce of record (one pending wake per session): standard pg-boss queues do not dedupe by key (Pitfall 4). The
     // 3 s delay absorbs an `idle → running` flip of the same dispatch; the handler decides on the state it then reads.
-    if (entered && s.startedByAgentId && this.deps.jobs) {
-      const flipped = await tx.execute(sql`
-        update app.bot_work_sessions set wake_pending = true
-         where work_session_id = ${s.id} and not wake_pending
-        returning 1`);
-      if (flipped.rows.length > 0) {
-        await this.deps.jobs.sendInTx(
-          tx,
-          "work_session.bot_sync",
-          { organizationId: s.organizationId, workSessionId: s.id },
-          { startAfter: new Date(Date.now() + 3_000) },
-        );
-      }
-    }
+    if (entered) await this.syncBotCard(tx, s);
     await this.emitSession(tx, s.id);
+  }
+
+  /**
+   * 07.16 (D-12, PD-16): a bot's session changed what its live card shows (its state, or its mode or model without a
+   * state change: code review WR-07): one pending `work_session.bot_sync` per session. The handler refreshes the card
+   * only when its fields changed and wakes the bot only for a wake-worthy state not woken yet, so a settings change
+   * alone never wakes it. A person's session does nothing.
+   */
+  async syncBotCard(
+    tx: Tx,
+    s: Pick<SessionRow, "id" | "organizationId" | "startedByAgentId">,
+  ): Promise<void> {
+    if (!s.startedByAgentId || !this.deps.jobs) return;
+    const flipped = await tx.execute(sql`
+      update app.bot_work_sessions set wake_pending = true
+       where work_session_id = ${s.id} and not wake_pending
+      returning 1`);
+    if (flipped.rows.length > 0) {
+      await this.deps.jobs.sendInTx(
+        tx,
+        "work_session.bot_sync",
+        { organizationId: s.organizationId, workSessionId: s.id },
+        { startAfter: new Date(Date.now() + 3_000) },
+      );
+    }
   }
 
   /** `session.start` payload for this session (resume when the runtime already has a session id). */
@@ -969,6 +981,8 @@ export class WorkSessionService implements DeviceSessionHandler {
     if (s.startedByAgentId && !interruptSent) {
       await this.interruptBotTurn(tx, s, creator.ctx, layer, reason, actor);
     }
+    // WR-07: the live card shows the mode and model every reader of the channel sees; it follows the downgrade.
+    await this.syncBotCard(tx, s);
     await this.emitSession(tx, s.id);
   }
 

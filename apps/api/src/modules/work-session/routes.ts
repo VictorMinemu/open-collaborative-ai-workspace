@@ -451,6 +451,8 @@ export function registerWorkSessionRoutes(
         metadata: { from, to, source },
       });
     }
+    // 07.16 code review WR-07: a bot's session shows its mode and model on its live card; the card follows the change.
+    await svc.syncBotCard(tx, s);
     return { session: (await svc.emitSession(tx, s.id))!, ctx, changed: true };
   }
 

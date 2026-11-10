@@ -442,3 +442,8 @@ audience grows with the project: someone who later joins it would see a session 
 conversation they never read. Now the rule is P ⊆ R **and R is unbounded** (a public channel every member reads) →
 `project`. A bounded R (a DM, a group, a private channel, an AI chat) always gets the `people` snapshot of §7, even
 when every person of the project reads it today.
+
+**The card also follows mode and model changes (WR-07).** This completes §11's trigger, which marked a pending
+`work_session.bot_sync` only on a state change. Re-authorization lowering a session's settings, and a person in the
+audience changing them, change the card's Mode or Model without a state change, so they mark it too. The handler is
+unchanged: it refreshes the card only when its fields changed, and a settings change alone never wakes the bot.
