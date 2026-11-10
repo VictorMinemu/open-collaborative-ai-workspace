@@ -612,6 +612,17 @@ describe("the audience is the server's: readers of the conversation ∩ people o
     expect(await audienceOf(body.workSessionId)).toEqual({ kind: "people", userIds: [anaId, boId].sort() });
   });
 
+  it("WR-06: a private channel holding every project member → a people snapshot, never the growing project audience", async () => {
+    // Private #ledger-all: Víctor, Ana, Bo and Dee, every person of Ledger today (P ⊆ R, but R is bounded).
+    const allId = await channel("ledger-all", [atlasId], [anaId, boId, deeId], "private");
+    const body = await started(await askAtlas(ana, allId), { projectId: ledgerId });
+    // Someone who joins Ledger later never reads #ledger-all, so never sees the session either.
+    expect(await audienceOf(body.workSessionId)).toEqual({
+      kind: "people",
+      userIds: [anaId, boId, deeId].sort(),
+    });
+  });
+
   it("Ana's DM with Atlas: people [Ana] when she has project access, owner when she has none", async () => {
     const inProject = await started(await askAtlas(ana, anaDmId), { projectId: ledgerId });
     expect(await audienceOf(inProject.workSessionId)).toEqual({ kind: "people", userIds: [anaId] });

@@ -436,3 +436,9 @@ for live sessions. Start, read and stop already ran as the session's sponsor (`b
 a prompt ran as the profile's current one. When someone else has re-saved the profile since the start, a prompt to
 that session answers `profile_inactive`, and the bot starts a new session under the new sponsor. The bot may still
 read and stop the old one.
+
+**`project` only for unbounded readers (WR-06).** This replaces §7's first rule, "P ⊆ R → `project`". The `project`
+audience grows with the project: someone who later joins it would see a session whose prompts come from a
+conversation they never read. Now the rule is P ⊆ R **and R is unbounded** (a public channel every member reads) →
+`project`. A bounded R (a DM, a group, a private channel, an AI chat) always gets the `people` snapshot of §7, even
+when every person of the project reads it today.

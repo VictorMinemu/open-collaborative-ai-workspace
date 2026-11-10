@@ -239,8 +239,9 @@ async function projectPeople(tx: Tx, projectId: string, sponsorUserId: string): 
 
 /**
  * PD-11 (D-07): who sees a bot's session, decided server-side from existing kinds only. R = the origin conversation's
- * readers, P = the project's people. P ⊆ R → `project`; else S = (R ∩ P) \ {sponsor}: up to 100 → `people` S; more →
- * `people` [requester] when the requester is in P, else `owner`; S empty → `owner`. The sponsor (creator) and the
+ * readers, P = the project's people. P ⊆ R with R unbounded → `project`; else S = (R ∩ P) \ {sponsor}: up to 100 →
+ * `people` S; more → `people` [requester] when the requester is in P, else `owner`; S empty → `owner`. The sponsor
+ * (creator) and the
  * device's owner always see it through their own relations. A later change of the conversation's members does not
  * change a `people` snapshot (ADR-0038).
  */
@@ -261,7 +262,9 @@ export async function botSessionAudience(
   for (const id of people) {
     if (p.readers.unbounded ? await p.isReadable(id) : bounded.has(id)) reading.push(id);
   }
-  if (reading.length === people.length) return { kind: "project" };
+  // `project` grows with the project; it stays inside R only when R is unbounded (a public channel every member reads).
+  // A bounded R (a DM, a group, a private channel, an AI chat) is always a snapshot, even when P ⊆ R today (WR-06).
+  if (p.readers.unbounded && reading.length === people.length) return { kind: "project" };
   const shown = reading.filter((id) => id !== p.sponsorUserId);
   if (shown.length === 0) return { kind: "owner" };
   if (shown.length <= WORK_PROJECT_LIMITS.userIdsMax) return { kind: "people", userIds: shown };
