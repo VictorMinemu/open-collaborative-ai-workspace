@@ -1030,6 +1030,105 @@ export const RECORD_UPDATE_MAX_CHANGES = 20;
 /** The longest string value of one `ocw_record_update` change. */
 export const RECORD_UPDATE_VALUE_MAX = 500;
 
+// ---------------------------------------------------------------- automation fan-out (Phase 07.17)
+
+/**
+ * Phase 07.17 (D-02, D-03, D-08): mirror of the contracts' `automation-fan-out.ts` and `CONVERSATION_OPEN_FLAGS`
+ * (parity: plugin-contract.test.ts). A fan-out run turn opens one conversation per new item through
+ * `ocw_conversation_open`; the bot names items only, never a conversation, a column, a person, an automation or a run
+ * (the API takes them from the stored turn).
+ */
+export const FAN_OUT_LIMITS = {
+  perRunDefault: 10,
+  perRunMax: 25,
+  perDayDefault: 100,
+  perDayMax: 500,
+  externalKeyMax: 200,
+  titleMax: 200,
+  bodyMax: 4000,
+  escalationMax: 5,
+} as const;
+
+/** Contracts `BUILTIN_TOOLS.conversationOpen`: offered only on run turns of fan-out automations. */
+export const CONVERSATION_OPEN_TOOL = "ocw_conversation_open";
+/** Contracts `CONVERSATION_OPEN_FLAGS`: it posts in the automation's target; the answer is the platform's own ids. */
+export const CONVERSATION_OPEN_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
+
+/** A person or team the bot mentions when it finishes or needs help (contracts `EscalationTargetView`). */
+export const EscalationTargetView = z.object({
+  kind: z.enum(["user", "unit"]),
+  id: Id,
+  handle: z.string().max(64),
+  displayName: z.string().max(200),
+});
+export type EscalationTargetView = z.infer<typeof EscalationTargetView>;
+
+export const AgentChannelConversationOpenItem = z.strictObject({
+  externalKey: z.string().trim().min(1).max(FAN_OUT_LIMITS.externalKeyMax),
+  title: z.string().trim().min(1).max(FAN_OUT_LIMITS.titleMax),
+  body: z.string().max(FAN_OUT_LIMITS.bodyMax).default(""),
+});
+export type AgentChannelConversationOpenItem = z.infer<typeof AgentChannelConversationOpenItem>;
+
+/** `POST /conversations/open`: strict, the event and the bot plus the items (`[]` = nothing new). */
+export const AgentChannelConversationOpen = z.strictObject({
+  eventId: Id,
+  agentId: Id,
+  items: z.array(AgentChannelConversationOpenItem).max(FAN_OUT_LIMITS.perRunMax),
+});
+export type AgentChannelConversationOpen = z.infer<typeof AgentChannelConversationOpen>;
+
+/** The contracts' refusal codes, in their order. */
+export const ConversationOpenRefusal = z.enum([
+  "not_in_turn",
+  "not_a_run",
+  "automation_inactive",
+  "fan_out_off",
+  "target_not_postable",
+  "cap_reached",
+]);
+export type ConversationOpenRefusal = z.infer<typeof ConversationOpenRefusal>;
+
+/** The contracts' fixed sentence per code; the tool uses them for the refusals it decides locally. */
+export const CONVERSATION_OPEN_SENTENCES: Readonly<Record<ConversationOpenRefusal, string>> = {
+  not_in_turn: "Opening conversations is not available on this turn.",
+  not_a_run: "Only an automation run can open conversations. Reply in this thread instead.",
+  automation_inactive: "This automation is paused or needs attention, so it can't open conversations now.",
+  fan_out_off: "This automation no longer opens a conversation per item. Reply in this thread instead.",
+  target_not_postable:
+    "The bot can't post in this automation's channel or board any more. Tell the person who owns the automation.",
+  cap_reached: "This turn has used all its tool calls. List the new items in your reply instead.",
+};
+
+/** A refusal code or cap reason from a newer API stays a string, so its answer (and sentence) still reaches the model. */
+const OpenCode = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/u);
+
+export const ConversationOpenItemResult = z.object({
+  externalKey: z.string().max(FAN_OUT_LIMITS.externalKeyMax),
+  opened: z.boolean(),
+  conversationId: Id.nullable(),
+  threadRootMessageId: Id.nullable(),
+  refused: OpenCode.nullable(),
+});
+export type ConversationOpenItemResult = z.infer<typeof ConversationOpenItemResult>;
+
+export const AgentChannelConversationOpenResponse = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    results: z.array(ConversationOpenItemResult).max(FAN_OUT_LIMITS.perRunMax),
+    remainingRun: z.number().int().nonnegative(),
+    remainingDay: z.number().int().nonnegative(),
+  }),
+  z.object({ ok: z.literal(false), code: OpenCode, sentence: z.string().max(300) }),
+]);
+export type AgentChannelConversationOpenResponse = z.infer<typeof AgentChannelConversationOpenResponse>;
+
+/** Contracts `fanOutLabel`: the run card's status label of a fan-out run. */
+export function fanOutLabel(opened: number): string {
+  if (opened <= 0) return "Nothing new";
+  return opened === 1 ? "Opened 1 conversation" : `Opened ${opened} conversations`;
+}
+
 /**
  * Phase 07.6 (D-03, C-01): the outside content that started a run (a webhook payload or a mail), composed by the API.
  * Untrusted: the mapper puts it in its own `external` block, never in the message text or the standing order. A
@@ -1058,6 +1157,17 @@ export const AgentAutomationRunEvent = AgentMentionEvent.omit({ type: true }).ex
     trigger: z.string().min(1).max(32),
     instructions: z.string().max(AUTOMATION_LIMITS.instructionsMax),
     inbound: AgentAutomationRunInbound.nullable(),
+    /** 07.17 (D-02, PD-08): only on fan-out runs (the turn offers `ocw_conversation_open`); absent or null otherwise. */
+    fanOut: z
+      .object({
+        perRun: z.number().int().min(1).max(FAN_OUT_LIMITS.perRunMax),
+        remainingRun: z.number().int().nonnegative(),
+        remainingDay: z.number().int().nonnegative(),
+      })
+      .nullable()
+      .optional(),
+    /** 07.17 (D-08, PD-15): the people and teams to mention when the work is done or needs help. */
+    escalation: z.array(EscalationTargetView).max(FAN_OUT_LIMITS.escalationMax).optional(),
   }),
 });
 export type AgentAutomationRunEvent = z.infer<typeof AgentAutomationRunEvent>;

@@ -7,6 +7,7 @@ export * from "./ai-chat";
 export * from "./ai-generation";
 export * from "./approvals";
 export * from "./attachments";
+export * from "./automation-fan-out";
 export * from "./automations";
 export * from "./board";
 export * from "./bot-capabilities";

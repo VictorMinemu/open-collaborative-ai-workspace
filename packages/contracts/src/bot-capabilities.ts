@@ -557,6 +557,14 @@ export const BUILTIN_TOOLS = {
   workSessionPrompt: "ocw_work_session_prompt",
   workSessionRead: "ocw_work_session_read",
   workSessionStop: "ocw_work_session_stop",
+  /**
+   * 07.17 (D-02, PD-07, ADR-0039): a fan-out automation's run turn opens one conversation per new item (a thread in
+   * the automation's channel, or a card on its board) through `POST /conversations/open`, which decides the target,
+   * the run, the caps and the dedupe from the stored turn and audits each call. Offered only on run turns of fan-out
+   * automations, self-validated in the cell, turn-scoped (never in `GET /cell`), never approvable (not in
+   * `APPROVABLE_BUILTINS`).
+   */
+  conversationOpen: "ocw_conversation_open",
 } as const;
 
 /** 07.16 (D-05): the four Work Zone session tools, offered together (PD-17). */
@@ -579,6 +587,12 @@ export const WORK_SESSION_TOOL_FLAGS: Readonly<Record<WorkSessionToolName, TurnT
   ocw_work_session_read: { untrustedOutput: false, sideEffecting: false },
   ocw_work_session_stop: { untrustedOutput: false, sideEffecting: true },
 };
+
+/**
+ * 07.17 (D-02, D-05): opening conversations posts in the automation's target, so it is side-effecting; the answer is
+ * the platform's own ids, never outside content.
+ */
+export const CONVERSATION_OPEN_FLAGS: TurnToolFlags = { untrustedOutput: false, sideEffecting: true };
 
 /**
  * 07.15 (D-08, PD-08): a read returns a person's file, third-party content: it taints the turn (and its return turns).
