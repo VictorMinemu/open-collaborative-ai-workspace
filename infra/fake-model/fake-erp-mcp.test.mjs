@@ -61,7 +61,7 @@ describe("fake ERP MCP (07.6-04, D-04 / A6)", () => {
     assert.equal(init.body.result.protocolVersion, "2025-06-18");
   });
 
-  it("tools/list lists the five tools with input schemas", async () => {
+  it("tools/list lists the five tools with input schemas (never the unlisted __add hook)", async () => {
     const { body } = await rpc("tools/list");
     const names = body.result.tools.map((t) => t.name).sort();
     assert.deepEqual(names, ["__mutate", "add_note", "get_record", "list_records", "update_record"]);
@@ -163,6 +163,56 @@ describe("fake ERP MCP (07.6-04, D-04 / A6)", () => {
     assert.equal(after.total, "1310.00");
     assert.equal(after.status, "Shipped");
     assert.ok(after.updated_at > before.updated_at);
+  });
+
+  it("__add adds a record that list_records lists and get_record reads (07.17-18: a new order elsewhere)", async () => {
+    const before = Date.now();
+    const r = await call("__add", { id: "1042", fields: { status: "new", customer: "Fleet Co" } });
+    assert.equal(r.isError, undefined);
+    assert.equal(r.structuredContent.id, "1042");
+    assert.deepEqual((await call("list_records", {})).structuredContent.ids, [
+      "SO-10442",
+      "SO-10443",
+      "1042",
+    ]);
+    const got = (await call("get_record", { id: "1042" })).structuredContent;
+    assert.equal(got.status, "new");
+    assert.equal(got.customer, "Fleet Co");
+    assert.equal(got.delivery_date, "");
+    assert.equal(got.total, "0.00");
+    assert.deepEqual(got.notes, []);
+    assert.ok(Date.parse(got.updated_at) >= before - 1);
+    assert.deepEqual(r.structuredContent, got);
+  });
+
+  it("__add refuses an id that exists, an empty id and unknown or non-string fields, and changes nothing", async () => {
+    const seeded = (await call("get_record", { id: "SO-10442" })).structuredContent;
+    const dup = await call("__add", { id: "SO-10442", fields: { status: "new" } });
+    assert.equal(dup.isError, true);
+    assert.match(dup.content[0].text, /exists: SO-10442/);
+    assert.equal(dup.structuredContent.error, "exists");
+    assert.deepEqual((await call("get_record", { id: "SO-10442" })).structuredContent, seeded);
+    await call("__add", { id: "1043", fields: {} });
+    assert.equal((await call("__add", { id: "1043", fields: { status: "new" } })).isError, true);
+    for (const args of [
+      { id: "", fields: {} },
+      { id: "1044", fields: { colour: "red" } },
+      { id: "1044", fields: { total: 12 } },
+      { id: "1044", fields: "new" },
+    ]) {
+      assert.equal((await call("__add", args)).isError, true, JSON.stringify(args));
+    }
+    assert.deepEqual((await call("list_records", {})).structuredContent.ids, [
+      "SO-10442",
+      "SO-10443",
+      "1043",
+    ]);
+  });
+
+  it("reset() forgets the records __add added", async () => {
+    await call("__add", { id: "1042", fields: { status: "new" } });
+    erp.reset();
+    assert.deepEqual([...erp.state.records.keys()], ["SO-10442", "SO-10443"]);
   });
 
   it("unknown ids are an isError 'not found' on every record tool", async () => {
