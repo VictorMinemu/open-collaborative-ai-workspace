@@ -593,11 +593,25 @@ describe("act on outside content: admins only (D-08, PD-04)", () => {
     expect(on.profile).toMatchObject({ actOnOutsideContent: true, sponsor: { id: lenaId } });
   });
 
-  it("a manager who is not the sponsor cannot turn it off, and re-saving resets it to off", async () => {
-    const off = await put(noa, atlasId, serverBody({ actOnOutsideContent: false }));
+  it("IN-03: the sponsor cannot turn it off alone (same scope: 403); a save that resets it may send it off", async () => {
+    const off = await put(lena, atlasId, serverBody({ actOnOutsideContent: false }));
     expect(off.status).toBe(403);
     expect(errorCode(off)).toBe("outside_content_admin_only");
 
+    // Noa is not the sponsor: her save resets the flag anyway, so sending it off is the same save, not a 403.
+    const reset = await createBotProfile(noa, atlasId, serverBody({ actOnOutsideContent: false }));
+    expect(reset.profile).toMatchObject({ actOnOutsideContent: false, sponsor: { id: noaId } });
+    const changes = await audits("bot.work_zone_profile_outside_content_changed");
+    expect(changes.at(-1)).toMatchObject({
+      actor_id: noaId,
+      metadata: { agentId: atlasId, value: false, sponsorUserId: noaId, reason: "sponsor_changed" },
+    });
+    // Back to Lena's profile with the flag on (the next case starts from it).
+    await createBotProfile(lena, atlasId, serverBody());
+    await createBotProfile(victor, atlasId, serverBody({ actOnOutsideContent: true }));
+  });
+
+  it("a manager who is not the sponsor re-saving with it on resets it to off", async () => {
     const view = await createBotProfile(noa, atlasId, serverBody({ actOnOutsideContent: true }));
     expect(view.profile).toMatchObject({
       actOnOutsideContent: false,

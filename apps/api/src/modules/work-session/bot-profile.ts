@@ -585,7 +585,17 @@ export function registerBotProfileRoutes(
         const existing = await loadBotProfile(tx, bot.id);
         const admin = await perms.can(req, tx, "work_zone.manage", orgResource());
         const stored = existing?.actOnOutsideContent ?? false;
-        if (body.actOnOutsideContent !== stored && !admin) {
+        // A non-admin save that resets the flag anyway (WR-08's rules below) may say so: `false` is not a change.
+        const resets =
+          !admin &&
+          existing !== null &&
+          stored &&
+          (existing.sponsorUserId !== auth.userId || scopeChanged(existing, body));
+        if (
+          body.actOnOutsideContent !== stored &&
+          !admin &&
+          !(resets && body.actOnOutsideContent === false)
+        ) {
           throw new HttpError(
             403,
             "outside_content_admin_only",
