@@ -198,7 +198,12 @@ describe("cardMessageBody", () => {
   });
 
   it("07.17-16 (P2): keeps the word joiner that defuses a mention in a bot-written title; other format characters go", () => {
-    const body = cardMessageBody({ title: "\u2060@sam urgent\u202E", description: "", fields: {}, defs: DEFS });
+    const body = cardMessageBody({
+      title: "\u2060@sam urgent\u202E",
+      description: "",
+      fields: {},
+      defs: DEFS,
+    });
     expect(body).toBe("\u2060@sam urgent");
     expect(extractMentionHandles(body)).toEqual([]);
   });
