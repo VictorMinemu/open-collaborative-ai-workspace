@@ -203,10 +203,47 @@ async function unitCounts(tx: Tx, unitId?: string) {
   return new Map(rows.map((r) => [r.unitId, { members: Number(r.members), leads: Number(r.leads) }]));
 }
 
+export interface UnitReach {
+  reach: number;
+  viewerInReach: boolean;
+}
+
+/**
+ * Phase 07.17 (D-13, PD-14): who a mention of each unit reaches, in one grouped query: the distinct active members of
+ * the unit's subtree (memberships of the units whose `path` holds it; deactivated members never count) and whether the
+ * viewer is one of them. Tenant RLS filters every table read; the explicit organization joins keep a row of another
+ * organization out even if one were ever planted on this tree. A unit absent from the map reaches no one.
+ */
+async function unitReach(
+  tx: Tx,
+  viewerUserId: string | null,
+  unitIds?: readonly string[],
+): Promise<Map<string, UnitReach>> {
+  const res = await tx.execute(sql`
+    select u.id as unit_id,
+           count(distinct m.user_id)::int as reach,
+           coalesce(bool_or(m.user_id = ${viewerUserId}::uuid), false) as viewer_in_reach
+      from app.org_units u
+      join app.org_units d on d.organization_id = u.organization_id and d.path @> array[u.id]
+      join app.unit_memberships m on m.organization_id = u.organization_id and m.unit_id = d.id
+      join app.org_members om
+        on om.organization_id = m.organization_id and om.user_id = m.user_id and om.deactivated_at is null
+     ${unitIds ? sql`where u.id = any(${uuidArray(unitIds)})` : sql``}
+     group by u.id`);
+  const rows = res.rows as Array<{ unit_id: string; reach: number; viewer_in_reach: boolean }>;
+  return new Map(
+    rows.map((r) => [
+      String(r.unit_id),
+      { reach: Number(r.reach), viewerInReach: r.viewer_in_reach === true },
+    ]),
+  );
+}
+
 function toOrgUnit(
   row: UnitRow,
   counts: { members: number; leads: number } | undefined,
   viewerCan: Permission[],
+  reach: UnitReach | undefined,
 ) {
   return OrgUnit.parse({
     id: row.id,
@@ -218,6 +255,8 @@ function toOrgUnit(
     leadCount: counts?.leads ?? 0,
     viewerCan,
     handle: row.handle,
+    reach: reach?.reach ?? 0,
+    viewerInReach: reach?.viewerInReach ?? false,
     createdAt: new Date(row.createdAt).toISOString(),
     updatedAt: new Date(row.updatedAt).toISOString(),
   });
@@ -226,8 +265,9 @@ function toOrgUnit(
 /** One unit as the API returns it, decided for the request's principal. */
 export async function unitView(req: FastifyRequest, tx: Tx, perms: PermissionService, row: UnitRow) {
   const counts = await unitCounts(tx, row.id);
+  const reach = await unitReach(tx, req.auth?.userId ?? null, [row.id]);
   const viewerCan = await perms.viewerCan(req, tx, unitResource(row), UNIT_VIEWER_PERMISSIONS);
-  return toOrgUnit(row, counts.get(row.id), viewerCan);
+  return toOrgUnit(row, counts.get(row.id), viewerCan, reach.get(row.id));
 }
 
 /** Durable `units.updated` on `org:<id>` (the web refetches the tree and `/me/permissions`). */
@@ -343,10 +383,11 @@ export function registerUnitRoutes(
         const lastSeq = await core.realtime.lastSeq(tx, orgTopic(tenantOf(tx).organizationId));
         const rows = await tx.select().from(orgUnits).orderBy(asc(orgUnits.createdAt), asc(orgUnits.id));
         const counts = await unitCounts(tx);
+        const reach = await unitReach(tx, req.auth?.userId ?? null);
         const units = [];
         for (const row of rows) {
           const viewerCan = await perms.viewerCan(req, tx, unitResource(row), UNIT_VIEWER_PERMISSIONS);
-          units.push(toOrgUnit(row, counts.get(row.id), viewerCan));
+          units.push(toOrgUnit(row, counts.get(row.id), viewerCan, reach.get(row.id)));
         }
         return { units, lastSeq };
       }),

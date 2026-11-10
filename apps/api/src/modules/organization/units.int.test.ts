@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
@@ -848,5 +849,116 @@ describe("units: @handles are generated once (Phase 07.17, D-14, PD-12, E19)", (
     expect((await create("team", "Dispatch", south)).handle).toBe("dispatch-2");
     await ok(admin.request("DELETE", `/api/v1/units/${unit}`));
     expect((await create("team", "Dispatch", west)).handle).toBe("dispatch");
+  });
+});
+
+describe("units: who a unit reaches, and whether the viewer is one of them (Phase 07.17, D-13, PD-14)", () => {
+  let field: string;
+  let teamA: string;
+  let teamB: string;
+  let ben: TestClient;
+  let eva: TestClient;
+  const ids: Record<string, string> = {};
+
+  const create = async (client: TestClient, kind: string, name: string, parentId: string | null) =>
+    (await ok(client.request("POST", "/api/v1/units", { kind, name, parentId }))).id as string;
+  const join = (client: TestClient, unitId: string, userId: string) =>
+    ok(client.request("POST", `/api/v1/units/${unitId}/members`, { userId }));
+  /** `[reach, viewerInReach, memberCount, leadCount]` per unit id, as `GET /units` lists it for `client`. */
+  const reachOf = async (client: TestClient) =>
+    new Map(
+      (
+        (await ok(client.request("GET", "/api/v1/units"))).units as Array<{
+          id: string;
+          reach: number;
+          viewerInReach: boolean;
+          memberCount: number;
+          leadCount: number;
+        }>
+      ).map((u) => [u.id, [u.reach, u.viewerInReach, u.memberCount, u.leadCount]]),
+    );
+
+  beforeAll(async () => {
+    for (const name of ["ana", "ben", "cam", "dan", "eva", "fay"]) {
+      const invited = await invite(`${name}.reach@example.test`, "standard", name);
+      ids[name] = invited.id;
+      if (name === "ben") ben = invited.client;
+      if (name === "eva") eva = invited.client;
+    }
+    field = await create(admin, "department", "Field", null);
+    teamA = await create(admin, "team", "Field A", field);
+    teamB = await create(admin, "team", "Field B", field);
+    for (const name of ["ana", "ben", "fay"]) await join(admin, teamA, ids[name] as string);
+    for (const name of ["ben", "cam"]) await join(admin, teamB, ids[name] as string);
+    await join(admin, field, ids.dan as string);
+    // Fay is deactivated: still a membership row (memberCount), never someone a mention reaches.
+    await su.query(
+      "update app.org_members set deactivated_at = now() where organization_id = $1 and user_id = $2",
+      [orgId, ids.fay],
+    );
+  });
+
+  it("counts the distinct active members of the subtree; memberCount and leadCount are unchanged", async () => {
+    const forBen = await reachOf(ben);
+    expect(forBen.get(field)).toEqual([4, true, 1, 0]);
+    expect(forBen.get(teamA)).toEqual([2, true, 3, 0]);
+    expect(forBen.get(teamB)).toEqual([2, true, 2, 0]);
+
+    const forEva = await reachOf(eva);
+    expect(forEva.get(field)).toEqual([4, false, 1, 0]);
+    expect(forEva.get(teamA)).toEqual([2, false, 3, 0]);
+    expect(forEva.get(teamB)).toEqual([2, false, 2, 0]);
+    // Every unit carries both fields, including the ones nobody belongs to.
+    for (const [, [reach, viewerInReach]] of forEva) {
+      expect(typeof reach).toBe("number");
+      expect(typeof viewerInReach).toBe("boolean");
+    }
+  });
+
+  it("the single-unit view carries reach and viewerInReach too", async () => {
+    const view = await ok(admin.request("PATCH", `/api/v1/units/${teamB}`, { name: "Field B" }));
+    expect(view).toMatchObject({ id: teamB, reach: 2, viewerInReach: false, memberCount: 2 });
+    const created = await ok(
+      admin.request("POST", "/api/v1/units", { kind: "team", name: "Field C", parentId: field }),
+    );
+    expect(created).toMatchObject({ reach: 0, viewerInReach: false, memberCount: 0 });
+    expect((await reachOf(admin)).get(field)?.[0]).toBe(4);
+  });
+
+  it("organization B never sees A's units, and A's reach never counts B's members", async () => {
+    const { client: zed, id: zedId } = await invite("zed.reach@example.test", "standard", "Zed");
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil', $2)", [
+      orgB,
+      `evil-${orgB}`,
+    ]);
+    await su.query("delete from auth.member where user_id = $1", [zedId]);
+    await su.query("delete from app.org_members where user_id = $1", [zedId]);
+    await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, 'owner')", [
+      orgB,
+      zedId,
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, role) values ($1, $2, 'Zed', 'admin')",
+      [orgB, zedId],
+    );
+    await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, zedId]);
+
+    const bDept = await create(zed, "department", "Field", null);
+    await join(zed, bDept, zedId);
+    // A membership row planted with B's organization on A's team (no API writes this): RLS hides it from A.
+    await su.query(
+      "insert into app.unit_memberships (organization_id, unit_id, user_id) values ($1, $2, $3)",
+      [orgB, teamA, zedId],
+    );
+
+    const forZed = await ok(zed.request("GET", "/api/v1/units"));
+    expect(forZed.units.map((u: { id: string }) => u.id)).toEqual([bDept]);
+    expect(forZed.units[0]).toMatchObject({ handle: "field", reach: 1, viewerInReach: true });
+
+    const forBen = await reachOf(ben);
+    expect(forBen.has(bDept)).toBe(false);
+    expect(forBen.get(field)).toEqual([4, true, 1, 0]);
+    expect(forBen.get(teamA)).toEqual([2, true, 3, 0]);
   });
 });
