@@ -59,6 +59,23 @@ export const AutomationFanOutInput = z
   });
 export type AutomationFanOutInput = z.infer<typeof AutomationFanOutInput>;
 
+/**
+ * 07.17 code review WR-08: the fan-out settings on update. No defaults: a cap the caller leaves out keeps its stored
+ * value (the API merges, then checks `perRun <= perDay` on the merged values), so `{ enabled: false }` never resets
+ * 25 / 500 to 10 / 100.
+ */
+export const AutomationFanOutUpdate = z
+  .strictObject({
+    enabled: z.boolean(),
+    perRun: z.number().int().min(1).max(FAN_OUT_LIMITS.perRunMax).optional(),
+    perDay: z.number().int().min(1).max(FAN_OUT_LIMITS.perDayMax).optional(),
+  })
+  .refine((f) => f.perRun === undefined || f.perDay === undefined || f.perRun <= f.perDay, {
+    message: "the per-run cap can't exceed the per-day cap",
+    path: ["perRun"],
+  });
+export type AutomationFanOutUpdate = z.infer<typeof AutomationFanOutUpdate>;
+
 /** The stored settings as the API returns them. */
 export const AutomationFanOutView = z.object({
   enabled: z.boolean(),

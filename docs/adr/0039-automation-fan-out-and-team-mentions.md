@@ -338,3 +338,6 @@ documented behaviour below. The accepted text above stays as written; where it d
   the turn already holds 64 tools, the last organization MCP tool offered gives its slot (never a platform tool), so a
   bot with many MCP tools still opens items. If only platform tools fill the turn, it is delivered without the tool
   and `automation.fan_out_unavailable` is audited (ids, reason `too_many_tools`).
+- **WR-08, § 2 (defaults only on create).** The 10 / 100 defaults apply on create only. An update's `fanOut`
+  (`AutomationFanOutUpdate`) carries no defaults: a cap left out keeps its stored value, and the merged caps must keep
+  `perRun <= perDay` (400 `bad_request` otherwise).

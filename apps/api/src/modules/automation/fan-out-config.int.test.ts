@@ -174,6 +174,30 @@ describe("fan-out settings (D-02, D-16, PD-05)", () => {
     expect(bad.status).toBe(400);
   });
 
+  it("WR-08: a partial fanOut on PATCH keeps the stored caps; the merged caps are checked", async () => {
+    const a = await created({ fanOut: { enabled: true, perRun: 25, perDay: 500 } });
+    const off = (await ok(patch(a.id, { fanOut: { enabled: false } }))).automation as Json;
+    expect(off.fanOut).toEqual({ enabled: false, perRun: 25, perDay: 500 });
+    expect(await automationRow(a.id)).toMatchObject({ fan_out_per_run: 25, fan_out_per_day: 500 });
+    const on = (await ok(patch(a.id, { fanOut: { enabled: true } }))).automation as Json;
+    expect(on.fanOut).toEqual({ enabled: true, perRun: 25, perDay: 500 });
+    // Only one cap: the other one is kept.
+    const day = (await ok(patch(a.id, { fanOut: { enabled: true, perDay: 300 } }))).automation as Json;
+    expect(day.fanOut).toEqual({ enabled: true, perRun: 25, perDay: 300 });
+    // A per-day cap below the stored per-run cap is refused (400, not the database check's 500); nothing changes.
+    const bad = await patch(a.id, { fanOut: { enabled: true, perDay: 20 } });
+    expect(bad.status, JSON.stringify(bad.body)).toBe(400);
+    expect(await automationRow(a.id)).toMatchObject({ fan_out_per_run: 25, fan_out_per_day: 300 });
+    // The audit says what is stored.
+    const [updated] = (
+      await s.su.query(
+        "select metadata from app.audit_events where action = 'automation.updated' and resource_id = $1 order by occurred_at desc, id desc limit 1",
+        [a.id],
+      )
+    ).rows as [Json];
+    expect(updated.metadata).toMatchObject({ fanOut: true, perRun: 25, perDay: 300 });
+  });
+
   it("refuses fan-out on webhook, mail and digest automations and on DM or thread targets, on create and on update", async () => {
     const fanOut = { enabled: true };
     await expectRefused(

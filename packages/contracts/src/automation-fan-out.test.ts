@@ -3,6 +3,7 @@ import {
   AgentChannelConversationOpen,
   AgentChannelConversationOpenResponse,
   AutomationFanOutInput,
+  AutomationFanOutUpdate,
   AutomationFanOutView,
   automationItemSentence,
   CONVERSATION_OPEN_SENTENCES,
@@ -179,6 +180,22 @@ describe("fan-out settings (07.17 D-02, PD-05)", () => {
       expect(AutomationFanOutInput.safeParse(body).success, JSON.stringify(body)).toBe(false);
     }
     expect(AutomationFanOutInput.safeParse({ enabled: true, perRun: 10, perDay: 10 }).success).toBe(true);
+  });
+
+  it("WR-08: an update carries no defaults: only what the caller sent", () => {
+    expect(AutomationFanOutUpdate.parse({ enabled: false })).toEqual({ enabled: false });
+    expect(AutomationFanOutUpdate.parse({ enabled: true, perDay: 300 })).toEqual({
+      enabled: true,
+      perDay: 300,
+    });
+    for (const body of [
+      { enabled: true, perRun: 26 },
+      { enabled: true, perDay: 501 },
+      { enabled: true, perRun: 20, perDay: 10 },
+      { enabled: true, columnId: CONV },
+    ]) {
+      expect(AutomationFanOutUpdate.safeParse(body).success, JSON.stringify(body)).toBe(false);
+    }
   });
 
   it("the view is the stored values", () => {

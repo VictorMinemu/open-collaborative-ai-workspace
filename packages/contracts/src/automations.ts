@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ModelRef } from "./ai-generation";
 import {
   AutomationFanOutInput,
+  AutomationFanOutUpdate,
   AutomationFanOutView,
   EscalationTargets,
   EscalationTargetView,
@@ -449,7 +450,8 @@ export const UpdateAutomationRequest = z
     target: AutomationTarget.optional(),
     inbound: AutomationInbound.nullable().optional(),
     maxRunsPerDay: MaxRunsPerDay.optional(),
-    fanOut: AutomationFanOutInput.optional(),
+    // Code review WR-08: no defaults on update (a cap left out keeps its stored value).
+    fanOut: AutomationFanOutUpdate.optional(),
     escalation: EscalationTargets.optional(),
   })
   .superRefine((body, ctx) => {

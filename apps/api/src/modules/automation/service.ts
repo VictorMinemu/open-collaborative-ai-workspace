@@ -755,6 +755,18 @@ export function createAutomationService(
       if (before.actionKind === "digest") {
         throw new HttpError(400, "bad_request", "Change the digest in its own settings");
       }
+      // Code review WR-08: a cap left out keeps its stored value; the merged caps are checked here (the database check
+      // would answer a 500).
+      const fanOut: AutomationFanOutInput | null = input.fanOut
+        ? {
+            enabled: input.fanOut.enabled,
+            perRun: input.fanOut.perRun ?? before.fanOutPerRun,
+            perDay: input.fanOut.perDay ?? before.fanOutPerDay,
+          }
+        : null;
+      if (fanOut && fanOut.perRun > fanOut.perDay) {
+        throw new HttpError(400, "bad_request", "The per-run cap can't exceed the per-day cap");
+      }
       const trigger = input.trigger;
       const kind = trigger?.kind ?? before.triggerKind;
       if (
@@ -823,7 +835,7 @@ export function createAutomationService(
         inboundAskBot: inbound?.askBot ?? true,
         inboundConfig: inbound?.config ?? {},
         maxRunsPerDay: input.maxRunsPerDay ?? before.maxRunsPerDay,
-        ...(input.fanOut ? fanOutColumns(input.fanOut) : {}),
+        ...(fanOut ? fanOutColumns(fanOut) : {}),
         ...(input.escalation ? { escalationTargets: input.escalation } : {}),
         // The run log root is a message of the target conversation (its key carries both): another conversation
         // starts a new thread on its next fan-out run. Turning fan-out off and on again keeps it (PD-05).
