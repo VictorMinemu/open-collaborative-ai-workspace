@@ -272,13 +272,12 @@ describe("readAttachmentForAgent: images", () => {
       height: 240,
     });
     const { storage, calls } = memoryStorage(gif, { original: body });
-    expect(await readAttachmentForAgent(storage, gif, CAPS)).toEqual({
-      kind: "image",
-      mimeType: "image/gif",
-      data: body,
-      width: 320,
-      height: 240,
-    });
+    const out = await readAttachmentForAgent(storage, gif, CAPS);
+    // The 1 MiB body is compared as bytes: a deep `toEqual` walks it element by element and took over 15 s on a loaded
+    // CI host (p244).
+    const { data, ...rest } = out as { data: Uint8Array };
+    expect(rest).toEqual({ kind: "image", mimeType: "image/gif", width: 320, height: 240 });
+    expect(Buffer.from(data).equals(Buffer.from(body))).toBe(true);
     expect(calls).toEqual([{ method: "stream", key: keyOf(gif, "original") }]);
   });
 
