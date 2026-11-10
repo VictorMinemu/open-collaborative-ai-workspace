@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { BoardCard, EventTypes } from "@ocw/contracts";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sha256Hex } from "../../lib/crypto";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
 
@@ -900,5 +900,193 @@ describe("07.17 D-06: a tainted turn moves the card its automation opened, with 
       agent_id: clerkId,
       metadata: { route: "update", messageId: order.messageId },
     });
+  });
+});
+
+describe("07.17 D-06 / D-12: the exemption is exactly that card, that bot, that flag (Task 2)", () => {
+  /** D: also opened by @clerk's automation, but not the turn thread's card. */
+  let sibling: Json;
+  /** E: opened by @other's automation. */
+  let othersCard: Json;
+  /** F: opened by no automation. */
+  let plainCard: Json;
+  /** A tainted turn of @clerk in C's thread. */
+  let tainted: Json;
+
+  beforeAll(async () => {
+    await su.query("delete from app.agent_usage_daily");
+    const otherFanOut = await seedFanOut(otherId, "Other's orders");
+    sibling = await humanCard(victor, opsId, "Order #1043: wipers");
+    await opened(clerkFanOut, sibling.messageId as string);
+    othersCard = await humanCard(victor, opsId, "Order #1044: mirrors");
+    await opened(otherFanOut, othersCard.messageId as string);
+    plainCard = await humanCard(victor, opsId, "Order #1045: filed by hand");
+    tainted = await threadTurn(order.messageId as string, "@clerk check the order mail");
+    await taint(tainted.eventId);
+  });
+
+  beforeEach(async () => {
+    await setOutsideContent(clerkId, true);
+  });
+
+  it("with the flag on: another card of the board, even one @clerk's automation opened, is 403 tainted and unchanged", async () => {
+    const before = await boardRows(opsId);
+    const res = await moveTo(tainted.eventId, sibling.messageId, columns.done);
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(codeOf(res)).toBe("tainted");
+    expect(await boardRows(opsId)).toEqual(before);
+  });
+
+  it("with the flag on: a card opened by @other's automation, or by no automation, is 403 tainted from its own thread", async () => {
+    for (const card of [othersCard, plainCard]) {
+      const ev = await threadTurn(card.messageId as string, "@clerk see the order");
+      await taint(ev.eventId);
+      const before = await boardRows(opsId);
+      for (const res of [
+        await moveTo(ev.eventId, card.messageId, columns.inProgress),
+        await patchCard(ev.eventId, card.messageId, {
+          expectedVersion: (await cardRow(card.messageId)).version,
+          waitingOn: "customer",
+        }),
+      ]) {
+        expect(res.status, JSON.stringify(res.body)).toBe(403);
+        expect(codeOf(res)).toBe("tainted");
+      }
+      expect(await boardRows(opsId)).toEqual(before);
+      expect(await toolCalls(ev.eventId)).toBe(0);
+    }
+  });
+
+  it("with the flag on: create and read on the tainted turn stay 403 tainted; a body naming text stays 403 not_author", async () => {
+    const before = await boardRows(opsId);
+    for (const res of [await createCard(tainted.eventId), await readBoard(tainted.eventId)]) {
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(codeOf(res)).toBe("tainted");
+    }
+    for (const text of [{ title: "Renamed" }, { description: "New text" }, { fields: {} }]) {
+      const res = await moveTo(tainted.eventId, order.messageId, columns.done, text);
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(codeOf(res)).toBe("not_author");
+    }
+    expect(await boardRows(opsId)).toEqual(before);
+  });
+
+  it("from the card's own root turn (the card mentions @clerk) the move passes too; the tool cap still holds", async () => {
+    const { card, ev } = await cardTurn(victor, opsId, "Order #1046: tyres\n@clerk handle this order");
+    await opened(clerkFanOut, card.messageId as string);
+    await taint(ev.eventId);
+    const moved = await moveTo(ev.eventId, card.messageId, columns.inProgress);
+    expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+    expect(await cardAudit("board.card.moved", card.messageId)).toMatchObject({
+      metadata: { outsideContent: true },
+    });
+
+    await su.query("update app.agent_turns set tool_calls = 8 where event_id = $1", [ev.eventId]);
+    const before = await cardRow(card.messageId);
+    const capped = await moveTo(ev.eventId, card.messageId, columns.done);
+    expect(capped.status).toBe(403);
+    expect(codeOf(capped)).toBe("cap_reached");
+    expect(await cardRow(card.messageId)).toEqual(before);
+    expect(await toolCalls(ev.eventId)).toBe(8);
+  });
+
+  it("D-12: after a Work Zone session read, the move passes with the flag (sessionOutputExempt: true) and is 403 tainted without it", async () => {
+    const ev = await threadTurn(order.messageId as string, "@clerk read the session and close it");
+    await su.query("update app.agent_turns set session_output_read = true where event_id = $1", [ev.eventId]);
+
+    const moved = await moveTo(ev.eventId, order.messageId, columns.done);
+    expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+    const audit = await cardAudit("board.card.moved", order.messageId);
+    expect(audit).toMatchObject({ agent_id: clerkId, metadata: { sessionOutputExempt: true } });
+    expect(audit?.metadata).not.toHaveProperty("outsideContent");
+
+    // Another card from the same session-read turn stays refused.
+    const sib = await moveTo(ev.eventId, sibling.messageId, columns.done);
+    expect(codeOf(sib)).toBe("tainted");
+
+    await setOutsideContent(clerkId, false);
+    const before = await cardRow(order.messageId);
+    const res = await moveTo(ev.eventId, order.messageId, columns.inProgress);
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(codeOf(res)).toBe("tainted");
+    expect(await cardRow(order.messageId)).toEqual(before);
+  });
+
+  it("an untainted turn moves any card of the board as before, and its audit carries no exemption flag", async () => {
+    await setOutsideContent(clerkId, false);
+    const ev = await threadTurn(order.messageId as string, "@clerk tidy the board");
+    for (const card of [plainCard, othersCard, order]) {
+      const res = await moveTo(ev.eventId, card.messageId, columns.inProgress);
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      const audit = await cardAudit("board.card.moved", card.messageId);
+      expect(audit?.metadata).not.toHaveProperty("outsideContent");
+      expect(audit?.metadata).not.toHaveProperty("sessionOutputExempt");
+    }
+  });
+
+  it("org B's cell token naming the exempt turn is 403 no_trigger; org B's row naming an org A card never exempts it (RLS)", async () => {
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, 'Evil 2', $2)", [
+      orgB,
+      `evil-${orgB}`,
+    ]);
+    const tokenB = `ocw_cell_${randomUUID()}${randomUUID()}`;
+    await su.query(
+      "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
+      [orgB, sha256Hex(tokenB)],
+    );
+    const before = await cardRow(order.messageId);
+    const calls = await toolCalls(tainted.eventId);
+    const res = await patchCard(
+      tainted.eventId,
+      order.messageId,
+      { expectedVersion: before.version, move: { columnId: columns.backlog, afterCardId: null } },
+      tokenB,
+    );
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(codeOf(res)).toBe("no_trigger");
+    expect(await cardRow(order.messageId)).toEqual(before);
+    expect(await toolCalls(tainted.eventId)).toBe(calls);
+
+    // Org B's forged automation of @clerk naming org A's plain card (the foreign keys forbid it; the superuser writes it
+    // with them off, to prove RLS alone hides it from org A's gate).
+    const automationB = randomUUID();
+    const runB = randomUUID();
+    await su.query("begin");
+    try {
+      await su.query("set local session_replication_role = replica");
+      await su.query(
+        `insert into app.automations (id, organization_id, name, agent_id, run_as_user_id, created_by, trigger_kind,
+           schedule_cron, time_zone, target_kind, conversation_id, board_column_id, fan_out_enabled)
+         values ($1, $2, 'Forged', $3, $4, $4, 'schedule', '*/10 * * * *', 'Europe/Madrid', 'board', $5, $6, true)`,
+        [automationB, orgB, clerkId, victorId, opsId, columns.backlog],
+      );
+      await su.query(
+        "insert into app.automation_runs (id, organization_id, automation_id, trigger) values ($1, $2, $3, 'manual')",
+        [runB, orgB, automationB],
+      );
+      await su.query(
+        `insert into app.automation_conversations (organization_id, automation_id, run_id, external_key_hash,
+           conversation_id, root_message_id, status) values ($1, $2, $3, $4, $5, $6, 'delivered')`,
+        [orgB, automationB, runB, sha256Hex(randomUUID()), opsId, plainCard.messageId],
+      );
+      await su.query("commit");
+    } catch (err) {
+      await su.query("rollback");
+      throw err;
+    }
+    try {
+      const ev = await threadTurn(plainCard.messageId as string, "@clerk the forged order");
+      await taint(ev.eventId);
+      const cardBefore = await cardRow(plainCard.messageId);
+      const forged = await moveTo(ev.eventId, plainCard.messageId, columns.done);
+      expect(forged.status, JSON.stringify(forged.body)).toBe(403);
+      expect(codeOf(forged)).toBe("tainted");
+      expect(await cardRow(plainCard.messageId)).toEqual(cardBefore);
+    } finally {
+      await su.query("delete from app.automation_conversations where organization_id = $1", [orgB]);
+      await su.query("delete from app.automation_runs where organization_id = $1", [orgB]);
+      await su.query("delete from app.automations where organization_id = $1", [orgB]);
+    }
   });
 });
