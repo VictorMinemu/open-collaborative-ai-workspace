@@ -264,7 +264,9 @@ beforeAll(async () => {
     "exactly one fan-out migration",
   ).toHaveLength(1);
   const before = mkdtempSync(join(tmpdir(), "ocw-afo-"));
-  const links = folders.filter((d) => !d.endsWith(FAN_OUT_SUFFIX)).map((d) => join(before, d));
+  // Every migration older than the fan-out one: later ones (07.17 code review WR-02's) build on it and run in step 3.
+  const fanOut = folders.find((d) => d.endsWith(FAN_OUT_SUFFIX)) as string;
+  const links = folders.filter((d) => d < fanOut).map((d) => join(before, d));
   try {
     for (const link of links) symlinkSync(join(MIGRATIONS_DIR, basename(link)), link);
     const pool = new pg.Pool({ connectionString: migratorUrl, max: 1 });
@@ -582,6 +584,8 @@ describe("opened conversations (07.17, D-03, P1)", () => {
       "agent_event_id",
       "created_at",
       "updated_at",
+      // 07.17 code review WR-02: the re-queue counter (20261110124940_automation_item_waiting).
+      "attempt",
     ]);
   });
 
