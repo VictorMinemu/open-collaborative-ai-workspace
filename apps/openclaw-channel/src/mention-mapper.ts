@@ -960,6 +960,12 @@ function itemToolSentences(tools: readonly string[]): string[] {
     out.push(`To move this card or mark it waiting, use ${BOARD_TOOL_NAME}.`);
   if (tools.includes(WORK_SESSION_START_TOOL)) {
     out.push(`To work on it in the Work Zone, start a session with ${WORK_SESSION_START_TOOL}.`);
+    // 07.17 review WR-02: an idle session still holds one of the bot's session slots, so waiting items start only
+    // once the bot stops the sessions it has finished.
+    if (tools.includes(WORK_SESSION_STOP_TOOL))
+      out.push(
+        `When this item's work is done, stop its session with ${WORK_SESSION_STOP_TOOL} so the next item can start.`,
+      );
   }
   return out;
 }
