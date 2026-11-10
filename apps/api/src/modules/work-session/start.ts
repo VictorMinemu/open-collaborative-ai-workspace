@@ -1,8 +1,10 @@
 import {
   type AuthzDenial,
+  type ContextWindow,
   type ControlDenialReason,
   type CreateWorkSessionRequest,
   compatibilityOf,
+  type EffortLevel,
   type RuntimeId,
   RuntimeInfo,
   type SessionAudienceInput,
@@ -27,7 +29,13 @@ import { linkWorkPromptAttachments } from "../artifact";
 import { type DeviceHub, deviceFacts, loadDeviceAccess } from "../device";
 import { AuthzDeniedError, orgResource, type PermissionService } from "../organization";
 import { type AgentControlsLayer, loadControlsContext } from "./context";
-import { buildRuntimeControls, decideSettings, highestAvailableMode, storedSettings } from "./controls";
+import {
+  buildRuntimeControls,
+  type ControlsContext,
+  decideSettings,
+  highestAvailableMode,
+  storedSettings,
+} from "./controls";
 import { checkImageBudget } from "./images";
 import { defaultVisibilityOf } from "./projects";
 import type { SessionRow, WorkSessionService } from "./service";
@@ -329,6 +337,12 @@ export async function createWorkSession(
   };
   const start = decideSettings(baseline, startPatch, runtimeId, ctx);
   if (!start.ok) return settingsFailure(start.field, start.reason);
+  // 07.16 code review WR-03: what a bot's session actually runs stays inside its profile's sets, a value left to the
+  // runtime included (the catalog's default model, that model's default effort and selectable context window).
+  if (opts.agent) {
+    const off = botSettingOutside(opts.agent.layer, ctx, runtimeId, start.next);
+    if (off) return settingsFailure(off, "bot_profile");
+  }
   // D-03, D-04: the asked audience, validated against the project's access, or the project's default (`project` when
   // its switch is on, `owner` when off; a personal repository: `project`). A proposal never passes one.
   const audience: SessionAudienceInput = input.visibility ?? {
@@ -416,6 +430,33 @@ export async function createWorkSession(
   }
   const dto = await svc.emitSession(tx, s!.id);
   return { ok: true, session: dto! };
+}
+
+/**
+ * WR-03: the first effective setting of a bot's start outside its profile's sets, or null. The effective model is the
+ * one named, else the catalog's default; its effort and context window are the ones named, else the model's defaults
+ * (a fixed window, one the runtime offers no choice of, is never checked).
+ */
+function botSettingOutside(
+  layer: AgentControlsLayer,
+  ctx: ControlsContext,
+  runtime: RuntimeId,
+  next: SessionSettingsPatch,
+): "model" | "effort" | "contextWindow" | null {
+  const catalog = ctx.catalog && ctx.catalog.runtime === runtime ? ctx.catalog : null;
+  if (!catalog) return null;
+  const model =
+    (next.model ? catalog.models.find((m) => m.id === next.model) : undefined) ??
+    catalog.models.find((m) => m.isDefault);
+  if (!model) return null;
+  if (!layer.models.includes(model.id)) return "model";
+  const effort = next.effort ?? model.defaultEffort;
+  if (model.efforts.length > 0 && effort && !layer.efforts.includes(effort as EffortLevel)) return "effort";
+  const window = next.contextWindow ?? model.defaultContextWindow;
+  if (model.contextWindows.length > 1 && window && !layer.contextWindows.includes(window as ContextWindow)) {
+    return "contextWindow";
+  }
+  return null;
 }
 
 function settingsFailure(field: string, reason: ControlDenialReason): WorkSessionStartFailure {

@@ -328,7 +328,11 @@ const settingField = (field: string): BotWorkSessionRefused["field"] =>
     ? (field as BotWorkSessionRefused["field"])
     : undefined;
 
-/** The start's settings: what the bot asked, else the profile's defaults (PD-09). */
+/**
+ * The start's settings: what the bot asked, else the profile's defaults (PD-09). A profile that restricts the models
+ * but names no default starts on its first allowed model (code review WR-03): never the runtime's default, which may be
+ * outside the set. An effort or context window left to the model's default is checked by `createWorkSession`.
+ */
 function settingsOf(profile: BotProfileRow, input: AgentChannelWorkSessionStart) {
   const contextWindow =
     input.contextWindow ??
@@ -336,7 +340,7 @@ function settingsOf(profile: BotProfileRow, input: AgentChannelWorkSessionStart)
       ? (Number(profile.defaultContextWindow) as ContextWindow)
       : undefined);
   return {
-    model: input.model ?? profile.defaultModel ?? undefined,
+    model: input.model ?? profile.defaultModel ?? profile.allowedModels[0] ?? undefined,
     effort: input.effort ?? profile.defaultEffort ?? undefined,
     contextWindow,
     fastMode: input.fastMode ?? (profile.fastMode === "on" ? true : undefined),

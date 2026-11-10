@@ -413,3 +413,13 @@ marking it tainted. Now:
 
 A prompt to the session the turn read is still not marked tainted: that output came from the same runtime, which
 already holds it.
+
+**What a bot's session runs stays inside the profile's sets, defaults included (WR-03).** This completes §5's "when
+absent, the profile default applies". A profile may restrict the models, efforts or context windows and name no
+default. Then:
+
+- a start with no model runs on the profile's first allowed model, never on the runtime's default outside the set;
+- `createWorkSession` checks the effective values of a bot's start against the agent layer: the model named or the
+  catalog's default, and that model's default effort and selectable context window when the bot names none. A value
+  outside the set answers `setting_not_allowed` with the field (reason `bot_profile`), so the bot names a listed
+  value. A fixed context window is never checked.

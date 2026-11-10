@@ -513,6 +513,34 @@ describe("the bot chooses only what its profile allows (PD-09, PD-10)", () => {
     expect(s!.model).toBe("opus");
     expect(JSON.stringify(s!.settings)).toContain("high");
   });
+
+  it("WR-03: allowed models without a default → the first allowed model, never the runtime's default outside the set", async () => {
+    // The device's default model is opus; the profile allows sonnet only and names no default.
+    await saveProfile({ defaultModel: null, allowedModels: ["sonnet"] });
+    try {
+      const body = await started(await askAtlas());
+      expect(body.model).toBe("sonnet");
+      const [s] = await rowsOf("select model from app.work_sessions where id = $1", [body.workSessionId]);
+      expect(s!.model).toBe("sonnet");
+    } finally {
+      await saveProfile();
+    }
+  });
+
+  it("WR-03: allowed efforts without a default, the model's own default outside them → setting_not_allowed effort", async () => {
+    // opus's default effort is medium; the profile allows high only.
+    await saveProfile({ defaultEffort: null, allowedEfforts: ["high"] });
+    try {
+      const before = await counts();
+      const r = await refused(await askAtlas(), "setting_not_allowed");
+      expect(r.field).toBe("effort");
+      expect(await counts()).toEqual(before);
+      // An allowed effort asked for starts.
+      await started(await askAtlas(), { effort: "high" });
+    } finally {
+      await saveProfile();
+    }
+  });
 });
 
 describe("one executor per tree (D-15, PD-10)", () => {
