@@ -12,7 +12,14 @@ import type { App, Core } from "../../core";
 import { notFound } from "../../lib/errors";
 import { auditBotWorkSession, ownBotSession, refusedAnswer, type WorkSessionModule } from "../work-session";
 import { type CellPrincipal, cellOf } from "./auth";
-import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, claimToolCall, liveTurn } from "./claim";
+import {
+  type AgentTurnRow,
+  auditUnknownTurn,
+  cellAuditBase,
+  claimToolCall,
+  liveTurn,
+  markSessionOutputRead,
+} from "./claim";
 
 /**
  * Phase 07.16-17 (D-05, D-10, D-14, D-20; PD-14, PD-15, PD-21): `POST /agent-channel/v1/work-sessions/read`
@@ -150,10 +157,8 @@ export function registerWorkSessionReadRoute(
             ...(body.cursor !== undefined ? { cursor: body.cursor } : {}),
           });
           // D-20: the turn has read the session's output; its other side effects stay blocked from now on.
-          await tx
-            .update(agentTurns)
-            .set({ sessionOutputRead: true })
-            .where(eq(agentTurns.eventId, turn.eventId));
+          // CR-02: also on its live return turns, which resume the same OpenClaw session.
+          await markSessionOutputRead(tx, turn.eventId);
           await core.audit.record(tx, {
             ...cellAuditBase(cell),
             sessionId: own.session.id,

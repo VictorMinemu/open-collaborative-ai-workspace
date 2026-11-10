@@ -181,6 +181,26 @@ const LATE_TAINT_MAX_STEPS = 10;
  * the sandbox claim, the memory, board and consult routes), so the cell's local guard needs no new signal.
  */
 export async function taintReturnTurns(tx: Tx, eventId: string): Promise<void> {
+  await markReturnTurns(tx, eventId, "tainted");
+}
+
+/**
+ * 07.16 D-20 (code review CR-02): the turn read a Work Zone session's output (`ocw_work_session_read`). The mark is set
+ * on the turn and handed, like late taint, to every still-running return turn that continues it: they resume the same
+ * per-thread OpenClaw session, which now holds the output. Only `session_output_read` is set (it is not a taint).
+ */
+export async function markSessionOutputRead(tx: Tx, eventId: string): Promise<void> {
+  await tx.update(agentTurns).set({ sessionOutputRead: true }).where(eq(agentTurns.eventId, eventId));
+  await markReturnTurns(tx, eventId, "session_output_read");
+}
+
+/** `taintReturnTurns`' walk, for one of the two carried marks (a fixed column name, never caller text). */
+async function markReturnTurns(
+  tx: Tx,
+  eventId: string,
+  mark: "tainted" | "session_output_read",
+): Promise<void> {
+  const column = sql.raw(mark);
   await tx.execute(sql`
     with recursive chain as (
       select c.id from ${agentChains} c where c.root_event_id = ${eventId}
@@ -196,9 +216,9 @@ export async function taintReturnTurns(tx: Tx, eventId: string): Promise<void> {
         join ${agentTurns} t on t.returning_hop_id = h.id and t.chain_id = h.chain_id
        where r.n < ${LATE_TAINT_MAX_STEPS}
     )
-    update ${agentTurns} t set tainted = true
+    update ${agentTurns} t set ${column} = true
       from reach r
-     where t.event_id = r.event_id and r.n > 0 and t.tainted = false and t.done_at is null`);
+     where t.event_id = r.event_id and r.n > 0 and t.${column} = false and t.done_at is null`);
 }
 
 /** A call refused before any turn was found (unknown, foreign or no longer live): audited with no human to attribute. */

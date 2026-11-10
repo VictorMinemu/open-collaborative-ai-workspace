@@ -366,3 +366,20 @@ No layer of ADR-0012 is removed, and nothing outside this chain enables a bypass
   - a live card for sessions people start (Phase 12 may reuse this renderer).
 - AGENTS.md gains a "Bot Work Zone orchestration" row citing this record. Its ADR-0026 row now says that bots
   **without a Work Zone profile** propose sessions only the asker starts.
+
+## Amendment (code review)
+
+*Amended 2026-11-09, before the phase merged, from `07.16-REVIEW.md`. The decisions above stand; these points replace
+or complete the parts they name.*
+
+**The session-output mark is carried like the taint (CR-02).** This completes §9's "An ADR-0026 grant lifts it exactly
+as it lifts the taint". `agent_turns.session_output_read` now travels everywhere `tainted` does for a turn that
+continues another one:
+
+- an ADR-0026 re-run starts with the mark when the asking turn has it (read live from the asking turn, as member data
+  is), and the grant lifts it for its one claimed call only;
+- an ADR-0027 consult return turn starts with it when the asking turn or a turn that answered the hop has it, and a
+  read made after the answer came back marks the still-running return turns (the late-taint walk);
+- the approval's card, headline and review show "Outside content" when the asking turn read a session's output, so
+  the person who decides is warned. The stored request's own `tainted` is unchanged, and a re-run is never tainted by
+  a session read alone.

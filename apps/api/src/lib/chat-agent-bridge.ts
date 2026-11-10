@@ -168,6 +168,8 @@ export interface CardAction {
   tainted?: boolean | undefined;
   /** 07.8-25 (D-13): the request came from a turn that used a member's sign-in: the re-run turn has member data. */
   memberData?: boolean | undefined;
+  /** 07.16 D-20 (CR-02): the request came from a turn that read session output: the re-run turn keeps that mark. */
+  sessionOutputRead?: boolean | undefined;
   /**
    * 07.5-11: an approved `server_apply` request whose apply failed: the kind's result code (`cardAction.resultCode`), so
    * the bot hears what went wrong, not only "approved".

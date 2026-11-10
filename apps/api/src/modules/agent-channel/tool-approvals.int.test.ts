@@ -896,6 +896,30 @@ describe("taint is lifted for the approved call only, and never laundered throug
     expect((await approvalRow(id)).status).toBe("applied");
     expect((await ask(rerun, DELETE)).body).toMatchObject({ allowed: false, reason: "tainted" });
   });
+
+  it("CR-02 (D-20): a request from a turn that read session output re-runs with the mark; the card warns; only the approved call runs", async () => {
+    await clearRules();
+    await rule({ pattern: WRITE, mode: "always" });
+    const ev = await turnOf(s.sam, samDm);
+    // The turn read its Work Zone session's output (`ocw_work_session_read` sets the mark, D-20).
+    await s.su.query("update app.agent_turns set session_output_read = true where event_id = $1", [
+      ev.eventId,
+    ]);
+    const asked = await ask(ev, WRITE, { arguments: { text: "after session output" } });
+    expect(asked.body).toMatchObject({ reason: "approval_required" });
+    const id = asked.body?.approval.id as string;
+    // The decider is told the request came after untrusted content.
+    expect((await ok(s.sam.request("GET", `/api/v1/approvals/${id}`))).view.tainted).toBe(true);
+    expect((await decide(s.sam, id, "approved")).status).toBe(200);
+
+    const rerun = await rerunOf(id);
+    // The re-run resumes the session that holds the output: it starts with the mark, never laundered.
+    expect((await turnRow(rerun.eventId)).session_output_read).toBe(true);
+    expect((await ask(rerun, WRITE, { arguments: { text: "after session output" } })).body).toMatchObject({
+      allowed: true,
+    });
+    expect((await ask(rerun, DELETE)).body).toMatchObject({ allowed: false, reason: "tainted" });
+  });
 });
 
 describe("rules changed in the middle of a turn", () => {

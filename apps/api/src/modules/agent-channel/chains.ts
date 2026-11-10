@@ -219,11 +219,14 @@ export async function deliverConsultReply(
     .select({
       tainted: sql<boolean>`coalesce(bool_or(${agentTurns.tainted}), false)`,
       memberData: sql<boolean>`coalesce(bool_or(${agentTurns.memberData}), false)`,
+      sessionOutputRead: sql<boolean>`coalesce(bool_or(${agentTurns.sessionOutputRead}), false)`,
     })
     .from(agentTurns)
     .where(or(eq(agentTurns.answeringHopId, hop.id), eq(agentTurns.eventId, hop.sourceEventId)));
   const tainted = carried?.tainted === true;
   const memberData = carried?.memberData === true;
+  // 07.16 D-20 (code review CR-02): a Work Zone session's output read by any of them is carried the same way.
+  const sessionOutputRead = carried?.sessionOutputRead === true;
 
   // CR-A-04: only an answered hop carries an answer; a failed turn's post (the bridge's failure notice) never does.
   const posted = outcome === "answered" ? await answerOf(tx, hop) : null;
@@ -267,8 +270,14 @@ export async function deliverConsultReply(
   if (!ev) return null;
   // D-09 (the 07.5 re-run rule, 07.8-25 D-13): member data read while answering stays with the answer, set before the
   // append so the cell never acts on a return turn without it.
-  if (memberData) {
-    await tx.update(agentTurns).set({ memberData: true }).where(eq(agentTurns.eventId, ev.eventId));
+  if (memberData || sessionOutputRead) {
+    await tx
+      .update(agentTurns)
+      .set({
+        ...(memberData ? { memberData: true } : {}),
+        ...(sessionOutputRead ? { sessionOutputRead: true } : {}),
+      })
+      .where(eq(agentTurns.eventId, ev.eventId));
   }
   const targetRef = { id: target.id, handle: target.username, displayName: target.name };
   const answerIds = new Set(posted?.ids ?? []);

@@ -114,6 +114,11 @@ export interface ApprovalCardTurn {
    * turn has member data from its start and D-13's approvals keep applying to it.
    */
   sourceMemberData?: boolean;
+  /**
+   * 07.16 D-20 (code review CR-02): the requesting turn read a Work Zone session's output
+   * (`agent_turns.session_output_read`), so the re-run turn starts with that mark; the grant lifts it for its one call.
+   */
+  sourceSessionOutputRead?: boolean;
 }
 
 export interface ApprovalRegistry {
