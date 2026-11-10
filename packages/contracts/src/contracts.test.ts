@@ -832,7 +832,8 @@ describe("Phase 6 Agent Cards, message fields, event types and notification kind
     expect(NotificationKind.options).toEqual(expect.arrayContaining(["ai_chat_shared", "card_updated"]));
     expect(NOTIFICATION_KIND_RANK.ai_chat_shared).toBe(7);
     expect(NOTIFICATION_KIND_RANK.card_updated).toBe(0);
-    expect(MENTION_KINDS).toEqual(["mention", "channel", "here", "dm", "group_dm"]);
+    // 07.17 (PD-14) appends team_mention; the earlier kinds are unchanged.
+    expect(MENTION_KINDS).toEqual(["mention", "channel", "here", "dm", "group_dm", "team_mention"]);
   });
 });
 

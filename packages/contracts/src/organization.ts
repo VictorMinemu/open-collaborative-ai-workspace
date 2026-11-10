@@ -70,6 +70,12 @@ export const OrgUnit = z.object({
   viewerCan: z.array(Permission),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+  /** 07.17 (D-14): the unit's stored `@handle` (present from 07.17 servers). */
+  handle: z.string().max(48).optional(),
+  /** 07.17 (D-07): distinct active members of the unit's subtree, who a team mention reaches (present from 07.17). */
+  reach: z.number().int().nonnegative().optional(),
+  /** 07.17 (D-07): the viewer is among them (present from 07.17). */
+  viewerInReach: z.boolean().optional(),
 });
 export type OrgUnit = z.infer<typeof OrgUnit>;
 
