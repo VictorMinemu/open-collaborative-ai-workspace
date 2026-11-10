@@ -1,4 +1,6 @@
 import {
+  AgentAutomationItemEvent,
+  type AgentAutomationItemEvent as AgentAutomationItemEventType,
   AgentAutomationRunEvent,
   type AgentAutomationRunEvent as AgentAutomationRunEventType,
   AgentCardActionEvent,
@@ -25,6 +27,7 @@ import type { DurableFrame, EventStreamLogger } from "./event-stream.js";
 import { handleMcpProbe, type probeMcpServer } from "./mcp-probe.js";
 import {
   type MappedMention,
+  mapAutomationItem,
   mapAutomationRun,
   mapCardAction,
   mapConsultReply,
@@ -99,6 +102,7 @@ const TURN_EVENT_TYPES: ReadonlySet<string> = new Set([
   AgentChannelEventTypes.automationRun,
   AgentChannelEventTypes.consultReply,
   AgentChannelEventTypes.workSession,
+  AgentChannelEventTypes.automationItem,
 ]);
 
 const readableId = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 200;
@@ -301,6 +305,15 @@ export function createBridge(opts: BridgeOptions) {
    */
   async function handleWorkSession(event: AgentWorkSessionEventType): Promise<void> {
     await runTurn(event, "work session update", (agent) => mapWorkSessionEvent(event, agent));
+  }
+
+  /**
+   * A fan-out run opened a conversation for one new item (07.17 D-04, PD-09): a tainted turn like a mention of the bot
+   * on the opened root, in the root's thread, in reply to the root, keyed `evt:<eventId>`, with the item as outside
+   * content in its own block.
+   */
+  async function handleAutomationItem(event: AgentAutomationItemEventType): Promise<void> {
+    await runTurn(event, "automation item", (agent) => mapAutomationItem(event, agent));
   }
 
   /**
@@ -517,6 +530,20 @@ export function createBridge(opts: BridgeOptions) {
           return;
         }
         await handleWorkSession(parsed.data);
+        return;
+      }
+      case AgentChannelEventTypes.automationItem: {
+        // agent.automation_item.v1 (07.17): untrusted until parsed; the warning names the seq and the field path only
+        // (never the item, a name or a handle).
+        const parsed = AgentAutomationItemEvent.safeParse(frame.data);
+        if (!parsed.success) {
+          log.warn?.(
+            `seq=${frame.seq}: invalid ${frame.type} payload; skipped (${parsed.error.issues[0]?.path.join(".") || "?"})`,
+          );
+          await skipInvalid(frame);
+          return;
+        }
+        await handleAutomationItem(parsed.data);
         return;
       }
       case AgentChannelEventTypes.configChanged:
