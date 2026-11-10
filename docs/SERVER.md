@@ -248,6 +248,33 @@ supervisor: a Docker restart policy, tmux, supervisord.
 Each account's `~/.ocw` has one runtime: the desktop app or the service, never both. `service install` refuses while
 the desktop app (or a hand-started `ocw-runtime run`) runs on the account. Quit it first, or use another account.
 
+## Isolated server (Phase 07.16)
+
+Bots can run Work Zone sessions on this server (ADR-0038, [DEMO.md](DEMO.md#bot-work-zone-orchestration-phase-0716)).
+After a bot reads outside content (MCP results, attachments, webhooks, mail, web pages), text written by others can
+steer what it asks the coding agent to do. Such a session runs in Full access **only on an isolated server**. Turn the
+mark on only on a machine that holds nothing else that matters: no other projects, no personal credentials, no access
+to internal systems the bot should not reach.
+
+```bash
+ocw-runtime full-access on          # the device's own Full access opt-in (ADR-0012), needed for any Full access
+ocw-runtime isolated-server on      # prints the warning, then sets the mark
+ocw-runtime isolated-server status  # {"isolatedServer": true, "host": "service", "honoured": true, ...}
+ocw-runtime isolated-server off
+```
+
+- **Set only here.** The mark lives in `~/.ocw/runtime.json` and reaches the API only in the device's own frames. The
+  web and the API can never set it; Settings › Devices shows it read-only ("Set on the device").
+- **`OCW_ISOLATED_SERVER`** (`1`/`true` or `0`/`false`) in the daemon's environment, for example in
+  `~/.ocw/service.env`, overrides `runtime.json`. `status` shows the source.
+- **Only for service installs.** The API honours the mark only when the daemon reports itself as a headless service:
+  `OCW_RUNTIME_HOST=service`, which the systemd unit and the LaunchAgent set, or the bundle `install.sh` installed. The
+  desktop app sets `OCW_RUNTIME_HOST=desktop`, so a laptop is never isolated; there `status` says `"honoured": false`
+  with a note.
+- **It allows nothing alone.** A bot still needs the organization policy, the device's Full access opt-in, the
+  sponsor's Full access on this device, "Allow Full access for this bot" and a profile whose highest mode is Full
+  access. Without the mark, a session that once followed outside content never runs in Full access here again.
+
 ## Behind a proxy
 
 The pairing and download routes are rate limited per client IP, per route and per API instance:

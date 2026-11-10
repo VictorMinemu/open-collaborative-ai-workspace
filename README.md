@@ -41,6 +41,9 @@ Everything runs with `docker compose` on your own server. No essential feature d
 - **Bots:** OpenClaw bots, personas, Agent Cards, memory, per-tool approvals, sandboxes and a browser, automations and
   bot-to-bot consultations.
 - **Work Zone:** the Work Zone with the desktop app (macOS, Windows, Linux) or a headless Linux/macOS server.
+- **Bots in the Work Zone:** a bot starts and drives Work Zone sessions itself through its profile (device or server,
+  projects, runtime, model, permissions). Full access needs the organization policy, the device's opt-in for that bot
+  and the profile. A live card in the conversation opens the session, and the session links back.
 - **Self-hosting:** a self-hosted release with HTTPS, backups, upgrades, OpenBao and observability.
 
 [`docs/STATUS.md`](docs/STATUS.md) lists what is built, and the roadmap continues in
@@ -206,10 +209,13 @@ MVP 1 is for testing with your team, not yet for production-critical work:
 - **AI chats:** web search on org models needs the optional `search` profile. Company knowledge, MCP and skills in AI
   chats are not available yet.
 - **Headless Work Zone server:** no Windows service and no container image.
+- **Bots in the Work Zone:** no team mentions or automation fan-out yet (07.17). Bots never approve runtime requests;
+  people do. A `people` audience is a snapshot of the conversation when the session starts.
 - **Not yet proven against real services by the maintainers:**
   - an install on a clean machine;
   - real mailbox and ERP automations;
-  - Full-access mode.
+  - Full-access mode;
+  - a bot running a real session on a server.
 
   They are listed as owner checks in [`docs/DEMO.md`](docs/DEMO.md).
 

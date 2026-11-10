@@ -143,3 +143,23 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   2 at a time, no eval); nothing is cached. Refusals are closed codes with fixed sentences; a read taints the turn;
   `bot.attachment_read` and `bot.attachment_imported` audit ids and counts, never names or content. Other files go to
   the sandbox under F-8. A persona-only message in a shared AI chat meets the chat model's attachment gate (ADR-0037).
+- **07.16 Bot Work Zone orchestration:** a bot with a Work Zone profile starts, prompts, reads and stops Work Zone
+  sessions itself through four turn-scoped tools (`ocw_work_session_start|prompt|read|stop`) decided in the Agent
+  Channel API. One profile per bot (`app.bot_work_zone_profiles`, tenant RLS) names by id the device, up to 50
+  projects, the runtime, default model and options with the sets the bot may pick from, default and highest mode,
+  worktree and limits; the saver is the sponsor, every value is checked against the sponsor's live controls, and
+  `actOnOutsideContent` is admin-only. The device's owner (or an admin, on a headless server) allows each bot, with a
+  separate "Allow Full access for this bot". Status is decided live (eight closed reasons) at every call and dispatch.
+  The routes run in the sponsor's transaction (`created_by` = sponsor, `started_by_agent_id` = the bot, prompts with
+  `author_agent_id`); bodies cannot name a user, device, audience or worktree; caps 2 sessions and 30 prompts an hour
+  per bot, 10 bot sessions per organization; the audience comes from the existing kinds, never wider than the
+  conversation's readers ∩ the project's audience. Full access is ADR-0012's chain plus the per-bot consent and the
+  profile's highest mode; after outside content it needs the admin's flag and a device-only `ocw-runtime
+  isolated-server` mark honoured only for service hosts, otherwise the start becomes a tainted proposal. The redacted
+  read model (6 000 characters of tail, repo-relative paths, never a person's prompt text) marks the turn so other
+  side effects stay blocked. `work_session.bot_sync` wakes the bot in its card's thread as the original asker on turn
+  done, approval, failure, end or offline (debounced, idempotent, 20 a day per session), with the live `work_zone`
+  card kept current; the session page leads back to the conversation through a per-viewer `origin`. Bots never
+  approve runtime requests; bots without a profile get byte-identical turns and today's proposals. Audit carries ids
+  and counts only. Limits: team mentions and automation fan-out are 07.17; a `people` audience is a snapshot
+  (ADR-0038, docs/SERVER.md › Isolated server).
