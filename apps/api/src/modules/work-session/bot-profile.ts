@@ -47,7 +47,9 @@ import type { ReauthorizeReason } from "./service";
  *   field), and every value is validated against the sponsor's live controls for (device, runtime): the one
  *   `loadControlsContext` + `buildRuntimeControls` a person's start uses. Defaults are added to the allowed sets.
  * - `actOnOutsideContent` changes only with `work_zone.manage`; a non-admin who is not the current sponsor re-saving
- *   resets it (the admin accepted the warning for the previous sponsor's rights). An admin save that changes nothing
+ *   resets it (the admin accepted the warning for the previous sponsor's rights), and so does any non-admin save that
+ *   changes the device, runtime, projects or highest mode (WR-08: the scope it was accepted for). An admin save that
+ *   changes nothing
  *   but the flag keeps the sponsor: accepting the warning is not taking the bot over.
  * - The consent is granted, updated and revoked (softly) by the device's owner (`device.update`), and by an admin
  *   (`work_zone.manage`) only on a `service` host (an organization server, ADR-0033), never on someone's laptop.
@@ -372,9 +374,23 @@ async function validateProfile(
 }
 
 /** Every stored field but the flag equals the (normalized) body: an admin's save that only flips the flag. */
+const sameSet = <T>(a: readonly T[], b: readonly T[]) =>
+  a.length === b.length && a.every((x) => b.includes(x));
+
+/**
+ * WR-08: whether a save changes what an admin reviewed when turning `actOnOutsideContent` on: where the bot runs
+ * (device, runtime), on what (projects) and how far (the highest mode).
+ */
+function scopeChanged(p: BotProfileRow, body: BotWorkZoneProfileBody): boolean {
+  return (
+    p.deviceId !== body.deviceId ||
+    p.runtime !== body.runtime ||
+    !sameSet(p.projectIds, body.projectIds) ||
+    p.maxMode !== body.maxMode
+  );
+}
+
 function onlyFlagDiffers(p: BotProfileRow, body: BotWorkZoneProfileBody, n: NormalizedProfile): boolean {
-  const sameSet = <T>(a: readonly T[], b: readonly T[]) =>
-    a.length === b.length && a.every((x) => b.includes(x));
   return (
     p.deviceId === body.deviceId &&
     p.runtime === body.runtime &&
@@ -586,10 +602,15 @@ export function registerBotProfileRoutes(
         await validateProfile(tx, perms, sponsor, body, n);
 
         let flag = body.actOnOutsideContent;
-        let flagChange: "set" | "sponsor_changed" | null = flag !== stored ? "set" : null;
+        let flagChange: "set" | "sponsor_changed" | "scope_changed" | null = flag !== stored ? "set" : null;
         if (!admin && existing && stored && existing.sponsorUserId !== auth.userId) {
           flag = false;
           flagChange = "sponsor_changed";
+        } else if (!admin && existing && stored && scopeChanged(existing, body)) {
+          // Code review WR-08: the admin accepted the warning for this device, runtime, projects and highest mode; a
+          // non-admin who changes any of them (the sponsor included) turns the flag off, audited.
+          flag = false;
+          flagChange = "scope_changed";
         }
         const now = new Date().toISOString();
         const values = {

@@ -571,6 +571,28 @@ describe("act on outside content: admins only (D-08, PD-04)", () => {
     expect(view.profile).toMatchObject({ actOnOutsideContent: true, sponsor: { id: lenaId } });
   });
 
+  it("WR-08: Lena, the sponsor, changes the scope the admin reviewed (the max mode): it resets to off, audited", async () => {
+    const view = await createBotProfile(
+      lena,
+      atlasId,
+      serverBody({ actOnOutsideContent: true, maxMode: "default" }),
+    );
+    expect(view.profile).toMatchObject({
+      actOnOutsideContent: false,
+      actOnOutsideContentBy: null,
+      sponsor: { id: lenaId },
+    });
+    const changes = await audits("bot.work_zone_profile_outside_content_changed");
+    expect(changes.at(-1)).toMatchObject({
+      actor_id: lenaId,
+      metadata: { agentId: atlasId, value: false, sponsorUserId: lenaId, reason: "scope_changed" },
+    });
+    // Back to the reviewed scope, and the admin turns it on again (the next case starts from it).
+    await createBotProfile(lena, atlasId, serverBody());
+    const on = await createBotProfile(victor, atlasId, serverBody({ actOnOutsideContent: true }));
+    expect(on.profile).toMatchObject({ actOnOutsideContent: true, sponsor: { id: lenaId } });
+  });
+
   it("a manager who is not the sponsor cannot turn it off, and re-saving resets it to off", async () => {
     const off = await put(noa, atlasId, serverBody({ actOnOutsideContent: false }));
     expect(off.status).toBe(403);

@@ -447,3 +447,8 @@ when every person of the project reads it today.
 `work_session.bot_sync` only on a state change. Re-authorization lowering a session's settings, and a person in the
 audience changing them, change the card's Mode or Model without a state change, so they mark it too. The handler is
 unchanged: it refreshes the card only when its fields changed, and a settings change alone never wakes the bot.
+
+**`actOnOutsideContent` resets when its scope changes (WR-08).** This completes §1's reset rule. The admin accepted
+the warning for one device, runtime, set of projects and highest mode. A non-admin save that changes any of them, the
+sponsor's own included, turns the flag off, audited as `bot.work_zone_profile_outside_content_changed` with reason
+`scope_changed`. An admin turns it on again if the new scope is acceptable.
