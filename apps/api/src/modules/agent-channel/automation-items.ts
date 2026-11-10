@@ -1,6 +1,7 @@
 import {
   type AgentAutomationItemEvent,
   AgentChannelEventTypes,
+  AUTOMATION_ITEM_ATTEMPTS_MAX,
   AUTOMATION_LIMITS,
   type AutomationItemWaitReason,
   type AutomationRunReason,
@@ -146,7 +147,7 @@ export async function skipAutomationItem(
  * 07.17 code review WR-02: an item whose turn found no free Work Zone session (`session_capacity`, from `delivered`) or
  * the bot at its daily limit (`agent_daily_limit`, from `queued`) waits, in the caller's transaction: `waiting` with
  * its reason and one `automation.item_waiting` audit (ids, the reason and the attempt only). An item already queued
- * again `FAN_OUT_LIMITS.itemAttemptsMax` times is skipped with that reason instead (`automation.item_skipped`, the
+ * again `AUTOMATION_ITEM_ATTEMPTS_MAX` times is skipped with that reason instead (`automation.item_skipped`, the
  * same ids, the reason and the attempt). A row
  * that is not in `from` any more is left as it is. Returns what it became.
  */
@@ -162,7 +163,7 @@ export async function waitAutomationItem(
     .limit(1)
     .for("update");
   if (!row) return null;
-  const exhausted = row.attempt >= FAN_OUT_LIMITS.itemAttemptsMax;
+  const exhausted = row.attempt >= AUTOMATION_ITEM_ATTEMPTS_MAX;
   const [updated] = await tx
     .update(automationConversations)
     .set({ status: exhausted ? "skipped" : "waiting", reason: p.reason, updatedAt: sql`now()` })

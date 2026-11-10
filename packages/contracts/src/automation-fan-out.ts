@@ -26,12 +26,14 @@ export const FAN_OUT_LIMITS = {
   bodyMax: 4000,
   /** People and teams one automation may mention. */
   escalationMax: 5,
-  /**
-   * 07.17 code review WR-02: how many times one opened item is queued again after it waited for a free Work Zone
-   * session or for the bot's next day; past it, the item is skipped with its waiting reason.
-   */
-  itemAttemptsMax: 5,
 } as const;
+
+/**
+ * 07.17 code review WR-02: how many times one opened item is queued again after it waited for a free Work Zone session
+ * or for the bot's next day; past it, the item is skipped with its waiting reason. Server-only (the plugin mirrors
+ * `FAN_OUT_LIMITS` exactly, so this is not part of it).
+ */
+export const AUTOMATION_ITEM_ATTEMPTS_MAX = 5;
 
 /**
  * 07.17 code review WR-02: why an opened item waits (`automation_conversations.status = 'waiting'`). `session_capacity`:

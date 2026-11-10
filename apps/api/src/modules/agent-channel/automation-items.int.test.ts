@@ -3,10 +3,10 @@ import {
   AgentAutomationItemEvent,
   AgentChannelEventTypes,
   AgentChannelWorkSessionStartResponse,
+  AUTOMATION_ITEM_ATTEMPTS_MAX,
   automationItemSentence,
   type BotWorkZoneProfileInput,
   BUILTIN_TOOLS,
-  FAN_OUT_LIMITS,
   WORK_SESSION_TOOL_NAMES,
 } from "@ocw/contracts";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -1026,7 +1026,7 @@ describe("the per-order journey: Work Zone session, card moves, wake and team me
     await s.su.query("update app.work_sessions set status = 'running' where id = $1", [workSessionId]);
     await s.su.query("update app.automation_conversations set attempt = $2 where id = $1", [
       item43,
-      FAN_OUT_LIMITS.itemAttemptsMax,
+      AUTOMATION_ITEM_ATTEMPTS_MAX,
     ]);
     const last = await startFrom(again[1]?.eventId as string, "Prepare the shipment for order 3043");
     expect(AgentChannelWorkSessionStartResponse.parse(last.body)).toMatchObject({
@@ -1035,7 +1035,7 @@ describe("the per-order journey: Work Zone session, card moves, wake and team me
     expect(await itemRow(item43)).toMatchObject({ status: "skipped", reason: "session_capacity" });
     expect((await auditsOf("automation.item_skipped", item43))[0]?.metadata).toMatchObject({
       reason: "session_capacity",
-      attempt: FAN_OUT_LIMITS.itemAttemptsMax,
+      attempt: AUTOMATION_ITEM_ATTEMPTS_MAX,
     });
   });
 

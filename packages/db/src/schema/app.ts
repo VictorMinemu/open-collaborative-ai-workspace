@@ -4543,7 +4543,7 @@ export const automationRuns = appSchema.table(
  * sent) → `delivered`, or `skipped` / `failed` with an `AutomationRunReason` code. 07.17 code review WR-02: `waiting`
  * (reason `session_capacity` or `agent_daily_limit`) is an item whose turn found no free Work Zone session or the bot at
  * its daily limit; it goes back to `queued` with `attempt + 1` (a new derived event id) when one of the bot's sessions
- * ends, or on the automation's next local day, at most `FAN_OUT_LIMITS.itemAttemptsMax` times.
+ * ends, or on the automation's next local day, at most `AUTOMATION_ITEM_ATTEMPTS_MAX` times.
  */
 export const automationConversations = appSchema.table(
   "automation_conversations",

@@ -304,7 +304,7 @@ documented behaviour below. The accepted text above stays as written; where it d
   `skipped`); the scheduler tick queues it again once its automation's local day has changed, at most `fan_out_per_day`
   per automation (`app.day_waiting_automation_items`, ids only). A queued-again item has `attempt + 1` and a new derived
   event id (`itemEventId(itemId, attempt)`, attempt 0 unchanged), so it is a new turn; after
-  `FAN_OUT_LIMITS.itemAttemptsMax` (5) it is skipped with its waiting reason. Audits `automation.item_waiting` and
+  `AUTOMATION_ITEM_ATTEMPTS_MAX` (5) it is skipped with its waiting reason. Audits `automation.item_waiting` and
   `automation.item_requeued` carry ids, the reason and the attempt only. The run history shows "N waiting". One
   additive migration (`20261110124940_automation_item_waiting`: the `attempt` column, a partial index, the status check
   widened by `waiting`).
