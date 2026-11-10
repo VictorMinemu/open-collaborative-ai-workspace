@@ -1110,7 +1110,6 @@ function EditorSkeleton() {
   );
 }
 
-/** `?draft=` (UI-SPEC § Copy › Editor banners, R5): whose proposal this is, and that saving closes it. */
 /**
  * Under runs a day (07.17, D-11, PD-19): when the turns this automation can use a day exceed the bot's daily limit, a
  * non-blocking amber note says so before saving. Saving stays possible; the limit still stops runs server-side.
@@ -1141,6 +1140,7 @@ export function DailyLimitWarning({
   );
 }
 
+/** `?draft=` (UI-SPEC § Copy › Editor banners, R5): whose proposal this is, and that saving closes it. */
 export function DraftBanner({ bot, conversation }: { bot: string; conversation: string }) {
   return (
     <p
