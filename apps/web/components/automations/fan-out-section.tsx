@@ -210,7 +210,12 @@ export function FanOutSection({
           </div>
           <p className="text-[13px] text-muted-foreground">
             Up to {FAN_OUT_LIMITS.perRunMax} per run and {FAN_OUT_LIMITS.perDayMax} a day. Items already
-            opened are skipped, never opened twice.
+            opened are skipped, never opened twice. Items already opened stay where they are if you change the
+            target.
+          </p>
+          <p className="text-[13px] text-muted-foreground" data-testid="automation-fan-out-dedicated">
+            Pick a channel or board just for these items: what the bot opens counts as outside content, so a
+            bot mentioned there starts with its safety limits on.
           </p>
           <p className="text-muted-foreground text-xs" data-testid="automation-fan-out-runs-thread">
             {name ? `Runs are listed in one “${name} · Runs” thread.` : "Runs are listed in one thread."}

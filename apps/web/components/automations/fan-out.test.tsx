@@ -120,6 +120,9 @@ describe("the For each new item section (PD-19)", () => {
     expect(t).toContain("At most per run");
     expect(t).toContain("At most per day");
     expect(t).toContain("Items already opened are skipped, never opened twice.");
+    // IN-06 / IN-07: what a target change keeps, and why a dedicated channel or board is the right target.
+    expect(t).toContain("Items already opened stay where they are if you change the target.");
+    expect(t).toContain("Pick a channel or board just for these items");
     expect(t).toContain("Runs are listed in one “Orders · Runs” thread.");
     // Every input is 44 px tall on phones.
     expect(html.match(/<input[^>]*max-md:h-11[^>]*>/g) ?? []).toHaveLength(2);
