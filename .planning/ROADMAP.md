@@ -1073,14 +1073,14 @@ or needs help.
   4. Integration tests (dedupe, caps, tenant isolation, team mention audience) and an e2e spec pass on desktop and mobile;
      ADR-0039 records the decisions
 
-**Plans:** 19 plans
+**Plans:** 3/19 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 07.17-01-PLAN.md — Wave 1: Contracts (`ocw_conversation_open` request/answer, fan-out and escalation settings, `agent.automation_item.v1`, `MessageMention` with `unit`, `unitHandle`, `team_mention`), the plugin mirror, and the phase hub (plan map, shared files, PD-01…PD-26)
-- [ ] 07.17-02-PLAN.md — Wave 1: The one migration (`automation_conversations`, fan-out columns, `org_units.handle` backfill, `notifications.unit_id`, caps 5 min / 288 in DB and code), RLS, the `automation.item` queue, upgrade proof
-- [ ] 07.17-03-PLAN.md — Wave 1: ADR-0039 (Accepted; supersedes the quoted ADR-0028/0022/0038 clauses), AGENTS.md row, COVERAGE.md
+- [x] 07.17-01-PLAN.md — Wave 1: Contracts (`ocw_conversation_open` request/answer, fan-out and escalation settings, `agent.automation_item.v1`, `MessageMention` with `unit`, `unitHandle`, `team_mention`), the plugin mirror, and the phase hub (plan map, shared files, PD-01…PD-26)
+- [x] 07.17-02-PLAN.md — Wave 1: The one migration (`automation_conversations`, fan-out columns, `org_units.handle` backfill, `notifications.unit_id`, caps 5 min / 288 in DB and code), RLS, the `automation.item` queue, upgrade proof
+- [x] 07.17-03-PLAN.md — Wave 1: ADR-0039 (Accepted; supersedes the quoted ADR-0028/0022/0038 clauses), AGENTS.md row, COVERAGE.md
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
