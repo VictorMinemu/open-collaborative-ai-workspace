@@ -578,6 +578,11 @@ export const AutomationRun = z.object({
   anchor: z.object({ conversationId: Id, messageId: Id, threadRootId: Id }).nullable(),
   /** 07.17 (D-10): conversations this fan-out run opened; null or absent = not a fan-out run. */
   opened: z.number().int().nonnegative().nullable().optional(),
+  /**
+   * 07.17 code review WR-02: of those, how many wait for a free Work Zone session or the bot's next day (queued again
+   * by the platform); null or absent = not a fan-out run.
+   */
+  waiting: z.number().int().nonnegative().nullable().optional(),
 });
 export type AutomationRun = z.infer<typeof AutomationRun>;
 

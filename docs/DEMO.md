@@ -1080,7 +1080,8 @@ Verifications). On `https://ocw.autofy.ing`, with the headless server and the te
    runtime and model. As an admin turn on **Act on outside content** and read its warning: the orders and documents the
    bot reads can steer what it runs; it only writes in the bot's own sessions and the cards its automation opened. Set
    **Sessions at once** to the number of orders you expect at the same time (up to 10): an order whose start is refused
-   for that limit is not retried automatically yet; the bot says so in the card and a person can ask again.
+   for that limit waits ("N waiting" in the run history) and gets a new turn when one of the bot's sessions ends, at
+   most 5 times. An idle session still counts, so the bot should stop each session when its order is done.
 3. **The daily limit.** Bots › the bot › Capabilities › **Daily limit**: above the editor's number (every 10 minutes is
    144 run turns a day, plus one turn per order and the session's wake-ups).
 4. **The automation.** Bots › Automations › New automation: the team bot, **Every few minutes** › every 10 minutes,

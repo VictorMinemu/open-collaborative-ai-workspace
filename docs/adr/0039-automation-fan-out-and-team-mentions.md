@@ -295,3 +295,16 @@ documented behaviour below. The accepted text above stays as written; where it d
 - **WR-01, § 6 and § 13 (an item whose delivery keeps failing).** A delivery that fails for a reason that is not a
   refusal is retried by the queue; its last attempt marks the item `failed` with `delivery_failed` and audits
   `automation.item_skipped` with result `error` (ids and the reason only).
+- **WR-02, § 5, § 6 and Consequences (items refused for capacity).** Replaces "There is no retry queue" and removes "a
+  retry queue for items refused `too_many_sessions`" from Out of scope. An item whose own turn's Work Zone start
+  answers `too_many_sessions` waits (`automation_conversations.status = 'waiting'`, reason `session_capacity`); when one
+  of the bot's sessions leaves the active states, the `work_session.bot_sync` handler queues again as many of the bot's
+  waiting items as it has free sessions, oldest first (`FOR UPDATE SKIP LOCKED`, active automations only). An item whose
+  turn finds the bot at its daily limit waits too (reason `agent_daily_limit`, the limit notice as before, no longer
+  `skipped`); the scheduler tick queues it again once its automation's local day has changed, at most `fan_out_per_day`
+  per automation (`app.day_waiting_automation_items`, ids only). A queued-again item has `attempt + 1` and a new derived
+  event id (`itemEventId(itemId, attempt)`, attempt 0 unchanged), so it is a new turn; after
+  `FAN_OUT_LIMITS.itemAttemptsMax` (5) it is skipped with its waiting reason. Audits `automation.item_waiting` and
+  `automation.item_requeued` carry ids, the reason and the attempt only. The run history shows "N waiting". One
+  additive migration (`20261110124940_automation_item_waiting`: the `attempt` column, a partial index, the status check
+  widened by `waiting`).

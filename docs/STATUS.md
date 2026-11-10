@@ -179,6 +179,6 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   posts is a `{ kind: "unit" }` mention decided by `unit.read`, notifying the active members of the subtree who can
   read the conversation (`team_mention`, 200 a message), never waking a bot; bots resolve at most 3 teams a message.
   An automation names up to 5 people or teams its bot mentions when it finishes or needs help. Audit carries ids and
-  counts only. Limits: fan-out only from schedules; items past the bot's "Sessions at once" are not retried
-  automatically; handles cannot be edited; fan-out needs the matching cell image (ADR-0039,
-  docs/self-hosting/automations.md).
+  counts only. Limits: fan-out only from schedules; items past the bot's "Sessions at once" wait and are queued
+  again when one of its sessions ends (at the daily limit: the next day), at most 5 times (code review WR-02); handles
+  cannot be edited; fan-out needs the matching cell image (ADR-0039, docs/self-hosting/automations.md).

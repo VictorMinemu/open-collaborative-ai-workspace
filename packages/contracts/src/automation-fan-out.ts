@@ -26,7 +26,20 @@ export const FAN_OUT_LIMITS = {
   bodyMax: 4000,
   /** People and teams one automation may mention. */
   escalationMax: 5,
+  /**
+   * 07.17 code review WR-02: how many times one opened item is queued again after it waited for a free Work Zone
+   * session or for the bot's next day; past it, the item is skipped with its waiting reason.
+   */
+  itemAttemptsMax: 5,
 } as const;
+
+/**
+ * 07.17 code review WR-02: why an opened item waits (`automation_conversations.status = 'waiting'`). `session_capacity`:
+ * its turn's Work Zone start answered `too_many_sessions`; it is queued again when one of the bot's sessions ends.
+ * `agent_daily_limit`: the bot was at its daily turn limit; it is queued again on the automation's next local day.
+ */
+export const AutomationItemWaitReason = z.enum(["session_capacity", "agent_daily_limit"]);
+export type AutomationItemWaitReason = z.infer<typeof AutomationItemWaitReason>;
 
 // ---------------------------------------------------------------- settings (D-02, PD-05)
 

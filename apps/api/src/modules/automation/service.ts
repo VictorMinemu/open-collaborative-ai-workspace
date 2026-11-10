@@ -1029,9 +1029,15 @@ export function createAutomationService(
       const shown = rows.slice(0, page);
       // 07.17 (D-10): how many conversations each fan-out run opened, one grouped read over the page (null otherwise).
       const opened = new Map<string, number>();
+      // WR-02: of those, the items waiting for a free session or the bot's next day.
+      const waiting = new Map<string, number>();
       if (row.fanOutEnabled && shown.length > 0) {
         const counts = await tx
-          .select({ runId: automationConversations.runId, n: count() })
+          .select({
+            runId: automationConversations.runId,
+            n: count(),
+            waiting: sql<number>`count(*) filter (where ${automationConversations.status} = 'waiting')`,
+          })
           .from(automationConversations)
           .where(
             inArray(
@@ -1040,7 +1046,10 @@ export function createAutomationService(
             ),
           )
           .groupBy(automationConversations.runId);
-        for (const c of counts) opened.set(c.runId, Number(c.n));
+        for (const c of counts) {
+          opened.set(c.runId, Number(c.n));
+          waiting.set(c.runId, Number(c.waiting));
+        }
       }
       return {
         runs: shown.map(
@@ -1054,6 +1063,7 @@ export function createAutomationService(
             answeredAt: iso(run.answeredAt),
             tainted: run.tainted,
             opened: row.fanOutEnabled ? (opened.get(run.id) ?? 0) : null,
+            waiting: row.fanOutEnabled ? (waiting.get(run.id) ?? 0) : null,
             anchor:
               run.anchorMessageId && anchorConversationId
                 ? {

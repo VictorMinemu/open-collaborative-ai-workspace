@@ -14,6 +14,7 @@ import type {
 } from "./actions";
 import { decideFire, localDayStart, outcomeOf, recordOutcome } from "./budget";
 import { escalationFor } from "./escalation";
+import { requeueDayWaitingItem } from "./fan-out";
 import { inboundDelivery } from "./inbound";
 import { missedPolicy, nextRunAfter } from "./schedule";
 import { isRefusal, postAnchor, reasonSentence, refusalReason, runCardFields, runPeople } from "./targets";
@@ -240,6 +241,21 @@ export async function tickOnce(core: Core, now: Date = new Date()): Promise<Tick
       core.log.warn(
         { automationId: row.id, err: { name: (err as Error)?.name, message: (err as Error)?.message } },
         "automation tick failed",
+      );
+    }
+  }
+  // 07.17 code review WR-02: items that waited for the bot's daily limit, once their automation's day has changed.
+  const waiting = await core.db.pool.query<{ id: string; organization_id: string }>(
+    "select id, organization_id from app.day_waiting_automation_items($1, $2)",
+    [TICK_BATCH, now.toISOString()],
+  );
+  for (const row of waiting.rows) {
+    try {
+      await requeueDayWaitingItem(core, row.organization_id, row.id, now);
+    } catch (err) {
+      core.log.warn(
+        { itemId: row.id, err: { name: (err as Error)?.name, message: (err as Error)?.message } },
+        "automation item re-queue failed",
       );
     }
   }

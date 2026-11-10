@@ -21,6 +21,7 @@ import {
   deliverAutomationItem,
   lockRunAndAutomation,
   markRunAnswered,
+  requeueAutomationItem,
   skipAutomationItem,
   updatePlatformCardNotified,
 } from "../agent-channel";
@@ -322,10 +323,13 @@ const ITEM_CONCURRENCY = 3;
 /**
  * Phase 07.17 (D-04, PD-09; E11): the event id of an opened item's own turn, derived from the item (a UUID of version 8,
  * RFC 9562 custom, from SHA-256: the 07.16 wake construction), so a retried or concurrent job can never deliver a second
- * turn (`agent_turns.event_id` is the turn's key).
+ * turn (`agent_turns.event_id` is the turn's key). 07.17 code review WR-02: an item queued again after waiting is a new
+ * turn, so each later attempt has its own id (`attempt` 0 keeps the first construction).
  */
-export function itemEventId(itemId: string): string {
-  const h = createHash("sha256").update(`automation_item:${itemId}`).digest();
+export function itemEventId(itemId: string, attempt = 0): string {
+  const h = createHash("sha256")
+    .update(attempt === 0 ? `automation_item:${itemId}` : `automation_item:${itemId}:${attempt}`)
+    .digest();
   h[6] = ((h[6] ?? 0) & 0x0f) | 0x80;
   h[8] = ((h[8] ?? 0) & 0x3f) | 0x80;
   const x = h.subarray(0, 16).toString("hex");
@@ -351,7 +355,11 @@ export async function deliverItemJob(
   const { organizationId, itemId } = data;
   const head = await core.db.withTenant({ organizationId }, async (tx) => {
     const [r] = await tx
-      .select({ status: automationConversations.status, runAs: automations.runAsUserId })
+      .select({
+        status: automationConversations.status,
+        attempt: automationConversations.attempt,
+        runAs: automations.runAsUserId,
+      })
       .from(automationConversations)
       .innerJoin(automations, eq(automations.id, automationConversations.automationId))
       .where(eq(automationConversations.id, itemId))
@@ -371,7 +379,7 @@ export async function deliverItemJob(
           // D-08, PD-15: whom the bot names when done or stuck, re-validated at this delivery.
           escalationFor: (t, a) => escalationFor(t, { core, perms: deps.perms }, a),
         },
-        { itemId, eventId: itemEventId(itemId) },
+        { itemId, eventId: itemEventId(itemId, head.attempt), attempt: head.attempt },
       ),
     );
   } catch (err) {
@@ -391,6 +399,45 @@ export async function deliverItemJob(
       skipAutomationItem(tx, core, itemId, refusalReason(err)),
     );
   }
+}
+
+/**
+ * 07.17 code review WR-02, from the scheduler tick: an item that waited for the bot's daily limit (`agent_daily_limit`)
+ * is queued again once its automation's local day has changed (`app.day_waiting_automation_items` gives ids only,
+ * bounded per automation by `fan_out_per_day`). Re-checked under the row's lock in the item's organization, of an
+ * active automation only. Returns whether it was queued again.
+ */
+export async function requeueDayWaitingItem(
+  core: Core,
+  organizationId: string,
+  itemId: string,
+  now: Date,
+): Promise<boolean> {
+  return core.db.withTenant({ organizationId, userId: null }, async (tx) => {
+    const [row] = await tx
+      .select({
+        status: automationConversations.status,
+        reason: automationConversations.reason,
+        updatedAt: automationConversations.updatedAt,
+        automationStatus: automations.status,
+        timeZone: automations.timeZone,
+      })
+      .from(automationConversations)
+      .innerJoin(automations, eq(automations.id, automationConversations.automationId))
+      .where(eq(automationConversations.id, itemId))
+      .limit(1)
+      .for("update", { of: automationConversations });
+    if (
+      row?.status !== "waiting" ||
+      row.reason !== "agent_daily_limit" ||
+      row.automationStatus !== "active"
+    ) {
+      return false;
+    }
+    if (new Date(row.updatedAt).getTime() >= localDayStart(now, row.timeZone ?? "UTC").getTime())
+      return false;
+    return requeueAutomationItem(tx, core, itemId);
+  });
 }
 
 /**

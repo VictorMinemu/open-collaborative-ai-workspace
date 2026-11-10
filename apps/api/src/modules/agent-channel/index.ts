@@ -79,7 +79,11 @@ export {
   type DeliverAutomationItemInput,
   type DeliverAutomationItemResult,
   deliverAutomationItem,
+  requeueAfterSession,
+  requeueAutomationItem,
   skipAutomationItem,
+  waitAutomationItem,
+  waitItemForTurn,
 } from "./automation-items";
 export {
   type DeliverAutomationRunInput,

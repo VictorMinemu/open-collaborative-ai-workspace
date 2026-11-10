@@ -30,6 +30,7 @@ import {
   type WorkZoneProposalService,
 } from "../work-session";
 import { type CellPrincipal, cellOf } from "./auth";
+import { waitItemForTurn } from "./automation-items";
 import { type AgentTurnRow, auditUnknownTurn, cellAuditBase, claimToolCall, liveTurn } from "./claim";
 import { conversationAudience } from "./memory-files";
 
@@ -394,7 +395,7 @@ export function registerBotWorkSessionRoutes(
 
           const readers = await conversationAudience(tx, turn);
           const judged = await judgedConversationId(tx, turn.conversationId);
-          return workSession.bots.start(tx, {
+          const answer = await workSession.bots.start(tx, {
             turn,
             profile,
             status,
@@ -403,6 +404,12 @@ export function registerBotWorkSessionRoutes(
             isReadable: (userId) => access.isReadable(tx, userId, judged, { kinds: READABLE_KINDS }),
             auditBase: cellAuditBase(cell),
           });
+          // 07.17 code review WR-02: an opened item's own turn found every session of the bot busy, so the item waits
+          // and is queued again when one of them ends (`requeueAfterSession`, from `work_session.bot_sync`).
+          if (answer.kind === "refused" && answer.code === "too_many_sessions") {
+            await waitItemForTurn(tx, core, turn.eventId);
+          }
+          return answer;
         },
       );
       if (out === UNKNOWN) throw notFound(UNKNOWN_TURN, "unknown_turn");

@@ -538,4 +538,26 @@ describe("run history: what each fan-out run opened", () => {
     const chip = /<span[^>]*data-testid="run-opened"[^>]*>/.exec(html)?.[0] ?? "";
     expect(chip).toContain("bg-secondary");
   });
+
+  it("WR-02: a run with items waiting for a free session says how many; none waiting shows nothing", async () => {
+    const { RunHistory } = await import("./run-history");
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    qc.setQueryData(["me"], { user: { id: uid(1), name: "Cam Ortega" }, organization: { id: AID } });
+    qc.setQueryData(automationKeys.runs(AID), {
+      pages: [
+        {
+          runs: [{ ...run(1, 3), waiting: 2 }, { ...run(2, 1), waiting: 0 }, run(3, null)],
+          nextCursor: null,
+        },
+      ],
+      pageParams: [null],
+    });
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={qc}>
+        <RunHistory automation={automation} highlight={null} />
+      </QueryClientProvider>,
+    );
+    const chips = [...html.matchAll(/data-testid="run-waiting"[^>]*>([^<]*)</g)].map((m) => m[1]);
+    expect(chips).toEqual(["2 waiting"]);
+  });
 });

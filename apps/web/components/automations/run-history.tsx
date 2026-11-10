@@ -185,6 +185,16 @@ function RunRow({
             {fanOutLabel(run.opened)}
           </Badge>
         ) : null}
+        {/* 07.17 code review WR-02: items waiting for a free Work Zone session or the bot's next day. */}
+        {typeof run.waiting === "number" && run.waiting > 0 ? (
+          <Badge
+            variant="outline"
+            data-testid="run-waiting"
+            title="Started again when one of the bot's sessions ends, or on its next day"
+          >
+            {run.waiting} waiting
+          </Badge>
+        ) : null}
       </p>
       <p className="flex items-center gap-1.5 text-xs [grid-area:result]" data-testid="run-result">
         <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", RESULT_TONE[result.tone].dot)} />

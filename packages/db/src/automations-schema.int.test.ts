@@ -642,6 +642,8 @@ describe("ids-only SECURITY DEFINER functions (07.6-02, D-07, P-10)", () => {
     "app.due_watched_records(integer, timestamptz)",
     "app.lookup_webhook_endpoint(text)",
     "app.expired_automation_events(integer, timestamptz)",
+    // 07.17 code review WR-02: opened items waiting for the bot's next day.
+    "app.day_waiting_automation_items(integer, timestamptz)",
   ] as const;
 
   let C: Org;

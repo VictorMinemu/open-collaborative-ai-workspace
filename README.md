@@ -217,9 +217,11 @@ MVP 1 is for testing with your team, not yet for production-critical work:
 - **Headless Work Zone server:** no Windows service and no container image.
 - **Bots in the Work Zone:** bots never approve runtime requests; people do. A `people` audience is a snapshot of the
   conversation when the session starts.
-- **Automation fan-out:** only from schedules (webhooks and mail keep one item per event). Items past the bot's
-  Work Zone limit ("Sessions at once") are not retried automatically yet: set it to the orders you expect at once.
-  Fan-out needs the matching cell image. A team's `@handle` cannot be edited yet.
+- **Automation fan-out:** only from schedules (webhooks and mail keep one item per event). An item past the bot's
+  Work Zone limit ("Sessions at once") waits and starts again when one of the bot's sessions ends, and one refused at
+  the bot's daily limit starts again the next day, each at most 5 times; a session that stays open (idle) still holds
+  its place, so the bot should stop sessions it is done with. Fan-out needs the matching cell image. A team's
+  `@handle` cannot be edited yet.
 - **Not yet proven against real services by the maintainers:**
   - an install on a clean machine;
   - real mailbox and ERP automations, and fan-out from a real orders MCP;

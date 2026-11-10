@@ -4540,7 +4540,10 @@ export const automationRuns = appSchema.table(
  * (automation, sha256 hex of the item's external key): a key opened once is never opened again by that automation, even
  * after its root is deleted (`root_message_id` then reads NULL and the row stays). Ids and the key hash only: never the
  * key in clear, a title or a body. `status` follows the item's own bot turn (`agent_event_id`): `queued` (posted, job
- * sent) → `delivered`, or `skipped` / `failed` with an `AutomationRunReason` code.
+ * sent) → `delivered`, or `skipped` / `failed` with an `AutomationRunReason` code. 07.17 code review WR-02: `waiting`
+ * (reason `session_capacity` or `agent_daily_limit`) is an item whose turn found no free Work Zone session or the bot at
+ * its daily limit; it goes back to `queued` with `attempt + 1` (a new derived event id) when one of the bot's sessions
+ * ends, or on the automation's next local day, at most `FAN_OUT_LIMITS.itemAttemptsMax` times.
  */
 export const automationConversations = appSchema.table(
   "automation_conversations",
@@ -4557,12 +4560,14 @@ export const automationConversations = appSchema.table(
      * ("root_message_id")`, hand-narrowed in the migration so `conversation_id` is never cleared).
      */
     rootMessageId: uuid("root_message_id"),
-    status: text("status", { enum: ["queued", "delivered", "skipped", "failed"] })
+    status: text("status", { enum: ["queued", "delivered", "waiting", "skipped", "failed"] })
       .notNull()
       .default("queued"),
     reason: text("reason"),
     /** The `agent.automation_item.v1` event id of the item's own turn. */
     agentEventId: uuid("agent_event_id"),
+    /** WR-02: how many times the item was queued again after waiting (0 = its first turn); part of its event id. */
+    attempt: smallint("attempt").notNull().default(0),
     createdAt: createdAt(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
@@ -4593,8 +4598,9 @@ export const automationConversations = appSchema.table(
     check("automation_conversations_hash_check", sql`${t.externalKeyHash} ~ '^[0-9a-f]{64}$'`),
     check(
       "automation_conversations_status_check",
-      sql`${t.status} in ('queued','delivered','skipped','failed')`,
+      sql`${t.status} in ('queued','delivered','waiting','skipped','failed')`,
     ),
+    check("automation_conversations_attempt_check", sql`${t.attempt} between 0 and 100`),
     check(
       "automation_conversations_reason_len_check",
       sql`${t.reason} is null or char_length(${t.reason}) <= 64`,
@@ -4604,6 +4610,10 @@ export const automationConversations = appSchema.table(
     index("automation_conversations_run_idx").on(t.runId),
     /** Inbound replies and the board exemption find an opened root by its message id. */
     index("automation_conversations_root_idx").on(t.rootMessageId).where(sql`root_message_id is not null`),
+    /** WR-02: the waiting items, oldest first (a session ended, or the automation's next local day). */
+    index("automation_conversations_waiting_idx")
+      .on(t.automationId, t.updatedAt)
+      .where(sql`status = 'waiting'`),
   ],
 );
 

@@ -2,6 +2,7 @@ import {
   type AgentAutomationItemEvent,
   AgentChannelEventTypes,
   AUTOMATION_LIMITS,
+  type AutomationItemWaitReason,
   type AutomationRunReason,
   automationItemSentence,
   cellTopic,
@@ -14,19 +15,22 @@ import {
   automationConversations,
   automations,
   boardCards,
+  botWorkSessions,
   conversationMembers,
   conversations,
   messages,
   type Tx,
   tenantOf,
+  workSessions,
 } from "@ocw/db";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, count, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { AgentMention } from "../../lib/chat-agent-bridge";
 import { findAgent } from "../agent";
 import { createConversationAccess } from "../chat";
 import type { MemoryService } from "../memory";
 import { memberDirectory, type PermissionService } from "../organization";
+import { ACTIVE_STATES, loadBotProfile } from "../work-session";
 import { buildMentionEvents } from "./mentions";
 
 /**
@@ -75,8 +79,13 @@ export interface DeliverAutomationItemDeps {
 
 export interface DeliverAutomationItemInput {
   itemId: string;
-  /** The item turn's event id (`itemEventId(itemId)`, derived, so a retry can never make a second turn). */
+  /**
+   * The item turn's event id (`itemEventId(itemId, attempt)`, derived, so a retry can never make a second turn; a new
+   * attempt after waiting gets a new one, WR-02).
+   */
   eventId: string;
+  /** WR-02: the attempt the job was sent for; a row at another attempt (a newer job exists) is left as it is. */
+  attempt?: number;
 }
 
 export type DeliverAutomationItemResult =
@@ -100,7 +109,7 @@ export async function skipAutomationItem(
   tx: Tx,
   core: Core,
   itemId: string,
-  reason: AutomationRunReason,
+  reason: AutomationRunReason | AutomationItemWaitReason,
   /**
    * 07.17 code review WR-01: `failed` when the delivery's last attempt failed for a reason that is not a refusal (a
    * deadlock, a dropped connection), audited with result `error`; `skipped` (result `denied`) otherwise.
@@ -134,6 +143,165 @@ export async function skipAutomationItem(
 }
 
 /**
+ * 07.17 code review WR-02: an item whose turn found no free Work Zone session (`session_capacity`, from `delivered`) or
+ * the bot at its daily limit (`agent_daily_limit`, from `queued`) waits, in the caller's transaction: `waiting` with
+ * its reason and one `automation.item_waiting` audit (ids, the reason and the attempt only). An item already queued
+ * again `FAN_OUT_LIMITS.itemAttemptsMax` times is skipped with that reason instead (`automation.item_skipped`, the
+ * same ids, the reason and the attempt). A row
+ * that is not in `from` any more is left as it is. Returns what it became.
+ */
+export async function waitAutomationItem(
+  tx: Tx,
+  core: Core,
+  p: { itemId: string; reason: AutomationItemWaitReason; from: "queued" | "delivered" },
+): Promise<"waiting" | "skipped" | null> {
+  const [row] = await tx
+    .select({ id: automationConversations.id, attempt: automationConversations.attempt })
+    .from(automationConversations)
+    .where(and(eq(automationConversations.id, p.itemId), eq(automationConversations.status, p.from)))
+    .limit(1)
+    .for("update");
+  if (!row) return null;
+  const exhausted = row.attempt >= FAN_OUT_LIMITS.itemAttemptsMax;
+  const [updated] = await tx
+    .update(automationConversations)
+    .set({ status: exhausted ? "skipped" : "waiting", reason: p.reason, updatedAt: sql`now()` })
+    .where(eq(automationConversations.id, row.id))
+    .returning({
+      id: automationConversations.id,
+      automationId: automationConversations.automationId,
+      runId: automationConversations.runId,
+    });
+  if (!updated) return null;
+  await auditItem(tx, core, exhausted ? "automation.item_skipped" : "automation.item_waiting", updated, {
+    reason: p.reason,
+    attempt: row.attempt,
+  });
+  return exhausted ? "skipped" : "waiting";
+}
+
+/** Ids, the reason and the attempt only (P1): never a title, a text or a key. */
+async function auditItem(
+  tx: Tx,
+  core: Core,
+  action: "automation.item_waiting" | "automation.item_requeued" | "automation.item_skipped",
+  row: { id: string; automationId: string; runId: string },
+  extra: { reason: AutomationItemWaitReason; attempt: number },
+): Promise<void> {
+  const [a] = await tx
+    .select({ agentId: automations.agentId, runAsUserId: automations.runAsUserId })
+    .from(automations)
+    .where(eq(automations.id, row.automationId))
+    .limit(1);
+  await core.audit.record(tx, {
+    action,
+    resourceType: "automation_item",
+    resourceId: row.id,
+    actorKind: "system",
+    ...(a ? { agentId: a.agentId, userId: a.runAsUserId } : {}),
+    metadata: { automationId: row.automationId, runId: row.runId, itemId: row.id, ...extra },
+  });
+}
+
+/**
+ * WR-02: the Work Zone start of an item's own turn answered `too_many_sessions`, so the item waits for a free session
+ * (in the start's transaction). Any other turn (a run, a wake, a person's mention, an earlier attempt) is not an item
+ * turn and changes nothing.
+ */
+export async function waitItemForTurn(tx: Tx, core: Core, eventId: string): Promise<void> {
+  const [row] = await tx
+    .select({ id: automationConversations.id })
+    .from(automationConversations)
+    .where(
+      and(eq(automationConversations.agentEventId, eventId), eq(automationConversations.status, "delivered")),
+    )
+    .limit(1);
+  if (row)
+    await waitAutomationItem(tx, core, { itemId: row.id, reason: "session_capacity", from: "delivered" });
+}
+
+/**
+ * WR-02: one waiting item back to `queued` (already locked by the caller), with `attempt + 1`, so its job derives a new
+ * event id and delivers a new turn; one ids-only `automation.item` job and one `automation.item_requeued` audit.
+ */
+export async function requeueAutomationItem(tx: Tx, core: Core, itemId: string): Promise<boolean> {
+  const [waiting] = await tx
+    .select({ reason: automationConversations.reason })
+    .from(automationConversations)
+    .where(and(eq(automationConversations.id, itemId), eq(automationConversations.status, "waiting")))
+    .limit(1);
+  if (!waiting) return false;
+  const [row] = await tx
+    .update(automationConversations)
+    .set({
+      status: "queued",
+      reason: null,
+      attempt: sql`${automationConversations.attempt} + 1`,
+      updatedAt: sql`now()`,
+    })
+    .where(and(eq(automationConversations.id, itemId), eq(automationConversations.status, "waiting")))
+    .returning({
+      id: automationConversations.id,
+      automationId: automationConversations.automationId,
+      runId: automationConversations.runId,
+      organizationId: automationConversations.organizationId,
+      attempt: automationConversations.attempt,
+    });
+  if (!row) return false;
+  await auditItem(tx, core, "automation.item_requeued", row, {
+    reason: waiting.reason === "agent_daily_limit" ? "agent_daily_limit" : "session_capacity",
+    attempt: row.attempt,
+  });
+  // Ids only (P1), as when it was opened.
+  await core.jobs.sendInTx(tx, "automation.item", { organizationId: row.organizationId, itemId: row.id });
+  return true;
+}
+
+/**
+ * WR-02, from the `work_session.bot_sync` handler (user-less): one of the bot's sessions left the active states, so as
+ * many of its `session_capacity` items as it now has free sessions (`maxConcurrent` of its profile minus its active
+ * sessions) go back to the queue, oldest first, of active automations only (`FOR UPDATE SKIP LOCKED`: two endings at
+ * once queue two different items). A bot without a profile queues nothing (its item turns could not start one).
+ * Returns how many were queued again.
+ */
+export async function requeueAfterSession(tx: Tx, core: Core, workSessionId: string): Promise<number> {
+  const [bot] = await tx
+    .select({ agentId: botWorkSessions.agentId, status: workSessions.status })
+    .from(botWorkSessions)
+    .innerJoin(workSessions, eq(workSessions.id, botWorkSessions.workSessionId))
+    .where(eq(botWorkSessions.workSessionId, workSessionId))
+    .limit(1);
+  if (!bot || ACTIVE_STATES.includes(bot.status)) return 0;
+  const profile = await loadBotProfile(tx, bot.agentId);
+  if (!profile) return 0;
+  const [active] = await tx
+    .select({ n: count() })
+    .from(workSessions)
+    .where(
+      and(
+        isNotNull(workSessions.startedByAgentId),
+        eq(workSessions.startedByAgentId, bot.agentId),
+        inArray(workSessions.status, ACTIVE_STATES),
+      ),
+    );
+  const free = profile.maxConcurrent - Number(active?.n ?? 0);
+  if (free <= 0) return 0;
+  const res = await tx.execute(sql`
+    select c.id from app.automation_conversations c
+    join app.automations a on a.organization_id = c.organization_id and a.id = c.automation_id
+    where c.status = 'waiting' and c.reason = 'session_capacity' and a.agent_id = ${bot.agentId}::uuid
+      and a.status = 'active'
+    order by c.updated_at, c.id
+    limit ${free}
+    for update of c skip locked`);
+  let queued = 0;
+  for (const r of res.rows as Array<{ id: string }>) {
+    if (await requeueAutomationItem(tx, core, r.id)) queued += 1;
+  }
+  return queued;
+}
+
+/**
  * Delivers one queued item to the cell, inside the caller's transaction as the automation's run-as person (module
  * doc). Returns what happened, for the worker and the tests; a skip is already recorded when it returns.
  */
@@ -156,6 +324,8 @@ export async function deliverAutomationItem(
       ? { delivered: true, eventId: item.agentEventId }
       : { delivered: false };
   }
+  // WR-02: a job of an earlier attempt (the item waited and was queued again since) leaves it to the newer job.
+  if (p.attempt !== undefined && item.attempt !== p.attempt) return { delivered: false };
   const skip = async (reason: AutomationRunReason): Promise<DeliverAutomationItemResult> => {
     await skipAutomationItem(tx, core, item.id, reason);
     return { delivered: false, reason };
@@ -244,8 +414,12 @@ export async function deliverAutomationItem(
   });
   const [ev] = events;
   // The bot is live and a member and the person reads here (checked above): no event means the daily limit (turnPolicy
-  // refused to meter, D-11; the limit notice follows in the item's thread like for a mention).
-  if (!ev) return skip("agent_daily_limit");
+  // refused to meter, D-11; the limit notice follows in the item's thread like for a mention). WR-02: the item waits
+  // for the automation's next local day (the scheduler tick queues it again), bounded by its attempts.
+  if (!ev) {
+    await waitAutomationItem(tx, core, { itemId: item.id, reason: "agent_daily_limit", from: "queued" });
+    return { delivered: false, reason: "agent_daily_limit" };
+  }
 
   const escalation = deps.escalationFor ? await deps.escalationFor(tx, a) : [];
   const [updated] = await tx

@@ -6,6 +6,7 @@ import {
   automationItemSentence,
   type BotWorkZoneProfileInput,
   BUILTIN_TOOLS,
+  FAN_OUT_LIMITS,
   WORK_SESSION_TOOL_NAMES,
 } from "@ocw/contracts";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -28,6 +29,7 @@ import {
   pairDevice,
 } from "../../testing-workzone";
 import { itemEventId } from "../automation";
+import { tickOnce } from "../automation/runner";
 
 /**
  * 07.17-17 (AFO-02, AFO-03, AFO-05; D-04, D-06, D-07, D-09, D-12; PD-09, PD-10, PD-11; E8, E11, E12): every item a
@@ -573,12 +575,29 @@ describe("skips with their reasons (E12, PD-09; T-07.17-17-05)", () => {
     await expectSkipped(o, "target_not_postable");
   });
 
-  it("Atlas at its daily limit → skipped agent_daily_limit, with the limit notice in the card's thread", async () => {
+  it("WR-02: Atlas at its daily limit → the item waits (agent_daily_limit), with the limit notice; the next local day's tick queues it again as a new turn", async () => {
     const o = await openedQueued("5006");
     // The run turn counted today's first turn; the limit is now reached.
     await s.su.query("update app.agent_usage_daily set turns = 100000 where agent_id = $1", [atlas.id]);
     try {
-      await expectSkipped(o, "agent_daily_limit");
+      expect(await drainItems()).toBe(1);
+      expect(await itemRow(o.itemId)).toMatchObject({
+        status: "waiting",
+        reason: "agent_daily_limit",
+        attempt: 0,
+        agent_event_id: null,
+      });
+      expect(await itemEvents(o.itemId)).toEqual([]);
+      expect(await auditsOf("automation.item_skipped", o.itemId)).toEqual([]);
+      const waited = await auditsOf("automation.item_waiting", o.itemId);
+      expect(waited).toHaveLength(1);
+      expect(waited[0]?.metadata).toEqual({
+        automationId: o.automationId,
+        runId: o.runId,
+        itemId: o.itemId,
+        reason: "agent_daily_limit",
+        attempt: 0,
+      });
       const limited = (
         await s.su.query(
           "select user_id, metadata from app.audit_events where action = 'agent.limit_reached' and agent_id = $1",
@@ -597,9 +616,37 @@ describe("skips with their reasons (E12, PD-09; T-07.17-17-05)", () => {
         return r;
       });
       expect(notice).toEqual({ author_kind: "agent", author_id: atlas.id, thread_id: o.root });
+
+      // Still the same local day: the tick leaves it waiting.
+      await tickOnce(core(), new Date());
+      expect((await itemRow(o.itemId)).status).toBe("waiting");
     } finally {
       await s.su.query("delete from app.agent_usage_daily where agent_id = $1", [atlas.id]);
     }
+
+    // The automation's next local day: the tick queues it again (attempt 1), and its job delivers a new turn.
+    await s.su.query(
+      "update app.automation_conversations set updated_at = now() - interval '2 days' where id = $1",
+      [o.itemId],
+    );
+    await tickOnce(core(), new Date());
+    expect(await itemRow(o.itemId)).toMatchObject({ status: "queued", reason: null, attempt: 1 });
+    expect((await auditsOf("automation.item_requeued", o.itemId))[0]?.metadata).toEqual({
+      automationId: o.automationId,
+      runId: o.runId,
+      itemId: o.itemId,
+      reason: "agent_daily_limit",
+      attempt: 1,
+    });
+    expect(await drainItems()).toBe(1);
+    const events = await itemEvents(o.itemId);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.eventId).toBe(itemEventId(o.itemId, 1));
+    expect(events[0]?.eventId).not.toBe(itemEventId(o.itemId));
+    expect(await itemRow(o.itemId)).toMatchObject({
+      status: "delivered",
+      agent_event_id: itemEventId(o.itemId, 1),
+    });
   });
 });
 
@@ -829,6 +876,11 @@ describe("the per-order journey: Work Zone session, card moves, wake and team me
       code: "too_many_sessions",
     });
     expect((await cardRow(roots[1] as string)).column_id).toBe(columns.backlog);
+    // WR-02: 1043 waits for a free session (queued again when one ends).
+    expect(await itemRow(rows[1]?.id as string)).toMatchObject({
+      status: "waiting",
+      reason: "session_capacity",
+    });
 
     // The runtime finishes the turn: one wake, in the card's thread, as Víctor, tainted (the session took outside content).
     (server as FakeDevice).emitTurn(workSessionId, {
@@ -899,6 +951,92 @@ describe("the per-order journey: Work Zone session, card moves, wake and team me
       (await s.su.query("select count(*)::int as n from app.agent_turns where message_id = $1", [messageId]))
         .rows[0].n,
     ).toBe(0);
+  });
+
+  it("WR-02: an item whose start found no free session waits, and is queued again as a new turn when the bot's session ends", async () => {
+    // Items an earlier case left waiting would be queued first (oldest first): they are not this case's.
+    await s.su.query("update app.automation_conversations set status = 'skipped' where status = 'waiting'");
+    const { automationId, rows, events } = await openedAndDelivered(["3042", "3043"]);
+    const [ev42, ev43] = events as [Json, Json];
+    const item43 = rows[1]?.id as string;
+    const started = AgentChannelWorkSessionStartResponse.parse(
+      (await startFrom(ev42.eventId as string, "Prepare the shipment for order 3042")).body,
+    );
+    if (started.kind !== "started") throw new Error(`not started: ${JSON.stringify(started)}`);
+    const workSessionId = started.workSessionId;
+    await deviceTakes(workSessionId);
+
+    // 3043's start finds the only session busy: the bot hears why, and the item waits for a free one.
+    const refused = await startFrom(ev43.eventId as string, "Prepare the shipment for order 3043");
+    expect(AgentChannelWorkSessionStartResponse.parse(refused.body)).toMatchObject({
+      kind: "refused",
+      code: "too_many_sessions",
+    });
+    expect(await itemRow(item43)).toMatchObject({
+      status: "waiting",
+      reason: "session_capacity",
+      attempt: 0,
+      agent_event_id: ev43.eventId,
+    });
+    expect((await auditsOf("automation.item_waiting", item43))[0]?.metadata).toEqual({
+      automationId,
+      runId: rows[1]?.run_id,
+      itemId: item43,
+      reason: "session_capacity",
+      attempt: 0,
+    });
+    // The run history says so.
+    const history = (
+      await ok(s.victor.request("GET", `/api/v1/automations/${automationId}/runs`) as Promise<Res>)
+    ).runs as Json[];
+    expect(history[0]).toMatchObject({ opened: 2, waiting: 1 });
+
+    const sync = () =>
+      core().db.withTenant({ organizationId: s.orgA, userId: null }, (tx) =>
+        core().jobs.sendInTx(tx, WAKES, { organizationId: s.orgA, workSessionId }),
+      );
+    // A sync while the session still runs frees nothing.
+    await sync();
+    await core().jobs.drain(WAKES);
+    expect((await itemRow(item43)).status).toBe("waiting");
+
+    // The session ends: its sync queues 3043 again (attempt 1), and the item's job delivers a new turn for it.
+    await s.su.query("update app.work_sessions set status = 'completed' where id = $1", [workSessionId]);
+    await sync();
+    await core().jobs.drain(WAKES);
+    expect(await itemRow(item43)).toMatchObject({ status: "queued", reason: null, attempt: 1 });
+    expect((await auditsOf("automation.item_requeued", item43))[0]?.metadata).toMatchObject({
+      itemId: item43,
+      reason: "session_capacity",
+      attempt: 1,
+    });
+    expect(await drainItems()).toBe(1);
+    const again = await itemEvents(item43);
+    expect(again.map((e) => e.eventId)).toEqual([ev43.eventId, itemEventId(item43, 1)]);
+    expect(await itemRow(item43)).toMatchObject({
+      status: "delivered",
+      agent_event_id: itemEventId(item43, 1),
+    });
+    // A second sync of the same ending queues nothing more (the item is no longer waiting).
+    await sync();
+    await core().jobs.drain(WAKES);
+    expect(await drainItems()).toBe(0);
+
+    // Bounded: an item already queued again the maximum number of times is skipped instead of waiting once more.
+    await s.su.query("update app.work_sessions set status = 'running' where id = $1", [workSessionId]);
+    await s.su.query("update app.automation_conversations set attempt = $2 where id = $1", [
+      item43,
+      FAN_OUT_LIMITS.itemAttemptsMax,
+    ]);
+    const last = await startFrom(again[1]?.eventId as string, "Prepare the shipment for order 3043");
+    expect(AgentChannelWorkSessionStartResponse.parse(last.body)).toMatchObject({
+      code: "too_many_sessions",
+    });
+    expect(await itemRow(item43)).toMatchObject({ status: "skipped", reason: "session_capacity" });
+    expect((await auditsOf("automation.item_skipped", item43))[0]?.metadata).toMatchObject({
+      reason: "session_capacity",
+      attempt: FAN_OUT_LIMITS.itemAttemptsMax,
+    });
   });
 
   it("without the flag: the item turn's start becomes a Work Zone proposal and its move answers tainted", async () => {
