@@ -356,3 +356,102 @@ describe("team mentions on every channel write path (07.17 PD-13, D-17)", () => 
     expect(await storedMentions(chat.userMessage.id)).toEqual([]);
   });
 });
+
+describe("ADR-0027 holds: a team mention wakes no bot (07.17 P4, E17)", () => {
+  let relayId: string;
+  let relayChannel: string;
+
+  beforeAll(async () => {
+    const relay = await ok(
+      admin.request("POST", "/api/v1/agents", {
+        name: "Relay",
+        username: "relay",
+        instructions: "You are Relay.",
+        modelProvider: "mock",
+        modelId: "mock-1",
+      }),
+    );
+    relayId = relay.id;
+    await ok(admin.request("PATCH", `/api/v1/agents/${relayId}/capabilities`, { replyMode: "all" }));
+    relayChannel = (await ok(admin.request("POST", "/api/v1/channels", { name: "relay" }))).id;
+    await ok(ana.request("POST", `/api/v1/channels/${relayChannel}/join`, {}));
+    for (const id of [relayId, scoutId]) {
+      await ok(admin.request("POST", `/api/v1/channels/${relayChannel}/members`, { kind: "agent", id }));
+    }
+  });
+
+  const eventsFor = async (messageId: string) =>
+    (await cellEvents()).filter((e) => e.message.id === messageId);
+
+  it("a bot's @logistics creates no turn and no event for any bot", async () => {
+    for (const conversationId of [ordersId, relayChannel]) {
+      const id = await botPost(conversationId, "@logistics done", anaId);
+      expect(await storedMentions(id)).toEqual(ids("logistics"));
+      expect(await turnsFor(id)).toBe(0);
+      expect(await eventsFor(id)).toEqual([]);
+    }
+  });
+
+  it("a person's @logistics: no mention turn; a reply-mode bot answers as before, without the unit", async () => {
+    const msg = await say(ana, relayChannel, "@logistics can you check?");
+    expect(msg.mentions).toEqual(ids("logistics"));
+    const events = await eventsFor(msg.id);
+    // Only the reply-mode `all` bot, exactly as for a message that mentions nobody (D-12); Scout is not woken.
+    expect(events.map((e) => e.agent.id)).toEqual([relayId]);
+    expect(events[0]?.message.mentions).toEqual([]);
+    expect(await turnsFor(msg.id)).toBe(1);
+    // In #orders (no reply-mode bot) the same kind of text wakes nobody.
+    const quiet = await say(ana, ordersId, "@logistics and @it, any news?");
+    expect(await turnsFor(quiet.id)).toBe(0);
+    expect(await eventsFor(quiet.id)).toEqual([]);
+  });
+
+  it("organization B never resolves A's units, and A never resolves B's (tenant isolation)", async () => {
+    const [zed, zedId] = await joinAs("zed@example.test", "Zed", "standard");
+    const orgB = randomUUID();
+    await su.query("insert into auth.organization (id, name, slug) values ($1, $2, $3)", [
+      orgB,
+      "Other Org",
+      `other-${orgB}`,
+    ]);
+    await su.query("delete from auth.member where user_id = $1", [zedId]);
+    await su.query("delete from app.org_members where user_id = $1", [zedId]);
+    await su.query("insert into auth.member (organization_id, user_id, role) values ($1, $2, $3)", [
+      orgB,
+      zedId,
+      "owner",
+    ]);
+    await su.query(
+      "insert into app.org_members (organization_id, user_id, display_name, email, role) values ($1, $2, $3, $4, $5)",
+      [orgB, zedId, "Zed", "zed@example.test", "admin"],
+    );
+    await su.query("update auth.session set active_organization_id = $1 where user_id = $2", [orgB, zedId]);
+
+    const bField = await ok(
+      zed.request("POST", "/api/v1/units", { kind: "department", name: "Field", parentId: null }),
+    );
+    const bLogistics = await ok(
+      zed.request("POST", "/api/v1/units", { kind: "team", name: "Logistics", parentId: bField.id }),
+    );
+    expect(bLogistics.handle).toBe("logistics");
+    const bChannel = (await ok(zed.request("POST", "/api/v1/channels", { name: "orders" }))).id;
+    const inB = await say(zed, bChannel, "@logistics @ops @billing");
+    // B's own Logistics only: A's Ops and Billing do not exist in B's directory.
+    expect(inB.mentions).toEqual([{ kind: "unit", id: bLogistics.id }]);
+    expect(bLogistics.id).not.toBe(unit.logistics);
+
+    const inA = await say(ana, ordersId, "@logistics again");
+    expect(inA.mentions).toEqual(ids("logistics"));
+    expect((await cellEvents(orgB)).length).toBe(0);
+  });
+
+  it("every cell event of this file parses with the cell's AgentMentionEvent (no unit ever crosses)", async () => {
+    const events = await cellEvents();
+    expect(events.length).toBeGreaterThan(0);
+    for (const e of events) {
+      const parsed = AgentMentionEvent.safeParse(e);
+      expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
+      expect((e.message.mentions as Json[]).every((m) => m.kind === "user" || m.kind === "agent")).toBe(true);
+    }
+  });
+});
