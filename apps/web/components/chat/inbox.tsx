@@ -265,8 +265,14 @@ export function Inbox() {
           description={unread > 0 ? `${unread > 99 ? "99+" : unread} unread` : "You're all caught up"}
           actions={
             unread > 0 ? (
-              <Button variant="ghost" size="sm" onClick={markAll} data-testid="inbox-mark-all">
-                <CheckCheck />
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={markAll}
+                data-testid="inbox-mark-all"
+                aria-label="Mark all read"
+              >
+                <CheckCheck aria-hidden />
                 <span className="hidden sm:inline">Mark all read</span>
               </Button>
             ) : null
