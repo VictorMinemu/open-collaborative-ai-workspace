@@ -395,6 +395,7 @@ export async function buildApp(
       workZone: workSession.proposals, // 07.5-08: Work Zone proposals (D-03)
       workSession, // 07.16-15: a bot's own Work Zone sessions, in its sponsor's name (PD-03)
       automations: automation.proposals, // 07.6-12: natural-language automation proposals (AUTO-03)
+      fanOut: automation.fanOut, // 07.17-16: a fan-out run opens one conversation per new item (AFO-02)
       records: createRecordWrites(core), // 07.6-14: compare-and-set writes to watched records (AUTO-04)
       toolApproval: toolApproval.service, // 07.5-11: the approval decision of every agent action (D-04)
       sandbox, // 07.8-05: the sandboxd client of the bots' sandbox routes
