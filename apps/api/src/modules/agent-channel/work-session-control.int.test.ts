@@ -659,6 +659,21 @@ describe("prompt refusals; a stop stays allowed", () => {
     }
   });
 
+  it("WR-05: a session started under another sponsor is never prompted in the new sponsor's name → profile_inactive", async () => {
+    const { workSessionId } = await botSession();
+    // The session was started while Ana sponsored the profile; Víctor has re-saved it since (a change of sponsor).
+    await su.query("update app.bot_work_sessions set sponsor_user_id = $2 where work_session_id = $1", [
+      workSessionId,
+      anaId,
+    ]);
+    await su.query("update app.work_sessions set created_by = $2 where id = $1", [workSessionId, anaId]);
+    const before = await stateOf(workSessionId);
+    await refusedWith(promptCall(await ask(), workSessionId), "profile_inactive");
+    expect(await stateOf(workSessionId)).toEqual(before);
+    // The bot may still end it (stop runs as the session's own sponsor).
+    await stopped(await ask(), workSessionId);
+  });
+
   it("WR-04: the profile's runtime switched → profile_inactive for the session's prompts", async () => {
     const { workSessionId } = await botSession();
     await su.query("update app.bot_work_zone_profiles set runtime = 'codex' where agent_id = $1", [atlasId]);

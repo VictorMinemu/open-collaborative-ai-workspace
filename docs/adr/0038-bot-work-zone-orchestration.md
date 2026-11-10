@@ -430,3 +430,9 @@ route also require the profile's device and runtime to be the session's, and the
 projects the profile lists and the sponsor can still start in. Otherwise the arbiter refuses the bot's queued prompt
 (`bot_not_allowed`) and the prompt route answers up front: `profile_inactive` for another device or runtime,
 `project_not_allowed` for the project, never `queued`. Read and stop are unchanged.
+
+**A session keeps the sponsor it was started under (WR-05).** This completes D-02's "a change of sponsor is a re-save"
+for live sessions. Start, read and stop already ran as the session's sponsor (`bot_work_sessions.sponsor_user_id`);
+a prompt ran as the profile's current one. When someone else has re-saved the profile since the start, a prompt to
+that session answers `profile_inactive`, and the bot starts a new session under the new sponsor. The bot may still
+read and stop the old one.

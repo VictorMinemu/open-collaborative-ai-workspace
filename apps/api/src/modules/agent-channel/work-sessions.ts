@@ -556,6 +556,10 @@ export function registerBotWorkSessionRoutes(
           // decides at dispatch (`botLayerForSession`): never answered `queued` for a prompt that would then fail.
           const outOfScope = profileScopeRefusal(profile, status, found.own.session);
           if (outOfScope) return refuse(outOfScope);
+          // WR-05 (D-02): a session keeps the sponsor it was started under (its identity, subscription and audit). A
+          // profile re-saved by someone else since never prompts it in the new sponsor's name: the bot starts a new
+          // session under them (stop and read keep using the session's own sponsor).
+          if (found.own.bot.sponsorUserId !== profile.sponsorUserId) return refuse("profile_inactive");
           // D-08 (PD-15): a turn that read outside content prompts only with the profile's admin flag. No fallback
           // without it: a person can prompt the session.
           if (turn.tainted && !profile.actOnOutsideContent) return refuse("outside_content");
