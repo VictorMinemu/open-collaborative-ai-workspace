@@ -1,11 +1,22 @@
+import { randomUUID } from "node:crypto";
 import {
   AgentAutomationItemEvent,
   AgentChannelEventTypes,
   automationItemSentence,
+  type BotWorkZoneProfileInput,
   BUILTIN_TOOLS,
+  WORK_SESSION_TOOL_NAMES,
 } from "@ocw/contracts";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { eventually, FakeDevice } from "../../testing-device";
 import { type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
+import {
+  CLAUDE_CATALOG,
+  CODEX_CATALOG,
+  createBotProfile,
+  grantBotConsent,
+  pairDevice,
+} from "../../testing-workzone";
 import { itemEventId } from "../automation";
 
 /**
@@ -221,8 +232,76 @@ beforeAll(async () => {
 }, 240_000);
 
 afterAll(async () => {
+  await server?.close().catch(() => {});
   await s?.stop();
 });
+
+// ---------------------------------------------------------------- the Work Zone (07.16): a build server and a profile
+
+let server: FakeDevice | undefined;
+let serverId: string;
+let billingId: string;
+
+/** Atlas's profile on the build server (Víctor, admin, is its sponsor): one session at a time, acting on outside content. */
+const profile = (over: Partial<BotWorkZoneProfileInput> = {}): BotWorkZoneProfileInput => ({
+  deviceId: serverId,
+  runtime: "claude-code",
+  projectIds: [billingId],
+  defaultModel: "opus",
+  allowedModels: ["opus"],
+  defaultEffort: "medium",
+  allowedEfforts: ["medium", "high"],
+  defaultContextWindow: null,
+  allowedContextWindows: [],
+  fastMode: "off",
+  defaultMode: "default",
+  maxMode: "fullAccess",
+  worktree: true,
+  maxConcurrent: 1,
+  promptsPerHour: 30,
+  wakesPerSessionDay: 20,
+  actOnOutsideContent: true,
+  ...over,
+});
+
+/**
+ * Once per file (07.16's setup): Víctor pairs a build server (a `service` host with the isolated-server mark) that
+ * reports billing-api and both runtimes, saves Atlas's profile and lets Atlas run sessions on it.
+ */
+async function setUpWorkZone(): Promise<void> {
+  if (server) return;
+  await ok(
+    s.victor.request("PUT", "/api/v1/work-zone-policy", {
+      allowFullAccess: true,
+      allowFastMode: true,
+    }) as Promise<Res>,
+  );
+  const paired = await pairDevice(s.stack, s.victor, "build-server");
+  serverId = paired.deviceId;
+  server = await FakeDevice.connect(s.stack.baseUrl, paired.token, undefined, {
+    host: "service",
+    isolatedServer: true,
+  });
+  server.send({
+    type: "projects.sync",
+    projects: [{ localId: "lp_billing-api", name: "billing-api", gitRemote: null, defaultBranch: "main" }],
+  });
+  await server.next((f) => f.type === "projects.ack");
+  server.capabilities([CLAUDE_CATALOG, CODEX_CATALOG], true, true);
+  await eventually(async () => {
+    const d = (
+      await s.su.query("select runtime_catalog, host_kind, isolated_server from app.devices where id = $1", [
+        serverId,
+      ])
+    ).rows[0] as Json;
+    return (d.runtime_catalog as unknown[]).length === 2 && d.host_kind === "service" && d.isolated_server;
+  });
+  const list = (await ok(s.victor.request("GET", "/api/v1/projects") as Promise<Res>)).projects as Json[];
+  billingId = list.find((p) => p.name === "billing-api")?.id as string;
+  expect(billingId).toBeTruthy();
+  await createBotProfile(s.victor, atlas.id, profile());
+  await grantBotConsent(s.victor, serverId, atlas.id, { allowFullAccess: true });
+}
 
 beforeEach(async () => {
   // No item job of an earlier case is left in the queue (each case drains its own).
@@ -337,5 +416,218 @@ describe("an opened card gets its own tainted turn with the item as outside cont
     expect(ev.automationItem.item.title).not.toContain("**");
     expect((await turnRow(ev.eventId as string))?.tainted).toBe(true);
     expect((await itemRow(rows[0]?.id as string)).status).toBe("delivered");
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: tools, skips and forged jobs
+
+/** An automation whose run opened one item that is still queued (its job not drained yet). */
+async function openedQueued(key: string, extra: Json = {}, agentId = atlas.id) {
+  const automationId = await createAutomation({ agentId, ...extra });
+  const { runId, ev } = await runTurn(automationId, agentId);
+  const [root] = await openItems(ev, [item(key)], agentId);
+  const [row] = await itemRows(automationId);
+  expect(row).toMatchObject({ status: "queued", root_message_id: root });
+  return { automationId, runId, root: root as string, itemId: row?.id as string };
+}
+
+/** The item's one job ran and skipped it with `reason`: the row, one audit with ids and the reason, no event. */
+async function expectSkipped(o: { automationId: string; runId: string; itemId: string }, reason: string) {
+  expect(await drainItems()).toBe(1);
+  expect(await itemRow(o.itemId)).toMatchObject({ status: "skipped", reason, agent_event_id: null });
+  expect(await itemEvents(o.itemId)).toEqual([]);
+  expect(await auditsOf("automation.item_delivered", o.itemId)).toEqual([]);
+  const skipped = await auditsOf("automation.item_skipped", o.itemId);
+  expect(skipped).toHaveLength(1);
+  expect(skipped[0]).toMatchObject({ result: "denied", agent_id: expect.any(String) });
+  expect(skipped[0]?.metadata).toEqual({
+    automationId: o.automationId,
+    runId: o.runId,
+    itemId: o.itemId,
+    reason,
+  });
+}
+
+describe("the item turn's tools (D-04, D-09, ADR-0039; T-07.17-17-03)", () => {
+  beforeAll(async () => {
+    await setUpWorkZone();
+  }, 120_000);
+
+  it("Atlas with an active profile: the four ocw_work_session_* tools, the board tool and turn.workZone; never the open tool, a browser tool or a consult", async () => {
+    const { events } = await openedAndDelivered(["4042"]);
+    const ev = events[0] as Json;
+    const tools = ev.turn.tools as string[];
+    for (const t of WORK_SESSION_TOOL_NAMES) expect(tools).toContain(t);
+    expect(BUILTIN_TOOLS.workSessionStart).toBe("ocw_work_session_start");
+    expect(tools).toContain("ocw_work_session_start");
+    expect(tools).toContain(BUILTIN_TOOLS.boardCard);
+    expect(ev.turn.workZone).toBeDefined();
+    expect(ev.turn.workZone.projects.map((p: Json) => p.id)).toEqual([billingId]);
+    expect(tools).not.toContain(BUILTIN_TOOLS.conversationOpen);
+    expect(tools).not.toContain(BUILTIN_TOOLS.consultAgent);
+    expect(ev.turn.consult).toBeUndefined();
+    expect(tools.filter((t) => t.startsWith("ocw_browser_"))).toEqual([]);
+  });
+
+  it("the run turn of the same automation keeps its tools: the open tool, never a Work Zone tool (ADR-0038 §12 for runs)", async () => {
+    const automationId = await createAutomation();
+    const { ev } = await runTurn(automationId);
+    const tools = ev.turn.tools as string[];
+    expect(tools).toContain(BUILTIN_TOOLS.conversationOpen);
+    for (const t of WORK_SESSION_TOOL_NAMES) expect(tools).not.toContain(t);
+    expect(ev.turn.workZone).toBeUndefined();
+  });
+
+  it("a bot without a profile: the board tool, no Work Zone tool and no workZone", async () => {
+    const nova = await s.newBot("Nova");
+    await ok(
+      s.victor.request("POST", `/api/v1/channels/${fleetId}/members`, {
+        kind: "agent",
+        id: nova.id,
+      }) as Promise<Res>,
+    );
+    const o = await openedQueued("4043", {}, nova.id);
+    expect(await drainItems()).toBe(1);
+    const [ev] = await itemEvents(o.itemId);
+    expect(ev?.agent.id).toBe(nova.id);
+    const tools = ev?.turn.tools as string[];
+    expect(tools).toContain(BUILTIN_TOOLS.boardCard);
+    for (const t of WORK_SESSION_TOOL_NAMES) expect(tools).not.toContain(t);
+    expect(ev?.turn.workZone).toBeUndefined();
+    expect(tools).not.toContain(BUILTIN_TOOLS.conversationOpen);
+  });
+});
+
+describe("skips with their reasons (E12, PD-09; T-07.17-17-05)", () => {
+  it("the automation paused → skipped paused", async () => {
+    const o = await openedQueued("5001");
+    await s.su.query("update app.automations set status = 'paused' where id = $1", [o.automationId]);
+    await expectSkipped(o, "paused");
+  });
+
+  it("Atlas disabled → skipped agent_disabled", async () => {
+    const o = await openedQueued("5002");
+    await s.su.query("update app.agents set status = 'disabled' where id = $1", [atlas.id]);
+    try {
+      await expectSkipped(o, "agent_disabled");
+    } finally {
+      await s.su.query("update app.agents set status = 'ready' where id = $1", [atlas.id]);
+    }
+  });
+
+  it("Atlas no longer a member of #fleet → skipped agent_not_member", async () => {
+    const o = await openedQueued("5003");
+    await s.su.query(
+      "delete from app.conversation_members where conversation_id = $1 and member_kind = 'agent' and member_id = $2",
+      [fleetId, atlas.id],
+    );
+    try {
+      await expectSkipped(o, "agent_not_member");
+    } finally {
+      await ok(
+        s.victor.request("POST", `/api/v1/channels/${fleetId}/members`, {
+          kind: "agent",
+          id: atlas.id,
+        }) as Promise<Res>,
+      );
+    }
+  });
+
+  it("the run-as person (Sam) removed from the private board → skipped bot_not_readable", async () => {
+    const o = await openedQueued("5004");
+    // The automation is Sam's (it always runs as its creator), and Sam then leaves #fleet (written directly: what a
+    // membership change leaves behind).
+    await s.su.query("update app.automations set run_as_user_id = $2, created_by = $2 where id = $1", [
+      o.automationId,
+      s.samId,
+    ]);
+    await s.su.query(
+      "delete from app.conversation_members where conversation_id = $1 and member_kind = 'user' and member_id = $2",
+      [fleetId, s.samId],
+    );
+    try {
+      await expectSkipped(o, "bot_not_readable");
+    } finally {
+      await ok(
+        s.victor.request("POST", `/api/v1/channels/${fleetId}/members`, {
+          kind: "user",
+          id: s.samId,
+        }) as Promise<Res>,
+      );
+    }
+  });
+
+  it("the card deleted → skipped target_not_postable", async () => {
+    const o = await openedQueued("5005");
+    await s.su.query("update app.messages set deleted_at = now() where id = $1", [o.root]);
+    await expectSkipped(o, "target_not_postable");
+  });
+
+  it("Atlas at its daily limit → skipped agent_daily_limit, with the limit notice in the card's thread", async () => {
+    const o = await openedQueued("5006");
+    // The run turn counted today's first turn; the limit is now reached.
+    await s.su.query("update app.agent_usage_daily set turns = 100000 where agent_id = $1", [atlas.id]);
+    try {
+      await expectSkipped(o, "agent_daily_limit");
+      const limited = (
+        await s.su.query(
+          "select user_id, metadata from app.audit_events where action = 'agent.limit_reached' and agent_id = $1",
+          [atlas.id],
+        )
+      ).rows.filter((a) => a.metadata.messageId === o.root);
+      expect(limited).toHaveLength(1);
+      expect(limited[0]?.user_id).toBe(s.victorId);
+      const notice = await eventually(async () => {
+        const r = (
+          await s.su.query(
+            "select author_kind, author_id, thread_id from app.messages where client_message_id = $1",
+            [`limit:${o.root}`],
+          )
+        ).rows[0] as Json | undefined;
+        return r;
+      });
+      expect(notice).toEqual({ author_kind: "agent", author_id: atlas.id, thread_id: o.root });
+    } finally {
+      await s.su.query("delete from app.agent_usage_daily where agent_id = $1", [atlas.id]);
+    }
+  });
+});
+
+describe("forged and stale jobs (E8; T-07.17-17-01)", () => {
+  it("a job naming organization A's item under organization B, or an unknown item, does nothing", async () => {
+    const o = await openedQueued("6001");
+    const before = await itemRow(o.itemId);
+    await s.su.query("delete from pgboss.job where name = $1", [QUEUE]);
+    const eventsBefore = await allItemEvents();
+    await sendItemJob(s.orgB, o.itemId);
+    await sendItemJob(s.orgA, randomUUID());
+    expect(await drainItems()).toBe(2);
+    expect(await itemRow(o.itemId)).toEqual(before);
+    expect(await allItemEvents()).toBe(eventsBefore);
+    expect(
+      Number(
+        (
+          await s.su.query("select count(*)::int as n from app.audit_events where resource_id = $1", [
+            o.itemId,
+          ])
+        ).rows[0].n,
+      ),
+    ).toBe(0);
+  });
+
+  it("a job whose item was deleted (its automation deleted) does nothing", async () => {
+    const o = await openedQueued("6002");
+    await ok(s.victor.request("DELETE", `/api/v1/automations/${o.automationId}`) as Promise<Res>, 204);
+    expect(
+      (
+        await s.su.query("select count(*)::int as n from app.automation_conversations where id = $1", [
+          o.itemId,
+        ])
+      ).rows[0].n,
+    ).toBe(0);
+    const eventsBefore = await allItemEvents();
+    expect(await drainItems()).toBe(1);
+    expect(await allItemEvents()).toBe(eventsBefore);
+    expect(await auditsOf("automation.item_skipped", o.itemId)).toEqual([]);
   });
 });
