@@ -1,4 +1,4 @@
-import { automationEvents, automationRuns, type Tx } from "@ocw/db";
+import { automationConversations, automationEvents, automationRuns, type Tx } from "@ocw/db";
 import { and, eq, inArray, or } from "drizzle-orm";
 
 /**
@@ -10,6 +10,10 @@ import { and, eq, inArray, or } from "drizzle-orm";
  * them starts tainted, so a person asking the bot in such a thread never gets a side-effecting turn whose history holds
  * injected text. Ids only; RLS keeps both tables to the transaction's organization. A leaf module, so the mention
  * delivery and the run delivery share it without an import cycle (`automation-runs.ts` re-exports it).
+ *
+ * 07.17 PD-10: an opened root (`automation_conversations.root_message_id`) holds bot-written outside content (an item's
+ * title and body, from a run that may have read an MCP), so it counts too: the item's own turn, a person's @mention and
+ * a Work Zone wake in its thread all start tainted. The run log root is not included (run turns keep a clean start).
  */
 export async function inboundRooted(
   tx: Tx,
@@ -35,5 +39,11 @@ export async function inboundRooted(
     .from(automationRuns)
     .where(and(eq(automationRuns.tainted, true), inArray(automationRuns.anchorMessageId, ids)))
     .limit(1);
-  return run !== undefined;
+  if (run) return true;
+  const [opened] = await tx
+    .select({ id: automationConversations.id })
+    .from(automationConversations)
+    .where(inArray(automationConversations.rootMessageId, ids))
+    .limit(1);
+  return opened !== undefined;
 }

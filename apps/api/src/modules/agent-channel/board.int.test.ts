@@ -992,13 +992,19 @@ describe("07.17 D-06 / D-12: the exemption is exactly that card, that bot, that 
 
   it("D-12: after a Work Zone session read, the move passes with the flag (sessionOutputExempt: true) and is 403 tainted without it", async () => {
     const ev = await threadTurn(order.messageId as string, "@clerk read the session and close it");
+    // 07.17-16 (PD-10): a turn in an opened card's thread starts tainted, so the move is exempt on both counts.
+    expect(
+      (await su.query("select tainted from app.agent_turns where event_id = $1", [ev.eventId])).rows[0],
+    ).toEqual({ tainted: true });
     await su.query("update app.agent_turns set session_output_read = true where event_id = $1", [ev.eventId]);
 
     const moved = await moveTo(ev.eventId, order.messageId, columns.done);
     expect(moved.status, JSON.stringify(moved.body)).toBe(200);
     const audit = await cardAudit("board.card.moved", order.messageId);
-    expect(audit).toMatchObject({ agent_id: clerkId, metadata: { sessionOutputExempt: true } });
-    expect(audit?.metadata).not.toHaveProperty("outsideContent");
+    expect(audit).toMatchObject({
+      agent_id: clerkId,
+      metadata: { sessionOutputExempt: true, outsideContent: true },
+    });
 
     // Another card from the same session-read turn stays refused.
     const sib = await moveTo(ev.eventId, sibling.messageId, columns.done);
@@ -1014,7 +1020,11 @@ describe("07.17 D-06 / D-12: the exemption is exactly that card, that bot, that 
 
   it("an untainted turn moves any card of the board as before, and its audit carries no exemption flag", async () => {
     await setOutsideContent(clerkId, false);
-    const ev = await threadTurn(order.messageId as string, "@clerk tidy the board");
+    // A card no automation opened: its thread starts clean (07.17-16, PD-10: an opened card's thread would not).
+    const ev = await threadTurn(plainCard.messageId as string, "@clerk tidy the board");
+    expect(
+      (await su.query("select tainted from app.agent_turns where event_id = $1", [ev.eventId])).rows[0],
+    ).toEqual({ tainted: false });
     for (const card of [plainCard, othersCard, order]) {
       const res = await moveTo(ev.eventId, card.messageId, columns.inProgress);
       expect(res.status, JSON.stringify(res.body)).toBe(200);
