@@ -1107,7 +1107,7 @@ describe("the leak sweep and tenants (P1, PD-17; E8)", () => {
   it("the item's title and text reach only the cell event: no audit row, job, tool call or log line holds them", async () => {
     const automationId = await createAutomation();
     const { ev } = await runTurn(automationId);
-    await openItems(ev, [{ externalKey: "OCW-MARKER-071717-key", title: TITLE, body: BODY }]);
+    await openItems(ev, [{ externalKey: "OCW-MARKER-071717-extid", title: TITLE, body: BODY }]);
     expect(await drainItems()).toBe(1);
     const [row] = await itemRows(automationId);
     const [delivered] = await itemEvents(row?.id as string);

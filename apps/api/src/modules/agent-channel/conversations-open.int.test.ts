@@ -807,7 +807,7 @@ describe("outside content (D-05, PD-10, E7)", () => {
 });
 
 describe("the leak sweep (P1, PD-17)", () => {
-  const KEY = "OCW-MARKER-0717-key";
+  const KEY = "OCW-MARKER-0717-extid";
   const TITLE = "OCW-MARKER-0717-title";
   const BODY = "OCW-MARKER-0717-body";
 
