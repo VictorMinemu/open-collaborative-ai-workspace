@@ -806,6 +806,72 @@ describe("outside content (D-05, PD-10, E7)", () => {
   });
 });
 
+describe("the e2e scenario's ERP (PD-22): an organization MCP server is read in the cell, then the run opens", () => {
+  it("the run turn offers the ERP's list tool and the open tool; the proxy refuses an org_secret server (not_in_turn), the in-cell gate allows it, and the tainted turn opens", async () => {
+    // The fake ERP as the e2e registers it: static headers (`org_secret`, rendered in the cell), list_records granted.
+    const serverId = randomUUID();
+    // The API's safe-name format (`m` + 8 hex), as `POST /mcp-servers` mints it.
+    const safe = `m${randomUUID().replaceAll("-", "").slice(0, 8)}`;
+    const list = `${safe}__list_records`;
+    await s.su.query(
+      `insert into app.mcp_servers (id, organization_id, name, safe_name, transport, url, status, auth_mode)
+       values ($1, $2, 'Orders ERP', $3, 'streamable-http', 'https://erp.example.test/erp-mcp', 'ready', 'org_secret')`,
+      [serverId, s.orgA, safe],
+    );
+    await s.su.query(
+      "insert into app.mcp_server_tools (organization_id, server_id, name, openclaw_name, read_only) values ($1, $2, 'list_records', $3, true)",
+      [s.orgA, serverId, list],
+    );
+    const grant = (tools: string[]) =>
+      ok(
+        s.victor.request("PATCH", `/api/v1/agents/${atlas.id}/capabilities`, {
+          tools: tools.map((tool) => ({ sourceKind: "mcp", sourceId: serverId, tool })),
+        }) as Promise<Res>,
+      );
+    await grant([list]);
+    try {
+      const automationId = await createAutomation();
+      const { runId, ev } = await runTurn(automationId);
+      expect(ev.turn.tools).toEqual(expect.arrayContaining([list, OPEN]));
+      expect(ev.automationRun.fanOut).toEqual({ perRun: 10, remainingRun: 10, remainingDay: 100 });
+
+      // What the e2e fake cell sent: `ocw_connector_call` is the proxy of the per-member and organization-account
+      // modes only, so an org_secret server's tool is not_in_turn there: nothing read, nothing opened, the turn clean.
+      const proxied = await s.cell("/connectors/call", {
+        eventId: ev.eventId,
+        agentId: atlas.id,
+        connector: safe,
+        tool: "list_records",
+        arguments: {},
+      });
+      expect(proxied.status, JSON.stringify(proxied.body)).toBe(409);
+      expect(codeOf(proxied)).toBe("not_in_turn");
+      expect((await turnRow(ev.eventId as string)).tainted).toBe(false);
+      expect(await conversationRows(automationId)).toHaveLength(0);
+
+      // What the real cell does: OpenClaw calls the server itself after the gate allows the call; its output taints.
+      const gated = await ok(
+        s.cell("/tool-calls", { eventId: ev.eventId, agentId: atlas.id, tool: list, params: {} }),
+      );
+      expect(gated).toMatchObject({ allowed: true, reason: null });
+      await ok(s.cell(`/tool-calls/${gated.callId}/result`, { status: "ok", resultCount: 0, durationMs: 1 }));
+      expect((await turnRow(ev.eventId as string)).tainted).toBe(true);
+
+      // The tainted run turn opens one card per order (D-05: in its own target only).
+      const out = await openOk(ev, [item("E2E-1042"), item("E2E-1043")]);
+      expect((out.results as Json[]).map((r) => r.opened)).toEqual([true, true]);
+      expect(await conversationRows(automationId)).toHaveLength(2);
+      expect((await runRow(runId)).status).toBe("answered");
+      expect((await audits("automation.conversation_opened", runId))[0]?.metadata).toMatchObject({
+        opened: 2,
+        outsideContent: true,
+      });
+    } finally {
+      await grant([]);
+    }
+  });
+});
+
 describe("the leak sweep (P1, PD-17)", () => {
   const KEY = "OCW-MARKER-0717-extid";
   const TITLE = "OCW-MARKER-0717-title";
