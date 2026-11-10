@@ -618,11 +618,20 @@ export function createChatModule(core: Core): ApiModule {
         );
       }
     }
+    // Phase 07.17 (D-17, PD-13): a bot's `@team` resolves on channel posts for units its turn's human may read, at most
+    // three per message; no turn human = no units. Its people are resolved as before, and it never broadcasts.
+    const unitOpts = await unitMentionGate(tx, perms, {
+      body: input.body,
+      dir,
+      conversationKind: conv.kind,
+      humanUserId: input.onBehalfOfUserId ?? null,
+      agentAuthor: true,
+    });
     const result = await postMessage(tx, deps, dir, {
       conv,
       author: { kind: "agent", id: agent.id },
       body: input.body,
-      mentions: resolveMentions(input.body, dir),
+      mentions: resolveMentions(input.body, dir, unitOpts),
       threadRootId,
       // A card's key lives in its own namespace, so a card and a plain reply never collide on one key.
       clientMessageId: input.card ? `card:${input.idempotencyKey}` : input.idempotencyKey,

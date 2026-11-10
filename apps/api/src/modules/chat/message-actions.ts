@@ -24,7 +24,7 @@ import { badRequest, conflict, forbidden, gone, notFound } from "../../lib/error
 import { channelResource, type PermissionService } from "../organization";
 import type { ConversationAccess } from "./access";
 import { type Directory, loadDirectory } from "./directory";
-import { resolveMentions } from "./mentions";
+import { type ResolveMentionOptions, resolveMentions, unitMentionGate } from "./mentions";
 import {
   type ChatDeps,
   convTopic,
@@ -113,7 +113,13 @@ export async function editMessage(
   tx: Tx,
   deps: ChatDeps,
   dir: Directory,
-  input: { message: MessageRow; body: string; editor: { kind: "user"; id: string } },
+  input: {
+    message: MessageRow;
+    body: string;
+    editor: { kind: "user"; id: string };
+    /** Phase 07.17 (PD-13): the editor's `unitMentionGate` (absent = no unit resolves, as in a DM). */
+    mentionOptions?: ResolveMentionOptions;
+  },
 ): Promise<{ row: MessageRow; version: number; previousMentions: MessageMention[] }> {
   const { message } = input;
   const version = await nextVersion(tx, message.id);
@@ -129,7 +135,11 @@ export async function editMessage(
   });
   const [row] = await tx
     .update(messages)
-    .set({ body: input.body, mentions: resolveMentions(input.body, dir), editedAt: sql`now()` })
+    .set({
+      body: input.body,
+      mentions: resolveMentions(input.body, dir, input.mentionOptions),
+      editedAt: sql`now()`,
+    })
     .where(eq(messages.id, message.id))
     .returning();
   if (!row) throw new Error("message update returned no row");
@@ -265,6 +275,14 @@ export function registerMessageActionRoutes(app: App, ctx: MessageActionsContext
           message,
           body: req.body.body,
           editor: { kind: "user", id: auth.userId },
+          // Phase 07.17 (PD-13): the stored list follows the text under the author's own rules.
+          mentionOptions: await unitMentionGate(tx, perms, {
+            body: req.body.body,
+            dir,
+            conversationKind: conv.kind,
+            humanUserId: auth.userId,
+            agentAuthor: false,
+          }),
         });
         const dto = await dtoOf(tx, row, dir);
         // Observers (notifications) in the edit transaction: only people the edit newly mentions are notified,

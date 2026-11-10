@@ -24,7 +24,7 @@ import { and, asc, eq, isNull, lte, ne, type SQL, sql } from "drizzle-orm";
 import { badRequest, conflict, forbidden, gone, HttpError, notFound } from "../../../lib/errors";
 import { AuthzDeniedError, channelResource, type PermissionService } from "../../organization";
 import { type Directory, loadDirectory } from "../directory";
-import { resolveMentions } from "../mentions";
+import { resolveMentions, unitMentionGate } from "../mentions";
 import { editMessage } from "../message-actions";
 import {
   type ChatDeps,
@@ -532,12 +532,22 @@ export async function createBoardCard(
       fields,
     });
   const body = cardMessageBody({ title, description: input.description, fields, defs });
+  // Phase 07.17 (PD-13): a card is a channel post: `@team` for units its author (a bot: its turn's human) may read.
+  const unitOpts = args.perms
+    ? await unitMentionGate(tx, args.perms, {
+        body,
+        dir,
+        conversationKind: conv.kind,
+        humanUserId: author.kind === "agent" ? author.onBehalfOfUserId : author.id,
+        agentAuthor: author.kind === "agent",
+      })
+    : undefined;
 
   const result = await postMessage(tx, deps, dir, {
     conv,
     author: { kind: author.kind, id: author.id },
     body,
-    mentions: resolveMentions(body, dir),
+    mentions: resolveMentions(body, dir, unitOpts),
     threadRootId: null,
     clientMessageId: input.clientMessageId,
     clientKind: args.clientKind,
@@ -748,6 +758,16 @@ export async function updateBoardCard(tx: Tx, deps: ChatDeps, args: UpdateBoardC
         message,
         body,
         editor: { kind: "user", id: actor.id },
+        // Phase 07.17 (PD-13): the edited card re-resolves `@team` under its editor's `unit.read`.
+        mentionOptions: args.perms
+          ? await unitMentionGate(tx, args.perms, {
+              body,
+              dir,
+              conversationKind: conv.kind,
+              humanUserId: actor.id,
+              agentAuthor: false,
+            })
+          : undefined,
       });
       await args.onTextEdited?.(tx, { row: edit.row, previousMentions: edit.previousMentions, dir });
     }

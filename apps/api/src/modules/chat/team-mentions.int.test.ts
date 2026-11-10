@@ -1,7 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { AgentMentionEvent } from "@ocw/contracts";
+import { conversations } from "@ocw/db";
+import { eq } from "drizzle-orm";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestStack, TEST_SETUP_TOKEN, TestClient, type TestStack } from "../../testing";
+import { createPermissionService } from "../organization";
+import { createBoardCard } from "./board/service";
 
 /**
  * Phase 07.17 (D-07, D-17, D-18, PD-13, AFO-04): `@team` on channel posts is a stored, structural mention
@@ -30,7 +35,10 @@ let anaId: string;
 let benId: string;
 let ordersId: string;
 let scoutId: string;
+let sam: TestClient;
+let samId: string;
 const unit: Record<string, string> = {};
+const people: Record<string, string> = {};
 
 async function ok(res: Promise<{ status: number; body: Record<string, unknown> | null }>, status = 200) {
   const r = await res;
@@ -87,6 +95,11 @@ beforeAll(async () => {
   orgId = setup.organization.id;
   [ana, anaId] = await joinAs("ana@example.test", "Ana Ruiz", "standard");
   [, benId] = await joinAs("ben@example.test", "Ben Ito", "standard");
+  for (const name of ["cam", "dan", "eva"]) {
+    const [, id] = await joinAs(`${name}@example.test`, name.toUpperCase(), "standard");
+    people[name] = id;
+  }
+  [sam, samId] = await joinAs("sam@example.test", "Sam Lee", "standard");
 
   const it_ = await createUnit("department", "IT");
   unit.it = it_.id;
@@ -117,6 +130,13 @@ beforeAll(async () => {
   ordersId = (await ok(admin.request("POST", "/api/v1/channels", { name: "orders" }))).id;
   await ok(ana.request("POST", `/api/v1/channels/${ordersId}/join`, {}));
   await ok(admin.request("POST", `/api/v1/channels/${ordersId}/members`, { kind: "agent", id: scoutId }));
+  await ok(sam.request("POST", `/api/v1/channels/${ordersId}/join`, {}));
+  // Sam may not see the Ops team (an explicit deny on its subtree): the resolver denies `unit.read` there.
+  await su.query(
+    `insert into app.permission_rules (id, organization_id, scope_unit_id, subject_kind, subject_id, permission, effect)
+     values ($1, $2, $3, 'user', $4, 'unit.read', 'deny')`,
+    [randomUUID(), orgId, unit.ops, samId],
+  );
 }, 180_000);
 
 afterAll(async () => {
@@ -165,5 +185,174 @@ describe("team mentions by a person (07.17 PD-13)", () => {
     expect(ev?.message.author.id).toBe(anaId);
     expect(AgentMentionEvent.safeParse(ev).success).toBe(true);
     expect(await turnsFor(msg.id)).toBe(1);
+  });
+});
+
+/** Scout's post through `postAgentMessageIn` (what the Agent Channel API calls), for the turn's human when given. */
+async function botPost(
+  conversationId: string,
+  body: string,
+  onBehalfOfUserId?: string,
+  threadRootId?: string,
+) {
+  const { core } = stack.built;
+  const posted = await core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+    core.chatAgent.postAgentMessageIn(tx, {
+      agentId: scoutId,
+      conversationId,
+      threadRootId: threadRootId ?? null,
+      body,
+      idempotencyKey: randomUUID(),
+      ...(onBehalfOfUserId ? { onBehalfOfUserId } : {}),
+    }),
+  );
+  return posted.messageId;
+}
+
+/** Scout's board card (what `agent-channel/board.ts` calls for a turn of `onBehalfOfUserId`). */
+async function botCard(boardId: string, description: string, onBehalfOfUserId: string) {
+  const { core } = stack.built;
+  return core.db.withTenant({ organizationId: orgId, userId: null }, async (tx) => {
+    const [conv] = await tx.select().from(conversations).where(eq(conversations.id, boardId));
+    const made = await createBoardCard(
+      tx,
+      { audit: core.audit, realtime: core.realtime },
+      {
+        conv: conv!,
+        author: { kind: "agent", id: scoutId, onBehalfOfUserId },
+        input: { title: "Bot card", description, clientMessageId: `board:${randomUUID()}` },
+        clientKind: "agent",
+        perms: createPermissionService(core),
+      },
+    );
+    return made.result.row.id;
+  });
+}
+
+const ids = (...handles: string[]) => handles.map((h) => ({ kind: "unit", id: unit[h] }));
+
+describe("team mentions on every channel write path (07.17 PD-13, D-17)", () => {
+  let boardId: string;
+
+  beforeAll(async () => {
+    boardId = (
+      await ok(
+        admin.request("POST", "/api/v1/channels", {
+          name: "ops-board",
+          layout: "board",
+          visibility: "public",
+        }),
+      )
+    ).id;
+    await ok(ana.request("POST", `/api/v1/channels/${boardId}/join`, {}));
+    await ok(admin.request("POST", `/api/v1/channels/${boardId}/members`, { kind: "agent", id: scoutId }));
+  });
+
+  it("a standard member's thread reply resolves @logistics (A-02: unit.read by default)", async () => {
+    const root = await say(ana, ordersId, "a root");
+    const reply = await say(ana, ordersId, "@logistics over to you", { threadRootId: root.id });
+    expect(reply.threadId).toBe(root.id);
+    expect(await storedMentions(reply.id)).toEqual(ids("logistics"));
+  });
+
+  it("a person's board card resolves @logistics in its description, and a text edit re-resolves it", async () => {
+    const card = await ok(
+      ana.request("POST", `/api/v1/boards/${boardId}/cards`, {
+        title: "Late pallets",
+        description: "@logistics please check",
+        clientMessageId: randomUUID(),
+      }),
+    );
+    expect(await storedMentions(card.messageId)).toEqual(ids("logistics"));
+    await ok(
+      ana.request("PATCH", `/api/v1/boards/${boardId}/cards/${card.messageId}`, {
+        expectedVersion: card.version,
+        description: "@billing please check",
+      }),
+    );
+    expect(await storedMentions(card.messageId)).toEqual(ids("billing"));
+  });
+
+  it("a bot's post keeps the first three teams and every person (D-17, E15)", async () => {
+    const body = "@logistics @ops @billing @support done @ana @ben @cam @dan @eva";
+    const id = await botPost(ordersId, body, anaId);
+    expect(await storedMentions(id)).toEqual([
+      ...ids("logistics", "ops", "billing"),
+      { kind: "user", id: anaId },
+      { kind: "user", id: benId },
+      { kind: "user", id: people.cam },
+      { kind: "user", id: people.dan },
+      { kind: "user", id: people.eva },
+    ]);
+  });
+
+  it("a bot's units are decided for its turn's human: Sam cannot read Ops (T-07.17-07-01)", async () => {
+    const id = await botPost(ordersId, "@ops and @logistics", samId);
+    expect(await storedMentions(id)).toEqual(ids("logistics"));
+    // Sam's own post: the same rule.
+    const own = await say(sam, ordersId, "@ops and @logistics");
+    expect(own.mentions).toEqual(ids("logistics"));
+  });
+
+  it("a bot post without a turn's human resolves no unit; its people still resolve", async () => {
+    const id = await botPost(ordersId, "@logistics fyi @ana");
+    expect(await storedMentions(id)).toEqual([{ kind: "user", id: anaId }]);
+  });
+
+  it("a bot's thread reply and board card resolve units under the same cap", async () => {
+    const root = await say(ana, ordersId, "another root");
+    const reply = await botPost(ordersId, "@support done", anaId, root.id);
+    expect(await storedMentions(reply)).toEqual(ids("support"));
+    const card = await botCard(boardId, "@logistics @ops @billing @support @it", anaId);
+    expect(await storedMentions(card)).toEqual(ids("logistics", "ops", "billing"));
+  });
+
+  it("a bot's @channel sets no broadcast (P7) and notifies nobody as one", async () => {
+    const id = await botPost(ordersId, "@channel heads up @logistics", anaId);
+    expect(await storedMentions(id)).toEqual(ids("logistics"));
+    const broadcast = await su.query(
+      "select count(*)::int as n from app.notifications where message_id = $1 and kind in ('channel','here')",
+      [id],
+    );
+    expect(broadcast.rows[0].n).toBe(0);
+  });
+
+  it("an edit follows the text: adding @logistics stores it, removing it drops it", async () => {
+    const msg = await say(ana, ordersId, "hello");
+    const added = await ok(ana.request("PATCH", `/api/v1/messages/${msg.id}`, { body: "hello @logistics" }));
+    expect(added.mentions).toEqual(ids("logistics"));
+    expect(await storedMentions(msg.id)).toEqual(ids("logistics"));
+    await ok(ana.request("PATCH", `/api/v1/messages/${msg.id}`, { body: "hello" }));
+    expect(await storedMentions(msg.id)).toEqual([]);
+  });
+
+  it("the bot's body in its DM with Ana, a group DM and an AI chat store no unit mention (E16)", async () => {
+    const dm = await ok(
+      ana.request("POST", "/api/v1/dms", { participants: [{ kind: "agent", id: scoutId }] }),
+    );
+    const inDm = await botPost(dm.id, "@logistics @ops done", anaId);
+    expect(await storedMentions(inDm)).toEqual([]);
+
+    const group = await ok(
+      ana.request("POST", "/api/v1/dms", {
+        participants: [
+          { kind: "user", id: benId },
+          { kind: "user", id: people.cam },
+        ],
+      }),
+    );
+    const inGroup = await say(ana, group.id, "@logistics @ben");
+    expect(inGroup.mentions).toEqual([{ kind: "user", id: benId }]);
+
+    const chat = await ok(
+      ana.request("POST", "/api/v1/ai-chats", {
+        clientMessageId: randomUUID(),
+        body: "@logistics status?",
+        model: { backend: "mock", provider: "mock", modelId: "mock-1" },
+      }),
+      201,
+    );
+    expect(chat.userMessage.mentions).toEqual([]);
+    expect(await storedMentions(chat.userMessage.id)).toEqual([]);
   });
 });

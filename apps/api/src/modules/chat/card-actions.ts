@@ -26,7 +26,7 @@ import { badRequest, conflict, forbidden, gone, notFound } from "../../lib/error
 import { channelResource, type PermissionService } from "../organization";
 import { authorOf, type Directory, loadDirectory } from "./directory";
 import type { ChatRouteCtx } from "./index";
-import { resolveMentions } from "./mentions";
+import { type ResolveMentionOptions, resolveMentions } from "./mentions";
 import {
   type ChatDeps,
   channelFacts,
@@ -306,7 +306,16 @@ export async function cardMessageOf(tx: Tx, row: MessageRow, dir: Directory): Pr
 export async function patchCard(
   tx: Tx,
   deps: ChatDeps,
-  a: { messageId: string; agentId: string; patch: AgentCardPatch },
+  a: {
+    messageId: string;
+    agentId: string;
+    patch: AgentCardPatch;
+    /**
+     * Phase 07.17 (PD-13): the agent rules of `unitMentionGate` for the card's turn human, when the caller knows one.
+     * Absent (the Agent Channel PATCH carries no turn) = a new summary resolves no unit.
+     */
+    mentionOptions?: ResolveMentionOptions;
+  },
 ): Promise<{ before: CardRow; after: CardRow; message: Message }> {
   const [before] = await tx
     .select()
@@ -359,7 +368,11 @@ export async function patchCard(
   if (patch.summary !== undefined && patch.summary !== message.body) {
     const [updated] = await tx
       .update(messages)
-      .set({ body: patch.summary, mentions: resolveMentions(patch.summary, dir), editedAt: sql`now()` })
+      .set({
+        body: patch.summary,
+        mentions: resolveMentions(patch.summary, dir, a.mentionOptions),
+        editedAt: sql`now()`,
+      })
       .where(eq(messages.id, message.id))
       .returning();
     if (!updated) throw new Error("message update returned no row");
