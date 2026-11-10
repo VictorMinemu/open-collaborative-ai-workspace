@@ -1073,7 +1073,7 @@ or needs help.
   4. Integration tests (dedupe, caps, tenant isolation, team mention audience) and an e2e spec pass on desktop and mobile;
      ADR-0039 records the decisions
 
-**Plans:** 3/19 plans executed
+**Plans:** 10/19 plans executed
 
 Plans:
 **Wave 1**
@@ -1084,13 +1084,13 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 07.17-04-PLAN.md — Wave 2: Every 5 minutes in the editor (interval presets, summary, runs-a-day prefill, daily-limit warning), self-hosting limits
-- [ ] 07.17-05-PLAN.md — Wave 2: Fan-out and escalation settings on automations, the "<name> · Runs" thread, run `opened` counts
-- [ ] 07.17-06-PLAN.md — Wave 2: Unit handles generated once in the organization API, `reach` and `viewerInReach`
-- [ ] 07.17-07-PLAN.md — Wave 2: Team mentions resolve on channel posts (people and bots, ≤ 3 teams per bot message), never in DMs/AI chats, never to the cell
-- [ ] 07.17-08-PLAN.md — Wave 2: Bots move and set waiting on the cards their automation opened (D-06, D-12)
-- [ ] 07.17-09-PLAN.md — Wave 2: Plugin: the `ocw_conversation_open` tool and the board/open guard rules
-- [ ] 07.17-10-PLAN.md — Wave 2: Plugin: item turns, the fan-out instruction and the escalation sentence
+- [x] 07.17-04-PLAN.md — Wave 2: Every 5 minutes in the editor (interval presets, summary, runs-a-day prefill, daily-limit warning), self-hosting limits
+- [x] 07.17-05-PLAN.md — Wave 2: Fan-out and escalation settings on automations, the "<name> · Runs" thread, run `opened` counts
+- [x] 07.17-06-PLAN.md — Wave 2: Unit handles generated once in the organization API, `reach` and `viewerInReach`
+- [x] 07.17-07-PLAN.md — Wave 2: Team mentions resolve on channel posts (people and bots, ≤ 3 teams per bot message), never in DMs/AI chats, never to the cell
+- [x] 07.17-08-PLAN.md — Wave 2: Bots move and set waiting on the cards their automation opened (D-06, D-12)
+- [x] 07.17-09-PLAN.md — Wave 2: Plugin: the `ocw_conversation_open` tool and the board/open guard rules
+- [x] 07.17-10-PLAN.md — Wave 2: Plugin: item turns, the fan-out instruction and the escalation sentence
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
