@@ -1,0 +1,1 @@
+No external API integration: Phase 07.17 adds no third-party service, SDK or package; the orders MCP is the owner's own connector reached through the existing 07.4 connector proxy, and the "Agent Channel API" is this repository's internal API (RESEARCH Standard Stack: no new dependency).
