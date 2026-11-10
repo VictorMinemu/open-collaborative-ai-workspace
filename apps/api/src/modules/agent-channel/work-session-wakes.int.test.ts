@@ -489,6 +489,50 @@ describe("every meaningful transition wakes Atlas once; the card always shows th
     ).toBe(true);
   });
 
+  it("the e2e's order: a first turn that asks at once wakes Atlas; the wake turn's read names the tool, the reply posts", async () => {
+    // As in work-zone-bot-orchestration.spec.ts: the start's steps and the first turn's approval all land before the
+    // first job runs (the 3 s debounce), so one job sees `waiting_approval` straight after the start.
+    const s = await botSession();
+    const approvalId = randomUUID();
+    server.emitApproval(s.workSessionId, { approvalId, tool: "Write", paths: ["notes/ocw-change-1.md"] });
+    expect(await settle(s.workSessionId, "waiting_approval")).toBe(1);
+
+    const wakes = await wakesOf(s.workSessionId);
+    expect(wakes.map((w) => w.workSession.transition)).toEqual(["waiting_approval"]);
+    const ev = AgentWorkSessionEvent.parse({ ...wakes[0], seq: 1 });
+    expect(ev.workSession).toMatchObject({ status: "waiting_approval", pendingApprovals: 1 });
+    expect(ev.workSession.deciders[0]).toMatchObject({ id: victorId, handle: "victor" });
+    // WR-01: the summary holds a count only; the tool reaches the bot through the read its wake turn offers.
+    expect(ev.workSession.summary).not.toContain("Write");
+    expect(ev.turn?.tools).toContain("ocw_work_session_read");
+    const read = await cell("/work-sessions/read", {
+      eventId: ev.eventId,
+      agentId: atlasId,
+      workSessionId: s.workSessionId,
+    });
+    expect(read.status, JSON.stringify(read.body)).toBe(200);
+    expect(read.body).toMatchObject({
+      kind: "read",
+      session: { status: "waiting_approval" },
+      approvals: [{ id: approvalId, tool: "Write" }],
+    });
+    expect(read.body.deciders[0]).toMatchObject({ id: victorId, handle: "victor" });
+    // After the read the bot may still answer on its card (the reply names the decider; it approves nothing).
+    const reply = await cell("/messages", {
+      agentId: atlasId,
+      conversationId: engId,
+      threadRootMessageId: s.askedMessageId,
+      inReplyToMessageId: s.cardMessageId,
+      eventId: ev.eventId,
+      text: "Needs approval: Write @victor",
+      idempotencyKey: `evt:${ev.eventId}`,
+    });
+    expect(reply.status, JSON.stringify(reply.body)).toBe(200);
+    expect(await statusOf(s.workSessionId)).toBe("waiting_approval");
+    const [pending] = await rowsOf("select status from app.work_approvals where id = $1", [approvalId]);
+    expect(pending?.status).toBe("pending");
+  });
+
   it("failed: a session.state failed frame wakes Atlas and the card says failed", async () => {
     const s = await botSession();
     await drainWakes();
