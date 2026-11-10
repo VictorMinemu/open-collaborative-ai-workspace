@@ -83,6 +83,16 @@ export const orgUnits = appSchema.table(
     createdBy: uuid("created_by"),
     createdAt: createdAt(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
+    /**
+     * Phase 07.17 (D-14, PD-12): the unit's `@handle`, generated ONCE from its name (`unitHandle`, then "-2", "-3", …
+     * with the base trimmed so the handle stays at most 40 characters, until it differs from every other unit handle and
+     * every live bot username of the organization) and never changed by a rename or a move. An insert that omits it
+     * (N-1 code, raw inserts) gets it from the `org_units_fill_handle` trigger, the same SQL allocator the migration's
+     * backfill ran (`app.org_unit_handle`), so the column is NOT NULL for every writer.
+     */
+    handle: text("handle")
+      .notNull()
+      .$defaultFn(() => sql`null`),
   },
   (t) => [
     index("org_units_parent_idx").on(t.organizationId, t.parentId),
@@ -93,6 +103,9 @@ export const orgUnits = appSchema.table(
     check("org_units_kind_check", sql`${t.kind} in ('department','team','project')`),
     /** Phase 07.5: target of composite foreign keys that carry the organization (FKs bypass RLS). */
     unique("org_units_org_id_uq").on(t.organizationId, t.id),
+    /** Phase 07.17 (D-14): one unit per handle in an organization, in the `UNIT_HANDLE_RE` grammar. */
+    uniqueIndex("org_units_handle_uq").on(t.organizationId, t.handle),
+    check("org_units_handle_check", sql`${t.handle} ~ '^[a-z0-9]([a-z0-9._-]{0,46}[a-z0-9])?$'`),
   ],
 );
 
@@ -446,6 +459,7 @@ export const notifications = appSchema.table(
         "thread_reply",
         "ai_chat_shared",
         "card_updated",
+        "team_mention",
       ],
     }).notNull(),
     conversationId: uuid("conversation_id")
@@ -459,8 +473,18 @@ export const notifications = appSchema.table(
     actorId: uuid("actor_id"),
     createdAt: createdAt(),
     readAt: ts("read_at"),
+    /**
+     * Phase 07.17 (D-07): the team a `team_mention` names (an id, never its name). Deleting the unit only unlinks it
+     * (`ON DELETE SET NULL ("unit_id")`, hand-narrowed in the migration so `organization_id` is never cleared).
+     */
+    unitId: uuid("unit_id"),
   },
   (t) => [
+    foreignKey({
+      name: "notifications_unit_fk",
+      columns: [t.organizationId, t.unitId],
+      foreignColumns: [orgUnits.organizationId, orgUnits.id],
+    }).onDelete("set null"),
     uniqueIndex("notifications_user_message_uq").on(t.userId, t.messageId),
     index("notifications_org_user_created_idx").on(t.organizationId, t.userId, t.createdAt),
     index("notifications_unread_idx")
@@ -468,7 +492,7 @@ export const notifications = appSchema.table(
       .where(sql`read_at is null`),
     check(
       "notifications_kind_check",
-      sql`${t.kind} in ('mention','channel','here','dm','group_dm','thread_reply','ai_chat_shared','card_updated')`,
+      sql`${t.kind} in ('mention','channel','here','dm','group_dm','thread_reply','ai_chat_shared','card_updated','team_mention')`,
     ),
     check("notifications_actor_kind_check", sql`${t.actorKind} in ('user','agent','system')`),
   ],
@@ -664,12 +688,13 @@ export const botPolicies = appSchema.table(
     /**
      * Phase 07.6 (Pitfall 1, D-07): the organization's automation caps. How many automations one person may own, the
      * shortest schedule interval, how many inbound items (webhook or mail) one automation may run per hour, and the
-     * ceiling of every automation's own `max_runs_per_day`.
+     * ceiling of every automation's own `max_runs_per_day`. Phase 07.17 (D-01, D-11, PD-04): every 5 minutes and 288
+     * runs a day by default (the migration moved rows still holding the 07.6 defaults 15 / 96; other values stay).
      */
     maxAutomationsPerUser: integer("max_automations_per_user").notNull().default(10),
-    minScheduleMinutes: integer("min_schedule_minutes").notNull().default(15),
+    minScheduleMinutes: integer("min_schedule_minutes").notNull().default(5),
     maxInboundPerHour: integer("max_inbound_per_hour").notNull().default(30),
-    maxRunsPerDayCap: integer("max_runs_per_day_cap").notNull().default(96),
+    maxRunsPerDayCap: integer("max_runs_per_day_cap").notNull().default(288),
   },
   (t) => [
     check("bot_policies_egress_private_hosts_check", sql`cardinality(${t.egressPrivateHosts}) <= 64`),
@@ -4120,9 +4145,35 @@ export const automations = appSchema.table(
     version: integer("version").notNull().default(1),
     createdAt: createdAt(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
+    /**
+     * Phase 07.17 (D-02, D-16, PD-05): whether the run turn may open one conversation per new item
+     * (`ocw_conversation_open`), and how many per run and per local day. Only agent-turn schedules (Run now included)
+     * to a channel or a board (the fan-out check below); webhook and mail keep one item per event. Turning it off
+     * keeps the opened rows (the dedupe history) and the run log root.
+     */
+    fanOutEnabled: boolean("fan_out_enabled").notNull().default(false),
+    fanOutPerRun: smallint("fan_out_per_run").notNull().default(10),
+    fanOutPerDay: integer("fan_out_per_day").notNull().default(100),
+    /** Phase 07.17 (D-08): up to five people or teams the item turns may name when stuck (stable ids only). */
+    escalationTargets: jsonb("escalation_targets")
+      .$type<Array<{ kind: "user" | "unit"; id: string }>>()
+      .notNull()
+      .default([]),
+    /**
+     * Phase 07.17 (D-10, PD-06): the root of the fan-out automation's run log thread in its target conversation. A
+     * deleted root only unlinks (`ON DELETE SET NULL ("run_log_message_id")`, hand-narrowed in the migration so the
+     * target `conversation_id` is never cleared); the next run posts a new one.
+     */
+    runLogMessageId: uuid("run_log_message_id"),
   },
   (t) => [
     unique("automations_org_id_uq").on(t.organizationId, t.id),
+    /** Phase 07.17 (D-10): the run log root is a message of the target conversation. */
+    foreignKey({
+      name: "automations_run_log_fk",
+      columns: [t.runLogMessageId, t.conversationId],
+      foreignColumns: [messages.id, messages.conversationId],
+    }).onDelete("set null"),
     foreignKey({
       name: "automations_agent_fk",
       columns: [t.organizationId, t.agentId],
@@ -4181,6 +4232,21 @@ export const automations = appSchema.table(
       sql`${t.actionKind} <> 'digest' or (${t.triggerKind} = 'schedule' and ${t.targetKind} = 'dm')`,
     ),
     check("automations_max_runs_per_day_check", sql`${t.maxRunsPerDay} between 1 and 288`),
+    // Phase 07.17 (D-02, D-16, PD-05): fan-out only where no outside content arrives with the trigger.
+    check(
+      "automations_fan_out_check",
+      sql`not ${t.fanOutEnabled} or (${t.actionKind} = 'agent_turn' and ${t.triggerKind} = 'schedule'
+          and ${t.targetKind} in ('channel','board'))`,
+    ),
+    check("automations_fan_out_per_run_check", sql`${t.fanOutPerRun} between 1 and 25`),
+    check(
+      "automations_fan_out_per_day_check",
+      sql`${t.fanOutPerDay} between 1 and 500 and ${t.fanOutPerDay} >= ${t.fanOutPerRun}`,
+    ),
+    check(
+      "automations_escalation_targets_check",
+      sql`jsonb_typeof(${t.escalationTargets}) = 'array' and jsonb_array_length(${t.escalationTargets}) <= 5`,
+    ),
     check("automations_consecutive_failures_check", sql`${t.consecutiveFailures} >= 0`),
     check("automations_version_check", sql`${t.version} >= 1`),
     check(
@@ -4424,6 +4490,8 @@ export const automationRuns = appSchema.table(
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
   (t) => [
+    /** Phase 07.17: target of the composite key of `automation_conversations.run_id` (FKs bypass RLS). */
+    unique("automation_runs_org_id_uq").on(t.organizationId, t.id),
     foreignKey({
       name: "automation_runs_automation_fk",
       columns: [t.organizationId, t.automationId],
@@ -4458,6 +4526,78 @@ export const automationRuns = appSchema.table(
       sql`${t.inboundEventId} is null or ${t.trigger} in ('webhook','mail')`,
     ),
     check("automation_runs_reason_len_check", sql`${t.reason} is null or char_length(${t.reason}) <= 64`),
+  ],
+);
+
+/**
+ * Phase 07.17 (D-03, P1, ADR-0028 §12): one conversation a fan-out run opened for one external item. The dedupe key is
+ * (automation, sha256 hex of the item's external key): a key opened once is never opened again by that automation, even
+ * after its root is deleted (`root_message_id` then reads NULL and the row stays). Ids and the key hash only: never the
+ * key in clear, a title or a body. `status` follows the item's own bot turn (`agent_event_id`): `queued` (posted, job
+ * sent) → `delivered`, or `skipped` / `failed` with an `AutomationRunReason` code.
+ */
+export const automationConversations = appSchema.table(
+  "automation_conversations",
+  {
+    id: id(),
+    organizationId: orgId(),
+    automationId: uuid("automation_id").notNull(),
+    /** The run whose turn opened it. */
+    runId: uuid("run_id").notNull(),
+    externalKeyHash: text("external_key_hash").notNull(),
+    conversationId: uuid("conversation_id").notNull(),
+    /**
+     * The opened root (a board card or a top-level message). A deleted root only unlinks (`ON DELETE SET NULL
+     * ("root_message_id")`, hand-narrowed in the migration so `conversation_id` is never cleared).
+     */
+    rootMessageId: uuid("root_message_id"),
+    status: text("status", { enum: ["queued", "delivered", "skipped", "failed"] })
+      .notNull()
+      .default("queued"),
+    reason: text("reason"),
+    /** The `agent.automation_item.v1` event id of the item's own turn. */
+    agentEventId: uuid("agent_event_id"),
+    createdAt: createdAt(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    unique("automation_conversations_key_uq").on(t.automationId, t.externalKeyHash),
+    unique("automation_conversations_org_id_uq").on(t.organizationId, t.id),
+    foreignKey({
+      name: "automation_conversations_automation_fk",
+      columns: [t.organizationId, t.automationId],
+      foreignColumns: [automations.organizationId, automations.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "automation_conversations_run_fk",
+      columns: [t.organizationId, t.runId],
+      foreignColumns: [automationRuns.organizationId, automationRuns.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "automation_conversations_conversation_fk",
+      columns: [t.organizationId, t.conversationId],
+      foreignColumns: [conversations.organizationId, conversations.id],
+    }).onDelete("cascade"),
+    /** The root is a message of the opened conversation. */
+    foreignKey({
+      name: "automation_conversations_root_fk",
+      columns: [t.rootMessageId, t.conversationId],
+      foreignColumns: [messages.id, messages.conversationId],
+    }).onDelete("set null"),
+    check("automation_conversations_hash_check", sql`${t.externalKeyHash} ~ '^[0-9a-f]{64}$'`),
+    check(
+      "automation_conversations_status_check",
+      sql`${t.status} in ('queued','delivered','skipped','failed')`,
+    ),
+    check(
+      "automation_conversations_reason_len_check",
+      sql`${t.reason} is null or char_length(${t.reason}) <= 64`,
+    ),
+    /** The per-day cap counts an automation's rows since the local day start. */
+    index("automation_conversations_day_idx").on(t.automationId, t.createdAt),
+    index("automation_conversations_run_idx").on(t.runId),
+    /** Inbound replies and the board exemption find an opened root by its message id. */
+    index("automation_conversations_root_idx").on(t.rootMessageId).where(sql`root_message_id is not null`),
   ],
 );
 
