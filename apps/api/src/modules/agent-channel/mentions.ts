@@ -260,9 +260,12 @@ export async function buildMentionEvents(
     ));
   // D-12: an automation run's turn has nobody present (no browser tools); a person's message never is one. Phase 07.7
   // (D-13): neither has a consult hop turn (the question to a consulted bot, the answer back to the asker). Phase 07.16
-  // (D-09): nor a Work Zone wake (the bot hears about its session; nobody is there to watch a browser).
+  // (D-09): nor a Work Zone wake (the bot hears about its session; nobody is there to watch a browser). Phase 07.17
+  // (D-04, PD-09): nor an item a fan-out run opened (its own turn, delivered by the item worker).
   const workSessionWake = mention.trigger === "work_session";
-  const unattended = mention.trigger === "automation" || mention.trigger === "consult" || workSessionWake;
+  const automationItem = mention.trigger === "automation_item";
+  const unattended =
+    mention.trigger === "automation" || mention.trigger === "consult" || workSessionWake || automationItem;
 
   // Phase 07.15 (D-02, PD-04): the files of the messages this turn reads (the current message and the history window
   // above: the same thread filter, live messages only), ready and linked, in listing order: the current message's in
@@ -304,9 +307,10 @@ export async function buildMentionEvents(
       : [];
     // Phase 07.16 (D-05, D-21, PD-17): a person's delivery (a mention or reply mode, never an automation run or a
     // consult hop) or a wake about the bot's own session (`work_session`, 07.16-20), of a bot whose Work Zone profile is
-    // active, for an asker who passes the Work Zone module gate.
+    // active, for an asker who passes the Work Zone module gate. Phase 07.17 (D-04, ADR-0039): an opened item's turn
+    // too, for the automation's run-as person, tainted (outside content: the start route decides the flag's path).
     const workZone =
-      unattended && !workSessionWake
+      unattended && !workSessionWake && !automationItem
         ? null
         : await workZoneOfferFor(tx, deps.perms, {
             agentId: a.id,

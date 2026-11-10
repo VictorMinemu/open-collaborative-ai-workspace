@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import {
   AgentAutomationItemEvent,
   AgentChannelEventTypes,
@@ -171,7 +170,10 @@ beforeAll(async () => {
   ).id as string;
   dispatchId = (
     await ok(
-      s.victor.request("POST", "/api/v1/channels", { name: "dispatch", visibility: "private" }) as Promise<Res>,
+      s.victor.request("POST", "/api/v1/channels", {
+        name: "dispatch",
+        visibility: "private",
+      }) as Promise<Res>,
     )
   ).id as string;
   for (const conversationId of [fleetId, dispatchId]) {
@@ -193,7 +195,11 @@ beforeAll(async () => {
 
   // Ops ⊃ Logistics {Sam, Alex}: the automations' escalation target and the team the bot mentions when done.
   const ops = await ok(
-    s.victor.request("POST", "/api/v1/units", { kind: "department", name: "Ops", parentId: null }) as Promise<Res>,
+    s.victor.request("POST", "/api/v1/units", {
+      kind: "department",
+      name: "Ops",
+      parentId: null,
+    }) as Promise<Res>,
   );
   const logistics = await ok(
     s.victor.request("POST", "/api/v1/units", {
@@ -299,8 +305,8 @@ describe("an opened card gets its own tainted turn with the item as outside cont
     const before = await itemRow(itemId);
     const eventsBefore = await allItemEvents();
     const turnsBefore = Number(
-      (await s.su.query("select count(*)::int as n from app.agent_turns where agent_id = $1", [atlas.id])).rows[0]
-        .n,
+      (await s.su.query("select count(*)::int as n from app.agent_turns where agent_id = $1", [atlas.id]))
+        .rows[0].n,
     );
     await sendItemJob(s.orgA, itemId);
     await sendItemJob(s.orgA, itemId);
@@ -320,7 +326,8 @@ describe("an opened card gets its own tainted turn with the item as outside cont
     const { rows, roots, events } = await openedAndDelivered(["3042"], {
       target: { kind: "channel", conversationId: dispatchId },
     });
-    const [root] = (await s.su.query("select body from app.messages where id = $1", [roots[0]])).rows as Json[];
+    const [root] = (await s.su.query("select body from app.messages where id = $1", [roots[0]]))
+      .rows as Json[];
     const ev = events[0] as Json;
     expect(ev.conversation.id).toBe(dispatchId);
     expect(ev.thread.rootMessageId).toBe(roots[0]);

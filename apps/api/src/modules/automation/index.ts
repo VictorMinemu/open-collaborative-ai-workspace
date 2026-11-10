@@ -6,7 +6,7 @@ import type { ModelGateway } from "../model-gateway";
 import type { PermissionService } from "../organization";
 import type { AutomationSeamDeps } from "./actions";
 import { type AutomationProposals, registerAutomationApprovalKind } from "./approval-kind";
-import { type AutomationFanOut, createAutomationFanOut } from "./fan-out";
+import { type AutomationFanOut, createAutomationFanOut, registerFanOutWorker } from "./fan-out";
 import { registerInbound } from "./inbound";
 import { registerMailboxRoutes } from "./mailboxes";
 import { registerAutomationRoutes } from "./routes";
@@ -38,7 +38,7 @@ export {
   type ProposalRefusal,
   type ProposingTurn,
 } from "./approval-kind";
-export { type AutomationFanOut, externalKeyHash, type FanOutOpenInput } from "./fan-out";
+export { type AutomationFanOut, externalKeyHash, type FanOutOpenInput, itemEventId } from "./fan-out";
 export { firstRunAt, missedPolicy, nextRunAfter, nextRuns, validateSchedule } from "./schedule";
 export {
   type AutomationCaps,
@@ -87,6 +87,8 @@ export function createAutomationModule(
         // Workers and ticks register during module registration, before `core.jobs` starts (onReady).
         registerRunner(core, seams);
         registerInbound(core, seams);
+        // 07.17 (D-04, PD-09): one bot turn per opened item.
+        registerFanOutWorker(core, seams);
       },
     },
   };

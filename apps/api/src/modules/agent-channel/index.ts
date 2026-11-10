@@ -75,6 +75,13 @@ import { registerWorkZoneRoutes } from "./work-zone";
 export { currentPhrase } from "./activity";
 export { consultTargets, decideAgentMessage } from "./agent-message";
 export {
+  type DeliverAutomationItemDeps,
+  type DeliverAutomationItemInput,
+  type DeliverAutomationItemResult,
+  deliverAutomationItem,
+  skipAutomationItem,
+} from "./automation-items";
+export {
   type DeliverAutomationRunInput,
   type DeliverAutomationRunResult,
   deliverAutomationRun,

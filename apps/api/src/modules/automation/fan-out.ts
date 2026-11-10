@@ -16,12 +16,21 @@ import {
 } from "@ocw/db";
 import { and, count, eq, gte } from "drizzle-orm";
 import type { Core } from "../../core";
-import { lockRunAndAutomation, markRunAnswered, updatePlatformCardNotified } from "../agent-channel";
+import type { JobData } from "../../lib/jobs";
+import {
+  deliverAutomationItem,
+  lockRunAndAutomation,
+  markRunAnswered,
+  skipAutomationItem,
+  updatePlatformCardNotified,
+} from "../agent-channel";
 import { createBoardCard } from "../chat";
 import type { PermissionService } from "../organization";
+import type { AutomationSeamDeps } from "./actions";
 import { localDayStart } from "./budget";
+import { escalationFor } from "./escalation";
 import { boardDescription, defuseMentions, inertMarkdown, textFence } from "./inbound-card";
-import { isRefusal } from "./targets";
+import { isRefusal, refusalReason } from "./targets";
 
 /**
  * Phase 07.17 (D-02, D-03, D-05, D-15; PD-07, PD-08, PD-17): a fan-out run opens one conversation per new item in its
@@ -305,4 +314,82 @@ export function createAutomationFanOut(core: Core, deps: { perms: PermissionServ
       };
     },
   };
+}
+
+/** Items delivered at once per API process (PD-09): each is one bot turn, so a burst of opens is spread out. */
+const ITEM_CONCURRENCY = 3;
+
+/**
+ * Phase 07.17 (D-04, PD-09; E11): the event id of an opened item's own turn, derived from the item (a UUID of version 8,
+ * RFC 9562 custom, from SHA-256: the 07.16 wake construction), so a retried or concurrent job can never deliver a second
+ * turn (`agent_turns.event_id` is the turn's key).
+ */
+export function itemEventId(itemId: string): string {
+  const h = createHash("sha256").update(`automation_item:${itemId}`).digest();
+  h[6] = ((h[6] ?? 0) & 0x0f) | 0x80;
+  h[8] = ((h[8] ?? 0) & 0x3f) | 0x80;
+  const x = h.subarray(0, 16).toString("hex");
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20)}`;
+}
+
+/**
+ * One `automation.item` job (D-04, PD-09): ids only. The item's automation is found with no user (RLS keeps it to the
+ * job's organization, so a forged job naming another organization's item, or a deleted one, finds nothing, E8), then
+ * the item is delivered in one transaction as the automation's run-as person (`deliverAutomationItem`: the checks, the
+ * skips and the turn). A refusal thrown by chat or the resolver is the item's real outcome and becomes a skip with its
+ * reason; anything else (a deadlock, a dropped connection) is retried by pg-boss, and the derived event id keeps the
+ * retry from making a second turn.
+ */
+export async function deliverItemJob(
+  core: Core,
+  deps: Pick<AutomationSeamDeps, "perms" | "modelGateway" | "memory">,
+  data: JobData<"automation.item">,
+): Promise<void> {
+  const { organizationId, itemId } = data;
+  const head = await core.db.withTenant({ organizationId }, async (tx) => {
+    const [r] = await tx
+      .select({ status: automationConversations.status, runAs: automations.runAsUserId })
+      .from(automationConversations)
+      .innerJoin(automations, eq(automations.id, automationConversations.automationId))
+      .where(eq(automationConversations.id, itemId))
+      .limit(1);
+    return r ?? null;
+  });
+  if (head?.status !== "queued") return;
+  try {
+    await core.db.withTenant({ organizationId, userId: head.runAs }, (tx) =>
+      deliverAutomationItem(
+        tx,
+        {
+          core,
+          perms: deps.perms,
+          modelLabel: (ref) => deps.modelGateway.labelOf(ref),
+          memory: deps.memory,
+          // D-08, PD-15: whom the bot names when done or stuck, re-validated at this delivery.
+          escalationFor: (t, a) => escalationFor(t, { core, perms: deps.perms }, a),
+        },
+        { itemId, eventId: itemEventId(itemId) },
+      ),
+    );
+  } catch (err) {
+    // Ids and error names only (P1).
+    core.log.warn(
+      { itemId, err: { name: (err as Error)?.name, code: (err as { code?: unknown })?.code } },
+      "automation item delivery failed",
+    );
+    if (!isRefusal(err)) throw err;
+    await core.db.withTenant({ organizationId, userId: head.runAs }, (tx) =>
+      skipAutomationItem(tx, core, itemId, refusalReason(err)),
+    );
+  }
+}
+
+/**
+ * Wires the `automation.item` worker once (from the module index, before `core.jobs` starts). Workers run only with
+ * `OCW_JOBS_WORKER=on`; tests drive `core.jobs.drain("automation.item")`.
+ */
+export function registerFanOutWorker(core: Core, deps: AutomationSeamDeps): void {
+  core.jobs.work("automation.item", (data) => deliverItemJob(core, deps, data), {
+    localConcurrency: ITEM_CONCURRENCY,
+  });
 }
