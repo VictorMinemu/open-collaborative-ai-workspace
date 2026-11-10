@@ -1073,7 +1073,7 @@ or needs help.
   4. Integration tests (dedupe, caps, tenant isolation, team mention audience) and an e2e spec pass on desktop and mobile;
      ADR-0039 records the decisions
 
-**Plans:** 15/19 plans executed
+**Plans:** 16/19 plans executed
 
 Plans:
 **Wave 1**
@@ -1102,7 +1102,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 07.17-16-PLAN.md — Wave 4: The open route `POST /agent-channel/v1/conversations/open` (dedupe, caps, races, taint, audit): the phase's API end to end
+- [x] 07.17-16-PLAN.md — Wave 4: The open route `POST /agent-channel/v1/conversations/open` (dedupe, caps, races, taint, audit): the phase's API end to end
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
