@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type APIRequestContext, expect, type Locator, type Page, test } from "@playwright/test";
+import { expectNoSeriousA11y } from "../support/a11y";
 import { apiAs, BASE_URL, openAs, userIdOf } from "../support/actors";
 import {
   addOrders,
@@ -24,6 +25,7 @@ import { type BotWorkZonePolicy, setWorkZonePolicy } from "../support/bot-work-z
 import { cellToken } from "../support/cell-token";
 import { messageRow } from "../support/chat";
 import { FakeCellPlugin } from "../support/fake-cell-plugin";
+import { captureReview, expectNoSidewaysScroll, expectTouchTargets } from "../support/layout";
 import { grantErp, registerFakeErp, removeConnector } from "../support/watched";
 import { type FakeDeviceHandle, startIsolatedServer } from "../support/work-zone-device";
 import { ADMIN, API_URL } from "./env";
@@ -47,6 +49,9 @@ import { ADMIN, API_URL } from "./env";
  *      replies "Done: … @logistics" in the card's thread.
  *   4. Cam (Logistics, reads `#fleet`) gets the team mention in his Mentions ("Atlas mentioned @logistics"); Eva, who
  *      reads `#fleet` from outside the team, gets nothing.
+ * Every screen passes axe in light and dark and never scrolls sideways (44 px targets on phones for the editor's
+ * sections, the escalation chips and the composer's suggestions); review screenshots `0717-<screen>-<width>` in light
+ * and dark when OCW_E2E_SCREENSHOT_DIR is set: editor, board, runs, card-thread, composer-teams, inbox.
  * The spec removes its automation, connector, bot and device, and puts the organization's Work Zone policy back.
  */
 
@@ -199,6 +204,25 @@ async function boardMentions(api: APIRequestContext) {
     unreadCount: number;
   };
   return { items: list.items.filter((n) => n.conversation.id === board.id), unreadCount: list.unreadCount };
+}
+
+/**
+ * The invariants of one screen (PD-19): axe in light and dark on `selector`, no sideways scroll in either theme, and on
+ * phones 44 px targets under each of `touch`. The screen's `0717-<screen>-<width>` capture follows each call.
+ */
+async function checkScreen(
+  page: Page,
+  screen: string,
+  selector: string,
+  touch: Array<string | Locator> = [],
+) {
+  for (const theme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: theme });
+    await expectNoSeriousA11y(page, selector);
+    await expectNoSidewaysScroll(page, `${screen} ${w} (${theme})`);
+  }
+  await page.emulateMedia({ colorScheme: "light" });
+  if (mobile) for (const root of touch) await expectTouchTargets(page, root);
 }
 
 async function readAll(api: APIRequestContext): Promise<void> {
@@ -358,6 +382,12 @@ test("desktop: the owner creates the fan-out automation in the editor: every 10 
     await expect(sheet.getByTestId("escalation-picker")).toContainText(
       `They get a notification only if they can read ${board.name}`,
     );
+    // The first Escape closes the options (the sheet stays): the review shows the three sections as saved.
+    await add.press("Escape");
+    await expect(sheet).toBeVisible();
+    await fanOut.scrollIntoViewIfNeeded();
+    await checkScreen(s.page, "0717-editor", '[data-testid="automation-editor"]');
+    await captureReview(s.page, `0717-editor-${w}`);
 
     await sheet.getByTestId("automation-submit").click();
     await expect(s.page.getByText(new RegExp(`Created “${name}”`))).toBeVisible({ timeout: 15_000 });
@@ -410,6 +440,17 @@ test("phone: the same automation, created through the API, shows its fan-out and
     const chip = sheet.getByTestId("escalation-chip").filter({ hasText: TEAM });
     await chip.scrollIntoViewIfNeeded();
     await expect(chip).toHaveAttribute("data-kind", "unit");
+    // 44 px: the switch row, the cap inputs' rows, the chip's remove button and the add field (PD-19).
+    const remove = chip.getByRole("button", { name: `Remove ${TEAM}` });
+    const box = await remove.boundingBox();
+    expect(box?.height ?? 0, "the chip's remove button is 44 px tall").toBeGreaterThanOrEqual(43.5);
+    await expectTouchTargets(s.page, '[data-testid="escalation-picker"]');
+    await fanOut.scrollIntoViewIfNeeded();
+    await checkScreen(s.page, "0717-editor", '[data-testid="automation-editor"]', [
+      '[data-testid="automation-editor"]',
+      '[data-testid="automation-fan-out-section"]',
+    ]);
+    await captureReview(s.page, `0717-editor-${w}`);
   } finally {
     await s.context.close();
   }
@@ -459,6 +500,8 @@ test("two new orders, Run now: two cards in Backlog and “Opened 2 conversation
       await expect(cardTile(backlog, await cardOf(id))).toContainText(`Order ${id}`, { timeout: 15_000 });
     }
     await expect(view.getByTestId("board-card")).toHaveCount(2);
+    await checkScreen(page, "0717-board", '[data-testid="board-view"]');
+    await captureReview(page, `0717-board-${w}`);
 
     // ---- the "Fleet orders · Runs" thread holds the run card
     const opening = (await runsOf(admin, automationId)).find((r) => (r.opened ?? 0) === 2);
@@ -485,6 +528,8 @@ test("two new orders, Run now: two cards in Backlog and “Opened 2 conversation
     ).toBeVisible({ timeout: 15_000 });
     await expect(botReply(panel, "Opened 0, existing 2")).toBeVisible({ timeout: 15_000 });
     expect((await cardsByTitle()).size).toBe(2);
+    await checkScreen(page, "0717-runs", THREAD);
+    await captureReview(page, `0717-runs-${w}`);
   } finally {
     await s.context.close();
   }
@@ -524,6 +569,8 @@ test("each card's turn moves it to In progress and starts its session; the turn 
     for (const root of roots) {
       await expect(cardTile(boardColumn(view, board.columns.started), root)).toBeVisible({ timeout: 15_000 });
     }
+    await expectNoSeriousA11y(page, '[data-testid="board-view"]');
+    await expectNoSidewaysScroll(page, `board in progress ${w}`);
 
     // ---- 1042's thread: the bot's answer and its live card, working (the daemon holds the turn)
     const panel = await openThread(page, roots[0] as string);
@@ -567,6 +614,8 @@ test("each card's turn moves it to In progress and starts its session; the turn 
     const unit = done.locator('[data-testid="mention"][data-mention-kind="unit"]');
     await expect(unit).toContainText(`@${TEAM_HANDLE}`);
     await expect(unit).toHaveAttribute("title", `${TEAM} · team`);
+    await done.scrollIntoViewIfNeeded();
+    await checkScreen(page, "0717-card-done", THREAD);
   } finally {
     await s.context.close();
   }
@@ -603,6 +652,7 @@ test("Cam (Logistics) gets “Atlas mentioned @logistics” in his Mentions; Eva
     await expect(row).toBeVisible({ timeout: 15_000 });
     await expect(row).toContainText("mentioned @logistics");
     await expect(row.getByTestId("inbox-actor")).toHaveText(atlas.name);
+    await expectNoSeriousA11y(cam.page, '[data-testid="inbox"]');
     // It opens the card's thread (the permalink names the card as the thread root).
     const href = (await row.getAttribute("href")) ?? "";
     expect(href, href).toContain(`/chat/${board.id}`);
@@ -633,6 +683,7 @@ test("Cam (Logistics) gets “Atlas mentioned @logistics” in his Mentions; Eva
     const views = e.page.getByTestId(mobile ? "views-segmented" : "views-list").filter({ visible: true });
     await expect(views.getByTestId("view-mentions")).toBeVisible();
     await expect(views.getByTestId("view-mentions").getByTestId("view-count")).toHaveCount(0);
+    await expectNoSidewaysScroll(e.page, `Eva's mentions ${w}`);
   } finally {
     await e.context.close();
   }
@@ -666,6 +717,9 @@ test("Dan types @log in Order 1043's thread, picks Logistics from Teams and send
     await expect(option).toContainText(TEAM);
     await expect(option).toContainText("@logistics");
     await expect(option).toContainText("Team · 2");
+    await checkScreen(dan.page, "0717-composer-teams", THREAD, ['[data-testid="mention-suggestions"]']);
+    await captureReview(dan.page, `0717-composer-teams-${w}`);
+    await expect(suggestions).toBeVisible();
     await option.click();
     await expect(composer).toHaveValue("@logistics ");
     await composer.pressSequentially(BRAKES);
@@ -682,6 +736,11 @@ test("Dan types @log in Order 1043's thread, picks Logistics from Teams and send
     const chip = sent.locator('[data-testid="mention"][data-mention-kind="unit"]');
     await expect(chip).toContainText("@logistics");
     await expect(chip).toHaveAttribute("title", `${TEAM} · team`);
+    // The card's thread as the team sees it: the bot's "Done … @logistics" above Dan's own mention.
+    await expect(botReply(panel, "Done: Mode: fullAccess", "@logistics")).toBeVisible();
+    await sent.scrollIntoViewIfNeeded();
+    await checkScreen(dan.page, "0717-card-thread", THREAD);
+    await captureReview(dan.page, `0717-card-thread-${w}`);
   } finally {
     await dan.context.close();
   }
@@ -718,6 +777,11 @@ test("Cam's inbox reads “Dan mentioned @logistics” and opens Order 1043's th
     await expect(row).toContainText("mentioned @logistics");
     await expect(row.getByTestId("inbox-actor")).toHaveText(DAN.name);
     await expect(row.getByTestId("inbox-snippet").getByTestId("mention")).toContainText("@logistics");
+    await expect(
+      inbox.getByTestId("inbox-item").filter({ hasText: "Done: Mode: fullAccess" }).first(),
+    ).toContainText("mentioned @logistics");
+    await checkScreen(cam.page, "0717-inbox", '[data-testid="inbox"]');
+    await captureReview(cam.page, `0717-inbox-${w}`);
     await row.click();
     await expect(cam.page).toHaveURL(new RegExp(`/chat/${board.id}\\?thread=${root43}&m=`), {
       timeout: 15_000,
