@@ -29,6 +29,13 @@ import { SandboxRefusal } from "../../packages/contracts/src/sandbox";
  * Bot Work Zone sessions (07.16-21, PD-26): `[[call ocw_work_session_start {"projectId":"…","prompt":"…"}]]` (and
  * `_prompt`, `_read`, `_stop`) posts exactly the plugin's body to `POST /agent-channel/v1/work-sessions/<verb>`; an
  * `agent.work_session.v1` wake is answered on the session's card (`Done: …`, `Needs approval: …`, `<transition>: …`).
+ *
+ * Automation fan-out (07.17-18, PD-22), only for a spec that sets the hooks: a run turn offered `ocw_conversation_open`
+ * lists the spec's connector (`fanOutFor`) and opens one conversation per id through `POST
+ * /agent-channel/v1/conversations/open` (exactly the plugin's body); an `agent.automation_item.v1` turn runs
+ * `itemCallsFor` in the item's thread; a `turn_done` wake in such a thread runs `wakeCallsFor` and mentions the item's
+ * escalation. Like the plugin's board tool, a tainted or session-read turn never reads the board: it moves its thread's
+ * card at the version it last saw (1 for a just-opened card) and retries one 409 at the current version.
  */
 
 export interface FakeCellEvent {
@@ -179,6 +186,28 @@ export interface AutomationRunPayload extends MentionPayload {
   };
 }
 
+/** `agent.automation_item.v1` (07.17-17, D-04): a fan-out run opened this thread for an item; a tainted turn in it. */
+export const AUTOMATION_ITEM_EVENT = "agent.automation_item.v1";
+
+/**
+ * `agent.automation_item.v1` (07.17 D-04, PD-09): built like a mention of the bot on the opened root (the card or the
+ * channel message), authored by the run-as person, tainted from the start. The item travels only in `automationItem`.
+ */
+export interface AutomationItemPayload extends MentionPayload {
+  automationItem: {
+    automationId: string;
+    runId: string;
+    itemId: string;
+    name: string;
+    instructions: string;
+    item: { title: string; text: string; openedAt: string };
+    escalation: Array<{ kind: "user" | "unit"; id: string; handle: string; displayName: string }>;
+  };
+}
+
+/** One simulated tool call (a `[[call …]]` directive, or what a spec's hook decides). */
+export type SimulatedCall = { tool: string; args: Record<string, unknown> };
+
 /** Subscription sign-in emulation (provider.auth.* commands), against a fake device-auth server. */
 export interface FakeDeviceAuthOptions {
   /** Base URL of e2e/support/fake-device-auth-server.ts (stands in for https://auth.openai.com). */
@@ -245,6 +274,28 @@ export interface FakeCellOptions {
    * wake's decider of the same id, else by their display name.
    */
   userHandles?: Readonly<Record<string, string>>;
+  /**
+   * 07.17-18 (PD-22): on an `agent.automation_run.v1` whose turn offers `ocw_conversation_open`, the connector (its safe
+   * name) whose `list_records` the persona reads, and the ids it keeps as new (default: every id). The fake then makes
+   * one `ocw_connector_call` and one `ocw_conversation_open` (an item per kept id: key `<id>`, title `Order <id>`, body
+   * `Order <id> from the ERP.`) and replies `Opened <opened>, existing <existing>` on the run card. Null = the 07.6 run
+   * answer. Unset = every run is answered as before.
+   */
+  fanOutFor?: (
+    run: AutomationRunPayload,
+  ) => { connector: string; select?: (ids: string[]) => string[] } | null;
+  /**
+   * 07.17-18 (PD-22): the calls the persona makes on an `agent.automation_item.v1` (in the item's thread, replying to its
+   * root), awaited so a spec can hold the turn. The item's escalation is remembered by thread root for the wake. Unset =
+   * item events are not answered (the cell before 07.17).
+   */
+  itemCallsFor?: (item: AutomationItemPayload) => SimulatedCall[] | Promise<SimulatedCall[]>;
+  /**
+   * 07.17-18 (PD-22): on a `turn_done` wake in a thread an item turn answered, the calls the persona makes (the session
+   * read, the card's move); it then replies `Done: <last output line of its read> @<escalation handles>` (the asker when
+   * the automation names nobody). Unset, or any other wake = the 07.16 answer.
+   */
+  wakeCallsFor?: (wake: WorkSessionWakePayload, ctx: { escalationHandles: string[] }) => SimulatedCall[];
 }
 
 /** 07.7: the consult tool (self-validated by `POST /consultations`, never `/tool-calls`). */
@@ -372,6 +423,20 @@ const WORK_SESSION_KEYS: Record<WorkSessionTool, readonly string[]> = {
   ocw_work_session_read: ["workSessionId", "cursor"],
   ocw_work_session_stop: ["workSessionId"],
 };
+
+/**
+ * The ids a `list_records` answer lists (07.17-18): the connector's content is the tool's JSON text (`{"ids":[…]}`);
+ * null for a refusal, an error result or anything else.
+ */
+export function idsOf(content: string): string[] | null {
+  try {
+    const parsed = JSON.parse(content) as { ids?: unknown } | null;
+    const ids = parsed?.ids;
+    return Array.isArray(ids) && ids.every((x) => typeof x === "string") ? (ids as string[]) : null;
+  } catch {
+    return null;
+  }
+}
 
 /** The last non-empty line of a read answer's newest output text ("" when it has none). */
 export function lastOutputLine(read: { output?: { texts?: Array<{ text: string }> } } | null): string {
@@ -781,12 +846,22 @@ export class FakeCellPlugin {
         // turn (`eventId`); the anchor is in the thread the event names (flat in a DM). Only the persona's own calls run:
         // the server sentence carries no directives, and outside content is never read as one.
         const r = data as unknown as AutomationRunPayload;
+        const fanOut = (r.turn?.tools ?? []).includes(BUILTIN_TOOLS.conversationOpen)
+          ? (this.opts.fanOutFor?.(r) ?? null)
+          : null;
+        if (fanOut) {
+          await this.answerFanOutRun(r, fanOut);
+          return;
+        }
         const calls = this.opts.toolCallsFor?.(r) ?? [];
         const body =
           calls.length > 0
             ? (await this.simulateToolCalls(r, calls)).join("\n")
             : (this.opts.replyText ?? identityReply)(r);
         await this.replyToRun(r, body + turnToolsSuffix(r) + turnContextSuffix(r));
+      }
+      if (type === AUTOMATION_ITEM_EVENT && this.opts.autoReply && this.opts.itemCallsFor) {
+        await this.answerItem(data as unknown as AutomationItemPayload);
       }
       if (type === "agent.card_action.v1" && this.opts.autoReply) {
         // An approved grant (07.5 D-02): call the granted tool once, with exactly the granted arguments.
@@ -1177,6 +1252,8 @@ export class FakeCellPlugin {
     transition: WorkSessionWakePayload["workSession"]["transition"];
     workSessionId: string;
     text: string;
+    /** 07.17-18: the lines of `wakeCallsFor`'s calls, on the wakes of an item's card only. */
+    lines?: string[];
   }> = [];
 
   /**
@@ -1241,6 +1318,32 @@ export class FakeCellPlugin {
     if (this.opts.holdAgents?.has(w.agent.id)) return;
     const ws = w.workSession;
     const asker = `@${this.handleOf(w, w.message.author.id, w.message.author.displayName)}`;
+    const escalation = this.escalationByRoot.get(w.thread.rootMessageId);
+    if (escalation && this.opts.wakeCallsFor && ws.transition === "turn_done") {
+      // PD-22: the item's card. The spec's calls (the read, the move), then the people the automation names.
+      const lines = await this.simulateToolCalls(
+        w,
+        this.opts.wakeCallsFor(w, { escalationHandles: escalation }),
+      );
+      const read = this.workSessionRequests
+        .filter(
+          (r) =>
+            r.eventId === w.eventId && r.tool === BUILTIN_TOOLS.workSessionRead && r.body?.kind === "read",
+        )
+        .at(-1);
+      const line = (read ? lastOutputLine(read.body) : "") || ws.summary;
+      const people = escalation.length > 0 ? escalation.map((h) => `@${h}`).join(" ") : asker;
+      const text = `Done: ${line} ${people}`;
+      await this.reply(w, text);
+      this.workSessionWakes.push({
+        eventId: w.eventId,
+        transition: ws.transition,
+        workSessionId: ws.workSessionId,
+        text,
+        lines,
+      });
+      return;
+    }
     const read = (w.turn?.tools ?? []).includes(BUILTIN_TOOLS.workSessionRead)
       ? () => this.workSessionCall(w, BUILTIN_TOOLS.workSessionRead, { workSessionId: ws.workSessionId })
       : null;
@@ -1314,6 +1417,10 @@ export class FakeCellPlugin {
     const denied = (res: { status: number; body: ErrorBody | null }) =>
       `denied (${res.body?.error?.code ?? res.status})`;
     const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+    // 07.17 (D-06, D-12), like the plugin: outside content or a session's output never creates a card or reads the board.
+    const restricted = this.restrictedTurn(m);
+    if (restricted && (args.action === "create" || args.action === "read")) return "denied (tainted)";
+    if (restricted) return this.restrictedBoardChange(m, args, call);
     if (args.action === "create") {
       const res = await call<{ card: { messageId: string } }>("POST", "/board/cards", {
         ...turn,
@@ -1348,6 +1455,141 @@ export class FakeCellPlugin {
     });
     if (res.status !== 200) return denied(res);
     return args.action === "move" ? "moved" : "waiting set";
+  }
+
+  /** A turn that started tainted, or read a Work Zone session's output (07.17 D-06, D-12): it may not read the board. */
+  private restrictedTurn(m: MentionPayload): boolean {
+    return (
+      m.turn?.tainted === true ||
+      this.workSessionRequests.some(
+        (r) => r.eventId === m.eventId && r.tool === BUILTIN_TOOLS.workSessionRead,
+      )
+    );
+  }
+
+  /** The card versions this cell last saw (`<agentId>:<cardId>`), like the plugin's board-tool memory (07.17 D-06). */
+  private readonly boardVersions = new Map<string, number>();
+
+  /**
+   * A move or waiting change on a turn that may not read the board (apps/openclaw-channel's board-tool.ts, 07.17 D-06):
+   * the thread's card (or `cardId`) at the version this cell last saw, else 1 (a card the automation just opened); a 409
+   * `board_card_version_conflict` whose details carry that card is retried ONCE at its version. The route decides.
+   */
+  private async restrictedBoardChange(
+    m: MentionPayload,
+    args: Record<string, unknown>,
+    call: <T>(
+      method: string,
+      route: string,
+      body: Record<string, unknown>,
+    ) => Promise<{ status: number; body: (T & { error?: { code?: string } }) | null }>,
+  ): Promise<string> {
+    const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+    const change =
+      args.action === "move"
+        ? { move: { columnId: str(args.columnId) ?? "", afterCardId: str(args.afterCardId) ?? null } }
+        : args.action === "set_waiting"
+          ? { waitingOn: str(args.waitingOn) ?? "" }
+          : null;
+    if (!change) return "denied (unknown_action)";
+    const cardId = str(args.cardId) ?? m.thread.rootMessageId;
+    const key = `${m.agent.id}:${cardId}`;
+    type Card = { messageId?: string; version?: number };
+    type Answer = { card?: Card; error?: { code?: string; details?: { card?: Card } } };
+    const patch = (expectedVersion: number) =>
+      call<Answer>("PATCH", `/board/cards/${cardId}`, {
+        eventId: m.eventId,
+        agentId: m.agent.id,
+        expectedVersion,
+        ...change,
+      });
+    let res = await patch(this.boardVersions.get(key) ?? 1);
+    const current = res.body?.error?.details?.card;
+    if (
+      res.status === 409 &&
+      res.body?.error?.code === "board_card_version_conflict" &&
+      current?.messageId === cardId &&
+      typeof current.version === "number"
+    ) {
+      res = await patch(current.version);
+    }
+    if (res.status !== 200) {
+      if (res.status === 409) this.boardVersions.delete(key);
+      return `denied (${res.body?.error?.code ?? res.status})`;
+    }
+    const version = res.body?.card?.version;
+    if (typeof version === "number") this.boardVersions.set(key, version);
+    return args.action === "move" ? "moved" : "waiting set";
+  }
+
+  /** Every `POST /conversations/open` this cell made (07.17-18): the body sent exactly, the status and the answer. */
+  readonly conversationOpenRequests: Array<{
+    eventId: string;
+    sent: Record<string, unknown>;
+    status: number;
+    body: Loose | null;
+  }> = [];
+
+  /** Every item turn this cell answered (07.17-18): its thread root, the item's title and the lines its calls made. */
+  readonly itemTurns: Array<{ eventId: string; rootMessageId: string; title: string; lines: string[] }> = [];
+
+  /** The escalation handles of the item turns answered, by thread root (the card or message the run opened). */
+  private readonly escalationByRoot = new Map<string, string[]>();
+
+  /**
+   * PD-22: a fan-out run. One `ocw_connector_call` of `<connector>__list_records` (not sent, and nothing opened, when
+   * the turn does not offer it), then exactly the plugin's `ocw_conversation_open` body (`{ eventId, agentId, items }`,
+   * apps/openclaw-channel's conversation-open-tool.ts) with an item per kept id, then one reply on the run card:
+   * `Opened <opened>, existing <existing>`, or the refusal.
+   */
+  private async answerFanOutRun(
+    r: AutomationRunPayload,
+    fanOut: { connector: string; select?: (ids: string[]) => string[] },
+  ): Promise<void> {
+    if (this.opts.holdAgents?.has(r.agent.id)) return;
+    const listed = await this.connectorCall(r, "ocw_connector_call", {
+      connector: fanOut.connector,
+      tool: "list_records",
+      arguments: {},
+    });
+    const ids = idsOf(listed);
+    if (!ids) {
+      await this.replyToRun(r, `Tool ocw_connector_call: ${listed}`);
+      return;
+    }
+    const kept = fanOut.select ? fanOut.select(ids) : ids;
+    const sent = {
+      eventId: r.eventId,
+      agentId: r.agent.id,
+      items: kept.map((id) => ({ externalKey: id, title: `Order ${id}`, body: `Order ${id} from the ERP.` })),
+    };
+    const res = await this.request<Loose | null>("POST", "/conversations/open", sent);
+    this.conversationOpenRequests.push({ eventId: r.eventId, sent, status: res.status, body: res.body });
+    const b = res.body;
+    if (res.status !== 200 || b?.ok !== true || !Array.isArray(b.results)) {
+      const code = b?.code ?? b?.error?.code ?? res.status;
+      await this.replyToRun(r, `Tool ${BUILTIN_TOOLS.conversationOpen}: refused (${code})`);
+      return;
+    }
+    const results = b.results as Array<{ opened?: boolean; refused?: string | null }>;
+    const opened = results.filter((x) => x.opened === true).length;
+    const existing = results.filter((x) => x.opened !== true && !x.refused).length;
+    await this.replyToRun(r, `Opened ${opened}, existing ${existing}`);
+  }
+
+  /** PD-22: an item turn. The spec's calls run in the item's thread (the reply answers the opened root). */
+  private async answerItem(item: AutomationItemPayload): Promise<void> {
+    if (this.opts.holdAgents?.has(item.agent.id)) return;
+    const root = item.thread.rootMessageId;
+    this.escalationByRoot.set(
+      root,
+      (item.automationItem?.escalation ?? []).map((e) => e.handle),
+    );
+    const calls = (await this.opts.itemCallsFor?.(item)) ?? [];
+    const lines = calls.length > 0 ? await this.simulateToolCalls(item, calls) : [];
+    const title = item.automationItem?.item.title ?? "";
+    await this.reply(item, lines.length > 0 ? lines.join("\n") : `Read ${title}`);
+    this.itemTurns.push({ eventId: item.eventId, rootMessageId: root, title, lines });
   }
 
   private step() {
