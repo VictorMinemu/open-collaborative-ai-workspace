@@ -4537,8 +4537,8 @@ export const automationRuns = appSchema.table(
 
 /**
  * Phase 07.17 (D-03, P1, ADR-0028 §12): one conversation a fan-out run opened for one external item. The dedupe key is
- * (automation, sha256 hex of the item's external key): a key opened once is never opened again by that automation, even
- * after its root is deleted (`root_message_id` then reads NULL and the row stays). Ids and the key hash only: never the
+ * (automation, keyed HMAC-SHA256 hex of the item's external key, code review WR-06): a key opened once is never
+ * opened again by that automation, even after its root is deleted (`root_message_id` then reads NULL and the row stays). Ids and the key hash only: never the
  * key in clear, a title or a body. `status` follows the item's own bot turn (`agent_event_id`): `queued` (posted, job
  * sent) → `delivered`, or `skipped` / `failed` with an `AutomationRunReason` code. 07.17 code review WR-02: `waiting`
  * (reason `session_capacity` or `agent_daily_limit`) is an item whose turn found no free Work Zone session or the bot at

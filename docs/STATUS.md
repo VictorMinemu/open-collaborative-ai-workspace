@@ -168,7 +168,7 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   is lower than the turns it can use). An `agent_turn` schedule into a channel or a board can turn on "For each new
   item": its run turn gets the batch tool `ocw_conversation_open` (`POST /agent-channel/v1/conversations/open`, up to
   25 items a call), which opens one top-level thread or one board card per new item in the run's own target only,
-  deduplicated on the sha256 of the item's key (`app.automation_conversations`, tenant RLS; the key never stored in
+  deduplicated on a keyed HMAC of the item's key (`app.automation_conversations`, tenant RLS; the key never stored in
   clear), capped per run (10, 1…25) and per day (100, 1…500) under the run and automation locks. Bot-written text is
   defused. The runs post into one "<name> · Runs" thread, and the open call answers the run, so quiet runs never trip
   the breaker. Each opened item gets one ids-only `automation.item` job and one tainted, unattended

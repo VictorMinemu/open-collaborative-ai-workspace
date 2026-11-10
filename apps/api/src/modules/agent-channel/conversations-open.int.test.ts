@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, hkdfSync, randomUUID } from "node:crypto";
 import {
   BUILTIN_TOOLS,
   CONVERSATION_OPEN_SENTENCES,
@@ -6,6 +6,7 @@ import {
   MAX_TOOL_CALLS_PER_TURN,
 } from "@ocw/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { decodeKey } from "../../config/env";
 import { sha256Hex } from "../../lib/crypto";
 import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
 import { inboundRooted } from "./inbound-origin";
@@ -103,6 +104,26 @@ const openOk = async (ev: Json, items: Json[]): Promise<Json> => {
 };
 
 const sha = (key: string) => createHash("sha256").update(key.normalize("NFC").trim()).digest("hex");
+
+/**
+ * Code review WR-06: the stored dedupe hash, rebuilt here from its documented construction: HMAC-SHA256 under a key
+ * derived (HKDF-SHA256, info `ocw/automation-item-key/v1`) from the server's OCW_ENCRYPTION_KEY, over organization,
+ * automation and the NFC-normalised, trimmed key, NUL-separated.
+ */
+const keyed = (organizationId: string, automationId: string, key: string) => {
+  const secret = Buffer.from(
+    hkdfSync(
+      "sha256",
+      decodeKey(core().env.OCW_ENCRYPTION_KEY) as Buffer,
+      Buffer.alloc(0),
+      "ocw/automation-item-key/v1",
+      32,
+    ),
+  );
+  return createHmac("sha256", secret)
+    .update(`${organizationId}\u0000${automationId}\u0000${key.normalize("NFC").trim()}`, "utf8")
+    .digest("hex");
+};
 
 const conversationRows = async (automationId: string) =>
   (
@@ -237,13 +258,13 @@ describe("Run now → the run's bot opens one card per new order; the next run o
       expect(created).toMatchObject({ agent_id: atlas.id, user_id: s.victorId });
     }
 
-    // Two rows: the key's sha256 only, queued, this run, the cards as roots.
+    // Two rows: the key's keyed hash only (WR-06), queued, this run, the cards as roots.
     const rows = await conversationRows(automationId);
     expect(
       rows.map((r) => [r.external_key_hash, r.status, r.run_id, r.conversation_id, r.root_message_id]),
     ).toEqual([
-      [sha("1042"), "queued", runId, fleetId, roots[0]],
-      [sha("1043"), "queued", runId, fleetId, roots[1]],
+      [keyed(s.orgA, automationId, "1042"), "queued", runId, fleetId, roots[0]],
+      [keyed(s.orgA, automationId, "1043"), "queued", runId, fleetId, roots[1]],
     ]);
     for (const r of rows) expect(r.external_key_hash).toMatch(/^[0-9a-f]{64}$/);
     const itemIds = rows.map((r) => r.id as string);
@@ -790,7 +811,7 @@ describe("the leak sweep (P1, PD-17)", () => {
   const TITLE = "OCW-MARKER-0717-title";
   const BODY = "OCW-MARKER-0717-body";
 
-  it("the external key, the title and the body are in no audit row, tool call, job or log line; the row holds the sha256", async () => {
+  it("the external key, the title and the body are in no audit row, tool call, job or log line; the row holds only a keyed hash (WR-06)", async () => {
     const automationId = await createAutomation();
     const { ev } = await runTurn(automationId);
     const out = await openOk(ev, [{ externalKey: KEY, title: TITLE, body: BODY }]);
@@ -803,10 +824,12 @@ describe("the leak sweep (P1, PD-17)", () => {
     expect(card.description).toContain(BODY);
 
     const [row] = await conversationRows(automationId);
-    expect(row?.external_key_hash).toBe(sha256Hex(KEY));
-    expect(row?.external_key_hash).toBe(sha(KEY));
+    // WR-06: a keyed hash, scoped to the automation: never the plain sha256 a dictionary of order numbers reverses.
+    expect(row?.external_key_hash).toBe(keyed(s.orgA, automationId, KEY));
+    expect(row?.external_key_hash).not.toBe(sha256Hex(KEY));
+    expect(row?.external_key_hash).not.toBe(sha(KEY));
     expect(s.logs.length).toBeGreaterThan(20);
-    for (const needle of [KEY, TITLE, BODY, sha(KEY)]) {
+    for (const needle of [KEY, TITLE, BODY, sha(KEY), keyed(s.orgA, automationId, KEY)]) {
       for (const q of [
         "select count(*)::int as n from app.audit_events t where strpos(row_to_json(t)::text, $1) > 0",
         "select count(*)::int as n from app.agent_tool_calls t where strpos(row_to_json(t)::text, $1) > 0",
@@ -933,7 +956,11 @@ describe("tenants (E8, T-07.17-16-01)", () => {
         [automationB],
       )
     ).rows;
-    expect(rowsB).toEqual([{ organization_id: s.orgB, external_key_hash: sha("1042") }]);
+    expect(rowsB).toEqual([
+      { organization_id: s.orgB, external_key_hash: keyed(s.orgB, automationB, "1042") },
+    ]);
+    // The same key in two automations stores two different hashes (WR-06: scoped per automation).
+    expect(rowsB[0]?.external_key_hash).not.toBe(keyed(s.orgA, automationA, "1042"));
     expect(await conversationRows(automationA)).toEqual(rowsA);
   });
 });

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, hkdfSync } from "node:crypto";
 import {
   AGENT_CARD_TITLE_MAX,
   type AgentChannelConversationOpenItem,
@@ -15,6 +15,7 @@ import {
   type Tx,
 } from "@ocw/db";
 import { and, count, eq, gte } from "drizzle-orm";
+import { decodeKey } from "../../config/env";
 import type { Core } from "../../core";
 import { type JobContext, type JobData, lastAttempt } from "../../lib/jobs";
 import {
@@ -50,7 +51,8 @@ import { isRefusal, refusalReason } from "./targets";
  *
  * Bot-written text never mentions anyone (P2): titles and bodies are defused, bodies fenced, the channel title inert
  * Markdown, and the board card is posted with `mentionAll: null`. Ids and counts only (P1): the external key is hashed
- * (sha256 hex) and never stored in clear, logged, audited or put in a job; titles and bodies live only in the posts.
+ * (a keyed HMAC-SHA256, hex: code review WR-06) and never stored in clear, logged, audited or put in a job; titles and
+ * bodies live only in the posts.
  * The route takes the target, the column, the run and the person from the stored turn and automation (P6).
  */
 
@@ -71,9 +73,34 @@ export interface AutomationFanOut {
   isPostRefusal(err: unknown): boolean;
 }
 
-/** The dedupe key of an external item: the sha256 hex of its NFC-normalised, trimmed key (never stored in clear). */
-export function externalKeyHash(key: string): string {
-  return createHash("sha256").update(key.normalize("NFC").trim(), "utf8").digest("hex");
+/** HKDF `info` of the dedupe key: a key of its own, derived from the server secret, never reused for anything else. */
+const ITEM_KEY_INFO = "ocw/automation-item-key/v1";
+
+/**
+ * 07.17 code review WR-06: the server key the dedupe hashes are keyed with, derived (HKDF-SHA256) from
+ * `OCW_ENCRYPTION_KEY`, the operator secret the API already resolves through the `SecretStore` (`env`, `_FILE` or an
+ * `openbao://` reference; principle 8): never stored in the database or a config file. Rotating that secret re-keys
+ * every hash, so items already opened would open again: rotate it only with a rehash.
+ */
+export function itemKeySecret(encryptionKey: string): Buffer {
+  const master = decodeKey(encryptionKey);
+  if (!master) throw new Error("OCW_ENCRYPTION_KEY is invalid");
+  return Buffer.from(hkdfSync("sha256", master, Buffer.alloc(0), ITEM_KEY_INFO, 32));
+}
+
+/**
+ * The dedupe key of an external item (D-03, P1; code review WR-06): HMAC-SHA256 under `itemKeySecret`, hex, over the
+ * organization, the automation and the NFC-normalised, trimmed key, NUL-separated. Never stored in clear and not
+ * reversible from a database or backup read (order numbers and plates are low-entropy), and scoped per automation (the
+ * same order in two automations stores two unrelated hashes). Keeps the 64-hex format and the unique index.
+ */
+export function externalKeyHash(
+  secret: Buffer,
+  p: { organizationId: string; automationId: string; key: string },
+): string {
+  return createHmac("sha256", secret)
+    .update(`${p.organizationId}\u0000${p.automationId}\u0000${p.key.normalize("NFC").trim()}`, "utf8")
+    .digest("hex");
 }
 
 /** One line of plain text: control characters and runs of whitespace become one space. */
@@ -89,6 +116,7 @@ export function channelItemBody(item: Pick<AgentChannelConversationOpenItem, "ti
 }
 
 export function createAutomationFanOut(core: Core, deps: { perms: PermissionService }): AutomationFanOut {
+  const keySecret = itemKeySecret(core.env.OCW_ENCRYPTION_KEY);
   /** The root an earlier row opened, or null once it is gone or deleted (E10). */
   async function liveRoot(tx: Tx, rootMessageId: string | null): Promise<string | null> {
     if (!rootMessageId) return null;
@@ -200,7 +228,11 @@ export function createAutomationFanOut(core: Core, deps: { perms: PermissionServ
       let existing = 0;
       let refused = 0;
       for (const item of p.items) {
-        const hash = externalKeyHash(item.externalKey);
+        const hash = externalKeyHash(keySecret, {
+          organizationId: a.organizationId,
+          automationId: a.id,
+          key: item.externalKey,
+        });
         const known = await existingRow(tx, a.id, hash);
         if (known) {
           existing += 1;

@@ -323,3 +323,14 @@ documented behaviour below. The accepted text above stays as written; where it d
   function as the backfill and the fill trigger, so "Straße" is `strasse` on every path. The contracts' `unitHandle` is
   only the composer's preview (approximate for letters that do not decompose). A handle unique violation from a writer
   outside the lock answers 409 `unit_handle_taken` instead of a 500.
+- **WR-06, § 4 and § 13 (a keyed dedupe hash).** Replaces "stored only as the sha256 hex of its NFC-normalised,
+  trimmed form": the stored value is HMAC-SHA256 (hex, still 64 characters, still unique per automation) under a key
+  derived with HKDF-SHA256 (info `ocw/automation-item-key/v1`) from `OCW_ENCRYPTION_KEY`, over the organization id,
+  the automation id and the NFC-normalised, trimmed key, NUL-separated. The secret is the operator secret the API
+  already resolves through the `SecretStore` (env, `_FILE` or an `openbao://` reference, principle 8); nothing is
+  stored in the database or a config file, and no new setting is needed for self-hosting. A plain sha256 of order
+  numbers or plates is reversed by a dictionary from any database or backup read; this one is not, and the same key in
+  two automations gives unrelated hashes. **Rotation:** a new `OCW_ENCRYPTION_KEY` re-keys every hash, so items
+  already opened would open again; rotate it only together with a rehash. **Stored rows:** the fan-out migration has
+  never shipped in a release, so no production row holds the old sha256; a development database that ran it keeps its
+  rows (the 64-hex check still holds) and may open such an item once more.
