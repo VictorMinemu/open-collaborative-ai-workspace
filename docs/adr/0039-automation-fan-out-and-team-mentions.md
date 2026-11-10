@@ -276,3 +276,14 @@ mentions and notifications. The research found what stops the flow today:
   - natural-language proposals with fan-out;
   - listing attachments on unattended turns.
 - AGENTS.md gains an "Automation fan-out and team mentions" row citing this record, right after "Jobs and automations".
+
+## Amendment (code review), 2026-11-10
+
+The phase's code review (`.planning/phases/07.17-automation-fan-out-and-team-mentions/07.17-REVIEW.md`) changed the
+documented behaviour below. The accepted text above stays as written; where it disagrees, this section decides.
+
+- **CR-01, § 7 (taint of the run log thread).** A fan-out run turn is delivered with an empty `threadHistory`: the run
+  log is for people, and a run turn never reads an earlier run's reply. The run log thread counts as outside content
+  for every other turn that reads it (a person's @mention, reply mode) once any run anchored in it started tainted or
+  has a tainted turn (`agent_turns.tainted`, read live, so a taint reached mid-turn counts; `runLogTainted`). Fan-out
+  run turns keep their clean start. Non-fan-out runs are unchanged.

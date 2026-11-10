@@ -40,7 +40,7 @@ import { createPermissionService, memberDirectory, type PermissionService } from
 import { workZoneOfferFor } from "../work-session";
 import { consultTargets } from "./agent-message";
 import { messageScopeFilter } from "./attachment-access";
-import { inboundRooted } from "./inbound-origin";
+import { inboundRooted, runLogTainted } from "./inbound-origin";
 import { conversationAudience } from "./memory-files";
 
 /** Bounded thread context per mention (A2.2). */
@@ -134,15 +134,21 @@ export async function buildMentionEvents(
   const aiChat = conv.kind === "ai_chat";
   // 07.15 D-16: the same filter decides which files the turn may read or import (attachment-access.ts).
   const threadFilter = messageScopeFilter(conv, root);
-  const historyRows = (
-    await tx
-      .select()
-      .from(messages)
-      // Deleted text never reaches a model (Pitfall 8): tombstones are not history.
-      .where(and(threadFilter, ne(messages.id, mention.messageId), isNull(messages.deletedAt)))
-      .orderBy(desc(messages.createdAt), desc(messages.seq))
-      .limit(HISTORY_LIMIT)
-  ).reverse();
+  // 07.17 code review CR-01: a fan-out run anchors in its automation's long-lived run log thread (D-10), whose earlier
+  // replies may echo outside content from earlier runs. The log is for people; the run turn reads no history, so its
+  // clean start (ADR-0039 § 7) never carries another run's text.
+  const fanOutRun = mention.trigger === "automation" && mention.conversationOpen != null;
+  const historyRows = fanOutRun
+    ? []
+    : (
+        await tx
+          .select()
+          .from(messages)
+          // Deleted text never reaches a model (Pitfall 8): tombstones are not history.
+          .where(and(threadFilter, ne(messages.id, mention.messageId), isNull(messages.deletedAt)))
+          .orderBy(desc(messages.createdAt), desc(messages.seq))
+          .limit(HISTORY_LIMIT)
+      ).reverse();
 
   const users = await memberDirectory(tx);
   const agentIdsNeeded = [
@@ -257,7 +263,9 @@ export async function buildMentionEvents(
       tx,
       root,
       historyRows.map((m) => m.id),
-    ));
+    )) ||
+    // CR-01: a turn that reads a run log thread starts tainted once a run there read outside content.
+    (!fanOutRun && (await runLogTainted(tx, root)));
   // D-12: an automation run's turn has nobody present (no browser tools); a person's message never is one. Phase 07.7
   // (D-13): neither has a consult hop turn (the question to a consulted bot, the answer back to the asker). Phase 07.16
   // (D-09): nor a Work Zone wake (the bot hears about its session; nobody is there to watch a browser). Phase 07.17
