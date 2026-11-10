@@ -200,6 +200,16 @@ async function refused(p: Promise<unknown>, named: { constraint: string }): Prom
   await expect(p, named.constraint).rejects.toMatchObject(named);
 }
 
+/** The SQLSTATE of a statement that must fail, or null when it succeeded. */
+async function errorCode(fn: () => Promise<unknown>): Promise<string | null> {
+  try {
+    await fn();
+    return null;
+  } catch (err) {
+    return (err as { code?: string }).code ?? "unknown";
+  }
+}
+
 /** Runs `fn` as ocw_app in `org`'s tenant transaction, always rolled back. */
 async function asApp<T>(org: string, fn: (q: Q) => Promise<T>): Promise<T> {
   await app.query("begin");
@@ -643,5 +653,62 @@ describe("opened conversations (07.17, D-03, P1)", () => {
     await refused(opened(mq, A, { automation: a, run: r, hash: hash("9"), conversation: B.channel }), {
       constraint: "automation_conversations_conversation_fk",
     });
+  });
+});
+
+describe("opened conversations as ocw_app (07.17, D-03, tenant isolation)", () => {
+  let aRow: string;
+
+  beforeAll(async () => {
+    const a = await automation(mq, A, { fan_out_enabled: true });
+    aRow = await opened(mq, A, { automation: a, run: await run(mq, A, a), hash: hash("c") });
+  });
+
+  it("organization B reads, updates and deletes none of organization A's rows, and cannot insert one naming A", async () => {
+    const own = await asApp(A.id, (q) =>
+      q("select count(*)::int as n from app.automation_conversations where id = $1", [aRow]),
+    );
+    expect(own.rows[0].n).toBe(1);
+    const cross = await asApp(B.id, (q) =>
+      q("select count(*)::int as n from app.automation_conversations where organization_id = $1", [A.id]),
+    );
+    expect(cross.rows[0].n).toBe(0);
+    for (const stmt of [
+      "update app.automation_conversations set status = 'failed' where organization_id = $1",
+      "delete from app.automation_conversations where organization_id = $1",
+    ]) {
+      const r = await asApp(B.id, (q) => q(stmt, [A.id]));
+      expect(r.rowCount, stmt).toBe(0);
+    }
+    const a = await automation(mq, A, { fan_out_enabled: true });
+    const r = await run(mq, A, a);
+    await expect(
+      asApp(B.id, (q) => opened(q, A, { automation: a, run: r, hash: hash("d") })),
+    ).rejects.toThrow(/row-level security/);
+    // Inside its own tenant, A writes and reads its row.
+    expect(
+      await errorCode(() => asApp(A.id, (q) => opened(q, A, { automation: a, run: r, hash: hash("d") }))),
+    ).toBeNull();
+    const kept = await mq("select status from app.automation_conversations where id = $1", [aRow]);
+    expect(kept.rows[0].status).toBe("queued");
+  });
+
+  it("is ENABLE + FORCE row level security with the tenant policy", async () => {
+    const t = await mq(
+      `select c.relrowsecurity as rls, c.relforcerowsecurity as force,
+              (select array_agg(policyname::text) from pg_policies p where p.schemaname = 'app' and p.tablename = c.relname) as policies
+         from pg_class c where c.oid = 'app.automation_conversations'::regclass`,
+    );
+    expect(t.rows[0]).toEqual({ rls: true, force: true, policies: ["tenant_isolation"] });
+  });
+
+  it("the app role cannot TRUNCATE the table (TRUNCATE ignores RLS)", async () => {
+    expect(await errorCode(() => asApp(A.id, (q) => q("truncate app.automation_conversations")))).toBe(
+      "42501",
+    );
+    expect(
+      (await mq("select count(*)::int as n from app.automation_conversations where id = $1", [aRow])).rows[0]
+        .n,
+    ).toBe(1);
   });
 });

@@ -75,6 +75,11 @@ REVOKE TRUNCATE ON app.work_zone_proposals FROM ocw_app;
 -- a bot, device, project, session or conversation, and for the API's own profile and consent changes.
 REVOKE TRUNCATE ON app.bot_work_zone_profiles, app.bot_work_zone_profile_projects, app.device_bot_consents, app.bot_work_sessions FROM ocw_app;
 
+-- Automation fan-out (Phase 07.17, D-03): TRUNCATE ignores RLS, and the opened rows are the dedupe history that keeps an
+-- item from ever being opened twice, so the app role never truncates them (stated explicitly, as for 07.16). DELETE stays
+-- granted for the cascades of an automation, a run or a conversation.
+REVOKE TRUNCATE ON app.automation_conversations FROM ocw_app;
+
 -- ADR-0010 ("the human can see and clear the notes; admins cannot" / admins "can never read its chat, memory or
 -- instructions"): every memory row of a personal scope, or of a personal bot's notebook, carries
 -- `personal_owner_user_id`. These SECURITY DEFINER trigger functions (owner ocw_migrator, which bypasses RLS to read the
