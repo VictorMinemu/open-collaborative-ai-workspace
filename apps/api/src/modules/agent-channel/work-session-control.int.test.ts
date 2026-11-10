@@ -147,6 +147,13 @@ async function stopped(eventId: string, workSessionId: string) {
   return body;
 }
 
+/** `ocw_work_session_read` of `workSessionId` from the turn, which must succeed (it marks the turn, D-20). */
+async function readOk(eventId: string, workSessionId: string) {
+  const r = await cell("/work-sessions/read", { eventId, agentId: atlasId, workSessionId });
+  expect(r.status, JSON.stringify(r.body)).toBe(200);
+  expect(r.body.kind, JSON.stringify(r.body)).toBe("read");
+}
+
 /** A prompt or stop answer that must be the refusal `code`, with its fixed sentence. */
 async function refusedWith(res: Promise<{ status: number; body: Json }>, code: BotWorkSessionRefusal) {
   const r = await res;
@@ -696,12 +703,37 @@ describe("prompt refusals; a stop stays allowed", () => {
     }
   });
 
-  it("after the turn read a session's output, prompt and stop are still allowed (D-20)", async () => {
+  it("after the turn read a session's output, prompt and stop of that session are still allowed (D-20)", async () => {
+    const { workSessionId } = await botSession();
+    const eventId = await ask();
+    await readOk(eventId, workSessionId);
+    await queued(eventId, workSessionId);
+    await stopped(eventId, workSessionId);
+  });
+
+  it("WR-02: after reading session A the turn cannot prompt session B → session_output; B can still be stopped", async () => {
+    const a = await botSession();
+    const b = await botSession();
+    const eventId = await ask();
+    await readOk(eventId, a.workSessionId);
+    const before = await stateOf(b.workSessionId);
+    await refusedWith(promptCall(eventId, b.workSessionId), "session_output");
+    expect(await stateOf(b.workSessionId)).toEqual(before);
+    // Reading B as well does not clear A's output from the turn: B still cannot be prompted from it.
+    await readOk(eventId, b.workSessionId);
+    await refusedWith(promptCall(eventId, b.workSessionId), "session_output");
+    expect(await stateOf(b.workSessionId)).toEqual(before);
+    // Stopping only ends work: never blocked.
+    await stopped(eventId, b.workSessionId);
+  });
+
+  it("WR-02: a turn that carries the mark without reading here (a re-run, a return, a wake) must read the session first", async () => {
     const { workSessionId } = await botSession();
     const eventId = await ask();
     await su.query("update app.agent_turns set session_output_read = true where event_id = $1", [eventId]);
+    await refusedWith(promptCall(eventId, workSessionId), "session_output");
+    await readOk(eventId, workSessionId);
     await queued(eventId, workSessionId);
-    await stopped(eventId, workSessionId);
   });
 });
 

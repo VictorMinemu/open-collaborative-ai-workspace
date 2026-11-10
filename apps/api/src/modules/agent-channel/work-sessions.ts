@@ -12,8 +12,8 @@ import {
   BUILTIN_TOOLS,
   WORK_SESSION_TOOL_FLAGS,
 } from "@ocw/contracts";
-import { agentTurns, conversations, type Tx } from "@ocw/db";
-import { eq } from "drizzle-orm";
+import { agentToolCalls, agentTurns, conversations, type Tx } from "@ocw/db";
+import { and, eq } from "drizzle-orm";
 import type { App, Core } from "../../core";
 import { notFound } from "../../lib/errors";
 import { createConversationAccess } from "../chat";
@@ -63,8 +63,8 @@ import { conversationAudience } from "./memory-files";
  * allowed with an inactive profile). A prompt from a turn that read outside content answers `outside_content` unless
  * the profile's flag allows it (07.16-19: claimed `outsideContent`, queued `tainted`, the session's `tainted_at` set);
  * a start with the flag is claimed the same way, and an explicit Full access off an isolated server answers
- * `outside_content_bypass`. A stop is never blocked by taint (claimed with `outsideContent`). Both are exempt from
- * the session-output rule (D-20). `interrupt` is not exposed and nothing here resolves a runtime approval (P3).
+ * `outside_content_bypass`. A stop is never blocked by taint (claimed with `outsideContent`) nor by a session read;
+ * a prompt is exempt from the session-output rule (D-20) only for the one session the turn itself read (WR-02). `interrupt` is not exposed and nothing here resolves a runtime approval (P3).
  *
  * Every outcome is a 200 `{ kind }` (the plugin reads a refusal's fixed sentence) except an unknown or ended turn (404
  * with `error.code` `unknown_turn`, recorded by `auditUnknownTurn`). Each is recorded exactly once: a refusal before the
@@ -78,6 +78,7 @@ const bearer = [{ cellToken: [] as string[] }];
 const START = BUILTIN_TOOLS.workSessionStart;
 const PROMPT = BUILTIN_TOOLS.workSessionPrompt;
 const STOP = BUILTIN_TOOLS.workSessionStop;
+const READ = BUILTIN_TOOLS.workSessionRead;
 const UNKNOWN_TURN = "No delivered turn of this bot has that id";
 const UNKNOWN: unique symbol = Symbol("unknown_turn");
 const READABLE_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
@@ -132,6 +133,24 @@ function controlRecord(
     workSessionId: body.workSessionId,
     ...(promptChars !== undefined ? { promptChars } : {}),
   };
+}
+
+/**
+ * WR-02 (D-20): whether the turn's successful `ocw_work_session_read` calls (its allowed `agent_tool_calls` rows) read
+ * `workSessionId` and nothing else. False when it read none (the mark came from another turn).
+ */
+async function readOnly(tx: Tx, eventId: string, workSessionId: string): Promise<boolean> {
+  const rows = await tx
+    .selectDistinct({ target: agentToolCalls.target })
+    .from(agentToolCalls)
+    .where(
+      and(
+        eq(agentToolCalls.eventId, eventId),
+        eq(agentToolCalls.tool, READ),
+        eq(agentToolCalls.decision, "allowed"),
+      ),
+    );
+  return rows.length > 0 && rows.every((r) => r.target === workSessionId);
 }
 
 /** The conversation whose readers decide a turn's audience: a thread is read through its channel or DM. */
@@ -535,14 +554,20 @@ export function registerBotWorkSessionRoutes(
           // D-08 (PD-15): a turn that read outside content prompts only with the profile's admin flag. No fallback
           // without it: a person can prompt the session.
           if (turn.tainted && !profile.actOnOutsideContent) return refuse("outside_content");
+          // D-20 (code review WR-02): after a read, the turn prompts only the session whose output it read, and only
+          // when that is the only session it read here. Another session's output could steer it (one in Full access
+          // on another device), and a mark carried from another turn (a re-run, a return, a wake) names no session:
+          // the bot reads the session first.
+          const exempt = turn.sessionOutputRead && (await readOnly(tx, turn.eventId, body.workSessionId));
+          if (turn.sessionOutputRead && !exempt) return refuse("session_output");
 
-          // D-20: prompting its own session stays allowed after the turn read that session's output. With the flag, a
-          // tainted turn's prompt is claimed (`outsideContent`), queued `tainted` and marks the session (sticky, E12).
+          // With the flag, a tainted turn's prompt is claimed (`outsideContent`), queued `tainted` and marks the
+          // session (sticky, E12).
           const refused = await claim(tx, {
             cell,
             turn,
             call,
-            sessionOutputExempt: true,
+            ...(exempt ? { sessionOutputExempt: true } : {}),
             ...(turn.tainted ? { outsideContent: true } : {}),
           });
           if (refused) return refused;

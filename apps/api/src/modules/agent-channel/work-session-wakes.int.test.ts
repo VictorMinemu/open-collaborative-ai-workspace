@@ -755,6 +755,36 @@ describe("the wake runs as the person who asked, carries what the bot may use, a
     expect(turn).toEqual({ user_id: anaId, tainted: true, session_output_read: false });
   });
 
+  it("WR-02: once Atlas read the session's output in this conversation, its next wake starts with the mark", async () => {
+    const s = await botSession();
+    await drainWakes();
+    // Atlas reads the session from a turn in #eng (the same per-thread context the wake resumes).
+    const reading = await askAgain("what did it change");
+    const read = await cell("/work-sessions/read", {
+      eventId: reading,
+      agentId: atlasId,
+      workSessionId: s.workSessionId,
+    });
+    expect(read.body.kind, JSON.stringify(read.body)).toBe("read");
+    await finishTurn(s.workSessionId, s.first);
+    await settle(s.workSessionId, "idle");
+    const [ev] = await wakesOf(s.workSessionId);
+    expect(ev).toBeDefined();
+    const [turn] = await rowsOf(
+      "select tainted, session_output_read from app.agent_turns where event_id = $1",
+      [ev!.eventId],
+    );
+    expect(turn).toEqual({ tainted: false, session_output_read: true });
+    // It may read again and then prompt this session; nothing else side-effecting.
+    const start = await cell("/work-sessions/start", {
+      eventId: ev!.eventId,
+      agentId: atlasId,
+      projectId: billingId,
+      prompt: FIRST,
+    });
+    expect(start.body).toMatchObject({ kind: "refused", code: "session_output" });
+  });
+
   it("with the consent revoked the wake still arrives (the bot can report) but carries none of the four tools", async () => {
     const s = await botSession();
     await drainWakes();

@@ -648,7 +648,7 @@ export const BOT_WORK_SESSION_SENTENCES: Readonly<Record<BotWorkSessionRefusal, 
   outside_content_bypass:
     "After outside content, Full access runs only on an isolated server. Use a lower mode.",
   session_output:
-    "This turn read a session's output, so it can't start another session. Ask the person to send the request again.",
+    "This turn read a session's output: it can't start a session, and it can prompt only the one session it read. Ask the person to send the request again.",
   not_your_session: "This bot can only control Work Zone sessions it started.",
   session_ended: "That session has ended.",
   not_allowed: "The bot's sponsor is not allowed to do this in the Work Zone any more.",

@@ -396,3 +396,20 @@ branch and the tool names are chosen by the runtime, which may have been steered
 the mention's text in the asker's name on a turn that starts without `session_output_read`. The summary now holds
 fixed sentences, the repository name, the turn number and counts only (queued prompts, changed files, pending
 approvals). The bot learns the branch and the tools through `ocw_work_session_read`, which sets the D-20 mark.
+
+**After a read, the bot prompts only the session it read (WR-02).** This narrows §9's "except
+`ocw_work_session_prompt` and `ocw_work_session_stop` on the bot's own sessions". A session's output could otherwise
+steer a prompt into another of the bot's sessions, one in Full access on a non-isolated device included, without
+marking it tainted. Now:
+
+- a prompt on a turn with the mark is exempt only when the turn's successful reads (its allowed
+  `ocw_work_session_read` calls) read that session and no other; otherwise it answers `session_output`, whose
+  sentence now says the turn can prompt only the one session it read;
+- a turn that carries the mark from another turn (a re-run, a consult return, a wake) names no session: it reads the
+  session first;
+- a wake turn starts with the mark when the bot already read that session from a turn in the same conversation,
+  since the wake resumes that context;
+- stop stays exempt for every one of the bot's own sessions: it only ends work.
+
+A prompt to the session the turn read is still not marked tainted: that output came from the same runtime, which
+already holds it.

@@ -3,6 +3,7 @@ import {
   AgentChannelEventTypes,
   type AgentWorkSessionEvent,
   BOT_WORK_ZONE_LIMITS,
+  BUILTIN_TOOLS,
   cellTopic,
   type ModelRef,
   redactSecrets,
@@ -13,6 +14,8 @@ import {
   type WorkSessionTransition,
 } from "@ocw/contracts";
 import {
+  agentToolCalls,
+  agentTurns,
   botWorkSessions,
   botWorkZoneProfiles,
   conversationMembers,
@@ -505,6 +508,26 @@ async function deliver(tx: Tx, core: Core, deps: WorkSessionWakesDeps, w: WakePl
   const [ev] = events;
   // The bot is live, a member, and the person reads here: no event means the bot's daily limit (its notice follows).
   if (!ev) return { delivered: false, reason: "daily_limit" };
+  // D-20 (code review WR-02): the wake resumes the conversation's OpenClaw context. When the bot already read this
+  // session's output from a turn here, that output is in it, so the wake starts with the mark (set before the append,
+  // like a re-run's taint): it can read, prompt the session it read and stop, nothing else side-effecting.
+  const [readHere] = await tx
+    .select({ id: agentToolCalls.id })
+    .from(agentToolCalls)
+    .innerJoin(agentTurns, eq(agentTurns.eventId, agentToolCalls.eventId))
+    .where(
+      and(
+        eq(agentToolCalls.agentId, agent.id),
+        eq(agentToolCalls.tool, BUILTIN_TOOLS.workSessionRead),
+        eq(agentToolCalls.target, w.session.id),
+        eq(agentToolCalls.decision, "allowed"),
+        eq(agentTurns.conversationId, conv.id),
+      ),
+    )
+    .limit(1);
+  if (readHere) {
+    await tx.update(agentTurns).set({ sessionOutputRead: true }).where(eq(agentTurns.eventId, ev.eventId));
+  }
 
   const payload: Omit<AgentWorkSessionEvent, "seq"> = {
     ...ev,
