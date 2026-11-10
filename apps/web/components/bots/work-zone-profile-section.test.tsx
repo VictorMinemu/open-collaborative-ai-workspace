@@ -304,15 +304,15 @@ describe("the API's status line (Task 1)", () => {
 });
 
 describe("the bot sheet (Task 1)", () => {
-  it("shows the Work Zone section only with bot.configure, right after Capabilities; nothing else moves", () => {
+  it("shows the Work Zone section only with bot.configure, after Consulting other bots (which stays right after Capabilities); nothing else moves", () => {
     const sheet = readFileSync(join(__dirname, "bot-detail-sheet.tsx"), "utf8");
     const titles = [...sheet.matchAll(/<SheetSection title="([^"]+)"/g)].map((m) => m[1]);
     expect(titles).toEqual([
       "Connections",
       "Who can use it",
       "Capabilities",
-      "Work Zone",
       "Consulting other bots",
+      "Work Zone",
       "Profile & behaviour",
       "About",
       "Availability",

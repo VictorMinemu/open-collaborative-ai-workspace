@@ -326,15 +326,15 @@ export function BotDetailSheet({
             </SheetSection>
           ) : null}
 
-          {canConfigure ? (
-            <SheetSection title="Work Zone">
-              <WorkZoneProfileSection agent={agent} />
-            </SheetSection>
-          ) : null}
-
           {!personal && canReadRules ? (
             <SheetSection title="Consulting other bots">
               <AgentMessagingSection agent={agent} />
+            </SheetSection>
+          ) : null}
+
+          {canConfigure ? (
+            <SheetSection title="Work Zone">
+              <WorkZoneProfileSection agent={agent} />
             </SheetSection>
           ) : null}
 

@@ -662,7 +662,7 @@ function SessionHeader({
                         name={p.name}
                         src={p.avatarUrl}
                         seed={p.uid}
-                        className="size-6 opacity-50 ring-2 ring-background grayscale"
+                        className="size-6 ring-2 ring-background grayscale"
                       />
                     </span>
                   </Tooltip>

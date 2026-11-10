@@ -525,15 +525,16 @@ test("Ana asks @Atlas in the channel: the live card, Open session and back, the 
     ).toBe(true);
     expect(cell.workSessionWakes.find((x) => x.workSessionId === sessionId)?.transition).toBe("turn_done");
 
-    // ---- her Mentions count rises
+    await reply.scrollIntoViewIfNeeded();
+    await checkScreen(page, "0716-reply", THREAD, [row.getByTestId("agent-card")]);
+    await captureReview(page, `0716-reply-${w}`);
+
+    // ---- her Mentions count rises (on a phone the open thread covers the navigation, so start from the home screen)
+    if (mobile) await page.goto("/chat");
     const views = await openViews(page);
     await expect(views.getByTestId("view-mentions").getByTestId("view-count")).toHaveText("1", {
       timeout: 15_000,
     });
-    if (mobile) await page.keyboard.press("Escape");
-    await reply.scrollIntoViewIfNeeded();
-    await checkScreen(page, "0716-reply", THREAD, [row.getByTestId("agent-card")]);
-    await captureReview(page, `0716-reply-${w}`);
   } finally {
     await ana.context.close();
   }
