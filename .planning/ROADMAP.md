@@ -1073,7 +1073,7 @@ or needs help.
   4. Integration tests (dedupe, caps, tenant isolation, team mention audience) and an e2e spec pass on desktop and mobile;
      ADR-0039 records the decisions
 
-**Plans:** 10/19 plans executed
+**Plans:** 15/19 plans executed
 
 Plans:
 **Wave 1**
@@ -1094,11 +1094,11 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 07.17-11-PLAN.md — Wave 3: The fan-out offer on run turns (`conversationOpen`, `automationRun.fanOut`, escalation)
-- [ ] 07.17-12-PLAN.md — Wave 3: Team mention notifications (subtree ∩ readers, ≤ 200, `team_mention`, inbox `unit`)
-- [ ] 07.17-13-PLAN.md — Wave 3: Web: `@team` in the composer, chips, reach confirmation, inbox label, handles on the organization page
-- [ ] 07.17-14-PLAN.md — Wave 3: Web: the editor's "For each new item" and "When it needs people" sections, run history counts
-- [ ] 07.17-15-PLAN.md — Wave 3: Real-cell smoke `automation-fan-out`
+- [x] 07.17-11-PLAN.md — Wave 3: The fan-out offer on run turns (`conversationOpen`, `automationRun.fanOut`, escalation)
+- [x] 07.17-12-PLAN.md — Wave 3: Team mention notifications (subtree ∩ readers, ≤ 200, `team_mention`, inbox `unit`)
+- [x] 07.17-13-PLAN.md — Wave 3: Web: `@team` in the composer, chips, reach confirmation, inbox label, handles on the organization page
+- [x] 07.17-14-PLAN.md — Wave 3: Web: the editor's "For each new item" and "When it needs people" sections, run history counts
+- [x] 07.17-15-PLAN.md — Wave 3: Real-cell smoke `automation-fan-out`
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
