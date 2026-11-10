@@ -581,6 +581,7 @@ export function MentionSuggestions({
   return (
     <div
       role="listbox"
+      aria-label="Mention suggestions"
       data-testid="mention-suggestions"
       className="absolute inset-x-0 bottom-full z-30 mb-2 overflow-hidden rounded-xl border bg-popover p-1 text-popover-foreground shadow-xl shadow-black/5 dark:shadow-black/40"
     >
