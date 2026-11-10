@@ -44,6 +44,7 @@ import {
   baseVersionAfter,
   cronToSchedule,
   defaultSchedule,
+  expectedTurnsPerDay,
   formatRunInstant,
   resumedText,
   runReasonSentence,
@@ -560,6 +561,15 @@ export function AutomationEditorSheet({
   const instructionsLength = values.instructions.length;
   const ownerName = automation?.runAs.displayName ?? me?.name ?? "";
   const dailyLimit = values.agentId ? options.data?.botDailyLimit[values.agentId] : undefined;
+  const runsRaw = values.maxRunsPerDay.trim();
+  const expectedTurns =
+    /^\d+$/.test(runsRaw) && Number(runsRaw) >= 1
+      ? expectedTurnsPerDay({
+          schedule: values.triggerKind === "schedule" ? values.schedule : null,
+          maxRunsPerDay: Number(runsRaw),
+          fanOutPerDay: 0,
+        })
+      : null;
   const showTabs = !!id && !!automation;
 
   return (
@@ -863,6 +873,7 @@ export function AutomationEditorSheet({
                         {errors.maxRunsPerDay}
                       </p>
                     ) : null}
+                    <DailyLimitWarning botName={botName} dailyLimit={dailyLimit} expected={expectedTurns} />
                     <ul className="grid gap-1 text-muted-foreground text-xs" data-testid="automation-limits">
                       {dailyLimit !== undefined ? (
                         <li>
@@ -967,6 +978,36 @@ function EditorSkeleton() {
 }
 
 /** `?draft=` (UI-SPEC § Copy › Editor banners, R5): whose proposal this is, and that saving closes it. */
+/**
+ * Under runs a day (07.17, D-11, PD-19): when the turns this automation can use a day exceed the bot's daily limit, a
+ * non-blocking amber note says so before saving. Saving stays possible; the limit still stops runs server-side.
+ */
+export function DailyLimitWarning({
+  botName,
+  dailyLimit,
+  expected,
+}: {
+  botName: string;
+  dailyLimit: number | null | undefined;
+  expected: number | null;
+}) {
+  if (dailyLimit === null || dailyLimit === undefined || expected === null || expected <= dailyLimit)
+    return null;
+  return (
+    <p
+      role="status"
+      data-testid="automation-daily-limit-warning"
+      className="flex w-full items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] text-amber-900 leading-5 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-200"
+    >
+      <CircleAlert className="mt-0.5 size-4 shrink-0" aria-hidden />
+      <span className="min-w-0">
+        {botName} can take {dailyLimit} turns a day. This automation can use up to {expected}. Raise the bot's
+        daily limit in its sheet, or runs stop when it is reached.
+      </span>
+    </p>
+  );
+}
+
 export function DraftBanner({ bot, conversation }: { bot: string; conversation: string }) {
   return (
     <p

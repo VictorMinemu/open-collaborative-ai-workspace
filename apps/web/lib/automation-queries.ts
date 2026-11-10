@@ -481,6 +481,19 @@ export function runsPerDayPrefill(prev: ScheduleValue, next: ScheduleValue, cap:
   return runs === null ? null : Math.min(cap, runs);
 }
 
+/**
+ * The bot turns a day an automation can use (D-11, PD-19): the schedule's runs within its runs a day (runs a day alone
+ * for Custom, or for a webhook or mail trigger, `schedule: null`), plus the conversations its fan-out may open a day.
+ */
+export function expectedTurnsPerDay(p: {
+  schedule: ScheduleValue | null;
+  maxRunsPerDay: number;
+  fanOutPerDay: number;
+}): number {
+  const runs = p.schedule ? runsPerDayOfSchedule(p.schedule) : null;
+  return Math.min(p.maxRunsPerDay, runs ?? p.maxRunsPerDay) + p.fanOutPerDay;
+}
+
 // ---------------------------------------------------------------- dates in an automation's zone
 
 /** `Fri, Oct 9, 5:00 PM` in `timeZone`. */

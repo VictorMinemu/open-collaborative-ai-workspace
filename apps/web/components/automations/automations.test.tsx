@@ -10,6 +10,7 @@ import {
   baseVersionAfter,
   cronToSchedule,
   defaultSchedule,
+  expectedTurnsPerDay,
   INTERVAL_MINUTES,
   intervalOptions,
   nextRelative,
@@ -24,6 +25,7 @@ import {
   scheduleToCron,
   yourTimeSuffix,
 } from "@/lib/automation-queries";
+import { DailyLimitWarning } from "./automation-editor-sheet";
 import { RunHistory } from "./run-history";
 import { NextRuns } from "./schedule-builder";
 import { conversationOptionLabel, EMPTY_TARGET, TargetPicker } from "./target-picker";
@@ -261,6 +263,41 @@ describe("every few minutes (07.17, D-01, PD-04, PD-19)", () => {
     expect(automationErrorText(new ApiRequestError(400, "schedule_too_frequent", "x"), ctx)).toBe(
       "Runs can be at most every 5 minutes in this workspace.",
     );
+  });
+});
+
+describe("the bot's daily limit before saving (07.17, D-11, PD-19)", () => {
+  const ten = sched({ preset: "every_minutes", everyMinutes: 10 });
+
+  it("expected turns a day: the schedule's runs within runs a day, plus the fan-out", () => {
+    expect(expectedTurnsPerDay({ schedule: ten, maxRunsPerDay: 144, fanOutPerDay: 0 })).toBe(144);
+    expect(expectedTurnsPerDay({ schedule: ten, maxRunsPerDay: 96, fanOutPerDay: 0 })).toBe(96);
+    expect(
+      expectedTurnsPerDay({ schedule: sched({ preset: "weekly" }), maxRunsPerDay: 24, fanOutPerDay: 0 }),
+    ).toBe(1);
+    const custom = sched({ preset: "custom", cron: "*/7 * * * *" });
+    expect(expectedTurnsPerDay({ schedule: custom, maxRunsPerDay: 50, fanOutPerDay: 0 })).toBe(50);
+    expect(expectedTurnsPerDay({ schedule: ten, maxRunsPerDay: 144, fanOutPerDay: 100 })).toBe(244);
+    // A webhook or mail trigger has no schedule: runs a day is the bound.
+    expect(expectedTurnsPerDay({ schedule: null, maxRunsPerDay: 30, fanOutPerDay: 0 })).toBe(30);
+  });
+
+  it("over the bot's limit: an amber status callout naming the bot, its limit and the expected turns", () => {
+    const html = render(<DailyLimitWarning botName="Scout" dailyLimit={100} expected={144} />);
+    expect(html).toContain('data-testid="automation-daily-limit-warning"');
+    expect(html).toContain('role="status"');
+    expect(html).toMatch(/dark:text-amber-/);
+    expect(text(html)).toBe(
+      "Scout can take 100 turns a day. This automation can use up to 144. Raise the bot's daily limit in its sheet, or runs stop when it is reached.",
+    );
+  });
+
+  it("within the limit, or a bot with no limit: no callout", () => {
+    expect(render(<DailyLimitWarning botName="Scout" dailyLimit={200} expected={144} />)).toBe("");
+    expect(render(<DailyLimitWarning botName="Scout" dailyLimit={144} expected={144} />)).toBe("");
+    expect(render(<DailyLimitWarning botName="Scout" dailyLimit={null} expected={144} />)).toBe("");
+    expect(render(<DailyLimitWarning botName="Scout" dailyLimit={undefined} expected={144} />)).toBe("");
+    expect(render(<DailyLimitWarning botName="Scout" dailyLimit={100} expected={null} />)).toBe("");
   });
 });
 

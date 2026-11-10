@@ -66,10 +66,13 @@ These are per organization, in `app.bot_policies`, with these defaults (there is
 | Limit | Default |
 | --- | --- |
 | Automations per person | 10 |
-| Shortest interval between two runs | 15 minutes |
-| Runs a day per automation (the most anyone may set) | 96 (schema ceiling 288) |
+| Shortest interval between two runs | 5 minutes |
+| Runs a day per automation (the most anyone may set) | 288 |
 | Inbound items (webhook or mail) an hour per automation | 30 |
 | Digest runs a day (schedule and test sends together) | 5 |
+
+Existing instances whose limits were still the old defaults (15 minutes, 96 runs a day) move to the new ones on
+upgrade; values an admin changed are kept.
 
 Each bot's daily limit (Bots › a bot › Limits) applies to runs too, and the person an automation runs as pays for it.
 Three failed runs in a row pause an automation as *Needs attention*; its owner resumes it.
