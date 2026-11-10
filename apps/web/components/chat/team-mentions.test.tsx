@@ -1,13 +1,18 @@
-import type { OrgUnit } from "@ocw/contracts";
+import { type Notification, type OrgUnit, TEAM_MENTION_LIMITS } from "@ocw/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { buildTree } from "../organization/unit-meta";
+import { UnitTree } from "../organization/unit-tree";
 import {
   buildMentionSuggestions,
   type MentionCandidate,
   MentionSuggestions,
+  mentionConfirmation,
   rankUnitMention,
   type SpecialMention,
+  teamReachOf,
 } from "./composer";
+import { actionOf } from "./inbox";
 import { MentionChip, MentionContext, type MentionContextValue, type MentionTarget } from "./markdown";
 import { mentionUnitsOf, type UnitMentionCandidate } from "./use-chat-directory";
 
@@ -226,5 +231,140 @@ describe("the unit chip (07.17 PD-19)", () => {
     );
     expect(chip("atlas", ctx(null))).toContain('title="Atlas (bot)"');
     expect(chip("sam", ctx("sam"))).toContain("bg-amber-400/25");
+  });
+});
+
+// ---------------------------------------------------------------- Task 2: confirmation, inbox, organization page
+
+describe("teamReachOf and the reach confirmation (07.17 D-18)", () => {
+  const units = (reach: number): UnitMentionCandidate[] => [
+    { id: OPS.id, kind: "department", name: "Operations", handle: "ops", reach, viewerInReach: false },
+    { id: BLOG.id, kind: "team", name: "Blog team", handle: "blog-team", reach: 3, viewerInReach: false },
+  ];
+
+  it("the largest reach among the units the body names; 0 when none", () => {
+    expect(teamReachOf("ship it @ops and @blog-team", units(24))).toBe(24);
+    expect(teamReachOf("only @blog-team.", units(24))).toBe(3);
+    expect(teamReachOf("@OPS shouting", units(24))).toBe(24);
+    expect(teamReachOf("no team here, @sam", units(24))).toBe(0);
+    expect(teamReachOf("@ops", undefined)).toBe(0);
+    expect(teamReachOf("mail ops@example.com", units(24))).toBe(0);
+  });
+
+  it("21 people opens the confirmation, 20 sends at once (TEAM_MENTION_LIMITS.confirmAbove)", () => {
+    expect(TEAM_MENTION_LIMITS.confirmAbove).toBe(20);
+    expect(mentionConfirmation("@ops", { unitMentions: units(21) })).not.toBeNull();
+    expect(mentionConfirmation("@ops", { unitMentions: units(20) })).toBeNull();
+    // No unit mentions passed (DMs, group DMs, AI chats): never a team confirmation.
+    expect(mentionConfirmation("@ops", {})).toBeNull();
+  });
+
+  it("the team dialog reads Notify 24 people? / @ops reaches 24 people who can read this channel.", () => {
+    expect(mentionConfirmation("@ops look", { unitMentions: units(24) })).toEqual({
+      kind: "team",
+      title: "Notify 24 people?",
+      description: "@ops reaches 24 people who can read this channel.",
+    });
+  });
+
+  it("@channel and a large team in one body: one dialog, the @channel one", () => {
+    const opts = { unitMentions: units(24), specialMentions: [CHANNEL], memberCount: 40 };
+    expect(mentionConfirmation("@channel and @ops", opts)).toEqual({
+      kind: "all",
+      title: "Notify 40 people?",
+      description: "@channel notifies all 40 members of this channel, wherever they are.",
+    });
+    // The @channel confirmation is unchanged: it needs the permission and more than 20 members.
+    expect(mentionConfirmation("@channel", { specialMentions: [CHANNEL], memberCount: 20 })).toBeNull();
+    expect(mentionConfirmation("@channel", { memberCount: 40 })).toBeNull();
+    expect(mentionConfirmation("@here", { specialMentions: [CHANNEL], memberCount: 40 })?.description).toBe(
+      "@here notifies everyone in this channel who is online now, out of 40 members.",
+    );
+  });
+});
+
+describe("the inbox line of a team mention (07.17 D-07, PD-19)", () => {
+  const item = (over: Partial<Notification>): Notification => ({
+    id: "00000000-0000-4000-8000-0000000000d1",
+    kind: "team_mention",
+    conversation: {
+      id: "00000000-0000-4000-8000-0000000000d2",
+      kind: "channel",
+      name: "fleet",
+      label: "#fleet",
+      visibility: "public",
+      archived: false,
+    },
+    messageId: "00000000-0000-4000-8000-0000000000d3",
+    threadRootId: null,
+    actor: { kind: "agent", id: ATLAS.id, displayName: "Atlas" },
+    snippet: "Done: order 1042 @logistics",
+    createdAt: NOW,
+    readAt: null,
+    ...over,
+  });
+
+  it("names the team that reached the reader; falls back when the unit is gone", () => {
+    expect(actionOf(item({ unit: { id: LOGISTICS.id, handle: "logistics", name: "Logistics" } }))).toBe(
+      "mentioned @logistics",
+    );
+    expect(actionOf(item({ unit: null }))).toBe("mentioned your team");
+    expect(actionOf(item({}))).toBe("mentioned your team");
+  });
+
+  it("other kinds keep their labels", () => {
+    expect(actionOf(item({ kind: "mention" }))).toBe("mentioned you");
+    expect(actionOf(item({ kind: "channel" }))).toBe("notified @channel");
+  });
+});
+
+describe("the handle on Settings › Organization (07.17 D-14)", () => {
+  const tree = (units: OrgUnit[]) =>
+    renderToStaticMarkup(
+      <UnitTree
+        roots={buildTree(units).roots}
+        selectedId={null}
+        collapsed={new Set()}
+        onSelect={() => {}}
+        onToggle={() => {}}
+      />,
+    );
+  const DEPT = "00000000-0000-4000-8000-0000000000e0";
+  const TEAM = "00000000-0000-4000-8000-0000000000e1";
+  const PROJ = "00000000-0000-4000-8000-0000000000e2";
+
+  it("a team and a department show their @handle in muted mono; a project shows none", () => {
+    const html = tree([
+      unit({ id: DEPT, path: [DEPT], kind: "department", name: "Operations", handle: "ops" }),
+      unit({
+        id: TEAM,
+        parentId: DEPT,
+        path: [DEPT, TEAM],
+        kind: "team",
+        name: "Logistics",
+        handle: "logistics",
+      }),
+      unit({
+        id: PROJ,
+        parentId: TEAM,
+        path: [DEPT, TEAM, PROJ],
+        kind: "project",
+        name: "Portal",
+        handle: "portal",
+      }),
+    ]);
+    const handles = [...html.matchAll(/<span[^>]*data-testid="unit-handle"[^>]*>([^<]*)</g)];
+    expect(handles.map((m) => m[1])).toEqual(["@ops", "@logistics"]);
+    const tag = handles[0]?.[0] ?? "";
+    expect(tag).toContain('title="Mention handle"');
+    expect(tag).toContain("font-mono");
+    expect(tag).toContain("text-muted-foreground");
+    expect(tag).toContain("truncate");
+    expect(tag).toContain("min-w-0");
+    expect(html).toContain("Portal");
+  });
+
+  it("a unit from an older server (no handle) shows none", () => {
+    expect(tree([unit({ kind: "team", name: "Legacy" })])).not.toContain("unit-handle");
   });
 });
