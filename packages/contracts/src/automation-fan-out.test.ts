@@ -2,9 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   AgentChannelConversationOpen,
   AgentChannelConversationOpenResponse,
+  AutomationFanOutInput,
+  AutomationFanOutView,
+  automationItemSentence,
   CONVERSATION_OPEN_SENTENCES,
   ConversationOpenRefusal,
+  EscalationTarget,
+  EscalationTargets,
   EscalationTargetView,
+  escalationSentence,
   FAN_OUT_LIMITS,
   fanOutLabel,
 } from "./automation-fan-out";
@@ -145,5 +151,96 @@ describe("escalation targets as the bot sees them (07.17 D-08, PD-15)", () => {
     expect(EscalationTargetView.parse(view)).toEqual(view);
     expect(EscalationTargetView.safeParse({ ...view, kind: "agent" }).success).toBe(false);
     expect(EscalationTargetView.safeParse({ ...view, handle: "h".repeat(65) }).success).toBe(false);
+  });
+});
+
+describe("fan-out settings (07.17 D-02, PD-05)", () => {
+  it("defaults the per-run and per-day caps", () => {
+    expect(AutomationFanOutInput.parse({ enabled: true })).toEqual({
+      enabled: true,
+      perRun: 10,
+      perDay: 100,
+    });
+    expect(AutomationFanOutInput.parse({ enabled: false, perRun: 25, perDay: 500 })).toEqual({
+      enabled: false,
+      perRun: 25,
+      perDay: 500,
+    });
+  });
+
+  it("refuses caps over the ceilings, a per-run cap above the per-day cap and an extra key", () => {
+    for (const body of [
+      { enabled: true, perRun: 26 },
+      { enabled: true, perDay: 501 },
+      { enabled: true, perRun: 0 },
+      { enabled: true, perRun: 20, perDay: 10 },
+      { enabled: true, columnId: CONV },
+    ]) {
+      expect(AutomationFanOutInput.safeParse(body).success, JSON.stringify(body)).toBe(false);
+    }
+    expect(AutomationFanOutInput.safeParse({ enabled: true, perRun: 10, perDay: 10 }).success).toBe(true);
+  });
+
+  it("the view is the stored values", () => {
+    expect(AutomationFanOutView.parse({ enabled: true, perRun: 3, perDay: 30 })).toEqual({
+      enabled: true,
+      perRun: 3,
+      perDay: 30,
+    });
+  });
+});
+
+describe("escalation targets (07.17 D-08, PD-15)", () => {
+  const T = (n: number) => `0199b1c2-d3e4-7f5a-8b9c-0d1e2f3a4c${String(n).padStart(2, "0")}`;
+
+  it("up to five distinct people or teams, by id", () => {
+    const five = [1, 2, 3, 4, 5].map((n) => ({ kind: n % 2 ? "user" : "unit", id: T(n) }));
+    expect(EscalationTargets.parse(five)).toEqual(five);
+    expect(EscalationTargets.parse([])).toEqual([]);
+    // The same id as a person and as a team is two targets.
+    expect(
+      EscalationTargets.safeParse([
+        { kind: "user", id: T(1) },
+        { kind: "unit", id: T(1) },
+      ]).success,
+    ).toBe(true);
+  });
+
+  it("refuses six, a duplicated target, a bot and an extra key", () => {
+    const six = [1, 2, 3, 4, 5, 6].map((n) => ({ kind: "user", id: T(n) }));
+    expect(EscalationTargets.safeParse(six).success).toBe(false);
+    expect(
+      EscalationTargets.safeParse([
+        { kind: "unit", id: T(1) },
+        { kind: "unit", id: T(1) },
+      ]).success,
+    ).toBe(false);
+    expect(EscalationTargets.safeParse([{ kind: "agent", id: T(1) }]).success).toBe(false);
+    expect(EscalationTarget.safeParse({ kind: "user", id: T(1), handle: "ana" }).success).toBe(false);
+  });
+
+  it("the bot reads one sentence naming the handles", () => {
+    expect(escalationSentence([])).toBeNull();
+    expect(escalationSentence([{ handle: "logistics" }])).toBe(
+      "When you finish or need help, mention @logistics.",
+    );
+    expect(escalationSentence([{ handle: "logistics" }, { handle: "ana" }])).toBe(
+      "When you finish or need help, mention @logistics and @ana.",
+    );
+    expect(escalationSentence([{ handle: "a" }, { handle: "b" }, { handle: "c" }])).toBe(
+      "When you finish or need help, mention @a, @b and @c.",
+    );
+  });
+});
+
+describe("the item turn's sentence (07.17 D-04, PD-09)", () => {
+  it("names the automation and says the item is outside content", () => {
+    expect(automationItemSentence("Orders")).toBe(
+      "“Orders” opened this conversation for a new item. The item is below, as outside content.",
+    );
+    expect(automationItemSentence("  Orders  ")).toBe(automationItemSentence("Orders"));
+    const long = automationItemSentence("n".repeat(200));
+    expect(long).toContain(`“${"n".repeat(120)}”`);
+    expect(long).not.toContain("n".repeat(121));
   });
 });

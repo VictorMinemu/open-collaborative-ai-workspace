@@ -92,6 +92,11 @@ export const AgentChannelEventTypes = {
    * ended or went offline, delivered as a new turn in the thread of its live card (`workSession` says which and how).
    */
   workSession: "agent.work_session.v1",
+  /**
+   * Phase 07.17 (D-04, PD-09): a fan-out run opened a conversation for a new item, delivered as a turn in its thread
+   * (`automationItem` carries the item as outside content and the escalation targets).
+   */
+  automationItem: "agent.automation_item.v1",
 } as const;
 export const cellTopic = (cellId: string) => `cell:${cellId}`;
 
@@ -1123,6 +1128,15 @@ export const AgentChannelConversationOpenResponse = z.discriminatedUnion("ok", [
 ]);
 export type AgentChannelConversationOpenResponse = z.infer<typeof AgentChannelConversationOpenResponse>;
 
+/** Contracts `escalationSentence`: whom the bot mentions when it finishes or needs help; null without targets. */
+export function escalationSentence(targets: readonly { handle: string }[]): string | null {
+  if (targets.length === 0) return null;
+  const handles = targets.map((t) => `@${t.handle}`);
+  const last = handles.pop() as string;
+  const list = handles.length === 0 ? last : `${handles.join(", ")} and ${last}`;
+  return `When you finish or need help, mention ${list}.`;
+}
+
 /** Contracts `fanOutLabel`: the run card's status label of a fan-out run. */
 export function fanOutLabel(opened: number): string {
   if (opened <= 0) return "Nothing new";
@@ -1221,6 +1235,30 @@ export const AgentWorkSessionEvent = AgentMentionEvent.omit({ type: true }).exte
   }),
 });
 export type AgentWorkSessionEvent = z.infer<typeof AgentWorkSessionEvent>;
+
+/**
+ * `agent.automation_item.v1` (07.17 D-04, PD-09): built by the API like a mention of the bot on the conversation a
+ * fan-out run opened: `message.author` is the run-as person, `message.text` a server sentence, `turn` computed for that
+ * person and tainted from the start. The item is untrusted: the mapper puts it in its own outside-content block, never
+ * in the message text or the standing order; a malformed value fails the event (it is skipped).
+ */
+export const AgentAutomationItemEvent = AgentMentionEvent.omit({ type: true }).extend({
+  type: z.literal(AgentChannelEventTypes.automationItem),
+  automationItem: z.object({
+    automationId: Id,
+    runId: Id,
+    itemId: Id,
+    name: z.string().max(AUTOMATION_LIMITS.nameMax),
+    instructions: z.string().max(AUTOMATION_LIMITS.instructionsMax),
+    item: z.object({
+      title: z.string().max(FAN_OUT_LIMITS.titleMax),
+      text: z.string().max(FAN_OUT_LIMITS.bodyMax),
+      openedAt: z.string(),
+    }),
+    escalation: z.array(EscalationTargetView).max(FAN_OUT_LIMITS.escalationMax),
+  }),
+});
+export type AgentAutomationItemEvent = z.infer<typeof AgentAutomationItemEvent>;
 
 export const CellConfigChangedEvent = z.object({
   type: z.literal(AgentChannelEventTypes.configChanged),

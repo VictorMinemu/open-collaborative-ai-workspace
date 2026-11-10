@@ -3899,3 +3899,78 @@ describe("automation fan-out mirror parity (07.17-01: plugin ↔ packages/contra
     }
   });
 });
+
+describe("automation item mirror parity (07.17-01: plugin ↔ packages/contracts agent-channel.ts, automation-fan-out.ts; PD-09)", () => {
+  // Non-literal specifiers: the contracts package lives outside this package (and is not type-checked from here).
+  const contracts = (file: string) =>
+    new URL(`../../../packages/contracts/src/${file}`, import.meta.url).href;
+  type Schema = { safeParse: (v: unknown) => { success: boolean; data?: unknown } };
+  const U = (n: number) => `0199b1c2-d3e4-7f5a-8b9c-${String(n).padStart(12, "0")}`;
+
+  it("the item event parses identically in both copies; the wording helpers are the contracts'", async () => {
+    const channel = (await import(contracts("agent-channel.ts"))) as {
+      AgentChannelEventTypes: Record<string, string>;
+      AgentAutomationItemEvent: Schema;
+    };
+    const fo = (await import(contracts("automation-fan-out.ts"))) as {
+      escalationSentence: (t: readonly { handle: string }[]) => string | null;
+      automationItemSentence: (name: string) => string;
+    };
+    const m = await import("./agent-channel-protocol.js");
+    expect(m.AgentChannelEventTypes.automationItem).toBe(channel.AgentChannelEventTypes.automationItem);
+    expect(m.AgentChannelEventTypes.automationItem).toBe("agent.automation_item.v1");
+    const event = {
+      eventId: U(1),
+      seq: 9,
+      type: "agent.automation_item.v1",
+      organizationId: U(2),
+      cellId: U(2),
+      agent: { id: U(3), handle: "atlas", displayName: "Atlas" },
+      conversation: { id: U(4), kind: "channel", name: "fleet" },
+      thread: { rootMessageId: U(5) },
+      message: {
+        id: U(5),
+        text: fo.automationItemSentence("New orders"),
+        createdAt: "2026-11-10T08:00:00.000Z",
+        author: { kind: "user", id: U(6), displayName: "Ana Pérez" },
+        mentions: [],
+      },
+      threadHistory: [],
+      roster: [{ kind: "user", id: U(6), displayName: "Ana Pérez", role: "standard" }],
+      automationItem: {
+        automationId: U(7),
+        runId: U(8),
+        itemId: U(9),
+        name: "New orders",
+        instructions: "Prepare each order for dispatch.",
+        item: { title: "Order 1042", text: "Order 1042 from the ERP.", openedAt: "2026-11-10T08:00:00.000Z" },
+        escalation: [],
+      },
+    };
+    const withItem = (patch: Record<string, unknown>) => ({
+      ...event,
+      automationItem: { ...event.automationItem, ...patch },
+    });
+    expect(channel.AgentAutomationItemEvent.safeParse(event).data).toEqual(event);
+    expect(m.AgentAutomationItemEvent.parse(event)).toEqual(event);
+    const target = { kind: "unit", id: U(10), handle: "logistics", displayName: "Logistics" };
+    for (const v of [
+      event,
+      withItem({ escalation: [target] }),
+      withItem({ escalation: Array(6).fill(target) }),
+      withItem({ item: { ...event.automationItem.item, text: "x".repeat(4001) } }),
+      withItem({ item: { ...event.automationItem.item, title: "t".repeat(201) } }),
+      withItem({ name: "n".repeat(121) }),
+      { ...event, type: "agent.mention.v1" },
+    ]) {
+      const a = m.AgentAutomationItemEvent.safeParse(v);
+      const b = channel.AgentAutomationItemEvent.safeParse(v);
+      expect(a.success, JSON.stringify(v).slice(0, 160)).toBe(b.success);
+      if (a.success && b.success) expect(a.data).toEqual(b.data);
+    }
+    for (const handles of [[], ["a"], ["a", "b"], ["a", "b", "c"], ["a", "b", "c", "d", "e"]]) {
+      const t = handles.map((handle) => ({ handle }));
+      expect(m.escalationSentence(t)).toBe(fo.escalationSentence(t));
+    }
+  });
+});

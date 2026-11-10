@@ -160,7 +160,7 @@ describe("scheduleSummary (UI-SPEC § Copy › Trigger summaries)", () => {
     expect(scheduleSummary("0 9 * * 1,4")).toBe("Mondays and Thursdays at 9:00 AM");
     expect(scheduleSummary("0 18 3 * *")).toBe("Monthly on day 3 at 6:00 PM");
     expect(scheduleSummary("45 23 L * *")).toBe("Monthly on the last day at 11:45 PM");
-    expect(scheduleSummary("*/20 * * * *")).toBe("Custom schedule (*/20 * * * *)");
+    expect(scheduleSummary("*/7 * * * *")).toBe("Custom schedule (*/7 * * * *)");
   });
 });
 

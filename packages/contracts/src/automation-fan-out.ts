@@ -28,10 +28,48 @@ export const FAN_OUT_LIMITS = {
   escalationMax: 5,
 } as const;
 
+// ---------------------------------------------------------------- settings (D-02, PD-05)
+
+/**
+ * The owner's fan-out settings on create and update. Allowed only on scheduled agent-turn automations into a channel or
+ * a board (the API answers 400 `fan_out_not_allowed` otherwise; webhooks and mail keep one item per event, D-16).
+ */
+export const AutomationFanOutInput = z
+  .strictObject({
+    enabled: z.boolean(),
+    perRun: z.number().int().min(1).max(FAN_OUT_LIMITS.perRunMax).default(FAN_OUT_LIMITS.perRunDefault),
+    perDay: z.number().int().min(1).max(FAN_OUT_LIMITS.perDayMax).default(FAN_OUT_LIMITS.perDayDefault),
+  })
+  .refine((f) => f.perRun <= f.perDay, {
+    message: "the per-run cap can't exceed the per-day cap",
+    path: ["perRun"],
+  });
+export type AutomationFanOutInput = z.infer<typeof AutomationFanOutInput>;
+
+/** The stored settings as the API returns them. */
+export const AutomationFanOutView = z.object({
+  enabled: z.boolean(),
+  perRun: z.number().int(),
+  perDay: z.number().int(),
+});
+export type AutomationFanOutView = z.infer<typeof AutomationFanOutView>;
+
 // ---------------------------------------------------------------- escalation targets (D-08, PD-15)
 
 export const EscalationTargetKind = z.enum(["user", "unit"]);
 export type EscalationTargetKind = z.infer<typeof EscalationTargetKind>;
+
+/** A person or a team (or department) by id, as saved on the automation; validated by the API at save (PD-15). */
+export const EscalationTarget = z.strictObject({ kind: EscalationTargetKind, id: Id });
+export type EscalationTarget = z.infer<typeof EscalationTarget>;
+
+export const EscalationTargets = z
+  .array(EscalationTarget)
+  .max(FAN_OUT_LIMITS.escalationMax)
+  .refine((ts) => new Set(ts.map((t) => `${t.kind}:${t.id}`)).size === ts.length, {
+    message: "each person or team once",
+  });
+export type EscalationTargets = z.infer<typeof EscalationTargets>;
 
 /**
  * What the bot sees of a target, resolved at delivery from the stored ids (gone or no longer valid targets are
@@ -121,4 +159,28 @@ export type AgentChannelConversationOpenResponse = z.infer<typeof AgentChannelCo
 export function fanOutLabel(opened: number): string {
   if (opened <= 0) return "Nothing new";
   return opened === 1 ? "Opened 1 conversation" : `Opened ${opened} conversations`;
+}
+
+/**
+ * The sentence the plugin adds to run and item turns of automations with escalation targets (D-08); null without any.
+ * "When you finish or need help, mention @a, @b and @c."
+ */
+export function escalationSentence(targets: readonly { handle: string }[]): string | null {
+  if (targets.length === 0) return null;
+  const handles = targets.map((t) => `@${t.handle}`);
+  const last = handles.pop() as string;
+  const list = handles.length === 0 ? last : `${handles.join(", ")} and ${last}`;
+  return `When you finish or need help, mention ${list}.`;
+}
+
+/** Characters of the automation's name quoted in the item turn's sentence. */
+const ITEM_SENTENCE_NAME_MAX = 120;
+
+/**
+ * `message.text` of an `agent.automation_item.v1` turn (D-04, PD-09): a server sentence, never the item itself (the item
+ * travels only in `automationItem.item`, labelled as outside content).
+ */
+export function automationItemSentence(name: string): string {
+  const quoted = name.trim().slice(0, ITEM_SENTENCE_NAME_MAX).trim();
+  return `“${quoted}” opened this conversation for a new item. The item is below, as outside content.`;
 }

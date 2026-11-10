@@ -1,5 +1,12 @@
 import { z } from "zod";
 import { ModelRef } from "./ai-generation";
+import {
+  AutomationFanOutInput,
+  AutomationFanOutView,
+  EscalationTargets,
+  EscalationTargetView,
+  FAN_OUT_LIMITS,
+} from "./automation-fan-out";
 import { BoardColumnCategory } from "./board";
 import { Id, IsoDateTime } from "./common";
 
@@ -7,8 +14,8 @@ import { Id, IsoDateTime } from "./common";
  * Automations (Phase 07.6, AUTO-01 … AUTO-03, PRD §73-75, D-01, D-02, D-07). An automation is a standing order: a bot,
  * instructions, a trigger (a schedule in an IANA zone, a signed webhook or a mailbox), a delivery target named by
  * stable ids, the person it runs as (always its creator, P-04), a daily budget and its runs. Leaf module: it imports
- * `common`, `board` (column categories) and `ai-generation` (the digest model) only, so `agent-channel.ts` can reuse its schedule and run
- * kinds without a cycle.
+ * `common`, `board` (column categories), `ai-generation` (the digest model) and `automation-fan-out` (07.17) only, so
+ * `agent-channel.ts` can reuse its schedule and run kinds without a cycle.
  *
  * Validation here is shape only: the cron's meaning, the minimum interval, caps and every permission are the API's.
  */
@@ -17,8 +24,13 @@ export const AUTOMATION_LIMITS = {
   nameMax: 120,
   instructionsMax: 4000,
   maxRunsPerDayDefault: 24,
-  /** The schema's ceiling (one every 5 minutes); the organization cap (`bot_policies`, default 96) is the API's. */
+  /** The schema's ceiling (one every 5 minutes); the organization cap (`bot_policies`, 288 by default since 07.17) is the API's. */
   maxRunsPerDayCeiling: 288,
+  /**
+   * The organization's default minimum interval in minutes since 07.17 (D-01), shown when the options do not say. The
+   * API's `validateSchedule` with the organization's `min_schedule_minutes` is the only decider.
+   */
+  minScheduleMinutesDefault: 5,
   runsPage: 30,
   webhookBodyMaxBytes: 65_536,
   webhookToleranceSeconds: 300,
@@ -110,6 +122,10 @@ export const AutomationErrorCode = z.enum([
   "trigger_unavailable",
   "approval_not_found",
   "not_found",
+  /** 07.17 (PD-05): fan-out only on scheduled agent-turn automations into a channel or a board. */
+  "fan_out_not_allowed",
+  /** 07.17 (PD-15): a target who left, can't read the automation's target or is not a team or department. */
+  "escalation_not_allowed",
 ]);
 export type AutomationErrorCode = z.infer<typeof AutomationErrorCode>;
 
@@ -241,6 +257,13 @@ export function scheduleSummary(cron: string): string {
   const f = cron.trim().split(/\s+/);
   if (f.length !== 5) return custom;
   const [min, hour, dom, month, dow] = f as [string, string, string, string, string];
+  // 07.17 (D-01): `*/N * * * *`. Only a step that divides the hour fires every N minutes (`*/7` restarts at :00).
+  const step = /^\*\/([1-9][0-9]?)$/.exec(min);
+  if (step && hour === "*" && dom === "*" && month === "*" && dow === "*") {
+    const n = Number(step[1]);
+    if (n < 60 && 60 % n === 0) return n === 1 ? "Every minute" : `Every ${n} minutes`;
+    return custom;
+  }
   if (!MINUTE_RE.test(min) || month !== "*") return custom;
   const minute = Number(min);
   if (hour === "*" && dom === "*" && dow === "*") return `Every hour at :${String(minute).padStart(2, "0")}`;
@@ -408,6 +431,10 @@ export const CreateAutomationRequest = z
     maxRunsPerDay: MaxRunsPerDay.default(AUTOMATION_LIMITS.maxRunsPerDayDefault),
     /** "Created with changes": the natural-language proposal this form was opened from (R5). */
     fromApprovalId: Id.optional(),
+    /** 07.17 (D-02, PD-05): one conversation per new item; absent = off. */
+    fanOut: AutomationFanOutInput.optional(),
+    /** 07.17 (D-08, PD-15): people and teams the bot mentions when it finishes or needs help; absent = none. */
+    escalation: EscalationTargets.optional(),
   })
   .superRefine((body, ctx) => checkInbound(body.trigger, body.inbound, ctx, true));
 export type CreateAutomationRequest = z.infer<typeof CreateAutomationRequest>;
@@ -422,6 +449,8 @@ export const UpdateAutomationRequest = z
     target: AutomationTarget.optional(),
     inbound: AutomationInbound.nullable().optional(),
     maxRunsPerDay: MaxRunsPerDay.optional(),
+    fanOut: AutomationFanOutInput.optional(),
+    escalation: EscalationTargets.optional(),
   })
   .superRefine((body, ctx) => {
     const { expectedVersion: _version, ...changes } = body;
@@ -479,6 +508,10 @@ export const Automation = z.object({
   updatedAt: IsoDateTime,
   /** Decided by the API per viewer: a manager pauses and deletes, never edits, resumes or runs (P-04). */
   viewerCan: z.array(AutomationViewerAction),
+  /** 07.17 (D-02, PD-16): set by 07.17 servers; absent = off. */
+  fanOut: AutomationFanOutView.optional(),
+  /** 07.17 (D-08, PD-16): resolved per read (gone targets dropped); absent = none. */
+  escalation: z.array(EscalationTargetView).max(FAN_OUT_LIMITS.escalationMax).optional(),
 });
 export type Automation = z.infer<typeof Automation>;
 
@@ -543,6 +576,8 @@ export const AutomationRun = z.object({
   tainted: z.boolean(),
   /** The message the run was delivered under; null when it never posted. */
   anchor: z.object({ conversationId: Id, messageId: Id, threadRootId: Id }).nullable(),
+  /** 07.17 (D-10): conversations this fan-out run opened; null or absent = not a fan-out run. */
+  opened: z.number().int().nonnegative().nullable().optional(),
 });
 export type AutomationRun = z.infer<typeof AutomationRun>;
 
