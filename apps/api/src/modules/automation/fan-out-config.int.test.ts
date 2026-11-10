@@ -1,0 +1,382 @@
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { codeOf, type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
+
+/**
+ * 07.17-05 (AFO-02; D-02, D-08, D-10, D-16; PD-05, PD-06, PD-15, PD-17): an automation can be told to fan out and whom
+ * to mention, and a fan-out automation's runs live in one "<name> · Runs" thread at its target instead of one card per
+ * run. Real PostgreSQL + Redis + pg-boss; Víctor Ruiz (admin) owns the automations, Sam Lee and Alex Kim are members of
+ * organization A, Eve Black is the admin of organization B; the team bot Scout runs them.
+ */
+
+let s: SandboxStack;
+let salesId: string;
+let ordersId: string;
+let intakeId: string;
+
+const core = () => s.stack.built.core;
+const drain = () => core().jobs.drain("automation.fire");
+
+const ORDER = "Find the new orders and open one conversation for each.";
+
+const body = (extra: Json = {}): Json => ({
+  name: "New orders",
+  agentId: s.scoutId,
+  instructions: ORDER,
+  trigger: { kind: "schedule", schedule: { cron: "0 17 * * 5", timeZone: "Europe/Madrid" } },
+  target: { kind: "board", conversationId: ordersId, columnId: intakeId },
+  maxRunsPerDay: 24,
+  ...extra,
+});
+
+const create = (extra: Json = {}) =>
+  s.victor.request("POST", "/api/v1/automations", body(extra)) as Promise<Res>;
+
+async function created(extra: Json = {}): Promise<Json> {
+  return (await ok(create(extra), 201)).automation as Json;
+}
+
+const patch = async (id: string, changes: Json) => {
+  const version = ((await ok(s.victor.request("GET", `/api/v1/automations/${id}`) as Promise<Res>)) as Json)
+    .version as number;
+  return s.victor.request("PATCH", `/api/v1/automations/${id}`, {
+    expectedVersion: version,
+    ...changes,
+  }) as Promise<Res>;
+};
+
+const automationRow = async (id: string) =>
+  (await s.su.query("select * from app.automations where id = $1", [id])).rows[0] as Json;
+
+const runRow = async (runId: string) =>
+  (await s.su.query("select * from app.automation_runs where id = $1", [runId])).rows[0] as Json;
+
+const messageRow = async (id: string) =>
+  (
+    await s.su.query("select id, conversation_id, thread_id, deleted_at from app.messages where id = $1", [
+      id,
+    ])
+  ).rows[0] as Json;
+
+const runEvent = async (runId: string) =>
+  (
+    await s.su.query(
+      "select payload from app.stream_events where stream_id = $1 and type = 'agent.automation_run.v1' and payload->'automationRun'->>'runId' = $2",
+      [`cell:${s.orgA}`, runId],
+    )
+  ).rows.map((r) => r.payload as Json)[0] as Json;
+
+const boardCards = async (conversationId: string) =>
+  Number(
+    (
+      await s.su.query("select count(*)::int as n from app.board_cards where conversation_id = $1", [
+        conversationId,
+      ])
+    ).rows[0].n,
+  );
+
+const runNow = async (automationId: string) =>
+  (await ok(s.victor.request("POST", `/api/v1/automations/${automationId}/run`) as Promise<Res>, 202))
+    .runId as string;
+
+/** A top-level message as Víctor reads it (the board's Messages view lists the same top-level, non-card messages). */
+async function topLevel(conversationId: string): Promise<Json[]> {
+  return (
+    await ok(s.victor.request("GET", `/api/v1/conversations/${conversationId}/messages`) as Promise<Res>)
+  ).messages as Json[];
+}
+
+async function expectRefused(res: Promise<Res>, code: string) {
+  const r = await res;
+  expect(r.status, JSON.stringify(r.body)).toBe(400);
+  expect(codeOf(r)).toBe(code);
+}
+
+beforeAll(async () => {
+  s = await startSandboxStack();
+  await s.su.query(
+    `insert into app.bot_policies (organization_id, max_automations_per_user) values ($1, 1000)
+     on conflict (organization_id) do update set max_automations_per_user = 1000`,
+    [s.orgA],
+  );
+  salesId = (
+    await ok(
+      s.victor.request("POST", "/api/v1/channels", { name: "sales", visibility: "private" }) as Promise<Res>,
+    )
+  ).id as string;
+  ordersId = (
+    await ok(
+      s.victor.request("POST", "/api/v1/channels", {
+        name: "orders",
+        visibility: "private",
+        layout: "board",
+      }) as Promise<Res>,
+    )
+  ).id as string;
+  for (const conv of [salesId, ordersId]) {
+    for (const member of [
+      { kind: "agent", id: s.scoutId },
+      { kind: "user", id: s.samId },
+    ]) {
+      await ok(s.victor.request("POST", `/api/v1/channels/${conv}/members`, member) as Promise<Res>);
+    }
+  }
+  const col = await s.victor.request("POST", `/api/v1/boards/${ordersId}/columns`, {
+    name: "Intake",
+    category: "backlog",
+  });
+  expect([200, 201], JSON.stringify(col.body)).toContain(col.status);
+  const columns = (await ok(s.victor.request("GET", `/api/v1/boards/${ordersId}`) as Promise<Res>))
+    .columns as Json[];
+  intakeId = columns.find((c) => c.name === "Intake")?.id as string;
+  expect(intakeId).toBeTruthy();
+});
+
+afterAll(async () => {
+  await s?.stop();
+});
+
+// ---------------------------------------------------------------- Task 1: settings and the run log thread
+
+describe("fan-out settings (D-02, D-16, PD-05)", () => {
+  it("saves fanOut on a board schedule, PATCH changes and toggles it, a 07.16 body saves with fan-out off", async () => {
+    const a = await created({ fanOut: { enabled: true, perRun: 5, perDay: 20 } });
+    expect(a.fanOut).toEqual({ enabled: true, perRun: 5, perDay: 20 });
+    expect(await automationRow(a.id)).toMatchObject({
+      fan_out_enabled: true,
+      fan_out_per_run: 5,
+      fan_out_per_day: 20,
+    });
+
+    // The defaults (10 / 100) when only the switch is sent.
+    const d = await created({ fanOut: { enabled: true } });
+    expect(d.fanOut).toEqual({ enabled: true, perRun: 10, perDay: 100 });
+
+    const changed = (await ok(patch(a.id, { fanOut: { enabled: true, perRun: 8, perDay: 40 } })))
+      .automation as Json;
+    expect(changed.fanOut).toEqual({ enabled: true, perRun: 8, perDay: 40 });
+    const off = (await ok(patch(a.id, { fanOut: { enabled: false, perRun: 8, perDay: 40 } })))
+      .automation as Json;
+    expect(off.fanOut).toEqual({ enabled: false, perRun: 8, perDay: 40 });
+    // An update without fanOut keeps it as it is.
+    const renamed = (await ok(patch(a.id, { name: "New orders (renamed)" }))).automation as Json;
+    expect(renamed.fanOut).toEqual({ enabled: false, perRun: 8, perDay: 40 });
+    const on = (await ok(patch(a.id, { fanOut: { enabled: true, perRun: 8, perDay: 40 } })))
+      .automation as Json;
+    expect(on.fanOut).toEqual({ enabled: true, perRun: 8, perDay: 40 });
+
+    // A 07.16 body: no fanOut at all.
+    const plain = await created();
+    expect(plain.fanOut).toEqual({ enabled: false, perRun: 10, perDay: 100 });
+    expect(await automationRow(plain.id)).toMatchObject({ fan_out_enabled: false, run_log_message_id: null });
+
+    // per run above per day is the contract's refusal.
+    const bad = await create({ fanOut: { enabled: true, perRun: 30, perDay: 20 } });
+    expect(bad.status).toBe(400);
+  });
+
+  it("refuses fan-out on webhook, mail and digest automations and on DM or thread targets, on create and on update", async () => {
+    const fanOut = { enabled: true };
+    await expectRefused(
+      create({
+        fanOut,
+        trigger: { kind: "webhook" },
+        target: { kind: "channel", conversationId: salesId },
+        inbound: { action: "post", askBot: true, config: {} },
+      }),
+      "fan_out_not_allowed",
+    );
+    await expectRefused(
+      create({
+        fanOut,
+        trigger: {
+          kind: "mail",
+          mailbox: {
+            vaultItemId: "00000000-0000-4000-8000-000000000001",
+            host: "imap.example.test",
+            port: 993,
+            folder: "INBOX",
+            pollIntervalMinutes: 10,
+          },
+        },
+        target: { kind: "channel", conversationId: salesId },
+        inbound: { action: "post", askBot: true, config: {} },
+      }),
+      "fan_out_not_allowed",
+    );
+    await expectRefused(create({ fanOut, target: { kind: "dm" } }), "fan_out_not_allowed");
+    const root = (
+      await ok(
+        s.victor.request("POST", `/api/v1/conversations/${salesId}/messages`, {
+          body: "Order thread",
+        }) as Promise<Res>,
+      )
+    ).id as string;
+    await expectRefused(
+      create({ fanOut, target: { kind: "thread", conversationId: salesId, threadRootMessageId: root } }),
+      "fan_out_not_allowed",
+    );
+    // Fan-out off on the same shapes saves as before.
+    expect((await created({ fanOut: { enabled: false }, target: { kind: "dm" } })).fanOut).toMatchObject({
+      enabled: false,
+    });
+
+    // A fan-out automation cannot move to a DM, a thread or a webhook.
+    const a = await created({ fanOut });
+    await expectRefused(patch(a.id, { target: { kind: "dm" } }), "fan_out_not_allowed");
+    await expectRefused(
+      patch(a.id, { target: { kind: "thread", conversationId: salesId, threadRootMessageId: root } }),
+      "fan_out_not_allowed",
+    );
+    await expectRefused(
+      patch(a.id, {
+        trigger: { kind: "webhook" },
+        inbound: { action: "post", askBot: true, config: {} },
+      }),
+      "fan_out_not_allowed",
+    );
+    // Turning fan-out on for a DM automation is refused the same.
+    const dm = await created({ target: { kind: "dm" } });
+    await expectRefused(patch(dm.id, { fanOut }), "fan_out_not_allowed");
+    // A digest never fans out.
+    const [digest] = (
+      await s.su.query(
+        `insert into app.automations (organization_id, name, agent_id, run_as_user_id, created_by, action_kind, instructions,
+           trigger_kind, schedule_cron, time_zone, target_kind, max_runs_per_day)
+         values ($1, 'Daily digest', $2, $3, $3, 'digest', '', 'schedule', '0 8 * * *', 'Europe/Madrid', 'dm', 1)
+         returning id`,
+        [s.orgA, s.scoutId, s.victorId],
+      )
+    ).rows as [Json];
+    await expectRefused(patch(digest.id, { fanOut }), "fan_out_not_allowed");
+    expect(await automationRow(a.id)).toMatchObject({ fan_out_enabled: true, target_kind: "board" });
+  });
+});
+
+describe("the “<name> · Runs” thread (D-10, PD-06)", () => {
+  it("board: Run now posts the run log root top-level (no board card), the run card in its thread, and delivers there; the root is reused, and replaced once deleted", async () => {
+    const a = await created({ name: "Shopify orders", fanOut: { enabled: true, perRun: 5, perDay: 20 } });
+    const cardsBefore = await boardCards(ordersId);
+
+    const runId = await runNow(a.id);
+    expect(await drain()).toBe(1);
+    const row = await automationRow(a.id);
+    const rootId = row.run_log_message_id as string;
+    expect(rootId).toBeTruthy();
+    // A-01: a top-level message in the board channel, not a board card, shown in its Messages view.
+    expect(await messageRow(rootId)).toMatchObject({ conversation_id: ordersId, thread_id: null });
+    expect(await boardCards(ordersId)).toBe(cardsBefore);
+    const root = (await topLevel(ordersId)).find((m) => m.id === rootId) as Json;
+    expect(root?.author).toMatchObject({ kind: "agent", id: s.scoutId });
+    expect(root?.card).toMatchObject({
+      kind: "automation",
+      platformOwned: true,
+      title: "Shopify orders · Runs",
+      fields: [
+        { label: "Schedule", value: "Fridays at 5:00 PM" },
+        { label: "Opens", value: "Up to 5 per run · 20 a day" },
+      ],
+      actions: [
+        { kind: "open", label: "Open automation", target: `/bots/automations?edit=${a.id}` },
+        { kind: "follow", label: "Follow" },
+      ],
+    });
+    const key = (await s.su.query("select client_message_id from app.messages where id = $1", [rootId]))
+      .rows[0];
+    expect(key.client_message_id).toBe(`card:runlog:${runId}`);
+
+    // The run card is a reply in that thread; the run's turn names that thread.
+    const run = await runRow(runId);
+    expect(run.board_card_message_id).toBeNull();
+    expect(run.status).toBe("delivered");
+    const anchor = await messageRow(run.anchor_message_id);
+    expect(anchor).toMatchObject({ conversation_id: ordersId, thread_id: rootId });
+    const ev = await runEvent(runId);
+    expect(ev.message.id).toBe(run.anchor_message_id);
+    expect(ev.thread.rootMessageId).toBe(rootId);
+    const listed = (
+      (await ok(s.victor.request("GET", `/api/v1/automations/${a.id}/runs`) as Promise<Res>)).runs as Json[]
+    ).find((r) => r.id === runId) as Json;
+    expect(listed.anchor).toEqual({
+      conversationId: ordersId,
+      messageId: run.anchor_message_id,
+      threadRootId: rootId,
+    });
+
+    // A second run: a second run card in the same thread, no new root, no board card.
+    const second = await runNow(a.id);
+    expect(await drain()).toBe(1);
+    expect((await automationRow(a.id)).run_log_message_id).toBe(rootId);
+    const secondRun = await runRow(second);
+    expect(await messageRow(secondRun.anchor_message_id)).toMatchObject({ thread_id: rootId });
+    expect(secondRun.anchor_message_id).not.toBe(run.anchor_message_id);
+    expect(await boardCards(ordersId)).toBe(cardsBefore);
+    const roots = (
+      await s.su.query(
+        "select count(*)::int as n from app.messages where conversation_id = $1 and client_message_id like 'card:runlog:%'",
+        [ordersId],
+      )
+    ).rows[0];
+    expect(roots.n).toBe(1);
+
+    // The root deleted (moderated by Víctor): the next run posts a new root and stores it.
+    await ok(s.victor.request("DELETE", `/api/v1/messages/${rootId}`) as Promise<Res>);
+    const third = await runNow(a.id);
+    expect(await drain()).toBe(1);
+    const newRoot = (await automationRow(a.id)).run_log_message_id as string;
+    expect(newRoot).toBeTruthy();
+    expect(newRoot).not.toBe(rootId);
+    expect(await messageRow(newRoot)).toMatchObject({
+      conversation_id: ordersId,
+      thread_id: null,
+      deleted_at: null,
+    });
+    const thirdRun = await runRow(third);
+    expect(thirdRun.status).toBe("delivered");
+    expect(await messageRow(thirdRun.anchor_message_id)).toMatchObject({ thread_id: newRoot });
+    expect(await boardCards(ordersId)).toBe(cardsBefore);
+  });
+
+  it("channel: the same thread, and the run card is never top-level", async () => {
+    const a = await created({
+      name: "Support inbox",
+      target: { kind: "channel", conversationId: salesId },
+      fanOut: { enabled: true },
+    });
+    const first = await runNow(a.id);
+    const second = await runNow(a.id);
+    expect(await drain()).toBe(2);
+    const rootId = (await automationRow(a.id)).run_log_message_id as string;
+    expect(await messageRow(rootId)).toMatchObject({ conversation_id: salesId, thread_id: null });
+    const top = await topLevel(salesId);
+    const root = top.find((m) => m.id === rootId) as Json;
+    expect(root?.card).toMatchObject({
+      title: "Support inbox · Runs",
+      fields: [
+        { label: "Schedule", value: "Fridays at 5:00 PM" },
+        { label: "Opens", value: "Up to 10 per run · 100 a day" },
+      ],
+    });
+    for (const runId of [first, second]) {
+      const run = await runRow(runId);
+      expect(await messageRow(run.anchor_message_id)).toMatchObject({
+        conversation_id: salesId,
+        thread_id: rootId,
+      });
+      expect(top.some((m) => m.id === run.anchor_message_id)).toBe(false);
+      expect((await runEvent(runId)).thread.rootMessageId).toBe(rootId);
+    }
+  });
+
+  it("an automation without fan-out keeps its run card top-level in the channel and stores no root (E9, PD-18)", async () => {
+    const a = await created({ name: "Plain report", target: { kind: "channel", conversationId: salesId } });
+    const runId = await runNow(a.id);
+    expect(await drain()).toBe(1);
+    const run = await runRow(runId);
+    expect(await messageRow(run.anchor_message_id)).toMatchObject({
+      conversation_id: salesId,
+      thread_id: null,
+    });
+    expect((await automationRow(a.id)).run_log_message_id).toBeNull();
+    expect((await runEvent(runId)).thread.rootMessageId).toBe(run.anchor_message_id);
+  });
+});

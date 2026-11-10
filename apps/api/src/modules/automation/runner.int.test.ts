@@ -742,6 +742,11 @@ describe("every target lands where the UI-SPEC shows it (P-08, R2)", () => {
     const [run] = (await runsOf(automationId)) as [Json];
     const cardMessageId = run.board_card_message_id as string;
     expect(cardMessageId).toBeTruthy();
+    // 07.17 (E9, PD-18): without fan-out a board run still files its own board card, and no run log thread exists.
+    expect(await automationRow(automationId)).toMatchObject({
+      fan_out_enabled: false,
+      run_log_message_id: null,
+    });
     const date = new Intl.DateTimeFormat("en-US", {
       timeZone: "Europe/Madrid",
       month: "short",

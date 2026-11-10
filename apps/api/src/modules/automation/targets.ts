@@ -1,11 +1,12 @@
 import {
+  AGENT_CARD_TITLE_MAX,
   type AgentCardField,
   type AgentCardNotice,
   type AutomationRunReason,
   type AutomationRunTrigger,
   scheduleSummary,
 } from "@ocw/contracts";
-import { agents, automationRuns, conversations, orgMembers, type Tx } from "@ocw/db";
+import { agents, automationRuns, automations, conversations, messages, orgMembers, type Tx } from "@ocw/db";
 import { eq } from "drizzle-orm";
 import type { Core } from "../../core";
 import type { PlatformCardInput } from "../../lib/chat-agent-bridge";
@@ -22,6 +23,10 @@ import type { AutomationRow, RunRow } from "./actions";
  * Thread: a reply in the chosen thread. DM: a message in the person's DM with the bot (created on the first run), the
  * bot's answer flat after it. Board: a 07.1 board card "{name} · {date}" in the chosen column, authored by the bot for
  * the person, with the run card as its first reply.
+ *
+ * Phase 07.17 (D-10, PD-06): a fan-out automation (channel or board) keeps its runs in one "{name} · Runs" thread at its
+ * target instead: a platform-owned card posted top-level once (a board channel's Messages view shows it, no board card),
+ * every run card a reply in it, so a poll every few minutes never floods the target.
  */
 
 /** The names a run card shows. */
@@ -170,6 +175,55 @@ export interface AnchorDeps {
   perms: PermissionService;
 }
 
+/** The run log root's "Opens" field: `Up to 10 per run · 100 a day`. */
+export const opensLabel = (a: Pick<AutomationRow, "fanOutPerRun" | "fanOutPerDay">): string =>
+  `Up to ${a.fanOutPerRun} per run · ${a.fanOutPerDay} a day`;
+
+/**
+ * The root of a fan-out automation's run log thread (D-10, PD-06): the stored one while it is a live message of the
+ * target, else a new platform-owned `automation` card "{name} · Runs" posted top-level by the bot for the run-as person
+ * (chat re-decides the bot's `channel.post` and agent ∩ person `channel.read`) under the key `runlog:<runId>` of the run
+ * that creates it, stored in `automations.run_log_message_id`. Called in the fire transaction, which holds the run then
+ * the automation `FOR UPDATE`, so two concurrent runs of one automation create one root.
+ */
+export async function runLogRoot(tx: Tx, deps: AnchorDeps, a: AutomationRow, run: RunRow): Promise<string> {
+  const conversationId = a.conversationId as string;
+  if (a.runLogMessageId) {
+    const [live] = await tx
+      .select({ id: messages.id, deletedAt: messages.deletedAt, conversationId: messages.conversationId })
+      .from(messages)
+      .where(eq(messages.id, a.runLogMessageId))
+      .limit(1);
+    if (live && !live.deletedAt && live.conversationId === conversationId) return live.id;
+  }
+  const summary = `Each run of “${a.name}” is posted in this thread.`;
+  const posted = await deps.core.chatAgent.postAgentMessageIn(tx, {
+    agentId: a.agentId,
+    conversationId,
+    threadRootId: null,
+    body: summary,
+    idempotencyKey: `runlog:${run.id}`,
+    onBehalfOfUserId: a.runAsUserId,
+    cardPlatformOwned: true,
+    card: {
+      kind: "automation",
+      title: `${a.name} · Runs`.slice(0, AGENT_CARD_TITLE_MAX),
+      summary,
+      status: "info",
+      fields: [
+        ...(a.scheduleCron ? [{ label: "Schedule", value: scheduleSummary(a.scheduleCron) }] : []),
+        { label: "Opens", value: opensLabel(a) },
+      ],
+      actions: [
+        { kind: "open", label: "Open automation", target: `/bots/automations?edit=${a.id}` },
+        { kind: "follow", label: "Follow" },
+      ],
+    } satisfies PlatformCardInput,
+  });
+  await tx.update(automations).set({ runLogMessageId: posted.messageId }).where(eq(automations.id, a.id));
+  return posted.messageId;
+}
+
 /**
  * Posts (or, on a retry, finds) the run card where the automation delivers, in the fire transaction, as the bot for the
  * run-as person (chat decides the bot's own `channel.post` and agent ∩ person `channel.read` again). Idempotent per
@@ -211,6 +265,20 @@ export async function postAnchor(
         ],
       } satisfies PlatformCardInput,
     });
+
+  // 07.17 (PD-06): a fan-out run's card is a reply in the run log thread; no board card per run.
+  if (a.fanOutEnabled && (a.targetKind === "channel" || a.targetKind === "board")) {
+    const conversationId = a.conversationId as string;
+    const root = await runLogRoot(tx, deps, a, run);
+    const posted = await post(conversationId, root);
+    return {
+      anchorMessageId: posted.messageId,
+      conversationId,
+      threadRootId: root,
+      delivery: "thread",
+      boardCardMessageId: null,
+    };
+  }
 
   switch (a.targetKind) {
     case "dm": {

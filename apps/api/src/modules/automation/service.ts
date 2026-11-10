@@ -2,6 +2,7 @@ import {
   AUTOMATION_LIMITS,
   type Automation,
   type AutomationActionKind,
+  type AutomationFanOutInput,
   type AutomationInbound,
   type AutomationList,
   type AutomationListQuery,
@@ -11,6 +12,7 @@ import {
   type AutomationRunListQuery,
   type AutomationRunReason,
   type AutomationTarget,
+  type AutomationTargetKind,
   type AutomationTargetOptions,
   type AutomationTargetView,
   type AutomationViewerAction,
@@ -182,6 +184,35 @@ const runsPerDayError = (max: number) =>
   new HttpError(400, "bad_request", `Use a whole number from 1 to ${max}`, { max });
 const versionConflict = () =>
   new HttpError(409, "version", "This automation changed while you were editing. Reload it.");
+const fanOutNotAllowed = () =>
+  new HttpError(
+    400,
+    "fan_out_not_allowed",
+    "Only scheduled automations that post in a channel or a board can open a conversation for each item",
+  );
+
+/**
+ * Phase 07.17 (D-02, D-16, PD-05): fan-out only where no outside content arrives with the trigger: an agent turn on a
+ * schedule (Run now included) into a channel or a board. The database check `automations_fan_out_check` says the same.
+ */
+export function fanOutAllowed(p: {
+  actionKind: AutomationActionKind;
+  triggerKind: AutomationRow["triggerKind"];
+  targetKind: AutomationTargetKind;
+}): boolean {
+  return (
+    p.actionKind === "agent_turn" &&
+    p.triggerKind === "schedule" &&
+    (p.targetKind === "channel" || p.targetKind === "board")
+  );
+}
+
+/** The stored columns of the owner's fan-out settings. */
+const fanOutColumns = (f: AutomationFanOutInput) => ({
+  fanOutEnabled: f.enabled,
+  fanOutPerRun: f.perRun,
+  fanOutPerDay: f.perDay,
+});
 
 /** The columns of a target (stable ids only, principle 11). */
 export function targetColumns(target: AutomationTarget, conversationId: string | null) {
@@ -490,6 +521,7 @@ export function createAutomationService(
             }
           : null,
         inboundToday: inbound.get(row.id) ?? 0,
+        fanOut: { enabled: row.fanOutEnabled, perRun: row.fanOutPerRun, perDay: row.fanOutPerDay },
         version: row.version,
         createdAt: new Date(row.createdAt).toISOString(),
         updatedAt: new Date(row.updatedAt).toISOString(),
@@ -554,6 +586,12 @@ export function createAutomationService(
         );
       }
       const trigger = input.trigger;
+      if (
+        input.fanOut?.enabled &&
+        !fanOutAllowed({ actionKind, triggerKind: trigger.kind, targetKind: input.target.kind })
+      ) {
+        throw fanOutNotAllowed();
+      }
       if (trigger.kind === "webhook" && !(await canWebhook(perms, tx, actor))) {
         throw new HttpError(403, "webhook_not_allowed", "Only team leads and admins can create webhooks.");
       }
@@ -611,6 +649,8 @@ export function createAutomationService(
             config: opts.config ?? {},
             maxRunsPerDay: input.maxRunsPerDay,
             nextRunAt,
+            // 07.17 (PD-05): absent = off, the column defaults.
+            ...(input.fanOut ? fanOutColumns(input.fanOut) : {}),
           })
           .returning(),
       );
@@ -673,6 +713,18 @@ export function createAutomationService(
       await owned(tx, actor, id, "Only its owner can edit an automation");
       const before = await locked(tx, id);
       if (before.version !== input.expectedVersion) throw versionConflict();
+      // 07.17 (PD-05): the resulting row decides, so a fan-out automation never moves to a trigger or a target where
+      // outside content arrives with the run (and the database check is never the one to refuse).
+      if (
+        (input.fanOut?.enabled ?? before.fanOutEnabled) &&
+        !fanOutAllowed({
+          actionKind: before.actionKind,
+          triggerKind: input.trigger?.kind ?? before.triggerKind,
+          targetKind: input.target?.kind ?? before.targetKind,
+        })
+      ) {
+        throw fanOutNotAllowed();
+      }
       if (before.actionKind === "digest") {
         throw new HttpError(400, "bad_request", "Change the digest in its own settings");
       }
@@ -735,6 +787,10 @@ export function createAutomationService(
         inboundAskBot: inbound?.askBot ?? true,
         inboundConfig: inbound?.config ?? {},
         maxRunsPerDay: input.maxRunsPerDay ?? before.maxRunsPerDay,
+        ...(input.fanOut ? fanOutColumns(input.fanOut) : {}),
+        // The run log root is a message of the target conversation (its key carries both): another conversation
+        // starts a new thread on its next fan-out run. Turning fan-out off and on again keeps it (PD-05).
+        ...(decided.conversationId !== before.conversationId ? { runLogMessageId: null } : {}),
       });
       // R3: the trigger's entity changes with the automation, in this transaction.
       let made: { webhookSecret?: string } = {};
