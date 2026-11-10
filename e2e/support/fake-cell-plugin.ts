@@ -457,16 +457,19 @@ function mcpSession(
   const url = new URL(server.url);
   const mapped = hosts?.[url.host];
   if (mapped) url.host = mapped;
-  const headers: Record<string, string> = {
+  // A `Headers` object, not a plain record keyed by server-supplied names (no prototype keys, names validated).
+  const base = new Headers({
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
-  };
-  for (const h of server.headers) headers[h.name] = h.value;
+  });
+  for (const h of server.headers) base.set(h.name, h.value);
   let session: string | null = null;
   return async (id: number | null, method: string, params: Record<string, unknown> = {}) => {
+    const headers = new Headers(base);
+    if (session) headers.set("mcp-session-id", session);
     const res = await fetch(url, {
       method: "POST",
-      headers: { ...headers, ...(session ? { "mcp-session-id": session } : {}) },
+      headers,
       body: JSON.stringify({ jsonrpc: "2.0", ...(id === null ? {} : { id }), method, params }),
       redirect: "error",
     });
