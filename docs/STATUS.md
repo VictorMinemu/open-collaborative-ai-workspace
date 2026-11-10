@@ -163,3 +163,22 @@ Moved out of `AGENTS.md` so that file keeps only what every session needs.
   approve runtime requests; bots without a profile get byte-identical turns and today's proposals. Audit carries ids
   and counts only. Limits: team mentions and automation fan-out are 07.17; a `people` audience is a snapshot
   (ADR-0038, docs/SERVER.md › Isolated server).
+- **07.17 Automation fan-out and team mentions:** schedules run as often as every 5 minutes (organization defaults 5
+  minutes and 288 runs a day; the editor's "Every few minutes" pre-fills the runs and warns when the bot's daily limit
+  is lower than the turns it can use). An `agent_turn` schedule into a channel or a board can turn on "For each new
+  item": its run turn gets the batch tool `ocw_conversation_open` (`POST /agent-channel/v1/conversations/open`, up to
+  25 items a call), which opens one top-level thread or one board card per new item in the run's own target only,
+  deduplicated on the sha256 of the item's key (`app.automation_conversations`, tenant RLS; the key never stored in
+  clear), capped per run (10, 1…25) and per day (100, 1…500) under the run and automation locks. Bot-written text is
+  defused. The runs post into one "<name> · Runs" thread, and the open call answers the run, so quiet runs never trip
+  the breaker. Each opened item gets one ids-only `automation.item` job and one tainted, unattended
+  `agent.automation_item.v1` turn in its own thread as the run-as person, with a derived event id and the bot's 07.16
+  Work Zone tools. A bot moves (and sets waiting on) a card its automation opened even after outside content or a
+  session read, only with the profile's admin-set `actOnOutsideContent`; card creation stays refused. Every team and
+  department has a stable `@handle` (40 characters, unique per organization, generated once); `@team` on channel
+  posts is a `{ kind: "unit" }` mention decided by `unit.read`, notifying the active members of the subtree who can
+  read the conversation (`team_mention`, 200 a message), never waking a bot; bots resolve at most 3 teams a message.
+  An automation names up to 5 people or teams its bot mentions when it finishes or needs help. Audit carries ids and
+  counts only. Limits: fan-out only from schedules; items past the bot's "Sessions at once" are not retried
+  automatically; handles cannot be edited; fan-out needs the matching cell image (ADR-0039,
+  docs/self-hosting/automations.md).

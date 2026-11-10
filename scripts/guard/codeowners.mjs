@@ -82,6 +82,13 @@ export const REQUIRED_AREAS = [
     area: "prompt and archive bodies people and bots share",
     file: "apps/api/src/modules/work-session/controller.ts",
   },
+  // Phase 07.17 (ADR-0039): a fan-out run opens conversations in its own target (hashed-key dedupe, caps, taint), each
+  // item gets one turn, escalation targets are re-validated, and a team mention reaches only readers of the subtree.
+  { area: "automation fan-out open route", file: "apps/api/src/modules/agent-channel/conversations-open.ts" },
+  { area: "automation item turns", file: "apps/api/src/modules/agent-channel/automation-items.ts" },
+  { area: "automation fan-out dedupe and caps", file: "apps/api/src/modules/automation/fan-out.ts" },
+  { area: "automation escalation targets", file: "apps/api/src/modules/automation/escalation.ts" },
+  { area: "team mention audience", file: "apps/api/src/modules/notification/team-mentions.ts" },
 ];
 
 /** GitHub CODEOWNERS pattern (gitignore subset) → RegExp over repo-relative paths. */
