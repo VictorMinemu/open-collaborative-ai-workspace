@@ -759,3 +759,94 @@ describe("units: a project created in Settings › Organization auto-leads its c
     expect((await su.query("select 1 from app.org_units where name = 'Sneaky'")).rowCount).toBe(0);
   });
 });
+
+describe("units: @handles are generated once (Phase 07.17, D-14, PD-12, E19)", () => {
+  let north: string;
+  let south: string;
+  let west: string;
+
+  // biome-ignore lint/suspicious/noExplicitAny: loose JSON access keeps the assertions readable
+  const create = async (kind: string, name: string, parentId: string | null): Promise<Record<string, any>> =>
+    ok(admin.request("POST", "/api/v1/units", { kind, name, parentId }));
+  const listed = async (id: string) =>
+    ((await ok(admin.request("GET", "/api/v1/units"))).units as Array<{ id: string; handle: string }>).find(
+      (u) => u.id === id,
+    )?.handle;
+  const stored = async (id: string) =>
+    (await su.query("select handle from app.org_units where id = $1", [id])).rows[0]?.handle as string;
+  /** What the SQL allocator (backfill and fill trigger) would give right now: the two must never disagree. */
+  const sqlHandle = async (name: string) =>
+    (await su.query("select app.org_unit_handle($1, $2) as h", [orgId, name])).rows[0].h as string;
+
+  beforeAll(async () => {
+    north = (await create("department", "Ops North", null)).id;
+    south = (await create("department", "Ops South", null)).id;
+    west = (await create("department", "Ops West", null)).id;
+  });
+
+  it("a new team gets its name's handle; the same name under other parents gets -2, -3", async () => {
+    const first = await create("team", "Logistics", north);
+    expect(first.handle).toBe("logistics");
+    expect(await listed(first.id)).toBe("logistics");
+    expect(await stored(first.id)).toBe("logistics");
+
+    expect(await sqlHandle("Logistics")).toBe("logistics-2");
+    const second = await create("team", "Logistics", south);
+    expect(second.handle).toBe("logistics-2");
+    expect(await sqlHandle("Logistics")).toBe("logistics-3");
+    const third = await create("team", "Logistics", west);
+    expect(third.handle).toBe("logistics-3");
+    expect(await listed(third.id)).toBe("logistics-3");
+  });
+
+  it("a sibling name clash is still unit_name_taken; nothing is created", async () => {
+    const count = async () => (await su.query("select count(*)::int as n from app.org_units")).rows[0].n;
+    const before = await count();
+    const refused = await fails(
+      admin.request("POST", "/api/v1/units", { kind: "team", name: "logistics", parentId: south }),
+      409,
+    );
+    expect(refused.code).toBe("unit_name_taken");
+    expect(await count()).toBe(before);
+  });
+
+  it("reserved and punctuated names, and a long name that stays one typeable @token", async () => {
+    expect((await create("team", "here", north)).handle).toBe("here-1");
+    expect((await create("team", "R&D / Labs", north)).handle).toBe("rd-labs");
+    const long = "Operations and Logistics for the North Region";
+    expect((await create("team", long, north)).handle).toBe("operations-and-logistics-for-the-north-r");
+    expect(await sqlHandle(long)).toBe("operations-and-logistics-for-the-north-2");
+    const again = await create("team", long, south);
+    expect(again.handle).toBe("operations-and-logistics-for-the-north-2");
+    expect(again.handle.length).toBe(40);
+  });
+
+  it("a live bot's username is skipped; a deleted bot's username is free again", async () => {
+    const bot = await su.query(
+      "insert into app.agents (organization_id, name, username, instructions, model_provider, model_id) values ($1, 'Scout', 'scout', 'Help', 'mock', 'mock-1') returning id",
+      [orgId],
+    );
+    expect((await create("team", "Scout", north)).handle).toBe("scout-2");
+    await su.query("update app.agents set deleted_at = now() where id = $1", [bot.rows[0].id]);
+    expect(await sqlHandle("Scout")).toBe("scout");
+    expect((await create("team", "Scout", south)).handle).toBe("scout");
+    // A unit holds "scout" now and another "scout-2": the next one takes the next free suffix.
+    expect((await create("team", "Scout", west)).handle).toBe("scout-3");
+  });
+
+  it("renames and moves never change a handle; a delete frees it", async () => {
+    const unit = (await create("department", "Dispatch", null)).id;
+    expect(await stored(unit)).toBe("dispatch");
+    const renamed = await ok(admin.request("PATCH", `/api/v1/units/${unit}`, { name: "Shipping" }));
+    expect(renamed).toMatchObject({ name: "Shipping", handle: "dispatch" });
+    const moved = await ok(admin.request("POST", `/api/v1/units/${unit}/move`, { parentId: north }));
+    expect(moved).toMatchObject({ parentId: north, handle: "dispatch" });
+    expect(await listed(unit)).toBe("dispatch");
+    expect(await stored(unit)).toBe("dispatch");
+
+    // A new "Dispatch" while the renamed unit still holds the handle gets a suffix; once it is gone, the handle is free.
+    expect((await create("team", "Dispatch", south)).handle).toBe("dispatch-2");
+    await ok(admin.request("DELETE", `/api/v1/units/${unit}`));
+    expect((await create("team", "Dispatch", west)).handle).toBe("dispatch");
+  });
+});

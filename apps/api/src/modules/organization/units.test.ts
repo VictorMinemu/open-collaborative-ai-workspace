@@ -1,7 +1,7 @@
-import type { UnitKind } from "@ocw/contracts";
+import { MENTION_TOKEN_RE, UNIT_HANDLE_MAX, UNIT_HANDLE_RE, type UnitKind, unitHandle } from "@ocw/contracts";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { applyMove, type UnitNode, validateParentKind } from "./units";
+import { applyMove, nextHandleCandidate, type UnitNode, validateParentKind } from "./units";
 
 describe("validateParentKind", () => {
   // Literal truth table (D-07): rows = kind, columns = parent (null = top level).
@@ -137,5 +137,45 @@ describe("applyMove", () => {
       parentId: null,
       path: ["c"],
     });
+  });
+});
+
+// ---------------------------------------------------------------- nextHandleCandidate (07.17, D-14, PD-12)
+
+/** The whole handle is one `@mention` token (`MENTION_TOKEN_RE` reads at most 40 characters). */
+const typedAsOneToken = (handle: string) => {
+  const match = [...` @${handle}`.matchAll(MENTION_TOKEN_RE)][0];
+  return match?.[2] === handle;
+};
+
+describe("nextHandleCandidate", () => {
+  it("is the base first, then base-2, base-3, …", () => {
+    expect(nextHandleCandidate("ops", 1)).toBe("ops");
+    expect(nextHandleCandidate("ops", 2)).toBe("ops-2");
+    expect(nextHandleCandidate("ops", 3)).toBe("ops-3");
+    expect(nextHandleCandidate("here-1", 2)).toBe("here-1-2");
+  });
+
+  it("cuts a long base before the suffix, like app.org_unit_handle (40 characters, trailing ._- trimmed)", () => {
+    const base = unitHandle("Operations and Logistics for the North Region");
+    expect(base).toBe("operations-and-logistics-for-the-north-r");
+    expect(nextHandleCandidate(base, 2)).toBe("operations-and-logistics-for-the-north-2");
+    // The cut lands on "-": it is trimmed so the handle never holds "--2".
+    expect(nextHandleCandidate("a".repeat(37).concat("-bc"), 2)).toBe(`${"a".repeat(37)}-2`);
+    expect(nextHandleCandidate("x".repeat(40), 123)).toBe(`${"x".repeat(36)}-123`);
+  });
+
+  it("always stays a stored, typeable handle", () => {
+    fc.assert(
+      fc.property(fc.string({ maxLength: 80 }), fc.integer({ min: 1, max: 100_000 }), (name, n) => {
+        const handle = nextHandleCandidate(unitHandle(name), n);
+        expect(handle.length).toBeLessThanOrEqual(40);
+        expect(handle.length).toBeLessThanOrEqual(UNIT_HANDLE_MAX);
+        expect(handle).toMatch(UNIT_HANDLE_RE);
+        expect(typedAsOneToken(handle)).toBe(true);
+        if (n > 1) expect(handle.endsWith(`-${n}`)).toBe(true);
+      }),
+      { numRuns: 500 },
+    );
   });
 });

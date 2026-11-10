@@ -20,6 +20,7 @@ import {
   UnitMemberParams,
   UnitRole,
   UpdateUnitMemberRequest,
+  unitHandle,
 } from "@ocw/contracts";
 import {
   agents,
@@ -39,7 +40,7 @@ import {
   workProjectRepos,
   workProjectTeams,
 } from "@ocw/db";
-import { and, asc, eq, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import { type App, type Core, tenant } from "../../core";
 import { badRequest, conflict, notFound } from "../../lib/errors";
@@ -94,6 +95,23 @@ export function applyMove<T extends UnitNode>(
   });
 }
 
+/**
+ * Longest allocated unit handle: one `@mention` token (`MENTION_TOKEN_RE` reads at most 40 characters), so every handle
+ * can be typed. The same cut as `app.org_unit_handle`, the SQL allocator of the backfill and the fill trigger.
+ */
+const UNIT_HANDLE_TYPED_MAX = 40;
+
+/**
+ * Phase 07.17 (D-14, PD-12): the `n`-th handle tried for a unit whose name gives `base` (`unitHandle`): `base` first,
+ * then `base-2`, `base-3`, … with the base cut to `40 - len("-n")` and its trailing `._-` trimmed, so the handle stays
+ * one typeable token. Mirrors `app.org_unit_handle` exactly (the integration test compares the two).
+ */
+export function nextHandleCandidate(base: string, n: number): string {
+  if (n <= 1) return base;
+  const suffix = `-${n}`;
+  return `${base.slice(0, UNIT_HANDLE_TYPED_MAX - suffix.length).replace(/[._-]+$/, "")}${suffix}`;
+}
+
 // ---------------------------------------------------------------- data access
 
 export type UnitRow = typeof orgUnits.$inferSelect;
@@ -139,6 +157,39 @@ export async function requireUnit(tx: Tx, id: string): Promise<UnitRow> {
   return unit;
 }
 
+/** How many `nextHandleCandidate`s one allocation round checks (two queries per round; one round in practice). */
+const HANDLE_ROUND = 32;
+
+/**
+ * Phase 07.17 (D-14, PD-12): the handle a new unit named `name` gets: the first `nextHandleCandidate` of
+ * `unitHandle(name)` that no other unit of the organization holds and that is not a live bot's username (a deleted
+ * bot's username is free again). The same rules as `app.org_unit_handle`. The caller holds `lockUnits`, the lock every
+ * unit insert takes, so the handle cannot be taken between this read and the insert.
+ */
+export async function allocateUnitHandle(tx: Tx, organizationId: string, name: string): Promise<string> {
+  const base = unitHandle(name);
+  for (let first = 1; ; first += HANDLE_ROUND) {
+    const candidates = Array.from({ length: HANDLE_ROUND }, (_, i) => nextHandleCandidate(base, first + i));
+    const units = await tx
+      .select({ handle: orgUnits.handle })
+      .from(orgUnits)
+      .where(and(eq(orgUnits.organizationId, organizationId), inArray(orgUnits.handle, candidates)));
+    const bots = await tx
+      .select({ handle: sql<string>`lower(${agents.username})` })
+      .from(agents)
+      .where(
+        and(
+          eq(agents.organizationId, organizationId),
+          isNull(agents.deletedAt),
+          inArray(sql`lower(${agents.username})`, candidates),
+        ),
+      );
+    const held = new Set([...units, ...bots].map((r) => r.handle));
+    const free = candidates.find((c) => !held.has(c));
+    if (free) return free;
+  }
+}
+
 async function unitCounts(tx: Tx, unitId?: string) {
   const rows = await tx
     .select({
@@ -166,6 +217,7 @@ function toOrgUnit(
     memberCount: counts?.members ?? 0,
     leadCount: counts?.leads ?? 0,
     viewerCan,
+    handle: row.handle,
     createdAt: new Date(row.createdAt).toISOString(),
     updatedAt: new Date(row.updatedAt).toISOString(),
   });
@@ -209,22 +261,26 @@ export async function createUnit(
   }
   const idRes = await tx.execute(sql`select uuidv7() as id`);
   const id = String((idRes.rows[0] as { id: string }).id);
+  const { organizationId } = tenantOf(tx);
+  // D-14: generated once, here, under the lock; renames and moves never touch it.
+  const handle = await allocateUnitHandle(tx, organizationId, name);
   let row: UnitRow | undefined;
   try {
     [row] = await tx
       .insert(orgUnits)
       .values({
         id,
-        organizationId: tenantOf(tx).organizationId,
+        organizationId,
         parentId: parent?.id ?? null,
         kind,
         name,
         path: [...(parent?.path ?? []), id],
         createdBy,
+        handle,
       })
       .returning();
   } catch (err) {
-    if (isUniqueViolation(err)) throw nameTaken(name);
+    if (isUniqueViolation(err) && constraintOf(err) === "org_units_sibling_name_uq") throw nameTaken(name);
     throw err;
   }
   if (!row) throw new Error("unit insert returned no row");
