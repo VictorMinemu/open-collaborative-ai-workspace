@@ -321,7 +321,10 @@ export const messages = appSchema.table(
     authorKind: text("author_kind", { enum: ["user", "agent", "system"] }).notNull(),
     authorId: uuid("author_id"),
     body: text("body").notNull(),
-    mentions: jsonb("mentions").$type<Array<{ kind: "user" | "agent"; id: string }>>().notNull().default([]),
+    mentions: jsonb("mentions")
+      .$type<Array<{ kind: "user" | "agent" | "unit"; id: string }>>()
+      .notNull()
+      .default([]),
     status: text("status", { enum: ["sent", "streaming", "completed", "failed"] })
       .notNull()
       .default("sent"),
@@ -370,7 +373,10 @@ export const messageVersions = appSchema.table(
     /** `regenerate` (Phase 5): the assistant answer replaced by a regeneration, kept append-only. */
     kind: text("kind", { enum: ["edit", "delete", "regenerate"] }).notNull(),
     body: text("body").notNull(),
-    mentions: jsonb("mentions").$type<Array<{ kind: "user" | "agent"; id: string }>>().notNull().default([]),
+    mentions: jsonb("mentions")
+      .$type<Array<{ kind: "user" | "agent" | "unit"; id: string }>>()
+      .notNull()
+      .default([]),
     editedByKind: text("edited_by_kind", { enum: ["user", "agent", "system"] }).notNull(),
     editedBy: uuid("edited_by"),
     createdAt: createdAt(),

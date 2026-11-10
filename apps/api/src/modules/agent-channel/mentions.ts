@@ -9,6 +9,7 @@ import {
   cellTopic,
   type Mention,
   type ModelRef,
+  principalMentions,
 } from "@ocw/contracts";
 import {
   type AfterCommit,
@@ -229,10 +230,12 @@ export async function buildMentionEvents(
     .select({ mentions: messages.mentions })
     .from(messages)
     .where(eq(messages.id, mention.messageId));
-  // A reply-mode turn carries the message's own mentions only: it never claims the bot was mentioned.
+  // A reply-mode turn carries the message's own mentions only: it never claims the bot was mentioned. Phase 07.17 (P4,
+  // ADR-0027): only people and bots cross to the cell; a team mention never enters the event.
+  const principals = stored ? principalMentions(stored.mentions) : [];
   const mentions: Mention[] =
-    stored && (stored.mentions.length > 0 || replyMode)
-      ? stored.mentions
+    stored && (principals.length > 0 || replyMode)
+      ? principals
       : agentIds.map((id) => ({ kind: "agent" as const, id }));
 
   const author: AgentChannelAuthor = {

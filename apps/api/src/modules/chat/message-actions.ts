@@ -2,9 +2,9 @@ import {
   EditMessageRequest,
   EventTypes,
   IdParams,
-  type Mention,
   Message,
   type MessageDeletedEvent,
+  type MessageMention,
   Ok,
   type PinUpdatedEvent,
   type ThreadUpdatedEvent,
@@ -114,7 +114,7 @@ export async function editMessage(
   deps: ChatDeps,
   dir: Directory,
   input: { message: MessageRow; body: string; editor: { kind: "user"; id: string } },
-): Promise<{ row: MessageRow; version: number; previousMentions: Mention[] }> {
+): Promise<{ row: MessageRow; version: number; previousMentions: MessageMention[] }> {
   const { message } = input;
   const version = await nextVersion(tx, message.id);
   await tx.insert(messageVersions).values({

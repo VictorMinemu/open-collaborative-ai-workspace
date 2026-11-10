@@ -14,7 +14,7 @@ import {
   EventTypes,
   type FieldValue,
   fieldValuesSchema,
-  type Mention,
+  type MessageMention,
   renderCardTitle,
   type TemplateColumn,
   type UpdateBoardCardRequest,
@@ -590,7 +590,7 @@ export async function createBoardCard(
 /** A card root's text edit, for the caller's edit observers (notifications of newly mentioned people). */
 export interface CardTextEdit {
   row: MessageRow;
-  previousMentions: Mention[];
+  previousMentions: MessageMention[];
   dir: Directory;
 }
 

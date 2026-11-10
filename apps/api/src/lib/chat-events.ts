@@ -1,4 +1,4 @@
-import type { Mention, Message } from "@ocw/contracts";
+import type { Message, MessageMention } from "@ocw/contracts";
 import type { Tx } from "@ocw/db";
 
 /**
@@ -17,8 +17,8 @@ export interface MessagePostedInput {
   conv: { id: string; kind: "channel" | "dm" | "group" | "ai_chat"; organizationId: string };
   message: Message;
   author: { kind: "user" | "agent"; id: string };
-  /** Server-resolved mentions of the message (users and agents). */
-  mentions: Mention[];
+  /** Server-resolved mentions of the message: users, agents and (channel posts only, 07.17 PD-13) units. */
+  mentions: MessageMention[];
   /** `@channel` / `@here` of a channel message, decided and rate-limited by chat (null otherwise). */
   mentionAll: "channel" | "here" | null;
   /** The thread root when the message is a reply. */
@@ -30,7 +30,7 @@ export interface MessageEditedInput {
   message: Message;
   editorId: string;
   /** The mentions before the edit; only people mentioned now and not before are notified (Pitfall 8). */
-  previousMentions: Mention[];
+  previousMentions: MessageMention[];
 }
 
 /**

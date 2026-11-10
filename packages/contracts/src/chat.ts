@@ -122,7 +122,8 @@ export const Message = z.object({
   /** Resolved for display by the API (users from org_members, agents from agents). */
   author: MessageAuthor.optional(),
   body: z.string(),
-  mentions: z.array(Mention),
+  /** Server-resolved: people, bots and (channel posts only, 07.17 PD-13) teams or departments. */
+  mentions: z.array(MessageMention),
   status: MessageStatus,
   /** Root message id when this message is a reply in a thread. */
   threadId: Id.nullable(),

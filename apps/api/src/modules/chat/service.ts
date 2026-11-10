@@ -6,9 +6,9 @@ import {
   type ConversationNotifyLevel,
   EventTypes,
   MENTION_KINDS,
-  type Mention,
   type Message,
   type MessageAuthor,
+  type MessageMention,
   type ThreadUpdatedEvent,
   UNREAD_CAP,
 } from "@ocw/contracts";
@@ -833,7 +833,7 @@ export interface PostInput {
   conv: ConversationRow;
   author: { kind: "user" | "agent"; id: string };
   body: string;
-  mentions: Mention[];
+  mentions: MessageMention[];
   threadRootId?: string | null | undefined;
   clientMessageId?: string | null | undefined;
   clientKind: "web" | "desktop" | "mobile" | "agent" | "system";

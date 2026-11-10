@@ -3,7 +3,7 @@ import {
   type AiQueueState,
   type AiSkipReason,
   EventTypes,
-  type Mention,
+  type MessageMention,
   type ModelRef,
 } from "@ocw/contracts";
 import {
@@ -71,7 +71,7 @@ export interface StartNextOptions {
 }
 
 /** P-08: an explicit `askAi` wins; otherwise a message asks the model only when it mentions nobody. */
-export function addressedOf(askAi: boolean | undefined, mentions: Mention[]): boolean {
+export function addressedOf(askAi: boolean | undefined, mentions: MessageMention[]): boolean {
   return askAi ?? mentions.length === 0;
 }
 
