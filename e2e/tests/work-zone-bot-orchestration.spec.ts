@@ -561,8 +561,15 @@ test("a Supervised session asks for an approval: the card says Approval and the 
     await expect(card.getByTestId("agent-card-status")).toContainText("Approval", { timeout: 45_000 });
     await expect(card.getByTestId("agent-card-status")).toHaveAttribute("data-status", "pending");
     await expect(card.getByTestId("wz-live-step")).toContainText("Waiting for approval");
+    // The wake's summary is a count (WR-01): the bot reads the session to name the tool, then the people who decide.
     const reply = botReply(panel, "Needs approval: Write", `@${ADMIN_HANDLE}`);
     await expect(reply).toBeVisible({ timeout: 45_000 });
+    expect(
+      cell.workSessionRequests.some(
+        (r) => r.tool === "ocw_work_session_read" && r.sent.workSessionId === sessionId && r.status === 200,
+      ),
+      "the wake read the session before naming the tool",
+    ).toBe(true);
     expect(cell.workSessionWakes.find((x) => x.workSessionId === sessionId)?.transition).toBe(
       "waiting_approval",
     );

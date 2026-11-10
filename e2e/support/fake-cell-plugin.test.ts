@@ -563,6 +563,7 @@ const wake = (workSession: Record<string, unknown>, over: Record<string, unknown
   });
 
 const TURN_DONE = "Work Zone session in billing-api finished turn 1; nothing is queued.";
+const WAITING_SUMMARY = "Work Zone session in billing-api is waiting for 3 approvals.";
 
 describe("FakeCellPlugin Work Zone sessions (07.16-21, PD-26)", () => {
   it("ocw_work_session_start posts the turn, the project, the prompt and only the choices given to /work-sessions/start and renders `started <project> (<mode>)`", async () => {
@@ -723,30 +724,56 @@ describe("FakeCellPlugin Work Zone sessions (07.16-21, PD-26)", () => {
     });
   });
 
-  it("a waiting_approval wake names the tool and every decider without reading; other transitions say the summary to the asker", async () => {
+  it("a waiting_approval wake reads the session for the pending tools and names every decider; other transitions say the summary to the asker", async () => {
+    // The summary as the API writes it since code review WR-01: a count, never the runtime's tool names.
+    const summary = `${WAITING_SUMMARY} The bot can't approve it; mention one of the people listed.`;
+    const deciders = [
+      { id: VICTOR_ID, handle: "victor", displayName: "Víctor Ruiz" },
+      { id: ANA_ID, handle: "ana", displayName: "Ana Gil" },
+    ];
+    answers["/agent-channel/v1/work-sessions/read"] = [
+      200,
+      {
+        ...READ_ANSWER,
+        session: { ...READ_ANSWER.session, status: "waiting_approval", mode: "default" },
+        approvals: [
+          { id: PROJECT, tool: "Write", paths: ["notes/ocw-change-1.md"], summary: "Create notes" },
+          { id: CARD, tool: "Write", paths: ["notes/b.md"], summary: "Create notes" },
+          { id: ROOT, tool: "Bash", paths: [], summary: "npm test" },
+        ],
+        deciders,
+      },
+    ];
     const cell = new FakeCellPlugin({
       apiUrl,
       token: "cell-token",
       autoReply: true,
       userHandles: { [ANA_ID]: "ana" },
     });
+    const waiting = { transition: "waiting_approval", status: "waiting_approval", pendingApprovals: 3 };
     let from = seen.length;
+    await cell.onEvent("agent.work_session.v1", wake({ ...waiting, summary, deciders }));
+    expect(since(from)).toEqual([
+      "/agent-channel/v1/work-sessions/read",
+      "/agent-channel/v1/typing",
+      "/agent-channel/v1/messages",
+    ]);
+    expect(seen.at(-3)?.body).toEqual({ eventId: WAKE_EVENT, agentId: ATLAS_ID, workSessionId: WS });
+    // Each tool once, in the read's order; the deciders the wake names. The bot never calls a decision route.
+    expect(seen.at(-1)?.body.text).toBe("Needs approval: Write, Bash @victor @ana");
+    expect(cell.workSessionWakes.at(-1)).toMatchObject({
+      transition: "waiting_approval",
+      text: "Needs approval: Write, Bash @victor @ana",
+    });
+
+    // Not offered the read (the consent was revoked): it still names who decides, without a tool.
+    from = seen.length;
     await cell.onEvent(
       "agent.work_session.v1",
-      wake({
-        transition: "waiting_approval",
-        status: "waiting_approval",
-        pendingApprovals: 1,
-        summary:
-          "Work Zone session in billing-api is waiting for 1 approval (Write). The bot can't approve it; mention one of the people listed.",
-        deciders: [
-          { id: VICTOR_ID, handle: "victor", displayName: "Víctor Ruiz" },
-          { id: ANA_ID, handle: "ana", displayName: "Ana Gil" },
-        ],
-      }),
+      wake({ ...waiting, summary, deciders: deciders.slice(0, 1) }, { turn: { tools: [] } }),
     );
     expect(since(from)).toEqual(["/agent-channel/v1/typing", "/agent-channel/v1/messages"]);
-    expect(seen.at(-1)?.body.text).toBe("Needs approval: Write @victor @ana");
+    expect(seen.at(-1)?.body.text).toBe("Needs approval: a tool @victor");
 
     from = seen.length;
     await cell.onEvent(

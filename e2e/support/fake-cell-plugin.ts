@@ -385,9 +385,16 @@ export function lastOutputLine(read: { output?: { texts?: Array<{ text: string }
   );
 }
 
-/** The tool names a `waiting_approval` summary lists: `… waiting for 1 approval (Write, Bash). …` (07.16-20). */
-function approvalToolsOf(summary: string): string {
-  return /waiting for \d+ approvals? \(([^)]+)\)/u.exec(summary)?.[1] ?? "a tool";
+/**
+ * The pending approvals' tool names in a read answer, each once in the read's order (`Write, Bash`), else `a tool`.
+ * The wake's summary never names them (code review WR-01): the bot learns them only by reading the session (D-20).
+ */
+function approvalToolsOf(read: Loose | null): string {
+  const tools = read?.kind === "read" && Array.isArray(read.approvals) ? read.approvals : [];
+  const names = [
+    ...new Set(tools.map((a: { tool?: unknown }) => a.tool).filter((t) => typeof t === "string")),
+  ];
+  return names.length > 0 ? names.join(", ") : "a tool";
 }
 
 /** The Work Zone proposal tools (07.5-08/10) and the Agent Channel route each one calls (`POST /work-zone/<route>`). */
@@ -1226,26 +1233,29 @@ export class FakeCellPlugin {
    * PD-26: answers `agent.work_session.v1` deterministically, on the card in its thread for the wake (`reply`: the
    * event's thread, `inReplyToMessageId` = the card message, `eventId` = the wake). `turn_done` calls
    * `ocw_work_session_read` (when the wake offers it) and replies `Done: <last output line> @<asker>`; `waiting_approval`
-   * replies `Needs approval: <tool> @<decider> …` without reading (the bot never approves, D-10); `failed`, `ended`
-   * and `offline` reply `<transition>: <summary> @<asker>`. Never for a held bot.
+   * reads it too (when offered: the summary is a count only, WR-01) and replies `Needs approval: <tools> @<decider> …`
+   * (`a tool` without the read; the bot never approves, D-10); `failed`, `ended` and `offline` reply
+   * `<transition>: <summary> @<asker>`. Never for a held bot.
    */
   private async answerWake(w: WorkSessionWakePayload): Promise<void> {
     if (this.opts.holdAgents?.has(w.agent.id)) return;
     const ws = w.workSession;
     const asker = `@${this.handleOf(w, w.message.author.id, w.message.author.displayName)}`;
+    const read = (w.turn?.tools ?? []).includes(BUILTIN_TOOLS.workSessionRead)
+      ? () => this.workSessionCall(w, BUILTIN_TOOLS.workSessionRead, { workSessionId: ws.workSessionId })
+      : null;
     let text: string;
     if (ws.transition === "turn_done") {
       let line = ws.summary;
-      if ((w.turn?.tools ?? []).includes(BUILTIN_TOOLS.workSessionRead)) {
-        const read = await this.workSessionCall(w, BUILTIN_TOOLS.workSessionRead, {
-          workSessionId: ws.workSessionId,
-        });
-        line = read.body?.kind === "read" ? lastOutputLine(read.body) || ws.summary : read.line;
+      if (read) {
+        const r = await read();
+        line = r.body?.kind === "read" ? lastOutputLine(r.body) || ws.summary : r.line;
       }
       text = `Done: ${line} ${asker}`;
     } else if (ws.transition === "waiting_approval") {
+      const tools = approvalToolsOf(read ? (await read()).body : null);
       const deciders = ws.deciders.map((d) => `@${d.handle}`);
-      text = `Needs approval: ${approvalToolsOf(ws.summary)}${deciders.length > 0 ? ` ${deciders.join(" ")}` : ""}`;
+      text = `Needs approval: ${tools}${deciders.length > 0 ? ` ${deciders.join(" ")}` : ""}`;
     } else {
       text = `${ws.transition}: ${ws.summary} ${asker}`;
     }
