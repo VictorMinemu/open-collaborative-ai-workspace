@@ -289,8 +289,8 @@ export async function buildMentionEvents(
 
   const events: StoredMention[] = [];
   for (const a of delivered) {
-    // The event id first: the turn ledger row (`agent_turns`) is keyed by it.
-    const eventId = randomUUID();
+    // The event id first: the turn ledger row (`agent_turns`) is keyed by it. A wake brings its own (WR-09).
+    const eventId = mention.eventId && delivered.length === 1 ? mention.eventId : randomUUID();
     const targets = mayConsult
       ? await consultTargets(tx, deps.perms, {
           sourceAgentId: a.id,

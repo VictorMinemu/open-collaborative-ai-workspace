@@ -452,3 +452,17 @@ unchanged: it refreshes the card only when its fields changed, and a settings ch
 the warning for one device, runtime, set of projects and highest mode. A non-admin save that changes any of them, the
 sponsor's own included, turns the flag off, audited as `bot.work_zone_profile_outside_content_changed` with reason
 `scope_changed`. An admin turns it on again if the new scope is acceptable.
+
+**A wake is delivered once, and a lost one is retried (WR-09).** This completes §11's "idempotent across retries".
+The reservation and the delivery run in two transactions, so a worker that died between them lost the wake for good,
+and a transient skip kept the state marked as woken. Now:
+
+- the wake turn's event id is derived from the wake itself (session, state key, last finished prompt; a version-8
+  UUID), so the same wake can never create a second turn, whatever retries or runs at once;
+- the reservation writes `last_woken_status = pending:<key>`, confirmed to `<key>` after the delivery commits. A run
+  that finds its state still pending confirms it when the wake turn exists, and otherwise delivers it on the budget
+  already reserved;
+- a skip for the bot's daily turn limit or an unavailable bot gives the state back, so a later run wakes for it. The
+  other skips (budget, the asker can no longer read, no card) still mark the state as woken.
+
+No column was added: the marker lives in the existing state key.

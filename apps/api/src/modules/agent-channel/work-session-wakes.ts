@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   type AgentCardNotice,
   AgentChannelEventTypes,
@@ -210,9 +211,45 @@ interface WakePlan {
   pendingApprovals: number;
   deciders: WorkSessionDecider[];
   cardMessageId: string;
-  /** What tx1 reserved, so tx3 can give it back exactly. */
+  /** The state key this wake is for (`wakeStateKey`), and the wake turn's own id (`wakeEventId`, WR-09). */
+  wakeKey: string;
+  eventId: string;
+  /** What tx1 reserved (`pending:<key>`), so tx3 can confirm it or give it back exactly. */
   reserved: { day: string; used: number; status: string; promptId: string | null };
   previous: { day: string | null; used: number; status: string | null; promptId: string | null };
+}
+
+/**
+ * Code review WR-09: `last_woken_status` holds `pending:<key>` from the reservation (tx1) until the delivery is
+ * confirmed (tx3 writes `<key>`). A retry that finds its own state still pending looks for the wake turn: delivered →
+ * confirmed, nothing sent again; not delivered (the worker died in between) → delivered now, on the budget already
+ * reserved. A skip writes `<key>` directly.
+ */
+const PENDING = "pending:";
+
+/**
+ * The wake turn's event id, derived from what makes a wake unique (the session, the state key and the last finished
+ * prompt), so a retry or a concurrent run can never deliver the same wake twice (`agent_turns.event_id` is the turn's
+ * key). A UUID of version 8 (RFC 9562, custom) from SHA-256.
+ */
+export function wakeEventId(workSessionId: string, wakeKey: string, promptId: string | null): string {
+  const h = createHash("sha256")
+    .update(`ocw.work_session.wake\u0000${workSessionId}\u0000${wakeKey}\u0000${promptId ?? ""}`)
+    .digest();
+  h[6] = ((h[6] ?? 0) & 0x0f) | 0x80;
+  h[8] = ((h[8] ?? 0) & 0x3f) | 0x80;
+  const x = h.subarray(0, 16).toString("hex");
+  return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20)}`;
+}
+
+/** Whether the wake turn `eventId` exists (it is written in the delivery's transaction, with its cell event). */
+async function delivered(tx: Tx, eventId: string): Promise<boolean> {
+  const [row] = await tx
+    .select({ id: agentTurns.eventId })
+    .from(agentTurns)
+    .where(eq(agentTurns.eventId, eventId))
+    .limit(1);
+  return row !== undefined;
 }
 
 async function auditSkip(
@@ -337,13 +374,25 @@ async function decide(
     status: s.status,
     queued,
     lastDonePromptId,
-    lastWokenPromptId: bot.lastWokenPromptId,
+    // A reservation still pending (WR-09) names a wake that may not have happened: it does not hide a finished turn.
+    lastWokenPromptId: bot.lastWokenStatus?.startsWith(PENDING) ? null : bot.lastWokenPromptId,
     stoppedByAgent: bot.stoppedByAgent,
   });
   if (!transition) return null;
   const wakeKey = wakeStateKey(s.status, approvals.at(-1)?.id ?? null);
+  const eventId = wakeEventId(s.id, wakeKey, lastDonePromptId);
+  const samePrompt = bot.lastWokenPromptId === lastDonePromptId;
   // Idempotent across retries and repeated jobs (E8): the same (state key, last finished prompt) wakes once.
-  if (bot.lastWokenStatus === wakeKey && bot.lastWokenPromptId === lastDonePromptId) return null;
+  if (samePrompt && bot.lastWokenStatus === wakeKey) return null;
+  // WR-09: this wake was reserved by an attempt whose outcome is unknown. Delivered → confirm it; else deliver it now.
+  const recovering = samePrompt && bot.lastWokenStatus === `${PENDING}${wakeKey}`;
+  if (recovering && (await delivered(tx, eventId))) {
+    await tx
+      .update(botWorkSessions)
+      .set({ lastWokenStatus: wakeKey })
+      .where(eq(botWorkSessions.workSessionId, s.id));
+    return null;
+  }
 
   const previous = {
     day: bot.wakesDay,
@@ -352,7 +401,9 @@ async function decide(
     promptId: bot.lastWokenPromptId,
   };
   const today = ((await tx.execute(sql`select current_date::text as d`)).rows[0] as { d: string }).d;
-  const usedToday = bot.wakesDay === today ? bot.wakesUsed : 0;
+  // The day's wakes without this one: a recovered reservation was already counted (once).
+  const usedToday = bot.wakesDay === today ? Math.max(0, bot.wakesUsed - (recovering ? 1 : 0)) : 0;
+  /** A decided skip: the state is woken for good (`<key>`), the budget as given. */
   const markWoken = (used: number) =>
     tx
       .update(botWorkSessions)
@@ -396,7 +447,22 @@ async function decide(
     await auditSkip(tx, core, bot, { deviceId: s.deviceId, transition, reason: "card_missing" });
     return null;
   }
-  await markWoken(usedToday + 1);
+  // The reservation (WR-09): counted on the budget, pending until the delivery is confirmed.
+  const reserved = {
+    day: today,
+    used: usedToday + 1,
+    status: `${PENDING}${wakeKey}`,
+    promptId: lastDonePromptId,
+  };
+  await tx
+    .update(botWorkSessions)
+    .set({
+      wakesDay: reserved.day,
+      wakesUsed: reserved.used,
+      lastWokenStatus: reserved.status,
+      lastWokenPromptId: reserved.promptId,
+    })
+    .where(eq(botWorkSessions.workSessionId, s.id));
   // A delivered wake lifts yesterday's budget notice.
   if (notices?.some((n) => n.text === WAKE_LIMIT_NOTICE)) {
     await updatePlatformCardNotified(tx, core, {
@@ -434,7 +500,9 @@ async function decide(
     pendingApprovals: approvals.length,
     deciders,
     cardMessageId: bot.cardMessageId,
-    reserved: { day: today, used: usedToday + 1, status: wakeKey, promptId: lastDonePromptId },
+    wakeKey,
+    eventId,
+    reserved,
     previous,
   };
 }
@@ -444,6 +512,8 @@ type DeliverResult = { delivered: true; eventId: string } | { delivered: false; 
 /** tx2: the wake itself, as the requester (D-17). */
 async function deliver(tx: Tx, core: Core, deps: WorkSessionWakesDeps, w: WakePlan): Promise<DeliverResult> {
   const { bot } = w;
+  // WR-09: a concurrent run delivered this very wake since tx1 (its turn is keyed by the wake's own id).
+  if (await delivered(tx, w.eventId)) return { delivered: true, eventId: w.eventId };
   const [conv] = await tx
     .select({
       id: conversations.id,
@@ -498,6 +568,8 @@ async function deliver(tx: Tx, core: Core, deps: WorkSessionWakesDeps, w: WakePl
     trigger: "work_session",
     // T-07.16-20-06: a session that took outside content keeps its taint across every wake.
     taintedAtStart: w.session.tainted,
+    // WR-09: the wake's own id, so it is delivered at most once whatever retries or runs concurrently.
+    eventId: w.eventId,
   };
   const events = await buildMentionEvents(tx, mention, {
     core,
@@ -572,7 +644,11 @@ async function deliver(tx: Tx, core: Core, deps: WorkSessionWakesDeps, w: WakePl
   return { delivered: true, eventId: ev.eventId };
 }
 
-/** tx3: gives the reserved wake back (only while the row still holds what tx1 wrote); `restore` also un-marks the pair. */
+/**
+ * tx3: gives the reserved wake back (only while the row still holds what tx1 wrote). `restore` un-marks the pair too, so
+ * the same state is decided again by the next run (a failure, or a transient skip: WR-09); otherwise the state is
+ * woken for good (`<key>`) without spending the budget.
+ */
 async function release(tx: Tx, w: WakePlan, restore: boolean): Promise<void> {
   const still = and(
     eq(botWorkSessions.workSessionId, w.session.id),
@@ -590,10 +666,27 @@ async function release(tx: Tx, w: WakePlan, restore: boolean): Promise<void> {
             lastWokenStatus: w.previous.status,
             lastWokenPromptId: w.previous.promptId,
           }
-        : { wakesUsed: w.reserved.used - 1 },
+        : { wakesUsed: w.reserved.used - 1, lastWokenStatus: w.wakeKey },
     )
     .where(still);
 }
+
+/** tx3 after a delivery (WR-09): the reservation is confirmed, `pending:<key>` → `<key>` (a no-op once done). */
+async function confirm(tx: Tx, w: WakePlan): Promise<void> {
+  await tx
+    .update(botWorkSessions)
+    .set({ lastWokenStatus: w.wakeKey })
+    .where(
+      and(
+        eq(botWorkSessions.workSessionId, w.session.id),
+        eq(botWorkSessions.lastWokenStatus, w.reserved.status),
+        sql`${botWorkSessions.lastWokenPromptId} is not distinct from ${w.reserved.promptId}::uuid`,
+      ),
+    );
+}
+
+/** Skips that may pass by themselves (the bot's daily turn limit, a bot disabled or removed for a while). */
+const TRANSIENT: ReadonlySet<WakeSkipReason> = new Set(["daily_limit", "agent_unavailable"]);
 
 /**
  * One `work_session.bot_sync` job: the card refresh, the wake decision and its delivery (module doc). Returns what
@@ -618,10 +711,14 @@ export async function syncBotWorkSession(
     await core.db.withTenant({ organizationId, userId: null }, (tx) => release(tx, plan, true));
     throw err;
   }
-  if (out.delivered) return "woken";
+  if (out.delivered) {
+    await core.db.withTenant({ organizationId, userId: null }, (tx) => confirm(tx, plan));
+    return "woken";
+  }
   const reason = out.reason;
   await core.db.withTenant({ organizationId, userId: null }, async (tx) => {
-    await release(tx, plan, false);
+    // WR-09: a transient skip gives the state back, so a later run (a retry, the next transition) wakes for it.
+    await release(tx, plan, TRANSIENT.has(reason));
     if (reason === "requester_cannot_read") {
       await addCardNotice(tx, core, plan.cardMessageId, WAKE_CANNOT_POST_NOTICE);
     }

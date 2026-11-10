@@ -77,6 +77,12 @@ export interface AgentMention {
    * turn's local date and time (D-12). Never stored on the message.
    */
   clientTimeZone?: string | null;
+  /**
+   * Phase 07.16 (code review WR-09): the turn's event id, when the delivery is idempotent by construction (a Work Zone
+   * wake derives it from the wake itself, so a retry can never create a second turn). Single-bot deliveries only;
+   * absent = a fresh random id. Chat never sets it.
+   */
+  eventId?: string;
 }
 
 /**

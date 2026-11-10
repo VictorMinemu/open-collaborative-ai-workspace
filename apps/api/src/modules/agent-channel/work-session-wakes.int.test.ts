@@ -626,6 +626,49 @@ describe("bounded and idempotent: one pending wake, one wake per state, a daily 
     expect((await botRowOf(s.workSessionId)).wakes_used).toBe(1);
   });
 
+  /** One more `work_session.bot_sync` job for the session (a retry, or a later run of the same payload). */
+  const sendWake = (workSessionId: string) =>
+    core().db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+      core().jobs.sendInTx(tx, QUEUE, { organizationId: orgId, workSessionId }),
+    );
+
+  it("WR-09: a reservation whose delivery never committed (the worker died) is delivered by the retry, once", async () => {
+    const s = await botSession();
+    await drainWakes();
+    await finishTurn(s.workSessionId, s.first);
+    await eventually(async () => (await statusOf(s.workSessionId)) === "idle");
+    // What a first attempt leaves when it dies after reserving and before its delivery commits.
+    await su.query(
+      `update app.bot_work_sessions
+          set last_woken_status = 'pending:idle', last_woken_prompt_id = $2, wakes_day = current_date, wakes_used = 1
+        where work_session_id = $1`,
+      [s.workSessionId, s.first.payload.promptId],
+    );
+    await drainWakes();
+    expect(await wakesOf(s.workSessionId)).toHaveLength(1);
+    expect(await botRowOf(s.workSessionId)).toMatchObject({ wakes_used: 1, last_woken_status: "idle" });
+    await sendWake(s.workSessionId);
+    await drainWakes();
+    expect(await wakesOf(s.workSessionId)).toHaveLength(1);
+  });
+
+  it("WR-09: a delivery whose confirmation never committed is not delivered twice", async () => {
+    const s = await botSession();
+    await drainWakes();
+    await finishTurn(s.workSessionId, s.first);
+    await settle(s.workSessionId, "idle");
+    expect(await wakesOf(s.workSessionId)).toHaveLength(1);
+    // The wake turn committed; the worker died before marking the reservation done.
+    await su.query(
+      "update app.bot_work_sessions set last_woken_status = 'pending:idle' where work_session_id = $1",
+      [s.workSessionId],
+    );
+    await sendWake(s.workSessionId);
+    await drainWakes();
+    expect(await wakesOf(s.workSessionId)).toHaveLength(1);
+    expect(await botRowOf(s.workSessionId)).toMatchObject({ wakes_used: 1, last_woken_status: "idle" });
+  });
+
   it("E8: a state that is not a finished turn (failed) is woken for once, whatever re-runs", async () => {
     const s = await botSession();
     await drainWakes();
@@ -859,6 +902,26 @@ describe("the wake runs as the person who asked, carries what the bot may use, a
     } finally {
       await su.query("delete from app.agent_usage_daily");
     }
+  });
+
+  it("WR-09: a wake skipped at the daily turn limit is not lost: once the limit lifts, the next run of the job wakes", async () => {
+    const s = await botSession();
+    await drainWakes();
+    await su.query("update app.agent_usage_daily set turns = 100000 where agent_id = $1", [atlasId]);
+    try {
+      await finishTurn(s.workSessionId, s.first);
+      await settle(s.workSessionId, "idle");
+      expect(await wakesOf(s.workSessionId)).toEqual([]);
+    } finally {
+      await su.query("delete from app.agent_usage_daily");
+    }
+    await core().db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+      core().jobs.sendInTx(tx, QUEUE, { organizationId: orgId, workSessionId: s.workSessionId }),
+    );
+    await drainWakes();
+    const wakes = await wakesOf(s.workSessionId);
+    expect(wakes.map((w) => w.workSession.transition)).toEqual(["turn_done"]);
+    expect(await botRowOf(s.workSessionId)).toMatchObject({ wakes_used: 1, last_woken_status: "idle" });
   });
 
   it("Bea deactivated: her session's next transition wakes nobody and the card says the bot can't post here", async () => {
