@@ -82,7 +82,10 @@ export interface WorkSessionWakesDeps {
 
 const NAME_MAX = 200;
 const APPROVAL_TOOLS_MAX = 3;
-const DIRECT_KINDS = new Set(["dm", "group"]);
+/** Flat conversations: the wake names the card message itself (an AI chat is flat too, as in `emitCardAction`). */
+const DIRECT_KINDS = new Set(["dm", "group", "ai_chat"]);
+/** The kinds a start may come from (the start route's `READABLE_KINDS`); a thread is judged through its parent. */
+const READABLE_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
@@ -452,11 +455,6 @@ type DeliverResult = { delivered: true; eventId: string } | { delivered: false; 
 /** tx2: the wake itself, as the requester (D-17). */
 async function deliver(tx: Tx, core: Core, deps: WorkSessionWakesDeps, w: WakePlan): Promise<DeliverResult> {
   const { bot } = w;
-  // The confused-deputy rule (T-07.16-20-02): the bot acts for a person who still reads the conversation.
-  if (!(await createConversationAccess(core).isReadable(tx, bot.requesterUserId, bot.originConversationId))) {
-    return { delivered: false, reason: "requester_cannot_read" };
-  }
-  const agent = await findAgent(tx, bot.agentId);
   const [conv] = await tx
     .select({
       id: conversations.id,
@@ -467,6 +465,18 @@ async function deliver(tx: Tx, core: Core, deps: WorkSessionWakesDeps, w: WakePl
     .from(conversations)
     .where(eq(conversations.id, bot.originConversationId))
     .limit(1);
+  // The confused-deputy rule (T-07.16-20-02): the bot acts for a person who still reads the conversation, judged as
+  // the start judged it (`liveTurn`): a thread through its channel or DM, an AI chat as an AI chat (CR-01).
+  const judged = conv?.kind === "thread" ? conv.parentId : (conv?.id ?? null);
+  if (
+    !judged ||
+    !(await createConversationAccess(core).isReadable(tx, bot.requesterUserId, judged, {
+      kinds: READABLE_KINDS,
+    }))
+  ) {
+    return { delivered: false, reason: "requester_cannot_read" };
+  }
+  const agent = await findAgent(tx, bot.agentId);
   if (!agent || agent.status === "disabled" || !conv || conv.archivedAt) {
     return { delivered: false, reason: "agent_unavailable" };
   }

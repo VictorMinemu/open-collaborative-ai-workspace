@@ -808,6 +808,76 @@ describe("the wake runs as the person who asked, carries what the bot may use, a
     const skipped = await auditsFor("bot.work_session_wake_skipped", s.workSessionId);
     expect(skipped.map((a) => [a.user_id, a.metadata.reason])).toEqual([[beaId, "requester_cannot_read"]]);
   });
+
+  /**
+   * Moves a session's origin (and its card) into `conversationId`: a stand-in card message of Atlas there, the bot row
+   * pointing at it. The start route accepts AI chats and thread-kind conversations (`liveTurn`); so must the wake.
+   */
+  async function moveOrigin(s: BotSession, conversationId: string, threadRootId: string | null) {
+    const messageId = randomUUID();
+    await su.query(
+      `insert into app.messages (id, organization_id, conversation_id, seq, author_kind, author_id, body, thread_id)
+       values ($1, $2, $3, 1, 'agent', $4, 'Work Zone · billing-api', $5)`,
+      [messageId, orgId, conversationId, atlasId, threadRootId],
+    );
+    await su.query(
+      `update app.bot_work_sessions
+          set origin_conversation_id = $2, origin_thread_root_id = $3, origin_message_id = $4, card_message_id = $4
+        where work_session_id = $1`,
+      [s.workSessionId, conversationId, threadRootId ?? messageId, messageId],
+    );
+    return messageId;
+  }
+
+  it("CR-01: a session started from an AI chat wakes the bot there, flat (the AI chat is read as an AI chat)", async () => {
+    const s = await botSession();
+    await drainWakes();
+    const chatId = randomUUID();
+    await su.query(
+      `insert into app.conversations (id, organization_id, kind, visibility, name, created_by)
+       values ($1, $2, 'ai_chat', 'private', 'Invoices', $3)`,
+      [chatId, orgId, anaId],
+    );
+    await su.query(
+      `insert into app.conversation_members (conversation_id, organization_id, member_kind, member_id, role)
+       values ($1, $2, 'user', $3, 'owner'), ($1, $2, 'agent', $4, 'member')`,
+      [chatId, orgId, anaId, atlasId],
+    );
+    await su.query(
+      `insert into app.ai_chats (conversation_id, organization_id, owner_user_id, title_source, last_model)
+       values ($1, $2, $3, 'auto', $4)`,
+      [chatId, orgId, anaId, { backend: "org_key", provider: "anthropic", modelId: "claude-sonnet-5-5" }],
+    );
+    const card = await moveOrigin(s, chatId, null);
+
+    await finishTurn(s.workSessionId, s.first);
+    await settle(s.workSessionId, "idle");
+    const wakes = await wakesOf(s.workSessionId);
+    expect(wakes).toHaveLength(1);
+    const ev = AgentWorkSessionEvent.parse({ ...wakes[0], seq: 1 });
+    expect(ev.conversation).toMatchObject({ id: chatId, kind: "ai_chat" });
+    // An AI chat is flat: the wake names the card message itself, never a thread under it.
+    expect(ev.thread.rootMessageId).toBe(card);
+    expect(await auditsFor("bot.work_session_wake_skipped", s.workSessionId)).toEqual([]);
+  });
+
+  it("CR-01: a session started from a thread-kind conversation is judged through its channel and wakes the bot", async () => {
+    const s = await botSession();
+    await drainWakes();
+    const threadId = randomUUID();
+    await su.query(
+      `insert into app.conversations (id, organization_id, kind, visibility, parent_conversation_id, root_message_id)
+       values ($1, $2, 'thread', 'public', $3, $4)`,
+      [threadId, orgId, engId, s.askedMessageId],
+    );
+    await moveOrigin(s, threadId, s.askedMessageId);
+
+    await finishTurn(s.workSessionId, s.first);
+    await settle(s.workSessionId, "idle");
+    const wakes = await wakesOf(s.workSessionId);
+    expect(wakes).toHaveLength(1);
+    expect(await auditsFor("bot.work_session_wake_skipped", s.workSessionId)).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------- isolation and the leak sweep (ADR-0028, P1)
