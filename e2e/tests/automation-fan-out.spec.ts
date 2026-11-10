@@ -6,6 +6,7 @@ import { apiAs, BASE_URL, openAs, userIdOf } from "../support/actors";
 import {
   addOrders,
   CAM,
+  DAN,
   deleteAutomationsNamed,
   EVA,
   type FanOutBoard,
@@ -600,7 +601,7 @@ test("Cam (Logistics) gets “Atlas mentioned @logistics” in his Mentions; Eva
     // A retry of this spec's earlier tests adds rows of its own board: either proves it.
     const row = inbox.getByTestId("inbox-item").filter({ hasText: "Done: Mode: fullAccess" }).first();
     await expect(row).toBeVisible({ timeout: 15_000 });
-    await expect(row).toContainText(`mentioned @${TEAM_HANDLE}`);
+    await expect(row).toContainText("mentioned @logistics");
     await expect(row.getByTestId("inbox-actor")).toHaveText(atlas.name);
     // It opens the card's thread (the permalink names the card as the thread root).
     const href = (await row.getAttribute("href")) ?? "";
@@ -634,5 +635,141 @@ test("Cam (Logistics) gets “Atlas mentioned @logistics” in his Mentions; Eva
     await expect(views.getByTestId("view-mentions").getByTestId("view-count")).toHaveCount(0);
   } finally {
     await e.context.close();
+  }
+});
+
+// ---------------------------------------------------------------- a person mentions the team (AFO-04, D-07, PD-14)
+
+const BRAKES = "can someone check the brakes?";
+
+test("Dan types @log in Order 1043's thread, picks Logistics from Teams and sends: the unit chip; Cam's count rises by one, Eva's does not", async ({
+  browser,
+}) => {
+  test.setTimeout(150_000);
+  const root43 = await cardOf("1043");
+  const camBefore = (await boardMentions(people.cam.api)).unreadCount;
+  const evaBefore = (await boardMentions(people.eva.api)).unreadCount;
+
+  const dan = await openAs(browser, DAN, mobile ? "mobile" : "desktop");
+  let messageId = "";
+  try {
+    const panel = await openThread(dan.page, root43);
+    await expect(panel.getByTestId("card-strip")).toHaveAttribute("data-card-id", root43);
+    const composer = dan.page.getByTestId("thread-composer");
+    await composer.click();
+    await composer.pressSequentially("@log");
+    const suggestions = dan.page.getByTestId("mention-suggestions");
+    await expect(suggestions).toBeVisible();
+    await expect(suggestions).toContainText("Teams");
+    const option = suggestions.locator(`[data-testid="mention-option-unit"][data-handle="${TEAM_HANDLE}"]`);
+    await expect(option).toBeVisible();
+    await expect(option).toContainText(TEAM);
+    await expect(option).toContainText("@logistics");
+    await expect(option).toContainText("Team · 2");
+    await option.click();
+    await expect(composer).toHaveValue("@logistics ");
+    await composer.pressSequentially(BRAKES);
+    await composer.press("Enter");
+    // Two people are reached: below the 20 that ask first, so it sends at once.
+    await expect(dan.page.getByTestId("team-mention-confirm")).toHaveCount(0);
+
+    const sent = panel
+      .locator('[data-testid="message"][data-author-kind="user"]')
+      .filter({ hasText: BRAKES })
+      .last();
+    await expect(sent).toBeVisible({ timeout: 15_000 });
+    messageId = (await sent.getAttribute("data-message-id")) ?? "";
+    const chip = sent.locator('[data-testid="mention"][data-mention-kind="unit"]');
+    await expect(chip).toContainText("@logistics");
+    await expect(chip).toHaveAttribute("title", `${TEAM} · team`);
+  } finally {
+    await dan.context.close();
+  }
+
+  // Cam (Logistics, reads #fleet): one more unread, a team_mention naming Logistics. Eva: nothing at all.
+  await expect
+    .poll(async () => (await boardMentions(people.cam.api)).unreadCount, {
+      timeout: 15_000,
+      message: "Cam's unread count",
+    })
+    .toBe(camBefore + 1);
+  const camItem = (await boardMentions(people.cam.api)).items.find((n) => n.messageId === messageId);
+  expect(camItem).toMatchObject({ kind: "team_mention", unit: { handle: TEAM_HANDLE } });
+  const eva = await boardMentions(people.eva.api);
+  expect(eva.unreadCount).toBe(evaBefore);
+  expect(eva.items.some((n) => n.messageId === messageId)).toBe(false);
+  // Dan wrote it: a team mention never notifies its own author.
+  expect((await boardMentions(people.dan.api)).items.some((n) => n.messageId === messageId)).toBe(false);
+});
+
+test("Cam's inbox reads “Dan mentioned @logistics” and opens Order 1043's thread on the message", async ({
+  browser,
+}) => {
+  test.setTimeout(120_000);
+  const root43 = await cardOf("1043");
+  const cam = await openAs(browser, CAM, mobile ? "mobile" : "desktop");
+  try {
+    await cam.page.goto(`${BASE_URL}/chat/mentions`);
+    const inbox = cam.page.getByTestId("inbox");
+    await expect(inbox).toBeVisible({ timeout: 15_000 });
+    // A retry adds a second row (the earlier attempt's message, on its own board): the newest is this attempt's.
+    const row = inbox.getByTestId("inbox-item").filter({ hasText: BRAKES }).first();
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    await expect(row).toContainText("mentioned @logistics");
+    await expect(row.getByTestId("inbox-actor")).toHaveText(DAN.name);
+    await expect(row.getByTestId("inbox-snippet").getByTestId("mention")).toContainText("@logistics");
+    await row.click();
+    await expect(cam.page).toHaveURL(new RegExp(`/chat/${board.id}\\?thread=${root43}&m=`), {
+      timeout: 15_000,
+    });
+    const panel = cam.page.locator(THREAD);
+    await expect(panel).toBeVisible({ timeout: 15_000 });
+    await expect(panel.getByTestId("card-strip")).toHaveAttribute("data-card-id", root43);
+    const target = panel.locator('[data-testid="message"]').filter({ hasText: BRAKES }).last();
+    await expect(target).toHaveAttribute("data-highlighted", "true");
+  } finally {
+    await cam.context.close();
+  }
+});
+
+// ---------------------------------------------------------------- dedupe holds (D-03)
+
+test("a third Run now opens nothing: the board keeps its two cards; the runs list one “Opened 2 conversations” and the rest “Nothing new”", async ({
+  browser,
+}) => {
+  test.setTimeout(150_000);
+  const third = await runNowAnswered();
+  expect(third.opened).toBe(0);
+  const cards = await cardsByTitle();
+  expect([...cards.keys()].sort()).toEqual(ORDERS.map((id) => `Order ${id}`));
+  for (const id of ORDERS) expect(cards.get(`Order ${id}`)?.columnId).toBe(board.columns.done);
+
+  // Every 10 minutes a scheduled run may add one more "Nothing new": count from the runs, never a fixed number.
+  const runs = (await runsOf(admin, automationId)).filter((r) => r.status === "answered");
+  expect(runs.filter((r) => r.opened === 2)).toHaveLength(1);
+  const nothing = runs.filter((r) => r.opened === 0);
+  expect(nothing.length).toBeGreaterThanOrEqual(2);
+  const runsRoot = third.anchor?.threadRootId as string;
+  expect(new Set(runs.map((r) => r.anchor?.threadRootId))).toEqual(new Set([runsRoot]));
+
+  const s = await openAs(browser, ADMIN, mobile ? "mobile" : "desktop");
+  try {
+    const panel = await openThread(s.page, runsRoot);
+    const cardsIn = panel.getByTestId("agent-card");
+    await expect(cardsIn.filter({ hasText: "Opened 2 conversations" })).toHaveCount(1, { timeout: 15_000 });
+    await expect
+      .poll(async () => cardsIn.filter({ hasText: "Nothing new" }).count(), { timeout: 15_000 })
+      .toBeGreaterThanOrEqual(nothing.length);
+
+    // The editor's Runs tab says the same per run (07.17-14's chip).
+    const sheet = await openAutomations(s.page, `?edit=${automationId}`);
+    await sheet.getByTestId("automation-tab-runs").click();
+    const chips = sheet.getByTestId("run-opened");
+    await expect(chips.filter({ hasText: "Opened 2 conversations" })).toHaveCount(1, { timeout: 15_000 });
+    await expect
+      .poll(async () => chips.filter({ hasText: "Nothing new" }).count(), { timeout: 15_000 })
+      .toBeGreaterThanOrEqual(2);
+  } finally {
+    await s.context.close();
   }
 });
