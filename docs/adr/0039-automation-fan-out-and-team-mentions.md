@@ -314,10 +314,14 @@ documented behaviour below. The accepted text above stays as written; where it d
   `actOnOutsideContent`". A profile that lost any of these lifts no taint and no session-output mark.
 - **WR-04, § 9, § 10 and § 12 (shadowed unit handles).** An escalation target is a unit only while no person or bot
   holds its handle (the mention directory's `byHandle`): a shadowed unit is refused at save and dropped at delivery,
-  and the editor's picker does not offer it. Bot create and rename refuse a username equal to a team's or department's
-  handle (409 `username_taken`), and a name-derived username steps past one (`logistics-2`). The allocator still does
-  not skip people's handles: they are derived from names and e-mails that change after a unit exists, so the
-  resolve-time rule above is what holds; a SQL twin of `userHandle` would also be needed to keep § 9's parity.
+  and the editor's picker does not offer it. Bot create and rename are unchanged: a bot may take a username equal to a
+  team's or department's handle, explicit or name-derived, with no 409 and no suffix. Installs already name bots like
+  their teams (a `@backend` persona beside the Backend team), so refusing it would break bot creation that works
+  today; the mention precedence (agents, then people, then units, § 10) already resolves the clash to the bot, and the
+  resolve-time rule above keeps such a team out of escalation. (The first fix also refused those usernames with 409
+  `username_taken`; that part was reverted before release.) The allocator still does not skip people's handles: they
+  are derived from names and e-mails that change after a unit exists, so the resolve-time rule above is what holds; a
+  SQL twin of `userHandle` would also be needed to keep § 9's parity.
 - **WR-05, § 9 (one allocator).** Replaces "A TypeScript allocator under the organization lock must give the same
   result for the same state": `createUnit` takes its handle from `app.org_unit_handle` under the unit lock, the same
   function as the backfill and the fill trigger, so "Straße" is `strasse` on every path. The contracts' `unitHandle` is

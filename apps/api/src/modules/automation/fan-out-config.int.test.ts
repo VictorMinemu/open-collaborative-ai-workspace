@@ -552,50 +552,57 @@ describe("escalation targets: validated at save, resolved at delivery (D-08, PD-
     );
   });
 
-  it("WR-04: a team whose handle a person or bot holds is never an escalation target, and a bot cannot take a team's handle", async () => {
+  it("WR-04: a team whose handle a person or bot holds is never an escalation target; bots may still be named like a team", async () => {
     // A team named like Sam gets Sam's handle (people win the mention): it would name Sam, not the team.
     const samTeam = await unit("team", "Sam");
     expect(await handleOf(samTeam)).toBe("sam");
     await expectRefused(onSales([{ kind: "unit", id: samTeam }]), "escalation_not_allowed");
 
-    // A team saved as a target, then shadowed by a bot that takes its handle: dropped at delivery.
-    const yard = await unit("team", "Yard crew");
-    const handle = await handleOf(yard);
-    const a = (await ok(onSales([{ kind: "unit", id: yard }]), 201)).automation as Json;
-    expect((await get(a.id)).escalation).toHaveLength(1);
-    // The API refuses a bot with that username (below), so a raw row plays an older writer here.
-    await s.su.query(
-      "insert into app.agents (organization_id, name, username, instructions, model_provider, model_id) values ($1, 'Yard bot', $2, 'x', 'mock', 'mock-1')",
-      [s.orgA, handle],
-    );
-    try {
-      expect((await get(a.id)).escalation).toEqual([]);
-    } finally {
-      await s.su.query("delete from app.agents where organization_id = $1 and username = $2", [
-        s.orgA,
-        handle,
-      ]);
-    }
-
-    // Bot create and rename never take a team's or department's handle; a name-derived username steps past it.
     const bot = (name: string, extra: Json = {}) =>
-      s.victor.request("POST", "/api/v1/agents", {
-        name,
-        instructions: "Answer questions.",
-        modelProvider: "mock",
-        modelId: "mock-1",
-        ...extra,
-      }) as Promise<Res>;
-    const taken = await bot("Yard", { username: handle });
-    expect(taken.status, JSON.stringify(taken.body)).toBe(409);
-    expect(codeOf(taken)).toBe("username_taken");
-    const derived = (await ok(bot("Logistics"))) as Json;
-    expect(derived.username).not.toBe("logistics");
-    const renamed = await s.victor.request("PATCH", `/api/v1/agents/${derived.id}`, {
-      username: "logistics",
-    });
-    expect(renamed.status, JSON.stringify(renamed.body)).toBe(409);
-    expect(codeOf(renamed)).toBe("username_taken");
+      ok(
+        s.victor.request("POST", "/api/v1/agents", {
+          name,
+          instructions: "Answer questions.",
+          modelProvider: "mock",
+          modelId: "mock-1",
+          ...extra,
+        }) as Promise<Res>,
+      );
+    const made: string[] = [];
+    try {
+      // A team saved as a target, then a bot created with the team's handle as its username: the API creates it as it
+      // always did (installs name bots like their teams), and the mention names the bot (agents win), so the team is
+      // dropped at delivery and refused at save while the bot holds the handle.
+      const yard = await unit("team", "Yard crew");
+      const handle = await handleOf(yard);
+      const a = (await ok(onSales([{ kind: "unit", id: yard }]), 201)).automation as Json;
+      expect((await get(a.id)).escalation).toHaveLength(1);
+      const yardBot = await bot("Yard", { username: handle });
+      made.push(yardBot.id as string);
+      expect(yardBot.username).toBe(handle);
+      expect((await get(a.id)).escalation).toEqual([]);
+      await expectRefused(onSales([{ kind: "unit", id: yard }]), "escalation_not_allowed");
+      // The bot deleted frees the handle (B2-6): the team is the target again.
+      await ok(s.victor.request("DELETE", `/api/v1/agents/${yardBot.id}`) as Promise<Res>);
+      made.pop();
+      expect((await get(a.id)).escalation).toEqual([expect.objectContaining({ kind: "unit", id: yard })]);
+
+      // A name-derived username and a rename take a team's or department's handle as before: no 409, no suffix.
+      const dock = await unit("team", "Dock");
+      const gate = await unit("department", "Gate", null);
+      const dockBot = await bot("Dock");
+      made.push(dockBot.id as string);
+      expect(dockBot.username).toBe(await handleOf(dock));
+      const renamed = await ok(
+        s.victor.request("PATCH", `/api/v1/agents/${dockBot.id}`, {
+          username: await handleOf(gate),
+        }) as Promise<Res>,
+      );
+      expect(renamed.username).toBe("gate");
+      await expectRefused(onSales([{ kind: "unit", id: gate }]), "escalation_not_allowed");
+    } finally {
+      for (const id of made) await s.victor.request("DELETE", `/api/v1/agents/${id}`);
+    }
   });
 
   it("drops at delivery whoever left or lost access and a deleted unit; an update with [] clears, without escalation keeps", async () => {

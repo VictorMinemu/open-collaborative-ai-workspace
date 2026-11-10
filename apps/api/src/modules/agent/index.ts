@@ -478,9 +478,7 @@ export function createAgentModule(core: Core, deps: AgentModuleDeps): ApiModule 
                   .select({ id: agents.id })
                   .from(agents)
                   .where(and(eq(agents.username, username), isNull(agents.deletedAt)));
-                if (taken || (await isUnitHandle(tx, username))) {
-                  throw conflict(`@${username} is already taken`, "username_taken");
-                }
+                if (taken) throw conflict(`@${username} is already taken`, "username_taken");
               } else {
                 const base = slugifyUsername(body.name);
                 const rows = await tx
@@ -492,10 +490,7 @@ export function createAgentModule(core: Core, deps: AgentModuleDeps): ApiModule 
                       or(eq(agents.username, base), like(agents.username, `${base}-%`)),
                     ),
                   );
-                username = nextFreeUsername(
-                  base,
-                  new Set([...rows.map((r) => r.username), ...(await unitHandlesLike(tx, base))]),
-                );
+                username = nextFreeUsername(base, new Set(rows.map((r) => r.username)));
               }
               const [row] = await tx
                 .insert(agents)
@@ -662,9 +657,7 @@ export function createAgentModule(core: Core, deps: AgentModuleDeps): ApiModule 
                   .select({ id: agents.id })
                   .from(agents)
                   .where(and(eq(agents.username, body.username), isNull(agents.deletedAt)));
-                if (taken || (await isUnitHandle(tx, body.username))) {
-                  throw conflict(`@${body.username} is already taken`, "username_taken");
-                }
+                if (taken) throw conflict(`@${body.username} is already taken`, "username_taken");
               }
               if (
                 body.enabled === true &&
@@ -840,27 +833,4 @@ export function createAgentModule(core: Core, deps: AgentModuleDeps): ApiModule 
       );
     },
   };
-}
-
-/**
- * 07.17 code review WR-04: a team or department's `@handle` (ADR-0039 § 9). A bot username equal to one would shadow
- * the team in every mention (agents win), so bot create and rename refuse it like a taken username, and a
- * name-derived username steps past it. Units of the transaction's organization only (RLS).
- */
-async function isUnitHandle(tx: Tx, username: string): Promise<boolean> {
-  const [unit] = await tx
-    .select({ id: orgUnits.id })
-    .from(orgUnits)
-    .where(eq(orgUnits.handle, username.toLowerCase()))
-    .limit(1);
-  return unit !== undefined;
-}
-
-/** The unit handles a name-derived username `base` (or `base-N`) could collide with. */
-async function unitHandlesLike(tx: Tx, base: string): Promise<string[]> {
-  const rows = await tx
-    .select({ handle: orgUnits.handle })
-    .from(orgUnits)
-    .where(or(eq(orgUnits.handle, base), like(orgUnits.handle, `${base}-%`)));
-  return rows.map((r) => r.handle);
 }
