@@ -470,3 +470,19 @@ No column was added: the marker lives in the existing state key.
 **The caps' counter fails closed (WR-10).** This completes §6. `app.bot_work_session_load` is `SECURITY DEFINER` and
 bypasses RLS. Without `app.organization_id` it counted zero and every cap passed. It now raises
 (`insufficient_privilege`) when no tenant is set.
+
+**Clarified, unchanged by design (IN-01, IN-09).**
+
+- **The host kind and the isolated mark are the device owner's own statement (IN-01).** §2 stands as D-19 decided.
+  `host_kind = 'service'` comes from `OCW_RUNTIME_HOST` or the installed bundle, and the isolated mark from the
+  device, and the API cannot verify either. An owner can set `OCW_RUNTIME_HOST=service OCW_ISOLATED_SERVER=1` on a
+  laptop, and a launchd install on a personal Mac reports `service` too. Either way that laptop counts as an isolated
+  server, and admins can then grant bot consents on it (D-22). So "Full access after outside content only on an
+  isolated server" and D-22 rest on the owner's word. Admins should treat the "Isolated server" row as a claim by the
+  device's owner. Tying `service` to a fact the server issued at enrollment (the ADR-0033 install) is a later change,
+  not part of this phase.
+- **Re-authorization clamps a bot session's stored settings with the bot layer (IN-09).** When a device sweep
+  re-authorizes a session a bot started, the profile's sets are joined into the controls (§4). So a model or mode a
+  person in the audience chose outside the profile is lowered at the next sweep, not only on the bot's own turns.
+  This is deliberate: the session runs under the bot's sponsor and profile. People keep every right they have on
+  sessions people start.
