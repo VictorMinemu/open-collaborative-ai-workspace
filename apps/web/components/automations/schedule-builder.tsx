@@ -77,7 +77,7 @@ export function ScheduleBuilder({
       </FormField>
 
       {value.preset === "every_minutes" ? (
-        <FormField id={id("interval")} label="Every">
+        <FormField id={id("interval")} label="How often">
           <Select
             items={intervals.map((o) => ({ value: String(o.value), label: `Every ${o.value} minutes` }))}
             value={String(value.everyMinutes)}
