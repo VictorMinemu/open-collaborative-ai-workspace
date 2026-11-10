@@ -45,6 +45,7 @@ export {
   type BotProfileStatus,
   botLayerForSession,
   loadBotProfile,
+  profileScopeRefusal,
   profileStatus,
 } from "./bot-profile";
 // 07.16-17 (PD-14, D-10): what a bot reads about its own session; 07.16-20's wake names the same deciders.

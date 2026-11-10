@@ -635,6 +635,44 @@ describe("prompt refusals; a stop stays allowed", () => {
     expect(stopCallRow!.decision).toBe("allowed");
   });
 
+  it("WR-04: the session's project removed from the profile → project_not_allowed; a queued bot prompt is refused at dispatch", async () => {
+    const { workSessionId, first } = await botSession();
+    const waiting = await queued(await ask(), workSessionId);
+    await saveProfile({ projectIds: [ledgerId] });
+    try {
+      const before = await stateOf(workSessionId);
+      await refusedWith(promptCall(await ask(), workSessionId), "project_not_allowed");
+      expect(await stateOf(workSessionId)).toEqual(before);
+      // The arbiter re-decides the bot's queued prompt against the same rule: never sent to the device.
+      await finishTurn(workSessionId, first);
+      await eventually(async () => {
+        const [p] = await rowsOf("select status from app.work_prompts where id = $1", [waiting.promptId]);
+        return p?.status === "failed";
+      });
+      const [refusal] = await rowsOf(
+        "select metadata from app.audit_events where action = 'work_prompt.refused' and metadata->>'promptId' = $1",
+        [waiting.promptId],
+      );
+      expect(refusal!.metadata).toMatchObject({ reason: "bot_not_allowed" });
+    } finally {
+      await saveProfile();
+    }
+  });
+
+  it("WR-04: the profile's runtime switched → profile_inactive for the session's prompts", async () => {
+    const { workSessionId } = await botSession();
+    await su.query("update app.bot_work_zone_profiles set runtime = 'codex' where agent_id = $1", [atlasId]);
+    try {
+      const before = await stateOf(workSessionId);
+      await refusedWith(promptCall(await ask(), workSessionId), "profile_inactive");
+      expect(await stateOf(workSessionId)).toEqual(before);
+    } finally {
+      await su.query("update app.bot_work_zone_profiles set runtime = 'claude-code' where agent_id = $1", [
+        atlasId,
+      ]);
+    }
+  });
+
   it("CR-03: a completed session restarts under the caps: below them it is queued, at the bot's cap → too_many_sessions", async () => {
     await saveProfile({ maxConcurrent: 2 });
     try {

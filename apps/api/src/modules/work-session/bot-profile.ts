@@ -226,20 +226,44 @@ export async function profileStatus(
   return { active: true, layer: layerOf(profile, consent, device), consent, device, projectIds };
 }
 
+/** What a bot session names that its profile must still cover. */
+export interface BotSessionScope {
+  deviceId: string;
+  runtime: string;
+  projectId: string;
+}
+
+/**
+ * Code review WR-04 (ADR-0038 §1, "re-checked at every tool call and at every dispatch"): why the bot's active profile
+ * no longer covers one of its sessions, or null when it does. Another device or runtime is `profile_inactive` (the
+ * layer would be the other runtime's); a project the profile no longer lists, or the sponsor can no longer start in, is
+ * `project_not_allowed`.
+ */
+export function profileScopeRefusal(
+  profile: Pick<BotProfileRow, "deviceId" | "runtime">,
+  status: Extract<BotProfileStatus, { active: true }>,
+  s: BotSessionScope,
+): "profile_inactive" | "project_not_allowed" | null {
+  if (profile.deviceId !== s.deviceId || profile.runtime !== s.runtime) return "profile_inactive";
+  if (!status.projectIds.includes(s.projectId)) return "project_not_allowed";
+  return null;
+}
+
 /**
  * The bot's caps for one of its sessions (PD-05, Pitfall 10): null for a person's session, and for a bot session whose
- * profile is gone, inactive or now names another device (the bot may not act on it). Taint comes from the session.
+ * profile is gone, inactive or no longer covers it (another device or runtime, a project it no longer lists: WR-04),
+ * so the bot may not act on it. Taint comes from the session.
  */
 export async function botLayerForSession(
   tx: Tx,
   perms: PermissionService,
-  s: { id: string; startedByAgentId: string | null; deviceId: string; taintedAt: string | Date | null },
+  s: BotSessionScope & { id: string; startedByAgentId: string | null; taintedAt: string | Date | null },
 ): Promise<AgentControlsLayer | null> {
   if (!s.startedByAgentId) return null;
   const profile = await loadBotProfile(tx, s.startedByAgentId);
   if (!profile || profile.deviceId !== s.deviceId) return null;
   const status = await profileStatus(tx, perms, profile);
-  if (!status.active) return null;
+  if (!status.active || profileScopeRefusal(profile, status, s)) return null;
   return { ...status.layer, tainted: s.taintedAt !== null };
 }
 

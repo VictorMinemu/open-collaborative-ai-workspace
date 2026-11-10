@@ -423,3 +423,10 @@ default. Then:
   catalog's default, and that model's default effort and selectable context window when the bot names none. A value
   outside the set answers `setting_not_allowed` with the field (reason `bot_profile`), so the bot names a listed
   value. A fixed context window is never checked.
+
+**The profile must still cover the session, not only be active (WR-04).** This completes §1's "re-checked at every
+tool call and at every dispatch". For a session the bot started, the arbiter (`botLayerForSession`) and the prompt
+route also require the profile's device and runtime to be the session's, and the session's project to be one of the
+projects the profile lists and the sponsor can still start in. Otherwise the arbiter refuses the bot's queued prompt
+(`bot_not_allowed`) and the prompt route answers up front: `profile_inactive` for another device or runtime,
+`project_not_allowed` for the project, never `queued`. Read and stop are unchanged.

@@ -952,9 +952,11 @@ describe("the bot's caps (PD-05)", () => {
 
   it("botLayerForSession: null for a person's session or another device, tainted from the session", async () => {
     const perms = createPermissionService(stack.built.core);
-    const layerFor = (s: Parameters<typeof botLayerForSession>[2]) =>
+    // The scope of Scout's session (its profile's runtime and project); WR-04 cases below change one of them.
+    const scope = { runtime: "claude-code", projectId: billingId };
+    const layerFor = (s: Omit<Parameters<typeof botLayerForSession>[2], "runtime" | "projectId">) =>
       stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
-        botLayerForSession(tx, perms, s),
+        botLayerForSession(tx, perms, { ...scope, ...s }),
       );
     const id = randomUUID();
     expect(await layerFor({ id, startedByAgentId: null, deviceId: samDeviceId, taintedAt: null })).toBeNull();
@@ -965,6 +967,20 @@ describe("the bot's caps (PD-05)", () => {
     expect(
       await layerFor({ id, startedByAgentId: scoutId, deviceId: samDeviceId, taintedAt: new Date() }),
     ).toMatchObject({ agentId: scoutId, tainted: true });
+    // WR-04: the profile no longer covers a session on another runtime or in a project it does not list.
+    const scoped = (over: Partial<typeof scope>) =>
+      stack.built.core.db.withTenant({ organizationId: orgId, userId: null }, (tx) =>
+        botLayerForSession(tx, perms, {
+          id,
+          startedByAgentId: scoutId,
+          deviceId: samDeviceId,
+          taintedAt: null,
+          ...scope,
+          ...over,
+        }),
+      );
+    expect(await scoped({ runtime: "codex" })).toBeNull();
+    expect(await scoped({ projectId: randomUUID() })).toBeNull();
     await putPolicy({ botSessionsMax: 0 });
     try {
       expect(

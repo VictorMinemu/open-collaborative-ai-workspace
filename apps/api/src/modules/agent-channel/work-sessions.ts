@@ -23,6 +23,7 @@ import {
   type BotProfileRow,
   loadBotProfile,
   ownBotSession,
+  profileScopeRefusal,
   profileStatus,
   refusedAnswer,
   type WorkSessionModule,
@@ -551,6 +552,10 @@ export function registerBotWorkSessionRoutes(
           if (!profile || profile.sponsorUserId !== sponsorUserId) return refuse("profile_inactive");
           const status = await profileStatus(tx, perms, profile);
           if (!status.active) return refuse("profile_inactive", status.reason);
+          // WR-04: the active profile must still cover this session (its device, runtime and project), as the arbiter
+          // decides at dispatch (`botLayerForSession`): never answered `queued` for a prompt that would then fail.
+          const outOfScope = profileScopeRefusal(profile, status, found.own.session);
+          if (outOfScope) return refuse(outOfScope);
           // D-08 (PD-15): a turn that read outside content prompts only with the profile's admin flag. No fallback
           // without it: a person can prompt the session.
           if (turn.tainted && !profile.actOnOutsideContent) return refuse("outside_content");
