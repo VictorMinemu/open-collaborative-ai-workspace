@@ -287,3 +287,8 @@ documented behaviour below. The accepted text above stays as written; where it d
   for every other turn that reads it (a person's @mention, reply mode) once any run anchored in it started tainted or
   has a tainted turn (`agent_turns.tainted`, read live, so a taint reached mid-turn counts; `runLogTainted`). Fan-out
   run turns keep their clean start. Non-fan-out runs are unchanged.
+- **CR-02, § 11 (the 200 cap).** Replaces "the first 200 distinct users by user id across the message's units":
+  readers are decided before the cap. The candidates (at most 2 000, `TEAM_MENTION_CANDIDATES`; in a non-public
+  channel only its user members, since only members read it) are walked in mention order (the first unit that reached
+  a person, then user id) through the resolver's `isReadable`, and the first 200 readers are notified. `deliver`'s
+  reader check stays as the backstop.

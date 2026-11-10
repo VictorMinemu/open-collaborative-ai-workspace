@@ -431,11 +431,20 @@ export function createNotificationService(
       const threadRootId = input.threadRootId;
       const dir = await loadDirectory(tx);
       const authorUserId = input.author.kind === "user" ? input.author.id : null;
-      // 07.17 (PD-14): units resolve on channel posts only (chat's gate, PD-13); their members are offered
-      // `team_mention`, and `deliver`'s `eligible` keeps only those who can read this channel.
+      // 07.17 (PD-14): units resolve on channel posts only (chat's gate, PD-13); their members who can read this
+      // channel (the resolver, decided before the 200 cap: code review CR-02) are offered `team_mention`, and
+      // `deliver`'s `eligible` checks again.
       const unitIds =
         conv.kind === "channel" ? input.mentions.filter((m) => m.kind === "unit").map((m) => m.id) : [];
-      const teamMentions = unitIds.length > 0 ? await teamMentionAudience(tx, { unitIds, authorUserId }) : [];
+      const teamMentions =
+        unitIds.length > 0
+          ? await teamMentionAudience(tx, {
+              unitIds,
+              authorUserId,
+              conversationId: conv.id,
+              readable: (userId) => nd.access.isReadable(tx, userId, conv.id, { kinds: NOTIFIABLE_KINDS }),
+            })
+          : [];
       const unitOf = new Map<string, string>();
       for (const t of teamMentions) for (const u of t.userIds) if (!unitOf.has(u)) unitOf.set(u, t.unitId);
       const recipients = computeRecipients({

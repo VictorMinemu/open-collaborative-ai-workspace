@@ -251,6 +251,80 @@ describe("departments, the cap, ranks, edits, bots and tenants (07.17 D-13, PD-1
     expect(rows[sorted[200] as string]).toBeUndefined();
   });
 
+  it("CR-02: a private channel of 3 readers inside a 250-member department notifies all 3 (readers decided before the cap)", async () => {
+    const yard = await createUnit("department", "Yard");
+    const seeded = Array.from({ length: 247 }, () => randomUUID());
+    // The three readers sort after every other member, so a cap taken before the reader check would drop them all.
+    const readers = Array.from(
+      { length: 3 },
+      (_, i) => `ffffffff-ffff-4fff-8fff-${String(i).padStart(12, "0")}`,
+    );
+    const everyone = [...seeded, ...readers];
+    await su.query(
+      `insert into auth.user (id, name, email)
+       select id, 'Yard ' || n, id::text || '@yard.test' from unnest($1::uuid[]) with ordinality as s(id, n)`,
+      [everyone],
+    );
+    await su.query(
+      `insert into app.org_members (organization_id, user_id, display_name, role)
+       select $1, id, 'Yard ' || n, 'standard' from unnest($2::uuid[]) with ordinality as s(id, n)`,
+      [orgId, everyone],
+    );
+    await su.query(
+      `insert into app.unit_memberships (organization_id, unit_id, user_id, role)
+       select $1, $2, id, 'member' from unnest($3::uuid[]) as id`,
+      [orgId, yard.id, everyone],
+    );
+    const privateYard = await channel("yard-private", "private", readers);
+    const msg = await say(admin, privateYard, "@yard the gate is open");
+    expect(msg.mentions).toEqual([{ kind: "unit", id: yard.id }]);
+    expect(await rowsOf(msg.id)).toEqual(
+      Object.fromEntries(readers.map((id) => [id, { kind: "team_mention", unitId: yard.id }])),
+    );
+  });
+
+  it("CR-02: the cap follows mention order: the first unit's readers before the second's", async () => {
+    const guardsDept = await createUnit("department", "Guards");
+    const first = await createUnit("team", "Vanguard", guardsDept.id);
+    const second = await createUnit("team", "Rearguard", guardsDept.id);
+    // The second unit's members sort first by id: a cap by user id alone would spend it on them.
+    const early = Array.from(
+      { length: 150 },
+      (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+    );
+    const late = Array.from(
+      { length: 150 },
+      (_, i) => `eeeeeeee-eeee-4eee-8eee-${String(i).padStart(12, "0")}`,
+    );
+    const both = [...early, ...late];
+    await su.query(
+      `insert into auth.user (id, name, email)
+       select id, 'Guard ' || n, id::text || '@guard.test' from unnest($1::uuid[]) with ordinality as s(id, n)`,
+      [both],
+    );
+    await su.query(
+      `insert into app.org_members (organization_id, user_id, display_name, role)
+       select $1, id, 'Guard ' || n, 'standard' from unnest($2::uuid[]) with ordinality as s(id, n)`,
+      [orgId, both],
+    );
+    await su.query(
+      `insert into app.unit_memberships (organization_id, unit_id, user_id, role)
+       select $1, $2, id, 'member' from unnest($3::uuid[]) as id`,
+      [orgId, first.id, late],
+    );
+    await su.query(
+      `insert into app.unit_memberships (organization_id, unit_id, user_id, role)
+       select $1, $2, id, 'member' from unnest($3::uuid[]) as id`,
+      [orgId, second.id, early],
+    );
+    const guards = await channel("guards", "public", [person.ben as string]);
+    const msg = await say(client.ben as TestClient, guards, "@vanguard then @rearguard");
+    const rows = await rowsOf(msg.id);
+    expect(Object.keys(rows)).toHaveLength(TEAM_MENTION_LIMITS.recipientsPerMessage);
+    expect(late.every((id) => rows[id]?.unitId === first.id)).toBe(true);
+    expect(early.filter((id) => rows[id]?.unitId === second.id)).toEqual(early.slice(0, 50));
+  });
+
   it("@logistics @channel @cam: one row each, the stronger kind (direct > team > channel)", async () => {
     const ranks = await channel("ranks", "public", [
       person.ben as string,
