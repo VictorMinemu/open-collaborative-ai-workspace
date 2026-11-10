@@ -56,9 +56,8 @@ import { buildMentionEvents } from "./mentions";
  *    person can no longer be posted for, and `bot.work_session_wake_skipped` names the reason. A failure also restores
  *    the woken pair, so the job's retry decides again.
  *
- * The summary is composed from structured facts only (transition, repository name, turn number, counts, the branch, the
- * tool names of pending approvals), never runtime text, so a wake turn does not start as a read of the session's
- * output. No job row, audit row or log line carries a prompt or an output (P1). The bot never approves anything: the
+ * The summary is composed from structured facts only (transition, repository name, turn number, counts), never runtime
+ * text (no branch, no tool name: code review WR-01), so a wake turn does not start as a read of the session's output. No job row, audit row or log line carries a prompt or an output (P1). The bot never approves anything: the
  * wake names who can (P3).
  */
 
@@ -81,7 +80,6 @@ export interface WorkSessionWakesDeps {
 }
 
 const NAME_MAX = 200;
-const APPROVAL_TOOLS_MAX = 3;
 /** Flat conversations: the wake names the card message itself (an AI chat is flat too, as in `emitCardAction`). */
 const DIRECT_KINDS = new Set(["dm", "group", "ai_chat"]);
 /** The kinds a start may come from (the start route's `READABLE_KINDS`); a thread is judged through its parent. */
@@ -90,8 +88,11 @@ const READABLE_KINDS = ["channel", "dm", "group", "ai_chat"] as const;
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 /**
- * One or two plain sentences about a transition, from structured facts only (PD-16): never runtime text. The branch
- * passes `redactSecrets`; the result is at most `BOT_WORK_ZONE_LIMITS.summaryChars` characters.
+ * One or two plain sentences about a transition, from structured facts only (PD-16): fixed sentences, the repository
+ * name and counts. Never a string the runtime chose (code review WR-01): the branch and the tool names of pending
+ * approvals are runtime-reported, and the body reads as the person's own words on a turn that starts without
+ * `session_output_read`, so the bot learns them only through `ocw_work_session_read` (which sets it, D-20). The result
+ * is at most `BOT_WORK_ZONE_LIMITS.summaryChars` characters.
  */
 export function wakeSummary(p: {
   transition: WorkSessionTransition;
@@ -99,29 +100,18 @@ export function wakeSummary(p: {
   turn: number;
   queued: number;
   changedFiles: number;
-  branch: string | null;
   pendingApprovals: number;
-  approvalTools: string[];
 }): string {
-  const where = `Work Zone session in ${p.projectName.slice(0, NAME_MAX) || "the repository"}`;
-  const branch = p.branch ? redactSecrets(p.branch).slice(0, NAME_MAX) : null;
-  const changes =
-    p.changedFiles > 0
-      ? ` ${plural(p.changedFiles, "file", "files")} changed${branch ? ` on ${branch}` : ""}.`
-      : "";
+  const where = `Work Zone session in ${redactSecrets(p.projectName).slice(0, NAME_MAX) || "the repository"}`;
+  const changes = p.changedFiles > 0 ? ` ${plural(p.changedFiles, "file", "files")} changed.` : "";
   let text: string;
   switch (p.transition) {
     case "turn_done":
       text = `${where} finished turn ${p.turn}; ${p.queued > 0 ? `${plural(p.queued, "prompt is", "prompts are")} queued` : "nothing is queued"}.${changes}`;
       break;
-    case "waiting_approval": {
-      const tools = p.approvalTools
-        .slice(0, APPROVAL_TOOLS_MAX)
-        .map((t) => redactSecrets(t).slice(0, 100))
-        .join(", ");
-      text = `${where} is waiting for ${plural(p.pendingApprovals, "approval", "approvals")}${tools ? ` (${tools})` : ""}. ${APPROVAL_SENTENCE}`;
+    case "waiting_approval":
+      text = `${where} is waiting for ${plural(p.pendingApprovals, "approval", "approvals")}. ${APPROVAL_SENTENCE}`;
       break;
-    }
     case "failed":
       text = `${where} failed${p.turn > 0 ? ` during turn ${p.turn}` : ""}.${changes}`;
       break;
@@ -132,8 +122,6 @@ export function wakeSummary(p: {
       text = `${where} is paused: its device went offline.`;
       break;
   }
-  if (text.length <= BOT_WORK_ZONE_LIMITS.summaryChars) return text;
-  // Only a long branch or tool list can get here; the approval sentence is never cut.
   return text.slice(0, BOT_WORK_ZONE_LIMITS.summaryChars);
 }
 
@@ -290,7 +278,7 @@ async function decide(
     .orderBy(desc(workPrompts.position), desc(workPrompts.completedAt))
     .limit(1);
   const approvals = await tx
-    .select({ id: workApprovals.id, tool: sql<string>`${workApprovals.request}->>'tool'` })
+    .select({ id: workApprovals.id })
     .from(workApprovals)
     .where(and(eq(workApprovals.workSessionId, s.id), eq(workApprovals.status, "pending")))
     .orderBy(asc(workApprovals.createdAt), asc(workApprovals.id));
@@ -414,7 +402,7 @@ async function decide(
     });
   }
 
-  // The facts of the summary: the latest working-tree summary (counts and the branch only) and the pending tools.
+  // The facts of the summary: the latest working-tree summary (its file count only, WR-01).
   const [changesRow] = await tx
     .select({ payload: streamEvents.payload })
     .from(streamEvents)
@@ -428,9 +416,7 @@ async function decide(
     turn,
     queued,
     changedFiles: changes?.success ? changes.data.files.length : 0,
-    branch: changes?.success ? changes.data.branch : null,
     pendingApprovals: approvals.length,
-    approvalTools: [...new Set(approvals.map((a) => a.tool))],
   });
   // D-10: who can decide the pending approvals (sponsor first, then the device's owner); the bot never can.
   const deciders =

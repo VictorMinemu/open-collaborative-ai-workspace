@@ -389,3 +389,10 @@ continues another one:
 so it becomes active again. Under the bot's lock and then the organization's lock, the prompt is refused with
 `too_many_sessions`, `org_limit` or (without a worktree, another active session on the same tree) `tree_busy`,
 exactly as a start would be. People's prompts are unchanged.
+
+**The wake's summary carries no runtime string (WR-01).** This replaces, in §11's Delivery list, "queued and
+changed-file counts, and the branch through `redactSecrets`" and "pending approval counts and their tool names". The
+branch and the tool names are chosen by the runtime, which may have been steered by what it read, and the summary is
+the mention's text in the asker's name on a turn that starts without `session_output_read`. The summary now holds
+fixed sentences, the repository name, the turn number and counts only (queued prompts, changed files, pending
+approvals). The bot learns the branch and the tools through `ocw_work_session_read`, which sets the D-20 mark.

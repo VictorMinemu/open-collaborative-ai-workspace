@@ -479,7 +479,9 @@ describe("every meaningful transition wakes Atlas once; the card always shows th
     // The sponsor first (Víctor is also the device's owner), each with a handle the bot can @mention.
     expect(deciders[0]).toMatchObject({ id: victorId, displayName: "Víctor Ruiz" });
     for (const d of deciders) expect(d.handle).toMatch(/\S/);
-    expect(ev!.workSession.summary).toContain("Bash");
+    // WR-01: a count, never the runtime's tool name (the bot reads it with ocw_work_session_read).
+    expect(ev!.workSession.summary).toContain("waiting for 1 approval.");
+    expect(ev!.workSession.summary).not.toContain("Bash");
     expect(
       (ev!.workSession.summary as string).endsWith(
         "The bot can't approve it; mention one of the people listed.",
@@ -620,7 +622,7 @@ describe("bounded and idempotent: one pending wake, one wake per state, a daily 
 
     const wakes = await wakesOf(s.workSessionId);
     expect(wakes.map((w) => w.workSession.transition)).toEqual(["waiting_approval", "waiting_approval"]);
-    expect(wakes[1]!.workSession.summary).toContain("Edit");
+    expect(wakes[1]!.workSession.summary).not.toContain("Edit");
     expect((wakes[1]!.workSession.deciders as Json[])[0]).toMatchObject({ id: victorId });
     expect((await botRowOf(s.workSessionId)).wakes_used).toBe(2);
 
