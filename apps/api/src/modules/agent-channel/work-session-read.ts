@@ -143,7 +143,9 @@ export function registerWorkSessionReadRoute(
           const turn = await liveTurn(tx, core, body);
           if (!turn) return unknownTurn(tx);
           if (!turn.tools.includes(READ)) return refuse(tx, turn, found.own, "not_in_turn");
-          // The session as its sponsor sees it now (a sponsor who left the organization sees nothing).
+          // The session as its sponsor sees it now. The backstop admits its creator by `created_by` whatever their
+          // membership, so a deactivated sponsor still reads (and stops) the bot's own session: on purpose, the bot can
+          // always report on and end what it started (code review IN-02).
           const own = await ownBotSession(tx, { agentId: turn.agentId, workSessionId: body.workSessionId });
           if (!own) return refuse(tx, turn, found.own, "not_allowed");
 
