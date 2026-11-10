@@ -46,6 +46,8 @@ export const JOB_QUEUES = {
   // Phase 07.16 (D-09, PD-16): a bot session's state changed; the handler refreshes its card and decides a wake (ids
   // only; the worker is registered by 07.16-20).
   "work_session.bot_sync": z.object({ organizationId: Id, workSessionId: Id }).strict(),
+  // Phase 07.17 (D-04, PD-09): one opened item's own bot turn (ids only; the worker is registered by 07.17-17).
+  "automation.item": z.object({ organizationId: Id, itemId: Id }).strict(),
 } as const satisfies Record<JobQueueName, z.ZodType>;
 
 export type QueueName = keyof typeof JOB_QUEUES;

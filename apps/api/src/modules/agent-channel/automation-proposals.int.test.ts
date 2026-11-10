@@ -465,15 +465,16 @@ describe("only the right person, only clean turns (Task 2, D-02, D-07, T-07.6-12
     expect(await rows("select id from app.automation_drafts where event_id = $1", [eventId])).toEqual([]);
   });
 
-  it("every five minutes is refused with the schedule sentence; nothing is stored", async () => {
+  // Phase 07.17 (D-01, D-11): the workspace minimum is every 5 minutes, so every 4 is the first refused schedule.
+  it("every four minutes is refused with the schedule sentence; nothing is stored", async () => {
     const { eventId } = await mention(ana);
-    const r = await propose(eventId, { schedule: { cron: "*/5 * * * *", timeZone: "Europe/Madrid" } });
+    const r = await propose(eventId, { schedule: { cron: "*/4 * * * *", timeZone: "Europe/Madrid" } });
     expect(r.status).toBe(400);
     expect(r.body).toEqual({
       ok: false,
       code: "schedule_too_frequent",
       sentence:
-        "That schedule isn't valid or runs more often than every 15 minutes. Ask Ana Pérez for a simpler schedule.",
+        "That schedule isn't valid or runs more often than every 5 minutes. Ask Ana Pérez for a simpler schedule.",
     });
     expect(await rows("select id from app.automation_drafts where event_id = $1", [eventId])).toEqual([]);
     const [refused] = (await audits("automation.proposal_refused")).filter(
@@ -675,7 +676,7 @@ describe("Edit from the card: the editor's save closes the proposal as Created w
       "POST",
       "/api/v1/automations",
       edited(p.approvalId, {
-        trigger: { kind: "schedule", schedule: { cron: "*/5 * * * *", timeZone: "UTC" } },
+        trigger: { kind: "schedule", schedule: { cron: "*/4 * * * *", timeZone: "UTC" } },
       }),
     );
     expect(tooOften.status).toBe(400);

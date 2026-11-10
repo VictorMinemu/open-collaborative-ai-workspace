@@ -77,12 +77,15 @@ export interface AutomationCaps {
   maxRunsPerDayCap: number;
 }
 
-/** The `bot_policies` column defaults: an organization without a policy row gets these. */
+/**
+ * The `bot_policies` column defaults: an organization without a policy row gets these. Phase 07.17 (D-01, D-11): every 5
+ * minutes and 288 runs a day, as the database default and the 07.17 migration's update of default-valued rows say.
+ */
 export const DEFAULT_AUTOMATION_CAPS: AutomationCaps = {
   maxAutomationsPerUser: 10,
-  minScheduleMinutes: 15,
+  minScheduleMinutes: 5,
   maxInboundPerHour: 30,
-  maxRunsPerDayCap: 96,
+  maxRunsPerDayCap: 288,
 };
 
 export interface AutomationService {
