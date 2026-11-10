@@ -1073,7 +1073,7 @@ or needs help.
   4. Integration tests (dedupe, caps, tenant isolation, team mention audience) and an e2e spec pass on desktop and mobile;
      ADR-0039 records the decisions
 
-**Plans:** 18/19 plans executed
+**Plans:** 19/19 plans complete
 
 Plans:
 **Wave 1**
@@ -1114,7 +1114,7 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
-- [ ] 07.17-19-PLAN.md — Wave 7: Phase gate: every CI workflow green, README/DEMO/STATUS, CODEOWNERS and guard, signed VALIDATION
+- [x] 07.17-19-PLAN.md — Wave 7: Phase gate: every CI workflow green, README/DEMO/STATUS, CODEOWNERS and guard, signed VALIDATION
 
 ### Phase 07.13: Work Zone local browser (INSERTED)
 

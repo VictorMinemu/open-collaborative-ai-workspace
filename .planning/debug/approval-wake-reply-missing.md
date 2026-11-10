@@ -1,5 +1,5 @@
 ---
-status: awaiting_human_verify
+status: resolved
 trigger: "e2e work-zone-bot-orchestration.spec.ts:539 Supervised session approval: card shows Approval but the bot's wake reply 'Needs approval: Write @admin' never arrives within 45 s (CI p243, desktop+mobile, deterministic)"
 created: 2026-11-09T00:00:00Z
 updated: 2026-11-09T00:00:00Z
@@ -87,3 +87,7 @@ verification:
   guardrail_verdict: accepted (pending CI)
 files_changed: [e2e/support/fake-cell-plugin.ts, e2e/support/fake-cell-plugin.test.ts, e2e/tests/work-zone-bot-orchestration.spec.ts, apps/api/src/modules/agent-channel/work-session-wakes.int.test.ts]
 commits: [1831dd08, c338496d, 19d87282]
+
+## Resolution
+
+Confirmed fixed on CI (07.16: PR #66 green on 88cfd003; 07.17: PR #68 green on 1d1dc275, Woodpecker p260).

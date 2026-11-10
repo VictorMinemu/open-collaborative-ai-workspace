@@ -1,5 +1,5 @@
 ---
-status: awaiting_human_verify
+status: resolved
 trigger: "CI pipeline 255 (head f5ae0f16) e2e: (1) ai-chat-agents / ai-chat-multiplayer-day freshBackend 'create @backend' fails; (2) automation-fan-out.spec.ts:461 run answered but openedSoFar stays 0"
 created: 2026-11-10T00:00:00Z
 updated: 2026-11-10T15:40:00Z
@@ -87,3 +87,7 @@ fix: (1) agent/index.ts restored to its pre-WR-04 version (no unit-handle check 
 verification: fan-out-config.int.test.ts 14/14 (WR-04 test red on the old module); conversations-open.int.test.ts 23/23; fake-cell-plugin.test.ts 23/23 (new test red before the fake fix); openclaw-channel 727/727; typecheck --force 11/11; lint 0 errors (4 pre-existing warnings in local-runtime). e2e not run locally; needs CI
 files_changed: [apps/api/src/modules/agent/index.ts, apps/api/src/modules/automation/fan-out-config.int.test.ts, docs/adr/0039-automation-fan-out-and-team-mentions.md, .planning/phases/07.17-automation-fan-out-and-team-mentions/07.17-REVIEW.md, apps/api/src/modules/agent-channel/conversations-open.int.test.ts, e2e/support/fake-cell-plugin.ts, e2e/support/fake-cell-plugin.test.ts, e2e/tests/automation-fan-out.spec.ts]
 oracle_type: specified (HTTP status/username for (1); opened rows and request sequence for (2))
+
+## Resolution
+
+Confirmed fixed on CI (07.16: PR #66 green on 88cfd003; 07.17: PR #68 green on 1d1dc275, Woodpecker p260).
