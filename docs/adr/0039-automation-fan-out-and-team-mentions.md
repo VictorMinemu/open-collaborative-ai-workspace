@@ -345,3 +345,8 @@ documented behaviour below. The accepted text above stays as written; where it d
   (the resolver's decision, unit-scoped rules included), and the composer offers and chips only units the viewer may
   read. Its confirmation (D-18) counts every unit the message names, a unit inside another named one once, capped at
   200, and says "up to N people … Only those who can read this channel are notified": two teams of 15 now ask first.
+- **IN-04, § 11 (stated, unchanged).** A unit's subtree includes the `project` units under it: a team mention reaches
+  the members of the team's projects too (and they count in its reach), still only those who can read the channel.
+- **IN-09, § 14 (release skew).** An older cell image keeps `ocw_board_card` always side-effecting, so its own guard
+  blocks the § 8 move on every tainted item or wake turn even though the API allows it: the board moves also need the
+  matching cell image.
