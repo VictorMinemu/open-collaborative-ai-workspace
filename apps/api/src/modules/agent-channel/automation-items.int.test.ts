@@ -2,14 +2,24 @@ import { randomUUID } from "node:crypto";
 import {
   AgentAutomationItemEvent,
   AgentChannelEventTypes,
+  AgentChannelWorkSessionStartResponse,
   automationItemSentence,
   type BotWorkZoneProfileInput,
   BUILTIN_TOOLS,
   WORK_SESSION_TOOL_NAMES,
 } from "@ocw/contracts";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { sha256Hex } from "../../lib/crypto";
 import { eventually, FakeDevice } from "../../testing-device";
-import { type Json, ok, type Res, type SandboxStack, startSandboxStack } from "../../testing-sandbox";
+import {
+  codeOf,
+  type Json,
+  ok,
+  type Res,
+  SANDBOX_CELL_TOKEN,
+  type SandboxStack,
+  startSandboxStack,
+} from "../../testing-sandbox";
 import {
   CLAUDE_CATALOG,
   CODEX_CATALOG,
@@ -629,5 +639,320 @@ describe("forged and stale jobs (E8; T-07.17-17-01)", () => {
     expect(await drainItems()).toBe(1);
     expect(await allItemEvents()).toBe(eventsBefore);
     expect(await auditsOf("automation.item_skipped", o.itemId)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------- Task 3: the per-order journey at the API
+
+const WAKES = "work_session.bot_sync";
+
+/** A PATCH to the Agent Channel (the sandbox stack's `cell` only posts). */
+async function cellPatch(path: string, body: unknown, token = SANDBOX_CELL_TOKEN): Promise<Res> {
+  const res = await fetch(`${s.stack.baseUrl}/agent-channel/v1${path}`, {
+    method: "PATCH",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  return { status: res.status, body: text ? (JSON.parse(text) as Json) : null };
+}
+
+const cardRow = async (messageId: string) =>
+  (
+    await s.su.query("select column_id, waiting_on, version from app.board_cards where message_id = $1", [
+      messageId,
+    ])
+  ).rows[0] as { column_id: string; waiting_on: string; version: number };
+
+/** The bot's `ocw_board_card` move of `card` to `columnId`, from the turn `eventId`. */
+const moveCard = async (eventId: string, card: string, columnId: string, token?: string) =>
+  cellPatch(
+    `/board/cards/${card}`,
+    {
+      eventId,
+      agentId: atlas.id,
+      expectedVersion: (await cardRow(card)).version,
+      move: { columnId, afterCardId: null },
+    },
+    token,
+  );
+
+const startFrom = (eventId: string, prompt: string, token?: string) =>
+  s.cell(
+    "/work-sessions/start",
+    { eventId, agentId: atlas.id, projectId: billingId, prompt },
+    ...(token ? [token] : []),
+  );
+
+const cardAudit = async (action: string, messageId: string) =>
+  (
+    await s.su.query(
+      "select agent_id, user_id, metadata from app.audit_events where action = $1 and resource_id = $2 order by occurred_at desc limit 1",
+      [action, messageId],
+    )
+  ).rows[0] as Json | undefined;
+
+const statusOf = async (workSessionId: string) =>
+  (await s.su.query("select status from app.work_sessions where id = $1", [workSessionId])).rows[0]
+    ?.status as string;
+
+/** The device takes a started session: `session.start` acked, the runtime idle, the start's own prompt acked. */
+async function deviceTakes(workSessionId: string) {
+  const dev = server as FakeDevice;
+  const start = await dev.command("session.start", workSessionId);
+  dev.ack(start.id);
+  dev.event(workSessionId, {
+    type: "session.started",
+    runtime: "claude-code",
+    runtimeSessionId: `rt-${workSessionId}`,
+    model: "opus",
+    permissionMode: "default",
+  });
+  dev.event(workSessionId, { type: "session.state", status: "idle" });
+  const first = await dev.command("prompt", workSessionId);
+  dev.ack(first.id);
+  await eventually(async () => (await statusOf(workSessionId)) === "running");
+  return first;
+}
+
+/** The `agent.work_session.v1` wakes of one session, oldest first. */
+const wakesOf = async (workSessionId: string) =>
+  (
+    await s.su.query(
+      `select payload from app.stream_events
+        where stream_id = $1 and type = $2 and payload->'workSession'->>'workSessionId' = $3 order by seq`,
+      [`cell:${s.orgA}`, AgentChannelEventTypes.workSession, workSessionId],
+    )
+  ).rows.map((r) => r.payload as Json);
+
+describe("the per-order journey: Work Zone session, card moves, wake and team mention (D-06, D-07, D-12, PD-11)", () => {
+  beforeAll(async () => {
+    await setUpWorkZone();
+  }, 120_000);
+
+  beforeEach(async () => {
+    // Every session of an earlier case is over (archived directly, so no wake follows); no wake job is left over.
+    await s.su.query(
+      "update app.work_sessions set status = 'archived' where organization_id = $1 and status <> 'archived'",
+      [s.orgA],
+    );
+    await s.su.query("delete from pgboss.job where name = $1", [WAKES]);
+  });
+
+  it("with actOnOutsideContent: 1042's turn starts a tainted session and moves its card to In progress; the wake reads it, moves the card to Done and says Done @logistics", async () => {
+    const { roots, rows, events } = await openedAndDelivered(["1042", "1043"]);
+    const [ev42, ev43] = events as [Json, Json];
+    // Each order is its own turn in its own card's thread.
+    expect(ev42.thread.rootMessageId).toBe(roots[0]);
+    expect(ev43.thread.rootMessageId).toBe(roots[1]);
+    expect(ev42.eventId).not.toBe(ev43.eventId);
+    expect(rows.map((r) => r.status)).toEqual(["delivered", "delivered"]);
+
+    // 1042: the start passes on the tainted turn (07.16-19's flag path), the session is tainted from the start.
+    const started = await startFrom(ev42.eventId as string, "Prepare the shipment for order 1042");
+    expect(started.status, JSON.stringify(started.body)).toBe(200);
+    const body = AgentChannelWorkSessionStartResponse.parse(started.body);
+    if (body.kind !== "started") throw new Error(`not started: ${JSON.stringify(body)}`);
+    const workSessionId = body.workSessionId;
+    const session = (
+      await s.su.query(
+        "select created_by, started_by_agent_id, tainted_at is not null as tainted from app.work_sessions where id = $1",
+        [workSessionId],
+      )
+    ).rows[0];
+    expect(session).toEqual({ created_by: s.victorId, started_by_agent_id: atlas.id, tainted: true });
+    const startCall = (
+      await s.su.query("select decision from app.agent_tool_calls where event_id = $1 and tool = $2", [
+        ev42.eventId,
+        BUILTIN_TOOLS.workSessionStart,
+      ])
+    ).rows[0] as Json;
+    expect(startCall.decision).toBe("allowed");
+    const first = await deviceTakes(workSessionId);
+
+    // The card moves to a started column from the item turn (08's exemption: the card the bot's automation opened).
+    const doing = await moveCard(ev42.eventId as string, roots[0] as string, columns.started);
+    expect(doing.status, JSON.stringify(doing.body)).toBe(200);
+    expect((await cardRow(roots[0] as string)).column_id).toBe(columns.started);
+    expect(await cardAudit("board.card.moved", roots[0] as string)).toMatchObject({
+      agent_id: atlas.id,
+      user_id: s.victorId,
+      metadata: { outsideContent: true, toColumnId: columns.started },
+    });
+
+    // 1043 runs on its own: with one session at a time (maxConcurrent 1) its start is refused while 1042's runs.
+    const second = await startFrom(ev43.eventId as string, "Prepare the shipment for order 1043");
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+    expect(AgentChannelWorkSessionStartResponse.parse(second.body)).toMatchObject({
+      kind: "refused",
+      code: "too_many_sessions",
+    });
+    expect((await cardRow(roots[1] as string)).column_id).toBe(columns.backlog);
+
+    // The runtime finishes the turn: one wake, in the card's thread, as Víctor, tainted (the session took outside content).
+    (server as FakeDevice).emitTurn(workSessionId, {
+      promptId: first.payload.promptId as string,
+      text: "Shipment prepared.",
+    });
+    await eventually(async () => (await statusOf(workSessionId)) === "idle");
+    await s.su.query(
+      "update pgboss.job set start_after = now() where name = $1 and state in ('created', 'retry')",
+      [WAKES],
+    );
+    await core().jobs.drain(WAKES);
+    const wakes = await wakesOf(workSessionId);
+    expect(wakes).toHaveLength(1);
+    const wake = wakes[0] as Json;
+    expect(wake.thread.rootMessageId).toBe(roots[0]);
+    expect(wake.message.author.id).toBe(s.victorId);
+    expect((await turnRow(wake.eventId as string))?.tainted).toBe(true);
+
+    // The wake reads the session (D-20's mark), then moves the card to Done (D-12: the session-output exemption).
+    const read = await s.cell("/work-sessions/read", {
+      eventId: wake.eventId,
+      agentId: atlas.id,
+      workSessionId,
+    });
+    expect(read.status, JSON.stringify(read.body)).toBe(200);
+    expect(
+      (
+        await s.su.query("select session_output_read from app.agent_turns where event_id = $1", [
+          wake.eventId,
+        ])
+      ).rows[0],
+    ).toEqual({ session_output_read: true });
+    const done = await moveCard(wake.eventId as string, roots[0] as string, columns.done);
+    expect(done.status, JSON.stringify(done.body)).toBe(200);
+    expect((await cardRow(roots[0] as string)).column_id).toBe(columns.done);
+    expect(await cardAudit("board.card.moved", roots[0] as string)).toMatchObject({
+      agent_id: atlas.id,
+      metadata: { sessionOutputExempt: true, outsideContent: true, toColumnId: columns.done },
+    });
+
+    // "Done @logistics" in the card's thread: Sam and Alex (Logistics, readers of #fleet) get team_mention; no bot wakes.
+    const posted = await ok(
+      s.cell("/messages", {
+        agentId: atlas.id,
+        conversationId: fleetId,
+        threadRootMessageId: roots[0],
+        inReplyToMessageId: wake.message.id,
+        eventId: wake.eventId,
+        text: "Done @logistics",
+        idempotencyKey: randomUUID(),
+      }),
+    );
+    const messageId = posted.messageId as string;
+    expect(
+      (await s.su.query("select thread_id, mentions from app.messages where id = $1", [messageId])).rows[0],
+    ).toEqual({ thread_id: roots[0], mentions: [{ kind: "unit", id: logisticsId }] });
+    const notified = (
+      await s.su.query(
+        "select user_id, kind, unit_id from app.notifications where message_id = $1 order by user_id",
+        [messageId],
+      )
+    ).rows as Json[];
+    expect(notified).toEqual(
+      [s.samId, s.alexId].sort().map((user_id) => ({ user_id, kind: "team_mention", unit_id: logisticsId })),
+    );
+    expect(
+      (await s.su.query("select count(*)::int as n from app.agent_turns where message_id = $1", [messageId]))
+        .rows[0].n,
+    ).toBe(0);
+  });
+
+  it("without the flag: the item turn's start becomes a Work Zone proposal and its move answers tainted", async () => {
+    await createBotProfile(s.victor, atlas.id, profile({ actOnOutsideContent: false }));
+    try {
+      const { roots, events } = await openedAndDelivered(["1044"]);
+      const ev = events[0] as Json;
+      const sessionsBefore = Number(
+        (
+          await s.su.query(
+            "select count(*)::int as n from app.work_sessions where started_by_agent_id = $1",
+            [atlas.id],
+          )
+        ).rows[0].n,
+      );
+      const r = await startFrom(ev.eventId as string, "Prepare the shipment for order 1044");
+      expect(r.status, JSON.stringify(r.body)).toBe(200);
+      expect(AgentChannelWorkSessionStartResponse.parse(r.body)).toMatchObject({
+        kind: "proposed",
+        reason: "outside_content",
+      });
+      expect(
+        Number(
+          (
+            await s.su.query(
+              "select count(*)::int as n from app.work_sessions where started_by_agent_id = $1",
+              [atlas.id],
+            )
+          ).rows[0].n,
+        ),
+      ).toBe(sessionsBefore);
+
+      const moved = await moveCard(ev.eventId as string, roots[0] as string, columns.started);
+      expect(moved.status, JSON.stringify(moved.body)).toBe(403);
+      expect(codeOf(moved)).toBe("tainted");
+      expect((await cardRow(roots[0] as string)).column_id).toBe(columns.backlog);
+    } finally {
+      await createBotProfile(s.victor, atlas.id, profile());
+    }
+  });
+});
+
+describe("the leak sweep and tenants (P1, PD-17; E8)", () => {
+  const TITLE = "OCW-MARKER-071717-title";
+  const BODY = "OCW-MARKER-071717-body";
+
+  it("the item's title and text reach only the cell event: no audit row, job, tool call or log line holds them", async () => {
+    const automationId = await createAutomation();
+    const { ev } = await runTurn(automationId);
+    await openItems(ev, [{ externalKey: "OCW-MARKER-071717-key", title: TITLE, body: BODY }]);
+    expect(await drainItems()).toBe(1);
+    const [row] = await itemRows(automationId);
+    const [delivered] = await itemEvents(row?.id as string);
+    // The event holds them (the sweep is meaningful).
+    expect(delivered?.automationItem.item.title).toBe(TITLE);
+    expect(delivered?.automationItem.item.text).toContain(BODY);
+    expect(s.logs.length).toBeGreaterThan(20);
+    for (const needle of [TITLE, BODY]) {
+      for (const q of [
+        "select count(*)::int as n from app.audit_events t where strpos(row_to_json(t)::text, $1) > 0",
+        "select count(*)::int as n from app.agent_tool_calls t where strpos(row_to_json(t)::text, $1) > 0",
+        "select count(*)::int as n from pgboss.job t where strpos(row_to_json(t)::text, $1) > 0",
+        "select count(*)::int as n from app.agent_turns t where strpos(row_to_json(t)::text, $1) > 0",
+      ]) {
+        expect((await s.su.query(q, [needle])).rows[0].n, `${needle}: ${q}`).toBe(0);
+      }
+      expect(s.logs.filter((l) => l.includes(needle))).toEqual([]);
+    }
+  });
+
+  it("organization B's cell token with A's item turn: the start is an unknown turn and the move no trigger there", async () => {
+    await setUpWorkZone();
+    const tokenB = `ocw_cell_${randomUUID()}${randomUUID()}`;
+    await s.su.query(
+      "insert into app.agent_credentials (organization_id, kind, token_hash) values ($1, 'channel_plugin', $2)",
+      [s.orgB, sha256Hex(tokenB)],
+    );
+    const { roots, events } = await openedAndDelivered(["7001"]);
+    const ev = events[0] as Json;
+    const before = await cardRow(roots[0] as string);
+    const start = await startFrom(ev.eventId as string, "Prepare order 7001", tokenB);
+    expect(start.status, JSON.stringify(start.body)).toBe(404);
+    const move = await moveCard(ev.eventId as string, roots[0] as string, columns.started, tokenB);
+    // The board routes answer an event of no turn they can see as 403 no_trigger (07.1), whatever the organization.
+    expect(move.status, JSON.stringify(move.body)).toBe(403);
+    expect(codeOf(move)).toBe("no_trigger");
+    expect(await cardRow(roots[0] as string)).toEqual(before);
+    expect(
+      Number(
+        (
+          await s.su.query("select count(*)::int as n from app.agent_tool_calls where event_id = $1", [
+            ev.eventId,
+          ])
+        ).rows[0].n,
+      ),
+    ).toBe(0);
   });
 });
